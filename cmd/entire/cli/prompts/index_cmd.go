@@ -47,7 +47,7 @@ func runIndex(ctx context.Context, w io.Writer, ew io.Writer, rebuild, status, v
 	}
 
 	if status {
-		store := index.NewIndexStore("")
+		store := index.NewStore("")
 		stats, err := store.Stats(ctx)
 		if err != nil {
 			return fmt.Errorf("getting stats: %w", err)

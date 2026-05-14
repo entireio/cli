@@ -4,6 +4,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const truncatedNoteSuffix = " (truncated)"
+
 func NewCommandGroup() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "prompts",

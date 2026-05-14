@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -29,44 +30,44 @@ var (
 	ErrIndexEmpty        = errors.New("prompt index is empty")
 )
 
-type IndexStore struct {
+type Store struct {
 	repoRoot  string
 	indexPath string
 	lockPath  string
 }
 
-func NewIndexStore(repoRoot string) *IndexStore {
+func NewStore(repoRoot string) *Store {
 	entireDir := filepath.Join(repoRoot, paths.EntireDir)
 	indexDir := filepath.Join(entireDir, IndexDirName)
-	return &IndexStore{
+	return &Store{
 		repoRoot:  repoRoot,
 		indexPath: filepath.Join(indexDir, IndexFileName),
 		lockPath:  filepath.Join(indexDir, LockFileName),
 	}
 }
 
-func (s *IndexStore) IndexPath() string { return s.indexPath }
-func (s *IndexStore) LockPath() string  { return s.lockPath }
-func (s *IndexStore) IndexDir() string  { return filepath.Dir(s.indexPath) }
+func (s *Store) IndexPath() string { return s.indexPath }
+func (s *Store) LockPath() string  { return s.lockPath }
+func (s *Store) IndexDir() string  { return filepath.Dir(s.indexPath) }
 
-func (s *IndexStore) Exists() bool {
+func (s *Store) Exists() bool {
 	_, err := os.Stat(s.indexPath)
 	return err == nil
 }
 
-func (s *IndexStore) Load(_ context.Context) (*IndexHeader, []PromptEntry, error) {
+func (s *Store) Load(_ context.Context) ([]Entry, error) {
 	f, err := os.Open(s.indexPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil, ErrIndexMissing
+			return nil, ErrIndexMissing
 		}
-		return nil, nil, fmt.Errorf("opening index file: %w", err)
+		return nil, fmt.Errorf("opening index file: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
-	var header IndexHeader
-	var entries []PromptEntry
+	var header Header
+	var entries []Entry
 	lineNum := 0
 
 	for scanner.Scan() {
@@ -78,12 +79,12 @@ func (s *IndexStore) Load(_ context.Context) (*IndexHeader, []PromptEntry, error
 
 		if lineNum == 0 {
 			if err := json.Unmarshal([]byte(line), &header); err != nil {
-				return nil, nil, fmt.Errorf("%w: header: %w", ErrIndexCorrupt, err)
+				return nil, fmt.Errorf("%w: header: %w", ErrIndexCorrupt, err)
 			}
 		} else {
-			var entry PromptEntry
+			var entry Entry
 			if err := json.Unmarshal([]byte(line), &entry); err != nil {
-				return nil, nil, fmt.Errorf("%w: line %d: %w", ErrIndexCorrupt, lineNum+1, err)
+				return nil, fmt.Errorf("%w: line %d: %w", ErrIndexCorrupt, lineNum+1, err)
 			}
 			entries = append(entries, entry)
 		}
@@ -91,17 +92,17 @@ func (s *IndexStore) Load(_ context.Context) (*IndexHeader, []PromptEntry, error
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("reading index file: %w", err)
+		return nil, fmt.Errorf("reading index file: %w", err)
 	}
 
 	if lineNum == 0 {
-		return nil, nil, ErrIndexEmpty
+		return nil, ErrIndexEmpty
 	}
 
-	return &header, entries, nil
+	return entries, nil
 }
 
-func (s *IndexStore) AppendEntries(entries []PromptEntry) error {
+func (s *Store) AppendEntries(entries []Entry) error {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -114,16 +115,29 @@ func (s *IndexStore) AppendEntries(entries []PromptEntry) error {
 	if err != nil {
 		return fmt.Errorf("creating lock: %w", err)
 	}
-	defer func() { _ = lock.Unlock() }()
 
-	if err := lock.TryLock(); err != nil {
-		return fmt.Errorf("acquiring lock: %w", err)
+	var lockErr error
+	for attempt := range 3 {
+		lockErr = lock.TryLock()
+		if lockErr == nil {
+			break
+		}
+		time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
 	}
+	if lockErr != nil {
+		return fmt.Errorf("acquiring lock after retries: %w", lockErr)
+	}
+
+	defer func() {
+		if err := lock.Unlock(); err != nil {
+			logging.Warn(nil, "failed to unlock index", "error", err)
+		}
+	}()
 
 	return s.appendEntriesLine(entries)
 }
 
-func (s *IndexStore) appendEntriesLine(entries []PromptEntry) error {
+func (s *Store) appendEntriesLine(entries []Entry) error {
 	f, err := os.OpenFile(s.indexPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("opening index for append: %w", err)
@@ -142,38 +156,12 @@ func (s *IndexStore) appendEntriesLine(entries []PromptEntry) error {
 	return nil
 }
 
-func (s *IndexStore) appendEntriesWithRetry(entries []PromptEntry, maxRetries int) error {
-	var lastErr error
-	for range maxRetries {
-		time.Sleep(50 * time.Millisecond)
-
-		lock, err := newLockFile(s.lockPath)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		defer lock.Unlock()
-
-		if err := lock.TryLock(); err != nil {
-			lastErr = err
-			continue
-		}
-
-		if err := s.appendEntriesLine(entries); err != nil {
-			lastErr = err
-			continue
-		}
-		return nil
-	}
-	return fmt.Errorf("failed to acquire lock after %d retries: %w", maxRetries, lastErr)
-}
-
-func (s *IndexStore) InitIndex() error {
+func (s *Store) InitIndex() error {
 	if err := os.MkdirAll(filepath.Dir(s.indexPath), 0o750); err != nil {
 		return fmt.Errorf("creating index directory: %w", err)
 	}
 
-	header := IndexHeader{
+	header := Header{
 		Version:   CurrentIndexVersion,
 		CreatedAt: time.Now(),
 		RepoRoot:  s.repoRoot,
@@ -191,7 +179,7 @@ func (s *IndexStore) InitIndex() error {
 	return nil
 }
 
-type IndexStats struct {
+type Stats struct {
 	IndexPath       string
 	Version         int
 	CheckpointCount int
@@ -202,8 +190,8 @@ type IndexStats struct {
 	Exists          bool
 }
 
-func (s *IndexStore) Stats(_ context.Context) (IndexStats, error) {
-	stats := IndexStats{
+func (s *Store) Stats(_ context.Context) (Stats, error) {
+	stats := Stats{
 		IndexPath: s.indexPath,
 		Exists:    s.Exists(),
 	}
@@ -218,7 +206,7 @@ func (s *IndexStore) Stats(_ context.Context) (IndexStats, error) {
 		stats.LastUpdated = fi.ModTime()
 	}
 
-	_, entries, err := s.Load(context.Background())
+	entries, err := s.Load(context.Background())
 	if err != nil {
 		if errors.Is(err, ErrIndexMissing) || errors.Is(err, ErrIndexEmpty) {
 			return stats, nil
@@ -276,6 +264,11 @@ func newLockFile(path string) (*fileLock, error) {
 }
 
 func (l *fileLock) TryLock() error {
+	if info, err := os.Stat(l.path); err == nil {
+		if time.Since(info.ModTime()) > 30*time.Second {
+			_ = os.Remove(l.path)
+		}
+	}
 	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("creating lock file: %w", err)
@@ -298,7 +291,7 @@ func (l *fileLock) Unlock() error {
 	return nil
 }
 
-func (s *IndexStore) Rebuild() error {
+func (s *Store) Rebuild() error {
 	if err := s.InitIndex(); err != nil {
 		return err
 	}

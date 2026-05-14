@@ -2,6 +2,7 @@ package index
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -85,12 +86,12 @@ func ParseQuery(raw string) SearchQuery {
 }
 
 type ScoredEntry struct {
-	Entry          PromptEntry
+	Entry          Entry
 	Score          float64
 	TruncatedMatch bool
 }
 
-func ScoreEntry(entry PromptEntry, query SearchQuery) ScoredEntry {
+func ScoreEntry(entry Entry, query SearchQuery) ScoredEntry {
 	if len(query.Tokens) == 0 {
 		return ScoredEntry{Entry: entry, Score: 0}
 	}
@@ -148,7 +149,7 @@ func ScoreEntry(entry PromptEntry, query SearchQuery) ScoredEntry {
 	}
 }
 
-func Search(entries []PromptEntry, cfg SearchConfig) []ScoredEntry {
+func Search(entries []Entry, cfg SearchConfig) []ScoredEntry {
 	query := ParseQuery(cfg.Query)
 
 	scored := make([]ScoredEntry, 0, len(entries))
@@ -170,7 +171,7 @@ func Search(entries []PromptEntry, cfg SearchConfig) []ScoredEntry {
 	return scored
 }
 
-func matchesFilter(entry PromptEntry, cfg SearchConfig) bool {
+func matchesFilter(entry Entry, cfg SearchConfig) bool {
 	if cfg.Agent != "" && !strings.EqualFold(entry.Agent, cfg.Agent) {
 		return false
 	}
@@ -204,12 +205,10 @@ func matchesFilter(entry PromptEntry, cfg SearchConfig) bool {
 }
 
 func sortByScoreAndTime(entries []ScoredEntry) {
-	for i := 0; i < len(entries); i++ {
-		for j := i + 1; j < len(entries); j++ {
-			if entries[j].Score > entries[i].Score ||
-				(entries[j].Score == entries[i].Score && entries[j].Entry.CreatedAt.After(entries[i].Entry.CreatedAt)) {
-				entries[i], entries[j] = entries[j], entries[i]
-			}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Score != entries[j].Score {
+			return entries[i].Score > entries[j].Score
 		}
-	}
+		return entries[i].Entry.CreatedAt.After(entries[j].Entry.CreatedAt)
+	})
 }

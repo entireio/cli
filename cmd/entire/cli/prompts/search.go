@@ -70,7 +70,7 @@ func runSearch(ctx context.Context, w io.Writer, ew io.Writer, query string, cfg
 		return errors.New("query too short — enter at least one word")
 	}
 
-	store := index.NewIndexStore(repoRoot)
+	store := index.NewStore(repoRoot)
 
 	if !store.Exists() {
 		fmt.Fprintln(ew, "No prompt index found. Running automatic rebuild...")
@@ -79,21 +79,19 @@ func runSearch(ctx context.Context, w io.Writer, ew io.Writer, query string, cfg
 		}
 	}
 
-	header, entries, err := store.Load(ctx)
+	entries, err := store.Load(ctx)
 	if err != nil {
 		if errors.Is(err, index.ErrIndexMissing) || errors.Is(err, index.ErrIndexCorrupt) {
 			fmt.Fprintln(ew, "Prompt index is corrupt or missing. Running rebuild...")
 			if err := rebuildIndex(ctx, ew, repoRoot); err != nil {
 				return fmt.Errorf("rebuilding index: %w", err)
 			}
-			header, entries, err = store.Load(ctx)
+			entries, err = store.Load(ctx)
 		}
 		if err != nil {
 			return fmt.Errorf("loading index: %w", err)
 		}
 	}
-
-	_ = header
 
 	cfg.Query = query
 	results := index.Search(entries, cfg)
@@ -125,8 +123,8 @@ func rebuildIndex(ctx context.Context, w io.Writer, repoRoot string) error {
 		return fmt.Errorf("opening repository: %w", err)
 	}
 
-	store := index.NewIndexStore(repoRoot)
-	builder := index.NewIndexBuilder(repo, store)
+	store := index.NewStore(repoRoot)
+	builder := index.NewBuilder(repo, store)
 
 	fmt.Fprintln(w, "Building prompt index...")
 

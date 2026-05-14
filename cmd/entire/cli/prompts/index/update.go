@@ -12,13 +12,13 @@ func UpdateIndexForCheckpoint(_ context.Context, repoRoot string, cpID id.Checkp
 	entireDir := filepath.Join(repoRoot, paths.EntireDir)
 	indexDir := filepath.Join(entireDir, IndexDirName)
 
-	store := &IndexStore{
+	store := &Store{
 		repoRoot:  repoRoot,
 		indexPath: filepath.Join(indexDir, IndexFileName),
 		lockPath:  filepath.Join(indexDir, LockFileName),
 	}
 
-	builder := &IndexBuilder{store: store}
+	builder := &Builder{store: store}
 
 	return builder.AppendCheckpoint(nil, cpID, commitHash, commitMsg, branch, agent, model, filesTouched, sessionIdx, turnIdx, promptText)
 }

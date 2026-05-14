@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v6"
@@ -21,23 +22,23 @@ import (
 
 const MaxPromptLength = 2000
 
-type IndexBuilder struct {
+type Builder struct {
 	repo  *git.Repository
-	store *IndexStore
+	store *Store
 }
 
-func NewIndexBuilder(repo *git.Repository, store *IndexStore) *IndexBuilder {
-	return &IndexBuilder{repo: repo, store: store}
+func NewBuilder(repo *git.Repository, store *Store) *Builder {
+	return &Builder{repo: repo, store: store}
 }
 
-func (b *IndexBuilder) AppendCheckpoint(_ context.Context, cpID id.CheckpointID, commitHash, commitMsg, branch, agent, model string, filesTouched []string, sessionIdx, turnIdx int, promptText string) error {
+func (b *Builder) AppendCheckpoint(_ context.Context, cpID id.CheckpointID, commitHash, commitMsg, branch, agent, model string, filesTouched []string, sessionIdx, turnIdx int, promptText string) error {
 	truncated := false
 	if len(promptText) > MaxPromptLength {
 		promptText = promptText[:MaxPromptLength]
 		truncated = true
 	}
 
-	entry := PromptEntry{
+	entry := Entry{
 		CheckpointID:    cpID.String(),
 		SessionIndex:    sessionIdx,
 		TurnIndex:       turnIdx,
@@ -53,14 +54,14 @@ func (b *IndexBuilder) AppendCheckpoint(_ context.Context, cpID id.CheckpointID,
 		CreatedAt:       time.Now(),
 	}
 
-	if err := b.store.AppendEntries([]PromptEntry{entry}); err != nil {
+	if err := b.store.AppendEntries([]Entry{entry}); err != nil {
 		return fmt.Errorf("appending entry: %w", err)
 	}
 
 	return nil
 }
 
-func (b *IndexBuilder) Build(_ context.Context, out io.Writer, progress func(done, total int)) error {
+func (b *Builder) Build(_ context.Context, out io.Writer, progress func(done, total int)) error {
 	if err := b.store.InitIndex(); err != nil {
 		return fmt.Errorf("initializing index: %w", err)
 	}
@@ -81,29 +82,33 @@ func (b *IndexBuilder) Build(_ context.Context, out io.Writer, progress func(don
 	}
 
 	var cpIDs []id.CheckpointID
-	_ = walkCheckpointShards(b.repo, tree.ID(), func(cpID id.CheckpointID, _ plumbing.Hash) error {
+	if err := walkCheckpointShards(b.repo, tree.ID(), func(cpID id.CheckpointID, _ plumbing.Hash) error {
 		cpIDs = append(cpIDs, cpID)
 		return nil
-	})
+	}); err != nil {
+		return fmt.Errorf("walking checkpoint shards: %w", err)
+	}
 
 	total := len(cpIDs)
-	allEntries := make([]PromptEntry, 0)
+	allEntries := make([]Entry, 0)
 
 	for i, cpID := range cpIDs {
-		entries, _ := b.loadCheckpoint(cpID)
+		entries, err := b.loadCheckpoint(cpID)
+		if err != nil {
+			logging.Warn(nil, "skipping checkpoint due to load error", "checkpoint_id", cpID, "error", err)
+			continue
+		}
 		allEntries = append(allEntries, entries...)
 		if progress != nil {
 			progress(i+1, total)
 		}
 	}
 
-	header := IndexHeader{
-		Version:   CurrentIndexVersion,
-		CreatedAt: time.Now(),
-		RepoRoot:  b.store.repoRoot,
+	if len(allEntries) > 0 {
+		if err := b.store.AppendEntries(allEntries); err != nil {
+			return fmt.Errorf("writing index entries: %w", err)
+		}
 	}
-
-	_ = header
 
 	fmt.Fprintf(out, "Indexed %d prompts from %d checkpoints.\n", len(allEntries), total)
 
@@ -126,7 +131,7 @@ func walkCheckpointShards(repo *git.Repository, treeHash plumbing.Hash, fn func(
 	}
 
 	for _, shardEntry := range rootTree.Entries {
-		entryMode := filemode.FileMode(shardEntry.Mode)
+		entryMode := shardEntry.Mode
 		if entryMode != filemode.Dir || len(shardEntry.Name) != 2 || !isHex(shardEntry.Name) {
 			continue
 		}
@@ -137,7 +142,7 @@ func walkCheckpointShards(repo *git.Repository, treeHash plumbing.Hash, fn func(
 		}
 
 		for _, cpEntry := range shardTree.Entries {
-			cpMode := filemode.FileMode(cpEntry.Mode)
+			cpMode := cpEntry.Mode
 			if cpMode != filemode.Dir || len(cpEntry.Name) != 10 || !isHex(cpEntry.Name) {
 				continue
 			}
@@ -157,7 +162,7 @@ func walkCheckpointShards(repo *git.Repository, treeHash plumbing.Hash, fn func(
 	return nil
 }
 
-func (b *IndexBuilder) loadCheckpoint(cpID id.CheckpointID) ([]PromptEntry, error) {
+func (b *Builder) loadCheckpoint(cpID id.CheckpointID) ([]Entry, error) {
 	shard := cpID.String()[:2]
 	rest := cpID.String()[2:]
 	cpDir := filepath.Join(shard, rest, "0")
@@ -204,7 +209,7 @@ func (b *IndexBuilder) loadCheckpoint(cpID id.CheckpointID) ([]PromptEntry, erro
 	}
 	prompts := splitPrompts(allPrompts)
 
-	entries := make([]PromptEntry, 0)
+	entries := make([]Entry, 0)
 	for i := range metadata.Sessions {
 		sessionDir := filepath.Join(cpDir, strconv.Itoa(i))
 		sessionTree, err := cpTree.Tree(sessionDir)
@@ -238,7 +243,7 @@ func (b *IndexBuilder) loadCheckpoint(cpID id.CheckpointID) ([]PromptEntry, erro
 			truncated = true
 		}
 
-		entry := PromptEntry{
+		entry := Entry{
 			CheckpointID:    cpID.String(),
 			SessionIndex:    i,
 			TurnIndex:       0,

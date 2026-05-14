@@ -32,14 +32,14 @@ Examples:
 }
 
 func runList(ctx context.Context, w io.Writer, _ io.Writer, limit int) error {
-	store := index.NewIndexStore("")
+	store := index.NewStore("")
 
 	if !store.Exists() {
 		fmt.Fprintln(w, "No prompt index found. Run 'entire prompts index --rebuild' first.")
 		return nil
 	}
 
-	_, entries, err := store.Load(ctx)
+	entries, err := store.Load(ctx)
 	if err != nil {
 		if errors.Is(err, index.ErrIndexMissing) || errors.Is(err, index.ErrIndexEmpty) {
 			fmt.Fprintln(w, "Prompt index is empty.")

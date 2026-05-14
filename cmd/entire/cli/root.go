@@ -5,8 +5,8 @@ import (
 	"runtime"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/prompts"
+	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
@@ -82,13 +82,13 @@ func NewRootCmd() *cobra.Command {
 	}
 
 	// Noun groups (canonical homes for subcommands).
-	cmd.AddCommand(newSessionsCmd())        // 'session' (with 'sessions' as Cobra alias)
-	cmd.AddCommand(newCheckpointGroupCmd()) // 'checkpoint' / 'cp' / 'checkpoints'
-	cmd.AddCommand(newAgentGroupCmd())      // 'agent'
-	cmd.AddCommand(newAuthCmd())            // 'auth'
-	cmd.AddCommand(newDoctorCmd())          // 'doctor' (group: trace/logs/bundle)
-	cmd.AddCommand(newLabsCmd())            // 'labs' (experimental workflow discovery)
-	cmd.AddCommand(newPluginGroupCmd())     // 'plugin' (managed install/list/remove)
+	cmd.AddCommand(newSessionsCmd())          // 'session' (with 'sessions' as Cobra alias)
+	cmd.AddCommand(newCheckpointGroupCmd())   // 'checkpoint' / 'cp' / 'checkpoints'
+	cmd.AddCommand(newAgentGroupCmd())        // 'agent'
+	cmd.AddCommand(newAuthCmd())              // 'auth'
+	cmd.AddCommand(newDoctorCmd())            // 'doctor' (group: trace/logs/bundle)
+	cmd.AddCommand(newLabsCmd())              // 'labs' (experimental workflow discovery)
+	cmd.AddCommand(newPluginGroupCmd())       // 'plugin' (managed install/list/remove)
 	cmd.AddCommand(prompts.NewCommandGroup()) // 'prompts' (searchable prompt history)
 
 	// Top-level lifecycle and standalone commands.

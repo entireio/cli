@@ -105,7 +105,7 @@ func TestParseQuery_tooShort(t *testing.T) {
 func TestScore_exactPhrase(t *testing.T) {
 	t.Parallel()
 
-	entry := PromptEntry{
+	entry := Entry{
 		PromptText: "I need to add caching to improve performance",
 	}
 
@@ -123,7 +123,7 @@ func TestScore_exactPhrase(t *testing.T) {
 func TestScore_allTokens(t *testing.T) {
 	t.Parallel()
 
-	entry := PromptEntry{
+	entry := Entry{
 		PromptText: "I need to add caching to improve performance",
 	}
 
@@ -138,7 +138,7 @@ func TestScore_allTokens(t *testing.T) {
 func TestScore_termDensity(t *testing.T) {
 	t.Parallel()
 
-	entry := PromptEntry{
+	entry := Entry{
 		PromptText: "cache cache cache", // 3 tokens, 3 matches
 	}
 
@@ -154,7 +154,7 @@ func TestScore_termDensity(t *testing.T) {
 func TestSearch_returnsRanked(t *testing.T) {
 	t.Parallel()
 
-	entries := []PromptEntry{
+	entries := []Entry{
 		{PromptText: "add caching for performance", CreatedAt: time.Now()},
 		{PromptText: "fix auth bug", CreatedAt: time.Now().Add(-time.Hour)},
 		{PromptText: "update docs", CreatedAt: time.Now().Add(-2 * time.Hour)},
@@ -174,7 +174,7 @@ func TestSearch_returnsRanked(t *testing.T) {
 func TestSearch_emptyQuery(t *testing.T) {
 	t.Parallel()
 
-	entries := []PromptEntry{
+	entries := []Entry{
 		{PromptText: "test", CreatedAt: time.Now()},
 	}
 
@@ -189,7 +189,7 @@ func TestSearch_emptyQuery(t *testing.T) {
 func TestSearch_filters(t *testing.T) {
 	t.Parallel()
 
-	entries := []PromptEntry{
+	entries := []Entry{
 		{Agent: "claude-code", Branch: "main", PromptText: "add caching", CreatedAt: time.Now()},
 		{Agent: "gemini", Branch: "main", PromptText: "fix bug", CreatedAt: time.Now()},
 		{Agent: "claude-code", Branch: "feature", PromptText: "update docs", CreatedAt: time.Now()},
@@ -208,22 +208,22 @@ func TestSearch_filters(t *testing.T) {
 
 func BenchmarkTokenize(b *testing.B) {
 	text := "the quick brown fox jumps over the lazy dog authentication caching implemented"
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		Tokenize(text)
 	}
 }
 
 func BenchmarkSearch1K(b *testing.B) {
-	entries := make([]PromptEntry, 1000)
+	entries := make([]Entry, 1000)
 	for i := range entries {
-		entries[i] = PromptEntry{
+		entries[i] = Entry{
 			PromptText: "test prompt with some words here for testing",
 			CreatedAt:  time.Now().Add(-time.Duration(i) * time.Hour),
 		}
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		Search(entries, SearchConfig{Query: "test", Limit: 20})
 	}
 }
