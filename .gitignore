@@ -69,4 +69,4 @@ tmp/
 .superpowers/
 
 # Entire CLI data
-.entire/
+# Note: .entire/ subdirectories like prompts/ may be tracked
