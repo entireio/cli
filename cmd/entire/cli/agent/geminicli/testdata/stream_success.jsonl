@@ -1,0 +1,5 @@
+{"type":"init","timestamp":"2026-05-15T16:00:46.999Z","session_id":"test-session","model":"gemini-3-flash-preview"}
+{"type":"message","timestamp":"2026-05-15T16:00:46.999Z","role":"user","content":"say hi"}
+{"type":"message","timestamp":"2026-05-15T16:00:48.211Z","role":"assistant","content":"Hello","delta":true}
+{"type":"message","timestamp":"2026-05-15T16:00:48.311Z","role":"assistant","content":", world.","delta":true}
+{"type":"result","timestamp":"2026-05-15T16:00:48.500Z","status":"success","stats":{"total_tokens":42,"input_tokens":35,"output_tokens":7,"cached":0,"duration_ms":1501}}
