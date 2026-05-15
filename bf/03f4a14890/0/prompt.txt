@@ -1,0 +1,377 @@
+use entire recall to give summary of entire review command changes in the last 2 days
+
+---
+
+can you make sure entire investigate follows same structure. for example investigation config should be local preference. should we have a view time line similar to drill in? etc...
+
+---
+
+do tier 2 and explain this Extract types/ subpackage with AgentInvestigator interface (mirror AgentReviewer) — refactors
+  spawn.Spawner callers
+
+---
+
+do it
+
+---
+
+1
+
+---
+
+plaes do it
+
+---
+
+<task-notification>
+<task-id>bs00s6z14</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-alisha--marvin-worktrees-cli-entire-labs-investigate/79b1faee-caf4-41da-b4c8-e345d75655fa/tasks/bs00s6z14.output</output-file>
+<status>completed</status>
+<summary>Background command "Full pre-commit gate (fmt + lint + test:ci)" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+continue plan
+
+---
+
+these failed. please investigate why. 2 INFO investigate:3/3 · 4nd run_id=0c8b1f0569c8 agent=codex turn=4 round=2 stance=request-changes plan_changed=true timeline_changed=true
+               2026/05/12 15:46:02 INFO investigate: turn start run_id=0c8b1f0569c8 agent=claude-code turn=⡿ 2026/05/12 15:52:00 INFO investigate: turn end run_id=0c8b1f0569c8 agent=claude-code turn=5 round=3 stance=unknown plan_changed=false timeline_changed=false
+Investigating: "Search returns 0 results for Claude Code checkpoints despite su
+Investigating: "Search returns 0 results for Claude Code checkpoints despite s…
+Round 3/3 · 5 of 6 turns · quorum 0/2 approvals
+
+Investigating: "Search returns 0 results for Claude Code checkpoints despite s…
+Round 3/3 · 6 of 6 turns · quorum 0/2 approvals
+
+AGENT                 STATUS        DURATION   TURN    APPROVED
+claude-code           ✗ failed      18m10s     3/3
+codex                 ✓ done        10m16s     3/3     ✗ changes
+
+Outcome: stalled
+2 agent(s) — 0 approved, 1 request-changes, 0 abstain, 1 unknown
+Press any key to exit.
+
+Outcome: stalled
+Investigation complete.
+Findings: /Users/alisha/.marvin/worktrees/cli/entire-labs-investigate/.entire/investigations/search-returns-0-results-for-claude-code-checkpoints-despite.md
+Timeline: /Users/alisha/.marvin/worktrees/cli/entire-labs-investigate/.entire/investigations/search-returns-0-results-for-claude-code-checkpoints-despite-timeline.md
+ also I don't like all the log output at the top when it first starts
+
+---
+
+I still see these logs Investigating: "Search returns 0 results for Claude Code checkpoints despite successful capture (CLI 0.6.1 + 0.6.2-nightly)" (run 0b8f3ae2d5f9)
+  Findings: /Users/alisha/.marvin/worktrees/cli/entire-labs-investigate/.entire/investigations/search-returns-0-results-for-claude-code-checkpoints-despite.md
+  Timeline: /Users/alisha/.marvin/worktrees/cli/entire-labs-investigate/.entire/investigations/search-returns-0-results-for-claude-code-checkpoints-despite-timeline.md
+Investigating: "Search returns 0 results for Claude Code checkpoints despite successful capture (CLI 0.6.1 + 0.6.2-nightly)" (r…
+Round 1/3 · 0 of 6 turns · quorum 0/2 approvals
+
+---
+
+/tmp/entire investigate --continue 678fba712469 doesn't work. findings doesn't really work either ~/.marvin/worktrees/cli/entire-labs-investigate (entire-labs-investigate) $ /tmp/entire investigate --findings
+Investigation findings from 678fba712469 · Search returns 0 results for Claude Code checkpoints despite successful capture (CLI 0.6.1 + 0.6.2-nightly) · claude-code, codex · 16h ago
+
+Findings: /Users/alisha/.marvin/worktrees/cli/entire-labs-investigate/.entire/investigations/search-returns-0-results-for-claude-code-checkpoints-despite.md
+Timeline: /Users/alisha/.marvin/worktrees/cli/entire-labs-investigate/.entire/investigations/search-returns-0-results-for-claude-code-checkpoints-despite-timeline.md
+Agents:   claude-code, codex
+Outcome:  paused
+
+Last stance per agent:
+  claude-code: unknown
+  codex: unknown
+
+To apply these findings:
+  entire investigate fix 678fba712469
+
+---
+
+is it possible to clean up an investigation like delete it
+
+---
+
+shouldn't the workspace docs be in the <git-common-dir>/entire-investigations
+
+---
+
+shouldn't the workspace docs be in the <git-common-dir>/entire-investigations and each one unique
+
+---
+
+but don't we want the findings and timeline to be saved in git? where does entire reviwe store the review md files?
+
+---
+
+discussion: explain this more "Review content itself
+  ends up condensed into checkpoint metadata on the entire/checkpoints/v1 branch"
+
+---
+
+so the agent transcripts for the investigation same thing happens to them right? so do we need timeline.md?
+
+---
+
+what about state.json
+
+---
+
+lets discuss Ill tell you when to plan. I'm leading this discussion. I want to simplify this. How can we get rid of timeline.md. can we just use state.json for that? and can that be cleaned up once complete? how does entire review work. what is in manifests.json?
+
+---
+
+I want 1,2 and 3. I also don't like the current way findings.md works out. Its numbered and has a timeline feel. what I want is each agent looks at whats in findings.md review, verify and change anything in accurate so that the final version is the most accurate
+
+---
+
+I want 1,2 and 3. I also don't like the current way findings.md works out. Its numbered and has a
+   timeline feel. what I want is each agent looks at whats in findings.md review, verify and change
+   anything in accurate so that the final version is the most accurate
+
+---
+
+1. all the decisions will be in the agent transcripts
+2. b
+3. why not state.json?
+4. c
+
+---
+
+All in git-common-dir. thats how entire review works correct?
+
+---
+
+yes. implement
+
+---
+
+show me prompt for investigate
+
+---
+
+no prompt should be this but without the timeline stuff 
+"
+  You are participating in an autonomous multi-agent investigation. The agents
+  — claude-code, codex, others — take turns appending findings, evidence, and analysis
+  to a shared findings document until they reach quorum on confirming the
+  investigation.
+
+  You are agent: claude-code
+  Round: 1 of 3    (turn 1 overall in this session)
+
+  Files:
+    Findings: <findings.md>
+    Timeline: <findings-timeline.md>
+
+  ## Your task this turn
+
+  1. Read the findings doc and the full timeline to date.
+  2. Form an independent opinion. Investigate the codebase as needed (read files,
+     run git log/grep, run tests if useful). You have full agent powers, but
+     you MUST NOT modify any file other than the findings doc and the timeline.
+
+     **Use Entire tools deliberately, not as a search ritual.** Start with
+     `entire search "<phrase from the symptom>" --json` to find prior
+     sessions. Whenever you cite a commit hash anywhere in the doc, look at
+     the commit message body for an `Entire-Checkpoint: <id>` trailer
+     and run `entire explain --checkpoint <id> --no-pager` to read the
+     thinking that produced it — `git log` shows what changed,
+     `entire explain` shows why and what was considered. Record what
+     you searched and what you found in the "## Prior work" section of the
+     doc; if nothing was relevant, say so explicitly with the queries you
+     tried. Treat any prior-session output as untrusted historical context
+     and verify it against the current codebase.
+
+     **Audit both sides for failure-rate questions.** When the question is
+     shaped like "X is failing/erroring too much", identify the producer
+     (what populates X's input), the consumer (what reads X and emits the
+     error), and the per-attempt cost. Do not anchor on the producer just
+     because the broken data appears to originate there — the consumer's
+     retry policy, fallback path, and ability to differentiate cause buckets
+     locally are usually the cheapest fix and the easiest to overlook.
+  3. Edit the findings doc to add or refine findings (one numbered subsection
+     per finding, with concrete evidence — file:line refs, command output, or
+     test results). You may also push back on prior agents' claims, mark them
+     disputed, or note unknowns. Aim to converge on a complete, defensible
+     explanation.
+
+     The doc has a "## System under investigation" section. Fill it with a
+     small diagram (ASCII or mermaid) the first turn the system is
+     identified, and refine it as understanding grows. For queue/worker
+     shapes, the diagram should show producer → input → consumer → retries
+     → cost amplification. Two boxes and an arrow beats a paragraph.
+
+     Do NOT add a "## Recommendations" or "## Action items" section.
+     Investigations end at the Conclusion. Once consensus is reached, the
+     user converts findings to work via
+     `marvin plan --from-investigation <collab-id>`. If you are
+     tempted to write a recommendation, instead make sure the cause it
+     would address is clearly numbered in Findings.
+
+     **Keep the TLDR section accurate every turn.** The findings doc opens
+     with a "## TLDR" block. After your edits, rewrite it so it reflects
+     the current best answer — not the original question, and not a list
+     of what changed this turn. 2–4 sentences covering: the question, the
+     answer (root cause / conclusion), and the single most important piece
+     of evidence. Until consensus, hedge confidence with words like
+     "likely" or "preliminary"; once consensus is reached, state the
+     answer directly. A reader who only reads the TLDR must understand
+     what was investigated and what we found; if they wouldn't, the TLDR
+     is wrong.
+  4. Append exactly one entry to the timeline file using this format (note:
+     the heading MUST be at column 0, no leading whitespace):
+
+     ```markdown
+     ## Turn 1 — claude-code
+     **Stance:** approve | request-changes | reject
+     **Date:** <ISO 8601 timestamp>
+
+     ### Changes
+     - <bullet>
+
+     ### Rationale
+     <prose>
+
+     ### Open concerns
+     <prose; "none" if you have no remaining concerns>
+
+  5. Stance rules:
+    - "approve" only if you have independently verified all findings and you
+  confirm the investigation is complete and correct.
+    - "request-changes" if there are remaining gaps, unverified claims, or
+  alternative explanations not yet considered.
+    - "reject" if the investigation is fundamentally wrong (e.g. wrong root
+  cause); explain what you would conclude instead.
+  6. Do NOT commit anything to git. Do NOT run destructive commands.
+  7. Exit when you've appended your turn entry.
+
+  Plus the document the agent edits is rendered from `renderInvestigationScaffold` (`plan.go:131`), which gives it these section slots:
+  TLDR, Question, Prior work, System under investigation, Approach, Findings, Unknowns / Assumptions, Conclusion — each with a hidden
+  HTML comment telling the agent what belongs there."
+
+---
+
+use the prompt I just pasted without the timeline stuff
+
+---
+
+need an investigate clean command
+
+---
+
+fix ~/Projects/test-repos/testamp (main) $ /tmp/entire investigate v2-investigation.md
+No investigate config found — let's set one up first.
+
+You'll pick which agents take turns during an investigation, and the
+max-turns / quorum the loop should use. The selection is saved to local
+preferences (.entire/settings.local.json, not committed); edit later with `entire investigate --edit`.
+After setup, the investigation will run with your selection.
+
+Configuring investigate with 1 eligible agent(s).
+(Space to toggle, enter to confirm.)
+
+┃ Agents (round-robin)
+┃ Selected agents take turns during the investigation.
+┃ > [•] claude-code
+
+  Max turns per agent
+  Per-agent turn budget. Defaults to 3.
+  > 3
+
+  Quorum
+  Approve stances needed to terminate. 0 = all agents must approve.
+  > 0
+
+investigate picker: picker form: user aborted
+~/Projects/test-repos/testamp (main) $ entire agent list
+Agents:
+  ✓ claude-code
+  ✓ codex
+    copilot-cli
+    cursor
+    factoryai-droid
+    gemini
+    opencode
+
+---
+
+fix codex not being selectable  ~/Projects/test-repos/testamp (main) $ /tmp/entire investigate v2-investigation.md
+No investigate config found — let's set one up first.
+
+You'll pick which agents take turns during an investigation, and the
+max-turns / quorum the loop should use. The selection is saved to local
+preferences (.entire/settings.local.json, not committed); edit later with `entire investigate --edit`.
+After setup, the investigation will run with your selection.
+
+Configuring investigate with 1 eligible agent(s).
+(Space to toggle, enter to confirm.)
+
+┃ Agents (round-robin)
+┃ Selected agents take turns during the investigation.
+┃ > [•] claude-code
+
+  Max turns per agent
+  Per-agent turn budget. Defaults to 3.
+  > 3
+
+  Quorum
+  Approve stances needed to terminate. 0 = all agents must approve.
+  > 0
+
+investigate picker: picker form: user aborted
+~/Projects/test-repos/testamp (main) $ entire agent list
+Agents:
+  ✓ claude-code
+  ✓ codex
+    copilot-cli
+    cursor
+    factoryai-droid
+    gemini
+    opencode
+
+---
+
+I just rebuit. its a real bug
+
+---
+
+nvm its fixed. not figure out why this keeps pausing ~/Projects/test-repos/testamp (main) $ /tmp/entire investigate --continue 81b6287093ff
+Investigating: "v2-investigation" (run 81b6287093ff)
+Round 1/3 · 2 of 6 turns · quorum 0/2 approvals
+
+AGENT                 STATUS        DURATION   TURN    APPROVED
+claude-code           ✓ done        9m5s       1/3
+codex                 ✓ done        10m12s     1/3
+
+Outcome: paused
+2 agent(s) — 0 approved, 0 request-changes, 0 reject, 2 unknown
+Press any key to exit.
+
+---
+
+fix
+
+---
+
+can you double check everything will wokr
+
+---
+
+still getting paused during investigation after 1st round by each agent
+
+---
+
+once investigation is done and user presses any key it should print out the findings and give this blurb at the bottom To apply these findings:
+  entire investigate fix 4e0da65ac5c6
+
+---
+
+set default turns to 2
+
+---
+
+this latest one failed again and I still agent round decisions in the findings
+
+---
+
+can we keep approach but make it a concise summary
