@@ -252,3 +252,7 @@ no prompt should be this but without the timeline stuff
 ---
 
 use the prompt I just pasted without the timeline stuff
+
+---
+
+need an investigate clean command
