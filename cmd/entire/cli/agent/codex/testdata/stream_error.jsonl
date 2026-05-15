@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"test-thread"}
+{"type":"turn.started"}
+{"type":"error","message":"invalid_request_error: model not found"}
+{"type":"turn.failed","error":{"message":"model not found"}}

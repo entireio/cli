@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"test-thread"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Hello, world."}}
+{"type":"turn.completed","usage":{"input_tokens":9,"cached_input_tokens":1234,"output_tokens":3,"reasoning_output_tokens":0}}
