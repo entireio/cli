@@ -379,3 +379,9 @@ can we keep approach but make it a concise summary
 ---
 
 it should show the findings using the markdown viewer glamour or whatever the cli uses
+
+---
+
+fix this "~/Projects/test-repos/testamp (main) $ /tmp/entire investigate fix 2fe5378c55c7
+warning: could not read findings doc ".git/entire-investigations/2fe5378c55c7/findings.md": open .git/entire-investigations/2fe5378c55c7/findings.md: no such file or directory
+Launching claude-code with findings from run 2fe5378c55c7 ..."
