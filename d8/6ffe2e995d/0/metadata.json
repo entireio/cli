@@ -19,33 +19,6 @@
     "output_tokens": 5337,
     "api_call_count": 14
   },
-  "summary": {
-    "intent": "Add a GitHub workflow using CodeQL advanced security queries to validate Actions workflows on PRs that modify them.",
-    "outcome": "Created .github/workflows/codeql-actions.yml and gated the analysis/upload to same-repo PRs to avoid permission failures on forks.",
-    "learnings": {
-      "repo": [
-        "The repository follows a convention of SHA-pinning for GitHub Actions, although version tags were used initially for this task."
-      ],
-      "code": [
-        {
-          "path": ".github/workflows/codeql-actions.yml",
-          "line": 1,
-          "end_line": 35,
-          "finding": "Gating the workflow or SARIF upload with 'github.event.pull_request.head.repo.full_name == github.repository' is necessary to prevent 'security-events: write' permission failures on PRs from forks."
-        }
-      ],
-      "workflow": [
-        "GitHub Actions GITHUB_TOKEN permissions are restricted for fork PRs, specifically lacking 'security-events: write' required by CodeQL upload steps."
-      ]
-    },
-    "friction": [
-      "A security hook triggered a reminder during the initial file write attempt.",
-      "The inherent permission limitation for fork-based PRs required a follow-up fix to prevent red CI checks."
-    ],
-    "open_items": [
-      "Pin the CodeQL action versions to specific commit SHAs to align with repository conventions."
-    ]
-  },
   "initial_attribution": {
     "calculated_at": "2026-05-11T05:58:23.418649999Z",
     "agent_lines": 4,

@@ -1,0 +1,25 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "4042ed808959",
+  "strategy": "manual-commit",
+  "branch": "fix-stale-date-manifest-test",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/review/manifest_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/40/42ed808959/0/metadata.json",
+      "transcript": "/40/42ed808959/0/transcript.jsonl",
+      "content_hash": "/40/42ed808959/0/transcript_hash.txt",
+      "prompt": "/40/42ed808959/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 47,
+    "cache_creation_tokens": 57555,
+    "cache_read_tokens": 2306081,
+    "output_tokens": 10817,
+    "api_call_count": 43
+  }
+}
