@@ -363,3 +363,7 @@ still getting paused during investigation after 1st round by each agent
 
 once investigation is done and user presses any key it should print out the findings and give this blurb at the bottom To apply these findings:
   entire investigate fix 4e0da65ac5c6
+
+---
+
+set default turns to 2
