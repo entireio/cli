@@ -28,6 +28,7 @@ func parseCodexStream(stdout io.Reader, progress agent.ProgressFn) (string, erro
 		usage           *codexStreamUsage
 		turnStartedAt   time.Time
 		turnDuration    time.Duration
+		malformed       int
 	)
 
 	dispatch := func(p agent.GenerationProgress) {
@@ -43,6 +44,11 @@ func parseCodexStream(stdout io.Reader, progress agent.ProgressFn) (string, erro
 		}
 		var ev codexStreamEvent
 		if err := json.Unmarshal(line, &ev); err != nil {
+			// Codex may emit transient noise (blank lines, partial flushes); a
+			// schema-incompatible line is recoverable per-event but tracked so
+			// protocol regressions surface in the "no agent_message" error
+			// instead of disappearing silently.
+			malformed++
 			continue
 		}
 
@@ -69,9 +75,23 @@ func parseCodexStream(stdout io.Reader, progress agent.ProgressFn) (string, erro
 			}
 
 		case "turn.failed", "error":
-			detail := "unspecified error"
-			if len(line) > 0 {
-				detail = string(line)
+			var details struct {
+				Message string `json:"message"`
+				Error   struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			// Partial decode tolerated: if the schema changes we fall through
+			// to "unspecified error" rather than leaking the raw line (which
+			// may carry echoed user content or model-message fragments) into
+			// logs, telemetry, and *TextGenerationError.Stderr.
+			_ = json.Unmarshal(line, &details) //nolint:errcheck // see comment above
+			detail := details.Message
+			if detail == "" {
+				detail = details.Error.Message
+			}
+			if detail == "" {
+				detail = "unspecified error"
 			}
 			return "", fmt.Errorf("codex turn failed: %s", detail)
 		}
@@ -83,6 +103,9 @@ func parseCodexStream(stdout io.Reader, progress agent.ProgressFn) (string, erro
 		return "", errors.New("codex stream ended without a turn.completed event")
 	}
 	if resultText == "" {
+		if malformed > 0 {
+			return "", fmt.Errorf("codex stream produced no agent_message (%d malformed lines skipped)", malformed)
+		}
 		return "", errors.New("codex stream produced no agent_message")
 	}
 	if progress != nil {
