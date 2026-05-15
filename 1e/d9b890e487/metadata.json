@@ -1,0 +1,25 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "1ed9b890e487",
+  "strategy": "manual-commit",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/investigate/cmd.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/1e/d9b890e487/0/metadata.json",
+      "transcript": "/1e/d9b890e487/0/transcript.jsonl",
+      "content_hash": "/1e/d9b890e487/0/transcript_hash.txt",
+      "prompt": "/1e/d9b890e487/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 669,
+    "cache_creation_tokens": 2474355,
+    "cache_read_tokens": 158762764,
+    "output_tokens": 308904,
+    "api_call_count": 465
+  }
+}
