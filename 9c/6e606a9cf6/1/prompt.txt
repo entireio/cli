@@ -138,3 +138,7 @@ I want 1,2 and 3. I also don't like the current way findings.md works out. Its n
 ---
 
 All in git-common-dir. thats how entire review works correct?
+
+---
+
+yes. implement
