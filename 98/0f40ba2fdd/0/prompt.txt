@@ -248,3 +248,7 @@ no prompt should be this but without the timeline stuff
   Plus the document the agent edits is rendered from `renderInvestigationScaffold` (`plan.go:131`), which gives it these section slots:
   TLDR, Question, Prior work, System under investigation, Approach, Findings, Unknowns / Assumptions, Conclusion — each with a hidden
   HTML comment telling the agent what belongs there."
+
+---
+
+use the prompt I just pasted without the timeline stuff
