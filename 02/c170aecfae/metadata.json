@@ -1,0 +1,25 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "02c170aecfae",
+  "strategy": "manual-commit",
+  "branch": "redact-2",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "redact/redact_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/02/c170aecfae/0/metadata.json",
+      "transcript": "/02/c170aecfae/0/transcript.jsonl",
+      "content_hash": "/02/c170aecfae/0/transcript_hash.txt",
+      "prompt": "/02/c170aecfae/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 86,
+    "cache_creation_tokens": 151496,
+    "cache_read_tokens": 3987020,
+    "output_tokens": 31894,
+    "api_call_count": 41
+  }
+}
