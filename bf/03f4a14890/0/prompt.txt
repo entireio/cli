@@ -375,3 +375,7 @@ this latest one failed again and I still agent round decisions in the findings
 ---
 
 can we keep approach but make it a concise summary
+
+---
+
+it should show the findings using the markdown viewer glamour or whatever the cli uses
