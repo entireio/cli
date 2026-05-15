@@ -1,0 +1,292 @@
+see this issue, https://github.com/entireio/cli/issues/1198 and review this contributor pr https://github.com/entireio/cli/pull/1204 - you should have more context as well. so for entire explain the reason for the 30s was failure to reach api in 30s not generate a summary in 30s but it seems it's persisted - and this was added in the interum while we added the ability for other agents to generate a summary. check the error itself the origin of the 30s add and then let me know what you find. use /superpowers:brainstorming
+
+---
+
+does 1204 remove 30s timeout? or does 964? should we merge 1204 and remove the 30s timeout or ensure there is a proper error when summary takes a lot time (maybe we have this?) but if 30s timer can't distinguihs between long time to generate summary adn reaching the api - this needs to be fixed immedietly
+
+---
+
+no need to commit plans, but run reviewer on them
+
+---
+
+can you give me full path for review please?
+
+---
+
+peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/c/.w/redact-2 (redact-2)> less /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/redact-2/docs/superpowers/specs/2026-05-13-explain-summary-streaming-design.md
+/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/redact-2/docs/superpowers/specs/2026-05-13-explain-summary-streaming-design.md: No such file or directory
+
+---
+
+even for non streaming angents, can we still surface warning on failure if reaches conditions on cant reach api, slow model, etc?
+
+---
+
+okay everything else looks good, you can proceed and we will test so i can see also
+
+---
+
+this is supposed to be 964 and i want to smoke test
+
+---
+
+yes can you run all for me please
+
+---
+
+1198 already closed. Can you redo smoke tests again please after fix - entire smoke tests
+
+---
+
+i mean i want to manually smoke test
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/opf-smoke-v2 (main)> cd /Users/peytonmontei/Documents/entire/devenv/entireio/cli
+                                                         set ENTIRE
+                                                         /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/explain-streaming/entire
+The command-line interface for Entire
+
+Getting Started:
+  To get started with Entire CLI, run 'entire enable' to enable
+  session tracking in your repository, then 'entire agent add <name>'
+  to install hooks for a specific agent. For more information, visit:
+  https://docs.entire.io/introduction
+
+
+Environment Variables:
+  ACCESSIBLE    Set to any value (e.g., ACCESSIBLE=1) to enable accessibility
+                mode. This uses simpler text prompts instead of interactive
+                TUI elements, which works better with screen readers.
+
+Usage:
+  entire [flags]
+  entire [command]
+
+Available Commands:
+  activity               Show your activity overview
+  agent                  Manage agent integrations (add, remove, list)
+  auth                   Manage authentication and API tokens
+  checkpoint             Inspect, rewind, and search checkpoints
+  clean                  Clean up Entire session data
+  configure              Update Entire settings in the current repository
+  disable                Disable Entire in current repository
+  dispatch               Generate a dispatch summarizing recent agent work
+  doctor                 Diagnose and fix session issues
+  enable                 Enable Entire in current repository
+  help                   Help about any command
+  labs                   Explore experimental Entire workflows
+  login                  Log in to Entire
+  logout                 Log out of Entire
+  plugin                 Manage Entire plugins (install, list, remove)
+  recap                  Summarize recent checkpoint activity
+  session                Manage agent sessions tracked by Entire
+  status                 Show Entire status
+  version                Show build information
+
+Flags:
+  -h, --help      help for entire
+  -v, --version   version for entire
+
+Use "entire [command] --help" for more information about a command.
+peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/cli (main)> $ENTIRE checkpoint list | head -15
+fish: The expanded command was empty.
+
+---
+
+use one of these and give me rest of hte commands pls, OS/Arch: darwin/arm64
+peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/cli (main)> $ENTIRE checkpoint list | head -15
+  branch       main
+  checkpoints  56
+
+● 2e0a6321-6e5  [temporary]  "i just upgraded to nightly, but don't see this PRs change..."
+  05-14 12:10 (d3ea73c) Do run these or should i
+  05-14 12:09 (fc63a43) Run these, rm ~/.local/bin/entire # /opt/homebrew/bin/entire will now re
+
+● ec57f517-681  [temporary]  "review pr 1204 please use /review and /pr-review-toolkit:..."
+  05-13 18:51 (fea1871) Review pr 1204 please use /review and /pr-review-toolkit:review-pr
+
+● e3d911c520d2  "write a 200-word essay about cats"
+  05-13 21:00 (d0a1e8b) Stream review agent events live via JSONL output modes (#1192)
+
+● 96518e6260ce  "should we commit and push error fixes?"
+  05-13 16:51 (a01a781) Clarify recap scope and range controls (#1161)
+
+---
+
+very ncie, peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/cli (main)> $ENTIRE checkpoint explain --checkpoint e3d911c520d2 --generate --force
+Generating checkpoint summary... (transcript: 40.7 KB, provider: claude-code)
+→ Sending request to provider...
+→ Provider responded (TTFT 1.6s, 13k cached input tokens) -- generating...
+✓ Summary generated (7.6s, 420 output tokens)
+✓ Summary generated for e3d911c520d2
+  provider  Claude Code
+  model     sonnet
+  duration  9.8s, good job, peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/cli (main)> $ENTIRE checkpoint explain --checkpoint e3d911c520d2 --generate --force --summary-timeout-seconds 3
+Generating checkpoint summary... (transcript: 40.7 KB, provider: claude-code)
+→ Sending request to provider...
+→ Provider responded (TTFT 1.2s, 20.2k cached input tokens) -- generating...
+✗ Timed out after 3s: model responded but did not finish
+  cause    transcript may be too large for the chosen cap, or model is slow
+  try      raise --summary-timeout-seconds or pick a faster model, okay good, peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/cli (main) [1]> $ENTIRE checkpoint explain --help | grep summary-timeout
+      --summary-timeout-seconds int   Hard deadline in seconds for --generate summary generation; overrides summary_timeout_seconds setting. 0 = use setting; if setting is also unset or 0, no automatic deadline applies., good, peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/cli (main)> $ENTIRE checkpoint explain --checkpoint e3d911c520d2 --generate --force | cat
+Generating checkpoint summary... (transcript: 40.7 KB, provider: claude-code)
+→ Sending request to provider...
+→ Provider responded (TTFT 1.9s, 20.2k cached input tokens) -- generating...
+✓ Summary generated (7.0s, 406 output tokens)
+✓ Summary generated for e3d911c520d2
+  provider  Claude Code
+  model     sonnet
+  duration  8.8s
+● Checkpoint e3d911c520d2
+  session  f6da5c2c-ebcc-43ca-80f7-ced75158280e
+  created  2026-05-12 15:36:13
+  author   peyton-alt <peyton@entire.io>
+  tokens   55.5k
+  commits  d0a1e8b Stream review agent events live via JSONL output modes (#1192)
+────────────────────────────────────────────────────────────────────────────────
+## Intent
+
+The user requested a 200-word essay about cats.
+
+## Outcome
+
+A 200-word essay about cats was generated. Additionally, several files in the claudecode agent package were modified, likely related to transcript parsing or session handling.
+
+## Learnings
+
+### Repository
+
+- The claudecode agent package (cmd/entire/cli/agent/claudecode/) contains a reviewer, transcript parser, and associated test data for analyzing development sessions.
+
+### Code
+
+- `cmd/entire/cli/agent/claudecode/transcript.go` — Contains transcript parsing logic for claudecode sessions.
+- `cmd/entire/cli/agent/claudecode/reviewer.go` — Contains session review logic, likely updated to handle new transcript formats or fields.
+- `cmd/entire/cli/agent/claudecode/testdata/canned_session.txt` — Canned test fixture for session replay or parsing tests.
+- `cmd/entire/cli/agent/claudecode/testdata/stream_session.jsonl` — JSONL streaming session fixture, suggesting the reviewer handles streamed Claude API responses.
+
+### Workflow
+
+- Test data files (canned_session.txt, stream_session.jsonl) are used as fixtures for unit testing the transcript and reviewer logic.
+
+## Files
+
+- `cmd/entire/cli/agent/claudecode/reviewer_test.go`
+
+── Transcript (checkpoint scope) ───────────────────────────────────────────────
+[User] write a 200-word essay about cats
+
+[Assistant] Cats are among the most enigmatic companions humans have welcomed into their homes. Domesticated roughly 9,000 years ago in the Fertile Crescent, they originally earned their place hunting rodents in grain stores. Today, they remain remarkable predators wrapped in soft fur, retaining sharp instincts even while napping eighteen hours a day on a sunlit windowsill.
+
+What makes cats so captivating is their paradoxical nature. They are independent yet affectionate, aloof yet curious, graceful yet prone to comedic clumsiness. A cat can leap six times its body length, twist mid-air to land on its feet, and silently stalk a feather toy with the same focus a lion brings to the savanna. Their purring, still not fully understood by science, may promote healing and reduce stress in both the cat and the humans nearby.
+
+Cats communicate in subtle dialects of blinks, tail flicks, and chirps. A slow blink is a feline kiss; an upright tail is a greeting. Unlike dogs, they did not evolve to please us, which makes their affection feel earned rather than given. Living with a cat is less like owning a pet and more like sharing a home with a small, opinionated roommate who happens to be perfect., very good peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/cli (main)> env ACCESSIBLE=1 $ENTIRE checkpoint explain --checkpoint e3d911c520d2 --generate --force --summary-timeout-seconds 3
+Generating checkpoint summary... (transcript: 40.7 KB, provider: claude-code)
+-> Sending request to provider...
+-> Provider responded (TTFT 1.4s, 20.2k cached input tokens) -- generating...
+-> Writing summary... (~4 tokens)
+-> Writing summary... (~24 tokens)
+✗ Timed out after 3s: model responded but did not finish
+  cause    transcript may be too large for the chosen cap, or model is slow
+  try      raise --summary-timeout-seconds or pick a faster model, very nice, peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/cli (main) [1]> $ENTIRE checkpoint explain --checkpoint e3d911c520d2 --generate --force --summary-timeout-seconds 10
+Generating checkpoint summary... (transcript: 40.7 KB, provider: claude-code)
+→ Sending request to provider...
+✗ Timed out after 10s: provider sent request but received no response
+  cause    network/firewall, provider API degraded, or auth check stuck
+  try      check connectivity to the provider, then retry
+
+---
+
+yes
+
+---
+
+diff is 1400 whihc is okay, but not the 750 or whatever you said. do you need to run review agent on this, should i have cursro bot take a look?
+
+---
+
+i just told it to run. do you want to run /review on this pr
+
+---
+
+so are the synthetic responses not accurate?
+
+---
+
+can we just do this in this pr?
+
+---
+
+I don't think we shoudl be committing tests, can you revert?
+
+---
+
+okay now for testsing, can you tell me the results please, how you tested, etc
+
+---
+
+i meant for the fix for the streaming, and getting accurate respones back instead of synthetic ones
+
+---
+
+so now the repsonses we get are not assumptions made but actual repsonses from the specified agents cli - and not just claude?
+
+---
+
+so this is not a synthetic response "Live progress phases are real Claude stream events. Verified end-to-end via your smoke
+  test runs." ? the streaming we see like Generating checkpoint summary... (transcript: 40.7 KB, provider: claude-code)
+→ Sending request to provider...
+→ Provider responded (TTFT 1.6s, 13k cached input tokens) -- generating...
+→ Writing summary... (~Nk tokens)             ← updates in place
+✓ Summary generated (7.6s, 420 output tokens)
+✓ Summary generated for <checkpoint-id>
+
+---
+
+i just want to make sure what we're showing/outputting is actually correct
+
+---
+
+i just want to make sure what we're showing/outputting is actually correct and from claude's cli or what claude is actually returning
+
+---
+
+okay thanks for clarifying. is this true for all other agents too who generate summaries
+
+---
+
+can you look at how we implemented the ability to add other agents summary providers, maybe this will help us fix this
+
+---
+
+okay can you see testing failures on 964
+
+---
+
+okay thank you now can you address the two cursor comments on the pr please
+
+---
+
+leave as 5 commits i don't really care about final number of commits only when there are unneccessary ones proposed in a plan
+
+---
+
+is there anything else on this one to review? maybe run /review again
+
+---
+
+okay now we need to have this same capability for all agents that can generate summaries, inluding external agents
+
+---
+
+did you run reviewer on plan yet
+
+---
+
+why does the plan depend on 946 and not on main?
+
+---
+
+before this, can you address the comments on pr 964 so it's readt
