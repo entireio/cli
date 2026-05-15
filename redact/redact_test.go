@@ -224,6 +224,12 @@ func TestShouldSkipJSONLField(t *testing.T) {
 		{"ids", true},
 		{"session_ids", true},
 		{"userIds", true},
+		// Fields ending in "account" should be skipped (identifier shape,
+		// not credential): google_adsense_account, aws_account_id, etc.
+		{"account", true},
+		{"google_adsense_account", true},
+		{"aws_account", true},
+		{"service_account", true},
 		// Exact match "signature" should be skipped.
 		{"signature", true},
 		// Path-related fields should be skipped.
@@ -893,6 +899,21 @@ func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
 			input: "GOOGLE_ADSENSE_ACCOUNT=pub-1234567890123456",
 			want:  "GOOGLE_ADSENSE_ACCOUNT=pub-1234567890123456",
 		},
+		{
+			name:  "prose with token colon does not over-redact next word",
+			input: "Got the token: hunter2 don't merge yet",
+			want:  "Got the token: hunter2 don't merge yet",
+		},
+		{
+			name:  "prose with secret colon does not over-redact next word",
+			input: "secret: don't merge yet",
+			want:  "secret: don't merge yet",
+		},
+		{
+			name:  "prose with api_key colon does not over-redact next word",
+			input: "The api_key: was wrong, retry the request",
+			want:  "The api_key: was wrong, retry the request",
+		},
 	})
 }
 
@@ -1544,6 +1565,124 @@ func TestString_RedactionIsIdempotent(t *testing.T) {
 				t.Errorf("not idempotent for %q:\n  once:  %q\n  twice: %q", input, once, twice)
 			}
 		})
+	}
+}
+
+// Pins that `*_account` JSON keys are preserved by structure, not by entropy
+// coincidence. The value here is intentionally high-entropy (well above the
+// 4.5 threshold) so the test would fail if `_account` were not in the skip
+// list — proving the protection is design-driven, not luck-driven.
+func TestJSONLContent_AccountJSONKeysPreservedDespiteHighEntropy(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		`{"google_adsense_account":"` + highEntropySecret + `"}`,
+		`{"aws_account":"` + highEntropySecret + `"}`,
+		`{"service_account":"` + highEntropySecret + `"}`,
+	}
+	for _, in := range cases {
+		out, err := JSONLContent(in)
+		if err != nil {
+			t.Fatalf("unexpected error for %q: %v", in, err)
+		}
+		if out != in {
+			t.Errorf("expected %q preserved (account is identifier-shape), got: %s", in, out)
+		}
+	}
+}
+
+// Pins that JSON keys with known non-secret prefixes (cancel/pagination/
+// continuation/idempotency/cursor/next/previous/page/sync) followed by
+// `_token` or `_secret` are NOT flat-redacted. These are routinely safe
+// debug/pagination identifiers. Real high-entropy credential-shaped values
+// still get caught by entropy + Betterleaks via the per-value String() call.
+func TestJSONLContent_NonSecretTokenPrefixesPreserved(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		`{"cancel_token":"abc-123-xyz-cancel-debug"}`,
+		`{"pagination_token":"page_500_offset_10000"}`,
+		`{"continuation_token":"foo_bar_baz_continuation_12345"}`,
+		`{"idempotency_token":"req-7f2a-deadbeef"}`,
+		`{"cursor_token":"opaque-cursor-value"}`,
+		`{"next_token":"page-2-marker"}`,
+		`{"previous_token":"page-1-marker"}`,
+		`{"prev_token":"page-1-marker"}`,
+		`{"page_token":"page-2-marker"}`,
+		`{"sync_token":"sync-state-marker"}`,
+		`{"cancel_secret":"cancel-state-marker"}`,
+	}
+	for _, in := range cases {
+		out, err := JSONLContent(in)
+		if err != nil {
+			t.Fatalf("unexpected error for %q: %v", in, err)
+		}
+		if out != in {
+			t.Errorf("expected %q preserved (non-secret prefix), got: %s", in, out)
+		}
+	}
+}
+
+// Pins that prefixed `*_token` keys NOT in the non-secret allowlist still
+// redact — e.g. csrf_token, auth_token, oauth_token, refresh_token. Prevents
+// the allowlist from expanding to swallow real credential shapes.
+func TestJSONLContent_UnknownTokenPrefixesStillRedacted(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ in, wantSub string }{
+		{`{"csrf_token":"abc-csrf-real-secret"}`, `"csrf_token":"REDACTED"`},
+		{`{"auth_token":"abc-auth-real-secret"}`, `"auth_token":"REDACTED"`},
+		{`{"oauth_token":"abc-oauth-real-secret"}`, `"oauth_token":"REDACTED"`},
+		{`{"random_token":"abc-random-real-secret"}`, `"random_token":"REDACTED"`},
+	}
+	for _, c := range cases {
+		out, err := JSONLContent(c.in)
+		if err != nil {
+			t.Fatalf("unexpected error for %q: %v", c.in, err)
+		}
+		if !strings.Contains(out, c.wantSub) {
+			t.Errorf("input %q: expected %q in output, got: %s", c.in, c.wantSub, out)
+		}
+	}
+}
+
+// Pins that bare `{"token":"…"}` and `{"secret":"…"}` JSON fields are NOT
+// flat-redacted by the structural layer. Standalone `token`/`secret` keys
+// appear in many non-credential contexts (debug, request IDs, etc.); real
+// high-entropy values still get caught by entropy + Betterleaks.
+func TestJSONLContent_BareTokenSecretJSONKeysPreserved(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		`{"token":"abc-def-ghi-not-a-secret-debug-id"}`,
+		`{"secret":"abc-def-ghi-not-a-secret-debug-id"}`,
+	}
+	for _, in := range cases {
+		out, err := JSONLContent(in)
+		if err != nil {
+			t.Fatalf("unexpected error for %q: %v", in, err)
+		}
+		if out != in {
+			t.Errorf("expected %q preserved (bare token/secret keys are not credentials), got: %s", in, out)
+		}
+	}
+}
+
+// Pins that prefixed `*_token` / `*_secret` JSON fields continue to redact —
+// these are the structural credential shapes the layer targets.
+func TestJSONLContent_PrefixedTokenSecretJSONKeysRedacted(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ in, wantSub string }{
+		{`{"csrf_token":"abc-csrf-real-secret"}`, `"csrf_token":"REDACTED"`},
+		{`{"auth_token":"abc-auth-real-secret"}`, `"auth_token":"REDACTED"`},
+		{`{"api_key":"abc-api-real-secret"}`, `"api_key":"REDACTED"`},
+		{`{"client_secret":"abc-client-real-secret"}`, `"client_secret":"REDACTED"`},
+		{`{"refresh_token":"abc-refresh-real-secret"}`, `"refresh_token":"REDACTED"`},
+	}
+	for _, c := range cases {
+		out, err := JSONLContent(c.in)
+		if err != nil {
+			t.Fatalf("unexpected error for %q: %v", c.in, err)
+		}
+		if !strings.Contains(out, c.wantSub) {
+			t.Errorf("input %q: expected %q in output, got: %s", c.in, c.wantSub, out)
+		}
 	}
 }
 

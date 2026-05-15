@@ -31,8 +31,17 @@ var credentialedURIPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]{1,31}://
 // optional `_word`/`-word` segments + `password`/`passwd`/`pwd`). Used to
 // compose both the env-var assignment regex and the JSON-key regex so the
 // vendor list stays in one place.
-const dbPasswordKeyShape = `(?:db|database|pg|postgres|postgresql|mysql|mariadb|redis|mongo|mongodb|sqlserver|mssql|jdbc)(?:[_-]+[a-z0-9]+)*[_-]*(?:password|passwd|pwd)`                                        //nolint:gosec // regex literal, not a credential
-const secretValueKeyShape = `(?:[a-z0-9]+[_-]+)*(?:api[_-]*key|auth[_-]*token|access[_-]*token|refresh[_-]*token|client[_-]*secret|consumer[_-]*secret|secret[_-]*key|private[_-]*key|ssh[_-]*key|secret|token)` //nolint:gosec // regex literal, not a credential
+const dbPasswordKeyShape = `(?:db|database|pg|postgres|postgresql|mysql|mariadb|redis|mongo|mongodb|sqlserver|mssql|jdbc)(?:[_-]+[a-z0-9]+)*[_-]*(?:password|passwd|pwd)` //nolint:gosec // regex literal, not a credential
+// secretValueKeyShape matches credential-style key names. Two alternation
+// branches:
+//  1. Explicit shapes (api_key, auth_token, client_secret, …) with an
+//     optional prefix.
+//  2. Bare `secret`/`token` ONLY when preceded by at least one prefix segment
+//     (e.g. csrf_token, auth_secret). Standalone `{"token":"…"}` /
+//     `{"secret":"…"}` JSON fields are intentionally NOT matched here —
+//     entropy + Betterleaks cover real high-entropy values, and bare
+//     `token`/`secret` keys appear in many non-credential contexts.
+const secretValueKeyShape = `(?:(?:[a-z0-9]+[_-]+)*(?:api[_-]*key|auth[_-]*token|access[_-]*token|refresh[_-]*token|client[_-]*secret|consumer[_-]*secret|secret[_-]*key|private[_-]*key|ssh[_-]*key)|(?:[a-z0-9]+[_-]+)+(?:secret|token))` //nolint:gosec // regex literal, not a credential
 
 var (
 	jdbcPattern          = regexp.MustCompile(`(?i)\bjdbc:[^\s"'<>` + "`" + `]+`)
@@ -42,8 +51,12 @@ var (
 	// credentialValuePattern requires the prefix to start at a non-alphanumeric
 	// boundary, so APP_DB_PASSWORD matches via the leading `_` but mydbpassword
 	// does not.
-	credentialValuePattern  = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + dbPasswordKeyShape + `)\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
-	secretValuePattern      = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + secretValueKeyShape + `)\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
+	credentialValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + dbPasswordKeyShape + `)\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
+	// secretValuePattern targets shell/env-var assignments (`KEY=value`). It uses
+	// `=` only, not `:`, to avoid colliding with English prose ("the token: foo")
+	// in transcripts. YAML/JSON `key: value` shapes are handled by the JSON-aware
+	// path (`secretJSONKeyRegex`) which sees structured boundaries, not text.
+	secretValuePattern      = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + secretValueKeyShape + `)\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
 	shellStdinSecretPattern = regexp.MustCompile(
 		`(?is)\bprintf\s+(?:(?:%[A-Za-z]|'%-?[0-9.]*[A-Za-z](?:\\n)?'|"%-?[0-9.]*[A-Za-z](?:\\n)?")\s+)?("[^"\r\n]{1,512}"|'[^'\r\n]{1,512}'|[^\s|&;]{1,512})\s*\|\s*[^&;\r\n]{0,300}\bsecrets?\s+(?:put|set|add|create)\s+` + secretValueKeyShape + `\b`,
 	)
@@ -68,6 +81,25 @@ const entropyThreshold = 4.5
 
 // RedactedPlaceholder is the replacement text used for redacted secrets.
 const RedactedPlaceholder = "REDACTED"
+
+// nonSecretTokenPrefixes lists key-name prefixes that, when followed by
+// `_token` or `_secret`, denote routinely-non-sensitive debug or pagination
+// identifiers (e.g. cancel_token, pagination_token). These are excluded from
+// JSON-key redaction so they remain readable in transcripts. Real
+// high-entropy values still get caught by the entropy detector / Betterleaks
+// via the per-value String() call in collectJSONLReplacements.
+var nonSecretTokenPrefixes = map[string]struct{}{
+	"cancel":       {},
+	"continuation": {},
+	"cursor":       {},
+	"idempotency":  {},
+	"next":         {},
+	"page":         {},
+	"pagination":   {},
+	"prev":         {},
+	"previous":     {},
+	"sync":         {},
+}
 
 // placeholderSecretValues lists lowercase values that should be treated as
 // non-secrets when they appear as a credential value: prior redactions
@@ -520,10 +552,29 @@ func isRepeatedCharPlaceholder(s string) bool {
 
 func isCredentialJSONSecretKey(key string, credentialContext bool) bool {
 	normalized := normalizeCredentialJSONKey(key)
+	if isKnownNonSecretTokenKey(normalized) {
+		return false
+	}
 	if isSensitiveNormalizedJSONValueKey(normalized) {
 		return true
 	}
 	return credentialContext && genericPasswordKeyRegex.MatchString(normalized)
+}
+
+// isKnownNonSecretTokenKey reports whether the normalized JSON key is
+// `<prefix>_token` or `<prefix>_secret` where prefix is in
+// nonSecretTokenPrefixes. Used to short-circuit JSON-key redaction for keys
+// like `cancel_token`, `pagination_token`, `idempotency_token` that are
+// routinely non-credentials.
+func isKnownNonSecretTokenKey(normalized string) bool {
+	for _, suffix := range []string{"_token", "_secret"} {
+		if prefix, ok := strings.CutSuffix(normalized, suffix); ok {
+			if _, allowed := nonSecretTokenPrefixes[prefix]; allowed {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isNonSecretIdentifierAssignment(candidate string) bool {
@@ -922,6 +973,16 @@ func shouldSkipJSONLField(key string) bool {
 
 	// Skip ID fields
 	if strings.HasSuffix(lower, "id") || strings.HasSuffix(lower, "ids") {
+		return true
+	}
+
+	// Skip account fields. These are identifier-shape (e.g.,
+	// google_adsense_account, aws_account, service_account), not credential
+	// fields. Protects against entropy / vendor-regex false positives when
+	// account identifiers happen to look high-entropy. A misnamed credential
+	// field literally named `*_account` would slip through — acceptable trade
+	// because real credential fields use `*_secret`, `*_token`, etc.
+	if strings.HasSuffix(lower, "account") {
 		return true
 	}
 
