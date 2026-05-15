@@ -354,3 +354,7 @@ fix
 ---
 
 can you double check everything will wokr
+
+---
+
+still getting paused during investigation after 1st round by each agent
