@@ -5867,6 +5867,42 @@ func TestSummaryProgressWriter_NonTTYGenerateThrottle(t *testing.T) {
 	}
 }
 
+func TestSummaryProgressWriter_FirstTokenWithoutOptionalFields(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	attempt := newSummaryAttempt("gemini-cli", 0)
+	pw := newSummaryProgressWriter(&buf, attempt)
+
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseFirstToken})
+
+	out := buf.String()
+	if !strings.Contains(out, "Provider responded -- generating...") {
+		t.Errorf("output = %q, want 'Provider responded -- generating...' (no parens)", out)
+	}
+	if strings.Contains(out, "(") {
+		t.Errorf("output = %q, should not contain '(' when both fields are zero", out)
+	}
+}
+
+func TestSummaryProgressWriter_FirstTokenWithOnlyCachedTokens(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	attempt := newSummaryAttempt("codex", 0)
+	pw := newSummaryProgressWriter(&buf, attempt)
+
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseFirstToken, CachedInputTokens: 23808})
+
+	out := buf.String()
+	if !strings.Contains(out, "Provider responded (23.8k cached input tokens) -- generating...") {
+		t.Errorf("output = %q, want '(23.8k cached input tokens)' clause", out)
+	}
+	if strings.Contains(out, "TTFT") {
+		t.Errorf("output = %q, should not mention TTFT when TTFTms == 0", out)
+	}
+}
+
 func TestSummaryProgressWriter_Accessible(t *testing.T) {
 	// Cannot use t.Parallel() — t.Setenv mutates process-global state.
 	// (Strictly, t.Setenv IS compatible with t.Parallel() in Go 1.17+ when

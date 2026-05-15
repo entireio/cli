@@ -1413,9 +1413,20 @@ func (s *summaryProgressWriter) handle(p agent.GenerationProgress) {
 	case agent.PhaseConnecting:
 		s.printLine(s.arrow + " Sending request to provider...")
 	case agent.PhaseFirstToken:
+		var clauses []string
+		if p.TTFTms > 0 {
+			clauses = append(clauses, "TTFT "+formatMs(p.TTFTms))
+		}
+		if p.CachedInputTokens > 0 {
+			clauses = append(clauses, formatTokenCount(p.CachedInputTokens)+" cached input tokens")
+		}
+		detail := ""
+		if len(clauses) > 0 {
+			detail = " (" + strings.Join(clauses, ", ") + ")"
+		}
 		s.printLine(fmt.Sprintf(
-			"%s Provider responded (TTFT %s, %s cached input tokens) -- generating...",
-			s.arrow, formatMs(p.TTFTms), formatTokenCount(p.CachedInputTokens)))
+			"%s Provider responded%s -- generating...",
+			s.arrow, detail))
 	case agent.PhaseGenerating:
 		if !s.shouldEmitGenerating(p) {
 			return
