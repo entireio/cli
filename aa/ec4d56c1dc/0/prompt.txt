@@ -367,3 +367,11 @@ once investigation is done and user presses any key it should print out the find
 ---
 
 set default turns to 2
+
+---
+
+this latest one failed again and I still agent round decisions in the findings
+
+---
+
+can we keep approach but make it a concise summary
