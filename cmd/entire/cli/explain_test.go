@@ -4877,7 +4877,7 @@ func TestGetAssociatedCommits(t *testing.T) {
 	}
 
 	// Test: should find the one commit with matching checkpoint
-	commits, err := getAssociatedCommits(context.Background(), repo, checkpointID, false)
+	commits, err := getAssociatedCommits(context.Background(), repo, checkpointID, false, io.Discard)
 	if err != nil {
 		t.Fatalf("getAssociatedCommits error: %v", err)
 	}
@@ -4935,7 +4935,7 @@ func TestGetAssociatedCommits_NoMatches(t *testing.T) {
 
 	// Search for a checkpoint ID that doesn't exist (valid format: 12 hex chars)
 	checkpointID := id.MustCheckpointID("aaaa11112222")
-	commits, err := getAssociatedCommits(context.Background(), repo, checkpointID, false)
+	commits, err := getAssociatedCommits(context.Background(), repo, checkpointID, false, io.Discard)
 	if err != nil {
 		t.Fatalf("getAssociatedCommits error: %v", err)
 	}
@@ -5019,7 +5019,7 @@ func TestGetAssociatedCommits_MultipleMatches(t *testing.T) {
 	}
 
 	// Test: should find both commits with matching checkpoint
-	commits, err := getAssociatedCommits(context.Background(), repo, checkpointID, false)
+	commits, err := getAssociatedCommits(context.Background(), repo, checkpointID, false, io.Discard)
 	if err != nil {
 		t.Fatalf("getAssociatedCommits error: %v", err)
 	}
@@ -5255,7 +5255,7 @@ func TestGetBranchCheckpoints_WithMergeFromMain(t *testing.T) {
 
 	// Test getAssociatedCommits - should find BOTH feature checkpoint commits
 	// by walking first-parent chain (skipping the merge's second parent into main)
-	commits1, err := getAssociatedCommits(context.Background(), repo, cpID1, false)
+	commits1, err := getAssociatedCommits(context.Background(), repo, cpID1, false, io.Discard)
 	if err != nil {
 		t.Fatalf("getAssociatedCommits for cpID1 error: %v", err)
 	}
@@ -5263,7 +5263,7 @@ func TestGetBranchCheckpoints_WithMergeFromMain(t *testing.T) {
 		t.Errorf("expected 1 commit for cpID1 (first feature checkpoint), got %d", len(commits1))
 	}
 
-	commits2, err := getAssociatedCommits(context.Background(), repo, cpID2, false)
+	commits2, err := getAssociatedCommits(context.Background(), repo, cpID2, false, io.Discard)
 	if err != nil {
 		t.Fatalf("getAssociatedCommits for cpID2 error: %v", err)
 	}
@@ -5380,7 +5380,7 @@ func TestGetBranchCheckpoints_MergeCommitAtHEAD(t *testing.T) {
 	// HEAD is the merge commit itself.
 	// getAssociatedCommits should walk: merge -> featureCommit -> initial
 	// and find the checkpoint on featureCommit.
-	commits, err := getAssociatedCommits(context.Background(), repo, cpID, false)
+	commits, err := getAssociatedCommits(context.Background(), repo, cpID, false, io.Discard)
 	if err != nil {
 		t.Fatalf("getAssociatedCommits error: %v", err)
 	}
@@ -5389,124 +5389,6 @@ func TestGetBranchCheckpoints_MergeCommitAtHEAD(t *testing.T) {
 	}
 	if !strings.Contains(commits[0].Message, "feat: feature work") {
 		t.Errorf("expected feature commit message, got %q", commits[0].Message)
-	}
-}
-
-func TestWalkFirstParentCommits_SkipsMergeParents(t *testing.T) {
-	// Verify that walkFirstParentCommits follows only first parents and doesn't
-	// enter the second parent (merge source) of merge commits.
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	repo, err := git.PlainInit(tmpDir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create initial commit (shared ancestor)
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	initialCommit, err := w.Commit("A: initial", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-5 * time.Hour)},
-	})
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	// Create feature branch with one commit
-	featureBranch := plumbing.NewBranchReferenceName("feature/walk-test")
-	if err := w.Checkout(&git.CheckoutOptions{
-		Hash:   initialCommit,
-		Branch: featureBranch,
-		Create: true,
-	}); err != nil {
-		t.Fatalf("failed to create feature branch: %v", err)
-	}
-	if err := os.WriteFile(testFile, []byte("feature"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	featureCommit, err := w.Commit("B: feature work", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-4 * time.Hour)},
-	})
-	if err != nil {
-		t.Fatalf("failed to create feature commit: %v", err)
-	}
-
-	// Create main branch commit (will be merge source)
-	if err := w.Checkout(&git.CheckoutOptions{
-		Branch: plumbing.NewBranchReferenceName("master"),
-	}); err != nil {
-		t.Fatalf("failed to checkout master: %v", err)
-	}
-	mainFile := filepath.Join(tmpDir, "main.txt")
-	if err := os.WriteFile(mainFile, []byte("main"), 0o644); err != nil {
-		t.Fatalf("failed to write main file: %v", err)
-	}
-	if _, err := w.Add("main.txt"); err != nil {
-		t.Fatalf("failed to add main file: %v", err)
-	}
-	mainCommit, err := w.Commit("C: main work", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-3 * time.Hour)},
-	})
-	if err != nil {
-		t.Fatalf("failed to create main commit: %v", err)
-	}
-
-	// Switch to feature and create merge commit
-	if err := w.Checkout(&git.CheckoutOptions{
-		Branch: featureBranch,
-	}); err != nil {
-		t.Fatalf("failed to checkout feature: %v", err)
-	}
-	featureCommitObj, commitObjErr := repo.CommitObject(featureCommit)
-	if commitObjErr != nil {
-		t.Fatalf("failed to get feature commit object: %v", commitObjErr)
-	}
-	featureTree, treeErr := featureCommitObj.Tree()
-	if treeErr != nil {
-		t.Fatalf("failed to get feature commit tree: %v", treeErr)
-	}
-	mergeHash := createMergeCommit(t, repo, featureCommit, mainCommit, featureTree.Hash, "M: merge main into feature")
-
-	// Walk should visit: M (merge) -> B (feature) -> A (initial)
-	// It should NOT visit C (main work), because that's the second parent of the merge.
-	var visited []string
-	err = walkFirstParentCommits(context.Background(), repo, mergeHash, 0, func(c *object.Commit) error {
-		visited = append(visited, strings.Split(c.Message, "\n")[0])
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walkFirstParentCommits error: %v", err)
-	}
-
-	expected := []string{"M: merge main into feature", "B: feature work", "A: initial"}
-	if len(visited) != len(expected) {
-		t.Fatalf("expected %d commits visited, got %d: %v", len(expected), len(visited), visited)
-	}
-	for i, msg := range expected {
-		if visited[i] != msg {
-			t.Errorf("commit %d: expected %q, got %q", i, msg, visited[i])
-		}
-	}
-
-	// Verify C was NOT visited
-	for _, msg := range visited {
-		if strings.Contains(msg, "C: main work") {
-			t.Error("walkFirstParentCommits visited main branch commit (second parent of merge) - should only follow first parents")
-		}
 	}
 }
 
@@ -5538,11 +5420,11 @@ func TestFormatCheckpointOutput_NoCommitsOnBranch(t *testing.T) {
 	}
 }
 
-func TestGetAssociatedCommits_SearchAllFindsMergedBranchCommits(t *testing.T) {
-	// Regression test: --search-all should find checkpoint commits that live on
-	// a feature branch merged into main via a true merge commit. These commits
-	// are on the second parent of the merge, so first-parent-only traversal
-	// won't find them — but --search-all should use full DAG walk.
+func TestGetAssociatedCommits_FindsMergedBranchCommits(t *testing.T) {
+	// Regression test: getAssociatedCommits walks the full DAG by default, so
+	// checkpoint commits that live on a feature branch merged into main via a
+	// true merge commit are found whether or not --search-all is set. The
+	// commit is on the second parent of the merge.
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
@@ -5629,18 +5511,21 @@ func TestGetAssociatedCommits_SearchAllFindsMergedBranchCommits(t *testing.T) {
 		t.Fatalf("failed to set HEAD: %v", err)
 	}
 
-	// Without --search-all (first-parent only): should NOT find the feature commit
-	// because it's on the second parent of the merge
-	commits, err := getAssociatedCommits(context.Background(), repo, checkpointID, false)
+	// Default search (capped DAG walk): finds the feature commit because the
+	// walk follows merge parents.
+	commits, err := getAssociatedCommits(context.Background(), repo, checkpointID, false, io.Discard)
 	if err != nil {
 		t.Fatalf("getAssociatedCommits error: %v", err)
 	}
-	if len(commits) != 0 {
-		t.Errorf("expected 0 commits without --search-all (first-parent only), got %d", len(commits))
+	if len(commits) != 1 {
+		t.Fatalf("expected 1 commit by default (DAG walk), got %d", len(commits))
+	}
+	if commits[0].Author != "Feature Dev" {
+		t.Errorf("expected author 'Feature Dev', got %q", commits[0].Author)
 	}
 
-	// With --search-all (full DAG walk): SHOULD find the feature commit
-	commits, err = getAssociatedCommits(context.Background(), repo, checkpointID, true)
+	// --search-all (uncapped DAG walk): also finds it.
+	commits, err = getAssociatedCommits(context.Background(), repo, checkpointID, true, io.Discard)
 	if err != nil {
 		t.Fatalf("getAssociatedCommits --search-all error: %v", err)
 	}
@@ -5649,6 +5534,84 @@ func TestGetAssociatedCommits_SearchAllFindsMergedBranchCommits(t *testing.T) {
 	}
 	if commits[0].Author != "Feature Dev" {
 		t.Errorf("expected author 'Feature Dev', got %q", commits[0].Author)
+	}
+}
+
+func TestGetAssociatedCommits_FallbackBeyondCap(t *testing.T) {
+	// When the matching checkpoint is older than the bounded cap, the default
+	// path should auto-fall back to an uncapped walk, write a note to errW,
+	// and still return the match.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	checkpointID := id.MustCheckpointID("aaa111bbb222")
+	testFile := filepath.Join(tmpDir, "test.txt")
+
+	// First commit carries the checkpoint trailer; later commits bury it
+	// past the cap we'll set below.
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	_, err = w.Commit(trailers.FormatCheckpoint("feat: target", checkpointID), &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-10 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("failed to create target commit: %v", err)
+	}
+
+	for i := range 5 {
+		if err := os.WriteFile(testFile, []byte(fmt.Sprintf("noise-%d", i)), 0o644); err != nil {
+			t.Fatalf("failed to write file: %v", err)
+		}
+		if _, err := w.Add("test.txt"); err != nil {
+			t.Fatalf("failed to add file: %v", err)
+		}
+		_, err = w.Commit(fmt.Sprintf("noise %d", i), &git.CommitOptions{
+			Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-time.Duration(9-i) * time.Hour)},
+		})
+		if err != nil {
+			t.Fatalf("failed to create noise commit %d: %v", i, err)
+		}
+	}
+
+	// Cap of 3 means the walk visits the 3 most-recent noise commits and
+	// stops before reaching the trailered commit at the bottom.
+	var errBuf bytes.Buffer
+	commits, err := getAssociatedCommitsWithLimit(context.Background(), repo, checkpointID, false, &errBuf, 3)
+	if err != nil {
+		t.Fatalf("getAssociatedCommitsWithLimit error: %v", err)
+	}
+	if len(commits) != 1 {
+		t.Fatalf("expected fallback to find 1 commit, got %d", len(commits))
+	}
+	if !strings.Contains(errBuf.String(), "Searching full history") {
+		t.Errorf("expected fallback note on errW, got %q", errBuf.String())
+	}
+
+	// When the cap is large enough to include the target on the first pass,
+	// no fallback should fire.
+	errBuf.Reset()
+	commits, err = getAssociatedCommitsWithLimit(context.Background(), repo, checkpointID, false, &errBuf, 100)
+	if err != nil {
+		t.Fatalf("getAssociatedCommitsWithLimit error: %v", err)
+	}
+	if len(commits) != 1 {
+		t.Fatalf("expected 1 commit within cap, got %d", len(commits))
+	}
+	if errBuf.Len() != 0 {
+		t.Errorf("expected no fallback note, got %q", errBuf.String())
 	}
 }
 
@@ -5761,6 +5724,170 @@ func TestGetBranchCheckpoints_DefaultBranchFindsMergedCheckpoints(t *testing.T) 
 	}
 	if !found {
 		t.Errorf("expected to find checkpoint %s from merged feature branch on default branch, got %d points: %v", cpID, len(points), points)
+	}
+}
+
+func TestGetBranchCheckpointsInRange_ExcludesLeftSide(t *testing.T) {
+	// End-to-end check that getBranchCheckpointsInRange honors the exclude
+	// set: a range A..B drops checkpoints that are reachable from A while
+	// still collecting checkpoints reachable from B but not A.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("worktree: %v", err)
+	}
+
+	testFile := filepath.Join(tmpDir, "test.txt")
+	mustCommit := func(content, msg string, author time.Time) plumbing.Hash {
+		t.Helper()
+		require.NoError(t, os.WriteFile(testFile, []byte(content), 0o644))
+		_, err := w.Add("test.txt")
+		require.NoError(t, err)
+		hash, err := w.Commit(msg, &git.CommitOptions{
+			Author: &object.Signature{Name: "Test", Email: "test@example.com", When: author},
+		})
+		require.NoError(t, err)
+		return hash
+	}
+
+	now := time.Now()
+	// Linear chain: A (no trailer) <- B (cpB) <- C (cpC).
+	commitA := mustCommit("a", "initial", now.Add(-3*time.Hour))
+	cpB := id.MustCheckpointID("bbbbbbbbbbbb")
+	commitB := mustCommit("b", trailers.FormatCheckpoint("feat: B", cpB), now.Add(-2*time.Hour))
+	cpC := id.MustCheckpointID("cccccccccccc")
+	commitC := mustCommit("c", trailers.FormatCheckpoint("feat: C", cpC), now.Add(-1*time.Hour))
+
+	store := checkpoint.NewGitStore(repo)
+	for _, write := range []checkpoint.WriteCommittedOptions{
+		{CheckpointID: cpB, SessionID: "sess-b", Strategy: "manual-commit", FilesTouched: []string{"test.txt"}, Prompts: []string{"add B"}},
+		{CheckpointID: cpC, SessionID: "sess-c", Strategy: "manual-commit", FilesTouched: []string{"test.txt"}, Prompts: []string{"add C"}},
+	} {
+		require.NoError(t, store.WriteCommitted(context.Background(), write))
+	}
+
+	hasCheckpoint := func(points []strategy.RewindPoint, cpID id.CheckpointID) bool {
+		for _, p := range points {
+			if p.CheckpointID == cpID {
+				return true
+			}
+		}
+		return false
+	}
+
+	cases := []struct {
+		name            string
+		walk            checkpointWalkRange
+		wantContains    []id.CheckpointID
+		wantNotContains []id.CheckpointID
+	}{
+		{
+			name:         "full reach from C: finds B and C",
+			walk:         checkpointWalkRange{from: commitC},
+			wantContains: []id.CheckpointID{cpB, cpC},
+		},
+		{
+			name:         "C excluding A: A has no checkpoint, B and C still visible",
+			walk:         checkpointWalkRange{from: commitC, excludeFrom: commitA},
+			wantContains: []id.CheckpointID{cpB, cpC},
+		},
+		{
+			name:            "C excluding B: drops B (and ancestors), keeps C",
+			walk:            checkpointWalkRange{from: commitC, excludeFrom: commitB},
+			wantContains:    []id.CheckpointID{cpC},
+			wantNotContains: []id.CheckpointID{cpB},
+		},
+		{
+			name:            "B alone: C unreachable",
+			walk:            checkpointWalkRange{from: commitB},
+			wantContains:    []id.CheckpointID{cpB},
+			wantNotContains: []id.CheckpointID{cpC},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			points, err := getBranchCheckpointsInRange(context.Background(), repo, tc.walk, 100)
+			if err != nil {
+				t.Fatalf("getBranchCheckpointsInRange: %v", err)
+			}
+			for _, cp := range tc.wantContains {
+				if !hasCheckpoint(points, cp) {
+					t.Errorf("expected %s in result, got %v", cp, points)
+				}
+			}
+			for _, cp := range tc.wantNotContains {
+				if hasCheckpoint(points, cp) {
+					t.Errorf("did not expect %s in result, got %v", cp, points)
+				}
+			}
+		})
+	}
+}
+
+func TestGetBranchCheckpointsInRange_ExcludedCommitsDoNotConsumeBudget(t *testing.T) {
+	// Regression: excluded commits must not count toward commitScanLimit. We
+	// build a chain longer than the cap and put the trailered target on top —
+	// if the budget bug returns, the target gets skipped because the cap is
+	// exhausted by excluded ancestors.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	// Use plumbing-level commit creation to avoid the cost of
+	// commitScanLimit+5 worktree checkouts.
+	w, err := repo.Worktree()
+	require.NoError(t, err)
+	testFile := filepath.Join(tmpDir, "test.txt")
+	require.NoError(t, os.WriteFile(testFile, []byte("seed"), 0o644))
+	_, err = w.Add("test.txt")
+	require.NoError(t, err)
+	seedHash, err := w.Commit("seed", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	seedCommit, err := repo.CommitObject(seedHash)
+	require.NoError(t, err)
+	seedTree, err := seedCommit.Tree()
+	require.NoError(t, err)
+
+	leftTip := seedHash
+	for i := range commitScanLimit + 5 {
+		leftTip = createCommitWithTree(t, repo, seedTree.Hash, []plumbing.Hash{leftTip}, fmt.Sprintf("noise %d", i))
+	}
+	cpID := id.MustCheckpointID("ddddeeeeffff")
+	rightTip := createCommitWithTree(t, repo, seedTree.Hash, []plumbing.Hash{leftTip}, trailers.FormatCheckpoint("feat: target", cpID))
+
+	store := checkpoint.NewGitStore(repo)
+	require.NoError(t, store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "sess-target",
+		Strategy:     "manual-commit",
+		FilesTouched: []string{"test.txt"},
+		Prompts:      []string{"add target"},
+	}))
+
+	walk := checkpointWalkRange{from: rightTip, excludeFrom: leftTip}
+	points, err := getBranchCheckpointsInRange(context.Background(), repo, walk, 100)
+	require.NoError(t, err)
+	var found bool
+	for _, p := range points {
+		if p.CheckpointID == cpID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected to find target checkpoint past the exclude set, got %d points: %v", len(points), points)
 	}
 }
 
@@ -6291,5 +6418,94 @@ func TestRenderExplainBody_NoColorReturnsRawMarkdown(t *testing.T) {
 	got := renderExplainBody(&buf, "## Intent\n\nfoo\n")
 	if got != "## Intent\n\nfoo\n" {
 		t.Errorf("expected raw markdown when no color\n got: %q", got)
+	}
+}
+
+func TestParseCheckpointRevRange(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("worktree: %v", err)
+	}
+
+	// Two commits on the default branch ("master" by default for go-git).
+	first := filepath.Join(tmpDir, "first.txt")
+	if err := os.WriteFile(first, []byte("a"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := w.Add("first.txt"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	commitA, err := w.Commit("A", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-2 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("commit A: %v", err)
+	}
+	if err := os.WriteFile(first, []byte("b"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := w.Add("first.txt"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	commitB, err := w.Commit("B", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-1 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("commit B: %v", err)
+	}
+
+	defaultBranch := strategy.GetCurrentBranchName(repo)
+	if defaultBranch == "" {
+		t.Fatalf("could not resolve current branch")
+	}
+
+	cases := []struct {
+		name         string
+		arg          string
+		wantFrom     plumbing.Hash
+		wantExclude  plumbing.Hash
+		wantErr      bool
+		errSubstring string
+	}{
+		{name: "empty defaults to HEAD", arg: "", wantFrom: commitB},
+		{name: "single ref", arg: defaultBranch, wantFrom: commitB},
+		{name: "single hash", arg: commitA.String(), wantFrom: commitA},
+		{name: "A..B", arg: commitA.String() + ".." + commitB.String(), wantFrom: commitB, wantExclude: commitA},
+		{name: "A.. shortcut", arg: commitA.String() + "..", wantFrom: commitB, wantExclude: commitA},
+		{name: "..B shortcut", arg: ".." + commitB.String(), wantFrom: commitB},
+		{name: "symmetric difference rejected", arg: commitA.String() + "..." + commitB.String(), wantErr: true, errSubstring: "symmetric-difference"},
+		{name: "unknown ref rejected", arg: "no-such-ref", wantErr: true, errSubstring: "resolve"},
+		{name: "unknown left side rejected", arg: "no-such-ref..HEAD", wantErr: true, errSubstring: "resolve"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := parseCheckpointRevRange(repo, tc.arg)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.errSubstring != "" && !strings.Contains(err.Error(), tc.errSubstring) {
+					t.Errorf("error %q missing %q", err.Error(), tc.errSubstring)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if r.from != tc.wantFrom {
+				t.Errorf("from: got %s, want %s", r.from, tc.wantFrom)
+			}
+			if r.excludeFrom != tc.wantExclude {
+				t.Errorf("excludeFrom: got %s, want %s", r.excludeFrom, tc.wantExclude)
+			}
+		})
 	}
 }

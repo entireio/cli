@@ -49,22 +49,33 @@ func newCheckpointSearchCmd() *cobra.Command {
 	return cmd
 }
 
-// newCheckpointListCmd wraps the existing branch-default list view.
+// newCheckpointListCmd wraps the branch list view, with optional revision-range scoping.
 func newCheckpointListCmd() *cobra.Command {
 	var sessionFlag string
 	var noPagerFlag bool
 
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List checkpoints on the current branch",
-		Long: `List checkpoints on the current branch.
+		Use:   "list [<revrange>]",
+		Short: "List checkpoints reachable from HEAD or a revision range",
+		Long: `List checkpoints reachable from HEAD, mirroring git log semantics
+(checkpoints on merged feature branches are included).
 
-Optionally filter by session ID with --session.`,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+Optionally restrict to a git-style revision range:
+  list main..HEAD     — checkpoints on this branch but not in main
+  list main..         — same (HEAD is implicit)
+  list <ref>          — full history of <ref>
+
+Filter further by session ID with --session.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
 			if checkDisabledGuard(cmd.Context(), cmd.OutOrStdout()) {
 				return nil
 			}
-			return runExplainBranchWithFilter(cmd.Context(), cmd.OutOrStdout(), noPagerFlag, sessionFlag)
+			var revRangeArg string
+			if len(args) > 0 {
+				revRangeArg = args[0]
+			}
+			return runExplainBranchWithFilter(cmd.Context(), cmd.OutOrStdout(), noPagerFlag, sessionFlag, revRangeArg)
 		},
 	}
 
