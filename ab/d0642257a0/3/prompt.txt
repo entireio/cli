@@ -1,0 +1,15 @@
+/simplify
+
+---
+
+check git push status
+
+---
+
+<task-notification>
+<task-id>b9weqgmpu</task-id>
+<tool-use-id>toolu_01TGfeK7KsHZrn1fwEfGnyFb</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-alisha--marvin-worktrees-cli-entire-labs-investigate/79b1faee-caf4-41da-b4c8-e345d75655fa/tasks/b9weqgmpu.output</output-file>
+<status>completed</status>
+<summary>Background command "Push branch with upstream tracking" completed (exit code 0)</summary>
+</task-notification>
