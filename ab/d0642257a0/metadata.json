@@ -3,7 +3,7 @@
   "checkpoint_id": "abd0642257a0",
   "strategy": "manual-commit",
   "branch": "entire-labs-investigate",
-  "checkpoints_count": 12,
+  "checkpoints_count": 15,
   "files_touched": [
     ".github/workflows/nightly.yml",
     ".github/workflows/release.yml",
@@ -148,14 +148,20 @@
       "transcript": "/ab/d0642257a0/7/transcript.jsonl",
       "content_hash": "/ab/d0642257a0/7/transcript_hash.txt",
       "prompt": "/ab/d0642257a0/7/prompt.txt"
+    },
+    {
+      "metadata": "/ab/d0642257a0/8/metadata.json",
+      "transcript": "/ab/d0642257a0/8/transcript.jsonl",
+      "content_hash": "/ab/d0642257a0/8/transcript_hash.txt",
+      "prompt": "/ab/d0642257a0/8/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 374924,
-    "cache_creation_tokens": 1028078,
-    "cache_read_tokens": 37857722,
-    "output_tokens": 193327,
-    "api_call_count": 365
+    "input_tokens": 375881,
+    "cache_creation_tokens": 4482918,
+    "cache_read_tokens": 354476201,
+    "output_tokens": 598801,
+    "api_call_count": 1053
   },
   "has_investigation": true
 }
