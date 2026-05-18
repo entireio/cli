@@ -1,0 +1,9 @@
+I'd
+
+---
+
+I'd like to do a release today, can you look at the open PRs if everything looks urgent to be included? maybe also based on the changes that landed since last release
+
+---
+
+yes, let's do this
