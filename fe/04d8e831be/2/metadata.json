@@ -1,0 +1,39 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "fe04d8e831be",
+  "session_id": "802b09ab-4617-4518-902c-87ed5837e8f3",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-12T04:16:59.176352Z",
+  "branch": "feat/review-manifest-diagnostic",
+  "checkpoints_count": 1,
+  "files_touched": [],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7[1m]",
+  "turn_id": "4ef65efb3da5",
+  "token_usage": {
+    "input_tokens": 1553,
+    "cache_creation_tokens": 4647353,
+    "cache_read_tokens": 357451687,
+    "output_tokens": 709000,
+    "api_call_count": 830
+  },
+  "session_metrics": {
+    "turn_count": 30
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 116,
+      "user_lines_removed": 27,
+      "agent_lines_added": 620,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 55,
+        ".github/hooks/entire.json": 61
+      },
+      "user_removed_per_file": {
+        ".claude/settings.json": 27
+      }
+    }
+  ]
+}

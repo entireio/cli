@@ -1,0 +1,17 @@
+is there any manual smoke test for chunk 1 ?
+
+---
+
+yes
+
+---
+
+why is this a new file we need
+
+---
+
+it seems too specific and, like agree we need tests, but doesn't seem to follow how the rest of the codebase sets thi sup
+
+---
+
+proceed

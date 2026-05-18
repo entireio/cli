@@ -1,0 +1,16 @@
+Use the pfleidi:pr skill
+
+---
+
+> Rotation is local-only. It does not fetch, push, or contact the checkpoint
+remote. Remote publication happens later in the git `pre-push` hook.
+
+Can you validate that's actually the case? I think we're fetching the latest remote checkpoint generations but we might be doing that during pre-push. Can you validate?
+
+---
+
+Use the pfleidi:pr-feedback skill
+
+---
+
+Do both in a batch

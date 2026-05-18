@@ -1,0 +1,30 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "945292726919",
+  "strategy": "manual-commit",
+  "branch": "feat/review-base-flag-mainline-default",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/review/cmd.go",
+    "cmd/entire/cli/review/prompt.go",
+    "cmd/entire/cli/review/scope.go",
+    "cmd/entire/cli/review/scope_test.go",
+    "cmd/entire/cli/review/types/reviewer.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/94/5292726919/0/metadata.json",
+      "transcript": "/94/5292726919/0/transcript.jsonl",
+      "content_hash": "/94/5292726919/0/transcript_hash.txt",
+      "prompt": "/94/5292726919/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 110,
+    "cache_creation_tokens": 155037,
+    "cache_read_tokens": 6242612,
+    "output_tokens": 28961,
+    "api_call_count": 61
+  }
+}

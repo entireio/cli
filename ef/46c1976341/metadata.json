@@ -1,0 +1,32 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "ef46c1976341",
+  "strategy": "manual-commit",
+  "branch": "slow-codex-in-review",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/KNOWN_LIMITATIONS.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ef/46c1976341/0/metadata.json",
+      "transcript": "/ef/46c1976341/0/transcript.jsonl",
+      "content_hash": "/ef/46c1976341/0/transcript_hash.txt",
+      "prompt": "/ef/46c1976341/0/prompt.txt"
+    },
+    {
+      "metadata": "/ef/46c1976341/1/metadata.json",
+      "transcript": "/ef/46c1976341/1/transcript.jsonl",
+      "content_hash": "/ef/46c1976341/1/transcript_hash.txt",
+      "prompt": "/ef/46c1976341/1/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1955,
+    "cache_creation_tokens": 1312492,
+    "cache_read_tokens": 115716387,
+    "output_tokens": 381496,
+    "api_call_count": 290
+  },
+  "has_review": true
+}

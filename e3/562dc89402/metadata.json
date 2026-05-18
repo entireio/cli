@@ -1,0 +1,40 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "e3562dc89402",
+  "strategy": "manual-commit",
+  "branch": "feat/review-detail-viewport",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/review/tui_model.go",
+    "cmd/entire/cli/review/tui_model_test.go",
+    "cmd/entire/cli/review/tui_sink_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e3/562dc89402/0/metadata.json",
+      "transcript": "/e3/562dc89402/0/transcript.jsonl",
+      "content_hash": "/e3/562dc89402/0/transcript_hash.txt",
+      "prompt": "/e3/562dc89402/0/prompt.txt"
+    },
+    {
+      "metadata": "/e3/562dc89402/1/metadata.json",
+      "transcript": "/e3/562dc89402/1/transcript.jsonl",
+      "content_hash": "/e3/562dc89402/1/transcript_hash.txt",
+      "prompt": "/e3/562dc89402/1/prompt.txt"
+    },
+    {
+      "metadata": "/e3/562dc89402/2/metadata.json",
+      "transcript": "/e3/562dc89402/2/transcript.jsonl",
+      "content_hash": "/e3/562dc89402/2/transcript_hash.txt",
+      "prompt": "/e3/562dc89402/2/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 94163,
+    "cache_creation_tokens": 131330,
+    "cache_read_tokens": 16233734,
+    "output_tokens": 62144,
+    "api_call_count": 53
+  },
+  "has_review": true
+}

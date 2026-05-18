@@ -1,0 +1,54 @@
+{
+  "cli_version": "v0.6.2-nightly.202605110724.c111a3db-dev-dcf744f5a",
+  "checkpoint_id": "fb4beb223e3d",
+  "session_id": "019e18d8-2e63-7512-a081-3abb089e1d5c",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-11T21:08:43.737653Z",
+  "branch": "fix/checkpoints-v2-rotation-logic-docs",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/v2_generation.go",
+    "docs/architecture/checkpoints-v2-rotation.md"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.5",
+  "turn_id": "a7b75db5bb6a",
+  "token_usage": {
+    "input_tokens": 117098,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 1410560,
+    "output_tokens": 12955,
+    "api_call_count": 34
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-11T21:08:43.711605Z",
+    "agent_lines": 11,
+    "agent_removed": 8,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 11,
+    "total_lines_changed": 19,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 11,
+      "agent_lines_removed": 8
+    }
+  ]
+}

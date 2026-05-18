@@ -1,0 +1,38 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "78f59e95ff6d",
+  "session_id": "c277888e-b12d-4ae6-bfa7-0736750a0659",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-12T11:38:36.079573Z",
+  "branch": "soph/improve-redaction",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/agent.go",
+    "cmd/entire/cli/agent/capabilities.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7[1m]",
+  "turn_id": "9ac0d37a77b7",
+  "token_usage": {
+    "input_tokens": 292,
+    "cache_creation_tokens": 1098383,
+    "cache_read_tokens": 41912341,
+    "output_tokens": 168175,
+    "api_call_count": 214
+  },
+  "session_metrics": {
+    "turn_count": 13
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-12T11:38:35.98002Z",
+    "agent_lines": 33,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 33,
+    "total_lines_changed": 33,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}

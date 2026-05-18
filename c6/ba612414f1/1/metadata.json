@@ -1,0 +1,53 @@
+{
+  "cli_version": "v0.6.2-nightly.202605110724.c111a3db-dev-dcf744f5a",
+  "checkpoint_id": "c6ba612414f1",
+  "session_id": "e5e1da62-a043-4254-81ed-73be6ad15b8c",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-11T21:23:52.830693Z",
+  "branch": "fix/checkpoints-v2-rotation-logic-docs",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/architecture/checkpoints-v2-rotation.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7[1m]",
+  "turn_id": "dffabb396dba",
+  "token_usage": {
+    "input_tokens": 220,
+    "cache_creation_tokens": 96596,
+    "cache_read_tokens": 1239526,
+    "output_tokens": 13664,
+    "api_call_count": 16
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-11T21:23:52.814093Z",
+    "agent_lines": 28,
+    "agent_removed": 19,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 28,
+    "total_lines_changed": 47,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 28,
+      "agent_lines_removed": 19
+    }
+  ]
+}

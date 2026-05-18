@@ -1,0 +1,60 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "e3d911c520d2",
+  "strategy": "manual-commit",
+  "branch": "review-fix-progress-stream",
+  "checkpoints_count": 27,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/reviewer.go",
+    "cmd/entire/cli/agent/claudecode/reviewer_test.go",
+    "cmd/entire/cli/agent/claudecode/testdata/canned_session.txt",
+    "cmd/entire/cli/agent/claudecode/testdata/stream_session.jsonl",
+    "cmd/entire/cli/agent/claudecode/transcript.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e3/d911c520d2/0/metadata.json",
+      "transcript": "/e3/d911c520d2/0/transcript.jsonl",
+      "content_hash": "/e3/d911c520d2/0/transcript_hash.txt",
+      "prompt": "/e3/d911c520d2/0/prompt.txt"
+    },
+    {
+      "metadata": "/e3/d911c520d2/1/metadata.json",
+      "transcript": "/e3/d911c520d2/1/transcript.jsonl",
+      "content_hash": "/e3/d911c520d2/1/transcript_hash.txt",
+      "prompt": "/e3/d911c520d2/1/prompt.txt"
+    },
+    {
+      "metadata": "/e3/d911c520d2/2/metadata.json",
+      "transcript": "/e3/d911c520d2/2/transcript.jsonl",
+      "content_hash": "/e3/d911c520d2/2/transcript_hash.txt",
+      "prompt": "/e3/d911c520d2/2/prompt.txt"
+    },
+    {
+      "metadata": "/e3/d911c520d2/3/metadata.json",
+      "transcript": "/e3/d911c520d2/3/transcript.jsonl",
+      "content_hash": "/e3/d911c520d2/3/transcript_hash.txt",
+      "prompt": "/e3/d911c520d2/3/prompt.txt"
+    },
+    {
+      "metadata": "/e3/d911c520d2/4/metadata.json",
+      "transcript": "/e3/d911c520d2/4/transcript.jsonl",
+      "content_hash": "/e3/d911c520d2/4/transcript_hash.txt",
+      "prompt": "/e3/d911c520d2/4/prompt.txt"
+    },
+    {
+      "metadata": "/e3/d911c520d2/5/metadata.json",
+      "transcript": "/e3/d911c520d2/5/transcript.jsonl",
+      "content_hash": "/e3/d911c520d2/5/transcript_hash.txt",
+      "prompt": "/e3/d911c520d2/5/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 406,
+    "cache_creation_tokens": 1243126,
+    "cache_read_tokens": 43001779,
+    "output_tokens": 235632,
+    "api_call_count": 214
+  },
+  "has_review": true
+}

@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "4538743510a7",
+  "strategy": "manual-commit",
+  "branch": "fix-v2-migration-hint",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/push_common.go",
+    "cmd/entire/cli/strategy/push_common_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/45/38743510a7/0/metadata.json",
+      "transcript": "/45/38743510a7/0/transcript.jsonl",
+      "content_hash": "/45/38743510a7/0/transcript_hash.txt",
+      "prompt": "/45/38743510a7/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 25,
+    "cache_creation_tokens": 50701,
+    "cache_read_tokens": 861752,
+    "output_tokens": 4849,
+    "api_call_count": 15
+  }
+}

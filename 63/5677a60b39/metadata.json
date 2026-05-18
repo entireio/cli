@@ -1,0 +1,25 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "635677a60b39",
+  "strategy": "manual-commit",
+  "branch": "claude/sad-torvalds-fa05e6",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CONTRIBUTING.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/63/5677a60b39/0/metadata.json",
+      "transcript": "/63/5677a60b39/0/transcript.jsonl",
+      "content_hash": "/63/5677a60b39/0/transcript_hash.txt",
+      "prompt": "/63/5677a60b39/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 243,
+    "cache_creation_tokens": 270984,
+    "cache_read_tokens": 8374621,
+    "output_tokens": 78875,
+    "api_call_count": 78
+  }
+}

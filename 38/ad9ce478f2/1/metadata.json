@@ -1,0 +1,55 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "38ad9ce478f2",
+  "session_id": "bb690fb9-6eb4-4e1f-bbff-f26ceed257c5",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-13T15:51:03.992494Z",
+  "branch": "soph/improve-v2",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/v2_root.go",
+    "cmd/entire/cli/checkpoint/v2_root_test.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "548865db2e1c",
+  "checkpoint_transcript_start": 225,
+  "token_usage": {
+    "input_tokens": 38,
+    "cache_creation_tokens": 43006,
+    "cache_read_tokens": 10026017,
+    "output_tokens": 22084,
+    "api_call_count": 24
+  },
+  "session_metrics": {
+    "turn_count": 7
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-13T15:51:03.898749Z",
+    "agent_lines": 28,
+    "agent_removed": 71,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 28,
+    "total_lines_changed": 99,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 31,
+      "agent_lines_removed": 74
+    }
+  ]
+}

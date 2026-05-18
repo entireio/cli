@@ -1,0 +1,68 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "06fcc2e0141d",
+  "session_id": "a3085df3-7116-4e03-9bc9-71fca1bd5ac5",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-13T23:51:43.971627Z",
+  "branch": "slow-codex-in-review",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/codex/AGENT.md",
+    "cmd/entire/cli/agent/codex/reviewer.go",
+    "cmd/entire/cli/agent/codex/reviewer_test.go",
+    "cmd/entire/cli/agent/skilldiscovery/registry.go",
+    "cmd/entire/cli/agent/skilldiscovery/registry_test.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "298217df818b",
+  "token_usage": {
+    "input_tokens": 16,
+    "cache_creation_tokens": 86204,
+    "cache_read_tokens": 300798,
+    "output_tokens": 10800,
+    "api_call_count": 6
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-13T23:51:43.941796Z",
+    "agent_lines": 0,
+    "agent_removed": 1,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 29,
+    "total_committed": 11,
+    "total_lines_changed": 30,
+    "agent_percentage": 3.3333333333333335,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 89,
+      "user_lines_removed": 29,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "cmd/entire/cli/agent/codex/AGENT.md": 25,
+        "cmd/entire/cli/agent/codex/reviewer.go": 14,
+        "cmd/entire/cli/agent/codex/reviewer_test.go": 10,
+        "cmd/entire/cli/agent/skilldiscovery/registry.go": 10,
+        "cmd/entire/cli/agent/skilldiscovery/registry_test.go": 30
+      },
+      "user_removed_per_file": {
+        "cmd/entire/cli/agent/codex/AGENT.md": 2,
+        "cmd/entire/cli/agent/codex/reviewer.go": 21,
+        "cmd/entire/cli/agent/codex/reviewer_test.go": 4,
+        "cmd/entire/cli/agent/skilldiscovery/registry.go": 2
+      }
+    }
+  ],
+  "kind": "agent_review",
+  "review_skills": [
+    "/review"
+  ],
+  "review_prompt": "/review\n\nScope: review the commits unique to this branch vs HEAD~1, plus any uncommitted changes in the working tree. Ignore code outside this scope."
+}

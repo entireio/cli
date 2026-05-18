@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "d14d590faf48",
+  "strategy": "manual-commit",
+  "branch": "soph/handle-failing-push-better",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/execx/killoncancel_windows.go",
+    "cmd/entire/cli/strategy/push_common.go",
+    "cmd/entire/cli/strategy/push_messaging_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d1/4d590faf48/0/metadata.json",
+      "transcript": "/d1/4d590faf48/0/transcript.jsonl",
+      "content_hash": "/d1/4d590faf48/0/transcript_hash.txt",
+      "prompt": "/d1/4d590faf48/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 4375,
+    "cache_creation_tokens": 506672,
+    "cache_read_tokens": 38782377,
+    "output_tokens": 124639,
+    "api_call_count": 197
+  }
+}

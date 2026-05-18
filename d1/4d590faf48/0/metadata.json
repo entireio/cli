@@ -1,0 +1,61 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "d14d590faf48",
+  "session_id": "bec93069-720f-4956-8c3c-c7bce9ae3b94",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-12T16:47:35.080749Z",
+  "branch": "soph/handle-failing-push-better",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/execx/killoncancel_windows.go",
+    "cmd/entire/cli/strategy/push_common.go",
+    "cmd/entire/cli/strategy/push_messaging_test.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7[1m]",
+  "turn_id": "46f1900fbfb1",
+  "token_usage": {
+    "input_tokens": 4375,
+    "cache_creation_tokens": 506672,
+    "cache_read_tokens": 38782377,
+    "output_tokens": 124639,
+    "api_call_count": 197
+  },
+  "session_metrics": {
+    "turn_count": 14
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-12T16:47:34.974665Z",
+    "agent_lines": 67,
+    "agent_removed": 5,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 67,
+    "total_lines_changed": 72,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 1,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/scheduled_tasks.lock": 1
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 1,
+      "user_lines_removed": 0,
+      "agent_lines_added": 67,
+      "agent_lines_removed": 5,
+      "user_added_per_file": {
+        ".claude/scheduled_tasks.lock": 1
+      }
+    }
+  ]
+}

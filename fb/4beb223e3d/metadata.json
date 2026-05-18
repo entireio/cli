@@ -1,0 +1,26 @@
+{
+  "cli_version": "v0.6.2-nightly.202605110724.c111a3db-dev-dcf744f5a",
+  "checkpoint_id": "fb4beb223e3d",
+  "strategy": "manual-commit",
+  "branch": "fix/checkpoints-v2-rotation-logic-docs",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/v2_generation.go",
+    "docs/architecture/checkpoints-v2-rotation.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/fb/4beb223e3d/0/metadata.json",
+      "transcript": "/fb/4beb223e3d/0/transcript.jsonl",
+      "content_hash": "/fb/4beb223e3d/0/transcript_hash.txt",
+      "prompt": "/fb/4beb223e3d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 117098,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 1410560,
+    "output_tokens": 12955,
+    "api_call_count": 34
+  }
+}

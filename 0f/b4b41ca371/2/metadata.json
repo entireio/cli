@@ -1,0 +1,107 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "0fb4b41ca371",
+  "session_id": "8253d1f5-c190-4b99-9c76-498d358ab94f",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-12T02:48:20.442177Z",
+  "branch": "feat/review-manifest-diagnostic",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/review/cmd.go",
+    "cmd/entire/cli/review/manifest.go",
+    "cmd/entire/cli/review/manifest_test.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "4c487a0666ad",
+  "token_usage": {
+    "input_tokens": 20,
+    "cache_creation_tokens": 113512,
+    "cache_read_tokens": 662310,
+    "output_tokens": 21149,
+    "api_call_count": 10
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-12T02:48:20.405867Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 10,
+    "total_committed": 0,
+    "total_lines_changed": 10,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 1046,
+      "user_lines_removed": 54,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 55,
+        ".github/hooks/entire.json": 61,
+        "cmd/entire/cli/agent/claudecode/reviewer_test.go": 13,
+        "cmd/entire/cli/agent/codex/reviewer_test.go": 13,
+        "cmd/entire/cli/agent/geminicli/reviewer.go": 8,
+        "cmd/entire/cli/agent/geminicli/reviewer_test.go": 15,
+        "cmd/entire/cli/agent/skilldiscovery/registry.go": 3,
+        "cmd/entire/cli/agent/skilldiscovery/registry_test.go": 5,
+        "cmd/entire/cli/agent_group.go": 1,
+        "cmd/entire/cli/review/cmd.go": 6,
+        "cmd/entire/cli/review/manifest.go": 67,
+        "cmd/entire/cli/review/manifest_test.go": 175,
+        "cmd/entire/cli/review/marker_fallback.go": 1,
+        "cmd/entire/cli/review/types/reviewer.go": 2,
+        "cmd/entire/cli/review/types/template.go": 1,
+        "skills/.agents/plugins/marketplace.json": 20,
+        "skills/.claude-plugin/marketplace.json": 20,
+        "skills/.claude/agents/entire-search.md": 25,
+        "skills/.claude/settings.json": 84,
+        "skills/.codex/agents/entire-search.toml": 23,
+        "skills/.codex/config.toml": 3,
+        "skills/.codex/hooks.json": 40,
+        "skills/.cursor-plugin/plugin.json": 14,
+        "skills/.entire/.gitignore": 5,
+        "skills/.entire/settings.json": 4,
+        "skills/.gitignore": 1,
+        "skills/.opencode/INSTALL.md": 31,
+        "skills/GEMINI.md": 1,
+        "skills/README.md": 106,
+        "skills/gemini-extension.json": 6,
+        "skills/plugins/entire/.claude-plugin/plugin.json": 18,
+        "skills/plugins/entire/.codex-plugin/plugin.json": 31,
+        "skills/plugins/entire/skills/explain/SKILL.md": 22,
+        "skills/plugins/entire/skills/search/SKILL.md": 58,
+        "skills/plugins/entire/skills/session-handoff/SKILL.md": 108
+      },
+      "user_removed_per_file": {
+        ".claude/settings.json": 27,
+        "cmd/entire/cli/agent/geminicli/reviewer.go": 3,
+        "cmd/entire/cli/agent/geminicli/reviewer_test.go": 1,
+        "cmd/entire/cli/agent/skilldiscovery/registry.go": 3,
+        "cmd/entire/cli/agent/skilldiscovery/registry_test.go": 5,
+        "cmd/entire/cli/agent_group.go": 1,
+        "cmd/entire/cli/review/cmd.go": 4,
+        "cmd/entire/cli/review/manifest.go": 4,
+        "cmd/entire/cli/review/manifest_test.go": 2,
+        "cmd/entire/cli/review/marker_fallback.go": 1,
+        "cmd/entire/cli/review/types/reviewer.go": 2,
+        "cmd/entire/cli/review/types/template.go": 1
+      }
+    }
+  ],
+  "kind": "agent_review",
+  "review_skills": [
+    "/review",
+    "/security-review",
+    "/simplify",
+    "/pr-review-toolkit:review-pr"
+  ],
+  "review_prompt": "/review\n/security-review\n/simplify\n/pr-review-toolkit:review-pr\n\nScope: review only the commits unique to this branch vs origin/feat/trail-watch-sse.\n\nCheckpoint context from commits in scope:\n- 73edba371474: prompt: /simplify\n- e88497799415: no summary or prompt recorded\n- 3648eb673a37: prompt: ok latest migration looks good. generate detailed commit messages and push up the changes\n- 453d4bb44f01: prompt: Do both in a batch\n- c6ba612414f1: prompt: /simplify\n- fb4beb223e3d: prompt: Fix both issues\n- d534f23017c5: prompt: okay adn you fixed this just now?\n- 60d4f6868ab0: prompt: can you address the copilot comment on 1168\n- 9b0ff6b2a145: prompt: yes\n- 3a89cc2aab59: prompt: There's many code review comments, address them if applicable and resolve comments.\n- d86ffe2e995d: prompt: This job requests security-events: write and runs on pull_request. For PRs opened from forks, the GITHUB_TOKEN typically does not have security-events: write, so the CodeQL analyze step’s SARIF upload can fail and turn the check red for external contributors. Consider gating the upload (or the whole job) to same-rep...\n- 851184b08237: prompt: Push the branch up. Create a separate PR real quick to add the mise.local.toml to the gitignore and come back to this branch.\n- 2222d4bca8b2: prompt: yes\n- b664852f94af: prompt: /simplify\n- b7c4fac87aa9: prompt: 1\n- ea20ee1b0608: prompt: ok, can you make a commit?\n- 8b543a5d28eb: summary: Respond to PR #1154 review feedback by applying technically correct suggestions from Copilot and making the auth store constructor behavior consistent.; Three files were patched (auth store, auth store test, TUI sink test), tests and lint passed, and the changes were committed as 'Address test store review feedback'...\n- 556f162ba317: summary: Fix a data race in the review package that caused test:ci failures under -race, then push the fix to the open PR for local test reliability improvements.; Added an early cancelled-context return in multipicker.go to prevent Bubble Tea/huh from constructing a terminal reader when the context is already done, eliminat...\n- 7a9ca45bcbe4: summary: Diagnose and fix three interrelated issues with `mise run test`: garbled/interleaved output making failures hard to read, a hidden test failure, and slow/hung test runs (both unit and integration).; Five concrete bugs were fixed (timezone-sensitive test, ANSI escape leak from huh form, non-deterministic TUI dismissa...\n- 8d312240ffdf: prompt: can you look at the pr comments?\n- ... 1 more checkpoint omitted\n\nUse `entire explain <id>` for full checkpoint context, or `entire explain <id> --raw-transcript` for raw transcripts."
+}

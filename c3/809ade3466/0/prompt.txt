@@ -1,0 +1,102 @@
+this is symptom fix "I'll add a directive to the always-prompt telling codex not to run
+   CLI-verification commands," not actually improving perf
+
+---
+
+this is symptom fix "I'll add a directive to the always-prompt telling codex not to run
+   CLI-verification commands," not actually improving perf - or whatever the recursive thign was because users don't normally do this as part of their flow
+
+---
+
+why does codex do this and not claude? and do we need to review other worktree to verify?
+
+---
+
+after 20s claude returns stream, codex at 30s.
+
+---
+
+after 20s claude returns stream, codex at 30s.and same thing, AGENT                 STATUS      DURATION  TOKENS    PREVIEW
+claude-code           ✓ done      1m7s      210.6k/…  `★ Insight ─────────────────────────────────────` The `requestID`…
+codex                 ✓ done      5m0s      1843.2k…  DEMO_MARKER_VWX789 **Findings** - **High** - [.codex/config.toml:…
+
+2 agent(s) done — 2 succeeded, 0 failed, 0 cancelled
+Ctrl+O: drill in · q/Esc/Enter: exit
+
+---
+
+peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/c/.w/recap-tui (recap-tui) [126]> sed -i.tmp 's/model_reasoning_effort = "xhigh"/model_reasoning_effort = "low"/'~/.codex/config.toml
+sed: 1: "s/model_reasoning_effor ...": bad flag in substitute command: '~'
+
+---
+
+i did that but i actually want to see hte improvement, not just change the model and not re-run
+
+---
+
+still very slow, AGENT                 STATUS      DURATION  TOKENS    PREVIEW
+claude-code           ✓ done      1m22s     213.5k/…  I'll keep this focused per your request. DEMO_MARKER_VWX789:…
+codex                 ✓ done      3m42s     1237.3k…  DEMO_MARKER_VWX789 **Findings** - **High**: [.codex/config.t…
+
+2 agent(s) done — 2 succeeded, 0 failed, 0 cancelled
+Ctrl+O: drill in · q/Esc/Enter: exit - compare with claude code and codex because i think there is something happening here
+
+---
+
+did you try running codex session with same prompt outside of review to see if the speeds differed?
+
+---
+
+yes in what worktree?
+
+---
+
+AGENT                 STATUS      DURATION  TOKENS    PREVIEW
+claude-code           ✓ done      1m32s     280.9k/…  ## Code Review — `da7e662ed Address recap TUI review feedbac…
+codex                 ✓ done      1m9s      401.0k/…  DEMO_MARKER_VWX789 **Findings** - **Medium** [.codex/hooks.j…
+
+2 agent(s) done — 2 succeeded, 0 failed, 0 cancelled
+Ctrl+O: drill in · q/Esc/Enter: exit run one
+
+---
+
+here's the second runm AGENT                 STATUS      DURATION  TOKENS    PREVIEW
+claude-code           ✓ done      1m44s     476.5k/…  `★ Insight ─────────────────────────────────────` - The `req…
+codex                 ✓ done      1m49s     783.3k/…  DEMO_MARKER_VWX789 **Findings** - High: [.codex/config.toml]…
+
+2 agent(s) done — 2 succeeded, 0 failed, 0 cancelled
+Ctrl+O: drill in · q/Esc/Enter: exit
+
+---
+
+yes please
+
+---
+
+okay so do we want to commit anything and document this where we have all the openai filter information for users?
+
+---
+
+simplify this a bit. And did you add the ability to set the model , etc/
+
+---
+
+simplify this a bit. And did you add the ability to set the model , etc/ - like in the pr
+
+---
+
+did you add this in docs, To use the new knobs
+
+  Users edit their clone preferences (.git/entire/preferences.json):
+
+  {
+    "review": {
+      "codex": {
+        "skills": ["/review"],
+        "reasoning_effort": "low",
+        "model": "gpt-5-mini"
+      }
+    }
+  }
+
+  Or via .entire/settings.json review section.

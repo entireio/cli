@@ -1,0 +1,74 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "a6c21d0fe3b7",
+  "session_id": "9bdc46a1-c421-4dfd-9f50-d9d3810a8d80",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-11T23:32:47.355776Z",
+  "branch": "feat/review-detail-viewport",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/review/tui_sink.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "5f47d1fa2266",
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-11T23:32:47.339624Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 4,
+    "human_modified": 7,
+    "human_removed": 0,
+    "total_committed": 4,
+    "total_lines_changed": 11,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 681,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".github/hooks/entire.json": 61,
+        "skills/.agents/plugins/marketplace.json": 20,
+        "skills/.claude-plugin/marketplace.json": 20,
+        "skills/.claude/agents/entire-search.md": 25,
+        "skills/.claude/settings.json": 84,
+        "skills/.codex/agents/entire-search.toml": 23,
+        "skills/.codex/config.toml": 3,
+        "skills/.codex/hooks.json": 40,
+        "skills/.cursor-plugin/plugin.json": 14,
+        "skills/.entire/.gitignore": 5,
+        "skills/.entire/settings.json": 4,
+        "skills/.gitignore": 1,
+        "skills/.opencode/INSTALL.md": 31,
+        "skills/GEMINI.md": 1,
+        "skills/README.md": 106,
+        "skills/gemini-extension.json": 6,
+        "skills/plugins/entire/.claude-plugin/plugin.json": 18,
+        "skills/plugins/entire/.codex-plugin/plugin.json": 31,
+        "skills/plugins/entire/skills/explain/SKILL.md": 22,
+        "skills/plugins/entire/skills/search/SKILL.md": 58,
+        "skills/plugins/entire/skills/session-handoff/SKILL.md": 108
+      }
+    }
+  ],
+  "kind": "agent_review",
+  "review_skills": [
+    "/review",
+    "/security-review",
+    "/simplify",
+    "/pr-review-toolkit:review-pr"
+  ],
+  "review_prompt": "/review\n/security-review\n/simplify\n/pr-review-toolkit:review-pr\n\nScope: review only the commits unique to this branch vs main.\n\nCheckpoint context from commits in scope:\n- 4e31dbdd1b05: prompt: can we smoke test this?\n\nUse `entire explain <id>` for full checkpoint context, or `entire explain <id> --raw-transcript` for raw transcripts."
+}

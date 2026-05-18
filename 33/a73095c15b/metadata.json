@@ -1,0 +1,25 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "33a73095c15b",
+  "strategy": "manual-commit",
+  "branch": "soph/improve-redaction",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/walker.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/33/a73095c15b/0/metadata.json",
+      "transcript": "/33/a73095c15b/0/transcript.jsonl",
+      "content_hash": "/33/a73095c15b/0/transcript_hash.txt",
+      "prompt": "/33/a73095c15b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 293,
+    "cache_creation_tokens": 1098803,
+    "cache_read_tokens": 42237551,
+    "output_tokens": 168457,
+    "api_call_count": 215
+  }
+}

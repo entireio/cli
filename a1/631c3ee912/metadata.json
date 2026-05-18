@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "a1631c3ee912",
+  "strategy": "manual-commit",
+  "branch": "review-fix-local",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/review/cmd.go",
+    "cmd/entire/cli/review/picker.go",
+    "cmd/entire/cli/settings/settings.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a1/631c3ee912/0/metadata.json",
+      "transcript": "/a1/631c3ee912/0/transcript.jsonl",
+      "content_hash": "/a1/631c3ee912/0/transcript_hash.txt",
+      "prompt": "/a1/631c3ee912/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 50974,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 349056,
+    "output_tokens": 1959,
+    "api_call_count": 6
+  }
+}

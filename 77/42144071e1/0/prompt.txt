@@ -1,0 +1,77 @@
+one of my teammates is seeing this every time he pushes:
+```
+18:20:34 (git) main▲ $ git push
+[entire] Syncing and pushing v2 checkpoints...
+[entire] Pushing v2/main, v2/full/current...
+[entire] Warning: couldn't publish pending v2 full generation refs: push pending archive v2/full/0000000000110: failed to push v2/full/0000000000110: non-fast-forward
+[entire] Note: .entire/settings.json sets checkpoints_version: 2. Run 'entire migrate --checkpoints v2' to migrate existing checkpoints to v2.
+[entire] Use 'entire migrate --checkpoints v2 --force' to rewrite all checkpoints in v2.
+Everything up-to-date
+```
+
+---
+
+But `--force` takes like an hour to run, whereas regular migrate takes like 5 minutes
+
+---
+
+Wow, this is hanging a long time:
+```
+➜  entiredb git:(test-2) git push origin HEAD
+[entire] Syncing and pushing v2 checkpoints...
+[entire] Pushing v2/main, v2/full/current...
+
+
+
+```
+
+---
+
+It's only slow on this one repo though, I wonder if there's something odd about it?
+`/Users/ninawork/entire/devenv/entiredb`
+
+---
+
+Add more lines for debug during the push - I'd like to try it again (and a trace)
+
+---
+
+➜  entiredb git:(test-2) tail -f .entire/logs/entire.log
+{"time":"2026-05-12T09:53:54.002817-07:00","level":"DEBUG","msg":"pre-push hook invoked","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"hooks","hook":"pre-push","hook_type":"git","strategy":"manual-commit","remote":"origin"}
+{"time":"2026-05-12T09:53:54.007597-07:00","level":"DEBUG","msg":"push-v2: pushV2Refs start","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"hooks","active_ref_count":2,"pending_publication_count":1,"target":"origin"}
+{"time":"2026-05-12T09:53:54.007623-07:00","level":"DEBUG","msg":"push-v2: publishPendingV2FullGenerationPublications start","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"hooks","publication_count":1}
+{"time":"2026-05-12T09:53:54.007755-07:00","level":"DEBUG","msg":"push-v2: tryPushV2Refs start","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"hooks","ref_count":1,"refs":"v2/full/0000000000038"}
+{"time":"2026-05-12T09:53:55.585214-07:00","level":"DEBUG","msg":"push-v2: tryPushV2Refs done","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"hooks","duration":1577438166,"ref_count":1,"output_bytes":159,"error":false}
+{"time":"2026-05-12T09:53:57.739269-07:00","level":"DEBUG","msg":"push-v2: publishPendingV2FullGenerationPublications done","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"hooks","duration":3731588625,"successful_refs":2,"full_current_reset_handled":true}
+{"time":"2026-05-12T09:53:57.739347-07:00","level":"DEBUG","msg":"push-v2: tryPushV2Refs start","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"hooks","ref_count":1,"refs":"v2/main"}
+{"time":"2026-05-12T09:53:59.342668-07:00","level":"DEBUG","msg":"push-v2: tryPushV2Refs done","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"hooks","duration":1603288625,"ref_count":1,"output_bytes":136,"error":false}
+{"time":"2026-05-12T09:54:02.504786-07:00","level":"DEBUG","msg":"push-v2: pushV2Refs done","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"hooks","duration":8497138625}
+{"time":"2026-05-12T09:54:02.504802-07:00","level":"DEBUG","msg":"perf","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"perf","op":"pre-push","duration_ms":8501,"steps.push_v2_refs_ms":8501,"hook_type":"git"}
+
+---
+
+Why would my teammate be on 110 and I have 38? Also it's weird the messaging didn't say it was pushing 38
+
+---
+
+I think it should be remote aware to see what the latest pushed up version is because otherwise everyone is going to be on different numbers which doesn't make sense
+
+---
+
+is that checking for rotations on push time or commit time?
+
+---
+
+It should be on push time
+
+---
+
+Remove what's unused
+
+---
+
+/simplify
+
+---
+
+create commit messages and push

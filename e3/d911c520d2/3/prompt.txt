@@ -1,0 +1,28 @@
+/review
+
+Scope: review only the commits unique to this branch vs origin/feat/trail-watch-sse.
+
+Checkpoint context from commits in scope:
+- 73edba371474: prompt: /simplify
+- e88497799415: no summary or prompt recorded
+- 3648eb673a37: prompt: ok latest migration looks good. generate detailed commit messages and push up the changes
+- 453d4bb44f01: prompt: Do both in a batch
+- c6ba612414f1: prompt: /simplify
+- fb4beb223e3d: prompt: Fix both issues
+- d534f23017c5: prompt: okay adn you fixed this just now?
+- 60d4f6868ab0: prompt: can you address the copilot comment on 1168
+- 9b0ff6b2a145: prompt: yes
+- 3a89cc2aab59: prompt: There's many code review comments, address them if applicable and resolve comments.
+- d86ffe2e995d: prompt: This job requests security-events: write and runs on pull_request. For PRs opened from forks, the GITHUB_TOKEN typically does not have security-events: write, so the CodeQL analyze step’s SARIF upload can fail and turn the check red for external contributors. Consider gating the upload (or the whole job) to same-rep...
+- 851184b08237: prompt: Push the branch up. Create a separate PR real quick to add the mise.local.toml to the gitignore and come back to this branch.
+- 2222d4bca8b2: prompt: yes
+- b664852f94af: prompt: /simplify
+- b7c4fac87aa9: prompt: 1
+- ea20ee1b0608: prompt: ok, can you make a commit?
+- 8b543a5d28eb: summary: Respond to PR #1154 review feedback by applying technically correct suggestions from Copilot and making the auth store constructor behavior consistent.; Three files were patched (auth store, auth store test, TUI sink test), tests and lint passed, and the changes were committed as 'Address test store review feedback'...
+- 556f162ba317: summary: Fix a data race in the review package that caused test:ci failures under -race, then push the fix to the open PR for local test reliability improvements.; Added an early cancelled-context return in multipicker.go to prevent Bubble Tea/huh from constructing a terminal reader when the context is already done, eliminat...
+- 7a9ca45bcbe4: summary: Diagnose and fix three interrelated issues with `mise run test`: garbled/interleaved output making failures hard to read, a hidden test failure, and slow/hung test runs (both unit and integration).; Five concrete bugs were fixed (timezone-sensitive test, ANSI escape leak from huh form, non-deterministic TUI dismissa...
+- 8d312240ffdf: prompt: can you look at the pr comments?
+- ... 1 more checkpoint omitted
+
+Use `entire explain <id>` for full checkpoint context, or `entire explain <id> --raw-transcript` for raw transcripts.

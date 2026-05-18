@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "f516fe93f468",
+  "strategy": "manual-commit",
+  "branch": "review-fix-progress-stream",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/reviewer.go",
+    "cmd/entire/cli/agent/claudecode/reviewer_test.go",
+    "cmd/entire/cli/agent/codex/reviewer_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f5/16fe93f468/0/metadata.json",
+      "transcript": "/f5/16fe93f468/0/transcript.jsonl",
+      "content_hash": "/f5/16fe93f468/0/transcript_hash.txt",
+      "prompt": "/f5/16fe93f468/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 482,
+    "cache_creation_tokens": 1130695,
+    "cache_read_tokens": 72122123,
+    "output_tokens": 290234,
+    "api_call_count": 236
+  }
+}

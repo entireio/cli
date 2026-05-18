@@ -1,0 +1,680 @@
+can you run /pr-review-toolkit:review-pr on 1175
+
+---
+
+<task-notification>
+<task-id>a5bdc578786822b22</task-id>
+<tool-use-id>toolu_012cqz1XU1bSrLG8YMY2xGia</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-review-fix-2/ef324e8c-8832-4837-8183-bec6f1e417f7/tasks/a5bdc578786822b22.output</output-file>
+<status>completed</status>
+<summary>Agent "Silent failure scan of PR 1175" completed</summary>
+<result>I have enough context. Let me compile the findings now.
+
+---
+
+# PR #1175 Error Handling Review
+
+## Summary verdict
+
+This PR is mostly defensible. The new context composer (`review_context.go`) is genuinely best-effort enrichment of an agent prompt — the design intent is "if context can't be gathered, the review still runs" — and the implementation honours that with consistent `logging.Debug` traces on every error path. The committed-checkpoint section and in-progress section ARE independent, so a failure in one does not nuke the other. `scope.go` fails loud on `--base`, exits early with a meaningful error, and never panics. `cmd.go` validates `--base` before agent spawn (verified by `TestReviewCommandSmoke_BadBaseRefErrorsBeforeAgentSpawn`).
+
+That said, there are several issues worth raising. None are CRITICAL. Two are HIGH (one classifier ambiguity that legitimately could hide bugs, one inconsistent `cmd.SilenceUsage` pattern), and the rest are MEDIUM.
+
+---
+
+## Findings
+
+### 1. MEDIUM — `formatReviewSessionLine` cannot distinguish "no prompt yet" from "I/O error on prompt.txt"
+**Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go:244-253`
+
+```go
+raw, err := os.ReadFile(promptPath)
+if err != nil {
+    return ""
+}
+```
+
+The PR description claims "Sessions whose prompt.txt is missing or empty are skipped silently." That phrasing implies `os.IsNotExist(err)` and "empty content" — two well-defined, expected, optional-input cases. But the code's actual behaviour is "any `os.ReadFile` error, including permission-denied, EIO, EACCES, ELOOP (symlink loops), and ENAMETOOLONG, is silently swallowed and the session disappears from the context block." StateStore.List already swallows corrupt-JSON state files at `session/state.go:548`, so the silent-skip chain runs two layers deep with no operator trace.
+
+**Hidden errors:**
+- Permission-denied on `.entire/metadata/&lt;session&gt;/prompt.txt` (umask / chmod drift after `entire enable`)
+- `EACCES` on parent directory traversal
+- `EIO` (filesystem corruption)
+- A genuinely zero-byte `prompt.txt` (which IS a real bug — the lifecycle hook failed to append for every turn this session, but the file got created)
+
+**User impact:** A user who explicitly knows they have an active session in this worktree will see no "In-progress session context" block at all and have no way to know why. There's no debug line to grep for.
+
+**Recommendation:** Split the cases. `os.IsNotExist(err)` and empty content → silent skip (these ARE expected for a fresh session that hasn't taken a turn yet). Any other I/O error → `logging.Debug(ctx, "review session context: read prompt", slog.String("session_id", st.SessionID), slog.String("error", err.Error()))` then skip. Pass `ctx` into `formatReviewSessionLine` to enable this.
+
+```go
+func formatReviewSessionLine(ctx context.Context, worktreeRoot string, st *session.State) string {
+    promptPath := filepath.Join(worktreeRoot, paths.SessionMetadataDirFromSessionID(st.SessionID), paths.PromptFileName)
+    raw, err := os.ReadFile(promptPath)
+    switch {
+    case err == nil:
+        // fall through
+    case errors.Is(err, fs.ErrNotExist):
+        return "" // expected: session hasn't completed a turn yet
+    default:
+        logging.Debug(ctx, "review session context: read prompt failed",
+            slog.String("session_id", st.SessionID),
+            slog.String("path", promptPath),
+            slog.String("error", err.Error()))
+        return ""
+    }
+    // ...
+}
+```
+
+---
+
+### 2. MEDIUM — `canonicalisePath` silently swallows non-ENOENT errors from `EvalSymlinks`
+**Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go:232-240`
+
+```go
+if resolved, err := filepath.EvalSymlinks(p); err == nil {
+    return resolved
+}
+return p
+```
+
+The doc comment correctly notes the ENOENT case ("path doesn't exist yet"). But `EvalSymlinks` also returns errors for symlink loops, EACCES on intermediate components, and ENAMETOOLONG — none of which the function distinguishes from ENOENT. When the comparison is symmetric (both sides fall back to raw), this is usually harmless. But it can produce subtle false negatives: if the on-disk state file stores a `/private/var/...` form AND `EvalSymlinks` on the caller's worktree path fails with EACCES while the state path resolves cleanly, the two sides compare unequal and the session is silently dropped.
+
+**Hidden errors:** EACCES on a parent, symlink loop, ENAMETOOLONG.
+
+**Recommendation:** Either swap to debug-logged switch (similar to finding 1), or document explicitly that the fallback chain is "any error → raw path comparison; comparison is symmetric so worst case both sides degrade together." The current `Falls back to p itself when EvalSymlinks fails (e.g., the path doesn't exist yet)` comment misleads — `(e.g., ...)` reads as "this is the only case" when in fact several other error classes also hit the fallback.
+
+---
+
+### 3. MEDIUM — Empty `prompt.txt` content is silently treated as "no prompt", masking a lifecycle-hook bug
+**Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go:250-253`
+
+```go
+promptText := reviewPromptText(string(raw))
+if promptText == "" {
+    return ""
+}
+```
+
+If `prompt.txt` exists but is zero bytes (or contains only whitespace/separators), the function returns `""` and the session is dropped from the context block with no trace. A zero-byte `prompt.txt` for an existing session — i.e., the state.json says this session has done N turns — would mean the lifecycle hook silently failed to append at every prompt boundary. That is a real bug class (`lifecycle.go:294-310` writes to the file on every turn).
+
+**Hidden errors:** lifecycle-hook write failures (the hook silently no-ops on disk-full, the file got truncated by an external process, an editor accidentally cleared it).
+
+**Recommendation:** When `raw` is non-empty but `reviewPromptText` returns `""`, log at debug level. Distinguish from the zero-byte case (which is itself worth a debug line, given the state file says turns happened).
+
+---
+
+### 4. HIGH — `scope.go` fallback chain returns a generic error when ALL refs are missing
+**Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope.go:163-171`
+
+```go
+return "", errors.New("no suitable ancestor branch found; configure a base ref explicitly")
+```
+
+This is the failure mode that fires when a freshly-cloned shallow repo or a brand-new local-only repo has none of `origin/HEAD origin/main origin/master main master`. The message says "configure a base ref explicitly" but never mentions HOW (the `--base` flag), and never names the chain it tried. The user sees this through `runReview → detectScope → ComputeScopeStats` wrapping: the final stderr will be `detect scope base ref: no suitable ancestor branch found; configure a base ref explicitly` — opaque to anyone who didn't read the source.
+
+**Hidden errors:** none — but the error message itself is so terse it provides no actionable guidance. The CLAUDE.md rule "user-facing error messages must explain what the user can do" is being violated. Note this is the auto-detect path; with `--base`, the call short-circuits at line 89-91 with a much better message.
+
+**Recommendation:**
+
+```go
+return "", fmt.Errorf(
+    "no mainline ref found (tried origin/HEAD, origin/main, origin/master, main, master); " +
+        "pass --base &lt;ref&gt; to scope the review explicitly, or `git fetch` to populate origin refs")
+```
+
+Also: this error propagates up to `detectScope` (cmd.go:447-455) which IGNORES it in the no-override case ("`logging.Debug` + return ``""`` and proceed degraded") — that's correct per design, but means the user only sees this error if they used `--base`. The wording of the error should still be improved because it could be surfaced.
+
+---
+
+### 5. HIGH — `runReview` step-2 settings-load error uses `cmd.SilenceUsage` correctly, but step-5/6 do not
+**Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/cmd.go:366-380`
+
+```go
+// 5. Resolve HEAD SHA and worktree root.
+worktreeRoot, err := paths.WorktreeRoot(ctx)
+if err != nil {
+    return fmt.Errorf("resolve worktree root: %w", err)
+}
+
+// 6. Resolve HEAD SHA and detect scope.
+headSHA, shaErr := currentHeadSHA(ctx, worktreeRoot)
+if shaErr != nil {
+    return fmt.Errorf("resolve HEAD: %w", shaErr)
+}
+scopeBaseRef, scopeErr := detectScope(ctx, worktreeRoot, baseOverride, out)
+if scopeErr != nil {
+    cmd.SilenceUsage = true
+    return scopeErr
+}
+```
+
+Per CLAUDE.md: "`cmd.SilenceUsage = true` on prerequisite/precondition errors." Steps 5 and 6 are prerequisite errors (the user can't fix them by re-reading `--help`), but only the `scopeErr` branch sets `SilenceUsage`. Failures of `paths.WorktreeRoot` and `currentHeadSHA` will dump the full cobra usage block to the user — noise, masking the real cause.
+
+Also: when a user passes a malformed `--base` and the error bubbles up from `detectScope`, the user sees the wrapped error, but cobra's usage block is suppressed (good). The corresponding paths.WorktreeRoot at line 203 in the same function DOES set `SilenceUsage = true` AND prints a custom message — the inconsistency between the two prerequisite paths is the issue. Same gap exists in `runMultiAgentPath` at cmd.go:496-503.
+
+**Recommendation:** Set `cmd.SilenceUsage = true` for the WorktreeRoot and HEAD-resolution branches too. They're prerequisite failures — usage text is not useful here.
+
+---
+
+### 6. MEDIUM — `reviewContextCommitMessages` failure silently swallows the entire committed-checkpoint section
+**Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go:89-95`
+
+```go
+messages, commitsTruncated, err := reviewContextCommitMessages(ctx, worktreeRoot, scopeBaseRef, reviewContextMaxCommitScans)
+if err != nil || len(messages) == 0 {
+    if err != nil {
+        logging.Debug(ctx, "review checkpoint context: list commit messages", slog.String("error", err.Error()))
+    }
+    return ""
+}
+```
+
+This is mostly fine — the "best-effort context" contract is real and well-documented. BUT the predicate `err != nil || len(messages) == 0` conflates two very different conditions: "git log subprocess died" (an error worth investigating) and "the branch genuinely has no commits ahead of base" (expected, common, totally benign). Both get a return of `""` with no operator trace in the empty-result case. That's correct behaviour per design, but the operator who runs `entire review --base feat/parent` and sees no checkpoint context has no way to tell which case fired.
+
+**Recommendation:** Add a single debug line in the empty-list case too:
+
+```go
+if err != nil {
+    logging.Debug(ctx, "review checkpoint context: list commit messages", slog.String("error", err.Error()))
+    return ""
+}
+if len(messages) == 0 {
+    logging.Debug(ctx, "review checkpoint context: no commits in scope", slog.String("base_ref", scopeBaseRef))
+    return ""
+}
+```
+
+---
+
+### 7. MEDIUM — `reviewCheckpointDetail` returns "checkpoint metadata unavailable" as the user-visible string, with no breadcrumb to the underlying error
+**Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go:125-128`
+
+```go
+reader, summary, err := checkpoint.ResolveCommittedReaderForCheckpoint(ctx, cpID, v1, v2, preferCheckpointsV2)
+if err != nil || summary == nil {
+    lines = append(lines, fmt.Sprintf("- %s: checkpoint metadata unavailable", cpID))
+    continue
+}
+```
+
+The agent sees `- &lt;id&gt;: checkpoint metadata unavailable` in its prompt, with no log line explaining why. The error context (`v1 read failed`, `v2 fetch URL unreachable`, `checkpoint truly not found`) is dropped on the floor. A user debugging "why is the agent saying metadata is unavailable for a checkpoint I just made?" has no recourse.
+
+**Recommendation:** Add `logging.Debug` before append:
+
+```go
+if err != nil {
+    logging.Debug(ctx, "review checkpoint context: resolve committed reader",
+        slog.String("checkpoint_id", cpID.String()),
+        slog.String("error", err.Error()))
+}
+```
+
+Same for the `summary == nil` case (which on the current code path I cannot tell whether it indicates "checkpoint genuinely absent" or "race condition" — that ambiguity itself argues for a log line).
+
+---
+
+### 8. MEDIUM — `readReviewContextSessionMetadata` / `readReviewContextSessionPrompts` use `errors.New("session content is nil")` for a defensive nil check that may also indicate an interface contract bug
+**Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go:324-326, 340-342, 350-352`
+
+The fallback path calls `reader.ReadSessionContent` which by interface contract returns `(*SessionContent, error)`. When `err == nil` but `*SessionContent == nil`, that's a violated contract — the reader returned success with a nil payload. The current code wraps this in a generic `errors.New("session content is nil")` and treats it as a soft failure. Without a debug log this contract violation is invisible.
+
+**Recommendation:** Add a debug log so a contract violation in a `CommittedReader` implementation surfaces, not just silently degrades. Or — better — make the wrapping error type a named sentinel and treat the nil case as a programming error worth panicking on (it's `nil, nil` from a reader, the canonical "this should never happen" bug).
+
+---
+
+### 9. LOW — `reviewSessionContext` does not log when `worktreeRoot == "" || headSHA == ""` guard trips
+**Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go:178-181`
+
+If the function is called with an empty argument, the whole in-progress section disappears with no trace. This is a defensive-programming guard that should never fire in practice (callers always pass real values), but if it did — e.g., a future refactor accidentally passes an empty string — the silent return makes the bug invisible.
+
+**Recommendation:** Add a debug log so the guard's firing is visible to operators if it ever does fire:
+
+```go
+if worktreeRoot == "" || headSHA == "" {
+    logging.Debug(ctx, "review session context: empty argument",
+        slog.String("worktree_root", worktreeRoot),
+        slog.String("head_sha", headSHA))
+    return ""
+}
+```
+
+---
+
+### 10. LOW — `refExists` swallows the iteration error from `repo.References()`
+**Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope.go:174-188`
+
+```go
+refs, err := repo.References()
+if err != nil {
+    return false
+}
+```
+
+When the ref iterator itself fails (corrupt `.git/refs` or `.git/packed-refs`), `refExists` returns `false` for every name in the fallback chain, causing `fallbackScopeRef` to return `"no suitable ancestor branch found"` — the wrong error class. The real bug is "your refs are unreadable", but the user gets told their branches don't exist.
+
+**Hidden errors:** corrupt refs, EACCES on `.git/refs`, locked `.git/packed-refs` file during a concurrent gc.
+
+**Recommendation:** Return the error from `refExists` (or hoist the iterator open up to `fallbackScopeRef`) so the caller can distinguish "no matching ref" from "couldn't enumerate refs." The latter deserves a fail-loud error, not a fallback-to-no-mainline.
+
+---
+
+### 11. LOW — `currentBranchName` silently swallows `repo.Head()` error
+**Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope.go:192-201`
+
+```go
+head, err := repo.Head()
+if err != nil {
+    return ""
+}
+```
+
+A `repo.Head()` failure becomes indistinguishable from a detached HEAD in the banner output. The banner will print `Reviewing detached HEAD vs main: ...` when the real cause might be "your `.git/HEAD` is unreadable." Probably fine in practice — but log it for operators.
+
+**Recommendation:**
+
+```go
+head, err := repo.Head()
+if err != nil {
+    logging.Debug(ctx, "review scope: resolve HEAD failed (treating as detached)",
+        slog.String("error", err.Error()))
+    return ""
+}
+```
+
+(`scope.go` doesn't currently import `logging`, so this would add a new dependency; that's fine, it's a sister package in the same repo.)
+
+---
+
+## What this PR does well
+
+- `scope.go` `--base` validation runs BEFORE `runGit` calls — verified by `TestReviewCommandSmoke_BadBaseRefErrorsBeforeAgentSpawn`. The error message at scope.go:90 names the bad ref verbatim (`base ref %q does not resolve to a commit: %w`). The user gets an actionable error.
+- `detectScope` (cmd.go:433-459) correctly differentiates explicit-override failure (fail loud, abort) from auto-detect failure (debug log, proceed degraded). The rationale in the doc comment is exactly the right framing.
+- `runGit` (scope.go:256-272) correctly captures stderr separately and surfaces it in the wrapped error rather than smashing it into stdout — a frequent gotcha avoided.
+- All silent-skip paths in `review_context.go` have at least one `logging.Debug` line, so the debug trace is searchable.
+- The two top-level sections (committed + in-progress) are independent: a failure in `reviewSessionContextForCurrentHead` (lines 66-78) does not prevent `reviewCommittedCheckpointContext` from running. This matches the design intent stated in the user's review prompt.
+- `runReview` step-2 (cmd.go:214-220) explicitly justifies why a settings-load error is fail-loud rather than fall-through-to-picker, with a comment about the destructive consequences of the alternative. This is exactly the analysis CLAUDE.md asks for.
+
+---
+
+## Relevant files
+
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/cmd.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/prompt.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context_test.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/session/state.go` (referenced — `StateStore.List` already swallows corrupt files at line 548, which compounds the silent-skip stack in finding 1)</result>
+<usage><total_tokens>83235</total_tokens><tool_uses>17</tool_uses><duration_ms>124915</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a962e72f9aa1251d2</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-review-fix-2/ef324e8c-8832-4837-8183-bec6f1e417f7/tasks/a962e72f9aa1251d2.output</output-file>
+<status>completed</status>
+<summary>Agent "Test coverage analysis of PR 1175" completed</summary>
+<result>Now I have a comprehensive view. Let me provide the analysis.
+
+---
+
+# Test Coverage Review — PR #1175
+
+## Summary
+
+Coverage is **strong on the behavioral surface that ships** — the new tests target the exact bug class the PR fixes (mainline preference over timestamp-heuristic ancestor) and properly exercise the `--base` flag end-to-end through the cobra command chain. The smoke tests at `cmd/entire/cli/review_context_test.go` are notably valuable because they would catch regressions in flag wiring that pure unit tests would miss. Edge cases on git ref existence (origin/HEAD pointing nowhere, fallback chain ordering) and on `countFilesChanged`'s three-dot fix are the meaningful gaps.
+
+Test isolation is generally correct: `testutil.InitRepo` is used throughout, smoke tests properly avoid `t.Parallel()` when using `t.Chdir`/`t.Setenv`, and stub agents are invoked via PATH rather than direct exec.
+
+## Critical Gaps (8-10)
+
+### 1. The three-dot diff fix has no regression test — rating 8
+
+`/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope.go:217-234` documents that `countFilesChanged` uses three-dot syntax specifically to avoid over-counting upstream changes as "reversed deltas". The PR description lists this as item #4 ("Three-dot diff fix in `countFilesChanged`"), but no test forces the failure mode the fix prevents.
+
+`TestDetectScopeBaseRef_BranchOffMain` at `scope_test.go:153` checks the count is 3 when the branch is a fast-forward of main — that passes with both `base..HEAD` and `base...HEAD`. To force a divergence, the test must commit on `main` *after* the branch point.
+
+**What's missing:** a test where `main` advances after `feat/x` diverges. With two-dot, files changed only on main would be counted; with three-dot, only files unique to `feat/x` are counted. Without this test, a future contributor could revert the dot count thinking it's equivalent and the banner stat would silently regress. Bug-class: numeric over-count in a user-visible banner.
+
+### 2. No test for `detectScopeBaseRef` fallback chain ordering — rating 7-8
+
+`scope.go:163-171` declares the precedence `origin/HEAD → origin/main → origin/master → main → master`. Test coverage:
+
+- `TestDetectScopeBaseRef_BranchOffMain` exercises only the "main exists" leg (everything past the first hit is untested).
+- `TestDetectScopeBaseRef_NoSuitableAncestor` at `scope_test.go:319` verifies the all-empty case errors.
+
+**What's missing:**
+- A test where `master` exists but `main` does not (verifies master fallback works).
+- A test where `origin/HEAD` symbolic ref is set, distinct from `origin/main` — verifies `origin/HEAD` wins over `origin/main` when both exist and point to different branches. This is the most likely real-world precedence-disagreement scenario and is the *first* element in the chain.
+- A test where `origin/main` exists but `origin/HEAD` does not — common on remotes where `git remote set-head` was never run.
+
+Without these, the `fallbackScopeRef` precedence could be silently reordered and only fixed-branch-name tests would catch the most-common case.
+
+### 3. `detectScope` failure on `git.PlainOpen` is untested — rating 7
+
+`cmd/entire/cli/review/cmd.go:433-459` has a dedicated branch when `PlainOpen` fails *with* a `--base` override (`fmt.Errorf("--base %q given but cannot open repository...")` at line 442). The `TestReviewCommandSmoke_BadBaseRefErrorsBeforeAgentSpawn` test at `review_context_test.go:326` exercises the *invalid ref* path, not the *unopenable repo* path.
+
+**What's missing:** a test that points the command at a non-repo directory with `--base` set, asserting the specific PlainOpen error path returns the loud "--base given but cannot open repository" message. The current smoke test would pass even if line 441-443 were deleted.
+
+Severity is moderate (this path is defense-in-depth), but the existing comment explicitly calls out a consistency property ("inconsistent with the ComputeScopeStats error path") that has no enforcement.
+
+## Important Improvements (5-7)
+
+### 4. In-progress session filter: missing-state-file and missing-prompt-file paths — rating 5
+
+`reviewSessionContext` (`review_context.go:178-227`) silently skips sessions whose `prompt.txt` is unreadable (`formatReviewSessionLine` at line 247-249) and returns `""` if `store.List` fails. Coverage:
+
+- `TestReviewSessionContext_SkipsSessionsOutsideScope` covers the four explicit exclusion criteria (`FullyCondensed`, `WrongWorktree`, `WrongBaseCommit`, `KindAgentReview`).
+
+**Gaps:**
+- No test for "state file present, prompt.txt missing on disk" — `formatReviewSessionLine` returns `""` here. A regression that started rendering bare lines (`&lt;id&gt; &lt;agent&gt;` with no prompt) wouldn't fail any test.
+- No test for "state file present, prompt.txt empty after trimming" — same exit path.
+- No test for "two qualifying sessions both produce lines" — verifies the loop accumulates rather than only returning the first.
+
+These are quality-of-life rather than correctness-critical, but the silent-skip semantic is exactly the kind of behavior that drifts.
+
+### 5. Symlink canonicalization branch on macOS — rating 5
+
+`canonicalisePath` at `review_context.go:232-240` exists specifically to handle `/var → /private/var` symlinks on macOS. `TestReviewSessionContext_SkipsSessionsOutsideScope` writes state with `WorktreePath: repoRoot` (already canonical) and the `WrongWorktree` case uses `/some/other/repo` (a path that won't exist, falling into the fallback branch).
+
+**What's missing:** a test that writes a state file with a *symlinked* WorktreePath that resolves to `repoRoot`, asserting the session is still matched. Without this, removing the `EvalSymlinks` call would silently break macOS users — the existing tests would all pass because they only compare canonical-to-canonical or unequal-to-unequal.
+
+Bug-class: macOS-only false negatives that don't reproduce in CI Linux.
+
+### 6. `joinReviewContextSections` has no direct unit test — rating 4
+
+`review_context.go:52-60` is a small but real piece of composition logic. Behavior:
+- One non-empty, one empty → returns the non-empty one (no surrounding blanks).
+- Both non-empty → joins with `\n\n`.
+- Both empty → returns `""`.
+
+The smoke test `TestReviewCommandSmoke_IncludesInProgressSessionContextInPrompt` covers the "in-progress only" case, and `TestReviewCommandSmoke_IncludesCheckpointContextInPrompt` covers the "committed only" case. No test covers "both present" or asserts the exact separator. The function is small enough this is a low priority, but the smoke tests don't construct both sections simultaneously.
+
+## Test Quality Issues
+
+### 7. `TestComposeReviewPrompt_ScopeIncludesUncommittedChanges` is partially structural
+
+`prompt_test.go:84-103` only checks the prompt contains `"origin/main"` and `"uncommitted"`. The existing `TestComposeReviewPrompt_AllSectionsWithScope` already asserts the exact scope-clause string. The new test mostly duplicates a substring check of what the other test verifies verbatim. Not a problem — but it could be tightened to test something the other doesn't (e.g., the clause survives when only `Skills + ScopeBaseRef` are set, with no AlwaysPrompt/PerRunPrompt — confirming positioning).
+
+### 8. Smoke-test sh stub captures positional arg, not stdin — minor coupling
+
+`review_context_test.go:445-447`:
+```
+printf '%s' "$2" &gt; "$ENTIRE_SMOKE_PROMPT_FILE"
+```
+
+This depends on Claude Code spawning with the prompt as `argv[2]`. If the codex/gemini adapters were swapped in or Claude's argv layout changed (e.g., `--print` moved), the stub would silently capture the wrong thing and the assertions would fail with a confusing message. Not load-bearing for the PR, but the stub couples to one agent's argv contract. Consider documenting the argv assumption or adding a per-agent stub helper.
+
+## Positive Observations
+
+- **Bug-class regression is covered.** `TestDetectScopeBaseRef_PrefersMainOverAncestorBranches` at `scope_test.go:173-200` directly encodes the original symptom ("picked unrelated merged branch"). With the old timestamp-heuristic code it would have returned `feat/parent`, and the new code returns `main`. This is exactly the right test to ship with this fix.
+
+- **`TestReviewCommandSmoke_BaseFlagThreadsThroughToPromptAndBanner`** (`review_context_test.go:270-319`) is a genuinely valuable end-to-end test. It exercises the full `cobra → runReview → runSingleAgentPath → detectScope → ComputeScopeStats → ComposeReviewPrompt` chain via a PATH-injected sh stub, asserting both the scope banner on stdout AND the prompt content passed to the agent. The test would have caught the "silentErr suppression" bug the PR description mentions, and any future regression in flag wiring.
+
+- **`TestReviewCommandSmoke_BadBaseRefErrorsBeforeAgentSpawn`** (`review_context_test.go:326-360`) correctly asserts both the error message AND that `os.Stat(promptPath)` returns ErrNotExist — proving the agent stub was never invoked. This is the right shape for a fail-fast contract test.
+
+- **`TestReviewSessionContext_SkipsSessionsOutsideScope`** (`review_context_test.go:546-580`) uses a table of all four exclusion criteria with embedded "LEAKED-&lt;name&gt;" markers in each prompt, so a regression in any one criterion produces a specific failure message rather than a generic mismatch. Excellent design.
+
+- **Test isolation is correct throughout.** `testutil.InitRepo` is used for repo setup, smoke tests properly avoid `t.Parallel()` when using `t.Chdir`/`t.Setenv` (review_context_test.go:148, 211, 272, 328, 508, 548). The `paths.ClearWorktreeRootCache` cleanup pattern is correctly applied around `t.Chdir`.
+
+- **Comments document intent, not implementation.** Every new test has a leading block comment explaining the bug class it guards against — these survive refactors and tell the next reader *why* the test exists.
+
+## Files Reviewed
+
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope_test.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/prompt.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/prompt_test.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/cmd.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context_test.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/agent/codex/reviewer_test.go`</result>
+<usage><total_tokens>103797</total_tokens><tool_uses>31</tool_uses><duration_ms>146870</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a24241ef412871e5c</task-id>
+<tool-use-id>toolu_01MsGzwwH3bYGcvZMYVJEKGh</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-review-fix-2/ef324e8c-8832-4837-8183-bec6f1e417f7/tasks/a24241ef412871e5c.output</output-file>
+<status>completed</status>
+<summary>Agent "Comment accuracy analysis of PR 1175" completed</summary>
+<result>Test comment about `AgentType` being a display name is accurate. Good.
+
+Now I have enough to produce findings.
+
+# Code Comment Analysis — PR #1175
+
+## Summary
+
+Reviewed all Go comments added or modified in PR #1175 (`feat/review-base-flag-mainline-default`). The PR adds a `--base` flag to `entire review`, simplifies scope detection by deleting a 130-line "closest-ancestor" heuristic, and adds an "In-progress session context" composer in `review_context.go`.
+
+Most new comments are strong: they explain the WHY (heuristic-failure narrative on `detectScopeBaseRef`, two-dot vs three-dot diff on `countFilesChanged`, fail-loud rationale on `detectScope`). The main issues are **comment rot** left behind by the heuristic deletion — several adjacent comments still reference deleted concepts (`for-each-ref`, "closest ancestor"), and one new comment carries a brittle line-number reference that already does not match the cited code.
+
+---
+
+## Critical Issues
+
+### 1. Rot: `repoWorktreePath` comment references deleted `git for-each-ref` call
+
+- **Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope.go:149-151`
+- **Issue:** The comment reads `"detectScopeBaseRef needs this to invoke 'git for-each-ref' with the right working directory."` This PR deleted the `for-each-ref` shell-out (and its slow-path fallback `slowDetectScopeBaseRef`); `detectScopeBaseRef` now only calls `fallbackScopeRef(repo)` and never shells out. `repoWorktreePath` is still used, but only by `ComputeScopeStats` to pass `repoRoot` to `runGit` for `rev-list`/`diff`/`status`.
+- **Suggestion:** Replace with something like `// repoWorktreePath returns the working-tree path for repo, used as the cwd for the runGit invocations in countCommits / countFilesChanged / countUncommitted.` Better yet — given the body is two lines and the function name is self-describing — delete the comment per the "no WHAT-only comments" rule.
+
+### 2. Rot: brittle line-number reference in `reviewSessionContext` doc points to the wrong lines
+
+- **Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go:174-177`
+- **Issue:** The comment says `"for active sessions prompts are written to disk at lifecycle.go:294-310 on every turn"`. The prompt.txt write actually lives at `lifecycle.go:375-393`. Lines 294-310 are file-tracking code (`RecordFilesTouched`), not prompt writing. This was almost certainly accurate when written, but lifecycle.go has shifted.
+- **Suggestion:** Drop the line numbers entirely — `"prompts are written to disk by the UserPromptSubmit handler in lifecycle.go on every turn (before SaveStep copies them to the shadow branch)"` is accurate without inviting future drift. Line-number refs in comments are a known comment-rot anti-pattern; the codebase already prefers symbol references elsewhere (e.g. `explain.go:156` in `ComputeScopeStats` — see point 3 for the one I'd keep).
+
+### 3. Rot-adjacent: stale "closest ancestor" framing now contradicts behaviour
+
+- **Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/prompt.go:4-5` and `:19-20`
+- **Issue:** The package-level doc reads `'The scope clause pins agents to "commits unique to this branch vs the closest ancestor"'`, and `ComposeReviewPrompt`'s doc reads `"...a scope clause that pins the agent to commits unique to the current branch vs the closest ancestor."` Both claims contradict the new behaviour. After this PR the scope is **mainline** (origin/HEAD → origin/main → ...) by default, with `--base` for explicit overrides. The "closest ancestor" framing is exactly the heuristic this PR removes (and which the new `detectScopeBaseRef` doc explicitly disclaims as having been a structural bug). Also note the scope clause now also includes uncommitted working-tree changes — the current "commits unique to this branch" copy is incomplete.
+- **Suggestion:** Update both spots to "commits unique to this branch vs the mainline base ref (overridable via `--base`), plus uncommitted working-tree changes."
+
+### 4. Rot: `ScopeBaseRef` field doc still says "closest ancestor branch"
+
+- **Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/types/reviewer.go:89-91`
+- **Issue:** `"ScopeBaseRef is the git ref the review is scoped against (typically the closest ancestor branch)."` This is the exact heuristic the PR deleted. "Typically the closest ancestor" is now false in every default invocation.
+- **Suggestion:** `"ScopeBaseRef is the git ref the review is scoped against (mainline by default — origin/HEAD → origin/main → origin/master → main → master — or whatever --base overrides it to)."`
+
+### 5. Rot in project docs: CLAUDE.md still describes the deleted timestamp heuristic
+
+- **Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/CLAUDE.md:734`
+- **Issue:** `"detectScopeBaseRef finds the closest non-self ancestor branch by tip timestamp, with fallback chain ..."` is now wrong on both counts: the timestamp heuristic was deleted, and the chain is the entire detection (not a fallback). New maintainers will read this and look for code that no longer exists.
+- **Suggestion:** Rewrite as `"detectScopeBaseRef returns the first existing ref from the fallback chain origin/HEAD → origin/main → origin/master → main → master. Overridable via --base."` Project-instruction rot is especially dangerous because Claude itself loads it as authoritative context.
+
+---
+
+## Improvement Opportunities
+
+### 6. New `--base` flag help has redundant default text but missing semantics
+
+- **Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/cmd.go:128-131` (long-form) and `:190` (flag registration)
+- **Issue:** Both copies of the help text restate the fallback chain. The long-form (`Long:`) version is fine; the short flag-registration version duplicates it (`"git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)"`). Neither mentions whether refs are validated, which is the load-bearing behaviour distinguishing `--base` from passing the same ref to a downstream `git diff`. Users reading `entire review --help` won't learn that typos abort early.
+- **Suggestion:** Either trim the flag-registration line to `"git ref to scope the review against; validated before agents launch"` and let `--help`'s Long text carry the chain, or add `; unknown refs abort the run` to the Long form.
+
+### 7. Comment in `detectScope` over-promises about caller behaviour
+
+- **Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/cmd.go:425-432`
+- **Issue:** `"on success [...] returns ('', err) so the caller can fail-loudly before spawning agents."` Strictly accurate, but the doc doesn't say the caller actually does that. A reader checking only the doc cannot tell that the failure path is wired through. The inline comment at `:437-440` covers the override-on-PlainOpen case, and `:448-450` covers the override-on-ComputeScopeStats case, but the doc-comment summary makes it sound like caller behaviour is the doc's concern.
+- **Suggestion:** Tighten to "Returns (refName, nil) on success. With baseOverride set, any error short-circuits (the caller aborts the run). Without baseOverride, errors are swallowed and the function returns ('', nil) so the run proceeds in degraded mode without a banner."
+
+### 8. `reviewSessionContext` doc lists `state.WorktreePath == worktreeRoot` but code does canonicalised comparison
+
+- **Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go:156` (inclusion-criteria bullet)
+- **Issue:** The bullet says `"state.WorktreePath == worktreeRoot (this checkout)"`. The actual code compares `canonicalisePath(st.WorktreePath) != worktreeCanon`. The whole point of the canonicalisation (per its own well-written comment at `:193-197`) is to handle the macOS `/var → /private/var` symlink mismatch — a reader writing a new test for this function based on the doc would assume string equality and miss the symlink behaviour.
+- **Suggestion:** Update the bullet to `"canonicalisePath(state.WorktreePath) == canonicalisePath(worktreeRoot) (this checkout, with symlinks resolved)"` so the doc and the surprising-but-load-bearing canonicalisation step agree.
+
+### 9. `reviewCommittedCheckpointContext` doc is historical, not technical
+
+- **Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go:80-83`
+- **Issue:** `"Previously the body of reviewCheckpointContext; extracted so the parent can compose it with the in-progress session section."` This is a changelog entry pretending to be a doc-comment. Six months from now nobody cares that it was extracted — they care what it returns. The "why extracted" framing also implies the only reason it exists is composition, which is true but inverted: it exists to render committed-checkpoint context, and being extracted is incidental.
+- **Suggestion:** Reframe to behaviour: `"reviewCommittedCheckpointContext renders the 'Checkpoint context from commits in scope:' block from checkpoints already committed within scopeBaseRef..HEAD. Returns "" if scopeBaseRef is empty or no checkpoints are found."`
+
+---
+
+## Recommended Removals
+
+### 10. Test inline comment restates what code already says
+
+- **Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context_test.go:255`
+- **Issue:** `// Latest prompt of the session — same convention as committed-fallback.` The same point is already made (better) in the unit test at `:541-545`. Here it duplicates without adding context that's load-bearing for the smoke test specifically.
+- **Suggestion:** Remove. The string literal `"prompt: Also add retry tests for token refresh."` already encodes the "latest prompt wins" assertion.
+
+### 11. Inline `// Mainline must win even though feat/parent's tip is newer.` is implied by the test name
+
+- **Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope_test.go:196`
+- **Issue:** The function name is `TestDetectScopeBaseRef_PrefersMainOverAncestorBranches` and the test header (lines 162-172) already explains this. The inline comment is WHAT-only.
+- **Suggestion:** Drop the line; the error-message argument `"want %q (mainline-first, no timestamp heuristic)"` already encodes the assertion's rationale for failure output.
+
+### 12. `// Validate via go-git rather than shelling out — matches the codebase pattern in explain.go:156`
+
+- **Location:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope.go:85-88`
+- **Issue:** This is borderline keep. The "matches the codebase pattern in explain.go:156" reference is the same brittle line-number anti-pattern as point 2 (and `explain.go` is actively modified) — but the rest of the comment (annotated tag dereferencing) is genuinely non-obvious WHY content and should stay.
+- **Suggestion:** Drop the `explain.go:156` reference, keep the rest: `"Validate via go-git rather than shelling out. ResolveRevision handles branches, tags, abbreviated SHAs, and HEAD-relative refs, and dereferences annotated tags to their target commit automatically."` (Same applies to the matching mention in `ComputeScopeStats`'s function doc at `:72`.)
+
+---
+
+## Positive Findings
+
+These new comments are strong WHY-explanations and serve as good examples:
+
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope.go:126-144` — `detectScopeBaseRef`'s deletion narrative. Captures the failure mode of the deleted heuristic (every recently-merged PR branch was a candidate), the symptom (reviews scoped against 30+ unrelated commits), and the new design choice (explicit `--base` over inference). Future readers tempted to "fix" the seemingly-too-simple implementation will learn why it has to be simple.
+
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope.go:217-223` — `countFilesChanged` two-dot vs three-dot rationale. Names the over-counting failure mode precisely; reader cannot accidentally "simplify" to `..` without understanding the cost.
+
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/prompt.go:44-48` — scope-clause body comment. Explains the surprising agent behaviour (agents correctly skip uncommitted work when told "commits only") that motivated the prompt-wording change.
+
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go:193-197` — `worktreeCanon` canonicalisation. Names the specific macOS `/var → /private/var` symlink issue. Cannot accidentally be removed by a reader who doesn't know about that platform quirk.
+
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope.go:250-255` — `runGit`'s stderr-separation rationale, with the concrete failure case (`strconv.Atoi` on `rev-list --count` output mixed with warnings).
+
+---
+
+## Cross-cutting Recommendation
+
+The biggest risk in this PR isn't any single comment — it's that "closest ancestor" framing survives in **three different files plus CLAUDE.md** despite the underlying behaviour being deleted. A single grep before merging (`rg -i "closest ancestor|for-each-ref" cmd/ CLAUDE.md docs/`) would surface all of these in one pass. Consider that grep as a PR-merge gate when removing named-concepts from a codebase.
+
+Relevant files:
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/prompt.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/types/reviewer.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/cmd.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope_test.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context_test.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/lifecycle.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/CLAUDE.md`</result>
+<usage><total_tokens>84830</total_tokens><tool_uses>24</tool_uses><duration_ms>153940</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>adf552e075378bcdb</task-id>
+<tool-use-id>toolu_01CTFcHsMPJtqgxc1T6xq1Mr</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-review-fix-2/ef324e8c-8832-4837-8183-bec6f1e417f7/tasks/adf552e075378bcdb.output</output-file>
+<status>completed</status>
+<summary>Agent "General code review of PR 1175" completed</summary>
+<result>All tests pass. Now I have enough to compose the review.
+
+---
+
+# Code Review: PR #1175 — `feat/review-base-flag-mainline-default`
+
+**Reviewed files:**
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/cmd.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/prompt.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/scope_test.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review/prompt_test.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/cmd/entire/cli/review_context_test.go`
+
+**Verification done:**
+- `mise run lint` → 0 issues
+- `go test ./cmd/entire/cli/review/...` → ok
+- Behavioral verification of `origin/HEAD` as symbolic ref through go-git's `References().ForEach` + `Short() == "origin/HEAD"` match (works correctly with symbolic refs in scratch repo).
+- Verified `git rev-list --count origin/HEAD..HEAD` fails fatally when `origin/HEAD` isn't set, so the chain correctly falls through via `refExists` (it does not exist iff `git symbolic-ref` was never set, and `refExists` skips it).
+
+---
+
+## Critical (90-100)
+
+None. No correctness-breaking bugs, no security or data-loss risks, no CLAUDE.md violations that would fail CI.
+
+---
+
+## Important (80-89)
+
+### 1. `--base` validation is deferred past the interactive multi-agent picker (confidence: 82)
+
+**File:** `cmd/entire/cli/review/cmd.go:486-509`
+
+In `runMultiAgentPath`, the order is:
+
+1. `pickerFn(...)` — runs the interactive multi-select prompt (and optional per-run prompt field).
+2. `paths.WorktreeRoot(ctx)` / `currentHeadSHA(...)`.
+3. `detectScope(ctx, worktreeRoot, baseOverride, out)` — where `--base` validation finally happens.
+
+A user who runs `entire review --base no-such-ref` with two-or-more launchable agents configured has to navigate the agent picker and per-run prompt UI **before** seeing the validation error. The single-agent path has the same general structure (picker happens earlier still, in `runReview` before `runSingleAgentPath`), so the symptom is identical there.
+
+The unit test `TestComputeScopeStats_BaseOverrideUnknownRefErrors` and the smoke test `TestReviewCommandSmoke_BadBaseRefErrorsBeforeAgentSpawn` both pass because they use `--agent` to skip the picker, masking this UX gap from automated coverage.
+
+**Fix:** Validate `baseOverride` once at the top of `runReview` (or inside `NewCommand`'s `RunE`) — call `git.PlainOpen(worktreeRoot)` + `repo.ResolveRevision(plumbing.Revision(baseOverride))` before any interactive UI. The validation is cheap and the error message is the same.
+
+---
+
+### 2. Potential duplication: same prompt appears in both committed-checkpoint context and in-progress section (confidence: 80)
+
+**File:** `cmd/entire/cli/review_context.go:42-46`, `cmd/entire/cli/strategy/manual_commit_hooks.go:1314-1319`
+
+Scenario:
+
+1. Active session commits mid-flight with carry-forward files. Strategy condenses, sets `state.BaseCommit = newHead`, but **does not clear filesystem `prompt.txt`** because `state.FilesTouched &gt; 0` (`manual_commit_hooks.go:1317`). `state.FullyCondensed` stays false because the session is ACTIVE (not ENDED).
+2. User runs `entire review` immediately after.
+3. `reviewCommittedCheckpointContext` walks `scopeBaseRef..HEAD`, finds the just-created checkpoint commit, emits a "Checkpoint context from commits in scope:" line including a `prompt:` from that checkpoint.
+4. `reviewSessionContext` enumerates `state.WorktreePath==worktreeRoot`, `state.BaseCommit==headSHA`, `!state.FullyCondensed`, `Kind != KindAgentReview` — all four are satisfied. It reads the same `prompt.txt` (not cleared) and emits the same prompt content in the "In-progress session context (uncommitted):" block.
+
+The latest-prompt-only convention in `reviewPromptText` mitigates this for cases where the user has added new prompts since the commit, but for a session whose only activity was the commit-trigger, the two sections will report identical prompt text under different labels.
+
+This is not a correctness bug per se — agents may be unaffected, or even benefit from emphasis — but the in-progress framing ("uncommitted") will mislead the agent about what is committed. The CLAUDE.md description ("filter by ... not-fully-condensed") suggests the intent was to surface uncommitted work; in practice `!FullyCondensed` is too permissive.
+
+**Fix options:**
+- Tighten the filter to `state.LastCheckpointCommitHash != headSHA` (skip sessions whose last checkpoint already landed at HEAD).
+- Or skip when `len(state.FilesTouched) == 0` (no carry-forward in flight).
+- Or read prompts only from the portion of `prompt.txt` newer than `state.CheckpointTranscriptStart` if such a marker exists.
+
+A regression test mirroring the post-commit-with-carry-forward scenario would lock the chosen behavior in.
+
+---
+
+## Suggestions (informational, below report threshold but worth noting)
+
+- **`refExists` is O(refs) per call, called up to 5× per scope detection.** A 5-line replacement using `repo.ResolveRevision(plumbing.Revision(name))` would be O(1). Not a perf bug in practice, but the new code reads like an obvious cleanup opportunity given the comparable site in scope.go:89 already uses ResolveRevision.
+- **`detectScopeBaseRef` ignores its `ctx` parameter** (`_ context.Context`). Now that the function only calls `fallbackScopeRef` (which doesn't take a context), the parameter is purely vestigial. Either remove it or document why the signature is preserved for symmetry.
+
+---
+
+## Strengths
+
+- Heuristic replacement is correct and the rationale comment on `detectScopeBaseRef` (scope.go:130-144) is excellent — names the prior failure mode and explains the new mainline-first design clearly.
+- Three-dot diff fix in `countFilesChanged` is the right call; the comment (scope.go:217-223) accurately captures why two-dot inflated the count.
+- `--base` validation via `repo.ResolveRevision` is the right primitive (handles branches, tags, abbreviated SHAs, and HEAD-relative refs uniformly) and matches the existing pattern in `explain.go`.
+- Fail-loud error path for `--base` typos (`detectScope` returns the error when override is set, debug-logs when auto-detection fails) is a thoughtful UX contract.
+- `canonicalisePath` handles the `/var` vs `/private/var` macOS symlink correctly and degrades safely (returns `p` on EvalSymlinks failure rather than dropping the comparison entirely).
+- Smoke test `TestReviewCommandSmoke_BadBaseRefErrorsBeforeAgentSpawn` directly verifies the "agent not invoked on bad --base" contract by asserting on the stub-invocation tripwire file. This is exactly the right shape of test for the silentErr-suppression bug pattern referenced in the comment.
+- `t.Parallel()` discipline is honored: smoke tests that `t.Chdir` correctly omit it per the CLAUDE.md exception; pure helper tests use it.
+- Privacy guidance honored — `prompt.txt` content flows into the agent prompt (intended) but is never logged. Only operational metadata (errors, paths) hits `logging.Debug`.
+- `paths.WorktreeRoot(ctx)` is used throughout for file path construction in `review_context.go`, not `os.Getwd()` — matches CLAUDE.md "Repo Root vs Current Working Directory" guidance.</result>
+<usage><total_tokens>107800</total_tokens><tool_uses>41</tool_uses><duration_ms>270041</duration_ms></usage>
+</task-notification>
+
+---
+
+yes please

@@ -1,0 +1,31 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "d81c7590a3ff",
+  "strategy": "manual-commit",
+  "branch": "slow-codex-in-review",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/agent/codex/AGENT.md",
+    "cmd/entire/cli/agent/codex/prompt.go",
+    "cmd/entire/cli/agent/codex/prompt_test.go",
+    "cmd/entire/cli/agent/codex/reviewer.go",
+    "cmd/entire/cli/agent/codex/reviewer_test.go",
+    "cmd/entire/cli/agent/skilldiscovery/registry.go",
+    "cmd/entire/cli/agent/skilldiscovery/registry_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d8/1c7590a3ff/0/metadata.json",
+      "transcript": "/d8/1c7590a3ff/0/transcript.jsonl",
+      "content_hash": "/d8/1c7590a3ff/0/transcript_hash.txt",
+      "prompt": "/d8/1c7590a3ff/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1378,
+    "cache_creation_tokens": 336870,
+    "cache_read_tokens": 14479898,
+    "output_tokens": 134400,
+    "api_call_count": 78
+  }
+}

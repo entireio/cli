@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "f50ffa8e636d",
+  "strategy": "manual-commit",
+  "branch": "test-speedups",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/v2_read_test.go",
+    "cmd/entire/cli/doctor_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f5/0ffa8e636d/0/metadata.json",
+      "transcript": "/f5/0ffa8e636d/0/transcript.jsonl",
+      "content_hash": "/f5/0ffa8e636d/0/transcript_hash.txt",
+      "prompt": "/f5/0ffa8e636d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 247128,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 6283648,
+    "output_tokens": 29341,
+    "api_call_count": 70
+  }
+}

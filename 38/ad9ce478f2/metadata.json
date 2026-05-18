@@ -1,0 +1,32 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "38ad9ce478f2",
+  "strategy": "manual-commit",
+  "branch": "soph/improve-v2",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/v2_root.go",
+    "cmd/entire/cli/checkpoint/v2_root_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/38/ad9ce478f2/0/metadata.json",
+      "transcript": "/38/ad9ce478f2/0/transcript.jsonl",
+      "content_hash": "/38/ad9ce478f2/0/transcript_hash.txt",
+      "prompt": "/38/ad9ce478f2/0/prompt.txt"
+    },
+    {
+      "metadata": "/38/ad9ce478f2/1/metadata.json",
+      "transcript": "/38/ad9ce478f2/1/transcript.jsonl",
+      "content_hash": "/38/ad9ce478f2/1/transcript_hash.txt",
+      "prompt": "/38/ad9ce478f2/1/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 23558,
+    "cache_creation_tokens": 43006,
+    "cache_read_tokens": 10149153,
+    "output_tokens": 23451,
+    "api_call_count": 30
+  }
+}

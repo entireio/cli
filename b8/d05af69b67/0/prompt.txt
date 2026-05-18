@@ -1,0 +1,49 @@
+can you explain to me how we currently handle betterleaks / redaction? like how we let it run against the log file
+
+---
+
+so we feed the whole log as one, I wonder if it makes more sense to feed the actual content into betterleaks, like for example the message an user typed or the messaging the agent provide, basically everything that could contain entered our output secrets, this would include tool calls. We could dial down the entropy a bit then but don't risk breaking uuids or signatures in the log?
+
+---
+
+I also wonder if we could make this a package / tool to redact logs and it could support different agents
+
+---
+
+yes
+
+---
+
+do a prototype maybe based on claude code
+
+---
+
+droid is the least used of agents, maybe we should do codex? also wondering: should this live in the redact/agent folder or rather with the agent abstraction we already have?
+
+---
+
+1
+
+---
+
+run /simplify then do codex next
+
+---
+
+/simplify
+
+---
+
+now how would "wiring this into the actual redaction pipeline" look like?
+
+---
+
+could we not check if the agent has it implemented?
+
+---
+
+no kill switch needed
+
+---
+
+yes

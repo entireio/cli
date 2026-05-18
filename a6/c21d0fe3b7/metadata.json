@@ -1,0 +1,38 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "a6c21d0fe3b7",
+  "strategy": "manual-commit",
+  "branch": "feat/review-detail-viewport",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/review/tui_sink.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a6/c21d0fe3b7/0/metadata.json",
+      "transcript": "/a6/c21d0fe3b7/0/transcript.jsonl",
+      "content_hash": "/a6/c21d0fe3b7/0/transcript_hash.txt",
+      "prompt": "/a6/c21d0fe3b7/0/prompt.txt"
+    },
+    {
+      "metadata": "/a6/c21d0fe3b7/1/metadata.json",
+      "transcript": "/a6/c21d0fe3b7/1/transcript.jsonl",
+      "content_hash": "/a6/c21d0fe3b7/1/transcript_hash.txt",
+      "prompt": "/a6/c21d0fe3b7/1/prompt.txt"
+    },
+    {
+      "metadata": "/a6/c21d0fe3b7/2/metadata.json",
+      "transcript": "/a6/c21d0fe3b7/2/transcript.jsonl",
+      "content_hash": "/a6/c21d0fe3b7/2/transcript_hash.txt",
+      "prompt": "/a6/c21d0fe3b7/2/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1192,
+    "cache_creation_tokens": 2974138,
+    "cache_read_tokens": 277939781,
+    "output_tokens": 550801,
+    "api_call_count": 563
+  },
+  "has_review": true
+}

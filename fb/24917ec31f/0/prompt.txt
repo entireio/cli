@@ -1,0 +1,9 @@
+when attaching sessions to a checkpoint, do we today log the reason why a session was attached? like we have multiple triggers that cause it, I wonder if we can have a simple common logging that makes it easier figuring out why a session was attached especially if multiple sessions get added
+
+---
+
+yes, also wondering now: maybe we should include that in metadata.json too? It might be a good signal in general?
+
+---
+
+a yes, b no skip reason

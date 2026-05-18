@@ -1,0 +1,43 @@
+{
+  "cli_version": "v0.6.2-nightly.202605110724.c111a3db-dev-dcf744f5a",
+  "checkpoint_id": "c6ba612414f1",
+  "strategy": "manual-commit",
+  "branch": "fix/checkpoints-v2-rotation-logic-docs",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/architecture/checkpoints-v2-rotation.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c6/ba612414f1/0/metadata.json",
+      "transcript": "/c6/ba612414f1/0/transcript.jsonl",
+      "content_hash": "/c6/ba612414f1/0/transcript_hash.txt",
+      "prompt": "/c6/ba612414f1/0/prompt.txt"
+    },
+    {
+      "metadata": "/c6/ba612414f1/1/metadata.json",
+      "transcript": "/c6/ba612414f1/1/transcript.jsonl",
+      "content_hash": "/c6/ba612414f1/1/transcript_hash.txt",
+      "prompt": "/c6/ba612414f1/1/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 243450,
+    "cache_creation_tokens": 96596,
+    "cache_read_tokens": 4866150,
+    "output_tokens": 34660,
+    "api_call_count": 76
+  },
+  "combined_attribution": {
+    "calculated_at": "2026-05-11T21:23:53.59914Z",
+    "agent_lines": 28,
+    "agent_removed": 19,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 28,
+    "total_lines_changed": 47,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}

@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bs6hjh6xa</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-soph-Work-entire-devenv-cli-experiments-2/bec93069-720f-4956-8c3c-c7bce9ae3b94/tasks/bs6hjh6xa.output</output-file>
+<status>completed</status>
+<summary>Background command "Full check" completed (exit code 0)</summary>
+</task-notification>

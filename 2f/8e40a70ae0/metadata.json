@@ -1,0 +1,25 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "2f8e40a70ae0",
+  "strategy": "manual-commit",
+  "branch": "feat/redaction-rule-extensions",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/strategy/common.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/2f/8e40a70ae0/0/metadata.json",
+      "transcript": "/2f/8e40a70ae0/0/transcript.jsonl",
+      "content_hash": "/2f/8e40a70ae0/0/transcript_hash.txt",
+      "prompt": "/2f/8e40a70ae0/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 33,
+    "cache_creation_tokens": 220572,
+    "cache_read_tokens": 1498737,
+    "output_tokens": 15611,
+    "api_call_count": 18
+  }
+}

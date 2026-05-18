@@ -1,0 +1,26 @@
+{
+  "cli_version": "v0.6.2-nightly.202605110724.c111a3db-dev-dcf744f5a",
+  "checkpoint_id": "fc2e2f9fd801",
+  "strategy": "manual-commit",
+  "branch": "feat/trail-watch-sse",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/trail_watch_cmd.go",
+    "cmd/entire/cli/trail_watch_cmd_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/fc/2e2f9fd801/0/metadata.json",
+      "transcript": "/fc/2e2f9fd801/0/transcript.jsonl",
+      "content_hash": "/fc/2e2f9fd801/0/transcript_hash.txt",
+      "prompt": "/fc/2e2f9fd801/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 27,
+    "cache_creation_tokens": 226440,
+    "cache_read_tokens": 1662815,
+    "output_tokens": 6975,
+    "api_call_count": 17
+  }
+}

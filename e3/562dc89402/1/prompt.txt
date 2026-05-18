@@ -1,0 +1,64 @@
+yes smoke test now
+
+---
+
+do i do this in the worktree
+
+---
+
+what worktree are we in?
+
+---
+
+peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/cli (feat/review-detail-viewport) [1]> cd /Users/peytonmontei/Documents/entire/devenv/entireio/cli
+peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/cli (feat/review-detail-viewport)> go build -o /tmp/entire-detail-test ./cmd/entire/tmp/entire-detail-test review
+stat /Users/peytonmontei/Documents/entire/devenv/entireio/cli/cmd/entire/tmp/entire-detail-test: directory not found
+package review is not in std (/Users/peytonmontei/.local/share/mise/installs/go/1.26.2/src/review)
+
+---
+
+what am i suppsoed to see from smoke test here
+
+---
+
+what am i suppsoed to see from smoke test here
+
+---
+
+what am i suppsoed to see from smoke test here
+
+---
+
+yes proceed. Also, one more thing with the control c to cancel, when there is more than one agent running, we need to type control c twice to stop both agents, but we have no indication, like after clicking once should say like codex/claude stopped
+
+---
+
+yes but i like that the control c does one at a time, but the footer should tell usr that
+
+---
+
+It's confirmed i have to click it twice right now for it to stop. Clicking it once i think may stop both agents, but then i have to click again to see codex and cluade code canceled in the formatting - so maybe there is another issue, see, Reviewing feat/review-detail-viewport vs main: 1 commit, 5 files changed, 4 uncommitted
+AGENT                 STATUS      DURATION  TOKENS    PREVIEW
+claude-code           ⢿  running  2.6s
+codex                 ⢿  running  2.6s
+
+Ctrl+O: drill in · Ctrl+C: cancel
+^C
+  # claude-code review
+
+  cancelled
+
+
+  # codex review
+
+  cancelled
+
+2 agent(s) done — 0 succeeded, 0 failed, 2 cancelled
+
+---
+
+shoudl we smoke test first?
+
+---
+
+so when it's done we should stil be able to do cntrl o?

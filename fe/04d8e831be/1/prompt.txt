@@ -1,0 +1,12 @@
+Review the current branch changes and report actionable findings. Prioritize correctness, regressions, security, and missing test coverage. Do not make code changes.
+
+Scope: review only the commits unique to this branch vs main.
+
+Checkpoint context from commits in scope:
+- 39b4e9bacbf6: prompt: the mouse scroll didn't work. can you review the planning doc
+- a6c21d0fe3b7: prompt: okay we'll do the handshake issue after this
+- 007dbb86f787: prompt: okay proceed
+- e3562dc89402: prompt: so when it's done we should stil be able to do cntrl o?
+- 4e31dbdd1b05: prompt: can we smoke test this?
+
+Use `entire explain <id>` for full checkpoint context, or `entire explain <id> --raw-transcript` for raw transcripts.

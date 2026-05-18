@@ -1,0 +1,38 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "bf6816eceb85",
+  "session_id": "fb93c4d8-9548-4a4c-97e6-364245c50453",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-13T21:33:19.177874Z",
+  "branch": "feat/openai-privacy-filter",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "redact/opf.go",
+    "redact/opf_test.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "4b65a9cfd959",
+  "token_usage": {
+    "input_tokens": 363,
+    "cache_creation_tokens": 861920,
+    "cache_read_tokens": 71653800,
+    "output_tokens": 296079,
+    "api_call_count": 225
+  },
+  "session_metrics": {
+    "turn_count": 13
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-13T21:33:19.007052Z",
+    "agent_lines": 4,
+    "agent_removed": 0,
+    "human_added": 38,
+    "human_modified": 5,
+    "human_removed": 0,
+    "total_committed": 47,
+    "total_lines_changed": 50,
+    "agent_percentage": 8,
+    "metric_version": 2
+  }
+}

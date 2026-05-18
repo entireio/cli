@@ -1,0 +1,23 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "fe04d8e831be",
+  "session_id": "e755fa5c-b328-4df6-9d0e-c68b395e061e",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-12T04:17:02.730827Z",
+  "branch": "feat/review-manifest-diagnostic",
+  "checkpoints_count": 1,
+  "files_touched": [],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7[1m]",
+  "turn_id": "175e01b8a6c3",
+  "token_usage": {
+    "input_tokens": 24420,
+    "cache_creation_tokens": 257245,
+    "cache_read_tokens": 8191677,
+    "output_tokens": 52323,
+    "api_call_count": 60
+  },
+  "session_metrics": {
+    "turn_count": 2
+  }
+}

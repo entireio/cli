@@ -1,0 +1,28 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "0845ffccc4f3",
+  "strategy": "manual-commit",
+  "branch": "fix-slow-v2-pushes",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/remote/git.go",
+    "cmd/entire/cli/checkpoint/remote/git_test.go",
+    "cmd/entire/cli/strategy/push_v2.go",
+    "cmd/entire/cli/strategy/push_v2_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/08/45ffccc4f3/0/metadata.json",
+      "transcript": "/08/45ffccc4f3/0/transcript.jsonl",
+      "content_hash": "/08/45ffccc4f3/0/transcript_hash.txt",
+      "prompt": "/08/45ffccc4f3/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 479881,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 20085376,
+    "output_tokens": 62242,
+    "api_call_count": 166
+  }
+}

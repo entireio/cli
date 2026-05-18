@@ -1,0 +1,47 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "0bb7377a4f07",
+  "session_id": "802b09ab-4617-4518-902c-87ed5837e8f3",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-12T02:49:53.158092Z",
+  "branch": "feat/review-manifest-diagnostic",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/reviewer_test.go",
+    "cmd/entire/cli/agent/codex/reviewer_test.go",
+    "cmd/entire/cli/agent/geminicli/reviewer.go",
+    "cmd/entire/cli/agent/geminicli/reviewer_test.go",
+    "cmd/entire/cli/agent/skilldiscovery/registry.go",
+    "cmd/entire/cli/agent/skilldiscovery/registry_test.go",
+    "cmd/entire/cli/agent_group.go",
+    "cmd/entire/cli/review/marker_fallback.go",
+    "cmd/entire/cli/review/types/reviewer.go",
+    "cmd/entire/cli/review/types/template.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7[1m]",
+  "turn_id": "b499923c3e3a",
+  "checkpoint_transcript_start": 961,
+  "token_usage": {
+    "input_tokens": 2,
+    "cache_creation_tokens": 1196,
+    "cache_read_tokens": 459964,
+    "output_tokens": 910,
+    "api_call_count": 2
+  },
+  "session_metrics": {
+    "turn_count": 28
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-12T02:49:52.8983Z",
+    "agent_lines": 62,
+    "agent_removed": 17,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 62,
+    "total_lines_changed": 79,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}

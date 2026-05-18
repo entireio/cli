@@ -1,0 +1,176 @@
+quick question on git: 
+
+Let's say I have a commit A, now I do commit B on top of A, and also Commit C on top of A. Now a ref points to C and one to B. If I now delete the ref that points to C what happens when gc runs?
+
+---
+
+can you explain to me how the v2 roation between refs/entire/checkpoints/v2/full/0000000000001 and refs/entire/checkpoints/v2/full/0000000000002 works today?
+
+---
+
+Let's say I write a checkpoint, 002 has currently 10 logs, so I added the 11th and I push. On push we need to handle a fast forward since remote updated 002 a lot, after that 002 is at the max per bucket number, what happens then
+
+---
+
+let's say it would be a fast forward, would that update the local ref?
+
+---
+
+Client A reads the remote refs
+Client A starts rotating
+Client B reads the same remote ref
+Client A finished rotating and pushes the ref
+Client B finishes rotating and tries to push but both refs are incompatible and can't be merged
+
+how is this handled today
+
+---
+
+ok, but let's say we both all new branches of the same commit, like the first initialize of checkpoints v2 creates the first orphaned commit, and this is the one we keep using for any new ref too.
+
+---
+
+what could fix the wedge?
+
+---
+
+can you help me craft an example, for the following issue: 
+
+User A has a repo local, hasn't commited in weeks, pulls main and starts a new branch. His full ref is at `refs/entire/checkpoints/v2/full/0000000000032`. Now the actual remote repo was quite active and the latest ref there is `0000000000035` already. 
+
+Now he is at 90 checkpoints in 32 locally, so he runs an agent that results in 2 checkpoints. 
+
+Now on push the conflict is noticed, 32 is not where it was local. Now the cli would notice that and needs to figure out first if the remote ref is over size (so adding on top isn't feasible) and next if there are newer refs already. So it fetches newer refs, gets to 35 which is at 40. So now it can take the 2 conflicting commits/checkpoints and moves them from local 32 (which it resets to remote 32) to local 35 and pushes again.
+
+Now this is the "worst case" scenarios. The happy scenario is 32 was the latest, was still at 90, so push just works. The other scenario is 32 was at 94 so we just need to rebase, and push again. 
+
+Now questions: 
+
+- can you think of any other scenarios?
+- does this add up? do you agree it would solve even super long drift with the least amount of operations?
+
+---
+
+just to b
+
+---
+
+just to be sure, the ideas is that we also switch to comon basee char for each generation
+
+---
+
+ok, can you give me a summary about the idea with the scenarios described?
+
+---
+
+- Result: the entire /full/* graph is connected. git log refs/.../full/35 traces back through 34, 33, …, O0. Three-way merges have a well-defined base. gc
+  reachability is monotonic.
+
+this isn't correct, right? they all base of O0 but each is it's own branch
+
+---
+
+can you give me the difference to our proposal above and this gist: https://gist.github.com/pfleidi/e2d2e2866d279eb86a8016711a5eca05
+
+---
+
+can you explain the two trade offs more?
+
+---
+
+hmm, the first tradeoff gets worse when you increase the amount of checkpoints in an archive, right? Like especially for mono repos a 100 bucket might be fill up super quick so a lot of devs hit conflicts, initially I thought "so bump it to 1000" with the approach before the gist and the risk of hitting the rotation path gets less. That is still kind of true, but now the risk is for a nearly full bucket that always multiple people push their 1000 bucket....
+
+---
+
+question: let's say we just always ignore rotation on push, or let's say we ignore if the shard is only a short distance (let's say 1 or 2) like let's say we have 35 with 999 and now the first push happens to 1000, the pusher creates 36. Now the next person comes with 35 and also pushes 2 ontop of the 999. We now check that the next shard is less then 2 apart, in that case: Just add on top, so 35 will now have 1002 but locally we then use 36 state for anything new. 
+
+now in the case the diff is more then 2, then we would actually dedup?
+
+---
+
+no, I meant the diff not to be "diff to max size" but "how far behind is the shard I want to push too". Basically I want to prevent a user that rarely commits to push to 35 when actually 110 is current, and in worst case then moving all of 35 to 111 because it needs rotation. The idea is "we allow a relatively recent rotated archive to grow as long as it's only X behind" so if latest archive is 37, then 35 and 36 accept stil data, 34 would mean "move to 37 or 38"
+
+---
+
+ok, maybe clarification: how do we determine where current goes today, and with the new proposals, maybe I have a wrong model in mind there
+
+---
+
+- If the writer's /full/current was last reset/synced after rotation N, their diff is "based on" archive N.
+  - If N is warm (within X of remote max), FF-push the diff into /full/<N>.
+  - If N is cold, relocate to a warm archive.
+
+how do we figure out this "base on" ?
+
+---
+
+question: what happens on a clone of a repo that has v2 on a new machine, the clone won't fetch any refs by default, what happens on first checkpoint?
+
+---
+
+yeah let's add ensureRef to the design, then also max can be figured out from the newest archive
+
+---
+
+Let's create a new updated secret gist with this design
+
+---
+
+can you give me a tl;dr change summary to the gist?
+
+---
+
+question, with the current implemntation:
+
+⏺ Confirmed — the divergence is from multiple devs sharing one checkpoint remote:
+
+  - 32 — pfleidi (Sven Pfleiderer), 2026-05-07
+  - 33, 34, 44 — Unknown (likely a teammate without configured git user.name), 2026-05-08–11
+  - 49, 77 — Peyton Montei, 2026-05-11
+  - 78 — you, 2026-05-12
+
+How is it even possible that remote looks like this:
+
+✦ ❯ git ls-remote git@github.com:entireio/cli-checkpoints.git "refs/entire/*"
+8e4b4ab9fea32aa14203abb5c6a74315a3682abd        refs/entire/checkpoints/v2/full/0000000000032
+e33795f054b5fb4c7866fb72a6c04328b936c1a3        refs/entire/checkpoints/v2/full/0000000000033
+8587345e2d59b4c464fa06d7936b987588ad2446        refs/entire/checkpoints/v2/full/0000000000034
+6d8ce98411c270316ff56db5d6468485c3c5e229        refs/entire/checkpoints/v2/full/0000000000035
+e3a2197edc9fe60b1d2f1a5ea4ec01918fe70513        refs/entire/checkpoints/v2/full/0000000000036
+89b9d3facd3835cf922dedcd7c3cb583bac15435        refs/entire/checkpoints/v2/full/0000000000037
+c5132d5da641caa6e23f5a49478c0d3912c75bc6        refs/entire/checkpoints/v2/full/0000000000038
+a0e45483a52861945ecd95317f0c9fe16396401c        refs/entire/checkpoints/v2/full/0000000000039
+1f6e7dc6f84cc3020cb138b098abe08b967359e0        refs/entire/checkpoints/v2/full/0000000000040
+494c09c052a8df8b14e74da4b8cad199267e488e        refs/entire/checkpoints/v2/full/0000000000041
+de2bfe16fe3eed787429cc55ff192ba3028306cf        refs/entire/checkpoints/v2/full/0000000000042
+59a1cef6f849997276edd8a1b4e36c9106078539        refs/entire/checkpoints/v2/full/0000000000043
+fbe23690745ebb9bd2f0cc88c42b188a0cf5aac5        refs/entire/checkpoints/v2/full/0000000000044
+d13301c9fdf825e21548b95321824fcb7f9f5fa6        refs/entire/checkpoints/v2/full/0000000000045
+3be17a7c883c6f2535c3c53f1420df824ac79b1d        refs/entire/checkpoints/v2/full/0000000000046
+02c6acf5e5b5b1ab36d106a4f3bb51ff559b3982        refs/entire/checkpoints/v2/full/0000000000047
+89571a56d0d9dd73090ab17315b618b4a6473cb4        refs/entire/checkpoints/v2/full/0000000000048
+16df79384ffaabb1bf9bfb12b5a5bd119f21282e        refs/entire/checkpoints/v2/full/0000000000049
+10bace96d01abcc81f485f299fe45f7061354e57        refs/entire/checkpoints/v2/full/0000000000077
+561210120318aea5f95befaad997961665e87c63        refs/entire/checkpoints/v2/full/0000000000078
+1bf28d82a71cbd7f9a5c39841cd30d0ad783a880        refs/entire/checkpoints/v2/full/current
+cc175417f28fa0aaa242e47f0f9c7b2853483608        refs/entire/checkpoints/v2/main
+
+---
+
+The last sentence highlights an issue: yeah checkpoints should alwys be pushed top the remote, even rotated.. this is another huge gap
+
+---
+
+yes, please add
+
+---
+
+Question: The common root commit feels like a thing that can land on it's own, right?
+
+---
+
+ok, let's get going?
+
+---
+
+you can look at @../../go-git/

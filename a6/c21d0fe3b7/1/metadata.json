@@ -1,0 +1,55 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "a6c21d0fe3b7",
+  "session_id": "802b09ab-4617-4518-902c-87ed5837e8f3",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-11T23:32:47.225771Z",
+  "branch": "feat/review-detail-viewport",
+  "checkpoints_count": 1,
+  "files_touched": [],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "64d3ba9c0d66",
+  "token_usage": {
+    "input_tokens": 1192,
+    "cache_creation_tokens": 2974138,
+    "cache_read_tokens": 277939781,
+    "output_tokens": 550801,
+    "api_call_count": 563
+  },
+  "session_metrics": {
+    "turn_count": 18
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 681,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".github/hooks/entire.json": 61,
+        "skills/.agents/plugins/marketplace.json": 20,
+        "skills/.claude-plugin/marketplace.json": 20,
+        "skills/.claude/agents/entire-search.md": 25,
+        "skills/.claude/settings.json": 84,
+        "skills/.codex/agents/entire-search.toml": 23,
+        "skills/.codex/config.toml": 3,
+        "skills/.codex/hooks.json": 40,
+        "skills/.cursor-plugin/plugin.json": 14,
+        "skills/.entire/.gitignore": 5,
+        "skills/.entire/settings.json": 4,
+        "skills/.gitignore": 1,
+        "skills/.opencode/INSTALL.md": 31,
+        "skills/GEMINI.md": 1,
+        "skills/README.md": 106,
+        "skills/gemini-extension.json": 6,
+        "skills/plugins/entire/.claude-plugin/plugin.json": 18,
+        "skills/plugins/entire/.codex-plugin/plugin.json": 31,
+        "skills/plugins/entire/skills/explain/SKILL.md": 22,
+        "skills/plugins/entire/skills/search/SKILL.md": 58,
+        "skills/plugins/entire/skills/session-handoff/SKILL.md": 108
+      }
+    }
+  ]
+}

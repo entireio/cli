@@ -1,0 +1,45 @@
+{
+  "cli_version": "v0.6.2-nightly.202605110724.c111a3db-dev-dcf744f5a",
+  "checkpoint_id": "851184b08237",
+  "session_id": "019e12d9-8b37-725d-b723-76630bf6dd40",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-10T17:48:01.341635Z",
+  "branch": "chore/gitignore-mise-local",
+  "checkpoints_count": 0,
+  "files_touched": [
+    ".gitignore"
+  ],
+  "agent": "Pi",
+  "model": "",
+  "turn_id": "ac3913f7a9d1",
+  "checkpoint_transcript_start": 49,
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-10T17:48:01.334835Z",
+    "agent_lines": 3,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 3,
+    "total_lines_changed": 3,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 201,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".pi/extensions/entire.ts": 120,
+        ".pi/extensions/entire/index.ts": 73,
+        "mise.local.toml": 8
+      }
+    }
+  ]
+}

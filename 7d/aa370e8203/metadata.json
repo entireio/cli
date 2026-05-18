@@ -1,0 +1,32 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "7daa370e8203",
+  "strategy": "manual-commit",
+  "branch": "redact-2",
+  "checkpoints_count": 44,
+  "files_touched": [
+    "redact/redact.go",
+    "redact/redact_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/7d/aa370e8203/0/metadata.json",
+      "transcript": "/7d/aa370e8203/0/transcript.jsonl",
+      "content_hash": "/7d/aa370e8203/0/transcript_hash.txt",
+      "prompt": "/7d/aa370e8203/0/prompt.txt"
+    },
+    {
+      "metadata": "/7d/aa370e8203/1/metadata.json",
+      "transcript": "/7d/aa370e8203/1/transcript.jsonl",
+      "content_hash": "/7d/aa370e8203/1/transcript_hash.txt",
+      "prompt": "/7d/aa370e8203/1/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1144300,
+    "cache_creation_tokens": 130211,
+    "cache_read_tokens": 29545396,
+    "output_tokens": 142981,
+    "api_call_count": 318
+  }
+}

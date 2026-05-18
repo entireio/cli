@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "3c4e90ca76a8",
+  "strategy": "manual-commit",
+  "branch": "soph/improve-redaction",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/codex/walker.go",
+    "redact/transcript/codex.go",
+    "redact/transcript/codex_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/3c/4e90ca76a8/0/metadata.json",
+      "transcript": "/3c/4e90ca76a8/0/transcript.jsonl",
+      "content_hash": "/3c/4e90ca76a8/0/transcript_hash.txt",
+      "prompt": "/3c/4e90ca76a8/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 294,
+    "cache_creation_tokens": 1099183,
+    "cache_read_tokens": 42563181,
+    "output_tokens": 169004,
+    "api_call_count": 216
+  }
+}

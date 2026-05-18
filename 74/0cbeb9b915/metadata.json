@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "740cbeb9b915",
+  "strategy": "manual-commit",
+  "branch": "slow-codex-in-review",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hook_registry.go",
+    "cmd/entire/cli/review/env.go",
+    "cmd/entire/cli/review/env_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/74/0cbeb9b915/0/metadata.json",
+      "transcript": "/74/0cbeb9b915/0/transcript.jsonl",
+      "content_hash": "/74/0cbeb9b915/0/transcript_hash.txt",
+      "prompt": "/74/0cbeb9b915/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1835,
+    "cache_creation_tokens": 1183152,
+    "cache_read_tokens": 89326624,
+    "output_tokens": 312131,
+    "api_call_count": 245
+  }
+}

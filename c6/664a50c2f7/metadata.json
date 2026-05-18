@@ -1,0 +1,28 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "c6664a50c2f7",
+  "strategy": "manual-commit",
+  "branch": "migrate-force-fixups",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/migrate.go",
+    "cmd/entire/cli/migrate_test.go",
+    "cmd/entire/cli/strategy/push_common.go",
+    "cmd/entire/cli/strategy/push_common_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c6/664a50c2f7/0/metadata.json",
+      "transcript": "/c6/664a50c2f7/0/transcript.jsonl",
+      "content_hash": "/c6/664a50c2f7/0/transcript_hash.txt",
+      "prompt": "/c6/664a50c2f7/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 988,
+    "cache_creation_tokens": 599295,
+    "cache_read_tokens": 15276616,
+    "output_tokens": 64114,
+    "api_call_count": 107
+  }
+}

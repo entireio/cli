@@ -1,0 +1,34 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "fe04d8e831be",
+  "session_id": "019e192e-a439-7e90-8243-db5b9f69030c",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-12T04:16:53.855226Z",
+  "branch": "feat/review-manifest-diagnostic",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/review/manifest.go",
+    "cmd/entire/cli/review/manifest_test.go"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.5",
+  "turn_id": "971863f44bd8",
+  "checkpoint_transcript_start": 1,
+  "initial_attribution": {
+    "calculated_at": "2026-05-12T04:16:53.837572Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 82,
+    "human_modified": 23,
+    "human_removed": 0,
+    "total_committed": 82,
+    "total_lines_changed": 105,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "kind": "agent_review",
+  "review_skills": [
+    "/review"
+  ],
+  "review_prompt": "Review the current branch changes and report actionable findings. Prioritize correctness, regressions, security, and missing test coverage. Do not make code changes.\n\nScope: review only the commits unique to this branch vs main.\n\nCheckpoint context from commits in scope:\n- 4e31dbdd1b05: prompt: can we smoke test this?\n\nUse `entire explain <id>` for full checkpoint context, or `entire explain <id> --raw-transcript` for raw transcripts."
+}

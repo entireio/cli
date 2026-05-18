@@ -1,0 +1,31 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "1bdcc2e089e2",
+  "strategy": "manual-commit",
+  "branch": "pr-1167-review",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/review/tui_model.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/1b/dcc2e089e2/0/metadata.json",
+      "transcript": "/1b/dcc2e089e2/0/transcript.jsonl",
+      "content_hash": "/1b/dcc2e089e2/0/transcript_hash.txt",
+      "prompt": "/1b/dcc2e089e2/0/prompt.txt"
+    },
+    {
+      "metadata": "/1b/dcc2e089e2/1/metadata.json",
+      "transcript": "/1b/dcc2e089e2/1/transcript.jsonl",
+      "content_hash": "/1b/dcc2e089e2/1/transcript_hash.txt",
+      "prompt": "/1b/dcc2e089e2/1/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 25997,
+    "cache_creation_tokens": 4927376,
+    "cache_read_tokens": 371085268,
+    "output_tokens": 768624,
+    "api_call_count": 909
+  }
+}

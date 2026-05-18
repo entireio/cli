@@ -1,0 +1,6 @@
+1. Medium: the new redactor diagnostics do not actually go to .entire/logs/entire.log, despite the new code and docs telling users to look there. The pack/
+     custom-rule paths emit warnings with bare slog.Warn in redact/custom.go:46 and redact/packs.go:184, while the hook path explicitly claims those details
+     land in the log file in cmd/entire/cli/strategy/common.go:396 and docs/security-and-privacy.md:200. But the logging package writes through its own logger
+     instance and never installs it as the process-wide default; see cmd/entire/cli/logging/logger.go:137 and the fallback to slog.Default() in cmd/entire/cli/
+     logging/logger.go:260. In practice, invalid regexes, skipped pack files, and sample mismatches will bypass .entire/logs/entire.log, so the new
+     troubleshooting flow is misleading and hook-time failures are much harder to diagnose.

@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "55abcbede3df",
+  "strategy": "manual-commit",
+  "branch": "soph/track-attach-reason",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/session/attach_reason.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/55/abcbede3df/0/metadata.json",
+      "transcript": "/55/abcbede3df/0/transcript.jsonl",
+      "content_hash": "/55/abcbede3df/0/transcript_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 11,
+    "cache_creation_tokens": 6503,
+    "cache_read_tokens": 1772031,
+    "output_tokens": 4839,
+    "api_call_count": 11
+  }
+}

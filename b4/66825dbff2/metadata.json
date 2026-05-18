@@ -1,0 +1,33 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "b466825dbff2",
+  "strategy": "manual-commit",
+  "branch": "fix-slow-v2-pushes",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/strategy/push_common.go",
+    "cmd/entire/cli/strategy/push_v2.go",
+    "cmd/entire/cli/strategy/push_v2_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b4/66825dbff2/0/metadata.json",
+      "transcript": "/b4/66825dbff2/0/transcript.jsonl",
+      "content_hash": "/b4/66825dbff2/0/transcript_hash.txt",
+      "prompt": "/b4/66825dbff2/0/prompt.txt"
+    },
+    {
+      "metadata": "/b4/66825dbff2/1/metadata.json",
+      "transcript": "/b4/66825dbff2/1/transcript.jsonl",
+      "content_hash": "/b4/66825dbff2/1/transcript_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 20,
+    "cache_creation_tokens": 19647,
+    "cache_read_tokens": 6501194,
+    "output_tokens": 8150,
+    "api_call_count": 15
+  }
+}

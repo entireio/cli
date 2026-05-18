@@ -1,0 +1,2 @@
+I don't think we wanted to make `WalkCheckpointShardsCtx` its own method - it's ok to update callers to pass context to it.
+`listExistingV2Checkpoints` in migrate.go calls `checkpoint.WalkCheckpointShards`, and it already has ctx. just pass ctx to it and remove that extra function

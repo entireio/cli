@@ -1,0 +1,109 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "701bc9b12150",
+  "session_id": "019e2299-d12c-71c2-9138-309d08785ef1",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-13T19:09:13.687996Z",
+  "branch": "feat/openai-privacy-filter",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".golangci.yaml",
+    "cmd/entire/cli/settings/settings.go",
+    "cmd/entire/cli/settings/settings_test.go",
+    "cmd/entire/cli/strategy/common.go",
+    "redact/opf.go",
+    "redact/opf_runtime/runtime.go",
+    "redact/opf_test.go"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.5",
+  "turn_id": "0fca56a278a4",
+  "token_usage": {
+    "input_tokens": 176608,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 484096,
+    "output_tokens": 12320,
+    "api_call_count": 18
+  },
+  "session_metrics": {
+    "turn_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-13T19:09:13.655073Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 304,
+    "human_modified": 49,
+    "human_removed": 0,
+    "total_committed": 322,
+    "total_lines_changed": 353,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 302,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".golangci.yaml": 1,
+        "cmd/entire/cli/settings/settings.go": 66,
+        "cmd/entire/cli/settings/settings_test.go": 82,
+        "redact/opf.go": 75,
+        "redact/opf_runtime/runtime.go": 36,
+        "redact/opf_test.go": 42
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 132,
+      "user_lines_removed": 49,
+      "agent_lines_added": 320,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "cmd/entire/cli/strategy/common.go": 66,
+        "cmd/entire/cli/strategy/redaction_wireup_test.go": 51,
+        "redact/export_test.go": 15
+      },
+      "user_removed_per_file": {
+        "cmd/entire/cli/strategy/common.go": 49
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 81,
+      "user_lines_removed": 0,
+      "agent_lines_added": 386,
+      "agent_lines_removed": 49,
+      "user_added_per_file": {
+        "cmd/entire/cli/strategy/redaction_wireup_test.go": 51,
+        "redact/export_test.go": 15,
+        "redact/opf.go": 15
+      }
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 70,
+      "user_lines_removed": 0,
+      "agent_lines_added": 401,
+      "agent_lines_removed": 49,
+      "user_added_per_file": {
+        "cmd/entire/cli/strategy/redaction_wireup_test.go": 51,
+        "redact/export_test.go": 19
+      }
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 70,
+      "user_lines_removed": 0,
+      "agent_lines_added": 401,
+      "agent_lines_removed": 49,
+      "user_added_per_file": {
+        "cmd/entire/cli/strategy/redaction_wireup_test.go": 51,
+        "redact/export_test.go": 19
+      }
+    }
+  ]
+}

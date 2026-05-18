@@ -1,0 +1,28 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "2b14ae2de83c",
+  "strategy": "manual-commit",
+  "branch": "clean-all-quicker-output",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/parse_tree.go",
+    "cmd/entire/cli/checkpoint/v2_generation.go",
+    "cmd/entire/cli/clean.go",
+    "cmd/entire/cli/strategy/cleanup.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/2b/14ae2de83c/0/metadata.json",
+      "transcript": "/2b/14ae2de83c/0/transcript.jsonl",
+      "content_hash": "/2b/14ae2de83c/0/transcript_hash.txt",
+      "prompt": "/2b/14ae2de83c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 199,
+    "cache_creation_tokens": 389715,
+    "cache_read_tokens": 32821421,
+    "output_tokens": 99012,
+    "api_call_count": 161
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "fe04d8e831be",
+  "session_id": "019e1978-233c-7cf0-93f3-673b0d4859cf",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-12T04:16:54.334125Z",
+  "branch": "feat/review-manifest-diagnostic",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/review/manifest.go",
+    "cmd/entire/cli/review/manifest_test.go"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.5",
+  "turn_id": "6b4fd65db9bf",
+  "token_usage": {
+    "input_tokens": 116082,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 1866880,
+    "output_tokens": 12452,
+    "api_call_count": 23
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-12T04:16:54.296246Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 82,
+    "human_modified": 23,
+    "human_removed": 0,
+    "total_committed": 82,
+    "total_lines_changed": 105,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 681,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".github/hooks/entire.json": 61,
+        "skills/.agents/plugins/marketplace.json": 20,
+        "skills/.claude-plugin/marketplace.json": 20,
+        "skills/.claude/agents/entire-search.md": 25,
+        "skills/.claude/settings.json": 84,
+        "skills/.codex/agents/entire-search.toml": 23,
+        "skills/.codex/config.toml": 3,
+        "skills/.codex/hooks.json": 40,
+        "skills/.cursor-plugin/plugin.json": 14,
+        "skills/.entire/.gitignore": 5,
+        "skills/.entire/settings.json": 4,
+        "skills/.gitignore": 1,
+        "skills/.opencode/INSTALL.md": 31,
+        "skills/GEMINI.md": 1,
+        "skills/README.md": 106,
+        "skills/gemini-extension.json": 6,
+        "skills/plugins/entire/.claude-plugin/plugin.json": 18,
+        "skills/plugins/entire/.codex-plugin/plugin.json": 31,
+        "skills/plugins/entire/skills/explain/SKILL.md": 22,
+        "skills/plugins/entire/skills/search/SKILL.md": 58,
+        "skills/plugins/entire/skills/session-handoff/SKILL.md": 108
+      }
+    }
+  ],
+  "kind": "agent_review",
+  "review_skills": [
+    "/review"
+  ],
+  "review_prompt": "Review the current branch changes and report actionable findings. Prioritize correctness, regressions, security, and missing test coverage. Do not make code changes.\n\nScope: review only the commits unique to this branch vs main.\n\nCheckpoint context from commits in scope:\n- 39b4e9bacbf6: prompt: the mouse scroll didn't work. can you review the planning doc\n- a6c21d0fe3b7: prompt: okay we'll do the handshake issue after this\n- 007dbb86f787: prompt: okay proceed\n- e3562dc89402: prompt: so when it's done we should stil be able to do cntrl o?\n- 4e31dbdd1b05: prompt: can we smoke test this?\n\nUse `entire explain <id>` for full checkpoint context, or `entire explain <id> --raw-transcript` for raw transcripts."
+}

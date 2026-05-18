@@ -1,0 +1,25 @@
+{
+  "cli_version": "v0.6.2-nightly.202605110724.c111a3db-dev-dcf744f5a",
+  "checkpoint_id": "3648eb673a37",
+  "strategy": "manual-commit",
+  "branch": "migrate-failed-commit-bug",
+  "checkpoints_count": 7,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/parse_tree.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/36/48eb673a37/0/metadata.json",
+      "transcript": "/36/48eb673a37/0/transcript.jsonl",
+      "content_hash": "/36/48eb673a37/0/transcript_hash.txt",
+      "prompt": "/36/48eb673a37/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 270,
+    "cache_creation_tokens": 528629,
+    "cache_read_tokens": 30351182,
+    "output_tokens": 112559,
+    "api_call_count": 175
+  }
+}

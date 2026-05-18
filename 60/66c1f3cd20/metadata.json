@@ -1,0 +1,23 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "6066c1f3cd20",
+  "strategy": "manual-commit",
+  "branch": "review-fix-progress-stream",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/60/66c1f3cd20/0/metadata.json",
+      "transcript": "/60/66c1f3cd20/0/transcript.jsonl",
+      "content_hash": "/60/66c1f3cd20/0/transcript_hash.txt",
+      "prompt": "/60/66c1f3cd20/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 385,
+    "cache_creation_tokens": 1029181,
+    "cache_read_tokens": 48771373,
+    "output_tokens": 244002,
+    "api_call_count": 192
+  }
+}

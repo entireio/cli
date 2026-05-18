@@ -1,0 +1,38 @@
+i want to run smoke tests myself, can you tell me steps please
+
+---
+
+this isn't working for fish, peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/c/.w/redact (feat/openai-privacy-filter)> TMPREPO=$(mktemp -d /tmp/opf-smoke-B.XXXXXX)
+                                                                                     cd "$TMPREPO"
+                                                                                     git init -q
+                                                                                     git commit --allow-empty -m "root" -q
+                                                                                     mkdir -p .entire
+                                                                                     cat > .entire/settings.json <<'JSON'
+                                                                                     { "redaction": {
+                                                                                         "openai_privacy_filter": {
+                                                                                         "enabled": true,
+                                                                                         "categories": {"private_person": true, "secret": false},
+                                                                                         "command": "/nonexistent/opf",
+                                                                                         "timeout_seconds": 30,
+                                                                                         "on_failure": "warn"
+                                                                                         }
+                                                                                         }
+                                                                                     } JSON /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/redact/bin/entire status
+                                                                                     echo "exit code: $?"
+                                                                                     test -f .entire/logs/entire.log && grep -i "openai_privacy_filter\|opf" .entire/logs/entire.log
+
+---
+
+do any of these actualyl show me what a user will see?
+
+---
+
+okay why don't you run everything before F tell me the results and then tell me again after steps for F
+
+---
+
+we don't eed to commit these
+
+---
+
+sorry proceed

@@ -1,0 +1,14 @@
+gedtting this when I push, can you take a look?
+
+---
+
+gedtting this when I push, can you take a look?
+
+[entire] Pushing entire/checkpoints/v1 to checkpoint remote.... already up-to-date
+[entire] Syncing and pushing v2 checkpoints...
+[entire] Pushing v2/main, v2/full/current...
+[entire] Successfully pushed v2/main
+[entire] Warning: couldn't sync v2/full/current: failed to find related archived generation: no remote archive shares history with local /full/current
+[entire] A checkpoint remote is configured in Entire settings (.entire/settings.json or .entire/settings.local.json) but could not be reached.
+[entire] Checkpoints are saved locally but not synced. Ensure you have access to the checkpoint remote.
+Everything up-to-date

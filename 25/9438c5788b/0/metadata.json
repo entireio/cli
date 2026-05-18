@@ -1,0 +1,40 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "259438c5788b",
+  "session_id": "13e26df4-5885-4c44-9469-8449e56488e6",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-12T12:19:18.14419Z",
+  "branch": "feat/redaction-rule-extensions",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/security-and-privacy.md",
+    "redact/custom.go",
+    "redact/custom_test.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7[1m]",
+  "turn_id": "20fac5e1bdd1",
+  "checkpoint_transcript_start": 49,
+  "token_usage": {
+    "input_tokens": 16,
+    "cache_creation_tokens": 11279,
+    "cache_read_tokens": 2010943,
+    "output_tokens": 5983,
+    "api_call_count": 16
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-12T12:19:18.104916Z",
+    "agent_lines": 23,
+    "agent_removed": 26,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 23,
+    "total_lines_changed": 49,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}

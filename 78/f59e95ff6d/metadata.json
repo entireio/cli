@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "78f59e95ff6d",
+  "strategy": "manual-commit",
+  "branch": "soph/improve-redaction",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/agent.go",
+    "cmd/entire/cli/agent/capabilities.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/78/f59e95ff6d/0/metadata.json",
+      "transcript": "/78/f59e95ff6d/0/transcript.jsonl",
+      "content_hash": "/78/f59e95ff6d/0/transcript_hash.txt",
+      "prompt": "/78/f59e95ff6d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 292,
+    "cache_creation_tokens": 1098383,
+    "cache_read_tokens": 41912341,
+    "output_tokens": 168175,
+    "api_call_count": 214
+  }
+}

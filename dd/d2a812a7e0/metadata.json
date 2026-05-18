@@ -1,0 +1,30 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "ddd2a812a7e0",
+  "strategy": "manual-commit",
+  "branch": "soph/improve-redaction",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/condense_skip_test.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_redact.go",
+    "cmd/entire/cli/strategy/manual_commit_redact_test.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/dd/d2a812a7e0/0/metadata.json",
+      "transcript": "/dd/d2a812a7e0/0/transcript.jsonl",
+      "content_hash": "/dd/d2a812a7e0/0/transcript_hash.txt",
+      "prompt": "/dd/d2a812a7e0/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 296,
+    "cache_creation_tokens": 1100291,
+    "cache_read_tokens": 43215885,
+    "output_tokens": 169889,
+    "api_call_count": 218
+  }
+}

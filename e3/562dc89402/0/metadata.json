@@ -1,0 +1,84 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "e3562dc89402",
+  "session_id": "019e1949-28b9-7313-af6f-b1b52f92b1f4",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-11T23:10:55.574363Z",
+  "branch": "feat/review-detail-viewport",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/review/tui_model.go",
+    "cmd/entire/cli/review/tui_model_test.go",
+    "cmd/entire/cli/review/tui_sink_test.go"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.5",
+  "turn_id": "a17ea224ce23",
+  "token_usage": {
+    "input_tokens": 94061,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 1422208,
+    "output_tokens": 15448,
+    "api_call_count": 21
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-11T23:10:55.536245Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 25,
+    "total_committed": 0,
+    "total_lines_changed": 25,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 943,
+      "user_lines_removed": 25,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".github/hooks/entire.json": 61,
+        "cmd/entire/cli/review/tui_model.go": 55,
+        "cmd/entire/cli/review/tui_model_test.go": 203,
+        "cmd/entire/cli/review/tui_sink_test.go": 4,
+        "skills/.agents/plugins/marketplace.json": 20,
+        "skills/.claude-plugin/marketplace.json": 20,
+        "skills/.claude/agents/entire-search.md": 25,
+        "skills/.claude/settings.json": 84,
+        "skills/.codex/agents/entire-search.toml": 23,
+        "skills/.codex/config.toml": 3,
+        "skills/.codex/hooks.json": 40,
+        "skills/.cursor-plugin/plugin.json": 14,
+        "skills/.entire/.gitignore": 5,
+        "skills/.entire/settings.json": 4,
+        "skills/.gitignore": 1,
+        "skills/.opencode/INSTALL.md": 31,
+        "skills/GEMINI.md": 1,
+        "skills/README.md": 106,
+        "skills/gemini-extension.json": 6,
+        "skills/plugins/entire/.claude-plugin/plugin.json": 18,
+        "skills/plugins/entire/.codex-plugin/plugin.json": 31,
+        "skills/plugins/entire/skills/explain/SKILL.md": 22,
+        "skills/plugins/entire/skills/search/SKILL.md": 58,
+        "skills/plugins/entire/skills/session-handoff/SKILL.md": 108
+      },
+      "user_removed_per_file": {
+        "cmd/entire/cli/review/tui_model.go": 9,
+        "cmd/entire/cli/review/tui_model_test.go": 14,
+        "cmd/entire/cli/review/tui_sink_test.go": 2
+      }
+    }
+  ],
+  "kind": "agent_review",
+  "review_skills": [
+    "/review"
+  ],
+  "review_prompt": "Review the current branch changes and report actionable findings. Prioritize correctness, regressions, security, and missing test coverage. Do not make code changes.\n\nScope: review only the commits unique to this branch vs main.\n\nCheckpoint context from commits in scope:\n- 4e31dbdd1b05: prompt: can we smoke test this?\n\nUse `entire explain <id>` for full checkpoint context, or `entire explain <id> --raw-transcript` for raw transcripts."
+}

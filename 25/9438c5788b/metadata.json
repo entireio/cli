@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "259438c5788b",
+  "strategy": "manual-commit",
+  "branch": "feat/redaction-rule-extensions",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/security-and-privacy.md",
+    "redact/custom.go",
+    "redact/custom_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/25/9438c5788b/0/metadata.json",
+      "transcript": "/25/9438c5788b/0/transcript.jsonl",
+      "content_hash": "/25/9438c5788b/0/transcript_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 16,
+    "cache_creation_tokens": 11279,
+    "cache_read_tokens": 2010943,
+    "output_tokens": 5983,
+    "api_call_count": 16
+  }
+}

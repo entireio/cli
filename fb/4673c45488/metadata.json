@@ -1,0 +1,23 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "fb4673c45488",
+  "strategy": "manual-commit",
+  "branch": "review-fix-progress-stream",
+  "checkpoints_count": 2,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/fb/4673c45488/0/metadata.json",
+      "transcript": "/fb/4673c45488/0/transcript.jsonl",
+      "content_hash": "/fb/4673c45488/0/transcript_hash.txt",
+      "prompt": "/fb/4673c45488/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 377,
+    "cache_creation_tokens": 1016248,
+    "cache_read_tokens": 47334988,
+    "output_tokens": 236364,
+    "api_call_count": 189
+  }
+}

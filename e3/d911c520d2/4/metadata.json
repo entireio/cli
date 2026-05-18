@@ -1,0 +1,67 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "e3d911c520d2",
+  "session_id": "b1b4626d-fba6-47dd-bc48-856404de80cc",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-12T15:36:13.556084Z",
+  "branch": "review-fix-progress-stream",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/reviewer.go",
+    "cmd/entire/cli/agent/claudecode/reviewer_test.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "41fef230b2f6",
+  "token_usage": {
+    "input_tokens": 26,
+    "cache_creation_tokens": 64489,
+    "cache_read_tokens": 1103363,
+    "output_tokens": 11225,
+    "api_call_count": 16
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-12T15:36:13.527479Z",
+    "agent_lines": 49,
+    "agent_removed": 46,
+    "human_added": 7,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 56,
+    "total_lines_changed": 117,
+    "agent_percentage": 81.19658119658119,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 647,
+      "user_lines_removed": 7,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "cmd/entire/cli/agent/claudecode/reviewer.go": 3,
+        "cmd/entire/cli/agent/claudecode/reviewer_test.go": 63,
+        "cmd/entire/cli/agent/codex/reviewer.go": 5,
+        "cmd/entire/cli/agent/geminicli/reviewer.go": 4,
+        "cmd/entire/cli/review/run.go": 9,
+        "cmd/entire/cli/review/run_multi.go": 12,
+        "cmd/entire/cli/review/types/template.go": 131,
+        "cmd/entire/cli/review/types/template_test.go": 160,
+        "e2e/streaming-smoke/main.go": 260
+      },
+      "user_removed_per_file": {
+        "cmd/entire/cli/review/types/template.go": 2,
+        "cmd/entire/cli/review/types/template_test.go": 5
+      }
+    }
+  ],
+  "kind": "agent_review",
+  "review_skills": [
+    "/review"
+  ],
+  "review_prompt": "/review\n\nScope: review only the commits unique to this branch vs origin/feat/trail-watch-sse.\n\nCheckpoint context from commits in scope:\n- 73edba371474: prompt: /simplify\n- e88497799415: no summary or prompt recorded\n- 3648eb673a37: prompt: ok latest migration looks good. generate detailed commit messages and push up the changes\n- 453d4bb44f01: prompt: Do both in a batch\n- c6ba612414f1: prompt: /simplify\n- fb4beb223e3d: prompt: Fix both issues\n- d534f23017c5: prompt: okay adn you fixed this just now?\n- 60d4f6868ab0: prompt: can you address the copilot comment on 1168\n- 9b0ff6b2a145: prompt: yes\n- 3a89cc2aab59: prompt: There's many code review comments, address them if applicable and resolve comments.\n- d86ffe2e995d: prompt: This job requests security-events: write and runs on pull_request. For PRs opened from forks, the GITHUB_TOKEN typically does not have security-events: write, so the CodeQL analyze step’s SARIF upload can fail and turn the check red for external contributors. Consider gating the upload (or the whole job) to same-rep...\n- 851184b08237: prompt: Push the branch up. Create a separate PR real quick to add the mise.local.toml to the gitignore and come back to this branch.\n- 2222d4bca8b2: prompt: yes\n- b664852f94af: prompt: /simplify\n- b7c4fac87aa9: prompt: 1\n- ea20ee1b0608: prompt: ok, can you make a commit?\n- 8b543a5d28eb: summary: Respond to PR #1154 review feedback by applying technically correct suggestions from Copilot and making the auth store constructor behavior consistent.; Three files were patched (auth store, auth store test, TUI sink test), tests and lint passed, and the changes were committed as 'Address test store review feedback'...\n- 556f162ba317: summary: Fix a data race in the review package that caused test:ci failures under -race, then push the fix to the open PR for local test reliability improvements.; Added an early cancelled-context return in multipicker.go to prevent Bubble Tea/huh from constructing a terminal reader when the context is already done, eliminat...\n- 7a9ca45bcbe4: summary: Diagnose and fix three interrelated issues with `mise run test`: garbled/interleaved output making failures hard to read, a hidden test failure, and slow/hung test runs (both unit and integration).; Five concrete bugs were fixed (timezone-sensitive test, ANSI escape leak from huh form, non-deterministic TUI dismissa...\n- 8d312240ffdf: prompt: can you look at the pr comments?\n- ... 1 more checkpoint omitted\n\nUse `entire explain <id>` for full checkpoint context, or `entire explain <id> --raw-transcript` for raw transcripts."
+}

@@ -1,0 +1,485 @@
+can you review 1185 with /pr-review-toolkit:review-pr
+
+---
+
+<task-notification>
+<task-id>a58ee21802c474a2b</task-id>
+<tool-use-id>toolu_017fa6JFaXm4JyVyLne1PxaD</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-review-fix-2--worktrees-review-fix-local/a15672a4-e3dc-456e-b0fd-c521cad18358/tasks/a58ee21802c474a2b.output</output-file>
+<status>completed</status>
+<summary>Agent "Code review of PR 1185" completed</summary>
+<result>I have enough to write the review. Let me also note one subtle behavior: `explainEmptyManifest` is called even when `manifest.Sources` would have at least matched some but not all agents. Looking at cmd.go:651-659 — it checks `len(manifest.Sources) == 0`. So this only triggers when zero agents matched. That's the intended semantic.
+
+One issue: in `explainEmptyManifest`, when `summary.AgentRuns` is empty, `runName` is `""`, so `wantType` is `""`, so the AgentType filter loop returns early (`wantType != ""` fails) — but the caller in `cmd.go:649` early-returns if `len(summary.AgentRuns) == 0`. So this codepath is unreachable when no agent runs exist. OK.
+
+Now let me write the review.
+
+---
+
+## Code Review: PR 1185 — manifest-empty diagnostic + gemini reviewer naming alignment
+
+**Reviewed:** 13 files, 2 commits (`60324f0d6` manifest diagnostic, `93b82ae44` gemini rename) against `main`. Focus per request: correctness, idiomatic Go, CLAUDE.md compliance, subtle bugs. Test quality and comment accuracy excluded.
+
+### Critical issues
+
+None.
+
+### Important issues
+
+**1. `explainEmptyManifest` doesn't match all of `matchReviewSessionState`'s rejection paths** — `cmd/entire/cli/review/manifest.go:108-152` vs `:163-194`
+
+The matcher rejects on `used[st.SessionID]` (line 174) and on `st == nil` before any other check. `explainEmptyManifest` filters out `nil` correctly (line 117 `st != nil`) but never models the `used` map. In practice this is unreachable because the diagnostic only runs when `len(manifest.Sources) == 0` (so `used` is empty), but the function-level doc comment claims "Filter precedence in this function matches `matchReviewSessionState` so the reported cause aligns with what the matcher actually decided." That's slightly overstated. Confidence: 82. Suggestion: either tighten the comment ("equivalent when `manifest.Sources == 0`, since `used` is empty"), or add a defensive note.
+
+### Suggestions
+
+**2. The diagnostic stops at the first matching cause per filter category, not per state** — `manifest.go:135-150`
+
+Each filter loop returns on the first state that fails it, but the *next* filter still scans the same tagged slice. If state A fails worktree and state B fails BaseCommit, the user only ever sees the worktree cause. That matches `matchReviewSessionState`'s short-circuit behavior, so it's defensible — but for diagnostics where the user has zero matches, surfacing the *aggregate* cause distribution would be more useful (e.g., "2 of 3 mismatched worktree, 1 mismatched BaseCommit"). Confidence: 60. Not blocking.
+
+**3. Long diagnostic messages with raw paths/SHAs** — `manifest.go:137, 141`
+
+`%q` of `WorktreePath` will print absolute filesystem paths (`"/Users/foo/repo"`) into the user-facing warning. Not a privacy concern (this is a local CLI and CLAUDE.md "Privacy" rule targets *logged* user content), but readability suffers when paths are long. Consider truncating or using `filepath.Base` for display while still logging the full path. Confidence: 50.
+
+**4. Unused-when-empty path**: when `summary.AgentRuns` is empty, `runName == ""`, `wantType == ""`, so the AgentType loop is a no-op. The caller (`cmd.go:649`) early-returns on empty `AgentRuns` so this path is unreachable, but a brief `if len(summary.AgentRuns) == 0 { return "no agent runs in summary" }` guard inside `explainEmptyManifest` would harden the helper against future callers. Confidence: 45.
+
+### Strengths
+
+- **Gemini rename is complete and consistent.** No stale `"gemini-cli"` literals remain in non-test production code (verified via grep across `cmd/entire/cli/agent/geminicli/`, `skilldiscovery/`, `review/`). The single non-test occurrence is a comment in `reviewer.go:42` explaining the prior bug. `transcript/compact/testdata/*.jsonl` retain `"gemini-cli"` but those are fixture files for past CLI versions — correct to keep.
+- **Constant usage is canonical**: `agent.AgentNameGemini = "gemini"` (registry.go:173) is the single source of truth; `geminicli/reviewer.go:25,46` reference it via `string(agent.AgentNameGemini)`, eliminating the silent-skip bug in `adoptReviewEnv`.
+- **`skilldiscovery` rekey is consistent with callers.** `picker.go:169` calls `ActiveInstallHintsFor(string(c.name), ...)` where `c.name` is `agenttypes.AgentName`; the rekey from `"gemini-cli"` → `"gemini"` in `registry.go:34,66` aligns with the constant.
+- **Return-signature change is propagated correctly.** `localReviewManifestFromCurrentState` now returns `([]*session.State, error)`; the sole caller (`cmd.go:649`) consumes the new return value to build the diagnostic.
+- **`agent_group.go:102`** help text update is valid — `entire agent add gemini` matches `AgentNameGemini = "gemini"`.
+- **Comment edits in `cmd.go:5`, `marker_fallback.go:8`, `types/reviewer.go:4,26`, `types/template.go:7`** are pure doc updates with no substantive code drift in those hunks.
+- **Error handling** uses `fmt.Errorf("...: %w", err)` wrapping consistently in `manifest.go:84,88`. No `SilentError` needed since `writePostReviewManifest` is fire-and-forget and prints via `warnManifestNotWritten`.
+- **No settings or git-CLI rule violations**: no direct settings.json reads, no go-git `Reset/Checkout`, no `os.Getwd()` substitution for repo root.
+
+### Files reviewed
+
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/manifest.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/cmd.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/agent/geminicli/reviewer.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/agent/skilldiscovery/registry.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/agent_group.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/marker_fallback.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/types/reviewer.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/types/template.go</result>
+<usage><total_tokens>59032</total_tokens><tool_uses>25</tool_uses><duration_ms>105190</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>abda829a3dd4f171b</task-id>
+<tool-use-id>toolu_01X8NocHMkvWZLW3LRSeV81m</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-review-fix-2--worktrees-review-fix-local/a15672a4-e3dc-456e-b0fd-c521cad18358/tasks/abda829a3dd4f171b.output</output-file>
+<status>completed</status>
+<summary>Agent "Test coverage analysis of PR 1185" completed</summary>
+<result>Now I have all the data I need. Let me write up the analysis.
+
+---
+
+# Test Coverage Analysis — PR 1185
+
+## Summary
+
+The PR's tests are well-scoped to the surface they introduce. The six `explainEmptyManifest` tests isolate each rejection branch cleanly via field-by-field state construction, and the three `*_NameMatchesRegistryKey` regression tests lock the load-bearing identifier in both directions (Name() and `EnvAgent` value) because pre-existing `EnvVarsSet` tests already assert `envMap[review.EnvAgent] == wantAgentName`. There are real but small gaps around catch-all fallback, priority order, and skilldiscovery drift symmetry.
+
+## Critical Gaps (must add before merge)
+
+None. The tests for the behaviors the PR actually changes are sound.
+
+## Important Gaps (should add)
+
+1. **No test for the "catch-all" fallback branch** in `explainEmptyManifest` (the final `return fmt.Sprintf("... matcher rejected all of them (no filter explained the rejection — please report this as a bug)")` at /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/manifest.go:152). This branch is logically unreachable today but is a "report this as a bug" sentinel — a future filter divergence in `matchReviewSessionState` would silently surface this string with zero tests verifying its wording. Rating 5/10. Construct a state with `Kind=KindAgentReview` and all four filter fields empty (`WorktreePath=""`, `BaseCommit=""`, `StartedAt=zero`, `AgentType=""`) and assert the bug-report wording.
+
+2. **No assertion of "first matching cause wins" priority order** when multiple filters would reject the *same* state simultaneously. The PR's comment claims "Filter precedence in this function matches matchReviewSessionState" but no test pins this. Rating 6/10. Add a `TestExplainEmptyManifest_PriorityOrder` with one tagged state where `WorktreePath`, `BaseCommit`, *and* `AgentType` are all wrong; assert the reason is the worktree-mismatch string. Without this, a reordering refactor of `explainEmptyManifest` would silently change user-visible output and no test would fail.
+
+3. **`skilldiscovery` registry-key drift is not guarded by a *symmetry* test** the way the reviewers are. The updated tests at /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/agent/skilldiscovery/registry_test.go:19,55,63 hardcode `"gemini"` again rather than reference `string(agent.AgentNameGemini)`. The exact bug class this PR fixes (registry key drift between two hardcoded copies of `"gemini-cli"`) can recur in the skilldiscovery map. Rating 6/10. Add a test that iterates `curatedBuiltins` and `installHints` keys and asserts each is `agent.Get(types.AgentName(key))` succeeds — i.e. every registered key resolves to a real agent. This would make adding a new launchable agent loud rather than silent.
+
+## Suggestions
+
+4. **`TestExplainEmptyManifest_DumpAllReasons` asserts nothing**, only `t.Logf`. Per the comment it's intentional ("visual smoke check when iterating on wording"). Acceptable, but consider asserting that all 6 strings are distinct and non-empty so an accidental fallthrough doesn't silently collapse them to one message. Cost is trivial; rating 3/10.
+
+5. **No table-driven enumeration of launchable reviewers**. The three `*_NameMatchesRegistryKey` tests are copy-pasted; a future agent author has no structural reminder to add their own. Consider adding a single table-driven test in a shared review package (e.g. `cmd/entire/cli/review/reviewer_name_consistency_test.go`) that iterates `agent.List()` filtered to launchable agents and verifies each registered reviewer's `Name()` matches `string(ag.Name())`. Rating 5/10.
+
+6. **The E2E gap for gemini happy-path is acknowledged in the PR description.** Per the test plan, the underlying user-visible bug ("skills ran but findings were not persisted") was not reproduced as a test. The integration test `review_test.go` only covers `claude-code` for the env-var handshake → manifest write flow. Given this PR's whole purpose is fixing gemini's name drift, an integration test that simulates `ENTIRE_REVIEW_AGENT=gemini` and verifies the lifecycle hook tags the session (analogous to the existing claude-code test at /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/integration_test/review_test.go) would close this. Rating 7/10 — the unit-level regression guard catches Name() drift, but not e.g. an `AgentNameGemini` constant rename that breaks both sides simultaneously.
+
+## Strengths
+
+- Each `_explainEmptyManifest_*` test isolates exactly one filter by satisfying all preceding filters. This is the right way to test cascading rejection logic.
+- `TestExplainEmptyManifest_WorktreeMismatch` and `_BaseCommitMismatch` assert that *both* the observed and expected values appear in the message — that pins the diagnostic's usefulness, not just its identity.
+- `TestWritePostReviewManifest_WarnsWhenNoMatchingSessions` was updated to expect the new "no session states found" string, so the integration test isn't stuck asserting the legacy wording.
+- All new tests call `t.Parallel()` per CLAUDE.md.
+- `TestWritePostReviewManifest_WarnsWhenNoMatchingSessions` uses `testutil.InitRepo(t, repoRoot)` + `t.Chdir(repoRoot)` per the git-state isolation requirement.
+- The `EnvVarsSet` tests in all three reviewer packages assert `envMap[review.EnvAgent] == wantAgentName` — so the new `_NameMatchesRegistryKey` tests do cover the second direction transitively through the shared constant.
+
+## Relevant file paths
+
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/manifest.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/manifest_test.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/agent/geminicli/reviewer.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/agent/geminicli/reviewer_test.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/agent/claudecode/reviewer_test.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/agent/codex/reviewer_test.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/agent/skilldiscovery/registry.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/agent/skilldiscovery/registry_test.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/integration_test/review_test.go</result>
+<usage><total_tokens>65889</total_tokens><tool_uses>24</tool_uses><duration_ms>98981</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a0f1274ae700db171</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-review-fix-2--worktrees-review-fix-local/a15672a4-e3dc-456e-b0fd-c521cad18358/tasks/a0f1274ae700db171.output</output-file>
+<status>completed</status>
+<summary>Agent "Silent-failure hunt in PR 1185" completed</summary>
+<result>I have enough now. Let me verify one final concern about the `agentTypeForReviewAgent` swallowing in `explainEmptyManifest`:
+
+Line 189-195 in manifest.go: `agentTypeForReviewAgent` returns "" on `agent.Get` error — this returns silently. When `summary.AgentRuns[0].Name` resolves to an unknown agent (e.g. typo'd in summary), `wantType` becomes "" and the AgentType check at line 149 is skipped entirely. The function then falls through to the catch-all "no filter explained the rejection — please report this as a bug" line, which IS at least honest but misleading.
+
+Here is my audit.
+
+---
+
+## Audit: PR 1185 — silent failures &amp; error handling
+
+### Critical (must fix)
+None. The PR raises the bar without obvious regressions.
+
+### Important (should fix)
+
+**1. `session.StateStore.List` swallows per-file Load errors — explainEmptyManifest inherits the blind spot.**
+`cmd/entire/cli/session/state.go:547-549` silently `continue`s past corrupted state files (`// Skip corrupted state files`). The new `explainEmptyManifest` (`cmd/entire/cli/review/manifest.go:106-154`) operates on the survivors only. If the ONE state file that would have matched is the unreadable one, the diagnostic confidently reports "no session states found" or "none tagged as a review session" — exactly the misattribution the PR is trying to fix.
+Recommendation: have `StateStore.List` return `(states, skipCount, err)` or accumulate read errors, and surface non-zero skip counts in the diagnostic (e.g. "found N session state(s), M unreadable — see debug logs"). At minimum, `state.go:547` should `logging.Warn(ctx, ...)` with the path and `sessionID`; today it silently drops them with no log at all, defeating "Re-run with `ENTIRE_LOG_LEVEL=debug`" in `warnManifestNotWritten`.
+
+**2. `agentTypeForReviewAgent` swallows registry-lookup error.**
+`manifest.go:189-195` returns `""` on `agent.Get` failure with no log. Inside `explainEmptyManifest:132`, an unknown agent name silently disables the AgentType branch and routes the user to the catch-all "please report this as a bug" — when the actual cause is "agent not in registry." The error should be logged via `logging.Debug` at the call site in `explainEmptyManifest`, or `explainEmptyManifest` should pre-check and emit "unknown agent %q in summary" before evaluating filters.
+
+**3. Partial-match silence: `writePostReviewManifest` only diagnoses when `len(manifest.Sources) == 0`.**
+`cmd/entire/cli/review/cmd.go:655-660`. If a 3-agent run produces 2 matched sources, the third agent's session-tagging failure is invisible — manifest writes successfully, no warning, `writeReviewCompletionFooter` runs. The user sees a green completion footer for an incomplete manifest. Recommendation: add a `len(manifest.Sources) &lt; len(summary.AgentRuns)` branch that runs `explainEmptyManifest` (or a per-agent variant) for the missing ones and prints a softer "partial manifest" warning. The bug this PR is fixing applies just as much to the N-of-M case.
+
+### Suggestions
+
+**4. Diagnostic accuracy when `wantType == ""`.**
+`manifest.go:148-152`: the AgentType branch is skipped entirely when `wantType` is empty, so the function can fall through to "no filter explained the rejection" even though it never evaluated AgentType. Honest text would be "could not determine expected agent type for %q; check the agent registry."
+
+**5. `WorktreePath`/`BaseCommit` "empty string skip" semantics.**
+The filter loops (`manifest.go:134,139`) skip the check when either side is empty. The diagnostic is correct that this matches `matchReviewSessionState`, but it means a state with `WorktreePath == ""` will always pass the worktree filter and route the user to the next branch — which may report a misleading cause. Worth a brief debug log noting how many tagged states had empty critical fields.
+
+### Strengths
+
+- The `*_NameMatchesRegistryKey` tests (`reviewer_test.go` in all three agents) are a real drift guard: if a future maintainer adds a fourth launchable agent with the same hardcoded-string mistake, the test in their package would fail at the constant-vs-registry compare. The class of bug is genuinely caught.
+- Returning `states` alongside the manifest (`manifest.go:81-91`) keeps the diagnostic on the same snapshot that built the (empty) manifest — no TOCTOU drift.
+- `cmd.go:651-664` consistently pairs `logging.Debug` with `warnManifestNotWritten` for every failure branch — good operational/user split per CLAUDE.md.
+- `explainEmptyManifest` filter precedence comment (`manifest.go:104-105`) is enforced by mirroring `matchReviewSessionState`'s order — drift between the two would be debuggable.
+- The catch-all "please report this as a bug" tail (`manifest.go:153`) is honest about unknown causes rather than silently returning `""`.
+
+### Files referenced
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/manifest.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/cmd.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/session/state.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/lifecycle.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/agent/geminicli/reviewer.go</result>
+<usage><total_tokens>59125</total_tokens><tool_uses>19</tool_uses><duration_ms>92527</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a24843680586a03e9</task-id>
+<tool-use-id>toolu_01H2S3z1apf2KprhkuG9g75o</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-review-fix-2--worktrees-review-fix-local/a15672a4-e3dc-456e-b0fd-c521cad18358/tasks/a24843680586a03e9.output</output-file>
+<status>completed</status>
+<summary>Agent "Comment analysis of PR 1185" completed</summary>
+<result>Filter precedence in `explainEmptyManifest` matches `matchReviewSessionState`: Kind → worktreeRoot → BaseCommit → StartedAt → AgentType. Good.
+
+I have enough to produce the report.
+
+---
+
+# Comment Analysis: PR 1185
+
+## Summary
+
+The PR's stated comment goal (drop stale `gemini-cli` references in four doc-only files) is achieved cleanly. The new `explainEmptyManifest` function has unusually disciplined comments — function doc captures intent, contract, and orderings rule explicitly. Three regression-guard tests have clear "why" docs. A few stale `gemini-cli` strings remain in sibling test files that the PR doesn't claim to fix; whether they belong in this PR is a judgment call.
+
+## Critical Issues
+None. No factually wrong or misleading comments.
+
+## Comment Rot Risks (Out-of-Scope Misses)
+
+These files were not in this PR's diff but contain `gemini-cli` literals that will diverge from the production registry key `"gemini"`:
+
+- `cmd/entire/cli/review/run_test.go:260` — fake reviewer fixture named `"gemini-cli"`. Tests still pass but the name no longer represents the production reviewer.
+- `cmd/entire/cli/review/dump_test.go:121,156,169,170` — dump test uses `"gemini-cli"` as agent name and asserts on `"# gemini-cli review"` heading text. Will not match real Gemini reviewer output post-rename.
+- `cmd/entire/cli/review/picker_test.go:227` — passes `"gemini-cli"` to `BuildReviewPickerFields`; with the registry now keyed on `"gemini"`, this test exercises a non-existent agent name.
+
+These aren't *comments*, but they're stale references in the same drift class the PR addresses; worth a follow-up rather than expanding this PR's scope.
+
+Legitimate retentions (do not touch):
+- `cmd/entire/cli/transcript/compact/testdata/gemini_*.jsonl` — frozen test fixtures of historical agent output. `"agent":"gemini-cli"` reflects what the CLI used to emit; rewriting would break the parser-fidelity contract these fixtures encode.
+
+## Improvement Opportunities
+
+- `cmd/entire/cli/review/manifest.go:140` — diagnostic string says "HEAD moved between review start and first agent turn?". This is one plausible cause; another is a stale tagged-session leftover from a prior run on a different SHA. Consider phrasing as "(prior run on different SHA, or HEAD moved mid-review?)" to avoid implying a single root cause.
+- `cmd/entire/cli/review/manifest.go:124-127` — inline comment leans toward "what" ("Pick the first agent in summary.AgentRuns"). The non-obvious *why* — "all agents share the same worktree/SHA/StartedAt window, so one representative is sufficient" — is present but buried. Trimming the "Pick the first..." restatement and keeping only the shared-window justification would tighten this to a pure WHY comment per CLAUDE.md's guidance.
+
+## Recommended Removals
+None. Every new comment in the diff earns its place.
+
+## Positive Findings
+
+- `manifest.go:93-105` — Function doc nails CLAUDE.md's "WHY non-obvious" bar: states the contract (single-line diagnostic), the surface (warnManifestNotWritten), and most importantly the invariant "Filter precedence in this function matches matchReviewSessionState" — exactly the kind of cross-function constraint that rots silently. Verified accurate against `matchReviewSessionState` (manifest.go:166-181): both apply Kind → worktree → BaseCommit → StartedAt → AgentType in that order.
+- `agent/geminicli/reviewer.go:40-44` — Inline comment explains the silent-failure mode (`adoptReviewEnv` compares against `string(ag.Name())`) and names the prior bug. Pure WHY; future maintainers immediately see why a literal string is forbidden here.
+- `agent/{claudecode,codex,geminicli}/reviewer_test.go` `*_NameMatchesRegistryKey` — Each carries a 4-line doc explaining the drift bug class (`adoptReviewEnv` comparison + silent breakage). Without these, the test name alone would not convey *why* a trivial equality check deserves its own test.
+- `cmd/entire/cli/review/types/{reviewer,template}.go`, `review/cmd.go`, `review/marker_fallback.go` — All four "drop stale gemini-cli reference" edits verified accurate; no other `gemini-cli` strings remain in those files (confirmed via `grep -n gemini-cli`).
+
+## File References
+
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/manifest.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/manifest_test.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/cmd.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/marker_fallback.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/types/reviewer.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/types/template.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/agent/geminicli/reviewer.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/agent/{claudecode,codex,geminicli}/reviewer_test.go`
+- Stale-reference follow-ups (outside this PR's stated scope): `cmd/entire/cli/review/{run_test.go,dump_test.go,picker_test.go}`</result>
+<usage><total_tokens>57490</total_tokens><tool_uses>16</tool_uses><duration_ms>88656</duration_ms></usage>
+</task-notification>
+
+---
+
+do you think we should fix all?
+
+---
+
+okay go ahead
+
+---
+
+can you review 1184 with /pr-review-toolkit:review-pr
+
+---
+
+<task-notification>
+<task-id>a421368da302a1d1a</task-id>
+<tool-use-id>toolu_01G3Wqdg363kBJaaLdeRXuf5</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-review-fix-2--worktrees-review-fix-local/a15672a4-e3dc-456e-b0fd-c521cad18358/tasks/a421368da302a1d1a.output</output-file>
+<status>completed</status>
+<summary>Agent "Test coverage analysis of PR 1184" completed</summary>
+<result>I have enough context now to write the analysis.
+
+---
+
+# Test Coverage Analysis: PR 1184
+
+## Summary
+
+Strong overall. The PR's test-heavy diff (~460 LOC) is mostly load-bearing pinning of behavioral contracts, not coverage padding. The most important new behavior — `wasAtBottom` auto-tail, viewport delegation, double-Ctrl+C, post-finish access — has explicit end-to-end assertions on state effects (viewport `YOffset()`, `AtBottom()`, `m.cancelling`, `tea.QuitMsg`), not just delegation. CLAUDE.md compliance is clean: every test calls `t.Parallel()`, no `t.Chdir`, no filesystem or TTY touches.
+
+## Critical Gaps (8-10)
+
+None. The four highest-risk behaviors are pinned end-to-end:
+
+- **Mouse-wheel delegation** (`TestTUIModel_DelegatesMouseWheelToViewport`, lines 266-286) asserts `m.detail.YOffset()` actually advances after `tea.MouseWheelMsg{Button: MouseWheelDown}` — exactly the assertion that would have failed before commit 5. Not delegation-only.
+- **Second Ctrl+C force-quit** (`TestTUIModel_SecondCtrlCForceQuits`, 518-542) asserts both `tea.QuitMsg` and that the `CancelFunc` still fires once.
+- **Auto-tail preserves user scroll** (`TestTUIModel_AutoFollow_PreservesUserScroll`, 701-739) covers both branches: scrolled-up event does NOT yank to bottom; at-bottom event DOES auto-follow.
+- **Resize while tailing** (`TestTUIModel_AutoFollow_ResizePreservesBottomWhenTailing`, 571-595) closes the regression where `SetHeight/SetWidth` changes wrap math.
+
+## Important Gaps (5-7)
+
+1. **Rating 7 — Mouse delegation only covers `MouseWheelMsg`.** The `Update` switch at `tui_model.go:190` also routes `MouseClickMsg`, `MouseReleaseMsg`, `MouseMotionMsg`. None of those three are exercised. If a future refactor narrows the switch back to wheel-only, the regression slips. Add `TestTUIModel_DelegatesMouseClickToViewport` with `tea.MouseClickMsg{}` asserting no panic and a return cmd path. Cheap.
+2. **Rating 7 — Race: Ctrl+C between agent done and `runFinishedMsg`.** `TestTUIModel_CtrlCMarksAgentsCancelling` (468) tests Ctrl+C while running; `TestTUIModel_PostFinishQuitsOnExplicitKeys` (379) tests Ctrl+C after `runFinishedMsg`. The middle case — all rows have `Finished` status but `runFinishedMsg` hasn't arrived — is unpinned. The code path at `tui_model.go:316` (`m.finished &amp;&amp; !m.detailMode`) uses the `finished` flag, not row status, so this currently goes the "set cancelling" branch. Add a test asserting that intended behavior so a future "auto-set finished when all rows done" change doesn't silently change semantics.
+3. **Rating 6 — Keyboard delegation is single-key.** `TestTUIModel_DelegatesScrollKeysToViewport` (291-316) only exercises PgDn. The PR description lists PgUp/Home/End/g/G/u/d/j/k. Drop them into a table-test with the same `YOffset()` assertion (`g`/Home → 0; PgUp from middle → smaller offset). The current single-key test catches "switch swallows pager keys" but not "j/k or g/G omitted from passthrough."
+4. **Rating 6 — `wrapDisplayWidth` has no direct unit tests.** It's exercised transitively via `renderDetailViaModel`, but edge cases (`width &lt;= 0` → nil, empty string → nil, single-char width=1, ANSI in mid-paragraph, word longer than width, blank-line preservation between paragraphs) are not asserted at the function boundary. `tui_text.go:67` is small and pure — direct tests in `tui_text_test.go` (which doesn't exist) would catch regressions cheaply and document the contract in the doc comment.
+5. **Rating 5 — Cancellation status update.** `TestTUIModel_CtrlCMarksAgentsCancelling` checks the rendered row contains "cancel" and drops "running", and `TestTUIModel_FooterDuringCancellation` checks "Cancelling agents" + "Ctrl+C again". Good. Missing: that the indicator only applies to rows still running (not already-Finished rows). Add an assertion that a row with `status == Succeeded` retains "succeeded" after Ctrl+C.
+
+## Suggestions
+
+- `TestTUIModel_PostFinishIgnoresRandomKeys` only covers `x`, `Right`, `Left`. Add `j`/`k`/Space to harden against future "any printable key quits" regressions.
+- `wrapDisplayWidth` doc comment says width=1 is fine, but `truncateDisplayWidth` (called via `padDisplayWidthWith`) has a `width == 1` special case. Worth a 3-line test.
+
+## Strengths
+
+- Effect-based assertions (`YOffset()`, `AtBottom()`, `tea.QuitMsg`, `cancelOnce` count) rather than implementation snooping — refactor-resilient.
+- `renderDetailViaModel` helper composes the real model path; tests will catch breakage anywhere along wrap → viewport → frame.
+- Table tests for explicit-exit keys cover `q`, two flavors of Esc, Enter, Ctrl+C — completeness without sprawl.
+- DAMP test names with "pins that..." comments explaining the bug they guard against (266, 350, 464, 498, 515, 544, 568, 697, 779). Future readers will know what each test defends.
+
+Files: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_model_test.go`, `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_detail_test.go`, `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_text.go` (untested directly), `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_model.go:190` (mouse switch), `:316` (post-finish gate).</result>
+<usage><total_tokens>68317</total_tokens><tool_uses>13</tool_uses><duration_ms>76904</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a204d7bc791a5c257</task-id>
+<tool-use-id>toolu_01Sy15bMpmjbS8KVpAUAJuxu</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-review-fix-2--worktrees-review-fix-local/a15672a4-e3dc-456e-b0fd-c521cad18358/tasks/a204d7bc791a5c257.output</output-file>
+<status>completed</status>
+<summary>Agent "Comment analysis of PR 1184" completed</summary>
+<result>I have enough to assess. Note one important finding regarding the `cancelOnce` anti-pattern flag from CLAUDE.md.
+
+---
+
+## Comment Quality Analysis — PR 1184
+
+### Summary
+The PR cleanly retires the "press any key" wording, documents the viewport change well, and adds a strong WHY-focused comment on the new `cancelling` field. The doc-comment commit (6fb988b43) is complete: no stale "any key", "detailScroll", "buildBodyLines", "maxDetailScroll", or "clampScroll" references survive in production code. One genuine comment-rot risk on `tui_sink.go:26-30`, and one inconsistency about pageable keys.
+
+### Critical Issues
+
+**`cmd/entire/cli/review/tui_sink.go:26-30`** — `cancelOnce` description on the `TUISink` doc.
+The struct doc still says "*KeyCtrlC in the dashboard calls this function (gated by a sync.Once in the model)*." That's now factually thin: post-PR, the first Ctrl+C calls `cancel` (guarded by `cancelOnce`) but does NOT quit; only the second Ctrl+C quits. The phrasing predates the double-press semantic introduced in commit 27fd1baca and reads like a "single press cancels and quits" mental model. Suggest: "*The first KeyCtrlC fires the shared CancelFunc (guarded by sync.Once) and leaves the TUI up to show the cancelling indicator; a second KeyCtrlC force-quits.*"
+
+**`cmd/entire/cli/review/tui_detail.go:101` (and 77)** — Footer text and doc say "*PgUp/PgDn scroll*", but the viewport's default keymap also binds ↑/↓, Home/End, half-page, and mouse wheel. Doc lists only two of the actually-supported keys, and `tui_model.go:383-385` correctly says "*PgUp/PgDn/Home/End/↑/↓*". The user-facing footer is the bigger issue (under-promises); the doc comment at line 77 is at least technically accurate but feels stale. Consider aligning both to "scroll keys (PgUp/PgDn/↑/↓/Home/End)" or noting mouse-wheel support.
+
+### Improvement Opportunities
+
+**`cmd/entire/cli/review/tui_model.go:64`** — `cancelOnce *sync.Once` field has no inline comment. Per the task brief, CLAUDE.md's "Anti-Features (do NOT recreate)" section explicitly lists "*sync.Once-guarded onCancel + parallel signal.Notify goroutine*" as a forbidden combo. The use here is *not* the anti-pattern (there's no parallel signal.Notify; cobra owns SIGINT via `tea.WithoutSignalHandler`), but a future reviewer comparing this code to that doc rule will rightly flinch. Suggest a single-line WHY: "*Guards against the second Ctrl+C double-firing cancel; pairs with the cancelling-bool to give a force-quit affordance. Not the forbidden anti-pattern — cobra owns SIGINT.*"
+
+**`cmd/entire/cli/review/tui_model.go:312-320`** — Post-finish branch reads well, but the conditional `msg.Code == 'c' &amp;&amp; msg.Mod == tea.ModCtrl` is duplicated three lines later in the main switch. A one-line "WHY here too" comment would prevent a maintainer from "DRY-ing" them and breaking the post-finish path.
+
+### Recommended Removals
+
+**`cmd/entire/cli/review/tui_model.go:121-125`** — `tickCmd` doc "*schedules the next tick for duration/spinner refresh*" restates a 3-line function whose name says the same. Pre-existing; not introduced by this PR, but worth flagging.
+
+**`cmd/entire/cli/review/tui_detail.go:18-21`** — `eventLines` doc is the function signature restated, then a useful sentence about AssistantText. Tighten to just the AssistantText note — that's the only non-obvious part.
+
+### Positive Findings
+
+- **`tui_model.go:73-78`** (`cancelling` field): textbook WHY comment — explains the double-Ctrl+C semantic that's invisible from the type.
+- **`tui_model.go:190-201`** (mouse routing): explicitly preempts the "simplify into the catch-all" temptation by spelling out the View.MouseMode dependency. Exactly the comment the task brief was worried about.
+- **`tui_model.go:411-419`** (`View` doc on MouseMode): rare case of explaining a library quirk (per-view vs Program option) that a maintainer would otherwise hit by trial-and-error.
+- **`tui_text.go:60-66`** (`wrapDisplayWidth`): documents the load-bearing newline-preservation behavior and the width&lt;=0 edge case. Meets the bar.
+- **`tui_sink.go:121-131`** + `139-141`: doc-comment commit is thorough; both the head comment and the inline `Wait()` comment are in sync.
+
+### Files Reviewed
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_sink.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_model.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_detail.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_text.go</result>
+<usage><total_tokens>58846</total_tokens><tool_uses>12</tool_uses><duration_ms>61671</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a9bd8cb77e0769cb0</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-review-fix-2--worktrees-review-fix-local/a15672a4-e3dc-456e-b0fd-c521cad18358/tasks/a9bd8cb77e0769cb0.output</output-file>
+<status>completed</status>
+<summary>Agent "Code review of PR 1184" completed</summary>
+<result>All checks pass. Summary follows.
+
+---
+
+# Code Review: PR 1184 — feat(review): improve drill-in scrolling and post-run access
+
+Reviewed 7 files across 6 commits (~730 lines added) on `feat/review-detail-viewport`. Build is clean, vet is clean, `mise run lint` reports 0 issues, and the relevant TUI tests pass. Critical scrutiny areas validated below.
+
+## Critical
+None.
+
+## Important
+None.
+
+## Suggestions
+
+**1. `wrapDisplayWidth` silently strips ANSI even though `ansi.Wrap` preserves it** — `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_text.go:74`
+
+`sanitizeDisplayText` strips ANSI sequences before `ansi.Wrap` runs, so any colorized output from an agent (e.g. Codex's syntax highlighting) loses formatting in drill-in. This is intentional per the doc string and consistent with `truncateDisplayWidth`, but it's a small UX downgrade vs. what `ansi.Wrap` natively supports. Non-blocking — log if you want richer drill-in later.
+
+**2. Post-finish Ctrl+C handler short-circuits before `cancelOnce.Do(m.cancel)`** — `tui_model.go:316-320`
+
+After `m.finished=true`, Ctrl+C calls `tea.Quit` without firing the shared `CancelFunc`. This is correct in practice (the orchestrator has already returned and cancel is a no-op), but if `RunFinished`'s `s.Wait()` blocks on something downstream that depends on context cancellation, the user-visible quit could race. Today this isn't reachable because `runFinishedMsg` arrives strictly after the orchestrator exits. Worth noting if downstream sinks ever start observing the run context.
+
+## Strengths
+
+1. **`cancelOnce` is NOT the anti-pattern.** The CLAUDE.md anti-feature is "`sync.Once`-guarded onCancel + parallel `signal.Notify` goroutine". `cancelOnce` already existed on `main` (`tui_model.go:64`); this PR only adds the `cancelling bool` flag. There is no `signal.Notify` in the review package (`grep -rn "signal.Notify" cmd/entire/cli/review/` is empty), and `tea.WithoutSignalHandler` in `tui_sink.go:62` keeps SIGINT on cobra's single handler. `cancelOnce` guards only the in-loop double-press path, which is exactly what the anti-feature note permits.
+
+2. **Mouse routing is complete.** `tui_model.go:190-202` routes wheel/click/release/motion to the viewport only when `m.detailMode`. `View()` at `tui_model.go:420-433` sets `v.MouseMode = tea.MouseModeCellMotion` only inside detail mode; when Esc flips `detailMode=false`, the next `View()` returns the default `MouseModeNone`, so the terminal exits mouse-capture and text selection is restored. Tests at `tui_model_test.go:196-218` pin both directions.
+
+3. **`detailScroll` removal is clean.** `grep -rn detailScroll cmd/ e2e/` returns no matches; no JSON tags, no stringly-typed references.
+
+4. **`eventLine → eventLines` rename is complete.** Only callers are `buildEventLines` (`tui_detail.go:66`) and the function doc. No fixed-height iteration assumptions; `buildEventLines` flattens with `append(out, eventLines(...)...)` and feeds into `viewport.SetContentLines`, which handles variable-line content natively.
+
+5. **`tui_sink.go` doc comment** (`tui_sink.go:121-131`) accurately describes the new behavior: explicit exit keys (q/Esc/Enter/Ctrl+C), Ctrl+O for post-mortem, `RunFinished` blocks on dismissal so `DumpSink` renders below.
+
+6. **Auto-tail-on-resize follow-up** in `cc9017396` correctly samples `AtBottom()` before mutating the viewport in the `WindowSizeMsg` handler (`tui_model.go:179-185`) — previously a resize that changed wrap would compute `AtBottom` against the post-resize state and incorrectly drop tailing users out of tail mode. The new test `TestTUIModel_AutoFollow_ResizePreservesBottomWhenTailing` pins this.
+
+7. **Cancellation visibility** (`27fd1baca`) is well-layered: `m.cancelling` only affects rendering (status column + footer), the underlying `cancelOnce.Do(m.cancel)` mechanism is unchanged, and the post-finish branch in `dashboardView` (`tui_model.go:446-454`) correctly prioritizes finish state over cancelling state so the footer doesn't stick on "Cancelling agents...".
+
+Relevant files:
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_model.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_detail.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_text.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_sink.go`
+
+Recommendation: **approve**. No blocking issues found; two minor optional suggestions above.</result>
+<usage><total_tokens>73811</total_tokens><tool_uses>34</tool_uses><duration_ms>137059</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>af7e84c8f03a93234</task-id>
+<tool-use-id>toolu_016SkeLtJhC3sQ6VViPPfQr1</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-review-fix-2--worktrees-review-fix-local/a15672a4-e3dc-456e-b0fd-c521cad18358/tasks/af7e84c8f03a93234.output</output-file>
+<status>completed</status>
+<summary>Agent "Silent-failure hunt in PR 1184" completed</summary>
+<result>Pre-existing. Skip.
+
+I have enough to write the report.
+
+---
+
+## Error-Handling Audit — PR 1184
+
+Scope: `cmd/entire/cli/review/tui_*.go` on `feat/review-detail-viewport`. Most "errors" here are UX silent failures; the absolute file paths reviewed are:
+
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_model.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_detail.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_sink.go
+- /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/review-fix-2/.worktrees/review-fix-local/cmd/entire/cli/review/tui_text.go
+
+### Critical
+
+None. The Commit 5 fix is properly generalised — `tui_model.go:190-202` forwards `MouseWheelMsg/MouseClickMsg/MouseReleaseMsg/MouseMotionMsg` to the viewport while in detail mode, and `tui_model.go:386-390` forwards remaining keypresses, so PgUp/PgDn/Home/End/arrow keys reach the viewport's keymap (test at `tui_model_test.go:DelegatesScrollKeysToViewport`).
+
+### Important
+
+1. **"Cancelling agents..." flashes when there's nothing to cancel** — `tui_model.go:331-339`. On the dashboard while `!m.finished`, first Ctrl+C unconditionally sets `cancelling=true` and shows the cancellation footer. If agents are already mostly drained or the run is winding down, the user sees "Cancelling agents..." even though the CancelFunc is effectively a no-op (context already cancelled or agents already finishing). The misleading footer can persist for a noticeable moment if `runFinishedMsg` hasn't yet been processed. Suggest gating cancelling state on whether any agent row is still in `AgentStatusUnknown` with non-zero `runStart`. Post-finish Ctrl+C is correctly bypassed at `tui_model.go:316-320`.
+
+2. **Two-step dismissal post-finish in detail mode is undocumented and silent** — `tui_model.go:316-320` guards the post-finish exit-key shortcut behind `!m.detailMode`. If the user drilled in after the run finished (a flow the PR explicitly enables), q/Enter no longer dismisses; they fall through to `tui_model.go:386-389` and are forwarded to the viewport, which ignores them. The user must Esc out of detail first, then press q/Esc/Enter. The footer in `tui_detail.go:101` says "Esc back" so this is discoverable, but there's no signal that q/Enter is inert here. Either also accept q/Enter as "exit detail then quit" post-finish, or update the footer text.
+
+3. **Status column truncates silently if any future status string exceeds 10 chars** — `tui_model.go:521` (`statusWidth = 10`) and `tui_text.go:47-58` (truncates to "...". "cancelling" exactly fits at 10 chars (verified). Any future status name &gt;10 chars (e.g. "cancelled?", "force-quit") would be truncated mid-word with no error, no log, no test pinning the column width. Add a startup or compile-time assertion (e.g. table-driven test enumerating every `statusStr` literal and asserting `ansi.StringWidth(s) &lt;= statusWidth`).
+
+### Suggestions
+
+4. **`refreshDetailContent` on every event** — `tui_model.go:303-304` calls `buildEventLines` over the full buffer on every agent event when in detail mode, and `SetContentLines` then walks the slice again to split newlines (`viewport.go:241-253`). Bursty end-of-run event floods will rebuild the whole buffer on each event (O(n) per event, O(n^2) per burst). Most agents buffer their output so this rarely fires, but if a burst lands while the user is in detail mode the redraw will visibly stutter. Consider building incrementally (append new lines to existing slice) or batching multiple `agentEventMsg`s before refreshing.
+
+5. **`wrapDisplayWidth("", width)` returns `nil`** — `tui_text.go:67-83`. Combined with `eventLines` for any unknown event type returning `wrapDisplayWidth(raw, maxWidth)` where `raw` is "[unknown event]" (non-empty), this is fine. But if a future event variant produced an empty `raw` string by oversight, that event would contribute zero lines to the viewport with no indication. Add a comment in `eventLines` documenting that every branch must produce non-empty `raw` (the current `default` does).
+
+6. **Bubble Tea program error swallowed** — `tui_sink.go:83-89`. The comment justifies swallowing as "non-actionable in background goroutine," but for diagnostic value it should log to the `.entire/logs/` debug log via `logging.Debug(ctx, "review tui program exited with error", "err", err)`. Six months from now, a terminal-resize race or transport error here is invisible.
+
+### Strengths
+
+- `cancelOnce` correctness verified — test `SecondCtrlCForceQuits` (`tui_model_test.go:518-542`) pins exactly-once invocation across two Ctrl+Cs.
+- MouseMode reset on exit from detail mode is implicit but correct — `tui_model.go:427-432` only sets `v.MouseMode` when `m.detailMode`, so the dashboard frame returns `MouseModeNone` and the cursed_renderer (vendored at `cursed_renderer.go:350-353`) actively disables mouse capture on the transition. Test at `tui_model_test.go:216-218` pins it. Issue 6 is handled.
+- No `signal.Notify` goroutine reintroduced (`grep` confirms only a comment at `tui_sink.go:30`). The CLAUDE.md anti-feature stays excluded.
+- Viewport seeded with non-zero defaults (`tui_model.go:100-107`) so immediate Ctrl+O before a WindowSizeMsg doesn't divide by zero or render an empty frame — pinned by `TestTUIModel_InitializesDetailViewport`.
+- `splitBodyToHeight` (`tui_detail.go:118-135`) handles empty body and short content gracefully — pads with spaces, never panics on zero-line input.</result>
+<usage><total_tokens>84465</total_tokens><tool_uses>28</tool_uses><duration_ms>307998</duration_ms></usage>
+</task-notification>
+
+---
+
+okay proceed with this please
+
+---
+
+is this pr ready for review? if so, update with main please

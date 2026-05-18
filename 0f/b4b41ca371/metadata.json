@@ -1,0 +1,40 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "0fb4b41ca371",
+  "strategy": "manual-commit",
+  "branch": "feat/review-manifest-diagnostic",
+  "checkpoints_count": 7,
+  "files_touched": [
+    "cmd/entire/cli/review/cmd.go",
+    "cmd/entire/cli/review/manifest.go",
+    "cmd/entire/cli/review/manifest_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0f/b4b41ca371/0/metadata.json",
+      "transcript": "/0f/b4b41ca371/0/transcript.jsonl",
+      "content_hash": "/0f/b4b41ca371/0/transcript_hash.txt",
+      "prompt": "/0f/b4b41ca371/0/prompt.txt"
+    },
+    {
+      "metadata": "/0f/b4b41ca371/1/metadata.json",
+      "transcript": "/0f/b4b41ca371/1/transcript.jsonl",
+      "content_hash": "/0f/b4b41ca371/1/transcript_hash.txt",
+      "prompt": "/0f/b4b41ca371/1/prompt.txt"
+    },
+    {
+      "metadata": "/0f/b4b41ca371/2/metadata.json",
+      "transcript": "/0f/b4b41ca371/2/transcript.jsonl",
+      "content_hash": "/0f/b4b41ca371/2/transcript_hash.txt",
+      "prompt": "/0f/b4b41ca371/2/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 212345,
+    "cache_creation_tokens": 4414839,
+    "cache_read_tokens": 337487582,
+    "output_tokens": 692002,
+    "api_call_count": 789
+  },
+  "has_review": true
+}

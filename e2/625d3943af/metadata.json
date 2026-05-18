@@ -1,0 +1,44 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "e2625d3943af",
+  "strategy": "manual-commit",
+  "branch": "review-fix-progress-stream",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/agent/codex/reviewer.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e2/625d3943af/0/metadata.json",
+      "transcript": "/e2/625d3943af/0/transcript.jsonl",
+      "content_hash": "/e2/625d3943af/0/transcript_hash.txt",
+      "prompt": "/e2/625d3943af/0/prompt.txt"
+    },
+    {
+      "metadata": "/e2/625d3943af/1/metadata.json",
+      "transcript": "/e2/625d3943af/1/transcript.jsonl",
+      "content_hash": "/e2/625d3943af/1/transcript_hash.txt",
+      "prompt": "/e2/625d3943af/1/prompt.txt"
+    },
+    {
+      "metadata": "/e2/625d3943af/2/metadata.json",
+      "transcript": "/e2/625d3943af/2/transcript.jsonl",
+      "content_hash": "/e2/625d3943af/2/transcript_hash.txt",
+      "prompt": "/e2/625d3943af/2/prompt.txt"
+    },
+    {
+      "metadata": "/e2/625d3943af/3/metadata.json",
+      "transcript": "/e2/625d3943af/3/transcript.jsonl",
+      "content_hash": "/e2/625d3943af/3/transcript_hash.txt",
+      "prompt": "/e2/625d3943af/3/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 354,
+    "cache_creation_tokens": 984538,
+    "cache_read_tokens": 43656784,
+    "output_tokens": 221087,
+    "api_call_count": 181
+  },
+  "has_review": true
+}

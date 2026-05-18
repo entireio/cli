@@ -1,0 +1,3 @@
+/review
+
+Scope: review the commits unique to this branch vs HEAD~1, plus any uncommitted changes in the working tree. Ignore code outside this scope.

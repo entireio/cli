@@ -1,0 +1,25 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "faf57c42d164",
+  "strategy": "manual-commit",
+  "branch": "soph/handle-failing-push-better",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/strategy/push_messaging_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/fa/f57c42d164/0/metadata.json",
+      "transcript": "/fa/f57c42d164/0/transcript.jsonl",
+      "content_hash": "/fa/f57c42d164/0/transcript_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 4,
+    "cache_creation_tokens": 2294,
+    "cache_read_tokens": 491247,
+    "output_tokens": 980,
+    "api_call_count": 4
+  }
+}

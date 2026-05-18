@@ -1,0 +1,46 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "b6f2dac09988",
+  "session_id": "a15672a4-e3dc-456e-b0fd-c521cad18358",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-13T20:11:50.246397Z",
+  "branch": "feat/review-detail-viewport",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/review/tui_text.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "414b8df52aee",
+  "token_usage": {
+    "input_tokens": 144,
+    "cache_creation_tokens": 267842,
+    "cache_read_tokens": 12178613,
+    "output_tokens": 105949,
+    "api_call_count": 71
+  },
+  "session_metrics": {
+    "turn_count": 12
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-13T20:11:50.079783Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 152,
+    "human_modified": 2,
+    "human_removed": 0,
+    "total_committed": 152,
+    "total_lines_changed": 162,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}

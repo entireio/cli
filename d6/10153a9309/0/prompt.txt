@@ -1,0 +1,17 @@
+/simplify
+
+---
+
+can you open a draft PR?
+
+---
+
+should we just do this on enable? and then the next git push sends it to the remote?
+
+---
+
+ok, can you look at the comments on the pr?
+
+---
+
+fix all, just add a commit

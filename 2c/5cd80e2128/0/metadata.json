@@ -1,0 +1,36 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "2c5cd80e2128",
+  "session_id": "ee1798d5-f3d8-4826-afaf-9f07edd8802a",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-13T12:02:35.778494Z",
+  "branch": "soph/handle-failing-push-better",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/strategy/push_common.go",
+    "cmd/entire/cli/strategy/push_messaging_test.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "55b7627c0b63",
+  "checkpoint_transcript_start": 43,
+  "token_usage": {
+    "input_tokens": 8,
+    "cache_creation_tokens": 3739,
+    "cache_read_tokens": 1009894,
+    "output_tokens": 2826,
+    "api_call_count": 8
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-13T12:02:35.748537Z",
+    "agent_lines": 7,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 7,
+    "total_lines_changed": 7,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}

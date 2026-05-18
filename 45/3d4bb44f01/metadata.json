@@ -1,0 +1,25 @@
+{
+  "cli_version": "v0.6.2-nightly.202605110724.c111a3db-dev-dcf744f5a",
+  "checkpoint_id": "453d4bb44f01",
+  "strategy": "manual-commit",
+  "branch": "fix/checkpoints-v2-rotation-logic-docs",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/architecture/checkpoints-v2-rotation.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/45/3d4bb44f01/0/metadata.json",
+      "transcript": "/45/3d4bb44f01/0/transcript.jsonl",
+      "content_hash": "/45/3d4bb44f01/0/transcript_hash.txt",
+      "prompt": "/45/3d4bb44f01/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 314323,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 5311104,
+    "output_tokens": 24551,
+    "api_call_count": 74
+  }
+}

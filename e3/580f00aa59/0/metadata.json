@@ -1,0 +1,53 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "e3580f00aa59",
+  "session_id": "2c55ba91-9feb-4e7e-b027-482db4d32e8b",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-12T18:38:08.998029Z",
+  "branch": "v2-push-fixes",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/cleanup.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "cfa33e031d8f",
+  "token_usage": {
+    "input_tokens": 268,
+    "cache_creation_tokens": 507418,
+    "cache_read_tokens": 35098539,
+    "output_tokens": 132072,
+    "api_call_count": 185
+  },
+  "session_metrics": {
+    "turn_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-12T18:38:08.862445Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 15,
+    "human_modified": 37,
+    "human_removed": 0,
+    "total_committed": 15,
+    "total_lines_changed": 52,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 7036,
+      "agent_lines_removed": 0
+    }
+  ]
+}

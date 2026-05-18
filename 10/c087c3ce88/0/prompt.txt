@@ -1,0 +1,34 @@
+why does `entire clean --all` take so long to return any output?
+
+---
+
+run it concurrently after printing the preview header first
+
+---
+
+I have `./entire` in my PATH.
+➜  cli git:(clean-all-quicker-output) ✗ go build -o ./entire ./cmd/entire/
+➜  cli git:(clean-all-quicker-output) ✗ entire clean --all
+^C^C^C^C^C^C^C^C^C^C
+^C^C^C^C^C^C^C^C^C^C^C^Cc^C^C^C^C^C^C^C^C^C^C^C^C^C^C^C^C^C^C^C
+
+---
+
+minimal changes
+
+---
+
+why would it have to read any of the transcript jsonl? not the metadata.json?
+
+---
+
+oh I see, it's checking generation.json? 
+also, it still hangs after "Checking remote for archived v2 generations..." which I think is bad ux
+
+---
+
+generation.json is a fallback? why don't we do it first and then fall back to the slow path if it can't read it?
+
+---
+
+Let's update it for now and ensure that it's documented in the commit message explicitly and in the PR body

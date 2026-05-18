@@ -1,0 +1,57 @@
+Yes, fix it.
+
+---
+
+Push the branch up.
+
+---
+
+What I want is that when a new review comment comes in, that the locally active agent session automatically picks it up. So basically there's just a command to automatically  subscripe to the incoming messages based on the active trail. Is it possible to inject a message without a hook but the actual agent input field and send it? E.g. in PI coding agent (what I'm using right now).
+
+---
+
+Can you extend the existig trails extension I have?
+
+---
+
+Should be "on" by default (like when I reload now) maybe instead of stop/off we just do "pause"? How would I turn on again? Let's discuss first.
+
+---
+
+Let's do what you recommend.
+
+---
+
+What is "restart" needed for even?
+
+---
+
+Wouldn't reload do the same?
+
+---
+
+Remove it.
+
+---
+
+Now back to the CLI implementation. Is trail watch the correct terminology to describe what we are doing? So basically this is purely about code reviews. Not "all the comments" we just have that for now but really it's only about the review comments.
+
+---
+
+review watch is just awefully long though...
+
+---
+
+what about loop?
+
+---
+
+listen is semantically good but it somehow implies listening to audio while watching is more often used for "looking after something"?
+
+---
+
+Let's just stick to what we have for now. Review the implementation once more and create a PR.
+
+---
+
+There's many code review comments, address them if applicable and resolve comments.

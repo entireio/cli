@@ -1,0 +1,25 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "3dd5f29e5289",
+  "strategy": "manual-commit",
+  "branch": "review-fix-progress-stream",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/codex/reviewer.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/3d/d5f29e5289/0/metadata.json",
+      "transcript": "/3d/d5f29e5289/0/transcript.jsonl",
+      "content_hash": "/3d/d5f29e5289/0/transcript_hash.txt",
+      "prompt": "/3d/d5f29e5289/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 490,
+    "cache_creation_tokens": 1141166,
+    "cache_read_tokens": 73884247,
+    "output_tokens": 292299,
+    "api_call_count": 239
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "1813bcf854a2",
+  "strategy": "manual-commit",
+  "branch": "soph/track-attach-reason",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/18/13bcf854a2/0/metadata.json",
+      "transcript": "/18/13bcf854a2/0/transcript.jsonl",
+      "content_hash": "/18/13bcf854a2/0/transcript_hash.txt",
+      "prompt": "/18/13bcf854a2/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2787,
+    "cache_creation_tokens": 323477,
+    "cache_read_tokens": 24554631,
+    "output_tokens": 89296,
+    "api_call_count": 150
+  }
+}

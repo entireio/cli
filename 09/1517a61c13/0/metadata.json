@@ -1,0 +1,123 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "091517a61c13",
+  "session_id": "a15672a4-e3dc-456e-b0fd-c521cad18358",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-12T04:21:30.894311Z",
+  "branch": "feat/review-detail-viewport",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/review/tui_detail.go",
+    "cmd/entire/cli/review/tui_sink.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "db5c49bbcfcc",
+  "token_usage": {
+    "input_tokens": 112,
+    "cache_creation_tokens": 213214,
+    "cache_read_tokens": 5567054,
+    "output_tokens": 69273,
+    "api_call_count": 44
+  },
+  "session_metrics": {
+    "turn_count": 10
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-12T04:21:30.789722Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 76,
+    "human_removed": 72,
+    "total_committed": 0,
+    "total_lines_changed": 148,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 1042,
+      "user_lines_removed": 762,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "cmd/entire/cli/agent/claudecode/reviewer_test.go": 13,
+        "cmd/entire/cli/agent/codex/reviewer_test.go": 13,
+        "cmd/entire/cli/agent/geminicli/reviewer.go": 8,
+        "cmd/entire/cli/agent/geminicli/reviewer_test.go": 15,
+        "cmd/entire/cli/agent/skilldiscovery/registry.go": 3,
+        "cmd/entire/cli/agent/skilldiscovery/registry_test.go": 5,
+        "cmd/entire/cli/agent_group.go": 1,
+        "cmd/entire/cli/checkpoint/parse_tree.go": 54,
+        "cmd/entire/cli/checkpoint/v2_generation.go": 3,
+        "cmd/entire/cli/checkpoint/v2_store.go": 34,
+        "cmd/entire/cli/review/cmd.go": 6,
+        "cmd/entire/cli/review/manifest.go": 67,
+        "cmd/entire/cli/review/manifest_test.go": 175,
+        "cmd/entire/cli/review/marker_fallback.go": 1,
+        "cmd/entire/cli/review/tui_detail.go": 67,
+        "cmd/entire/cli/review/tui_detail_test.go": 90,
+        "cmd/entire/cli/review/tui_model.go": 61,
+        "cmd/entire/cli/review/tui_model_test.go": 64,
+        "cmd/entire/cli/review/tui_sink.go": 7,
+        "cmd/entire/cli/review/tui_sink_test.go": 2,
+        "cmd/entire/cli/review/types/reviewer.go": 2,
+        "cmd/entire/cli/review/types/template.go": 1,
+        "docs/architecture/checkpoints-v2-rotation.md": 350
+      },
+      "user_removed_per_file": {
+        "cmd/entire/cli/agent/geminicli/reviewer.go": 3,
+        "cmd/entire/cli/agent/geminicli/reviewer_test.go": 1,
+        "cmd/entire/cli/agent/skilldiscovery/registry.go": 3,
+        "cmd/entire/cli/agent/skilldiscovery/registry_test.go": 5,
+        "cmd/entire/cli/agent_group.go": 1,
+        "cmd/entire/cli/checkpoint/parse_tree.go": 4,
+        "cmd/entire/cli/checkpoint/v2_generation.go": 2,
+        "cmd/entire/cli/checkpoint/v2_store.go": 1,
+        "cmd/entire/cli/review/cmd.go": 4,
+        "cmd/entire/cli/review/manifest.go": 4,
+        "cmd/entire/cli/review/manifest_test.go": 2,
+        "cmd/entire/cli/review/marker_fallback.go": 1,
+        "cmd/entire/cli/review/tui_detail.go": 59,
+        "cmd/entire/cli/review/tui_detail_test.go": 119,
+        "cmd/entire/cli/review/tui_model.go": 171,
+        "cmd/entire/cli/review/tui_model_test.go": 339,
+        "cmd/entire/cli/review/tui_sink.go": 11,
+        "cmd/entire/cli/review/tui_sink_test.go": 4,
+        "cmd/entire/cli/review/tui_text.go": 25,
+        "cmd/entire/cli/review/types/reviewer.go": 2,
+        "cmd/entire/cli/review/types/template.go": 1
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 1042,
+      "agent_lines_removed": 762
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 1042,
+      "agent_lines_removed": 762
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 1042,
+      "agent_lines_removed": 762
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}

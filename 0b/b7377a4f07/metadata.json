@@ -1,0 +1,47 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "0bb7377a4f07",
+  "strategy": "manual-commit",
+  "branch": "feat/review-manifest-diagnostic",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/reviewer_test.go",
+    "cmd/entire/cli/agent/codex/reviewer_test.go",
+    "cmd/entire/cli/agent/geminicli/reviewer.go",
+    "cmd/entire/cli/agent/geminicli/reviewer_test.go",
+    "cmd/entire/cli/agent/skilldiscovery/registry.go",
+    "cmd/entire/cli/agent/skilldiscovery/registry_test.go",
+    "cmd/entire/cli/agent_group.go",
+    "cmd/entire/cli/review/marker_fallback.go",
+    "cmd/entire/cli/review/types/reviewer.go",
+    "cmd/entire/cli/review/types/template.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0b/b7377a4f07/0/metadata.json",
+      "transcript": "/0b/b7377a4f07/0/transcript.jsonl",
+      "content_hash": "/0b/b7377a4f07/0/transcript_hash.txt",
+      "prompt": "/0b/b7377a4f07/0/prompt.txt"
+    },
+    {
+      "metadata": "/0b/b7377a4f07/1/metadata.json",
+      "transcript": "/0b/b7377a4f07/1/transcript.jsonl",
+      "content_hash": "/0b/b7377a4f07/1/transcript_hash.txt",
+      "prompt": "/0b/b7377a4f07/1/prompt.txt"
+    },
+    {
+      "metadata": "/0b/b7377a4f07/2/metadata.json",
+      "transcript": "/0b/b7377a4f07/2/transcript.jsonl",
+      "content_hash": "/0b/b7377a4f07/2/transcript_hash.txt",
+      "prompt": "/0b/b7377a4f07/2/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 210874,
+    "cache_creation_tokens": 1196,
+    "cache_read_tokens": 4389308,
+    "output_tokens": 20888,
+    "api_call_count": 32
+  },
+  "has_review": true
+}

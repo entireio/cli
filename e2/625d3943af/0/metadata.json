@@ -1,0 +1,60 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "e2625d3943af",
+  "session_id": "29e905db-df81-4eac-9e54-265c4e180a9c",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-12T16:06:07.76176Z",
+  "branch": "review-fix-progress-stream",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/agent/codex/reviewer.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7[1m]",
+  "turn_id": "51c9e678b1dd",
+  "token_usage": {
+    "input_tokens": 354,
+    "cache_creation_tokens": 984538,
+    "cache_read_tokens": 43656784,
+    "output_tokens": 221087,
+    "api_call_count": 181
+  },
+  "session_metrics": {
+    "turn_count": 24
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-12T16:06:07.49894Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 96,
+    "human_removed": 26,
+    "total_committed": 0,
+    "total_lines_changed": 876,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 9,
+      "agent_lines_removed": 5
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 9,
+      "agent_lines_removed": 5
+    }
+  ]
+}
