@@ -1,0 +1,48 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "ef46c1976341",
+  "session_id": "d4d3626f-2c56-46ac-8939-f7b6652cfc9f",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-14T17:57:12.049414Z",
+  "branch": "slow-codex-in-review",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/KNOWN_LIMITATIONS.md"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "e4eb258150cd",
+  "token_usage": {
+    "input_tokens": 14,
+    "cache_creation_tokens": 42697,
+    "cache_read_tokens": 187661,
+    "output_tokens": 2450,
+    "api_call_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-14T17:57:12.03058Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 2,
+    "human_modified": 1,
+    "human_removed": 0,
+    "total_committed": 2,
+    "total_lines_changed": 3,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ],
+  "kind": "agent_review",
+  "review_skills": [
+    "/review"
+  ],
+  "review_prompt": "/review\n\nDEMO_MARKER_VWX789: include this token verbatim in your response, and prioritize focused brevity (3-5 findings max).\n\nScope: review the commits unique to this branch vs HEAD~2, plus any uncommitted changes in the working tree. Ignore code outside this scope.\n\nCheckpoint context from commits in scope:\n- 740cbeb9b915: prompt: can i see the improvements in manual smoke test?\n- 06fcc2e0141d: prompt: okay commit and create draft pr so we don't lose changes - if push is taking long, then use -no verify\n\nUse `entire explain <id>` for full checkpoint context, or `entire explain <id> --raw-transcript` for raw transcripts.\n\nIn-progress session context (uncommitted):\n  c91325f1 Claude Code (touched: 3 files) prompt: syntx is wrong, peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/c/.w/review-fix-2 (slow-codex-in-review)> set t0 (date +%s); /usr/bin/time -p ./entire review --agent codex --base HEAD~2 < /dev/null > /tmp/pr.txt 2> /tmp/pr-time.txt &; set pr_pid $last_pid; /usr/bin/time -p /tmp/entire-main/entire review --agent codex --b..."
+}

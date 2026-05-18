@@ -1,0 +1,33 @@
+are you trying to commit or runngin smoke test
+
+---
+
+no scope flags also unaccesptable
+
+---
+
+need to smoke test myself first please
+
+---
+
+can we test with both codex and claude to see the time difference
+
+---
+
+okay commit and create draft pr so we don't lose changes
+
+---
+
+okay commit and create draft pr so we don't lose changes - if push is taking long, then use -no verify
+
+---
+
+Does this PR really fix everything we've been working on and expect? 1. codex performance time, 2. reading both user prompts, and calls plugin/skill on review
+
+---
+
+is the test still running?
+
+---
+
+can i see the improvements in manual smoke test?

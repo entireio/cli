@@ -1,0 +1,149 @@
+are you trying to commit or runngin smoke test
+
+---
+
+no scope flags also unaccesptable
+
+---
+
+need to smoke test myself first please
+
+---
+
+can we test with both codex and claude to see the time difference
+
+---
+
+okay commit and create draft pr so we don't lose changes
+
+---
+
+okay commit and create draft pr so we don't lose changes - if push is taking long, then use -no verify
+
+---
+
+Does this PR really fix everything we've been working on and expect? 1. codex performance time, 2. reading both user prompts, and calls plugin/skill on review
+
+---
+
+is the test still running?
+
+---
+
+can i see the improvements in manual smoke test?
+
+---
+
+for this one,  # 1. PR binary (no paraphrase, /review passes through)
+  time ./entire review --agent codex --base HEAD~2
+
+  # 2. Main binary (with 28-word paraphrase)
+  time /tmp/entire-main/entire review --agent codex --base HEAD~2
+
+  # 3. Claude for ratio context
+  time ./entire review --agent claude-code --base HEAD~2 - can i just run both at the same time? and can i verify that both prompts were read by both during this run too?
+
+---
+
+do i paste this to see review session like end user will? echo "===START $(date +%s)==="
+  (time ./entire review --agent codex --base HEAD~2 > /tmp/pr.txt 2>&1)
+  2>/tmp/pr-time.txt &
+  PR_PID=$!
+  (time /tmp/entire-main/entire review --agent codex --base HEAD~2 > /tmp/main.txt 2>&1)
+  2>/tmp/main-time.txt &
+  MAIN_PID=$!
+  (time ./entire review --agent claude-code --base HEAD~2 > /tmp/claude.txt 2>&1)
+  2>/tmp/claude-time.txt &
+  CLAUDE_PID=$!
+
+  echo "PIDs: PR=$PR_PID  MAIN=$MAIN_PID  CLAUDE=$CLAUDE_PID"
+  wait $PR_PID; PR_EXIT=$?
+  wait $MAIN_PID; MAIN_EXIT=$?
+  wait $CLAUDE_PID; CLAUDE_EXIT=$?
+  echo "===DONE $(date +%s) exits: PR=$PR_EXIT MAIN=$MAIN_EXIT CLAUDE=$CLAUDE_EXIT===" also please give it to me ins ignle line so i can paste in fish
+
+---
+
+Started: PR=78094 MAIN=78097 CLAUDE=78098
+fish: Job 3, '/usr/bin/time -p ./entire revie…' has stopped
+fish: Job 1, '/usr/bin/time -p ./entire revie…' has stopped
+
+---
+
+eytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/c/.w/redact-2 (redact-2) [SIGINT]> kill -KILL %1 %2 %3 2>/dev/null; jobs
+Job     Group   State   Command
+2       78097   running /tmp/entire-main/entire review --agent codex --base HEAD~2 >/tmp/main.txt 2>/tmp/main-time.txt &
+fish: Job 3, '/usr/bin/time -p ./entire revie…' has stopped
+fish: Job 1, '/usr/bin/time -p ./entire revie…' has stopped
+
+fish: Job 2, '/tmp/entire-main/entire review …' terminated by signal SIGKILL (Forced quit)
+peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/c/.w/redact-2 (redact-2)> set t0 (date +%s); /usr/bin/time -p ./entire review --agent codex --base HEAD~2 >/tmp/pr.txt 2>/tmp/pr-time.txt &; set pr_pid $last_pid; /usr/bin/time -p
+                                                                     /tmp/entire-main/entire review --agent codex --base HEAD~2 >/tmp/main.txt 2>/tmp/main-time.txt &; set main_pid $last_pid; /usr/bin/time -p ./entire review --agent claude-code --base HEAD~2 >/tmp/claude.txt 2>/tmp/claude-time.txt &; set claude_pid $last_pid; echo "Started: PR=$pr_pid MAIN=$main_pid CLAUDE=$claude_pid";
+                                                                     wait; echo "===Done in "(math (date +%s) - $t0)"s==="; for n in pr main claude; printf "%-7s : " $n; grep "^real" /tmp/$n-time.txt; end; echo; echo "===Marker hits per
+                                                                       run==="; for n in pr main claude; printf "%-7s : %s hit(s)\n" $n (grep -c DEMO_MARKER_VWX789 /tmp/$n.txt); end; echo; echo "===Codex first-line (PR)===" ; grep -m1 -o '\"text\":\"[^\"]*\"' /tmp/pr.txt | head -c 300; echo; echo; echo "===Codex
+                                                                       first-line (MAIN)==="; grep -m1 -o '\"text\":\"[^\"]*\"' /tmp/main.txt | head -c 300;
+                                                                     echo
+Started: PR=78871 MAIN=78874 CLAUDE=78875
+fish: Job 3, '/usr/bin/time -p ./entire revie…' has stopped
+fish: Job 1, '/usr/bin/time -p ./entire revie…' has stopped
+
+---
+
+syntx is wrong, peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/c/.w/review-fix-2 (slow-codex-in-review)> set t0 (date +%s); /usr/bin/time -p ./entire review --agent codex --base HEAD~2 < /dev/null > /tmp/pr.txt 2> /tmp/pr-time.txt &; set pr_pid $last_pid; /usr/bin/time -p
+                                                                                     /tmp/entire-main/entire review --agent codex --base HEAD~2 < /dev/null > /tmp/main.txt 2> /tmp/main-time.txt &; set main_pid $last_pid; /usr/bin/time -p ./entire review --agent claude-code --base HEAD~2 < /dev/null > /tmp/claude.txt 2> /tmp/claude-time.txt &; set claude_pid $last_pid; echo "Started: PR=$pr_pid MAIN=$main_pid
+                                                                                       CLAUDE=$claude_pid"; wait; echo "===Done in "(math (date +%s) - $t0)"s==="; for n in pr
+                                                                                         /tmp/entire-main/entire review --agent codex --base HEAD~2 < /dev/null > /tmp/main.txt 2>
+
+---
+
+did you mean to only start claude
+
+---
+
+=== Started message + jobs ===
+jobs: There are no jobs
+=== PR exit/output ===
+-rw-r--r--@ 1 peytonmontei  wheel  196 May 14 12:26 /tmp/pr.txt
+Reviewing slow-codex-in-review vs HEAD~2: 2 commits, 5 files changed, 0 uncommitted
+Running review with codex...
+# codex review
+
+_cancelled_
+=== MAIN exit/output ===
+-rw-r--r--@ 1 peytonmontei  wheel  196 May 14 12:26 /tmp/main.txt
+Reviewing slow-codex-in-review vs HEAD~2: 2 commits, 5 files changed, 0 uncommitted
+Running review with codex...
+# codex review
+
+_cancelled_
+=== CLAUDE alive? ===
+-rw-r--r--@ 1 peytonmontei  wheel  208 May 14 12:26 /tmp/claude.txt
+Reviewing slow-codex-in-review vs HEAD~2: 2 commits, 5 files changed, 0 uncommitted
+Running review with claude-code...
+# claude-code review
+
+---
+
+Expect ~7-12 minutes total (sequential, codex runs are 2-5min each, claude
+  usually 2-3min). - but codex and claude are supposed to run at the asme time
+
+---
+
+claude-code           ✓ done      1m30s     234.5k/…  `★ Insight ─────────────────────────────────────` - The fix removes `expandCod…
+codex                 ✓ done      5m22s     1992.5k…  DEMO_MARKER_VWX789 **Findings** 1. **Medium: Codex plugin syntax cleanup is in…
+
+---
+
+for this, "2. ✅ Always-prompt reaches codex — DEMO_MARKER_VWX789 in codex output" how do you know? and does it alos include the per run prompt
+
+---
+
+did you do this and read the transcript
+
+---
+
+no that's fine but just to confirm that codex will read all prompts and plugins/skills? And what should we do about performance time
+
+---
+
+why can't we handle A in this PR?

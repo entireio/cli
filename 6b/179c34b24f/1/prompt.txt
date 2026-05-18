@@ -1,0 +1,39 @@
+Don't push anything up or change code yet, just take a look at this test flake and diagnose the issue:
+```
+⏺ Read(/Users/ninawork/entire/devenv/cli/cmd/entire/cli/strategy/push_v2.go · lines 175-209)
+  ⎿  Read 35 lines
+
+⏺ Bash(go test ./cmd/entire/cli/strategy/ 2>&1 | tail -3)
+  ⎿  FAIL
+     FAIL       github.com/entireio/cli/cmd/entire/cli/strategy 46.807s
+     FAIL
+
+⏺ Bash(go test ./cmd/entire/cli/strategy/ 2>&1 | grep -E "^---|FAIL:" | head -10)
+  ⎿  --- FAIL: TestResolveAgentForRewind (0.00s)
+         --- FAIL: TestResolveAgentForRewind/dynamically_registered_agent_resolves_by_type (0.00s)
+
+⏺ Bash(go test ./cmd/entire/cli/strategy/ -run TestResolveAgentForRewind -v 2>&1 | tail -20)
+  ⎿  === PAUSE TestResolveAgentForRewind/Claude_Code_type_resolves_correctly
+     === RUN   TestResolveAgentForRewind/Gemini_CLI_type_resolves_correctly
+     === PAUSE TestResolveAgentForRewind/Gemini_CLI_type_resolves_correctly
+     === RUN   TestResolveAgentForRewind/unknown_type_returns_error
+     === PAUSE TestResolveAgentForRewind/unknown_type_returns_error
+     === RUN   TestResolveAgentForRewind/dynamically_registered_agent_resolves_by_type
+     === PAUSE TestResolveAgentForRewind/dynamically_registered_agent_resolves_by_type
+     === CONT  TestResolveAgentForRewind/empty_type_returns_error
+     === CONT  TestResolveAgentForRewind/dynamically_registered_agent_resolves_by_type
+     === CONT  TestResolveAgentForRewind/unknown_type_returns_error
+     === CONT  TestResolveAgentForRewind/Gemini_CLI_type_resolves_correctly
+     === CONT  TestResolveAgentForRewind/Claude_Code_type_resolves_correctly
+     --- PASS: TestResolveAgentForRewind (0.00s)
+         --- PASS: TestResolveAgentForRewind/empty_type_returns_error (0.00s)
+         --- PASS: TestResolveAgentForRewind/dynamically_registered_agent_resolves_by_type (0.00s)
+         --- PASS: TestResolveAgentForRewind/unknown_type_returns_error (0.00s)
+         --- PASS: TestResolveAgentForRewind/Gemini_CLI_type_resolves_correctly (0.00s)
+         --- PASS: TestResolveAgentForRewind/Claude_Code_type_resolves_correctly (0.00s)
+     PASS
+     ok         github.com/entireio/cli/cmd/entire/cli/strategy 0.432s
+
+                                                                                                                                                                     02:14 PM claude-opus-4-7
+⏺ That test passes in isolation — flaky test ordering, unrelated to this change. Let me verify by running it again.
+```

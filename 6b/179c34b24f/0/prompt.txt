@@ -1,0 +1,17 @@
+Address the review comments on https://github.com/entireio/cli/pull/1216
+
+---
+
+continue making changes but don't run the tests
+
+---
+
++        for _, ref := range refs {
++            skipped = appendUniqueRef(skipped, ref)
++        }
+
+where is the function definition for that though?
+
+---
+
+why does it need to be in its own for loop now?

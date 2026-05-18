@@ -1,0 +1,49 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "45f368dc487a",
+  "session_id": "fb93c4d8-9548-4a4c-97e6-364245c50453",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-13T22:32:04.007867Z",
+  "branch": "feat/openai-privacy-filter",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/attach.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/checkpoint/tree_surgery_equiv_test.go",
+    "cmd/entire/cli/checkpoint/v2_committed.go",
+    "cmd/entire/cli/doctor_bundle.go",
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/strategy/condense_skip_test.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation_test.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "4b65a9cfd959",
+  "token_usage": {
+    "input_tokens": 377,
+    "cache_creation_tokens": 893898,
+    "cache_read_tokens": 79552216,
+    "output_tokens": 313994,
+    "api_call_count": 239
+  },
+  "session_metrics": {
+    "turn_count": 13
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-13T22:32:03.811331Z",
+    "agent_lines": 87,
+    "agent_removed": 82,
+    "human_added": 103,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 190,
+    "total_lines_changed": 272,
+    "agent_percentage": 62.13235294117647,
+    "metric_version": 2
+  }
+}

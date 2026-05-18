@@ -1,0 +1,23 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "a243a6ef654e",
+  "strategy": "manual-commit",
+  "branch": "feat/openai-privacy-filter",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/a2/43a6ef654e/0/metadata.json",
+      "transcript": "/a2/43a6ef654e/0/transcript.jsonl",
+      "content_hash": "/a2/43a6ef654e/0/transcript_hash.txt",
+      "prompt": "/a2/43a6ef654e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 728,
+    "cache_creation_tokens": 1869904,
+    "cache_read_tokens": 231562542,
+    "output_tokens": 514063,
+    "api_call_count": 447
+  }
+}

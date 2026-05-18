@@ -1,0 +1,19 @@
+proceed
+
+---
+
+<task-notification>
+<task-id>byosxqwey</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-redact-2/19b7cd33-a796-49bd-9cad-3d1398001e2d/tasks/byosxqwey.output</output-file>
+<status>completed</status>
+<summary>Background command "Push branch and set upstream" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+if push is taking too long use no verify
+
+---
+
+see cursor commemt

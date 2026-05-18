@@ -1,0 +1,189 @@
+Pushing the entiredb is really slow. I enabled debug...
+➜  entiredb git:(test-2) git push origin HEAD
+[entire] Syncing and pushing v2 checkpoints...
+[entire] Pushing v2/main, v2/full/current...
+[entire] Successfully pushed v2/main
+[entire] Warning: couldn't sync v2/full/current: failed to find related archived generation: no remote archive shares history with local /full/current
+[entire] Note: .entire/settings.json sets checkpoints_version: 2, but there are some v1 checkpoints that have not been migrated to v2.
+[entire] Run 'entire migrate --checkpoints v2' to migrate missing checkpoints to v2.
+Enumerating objects: 15, done.
+Counting objects: 100% (13/13), done.
+Delta compression using up to 10 threads
+Compressing objects: 100% (6/6), done.
+Writing objects: 100% (7/7), 906 bytes | 906.00 KiB/s, done.
+Total 7 (delta 3), reused 5 (delta 1), pack-reused 0 (from 0)
+remote: Resolving deltas: 100% (3/3), completed with 2 local objects.
+To https://github.com/entirehq/entiredb.git
+   b01329914..585b686a0  HEAD -> test-2
+
+{"time":"2026-05-13T12:27:22.820981-07:00","level":"INFO","msg":"shadow branch deleted","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"checkpoint","strategy":"manual-commit","shadow_branch":"entire/2d4dcb8-e3b0c4"}
+{"time":"2026-05-13T12:27:22.821246-07:00","level":"DEBUG","msg":"perf","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"perf","op":"post-commit","duration_ms":222,"steps.open_repository_and_head_ms":0,"steps.find_sessions_for_worktree_ms":0,"steps.resolve_commit_trees_ms":6,"steps.process_sessions_ms":186,"steps.process_sessions.0_ms":186,"steps.process_sessions.0.resolve_shadow_branch_ms":0,"steps.process_sessions.0.check_session_content_ms":0,"steps.process_sessions.0.transition_and_condense_ms":180,"steps.process_sessions.0.extract_session_data_ms":0,"steps.process_sessions.0.redact_transcript_ms":141,"steps.process_sessions.0.calculate_session_attribution_ms":7,"steps.process_sessions.0.compact_transcript_v2_ms":0,"steps.process_sessions.0.compact_transcript_v2~1_ms":6,"steps.process_sessions.0.write_committed_v1_ms":0,"steps.process_sessions.0.write_committed_v2_ms":17,"steps.process_sessions.0.carry_forward_files_ms":0,"steps.cleanup_shadow_branches_ms":12,"hook_type":"git"}
+{"time":"2026-05-13T12:27:25.919416-07:00","level":"DEBUG","msg":"pre-push hook invoked","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"hooks","hook":"pre-push","hook_type":"git","strategy":"manual-commit","remote":"origin"}
+{"time":"2026-05-13T12:27:26.76799-07:00","level":"DEBUG","msg":"git push failed","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"hooks","error":"git push: exit status 1","output":"error: failed to push some refs to 'https://github.com/entirehq/entiredb.git'\nhint: Updates were rejected because the remote contains work that you do not\nhint: have locally. This is usually caused by another repository pushing to\nhint: the same ref. If you want to integrate the remote changes, use\nhint: 'git pull' before pushing again.\nhint: See the 'Note about fast-forwards' in 'git push --help' for details.\nTo https://github.com/entirehq/entiredb.git\n!\trefs/entire/checkpoints/v2/full/current:refs/entire/checkpoints/v2/full/current\t[rejected] (fetch first)\n!\trefs/entire/checkpoints/v2/main:refs/entire/checkpoints/v2/main\t[rejected] (fetch first)\nDone\n"}
+{"time":"2026-05-13T12:28:20.65595-07:00","level":"DEBUG","msg":"perf","session_id":"b08177a4-f14f-4275-b7ff-59c2c01c7310","component":"perf","op":"pre-push","duration_ms":54734,"steps.push_v2_refs_ms":54734,"hook_type":"git"}
+
+---
+
+➜  entiredb git:(test-2) git ls-remote origin 'refs/entire/checkpoints/v2/full/*'
+git for-each-ref refs/entire/checkpoints/v2/full --format='%(refname)'
+f81138a51892d8a6901d39efb70954a94ea06b75    refs/entire/checkpoints/v2/full/0000000000001
+3ea0a5f1548d78df660bd41e595864194bfdfd9c    refs/entire/checkpoints/v2/full/0000000000002
+acd168aa6650920290c1969746c75f0950858817    refs/entire/checkpoints/v2/full/0000000000003
+695c288c4316c67ab85792b102ad82852aaacb83    refs/entire/checkpoints/v2/full/0000000000004
+fbc1a36c6755e930948c87ab890b4f6ff3df0654    refs/entire/checkpoints/v2/full/0000000000005
+1d475a95d0f206d39bbeddcc36494f657a7fa5e7    refs/entire/checkpoints/v2/full/0000000000006
+4e279e7d1d98e8be93e8b88b479346141033c0de    refs/entire/checkpoints/v2/full/0000000000007
+6c6943b681002a57b2c1267a2a07804e53329dbd    refs/entire/checkpoints/v2/full/0000000000015
+94f43ec3484dc2044482f33dfe4adecb77408a95    refs/entire/checkpoints/v2/full/0000000000016
+76b543e44d13297a6b3ffe49f1c52e8f1dcb3146    refs/entire/checkpoints/v2/full/0000000000017
+33c3d31bc5849ad888010da72cddd5e277262718    refs/entire/checkpoints/v2/full/0000000000018
+ad419175a8978a6f0e3849d73b505ed482f20898    refs/entire/checkpoints/v2/full/0000000000019
+5668c2a336c2a39f710e0b2f08584df9d19de184    refs/entire/checkpoints/v2/full/0000000000020
+8ea9595af8f4d67ca8126b0f63d00748d90b8173    refs/entire/checkpoints/v2/full/0000000000021
+68985874c88a58d65a1f6e4ab1f56ff034ae4249    refs/entire/checkpoints/v2/full/0000000000022
+bb66fd057c82c50ac0e1d14739a9a30a2bb11474    refs/entire/checkpoints/v2/full/0000000000023
+030a076e2fe4c6ab348e2aabc881731ef68dadca    refs/entire/checkpoints/v2/full/0000000000036
+188e99fd8eb400e0e2caba900a1b866a7c9ed24e    refs/entire/checkpoints/v2/full/0000000000037
+7bc28b31d465978743249824e5e2e08a2bf31775    refs/entire/checkpoints/v2/full/0000000000038
+75594eabe077d4e83520fb9b06e33935828eb912    refs/entire/checkpoints/v2/full/0000000000047
+bb4ab537acb7e3eb4005b6bed0c283245b3b68f9    refs/entire/checkpoints/v2/full/0000000000057
+101f25f33ab3c8fb401466f01e3e6fd33adba04b    refs/entire/checkpoints/v2/full/0000000000058
+de218f9adff2d9587a36c2cf51cd3a489da8c201    refs/entire/checkpoints/v2/full/0000000000059
+8bd5bda3153338c14e92a9f0479a5cec647e55f4    refs/entire/checkpoints/v2/full/0000000000060
+61d0d4d50dd6bf610f4b23b240e0aafd163760a7    refs/entire/checkpoints/v2/full/0000000000061
+a27e50c317a9b63a8351cd1ee9067c7f0ef8d232    refs/entire/checkpoints/v2/full/0000000000062
+581be627ace7d69b2dfbec8f17e824df33bd367b    refs/entire/checkpoints/v2/full/0000000000063
+4f3d74073fdbcf02d5372772bdc63e5a138f3ec9    refs/entire/checkpoints/v2/full/0000000000064
+45e625bf8e30157b465941382ab13d249e7e7717    refs/entire/checkpoints/v2/full/0000000000065
+63befe6f22c6aac5c45533b76e07253abebf22f7    refs/entire/checkpoints/v2/full/0000000000066
+60739a15023355b1ac140a73942556108a2a4d04    refs/entire/checkpoints/v2/full/0000000000067
+84ce7426adec9dec224f74f5db35ab8b68063237    refs/entire/checkpoints/v2/full/0000000000068
+d3424d86fa7156a11247f78ba30bdd9a32fa69a5    refs/entire/checkpoints/v2/full/0000000000069
+0650516b54f17d1b59599b94fbc1f6a036b30dfd    refs/entire/checkpoints/v2/full/0000000000070
+ae05def0319b8b3d4548dea22e4183b62d9acd7d    refs/entire/checkpoints/v2/full/0000000000071
+da1ebdd3988ef779ed869d7ecf6a4d7eab4ee645    refs/entire/checkpoints/v2/full/0000000000072
+3a7a6996b3e98060f95cc0e8a88f23ea1f86356b    refs/entire/checkpoints/v2/full/0000000000073
+2fc1d25f78ef1ba9937339bb2dfaa080aadb292d    refs/entire/checkpoints/v2/full/0000000000074
+0283422578fe328d98f527608dfa224836ac435a    refs/entire/checkpoints/v2/full/0000000000075
+b7c287721153f4959345b335140975dd137b1487    refs/entire/checkpoints/v2/full/0000000000076
+9de1217fb312a8373091b46876618eb63edd98b3    refs/entire/checkpoints/v2/full/0000000000077
+95bf47f432b27d465ad351d1c96f071c31ae0fd8    refs/entire/checkpoints/v2/full/0000000000078
+225268131aa6c9a846b7f59a8f008c5110346b6a    refs/entire/checkpoints/v2/full/0000000000079
+1071c62a241bbb46925a70509aa96a65e6e31845    refs/entire/checkpoints/v2/full/0000000000080
+8c54eb57945d0d02410038afd8dc052b10afb844    refs/entire/checkpoints/v2/full/0000000000081
+7ef92fab4d31b1cd921a9abc991fe9ec255b3f54    refs/entire/checkpoints/v2/full/0000000000082
+1f29373f63d4dc16efca10c334a3fcad48db6d65    refs/entire/checkpoints/v2/full/0000000000083
+9972e8b40f994bc3dc5187c00dbf31c2c562ec45    refs/entire/checkpoints/v2/full/0000000000084
+7649011687c3dd2f8a326757faa9de58db95a140    refs/entire/checkpoints/v2/full/0000000000085
+43fd437ea76037b6eb67cc941ad98ada48b1674a    refs/entire/checkpoints/v2/full/0000000000086
+8576af81252f8d85488e4de05325d910effb9f19    refs/entire/checkpoints/v2/full/0000000000087
+59f72d1eff7ddcef4dcaafde49a647f7b3208030    refs/entire/checkpoints/v2/full/0000000000088
+5d898ba6fbeb54747d953426f0777f6fed02005a    refs/entire/checkpoints/v2/full/0000000000089
+98f87153f97f709267bff7101540a8479043f2bd    refs/entire/checkpoints/v2/full/0000000000090
+c60d12d23826a1091bcd6f2e14e7ffb8b0ddd4c6    refs/entire/checkpoints/v2/full/0000000000091
+1623c470621105e2dd2b4318f56fd7f44c966b95    refs/entire/checkpoints/v2/full/0000000000092
+a424036198fdd055c69e5b985c71cb461349cb16    refs/entire/checkpoints/v2/full/0000000000093
+6354463032e8286f9b907b337968df8f721f3bc0    refs/entire/checkpoints/v2/full/0000000000094
+4a0a815529905d03e335c7d6c21787e9f12f96e1    refs/entire/checkpoints/v2/full/0000000000095
+648be6c53a194d7b2d992889d0bb65b547a0bd28    refs/entire/checkpoints/v2/full/0000000000096
+b25c45a1321d10866b2168692f821e95d52fc7ea    refs/entire/checkpoints/v2/full/0000000000097
+3c06f259b36d3761a0de5ab09f409bcb4483e77b    refs/entire/checkpoints/v2/full/0000000000098
+6613deb7153a11fce108d41327c39b5f6264a631    refs/entire/checkpoints/v2/full/0000000000099
+16699224ba4b89b2e7766800592603491ae0f694    refs/entire/checkpoints/v2/full/0000000000100
+e6a2d5cdee0c0bbda4bfb905268c5c7bd2aae169    refs/entire/checkpoints/v2/full/0000000000101
+66467e03c4dfbd95fe110397646790995b72cfd9    refs/entire/checkpoints/v2/full/0000000000102
+ef63580fc54db42049b4341a058d729970dea13f    refs/entire/checkpoints/v2/full/0000000000103
+c8509ac27a166adfa7a74204e4f9a64e035347c5    refs/entire/checkpoints/v2/full/0000000000104
+7f30c7d1ccb3ee25aaf96add978148e0ba795eea    refs/entire/checkpoints/v2/full/0000000000105
+c41d14ba714275669be803e54a37b98950f43f34    refs/entire/checkpoints/v2/full/0000000000106
+5925843c52e823b243421991a2005a87ccb64ec8    refs/entire/checkpoints/v2/full/0000000000107
+8547fc19d623b38fe52b00b217fb9c0ec0f518cc    refs/entire/checkpoints/v2/full/0000000000108
+495919950ba442da6595ba47e8344ad6fe137314    refs/entire/checkpoints/v2/full/0000000000109
+b1cd7464315994804fe8ba775ab41eb69e6f70d5    refs/entire/checkpoints/v2/full/0000000000110
+8da696069722ff58cc1b91350e93ad458a88b0a2    refs/entire/checkpoints/v2/full/0000000000111
+91835316c8992b0a035318e2b414c1a656929993    refs/entire/checkpoints/v2/full/0000000000112
+e8fb5a67b23f140bdeb74c722e6dbc00cea1adb5    refs/entire/checkpoints/v2/full/0000000000113
+4a54caab834589af7c86be06f2793fb4d07c71bd    refs/entire/checkpoints/v2/full/0000000000114
+5f2e45fa5e90573cd305efd183fa5329a4cf28c4    refs/entire/checkpoints/v2/full/0000000000115
+b71098ed512c16063b07155595c0de4600f3c538    refs/entire/checkpoints/v2/full/0000000000116
+ad96f3645f1415a19349aea66290036aa2ca203f    refs/entire/checkpoints/v2/full/0000000000117
+1ce47eafe0a6e2ea74325fe8e709b21295e5c704    refs/entire/checkpoints/v2/full/0000000000118
+7cc64cd1eb125975a915b139c98208a1d27ea6f1    refs/entire/checkpoints/v2/full/0000000000119
+9917021842c7a79f378e00ca6dd87760257aaabb    refs/entire/checkpoints/v2/full/0000000000120
+ee1ea22b9ccab43e52629870d144e3c79bb93b82    refs/entire/checkpoints/v2/full/0000000000121
+2b29b182c8afc1db3fd48f22d64e3757da064050    refs/entire/checkpoints/v2/full/0000000000122
+c2f9b8ed8fa485eb0b7c0c3e6a2f8548a719cadd    refs/entire/checkpoints/v2/full/0000000000123
+26299a1d736043b05697b259471f212c447b2dc1    refs/entire/checkpoints/v2/full/0000000000124
+3970ff60ccfeb0951c1ac17c9fdede0e32818ff3    refs/entire/checkpoints/v2/full/0000000000125
+9585a8893703b5d68a463271705194e9bd9e975e    refs/entire/checkpoints/v2/full/0000000000126
+eb8f1a0cc65ed24cd23d2dfcda1755f741eb4120    refs/entire/checkpoints/v2/full/0000000000127
+dcc4013cee3bac6128a7f9ec3fae8675b41bdb6f    refs/entire/checkpoints/v2/full/0000000000128
+02536368d31ed690465936b653091609d7c024bf    refs/entire/checkpoints/v2/full/0000000000129
+a7a96ec63b2e0933ea7344a3960b3af0a924d405    refs/entire/checkpoints/v2/full/0000000000130
+8c01a665aa8460d61ebbe957de9b4077087d045c    refs/entire/checkpoints/v2/full/0000000000131
+e6cf5cfa8f811c0b9cf39ec2a1840195f01c738e    refs/entire/checkpoints/v2/full/0000000000132
+9b7308ef6ca5dde6ceb241821b17675e9eaa17ea    refs/entire/checkpoints/v2/full/0000000000133
+d0e673602afa0cdd58ab572b421cfad07ed939f4    refs/entire/checkpoints/v2/full/0000000000134
+513936ac6aaa4f02e2d405c04c3de8d2ec11c7a6    refs/entire/checkpoints/v2/full/0000000000135
+0ec57858927bcb69ff48d136cc90c8e817cf4594    refs/entire/checkpoints/v2/full/0000000000136
+bc3f689ab3c9bf36715eecd0e15d0d7d106a7fa6    refs/entire/checkpoints/v2/full/0000000000137
+2172601ad73f49c00afe9498f0a4d434b227643d    refs/entire/checkpoints/v2/full/0000000000138
+1bf06d0015eacdf45b04c24f8e22289a3a7be94a    refs/entire/checkpoints/v2/full/0000000000139
+310f92fa75a3ebe503c05560ec0909a8de031698    refs/entire/checkpoints/v2/full/0000000000140
+611b1ee202cf3e2ee2aeb2c718615bb4bc67c012    refs/entire/checkpoints/v2/full/0000000000141
+6b2d25ecfa4cdd8be8d51ba45ef7a4b09c9318fb    refs/entire/checkpoints/v2/full/0000000000142
+6488221d74dfbe9b38b38b5b032ab0049c3d45bc    refs/entire/checkpoints/v2/full/0000000000143
+b3495e5ebdb3ad3386002ae09f5873f8f8eac31b    refs/entire/checkpoints/v2/full/0000000000144
+c2bb0fa0d3a2eb8147ea8026ae88e5b0e56c56d5    refs/entire/checkpoints/v2/full/0000000000145
+ae615916fda9d79cb1b56697e0c18d821044cc95    refs/entire/checkpoints/v2/full/0000000000146
+ab2e6df664b8f77dc6bcd5cef4c43373f5d068ad    refs/entire/checkpoints/v2/full/0000000000147
+c61dcd9a9d7e80b90e8137837cf83e3e58737d19    refs/entire/checkpoints/v2/full/0000000000148
+e8d60db83d664d3632197312a9a202d9f039b350    refs/entire/checkpoints/v2/full/0000000000149
+fbda5760a20ed2c8281a3739d56dbac99ec6072c    refs/entire/checkpoints/v2/full/0000000000150
+83bb4c9ae5fcdfd263e0128fb4edf38c42bce3c1    refs/entire/checkpoints/v2/full/0000000000151
+653a5b61282727a0bdab8157cc39c7ed7d455e23    refs/entire/checkpoints/v2/full/0000000000152
+9f6284b8cd0555e454b8f3532bbfa1396c854211    refs/entire/checkpoints/v2/full/0000000000153
+9b1b5ff0796f24962883319abd2b42fef6e433d1    refs/entire/checkpoints/v2/full/0000000000154
+02660a6647dfb0ae9a844e49e098b8c111888ad5    refs/entire/checkpoints/v2/full/0000000000155
+d50efac9f4270ff3a4f04a91bd28885300592835    refs/entire/checkpoints/v2/full/0000000000156
+0aa9a661b5c92163a0e7922ee7cc27bf98ecd20b    refs/entire/checkpoints/v2/full/0000000000157
+9df4d944c7fd03fccf00f478522848117b814d4c    refs/entire/checkpoints/v2/full/0000000000158
+f94a8b639708c9deddd252419ac0e7c85013043e    refs/entire/checkpoints/v2/full/0000000000159
+8d039aaa306b2f40847be14fc9321ba62ea6b882    refs/entire/checkpoints/v2/full/0000000000160
+9d7c32e4e5efd6f43d8ad887b0f5506f796106f3    refs/entire/checkpoints/v2/full/0000000000161
+8b8833c075bca3e42206b243bd30d4323ca975cd    refs/entire/checkpoints/v2/full/0000000000162
+876c8ca444f3301e336eb6934ddc8c16efd9a460    refs/entire/checkpoints/v2/full/0000000000163
+c96b4aef5d17cc3d9508c83e36bd8b36fc192ccf    refs/entire/checkpoints/v2/full/0000000000164
+5ddfad108577c1a0d56de8149bcd4a5f2985c7a8    refs/entire/checkpoints/v2/full/0000000000165
+1d05793746c4e6a26cd08284cb370a92cd6afa4f    refs/entire/checkpoints/v2/full/0000000000166
+9f1ed23fe26a9c18a55b13706f6aecce08f9e856    refs/entire/checkpoints/v2/full/0000000000167
+356532772bb87903f8e28b3db900ca5f3717ebdc    refs/entire/checkpoints/v2/full/0000000000168
+f1c0775cea9af9a90e7f560164be69c3594c9bc6    refs/entire/checkpoints/v2/full/0000000000169
+6c46d3746b65bbe1f2dabce4562d0db21101a166    refs/entire/checkpoints/v2/full/0000000000170
+9d293688dade2c4e92c27f7186229f079710f365    refs/entire/checkpoints/v2/full/0000000000171
+935f8979320cfa3164ff074109c79f10245192f8    refs/entire/checkpoints/v2/full/0000000000172
+611a0042ea540148247043df0ade14b711059d5c    refs/entire/checkpoints/v2/full/0000000000173
+8313fa55556ea46361e533987146be794df7a51d    refs/entire/checkpoints/v2/full/0000000000174
+3452e92240a41a8565d115c81d978c3490e9a392    refs/entire/checkpoints/v2/full/0000000000175
+e91bbc7ddc9f13d8c4cfacbe547f61a767788105    refs/entire/checkpoints/v2/full/0000000000176
+456ccc5b2c8f230c6dbdc94c6288b20085e3566c    refs/entire/checkpoints/v2/full/current
+refs/entire/checkpoints/v2/full/0000000000023
+refs/entire/checkpoints/v2/full/0000000000037
+refs/entire/checkpoints/v2/full/0000000000038
+refs/entire/checkpoints/v2/full/current
+
+---
+
+explain the blobless fetch first option
+
+---
+
+why does it need to do the fetch at all on push?
+
+---
+
+Check https://github.com/entireio/cli/pull/1201 and see if it would address these issues
+
+---
+
+Ok so let's address the slow push with the idea that something like https://github.com/entireio/cli/pull/1201 is in place (without pulling it in)

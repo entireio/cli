@@ -1,0 +1,81 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "06fcc2e0141d",
+  "session_id": "c91325f1-f623-48a0-8787-23aa038adae3",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-13T23:51:47.82707Z",
+  "branch": "slow-codex-in-review",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/agent/codex/AGENT.md",
+    "cmd/entire/cli/agent/codex/reviewer.go",
+    "cmd/entire/cli/agent/codex/reviewer_test.go",
+    "cmd/entire/cli/agent/skilldiscovery/registry.go",
+    "cmd/entire/cli/agent/skilldiscovery/registry_test.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7[1m]",
+  "turn_id": "48364041250d",
+  "checkpoint_transcript_start": 120,
+  "token_usage": {
+    "input_tokens": 404,
+    "cache_creation_tokens": 270499,
+    "cache_read_tokens": 56650674,
+    "output_tokens": 151387,
+    "api_call_count": 134
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-13T23:51:47.662216Z",
+    "agent_lines": 254,
+    "agent_removed": 310,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 52,
+    "total_committed": 254,
+    "total_lines_changed": 616,
+    "agent_percentage": 91.55844155844156,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 263,
+      "user_lines_removed": 232,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "cmd/entire/cli/agent/codex/review_hook.go": 135,
+        "cmd/entire/cli/agent/codex/reviewer.go": 28,
+        "cmd/entire/cli/agent/codex/reviewer_test.go": 32,
+        "cmd/entire/cli/hook_registry.go": 17,
+        "cmd/entire/cli/review/env.go": 26,
+        "cmd/entire/cli/review/env_test.go": 25
+      },
+      "user_removed_per_file": {
+        "cmd/entire/cli/agent/codex/prompt.go": 74,
+        "cmd/entire/cli/agent/codex/prompt_test.go": 98,
+        "cmd/entire/cli/agent/codex/reviewer.go": 10,
+        "cmd/entire/cli/agent/codex/reviewer_test.go": 42,
+        "cmd/entire/cli/review/env.go": 1,
+        "cmd/entire/cli/review/env_test.go": 7
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 263,
+      "agent_lines_removed": 232
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 100,
+      "agent_lines_removed": 30
+    }
+  ]
+}

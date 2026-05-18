@@ -1,0 +1,37 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "701bc9b12150",
+  "strategy": "manual-commit",
+  "branch": "feat/openai-privacy-filter",
+  "checkpoints_count": 9,
+  "files_touched": [
+    ".golangci.yaml",
+    "cmd/entire/cli/settings/settings.go",
+    "cmd/entire/cli/settings/settings_test.go",
+    "cmd/entire/cli/strategy/common.go",
+    "redact/opf.go",
+    "redact/opf_runtime/runtime.go",
+    "redact/opf_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/70/1bc9b12150/0/metadata.json",
+      "transcript": "/70/1bc9b12150/0/transcript.jsonl",
+      "content_hash": "/70/1bc9b12150/0/transcript_hash.txt",
+      "prompt": "/70/1bc9b12150/0/prompt.txt"
+    },
+    {
+      "metadata": "/70/1bc9b12150/1/metadata.json",
+      "transcript": "/70/1bc9b12150/1/transcript.jsonl",
+      "content_hash": "/70/1bc9b12150/1/transcript_hash.txt",
+      "prompt": "/70/1bc9b12150/1/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 176852,
+    "cache_creation_tokens": 679193,
+    "cache_read_tokens": 30573117,
+    "output_tokens": 201066,
+    "api_call_count": 154
+  }
+}

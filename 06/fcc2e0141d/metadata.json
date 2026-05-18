@@ -1,0 +1,36 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "06fcc2e0141d",
+  "strategy": "manual-commit",
+  "branch": "slow-codex-in-review",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/agent/codex/AGENT.md",
+    "cmd/entire/cli/agent/codex/reviewer.go",
+    "cmd/entire/cli/agent/codex/reviewer_test.go",
+    "cmd/entire/cli/agent/skilldiscovery/registry.go",
+    "cmd/entire/cli/agent/skilldiscovery/registry_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/06/fcc2e0141d/0/metadata.json",
+      "transcript": "/06/fcc2e0141d/0/transcript.jsonl",
+      "content_hash": "/06/fcc2e0141d/0/transcript_hash.txt",
+      "prompt": "/06/fcc2e0141d/0/prompt.txt"
+    },
+    {
+      "metadata": "/06/fcc2e0141d/1/metadata.json",
+      "transcript": "/06/fcc2e0141d/1/transcript.jsonl",
+      "content_hash": "/06/fcc2e0141d/1/transcript_hash.txt",
+      "prompt": "/06/fcc2e0141d/1/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 420,
+    "cache_creation_tokens": 356703,
+    "cache_read_tokens": 56951472,
+    "output_tokens": 162187,
+    "api_call_count": 140
+  },
+  "has_review": true
+}

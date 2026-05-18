@@ -1,0 +1,61 @@
+see the current redaction logic we have now, from betterleaks, entropy level, adding custom redact secrets, and pii optional. Sometimes we may miss something user wants, but we risk over-redacting, which has happened in the past and makes logs unusable. Instead another option is adding this, https://github.com/openai/privacy-filter, as an optional add on because another caveat to consider is the fact that pushes on commits can take a long time and an additional llm call on push to redact will also cause a delay, so it's like can't win everything unless we tst and there is no delay or add message or opt in's that says openai redaction in progress or something. use /superpowers:brainstorming to check out this repo, adding this, comparing what we already have, performance concerns
+
+---
+
+yeah we do it like you proposed, i agree
+
+---
+
+okay we'll start with this and can change if needed
+
+---
+
+can we not do this now? Daemon mode is a documented future path. - or what does that look like
+
+---
+
+yes looks good, and we will test latency like discussed earlier
+
+---
+
+yes
+
+---
+
+yes
+
+---
+
+can you give me full path for review please
+
+---
+
+okay looks good, and actually looking at the repo, it looks like it's mostly for pii redaction, then has secret at the end- can you see what secret examples they have?
+
+---
+
+sure
+
+---
+
+ready for /superpowers:write-plans
+
+---
+
+ready for /superpowers:write-plan
+
+---
+
+proceed
+
+---
+
+okay looks good, can/should we smoke test in between each chunk? or what is the best way to smoke test the implementation and see filter being used
+
+---
+
+you can add it or if you will just remember when we get to it that's fine too
+
+---
+
+just so you know, for the smoke test in chunk 4, i want to also run in binary build so i can personally test the filter and changes

@@ -1,0 +1,25 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "d9c2b424f2ea",
+  "strategy": "manual-commit",
+  "branch": "push-failing-v2",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/push_v2.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d9/c2b424f2ea/0/metadata.json",
+      "transcript": "/d9/c2b424f2ea/0/transcript.jsonl",
+      "content_hash": "/d9/c2b424f2ea/0/transcript_hash.txt",
+      "prompt": "/d9/c2b424f2ea/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 178460,
+    "cache_read_tokens": 1154550,
+    "output_tokens": 7724,
+    "api_call_count": 7
+  }
+}

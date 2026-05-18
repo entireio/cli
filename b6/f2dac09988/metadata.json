@@ -1,0 +1,25 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "b6f2dac09988",
+  "strategy": "manual-commit",
+  "branch": "feat/review-detail-viewport",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/review/tui_text.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b6/f2dac09988/0/metadata.json",
+      "transcript": "/b6/f2dac09988/0/transcript.jsonl",
+      "content_hash": "/b6/f2dac09988/0/transcript_hash.txt",
+      "prompt": "/b6/f2dac09988/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 144,
+    "cache_creation_tokens": 267842,
+    "cache_read_tokens": 12178613,
+    "output_tokens": 105949,
+    "api_call_count": 71
+  }
+}

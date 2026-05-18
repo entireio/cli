@@ -1,0 +1,21 @@
+Find the 5 slowest tests to run for this project and show how much time it takes to run them
+
+---
+
+Investigate the slowness from TestCheckV2CheckpointCounts_ReturnsErrorForCorruptRef and TestV2ReadSessionMetadata_FetchesMissingMetadataBlob
+
+---
+
+Wait, we should only be modifying the tests, not the production code
+
+---
+
+unless p roduction path is slow too
+
+---
+
+actually, no, for now, let's only fix the tests
+
+---
+
+There are a lot of files edited that aren't those two tests

@@ -1,0 +1,11 @@
+in new review command, we have agents to select, claude and codex (and should have gemini) for review which selects plugins or configures review plugins for reviewing changes on a branch. There are open pr's in entireio/cli to fix, so take a look at these too - i authored them. However, the purpose of this task is to investigate why claude agents finishes sometimes 2-5x faster than codex. And when running plugins in codex session independently, does not seem to even take this. use /superpowers:brainstorming
+
+---
+
+also consider this, Codex plugins do not get their own /plugin-name slash commands. In
+  Codex CLI, slash commands are built-ins like /review and /plugins. Installed plugins
+  are invoked with @plugin or bundled skills with $skill. - and how this impact invocation of skills/plugins and the skill we have for detecting plugins
+
+---
+
+proceed

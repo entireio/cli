@@ -1,0 +1,1 @@
+simplify the new test in testcmd/entire/cli/strategy/push_v2_test.go

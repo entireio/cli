@@ -1,0 +1,14 @@
+/review
+
+DEMO_MARKER_VWX789: include this token verbatim in your response, and prioritize focused brevity (3-5 findings max).
+
+Scope: review the commits unique to this branch vs HEAD~2, plus any uncommitted changes in the working tree. Ignore code outside this scope.
+
+Checkpoint context from commits in scope:
+- 740cbeb9b915: prompt: can i see the improvements in manual smoke test?
+- 06fcc2e0141d: prompt: okay commit and create draft pr so we don't lose changes - if push is taking long, then use -no verify
+
+Use `entire explain <id>` for full checkpoint context, or `entire explain <id> --raw-transcript` for raw transcripts.
+
+In-progress session context (uncommitted):
+  c91325f1 Claude Code (touched: 3 files) prompt: syntx is wrong, peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/c/.w/review-fix-2 (slow-codex-in-review)> set t0 (date +%s); /usr/bin/time -p ./entire review --agent codex --base HEAD~2 < /dev/null > /tmp/pr.txt 2> /tmp/pr-time.txt &; set pr_pid $last_pid; /usr/bin/time -p /tmp/entire-main/entire review --agent codex --b...

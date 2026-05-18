@@ -1,0 +1,1 @@
+Pull only the migration hint fix changes out from https://github.com/entireio/cli/pull/1208. The changes where we don't walk all of v1 vs v2 and only check for the /main ref now.
