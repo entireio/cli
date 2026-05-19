@@ -48,6 +48,7 @@ func parseCopilotStream(stdout io.Reader, progress agent.ProgressFn) (string, er
 		sawTerminal     bool
 		usage           *copilotStreamUsage
 		outputTokens    int
+		streamedChars   int
 		malformed       int
 		start           = time.Now()
 	)
@@ -95,7 +96,13 @@ func parseCopilotStream(stdout io.Reader, progress agent.ProgressFn) (string, er
 				// without parens.
 				dispatch(agent.GenerationProgress{Phase: agent.PhaseFirstToken})
 			} else {
-				dispatch(agent.GenerationProgress{Phase: agent.PhaseGenerating})
+				// Estimate running output tokens from accumulated character
+				// count so the writer's "Writing summary... (~Nk tokens)"
+				// counter ticks during streaming (matches Claude's pattern
+				// from PR #964). Authoritative output_tokens still arrives
+				// later via assistant.message events and overrides on Done.
+				streamedChars += len(ev.Data.DeltaContent)
+				dispatch(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: streamedChars / 4})
 			}
 			result.WriteString(ev.Data.DeltaContent)
 
