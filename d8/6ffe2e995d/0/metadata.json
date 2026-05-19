@@ -20,42 +20,43 @@
     "api_call_count": 14
   },
   "summary": {
-    "intent": "Add a GitHub Actions workflow that runs CodeQL advanced security queries against the repo's GitHub workflow files, triggered only on pull requests that modify workflow or action definitions.",
-    "outcome": "Created `.github/workflows/codeql-actions.yml` with CodeQL `actions`-language analysis using `security-extended` and `security-and-quality` query suites, scoped to PRs touching `.github/workflows/**` or `.github/actions/**` (plus `workflow_dispatch`). After initial commit `256a66fb`, the workflow was updated to gate SARIF upload to same-repo PRs so fork contributions do not fail on missing `security-events: write` permission.",
+    "intent": "Add a GitHub Actions workflow that runs CodeQL advanced security queries against the repo's GitHub workflows, scoped so it only runs on pull requests that modify workflow or composite action files.",
+    "outcome": "Created `.github/workflows/codeql-actions.yml` with CodeQL `actions`-language analysis using `security-extended` and `security-and-quality` query suites, path-filtered to `.github/workflows/**` and `.github/actions/**`, plus `workflow_dispatch`. After review feedback, SARIF upload was gated to same-repo PRs to avoid fork permission failures. Changes were committed in two commits, including `256a66fb`.",
     "learnings": {
       "repo": [
         "Existing workflows (`lint.yml`, `ci.yml`) follow a SHA-pinning convention for third-party actions.",
-        "CodeQL action versions were initially added with `@v3` tags, with SHA pinning explicitly deferred.",
-        "Workflow path filters also include `.github/actions/**`, not just `.github/workflows/**`."
+        "CodeQL action versions were initially added as `@v3` tags with SHA pinning deferred to match repo standards later.",
+        "A security hook flagged risky workflow patterns on first write; the workflow was validated as safe because it only uses `github.event.pull_request.head.sha`, which is not user-controllable."
       ],
       "code": [
         {
           "path": ".github/workflows/codeql-actions.yml",
-          "finding": "Uses CodeQL with `languages: actions` and both `security-extended` and `security-and-quality` query suites to statically analyze GitHub Actions workflow definitions."
+          "line": 1,
+          "end_line": 50,
+          "finding": "Workflow runs CodeQL for the `actions` language with both `security-extended` and `security-and-quality` query suites, triggered on PRs touching `.github/workflows/**` or `.github/actions/**` and via `workflow_dispatch`."
         },
         {
           "path": ".github/workflows/codeql-actions.yml",
-          "finding": "SARIF upload is gated with `if: github.event.pull_request.head.repo.full_name == github.repository` because fork PRs typically lack `security-events: write` on `GITHUB_TOKEN`, which would cause the analyze/upload step to fail for external contributors."
-        },
-        {
-          "path": ".github/workflows/codeql-actions.yml",
-          "finding": "Only references `github.event.pull_request.head.sha` for checkout, which is treated as a non-user-controllable value and acceptable to security review hooks."
+          "line": 51,
+          "end_line": 80,
+          "finding": "Fork PRs cannot reliably upload SARIF because `GITHUB_TOKEN` lacks `security-events: write`; upload (or the analyze step) should be gated with `github.event.pull_request.head.repo.full_name == github.repository`."
         }
       ],
       "workflow": [
-        "Review existing repo workflows before adding new ones to match conventions (trigger patterns, action pinning, permissions).",
-        "CodeQL can target the `actions` language specifically for GitHub workflow security validation.",
-        "Security hooks may block workflow file writes; retry after confirming no risky expression patterns (e.g., unsanitized `${{ github.event.* }}` usage).",
-        "CodeQL analyze jobs that upload SARIF on `pull_request` need fork-aware permission handling to avoid red checks for external contributors."
+        "Review existing repo workflows before adding new ones to match conventions such as action pinning.",
+        "Look up latest CodeQL action release tags/commits when aligning with security pinning practices.",
+        "Gate CodeQL SARIF upload on pull_request workflows when external contributors use forks to prevent false-red checks.",
+        "Security lint hooks on workflow files may require a retry even when the workflow uses only safe GitHub context expressions."
       ]
     },
     "friction": [
-      "Initial write of `codeql-actions.yml` was blocked by a security reminder hook and required a retry.",
-      "First implementation did not account for fork PR token limitations on `security-events: write`, requiring a follow-up fix after user review."
+      "Initial workflow write was blocked or interrupted by a security reminder hook, requiring a retry.",
+      "Repo SHA-pinning convention conflicted with using `@v3` tags for CodeQL actions in the first implementation.",
+      "Fork PR `security-events: write` limitation was caught only after the initial commit, requiring a follow-up fix."
     ],
     "open_items": [
-      "Pin CodeQL action SHAs to match the repo's SHA-pinning convention (currently using `@v3` tags).",
-      "Verify the fork-PR upload gating behaves as intended on both same-repo and fork PRs in CI."
+      "Pin CodeQL action references to commit SHAs to match the repo's existing workflow convention.",
+      "Verify the fork-gating behavior on an actual fork PR and confirm analysis still runs usefully when SARIF upload is skipped."
     ]
   },
   "initial_attribution": {
