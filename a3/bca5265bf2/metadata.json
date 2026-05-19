@@ -1,0 +1,25 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "a3bca5265bf2",
+  "strategy": "manual-commit",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/uiform/uiform.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a3/bca5265bf2/0/metadata.json",
+      "transcript": "/a3/bca5265bf2/0/transcript.jsonl",
+      "content_hash": "/a3/bca5265bf2/0/transcript_hash.txt",
+      "prompt": "/a3/bca5265bf2/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 583,
+    "cache_creation_tokens": 871180,
+    "cache_read_tokens": 154239275,
+    "output_tokens": 229072,
+    "api_call_count": 492
+  }
+}

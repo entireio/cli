@@ -1,0 +1,37 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "a3bca5265bf2",
+  "session_id": "22ea627b-151b-4830-b957-b6c379b78cc9",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-19T19:11:08.019738Z",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/uiform/uiform.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "92b8cc115b58",
+  "token_usage": {
+    "input_tokens": 583,
+    "cache_creation_tokens": 871180,
+    "cache_read_tokens": 154239275,
+    "output_tokens": 229072,
+    "api_call_count": 492
+  },
+  "session_metrics": {
+    "turn_count": 14
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-19T19:11:07.811384Z",
+    "agent_lines": 23,
+    "agent_removed": 0,
+    "human_added": 8,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 31,
+    "total_lines_changed": 69,
+    "agent_percentage": 33.33333333333333,
+    "metric_version": 2
+  }
+}
