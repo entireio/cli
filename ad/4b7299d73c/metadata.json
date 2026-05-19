@@ -1,0 +1,23 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "ad4b7299d73c",
+  "strategy": "manual-commit",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/ad/4b7299d73c/0/metadata.json",
+      "transcript": "/ad/4b7299d73c/0/transcript.jsonl",
+      "content_hash": "/ad/4b7299d73c/0/transcript_hash.txt",
+      "prompt": "/ad/4b7299d73c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 235,
+    "cache_creation_tokens": 234556,
+    "cache_read_tokens": 26893006,
+    "output_tokens": 76352,
+    "api_call_count": 178
+  }
+}
