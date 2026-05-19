@@ -1,0 +1,48 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "85adbe5f263b",
+  "session_id": "3276c337-988f-4c40-acfc-a8948f630692",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-19T14:17:48.873592Z",
+  "branch": "soph/raise-api-body-cap",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/api/client.go",
+    "cmd/entire/cli/api/client_test.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "da4f6268745e",
+  "checkpoint_transcript_start": 31,
+  "token_usage": {
+    "input_tokens": 43,
+    "cache_creation_tokens": 309141,
+    "cache_read_tokens": 5096811,
+    "output_tokens": 20284,
+    "api_call_count": 38
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-19T14:17:48.829016Z",
+    "agent_lines": 55,
+    "agent_removed": 1,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 55,
+    "total_lines_changed": 56,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
