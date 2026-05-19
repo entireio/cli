@@ -1,0 +1,29 @@
+/simplify
+
+---
+
+/simplify all code on branch diff from main
+
+---
+
+extract things that are similar to review but not the othre things
+
+---
+
+commit then extract things that are similar to review but not the othre things
+
+---
+
+what is gitexec.go and why is it needed?
+
+---
+
+remove the entire search section from findings. I want the agents to use entire search but not put output in findings
+
+---
+
+nvm. instead of  Optional per-run prompt it should say investigation prompt but only if no seed doc. also get rid of the investigation attach command and make sure to clean up the code so there is no dead code
+
+---
+
+nvm. instead of  Optional per-run prompt it should say investigation prompt but only if no seed doc. then get rid of --topic flag.  also get rid of the investigation attach command and make sure to clean up the code so there is no dead code
