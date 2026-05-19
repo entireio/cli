@@ -1,0 +1,33 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "df0fb75a3046",
+  "strategy": "manual-commit",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/investigate/cmd.go",
+    "cmd/entire/cli/investigate/loop.go",
+    "cmd/entire/cli/investigate/loop_test.go",
+    "cmd/entire/cli/investigate/progress.go",
+    "cmd/entire/cli/investigate/progress_test.go",
+    "cmd/entire/cli/investigate/tui_model.go",
+    "cmd/entire/cli/investigate/tui_model_test.go",
+    "cmd/entire/cli/investigate/tui_sink.go",
+    "cmd/entire/cli/investigate/tui_text.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/df/0fb75a3046/0/metadata.json",
+      "transcript": "/df/0fb75a3046/0/transcript.jsonl",
+      "content_hash": "/df/0fb75a3046/0/transcript_hash.txt",
+      "prompt": "/df/0fb75a3046/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 128,
+    "cache_creation_tokens": 619991,
+    "cache_read_tokens": 14673992,
+    "output_tokens": 56696,
+    "api_call_count": 99
+  }
+}

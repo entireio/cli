@@ -1,0 +1,36 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "d9fc3447ba6e",
+  "strategy": "manual-commit",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/investigate/cmd.go",
+    "cmd/entire/cli/investigate/cmd_test.go",
+    "cmd/entire/cli/investigate/multipicker.go",
+    "cmd/entire/cli/investigate/multipicker_test.go",
+    "cmd/entire/cli/investigate/picker.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d9/fc3447ba6e/0/metadata.json",
+      "transcript": "/d9/fc3447ba6e/0/transcript.jsonl",
+      "content_hash": "/d9/fc3447ba6e/0/transcript_hash.txt",
+      "prompt": ""
+    },
+    {
+      "metadata": "/d9/fc3447ba6e/1/metadata.json",
+      "transcript": "/d9/fc3447ba6e/1/transcript.jsonl",
+      "content_hash": "/d9/fc3447ba6e/1/transcript_hash.txt",
+      "prompt": "/d9/fc3447ba6e/1/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 323,
+    "cache_creation_tokens": 403597,
+    "cache_read_tokens": 49458768,
+    "output_tokens": 151364,
+    "api_call_count": 221
+  },
+  "has_investigation": true
+}

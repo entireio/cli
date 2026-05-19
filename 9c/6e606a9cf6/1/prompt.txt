@@ -1,0 +1,144 @@
+use entire recall to give summary of entire review command changes in the last 2 days
+
+---
+
+can you make sure entire investigate follows same structure. for example investigation config should be local preference. should we have a view time line similar to drill in? etc...
+
+---
+
+do tier 2 and explain this Extract types/ subpackage with AgentInvestigator interface (mirror AgentReviewer) — refactors
+  spawn.Spawner callers
+
+---
+
+do it
+
+---
+
+1
+
+---
+
+plaes do it
+
+---
+
+<task-notification>
+<task-id>bs00s6z14</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-alisha--marvin-worktrees-cli-entire-labs-investigate/79b1faee-caf4-41da-b4c8-e345d75655fa/tasks/bs00s6z14.output</output-file>
+<status>completed</status>
+<summary>Background command "Full pre-commit gate (fmt + lint + test:ci)" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+continue plan
+
+---
+
+these failed. please investigate why. 2 INFO investigate:3/3 · 4nd run_id=0c8b1f0569c8 agent=codex turn=4 round=2 stance=request-changes plan_changed=true timeline_changed=true
+               2026/05/12 15:46:02 INFO investigate: turn start run_id=0c8b1f0569c8 agent=claude-code turn=⡿ 2026/05/12 15:52:00 INFO investigate: turn end run_id=0c8b1f0569c8 agent=claude-code turn=5 round=3 stance=unknown plan_changed=false timeline_changed=false
+Investigating: "Search returns 0 results for Claude Code checkpoints despite su
+Investigating: "Search returns 0 results for Claude Code checkpoints despite s…
+Round 3/3 · 5 of 6 turns · quorum 0/2 approvals
+
+Investigating: "Search returns 0 results for Claude Code checkpoints despite s…
+Round 3/3 · 6 of 6 turns · quorum 0/2 approvals
+
+AGENT                 STATUS        DURATION   TURN    APPROVED
+claude-code           ✗ failed      18m10s     3/3
+codex                 ✓ done        10m16s     3/3     ✗ changes
+
+Outcome: stalled
+2 agent(s) — 0 approved, 1 request-changes, 0 abstain, 1 unknown
+Press any key to exit.
+
+Outcome: stalled
+Investigation complete.
+Findings: /Users/alisha/.marvin/worktrees/cli/entire-labs-investigate/.entire/investigations/search-returns-0-results-for-claude-code-checkpoints-despite.md
+Timeline: /Users/alisha/.marvin/worktrees/cli/entire-labs-investigate/.entire/investigations/search-returns-0-results-for-claude-code-checkpoints-despite-timeline.md
+ also I don't like all the log output at the top when it first starts
+
+---
+
+I still see these logs Investigating: "Search returns 0 results for Claude Code checkpoints despite successful capture (CLI 0.6.1 + 0.6.2-nightly)" (run 0b8f3ae2d5f9)
+  Findings: /Users/alisha/.marvin/worktrees/cli/entire-labs-investigate/.entire/investigations/search-returns-0-results-for-claude-code-checkpoints-despite.md
+  Timeline: /Users/alisha/.marvin/worktrees/cli/entire-labs-investigate/.entire/investigations/search-returns-0-results-for-claude-code-checkpoints-despite-timeline.md
+Investigating: "Search returns 0 results for Claude Code checkpoints despite successful capture (CLI 0.6.1 + 0.6.2-nightly)" (r…
+Round 1/3 · 0 of 6 turns · quorum 0/2 approvals
+
+---
+
+/tmp/entire investigate --continue 678fba712469 doesn't work. findings doesn't really work either ~/.marvin/worktrees/cli/entire-labs-investigate (entire-labs-investigate) $ /tmp/entire investigate --findings
+Investigation findings from 678fba712469 · Search returns 0 results for Claude Code checkpoints despite successful capture (CLI 0.6.1 + 0.6.2-nightly) · claude-code, codex · 16h ago
+
+Findings: /Users/alisha/.marvin/worktrees/cli/entire-labs-investigate/.entire/investigations/search-returns-0-results-for-claude-code-checkpoints-despite.md
+Timeline: /Users/alisha/.marvin/worktrees/cli/entire-labs-investigate/.entire/investigations/search-returns-0-results-for-claude-code-checkpoints-despite-timeline.md
+Agents:   claude-code, codex
+Outcome:  paused
+
+Last stance per agent:
+  claude-code: unknown
+  codex: unknown
+
+To apply these findings:
+  entire investigate fix 678fba712469
+
+---
+
+is it possible to clean up an investigation like delete it
+
+---
+
+shouldn't the workspace docs be in the <git-common-dir>/entire-investigations
+
+---
+
+shouldn't the workspace docs be in the <git-common-dir>/entire-investigations and each one unique
+
+---
+
+but don't we want the findings and timeline to be saved in git? where does entire reviwe store the review md files?
+
+---
+
+discussion: explain this more "Review content itself
+  ends up condensed into checkpoint metadata on the entire/checkpoints/v1 branch"
+
+---
+
+so the agent transcripts for the investigation same thing happens to them right? so do we need timeline.md?
+
+---
+
+what about state.json
+
+---
+
+lets discuss Ill tell you when to plan. I'm leading this discussion. I want to simplify this. How can we get rid of timeline.md. can we just use state.json for that? and can that be cleaned up once complete? how does entire review work. what is in manifests.json?
+
+---
+
+I want 1,2 and 3. I also don't like the current way findings.md works out. Its numbered and has a timeline feel. what I want is each agent looks at whats in findings.md review, verify and change anything in accurate so that the final version is the most accurate
+
+---
+
+I want 1,2 and 3. I also don't like the current way findings.md works out. Its numbered and has a
+   timeline feel. what I want is each agent looks at whats in findings.md review, verify and change
+   anything in accurate so that the final version is the most accurate
+
+---
+
+1. all the decisions will be in the agent transcripts
+2. b
+3. why not state.json?
+4. c
+
+---
+
+All in git-common-dir. thats how entire review works correct?
+
+---
+
+yes. implement

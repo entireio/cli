@@ -1,0 +1,49 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "aaec4d56c1dc",
+  "session_id": "f65e0736-a369-493d-bf75-f7ed3440bead",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-15T22:44:18.62593Z",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 2,
+  "files_touched": [],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "840f439201ca",
+  "token_usage": {
+    "input_tokens": 883,
+    "cache_creation_tokens": 2628579,
+    "cache_read_tokens": 271588226,
+    "output_tokens": 388801,
+    "api_call_count": 629
+  },
+  "session_metrics": {
+    "turn_count": 20
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 44,
+      "user_lines_removed": 72,
+      "agent_lines_added": 3,
+      "agent_lines_removed": 30,
+      "user_added_per_file": {
+        "cmd/entire/cli/agent/codex/reviewer_test.go": 3,
+        "cmd/entire/cli/agent/codex/spawner.go": 17,
+        "cmd/entire/cli/agent/codex/spawner_test.go": 24
+      },
+      "user_removed_per_file": {
+        "cmd/entire/cli/agent/codex/reviewer_test.go": 3,
+        "cmd/entire/cli/agent/codex/spawner.go": 39,
+        "cmd/entire/cli/agent/codex/spawner_test.go": 30
+      }
+    }
+  ]
+}

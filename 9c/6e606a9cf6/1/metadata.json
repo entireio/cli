@@ -1,0 +1,83 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "9c6e606a9cf6",
+  "session_id": "f65e0736-a369-493d-bf75-f7ed3440bead",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-15T17:17:25.490389Z",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "cmd/entire/cli/investigate/cmd.go",
+    "cmd/entire/cli/investigate/cmd_test.go",
+    "cmd/entire/cli/investigate/findings.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "bd41f023da90",
+  "token_usage": {
+    "input_tokens": 595,
+    "cache_creation_tokens": 2402090,
+    "cache_read_tokens": 130757576,
+    "output_tokens": 267464,
+    "api_call_count": 416
+  },
+  "session_metrics": {
+    "turn_count": 8
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-15T17:17:25.284659Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 595,
+    "human_modified": 51,
+    "human_removed": 0,
+    "total_committed": 595,
+    "total_lines_changed": 1413,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 3,
+      "agent_lines_removed": 30
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 3,
+      "agent_lines_removed": 30
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 3,
+      "agent_lines_removed": 30
+    },
+    {
+      "checkpoint_number": 6,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 3,
+      "agent_lines_removed": 30
+    },
+    {
+      "checkpoint_number": 7,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 3,
+      "agent_lines_removed": 30
+    }
+  ]
+}

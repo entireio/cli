@@ -1,0 +1,35 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "d9fc3447ba6e",
+  "session_id": "f65e0736-a369-493d-bf75-f7ed3440bead",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-12T20:00:13.041074Z",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 1,
+  "files_touched": [],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "ced82ab2ec24",
+  "token_usage": {
+    "input_tokens": 323,
+    "cache_creation_tokens": 403597,
+    "cache_read_tokens": 49458768,
+    "output_tokens": 151364,
+    "api_call_count": 221
+  },
+  "session_metrics": {
+    "turn_count": 6
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 1,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/scheduled_tasks.lock": 1
+      }
+    }
+  ]
+}

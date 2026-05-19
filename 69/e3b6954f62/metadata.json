@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "69e3b6954f62",
+  "strategy": "manual-commit",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/reviewer_test.go",
+    "cmd/entire/cli/agent/claudecode/spawner.go",
+    "cmd/entire/cli/agent/claudecode/spawner_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/69/e3b6954f62/0/metadata.json",
+      "transcript": "/69/e3b6954f62/0/transcript.jsonl",
+      "content_hash": "/69/e3b6954f62/0/transcript_hash.txt",
+      "prompt": "/69/e3b6954f62/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 795,
+    "cache_creation_tokens": 2577363,
+    "cache_read_tokens": 221824063,
+    "output_tokens": 362073,
+    "api_call_count": 561
+  }
+}
