@@ -1,0 +1,549 @@
+You are reviewing one semantic feature for clawpatch.
+
+Return strict JSON only. No markdown fences.
+
+Project:
+{
+  "name": "cli",
+  "detected": {
+    "languages": [
+      "go"
+    ],
+    "frameworks": [],
+    "packageManagers": [],
+    "commands": {
+      "typecheck": "go test ./...",
+      "lint": null,
+      "format": null,
+      "test": "go test ./..."
+    }
+  }
+}
+
+Feature:
+{
+  "schemaVersion": 1,
+  "featureId": "feat_cli-command_b26a734ef3",
+  "title": "Go command testreport",
+  "summary": "Go command package e2e/cmd/testreport with 1 source file(s).",
+  "kind": "cli-command",
+  "source": "go-package",
+  "confidence": "medium",
+  "entrypoints": [
+    {
+      "path": "e2e/cmd/testreport/main.go",
+      "symbol": "main",
+      "route": null,
+      "command": null
+    }
+  ],
+  "ownedFiles": [
+    {
+      "path": "e2e/cmd/testreport/main.go",
+      "reason": "go package source"
+    }
+  ],
+  "contextFiles": [
+    {
+      "path": "cmd/entire/cli/interactive/interactive.go",
+      "reason": "imported package github.com/entireio/cli/cmd/entire/cli/interactive"
+    }
+  ],
+  "tests": [],
+  "tags": [
+    "go",
+    "cli"
+  ],
+  "trustBoundaries": [
+    "user-input",
+    "filesystem",
+    "process-exec",
+    "network"
+  ],
+  "status": "claimed",
+  "lock": {
+    "lockedByRunId": "20260519T175303-e13c5e",
+    "lockedAt": "2026-05-19T17:53:03.057Z",
+    "hostname": "Peytons-MacBook-Pro.local",
+    "pid": 43571
+  },
+  "findingIds": [],
+  "patchAttemptIds": [],
+  "analysisHistory": [],
+  "createdAt": "2026-05-19T17:52:59.936Z",
+  "updatedAt": "2026-05-19T17:53:03.058Z"
+}
+
+Review categories:
+- correctness bugs
+- security issues
+- race/concurrency bugs
+- data loss/corruption
+- resource leaks
+- bad error handling
+- permission/auth gaps
+- API contract mismatches
+- missing/weak tests
+- release/build hazards
+- maintainability risks with concrete impact
+
+
+
+Inspect owned files, context files, and linked tests. Treat included tests as first-class
+evidence of intended behavior. If tests contradict a suspected bug, either skip it or
+downgrade confidence and explain the uncertainty. Avoid reporting behavior as a bug
+solely because a helper name implies a broader contract. Deduplicate sibling/root-cause
+issues: when the same bug pattern appears in multiple owned files, emit one finding
+with multiple evidence refs instead of separate one-off findings.
+
+Avoid speculative low-evidence findings. Evidence must point at included files.
+
+JSON shape:
+{
+  "findings": [
+    {
+      "title": "string",
+      "category": "bug|security|performance|concurrency|api-contract|data-loss|test-gap|docs-gap|build-release|maintainability",
+      "severity": "critical|high|medium|low",
+      "confidence": "high|medium|low",
+      "evidence": [{"path":"string","startLine":1,"endLine":1,"symbol":null,"quote":null}],
+      "reasoning": "string",
+      "reproduction": null,
+      "recommendation": "string",
+      "whyTestsDoNotAlreadyCoverThis": "string",
+      "suggestedRegressionTest": "string or null",
+      "minimumFixScope": "string"
+    }
+  ],
+  "inspected": {"files":["string"],"symbols":["string"],"notes":["string"]}
+}
+
+Files:
+--- e2e/cmd/testreport/main.go
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
+)
+
+type TestEvent struct {
+	Action  string  `json:"Action"`
+	Package string  `json:"Package"`
+	Test    string  `json:"Test"`
+	Elapsed float64 `json:"Elapsed"`
+	Output  string  `json:"Output"`
+}
+
+type subtest struct {
+	name    string
+	action  string // pass, fail, skip
+	elapsed float64
+	output  []string
+}
+
+type parentTest struct {
+	name     string
+	action   string
+	elapsed  float64
+	children []*subtest
+}
+
+func main() {
+	colorFlag := flag.Bool("color", false, "Force color output (default: auto-detect TTY)")
+	outputFile := flag.String("o", "", "Write output to file (ANSI + .nocolor.txt)")
+	flag.Parse()
+
+	useColor := *colorFlag || interactive.IsTerminalWriter(os.Stdout)
+
+	r, err := openInput(flag.Arg(0))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	parents := parseEvents(r)
+	report := renderReport(parents, useColor)
+
+	fmt.Print(report)
+
+	if *outputFile != "" {
+		colorReport := renderReport(parents, true)
+		if err := os.WriteFile(*outputFile, []byte(colorReport), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "error writing %s: %v\n", *outputFile, err)
+			os.Exit(1)
+		}
+		noColorFile := strings.TrimSuffix(*outputFile, ".txt") + ".nocolor.txt"
+		plainReport := stripANSI(colorReport)
+		if err := os.WriteFile(noColorFile, []byte(plainReport), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "error writing %s: %v\n", noColorFile, err)
+			os.Exit(1)
+		}
+	}
+}
+
+func openInput(path string) (io.Reader, error) {
+	if path == "" {
+		return os.Stdin, nil
+	}
+	return os.Open(path)
+}
+
+func parseEvents(r io.Reader) []*parentTest {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+
+	type testInfo struct {
+		action  string
+		elapsed float64
+		output  []string
+	}
+
+	tests := make(map[string]*testInfo)
+
+	for scanner.Scan() {
+		var ev TestEvent
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+			continue
+		}
+		if ev.Test == "" {
+			continue
+		}
+
+		info, ok := tests[ev.Test]
+		if !ok {
+			info = &testInfo{}
+			tests[ev.Test] = info
+		}
+
+		switch ev.Action {
+		case "pass", "fail", "skip":
+			info.action = ev.Action
+			info.elapsed = ev.Elapsed
+		case "output":
+			info.output = append(info.output, ev.Output)
+		}
+	}
+
+	// Group by parent
+	parentMap := make(map[string]*parentTest)
+	for name, info := range tests {
+		parentName, childName := splitTestName(name)
+		if childName == "" {
+			// This is a parent test (or standalone)
+			p, ok := parentMap[parentName]
+			if !ok {
+				p = &parentTest{name: parentName}
+				parentMap[parentName] = p
+			}
+			p.action = info.action
+			p.elapsed = info.elapsed
+			continue
+		}
+
+		p, ok := parentMap[parentName]
+		if !ok {
+			p = &parentTest{name: parentName}
+			parentMap[parentName] = p
+		}
+		p.children = append(p.children, &subtest{
+			name:    childName,
+			action:  info.action,
+			elapsed: info.elapsed,
+			output:  info.output,
+		})
+	}
+
+	// Sort parents alphabetically, children alphabetically
+	var result []*parentTest
+	for _, p := range parentMap {
+		sort.Slice(p.children, func(i, j int) bool {
+			return p.children[i].name < p.children[j].name
+		})
+		result = append(result, p)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].name < result[j].name
+	})
+
+	return result
+}
+
+func splitTestName(name string) (parent, child string) {
+	parent, child, ok := strings.Cut(name, "/")
+	if !ok {
+		return name, ""
+	}
+	return parent, child
+}
+
+func renderReport(parents []*parentTest, color bool) string {
+	var b strings.Builder
+
+	// Count totals
+	var total, passed, failed, skipped int
+	for _, p := range parents {
+		total++
+		switch p.action {
+		case "pass":
+			passed++
+		case "fail":
+			failed++
+		case "skip":
+			skipped++
+		}
+	}
+
+	// Header
+	b.WriteString("E2E Test Report\n")
+	b.WriteString("═══════════════\n\n")
+	fmt.Fprintf(&b, "Total: %d  Passed: %d  Failed: %d  Skipped: %d\n\n", total, passed, failed, skipped)
+
+	for _, p := range parents {
+		icon := statusIcon(p.action, color)
+		if p.elapsed > 0 {
+			fmt.Fprintf(&b, "%s %s (%.1fs)\n", icon, p.name, p.elapsed)
+		} else {
+			fmt.Fprintf(&b, "%s %s\n", icon, p.name)
+		}
+
+		for _, c := range p.children {
+			cIcon := statusIcon(c.action, color)
+			switch c.action {
+			case "skip":
+				reason := extractSkipReason(c.output)
+				fmt.Fprintf(&b, "  %s %-20s SKIP", cIcon, c.name)
+				if reason != "" {
+					fmt.Fprintf(&b, ": %s", reason)
+				}
+				b.WriteString("\n")
+			case "fail":
+				fmt.Fprintf(&b, "  %s %-20s %.1fs\n", cIcon, c.name, c.elapsed)
+				for _, line := range filterFailureOutput(c.output) {
+					fmt.Fprintf(&b, "      %s\n", line)
+				}
+			default:
+				fmt.Fprintf(&b, "  %s %-20s %.1fs\n", cIcon, c.name, c.elapsed)
+			}
+		}
+
+		b.WriteString("\n")
+	}
+
+	// Rerun commands for failed tests
+	if failed > 0 {
+		b.WriteString("Rerun failed tests:\n")
+		for _, p := range parents {
+			if p.action != "fail" {
+				continue
+			}
+			var failedAgents []string
+			for _, c := range p.children {
+				if c.action == "fail" {
+					failedAgents = append(failedAgents, c.name)
+				}
+			}
+			if len(failedAgents) > 0 {
+				for _, agent := range failedAgents {
+					fmt.Fprintf(&b, "  mise run test:e2e --agent %s %s\n", agent, p.name)
+				}
+			} else {
+				// Standalone test with no subtests
+				fmt.Fprintf(&b, "  mise run test:e2e %s\n", p.name)
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	// Footer banner
+	if failed > 0 {
+		banner := fmt.Sprintf("💥 FAILED (%d/%d passed) 💥", passed, total)
+		if color {
+			fmt.Fprintf(&b, "%s%s%s\n", colorRed, banner, colorReset)
+		} else {
+			b.WriteString(banner + "\n")
+		}
+	} else {
+		banner := fmt.Sprintf("🎉 ALL %d TESTS PASSED 🎉", total)
+		if color {
+			fmt.Fprintf(&b, "%s%s%s\n", colorGreen, banner, colorReset)
+		} else {
+			b.WriteString(banner + "\n")
+		}
+	}
+	b.WriteString("\n")
+
+	return b.String()
+}
+
+const (
+	colorGreen  = "\033[32m"
+	colorRed    = "\033[31m"
+	colorYellow = "\033[33m"
+	colorReset  = "\033[0m"
+)
+
+func statusIcon(action string, color bool) string {
+	switch action {
+	case "pass":
+		if color {
+			return colorGreen + "✓" + colorReset
+		}
+		return "✓"
+	case "fail":
+		if color {
+			return colorRed + "✗" + colorReset
+		}
+		return "✗"
+	case "skip":
+		if color {
+			return colorYellow + "−" + colorReset
+		}
+		return "−"
+	default:
+		return "?"
+	}
+}
+
+func extractSkipReason(output []string) string {
+	for _, line := range output {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "--- SKIP") || strings.HasPrefix(trimmed, "=== RUN") {
+			continue
+		}
+		if trimmed == "" {
+			continue
+		}
+		return trimmed
+	}
+	return ""
+}
+
+func filterFailureOutput(output []string) []string {
+	var lines []string
+	for _, line := range output {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "=== RUN") ||
+			strings.HasPrefix(trimmed, "=== PAUSE") ||
+			strings.HasPrefix(trimmed, "=== CONT") ||
+			strings.HasPrefix(trimmed, "--- FAIL") ||
+			strings.HasPrefix(trimmed, "--- PASS") {
+			continue
+		}
+		lines = append(lines, trimmed)
+	}
+	return lines
+}
+
+var ansiRegexp = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+func stripANSI(s string) string {
+	return ansiRegexp.ReplaceAllString(s, "")
+}
+
+
+--- cmd/entire/cli/interactive/interactive.go
+// Package interactive provides TTY-related helpers shared between the cli
+// and strategy packages without inducing an import cycle (strategy cannot
+// import cli).
+package interactive
+
+import (
+	"io"
+	"os"
+	"testing"
+
+	"golang.org/x/term"
+)
+
+// EnvTestTTY is the env-var name for the force-interactive test override.
+//   - EnvTestTTY=1 → CanPromptInteractively returns true.
+//   - EnvTestTTY set to any other value → returns false.
+//   - EnvTestTTY unset → real detection via testing.Testing(), agent
+//     sentinels, CI, then /dev/tty probe.
+const EnvTestTTY = "ENTIRE_TEST_TTY"
+
+// CanPromptInteractively reports whether interactive confirmation prompts
+// (huh forms, yes/no questions, etc.) can be shown. Returns false in CI,
+// agent subprocesses that inherit a TTY but can't respond to prompts,
+// and other environments without a controlling TTY.
+//
+// Precedence (first match wins):
+//  1. EnvTestTTY=1 forces interactive ON; any other non-empty value forces OFF.
+//  2. testing.Testing() — `go test` runs default to OFF so in-process tests
+//     don't hang on developer terminals that happen to have a real /dev/tty.
+//     Subprocess tests must spawn via execx.NonInteractive (or set EnvTestTTY).
+//  3. Agent sentinels — vendor-set by agent subprocesses.
+//  4. CI=<non-empty-non-false> — de-facto CI convention.
+//  5. /dev/tty probe.
+func CanPromptInteractively() bool {
+	if v := os.Getenv(EnvTestTTY); v != "" {
+		return v == "1"
+	}
+	if testing.Testing() {
+		return false
+	}
+	if isAgentSubprocessEnv() {
+		return false
+	}
+	// CI=<non-empty> is the de-facto CI-provider convention (GitHub Actions,
+	// CircleCI, GitLab, Travis, Buildkite). Self-hosted runners expose /dev/tty,
+	// so the probe below isn't enough — an interactive prompt on CI hangs.
+	// CI=false is the `is-ci` escape hatch for developers who need to override
+	// an inherited value.
+	if v := os.Getenv("CI"); v != "" && v != "false" {
+		return false
+	}
+
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	_ = tty.Close()
+	return true
+}
+
+// UnderTest reports whether the process is running in a test context — either
+// inside `go test` (testing.Testing()) or with EnvTestTTY explicitly set. Use
+// to skip operations that read from the real terminal (e.g. opening /dev/tty)
+// even when CanPromptInteractively() returns true.
+func UnderTest() bool {
+	return testing.Testing() || os.Getenv(EnvTestTTY) != ""
+}
+
+// isAgentSubprocessEnv reports whether the env indicates we're running inside
+// an agent subprocess that inherited a TTY but can't respond to prompts:
+//   - GEMINI_CLI=1: Gemini CLI shell tool (https://geminicli.com/docs/tools/shell/)
+//   - COPILOT_CLI=1: Copilot CLI hook subprocesses (v0.0.421+)
+//   - PI_CODING_AGENT=true: Pi Coding Agent shell tool
+//   - GIT_TERMINAL_PROMPT=0: caller (CI, Factory AI Droid, etc.) asked git
+//     to stop prompting; respect it from git-hook context too.
+func isAgentSubprocessEnv() bool {
+	return os.Getenv("GEMINI_CLI") != "" ||
+		os.Getenv("COPILOT_CLI") != "" ||
+		os.Getenv("PI_CODING_AGENT") != "" ||
+		os.Getenv("GIT_TERMINAL_PROMPT") == "0"
+}
+
+// IsTerminalWriter reports whether w is an *os.File backed by a terminal.
+// Use for deciding on color, pager, progress bars, or other writer-scoped
+// TTY formatting. For "can I prompt the user?" use CanPromptInteractively.
+func IsTerminalWriter(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(f.Fd())) //nolint:gosec // G115: uintptr->int is safe for fd
+}
