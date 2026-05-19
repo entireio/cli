@@ -1,0 +1,8 @@
+{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/private/tmp","session_id":"test","model":"Composer 2.5 Fast","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"say hi"}]},"session_id":"test"}
+{"type":"thinking","subtype":"delta","text":"Hi","session_id":"test","timestamp_ms":1}
+{"type":"thinking","subtype":"completed","session_id":"test","timestamp_ms":2}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}]},"session_id":"test","timestamp_ms":3}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":", world."}]},"session_id":"test","timestamp_ms":4}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello, world."}]},"session_id":"test"}
+{"type":"result","subtype":"success","duration_ms":3372,"is_error":false,"result":"Hello, world.","session_id":"test","usage":{"inputTokens":9141,"outputTokens":268,"cacheReadTokens":4608,"cacheWriteTokens":0}}

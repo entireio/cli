@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/private/tmp","session_id":"test","model":"Composer 2.5 Fast","permissionMode":"default"}
+{"type":"result","subtype":"error_max_turns","duration_ms":100,"is_error":true,"result":"Max turns exceeded","session_id":"test"}
