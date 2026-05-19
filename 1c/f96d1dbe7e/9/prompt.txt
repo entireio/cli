@@ -1,0 +1,1915 @@
+You are reviewing one semantic feature for clawpatch.
+
+Return strict JSON only. No markdown fences.
+
+Project:
+{
+  "name": "cli",
+  "detected": {
+    "languages": [
+      "go"
+    ],
+    "frameworks": [],
+    "packageManagers": [],
+    "commands": {
+      "typecheck": "go test ./...",
+      "lint": null,
+      "format": null,
+      "test": "go test ./..."
+    }
+  }
+}
+
+Feature:
+{
+  "schemaVersion": 1,
+  "featureId": "feat_library_02c90f2a9e",
+  "title": "Go package logging",
+  "summary": "Go package cmd/entire/cli/logging with 2 source file(s).",
+  "kind": "library",
+  "source": "go-package",
+  "confidence": "medium",
+  "entrypoints": [
+    {
+      "path": "cmd/entire/cli/logging/context.go",
+      "symbol": null,
+      "route": null,
+      "command": null
+    }
+  ],
+  "ownedFiles": [
+    {
+      "path": "cmd/entire/cli/logging/context.go",
+      "reason": "go package source"
+    },
+    {
+      "path": "cmd/entire/cli/logging/logger.go",
+      "reason": "go package source"
+    }
+  ],
+  "contextFiles": [
+    {
+      "path": "cmd/entire/cli/logging/context_test.go",
+      "reason": "go package test"
+    },
+    {
+      "path": "cmd/entire/cli/logging/logger_test.go",
+      "reason": "go package test"
+    },
+    {
+      "path": "cmd/entire/cli/agent/types/agent.go",
+      "reason": "imported package github.com/entireio/cli/cmd/entire/cli/agent/types"
+    },
+    {
+      "path": "cmd/entire/cli/paths/paths.go",
+      "reason": "imported package github.com/entireio/cli/cmd/entire/cli/paths"
+    },
+    {
+      "path": "cmd/entire/cli/paths/transcript.go",
+      "reason": "imported package github.com/entireio/cli/cmd/entire/cli/paths"
+    },
+    {
+      "path": "cmd/entire/cli/paths/worktree.go",
+      "reason": "imported package github.com/entireio/cli/cmd/entire/cli/paths"
+    },
+    {
+      "path": "cmd/entire/cli/validation/validators.go",
+      "reason": "imported package github.com/entireio/cli/cmd/entire/cli/validation"
+    }
+  ],
+  "tests": [
+    {
+      "path": "cmd/entire/cli/logging/context_test.go",
+      "command": "go test ./..."
+    },
+    {
+      "path": "cmd/entire/cli/logging/logger_test.go",
+      "command": "go test ./..."
+    }
+  ],
+  "tags": [
+    "go",
+    "package"
+  ],
+  "trustBoundaries": [],
+  "status": "claimed",
+  "lock": {
+    "lockedByRunId": "20260519T175303-e13c5e",
+    "lockedAt": "2026-05-19T17:53:03.057Z",
+    "hostname": "Peytons-MacBook-Pro.local",
+    "pid": 43571
+  },
+  "findingIds": [],
+  "patchAttemptIds": [],
+  "analysisHistory": [],
+  "createdAt": "2026-05-19T17:52:59.936Z",
+  "updatedAt": "2026-05-19T17:53:03.058Z"
+}
+
+Review categories:
+- correctness bugs
+- security issues
+- race/concurrency bugs
+- data loss/corruption
+- resource leaks
+- bad error handling
+- permission/auth gaps
+- API contract mismatches
+- missing/weak tests
+- release/build hazards
+- maintainability risks with concrete impact
+
+
+
+Inspect owned files, context files, and linked tests. Treat included tests as first-class
+evidence of intended behavior. If tests contradict a suspected bug, either skip it or
+downgrade confidence and explain the uncertainty. Avoid reporting behavior as a bug
+solely because a helper name implies a broader contract. Deduplicate sibling/root-cause
+issues: when the same bug pattern appears in multiple owned files, emit one finding
+with multiple evidence refs instead of separate one-off findings.
+
+Avoid speculative low-evidence findings. Evidence must point at included files.
+
+JSON shape:
+{
+  "findings": [
+    {
+      "title": "string",
+      "category": "bug|security|performance|concurrency|api-contract|data-loss|test-gap|docs-gap|build-release|maintainability",
+      "severity": "critical|high|medium|low",
+      "confidence": "high|medium|low",
+      "evidence": [{"path":"string","startLine":1,"endLine":1,"symbol":null,"quote":null}],
+      "reasoning": "string",
+      "reproduction": null,
+      "recommendation": "string",
+      "whyTestsDoNotAlreadyCoverThis": "string",
+      "suggestedRegressionTest": "string or null",
+      "minimumFixScope": "string"
+    }
+  ],
+  "inspected": {"files":["string"],"symbols":["string"],"notes":["string"]}
+}
+
+Files:
+--- cmd/entire/cli/logging/context.go
+package logging
+
+import (
+	"context"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+)
+
+// Context keys for logging values.
+// Using private types to avoid key collisions.
+type contextKey int
+
+const (
+	sessionIDKey contextKey = iota
+	parentSessionIDKey
+	toolCallIDKey
+	componentKey
+	agentKey
+)
+
+// WithSession adds a session ID to the context.
+// If the context already has a session ID, it becomes the parent session ID.
+func WithSession(ctx context.Context, sessionID string) context.Context {
+	// If there's an existing session, it becomes the parent
+	existing := SessionIDFromContext(ctx)
+	if existing != "" && existing != sessionID {
+		ctx = context.WithValue(ctx, parentSessionIDKey, existing)
+	}
+	return context.WithValue(ctx, sessionIDKey, sessionID)
+}
+
+// WithParentSession explicitly sets the parent session ID.
+// Use this when you need to set the parent explicitly rather than
+// having it inferred from an existing session.
+func WithParentSession(ctx context.Context, parentSessionID string) context.Context {
+	return context.WithValue(ctx, parentSessionIDKey, parentSessionID)
+}
+
+// WithToolCall adds a tool call ID to the context.
+func WithToolCall(ctx context.Context, toolCallID string) context.Context {
+	return context.WithValue(ctx, toolCallIDKey, toolCallID)
+}
+
+// WithComponent adds a component name to the context.
+// Component names help identify the subsystem generating logs (e.g., "hooks", "strategy", "session").
+func WithComponent(ctx context.Context, component string) context.Context {
+	return context.WithValue(ctx, componentKey, component)
+}
+
+// WithAgent adds an agent name to the context.
+// Agent names identify the AI agent generating activity (e.g., "claude-code", "cursor", "aider").
+func WithAgent(ctx context.Context, agentName types.AgentName) context.Context {
+	return context.WithValue(ctx, agentKey, string(agentName))
+}
+
+// SessionIDFromContext extracts the session ID from the context.
+// Returns empty string if not set.
+func SessionIDFromContext(ctx context.Context) string {
+	if v := ctx.Value(sessionIDKey); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// ParentSessionIDFromContext extracts the parent session ID from the context.
+// Returns empty string if not set.
+func ParentSessionIDFromContext(ctx context.Context) string {
+	if v := ctx.Value(parentSessionIDKey); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// ToolCallIDFromContext extracts the tool call ID from the context.
+// Returns empty string if not set.
+func ToolCallIDFromContext(ctx context.Context) string {
+	if v := ctx.Value(toolCallIDKey); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// ComponentFromContext extracts the component name from the context.
+// Returns empty string if not set.
+func ComponentFromContext(ctx context.Context) string {
+	if v := ctx.Value(componentKey); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// AgentFromContext extracts the agent name from the context.
+// Returns empty string if not set.
+func AgentFromContext(ctx context.Context) string {
+	if v := ctx.Value(agentKey); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+
+--- cmd/entire/cli/logging/logger.go
+// Package logging provides structured logging for the Entire CLI using slog.
+//
+// Usage:
+//
+//	// Initialize logger for a session (typically at session start)
+//	if err := logging.Init(sessionID); err != nil {
+//	    // handle error
+//	}
+//	defer logging.Close()
+//
+//	// Add context values
+//	ctx = logging.WithSession(ctx, sessionID)
+//	ctx = logging.WithToolCall(ctx, toolCallID)
+//
+//	// Log with context - session/tool IDs extracted automatically
+//	logging.Info(ctx, "hook invoked",
+//	    slog.String("hook", hookName),
+//	    slog.String("branch", branch),
+//	)
+package logging
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
+)
+
+// LogLevelEnvVar is the environment variable that controls log level.
+const LogLevelEnvVar = "ENTIRE_LOG_LEVEL"
+
+// LogsDir is the directory where log files are stored (relative to repo root).
+const LogsDir = ".entire/logs"
+
+var (
+	// logger is the package-level logger instance
+	logger *slog.Logger
+
+	// logFile holds the current log file handle for cleanup
+	logFile *os.File
+
+	// logBufWriter wraps logFile with buffered I/O for performance
+	logBufWriter *bufio.Writer
+
+	// currentSessionID stores the session ID from Init() to include in all logs
+	currentSessionID string
+
+	// mu protects logger, logFile, logBufWriter, and currentSessionID
+	mu sync.RWMutex
+
+	// logLevelGetter is an optional callback to get log level from settings.
+	// Set by SetLogLevelGetter before Init is called.
+	logLevelGetter func() string
+)
+
+// SetLogLevelGetter sets a callback function to get the log level from settings.
+// This allows the logging package to read settings without a circular dependency.
+// The callback is only used if ENTIRE_LOG_LEVEL env var is not set.
+func SetLogLevelGetter(getter func() string) {
+	mu.Lock()
+	defer mu.Unlock()
+	logLevelGetter = getter
+}
+
+// Init initializes the logger for a session, writing JSON logs to
+// .entire/logs/entire.log.
+//
+// If sessionID is non-empty, it is stored as an slog attribute on every log line for filtering.
+// If the log file cannot be created, falls back to stderr.
+// Log level is controlled by ENTIRE_LOG_LEVEL environment variable.
+func Init(ctx context.Context, sessionID string) error {
+	// Validate session ID if provided (used only for the slog attribute, not the filename)
+	if sessionID != "" {
+		if err := validation.ValidateSessionID(sessionID); err != nil {
+			return fmt.Errorf("invalid session ID for logging: %w", err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Close any existing log file (flush buffer first)
+	if logBufWriter != nil {
+		_ = logBufWriter.Flush()
+		logBufWriter = nil
+	}
+	if logFile != nil {
+		_ = logFile.Close()
+		logFile = nil
+	}
+
+	// Get log level from environment first, then settings
+	levelStr := os.Getenv(LogLevelEnvVar)
+	if levelStr == "" && logLevelGetter != nil {
+		levelStr = logLevelGetter()
+	}
+	level := parseLogLevel(levelStr)
+
+	// Warn if invalid level was provided
+	if levelStr != "" && !isValidLogLevel(levelStr) {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: invalid log level %q, defaulting to INFO\n", levelStr)
+	}
+
+	// Determine log file path
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		// Fall back to current directory
+		repoRoot = "."
+	}
+
+	logsPath := filepath.Join(repoRoot, LogsDir)
+	if err := os.MkdirAll(logsPath, 0o750); err != nil {
+		// Fall back to stderr
+		logger = createLogger(os.Stderr, level)
+		return nil
+	}
+
+	logFilePath := filepath.Join(logsPath, "entire.log")
+	f, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // fixed filename, not user-controlled
+	if err != nil {
+		// Fall back to stderr
+		logger = createLogger(os.Stderr, level)
+		return nil
+	}
+
+	logFile = f
+	logBufWriter = bufio.NewWriterSize(f, 8192) // 8KB buffer for batched writes
+	logger = createLogger(logBufWriter, level)
+	currentSessionID = sessionID
+
+	return nil
+}
+
+// Close closes the log file if one is open.
+// Flushes any buffered data before closing.
+// Safe to call multiple times.
+func Close() {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if logBufWriter != nil {
+		_ = logBufWriter.Flush()
+		logBufWriter = nil
+	}
+	if logFile != nil {
+		_ = logFile.Close()
+		logFile = nil
+	}
+	currentSessionID = ""
+}
+
+// resetLogger resets the logger to nil (for testing).
+func resetLogger() {
+	mu.Lock()
+	defer mu.Unlock()
+	logger = nil
+	currentSessionID = ""
+	if logBufWriter != nil {
+		_ = logBufWriter.Flush()
+		logBufWriter = nil
+	}
+	if logFile != nil {
+		_ = logFile.Close()
+		logFile = nil
+	}
+}
+
+// createLogger creates a JSON logger writing to the given writer at the specified level.
+func createLogger(w io.Writer, level slog.Level) *slog.Logger {
+	opts := &slog.HandlerOptions{
+		Level: level,
+	}
+	handler := slog.NewJSONHandler(w, opts)
+	return slog.New(handler)
+}
+
+// parseLogLevel parses a log level string to slog.Level.
+// Returns slog.LevelInfo for empty or invalid values.
+func parseLogLevel(s string) slog.Level {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "DEBUG":
+		return slog.LevelDebug
+	case "INFO":
+		return slog.LevelInfo
+	case "WARN", "WARNING":
+		return slog.LevelWarn
+	case "ERROR":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// isValidLogLevel checks if the given string is a valid log level.
+func isValidLogLevel(s string) bool {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "DEBUG", "INFO", "WARN", "WARNING", "ERROR", "":
+		return true
+	default:
+		return false
+	}
+}
+
+// Debug logs at DEBUG level with context values automatically extracted.
+func Debug(ctx context.Context, msg string, attrs ...any) {
+	log(ctx, slog.LevelDebug, msg, attrs...)
+}
+
+// Info logs at INFO level with context values automatically extracted.
+func Info(ctx context.Context, msg string, attrs ...any) {
+	log(ctx, slog.LevelInfo, msg, attrs...)
+}
+
+// Warn logs at WARN level with context values automatically extracted.
+func Warn(ctx context.Context, msg string, attrs ...any) {
+	log(ctx, slog.LevelWarn, msg, attrs...)
+}
+
+// Error logs at ERROR level with context values automatically extracted.
+func Error(ctx context.Context, msg string, attrs ...any) {
+	log(ctx, slog.LevelError, msg, attrs...)
+}
+
+// LogDuration logs a message with duration_ms calculated from the start time.
+// The level parameter specifies the log level (use slog.LevelDebug, slog.LevelInfo, etc).
+// Designed for use with defer:
+//
+//	defer logging.LogDuration(ctx, slog.LevelInfo, "operation completed", time.Now())
+//
+// Or with additional attrs:
+//
+//	defer logging.LogDuration(ctx, slog.LevelDebug, "hook executed", start,
+//	    slog.String("hook", hookName),
+//	    slog.Bool("success", true),
+//	)
+func LogDuration(ctx context.Context, level slog.Level, msg string, start time.Time, attrs ...any) {
+	durationMs := time.Since(start).Milliseconds()
+
+	// Prepend duration_ms to attrs
+	allAttrs := make([]any, 0, len(attrs)+1)
+	allAttrs = append(allAttrs, slog.Int64("duration_ms", durationMs))
+	allAttrs = append(allAttrs, attrs...)
+
+	log(ctx, level, msg, allAttrs...)
+}
+
+// log is the internal logging function that extracts context values and logs.
+//
+// The read lock is held across l.Log so Init/Close cannot close logBufWriter
+// mid-write; do not shrink the lock scope to a snapshot pattern.
+func log(ctx context.Context, level slog.Level, msg string, attrs ...any) {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	l := logger
+	if l == nil {
+		l = slog.Default()
+	}
+	globalSessionID := currentSessionID
+
+	// Build attributes slice with session ID first (if set)
+	var allAttrs []any
+
+	// Add session ID from Init() if set (always first for consistency)
+	if globalSessionID != "" {
+		allAttrs = append(allAttrs, slog.String("session_id", globalSessionID))
+	}
+
+	// Extract context values, skipping session_id if already added from Init()
+	contextAttrs := attrsFromContext(ctx, globalSessionID)
+	for _, a := range contextAttrs {
+		allAttrs = append(allAttrs, a)
+	}
+
+	// Add caller-provided attributes
+	allAttrs = append(allAttrs, attrs...)
+
+	// Pass nil context to slog as we've already extracted context values as attributes.
+	// slog handlers are expected to handle nil context gracefully.
+	l.Log(nil, level, msg, allAttrs...) //nolint:staticcheck // nil context is intentional - we extract values as attributes
+}
+
+// attrsFromContext extracts logging attributes from a context.
+// If globalSessionID is non-empty, skips adding session_id from context to avoid duplicates.
+func attrsFromContext(ctx context.Context, globalSessionID string) []slog.Attr {
+	if ctx == nil {
+		return nil
+	}
+
+	var attrs []slog.Attr
+
+	// Only add session_id from context if not already set globally
+	if globalSessionID == "" {
+		if v := ctx.Value(sessionIDKey); v != nil {
+			if s, ok := v.(string); ok && s != "" {
+				attrs = append(attrs, slog.String("session_id", s))
+			}
+		}
+	}
+	if v := ctx.Value(parentSessionIDKey); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			attrs = append(attrs, slog.String("parent_session_id", s))
+		}
+	}
+	if v := ctx.Value(toolCallIDKey); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			attrs = append(attrs, slog.String("tool_call_id", s))
+		}
+	}
+	if v := ctx.Value(componentKey); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			attrs = append(attrs, slog.String("component", s))
+		}
+	}
+	if v := ctx.Value(agentKey); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			attrs = append(attrs, slog.String("agent", s))
+		}
+	}
+
+	return attrs
+}
+
+
+--- cmd/entire/cli/logging/context_test.go
+package logging
+
+import (
+	"context"
+	"testing"
+)
+
+// testComponent and testAgent are defined in logger_test.go
+
+func TestWithSession(t *testing.T) {
+	ctx := context.Background()
+	sessionID := "2025-01-15-test-session"
+
+	ctx = WithSession(ctx, sessionID)
+
+	got := SessionIDFromContext(ctx)
+	if got != sessionID {
+		t.Errorf("SessionIDFromContext() = %q, want %q", got, sessionID)
+	}
+}
+
+func TestWithSession_SetsParentFromExisting(t *testing.T) {
+	ctx := context.Background()
+	parentSessionID := "2025-01-15-parent-session"
+	childSessionID := "2025-01-15-child-session"
+
+	// Set parent session
+	ctx = WithSession(ctx, parentSessionID)
+
+	// Set child session - should automatically set parent
+	ctx = WithSession(ctx, childSessionID)
+
+	gotSession := SessionIDFromContext(ctx)
+	gotParent := ParentSessionIDFromContext(ctx)
+
+	if gotSession != childSessionID {
+		t.Errorf("SessionIDFromContext() = %q, want %q", gotSession, childSessionID)
+	}
+	if gotParent != parentSessionID {
+		t.Errorf("ParentSessionIDFromContext() = %q, want %q", gotParent, parentSessionID)
+	}
+}
+
+func TestWithParentSession(t *testing.T) {
+	ctx := context.Background()
+	parentSessionID := "2025-01-15-explicit-parent"
+
+	ctx = WithParentSession(ctx, parentSessionID)
+
+	got := ParentSessionIDFromContext(ctx)
+	if got != parentSessionID {
+		t.Errorf("ParentSessionIDFromContext() = %q, want %q", got, parentSessionID)
+	}
+}
+
+func TestWithToolCall(t *testing.T) {
+	ctx := context.Background()
+	toolCallID := "toolu_01ABC123XYZ"
+
+	ctx = WithToolCall(ctx, toolCallID)
+
+	got := ToolCallIDFromContext(ctx)
+	if got != toolCallID {
+		t.Errorf("ToolCallIDFromContext() = %q, want %q", got, toolCallID)
+	}
+}
+
+func TestWithComponent(t *testing.T) {
+	ctx := context.Background()
+
+	ctx = WithComponent(ctx, testComponent)
+
+	got := ComponentFromContext(ctx)
+	if got != testComponent {
+		t.Errorf("ComponentFromContext() = %q, want %q", got, testComponent)
+	}
+}
+
+func TestWithAgent(t *testing.T) {
+	ctx := context.Background()
+
+	ctx = WithAgent(ctx, testAgent)
+
+	got := AgentFromContext(ctx)
+	if got != testAgent {
+		t.Errorf("AgentFromContext() = %q, want %q", got, testAgent)
+	}
+}
+
+func TestContextValues_Empty(t *testing.T) {
+	ctx := context.Background()
+
+	// All should return empty strings for unset context
+	if got := SessionIDFromContext(ctx); got != "" {
+		t.Errorf("SessionIDFromContext() on empty = %q, want empty", got)
+	}
+	if got := ParentSessionIDFromContext(ctx); got != "" {
+		t.Errorf("ParentSessionIDFromContext() on empty = %q, want empty", got)
+	}
+	if got := ToolCallIDFromContext(ctx); got != "" {
+		t.Errorf("ToolCallIDFromContext() on empty = %q, want empty", got)
+	}
+	if got := ComponentFromContext(ctx); got != "" {
+		t.Errorf("ComponentFromContext() on empty = %q, want empty", got)
+	}
+	if got := AgentFromContext(ctx); got != "" {
+		t.Errorf("AgentFromContext() on empty = %q, want empty", got)
+	}
+}
+
+func TestContextValues_Chaining(t *testing.T) {
+	ctx := context.Background()
+
+	// Chain multiple values
+	ctx = WithSession(ctx, "session-1")
+	ctx = WithToolCall(ctx, "tool-1")
+	ctx = WithComponent(ctx, testComponent)
+	ctx = WithAgent(ctx, testAgent)
+
+	// All values should be preserved
+	if got := SessionIDFromContext(ctx); got != "session-1" {
+		t.Errorf("SessionIDFromContext() = %q, want 'session-1'", got)
+	}
+	if got := ToolCallIDFromContext(ctx); got != "tool-1" {
+		t.Errorf("ToolCallIDFromContext() = %q, want 'tool-1'", got)
+	}
+	if got := ComponentFromContext(ctx); got != testComponent {
+		t.Errorf("ComponentFromContext() = %q, want %q", got, testComponent)
+	}
+	if got := AgentFromContext(ctx); got != testAgent {
+		t.Errorf("AgentFromContext() = %q, want %q", got, testAgent)
+	}
+}
+
+func TestAttrsFromContext(t *testing.T) {
+	ctx := context.Background()
+	ctx = WithSession(ctx, "session-123")
+	ctx = WithParentSession(ctx, "parent-456")
+	ctx = WithToolCall(ctx, "tool-789")
+	ctx = WithComponent(ctx, testComponent)
+	ctx = WithAgent(ctx, testAgent)
+
+	// Pass empty string for globalSessionID to include context session_id
+	attrs := attrsFromContext(ctx, "")
+
+	// Should have 5 attrs
+	if len(attrs) != 5 {
+		t.Errorf("attrsFromContext() returned %d attrs, want 5", len(attrs))
+	}
+
+	// Verify attr values
+	attrMap := make(map[string]string)
+	for _, attr := range attrs {
+		attrMap[attr.Key] = attr.Value.String()
+	}
+
+	if attrMap["session_id"] != "session-123" {
+		t.Errorf("session_id = %q, want 'session-123'", attrMap["session_id"])
+	}
+	if attrMap["parent_session_id"] != "parent-456" {
+		t.Errorf("parent_session_id = %q, want 'parent-456'", attrMap["parent_session_id"])
+	}
+	if attrMap["tool_call_id"] != "tool-789" {
+		t.Errorf("tool_call_id = %q, want 'tool-789'", attrMap["tool_call_id"])
+	}
+	if attrMap["component"] != testComponent {
+		t.Errorf("component = %q, want %q", attrMap["component"], testComponent)
+	}
+	if attrMap["agent"] != testAgent {
+		t.Errorf("agent = %q, want %q", attrMap["agent"], testAgent)
+	}
+}
+
+func TestAttrsFromContext_Partial(t *testing.T) {
+	ctx := context.Background()
+	ctx = WithSession(ctx, "session-only")
+
+	// Pass empty string for globalSessionID to include context session_id
+	attrs := attrsFromContext(ctx, "")
+
+	// Should only have 1 attr (session_id) since others are empty
+	if len(attrs) != 1 {
+		t.Errorf("attrsFromContext() returned %d attrs, want 1", len(attrs))
+	}
+
+	if attrs[0].Key != "session_id" || attrs[0].Value.String() != "session-only" {
+		t.Errorf("Expected session_id='session-only', got %s=%s", attrs[0].Key, attrs[0].Value.String())
+	}
+}
+
+func TestAttrsFromContext_SkipsSessionWhenGlobalSet(t *testing.T) {
+	ctx := context.Background()
+	ctx = WithSession(ctx, "context-session")
+	ctx = WithToolCall(ctx, "tool-123")
+
+	// Pass a global session ID - context session_id should be skipped
+	attrs := attrsFromContext(ctx, "global-session")
+
+	// Should only have 1 attr (tool_call_id) since session_id is skipped
+	if len(attrs) != 1 {
+		t.Errorf("attrsFromContext() returned %d attrs, want 1 (session_id should be skipped)", len(attrs))
+	}
+
+	if attrs[0].Key != "tool_call_id" || attrs[0].Value.String() != "tool-123" {
+		t.Errorf("Expected tool_call_id='tool-123', got %s=%s", attrs[0].Key, attrs[0].Value.String())
+	}
+}
+
+
+--- cmd/entire/cli/logging/logger_test.go
+package logging
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// Test constants to avoid goconst warnings
+const (
+	testSessionID = "2025-01-15-test-session"
+	testComponent = "hooks"
+	testAgent     = "claude-code"
+	levelINFO     = "INFO"
+)
+
+// testLogFilePath returns the expected log file path for a test temp directory.
+func testLogFilePath(tmpDir string) string {
+	return filepath.Join(tmpDir, ".entire", "logs", "entire.log")
+}
+
+func TestParseLogLevel(t *testing.T) {
+	tests := []struct {
+		name     string
+		envValue string
+		want     slog.Level
+	}{
+		{"empty defaults to INFO", "", slog.LevelInfo},
+		{"DEBUG lowercase", "debug", slog.LevelDebug},
+		{"DEBUG uppercase", "DEBUG", slog.LevelDebug},
+		{"INFO lowercase", "info", slog.LevelInfo},
+		{"INFO uppercase", "INFO", slog.LevelInfo},
+		{"WARN lowercase", "warn", slog.LevelWarn},
+		{"WARN uppercase", "WARN", slog.LevelWarn},
+		{"ERROR lowercase", "error", slog.LevelError},
+		{"ERROR uppercase", "ERROR", slog.LevelError},
+		{"invalid defaults to INFO", "invalid", slog.LevelInfo},
+		{"warning alias", "warning", slog.LevelWarn},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseLogLevel(tt.envValue)
+			if got != tt.want {
+				t.Errorf("parseLogLevel(%q) = %v, want %v", tt.envValue, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInit_CreatesLogDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// Initialize git repo so WorktreeRoot works
+	initGitRepo(t, tmpDir)
+
+	err := Init(context.Background(), testSessionID)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	defer Close()
+
+	logsDir := filepath.Join(tmpDir, ".entire", "logs")
+	if _, err := os.Stat(logsDir); os.IsNotExist(err) {
+		t.Errorf("Init() did not create .entire/logs/ directory")
+	}
+}
+
+func TestInit_CreatesLogFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	initGitRepo(t, tmpDir)
+
+	err := Init(context.Background(), testSessionID)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	defer Close()
+
+	if _, err := os.Stat(testLogFilePath(tmpDir)); os.IsNotExist(err) {
+		t.Errorf("Init() did not create log file at %s", testLogFilePath(tmpDir))
+	}
+}
+
+func TestInit_WritesJSONLogs(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	initGitRepo(t, tmpDir)
+
+	sessionID := "2025-01-15-json-test"
+	err := Init(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	// Log something
+	Info(context.Background(), "test message", slog.String("key", "value"))
+
+	// Close to flush
+	Close()
+
+	// Read log file
+	content, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	// Parse as JSON
+	var logEntry map[string]interface{}
+	if err := json.Unmarshal(content, &logEntry); err != nil {
+		t.Errorf("Log output is not valid JSON: %v\nContent: %s", err, content)
+	}
+
+	// Verify expected fields
+	if msg, ok := logEntry["msg"].(string); !ok || msg != "test message" {
+		t.Errorf("Expected msg='test message', got %v", logEntry["msg"])
+	}
+	if key, ok := logEntry["key"].(string); !ok || key != "value" {
+		t.Errorf("Expected key='value', got %v", logEntry["key"])
+	}
+	if _, ok := logEntry["time"]; !ok {
+		t.Error("Expected 'time' field in log entry")
+	}
+	if _, ok := logEntry["level"]; !ok {
+		t.Error("Expected 'level' field in log entry")
+	}
+}
+
+func TestInit_RespectsLogLevel(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	initGitRepo(t, tmpDir)
+
+	// Set log level to WARN
+	t.Setenv(LogLevelEnvVar, "WARN")
+
+	sessionID := "2025-01-15-level-test"
+	err := Init(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	ctx := context.Background()
+
+	// These should NOT be logged
+	Debug(ctx, "debug message")
+	Info(ctx, "info message")
+
+	// This SHOULD be logged
+	Warn(ctx, "warn message")
+
+	Close()
+
+	// Read log file
+	content, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	contentStr := string(content)
+	if strings.Contains(contentStr, "debug message") {
+		t.Error("DEBUG message should not be logged when level is WARN")
+	}
+	if strings.Contains(contentStr, "info message") {
+		t.Error("INFO message should not be logged when level is WARN")
+	}
+	if !strings.Contains(contentStr, "warn message") {
+		t.Error("WARN message should be logged when level is WARN")
+	}
+}
+
+func TestInit_InvalidLogLevelWarns(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	initGitRepo(t, tmpDir)
+
+	// Capture stderr
+	var buf bytes.Buffer
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Failed to create pipe: %v", err)
+	}
+	os.Stderr = w
+
+	t.Setenv(LogLevelEnvVar, "INVALID_LEVEL")
+
+	sessionID := "2025-01-15-invalid-level"
+	err = Init(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("Failed to read from pipe: %v", err)
+	}
+	stderrOutput := buf.String()
+
+	if !strings.Contains(stderrOutput, "invalid log level") {
+		t.Errorf("Expected warning about invalid log level on stderr, got: %s", stderrOutput)
+	}
+
+	Close()
+}
+
+func TestInit_FallsBackToStderrOnError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	initGitRepo(t, tmpDir)
+
+	// Make logs directory unwritable (simulate permission error)
+	logsDir := filepath.Join(tmpDir, ".entire", "logs")
+	if err := os.MkdirAll(logsDir, 0o755); err != nil {
+		t.Fatalf("Failed to create logs dir: %v", err)
+	}
+
+	// Create a directory with the same name as the log file to cause an error
+	if err := os.MkdirAll(testLogFilePath(tmpDir), 0o755); err != nil {
+		t.Fatalf("Failed to create blocking dir: %v", err)
+	}
+
+	// Init should not return error, but fall back to stderr
+	err := Init(context.Background(), testSessionID)
+	if err != nil {
+		t.Errorf("Init() should not error, but got: %v", err)
+	}
+
+	// Verify logger still works (writing to stderr)
+	Info(context.Background(), "fallback test")
+
+	Close()
+}
+
+func TestClose_SafeToCallMultipleTimes(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	initGitRepo(t, tmpDir)
+
+	sessionID := "2025-01-15-close-test"
+	err := Init(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	// Should not panic
+	Close()
+	Close()
+	Close()
+}
+
+func TestLogging_BeforeInit(_ *testing.T) {
+	// Reset any global state
+	resetLogger()
+
+	// These should not panic, should use default stderr logger
+	ctx := context.Background()
+	Debug(ctx, "debug before init")
+	Info(ctx, "info before init")
+	Warn(ctx, "warn before init")
+	Error(ctx, "error before init")
+}
+
+// Helper to initialize a git repo for tests
+func initGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	t.Chdir(dir)
+	cmd := "git init && git config user.email 'test@test.com' && git config user.name 'Test'"
+	output, err := execCommand(t, "sh", "-c", cmd)
+	if err != nil {
+		t.Fatalf("Failed to init git repo: %v\nOutput: %s", err, output)
+	}
+}
+
+func execCommand(t *testing.T, name string, args ...string) (string, error) {
+	t.Helper()
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, name, args...)
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
+func TestLogging_IncludesContextValues(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	initGitRepo(t, tmpDir)
+
+	sessionID := "2025-01-15-context-test"
+	err := Init(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	// Create context with values
+	// Note: session_id from context is skipped when Init() has already set a global session ID
+	ctx := context.Background()
+	ctx = WithSession(ctx, "context-session-id") // Will be ignored, global takes precedence
+	ctx = WithToolCall(ctx, "toolu_123")
+	ctx = WithComponent(ctx, testComponent)
+	ctx = WithAgent(ctx, testAgent)
+
+	// Log with context
+	Info(ctx, "context test message")
+
+	Close()
+
+	// Read log file
+	content, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	// Parse as JSON
+	var logEntry map[string]interface{}
+	if err := json.Unmarshal(content, &logEntry); err != nil {
+		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, content)
+	}
+
+	// session_id comes from Init() when set, not from context (to avoid duplicates)
+	if logEntry["session_id"] != sessionID {
+		t.Errorf("Expected session_id='%s' (from Init), got %v", sessionID, logEntry["session_id"])
+	}
+	if logEntry["tool_call_id"] != "toolu_123" {
+		t.Errorf("Expected tool_call_id='toolu_123', got %v", logEntry["tool_call_id"])
+	}
+	if logEntry["component"] != testComponent {
+		t.Errorf("Expected component='%s', got %v", testComponent, logEntry["component"])
+	}
+	if logEntry["agent"] != testAgent {
+		t.Errorf("Expected agent='%s', got %v", testAgent, logEntry["agent"])
+	}
+}
+
+func TestLogging_ParentSessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	initGitRepo(t, tmpDir)
+
+	sessionID := "2025-01-15-parent-test"
+	err := Init(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	// Create parent context, then child context
+	// Note: WithSession sets parent_session_id when there's already a session in context
+	ctx := context.Background()
+	ctx = WithSession(ctx, "parent-session")
+	ctx = WithSession(ctx, "child-session") // This sets parent_session_id to "parent-session"
+
+	Info(ctx, "nested session test")
+
+	Close()
+
+	// Read log file
+	content, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	// Parse as JSON
+	var logEntry map[string]interface{}
+	if err := json.Unmarshal(content, &logEntry); err != nil {
+		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, content)
+	}
+
+	// session_id comes from Init(), context session_id is skipped to avoid duplicates
+	if logEntry["session_id"] != sessionID {
+		t.Errorf("Expected session_id='%s' (from Init), got %v", sessionID, logEntry["session_id"])
+	}
+	// parent_session_id from context is still included
+	if logEntry["parent_session_id"] != "parent-session" {
+		t.Errorf("Expected parent_session_id='parent-session', got %v", logEntry["parent_session_id"])
+	}
+}
+
+func TestLogging_AdditionalAttrs(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	initGitRepo(t, tmpDir)
+
+	sessionID := "2025-01-15-attrs-test"
+	err := Init(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	ctx := WithSession(context.Background(), "context-session") // Will be ignored, global takes precedence
+
+	// Log with additional attrs
+	Info(ctx, "attrs test",
+		slog.String("hook", "pre-push"),
+		slog.Int("duration_ms", 150),
+		slog.Bool("success", true),
+	)
+
+	Close()
+
+	// Read log file
+	content, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	// Parse as JSON
+	var logEntry map[string]interface{}
+	if err := json.Unmarshal(content, &logEntry); err != nil {
+		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, content)
+	}
+
+	// session_id comes from Init(), additional attrs work alongside
+	if logEntry["session_id"] != sessionID {
+		t.Errorf("Expected session_id='%s' (from Init), got %v", sessionID, logEntry["session_id"])
+	}
+	if logEntry["hook"] != "pre-push" {
+		t.Errorf("Expected hook='pre-push', got %v", logEntry["hook"])
+	}
+	if logEntry["duration_ms"] != float64(150) {
+		t.Errorf("Expected duration_ms=150, got %v", logEntry["duration_ms"])
+	}
+	if logEntry["success"] != true {
+		t.Errorf("Expected success=true, got %v", logEntry["success"])
+	}
+}
+
+func TestLogDuration(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	initGitRepo(t, tmpDir)
+
+	sessionID := "2025-01-15-duration-test"
+	err := Init(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	ctx := WithSession(context.Background(), "context-session") // Will be ignored, global takes precedence
+	ctx = WithComponent(ctx, testComponent)
+
+	// Simulate some work
+	start := time.Now().Add(-100 * time.Millisecond) // Fake 100ms ago
+
+	LogDuration(ctx, slog.LevelInfo, "operation completed", start,
+		slog.String("hook", "pre-push"),
+		slog.Bool("success", true),
+	)
+
+	Close()
+
+	// Read log file
+	content, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	// Parse as JSON
+	var logEntry map[string]interface{}
+	if err := json.Unmarshal(content, &logEntry); err != nil {
+		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, content)
+	}
+
+	// Verify duration_ms is present and reasonable
+	durationMs, ok := logEntry["duration_ms"].(float64)
+	if !ok {
+		t.Fatalf("Expected duration_ms to be a number, got %T: %v", logEntry["duration_ms"], logEntry["duration_ms"])
+	}
+	if durationMs < 90 || durationMs > 200 {
+		t.Errorf("Expected duration_ms around 100, got %v", durationMs)
+	}
+
+	// session_id comes from Init(), not context
+	if logEntry["session_id"] != sessionID {
+		t.Errorf("Expected session_id='%s' (from Init), got %v", sessionID, logEntry["session_id"])
+	}
+	if logEntry["component"] != testComponent {
+		t.Errorf("Expected component='%s', got %v", testComponent, logEntry["component"])
+	}
+	if logEntry["hook"] != "pre-push" {
+		t.Errorf("Expected hook='pre-push', got %v", logEntry["hook"])
+	}
+	if logEntry["success"] != true {
+		t.Errorf("Expected success=true, got %v", logEntry["success"])
+	}
+	if logEntry["level"] != levelINFO {
+		t.Errorf("Expected level='%s', got %v", levelINFO, logEntry["level"])
+	}
+}
+
+func TestLogging_ContextSessionID_WhenNoGlobalSet(t *testing.T) {
+	// Reset any global state to ensure no global session ID
+	resetLogger()
+
+	// Create a buffer to capture output since we won't use Init()
+	var buf bytes.Buffer
+	mu.Lock()
+	logger = createLogger(&buf, slog.LevelInfo)
+	mu.Unlock()
+
+	// Set session_id via context (no global set)
+	ctx := WithSession(context.Background(), "context-only-session")
+	ctx = WithComponent(ctx, testComponent)
+
+	Info(ctx, "context session test")
+
+	// Parse the output
+	var logEntry map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &logEntry); err != nil {
+		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, buf.String())
+	}
+
+	// When no global session ID is set, context session_id should be used
+	if logEntry["session_id"] != "context-only-session" {
+		t.Errorf("Expected session_id='context-only-session' from context, got %v", logEntry["session_id"])
+	}
+
+	resetLogger()
+}
+
+func TestLogging_ConcurrentInitAndLog(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	initGitRepo(t, tmpDir)
+
+	if err := Init(context.Background(), ""); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	defer Close()
+
+	const (
+		logGoroutines   = 8
+		initGoroutines  = 4
+		closeGoroutines = 2
+		iterations      = 200
+	)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	for i := range logGoroutines {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			<-start
+			for j := range iterations {
+				Info(context.Background(), "concurrent log", slog.Int("worker", worker), slog.Int("iteration", j))
+			}
+		}(i)
+	}
+
+	for range initGoroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range iterations {
+				if err := Init(context.Background(), ""); err != nil {
+					t.Errorf("Init() error = %v", err)
+					return
+				}
+			}
+		}()
+	}
+
+	for range closeGoroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range iterations {
+				Close()
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+}
+
+func TestInit_RejectsInvalidSessionIDs(t *testing.T) {
+	tests := []struct {
+		name      string
+		sessionID string
+		wantErr   bool
+	}{
+		{"empty session ID is allowed", "", false},
+		{"path traversal with slash", "../../../tmp/evil", true},
+		{"path traversal with backslash", "..\\..\\tmp\\evil", true},
+		{"contains forward slash", "2025-01-15/session", true},
+		{"contains backslash", "2025-01-15\\session", true},
+		{"valid session ID", "2025-01-15-valid-session", false},
+		{"valid UUID-like ID", "abc123-def456-ghi789", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reset logger state before each test
+			resetLogger()
+
+			// Set up git repo for cases that we expect to succeed
+			if !tt.wantErr {
+				tmpDir := t.TempDir()
+				t.Chdir(tmpDir)
+				initGitRepo(t, tmpDir)
+			}
+
+			err := Init(context.Background(), tt.sessionID)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Init(%q) error = %v, wantErr %v", tt.sessionID, err, tt.wantErr)
+			}
+			if err != nil && tt.wantErr {
+				// Verify error message mentions session ID
+				if !strings.Contains(err.Error(), "session ID") {
+					t.Errorf("Init(%q) error should mention 'session ID', got: %v", tt.sessionID, err)
+				}
+			}
+			Close()
+		})
+	}
+}
+
+
+--- cmd/entire/cli/agent/types/agent.go
+package types
+
+// AgentName is the registry key type for agents (e.g., "claude-code", "gemini").
+type AgentName string
+
+// AgentType is the display name type stored in metadata/trailers (e.g., "Claude Code", "Gemini CLI").
+type AgentType string
+
+
+--- cmd/entire/cli/paths/paths.go
+package paths
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
+	"sync"
+	"unicode"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+)
+
+// Directory constants
+const (
+	EntireDir         = ".entire"
+	EntireTmpDir      = ".entire/tmp"
+	EntireMetadataDir = ".entire/metadata"
+
+	osWindows = "windows"
+)
+
+// Metadata file names
+const (
+	PromptFileName                = "prompt.txt"
+	TranscriptFileName            = "full.jsonl"
+	TranscriptFileNameLegacy      = "full.log"
+	CompactTranscriptFileName     = "transcript.jsonl"
+	CompactTranscriptHashFileName = "transcript_hash.txt"
+	V2RawTranscriptFileName       = "raw_transcript"
+	V2RawTranscriptHashFileName   = "raw_transcript_hash.txt"
+	MetadataFileName              = "metadata.json"
+	CheckpointFileName            = "checkpoint.json"
+	ContentHashFileName           = "content_hash.txt"
+	SettingsFileName              = "settings.json"
+)
+
+// MetadataBranchName is the orphan branch used by manual-commit strategy to store metadata
+const MetadataBranchName = "entire/checkpoints/v1"
+
+// V2 ref names use custom refs under refs/entire/ (not refs/heads/).
+// These are invisible in GitHub's branch UI and not fetched by default.
+const (
+	// V2MainRefName stores permanent metadata + compact transcripts.
+	V2MainRefName = "refs/entire/checkpoints/v2/main"
+
+	// V2FullCurrentRefName stores the active generation of raw transcripts.
+	V2FullCurrentRefName = "refs/entire/checkpoints/v2/full/current"
+
+	// V2FullRefPrefix is the common prefix for all /full/* refs (current + archived).
+	V2FullRefPrefix = "refs/entire/checkpoints/v2/full/"
+
+	// GenerationFileName is the metadata file at the root of each /full/* generation tree.
+	GenerationFileName = "generation.json"
+)
+
+// TrailsBranchName is the orphan branch used to store trail metadata.
+// Trails are branch-centric work tracking abstractions that link to checkpoints by branch name.
+const TrailsBranchName = "entire/trails/v1"
+
+// CheckpointPath returns the sharded storage path for a checkpoint ID.
+// Uses first 2 characters as shard (256 buckets), remaining as folder name.
+// Example: "a3b2c4d5e6f7" -> "a3/b2c4d5e6f7"
+//
+// Deprecated: Use checkpointID.Path() directly instead.
+func CheckpointPath(checkpointID id.CheckpointID) string {
+	return checkpointID.Path()
+}
+
+// worktreeRootCache caches the worktree root to avoid repeated git commands.
+// The cache is keyed by the current working directory to handle directory changes.
+var (
+	worktreeRootMu       sync.RWMutex
+	worktreeRootCache    string
+	worktreeRootCacheDir string
+)
+
+// WorktreeRoot returns the git worktree root directory.
+// Uses 'git rev-parse --show-toplevel' which returns the working tree toplevel.
+// In a worktree this is the worktree root, not the main repository root.
+// The result is cached per working directory.
+// Returns an error if not inside a git repository.
+func WorktreeRoot(ctx context.Context) (string, error) {
+	// Get current working directory to check cache validity
+	cwd, err := os.Getwd() //nolint:forbidigo // already present in codebase
+	if err != nil {
+		cwd = ""
+	}
+
+	// Check cache with read lock first
+	worktreeRootMu.RLock()
+	if worktreeRootCache != "" && worktreeRootCacheDir == cwd {
+		cached := worktreeRootCache
+		worktreeRootMu.RUnlock()
+		return cached, nil
+	}
+	worktreeRootMu.RUnlock()
+
+	// Cache miss - get worktree root and update cache with write lock
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get git worktree root: %w", err)
+	}
+
+	root := strings.TrimSpace(string(output))
+
+	worktreeRootMu.Lock()
+	worktreeRootCache = root
+	worktreeRootCacheDir = cwd
+	worktreeRootMu.Unlock()
+
+	return root, nil
+}
+
+// ClearWorktreeRootCache clears the cached worktree root.
+// This is primarily useful for testing when changing directories.
+func ClearWorktreeRootCache() {
+	worktreeRootMu.Lock()
+	worktreeRootCache = ""
+	worktreeRootCacheDir = ""
+	worktreeRootMu.Unlock()
+}
+
+// AbsPath returns the absolute path for a relative path within the repository.
+// If the path is already absolute, it is returned as-is.
+// Uses WorktreeRoot() to resolve paths relative to the worktree root.
+func AbsPath(ctx context.Context, relPath string) (string, error) {
+	if filepath.IsAbs(relPath) {
+		return relPath, nil
+	}
+
+	root, err := WorktreeRoot(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(root, relPath), nil
+}
+
+// IsInfrastructurePath returns true if the path is part of CLI infrastructure
+// (i.e., inside the .entire directory)
+func IsInfrastructurePath(path string) bool {
+	return IsSubpath(EntireDir, path)
+}
+
+// IsSubpath reports whether child is lexically under parent (or equal to it).
+// It uses filepath.Rel, which cleans both inputs and is traversal-resistant:
+// a crafted child like "/a/b/../../../etc/passwd" that escapes parent will
+// produce a relative path starting with ".." and be rejected.
+func IsSubpath(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// ToRelativePath converts an absolute path to relative.
+// Returns empty string if the path is outside the working directory.
+func ToRelativePath(absPath, cwd string) string {
+	absPath = normalizeMSYSPath(absPath)
+	cwd = normalizeMSYSPath(cwd)
+
+	// On Windows, MSYS/Git Bash sometimes omits the drive letter, producing
+	// paths like /Users/... that filepath.IsAbs doesn't recognize. Prepend
+	// the drive letter from cwd so filepath.Rel can match them.
+	if runtime.GOOS == osWindows && len(absPath) > 0 && absPath[0] == '/' && len(cwd) >= 2 && cwd[1] == ':' {
+		absPath = cwd[:2] + absPath
+	}
+
+	if !filepath.IsAbs(absPath) {
+		return absPath
+	}
+	relPath, err := filepath.Rel(cwd, absPath)
+	if err != nil || strings.HasPrefix(relPath, "..") {
+		return ""
+	}
+
+	return relPath
+}
+
+// normalizeMSYSPath converts MSYS/Git Bash-style paths (e.g., /c/Users/...)
+// to Windows-style paths (e.g., C:/Users/...) so that filepath.IsAbs and
+// filepath.Rel work correctly. On non-Windows platforms this is a no-op.
+// Claude Code on Windows outputs MSYS paths in its transcript, but Go's
+// filepath package only recognizes Windows-style absolute paths.
+func normalizeMSYSPath(p string) string {
+	if runtime.GOOS != osWindows {
+		return p
+	}
+	// MSYS paths look like /c/Users/... where the second char is a drive letter
+	if len(p) >= 3 && p[0] == '/' && unicode.IsLetter(rune(p[1])) && p[2] == '/' {
+		return string(unicode.ToUpper(rune(p[1]))) + ":" + p[2:]
+	}
+	return p
+}
+
+// nonAlphanumericRegex matches any non-alphanumeric character
+var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]`)
+
+// SanitizePathForClaude converts a path to Claude's project directory format.
+// Claude replaces any non-alphanumeric character with a dash.
+func SanitizePathForClaude(path string) string {
+	return nonAlphanumericRegex.ReplaceAllString(path, "-")
+}
+
+// GetClaudeProjectDir returns the directory where Claude stores session transcripts
+// for the given repository path.
+//
+// In test environments, set ENTIRE_TEST_CLAUDE_PROJECT_DIR to override the default location.
+func GetClaudeProjectDir(repoPath string) (string, error) {
+	override := os.Getenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR")
+	if override != "" {
+		return override, nil
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	projectDir := SanitizePathForClaude(repoPath)
+	return filepath.Join(homeDir, ".claude", "projects", projectDir), nil
+}
+
+// SessionMetadataDirFromSessionID returns the path to a session's metadata directory
+// for the given Entire session ID. The sessionID must be the full, already date-prefixed
+// Entire session identifier as stored on disk, not an agent-specific or raw Claude ID.
+func SessionMetadataDirFromSessionID(sessionID string) string {
+	return EntireMetadataDir + "/" + sessionID
+}
+
+// ExtractSessionIDFromTranscriptPath attempts to extract a session ID from a transcript path.
+// Claude transcripts are stored at ~/.claude/projects/<project>/sessions/<id>.jsonl
+// If the path doesn't match expected format, returns empty string.
+func ExtractSessionIDFromTranscriptPath(transcriptPath string) string {
+	// Try to extract from typical path: ~/.claude/projects/<project>/sessions/<id>.jsonl
+	parts := strings.Split(filepath.ToSlash(transcriptPath), "/")
+	for i, part := range parts {
+		if part == "sessions" && i+1 < len(parts) {
+			// Return filename without extension
+			filename := parts[i+1]
+			if strings.HasSuffix(filename, ".jsonl") {
+				return strings.TrimSuffix(filename, ".jsonl")
+			}
+			return filename
+		}
+	}
+	return ""
+}
+
+
+--- cmd/entire/cli/paths/transcript.go
+package paths
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"os"
+	"time"
+)
+
+// GetLastTimestampFromFile reads the last non-empty line from a JSONL file
+// and extracts the timestamp field. Returns zero time if file doesn't exist
+// or no valid timestamp is found.
+func GetLastTimestampFromFile(path string) time.Time {
+	file, err := os.Open(path) //nolint:gosec // path is from controlled session directory
+	if err != nil {
+		return time.Time{}
+	}
+	defer file.Close()
+
+	var lastLine string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line != "" {
+			lastLine = line
+		}
+	}
+
+	return ParseTimestampFromJSONL(lastLine)
+}
+
+// GetLastTimestampFromBytes extracts the timestamp from the last non-empty line
+// of JSONL content. Returns zero time if not found.
+func GetLastTimestampFromBytes(data []byte) time.Time {
+	var lastLine string
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line != "" {
+			lastLine = line
+		}
+	}
+
+	return ParseTimestampFromJSONL(lastLine)
+}
+
+// ParseTimestampFromJSONL extracts the timestamp from a JSONL line.
+// Returns zero time if the line is empty or doesn't contain a valid timestamp.
+func ParseTimestampFromJSONL(line string) time.Time {
+	if line == "" {
+		return time.Time{}
+	}
+
+	var entry struct {
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		return time.Time{}
+	}
+
+	t, err := time.Parse(time.RFC3339, entry.Timestamp)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+
+--- cmd/entire/cli/paths/worktree.go
+package paths
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// GetWorktreeID returns the internal git worktree identifier for the given path.
+// For the main worktree (where .git is a directory), returns empty string.
+// For linked worktrees (where .git is a file), extracts the name from
+// .git/worktrees/<name>/ path. This name is stable across `git worktree move`.
+func GetWorktreeID(worktreePath string) (string, error) {
+	gitPath := filepath.Join(worktreePath, ".git")
+
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to stat .git: %w", err)
+	}
+
+	// Main worktree has .git as a directory
+	if info.IsDir() {
+		return "", nil
+	}
+
+	// Linked worktree has .git as a file with content: "gitdir: /path/to/.git/worktrees/<name>"
+	content, err := os.ReadFile(gitPath) //nolint:gosec // gitPath is constructed from worktreePath + ".git"
+	if err != nil {
+		return "", fmt.Errorf("failed to read .git file: %w", err)
+	}
+
+	line := strings.TrimSpace(string(content))
+	if !strings.HasPrefix(line, "gitdir: ") {
+		return "", fmt.Errorf("invalid .git file format: %s", line)
+	}
+
+	gitdir := strings.TrimPrefix(line, "gitdir: ")
+
+	// Extract worktree name from path like /repo/.git/worktrees/<name>
+	// or /repo/.bare/worktrees/<name> (bare repo + worktree layout).
+	// The path after the marker is the worktree identifier.
+	var worktreeID string
+	var found bool
+	for _, marker := range []string{".git/worktrees/", ".bare/worktrees/"} {
+		_, worktreeID, found = strings.Cut(gitdir, marker)
+		if found {
+			break
+		}
+	}
+	if !found {
+		return "", fmt.Errorf("unexpected gitdir format (no worktrees): %s", gitdir)
+	}
+	// Remove trailing slashes if any
+	worktreeID = strings.TrimSuffix(worktreeID, "/")
+
+	return worktreeID, nil
+}
+
+
+--- cmd/entire/cli/validation/validators.go
+// Package validation provides input validation functions for the Entire CLI.
+// This package has no dependencies to avoid import cycles.
+package validation
+
+import (
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+)
+
+// pathSafeRegex matches alphanumeric characters, underscores, and hyphens only.
+// Used to validate IDs that will be used in file paths.
+var pathSafeRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// ValidateSessionID validates that a session ID doesn't contain path separators
+// or other unsafe characters for use in file paths.
+// This prevents path traversal attacks when session IDs are used in file paths.
+func ValidateSessionID(id string) error {
+	if strings.TrimSpace(id) == "" {
+		return errors.New("session ID cannot be empty")
+	}
+	if strings.ContainsAny(id, "/\\") {
+		return fmt.Errorf("invalid session ID %q: contains path separators", id)
+	}
+	return nil
+}
+
+// ValidateToolUseID validates that a tool use ID contains only safe characters for paths.
+// Tool use IDs can be UUIDs or prefixed identifiers like "toolu_xxx".
+func ValidateToolUseID(id string) error {
+	if id == "" {
+		return nil // Empty is allowed (optional field)
+	}
+	if !pathSafeRegex.MatchString(id) {
+		return fmt.Errorf("invalid tool use ID %q: must be alphanumeric with underscores/hyphens only", id)
+	}
+	return nil
+}
+
+// ValidateAgentID validates that an agent ID contains only safe characters for paths.
+func ValidateAgentID(id string) error {
+	if id == "" {
+		return nil // Empty is allowed (optional field)
+	}
+	if !pathSafeRegex.MatchString(id) {
+		return fmt.Errorf("invalid agent ID %q: must be alphanumeric with underscores/hyphens only", id)
+	}
+	return nil
+}
+
+// ValidateAgentSessionID validates that an agent session ID contains only safe characters for paths.
+// Agent session IDs can be UUIDs (Claude Code), test identifiers, or other formats depending on the agent.
+// This prevents path traversal attacks when the ID is used in file path construction.
+func ValidateAgentSessionID(id string) error {
+	if id == "" {
+		return errors.New("agent session ID cannot be empty")
+	}
+	if !pathSafeRegex.MatchString(id) {
+		return fmt.Errorf("invalid agent session ID %q: must be alphanumeric with underscores/hyphens only", id)
+	}
+	return nil
+}

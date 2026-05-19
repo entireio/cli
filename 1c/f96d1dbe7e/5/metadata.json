@@ -1,0 +1,69 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "1cf96d1dbe7e",
+  "session_id": "019e415e-ae41-7eb3-abb6-e52ce34a38ab",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-19T18:00:47.059993Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".gitignore"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.5",
+  "turn_id": "15ac18dd5e2b",
+  "token_usage": {
+    "input_tokens": 51693,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 100992,
+    "output_tokens": 4248,
+    "api_call_count": 3
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-19T18:00:46.893123Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 0,
+    "total_lines_changed": 0,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 622,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".gitignore": 2,
+        "skills/.agents/plugins/marketplace.json": 20,
+        "skills/.claude-plugin/marketplace.json": 20,
+        "skills/.claude/agents/entire-search.md": 25,
+        "skills/.claude/settings.json": 84,
+        "skills/.codex/agents/entire-search.toml": 23,
+        "skills/.codex/config.toml": 3,
+        "skills/.codex/hooks.json": 40,
+        "skills/.cursor-plugin/plugin.json": 14,
+        "skills/.entire/.gitignore": 5,
+        "skills/.entire/settings.json": 4,
+        "skills/.gitignore": 1,
+        "skills/.opencode/INSTALL.md": 31,
+        "skills/GEMINI.md": 1,
+        "skills/README.md": 106,
+        "skills/gemini-extension.json": 6,
+        "skills/plugins/entire/.claude-plugin/plugin.json": 18,
+        "skills/plugins/entire/.codex-plugin/plugin.json": 31,
+        "skills/plugins/entire/skills/explain/SKILL.md": 22,
+        "skills/plugins/entire/skills/search/SKILL.md": 58,
+        "skills/plugins/entire/skills/session-handoff/SKILL.md": 108
+      }
+    }
+  ]
+}
