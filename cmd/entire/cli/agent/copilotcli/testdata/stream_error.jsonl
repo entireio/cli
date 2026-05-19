@@ -1,0 +1,5 @@
+{"type":"session.tools_updated","data":{"model":"claude-sonnet-4.6"},"id":"c","timestamp":"2026-05-15T21:35:30.958Z","ephemeral":true}
+{"type":"user.message","data":{"content":"hi","interactionId":"i0"},"id":"u0","timestamp":"2026-05-15T21:35:30.959Z"}
+{"type":"assistant.turn_start","data":{"turnId":"0","interactionId":"i0"},"id":"t0","timestamp":"2026-05-15T21:35:31.071Z"}
+{"type":"error","data":{},"message":"rate limited: too many requests","timestamp":"2026-05-15T21:35:31.100Z"}
+{"type":"result","timestamp":"2026-05-15T21:35:31.110Z","sessionId":"sess-1","exitCode":2,"usage":{"premiumRequests":0,"totalApiDurationMs":0,"sessionDurationMs":42}}
