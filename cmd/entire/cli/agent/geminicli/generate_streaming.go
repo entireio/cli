@@ -138,10 +138,9 @@ func (g *GeminiCLIAgent) GenerateTextStreaming(
 	progress agent.ProgressFn,
 ) (string, error) {
 	tmpl := &agent.StreamingGeneratorTemplate{
-		AgentName:   "gemini",
-		DisplayName: "gemini",
-		BuildCmd:    g.buildStreamCmd,
-		Parser:      parseGeminiStream,
+		AgentName: "gemini",
+		BuildCmd:  g.buildStreamCmd,
+		Parser:    parseGeminiStream,
 		LooksLikeUnrecognizedFlag: func(stderr string) bool {
 			return agent.LooksLikeUnrecognizedFlag(stderr, "output-format", "stream-json")
 		},

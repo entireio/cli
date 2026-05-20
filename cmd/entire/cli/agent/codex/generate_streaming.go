@@ -119,10 +119,9 @@ func (c *CodexAgent) GenerateTextStreaming(
 	progress agent.ProgressFn,
 ) (string, error) {
 	tmpl := &agent.StreamingGeneratorTemplate{
-		AgentName:   "codex",
-		DisplayName: "codex",
-		BuildCmd:    c.buildStreamCmd,
-		Parser:      parseCodexStream,
+		AgentName: "codex",
+		BuildCmd:  c.buildStreamCmd,
+		Parser:    parseCodexStream,
 		LooksLikeUnrecognizedFlag: func(stderr string) bool {
 			return agent.LooksLikeUnrecognizedFlag(stderr, "json")
 		},

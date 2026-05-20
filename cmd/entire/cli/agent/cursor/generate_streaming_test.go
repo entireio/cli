@@ -92,6 +92,25 @@ func TestParseCursorStream_MissingResult(t *testing.T) {
 	}
 }
 
+func TestParseCursorStream_EmptyResultText(t *testing.T) {
+	t.Parallel()
+
+	// A successful (is_error:false) result event with an empty `result`
+	// field must error rather than returning ("", nil) — mirrors the
+	// guarantee Codex's parser makes and that RunIsolatedTextGeneratorCLI
+	// makes on the non-streaming path.
+	stream := `{"type":"system","subtype":"init","session_id":"t"}
+{"type":"result","subtype":"success","duration_ms":1,"is_error":false,"result":"","session_id":"t"}
+`
+	_, err := parseCursorStream(strings.NewReader(stream), nil)
+	if err == nil {
+		t.Fatal("expected error when result event carries empty result text")
+	}
+	if !strings.Contains(err.Error(), "no result text") {
+		t.Errorf("error %q should mention 'no result text'", err)
+	}
+}
+
 func TestCursorGenerateTextStreaming_Success(t *testing.T) {
 	t.Parallel()
 

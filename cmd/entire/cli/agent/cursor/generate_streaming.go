@@ -141,6 +141,9 @@ func parseCursorStream(stdout io.Reader, progress agent.ProgressFn) (string, err
 		}
 		return "", errors.New("cursor stream ended without a result event")
 	}
+	if resultText == "" {
+		return "", errors.New("cursor stream produced no result text")
+	}
 	if progress != nil {
 		done := agent.GenerationProgress{Phase: agent.PhaseDone, DurationMs: durationMs}
 		if usage != nil {
@@ -160,10 +163,9 @@ func (c *CursorAgent) GenerateTextStreaming(
 	progress agent.ProgressFn,
 ) (string, error) {
 	tmpl := &agent.StreamingGeneratorTemplate{
-		AgentName:   "cursor",
-		DisplayName: "agent",
-		BuildCmd:    c.buildStreamCmd,
-		Parser:      parseCursorStream,
+		AgentName: "cursor",
+		BuildCmd:  c.buildStreamCmd,
+		Parser:    parseCursorStream,
 		LooksLikeUnrecognizedFlag: func(stderr string) bool {
 			return agent.LooksLikeUnrecognizedFlag(stderr, "stream-json", "stream-partial-output", "output-format")
 		},

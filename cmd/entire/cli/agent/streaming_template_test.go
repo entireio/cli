@@ -17,8 +17,7 @@ func TestStreamingGeneratorTemplate_Generate_Success(t *testing.T) {
 
 	parsed := false
 	tmpl := &agent.StreamingGeneratorTemplate{
-		AgentName:   "fake",
-		DisplayName: "fake",
+		AgentName: "fake",
 		BuildCmd: func(ctx context.Context, _, _ string) *exec.Cmd {
 			return testutil.FakeStreamCmd("hello\nworld\n", "", 0)(ctx, "fake", []string{}...)
 		},
@@ -58,8 +57,7 @@ func TestStreamingGeneratorTemplate_Generate_UnrecognizedFlagFallback(t *testing
 	t.Parallel()
 
 	tmpl := &agent.StreamingGeneratorTemplate{
-		AgentName:   "fake",
-		DisplayName: "fake",
+		AgentName: "fake",
 		BuildCmd: func(ctx context.Context, _, _ string) *exec.Cmd {
 			return testutil.FakeStreamCmd("", "error: unknown flag: --stream-json", 1)(ctx, "fake", []string{}...)
 		},
@@ -82,8 +80,7 @@ func TestStreamingGeneratorTemplate_Generate_NonZeroExitWrapsError(t *testing.T)
 	t.Parallel()
 
 	tmpl := &agent.StreamingGeneratorTemplate{
-		AgentName:   "fake",
-		DisplayName: "fake",
+		AgentName: "fake",
 		BuildCmd: func(ctx context.Context, _, _ string) *exec.Cmd {
 			return testutil.FakeStreamCmd("partial\n", "boom\n", 1)(ctx, "fake", []string{}...)
 		},
@@ -113,8 +110,7 @@ func TestStreamingGeneratorTemplate_Generate_ContextCancelled(t *testing.T) {
 	cancel()
 
 	tmpl := &agent.StreamingGeneratorTemplate{
-		AgentName:   "fake",
-		DisplayName: "fake",
+		AgentName: "fake",
 		BuildCmd: func(ctx context.Context, _, _ string) *exec.Cmd {
 			return testutil.FakeStreamCmd("ok\n", "", 0)(ctx, "fake", []string{}...)
 		},

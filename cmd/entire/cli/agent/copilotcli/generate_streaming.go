@@ -165,10 +165,9 @@ func (c *CopilotCLIAgent) GenerateTextStreaming(
 	progress agent.ProgressFn,
 ) (string, error) {
 	tmpl := &agent.StreamingGeneratorTemplate{
-		AgentName:   "copilot-cli",
-		DisplayName: "copilot",
-		BuildCmd:    c.buildStreamCmd,
-		Parser:      parseCopilotStream,
+		AgentName: "copilot-cli",
+		BuildCmd:  c.buildStreamCmd,
+		Parser:    parseCopilotStream,
 		LooksLikeUnrecognizedFlag: func(stderr string) bool {
 			return agent.LooksLikeUnrecognizedFlag(stderr, "stream", "output-format")
 		},

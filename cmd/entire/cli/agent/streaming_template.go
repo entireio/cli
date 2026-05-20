@@ -24,14 +24,9 @@ import (
 // Fields must be non-nil before Generate is called; nil values cause
 // Generate to return ErrTemplateMisconfigured.
 type StreamingGeneratorTemplate struct {
-	// AgentName is an identifier used in log entries (e.g., "codex").
+	// AgentName is an identifier used in log entries and the error-message
+	// prefix wrapped into *TextGenerationError (e.g., "codex").
 	AgentName string
-
-	// DisplayName is the user-facing CLI binary name used in *TextGenerationError
-	// wrapping (e.g., "codex"). Often the same as AgentName but kept separate
-	// for cases where they differ (e.g., Cursor's agent is named "cursor"
-	// but its binary is "agent").
-	DisplayName string
 
 	// BuildCmd constructs the *exec.Cmd for one streaming call. Implementations
 	// MUST set cmd.Stdin to the prompt and cmd.Args to the agent's
@@ -61,8 +56,18 @@ var ErrTemplateMisconfigured = errors.New("streaming template misconfigured")
 var ErrUnrecognizedStreamingFlag = errors.New("CLI rejected streaming flag")
 
 // Generate runs one streaming generation and returns the final result text.
-// On error, returns *TextGenerationError carrying captured stderr and the
-// stdout byte count, matching RunIsolatedTextGeneratorCLI's error shape.
+//
+// Error shapes by failure point:
+//   - Pre-subprocess (StdoutPipe failure): plain wrapped error, since no
+//     stderr/stdout exists yet to diagnose with.
+//   - cmd.Start failure: wrapped error, or *TextGenerationError when ctx is
+//     already cancelled at that point.
+//   - Anything after Start (parse error, non-zero exit, ctx cancellation):
+//     *TextGenerationError carrying captured stderr and the stdout byte
+//     count from countingReader, matching RunIsolatedTextGeneratorCLI's
+//     error shape so the explain layer's diagnostic path can read both.
+//   - LooksLikeUnrecognizedFlag predicate match: ErrUnrecognizedStreamingFlag
+//     sentinel so the caller can fall back to non-streaming.
 func (t *StreamingGeneratorTemplate) Generate(
 	ctx context.Context,
 	prompt, model string,
@@ -97,7 +102,10 @@ func (t *StreamingGeneratorTemplate) Generate(
 	counter := &countingReader{r: stdout}
 	result, parseErr := t.Parser(counter, progress)
 
-	if _, drainErr := io.Copy(io.Discard, stdout); drainErr != nil {
+	// Drain through the counter so StdoutBytes reflects the full subprocess
+	// output even when the parser exited early (e.g. on a recognized
+	// in-stream error). Reading from stdout directly would bypass counter.n.
+	if _, drainErr := io.Copy(io.Discard, counter); drainErr != nil {
 		logging.Debug(ctx, "draining stream stdout",
 			slog.String("agent", t.AgentName),
 			slog.String("error", drainErr.Error()))
