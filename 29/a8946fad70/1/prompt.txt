@@ -1,0 +1,22 @@
+use entire recall to give summary of entire review command changes in the last 2 days
+
+---
+
+can you make sure entire investigate follows same structure. for example investigation config should be local preference. should we have a view time line similar to drill in? etc...
+
+---
+
+do tier 2 and explain this Extract types/ subpackage with AgentInvestigator interface (mirror AgentReviewer) — refactors
+  spawn.Spawner callers
+
+---
+
+do it
+
+---
+
+1
+
+---
+
+plaes do it

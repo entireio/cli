@@ -1,0 +1,53 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "abd0642257a0",
+  "session_id": "019e1e53-09af-7110-9920-b7142bd90a53",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-18T23:40:33.207867Z",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.4",
+  "turn_id": "54d4b892f5cf",
+  "token_usage": {
+    "input_tokens": 143031,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 2341632,
+    "output_tokens": 13800,
+    "api_call_count": 26
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-18T23:40:33.15457Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 7782,
+    "human_modified": 35,
+    "human_removed": 0,
+    "total_committed": 7782,
+    "total_lines_changed": 9712,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 3,
+      "user_lines_removed": 30,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "CLAUDE.md": 3
+      },
+      "user_removed_per_file": {
+        "CLAUDE.md": 30
+      }
+    }
+  ],
+  "kind": "agent_investigate"
+}

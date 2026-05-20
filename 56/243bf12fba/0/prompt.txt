@@ -1,0 +1,13 @@
+/simplify
+
+---
+
+/simplify all code on branch diff from main
+
+---
+
+extract things that are similar to review but not the othre things
+
+---
+
+commit then extract things that are similar to review but not the othre things

@@ -1,0 +1,39 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "f1a08334c505",
+  "strategy": "manual-commit",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".golangci.yaml",
+    "cmd/entire/cli/investigate/cmd.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f1/a08334c505/0/metadata.json",
+      "transcript": "/f1/a08334c505/0/transcript.jsonl",
+      "content_hash": "/f1/a08334c505/0/transcript_hash.txt",
+      "prompt": ""
+    },
+    {
+      "metadata": "/f1/a08334c505/1/metadata.json",
+      "transcript": "/f1/a08334c505/1/transcript.jsonl",
+      "content_hash": "/f1/a08334c505/1/transcript_hash.txt",
+      "prompt": "/f1/a08334c505/1/prompt.txt"
+    },
+    {
+      "metadata": "/f1/a08334c505/2/metadata.json",
+      "transcript": "/f1/a08334c505/2/transcript.jsonl",
+      "content_hash": "/f1/a08334c505/2/transcript_hash.txt",
+      "prompt": "/f1/a08334c505/2/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 62,
+    "cache_creation_tokens": 81141,
+    "cache_read_tokens": 21739521,
+    "output_tokens": 16528,
+    "api_call_count": 54
+  },
+  "has_investigation": true
+}

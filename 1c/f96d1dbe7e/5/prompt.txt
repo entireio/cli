@@ -1,0 +1,2997 @@
+You are reviewing one semantic feature for clawpatch.
+
+Return strict JSON only. No markdown fences.
+
+Project:
+{
+  "name": "cli",
+  "detected": {
+    "languages": [
+      "go"
+    ],
+    "frameworks": [],
+    "packageManagers": [],
+    "commands": {
+      "typecheck": "go test ./...",
+      "lint": null,
+      "format": null,
+      "test": "go test ./..."
+    }
+  }
+}
+
+Feature:
+{
+  "schemaVersion": 1,
+  "featureId": "feat_cli-command_7cd3b070a5",
+  "title": "Go command bootstrap",
+  "summary": "Go command package e2e/bootstrap with 1 source file(s).",
+  "kind": "cli-command",
+  "source": "go-package",
+  "confidence": "medium",
+  "entrypoints": [
+    {
+      "path": "e2e/bootstrap/main.go",
+      "symbol": "main",
+      "route": null,
+      "command": null
+    }
+  ],
+  "ownedFiles": [
+    {
+      "path": "e2e/bootstrap/main.go",
+      "reason": "go package source"
+    }
+  ],
+  "contextFiles": [
+    {
+      "path": "e2e/agents/agent.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/claude.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/codex.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/codex_trust.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/copilot-cli.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/cursor_cli.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/droid.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/gemini.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/link_unix.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/link_windows.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/opencode.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/pi.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/procattr_unix.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/procattr_windows.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/roger_roger.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/tmux.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    },
+    {
+      "path": "e2e/agents/vogon.go",
+      "reason": "imported package github.com/entireio/cli/e2e/agents"
+    }
+  ],
+  "tests": [],
+  "tags": [
+    "go",
+    "cli"
+  ],
+  "trustBoundaries": [
+    "user-input",
+    "filesystem",
+    "process-exec",
+    "network"
+  ],
+  "status": "claimed",
+  "lock": {
+    "lockedByRunId": "20260519T175303-e13c5e",
+    "lockedAt": "2026-05-19T17:53:03.057Z",
+    "hostname": "Peytons-MacBook-Pro.local",
+    "pid": 43571
+  },
+  "findingIds": [],
+  "patchAttemptIds": [],
+  "analysisHistory": [],
+  "createdAt": "2026-05-19T17:52:59.936Z",
+  "updatedAt": "2026-05-19T17:53:03.058Z"
+}
+
+Review categories:
+- correctness bugs
+- security issues
+- race/concurrency bugs
+- data loss/corruption
+- resource leaks
+- bad error handling
+- permission/auth gaps
+- API contract mismatches
+- missing/weak tests
+- release/build hazards
+- maintainability risks with concrete impact
+
+
+
+Inspect owned files, context files, and linked tests. Treat included tests as first-class
+evidence of intended behavior. If tests contradict a suspected bug, either skip it or
+downgrade confidence and explain the uncertainty. Avoid reporting behavior as a bug
+solely because a helper name implies a broader contract. Deduplicate sibling/root-cause
+issues: when the same bug pattern appears in multiple owned files, emit one finding
+with multiple evidence refs instead of separate one-off findings.
+
+Avoid speculative low-evidence findings. Evidence must point at included files.
+
+JSON shape:
+{
+  "findings": [
+    {
+      "title": "string",
+      "category": "bug|security|performance|concurrency|api-contract|data-loss|test-gap|docs-gap|build-release|maintainability",
+      "severity": "critical|high|medium|low",
+      "confidence": "high|medium|low",
+      "evidence": [{"path":"string","startLine":1,"endLine":1,"symbol":null,"quote":null}],
+      "reasoning": "string",
+      "reproduction": null,
+      "recommendation": "string",
+      "whyTestsDoNotAlreadyCoverThis": "string",
+      "suggestedRegressionTest": "string or null",
+      "minimumFixScope": "string"
+    }
+  ],
+  "inspected": {"files":["string"],"symbols":["string"],"notes":["string"]}
+}
+
+Files:
+--- e2e/bootstrap/main.go
+// Package main provides a pre-test bootstrap command that runs agent-specific
+// setup (auth config, warmup) before E2E tests. Usage: go run ./e2e/bootstrap
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/entireio/cli/e2e/agents"
+)
+
+func main() {
+	// Optional: pass agent name as argument to bootstrap only that agent.
+	filter := ""
+	if len(os.Args) > 1 {
+		filter = os.Args[1]
+	}
+
+	for _, a := range agents.All() {
+		if filter != "" && a.Name() != filter {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "bootstrapping %s...\n", a.Name())
+		if err := a.Bootstrap(); err != nil {
+			fmt.Fprintf(os.Stderr, "bootstrap %s: %v\n", a.Name(), err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "bootstrapping %s: done\n", a.Name())
+	}
+}
+
+
+--- e2e/agents/agent.go
+package agents
+
+import (
+	"context"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type Output struct {
+	Command  string
+	Stdout   string
+	Stderr   string
+	ExitCode int
+}
+
+type Option func(*runConfig)
+type runConfig struct {
+	Model          string
+	PermissionMode string
+	PromptTimeout  time.Duration
+}
+
+func WithModel(model string) Option {
+	return func(c *runConfig) { c.Model = model }
+}
+
+func WithPermissionMode(mode string) Option {
+	return func(c *runConfig) { c.PermissionMode = mode }
+}
+
+func WithPromptTimeout(d time.Duration) Option {
+	return func(c *runConfig) { c.PromptTimeout = d }
+}
+
+type Agent interface {
+	Name() string
+	// Binary returns the CLI binary name (e.g. "claude", "gemini").
+	Binary() string
+	EntireAgent() string
+	PromptPattern() string
+	// TimeoutMultiplier returns a factor applied to per-test timeouts.
+	// Slower agents (e.g. Gemini) return values > 1.
+	TimeoutMultiplier() float64
+	RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error)
+	StartSession(ctx context.Context, dir string) (Session, error)
+	// Bootstrap performs one-time CI setup (auth config, warmup, etc.).
+	// Called before any tests run. Implementations should be idempotent.
+	Bootstrap() error
+	// IsTransientError returns true if the error from RunPrompt looks like
+	// a transient API failure (e.g. 500, rate limit, network error) that
+	// is worth retrying.
+	IsTransientError(out Output, err error) bool
+}
+
+type Session interface {
+	Send(input string) error
+	WaitFor(pattern string, timeout time.Duration) (string, error)
+	Capture() string
+	Close() error
+}
+
+// ExternalAgent is an optional interface for agents discovered via the
+// external agent protocol (entire-agent-* binaries). SetupRepo uses this
+// to pre-configure external_agents in settings before running `entire enable`.
+type ExternalAgent interface {
+	IsExternalAgent() bool
+}
+
+var registry []Agent
+var gates = map[string]chan struct{}{}
+
+func Register(a Agent) {
+	registry = append(registry, a)
+}
+
+// RegisterGate sets a concurrency limit for an agent's tests.
+// Tests call AcquireSlot/ReleaseSlot to respect this limit.
+// The limit can be overridden via E2E_CONCURRENT_TEST_LIMIT.
+func RegisterGate(name string, defaultMax int) {
+	max := defaultMax
+	if v, err := strconv.Atoi(os.Getenv("E2E_CONCURRENT_TEST_LIMIT")); err == nil && v > 0 {
+		max = v
+	}
+	gates[name] = make(chan struct{}, max)
+}
+
+// AcquireSlot blocks until a test slot is available for the agent or the
+// context is cancelled. Returns a non-nil error if the context expires
+// before a slot opens.
+func AcquireSlot(ctx context.Context, a Agent) error {
+	g, ok := gates[a.Name()]
+	if !ok {
+		return nil
+	}
+	select {
+	case g <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// ReleaseSlot frees a test slot for the agent.
+func ReleaseSlot(a Agent) {
+	if g, ok := gates[a.Name()]; ok {
+		<-g
+	}
+}
+
+func All() []Agent {
+	return registry
+}
+
+// filterEnv returns env with entries matching any of the given variable names
+// removed. Used to strip test-only overrides (e.g. ENTIRE_TEST_TTY) from agent
+// processes so they exercise real detection paths.
+func filterEnv(env []string, names ...string) []string {
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		skip := false
+		for _, name := range names {
+			if strings.HasPrefix(e, name+"=") {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+
+--- e2e/agents/claude.go
+package agents
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+)
+
+// cleanEnv returns os.Environ() with agent-incompatible variables removed.
+// It strips CLAUDECODE (so Claude Code doesn't refuse to start inside this
+// test runner) and ENTIRE_TEST_TTY (so agents exercise the real TTY detection
+// paths instead of the test override).
+func cleanEnv() []string {
+	var env []string
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "CLAUDECODE=") || strings.HasPrefix(e, "ENTIRE_TEST_TTY=") {
+			continue
+		}
+		env = append(env, e)
+	}
+	return env
+}
+
+func init() {
+	if env := os.Getenv("E2E_AGENT"); env != "" && env != "claude-code" {
+		return
+	}
+	Register(&Claude{})
+}
+
+type Claude struct{}
+
+func (c *Claude) Name() string               { return "claude-code" }
+func (c *Claude) Binary() string             { return "claude" }
+func (c *Claude) EntireAgent() string        { return "claude-code" }
+func (c *Claude) PromptPattern() string      { return `❯` }
+func (c *Claude) TimeoutMultiplier() float64 { return 1.0 }
+
+func (c *Claude) IsTransientError(out Output, _ error) bool {
+	transientPatterns := []string{
+		"overloaded",
+		"rate limit",
+		"529",
+		"503",
+		"ECONNRESET",
+		"ETIMEDOUT",
+	}
+	for _, p := range transientPatterns {
+		if strings.Contains(out.Stderr, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Claude) Bootstrap() error {
+	// On CI, write a config file so Claude Code uses the API key from the
+	// environment instead of trying OAuth/Keychain.
+	if os.Getenv("CI") == "" {
+		return nil
+	}
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+	dir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	config := fmt.Sprintf(`{"primaryApiKey":%q,"hasCompletedOnboarding":true}`, apiKey)
+	path := filepath.Join(dir, ".claude.json")
+	return os.WriteFile(path, []byte(config), 0o644)
+}
+
+func (c *Claude) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
+	cfg := &runConfig{Model: "haiku"}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	configDir, err := cleanConfigDir()
+	if err != nil {
+		return Output{}, fmt.Errorf("create clean config dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(configDir) }()
+
+	env := append(cleanEnv(),
+		"ACCESSIBLE=1",
+
+		// See https://code.claude.com/docs/en/settings - without this setting Claude was going off and
+		// trying to Git-clone its plugin marketplace, which meant calling git commands that could fail
+		// due to a user's exotic config (e.g. in paul's case, needing SSH-keychain access granted every
+		// time).  That's no good, so for the E2E tests, we tell Claude not to make calls to auto-update
+		// itself, clone its plugins, etc.
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+		"CLAUDE_CONFIG_DIR="+configDir,
+	)
+
+	args := []string{"-p", prompt, "--model", cfg.Model, "--dangerously-skip-permissions"}
+	displayArgs := []string{"-p", fmt.Sprintf("%q", prompt), "--model", cfg.Model, "--dangerously-skip-permissions"}
+	cmd := exec.CommandContext(ctx, c.Binary(), args...)
+	cmd.Dir = dir
+	cmd.Stdin = nil
+	cmd.Env = env
+	setupProcessGroup(cmd)
+	cmd.WaitDelay = 5 * time.Second
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	exitCode := 0
+	if err != nil {
+		exitErr := &exec.ExitError{}
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+
+	return Output{
+		Command:  c.Binary() + " " + strings.Join(displayArgs, " "),
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+	}, err
+}
+
+func (c *Claude) StartSession(ctx context.Context, dir string) (Session, error) {
+	if runtime.GOOS == "windows" {
+		return nil, nil //nolint:nilnil // nil session signals "not supported" per Agent interface contract
+	}
+	name := fmt.Sprintf("claude-test-%d", time.Now().UnixNano())
+
+	configDir, err := cleanConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("create clean config dir: %w", err)
+	}
+
+	envArgs := []string{
+		"ACCESSIBLE=1",
+
+		// See https://code.claude.com/docs/en/settings - without this setting Claude was going off and
+		// trying to Git-clone its plugin marketplace, which meant calling git commands that could fail
+		// due to a user's exotic config (e.g. in paul's case, needing SSH-keychain access granted every
+		// time).  That's no good, so for the E2E tests, we tell Claude not to make calls to auto-update
+		// itself, clone its plugins, etc.
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+		"CLAUDE_CONFIG_DIR=" + configDir,
+	}
+
+	args := append([]string{"env"}, envArgs...)
+	args = append(args, c.Binary(), "--dangerously-skip-permissions")
+	s, err := NewTmuxSession(name, dir, []string{"CLAUDECODE", "ENTIRE_TEST_TTY"}, args[0], args[1:]...)
+	if err != nil {
+		_ = os.RemoveAll(configDir)
+		return nil, err
+	}
+	s.OnClose(func() { _ = os.RemoveAll(configDir) })
+
+	// Dismiss startup dialogs until we reach the input prompt.
+	for range 5 {
+		content, err := s.WaitFor(`❯`, 15*time.Second)
+		if err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("waiting for startup prompt: %w", err)
+		}
+		if !strings.Contains(content, "Enter to confirm") {
+			break
+		}
+		// The bypass permissions dialog defaults to "No, exit" —
+		// arrow down to "Yes, I accept" before confirming.
+		if strings.Contains(content, "Yes, I accept") {
+			_ = s.SendKeys("Down")
+			time.Sleep(200 * time.Millisecond)
+		}
+		_ = s.SendKeys("Enter")
+		time.Sleep(500 * time.Millisecond)
+	}
+	s.stableAtSend = ""
+
+	return s, nil
+}
+
+// cleanConfigDir creates an isolated temp directory for CLAUDE_CONFIG_DIR so
+// that E2E test runs don't inherit any user settings (CLAUDE.md, skills,
+// projects, plugins, etc.).
+func cleanConfigDir() (string, error) {
+	dst, err := os.MkdirTemp("", "claude-config-*")
+	if err != nil {
+		return "", err
+	}
+
+	if os.Getenv("CI") != "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			src := filepath.Join(home, ".claude", ".claude.json")
+			if _, err := os.Stat(src); err == nil {
+				_ = linkFile(src, filepath.Join(dst, ".claude.json"))
+			}
+		}
+	} else {
+		_ = os.WriteFile(filepath.Join(dst, ".claude.json"),
+			[]byte(`{"hasCompletedOnboarding":true}`), 0o644)
+	}
+
+	return dst, nil
+}
+
+
+--- e2e/agents/codex.go
+package agents
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+func init() {
+	if env := os.Getenv("E2E_AGENT"); env != "" && env != "codex" {
+		return
+	}
+	Register(&Codex{})
+	RegisterGate("codex", 2)
+}
+
+// Codex implements the E2E Agent interface for OpenAI's Codex CLI.
+type Codex struct{}
+
+type CodexSession struct {
+	*TmuxSession
+
+	home string
+}
+
+func (s *CodexSession) Home() string { return s.home }
+
+func (c *Codex) Name() string               { return "codex" }
+func (c *Codex) Binary() string             { return "codex" }
+func (c *Codex) EntireAgent() string        { return "codex" }
+func (c *Codex) PromptPattern() string      { return `›` }
+func (c *Codex) TimeoutMultiplier() float64 { return 1.5 }
+
+func (c *Codex) Bootstrap() error {
+	if os.Getenv("CI") != "" && os.Getenv("OPENAI_API_KEY") == "" {
+		return errors.New("OPENAI_API_KEY must be set on CI for Codex E2E tests")
+	}
+	return nil
+}
+
+func (c *Codex) IsTransientError(out Output, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	combined := out.Stdout + out.Stderr
+	for _, p := range []string{"overloaded", "rate limit", "rate_limit", "503", "529", "ECONNRESET", "ETIMEDOUT"} {
+		if strings.Contains(combined, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// codexHome creates an isolated CODEX_HOME for a test run.
+// Auth still works via OPENAI_API_KEY env var or symlinked auth.json.
+//
+// The directory lives under the user's home (not the system temp dir) because
+// recent Codex versions refuse to install PATH helper binaries when CODEX_HOME
+// sits under /tmp, which breaks subsequent tool calls.
+func codexHome() (string, func(), error) {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve user cache dir: %w", err)
+	}
+	base := filepath.Join(cache, "entire-e2e")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return "", nil, fmt.Errorf("create codex home base %q: %w", base, err)
+	}
+	dir, err := os.MkdirTemp(base, "codex-home-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("create temporary codex home under %q: %w", base, err)
+	}
+	return dir, func() { _ = os.RemoveAll(dir) }, nil
+}
+
+func (c *Codex) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
+	cfg := &runConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	timeout := 60 * time.Second
+	if cfg.PromptTimeout > 0 {
+		timeout = cfg.PromptTimeout
+	}
+	promptCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	home, cleanup, err := codexHome()
+	if err != nil {
+		return Output{}, fmt.Errorf("create codex home: %w", err)
+	}
+	defer cleanup()
+
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		absDir = dir
+	}
+	if err := seedCodexHome(home, absDir); err != nil {
+		return Output{}, fmt.Errorf("seed codex home: %w", err)
+	}
+
+	args := []string{"exec", "--dangerously-bypass-approvals-and-sandbox"}
+	if cfg.Model != "" {
+		args = append(args, "-m", cfg.Model)
+	}
+	args = append(args, prompt)
+
+	env := append(filterEnv(os.Environ(), "ENTIRE_TEST_TTY", "CODEX_HOME"),
+		"CODEX_HOME="+home,
+	)
+
+	cmd := exec.CommandContext(promptCtx, c.Binary(), args...)
+	cmd.Dir = dir
+	cmd.Stdin = nil
+	cmd.Env = env
+	setupProcessGroup(cmd)
+	cmd.WaitDelay = 5 * time.Second
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	exitCode := 0
+	if err != nil {
+		exitErr := &exec.ExitError{}
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+		if promptCtx.Err() == context.DeadlineExceeded {
+			err = fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
+		}
+	}
+
+	return Output{
+		Command:  c.Binary() + " " + strings.Join(args[:len(args)-1], " ") + " " + fmt.Sprintf("%q", prompt),
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+	}, err
+}
+
+func (c *Codex) StartSession(ctx context.Context, dir string) (Session, error) {
+	name := fmt.Sprintf("codex-test-%d", time.Now().UnixNano())
+
+	home, cleanup, err := codexHome()
+	if err != nil {
+		return nil, fmt.Errorf("create codex home: %w", err)
+	}
+
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		absDir = dir
+	}
+	if err := seedCodexHome(home, absDir); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("seed codex home: %w", err)
+	}
+
+	s, err := c.startTmuxSession(name, dir, home, "codex", "--dangerously-bypass-approvals-and-sandbox")
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	s.OnClose(cleanup)
+
+	// Dismiss startup dialogs (model upgrade prompts, etc.) until we reach
+	// the input prompt. Similar to Claude's startup dialog handling.
+	for range 5 {
+		content, waitErr := s.WaitFor(c.PromptPattern(), 15*time.Second)
+		if waitErr != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("waiting for codex prompt: %w", waitErr)
+		}
+		if !strings.Contains(content, "press enter to confirm") &&
+			!strings.Contains(content, "Use ↑/↓ to move") {
+			break
+		}
+		_ = s.SendKeys("Enter")
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	return &CodexSession{TmuxSession: s, home: home}, nil
+}
+
+func (c *Codex) ResumeSession(ctx context.Context, dir, home, sessionID string) (Session, error) {
+	_ = ctx
+	name := fmt.Sprintf("codex-resume-%d", time.Now().UnixNano())
+
+	s, err := c.startTmuxSession(name, dir, home, "codex", "--dangerously-bypass-approvals-and-sandbox", "resume", sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Dismiss any startup prompts until the input prompt appears.
+	for range 5 {
+		content, waitErr := s.WaitFor(c.PromptPattern(), 15*time.Second)
+		if waitErr != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("waiting for codex resumed prompt: %w", waitErr)
+		}
+		if !strings.Contains(content, "press enter to confirm") &&
+			!strings.Contains(content, "Use ↑/↓ to move") {
+			break
+		}
+		_ = s.SendKeys("Enter")
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	return &CodexSession{TmuxSession: s, home: home}, nil
+}
+
+func (c *Codex) startTmuxSession(name, dir, home string, args ...string) (*TmuxSession, error) {
+	tmuxArgs := append([]string{"CODEX_HOME=" + home, "HOME=" + os.Getenv("HOME"), "TERM=" + os.Getenv("TERM")}, args...)
+	return NewTmuxSession(name, dir, []string{"CODEX_HOME", "ENTIRE_TEST_TTY"}, "env", tmuxArgs...)
+}
+
+// seedCodexHome writes trust + feature flag config and links auth credentials
+// so Codex loads the project's .codex/ layer and can authenticate.
+func seedCodexHome(home, projectDir string) error {
+	if err := os.MkdirAll(home, 0o750); err != nil {
+		return err
+	}
+
+	// Write config with trust, feature flag, and pinned model to skip upgrade dialogs.
+	model := os.Getenv("E2E_CODEX_MODEL")
+	if model == "" {
+		model = "gpt-5.4"
+	}
+	config := fmt.Sprintf("model = %q\n\n[features]\nhooks = true\n\n[projects.%q]\ntrust_level = \"trusted\"\n", model, projectDir)
+
+	// Codex 0.129+ refuses to run unmanaged hooks until each one has a
+	// trusted_hash entry in the user's config. Compute the hashes the same
+	// way Codex does and pre-trust them — without this, every hook in
+	// .codex/hooks.json sits as Untrusted and our hooks never fire under e2e.
+	trustState, err := codexHookTrustState(projectDir)
+	if err != nil {
+		return fmt.Errorf("compute hook trust state: %w", err)
+	}
+	if trustState != "" {
+		config += "\n" + trustState
+	}
+
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o600); err != nil {
+		return err
+	}
+
+	if apiKey := os.Getenv("OPENAI_API_KEY"); apiKey != "" {
+		return writeCodexAPIKeyAuth(home, apiKey)
+	}
+
+	// Symlink auth.json from the real ~/.codex/ so API credentials are available.
+	if realHome, err := os.UserHomeDir(); err == nil {
+		src := filepath.Join(realHome, ".codex", "auth.json")
+		if _, err := os.Stat(src); err == nil {
+			_ = os.Symlink(src, filepath.Join(home, "auth.json"))
+		}
+	}
+
+	return nil
+}
+
+func writeCodexAPIKeyAuth(home, apiKey string) error {
+	auth := struct {
+		AuthMode     string `json:"auth_mode"`
+		OpenAIAPIKey string `json:"OPENAI_API_KEY"`
+	}{
+		AuthMode:     "apikey",
+		OpenAIAPIKey: apiKey,
+	}
+
+	data, err := json.MarshalIndent(auth, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal codex auth: %w", err)
+	}
+	data = append(data, '\n')
+
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), data, 0o600); err != nil {
+		return fmt.Errorf("write codex auth: %w", err)
+	}
+
+	return nil
+}
+
+
+--- e2e/agents/codex_trust.go
+package agents
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// codexHookFile mirrors the on-disk shape of .codex/hooks.json. Field types
+// match Codex's serde definitions (codex-rs/config/src/hook_config.rs) so the
+// trust-hash computation below stays faithful to discover_handlers.
+type codexHookFile struct {
+	Hooks codexHookEvents `json:"hooks"`
+}
+
+type codexHookEvents struct {
+	PreToolUse        []codexHookGroup `json:"PreToolUse"`
+	PermissionRequest []codexHookGroup `json:"PermissionRequest"`
+	PostToolUse       []codexHookGroup `json:"PostToolUse"`
+	PreCompact        []codexHookGroup `json:"PreCompact"`
+	PostCompact       []codexHookGroup `json:"PostCompact"`
+	SessionStart      []codexHookGroup `json:"SessionStart"`
+	UserPromptSubmit  []codexHookGroup `json:"UserPromptSubmit"`
+	Stop              []codexHookGroup `json:"Stop"`
+}
+
+type codexHookGroup struct {
+	Matcher *string             `json:"matcher"`
+	Hooks   []codexHookHandlers `json:"hooks"`
+}
+
+type codexHookHandlers struct {
+	Type          string  `json:"type"`
+	Command       string  `json:"command"`
+	Timeout       *uint64 `json:"timeout"`
+	Async         bool    `json:"async"`
+	StatusMessage *string `json:"statusMessage"`
+}
+
+// codexHookEventLabels lists every event name in the order Codex emits in
+// the JSON schema, paired with the snake_case label it uses for trust state
+// keys (codex-rs/hooks/src/lib.rs:hook_event_key_label).
+var codexHookEventLabels = []struct {
+	displayName string
+	keyLabel    string
+}{
+	{"PreToolUse", "pre_tool_use"},
+	{"PermissionRequest", "permission_request"},
+	{"PostToolUse", "post_tool_use"},
+	{"PreCompact", "pre_compact"},
+	{"PostCompact", "post_compact"},
+	{"SessionStart", "session_start"},
+	{"UserPromptSubmit", "user_prompt_submit"},
+	{"Stop", "stop"},
+}
+
+// codexHookTrustState reads .codex/hooks.json from projectDir and returns the
+// `[hooks.state.<key>]` TOML block that pre-trusts every command handler
+// declared there. The hash matches Codex's command_hook_hash exactly (see
+// codex-rs/hooks/src/engine/discovery.rs and config/src/fingerprint.rs):
+//
+//  1. Build a NormalizedHookIdentity = { event_name, matcher, hooks: [normalized_handler] }
+//  2. Serialize to JSON with object keys sorted alphabetically (canonical_json)
+//  3. SHA-256 the compact JSON bytes; format as "sha256:<hex>"
+//
+// Returns empty string when no hooks file exists.
+func codexHookTrustState(projectDir string) (string, error) {
+	hooksPath := filepath.Join(projectDir, ".codex", "hooks.json")
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+
+	var file codexHookFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return "", fmt.Errorf("parse hooks.json: %w", err)
+	}
+
+	var sb strings.Builder
+	for _, ev := range codexHookEventLabels {
+		groups := codexEventGroups(&file.Hooks, ev.displayName)
+		for groupIdx, group := range groups {
+			for handlerIdx, handler := range group.Hooks {
+				if handler.Type != "command" {
+					continue
+				}
+				timeoutSec := uint64(600)
+				if handler.Timeout != nil {
+					timeoutSec = *handler.Timeout
+				}
+				if timeoutSec < 1 {
+					timeoutSec = 1
+				}
+				hash := codexCommandHookHash(ev.keyLabel, group.Matcher, handler.Command, timeoutSec, handler.Async, handler.StatusMessage)
+				key := fmt.Sprintf("%s:%s:%d:%d", hooksPath, ev.keyLabel, groupIdx, handlerIdx)
+				fmt.Fprintf(&sb, "[hooks.state.%q]\ntrusted_hash = %q\n\n", key, hash)
+			}
+		}
+	}
+	return sb.String(), nil
+}
+
+func codexEventGroups(events *codexHookEvents, displayName string) []codexHookGroup {
+	switch displayName {
+	case "PreToolUse":
+		return events.PreToolUse
+	case "PermissionRequest":
+		return events.PermissionRequest
+	case "PostToolUse":
+		return events.PostToolUse
+	case "PreCompact":
+		return events.PreCompact
+	case "PostCompact":
+		return events.PostCompact
+	case "SessionStart":
+		return events.SessionStart
+	case "UserPromptSubmit":
+		return events.UserPromptSubmit
+	case "Stop":
+		return events.Stop
+	}
+	return nil
+}
+
+// codexCommandHookHash mirrors command_hook_hash + version_for_toml. Codex
+// builds a TOML value of NormalizedHookIdentity then serde_json::to_value
+// converts it to JSON; we skip the TOML round-trip and emit the equivalent
+// JSON directly. Crucially:
+//   - matcher is omitted when nil (TOML can't represent null Options)
+//   - timeout is always present (the normalized handler always sets Some(_))
+//   - statusMessage is omitted when nil
+//   - object keys are sorted alphabetically by canonicalize before hashing
+func codexCommandHookHash(eventLabel string, matcher *string, command string, timeoutSec uint64, async bool, statusMessage *string) string {
+	handler := map[string]any{
+		"type":    "command",
+		"command": command,
+		"timeout": json.Number(strconv.FormatUint(timeoutSec, 10)),
+		"async":   async,
+	}
+	if statusMessage != nil {
+		handler["statusMessage"] = *statusMessage
+	}
+	identity := map[string]any{
+		"event_name": eventLabel,
+		"hooks":      []any{handler},
+	}
+	if matcher != nil {
+		identity["matcher"] = *matcher
+	}
+
+	canonical := codexCanonicalJSON(identity)
+	sum := sha256.Sum256(canonical)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// codexCanonicalJSON marshals v with object keys sorted alphabetically, no
+// whitespace. Go's encoding/json already sorts map[string]any keys, but we
+// re-walk explicitly to make the contract obvious and to keep the output
+// stable if a future stdlib change reorders.
+func codexCanonicalJSON(v any) []byte {
+	var buf strings.Builder
+	codexWriteCanonical(&buf, v)
+	return []byte(buf.String())
+}
+
+func codexWriteCanonical(buf *strings.Builder, v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		buf.WriteByte('{')
+		for i, k := range keys {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			buf.Write(codexJSONAtom(k))
+			buf.WriteByte(':')
+			codexWriteCanonical(buf, t[k])
+		}
+		buf.WriteByte('}')
+	case []any:
+		buf.WriteByte('[')
+		for i, item := range t {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			codexWriteCanonical(buf, item)
+		}
+		buf.WriteByte(']')
+	default:
+		buf.Write(codexJSONAtom(t))
+	}
+}
+
+// codexJSONAtom marshals a scalar matching serde_json's default escaping
+// rules: only the JSON-required characters (", \, control chars) are
+// escaped — `<`, `>`, `&` pass through unchanged. Go's default json.Marshal
+// HTML-escapes those bytes to \u00XX, which would diverge from Codex's
+// hash for any command containing shell redirection (>, &&, etc.).
+func codexJSONAtom(v any) []byte {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	// Callers pass strings, bools, and json.Number atoms only; encoding
+	// can't fail for those types. Ignore the error rather than complicating
+	// every call site for a static guarantee.
+	_ = enc.Encode(v) //nolint:errchkjson // scalar atoms only; error is unreachable
+	out := b.Bytes()
+	if n := len(out); n > 0 && out[n-1] == '\n' {
+		out = out[:n-1]
+	}
+	return out
+}
+
+
+--- e2e/agents/copilot-cli.go
+package agents
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+)
+
+func init() {
+	if env := os.Getenv("E2E_AGENT"); env != "" && env != "copilot-cli" {
+		return
+	}
+	Register(&CopilotCLI{})
+	RegisterGate("copilot-cli", 4)
+}
+
+type CopilotCLI struct{}
+
+func (c *CopilotCLI) Name() string               { return "copilot-cli" }
+func (c *CopilotCLI) Binary() string             { return "copilot" }
+func (c *CopilotCLI) EntireAgent() string        { return "copilot-cli" }
+func (c *CopilotCLI) PromptPattern() string      { return `❯` }
+func (c *CopilotCLI) TimeoutMultiplier() float64 { return 1.5 }
+
+func (c *CopilotCLI) IsTransientError(out Output, err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	combined := out.Stdout + out.Stderr
+	for _, p := range []string{
+		"overloaded",
+		"rate limit",
+		"503",
+		"529",
+		"ECONNRESET",
+		"ETIMEDOUT",
+		"Too Many Requests",
+		// Copilot sometimes calls its Edit tool without old_str,
+		// resulting in zero code changes despite a successful exit.
+		"old_str is required",
+	} {
+		if strings.Contains(combined, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *CopilotCLI) Bootstrap() error {
+	// Copilot CLI uses GitHub authentication (gh auth or GITHUB_TOKEN).
+	// No additional bootstrap needed — auth should be pre-configured.
+	return nil
+}
+
+func (c *CopilotCLI) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
+	cfg := &runConfig{Model: "claude-haiku-4.5"}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	timeout := 60 * time.Second
+	if cfg.PromptTimeout > 0 {
+		timeout = cfg.PromptTimeout
+	}
+	promptCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	args := []string{"-p", prompt, "--model", cfg.Model, "--allow-all"}
+	displayArgs := []string{"-p", fmt.Sprintf("%q", prompt), "--model", cfg.Model, "--allow-all"}
+	cmd := exec.CommandContext(promptCtx, c.Binary(), args...)
+	cmd.Dir = dir
+	cmd.Stdin = nil
+	// GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS opts in to .github/hooks/*.json loading
+	// in -p mode; gated since Copilot 1.0.40 (2026-05-01).
+	cmd.Env = append(os.Environ(),
+		"ENTIRE_TEST_TTY=0",
+		"GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS=true",
+	)
+	setupProcessGroup(cmd)
+	cmd.WaitDelay = 5 * time.Second
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		exitErr := &exec.ExitError{}
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+		if promptCtx.Err() == context.DeadlineExceeded {
+			err = fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
+		}
+	}
+
+	out := Output{
+		Command:  c.Binary() + " " + strings.Join(displayArgs, " "),
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+	}
+
+	// Copilot sometimes calls its Edit tool without required parameters,
+	// producing zero code changes despite exit 0. Surface this as an error so
+	// the transient-error retry mechanism can restart the scenario.
+	// Only trigger when copilot reports zero changes — it may retry internally.
+	if err == nil && strings.Contains(out.Stdout, "old_str is required") &&
+		strings.Contains(out.Stderr, "Total code changes:     +0 -0") {
+		err = errors.New("copilot Edit tool failed: old_str is required")
+	}
+
+	return out, err
+}
+
+// CopilotSession wraps TmuxSession to handle Copilot CLI's dual input modes.
+// Copilot CLI can be in "Chat" mode (Enter submits) or "Edit" mode (Ctrl+S
+// submits). After completing a prompt, copilot may return to either mode
+// non-deterministically. This wrapper detects Edit mode after sending Enter
+// and falls back to Ctrl+S if needed.
+type CopilotSession struct {
+	*TmuxSession
+}
+
+func (cs *CopilotSession) Send(input string) error {
+	if err := cs.clearInputLine(); err != nil {
+		return err
+	}
+
+	preSend := stableContent(cs.Capture())
+
+	if err := cs.sendOnce(input, preSend); err != nil {
+		return err
+	}
+
+	// Copilot CLI's autocomplete can non-deterministically trigger during
+	// text input (e.g. a "/" in "docs/red.md" opens the slash-command menu).
+	// If detected, dismiss with Escape, clear the input, and retry once.
+	time.Sleep(300 * time.Millisecond)
+	if isAutocompleteMenu(cs.Capture()) {
+		if err := cs.dismissAutocompleteAndClear(); err != nil {
+			return err
+		}
+		if err := cs.sendOnce(input, stableContent(cs.Capture())); err != nil {
+			return err
+		}
+	}
+
+	// Copilot can leave behind a stray slash-command invocation between turns.
+	// Only retry if that error appeared in output produced by this submission,
+	// not merely somewhere in pane scrollback from an earlier turn.
+	if content := cs.Capture(); appearedInNewOutput(preSend, content, "Unknown command: /") {
+		if err := cs.clearInputLine(); err != nil {
+			return err
+		}
+		if err := cs.sendOnce(input, stableContent(cs.Capture())); err != nil {
+			return err
+		}
+	}
+
+	// Wait for the terminal to reflect the echoed input, then snapshot.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		current := stableContent(cs.Capture())
+		if current != preSend {
+			cs.stableAtSend = current
+			return nil
+		}
+	}
+	cs.stableAtSend = stableContent(cs.Capture())
+	return nil
+}
+
+// clearInputLine removes any partially typed prompt text without sending other
+// UI navigation keys. In Copilot CLI, Escape can trigger undo/snapshot actions,
+// so routine pre-send cleanup must avoid it.
+func (cs *CopilotSession) clearInputLine() error {
+	if err := cs.SendKeys("C-u"); err != nil {
+		return err
+	}
+	time.Sleep(200 * time.Millisecond)
+	return nil
+}
+
+// dismissAutocompleteAndClear closes the slash-command autocomplete dropdown
+// and then clears the input line before retrying the prompt.
+func (cs *CopilotSession) dismissAutocompleteAndClear() error {
+	if err := cs.SendKeys("Escape"); err != nil {
+		return err
+	}
+	time.Sleep(200 * time.Millisecond)
+	return cs.clearInputLine()
+}
+
+// appearedInNewOutput reports whether pattern is present in content that was
+// added after the pre-send snapshot. This avoids retriggering on old pane
+// scrollback from previous turns.
+func appearedInNewOutput(before string, after string, pattern string) bool {
+	if after == before {
+		return false
+	}
+	if strings.HasPrefix(after, before) {
+		return strings.Contains(after[len(before):], pattern)
+	}
+
+	// If tmux capture lost a clean prefix relationship due to scrollback churn,
+	// fall back to checking only the most recent lines.
+	lines := strings.Split(after, "\n")
+	start := max(0, len(lines)-12)
+	return strings.Contains(strings.Join(lines[start:], "\n"), pattern)
+}
+
+// sendOnce types the input text, sends Enter, and handles Edit mode fallback.
+func (cs *CopilotSession) sendOnce(input string, preSend string) error {
+	// Use -l (literal) flag to prevent tmux from interpreting characters
+	// in the prompt text as special key names.
+	args := []string{"send-keys", "-l", "-t", cs.name, input}
+	cmd := exec.Command("tmux", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux send-keys -l: %w\n%s", err, out)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if err := cs.SendKeys("Enter"); err != nil {
+		return err
+	}
+
+	// Briefly poll to see if copilot is still in Edit mode (Enter didn't submit).
+	// In Edit mode the status bar shows "ctrl+s run command". If detected,
+	// send Ctrl+S to actually submit the prompt. Break early if the content
+	// changes from the pre-send snapshot, indicating submission has started.
+	editDeadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(editDeadline) {
+		content := cs.Capture()
+		if isEditMode(content) {
+			if err := cs.SendKeys("C-s"); err != nil {
+				return err
+			}
+			break
+		}
+		if stableContent(content) != preSend {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return nil
+}
+
+// isEditMode checks if copilot-cli is in Edit mode by looking for the
+// "ctrl+s run command" indicator in the last few lines (status bar area).
+// Restricting the search avoids false positives if the phrase appears in
+// agent output.
+func isEditMode(content string) bool {
+	lines := strings.Split(content, "\n")
+	const statusPhrase = "ctrl+s run command"
+	for i := len(lines) - 1; i >= 0 && i >= len(lines)-3; i-- {
+		if strings.Contains(lines[i], statusPhrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAutocompleteMenu detects copilot's slash-command autocomplete dropdown.
+// When triggered, copilot shows a list of commands starting with "▋  /"
+// below the input line, preventing prompt submission.
+func isAutocompleteMenu(content string) bool {
+	lines := strings.Split(content, "\n")
+	matches := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "▋") && strings.Contains(trimmed, "/") {
+			matches++
+			if matches >= 2 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, error) {
+	bin, err := exec.LookPath(c.Binary())
+	if err != nil {
+		return nil, fmt.Errorf("agent binary not found: %w", err)
+	}
+
+	// Forward auth-related env vars into the tmux session. tmux starts a new
+	// shell that doesn't inherit Go's os.Environ(), so without this the
+	// session can lose both token-based auth and local gh/copilot login state.
+	var envArgs []string
+	for _, key := range []string{"COPILOT_GITHUB_TOKEN", "HOME", "TERM", "XDG_CONFIG_HOME", "GH_CONFIG_DIR"} {
+		if v := os.Getenv(key); v != "" {
+			envArgs = append(envArgs, key+"="+v)
+		}
+	}
+	args := append([]string{"env"}, envArgs...)
+	args = append(args, bin, "--model", "claude-haiku-4.5", "--allow-all")
+
+	name := fmt.Sprintf("copilot-test-%d", time.Now().UnixNano())
+	// Strip CI env vars that may affect interactive mode.
+	unset := []string{"CI", "GITHUB_ACTIONS", "ENTIRE_TEST_TTY"}
+	s, err := NewTmuxSession(name, dir, unset, args[0], args[1:]...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Dismiss startup dialogs (folder trust, etc.) then wait for the "❯" prompt.
+	// Copilot CLI shows a "Confirm folder trust" dialog in interactive mode for
+	// new directories. "Yes" is pre-selected, so Enter dismisses it.
+	foundPrompt := false
+	for range 5 {
+		content, err := s.WaitFor(`(❯|Enter to select)`, 30*time.Second)
+		if err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("waiting for startup prompt: %w", err)
+		}
+		if strings.Contains(content, "❯") && !strings.Contains(content, "Enter to select") {
+			foundPrompt = true
+			break
+		}
+		if err := s.SendKeys("Enter"); err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("dismissing startup dialog: %w", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !foundPrompt {
+		_ = s.Close()
+		return nil, errors.New("copilot CLI did not reach interactive prompt after dismissing startup dialogs")
+	}
+	s.stableAtSend = ""
+
+	return &CopilotSession{TmuxSession: s}, nil
+}
+
+
+--- e2e/agents/cursor_cli.go
+package agents
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+func init() {
+	if env := os.Getenv("E2E_AGENT"); env != "" && env != "cursor-cli" {
+		return
+	}
+	Register(&CursorCLI{})
+}
+
+// CursorCLI implements the E2E Agent interface for the Cursor Agent CLI binary.
+// The CLI binary is called "agent" and uses Cursor's hooks system via
+// .cursor/hooks.json. It maps to the same Entire agent as Cursor IDE ("cursor").
+//
+// All E2E interactions use interactive (tmux) mode so that the full hook
+// lifecycle fires (sessionStart, beforeSubmitPrompt, stop, sessionEnd).
+// Headless (-p) mode skips beforeSubmitPrompt and stop hooks.
+type CursorCLI struct{}
+
+func (a *CursorCLI) Name() string               { return "cursor-cli" }
+func (a *CursorCLI) Binary() string             { return "agent" }
+func (a *CursorCLI) EntireAgent() string        { return "cursor" }
+func (a *CursorCLI) TimeoutMultiplier() float64 { return 1.5 }
+
+// PromptPattern returns a regex matching Cursor's ready-state prompt markers.
+// Cursor has used multiple startup/completion markers across releases.
+func (a *CursorCLI) PromptPattern() string {
+	return `(/ commands|Plan, search, build anything|Add a follow-up)`
+}
+
+func (a *CursorCLI) IsTransientError(out Output, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	combined := out.Stdout + out.Stderr
+	for _, p := range []string{
+		"overloaded",
+		"rate limit",
+		"429",
+		"503",
+		"529",
+		"ECONNRESET",
+		"ETIMEDOUT",
+		"server error",
+		"Internal Server Error",
+	} {
+		if strings.Contains(combined, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *CursorCLI) Bootstrap() error {
+	// The Cursor CLI authenticates via CURSOR_API_KEY env var or OAuth.
+	// On CI, ensure CURSOR_API_KEY is set. Locally, OAuth/keychain works.
+	if os.Getenv("CI") != "" && os.Getenv("CURSOR_API_KEY") == "" {
+		return errors.New("CURSOR_API_KEY must be set on CI for cursor-cli E2E tests")
+	}
+	return nil
+}
+
+// cursorConfigDir creates an isolated per-session config directory for the
+// Cursor CLI. Each session gets its own XDG_CONFIG_HOME so that parallel tests
+// don't race on the shared ~/.config/cursor/cli-config.json file.
+// The directory is pre-seeded with an empty cli-config.json to avoid the
+// atomic temp-file rename that triggers the ENOENT race.
+func cursorConfigDir() (string, error) {
+	tmp, err := os.MkdirTemp("", "cursor-e2e-config-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp config dir: %w", err)
+	}
+	cursorDir := filepath.Join(tmp, "cursor")
+	if err := os.MkdirAll(cursorDir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir cursor config: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(cursorDir, "cli-config.json"), []byte("{}"), 0o644); err != nil {
+		return "", fmt.Errorf("seed cli-config.json: %w", err)
+	}
+	return tmp, nil
+}
+
+func (a *CursorCLI) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
+	cfg := &runConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	timeout := 90 * time.Second
+	if cfg.PromptTimeout > 0 {
+		timeout = cfg.PromptTimeout
+	}
+
+	displayCmd := a.Binary() + " --force --workspace " + dir + " (interactive prompt: " + prompt + ")"
+
+	// Start an interactive tmux session so all hooks fire
+	// (beforeSubmitPrompt and stop don't fire in headless -p mode).
+	s, err := a.startInteractiveSession(dir)
+	if err != nil {
+		return Output{Command: displayCmd, ExitCode: -1},
+			fmt.Errorf("start interactive session: %w", err)
+	}
+	defer s.Close()
+
+	// Wait for trust dialog and accept it.
+	if err := a.acceptTrustDialogIfNeeded(s); err != nil {
+		return Output{Command: displayCmd, Stdout: s.Capture(), ExitCode: -1}, err
+	}
+
+	// Wait for the TUI to be ready.
+	if _, err := s.WaitFor(a.PromptPattern(), 45*time.Second); err != nil {
+		return Output{Command: displayCmd, Stdout: s.Capture(), ExitCode: -1},
+			fmt.Errorf("waiting for startup prompt: %w", err)
+	}
+
+	// Send the prompt.
+	if err := s.Send(prompt); err != nil {
+		return Output{Command: displayCmd, Stdout: s.Capture(), ExitCode: -1},
+			fmt.Errorf("sending prompt: %w", err)
+	}
+
+	// One absolute deadline covers both the "Add a follow-up" wait and the
+	// subsequent busy-hint wait, so the whole RunPrompt call honors the
+	// caller-provided timeout (rather than ~2× it across two stages).
+	deadline := time.Now().Add(timeout)
+
+	// Wait for the "Add a follow-up" input placeholder. This alone isn't
+	// sufficient — Cursor renders the placeholder while the agent is still
+	// editing, alongside a busy-state hint "ctrl+c to stop" on the same line
+	// (and the "Editing N tokens" spinner above). If we return now, the
+	// caller's defer s.Close() kills tmux mid-turn, the cursor process exits
+	// before its `stop` hook fires, SaveStep never runs, and the resulting
+	// checkpoint has empty FilesTouched.
+	content, waitErr := s.WaitFor(`Add a follow-up`, time.Until(deadline))
+	if waitErr != nil {
+		// Check for deadline exceeded to allow transient error detection.
+		if ctx.Err() == context.DeadlineExceeded {
+			waitErr = fmt.Errorf("%w: %w", waitErr, context.DeadlineExceeded)
+		}
+		return Output{Command: displayCmd, Stdout: content, ExitCode: -1}, waitErr
+	}
+
+	// Then wait for the busy hint to disappear, confirming the agent has
+	// finished its turn so the `stop` hook can fire before tmux is torn down.
+	for {
+		if !strings.Contains(content, "ctrl+c to stop") {
+			return Output{Command: displayCmd, Stdout: content, ExitCode: 0}, nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			err := fmt.Errorf("cursor agent did not finish turn (ctrl+c to stop still visible) within %s", timeout)
+			if ctx.Err() == context.DeadlineExceeded {
+				err = fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
+			}
+			return Output{Command: displayCmd, Stdout: content, ExitCode: -1}, err
+		}
+		sleep := 200 * time.Millisecond
+		if remaining < sleep {
+			sleep = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return Output{Command: displayCmd, Stdout: content, ExitCode: -1},
+				fmt.Errorf("waiting for cursor agent to finish turn: %w", ctx.Err())
+		case <-time.After(sleep):
+		}
+		content = s.Capture()
+	}
+}
+
+func (a *CursorCLI) StartSession(ctx context.Context, dir string) (Session, error) {
+	s, err := a.startInteractiveSession(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := a.acceptTrustDialogIfNeeded(s); err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+
+	// Wait for the TUI to be ready (input prompt).
+	if _, err := s.WaitFor(a.PromptPattern(), 45*time.Second); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("waiting for startup prompt: %w", err)
+	}
+	s.stableAtSend = ""
+
+	return s, nil
+}
+
+// startInteractiveSession creates a new tmux session running the Cursor CLI
+// in interactive mode (no -p flag) so all hooks fire.
+func (a *CursorCLI) startInteractiveSession(dir string) (*TmuxSession, error) {
+	// Resolve to absolute path so tmux can find the binary even if its
+	// shell doesn't inherit the test process's PATH (common on CI).
+	bin, err := exec.LookPath(a.Binary())
+	if err != nil {
+		return nil, fmt.Errorf("agent binary not found: %w", err)
+	}
+
+	// Create an isolated config directory for this session so parallel tests
+	// don't race on the shared ~/.config/cursor/cli-config.json file.
+	configDir, err := cursorConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("create cursor config dir: %w", err)
+	}
+
+	// Build env-wrapped command so the tmux session inherits critical env vars.
+	// tmux starts a new shell that doesn't inherit Go's os.Environ().
+	var envArgs []string
+	for _, key := range []string{"CURSOR_API_KEY", "PATH", "HOME", "TERM"} {
+		if v := os.Getenv(key); v != "" {
+			envArgs = append(envArgs, key+"="+v)
+		}
+	}
+	// Point XDG_CONFIG_HOME to our isolated dir so cursor writes its config
+	// there instead of ~/.config/cursor/. We keep the real HOME so that
+	// auth credentials (keychain, OAuth tokens) remain accessible.
+	envArgs = append(envArgs, "XDG_CONFIG_HOME="+configDir)
+
+	args := append([]string{"env"}, envArgs...)
+	args = append(args, bin, "--force", "--workspace", dir)
+
+	name := fmt.Sprintf("cursor-cli-test-%d", time.Now().UnixNano())
+	unset := []string{"CI"}
+	s, err := NewTmuxSession(name, dir, unset, args[0], args[1:]...)
+	if err != nil {
+		_ = os.RemoveAll(configDir)
+		return nil, err
+	}
+	s.OnClose(func() { _ = os.RemoveAll(configDir) })
+	return s, nil
+}
+
+// acceptTrustDialogIfNeeded checks whether the workspace trust dialog appears
+// and presses "a" to accept it. The dialog only shows on the first launch in
+// a workspace — subsequent sessions in the same directory skip it.
+func (a *CursorCLI) acceptTrustDialogIfNeeded(s *TmuxSession) error {
+	// Race: either the trust dialog or the input prompt will appear first.
+	// Use a short timeout to check for the trust dialog without blocking
+	// too long if the workspace is already trusted.
+	content, err := s.WaitFor(`Trust this workspace|`+a.PromptPattern(), 45*time.Second)
+	if err != nil {
+		return fmt.Errorf("waiting for trust dialog or prompt: %w", err)
+	}
+	if strings.Contains(content, "Trust this workspace") {
+		if err := s.SendKeys("a"); err != nil {
+			return fmt.Errorf("accepting trust dialog: %w", err)
+		}
+	}
+	return nil
+}
+
+
+--- e2e/agents/droid.go
+package agents
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+func init() {
+	if env := os.Getenv("E2E_AGENT"); env != "" && env != "factoryai-droid" {
+		return
+	}
+	if _, err := exec.LookPath("droid"); err != nil {
+		return
+	}
+	Register(&Droid{})
+}
+
+// Droid implements the Agent interface for Factory AI Droid.
+type Droid struct{}
+
+func (d *Droid) Name() string               { return "factoryai-droid" }
+func (d *Droid) Binary() string             { return "droid" }
+func (d *Droid) EntireAgent() string        { return "factoryai-droid" }
+func (d *Droid) PromptPattern() string      { return `>` }
+func (d *Droid) TimeoutMultiplier() float64 { return 2.0 }
+
+func (d *Droid) IsTransientError(out Output, err error) bool {
+	if err == nil {
+		return false
+	}
+	combined := out.Stdout + out.Stderr
+	transientPatterns := []string{
+		"overloaded",
+		"rate limit",
+		"529",
+		"503",
+		"ECONNRESET",
+		"ETIMEDOUT",
+	}
+	for _, p := range transientPatterns {
+		if strings.Contains(combined, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// droidSettings represents the ~/.factory/settings.json structure used for
+// BYOK (Bring Your Own Key) configuration.
+type droidSettings struct {
+	CustomModels []droidCustomModel `json:"customModels,omitempty"`
+}
+
+type droidCustomModel struct {
+	DisplayName    string `json:"displayName"`
+	Model          string `json:"model"`
+	BaseURL        string `json:"baseUrl"`
+	APIKey         string `json:"apiKey"`
+	Provider       string `json:"provider"`
+	MaxOutputToken int    `json:"maxOutputTokens"`
+}
+
+const (
+	// Droid v0.63+ expects custom model selection using custom:<model-id>.
+	// The displayName in settings is not accepted by --model.
+	droidCustomModelDisplayName = "claude-haiku-custom"
+	droidCustomModelBaseID      = "claude-haiku-4-5-20251001"
+	defaultDroidModel           = "custom:" + droidCustomModelBaseID
+)
+
+// DefaultDroidModel returns the default model string for Droid BYOK configuration.
+// Format is "custom:<baseModelID>" which the Droid API expects for custom model selection.
+func DefaultDroidModel() string { return defaultDroidModel }
+
+func (d *Droid) Bootstrap() error {
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		return nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+	dir := filepath.Join(home, ".factory")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+
+	settingsPath := filepath.Join(dir, "settings.json")
+
+	// Read existing settings to merge (hooks may already be configured
+	// in the repo-local .factory/settings.json, but the global config
+	// at ~/.factory/settings.json might have other pre-existing entries).
+	var settings droidSettings
+	if data, readErr := os.ReadFile(settingsPath); readErr == nil {
+		// Best-effort merge: ignore parse errors and start fresh
+		_ = json.Unmarshal(data, &settings)
+	}
+
+	// Replace or add the BYOK model entry.
+	byokModel := droidCustomModel{
+		DisplayName:    droidCustomModelDisplayName,
+		Model:          droidCustomModelBaseID,
+		BaseURL:        "https://api.anthropic.com",
+		APIKey:         apiKey,
+		Provider:       "anthropic",
+		MaxOutputToken: 8192,
+	}
+
+	found := false
+	for i, m := range settings.CustomModels {
+		if m.Model == byokModel.Model {
+			settings.CustomModels[i] = byokModel
+			found = true
+			break
+		}
+	}
+	if !found {
+		settings.CustomModels = append(settings.CustomModels, byokModel)
+	}
+
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal settings: %w", err)
+	}
+	return os.WriteFile(settingsPath, data, 0o644)
+}
+
+func (d *Droid) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
+	cfg := &runConfig{Model: defaultDroidModel}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	model := cfg.Model
+	if model == "" {
+		model = defaultDroidModel
+	}
+
+	args := []string{"exec", "--skip-permissions-unsafe", "--model", model, prompt}
+	displayArgs := []string{"exec", "--skip-permissions-unsafe", "--model", model, fmt.Sprintf("%q", prompt)}
+
+	cmd := exec.CommandContext(ctx, d.Binary(), args...)
+	cmd.Dir = dir
+	cmd.Stdin = nil
+	cmd.Env = filterEnv(os.Environ(), "ENTIRE_TEST_TTY", "CI", "GITHUB_ACTIONS")
+	setupProcessGroup(cmd)
+	cmd.WaitDelay = 5 * time.Second
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		exitErr := &exec.ExitError{}
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+
+	return Output{
+		Command:  d.Binary() + " " + strings.Join(displayArgs, " "),
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+	}, err
+}
+
+func (d *Droid) StartSession(ctx context.Context, dir string) (Session, error) {
+	name := fmt.Sprintf("droid-test-%d", time.Now().UnixNano())
+	// Unset CI and GITHUB_ACTIONS so Droid doesn't enter single-turn/headless
+	// mode — it checks these vars and skips interactive input after the first turn.
+	s, err := NewTmuxSession(name, dir, []string{"CI", "GITHUB_ACTIONS", "ENTIRE_TEST_TTY"}, d.Binary())
+	if err != nil {
+		return nil, err
+	}
+
+	// Wait for the interactive prompt indicator.
+	if _, err := s.WaitFor(`>`, 30*time.Second); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("waiting for startup prompt: %w", err)
+	}
+
+	// Droid auto-generates a greeting on startup which fires a Stop hook.
+	// Wait for the greeting turn to fully complete before accepting prompts.
+	select {
+	case <-ctx.Done():
+		_ = s.Close()
+		return nil, fmt.Errorf("context cancelled during startup wait: %w", ctx.Err())
+	case <-time.After(2 * time.Second):
+	}
+	s.stableAtSend = ""
+
+	return s, nil
+}
+
+
+--- e2e/agents/gemini.go
+package agents
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+func init() {
+	if env := os.Getenv("E2E_AGENT"); env != "" && env != "gemini-cli" {
+		return
+	}
+	Register(&Gemini{})
+	RegisterGate("gemini-cli", 2)
+}
+
+const geminiDefaultModel = "gemini-2.5-flash"
+const geminiTrustWorkspaceEnvKey = "GEMINI_CLI_TRUST_WORKSPACE"
+const geminiTrustWorkspaceEnv = geminiTrustWorkspaceEnvKey + "=true"
+
+type Gemini struct{}
+
+func (g *Gemini) Name() string               { return "gemini-cli" }
+func (g *Gemini) Binary() string             { return "gemini" }
+func (g *Gemini) EntireAgent() string        { return "gemini" }
+func (g *Gemini) PromptPattern() string      { return `Type your message` }
+func (g *Gemini) TimeoutMultiplier() float64 { return 2.5 }
+
+func (g *Gemini) IsTransientError(out Output, err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	transientPatterns := []string{
+		"INTERNAL",
+		"Incomplete JSON segment",
+		"429",
+		"TooManyRequests",
+		"RESOURCE_EXHAUSTED",
+		"UNAVAILABLE",
+		"DEADLINE_EXCEEDED",
+		"unexpected critical error",
+	}
+	for _, p := range transientPatterns {
+		if strings.Contains(out.Stderr, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *Gemini) Bootstrap() error {
+	return nil
+}
+
+func (g *Gemini) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
+	cfg := &runConfig{Model: geminiDefaultModel}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	// Per-prompt timeout so a slow response gets killed early enough to
+	// retry within the test's overall budget.
+	timeout := 60 * time.Second
+	if cfg.PromptTimeout > 0 {
+		timeout = cfg.PromptTimeout
+	}
+	promptCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	args := []string{"-p", prompt, "--model", cfg.Model, "-y"}
+	displayArgs := []string{"-p", fmt.Sprintf("%q", prompt), "--model", cfg.Model, "-y"}
+	cmd := exec.CommandContext(promptCtx, g.Binary(), args...)
+	cmd.Dir = dir
+	cmd.Stdin = nil
+	cmd.Env = geminiPromptEnv(dir)
+	setupProcessGroup(cmd)
+	cmd.WaitDelay = 5 * time.Second
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		exitErr := &exec.ExitError{}
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+		// Wrap the prompt-level deadline so IsTransientError can detect it.
+		// cmd.Run() returns "signal: killed", not the context error.
+		if promptCtx.Err() == context.DeadlineExceeded {
+			err = fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
+		}
+	}
+
+	return Output{
+		Command:  g.Binary() + " " + strings.Join(displayArgs, " "),
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+	}, err
+}
+
+func (g *Gemini) StartSession(_ context.Context, dir string) (Session, error) {
+	name := fmt.Sprintf("gemini-test-%d", time.Now().UnixNano())
+
+	envArgs := []string{"ACCESSIBLE=1", geminiTrustWorkspaceEnv, "HOME=" + geminiTestHomeDir(dir)}
+	for _, key := range []string{"TERM"} {
+		if v := os.Getenv(key); v != "" {
+			envArgs = append(envArgs, key+"="+v)
+		}
+	}
+
+	// Unset CI and GITHUB_ACTIONS so gemini doesn't force headless mode —
+	// it checks both in isHeadlessMode() and skips interactive TUI entirely.
+	args := append([]string{"env"}, envArgs...)
+	args = append(args, g.Binary(), "--model", geminiDefaultModel, "-y")
+	s, err := NewTmuxSession(name, dir, []string{"CI", "GITHUB_ACTIONS", "ENTIRE_TEST_TTY", "HOME"}, args[0], args[1:]...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Dismiss startup dialogs (auth, workspace trust, etc.)
+	for range 10 {
+		content, err := s.WaitFor(`(Type your message|trust|Enter to select|Enter to confirm|New Agents Discovered|Acknowledge and Enable)`, 30*time.Second)
+		if err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("waiting for startup prompt: %w", err)
+		}
+		if strings.Contains(content, "Type your message") {
+			break
+		}
+		_ = s.SendKeys("Enter")
+		time.Sleep(500 * time.Millisecond)
+	}
+	s.stableAtSend = ""
+
+	return s, nil
+}
+
+func geminiTestHomeDir(repoDir string) string {
+	return filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-gemini-home")
+}
+
+func geminiPromptEnv(repoDir string) []string {
+	return append(
+		filterEnv(os.Environ(), "ENTIRE_TEST_TTY", geminiTrustWorkspaceEnvKey),
+		"ACCESSIBLE=1",
+		geminiTrustWorkspaceEnv,
+		"HOME="+geminiTestHomeDir(repoDir),
+	)
+}
+
+
+--- e2e/agents/link_unix.go
+//go:build !windows
+
+package agents
+
+import "os"
+
+// linkFile creates a symbolic link from src to dst.
+func linkFile(src, dst string) error {
+	return os.Symlink(src, dst)
+}
+
+
+--- e2e/agents/link_windows.go
+//go:build windows
+
+package agents
+
+import "os"
+
+// linkFile copies src to dst because symlinks on Windows require elevated
+// privileges or Developer Mode.
+func linkFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o644)
+}
+
+
+--- e2e/agents/opencode.go
+package agents
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+)
+
+type openCodeAgent struct {
+	model   string
+	timeout time.Duration
+}
+
+func init() {
+	if env := os.Getenv("E2E_AGENT"); env != "" && env != "opencode" {
+		return
+	}
+	if _, err := exec.LookPath("opencode"); err != nil {
+		return
+	}
+	model := os.Getenv("E2E_OPENCODE_MODEL")
+	if model == "" {
+		model = "anthropic/claude-haiku-4-5"
+	}
+	Register(&openCodeAgent{model: model, timeout: 2 * time.Minute})
+}
+
+func (a *openCodeAgent) Name() string               { return "opencode" }
+func (a *openCodeAgent) Binary() string             { return "opencode" }
+func (a *openCodeAgent) EntireAgent() string        { return "opencode" }
+func (a *openCodeAgent) PromptPattern() string      { return `(Ask anything|▣)` }
+func (a *openCodeAgent) TimeoutMultiplier() float64 { return 2.0 }
+
+func (a *openCodeAgent) IsTransientError(out Output, _ error) bool {
+	transientPatterns := []string{
+		"overloaded",
+		"rate limit",
+		"529",
+		"503",
+		"ECONNRESET",
+		"ETIMEDOUT",
+		"Token refresh failed",
+		"database is locked",
+	}
+	for _, p := range transientPatterns {
+		if strings.Contains(out.Stderr, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *openCodeAgent) Bootstrap() error {
+	// opencode has first-run DB migration + node_modules resolution that
+	// races with parallel test execution (upstream issue #6935).
+	// Run a trivial prompt to force full initialization before tests.
+	for i := range 3 {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cmd := exec.CommandContext(ctx, a.Binary(), "run", "--model", a.model, "say hi")
+		cmd.Env = os.Environ()
+		out, err := cmd.CombinedOutput()
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if i < 2 {
+			fmt.Fprintf(os.Stderr, "opencode warmup attempt %d failed: %s\n%s\n", i+1, err, out)
+			time.Sleep(5 * time.Second)
+		}
+	}
+	// Non-fatal: warmup failure shouldn't block tests entirely.
+	fmt.Fprintln(os.Stderr, "opencode warmup failed after 3 attempts, proceeding anyway")
+	return nil
+}
+
+func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
+	cfg := &runConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	model := a.model
+	if cfg.Model != "" {
+		model = cfg.Model
+	}
+
+	args := []string{"run"}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args, prompt)
+
+	timeout := a.timeout
+	if envTimeout := os.Getenv("E2E_TIMEOUT"); envTimeout != "" {
+		if parsed, err := time.ParseDuration(envTimeout); err == nil {
+			timeout = parsed
+		}
+	}
+	// Per-prompt timeout is the most specific override.
+	if cfg.PromptTimeout > 0 {
+		timeout = cfg.PromptTimeout
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, a.Binary(), args...)
+	cmd.Dir = dir
+	cmd.Env = filterEnv(os.Environ(), "ENTIRE_TEST_TTY")
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	out := Output{
+		Command: a.Binary() + " " + strings.Join(args, " "),
+		Stdout:  stdout.String(),
+		Stderr:  stderr.String(),
+	}
+
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			out.ExitCode = exitErr.ExitCode()
+		} else {
+			out.ExitCode = -1
+		}
+		return out, err
+	}
+
+	return out, nil
+}
+
+func (a *openCodeAgent) StartSession(ctx context.Context, dir string) (Session, error) {
+	// opencode's TUI occasionally fails to render on CI (empty pane).
+	// Retry once if the first attempt produces no output at all.
+	var s *TmuxSession
+	var lastErr error
+	for attempt := range 2 {
+		name := fmt.Sprintf("opencode-test-%d", time.Now().UnixNano())
+		var err error
+		s, err = NewTmuxSession(name, dir, []string{"ENTIRE_TEST_TTY"}, a.Binary(), "--model", a.model)
+		if err != nil {
+			return nil, err
+		}
+
+		// Wait for TUI to be ready (input area with placeholder text).
+		// OpenCode's TUI has a large ASCII banner and multiple panels that
+		// can take a while to render on CI, plus WaitFor needs 2s settle.
+		if _, err := s.WaitFor(`Ask anything`, 60*time.Second); err != nil {
+			content := s.Capture()
+			_ = s.Close()
+			if strings.TrimSpace(content) == "" && attempt == 0 {
+				lastErr = err
+				continue
+			}
+			return nil, fmt.Errorf("waiting for startup: %w", err)
+		}
+		s.stableAtSend = ""
+		return s, nil
+	}
+	return nil, fmt.Errorf("opencode TUI failed to start after retry: %w", lastErr)
+}
+
+
+--- e2e/agents/pi.go
+package agents
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+func init() {
+	if env := os.Getenv("E2E_AGENT"); env != "" && env != "pi" {
+		return
+	}
+	Register(&Pi{})
+	RegisterGate("pi", 2)
+}
+
+// Pi implements the E2E Agent interface for the Pi coding agent.
+type Pi struct{}
+
+// PiSession exposes the per-test isolated Pi home so test fixtures can
+// inspect or clean it up.
+type PiSession struct {
+	*TmuxSession
+
+	home string
+}
+
+func (s *PiSession) Home() string { return s.home }
+
+func (p *Pi) Name() string               { return "pi" }
+func (p *Pi) Binary() string             { return "pi" }
+func (p *Pi) EntireAgent() string        { return "pi" }
+func (p *Pi) PromptPattern() string      { return `\$\d` }
+func (p *Pi) TimeoutMultiplier() float64 { return 1.5 }
+
+func (p *Pi) Bootstrap() error {
+	return nil
+}
+
+func (p *Pi) IsTransientError(out Output, _ error) bool {
+	combined := out.Stdout + out.Stderr
+	for _, pat := range []string{
+		"overloaded",
+		"rate limit",
+		"429",
+		"503",
+		"ECONNRESET",
+		"ETIMEDOUT",
+		"timeout",
+	} {
+		if strings.Contains(combined, pat) {
+			return true
+		}
+	}
+	return false
+}
+
+// piHome creates an isolated PI_CODING_AGENT_DIR for a test run so
+// parallel tests don't share session state with the real ~/.pi/agent.
+// Auth (auth.json) and user-tunable defaults (settings.json) are
+// symlinked from the real home if present so OAuth tokens flow through
+// without re-prompting; tests that run with an explicit
+// ANTHROPIC_API_KEY / OPENAI_API_KEY env will pick those up via the
+// inherited environment regardless.
+func piHome() (string, func(), error) {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve user cache dir: %w", err)
+	}
+	base := filepath.Join(cache, "entire-e2e")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return "", nil, fmt.Errorf("create pi home base %q: %w", base, err)
+	}
+	dir, err := os.MkdirTemp(base, "pi-home-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("create temporary pi home under %q: %w", base, err)
+	}
+	if err := seedPiHome(dir); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", nil, fmt.Errorf("seed pi home: %w", err)
+	}
+	return dir, func() { _ = os.RemoveAll(dir) }, nil
+}
+
+// seedPiHome links the user's auth.json + settings.json into the
+// isolated home (best-effort) so Pi can authenticate without
+// re-prompting. Sessions still write into the isolated home's
+// sessions/ subdir, keeping per-test session state hermetic.
+func seedPiHome(home string) error {
+	realHome, err := os.UserHomeDir()
+	if err != nil {
+		return nil //nolint:nilerr // no user home → can't seed; tests with API-key env still work
+	}
+	src := filepath.Join(realHome, ".pi", "agent")
+	for _, name := range []string{"auth.json", "settings.json"} {
+		from := filepath.Join(src, name)
+		if _, statErr := os.Stat(from); statErr != nil {
+			continue // file not present — skip
+		}
+		to := filepath.Join(home, name)
+		if linkErr := os.Symlink(from, to); linkErr != nil {
+			return fmt.Errorf("symlink %s: %w", name, linkErr)
+		}
+	}
+	return nil
+}
+
+func (p *Pi) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
+	cfg := &runConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	bin, err := exec.LookPath(p.Binary())
+	if err != nil {
+		return Output{}, fmt.Errorf("%s not in PATH: %w", p.Binary(), err)
+	}
+
+	home, cleanup, err := piHome()
+	if err != nil {
+		return Output{}, fmt.Errorf("create pi home: %w", err)
+	}
+	defer cleanup()
+
+	args := []string{"-p", prompt, "--no-skills", "--no-prompt-templates", "--no-themes"}
+	displayArgs := []string{"-p", fmt.Sprintf("%q", prompt), "--no-skills", "--no-prompt-templates", "--no-themes"}
+
+	env := append(filterEnv(os.Environ(), "ENTIRE_TEST_TTY", "PI_CODING_AGENT_DIR"),
+		"PI_CODING_AGENT_DIR="+home,
+	)
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	setupProcessGroup(cmd)
+	cmd.WaitDelay = 5 * time.Second
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	exitCode := 0
+	if err != nil {
+		exitErr := &exec.ExitError{}
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+
+	return Output{
+		Command:  p.Binary() + " " + strings.Join(displayArgs, " "),
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+	}, err
+}
+
+func (p *Pi) StartSession(_ context.Context, dir string) (Session, error) {
+	name := fmt.Sprintf("pi-test-%d", time.Now().UnixNano())
+
+	home, cleanup, err := piHome()
+	if err != nil {
+		return nil, fmt.Errorf("create pi home: %w", err)
+	}
+
+	s, err := p.startTmuxSession(name, dir, home, p.Binary())
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	s.OnClose(cleanup)
+
+	if _, err := s.WaitFor(p.PromptPattern(), 30*time.Second); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("waiting for initial prompt: %w", err)
+	}
+	s.stableAtSend = ""
+
+	return &PiSession{TmuxSession: s, home: home}, nil
+}
+
+// startTmuxSession spawns Pi inside tmux with PI_CODING_AGENT_DIR set
+// via the `env` command. Mirrors Codex's startTmuxSession pattern so
+// the per-test home propagates into the agent process.
+func (p *Pi) startTmuxSession(name, dir, home string, args ...string) (*TmuxSession, error) {
+	tmuxArgs := append([]string{
+		"PI_CODING_AGENT_DIR=" + home,
+		"HOME=" + os.Getenv("HOME"),
+		"TERM=" + os.Getenv("TERM"),
+	}, args...)
+	return NewTmuxSession(name, dir, []string{"PI_CODING_AGENT_DIR", "ENTIRE_TEST_TTY"}, "env", tmuxArgs...)
+}
+
+
+--- e2e/agents/procattr_unix.go
+//go:build unix
+
+package agents
+
+import (
+	"os/exec"
+	"syscall"
+)
+
+// setupProcessGroup configures the command to run in its own process group
+// so the entire tree can be killed on cancellation.
+func setupProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+}
+
+
+--- e2e/agents/procattr_windows.go
+//go:build windows
+
+package agents
+
+import (
+	"os"
+	"os/exec"
+	"syscall"
+)
+
+// setupProcessGroup configures the command for process cleanup on Windows.
+// Uses CREATE_NEW_PROCESS_GROUP so the process can be terminated cleanly.
+func setupProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+	}
+	cmd.Cancel = func() error {
+		return cmd.Process.Signal(os.Kill)
+	}
+}
+
+
+--- e2e/agents/roger_roger.go
+package agents
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+)
+
+func init() {
+	if env := os.Getenv("E2E_AGENT"); env != "" && env != "roger-roger" {
+		return
+	}
+	// Only register if both binaries exist (roger-roger REPL + protocol handler).
+	if _, err := exec.LookPath("roger-roger"); err != nil {
+		return
+	}
+	if _, err := exec.LookPath("entire-agent-roger-roger"); err != nil {
+		return
+	}
+	Register(&RogerRoger{})
+}
+
+// RogerRoger implements the Agent interface using a deterministic external
+// agent binary that creates files and fires hooks without making any API calls.
+// Unlike built-in agents (Vogon, Claude Code, etc.), roger-roger is discovered
+// via the external agent protocol (entire-agent-roger-roger binary in $PATH).
+type RogerRoger struct{}
+
+func (r *RogerRoger) Name() string                            { return "roger-roger" }
+func (r *RogerRoger) Binary() string                          { return "roger-roger" }
+func (r *RogerRoger) EntireAgent() string                     { return "roger-roger" }
+func (r *RogerRoger) PromptPattern() string                   { return `>` }
+func (r *RogerRoger) TimeoutMultiplier() float64              { return 0.5 } // Deterministic, no API calls
+func (r *RogerRoger) Bootstrap() error                        { return nil }
+func (r *RogerRoger) IsTransientError(_ Output, _ error) bool { return false }
+
+// IsExternalAgent returns true — roger-roger is discovered via the external agent protocol.
+func (r *RogerRoger) IsExternalAgent() bool { return true }
+
+func (r *RogerRoger) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
+	// roger-roger reads prompts from stdin line by line.
+	// An empty line causes the REPL to exit gracefully.
+	cmd := exec.CommandContext(ctx, r.Binary())
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(prompt + "\n\n")
+	cmd.Env = filterEnv(os.Environ(), "ENTIRE_TEST_TTY")
+	setupProcessGroup(cmd)
+	cmd.WaitDelay = 5 * time.Second
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		exitErr := &exec.ExitError{}
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+
+	return Output{
+		Command:  "roger-roger <<< " + fmt.Sprintf("%q", prompt),
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+	}, err
+}
+
+func (r *RogerRoger) StartSession(_ context.Context, dir string) (Session, error) {
+	name := fmt.Sprintf("rr-test-%d", time.Now().UnixNano())
+	s, err := NewTmuxSession(name, dir, []string{"ENTIRE_TEST_TTY"}, r.Binary())
+	if err != nil {
+		return nil, err
+	}
+
+	// Wait for the interactive prompt.
+	if _, err := s.WaitFor(`>`, 10*time.Second); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("waiting for startup prompt: %w", err)
+	}
+	s.stableAtSend = ""
+
+	return s, nil
+}
+
+
+--- e2e/agents/tmux.go
+package agents
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"regexp"
+	"strings"
+	"time"
+)
+
+// TmuxSession implements Session using tmux for PTY-based interactive agents.
+type TmuxSession struct {
+	name         string
+	stableAtSend string   // stable content snapshot when Send was last called
+	cleanups     []func() // run on Close
+}
+
+// OnClose registers a function to run when the session is closed.
+func (s *TmuxSession) OnClose(fn func()) {
+	s.cleanups = append(s.cleanups, fn)
+}
+
+// NewTmuxSession creates a new tmux session running the given command in dir.
+// unsetEnv lists environment variable names to strip from the session.
+//
+// The command is wrapped with `env` to propagate PATH from the current process.
+// tmux sessions inherit the tmux server's environment (not the client's), so
+// without this, binaries added to PATH by the test runner (e.g., freshly built
+// `entire` and `vogon`) would not be found inside the session.
+func NewTmuxSession(name string, dir string, unsetEnv []string, command string, args ...string) (*TmuxSession, error) {
+	s := &TmuxSession{name: name}
+
+	tmuxArgs := []string{"new-session", "-d", "-s", name, "-c", dir}
+	// Build a shell command string using `env` to:
+	//   1. Propagate PATH from the current process (tmux server may have stale PATH)
+	//   2. Unset variables listed in unsetEnv
+	// All arguments are shell-quoted to prevent injection or splitting.
+	// PATH is always forwarded from the current process so that the freshly-built
+	// "entire" binary (prepended to PATH by main_test.go) is available inside the
+	// tmux session. Without this, tmux inherits the server's environment which may
+	// have an older binary (or none at all).
+	var parts []string
+	parts = append(parts, "env")
+	// Options (-u) must precede variable assignments for BSD env on macOS.
+	for _, v := range unsetEnv {
+		parts = append(parts, "-u", shellQuote(v))
+	}
+	parts = append(parts, "PATH="+shellQuote(os.Getenv("PATH")))
+	parts = append(parts, shellQuote(command))
+	for _, a := range args {
+		parts = append(parts, shellQuote(a))
+	}
+	tmuxArgs = append(tmuxArgs, strings.Join(parts, " "))
+
+	cmd := exec.Command("tmux", tmuxArgs...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("tmux new-session: %w\n%s", err, out)
+	}
+	// Keep the pane around after the command exits so we can capture error output.
+	setCmd := exec.Command("tmux", "set-option", "-t", name, "remain-on-exit", "on")
+	_ = setCmd.Run()
+	return s, nil
+}
+
+func (s *TmuxSession) Send(input string) error {
+	preSend := stableContent(s.Capture())
+	// Send text and Enter separately — Claude's TUI can swallow Enter
+	// if it arrives before the input handler finishes processing the text.
+	if err := s.SendKeys(input); err != nil {
+		return err
+	}
+	time.Sleep(200 * time.Millisecond)
+	if err := s.SendKeys("Enter"); err != nil {
+		return err
+	}
+
+	// Wait for the terminal to reflect the echoed input, then snapshot.
+	// This ensures WaitFor compares against post-echo content, preventing
+	// false matches on prompt characters (e.g. ❯) in the echoed input.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		current := stableContent(s.Capture())
+		if current != preSend {
+			s.stableAtSend = current
+			return nil
+		}
+	}
+	s.stableAtSend = stableContent(s.Capture())
+	return nil
+}
+
+// SendKeys sends raw tmux key names without appending Enter.
+func (s *TmuxSession) SendKeys(keys ...string) error {
+	args := append([]string{"send-keys", "-t", s.name}, keys...)
+	cmd := exec.Command("tmux", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tmux send-keys: %w\n%s", err, out)
+	}
+	return nil
+}
+
+const (
+	settleTime   = 2 * time.Second
+	pollInterval = 500 * time.Millisecond
+)
+
+// stableContent returns the content with the last few lines stripped,
+// so that TUI status bar updates don't prevent the settle timer.
+func stableContent(content string) string {
+	lines := strings.Split(content, "\n")
+	if len(lines) > 3 {
+		lines = lines[:len(lines)-3]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (s *TmuxSession) WaitFor(pattern string, timeout time.Duration) (string, error) {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return "", fmt.Errorf("invalid pattern: %w", err)
+	}
+
+	deadline := time.Now().Add(timeout)
+	var matchedAt time.Time
+	var lastStable string
+	contentChanged := s.stableAtSend == "" // skip change requirement for initial waits
+
+	for time.Now().Before(deadline) {
+		content := s.Capture()
+		stable := stableContent(content)
+
+		// Bail early if the process has exited and the pattern doesn't match.
+		// remain-on-exit keeps the pane alive, so without this check we'd
+		// poll a dead pane for the full timeout duration.
+		if !re.MatchString(content) {
+			if s.IsPaneDead() {
+				return content, fmt.Errorf("process exited while waiting for %q\n--- pane content ---\n%s\n--- end pane content ---", pattern, content)
+			}
+			// Pattern lost — reset
+			matchedAt = time.Time{}
+			lastStable = ""
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// Detect content change since Send was called
+		if !contentChanged && stable != s.stableAtSend {
+			contentChanged = true
+		}
+
+		if stable != lastStable {
+			// Pattern matches but content is still changing — reset settle timer
+			matchedAt = time.Now()
+			lastStable = stable
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// Pattern matches and content hasn't changed since matchedAt.
+		// Only settle if content changed at least once after Send
+		// (prevents false settle on echoed input before agent starts).
+		if contentChanged && time.Since(matchedAt) >= settleTime {
+			return content, nil
+		}
+
+		time.Sleep(pollInterval)
+	}
+	content := s.Capture()
+	return content, fmt.Errorf("timed out waiting for %q after %s\n--- pane content ---\n%s\n--- end pane content ---", pattern, timeout, content)
+}
+
+// IsPaneDead returns true if the process inside the tmux pane has exited.
+// This relies on the remain-on-exit option being set (which NewTmuxSession does).
+func (s *TmuxSession) IsPaneDead() bool {
+	cmd := exec.Command("tmux", "display-message", "-t", s.name, "-p", "#{pane_dead}")
+	out, err := cmd.Output()
+	if err != nil {
+		// If tmux itself fails (e.g. session/pane no longer exists),
+		// treat it as dead so WaitFor doesn't poll until timeout.
+		return true
+	}
+	return strings.TrimSpace(string(out)) == "1"
+}
+
+func (s *TmuxSession) Capture() string {
+	cmd := exec.Command("tmux", "capture-pane", "-t", s.name, "-p")
+	out, _ := cmd.Output()
+	return strings.TrimRight(string(out), "\n")
+}
+
+func (s *TmuxSession) Close() error {
+	for _, fn := range s.cleanups {
+		fn()
+	}
+	cmd := exec.Command("tmux", "kill-session", "-t", s.name)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tmux kill-session: %w\n%s", err, out)
+	}
+	return nil
+}
+
+// shellQuote wraps s in single quotes with proper escaping for POSIX shells.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+
+--- e2e/agents/vogon.go
+package agents
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+func init() {
+	if env := os.Getenv("E2E_AGENT"); env != "" && env != "vogon" {
+		return
+	}
+	// Only register if the binary exists (built by the test runner).
+	if _, err := exec.LookPath("vogon"); err != nil {
+		return
+	}
+	Register(&Vogon{})
+}
+
+// Vogon implements the Agent interface using a deterministic binary
+// that creates files and fires hooks without making any API calls.
+// Named after the Vogons from The Hitchhiker's Guide to the Galaxy.
+type Vogon struct{}
+
+func (v *Vogon) Name() string               { return "vogon" }
+func (v *Vogon) Binary() string             { return "vogon" }
+func (v *Vogon) EntireAgent() string        { return "vogon" }
+func (v *Vogon) PromptPattern() string      { return `>` }
+func (v *Vogon) TimeoutMultiplier() float64 { return 0.5 } // Faster than real agents
+
+func (v *Vogon) Bootstrap() error { return nil }
+
+func (v *Vogon) IsTransientError(_ Output, _ error) bool { return false }
+
+func (v *Vogon) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
+	args := []string{"-p", prompt}
+	displayArgs := []string{"-p", fmt.Sprintf("%q", prompt)}
+	env := filterEnv(os.Environ(), "ENTIRE_TEST_TTY")
+	homeDir, err := vogonHomeDir(dir)
+	if err != nil {
+		return Output{}, err
+	}
+	env = append(env, "HOME="+homeDir)
+	return v.run(ctx, dir, args, displayArgs, env)
+}
+
+func (v *Vogon) StartSession(_ context.Context, dir string) (Session, error) {
+	name := fmt.Sprintf("vogon-test-%d", time.Now().UnixNano())
+	homeDir, err := vogonHomeDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	s, err := NewTmuxSession(name, dir, []string{"ENTIRE_TEST_TTY"}, "env", "HOME="+homeDir, v.Binary())
+	if err != nil {
+		return nil, err
+	}
+
+	// Wait for the interactive prompt.
+	if _, err := s.WaitFor(`>`, 10*time.Second); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("waiting for startup prompt: %w", err)
+	}
+	s.stableAtSend = ""
+
+	return s, nil
+}
+
+// WriteSessionTranscript creates a deterministic vogon session transcript
+// without firing hooks or mutating the repository. Attach E2E tests use this
+// to prepare a session that `entire attach` can import.
+func (v *Vogon) WriteSessionTranscript(ctx context.Context, dir string, extraEnv []string, sessionID, userPrompt, assistantMessage string) (Output, error) {
+	args := []string{
+		"--write-session",
+		"--session-id", sessionID,
+		"--user-prompt", userPrompt,
+		"--assistant-message", assistantMessage,
+	}
+	displayArgs := []string{
+		"--write-session",
+		"--session-id", sessionID,
+		"--user-prompt", fmt.Sprintf("%q", userPrompt),
+		"--assistant-message", fmt.Sprintf("%q", assistantMessage),
+	}
+	env := filterEnv(os.Environ(), "ENTIRE_TEST_TTY")
+	env = append(env, extraEnv...)
+	if !hasEnvVar(extraEnv, "HOME") {
+		homeDir, err := vogonHomeDir(dir)
+		if err != nil {
+			return Output{}, err
+		}
+		env = append(env, "HOME="+homeDir)
+	}
+	return v.run(ctx, dir, args, displayArgs, env)
+}
+
+func (v *Vogon) run(ctx context.Context, dir string, args, displayArgs []string, env []string) (Output, error) {
+	cmd := exec.CommandContext(ctx, v.Binary(), args...)
+	cmd.Dir = dir
+	cmd.Stdin = nil
+	cmd.Env = env
+	setupProcessGroup(cmd)
+	cmd.WaitDelay = 5 * time.Second
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		exitErr := &exec.ExitError{}
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+
+	return Output{
+		Command:  v.Binary() + " " + strings.Join(displayArgs, " "),
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+	}, err
+}
+
+func vogonHomeDir(dir string) (string, error) {
+	sum := sha256.Sum256([]byte(dir))
+	homeDir := filepath.Join(os.TempDir(), "vogon-e2e-home-"+hex.EncodeToString(sum[:6]))
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		return "", fmt.Errorf("create vogon home %s: %w", homeDir, err)
+	}
+	return homeDir, nil
+}
+
+func hasEnvVar(env []string, key string) bool {
+	for _, entry := range env {
+		if strings.HasPrefix(entry, key+"=") {
+			return true
+		}
+	}
+	return false
+}

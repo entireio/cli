@@ -1,0 +1,3730 @@
+You are reviewing one semantic feature for clawpatch.
+
+Return strict JSON only. No markdown fences.
+
+Project:
+{
+  "name": "cli",
+  "detected": {
+    "languages": [
+      "go"
+    ],
+    "frameworks": [],
+    "packageManagers": [],
+    "commands": {
+      "typecheck": "go test ./...",
+      "lint": null,
+      "format": null,
+      "test": "go test ./..."
+    }
+  }
+}
+
+Feature:
+{
+  "schemaVersion": 1,
+  "featureId": "feat_library_018bc2ff81",
+  "title": "Go package redact",
+  "summary": "Go package redact with 4 source file(s).",
+  "kind": "library",
+  "source": "go-package",
+  "confidence": "medium",
+  "entrypoints": [
+    {
+      "path": "redact/custom.go",
+      "symbol": null,
+      "route": null,
+      "command": null
+    }
+  ],
+  "ownedFiles": [
+    {
+      "path": "redact/custom.go",
+      "reason": "go package source"
+    },
+    {
+      "path": "redact/packs.go",
+      "reason": "go package source"
+    },
+    {
+      "path": "redact/pii.go",
+      "reason": "go package source"
+    },
+    {
+      "path": "redact/redact.go",
+      "reason": "go package source"
+    }
+  ],
+  "contextFiles": [
+    {
+      "path": "redact/betterleaks_env_test.go",
+      "reason": "go package test"
+    },
+    {
+      "path": "redact/custom_test.go",
+      "reason": "go package test"
+    },
+    {
+      "path": "redact/packs_test.go",
+      "reason": "go package test"
+    },
+    {
+      "path": "redact/pii_test.go",
+      "reason": "go package test"
+    },
+    {
+      "path": "redact/redact_bench_test.go",
+      "reason": "go package test"
+    },
+    {
+      "path": "redact/redact_test.go",
+      "reason": "go package test"
+    }
+  ],
+  "tests": [
+    {
+      "path": "redact/betterleaks_env_test.go",
+      "command": "go test ./..."
+    },
+    {
+      "path": "redact/custom_test.go",
+      "command": "go test ./..."
+    },
+    {
+      "path": "redact/packs_test.go",
+      "command": "go test ./..."
+    },
+    {
+      "path": "redact/pii_test.go",
+      "command": "go test ./..."
+    },
+    {
+      "path": "redact/redact_bench_test.go",
+      "command": "go test ./..."
+    },
+    {
+      "path": "redact/redact_test.go",
+      "command": "go test ./..."
+    }
+  ],
+  "tags": [
+    "go",
+    "package"
+  ],
+  "trustBoundaries": [],
+  "status": "claimed",
+  "lock": {
+    "lockedByRunId": "20260519T175303-e13c5e",
+    "lockedAt": "2026-05-19T17:53:03.057Z",
+    "hostname": "Peytons-MacBook-Pro.local",
+    "pid": 43571
+  },
+  "findingIds": [],
+  "patchAttemptIds": [],
+  "analysisHistory": [],
+  "createdAt": "2026-05-19T17:52:59.936Z",
+  "updatedAt": "2026-05-19T17:53:03.058Z"
+}
+
+Review categories:
+- correctness bugs
+- security issues
+- race/concurrency bugs
+- data loss/corruption
+- resource leaks
+- bad error handling
+- permission/auth gaps
+- API contract mismatches
+- missing/weak tests
+- release/build hazards
+- maintainability risks with concrete impact
+
+
+
+Inspect owned files, context files, and linked tests. Treat included tests as first-class
+evidence of intended behavior. If tests contradict a suspected bug, either skip it or
+downgrade confidence and explain the uncertainty. Avoid reporting behavior as a bug
+solely because a helper name implies a broader contract. Deduplicate sibling/root-cause
+issues: when the same bug pattern appears in multiple owned files, emit one finding
+with multiple evidence refs instead of separate one-off findings.
+
+Avoid speculative low-evidence findings. Evidence must point at included files.
+
+JSON shape:
+{
+  "findings": [
+    {
+      "title": "string",
+      "category": "bug|security|performance|concurrency|api-contract|data-loss|test-gap|docs-gap|build-release|maintainability",
+      "severity": "critical|high|medium|low",
+      "confidence": "high|medium|low",
+      "evidence": [{"path":"string","startLine":1,"endLine":1,"symbol":null,"quote":null}],
+      "reasoning": "string",
+      "reproduction": null,
+      "recommendation": "string",
+      "whyTestsDoNotAlreadyCoverThis": "string",
+      "suggestedRegressionTest": "string or null",
+      "minimumFixScope": "string"
+    }
+  ],
+  "inspected": {"files":["string"],"symbols":["string"],"notes":["string"]}
+}
+
+Files:
+--- redact/custom.go
+package redact
+
+import (
+	"log/slog"
+	"regexp"
+	"sync"
+)
+
+// CustomRulesConfig configures inline custom_redactions and parsed rule packs.
+type CustomRulesConfig struct {
+	// Inline maps a label (used only in logs/diagnostics) to a Go RE2 regex
+	// string. Failed compilations are logged via slog.Warn and dropped.
+	Inline map[string]string
+
+	// Packs are pre-parsed rule packs (see LoadPacks). Per-rule regex
+	// compilation failures are logged and dropped; sample mismatches are
+	// logged but do not drop the rule.
+	Packs []*Pack
+}
+
+// compiledCustomRule is a compiled regex retained across calls.
+// label is unused for replacement (custom rules always emit the bare REDACTED
+// token to match other secret layers), but is preserved for diagnostics.
+type compiledCustomRule struct {
+	label string
+	regex *regexp.Regexp
+}
+
+type customRulesState struct {
+	rules []compiledCustomRule
+}
+
+var (
+	customConfig   *customRulesState
+	customConfigMu sync.RWMutex
+)
+
+// componentAttr tags every warning emitted by this package so log aggregators
+// can filter redaction failures with the same key the CLI uses elsewhere
+// (`logging.WithComponent(ctx, "redaction")`).
+var componentAttr = slog.String("component", "redaction")
+
+// ConfigureCustomRules compiles user-defined redaction rules and stores the
+// result for use by redact.String(). Sample-validation runs here too, so
+// failures surface the next time any process initializes redaction.
+//
+// Call once at process startup after loading settings. Thread-safe.
+func ConfigureCustomRules(cfg CustomRulesConfig) {
+	state := &customRulesState{}
+
+	for label, pattern := range cfg.Inline {
+		compiled, ok := compileCustomRule(
+			label,
+			pattern,
+			"skipping invalid custom_redactions pattern",
+			slog.String("label", label),
+		)
+		if ok {
+			state.rules = append(state.rules, compiled)
+		}
+	}
+
+	for _, pack := range cfg.Packs {
+		for _, rule := range pack.Rules {
+			compiled, ok := compileCustomRule(
+				pack.Name+"."+rule.ID,
+				rule.Regex,
+				"skipping invalid pack rule",
+				slog.String("pack", pack.sourcePath),
+				slog.String("rule", rule.ID),
+			)
+			if ok {
+				state.rules = append(state.rules, compiled)
+				runRuleSamples(pack, rule, compiled.regex)
+			}
+		}
+	}
+
+	customConfigMu.Lock()
+	defer customConfigMu.Unlock()
+	customConfig = state
+}
+
+func compileCustomRule(label, pattern, warning string, attrs ...any) (compiledCustomRule, bool) {
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		all := make([]any, 0, len(attrs)+2)
+		all = append(all, componentAttr)
+		all = append(all, attrs...)
+		all = append(all, slog.String("error", err.Error()))
+		slog.Warn(warning, all...)
+		return compiledCustomRule{}, false
+	}
+	return compiledCustomRule{label: label, regex: compiled}, true
+}
+
+// runRuleSamples checks each sample against the compiled regex and logs a
+// warning per mismatch. Failures never drop the rule — sample validation
+// is informational, not gating.
+func runRuleSamples(pack *Pack, rule Rule, compiled *regexp.Regexp) {
+	for i, s := range rule.Samples {
+		got := compiled.MatchString(s.Input)
+		if got != s.Redacted {
+			slog.Warn("redactor pack sample mismatch",
+				componentAttr,
+				slog.String("pack", pack.sourcePath),
+				slog.String("rule", rule.ID),
+				slog.Int("sample_index", i),
+				slog.Int("sample_length", len(s.Input)),
+				slog.Bool("expected", s.Redacted),
+				slog.Bool("got", got))
+		}
+	}
+}
+
+// getCustomRulesConfig returns the currently-configured custom rules.
+// Returns nil if ConfigureCustomRules has never been called.
+func getCustomRulesConfig() *customRulesState {
+	customConfigMu.RLock()
+	defer customConfigMu.RUnlock()
+	return customConfig
+}
+
+// detectCustomRules returns tagged regions for every match of every
+// configured custom rule. Returns nil if no rules are configured.
+//
+// All regions use an empty label so they are replaced with the bare
+// "REDACTED" token used by the built-in secret layers, not the
+// "[REDACTED_<LABEL>]" token used by PII.
+func detectCustomRules(cfg *customRulesState, s string) []taggedRegion {
+	if cfg == nil || len(cfg.rules) == 0 || s == "" {
+		return nil
+	}
+	var regions []taggedRegion
+	for _, rule := range cfg.rules {
+		for _, loc := range rule.regex.FindAllStringIndex(s, -1) {
+			regions = append(regions, taggedRegion{region: region{loc[0], loc[1]}})
+		}
+	}
+	return regions
+}
+
+
+--- redact/packs.go
+package redact
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// RedactorsDirName is the .entire subdirectory used for user-defined rule packs.
+const RedactorsDirName = "redactors"
+
+// maxIdentifierLen caps the length of pack Name and rule ID values. Both fields
+// flow into slog attrs and into directory-derived diagnostics; the bound prevents
+// a runaway YAML scalar from blowing up log lines.
+const maxIdentifierLen = 64
+
+// maxPackFileBytes caps the per-file size LoadPacks will parse. The trust
+// boundary is "user owns repo," so this is not a security barrier — it is a
+// runaway-input guard that keeps an accidentally large YAML out of the
+// redaction startup path.
+const maxPackFileBytes = 1 << 20 // 1 MiB
+
+// maxPackFiles caps how many pack files LoadPacks will accept under one
+// .entire/redactors/ tree. Same trust model as maxPackFileBytes: prevents a
+// runaway directory from stalling every CLI invocation.
+const maxPackFiles = 256
+
+// identifierPattern restricts pack Name and rule ID to a conservative set of
+// characters that play well with filesystems, log greps, and JSON. Disallowing
+// whitespace and control characters avoids log-line injection from a malformed
+// pack scalar.
+var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// Pack is a versioned bundle of redaction rules loaded from a single file
+// under .entire/redactors/. Both YAML and JSON encodings are accepted; the
+// schema is identical.
+type Pack struct {
+	Name        string `json:"name"                  yaml:"name"`
+	Version     string `json:"version"               yaml:"version"`
+	Description string `json:"description,omitempty" yaml:"description"`
+	Rules       []Rule `json:"rules"                 yaml:"rules"`
+
+	// sourcePath is the file the pack was loaded from. Populated by
+	// ParsePack; used in log lines so users can find the offending file.
+	sourcePath string
+}
+
+// Rule is a single redaction rule within a Pack.
+type Rule struct {
+	ID          string   `json:"id"                    yaml:"id"`
+	Description string   `json:"description,omitempty" yaml:"description"`
+	Regex       string   `json:"regex"                 yaml:"regex"`
+	Samples     []Sample `json:"samples,omitempty"     yaml:"samples"`
+}
+
+// Sample is a self-test entry for a Rule. The runner asserts whether the
+// rule's regex matching `Input` matches the `Redacted` expectation.
+type Sample struct {
+	Input    string `json:"input"    yaml:"input"`
+	Redacted bool   `json:"redacted" yaml:"redacted"`
+}
+
+// ParsePack decodes a single pack file. sourcePath is used both to pick
+// the encoding (YAML by default; JSON only when the extension is .json)
+// and to enforce that the pack's `name` matches the filename stem.
+//
+// Precondition: sourcePath must be a vetted local file path (the production
+// caller is LoadPacks, which only invokes ParsePack with paths produced by
+// WalkDir under the configured .entire/redactors/ directory). Callers passing
+// arbitrary or remote paths must enforce their own trust model — ParsePack
+// does not sanitize sourcePath beyond reading its extension.
+func ParsePack(data []byte, sourcePath string) (*Pack, error) {
+	var pack Pack
+	switch strings.ToLower(filepath.Ext(sourcePath)) {
+	case ".json":
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&pack); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", sourcePath, err)
+		}
+		var extra any
+		if err := decoder.Decode(&extra); err == nil {
+			return nil, fmt.Errorf("parse %s: trailing content after pack", sourcePath)
+		} else if !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("parse %s: %w", sourcePath, err)
+		}
+	default:
+		decoder := yaml.NewDecoder(bytes.NewReader(data))
+		decoder.KnownFields(true)
+		if err := decoder.Decode(&pack); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", sourcePath, err)
+		}
+		var extra any
+		if err := decoder.Decode(&extra); err == nil {
+			return nil, fmt.Errorf("parse %s: trailing content after pack", sourcePath)
+		} else if !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("parse %s: %w", sourcePath, err)
+		}
+	}
+	pack.sourcePath = sourcePath
+	if err := validatePack(&pack); err != nil {
+		return nil, err
+	}
+	return &pack, nil
+}
+
+// validatePack enforces required fields and schema invariants. Regex
+// compilation is NOT performed here — that happens during ConfigureCustomRules
+// so failures emit the same warn-and-skip path as inline rules.
+func validatePack(p *Pack) error {
+	if p.Name == "" {
+		return fmt.Errorf("%s: missing required field 'name'", p.sourcePath)
+	}
+	if err := validateIdentifier("name", p.Name, p.sourcePath); err != nil {
+		return err
+	}
+	if p.Version == "" {
+		return fmt.Errorf("%s: missing required field 'version'", p.sourcePath)
+	}
+	if len(p.Rules) == 0 {
+		return fmt.Errorf("%s: 'rules' must contain at least one entry", p.sourcePath)
+	}
+
+	// Name must match filename stem so log lines and discovery stay consistent.
+	stem := strings.TrimSuffix(filepath.Base(p.sourcePath), filepath.Ext(p.sourcePath))
+	if stem != p.Name {
+		return fmt.Errorf("%s: pack name %q does not match filename stem %q", p.sourcePath, p.Name, stem)
+	}
+
+	seen := make(map[string]struct{}, len(p.Rules))
+	for i, r := range p.Rules {
+		if r.ID == "" {
+			return fmt.Errorf("%s: rules[%d] missing required field 'id'", p.sourcePath, i)
+		}
+		if err := validateIdentifier(fmt.Sprintf("rules[%d].id", i), r.ID, p.sourcePath); err != nil {
+			return err
+		}
+		if r.Regex == "" {
+			return fmt.Errorf("%s: rules[%d] (%s) missing required field 'regex'", p.sourcePath, i, r.ID)
+		}
+		if _, dup := seen[r.ID]; dup {
+			return fmt.Errorf("%s: duplicate rule id %q", p.sourcePath, r.ID)
+		}
+		seen[r.ID] = struct{}{}
+	}
+	return nil
+}
+
+// validateIdentifier rejects pack Name / rule ID values that exceed the length
+// cap or contain characters outside identifierPattern. Both fields end up in
+// log attributes and (for Name) the filename comparison; bounding them keeps
+// diagnostics readable and prevents a malformed pack from polluting log lines.
+func validateIdentifier(field, value, sourcePath string) error {
+	if len(value) > maxIdentifierLen {
+		return fmt.Errorf("%s: %s %q exceeds %d-character limit", sourcePath, field, value, maxIdentifierLen)
+	}
+	if !identifierPattern.MatchString(value) {
+		return fmt.Errorf("%s: %s %q contains characters outside [A-Za-z0-9._-]", sourcePath, field, value)
+	}
+	return nil
+}
+
+// LoadPacks discovers and parses all rule packs in dir, including any
+// subdirectories (so the conventional .entire/redactors/local/ path for
+// personal/uncommitted rules is picked up automatically). Files with the
+// extensions .yaml, .yml, and .json are considered packs; other files are
+// ignored. A missing directory is treated as "no packs configured" and
+// returns no error. Per-file parse errors are slog.Warn'd and the file is
+// skipped — never fatal — so one bad file does not silence the rest.
+//
+// Soft caps: files larger than maxPackFileBytes are skipped with a warning,
+// and discovery stops after maxPackFiles parsed packs. The trust boundary is
+// "user owns repo," so these are runaway-input guards, not security limits.
+func LoadPacks(dir string) ([]*Pack, error) {
+	var packs []*Pack
+	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if path == dir {
+				if os.IsNotExist(err) {
+					return nil
+				}
+				return fmt.Errorf("read redactors dir %s: %w", dir, err)
+			}
+			slog.Warn("skipping unreadable redactor pack path",
+				componentAttr,
+				slog.String("path", path),
+				slog.String("error", err.Error()))
+			return nil
+		}
+		if path == dir && !d.IsDir() {
+			return fmt.Errorf("redactors path %s is not a directory", dir)
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			slog.Warn("skipping symlinked redactor pack path",
+				componentAttr,
+				slog.String("path", path))
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		switch strings.ToLower(filepath.Ext(d.Name())) {
+		case ".yaml", ".yml", ".json":
+		default:
+			return nil
+		}
+
+		if len(packs) >= maxPackFiles {
+			slog.Warn("skipping redactor pack: file cap reached",
+				componentAttr,
+				slog.String("path", path),
+				slog.Int("max_files", maxPackFiles))
+			return filepath.SkipAll
+		}
+
+		info, statErr := d.Info()
+		if statErr != nil {
+			slog.Warn("skipping redactor pack: stat failed",
+				componentAttr,
+				slog.String("path", path),
+				slog.String("error", statErr.Error()))
+			return nil
+		}
+		if info.Size() > maxPackFileBytes {
+			slog.Warn("skipping redactor pack: file exceeds size cap",
+				componentAttr,
+				slog.String("path", path),
+				slog.Int64("size_bytes", info.Size()),
+				slog.Int("max_bytes", maxPackFileBytes))
+			return nil
+		}
+
+		data, err := os.ReadFile(path) //nolint:gosec // path comes from WalkDir under a configured dir
+		if err != nil {
+			slog.Warn("skipping unreadable redactor pack",
+				componentAttr,
+				slog.String("path", path),
+				slog.String("error", err.Error()))
+			return nil
+		}
+		pack, err := ParsePack(data, path)
+		if err != nil {
+			slog.Warn("skipping invalid redactor pack",
+				componentAttr,
+				slog.String("path", path),
+				slog.String("error", err.Error()))
+			return nil
+		}
+		packs = append(packs, pack)
+		return nil
+	})
+	if walkErr != nil {
+		return nil, fmt.Errorf("walk redactors dir %s: %w", dir, walkErr)
+	}
+	return packs, nil
+}
+
+
+--- redact/pii.go
+package redact
+
+import (
+	"log/slog"
+	"regexp"
+	"strings"
+	"sync"
+)
+
+// PIICategory identifies a category of personally identifiable information.
+type PIICategory string
+
+const (
+	PIIEmail   PIICategory = "email"
+	PIIPhone   PIICategory = "phone"
+	PIIAddress PIICategory = "address"
+)
+
+// Label constants used in replacement tokens and pattern matching.
+const (
+	labelEmail   = "EMAIL"
+	labelPhone   = "PHONE"
+	labelAddress = "ADDRESS"
+)
+
+// PIIConfig controls which PII categories are detected and redacted.
+type PIIConfig struct {
+	// Enabled globally enables/disables PII redaction.
+	// When false, no PII patterns are checked (secrets still redacted).
+	Enabled bool
+
+	// Categories maps each PII category to whether it is enabled.
+	// Missing keys default to false (disabled).
+	Categories map[PIICategory]bool
+
+	// CustomPatterns allows teams to define additional regex patterns.
+	// Each key is a label used in the replacement token (uppercased),
+	// and each value is a regex pattern string.
+	// Example: {"employee_id": `EMP-\d{6}`} produces [REDACTED_EMPLOYEE_ID].
+	CustomPatterns map[string]string
+
+	// patterns holds pre-compiled patterns, populated by ConfigurePII.
+	// When nil (e.g., in tests constructing PIIConfig directly),
+	// detectPII falls back to compilePIIPatterns.
+	patterns []piiPattern
+}
+
+// piiPattern is a compiled regex with its replacement token label.
+type piiPattern struct {
+	regex *regexp.Regexp
+	label string // e.g., "EMAIL", "PHONE", "ADDRESS"
+}
+
+var (
+	piiConfig   *PIIConfig
+	piiConfigMu sync.RWMutex
+)
+
+// ConfigurePII sets the global PII redaction configuration.
+// Pre-compiles patterns so the hot path (String → detectPII) does no compilation.
+// Call once at startup after loading settings. Thread-safe.
+func ConfigurePII(cfg PIIConfig) {
+	piiConfigMu.Lock()
+	defer piiConfigMu.Unlock()
+	cfgCopy := cfg
+	cfgCopy.patterns = compilePIIPatterns(&cfgCopy)
+	piiConfig = &cfgCopy
+}
+
+// getPIIConfig returns the current PII configuration, or nil if not configured.
+func getPIIConfig() *PIIConfig {
+	piiConfigMu.RLock()
+	defer piiConfigMu.RUnlock()
+	return piiConfig
+}
+
+// Pre-compiled builtin PII regexes.
+var (
+	emailRegex = regexp.MustCompile(`\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`)
+	// phoneRegex uses three branches to avoid false-positives on dotted-decimal
+	// strings like version numbers (1.234.567.8901) and IPs (192.168.001.0001).
+	// Dots are only allowed as separators when preceded by +1 (unambiguous intl prefix).
+	// Without +1, only dashes and spaces are accepted as separators.
+	phoneRegex = regexp.MustCompile(
+		`(?:` +
+			`\+1[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}` + // +1 intl prefix: any separator
+			`|` +
+			`(?:1[-\s])?\(\d{3}\)\s?\d{3}[-.\s]?\d{4}` + // parenthesized area code
+			`|` +
+			`(?:1[-\s])?\d{3}[-\s]\d{3}[-\s]\d{4}` + // bare digits: dash/space only
+			`)`,
+	)
+	addressRegex = regexp.MustCompile(`\d{1,5}\s+[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*\s+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Dr(?:ive)?|Ln|Lane|Rd|Road|Ct|Court|Pl(?:ace)?|Way|Cir(?:cle)?|Ter(?:race)?|Pkwy|Parkway)\.?`)
+)
+
+// emailAllowPatterns are email patterns that should NOT be treated as PII.
+// These appear frequently in coding transcripts (git authors, bot accounts)
+// and are public metadata rather than private information.
+// Entries starting with "@" match the email suffix; entries ending with "@"
+// match the email prefix. All comparisons are case-insensitive.
+var emailAllowPatterns = []string{
+	"noreply@",                  // Generic noreply addresses
+	"actions@",                  // GitHub Actions bot
+	"@users.noreply.github.com", // GitHub user noreply
+	"@noreply.github.com",       // GitHub noreply
+}
+
+// isAllowlistedEmail returns true if the email matches a known non-sensitive pattern.
+func isAllowlistedEmail(email string) bool {
+	lower := strings.ToLower(email)
+	for _, pattern := range emailAllowPatterns {
+		lp := strings.ToLower(pattern)
+		switch {
+		case strings.HasPrefix(pattern, "@"):
+			if strings.HasSuffix(lower, lp) {
+				return true
+			}
+		case strings.HasSuffix(pattern, "@"):
+			if strings.HasPrefix(lower, lp) {
+				return true
+			}
+		default:
+			if lower == lp {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// builtinPIIPattern associates a compiled regex with a category and label.
+type builtinPIIPattern struct {
+	category PIICategory
+	label    string
+	regex    *regexp.Regexp
+}
+
+// builtinPIIPatterns is the set of default PII detection patterns.
+var builtinPIIPatterns = []builtinPIIPattern{
+	{PIIEmail, labelEmail, emailRegex},
+	{PIIPhone, labelPhone, phoneRegex},
+	{PIIAddress, labelAddress, addressRegex},
+}
+
+// detectPII returns tagged regions for PII matches in s.
+// Returns nil immediately if PII redaction is not configured or not enabled.
+func detectPII(cfg *PIIConfig, s string) []taggedRegion {
+	if cfg == nil || !cfg.Enabled {
+		return nil
+	}
+
+	patterns := cfg.patterns
+	if patterns == nil {
+		patterns = compilePIIPatterns(cfg)
+	}
+	var regions []taggedRegion
+	for _, p := range patterns {
+		for _, loc := range p.regex.FindAllStringIndex(s, -1) {
+			// Skip allowlisted email addresses (noreply, bot accounts, etc.).
+			if p.label == labelEmail && isAllowlistedEmail(s[loc[0]:loc[1]]) {
+				continue
+			}
+			regions = append(regions, taggedRegion{
+				region: region{loc[0], loc[1]},
+				label:  p.label,
+			})
+		}
+	}
+	return regions
+}
+
+// compilePIIPatterns builds the pattern list from config.
+// Builtin regexes are pre-compiled package vars; only custom patterns
+// need compilation here.
+func compilePIIPatterns(cfg *PIIConfig) []piiPattern {
+	var patterns []piiPattern
+	for _, bp := range builtinPIIPatterns {
+		if enabled, ok := cfg.Categories[bp.category]; ok && enabled {
+			patterns = append(patterns, piiPattern{regex: bp.regex, label: bp.label})
+		}
+	}
+	for label, pattern := range cfg.CustomPatterns {
+		compiled, err := regexp.Compile(pattern)
+		if err != nil {
+			slog.Warn("skipping invalid custom PII pattern", slog.String("label", label), slog.String("error", err.Error()))
+			continue
+		}
+		patterns = append(patterns, piiPattern{regex: compiled, label: strings.ToUpper(label)})
+	}
+	return patterns
+}
+
+// replacementToken returns the redaction placeholder for a given label.
+// Empty label (secrets) returns "REDACTED" for backward compatibility.
+// Non-empty label (PII) returns "[REDACTED_<LABEL>]".
+func replacementToken(label string) string {
+	if label == "" {
+		return "REDACTED"
+	}
+	return "[REDACTED_" + label + "]"
+}
+
+
+--- redact/redact.go
+package redact
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"net/url"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/betterleaks/betterleaks/detect"
+)
+
+// secretPattern matches high-entropy strings that may be secrets.
+// Note: / is excluded to prevent matching entire file paths as single tokens.
+// Base64 and JWT tokens are still caught via high-entropy segments between slashes.
+var secretPattern = regexp.MustCompile(`[A-Za-z0-9+_=-]{10,}`)
+
+// credentialedURIPattern matches URLs that embed userinfo with a password, such
+// as REDACTED or REDACTED These often have
+// moderate entropy and are not reliably covered by vendor-specific scanners.
+var credentialedURIPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]{1,31}://[^\s/?#@"'` + "`" + `<>:]*:[^\s/?#@"'` + "`" + `<>]+@[^\s"'` + "`" + `<>]+`)
+
+// dbPasswordKeyShape matches a DB-prefixed credential key (vendor prefix +
+// optional `_word`/`-word` segments + `password`/`passwd`/`pwd`). Used to
+// compose both the env-var assignment regex and the JSON-key regex so the
+// vendor list stays in one place.
+const dbPasswordKeyShape = `(?:db|database|pg|postgres|postgresql|mysql|mariadb|redis|mongo|mongodb|sqlserver|mssql|jdbc)(?:[_-]+[a-z0-9]+)*[_-]*(?:password|passwd|pwd)` //nolint:gosec // regex literal, not a credential
+
+var (
+	jdbcPattern          = regexp.MustCompile(`(?i)\bjdbc:[^\s"'<>` + "`" + `]+`)
+	databaseURLPattern   = regexp.MustCompile(`(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^\s"'<>` + "`" + `]+`)
+	keywordDSNPattern    = regexp.MustCompile(`(?i)\b[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)(?:\s+[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)){2,}`)
+	semicolonConnPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|"[^"]*"|'[^']*'|[^=;"'\s]+)(?:;[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|"[^"]*"|'[^']*'|[^=;"'\s]+)){2,}`)
+	// credentialValuePattern requires the prefix to start at a non-alphanumeric
+	// boundary, so APP_DB_PASSWORD matches via the leading `_` but mydbpassword
+	// does not.
+	credentialValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + dbPasswordKeyShape + `)\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
+
+	keywordHostPattern      = regexp.MustCompile(`(?i)(?:^|\s)host=`)
+	keywordUserPattern      = regexp.MustCompile(`(?i)(?:^|\s)user=`)
+	semicolonServerPattern  = regexp.MustCompile(`(?i)(?:^|;)\s*(?:server|data source|datasource|addr|address|network address)\s*=`)
+	semicolonUserPattern    = regexp.MustCompile(`(?i)(?:^|;)\s*(?:user id|userid|user|uid)\s*=`)
+	passwordAssignmentRegex = regexp.MustCompile(`(?i)(?:^|[?&;\s])(?:password|pwd)=("[^"]*"|'[^']*'|[^&;\s"']+)`)
+	// credentialJSONKeyRegex operates on output of normalizeCredentialJSONKey
+	// (already lowercased, `-`/` `/`.` → `_`), so the `(?i)` flag is unnecessary.
+	credentialJSONKeyRegex  = regexp.MustCompile(`^` + dbPasswordKeyShape + `$`)
+	genericPasswordKeyRegex = regexp.MustCompile(`(?i)^(?:password|passwd|pwd)$`)
+)
+
+// entropyThreshold is the minimum Shannon entropy for a string to be considered
+// a secret. 4.5 was chosen through trial and error: high enough to avoid false
+// positives on common words and identifiers, low enough to catch typical API keys
+// and tokens which tend to have entropy well above 5.0.
+const entropyThreshold = 4.5
+
+// RedactedPlaceholder is the replacement text used for redacted secrets.
+const RedactedPlaceholder = "REDACTED"
+
+// placeholderSecretValues lists lowercase values that should be treated as
+// non-secrets when they appear as a credential value: prior redactions
+// (REDACTED / [REDACTED] / <REDACTED>), common documentation placeholders,
+// and obviously-non-real defaults. Values matched by shape (mask runs,
+// `<…>` brackets, `${…}` shell expansion) are handled separately.
+var placeholderSecretValues = func() map[string]struct{} {
+	lower := strings.ToLower(RedactedPlaceholder)
+	values := []string{
+		lower, "[" + lower + "]", "<" + lower + ">",
+		"changeme", "example", "placeholder",
+		"your_password", "your_db_password", "your_secret",
+		"secret_here",
+	}
+	out := make(map[string]struct{}, len(values))
+	for _, v := range values {
+		out[v] = struct{}{}
+	}
+	return out
+}()
+
+// RedactedBytes represents transcript data that has been through secret
+// redaction. Consumers that require pre-redacted input (e.g., compact.Compact,
+// checkpoint stores) accept this type to enforce the contract at compile time.
+//
+// Produced by JSONLBytes (primary constructor) or trusted wrappers for data
+// previously persisted by checkpoint writers.
+type RedactedBytes struct {
+	data []byte
+}
+
+// Bytes returns the underlying byte slice.
+func (r RedactedBytes) Bytes() []byte {
+	return r.data
+}
+
+// Len returns the number of bytes in the redacted payload.
+func (r RedactedBytes) Len() int {
+	return len(r.data)
+}
+
+// AlreadyRedacted wraps transcript bytes known to already be redacted by a
+// prior write path. Use this ONLY for trusted sources such as persisted
+// checkpoint transcripts or controlled test fixtures. For fresh transcript
+// input, use JSONLBytes.
+func AlreadyRedacted(data []byte) RedactedBytes {
+	return RedactedBytes{data: data}
+}
+
+var (
+	betterleaksDetector     *detect.Detector
+	betterleaksDetectorOnce sync.Once
+)
+
+func getDetector() *detect.Detector {
+	betterleaksDetectorOnce.Do(func() {
+		d, err := detect.NewDetectorDefaultConfig()
+		if err != nil {
+			return
+		}
+		betterleaksDetector = d
+	})
+	return betterleaksDetector
+}
+
+// region represents a byte range to redact.
+type region struct{ start, end int }
+
+// taggedRegion extends region with a label for typed replacement tokens.
+// Empty label = secret (produces "REDACTED"). Non-empty = PII (produces "[REDACTED_<LABEL>]").
+type taggedRegion struct {
+	region
+
+	label string
+}
+
+type jsonReplacement struct {
+	key      string
+	original string
+	redacted string
+}
+
+type connectionStringRule struct {
+	pattern   *regexp.Regexp
+	hasSecret func(string) bool
+}
+
+var connectionStringRules = []connectionStringRule{
+	{pattern: jdbcPattern, hasSecret: hasJDBCPassword},
+	{pattern: databaseURLPattern, hasSecret: hasDatabaseURLSecret},
+	{pattern: keywordDSNPattern, hasSecret: hasKeywordDSNPassword},
+	{pattern: semicolonConnPattern, hasSecret: hasSemicolonConnectionPassword},
+}
+
+// String replaces secrets and PII in s using layered detection:
+// 1. Entropy-based: high-entropy alphanumeric sequences (threshold 4.5)
+// 2. Pattern-based: betterleaks regex rules (260+ known secret formats)
+// 3. Credentialed URIs: URLs containing userinfo passwords
+// 4. Database connection strings: JDBC, keyword DSNs, and semicolon strings
+// 5. User-defined custom rules: configured via ConfigureCustomRules
+// 6. Bounded credential key/value pairs: DB_PASSWORD=...
+// 7. PII detection: email, phone, address patterns (only when configured via ConfigurePII)
+// A string is redacted if ANY method flags it.
+func String(s string) string {
+	var regions []taggedRegion
+
+	// 1. Entropy-based detection (secrets — always on).
+	for _, loc := range secretPattern.FindAllStringIndex(s, -1) {
+		start, end := loc[0], loc[1]
+
+		// Don't consume characters that are part of JSON/string escape sequences.
+		// Example: in "controller.go\nmodel.go", the regex could match "nmodel"
+		// (consuming the 'n' from '\n'), and after replacement the '\' would be
+		// followed by 'R' from "REDACTED", creating invalid escape '\R'.
+		// Only skip for known JSON escape letters to avoid trimming real secrets
+		// that happen to follow a literal backslash in decoded content.
+		if start > 0 && s[start-1] == '\\' {
+			switch s[start] {
+			case 'n', 't', 'r', 'b', 'f', 'u', '"', '\\', '/':
+				start++
+				if end-start < 10 {
+					continue
+				}
+			}
+		}
+
+		if shannonEntropy(s[start:end]) > entropyThreshold {
+			regions = append(regions, taggedRegion{region: region{start, end}})
+		}
+	}
+
+	// 2. Pattern-based detection via betterleaks (secrets — always on).
+	if d := getDetector(); d != nil {
+		for _, f := range d.DetectString(s) {
+			if f.Secret == "" {
+				continue
+			}
+			searchFrom := 0
+			for {
+				idx := strings.Index(s[searchFrom:], f.Secret)
+				if idx < 0 {
+					break
+				}
+				absIdx := searchFrom + idx
+				regions = append(regions, taggedRegion{region: region{absIdx, absIdx + len(f.Secret)}})
+				searchFrom = absIdx + len(f.Secret)
+			}
+		}
+	}
+
+	// 3. Credentialed URIs (secrets — always on).
+	for _, loc := range credentialedURIPattern.FindAllStringIndex(s, -1) {
+		regions = append(regions, taggedRegion{region: region{loc[0], loc[1]}})
+	}
+
+	// 4. Database and connection-string detection (secrets — always on).
+	regions = append(regions, detectConnectionStrings(s)...)
+
+	// 5. User-defined custom rules (secrets — only runs when configured).
+	regions = append(regions, detectCustomRules(getCustomRulesConfig(), s)...)
+
+	// 6. Bounded credential key/value detection (secrets — always on).
+	regions = append(regions, detectCredentialValues(s)...)
+
+	// 7. PII detection (opt-in — only runs when configured).
+	regions = append(regions, detectPII(getPIIConfig(), s)...)
+
+	if len(regions) == 0 {
+		return s
+	}
+
+	// Merge overlapping regions and build result.
+	sort.Slice(regions, func(i, j int) bool {
+		if regions[i].start != regions[j].start {
+			return regions[i].start < regions[j].start
+		}
+		if regions[i].end != regions[j].end {
+			return regions[i].end > regions[j].end // larger region first
+		}
+		return regions[i].label < regions[j].label // deterministic tie-break
+	})
+	merged := []taggedRegion{regions[0]}
+	for _, r := range regions[1:] {
+		last := &merged[len(merged)-1]
+		if r.start <= last.end {
+			if r.end > last.end {
+				last.end = r.end
+			}
+			// Keep the existing label (first/larger region wins)
+		} else {
+			merged = append(merged, r)
+		}
+	}
+
+	var b strings.Builder
+	prev := 0
+	for _, r := range merged {
+		b.WriteString(s[prev:r.start])
+		b.WriteString(replacementToken(r.label))
+		prev = r.end
+	}
+	b.WriteString(s[prev:])
+	return b.String()
+}
+
+func detectConnectionStrings(s string) []taggedRegion {
+	if !strings.ContainsRune(s, '=') {
+		return nil
+	}
+	var regions []taggedRegion
+	for _, rule := range connectionStringRules {
+		regions = append(regions, detectConnectionStringRule(s, rule)...)
+	}
+	return regions
+}
+
+func detectConnectionStringRule(s string, rule connectionStringRule) []taggedRegion {
+	var regions []taggedRegion
+	for _, loc := range rule.pattern.FindAllStringIndex(s, -1) {
+		start, end := loc[0], trimConnectionStringEnd(s, loc[0], loc[1])
+		if start >= end {
+			continue
+		}
+		if rule.hasSecret(s[start:end]) {
+			regions = append(regions, taggedRegion{region: region{start, end}})
+		}
+	}
+	return regions
+}
+
+func trimConnectionStringEnd(s string, start, end int) int {
+	for end > start {
+		switch s[end-1] {
+		case '.', ',', ';', ':', '!', '?', ')', ']':
+			end--
+		default:
+			return end
+		}
+	}
+	return end
+}
+
+func hasJDBCPassword(candidate string) bool {
+	if !strings.HasPrefix(strings.ToLower(candidate), "jdbc:") {
+		return false
+	}
+	return hasNonPlaceholderPasswordAssignment(candidate)
+}
+
+func hasDatabaseURLSecret(candidate string) bool {
+	u, err := url.Parse(candidate)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	for key, values := range u.Query() {
+		if !isPasswordQueryKey(key) {
+			continue
+		}
+		for _, value := range values {
+			if hasNonPlaceholderPasswordValue(value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isPasswordQueryKey(key string) bool {
+	return strings.EqualFold(key, "password") || strings.EqualFold(key, "pwd")
+}
+
+func hasKeywordDSNPassword(candidate string) bool {
+	return keywordHostPattern.MatchString(candidate) &&
+		keywordUserPattern.MatchString(candidate) &&
+		hasNonPlaceholderPasswordAssignment(candidate)
+}
+
+func hasSemicolonConnectionPassword(candidate string) bool {
+	return semicolonServerPattern.MatchString(candidate) &&
+		semicolonUserPattern.MatchString(candidate) &&
+		hasNonPlaceholderPasswordAssignment(candidate)
+}
+
+func detectCredentialValues(s string) []taggedRegion {
+	var regions []taggedRegion
+	for _, loc := range credentialValuePattern.FindAllStringSubmatchIndex(s, -1) {
+		if len(loc) < 6 || loc[4] < 0 || loc[5] < 0 {
+			continue
+		}
+		start, end := unquoteRange(s, loc[4], loc[5])
+		if hasNonPlaceholderPasswordValue(s[start:end]) {
+			regions = append(regions, taggedRegion{region: region{start, end}})
+		}
+	}
+	return regions
+}
+
+func unquoteRange(s string, start, end int) (int, int) {
+	if end-start < 2 {
+		return start, end
+	}
+	first, last := s[start], s[end-1]
+	if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+		return start + 1, end - 1
+	}
+	return start, end
+}
+
+func hasNonPlaceholderPasswordAssignment(candidate string) bool {
+	for _, loc := range passwordAssignmentRegex.FindAllStringSubmatchIndex(candidate, -1) {
+		if len(loc) >= 4 && loc[2] >= 0 && loc[3] >= 0 {
+			start, end := unquoteRange(candidate, loc[2], loc[3])
+			if hasNonPlaceholderPasswordValue(candidate[start:end]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasNonPlaceholderPasswordValue(value string) bool {
+	return value != "" && !isPlaceholderSecretValue(value)
+}
+
+func isPlaceholderSecretValue(value string) bool {
+	trimmed := strings.Trim(strings.TrimSpace(value), `"'`)
+	if trimmed == "" {
+		return true
+	}
+	if isBracketedPlaceholder(trimmed) {
+		return true
+	}
+	normalized := strings.ToLower(trimmed)
+	if strings.HasPrefix(normalized, "${") && strings.HasSuffix(normalized, "}") {
+		return true
+	}
+	if _, ok := placeholderSecretValues[normalized]; ok {
+		return true
+	}
+	return isRepeatedCharPlaceholder(normalized)
+}
+
+// bracketedPlaceholderInteriorRE matches the inside of a "<…>" placeholder
+// shape: lowercase letters joined by `-` or `_`. Digits, mixed case, and
+// special chars are rejected so values like `<hunter2>` or `<RealPassword>`
+// still fall through to redaction.
+var bracketedPlaceholderInteriorRE = regexp.MustCompile(`^[a-z][a-z_-]*$`)
+
+// isBracketedPlaceholder reports whether s is a "<name>" doc placeholder
+// (e.g. "<password>", "<your-db-password>"). The minimum total length of 5
+// keeps this from firing on `<a>` / `<ab>`.
+func isBracketedPlaceholder(s string) bool {
+	if len(s) < 5 || s[0] != '<' || s[len(s)-1] != '>' {
+		return false
+	}
+	return bracketedPlaceholderInteriorRE.MatchString(s[1 : len(s)-1])
+}
+
+// isRepeatedCharPlaceholder reports whether s is a run of a single masking
+// character commonly used to redact values in docs and screenshots, e.g.
+// "***", "xxxx", "....", "----". The minimum length of 3 keeps single-char
+// or 2-char values like `x` or `**` from being treated as masks.
+func isRepeatedCharPlaceholder(s string) bool {
+	if len(s) < 3 {
+		return false
+	}
+	first := s[0]
+	switch first {
+	case '*', 'x', '.', '-':
+	default:
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] != first {
+			return false
+		}
+	}
+	return true
+}
+
+func isCredentialJSONSecretKey(key string, credentialContext bool) bool {
+	normalized := normalizeCredentialJSONKey(key)
+	if credentialJSONKeyRegex.MatchString(normalized) {
+		return true
+	}
+	return credentialContext && genericPasswordKeyRegex.MatchString(normalized)
+}
+
+func isCredentialJSONObject(obj map[string]any) bool {
+	var hasHost, hasUser bool
+	for key := range obj {
+		switch normalizeCredentialJSONKey(key) {
+		case "host", "hostname", "server", "addr", "address", "datasource", "data_source":
+			hasHost = true
+		case "user", "username", "userid", "user_id", "uid":
+			hasUser = true
+		}
+		if hasHost && hasUser {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeCredentialJSONKey(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	key = strings.ReplaceAll(key, "-", "_")
+	key = strings.ReplaceAll(key, " ", "_")
+	// Flattened-config exporters (Spring, dotnet, Hashicorp Vault) emit dotted keys
+	// like "db.password" or "mysql.root.password"; treat them like underscored.
+	key = strings.ReplaceAll(key, ".", "_")
+	return key
+}
+
+// Bytes is a convenience wrapper around String for []byte content.
+func Bytes(b []byte) []byte {
+	s := string(b)
+	redacted := String(s)
+	if redacted == s {
+		return b
+	}
+	return []byte(redacted)
+}
+
+// JSONLBytes redacts secrets in JSONL-formatted byte content and returns
+// the result as RedactedBytes, certifying the output has been through redaction.
+func JSONLBytes(b []byte) (RedactedBytes, error) {
+	s := string(b)
+	redacted, err := JSONLContent(s)
+	if err != nil {
+		return RedactedBytes{}, err
+	}
+	if redacted == s {
+		return RedactedBytes{data: b}, nil
+	}
+	return RedactedBytes{data: []byte(redacted)}, nil
+}
+
+// JSONLContent parses each line as JSON to determine which string values
+// need redaction, then performs targeted replacements on the raw JSON bytes.
+// Lines with no secrets are returned unchanged, preserving original formatting.
+//
+// For multi-line JSON content (e.g., pretty-printed single JSON objects like
+// OpenCode export), the function first attempts to parse the entire content as
+// a single JSON value. This ensures field-aware redaction (which skips ID fields)
+// is used instead of falling back to entropy-based detection on raw text lines,
+// which would corrupt high-entropy identifiers.
+func JSONLContent(content string) (string, error) {
+	// Try parsing the entire content as a single JSON value first.
+	// Uses a streaming decoder to avoid copying the full content into []byte.
+	// After decoding, attempts a second Decode to confirm EOF — if it succeeds,
+	// the content is JSONL (multiple values) and we fall through to line-by-line.
+	trimmed := strings.TrimSpace(content)
+	if len(trimmed) > 0 {
+		dec := json.NewDecoder(strings.NewReader(trimmed))
+		var parsed any
+		if err := dec.Decode(&parsed); err == nil && isSingleJSONValue(dec) {
+			// Content is a single JSON value (object/array) — redact field-aware.
+			result, err := applyJSONReplacements(content, collectJSONLReplacements(parsed))
+			if err != nil {
+				return "", err
+			}
+			return result, nil
+		}
+	}
+
+	// Fall back to line-by-line JSONL processing.
+	lines := strings.Split(content, "\n")
+	var b strings.Builder
+	for i, line := range lines {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		lineTrimmed := strings.TrimSpace(line)
+		if lineTrimmed == "" {
+			b.WriteString(line)
+			continue
+		}
+		var parsed any
+		if err := json.Unmarshal([]byte(lineTrimmed), &parsed); err != nil {
+			b.WriteString(String(line))
+			continue
+		}
+		result, err := applyJSONReplacements(line, collectJSONLReplacements(parsed))
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(result)
+	}
+	return b.String(), nil
+}
+
+// applyJSONReplacements applies collected (original, redacted) string pairs
+// to the raw JSON text, replacing JSON-encoded originals with their redacted forms.
+// Returns s unchanged if repls is empty.
+func applyJSONReplacements(s string, repls []jsonReplacement) (string, error) {
+	if len(repls) == 0 {
+		return s, nil
+	}
+	for _, r := range repls {
+		origJSON, err := jsonEncodeString(r.original)
+		if err != nil {
+			return "", err
+		}
+		replJSON, err := jsonEncodeString(r.redacted)
+		if err != nil {
+			return "", err
+		}
+		if r.key == "" {
+			s = strings.ReplaceAll(s, origJSON, replJSON)
+			continue
+		}
+		keyJSON, err := jsonEncodeString(r.key)
+		if err != nil {
+			return "", err
+		}
+		s = replaceKeyedJSONValue(s, keyJSON, origJSON, replJSON)
+	}
+	return s, nil
+}
+
+// replaceKeyedJSONValue replaces every occurrence of origJSON that follows
+// keyJSON + optional whitespace + ':' + optional whitespace. Restricts
+// substitution to value positions so a key's own redacted text is not
+// rewritten when it collides with another field's value.
+func replaceKeyedJSONValue(s, keyJSON, origJSON, replJSON string) string {
+	if !strings.Contains(s, keyJSON) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		j := strings.Index(s[i:], keyJSON)
+		if j < 0 {
+			b.WriteString(s[i:])
+			break
+		}
+		keyEnd := i + j + len(keyJSON)
+		b.WriteString(s[i : i+j])
+		b.WriteString(keyJSON)
+		p := keyEnd
+		for p < len(s) && isJSONWhitespace(s[p]) {
+			p++
+		}
+		if p >= len(s) || s[p] != ':' {
+			i = keyEnd
+			continue
+		}
+		p++
+		for p < len(s) && isJSONWhitespace(s[p]) {
+			p++
+		}
+		if p+len(origJSON) <= len(s) && s[p:p+len(origJSON)] == origJSON {
+			b.WriteString(s[keyEnd:p])
+			b.WriteString(replJSON)
+			i = p + len(origJSON)
+			continue
+		}
+		i = keyEnd
+	}
+	return b.String()
+}
+
+func isJSONWhitespace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// isSingleJSONValue returns true if the decoder has reached EOF (no more
+// top-level values). This distinguishes a single JSON value (e.g., pretty-printed
+// object) from JSONL (multiple concatenated values). We attempt a second Decode
+// and require io.EOF rather than relying on dec.More(), which is documented for
+// use inside arrays/objects and not for top-level value boundaries.
+func isSingleJSONValue(dec *json.Decoder) bool {
+	var discard json.RawMessage
+	return dec.Decode(&discard) == io.EOF
+}
+
+// collectJSONLReplacements walks a parsed JSON value and collects unique string
+// replacements for values that need redaction.
+func collectJSONLReplacements(v any) []jsonReplacement {
+	seen := make(map[string]bool)
+	var repls []jsonReplacement
+	var walk func(key string, credentialContext bool, v any)
+	walk = func(key string, credentialContext bool, v any) {
+		switch val := v.(type) {
+		case map[string]any:
+			if shouldSkipJSONLObject(val) {
+				return
+			}
+			childCredentialContext := credentialContext || isCredentialJSONObject(val)
+			for k, child := range val {
+				if shouldSkipJSONLField(k) {
+					continue
+				}
+				walk(k, childCredentialContext, child)
+			}
+		case []any:
+			for _, child := range val {
+				walk("", credentialContext, child)
+			}
+		case string:
+			redacted := String(val)
+			if redacted == val && isCredentialJSONSecretKey(key, credentialContext) && hasNonPlaceholderPasswordValue(val) {
+				redacted = RedactedPlaceholder
+			}
+			if redacted != val {
+				seenKey := key + "\x00" + val
+				if !seen[seenKey] {
+					seen[seenKey] = true
+					repls = append(repls, jsonReplacement{key: key, original: val, redacted: redacted})
+				}
+			}
+		}
+	}
+	walk("", false, v)
+	return repls
+}
+
+// shouldSkipJSONLField returns true if a JSON key should be excluded from scanning/redaction.
+// Skips "signature" (exact), ID fields (ending in "id"/"ids"), and common path/directory fields.
+func shouldSkipJSONLField(key string) bool {
+	if key == "signature" {
+		return true
+	}
+	lower := strings.ToLower(key)
+
+	// Skip ID fields
+	if strings.HasSuffix(lower, "id") || strings.HasSuffix(lower, "ids") {
+		return true
+	}
+
+	// Skip common path and directory fields from agent transcripts.
+	// These appear frequently in tool calls and are structural, not secrets.
+	switch lower {
+	case "filepath", "file_path", "cwd", "root", "directory", "dir", "path":
+		return true
+	}
+
+	return false
+}
+
+// shouldSkipJSONLObject returns true if the object has "type":"image" or "type":"image_url".
+func shouldSkipJSONLObject(obj map[string]any) bool {
+	t, ok := obj["type"].(string)
+	return ok && (strings.HasPrefix(t, "image") || t == "base64")
+}
+
+func shannonEntropy(s string) float64 {
+	if len(s) == 0 {
+		return 0
+	}
+	freq := make(map[byte]int)
+	for i := range len(s) {
+		freq[s[i]]++
+	}
+	length := float64(len(s))
+	var entropy float64
+	for _, count := range freq {
+		p := float64(count) / length
+		entropy -= p * math.Log2(p)
+	}
+	return entropy
+}
+
+// jsonEncodeString returns the JSON encoding of s without HTML escaping.
+func jsonEncodeString(s string) (string, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(s); err != nil {
+		return "", fmt.Errorf("json encode string: %w", err)
+	}
+	return strings.TrimSuffix(buf.String(), "\n"), nil
+}
+
+
+--- redact/betterleaks_env_test.go
+package redact
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+func TestBetterleaksDoesNotPoisonGitEnvironment(t *testing.T) {
+	t.Parallel()
+
+	// Regression coverage for betterleaks v1.1.1: importing the detector set
+	// git isolation variables process-wide, and later git subprocesses could
+	// no longer read user credential helpers from ~/.gitconfig.
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("failed to resolve test source path")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), ".."))
+
+	tmpDir := t.TempDir()
+	goMod := `module betterleaksenvcheck
+
+go 1.26.2
+
+require github.com/entireio/cli v0.0.0
+
+replace github.com/entireio/cli => ` + filepath.ToSlash(repoRoot) + `
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	goSum, err := os.ReadFile(filepath.Join(repoRoot, "go.sum"))
+	if err != nil {
+		t.Fatalf("read go.sum: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.sum"), goSum, 0o644); err != nil {
+		t.Fatalf("write go.sum: %v", err)
+	}
+
+	mainGo := `package main
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/entireio/cli/redact"
+)
+
+func main() {
+	_ = redact.String("key=REDACTED")
+	for _, name := range []string{
+		"GIT_CONFIG_GLOBAL",
+		"GIT_CONFIG_NOSYSTEM",
+		"GIT_CONFIG_SYSTEM",
+		"GIT_NO_REPLACE_OBJECTS",
+		"GIT_TERMINAL_PROMPT",
+	} {
+		if value, ok := os.LookupEnv(name); ok {
+			fmt.Printf("%s=%s\n", name, value)
+		}
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(mainGo), 0o644); err != nil {
+		t.Fatalf("write main.go: %v", err)
+	}
+
+	cmd := exec.CommandContext(t.Context(), "go", "run", "-mod=mod", ".")
+	cmd.Dir = tmpDir
+	cmd.Env = envWithoutGitIsolation()
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go run env check failed: %v\n%s", err, output)
+	}
+	if strings.TrimSpace(string(output)) != "" {
+		t.Fatalf("redact import polluted git environment:\n%s", output)
+	}
+}
+
+func envWithoutGitIsolation() []string {
+	blocked := map[string]struct{}{
+		"GIT_CONFIG_GLOBAL":      {},
+		"GIT_CONFIG_NOSYSTEM":    {},
+		"GIT_CONFIG_SYSTEM":      {},
+		"GIT_NO_REPLACE_OBJECTS": {},
+		"GIT_TERMINAL_PROMPT":    {},
+	}
+
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if _, ok := blocked[name]; ok {
+			continue
+		}
+		if name == "GOWORK" {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, "GOWORK=off")
+}
+
+
+--- redact/custom_test.go
+package redact
+
+import (
+	"bytes"
+	"log/slog"
+	"strings"
+	"sync"
+	"testing"
+)
+
+// resetCustomRulesForTest clears the package-level config so tests don't leak
+// state into each other. Tests cannot run in parallel against the global, so
+// the helper is invoked at top-of-test in a t.Cleanup pattern.
+func resetCustomRulesForTest(t *testing.T) {
+	t.Helper()
+	customConfigMu.Lock()
+	customConfig = nil
+	customConfigMu.Unlock()
+	t.Cleanup(func() {
+		customConfigMu.Lock()
+		customConfig = nil
+		customConfigMu.Unlock()
+	})
+}
+
+// captureSlogForTest installs a slog handler that writes JSON lines to buf.
+// Returns a restore function the caller defers. Tests use this to assert
+// that ConfigureCustomRules emits the right warnings for failing samples.
+func captureSlogForTest(buf *bytes.Buffer) func() {
+	prev := slog.Default()
+	h := slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	slog.SetDefault(slog.New(h))
+	return func() { slog.SetDefault(prev) }
+}
+
+func TestConfigureCustomRules_SkipsInvalidRegexAndContinues(t *testing.T) {
+	resetCustomRulesForTest(t)
+
+	ConfigureCustomRules(CustomRulesConfig{
+		Inline: map[string]string{
+			"valid":   `[A-Z]{8}`,
+			"invalid": `[unterminated`,
+		},
+	})
+
+	cfg := getCustomRulesConfig()
+	if cfg == nil {
+		t.Fatal("expected config")
+	}
+	if got := len(cfg.rules); got != 1 {
+		t.Fatalf("rules: want 1 (invalid dropped), have %d", got)
+	}
+	if cfg.rules[0].label != "valid" {
+		t.Errorf("label: want valid, have %q", cfg.rules[0].label)
+	}
+}
+
+func TestConfigureCustomRules_ConcurrentReadsAndWrites(t *testing.T) {
+	resetCustomRulesForTest(t)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 100 {
+			ConfigureCustomRules(CustomRulesConfig{Inline: map[string]string{"x": `[a-z]+`}})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 100 {
+			_ = getCustomRulesConfig()
+		}
+	}()
+	wg.Wait()
+}
+
+func TestString_CustomRuleEndToEnd(t *testing.T) {
+	resetCustomRulesForTest(t)
+	ConfigureCustomRules(CustomRulesConfig{
+		Inline: map[string]string{
+			"acme_token": `ACME_TOKEN_[A-Za-z0-9]{20,}`,
+		},
+	})
+
+	in := "REDACTED REDACTED"
+	out := String(in)
+
+	if got := strings.Count(out, "REDACTED"); got != 2 {
+		t.Errorf("REDACTED count: want 2, have %d in %q", got, out)
+	}
+	if contains(t, out, "ACME_TOKEN_") {
+		t.Errorf("raw token leaked into output: %q", out)
+	}
+	if contains(t, out, "[REDACTED_") {
+		t.Errorf("custom rule used PII-style token: %q", out)
+	}
+}
+
+func TestString_CustomRuleNotConfiguredIsNoop(t *testing.T) {
+	resetCustomRulesForTest(t)
+
+	in := "T_aaaaaa T_bbbbbb"
+	if got := String(in); got != in {
+		t.Errorf("expected unchanged %q, got %q", in, got)
+	}
+}
+
+func contains(t *testing.T, s, sub string) bool {
+	t.Helper()
+	return strings.Contains(s, sub)
+}
+
+func TestConfigureCustomRules_SamplesPassEmitNoWarn(t *testing.T) {
+	resetCustomRulesForTest(t)
+
+	var buf bytes.Buffer
+	restore := captureSlogForTest(&buf)
+	defer restore()
+
+	pack := &Pack{
+		Name:    "ok",
+		Version: "1.0.0",
+		Rules: []Rule{
+			{
+				ID:    "match",
+				Regex: `T_[a-z]{6}`,
+				Samples: []Sample{
+					{Input: "T_abcdef", Redacted: true},
+					{Input: "T_short", Redacted: false},
+				},
+			},
+		},
+		sourcePath: "ok.yaml",
+	}
+
+	ConfigureCustomRules(CustomRulesConfig{Packs: []*Pack{pack}})
+
+	if strings.Contains(buf.String(), `"sample"`) {
+		t.Errorf("expected no sample warnings, got logs: %s", buf.String())
+	}
+}
+
+func TestConfigureCustomRules_SamplesFailEmitWarnButKeepRule(t *testing.T) {
+	resetCustomRulesForTest(t)
+
+	var buf bytes.Buffer
+	restore := captureSlogForTest(&buf)
+	defer restore()
+
+	pack := &Pack{
+		Name:    "bad-sample",
+		Version: "1.0.0",
+		Rules: []Rule{
+			{
+				ID:    "match",
+				Regex: `T_[a-z]{6}`,
+				Samples: []Sample{
+					{Input: "no_match", Redacted: true},
+				},
+			},
+		},
+		sourcePath: "bad-sample.yaml",
+	}
+
+	ConfigureCustomRules(CustomRulesConfig{Packs: []*Pack{pack}})
+
+	logs := buf.String()
+	if !strings.Contains(logs, `bad-sample.yaml`) {
+		t.Errorf("warn missing pack path: %s", logs)
+	}
+	if !strings.Contains(logs, `"rule":"match"`) {
+		t.Errorf("warn missing rule id: %s", logs)
+	}
+
+	cfg := getCustomRulesConfig()
+	if cfg == nil || len(cfg.rules) != 1 {
+		t.Fatalf("rule should remain active despite failing sample, have %v", cfg)
+	}
+}
+
+func REDACTED(t *testing.T) {
+	resetCustomRulesForTest(t)
+
+	var buf bytes.Buffer
+	restore := captureSlogForTest(&buf)
+	defer restore()
+
+	const sample = "REDACTED"
+	pack := &Pack{
+		Name:    "safe-logs",
+		Version: "1.0.0",
+		Rules: []Rule{
+			{
+				ID:      "sample",
+				Regex:   `NEVER_MATCHES`,
+				Samples: []Sample{{Input: sample, Redacted: true}},
+			},
+		},
+		sourcePath: "safe-logs.yaml",
+	}
+
+	ConfigureCustomRules(CustomRulesConfig{Packs: []*Pack{pack}})
+
+	logs := buf.String()
+	if strings.Contains(logs, sample) {
+		t.Fatalf("sample mismatch log leaked raw sample: %s", logs)
+	}
+	if !strings.Contains(logs, `"sample_index":0`) {
+		t.Errorf("warn missing sample index: %s", logs)
+	}
+	if !strings.Contains(logs, `"sample_length":`) {
+		t.Errorf("warn missing sample length: %s", logs)
+	}
+}
+
+
+--- redact/packs_test.go
+package redact
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestParsePack_Valid(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		sourcePath  string
+		body        string
+		wantRules   int
+		wantSamples int
+	}{
+		{
+			name:       "yaml",
+			sourcePath: "acme-internal.yaml",
+			body: `
+name: acme-internal
+version: 1.0.0
+description: Internal ACME tokens
+rules:
+  - id: acme-token
+    regex: 'ACME_TOKEN_[A-Za-z0-9]{20,}'
+    samples:
+      - { input: "REDACTED", redacted: true }
+      - { input: "ACME_TOKEN_short", redacted: false }
+  - id: acme-session
+    regex: 'asess_[a-f0-9]{32}'
+`,
+			wantRules:   2,
+			wantSamples: 2,
+		},
+		{
+			name:       "json",
+			sourcePath: "acme-internal.json",
+			body: `{
+  "name": "acme-internal",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "acme-token",
+      "regex": "ACME_TOKEN_[A-Za-z0-9]{20,}"
+    }
+  ]
+}`,
+			wantRules: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			pack, err := ParsePack([]byte(tc.body), tc.sourcePath)
+			if err != nil {
+				t.Fatalf("ParsePack: %v", err)
+			}
+			if pack.Name != "acme-internal" {
+				t.Errorf("Name: want acme-internal, have %q", pack.Name)
+			}
+			if pack.Version != "1.0.0" {
+				t.Errorf("Version: want 1.0.0, have %q", pack.Version)
+			}
+			if len(pack.Rules) != tc.wantRules {
+				t.Fatalf("Rules: want %d, have %d", tc.wantRules, len(pack.Rules))
+			}
+			if pack.Rules[0].ID != "acme-token" {
+				t.Errorf("Rules[0].ID: want acme-token, have %q", pack.Rules[0].ID)
+			}
+			if len(pack.Rules[0].Samples) != tc.wantSamples {
+				t.Errorf("Rules[0].Samples: want %d, have %d", tc.wantSamples, len(pack.Rules[0].Samples))
+			}
+		})
+	}
+}
+
+func TestParsePack_RejectsInvalidPacks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		sourcePath string
+		body       string
+		want       []string
+	}{
+		{
+			name:       "missing name",
+			sourcePath: "noname.yaml",
+			body: `
+version: 1.0.0
+rules:
+  - id: x
+    regex: 'X+'
+`,
+			want: []string{"name"},
+		},
+		{
+			name:       "empty rules",
+			sourcePath: "empty.yaml",
+			body: `
+name: empty
+version: 1.0.0
+rules: []
+`,
+			want: []string{"rules"},
+		},
+		{
+			name:       "duplicate rule ids",
+			sourcePath: "dupe.yaml",
+			body: `
+name: dupe
+version: 1.0.0
+rules:
+  - id: same
+    regex: 'A+'
+  - id: same
+    regex: 'B+'
+`,
+			want: []string{"duplicate"},
+		},
+		{
+			name:       "name must match filename stem",
+			sourcePath: "actual-filename.yaml",
+			body: `
+name: not-the-filename
+version: 1.0.0
+rules:
+  - id: x
+    regex: 'X+'
+`,
+			want: []string{"name", "filename"},
+		},
+		{
+			name:       "unknown yaml field",
+			sourcePath: "unknown-yaml.yaml",
+			body: `
+name: unknown-yaml
+version: 1.0.0
+rules:
+  - id: x
+    regex: 'X+'
+    samplez: []
+`,
+			want: []string{"samplez"},
+		},
+		{
+			name:       "unknown json field",
+			sourcePath: "unknown-json.json",
+			body: `{
+  "name": "unknown-json",
+  "version": "1.0.0",
+  "rules": [
+    {"id": "x", "regex": "X+", "samplez": []}
+  ]
+}`,
+			want: []string{"samplez"},
+		},
+		{
+			name:       "trailing json content",
+			sourcePath: "trailing-json.json",
+			body: `{
+  "name": "trailing-json",
+  "version": "1.0.0",
+  "rules": [{"id": "x", "regex": "X+"}]
+}
+{
+  "name": "second"
+}`,
+			want: []string{"trailing"},
+		},
+		{
+			name:       "multiple yaml documents",
+			sourcePath: "multiple-yaml.yaml",
+			body: `
+name: multiple-yaml
+version: 1.0.0
+rules:
+  - id: x
+    regex: 'X+'
+---
+name: second
+`,
+			want: []string{"trailing"},
+		},
+		{
+			name:       "rule id with disallowed characters",
+			sourcePath: "bad-id.yaml",
+			body: `
+name: bad-id
+version: 1.0.0
+rules:
+  - id: 'has space'
+    regex: 'X+'
+`,
+			want: []string{"rules[0].id", "characters"},
+		},
+		{
+			name:       "rule id exceeds length cap",
+			sourcePath: "long-id.yaml",
+			body: `
+name: long-id
+version: 1.0.0
+rules:
+  - id: ` + strings.Repeat("a", maxIdentifierLen+1) + `
+    regex: 'X+'
+`,
+			want: []string{"rules[0].id", "limit"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := ParsePack([]byte(tc.body), tc.sourcePath)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error should mention %q, got: %v", want, err)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadPacks_ReadsMultipleFilesAndIgnoresOthers(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	mustWrite(t, dir, "alpha.yaml", `
+name: alpha
+version: 1.0.0
+rules:
+  - id: a
+    regex: 'A+'
+`)
+	mustWrite(t, dir, "beta.json", `{
+  "name": "beta",
+  "version": "1.0.0",
+  "rules": [{"id": "b", "regex": "B+"}]
+}`)
+	mustWrite(t, dir, "ignored.txt", `not a pack`)
+	mustWrite(t, dir, "broken.yaml", `name: [this is malformed`)
+
+	packs, err := LoadPacks(dir)
+	if err != nil {
+		t.Fatalf("LoadPacks: %v", err)
+	}
+	if len(packs) != 2 {
+		t.Fatalf("packs: want 2 (alpha, beta), have %d", len(packs))
+	}
+
+	got := map[string]bool{}
+	for _, p := range packs {
+		got[p.Name] = true
+	}
+	if !got["alpha"] || !got["beta"] {
+		t.Errorf("expected packs alpha+beta, got %v", got)
+	}
+}
+
+func TestLoadPacks_MissingDirReturnsEmpty(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "does-not-exist")
+	packs, err := LoadPacks(dir)
+	if err != nil {
+		t.Fatalf("LoadPacks should be tolerant of missing dirs, got: %v", err)
+	}
+	if len(packs) != 0 {
+		t.Errorf("packs: want 0, have %d", len(packs))
+	}
+}
+
+func TestLoadPacks_RejectsNonDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "redactors")
+	if err := os.WriteFile(path, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadPacks(path)
+	if err == nil {
+		t.Fatal("expected error for non-directory redactors path")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("error should mention non-directory path, got: %v", err)
+	}
+}
+
+func TestLoadPacks_SkipsSymlinkedPackFiles(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.yaml")
+	if err := os.WriteFile(outside, []byte(`
+name: symlinked
+version: 1.0.0
+rules:
+  - id: x
+    regex: 'X+'
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "symlinked.yaml")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	packs, err := LoadPacks(dir)
+	if err != nil {
+		t.Fatalf("LoadPacks: %v", err)
+	}
+	if len(packs) != 0 {
+		t.Fatalf("symlinked pack should be skipped, loaded %d pack(s)", len(packs))
+	}
+}
+
+// TestLoadPacks_DescendsIntoSubdirs verifies that packs in subdirectories
+// (e.g. the conventional .entire/redactors/local/ for personal/uncommitted
+// rules) are discovered. Without recursion, the docs' "personal-only"
+// distribution path would silently no-op.
+func TestLoadPacks_DescendsIntoSubdirs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mustWrite(t, dir, "team.yaml", `
+name: team
+version: 1.0.0
+rules:
+  - id: t
+    regex: 'T+'
+`)
+	if err := os.MkdirAll(filepath.Join(dir, "local"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(dir, "local"), "personal.yaml", `
+name: personal
+version: 1.0.0
+rules:
+  - id: p
+    regex: 'P+'
+`)
+
+	packs, err := LoadPacks(dir)
+	if err != nil {
+		t.Fatalf("LoadPacks: %v", err)
+	}
+	got := map[string]bool{}
+	for _, p := range packs {
+		got[p.Name] = true
+	}
+	if !got["team"] || !got["personal"] {
+		t.Errorf("expected team+personal packs, got %v", got)
+	}
+}
+
+func TestLoadPacks_SkipsOversizedFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mustWrite(t, dir, "tiny.yaml", `
+name: tiny
+version: 1.0.0
+rules:
+  - id: t
+    regex: 'T+'
+`)
+	// Build a YAML body large enough to exceed maxPackFileBytes.
+	var b strings.Builder
+	b.WriteString("name: huge\nversion: 1.0.0\ndescription: ")
+	b.WriteString(strings.Repeat("x", maxPackFileBytes+1))
+	b.WriteString("\nrules:\n  - id: h\n    regex: 'H+'\n")
+	mustWrite(t, dir, "huge.yaml", b.String())
+
+	packs, err := LoadPacks(dir)
+	if err != nil {
+		t.Fatalf("LoadPacks: %v", err)
+	}
+	if len(packs) != 1 || packs[0].Name != "tiny" {
+		t.Fatalf("expected only tiny pack, got %#v", packs)
+	}
+}
+
+func mustWrite(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+
+--- redact/pii_test.go
+package redact
+
+import (
+	"strings"
+	"testing"
+)
+
+// =============================================================================
+// Level 1: Pure regex tests — no config, no globals, t.Parallel()
+// =============================================================================
+
+func TestEmailRegex(t *testing.T) {
+	t.Parallel()
+	match := []string{
+		"user@example.com",
+		"user+tag@domain.co.uk",
+		"first.last@company.org",
+		"a@b.com",
+	}
+	noMatch := []string{
+		"not an email",
+		"@missing.local",
+		"missing@",
+		"no-at-sign-here",
+	}
+	for _, s := range match {
+		if !emailRegex.MatchString(s) {
+			t.Errorf("emailRegex should match %q", s)
+		}
+	}
+	for _, s := range noMatch {
+		if emailRegex.MatchString(s) {
+			t.Errorf("emailRegex should NOT match %q", s)
+		}
+	}
+}
+
+func TestPhoneRegex(t *testing.T) {
+	t.Parallel()
+	match := []string{
+		"555-123-4567",
+		"(555) 123-4567",
+		"+1-555-123-4567",
+		"+1.555.123.4567",
+		"1-555-123-4567",
+		"555 123 4567",
+	}
+	noMatch := []string{
+		"42",
+		"12345",
+		"not a phone",
+		"1.234.567.8901",   // version-like dotted decimal
+		"192.168.001.0001", // IP-like dotted decimal
+		"555.123.4567",     // bare dots without +1 prefix (intentionally rejected)
+	}
+	for _, s := range match {
+		if !phoneRegex.MatchString(s) {
+			t.Errorf("phoneRegex should match %q", s)
+		}
+	}
+	for _, s := range noMatch {
+		if phoneRegex.MatchString(s) {
+			t.Errorf("phoneRegex should NOT match %q", s)
+		}
+	}
+}
+
+func TestAddressRegex(t *testing.T) {
+	t.Parallel()
+	match := []string{
+		"123 Main Street",
+		"456 Oak Avenue",
+		"789 Sunset Blvd",
+		"42 Pine Drive",
+	}
+	noMatch := []string{
+		"this is normal text",
+		"123 lowercase street",
+		"no number Street",
+	}
+	for _, s := range match {
+		if !addressRegex.MatchString(s) {
+			t.Errorf("addressRegex should match %q", s)
+		}
+	}
+	for _, s := range noMatch {
+		if addressRegex.MatchString(s) {
+			t.Errorf("addressRegex should NOT match %q", s)
+		}
+	}
+}
+
+// =============================================================================
+// Level 2: detectPII unit tests — explicit config, no globals, t.Parallel()
+// =============================================================================
+
+func TestDetectPII_EmailRegions(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	}
+	input := "contact user@example.com for info"
+	regions := detectPII(cfg, input)
+	if len(regions) != 1 {
+		t.Fatalf("expected 1 region, got %d", len(regions))
+	}
+	if regions[0].label != labelEmail {
+		t.Errorf("expected label EMAIL, got %q", regions[0].label)
+	}
+	got := input[regions[0].start:regions[0].end]
+	if got != "user@example.com" {
+		t.Errorf("expected matched text %q, got %q", "user@example.com", got)
+	}
+}
+
+func TestDetectPII_PhoneRegions(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIPhone: true},
+	}
+	regions := detectPII(cfg, "call 555-123-4567 now")
+	if len(regions) != 1 {
+		t.Fatalf("expected 1 region, got %d", len(regions))
+	}
+	if regions[0].label != labelPhone {
+		t.Errorf("expected label PHONE, got %q", regions[0].label)
+	}
+}
+
+func TestDetectPII_AddressRegions(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIAddress: true},
+	}
+	regions := detectPII(cfg, "lives at 123 Main Street ok")
+	if len(regions) != 1 {
+		t.Fatalf("expected 1 region, got %d", len(regions))
+	}
+	if regions[0].label != labelAddress {
+		t.Errorf("expected label ADDRESS, got %q", regions[0].label)
+	}
+}
+
+func TestDetectPII_CategoryToggle(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true, PIIPhone: false},
+	}
+	regions := detectPII(cfg, "email user@example.com phone 555-123-4567")
+	for _, r := range regions {
+		if r.label == labelPhone {
+			t.Errorf("phone should not be detected when category is disabled")
+		}
+	}
+	hasEmail := false
+	for _, r := range regions {
+		if r.label == labelEmail {
+			hasEmail = true
+		}
+	}
+	if !hasEmail {
+		t.Error("expected at least one EMAIL region")
+	}
+}
+
+func TestDetectPII_CustomPatterns(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:        true,
+		Categories:     map[PIICategory]bool{},
+		CustomPatterns: map[string]string{"employee_id": `EMP-\d{6}`},
+	}
+	regions := detectPII(cfg, "employee EMP-123456 joined")
+	if len(regions) != 1 {
+		t.Fatalf("expected 1 region, got %d", len(regions))
+	}
+	if regions[0].label != "EMPLOYEE_ID" {
+		t.Errorf("expected label EMPLOYEE_ID, got %q", regions[0].label)
+	}
+}
+
+func TestDetectPII_NilConfig(t *testing.T) {
+	t.Parallel()
+	regions := detectPII(nil, "user@example.com 555-123-4567")
+	if len(regions) != 0 {
+		t.Errorf("expected no regions with nil config, got %d", len(regions))
+	}
+}
+
+func TestDetectPII_Disabled(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    false,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	}
+	regions := detectPII(cfg, "user@example.com")
+	if len(regions) != 0 {
+		t.Errorf("expected no regions when disabled, got %d", len(regions))
+	}
+}
+
+func TestDetectPII_InvalidCustomPattern(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:        true,
+		Categories:     map[PIICategory]bool{},
+		CustomPatterns: map[string]string{"bad": "[invalid"},
+	}
+	regions := detectPII(cfg, "some text")
+	if len(regions) != 0 {
+		t.Errorf("expected no regions with invalid custom pattern, got %d", len(regions))
+	}
+}
+
+func TestDetectPII_MultipleMatches(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	}
+	regions := detectPII(cfg, "a@b.com and c@d.org")
+	if len(regions) != 2 {
+		t.Fatalf("expected 2 regions, got %d", len(regions))
+	}
+}
+
+// =============================================================================
+// Level 3: Integration smoke tests through String() — needs global, few cases
+// =============================================================================
+
+// NOTE: Level 3 tests modify global state via ConfigurePII, so they
+// are NOT t.Parallel(). Keep this section small — detailed coverage
+// lives in Level 1 (regex) and Level 2 (detectPII).
+
+// resetPIIConfig resets the global PII configuration between tests.
+func resetPIIConfig() {
+	piiConfigMu.Lock()
+	defer piiConfigMu.Unlock()
+	piiConfig = nil
+}
+
+func TestPIIIntegration_EmailThroughString(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	got := String("contact user@example.com for info")
+	want := "contact [REDACTED_EMAIL] for info"
+	if got != want {
+		t.Errorf("String() = %q, want %q", got, want)
+	}
+}
+
+func TestPIIIntegration_SecretAndPIICoexist(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	input := "key=" + highEntropySecret + " and user@example.com"
+	got := String(input)
+	if strings.Contains(got, highEntropySecret) {
+		t.Errorf("secret should be redacted, got %q", got)
+	}
+	if strings.Contains(got, "user@example.com") {
+		t.Errorf("email should be redacted, got %q", got)
+	}
+}
+
+func TestPIIIntegration_DisabledByDefault(t *testing.T) {
+	resetPIIConfig()
+	t.Cleanup(resetPIIConfig)
+
+	input := "contact user@example.com and call 555-123-4567"
+	got := String(input)
+	if got != input {
+		t.Errorf("PII should not be redacted when not configured, got %q", got)
+	}
+}
+
+func TestPIIIntegration_JSONLContent(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	input := `{"content":"contact user@example.com"}`
+	got, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(got, "user@example.com") {
+		t.Errorf("email should be redacted in JSONL, got %q", got)
+	}
+}
+
+func TestPIIIntegration_Bytes(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	got := Bytes([]byte("contact user@example.com"))
+	if !strings.Contains(string(got), "[REDACTED_EMAIL]") {
+		t.Errorf("expected [REDACTED_EMAIL] in Bytes output, got %q", string(got))
+	}
+}
+
+func TestPII_ReplacementTokenFormat(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		label string
+		want  string
+	}{
+		{"", "REDACTED"},
+		{labelEmail, "[REDACTED_EMAIL]"},
+		{labelPhone, "[REDACTED_PHONE]"},
+		{labelAddress, "[REDACTED_ADDRESS]"},
+		{"EMPLOYEE_ID", "[REDACTED_EMPLOYEE_ID]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.label, func(t *testing.T) {
+			t.Parallel()
+			got := replacementToken(tt.label)
+			if got != tt.want {
+				t.Errorf("replacementToken(%q) = %q, want %q", tt.label, got, tt.want)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// Level 2 additions: edge cases and contracts
+// =============================================================================
+
+func TestDetectPII_EmptyString(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true, PIIPhone: true},
+	}
+	regions := detectPII(cfg, "")
+	if len(regions) != 0 {
+		t.Errorf("expected nil regions for empty string, got %d", len(regions))
+	}
+}
+
+func TestDetectPII_InvalidAndValidCustomPatterns(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{},
+		CustomPatterns: map[string]string{
+			"bad":         "[invalid",
+			"employee_id": `EMP-\d{6}`,
+		},
+	}
+	regions := detectPII(cfg, "employee EMP-123456 joined")
+	if len(regions) != 1 {
+		t.Fatalf("expected 1 region (valid pattern should still fire despite invalid sibling), got %d", len(regions))
+	}
+	if regions[0].label != "EMPLOYEE_ID" {
+		t.Errorf("expected label EMPLOYEE_ID, got %q", regions[0].label)
+	}
+}
+
+// =============================================================================
+// Level 2: Email allowlist tests (TDD — these FAIL until allowlist is implemented)
+// =============================================================================
+
+func TestDetectPII_AllowlistedEmails(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	}
+	// These emails appear constantly in coding transcripts and are non-sensitive.
+	allowlisted := []string{
+		"noreply@github.com",
+		"user@users.noreply.github.com",
+		"dependabot@users.noreply.github.com",
+		"actions@github.com",
+		"someone@noreply.github.com",
+		"Noreply@GitHub.com", // case-insensitive
+	}
+	for _, email := range allowlisted {
+		input := "from " + email + " to"
+		regions := detectPII(cfg, input)
+		for _, r := range regions {
+			matched := input[r.start:r.end]
+			if r.label == labelEmail && matched == email {
+				t.Errorf("allowlisted email %q should NOT be detected as PII", email)
+			}
+		}
+	}
+
+	// Regular emails should still be detected.
+	regions := detectPII(cfg, "contact user@example.com for info")
+	hasEmail := false
+	for _, r := range regions {
+		if r.label == labelEmail {
+			hasEmail = true
+		}
+	}
+	if !hasEmail {
+		t.Error("non-allowlisted email should still be detected")
+	}
+}
+
+func TestDetectPII_GitAuthorNoreplyNotRedacted(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	}
+	// Simulates git log output — noreply addresses should not be redacted
+	input := "Author: Bot <noreply@github.com>\nCo-Authored-By: User <user@users.noreply.github.com>"
+	regions := detectPII(cfg, input)
+	for _, r := range regions {
+		if r.label == labelEmail {
+			t.Errorf("noreply email in git author line should NOT be detected, but matched %q", input[r.start:r.end])
+		}
+	}
+}
+
+// =============================================================================
+// Level 3 additions: #471 regression safety WITH PII enabled
+// =============================================================================
+
+func TestPIIEnabled_FilePathsStillPreserved(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true, PIIPhone: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	paths := []string{
+		"/tmp/TestE2E_Something3407889464/001/controller.go",
+		"/private/var/folders/v4/31cd3cg52_sfrpb1mbtr7q7r0000gn/T/TestE2E_Something/controller",
+		"/Users/peytonmontei/.claude/projects/something.jsonl",
+		"/tmp/test/controller.go\n/tmp/test/model.go\n/tmp/test/view.go",
+	}
+	for _, p := range paths {
+		got := String(p)
+		if got != p {
+			t.Errorf("file path should NOT be redacted with PII enabled\n  input: %q\n  got:   %q", p, got)
+		}
+	}
+}
+
+func TestPIIEnabled_JSONEscapesStillPreserved(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true, PIIPhone: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	tests := []string{
+		`controller.go\nmodel.go\nview.go`,
+		`something.go\tanother.go`,
+		`C:\\Users\\test\\file.go`,
+	}
+	for _, input := range tests {
+		got := String(input)
+		if got != input {
+			t.Errorf("JSON escape should NOT be corrupted with PII enabled\n  input: %q\n  got:   %q", input, got)
+		}
+	}
+}
+
+func TestPIIEnabled_JSONLPathFieldsStillSkipped(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	input := `{"file_path":"/private/var/folders/v4/31cd3cg52_sfrpb1mbtr7q7r0000gn/T/test/controller.go","cwd":"/private/var/folders/v4/31cd3cg52_sfrpb1mbtr7q7r0000gn/T/test","content":"normal text here"}`
+	got, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(got, "REDACTED") {
+		t.Errorf("JSONL path fields should NOT be redacted with PII enabled, got: %s", got)
+	}
+}
+
+func TestPIIEnabled_SecretPatternExcludesSlash(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true, PIIPhone: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	// This path was being redacted when / was in secretPattern
+	input := "/private/var/folders/v4/31cd3cg52_sfrpb1mbtr7q7r0000gn/T/TestE2E_Something/controller"
+	got := String(input)
+	if got != input {
+		t.Errorf("path with slashes should NOT be redacted\n  input: %q\n  got:   %q", input, got)
+	}
+}
+
+// =============================================================================
+// Level 3 additions: overlap and JSONL interaction
+// =============================================================================
+
+func TestPIIIntegration_OverlappingSecretAndPII(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	// Secret and email adjacent (not overlapping) — both should be redacted
+	input := "key=" + highEntropySecret + " user@example.com"
+	got := String(input)
+	if strings.Contains(got, highEntropySecret) {
+		t.Error("secret should be redacted")
+	}
+	if strings.Contains(got, "user@example.com") {
+		t.Error("email should be redacted")
+	}
+	if !strings.Contains(got, "REDACTED") {
+		t.Error("expected at least one REDACTED token")
+	}
+	if !strings.Contains(got, "[REDACTED_EMAIL]") {
+		t.Error("expected [REDACTED_EMAIL] token")
+	}
+}
+
+func REDACTED(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	// Email in file_path field should NOT be redacted (field is skipped).
+	// Email in content field SHOULD be redacted.
+	input := `{"file_path":"user@example.com/project/file.go","content":"contact admin@test.org"}`
+	got, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got, "user@example.com") {
+		t.Errorf("email in file_path should NOT be redacted, got: %s", got)
+	}
+	if strings.Contains(got, "admin@test.org") {
+		t.Errorf("email in content should be redacted, got: %s", got)
+	}
+}
+
+
+--- redact/redact_bench_test.go
+package redact
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+var benchmarkOpenSSHPrivateKey = makeFakeOpenSSHPrivateKey(`b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+REDACTED
+REDACTED
+REDACTED`)
+
+// BenchmarkRedactJSONLBytes gives us a stable redaction performance baseline.
+//
+// To compare against a base ref:
+//
+//	BENCH_PKG=./redact BENCH_PATTERN='BenchmarkRedactJSONLBytes' BASE_REF=main mise run bench:compare
+func BenchmarkRedactJSONLBytes(b *testing.B) {
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{
+			name: "Fixture/ClaudeFull2",
+			data: readBenchmarkFixture(b, "../cmd/entire/cli/transcript/compact/testdata/claude_full2.jsonl"),
+		},
+		{
+			name: "Synthetic/CheckpointLog",
+			data: generateBenchmarkJSONL(b, 2500),
+		},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(tc.data)))
+			for b.Loop() {
+				redacted, err := JSONLBytes(tc.data)
+				if err != nil {
+					b.Fatalf("redact JSONL: %v", err)
+				}
+				if redacted.Len() == 0 {
+					b.Fatal("redacted output was empty")
+				}
+			}
+		})
+	}
+}
+
+func readBenchmarkFixture(b *testing.B, path string) []byte {
+	b.Helper()
+	data, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		b.Fatalf("read benchmark fixture %s: %v", path, err)
+	}
+	return data
+}
+
+func generateBenchmarkJSONL(b *testing.B, lines int) []byte {
+	b.Helper()
+
+	var out strings.Builder
+	for i := range lines {
+		content := benchmarkLineContent(i)
+		entry := map[string]any{
+			"type":       "text",
+			"session_id": fmt.Sprintf("bench-session-%06d", i),
+			"message": map[string]any{
+				"role":    roleForBenchmarkLine(i),
+				"content": content,
+			},
+			"metadata": map[string]any{
+				"cwd":       "/tmp/entire-redact-benchmark/repo",
+				"tool_id":   fmt.Sprintf("toolu_%06d", i),
+				"file_path": fmt.Sprintf("src/generated/file_%04d.go", i%200),
+			},
+		}
+		encoded, err := json.Marshal(entry)
+		if err != nil {
+			b.Fatalf("marshal benchmark line: %v", err)
+		}
+		out.Write(encoded)
+		out.WriteByte('\n')
+	}
+	return []byte(out.String())
+}
+
+func benchmarkLineContent(i int) string {
+	switch {
+	case i%997 == 0:
+		return "Configure DATABASE_URL=REDACTED and keep going."
+	case i%991 == 0:
+		return "SSH key material follows:\n" + benchmarkOpenSSHPrivateKey
+	case i%137 == 0:
+		return "Use api_key=" + highEntropySecret + " when testing redaction throughput."
+	default:
+		return fmt.Sprintf(
+			"Line %04d: agent inspected files, summarized diffs, and wrote a long but ordinary transcript chunk %s.",
+			i,
+			strings.Repeat("with repeated neutral prose ", 12),
+		)
+	}
+}
+
+func roleForBenchmarkLine(i int) string {
+	if i%3 == 0 {
+		return "user"
+	}
+	return "assistant"
+}
+
+
+--- redact/redact_test.go
+package redact
+
+import (
+	"bytes"
+	"encoding/json"
+	"slices"
+	"strings"
+	"testing"
+)
+
+// highEntropySecret is a string with Shannon entropy > 4.5 that will trigger redaction.
+const highEntropySecret = "REDACTED"
+
+var fakeOpenSSHPrivateKey = makeFakeOpenSSHPrivateKey(`b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+REDACTED
+REDACTED
+REDACTED`)
+
+func makeFakeOpenSSHPrivateKey(payload string) string {
+	return strings.Join([]string{
+		openSSHPrivateKeyMarker("BEGIN"),
+		payload,
+		openSSHPrivateKeyMarker("END"),
+	}, "\n")
+}
+
+func openSSHPrivateKeyMarker(kind string) string {
+	return "-----" + kind + " " + "OPEN" + "SSH" + " " + "PRIVATE" + " KEY-----"
+}
+
+type stringRedactionCase struct {
+	name  string
+	input string
+	want  string
+}
+
+func assertStringRedactionCases(t *testing.T, tests []stringRedactionCase) {
+	t.Helper()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := String(tt.input)
+			if got != tt.want {
+				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBytes_NoSecrets(t *testing.T) {
+	input := []byte("hello world, this is normal text")
+	result := Bytes(input)
+	if string(result) != string(input) {
+		t.Errorf("expected unchanged input, got %q", result)
+	}
+	// Should return the original slice when no changes
+	if &result[0] != &input[0] {
+		t.Error("expected same underlying slice when no redaction needed")
+	}
+}
+
+func TestBytes_WithSecret(t *testing.T) {
+	input := []byte("my key is " + highEntropySecret + " ok")
+	result := Bytes(input)
+	expected := []byte("my key is REDACTED ok")
+	if !bytes.Equal(result, expected) {
+		t.Errorf("got %q, want %q", result, expected)
+	}
+}
+
+func TestJSONLBytes_NoSecrets(t *testing.T) {
+	input := []byte(`{"type":"text","content":"hello"}`)
+	result, err := JSONLBytes(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(result.Bytes()) != string(input) {
+		t.Errorf("expected unchanged input, got %q", result.Bytes())
+	}
+	if &result.Bytes()[0] != &input[0] {
+		t.Error("expected same underlying slice when no redaction needed")
+	}
+}
+
+func TestJSONLBytes_WithSecret(t *testing.T) {
+	input := []byte(`{"type":"text","content":"key=` + highEntropySecret + `"}`)
+	result, err := JSONLBytes(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := []byte(`{"type":"text","content":"REDACTED"}`)
+	if !bytes.Equal(result.Bytes(), expected) {
+		t.Errorf("got %q, want %q", result.Bytes(), expected)
+	}
+}
+
+func TestRedactedBytes_Bytes(t *testing.T) {
+	t.Parallel()
+	input := []byte(`{"type":"text","content":"hello"}`)
+	rb := AlreadyRedacted(input)
+	if !bytes.Equal(rb.Bytes(), input) {
+		t.Errorf("Bytes() = %q, want %q", rb.Bytes(), input)
+	}
+}
+
+func TestRedactedBytes_Len(t *testing.T) {
+	t.Parallel()
+	input := []byte(`some data`)
+	rb := AlreadyRedacted(input)
+	if rb.Len() != len(input) {
+		t.Errorf("Len() = %d, want %d", rb.Len(), len(input))
+	}
+}
+
+func TestAlreadyRedacted(t *testing.T) {
+	t.Parallel()
+	input := []byte(`some data`)
+	rb := AlreadyRedacted(input)
+	if !bytes.Equal(rb.Bytes(), input) {
+		t.Errorf("AlreadyRedacted() = %q, want %q", rb.Bytes(), input)
+	}
+}
+
+func TestJSONLContent_TopLevelArray(t *testing.T) {
+	// Top-level JSON arrays are valid JSONL and should be redacted.
+	input := `["` + highEntropySecret + `","normal text"]`
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := `["REDACTED","normal text"]`
+	if result != expected {
+		t.Errorf("got %q, want %q", result, expected)
+	}
+}
+
+func TestJSONLContent_TopLevelArrayNoSecrets(t *testing.T) {
+	input := `["hello","world"]`
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != input {
+		t.Errorf("expected unchanged input, got %q", result)
+	}
+}
+
+func TestJSONLContent_MultipleObjects_AllRedacted(t *testing.T) {
+	t.Parallel()
+	// Regression test: JSONL with multiple top-level JSON objects must redact
+	// secrets in ALL objects, not just the first. The single-JSON fast path must
+	// not accidentally consume only the first object and return early.
+	input := `{"content":"safe text","id":"abc"}
+{"content":"key=` + highEntropySecret + `","id":"def"}
+{"content":"also safe","id":"ghi"}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The secret in the second line should be redacted.
+	if strings.Contains(result, highEntropySecret) {
+		t.Error("secret in second JSONL object was not redacted")
+	}
+	if !strings.Contains(result, "REDACTED") {
+		t.Error("expected REDACTED in output")
+	}
+
+	// IDs should be preserved (field-aware skip).
+	for _, id := range []string{"abc", "def", "ghi"} {
+		if !strings.Contains(result, id) {
+			t.Errorf("ID %q should be preserved", id)
+		}
+	}
+
+	// Non-secret content should be preserved.
+	if !strings.Contains(result, "safe text") {
+		t.Error("safe text in first object was corrupted")
+	}
+	if !strings.Contains(result, "also safe") {
+		t.Error("safe text in third object was corrupted")
+	}
+}
+
+func TestJSONLContent_InvalidJSONLine(t *testing.T) {
+	// Lines that aren't valid JSON should be processed with normal string redaction.
+	input := `{"type":"text", "invalid ` + highEntropySecret + " json"
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := `{"type":"text", "invalid REDACTED json`
+	if result != expected {
+		t.Errorf("got %q, want %q", result, expected)
+	}
+}
+
+func TestCollectJSONLReplacements_Succeeds(t *testing.T) {
+	obj := map[string]any{
+		"content": "token=" + highEntropySecret,
+	}
+	repls := collectJSONLReplacements(obj)
+	// expect one replacement for high-entropy secret
+	want := []jsonReplacement{{key: "content", original: "token=" + highEntropySecret, redacted: "REDACTED"}}
+	if !slices.Equal(repls, want) {
+		t.Errorf("got %q, want %q", repls, want)
+	}
+}
+
+func TestShouldSkipJSONLField(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		// Fields ending in "id" should be skipped.
+		{"id", true},
+		{"session_id", true},
+		{"sessionId", true},
+		{"checkpoint_id", true},
+		{"checkpointID", true},
+		{"userId", true},
+		// Fields ending in "ids" should be skipped.
+		{"ids", true},
+		{"session_ids", true},
+		{"userIds", true},
+		// Exact match "signature" should be skipped.
+		{"signature", true},
+		// Path-related fields should be skipped.
+		{"filePath", true},
+		{"file_path", true},
+		{"cwd", true},
+		{"root", true},
+		{"directory", true},
+		{"dir", true},
+		{"path", true},
+		// Fields that should NOT be skipped.
+		{"content", false},
+		{"type", false},
+		{"name", false},
+		{"text", false},
+		{"output", false},
+		{"input", false},
+		{"command", false},
+		{"args", false},
+		{"video", false},      // ends in "o", not "id"
+		{"identify", false},   // ends in "ify", not "id"
+		{"signatures", false}, // not exact match "signature"
+		{"signal_data", false},
+		{"consideration", false}, // contains "id" but doesn't end with it
+	}
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			got := shouldSkipJSONLField(tt.key)
+			if got != tt.want {
+				t.Errorf("shouldSkipJSONLField(%q) = %v, want %v", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldSkipJSONLField_RedactionBehavior(t *testing.T) {
+	// Verify that secrets in skipped fields are preserved (not redacted).
+	obj := map[string]any{
+		"session_id": highEntropySecret,
+		"content":    highEntropySecret,
+	}
+	repls := collectJSONLReplacements(obj)
+	// Only "content" should produce a replacement; "session_id" should be skipped.
+	if len(repls) != 1 {
+		t.Fatalf("expected 1 replacement, got %d", len(repls))
+	}
+	if repls[0].original != highEntropySecret {
+		t.Errorf("expected replacement for secret in content field, got %q", repls[0].original)
+	}
+}
+
+func TestJSONLContent_SkippedFieldValueCollision(t *testing.T) {
+	t.Parallel()
+	input := `{"session_id":"` + highEntropySecret + `","content":"` + highEntropySecret + `"}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(result, `"session_id":"`+highEntropySecret+`"`) {
+		t.Fatalf("expected skipped session_id to be preserved, got: %s", result)
+	}
+	if !strings.Contains(result, `"content":"REDACTED"`) {
+		t.Fatalf("expected content field to be redacted, got: %s", result)
+	}
+}
+
+func TestString_PatternDetection(t *testing.T) {
+	// These secrets have entropy below 4.5 so entropy-only detection misses them.
+	// Betterleaks pattern matching should catch them.
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "AWS access key (entropy ~3.9, below 4.5 threshold)",
+			input: "key=REDACTED",
+			want:  "key=REDACTED",
+		},
+		{
+			name:  "two AWS keys separated by space produce two REDACTED tokens",
+			input: "key=REDACTED REDACTED",
+			want:  "key=REDACTED REDACTED",
+		},
+		{
+			name:  "adjacent AWS keys without separator merge into single REDACTED",
+			input: "key=REDACTED",
+			want:  "key=REDACTED",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Verify entropy is below threshold (proving entropy-only would miss this).
+			for _, loc := range secretPattern.FindAllStringIndex(tt.input, -1) {
+				e := shannonEntropy(tt.input[loc[0]:loc[1]])
+				if e > entropyThreshold {
+					t.Fatalf("test secret has entropy %.2f > %.1f; this test is meant for low-entropy secrets", e, entropyThreshold)
+				}
+			}
+
+			got := String(tt.input)
+			if got != tt.want {
+				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestString_CredentialedURIs(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "postgres URI",
+			input: "DATABASE_URL=REDACTED",
+			want:  "DATABASE_URL=REDACTED",
+		},
+		{
+			name:  "postgresql URI with query",
+			input: `dsn="REDACTED"`,
+			want:  `dsn="REDACTED"`,
+		},
+		{
+			name:  "mongodb srv URI",
+			input: "mongo=REDACTED",
+			want:  "mongo=REDACTED",
+		},
+		{
+			name:  "mysql URI",
+			input: "REDACTED",
+			want:  "REDACTED",
+		},
+		{
+			name:  "redis URI with empty username",
+			input: "cache REDACTED",
+			want:  "cache REDACTED",
+		},
+		{
+			name:  "generic credentialed URL",
+			input: "proxy=REDACTED",
+			want:  "proxy=REDACTED",
+		},
+		{
+			name:  "URL without password is preserved",
+			input: "repo=ssh://git@github.com/entireio/cli",
+			want:  "repo=ssh://git@github.com/entireio/cli",
+		},
+		{
+			name:  "colon and at-sign in path are preserved",
+			input: "url=https://example.com/a:b@c",
+			want:  "url=https://example.com/a:b@c",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := String(tt.input)
+			if got != tt.want {
+				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestString_DatabaseConnectionStringRedaction(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "postgres keyword DSN",
+			input: `dsn="REDACTED"`,
+			want:  `dsn="REDACTED"`,
+		},
+		{
+			name:  "postgres keyword DSN different order",
+			input: "REDACTED",
+			want:  "REDACTED",
+		},
+		{
+			name:  "sql server connection string",
+			input: "conn=REDACTED",
+			want:  "conn=REDACTED",
+		},
+		{
+			name:  "odbc connection string",
+			input: "conn=REDACTED",
+			want:  "conn=REDACTED",
+		},
+		{
+			name:  "jdbc query password",
+			input: "REDACTED",
+			want:  "REDACTED",
+		},
+		{
+			name:  "postgres URL query password without userinfo",
+			input: "DATABASE_URL=REDACTED",
+			want:  "DATABASE_URL=REDACTED",
+		},
+		{
+			name:  "postgres URL query password is case-insensitive",
+			input: "DATABASE_URL=REDACTED",
+			want:  "DATABASE_URL=REDACTED",
+		},
+		{
+			name:  "mongodb URL query password without userinfo",
+			input: "MONGO_URL=REDACTED",
+			want:  "MONGO_URL=REDACTED",
+		},
+		{
+			name:  "mongodb srv URL query password without userinfo",
+			input: "MONGO_URL=REDACTED",
+			want:  "MONGO_URL=REDACTED",
+		},
+		{
+			name:  "placeholder password in database URL query is preserved",
+			input: "DATABASE_URL=postgresql://db.example.com/app?user=svc&password=${DB_PASSWORD}",
+			want:  "DATABASE_URL=postgresql://db.example.com/app?user=svc&password=${DB_PASSWORD}",
+		},
+		{
+			name:  "jdbc semicolon password",
+			input: "REDACTED",
+			want:  "REDACTED",
+		},
+		{
+			name:  "ado.net quoted password with embedded semicolons",
+			input: `conn=REDACTED,
+			want:  "conn=REDACTED",
+		},
+		{
+			name:  "ado.net single-quoted password with embedded semicolons",
+			input: `conn=REDACTED,
+			want:  "conn=REDACTED",
+		},
+	})
+}
+
+func TestDatabaseConnectionStringRuleScope(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		candidate string
+		hasSecret func(string) bool
+		want      bool
+	}{
+		{
+			name:      "database URL query password is in scope",
+			candidate: "REDACTED",
+			hasSecret: hasDatabaseURLSecret,
+			want:      true,
+		},
+		{
+			name:      "database URL userinfo password is handled by credentialed URI detection",
+			candidate: "REDACTED",
+			hasSecret: hasDatabaseURLSecret,
+			want:      false,
+		},
+		{
+			name:      "JDBC query password is in scope",
+			candidate: "REDACTED",
+			hasSecret: hasJDBCPassword,
+			want:      true,
+		},
+		{
+			name:      "JDBC userinfo password is handled by credentialed URI detection",
+			candidate: "jdbc:REDACTED",
+			hasSecret: hasJDBCPassword,
+			want:      false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.hasSecret(tt.candidate)
+			if got != tt.want {
+				t.Errorf("hasSecret(%q) = %v, want %v", tt.candidate, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestString_BoundedCredentialValueRedaction(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "db password env var",
+			input: "DB_PASSWORD=REDACTED,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "postgres password env var",
+			input: "PGPASSWORD='REDACTED'",
+			want:  "PGPASSWORD='REDACTED'",
+		},
+		{
+			name:  "redis password env var",
+			input: `REDIS_PASSWORD="REDACTED"`,
+			want:  `REDIS_PASSWORD="REDACTED"`,
+		},
+		{
+			name:  "lowercase database password",
+			input: "database_password=REDACTED,
+			want:  "database_password=REDACTED",
+		},
+		{
+			name:  "prefixed db password env var",
+			input: "APP_DB_PASSWORD=REDACTED,
+			want:  "APP_DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "prefixed mysql password env var",
+			input: "PROD_MYSQL_PWD=REDACTED,
+			want:  "PROD_MYSQL_PWD=REDACTED",
+		},
+		{
+			name:  "mysql root password env var",
+			input: "MYSQL_ROOT_PASSWORD=REDACTED,
+			want:  "MYSQL_ROOT_PASSWORD=REDACTED",
+		},
+		{
+			name:  "mariadb root password env var",
+			input: "MARIADB_ROOT_PASSWORD=REDACTED,
+			want:  "MARIADB_ROOT_PASSWORD=REDACTED",
+		},
+		{
+			name:  "mongo initdb root password env var",
+			input: "MONGO_INITDB_ROOT_PASSWORD=REDACTED,
+			want:  "MONGO_INITDB_ROOT_PASSWORD=REDACTED",
+		},
+		{
+			name:  "mssql sa password env var",
+			input: "MSSQL_SA_PASSWORD=REDACTED,
+			want:  "MSSQL_SA_PASSWORD=REDACTED",
+		},
+		{
+			name:  "double underscore separator",
+			input: "DB__PASSWORD=REDACTED,
+			want:  "DB__PASSWORD=REDACTED",
+		},
+	})
+}
+
+func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "placeholder env var is preserved",
+			input: "DB_PASSWORD=${DB_PASSWORD}",
+			want:  "DB_PASSWORD=${DB_PASSWORD}",
+		},
+		{
+			name:  "already redacted value is preserved",
+			input: "DB_PASSWORD=REDACTED",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "prose about password is preserved",
+			input: "the password field should be rotated regularly",
+			want:  "the password field should be rotated regularly",
+		},
+		{
+			name:  "generic key is preserved",
+			input: "key=not-a-secret-setting",
+			want:  "key=not-a-secret-setting",
+		},
+		{
+			name:  "shell pwd is preserved",
+			input: "PWD=/workspace/project",
+			want:  "PWD=/workspace/project",
+		},
+		{
+			name:  "standalone password assignment is preserved",
+			input: "password=not-a-secret-setting",
+			want:  "password=not-a-secret-setting",
+		},
+		{
+			name:  "password reset query parameter is preserved",
+			input: "https://example.com/?password_reset=true",
+			want:  "https://example.com/?password_reset=true",
+		},
+		{
+			name:  "generic https password query is preserved",
+			input: "https://example.com/callback?user=svc&password=not-a-db-credential&debug=true",
+			want:  "https://example.com/callback?user=svc&password=not-a-db-credential&debug=true",
+		},
+		{
+			name:  "db password hash field is preserved",
+			input: "DB_PASSWORD_HASH=abcdef",
+			want:  "DB_PASSWORD_HASH=abcdef",
+		},
+		{
+			name:  "non-credential mysql field is preserved",
+			input: "MYSQL_USER_ID=alice",
+			want:  "MYSQL_USER_ID=alice",
+		},
+		{
+			name:  "angle bracket placeholder is preserved",
+			input: "DB_PASSWORD=<password>",
+			want:  "DB_PASSWORD=<password>",
+		},
+		{
+			name:  "your_password placeholder is preserved",
+			input: "DB_PASSWORD=your_password",
+			want:  "DB_PASSWORD=your_password",
+		},
+		{
+			name:  "your-db-password placeholder is preserved",
+			input: "DB_PASSWORD=<your-db-password>",
+			want:  "DB_PASSWORD=<your-db-password>",
+		},
+		{
+			name:  "asterisk mask placeholder is preserved",
+			input: "DB_PASSWORD=*****",
+			want:  "DB_PASSWORD=*****",
+		},
+		{
+			name:  "dot mask placeholder is preserved",
+			input: "DB_PASSWORD=......",
+			want:  "DB_PASSWORD=......",
+		},
+		{
+			name:  "secret_here placeholder is preserved",
+			input: "DB_PASSWORD=secret_here",
+			want:  "DB_PASSWORD=secret_here",
+		},
+		{
+			name:  "placeholder literal is preserved",
+			input: "DB_PASSWORD=placeholder",
+			want:  "DB_PASSWORD=placeholder",
+		},
+	})
+}
+
+// Pins that single-char "masks" and arbitrary <…> wrappers do NOT count as
+// placeholders, so credentials that happen to be short or bracket-wrapped
+// still get redacted. The opposite cases (`***`, `<password>`, etc.) are
+// covered above in TestString_BoundedCredentialValueOverRedactionGuards.
+func TestString_ShortAndOpaquePlaceholdersFallThrough(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "single x is not a mask",
+			input: "DB_PASSWORD=REDACTED,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "single dash is not a mask",
+			input: "DB_PASSWORD=REDACTED,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "single asterisk is not a mask",
+			input: "DB_PASSWORD=REDACTED,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "two-char repeat is not a mask",
+			input: "DB_PASSWORD=REDACTED,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "bracketed value with digits is not a placeholder",
+			input: "DB_PASSWORD=REDACTED,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "bracketed mixed-case value is not a placeholder",
+			input: "DB_PASSWORD=REDACTED,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+	})
+}
+
+func TestString_OpenSSHPrivateKeyBlock(t *testing.T) {
+	input := "key:\n" + fakeOpenSSHPrivateKey + "\nend"
+	want := "key:\nREDACTED\nend"
+
+	got := String(input)
+	if got != want {
+		t.Errorf("String(private key block) = %q, want %q", got, want)
+	}
+	if strings.Contains(got, openSSHPrivateKeyMarker("BEGIN")) || strings.Contains(got, openSSHPrivateKeyMarker("END")) {
+		t.Errorf("private key block markers should be fully redacted, got %q", got)
+	}
+}
+
+func TestJSONLContent_CredentialedURI(t *testing.T) {
+	input := `{"type":"text","content":"DATABASE_URL=REDACTED"}`
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if strings.Contains(result, "REDACTED") {
+		t.Error("credentialed database URI was not redacted")
+	}
+	if !strings.Contains(result, "DATABASE_URL=REDACTED") {
+		t.Errorf("expected credentialed URI replacement, got %q", result)
+	}
+}
+
+func TestJSONLContent_OpenSSHPrivateKeyBlock(t *testing.T) {
+	content, err := json.Marshal("key:\n" + fakeOpenSSHPrivateKey + "\nend")
+	if err != nil {
+		t.Fatalf("marshal content: %v", err)
+	}
+	input := `{"type":"text","content":` + string(content) + `}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(result, openSSHPrivateKeyMarker("BEGIN")) || strings.Contains(result, openSSHPrivateKeyMarker("END")) {
+		t.Errorf("private key block markers should be fully redacted, got %q", result)
+	}
+	if !strings.Contains(result, `key:\nREDACTED\nend`) {
+		t.Errorf("expected whole private key block replacement, got %q", result)
+	}
+}
+
+func TestJSONLContent_DatabaseCredentialRedaction(t *testing.T) {
+	t.Parallel()
+	input := `{"type":"assistant","message":"dsn REDACTED and env DB_PASSWORD=REDACTED,"session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0","file_path":"/tmp/TestE2E_ExistingFiles/controller.go"}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, leaked := range []string{"password=secret", "DB_PASSWORD=REDACTED {
+		if strings.Contains(result, leaked) {
+			t.Fatalf("expected %q to be redacted, got: %s", leaked, result)
+		}
+	}
+	for _, preserved := range []string{"ses_37273a1fdffegpYbwUTqEkPsQ0", "/tmp/TestE2E_ExistingFiles/controller.go"} {
+		if !strings.Contains(result, preserved) {
+			t.Fatalf("expected structural value %q to be preserved, got: %s", preserved, result)
+		}
+	}
+}
+
+func TestJSONLContent_StructuredCredentialFieldsRedacted(t *testing.T) {
+	t.Parallel()
+	input := `{"type":"assistant","env":{"DB_PASSWORD":"correct-horse-db","REDIS_PASSWORD":"${REDIS_PASSWORD}","note":"correct-horse-db"},"db":{"password":"correct-horse-db","host":"db.example.com","user":"svc"},"session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0"}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, leaked := range []string{`"DB_PASSWORD":"correct-horse-db"`, `"password":"correct-horse-db"`} {
+		if strings.Contains(result, leaked) {
+			t.Fatalf("expected structured credential field %q to be redacted, got: %s", leaked, result)
+		}
+	}
+	for _, preserved := range []string{
+		`"DB_PASSWORD":"REDACTED"`,
+		`"REDIS_PASSWORD":"${REDIS_PASSWORD}"`,
+		`"password":"REDACTED"`,
+		`"host":"db.example.com"`,
+		`"user":"svc"`,
+		`"note":"correct-horse-db"`,
+		"ses_37273a1fdffegpYbwUTqEkPsQ0",
+...[truncated]
