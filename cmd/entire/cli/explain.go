@@ -1110,7 +1110,7 @@ func formatCheckpointSummaryError(err error, attempt *summaryAttempt) (string, [
 	var claudeErr *claudecode.ClaudeError
 	switch {
 	case errors.As(err, &claudeErr):
-		switch claudeErr.Kind {
+		switch claudeErr.Kind { //nolint:exhaustive // ClaudeErrorUnknown handled by default
 		case claudecode.ClaudeErrorAuth:
 			label := "Claude authentication failed"
 			rows := []explainRow{
