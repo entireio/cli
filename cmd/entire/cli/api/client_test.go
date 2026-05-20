@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -298,5 +299,58 @@ func TestDecodeJSONResponse(t *testing.T) {
 	}
 	if result.Status != "ok" {
 		t.Errorf("Status = %q, want %q", result.Status, "ok")
+	}
+}
+
+// TestDecodeJSONResponse_LargeBodyOverOldCap exercises a JSON body whose size
+// exceeds the previous 1 MiB read cap. `entire activity` requests up to a
+// month of commits, which routinely produces 1.5+ MiB responses; under the
+// old cap, io.LimitReader truncated the body mid-JSON and json.Unmarshal
+// surfaced "unexpected end of JSON input", masking the real cause.
+func TestDecodeJSONResponse_LargeBodyOverOldCap(t *testing.T) {
+	t.Parallel()
+
+	const itemCount = 4000 // ~2 MiB at ~500 bytes per item
+	type item struct {
+		ID      string `json:"id"`
+		Message string `json:"message"`
+	}
+	payload := struct {
+		Items []item `json:"items"`
+	}{Items: make([]item, itemCount)}
+	for i := range payload.Items {
+		payload.Items[i] = item{
+			ID:      "0123456789abcdef0123456789abcdef0123456789abcdef",
+			Message: strings.Repeat("x", 400),
+		}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) <= 1<<20 {
+		t.Fatalf("test payload %d bytes is not over the old 1 MiB cap", len(encoded))
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(encoded) //nolint:errcheck // test handler
+	}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL) //nolint:noctx // test helper
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var got struct {
+		Items []item `json:"items"`
+	}
+	if err := DecodeJSON(resp, &got); err != nil {
+		t.Fatalf("DecodeJSON(%d-byte body) = %v, want nil", len(encoded), err)
+	}
+	if len(got.Items) != itemCount {
+		t.Errorf("decoded %d items, want %d", len(got.Items), itemCount)
 	}
 }

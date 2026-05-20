@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/spf13/cobra"
@@ -25,6 +26,9 @@ const maxTransientErrors = 5
 
 // browserOpenFunc is the signature for opening a URL in the user's browser.
 type browserOpenFunc func(ctx context.Context, url string) error
+
+// clipboardWriteFunc is the signature for copying text to the user's clipboard.
+type clipboardWriteFunc func(text string) error
 
 // deviceAuthClient abstracts the auth client so runLogin and waitForApproval can be unit-tested.
 type deviceAuthClient interface {
@@ -42,14 +46,14 @@ func newLoginCmd() *cobra.Command {
 			if err := requireSecureBaseURL(insecureHTTPAuth); err != nil {
 				return err
 			}
-			return runLogin(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), auth.NewClient(nil), openBrowser)
+			return runLogin(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), auth.NewClient(nil), openBrowser, copyToClipboard)
 		},
 	}
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	return cmd
 }
 
-func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient, openURL browserOpenFunc) error {
+func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient, openURL browserOpenFunc, writeClipboard clipboardWriteFunc) error {
 	start, err := client.StartDeviceAuth(ctx)
 	if err != nil {
 		return fmt.Errorf("start login: %w", err)
@@ -60,7 +64,7 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 	approvalURL := start.VerificationURI
 
 	if interactive.CanPromptInteractively() {
-		fmt.Fprintf(outW, "Press Enter to open %s in your browser and enter the generated device code...", approvalURL)
+		fmt.Fprintf(outW, "Press Enter to copy the code to your clipboard, open %s in your browser, and enter the generated device code...", approvalURL)
 
 		// Read from /dev/tty so we get a real keypress and don't consume piped stdin.
 		if err := waitForEnter(ctx); err != nil {
@@ -68,6 +72,9 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 		}
 
 		fmt.Fprintln(outW)
+		if copied := copyDeviceCodeToClipboard(errW, start.UserCode, writeClipboard); copied {
+			fmt.Fprintln(outW, "Device code copied to clipboard.")
+		}
 
 		if err := openURL(ctx, approvalURL); err != nil {
 			fmt.Fprintf(errW, "Warning: failed to open browser: %v\n", err)
@@ -91,6 +98,24 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 	}
 
 	fmt.Fprintln(outW, "Login complete.")
+	return nil
+}
+
+func copyDeviceCodeToClipboard(errW io.Writer, userCode string, writeClipboard clipboardWriteFunc) bool {
+	if writeClipboard == nil {
+		return false
+	}
+	if err := writeClipboard(userCode); err != nil {
+		fmt.Fprintf(errW, "Warning: failed to copy device code to clipboard: %v\n", err)
+		return false
+	}
+	return true
+}
+
+func copyToClipboard(text string) error {
+	if err := clipboard.WriteAll(text); err != nil {
+		return fmt.Errorf("write clipboard: %w", err)
+	}
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -36,6 +37,43 @@ func (m *mockClient) PollDeviceAuth(_ context.Context, _ string) (*auth.DeviceAu
 	r := m.responses[m.calls]
 	m.calls++
 	return r.result, r.err
+}
+
+func TestCopyDeviceCodeToClipboard_Success(t *testing.T) {
+	t.Parallel()
+
+	var errBuf bytes.Buffer
+	var copied string
+	ok := copyDeviceCodeToClipboard(&errBuf, "ABCD-1234", func(text string) error {
+		copied = text
+		return nil
+	})
+
+	if !ok {
+		t.Fatal("copyDeviceCodeToClipboard() = false, want true")
+	}
+	if copied != "ABCD-1234" {
+		t.Fatalf("copied = %q, want device code", copied)
+	}
+	if errBuf.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", errBuf.String())
+	}
+}
+
+func TestCopyDeviceCodeToClipboard_Failure(t *testing.T) {
+	t.Parallel()
+
+	var errBuf bytes.Buffer
+	ok := copyDeviceCodeToClipboard(&errBuf, "ABCD-1234", func(_ string) error {
+		return errors.New("clipboard unavailable")
+	})
+
+	if ok {
+		t.Fatal("copyDeviceCodeToClipboard() = true, want false")
+	}
+	if !strings.Contains(errBuf.String(), "failed to copy device code to clipboard") {
+		t.Fatalf("stderr = %q, want clipboard warning", errBuf.String())
+	}
 }
 
 func TestWaitForApproval_ImmediateSuccess(t *testing.T) {

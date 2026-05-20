@@ -15,6 +15,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -509,7 +510,7 @@ func acquireSessionGate(ctx context.Context, sessionID string) (gate *sessionGat
 	if err != nil {
 		return nil, false, nil, fmt.Errorf("resolve state lock path: %w", err)
 	}
-	flockRel, err := acquireStateFileLock(lockPath)
+	flockRel, err := flock.Acquire(lockPath)
 	if err != nil {
 		return nil, false, nil, fmt.Errorf("acquire state lock: %w", err)
 	}

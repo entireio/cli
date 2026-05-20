@@ -25,19 +25,16 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
 // headHasReviewCheckpoint checks whether HEAD's checkpoint metadata includes
 // a review session. Returns (true, infoString) if HasReview is set.
 // Single lookup: read the Entire-Checkpoint trailer from HEAD, then resolve
-// the CheckpointSummary via ResolveCommittedReaderForCheckpoint so v2-enabled
-// repos also work (v1 alone would miss v2-written summaries).
+// the CheckpointSummary through the configured committed checkpoint reader.
 func headHasReviewCheckpoint(ctx context.Context) (bool, string) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -60,15 +57,15 @@ func headHasReviewCheckpoint(ctx context.Context) (bool, string) {
 		logging.Debug(ctx, "head review check: open repository", slog.String("error", err.Error()))
 		return false, ""
 	}
-	v1Store := checkpoint.NewGitStore(repo)
-	v2URL, urlErr := remote.FetchURL(ctx)
-	if urlErr != nil {
-		logging.Debug(ctx, "head review check: no configured v2 fetch remote", slog.String("error", urlErr.Error()))
-		v2URL = ""
+	checkpointReader, readerErr := newCommittedCheckpointReader(ctx, repo, committedCheckpointReaderOptions{
+		fetchRemoteLog: "head review check: no configured v2 fetch remote",
+	})
+	if readerErr != nil {
+		logging.Debug(ctx, "head review check: checkpoint reader unavailable", slog.String("error", readerErr.Error()))
+		return false, ""
 	}
-	v2Store := checkpoint.NewV2GitStore(repo, v2URL)
-	_, summary, err := checkpoint.ResolveCommittedReaderForCheckpoint(ctx, cpID, v1Store, v2Store, settings.IsCheckpointsV2Enabled(ctx))
-	if err != nil || summary == nil {
+	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, checkpointReader.reader, cpID)
+	if err != nil {
 		logging.Debug(ctx, "head review check: resolve checkpoint summary",
 			slog.String("checkpoint_id", cpID.String()),
 			slog.Any("error", err))

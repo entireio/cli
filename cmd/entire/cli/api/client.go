@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	maxResponseBytes = 1 << 20
+	maxResponseBytes = 16 << 20
 	userAgent        = "entire-cli"
 )
 

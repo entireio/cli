@@ -686,8 +686,18 @@ func restoreSessionTranscript(ctx context.Context, w io.Writer, transcriptFile, 
 // This is used for strategies that store transcripts in git branches rather than local files.
 // Returns the session ID that was actually used (may differ from input if checkpoint provides one).
 func restoreSessionTranscriptFromStrategy(ctx context.Context, cpID id.CheckpointID, sessionID string, agent agentpkg.Agent) (string, error) {
-	// Get transcript content from checkpoint storage
-	content, returnedSessionID, err := checkpoint.LookupSessionLog(ctx, cpID)
+	repo, err := openRepository(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to open git repository: %w", err)
+	}
+
+	checkpointReader, err := newCommittedCheckpointReader(ctx, repo, committedCheckpointReaderOptions{
+		fetchRemoteLog: "rewind: using origin for v2 session log fetch remote",
+	})
+	if err != nil {
+		return "", fmt.Errorf("prepare checkpoint reader: %w", err)
+	}
+	content, returnedSessionID, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, checkpointReader.reader, cpID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get session log: %w", err)
 	}

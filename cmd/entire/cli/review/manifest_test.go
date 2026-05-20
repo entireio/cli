@@ -23,7 +23,7 @@ const manifestTokenTestAgentType agenttypes.AgentType = "Review Token Test"
 
 func TestHydrateReviewSummaryTokensFromStates_PopulatesTokensFromSessionState(t *testing.T) {
 	t.Parallel()
-	started := time.Date(2026, 5, 8, 10, 0, 0, 0, time.UTC)
+	started := time.Now().UTC().Truncate(time.Second)
 	summary := reviewtypes.RunSummary{
 		StartedAt: started,
 		AgentRuns: []reviewtypes.AgentRun{
@@ -67,7 +67,7 @@ func TestHydrateReviewSummaryTokensFromStates_FallsBackToTranscript(t *testing.T
 		return manifestTokenTestAgent{}, nil
 	}
 
-	started := time.Date(2026, 5, 8, 10, 0, 0, 0, time.UTC)
+	started := time.Now().UTC().Truncate(time.Second)
 	tmp := t.TempDir()
 	transcriptPath := filepath.Join(tmp, "review.jsonl")
 	transcript := "review transcript\n"
@@ -112,7 +112,7 @@ func TestReviewSummaryTokenEnricher_LoadsCurrentSessionState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStateStore: %v", err)
 	}
-	started := time.Date(2026, 5, 8, 10, 0, 0, 0, time.UTC)
+	started := time.Now().UTC().Truncate(time.Second)
 	if err := store.Save(ctx, &session.State{
 		SessionID:    "codex-session-token",
 		Kind:         session.KindAgentReview,

@@ -11,9 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -21,6 +25,46 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/spf13/cobra"
 )
+
+type recordingResumeAgent struct {
+	sessionDir     string
+	writtenSession *agent.AgentSession
+}
+
+var _ agent.Agent = (*recordingResumeAgent)(nil)
+
+func (a *recordingResumeAgent) Name() types.AgentName                          { return "recording-resume" }
+func (a *recordingResumeAgent) Type() types.AgentType                          { return "recording-resume" }
+func (a *recordingResumeAgent) Description() string                            { return "recording resume agent" }
+func (a *recordingResumeAgent) IsPreview() bool                                { return false }
+func (a *recordingResumeAgent) DetectPresence(_ context.Context) (bool, error) { return true, nil }
+func (a *recordingResumeAgent) ProtectedDirs() []string                        { return nil }
+func (a *recordingResumeAgent) ReadTranscript(string) ([]byte, error)          { return nil, nil }
+func (a *recordingResumeAgent) ChunkTranscript(_ context.Context, content []byte, _ int) ([][]byte, error) {
+	return [][]byte{content}, nil
+}
+func (a *recordingResumeAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
+	var out []byte
+	for _, chunk := range chunks {
+		out = append(out, chunk...)
+	}
+	return out, nil
+}
+func (a *recordingResumeAgent) GetSessionID(*agent.HookInput) string { return "" }
+func (a *recordingResumeAgent) GetSessionDir(string) (string, error) { return a.sessionDir, nil }
+func (a *recordingResumeAgent) ResolveSessionFile(sessionDir, sessionID string) string {
+	return filepath.Join(sessionDir, sessionID+".jsonl")
+}
+func (a *recordingResumeAgent) ReadSession(*agent.HookInput) (*agent.AgentSession, error) {
+	return nil, nil //nolint:nilnil // Not used by this test agent.
+}
+func (a *recordingResumeAgent) WriteSession(_ context.Context, session *agent.AgentSession) error {
+	a.writtenSession = session
+	return nil
+}
+func (a *recordingResumeAgent) FormatResumeCommand(sessionID string) string {
+	return "recording resume " + sessionID
+}
 
 func TestFirstLine(t *testing.T) {
 	tests := []struct {
@@ -597,6 +641,69 @@ func TestFindBranchCheckpoint_SquashMergeMultipleCheckpoints(t *testing.T) {
 	}
 	if result.checkpointIDs[1].String() != cpID2.String() {
 		t.Errorf("checkpointIDs[1] = %q, want %q", result.checkpointIDs[1].String(), cpID2.String())
+	}
+}
+
+func TestResumeSingleSession_FallsBackToV1WhenV2FullMissing(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+		t.Fatalf("failed to create settings dir: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(tmpDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("abc123abc123")
+	sessionID := "resume-v1-fallback-session"
+	raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"resume v1 fallback"}]}}` + "\n")
+
+	v1Store := checkpoint.NewGitStore(repo)
+	if err := v1Store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    sessionID,
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted(raw),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}); err != nil {
+		t.Fatalf("failed to write v1 checkpoint: %v", err)
+	}
+
+	v2Store := checkpoint.NewV2GitStore(repo, "origin")
+	if err := v2Store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+		CheckpointID:      cpID,
+		SessionID:         sessionID,
+		Strategy:          "manual-commit",
+		CompactTranscript: []byte(`{"v":1,"type":"user"}` + "\n"),
+		AuthorName:        "Test",
+		AuthorEmail:       "test@example.com",
+	}); err != nil {
+		t.Fatalf("failed to write v2 checkpoint: %v", err)
+	}
+
+	ag := &recordingResumeAgent{sessionDir: filepath.Join(tmpDir, "sessions")}
+	var stdout, stderr bytes.Buffer
+	if err := resumeSingleSession(ctx, &stdout, &stderr, ag, sessionID, cpID, tmpDir, true); err != nil {
+		t.Fatalf("resumeSingleSession() error = %v", err)
+	}
+
+	if ag.writtenSession == nil {
+		t.Fatal("resumeSingleSession() did not restore a session")
+	}
+	if string(ag.writtenSession.NativeData) != string(raw) {
+		t.Fatalf("restored transcript = %q, want %q", string(ag.writtenSession.NativeData), string(raw))
+	}
+	if strings.Contains(stdout.String(), "session log not available") {
+		t.Fatalf("resumeSingleSession() reported missing log: %q", stdout.String())
 	}
 }
 

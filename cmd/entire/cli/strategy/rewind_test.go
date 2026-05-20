@@ -250,8 +250,8 @@ func TestResolveAgentForRewind(t *testing.T) {
 		t.Parallel()
 
 		// Simulate what external.DiscoverAndRegister does: register an agent at runtime.
-		testName := types.AgentName("test-external-kiro")
-		testType := types.AgentType("Kiro")
+		testName := types.AgentName("test-external-rewind-agent")
+		testType := types.AgentType("Entire Test External Rewind Agent")
 		agent.Register(testName, func() agent.Agent {
 			return &fakeExternalAgent{name: testName, agentType: testType}
 		})

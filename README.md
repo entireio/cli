@@ -15,7 +15,7 @@ With Entire, you can:
 - **Understand why code changed, not just what** — Transcripts, prompts, files touched, token usage, tool calls, and more are captured alongside every commit.
 - **Rewind and resume from any checkpoint** — Go back to any previous agent session and pick up exactly where you or a coworker left off.
 - **Full context preserved and searchable** — A versioned record of every AI interaction tied to your git history, with nothing lost.
-- **Zero context switching** — Git-native, two-step setup, works with Claude Code, Codex, Gemini, and more.
+- **Zero context switching** — Git-native, two-step setup, works with Claude Code, Codex, Gemini, Pi, and more.
 
 ## Table of Contents
 
@@ -359,6 +359,7 @@ Each agent stores its hook configuration in its own directory. When you run `ent
 | Factory AI Droid | `.factory/settings.json`      | JSON hooks config |
 | Gemini CLI       | `.gemini/settings.json`       | JSON hooks config |
 | OpenCode         | `.opencode/plugins/entire.ts` | TypeScript plugin |
+| Pi               | `.pi/extensions/entire/index.ts` | TypeScript extension |
 
 You can enable multiple agents at the same time — each agent's hooks are independent. Entire detects which agents are active by checking for installed hooks, not by a setting in `settings.json`.
 
@@ -435,6 +436,7 @@ Local settings override project settings field-by-field. When you run `entire st
 - When enabling Entire for Codex, the command will also create or update `.codex/config.toml` with `codex_hooks = true` to enable Codex hooks. If you configure Codex manually, make sure this flag is set in your `.codex/config.toml`. Or select Codex from the interactive agent picker when running `entire enable`.
 - Entire supports Cursor IDE and Cursor Agent CLI tool, but `entire rewind` is not available at this time. Other commands (`doctor`, `status` etc.) work the same as all other agents.
 - Entire supports Copilot CLI, but not Copilot in VS Code, in other IDEs, or on github.com.
+- Entire supports Pi coding agent (Preview). Pi uses a TypeScript extension instead of a JSON hook config. Subagent capture is not currently available.
 
 ## Security & Privacy
 

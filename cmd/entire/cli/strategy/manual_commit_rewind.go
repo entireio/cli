@@ -30,13 +30,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// committedReader provides read access to committed checkpoint data.
-// Both checkpoint.GitStore (v1) and checkpoint.V2GitStore implement this interface.
-type committedReader interface {
-	ReadCommitted(ctx context.Context, checkpointID id.CheckpointID) (*cpkg.CheckpointSummary, error)
-	ReadSessionContent(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*cpkg.SessionContent, error)
-}
-
 // GetRewindPoints returns available rewind points.
 // Uses checkpoint.GitStore.ListTemporaryCheckpoints for reading from shadow branches.
 func (s *ManualCommitStrategy) GetRewindPoints(ctx context.Context, limit int) ([]RewindPoint, error) {
@@ -632,43 +625,34 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 		return nil, errors.New("missing checkpoint ID")
 	}
 
-	// Resolve which store has this checkpoint. Try v2 first when enabled.
-	// The chosen reader is used for all subsequent reads (summary + session content)
-	// to avoid mixed v1/v2 reads. No per-session fallback to v1: during dual-write,
-	// both stores receive the same data, so if v2 has the summary it also has the
-	// transcripts on /full/* refs.
-	var reader committedReader
-	var summary *cpkg.CheckpointSummary
+	v1Store, err := s.getCheckpointStore()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
+	}
 
-	if settings.IsCheckpointsV2Enabled(ctx) {
-		v2Store, v2Err := s.getV2CheckpointStore(ctx)
-		if v2Err == nil {
-			v2Summary, readErr := v2Store.ReadCommitted(ctx, point.CheckpointID)
-			if readErr != nil {
-				logging.Debug(ctx, "v2 ReadCommitted failed, falling back to v1",
-					slog.String("checkpoint_id", string(point.CheckpointID)),
-					slog.String("error", readErr.Error()),
-				)
-			} else if v2Summary != nil {
-				reader = v2Store
-				summary = v2Summary
+	var v2Store *cpkg.V2GitStore
+	readMode := cpkg.CommittedReadModeForOptions(settings.IsCheckpointsV2Enabled(ctx), settings.CheckpointsVersion(ctx))
+	if readMode != cpkg.CommittedReadV1 {
+		var v2Err error
+		v2Store, v2Err = s.getV2CheckpointStore(ctx)
+		if v2Err != nil {
+			if readMode == cpkg.CommittedReadV2 {
+				return nil, fmt.Errorf("failed to get v2 checkpoint store: %w", v2Err)
 			}
+			logging.Debug(ctx, "failed to get v2 checkpoint store, using v1 only",
+				slog.String("checkpoint_id", string(point.CheckpointID)),
+				slog.String("error", v2Err.Error()),
+			)
 		}
 	}
 
-	if summary == nil {
-		v1Store, err := s.getCheckpointStore()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
-		}
-		summary, err = v1Store.ReadCommitted(ctx, point.CheckpointID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read checkpoint: %w", err)
-		}
-		reader = v1Store
+	reader, err := cpkg.NewCommittedReader(v1Store, v2Store, readMode)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare checkpoint reader: %w", err)
 	}
-	if summary == nil {
-		return nil, fmt.Errorf("checkpoint not found: %s", point.CheckpointID)
+	summary, err := cpkg.ReadCommittedCheckpoint(ctx, reader, point.CheckpointID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
 
 	// Get worktree root for agent session directory lookup
@@ -862,7 +846,7 @@ type SessionRestoreInfo struct {
 // about each session, including whether local logs have newer timestamps.
 // repoRoot is used to compute per-session agent directories.
 // Sessions without agent metadata are skipped (cannot determine target directory).
-func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, repoRoot string, store committedReader, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary) []SessionRestoreInfo {
+func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, repoRoot string, store cpkg.CommittedReader, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary) []SessionRestoreInfo {
 	var sessions []SessionRestoreInfo
 
 	totalSessions := len(summary.Sessions)

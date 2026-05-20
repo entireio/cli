@@ -2190,6 +2190,181 @@ func TestRunExplainCheckpoint_V2UsesCompactTranscriptForIntent(t *testing.T) {
 	}
 }
 
+func TestRunExplainCheckpoint_V2EnabledV1FallbackPreservesTranscriptOffset(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tmpDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`),
+		0o644,
+	))
+
+	cpID := id.MustCheckpointID("878787878787")
+	transcriptBytes := []byte(
+		`{"type":"user","message":{"content":[{"type":"text","text":"old prompt before checkpoint"}]}}` + "\n" +
+			`{"type":"user","message":{"content":[{"type":"text","text":"scoped prompt for checkpoint"}]}}` + "\n",
+	)
+	require.NoError(t, checkpoint.NewGitStore(repo).WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID:              cpID,
+		SessionID:                 "session-v1",
+		Strategy:                  "manual-commit",
+		Transcript:                redact.AlreadyRedacted(transcriptBytes),
+		AuthorName:                "Test",
+		AuthorEmail:               "test@example.com",
+		Agent:                     agent.AgentTypeClaudeCode,
+		CheckpointTranscriptStart: 1,
+	}))
+
+	var buf, errBuf bytes.Buffer
+	err = runExplainCheckpoint(context.Background(), &buf, &errBuf, "878787", true, false, false, false, false, false, false, 0)
+	require.NoError(t, err)
+	require.Contains(t, buf.String(), "scoped prompt for checkpoint")
+	require.NotContains(t, buf.String(), "old prompt before checkpoint")
+}
+
+func TestRunExplainCheckpoint_GenerateV1OnlyDualModeReloadsFromV1(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tmpDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_v2": true}, "summary_generation": {"provider": "claude-code"}}`),
+		0o644,
+	))
+
+	originalGet := getSummaryAgent
+	originalCLI := isSummaryCLIAvailable
+	originalDiscover := discoverSummaryProviders
+	originalGenerate := generateTranscriptSummary
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		isSummaryCLIAvailable = originalCLI
+		discoverSummaryProviders = originalDiscover
+		generateTranscriptSummary = originalGenerate
+	})
+
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		return &stubTextAgent{name: name, kind: agent.AgentTypeClaudeCode}, nil
+	}
+	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
+	discoverSummaryProviders = func(context.Context) {}
+
+	var sawV1Transcript bool
+	generateTranscriptSummary = func(
+		_ context.Context,
+		transcript redact.RedactedBytes,
+		_ []string,
+		_ types.AgentType,
+		_ summarize.Generator,
+	) (*checkpoint.Summary, error) {
+		sawV1Transcript = strings.Contains(string(transcript.Bytes()), "v1-only generate prompt")
+		return &checkpoint.Summary{Intent: "generated intent", Outcome: "generated outcome"}, nil
+	}
+
+	cpID := id.MustCheckpointID("ab12ab12ab12")
+	ctx := context.Background()
+	require.NoError(t, checkpoint.NewGitStore(repo).WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-v1-only-generate",
+		Strategy:     "manual-commit",
+		Transcript: redact.AlreadyRedacted([]byte(
+			`{"type":"user","message":{"content":[{"type":"text","text":"v1-only generate prompt"}]}}` + "\n" +
+				`{"type":"assistant","message":{"content":"done"}}` + "\n",
+		)),
+		AuthorName:  "Test",
+		AuthorEmail: "test@example.com",
+		Agent:       agent.AgentTypeClaudeCode,
+	}))
+
+	var buf, errBuf bytes.Buffer
+	err = runExplainCheckpoint(ctx, &buf, &errBuf, "ab12ab", false, false, false, false, true, true, false, 0)
+	require.NoError(t, err)
+	require.True(t, sawV1Transcript, "summary generation should use v1 raw transcript")
+	require.Contains(t, buf.String(), "generated intent")
+}
+
+func TestRunExplainCheckpoint_GenerateV1ModeDoesNotRequireV2Store(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tmpDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "summary_generation": {"provider": "claude-code"}}`),
+		0o644,
+	))
+
+	ctx := context.Background()
+	stores, err := newCommittedCheckpointReader(ctx, repo, committedCheckpointReaderOptions{})
+	require.NoError(t, err)
+	require.Equal(t, checkpoint.CommittedReadV1, stores.readMode)
+	require.Nil(t, stores.v2Store)
+
+	originalGet := getSummaryAgent
+	originalCLI := isSummaryCLIAvailable
+	originalDiscover := discoverSummaryProviders
+	originalGenerate := generateTranscriptSummary
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		isSummaryCLIAvailable = originalCLI
+		discoverSummaryProviders = originalDiscover
+		generateTranscriptSummary = originalGenerate
+	})
+
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		return &stubTextAgent{name: name, kind: agent.AgentTypeClaudeCode}, nil
+	}
+	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
+	discoverSummaryProviders = func(context.Context) {}
+
+	var sawV1Transcript bool
+	generateTranscriptSummary = func(
+		_ context.Context,
+		transcript redact.RedactedBytes,
+		_ []string,
+		_ types.AgentType,
+		_ summarize.Generator,
+	) (*checkpoint.Summary, error) {
+		sawV1Transcript = strings.Contains(string(transcript.Bytes()), "v1-mode generate prompt")
+		return &checkpoint.Summary{Intent: "generated v1 intent", Outcome: "generated v1 outcome"}, nil
+	}
+
+	cpID := id.MustCheckpointID("cd12cd12cd12")
+	require.NoError(t, checkpoint.NewGitStore(repo).WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-v1-mode-generate",
+		Strategy:     "manual-commit",
+		Transcript: redact.AlreadyRedacted([]byte(
+			`{"type":"user","message":{"content":[{"type":"text","text":"v1-mode generate prompt"}]}}` + "\n" +
+				`{"type":"assistant","message":{"content":"done"}}` + "\n",
+		)),
+		AuthorName:  "Test",
+		AuthorEmail: "test@example.com",
+		Agent:       agent.AgentTypeClaudeCode,
+	}))
+
+	var buf, errBuf bytes.Buffer
+	err = runExplainCheckpoint(ctx, &buf, &errBuf, "cd12cd", false, false, false, false, true, true, false, 0)
+	require.NoError(t, err)
+	require.True(t, sawV1Transcript, "summary generation should use v1 raw transcript")
+	require.Contains(t, buf.String(), "generated v1 intent")
+}
+
 func TestRunExplainCheckpoint_V2PreferredGenerateWritesBothStores(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -2362,6 +2537,66 @@ func TestRunExplainCheckpoint_V2FallsBackToFullWhenCompactMissing(t *testing.T) 
 		"should use raw transcript from /full/current when compact is missing")
 }
 
+func TestRunExplainCheckpoint_FullFallsBackToV1WhenV2FullMissing(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "test.txt"), []byte("test"), 0o644))
+	_, err = wt.Add("test.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tmpDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`),
+		0o644,
+	))
+
+	v1Store := checkpoint.NewGitStore(repo)
+	v2Store := checkpoint.NewV2GitStore(repo, "origin")
+	cpID := id.MustCheckpointID("e2e3e4e5e6e7")
+	ctx := context.Background()
+
+	rawTranscript := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"v1 raw fallback prompt"}]}}` + "\n" +
+		`{"type":"assistant","message":{"content":"v1 raw reply"}}` + "\n")
+	compactTranscript := []byte(`{"v":1,"type":"user","content":[{"text":"v2 compact prompt"}]}` + "\n")
+
+	require.NoError(t, v1Store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-v1-fallback",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted(rawTranscript),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}))
+	require.NoError(t, v2Store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+		CheckpointID:      cpID,
+		SessionID:         "session-v1-fallback",
+		Strategy:          "manual-commit",
+		CompactTranscript: compactTranscript,
+		AuthorName:        "Test",
+		AuthorEmail:       "test@example.com",
+	}))
+
+	var buf, errBuf bytes.Buffer
+	err = runExplainCheckpoint(ctx, &buf, &errBuf, "e2e3e4", false, false, true, false, false, false, false, 0)
+	require.NoError(t, err)
+
+	output := buf.String()
+	require.Contains(t, output, "v1 raw fallback prompt")
+	require.NotContains(t, output, "v2 compact prompt")
+}
+
 func TestRunExplainCheckpoint_V2CompactTranscriptNotUsedForGenerate(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -2478,8 +2713,11 @@ func TestListCommittedForExplain_MergesV1AndV2(t *testing.T) {
 		AuthorEmail:  "t@t.com",
 	}))
 
-	// With v2 preferred: should return both the dual-write AND the v1-only checkpoint.
-	results, err := listCommittedForExplain(ctx, v1Store, v2Store, true)
+	reader, err := checkpoint.NewCommittedReader(v1Store, v2Store, checkpoint.CommittedReadDual)
+	require.NoError(t, err)
+
+	// In dual-read mode: should return both the dual-write AND the v1-only checkpoint.
+	results, err := reader.ListCommitted(ctx)
 	require.NoError(t, err)
 
 	foundIDs := make(map[id.CheckpointID]bool)
@@ -2544,7 +2782,10 @@ func TestListCommittedForExplain_V2Disabled_ReturnsV1Only(t *testing.T) {
 		AuthorEmail:  "t@t.com",
 	}))
 
-	results, err := listCommittedForExplain(ctx, v1Store, v2Store, false)
+	reader, err := checkpoint.NewCommittedReader(v1Store, v2Store, checkpoint.CommittedReadV1)
+	require.NoError(t, err)
+
+	results, err := reader.ListCommitted(ctx)
 	require.NoError(t, err)
 
 	foundIDs := make(map[id.CheckpointID]bool)

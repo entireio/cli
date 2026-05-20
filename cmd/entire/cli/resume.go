@@ -906,30 +906,18 @@ func resumeSingleSession(ctx context.Context, w, errW io.Writer, ag agent.Agent,
 	}
 
 	var logContent []byte
-	err = nil // Reset before v2/v1 resolution to avoid stale error from earlier code paths
-	if settings.IsCheckpointsV2Enabled(ctx) {
-		repo, repoErr := openRepository(ctx)
-		if repoErr == nil {
-			v2URL, fetchRemoteErr := remote.FetchURL(ctx)
-			if fetchRemoteErr != nil {
-				logging.Debug(ctx, "resume: using origin for v2 session log fetch remote",
-					slog.String("error", fetchRemoteErr.Error()),
-				)
-				v2URL = ""
-			}
-			v2Store := checkpoint.NewV2GitStore(repo, v2URL)
-			var v2Err error
-			logContent, _, v2Err = v2Store.GetSessionLog(ctx, checkpointID)
-			if v2Err != nil {
-				logging.Debug(ctx, "v2 GetSessionLog failed, falling back to v1",
-					slog.String("checkpoint_id", checkpointID.String()),
-					slog.String("error", v2Err.Error()),
-				)
-			}
-		}
-	}
-	if len(logContent) == 0 {
+	repo, repoErr := openRepository(ctx)
+	if repoErr != nil {
 		logContent, _, err = checkpoint.LookupSessionLog(ctx, checkpointID)
+	} else {
+		checkpointReader, readerErr := newCommittedCheckpointReader(ctx, repo, committedCheckpointReaderOptions{
+			fetchRemoteLog: "resume: using origin for v2 session log fetch remote",
+		})
+		if readerErr != nil {
+			err = readerErr
+		} else {
+			logContent, _, err = checkpoint.ReadRawSessionLogForCheckpoint(ctx, checkpointReader.reader, checkpointID)
+		}
 	}
 	if err != nil {
 		if errors.Is(err, checkpoint.ErrCheckpointNotFound) || errors.Is(err, checkpoint.ErrNoTranscript) {

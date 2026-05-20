@@ -445,7 +445,7 @@ func checkDisconnectedV2Main(cmd *cobra.Command, force bool) error {
 
 	ctx := cmd.Context()
 	configured := remote.Configured(ctx)
-	remoteName := migrateRemoteName
+	remoteName := "origin"
 	if configured {
 		resolvedRemote, resolveErr := remote.FetchURL(ctx)
 		if resolveErr != nil {

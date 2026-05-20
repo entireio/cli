@@ -15,11 +15,9 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
@@ -99,13 +97,14 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 		logging.Debug(ctx, "review checkpoint context: open repo", slog.String("error", err.Error()))
 		return ""
 	}
-	v1 := checkpoint.NewGitStore(repo)
-	v2URL, urlErr := remote.FetchURL(ctx)
-	if urlErr != nil {
-		logging.Debug(ctx, "review checkpoint context: no v2 fetch remote", slog.String("error", urlErr.Error()))
+	checkpointReader, readerErr := newCommittedCheckpointReader(ctx, repo, committedCheckpointReaderOptions{
+		fetchRemoteLog: "review checkpoint context: no v2 fetch remote",
+	})
+	if readerErr != nil {
+		logging.Debug(ctx, "review checkpoint context: checkpoint reader unavailable", slog.String("error", readerErr.Error()))
+		return ""
 	}
-	v2 := checkpoint.NewV2GitStore(repo, v2URL)
-	preferCheckpointsV2 := settings.IsCheckpointsV2Enabled(ctx)
+	reader := checkpointReader.reader
 
 	var lines []string
 	seen := map[checkpointid.CheckpointID]bool{}
@@ -122,8 +121,8 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 				continue
 			}
 
-			reader, summary, err := checkpoint.ResolveCommittedReaderForCheckpoint(ctx, cpID, v1, v2, preferCheckpointsV2)
-			if err != nil || summary == nil {
+			summary, err := checkpoint.ReadCommittedCheckpoint(ctx, reader, cpID)
+			if err != nil {
 				lines = append(lines, fmt.Sprintf("- %s: checkpoint metadata unavailable", cpID))
 				continue
 			}
@@ -334,13 +333,15 @@ func readReviewContextSessionPrompts(
 ) (string, error) {
 	if r, ok := reader.(reviewContextSessionMetadataPromptsReader); ok {
 		content, err := r.ReadSessionMetadataAndPrompts(ctx, cpID, sessionIndex)
-		if err != nil {
+		if err == nil {
+			if content == nil {
+				return "", errors.New("session content is nil")
+			}
+			return content.Prompts, nil
+		}
+		if !errors.Is(err, checkpoint.ErrCheckpointNotFound) {
 			return "", err //nolint:wrapcheck // Best-effort prompt context.
 		}
-		if content == nil {
-			return "", errors.New("session content is nil")
-		}
-		return content.Prompts, nil
 	}
 	content, err := reader.ReadSessionContent(ctx, cpID, sessionIndex)
 	if err != nil {
