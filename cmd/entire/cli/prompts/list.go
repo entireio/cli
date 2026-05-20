@@ -59,11 +59,12 @@ func runList(ctx context.Context, w io.Writer, _ io.Writer, limit int) error {
 		return nil
 	}
 
+	originalTotal := len(entries)
 	if limit > 0 && len(entries) > limit {
-		entries = entries[:limit]
+		entries = entries[len(entries)-limit:]
 	}
 
-	fmt.Fprintf(w, "Recent prompts (%d shown, %d total)\n\n", len(entries), len(entries))
+	fmt.Fprintf(w, "Recent prompts (%d shown, %d total)\n\n", len(entries), originalTotal)
 
 	for _, entry := range entries {
 		truncated := ""

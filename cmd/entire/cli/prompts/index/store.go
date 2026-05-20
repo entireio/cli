@@ -108,6 +108,27 @@ func (s *Store) Load(_ context.Context) ([]Entry, error) {
 	return entries, nil
 }
 
+func (s *Store) LoadHeader() (Header, error) {
+	f, err := os.Open(s.indexPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Header{}, ErrIndexMissing
+		}
+		return Header{}, fmt.Errorf("opening index file: %w", err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	if scanner.Scan() {
+		var header Header
+		if err := json.Unmarshal([]byte(scanner.Text()), &header); err != nil {
+			return Header{}, fmt.Errorf("%w: header: %w", ErrIndexCorrupt, err)
+		}
+		return header, nil
+	}
+	return Header{}, ErrIndexEmpty
+}
+
 func (s *Store) AppendEntries(entries []Entry) error {
 	if len(entries) == 0 {
 		return nil
@@ -217,6 +238,11 @@ func (s *Store) Stats(_ context.Context) (Stats, error) {
 	if err == nil {
 		stats.FileSize = fi.Size()
 		stats.LastUpdated = fi.ModTime()
+	}
+
+	header, err := s.LoadHeader()
+	if err == nil {
+		stats.Version = header.Version
 	}
 
 	entries, err := s.Load(context.Background())

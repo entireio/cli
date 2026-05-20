@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -204,7 +203,7 @@ func (b *Builder) loadCheckpoint(cpID id.CheckpointID) ([]Entry, error) {
 	if err == nil {
 		allPrompts, _ = promptFile.Contents() //nolint:errcheck // best-effort
 	}
-	prompts := splitPrompts(allPrompts)
+	prompts := checkpoint.SplitPromptContent(allPrompts)
 
 	entries := make([]Entry, 0)
 	for i := range metadata.Sessions {
@@ -247,6 +246,8 @@ func (b *Builder) loadCheckpoint(cpID id.CheckpointID) ([]Entry, error) {
 			Kind:            "session",
 			PromptText:      prompt,
 			PromptTruncated: truncated,
+			Branch:          metadata.Branch,
+			CreatedAt:       sessionMeta.CreatedAt,
 			Agent:           string(sessionMeta.Agent),
 			Model:           sessionMeta.Model,
 			FilesTouched:    sessionMeta.FilesTouched,
@@ -256,16 +257,4 @@ func (b *Builder) loadCheckpoint(cpID id.CheckpointID) ([]Entry, error) {
 	}
 
 	return entries, nil
-}
-
-func splitPrompts(promptContent string) []string {
-	if promptContent == "" {
-		return nil
-	}
-
-	result := strings.Split(promptContent, "---\n\n")
-	if len(result) == 0 {
-		return []string{promptContent}
-	}
-	return result
 }
