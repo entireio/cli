@@ -127,31 +127,7 @@ func parseCopilotStream(stdout io.Reader, progress agent.ProgressFn) (string, er
 			}
 
 		case "error":
-			var details struct {
-				Message string `json:"message"`
-				Error   struct {
-					Message string `json:"message"`
-				} `json:"error"`
-				Data struct {
-					Message string `json:"message"`
-				} `json:"data"`
-			}
-			// Partial decode tolerated: schema drift falls through to
-			// "unspecified error" rather than leaking the raw line (which
-			// may carry echoed user content or model fragments) into logs
-			// and *TextGenerationError.Stderr.
-			_ = json.Unmarshal(line, &details) //nolint:errcheck // see comment above
-			detail := details.Message
-			if detail == "" {
-				detail = details.Error.Message
-			}
-			if detail == "" {
-				detail = details.Data.Message
-			}
-			if detail == "" {
-				detail = "unspecified error"
-			}
-			return "", fmt.Errorf("copilot stream error: %s", detail)
+			return "", fmt.Errorf("copilot stream error: %s", agent.SafeErrorMessage(line))
 		}
 	}
 	if err := scanner.Err(); err != nil {

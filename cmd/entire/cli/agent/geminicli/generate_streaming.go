@@ -97,18 +97,7 @@ func parseGeminiStream(stdout io.Reader, progress agent.ProgressFn) (string, err
 		case "result":
 			stats = ev.Stats
 			if ev.Status == "error" {
-				detail := ""
-				if ev.Error != nil {
-					detail = ev.Error.Message
-				}
-				if detail == "" {
-					// Partial decode tolerated: schema drift falls through to
-					// "unspecified error" rather than leaking raw lines (which
-					// may carry echoed user content or model fragments) into
-					// logs and *TextGenerationError.Stderr.
-					detail = "unspecified error"
-				}
-				return "", fmt.Errorf("gemini stream error: %s", detail)
+				return "", fmt.Errorf("gemini stream error: %s", agent.SafeErrorMessage(line))
 			}
 		}
 	}

@@ -75,25 +75,7 @@ func parseCodexStream(stdout io.Reader, progress agent.ProgressFn) (string, erro
 			}
 
 		case "turn.failed", "error":
-			var details struct {
-				Message string `json:"message"`
-				Error   struct {
-					Message string `json:"message"`
-				} `json:"error"`
-			}
-			// Partial decode tolerated: if the schema changes we fall through
-			// to "unspecified error" rather than leaking the raw line (which
-			// may carry echoed user content or model-message fragments) into
-			// logs, telemetry, and *TextGenerationError.Stderr.
-			_ = json.Unmarshal(line, &details) //nolint:errcheck // see comment above
-			detail := details.Message
-			if detail == "" {
-				detail = details.Error.Message
-			}
-			if detail == "" {
-				detail = "unspecified error"
-			}
-			return "", fmt.Errorf("codex turn failed: %s", detail)
+			return "", fmt.Errorf("codex turn failed: %s", agent.SafeErrorMessage(line))
 		}
 	}
 	if err := scanner.Err(); err != nil {
