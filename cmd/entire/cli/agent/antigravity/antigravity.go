@@ -4,7 +4,6 @@ package antigravity
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -68,17 +67,5 @@ func (a *AntigravityAgent) ReadSession(_ *agent.HookInput) (*agent.AgentSession,
 }
 func (a *AntigravityAgent) WriteSession(_ context.Context, _ *agent.AgentSession) error { return nil }
 func (a *AntigravityAgent) FormatResumeCommand(sessionID string) string {
-	return "antigravity --resume " + sessionID
+	return "agy --conversation " + sessionID
 }
-
-// --- HookSupport stubs — full implementation lands in Chunk 2 (hooks.go, lifecycle.go) ---
-
-func (a *AntigravityAgent) HookNames() []string { return nil }
-func (a *AntigravityAgent) ParseHookEvent(_ context.Context, _ string, _ io.Reader) (*agent.Event, error) {
-	return nil, nil //nolint:nilnil // stub: real implementation in Chunk 2
-}
-func (a *AntigravityAgent) InstallHooks(_ context.Context, _ bool, _ bool) (int, error) {
-	return 0, nil
-}
-func (a *AntigravityAgent) UninstallHooks(_ context.Context) error   { return nil }
-func (a *AntigravityAgent) AreHooksInstalled(_ context.Context) bool { return false }

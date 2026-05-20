@@ -9,6 +9,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 
 	// Import agents to ensure they are registered before we iterate
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/copilotcli"
