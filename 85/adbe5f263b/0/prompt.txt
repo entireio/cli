@@ -1,0 +1,5 @@
+Ifi do entire activity I get:
+
+  Failed to load activity: fetch activity: decode commits: decode JSON response: unexpected end of JSON input
+
+  Press q to quit.
