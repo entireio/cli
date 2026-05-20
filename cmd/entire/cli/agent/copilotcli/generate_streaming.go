@@ -189,11 +189,13 @@ func (c *CopilotCLIAgent) GenerateTextStreaming(
 	progress agent.ProgressFn,
 ) (string, error) {
 	tmpl := &agent.StreamingGeneratorTemplate{
-		AgentName:                 "copilot-cli",
-		DisplayName:               "copilot",
-		BuildCmd:                  c.buildStreamCmd,
-		Parser:                    parseCopilotStream,
-		LooksLikeUnrecognizedFlag: looksLikeCopilotUnrecognizedFlag,
+		AgentName:   "copilot-cli",
+		DisplayName: "copilot",
+		BuildCmd:    c.buildStreamCmd,
+		Parser:      parseCopilotStream,
+		LooksLikeUnrecognizedFlag: func(stderr string) bool {
+			return agent.LooksLikeUnrecognizedFlag(stderr, "stream", "output-format")
+		},
 	}
 
 	result, err := tmpl.Generate(ctx, prompt, model, progress)
@@ -218,22 +220,4 @@ func (c *CopilotCLIAgent) buildStreamCmd(ctx context.Context, prompt, model stri
 	cmd := commandRunner(ctx, "copilot", args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	return cmd
-}
-
-// looksLikeCopilotUnrecognizedFlag is the 3rd of 4 per-agent flag-rejection
-// heuristics. Consolidation deferred to a post-chunk-5 cleanup commit. Phrase
-// set matches Codex's (strict — "unknown flag" rather than bare "unknown") to
-// avoid the over-broad matches a Chunk-3 code review flagged on Gemini.
-//
-//nolint:dupl // 3rd of 4 per-agent flag-rejection heuristics; consolidation deferred to a post-chunk-5 cleanup commit
-func looksLikeCopilotUnrecognizedFlag(stderr string) bool {
-	lower := strings.ToLower(stderr)
-	hasRejectPhrase := strings.Contains(lower, "unknown flag") ||
-		strings.Contains(lower, "unrecognized option") ||
-		strings.Contains(lower, "unknown option") ||
-		strings.Contains(lower, "invalid option")
-	if !hasRejectPhrase {
-		return false
-	}
-	return strings.Contains(lower, "stream") || strings.Contains(lower, "output-format")
 }

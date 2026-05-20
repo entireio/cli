@@ -137,11 +137,13 @@ func (c *CodexAgent) GenerateTextStreaming(
 	progress agent.ProgressFn,
 ) (string, error) {
 	tmpl := &agent.StreamingGeneratorTemplate{
-		AgentName:                 "codex",
-		DisplayName:               "codex",
-		BuildCmd:                  c.buildStreamCmd,
-		Parser:                    parseCodexStream,
-		LooksLikeUnrecognizedFlag: looksLikeCodexUnrecognizedFlag,
+		AgentName:   "codex",
+		DisplayName: "codex",
+		BuildCmd:    c.buildStreamCmd,
+		Parser:      parseCodexStream,
+		LooksLikeUnrecognizedFlag: func(stderr string) bool {
+			return agent.LooksLikeUnrecognizedFlag(stderr, "json")
+		},
 	}
 
 	result, err := tmpl.Generate(ctx, prompt, model, progress)
@@ -167,16 +169,4 @@ func (c *CodexAgent) buildStreamCmd(ctx context.Context, prompt, model string) *
 	cmd := commandRunner(ctx, "codex", args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	return cmd
-}
-
-func looksLikeCodexUnrecognizedFlag(stderr string) bool {
-	lower := strings.ToLower(stderr)
-	hasRejectPhrase := strings.Contains(lower, "unrecognized option") ||
-		strings.Contains(lower, "unknown flag") ||
-		strings.Contains(lower, "unknown option") ||
-		strings.Contains(lower, "invalid option")
-	if !hasRejectPhrase {
-		return false
-	}
-	return strings.Contains(lower, "json") || strings.Contains(lower, "exec")
 }

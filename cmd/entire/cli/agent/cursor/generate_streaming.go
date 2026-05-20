@@ -160,11 +160,13 @@ func (c *CursorAgent) GenerateTextStreaming(
 	progress agent.ProgressFn,
 ) (string, error) {
 	tmpl := &agent.StreamingGeneratorTemplate{
-		AgentName:                 "cursor",
-		DisplayName:               "agent",
-		BuildCmd:                  c.buildStreamCmd,
-		Parser:                    parseCursorStream,
-		LooksLikeUnrecognizedFlag: looksLikeCursorUnrecognizedFlag,
+		AgentName:   "cursor",
+		DisplayName: "agent",
+		BuildCmd:    c.buildStreamCmd,
+		Parser:      parseCursorStream,
+		LooksLikeUnrecognizedFlag: func(stderr string) bool {
+			return agent.LooksLikeUnrecognizedFlag(stderr, "stream-json", "stream-partial-output", "output-format")
+		},
 	}
 
 	result, err := tmpl.Generate(ctx, prompt, model, progress)
@@ -196,25 +198,4 @@ func (c *CursorAgent) buildStreamCmd(ctx context.Context, prompt, model string) 
 	cmd := commandRunner(ctx, "agent", args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	return cmd
-}
-
-// looksLikeCursorUnrecognizedFlag is the 4th of 4 per-agent flag-rejection
-// heuristics. Consolidation deferred to a post-chunk-5 cleanup commit. Phrase
-// set matches Codex/Copilot's (strict — "unknown flag" rather than bare
-// "unknown") to avoid the over-broad matches a Chunk-3 code review flagged on
-// Gemini.
-//
-//nolint:dupl // 4th of 4 per-agent flag-rejection heuristics; consolidation deferred to a post-chunk-5 cleanup commit
-func looksLikeCursorUnrecognizedFlag(stderr string) bool {
-	lower := strings.ToLower(stderr)
-	hasRejectPhrase := strings.Contains(lower, "unknown flag") ||
-		strings.Contains(lower, "unrecognized option") ||
-		strings.Contains(lower, "unknown option") ||
-		strings.Contains(lower, "invalid option")
-	if !hasRejectPhrase {
-		return false
-	}
-	return strings.Contains(lower, "stream-json") ||
-		strings.Contains(lower, "stream-partial-output") ||
-		strings.Contains(lower, "output-format")
 }

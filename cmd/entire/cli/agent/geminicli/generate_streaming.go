@@ -149,11 +149,13 @@ func (g *GeminiCLIAgent) GenerateTextStreaming(
 	progress agent.ProgressFn,
 ) (string, error) {
 	tmpl := &agent.StreamingGeneratorTemplate{
-		AgentName:                 "gemini",
-		DisplayName:               "gemini",
-		BuildCmd:                  g.buildStreamCmd,
-		Parser:                    parseGeminiStream,
-		LooksLikeUnrecognizedFlag: looksLikeGeminiUnrecognizedFlag,
+		AgentName:   "gemini",
+		DisplayName: "gemini",
+		BuildCmd:    g.buildStreamCmd,
+		Parser:      parseGeminiStream,
+		LooksLikeUnrecognizedFlag: func(stderr string) bool {
+			return agent.LooksLikeUnrecognizedFlag(stderr, "output-format", "stream-json")
+		},
 	}
 
 	result, err := tmpl.Generate(ctx, prompt, model, progress)
@@ -178,17 +180,4 @@ func (g *GeminiCLIAgent) buildStreamCmd(ctx context.Context, prompt, model strin
 	cmd := commandRunner(ctx, "gemini", args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	return cmd
-}
-
-// looksLikeGeminiUnrecognizedFlag is the second of 4 per-agent flag-rejection
-// heuristics. The controller will consolidate the 4 instances after Chunk 5.
-func looksLikeGeminiUnrecognizedFlag(stderr string) bool {
-	lower := strings.ToLower(stderr)
-	hasRejectPhrase := strings.Contains(lower, "unknown") ||
-		strings.Contains(lower, "unrecognized") ||
-		strings.Contains(lower, "invalid")
-	if !hasRejectPhrase {
-		return false
-	}
-	return strings.Contains(lower, "output-format") || strings.Contains(lower, "stream-json")
 }
