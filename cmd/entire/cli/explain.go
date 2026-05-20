@@ -1110,7 +1110,7 @@ func formatCheckpointSummaryError(err error, attempt *summaryAttempt) (string, [
 	var claudeErr *claudecode.ClaudeError
 	switch {
 	case errors.As(err, &claudeErr):
-		switch claudeErr.Kind { //nolint:exhaustive // ClaudeErrorUnknown handled by default
+		switch claudeErr.Kind {
 		case claudecode.ClaudeErrorAuth:
 			label := "Claude authentication failed"
 			rows := []explainRow{
@@ -1435,9 +1435,16 @@ func (s *summaryProgressWriter) handle(p agent.GenerationProgress) {
 			"%s Writing summary... (~%s tokens)",
 			s.arrow, formatTokenCount(p.OutputTokens)))
 	case agent.PhaseDone:
+		clauses := []string{
+			formatMs(p.DurationMs),
+			formatTokenCount(p.OutputTokens) + " output tokens",
+		}
+		if p.CachedInputTokens > 0 {
+			clauses = append(clauses, formatTokenCount(p.CachedInputTokens)+" cached input tokens")
+		}
 		s.printLine(fmt.Sprintf(
-			"%s Summary generated (%s, %s output tokens)",
-			s.check, formatMs(p.DurationMs), formatTokenCount(p.OutputTokens)))
+			"%s Summary generated (%s)",
+			s.check, strings.Join(clauses, ", ")))
 	}
 }
 

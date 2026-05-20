@@ -5903,6 +5903,52 @@ func TestSummaryProgressWriter_FirstTokenWithOnlyCachedTokens(t *testing.T) {
 	}
 }
 
+func TestSummaryProgressWriter_DoneWithCachedTokens(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	attempt := newSummaryAttempt("cursor", 0)
+	pw := newSummaryProgressWriter(&buf, attempt)
+
+	pw.handle(agent.GenerationProgress{
+		Phase:             agent.PhaseDone,
+		DurationMs:        10700,
+		OutputTokens:      1600,
+		CachedInputTokens: 4608,
+	})
+
+	out := buf.String()
+	if !strings.Contains(out, "1.6k output tokens") {
+		t.Errorf("output = %q, want '1.6k output tokens' clause", out)
+	}
+	if !strings.Contains(out, "4.6k cached input tokens") {
+		t.Errorf("output = %q, want '4.6k cached input tokens' clause when CachedInputTokens > 0", out)
+	}
+}
+
+func TestSummaryProgressWriter_DoneWithoutCachedTokens(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	attempt := newSummaryAttempt("gemini", 0)
+	pw := newSummaryProgressWriter(&buf, attempt)
+
+	pw.handle(agent.GenerationProgress{
+		Phase:        agent.PhaseDone,
+		DurationMs:   10700,
+		OutputTokens: 1600,
+		// CachedInputTokens: 0 — omitted
+	})
+
+	out := buf.String()
+	if !strings.Contains(out, "1.6k output tokens") {
+		t.Errorf("output = %q, want '1.6k output tokens' clause", out)
+	}
+	if strings.Contains(out, "cached input tokens") {
+		t.Errorf("output = %q, should not include cached tokens clause when CachedInputTokens == 0", out)
+	}
+}
+
 func TestSummaryProgressWriter_Accessible(t *testing.T) {
 	// Cannot use t.Parallel() — t.Setenv mutates process-global state.
 	// (Strictly, t.Setenv IS compatible with t.Parallel() in Go 1.17+ when
