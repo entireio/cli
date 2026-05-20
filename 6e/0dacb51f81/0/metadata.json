@@ -3,21 +3,37 @@
   "checkpoint_id": "6e0dacb51f81",
   "session_id": "27c10fbd-3055-4d96-8e88-8a95ee2d9e1e",
   "strategy": "manual-commit",
-  "created_at": "2026-05-20T23:04:46.236114Z",
+  "created_at": "2026-05-20T23:24:13.05689Z",
   "branch": "feat/antigravity-agent",
   "checkpoints_count": 1,
-  "files_touched": [],
+  "files_touched": [
+    "cmd/entire/cli/agent/antigravity/antigravity.go",
+    "cmd/entire/cli/checkpoint/committed_reader_resolve.go",
+    "cmd/entire/cli/strategy/manual_commit.go"
+  ],
   "agent": "Claude Code",
   "model": "claude-opus-4-7[1m]",
   "turn_id": "d259ee542db8",
   "token_usage": {
-    "input_tokens": 6103,
-    "cache_creation_tokens": 1089340,
-    "cache_read_tokens": 40573981,
-    "output_tokens": 220625,
-    "api_call_count": 131
+    "input_tokens": 6128,
+    "cache_creation_tokens": 1124618,
+    "cache_read_tokens": 53481077,
+    "output_tokens": 237385,
+    "api_call_count": 156
   },
   "session_metrics": {
     "turn_count": 8
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-20T23:24:12.894519Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 893,
+    "human_modified": 2,
+    "human_removed": 0,
+    "total_committed": 893,
+    "total_lines_changed": 895,
+    "agent_percentage": 0,
+    "metric_version": 2
   }
 }
