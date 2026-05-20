@@ -1,0 +1,29 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "bd01210310fd",
+  "strategy": "manual-commit",
+  "branch": "soph/cli-hardening",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/agent/opencode/lifecycle.go",
+    "cmd/entire/cli/agent/opencode/lifecycle_test.go",
+    "cmd/entire/cli/agent/opencode/opencode.go",
+    "cmd/entire/cli/checkpoint/remote/git_test.go",
+    "cmd/entire/cli/integration_test/hooks.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/bd/01210310fd/0/metadata.json",
+      "transcript": "/bd/01210310fd/0/transcript.jsonl",
+      "content_hash": "/bd/01210310fd/0/transcript_hash.txt",
+      "prompt": "/bd/01210310fd/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 38,
+    "cache_creation_tokens": 38429,
+    "cache_read_tokens": 8622039,
+    "output_tokens": 16426,
+    "api_call_count": 29
+  }
+}
