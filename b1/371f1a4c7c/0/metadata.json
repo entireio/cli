@@ -3,92 +3,28 @@
   "checkpoint_id": "b1371f1a4c7c",
   "session_id": "27c10fbd-3055-4d96-8e88-8a95ee2d9e1e",
   "strategy": "manual-commit",
-  "created_at": "2026-05-20T21:58:00.179184Z",
+  "created_at": "2026-05-20T22:30:02.068063Z",
   "branch": "feat/antigravity-agent",
-  "checkpoints_count": 8,
+  "checkpoints_count": 1,
   "files_touched": [],
   "agent": "Claude Code",
   "model": "claude-opus-4-7[1m]",
-  "turn_id": "c50389c9387d",
+  "turn_id": "d259ee542db8",
   "token_usage": {
-    "input_tokens": 6050,
-    "cache_creation_tokens": 1002522,
-    "cache_read_tokens": 23228329,
-    "output_tokens": 178222,
-    "api_call_count": 93
+    "input_tokens": 6084,
+    "cache_creation_tokens": 1057846,
+    "cache_read_tokens": 33832220,
+    "output_tokens": 205800,
+    "api_call_count": 117
   },
   "session_metrics": {
     "turn_count": 8
   },
   "prompt_attributions": [
     {
-      "checkpoint_number": 1,
-      "user_lines_added": 74,
-      "user_lines_removed": 6,
-      "agent_lines_added": 0,
-      "agent_lines_removed": 0,
-      "user_added_per_file": {
-        ".antigravitycli/20b32e0f-8a15-4567-8428-6d0883769166.json": 14,
-        "e2e/bootstrap/main.go": 38,
-        "e2e/bootstrap/main_test.go": 22
-      },
-      "user_removed_per_file": {
-        "e2e/bootstrap/main.go": 6
-      }
-    },
-    {
       "checkpoint_number": 2,
-      "user_lines_added": 0,
-      "user_lines_removed": 0,
-      "agent_lines_added": 74,
-      "agent_lines_removed": 6
-    },
-    {
-      "checkpoint_number": 3,
-      "user_lines_added": 0,
-      "user_lines_removed": 0,
-      "agent_lines_added": 74,
-      "agent_lines_removed": 6
-    },
-    {
-      "checkpoint_number": 4,
-      "user_lines_added": 0,
-      "user_lines_removed": 0,
-      "agent_lines_added": 74,
-      "agent_lines_removed": 6
-    },
-    {
-      "checkpoint_number": 5,
-      "user_lines_added": 0,
-      "user_lines_removed": 0,
-      "agent_lines_added": 74,
-      "agent_lines_removed": 6
-    },
-    {
-      "checkpoint_number": 6,
-      "user_lines_added": 0,
-      "user_lines_removed": 0,
-      "agent_lines_added": 74,
-      "agent_lines_removed": 6
-    },
-    {
-      "checkpoint_number": 7,
-      "user_lines_added": 0,
-      "user_lines_removed": 0,
-      "agent_lines_added": 74,
-      "agent_lines_removed": 6
-    },
-    {
-      "checkpoint_number": 8,
-      "user_lines_added": 0,
-      "user_lines_removed": 0,
-      "agent_lines_added": 74,
-      "agent_lines_removed": 6
-    },
-    {
-      "checkpoint_number": 9,
-      "user_lines_added": 10414,
-      "user_lines_removed": 0,
+      "user_lines_added": 10436,
+      "user_lines_removed": 67,
       "agent_lines_added": 0,
       "agent_lines_removed": 0,
       "user_added_per_file": {
@@ -183,6 +119,11 @@
         ".clawpatch/runs/20260519T175238-b66a6a.json": 19,
         ".clawpatch/runs/20260519T175303-e13c5e.json": 50,
         ".clawpatch/runs/20260519T180547-d22ddf.json": 21,
+        "cmd/entire/cli/agent/antigravity/antigravity.go": 2,
+        "cmd/entire/cli/agent/antigravity/generate.go": 1,
+        "cmd/entire/cli/agent/antigravity/testdata/hook_stdin_post_invocation.json": 2,
+        "cmd/entire/cli/agent/antigravity/types_test.go": 2,
+        "cmd/entire/cli/agent/generate_external_test.go": 15,
         "skills/.agents/plugins/marketplace.json": 20,
         "skills/.claude-plugin/marketplace.json": 20,
         "skills/.claude/agents/entire-search.md": 25,
@@ -203,6 +144,12 @@
         "skills/plugins/entire/skills/explain/SKILL.md": 22,
         "skills/plugins/entire/skills/search/SKILL.md": 58,
         "skills/plugins/entire/skills/session-handoff/SKILL.md": 108
+      },
+      "user_removed_per_file": {
+        "cmd/entire/cli/agent/antigravity/antigravity.go": 1,
+        "cmd/entire/cli/agent/antigravity/generate_test.go": 62,
+        "cmd/entire/cli/agent/antigravity/testdata/hook_stdin_post_invocation.json": 2,
+        "cmd/entire/cli/agent/antigravity/types_test.go": 2
       }
     }
   ]

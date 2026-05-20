@@ -3,7 +3,7 @@
   "checkpoint_id": "b1371f1a4c7c",
   "strategy": "manual-commit",
   "branch": "feat/antigravity-agent",
-  "checkpoints_count": 8,
+  "checkpoints_count": 1,
   "files_touched": null,
   "sessions": [
     {
@@ -14,10 +14,10 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 6050,
-    "cache_creation_tokens": 1002522,
-    "cache_read_tokens": 23228329,
-    "output_tokens": 178222,
-    "api_call_count": 93
+    "input_tokens": 6084,
+    "cache_creation_tokens": 1057846,
+    "cache_read_tokens": 33832220,
+    "output_tokens": 205800,
+    "api_call_count": 117
   }
 }

@@ -49,3 +49,15 @@ ready
 ---
 
 ready, make sure you create a new branch adn have latest main
+
+---
+
+either
+
+---
+
+did we do all necessary tests for chunk 1
+
+---
+
+we don't need to add a ton of tests, unless we really are missing coverage, but also like you just run individual smoke tests
