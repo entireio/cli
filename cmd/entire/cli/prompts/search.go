@@ -27,7 +27,7 @@ func newSearchCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "search [query]",
+		Use:   "search <query>",
 		Short: "Search prompts from checkpoint history",
 		Long: `Search prompts from your checkpoint history by keywords.
 

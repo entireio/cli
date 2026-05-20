@@ -2,10 +2,13 @@ package prompts
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/prompts/index"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/spf13/cobra"
 )
 
@@ -40,14 +43,39 @@ Examples:
 func runIndex(ctx context.Context, w io.Writer, ew io.Writer, rebuild, status, verify bool) error {
 	_ = ew
 
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return errors.New("not a git repository")
+	}
+
 	if rebuild {
-		fmt.Fprintln(w, "Rebuilding index...")
-		fmt.Fprintln(w, "(Use 'entire prompts search' to trigger automatic rebuild if index is missing)")
+		repo, err := strategy.OpenRepository(ctx)
+		if err != nil {
+			return fmt.Errorf("opening repository: %w", err)
+		}
+
+		store := index.NewStore(repoRoot)
+		builder := index.NewBuilder(repo, store)
+
+		fmt.Fprintln(w, "Rebuilding prompt index from checkpoints...")
+
+		progressFn := func(done, total int) {
+			if total > 0 {
+				fmt.Fprintf(w, "\r  %d / %d checkpoints", done, total)
+			}
+		}
+
+		if err := builder.Build(ctx, w, progressFn); err != nil {
+			return fmt.Errorf("building index: %w", err)
+		}
+
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "Index rebuild complete.")
 		return nil
 	}
 
 	if status {
-		store := index.NewStore("")
+		store := index.NewStore(repoRoot)
 		stats, err := store.Stats(ctx)
 		if err != nil {
 			return fmt.Errorf("getting stats: %w", err)
@@ -70,6 +98,7 @@ func runIndex(ctx context.Context, w io.Writer, ew io.Writer, rebuild, status, v
 
 	if verify {
 		fmt.Fprintln(w, "Verifying index entries...")
+		fmt.Fprintln(w, "(Use 'entire prompts search' to trigger automatic rebuild if index is missing)")
 		return nil
 	}
 

@@ -2,9 +2,11 @@ package prompts
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/prompts/index"
 	"github.com/spf13/cobra"
 )
@@ -28,7 +30,12 @@ Examples:
 }
 
 func runShow(ctx context.Context, w io.Writer, cpIDPrefix string) error {
-	store := index.NewStore("")
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return errors.New("not a git repository")
+	}
+
+	store := index.NewStore(repoRoot)
 	entries, err := store.Load(ctx)
 	if err != nil {
 		return fmt.Errorf("loading index: %w", err)

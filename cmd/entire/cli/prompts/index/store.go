@@ -81,6 +81,12 @@ func (s *Store) Load(_ context.Context) ([]Entry, error) {
 			if err := json.Unmarshal([]byte(line), &header); err != nil {
 				return nil, fmt.Errorf("%w: header: %w", ErrIndexCorrupt, err)
 			}
+			if header.Version <= 0 {
+				return nil, fmt.Errorf("%w: header: invalid version %d", ErrIndexCorrupt, header.Version)
+			}
+			if header.Version > CurrentIndexVersion {
+				return nil, ErrIndexVersionNewer
+			}
 		} else {
 			var entry Entry
 			if err := json.Unmarshal([]byte(line), &entry); err != nil {
@@ -138,6 +144,13 @@ func (s *Store) AppendEntries(entries []Entry) error {
 }
 
 func (s *Store) appendEntriesLine(entries []Entry) error {
+	fi, err := os.Stat(s.indexPath)
+	if err != nil || fi.Size() == 0 {
+		if err := s.InitIndex(); err != nil {
+			return fmt.Errorf("initializing index: %w", err)
+		}
+	}
+
 	f, err := os.OpenFile(s.indexPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("opening index for append: %w", err)

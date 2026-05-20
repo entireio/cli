@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/prompts/index"
 	"github.com/spf13/cobra"
 )
@@ -32,7 +33,12 @@ Examples:
 }
 
 func runList(ctx context.Context, w io.Writer, _ io.Writer, limit int) error {
-	store := index.NewStore("")
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return errors.New("not a git repository")
+	}
+
+	store := index.NewStore(repoRoot)
 
 	if !store.Exists() {
 		fmt.Fprintln(w, "No prompt index found. Run 'entire prompts index --rebuild' first.")

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -163,9 +162,7 @@ func walkCheckpointShards(repo *git.Repository, treeHash plumbing.Hash, fn func(
 }
 
 func (b *Builder) loadCheckpoint(cpID id.CheckpointID) ([]Entry, error) {
-	shard := cpID.String()[:2]
-	rest := cpID.String()[2:]
-	cpDir := filepath.Join(shard, rest, "0")
+	cpDir := cpID.Path()
 
 	ref, err := b.repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
@@ -211,7 +208,7 @@ func (b *Builder) loadCheckpoint(cpID id.CheckpointID) ([]Entry, error) {
 
 	entries := make([]Entry, 0)
 	for i := range metadata.Sessions {
-		sessionDir := filepath.Join(cpDir, strconv.Itoa(i))
+		sessionDir := strconv.Itoa(i)
 		sessionTree, err := cpTree.Tree(sessionDir)
 		if err != nil {
 			continue
