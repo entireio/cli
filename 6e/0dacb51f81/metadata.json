@@ -4,9 +4,7 @@
   "strategy": "manual-commit",
   "branch": "feat/antigravity-agent",
   "checkpoints_count": 1,
-  "files_touched": [
-    "cmd/entire/cli/agent/antigravity/antigravity.go"
-  ],
+  "files_touched": null,
   "sessions": [
     {
       "metadata": "/6e/0dacb51f81/0/metadata.json",
@@ -16,10 +14,10 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 6096,
-    "cache_creation_tokens": 1080802,
-    "cache_read_tokens": 37150349,
-    "output_tokens": 215554,
-    "api_call_count": 124
+    "input_tokens": 6103,
+    "cache_creation_tokens": 1089340,
+    "cache_read_tokens": 40573981,
+    "output_tokens": 220625,
+    "api_call_count": 131
   }
 }
