@@ -1,0 +1,9 @@
+can you take a look at https://github.com/entireio/cli/pull/799 it's rather old, but maybe we should stilly apply some of the fixes? can you also let me know if the assumption/findings are true?
+
+---
+
+is 1 maybe just test setup?
+
+---
+
+Let's do a new PR of main to adress issues that make sense, for 1 I'm concerne about worktree setups

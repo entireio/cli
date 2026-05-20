@@ -1,0 +1,55 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "eb4bd3a05e88",
+  "session_id": "27179d76-6dbf-4179-a022-5e46b6c375f9",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-20T09:57:05.877306Z",
+  "branch": "soph/cli-hardening",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/agent/opencode/opencode.go",
+    "cmd/entire/cli/osroot/osroot.go",
+    "cmd/entire/cli/utils.go",
+    "cmd/entire/cli/checkpoint/remote/git.go",
+    "cmd/entire/cli/osroot/osroot_test.go",
+    "cmd/entire/cli/agent/opencode/lifecycle_test.go",
+    "cmd/entire/cli/checkpoint/remote/git_test.go",
+    "cmd/entire/cli/utils_test.go",
+    "cmd/entire/cli/agent/opencode/lifecycle.go",
+    "cmd/entire/cli/integration_test/hooks.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7[1m]",
+  "turn_id": "256eae809400",
+  "token_usage": {
+    "input_tokens": 207,
+    "cache_creation_tokens": 659376,
+    "cache_read_tokens": 34435438,
+    "output_tokens": 81892,
+    "api_call_count": 192
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-20T09:57:05.784689Z",
+    "agent_lines": 286,
+    "agent_removed": 26,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 286,
+    "total_lines_changed": 312,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
