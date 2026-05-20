@@ -165,6 +165,7 @@ func pathHasDirPrefix(path, dir string) bool {
 
 // Agent name constants (registry keys)
 const (
+	AgentNameAntigravity    types.AgentName = "antigravity"
 	AgentNameClaudeCode     types.AgentName = "claude-code"
 	AgentNameCodex          types.AgentName = "codex"
 	AgentNameCopilotCLI     types.AgentName = "copilot-cli"
@@ -177,6 +178,7 @@ const (
 
 // Agent type constants (type identifiers stored in metadata/trailers)
 const (
+	AgentTypeAntigravity    types.AgentType = "Antigravity"
 	AgentTypeClaudeCode     types.AgentType = "Claude Code"
 	AgentTypeCodex          types.AgentType = "Codex"
 	AgentTypeCopilotCLI     types.AgentType = "Copilot CLI"
