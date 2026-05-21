@@ -711,3 +711,74 @@ started 1h ago · stale (run 'entire doctor')
 
 ────────────────────────────────────────────────────────────────────────────────
 1 session
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> cat .git/entire-sessions/26b76749-b98c-4689-a1db-a58bba455068.json | jq '.session_id,.files_touched, .phase'
+"26b76749-b98c-4689-a1db-a58bba455068"
+null
+"ended"
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> git add test.txt && git commit -m "third agy smoke"
+[main 240e90f] third agy smoke
+ 1 file changed, 2 insertions(+)
+ create mode 100644 test.txt
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> git log -1 --format="%B"
+third agy smoke
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> echo "=== PreToolUse stdin (the one that should populate
+                                                        files_touched) ==="
+                                                      cat /tmp/agy-debug/pre-tool-use.log | jq .
+                                                      echo ""
+                                                      echo "=== check session state - was files_touched populated
+                                                        this time? ==="
+                                                      ls -t .git/entire-sessions/ | head -1 | xargs -I{} cat.git/entire-sessions/{} | jq '{session_id, files_touched,
+                                                        phase}'
+=== PreToolUse stdin (the one that should populate
+  files_touched) ===
+{
+  "artifactDirectoryPath": "/Users/peytonmontei/.gemini/antigravity-cli/brain/5a44eaad-9a23-487f-b5ab-8240f3b9c9e9",
+  "conversationId": "5a44eaad-9a23-487f-b5ab-8240f3b9c9e9",
+  "stepIdx": 6,
+  "toolCall": {
+    "args": {
+      "AbsolutePath": "/tmp/agy-smoke/wire.txt"
+    },
+    "name": "view_file"
+  },
+  "transcriptPath": "/Users/peytonmontei/.gemini/antigravity-cli/brain/5a44eaad-9a23-487f-b5ab-8240f3b9c9e9/.system_generated/logs/transcript.jsonl",
+  "workspacePaths": [
+    "/tmp/agy-smoke"
+  ]
+}
+
+=== check session state - was files_touched populated
+  this time? ===
+xargs: cat.git/entire-sessions/{}: No such file or directory
+
+---
+
+=== all PreToolUse invocations ===
+=====
+{"artifactDirectoryPath":"/Users/peytonmontei/.gemini/antigravity-cli/brain/eb421dc8-4fd9-4951-b5c8-3ebe97bc23bb","conversationId":"eb421dc8-4fd9-4951-b5c8-3ebe97bc23bb","stepIdx":3,"toolCall":{"args":{"CodeContent":"test","Description":"Create a new markdown file named brandnew.md with the content \"test\".","IsArtifact":false,"Overwrite":true,"TargetFile":"/tmp/agy-smoke/brandnew.md"},"name":"write_to_file"},"transcriptPath":"/Users/peytonmontei/.gemini/antigravity-cli/brain/eb421dc8-4fd9-4951-b5c8-3ebe97bc23bb/.system_generated/logs/transcript.jsonl","workspacePaths":["/tmp/agy-smoke"]}
+=== session state after the agy run ===
+xargs: cat.git/entire-sessions/{}: No such file or directory
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> set NEWEST (ls -t .git/entire-sessions/ | head -1)
+                                                      echo "session file: $NEWEST"
+                                                      cat .git/entire-sessions/$NEWEST | jq '{session_id,
+                                                        files_touched, phase}'
+session file: eb421dc8-4fd9-4951-b5c8-3ebe97bc23bb.json
+{
+  "session_id": "eb421dc8-4fd9-4951-b5c8-3ebe97bc23bb",
+  "files_touched": null,
+  "phase": "ended"
+}peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main) [124]> ls -t .entire/logs/ 2>/dev/null | head -5
+                                                            grep -E "tool-use|files_touched|files touched" .entire/logs/*.log 2>/dev/null | tail -10
+entire.log
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> grep -E "FilterAndNormalize|RecordFilesTouched" .entire/logs/*.log 2>/dev/null | tail -10
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)>
