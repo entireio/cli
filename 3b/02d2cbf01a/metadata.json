@@ -3,10 +3,8 @@
   "checkpoint_id": "3b02d2cbf01a",
   "strategy": "manual-commit",
   "branch": "feat/antigravity-agent",
-  "checkpoints_count": 1,
-  "files_touched": [
-    "cmd/entire/cli/integration_test/antigravity_test.go"
-  ],
+  "checkpoints_count": 2,
+  "files_touched": null,
   "sessions": [
     {
       "metadata": "/3b/02d2cbf01a/0/metadata.json",
@@ -16,10 +14,10 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 6345,
-    "cache_creation_tokens": 2446144,
-    "cache_read_tokens": 124186820,
-    "output_tokens": 346038,
-    "api_call_count": 274
+    "input_tokens": 6375,
+    "cache_creation_tokens": 2476852,
+    "cache_read_tokens": 138721385,
+    "output_tokens": 369471,
+    "api_call_count": 294
   }
 }
