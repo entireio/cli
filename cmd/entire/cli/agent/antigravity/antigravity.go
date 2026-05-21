@@ -38,18 +38,17 @@ func (a *AntigravityAgent) Description() string {
 }
 func (a *AntigravityAgent) IsPreview() bool { return true }
 
+// DetectPresence reports whether Antigravity hooks are configured for this
+// workspace. Antigravity 2.0 stores runtime data in ~/.gemini/antigravity-cli/
+// (user-scope, not workspace-scope), so the only reliable per-workspace signal
+// is the .agents/ hooks directory we manage.
 func (a *AntigravityAgent) DetectPresence(ctx context.Context) (bool, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		repoRoot = "."
 	}
-	for _, candidate := range []string{
-		filepath.Join(repoRoot, ".agents"),
-		filepath.Join(repoRoot, ".gemini", "jetski"),
-	} {
-		if _, err := os.Stat(candidate); err == nil {
-			return true, nil
-		}
+	if _, err := os.Stat(filepath.Join(repoRoot, ".agents")); err == nil {
+		return true, nil
 	}
 	return false, nil
 }
