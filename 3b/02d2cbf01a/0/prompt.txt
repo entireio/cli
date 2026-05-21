@@ -483,3 +483,137 @@ I0521 12:33:32.165739 87986 server.go:2152] Language server shutting down
 ---
 
 so did the hooks not work, or was i not signed in? or what happened
+
+---
+
+okay see results, peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> cat .agents/hooks.json | jq '.entire | keys'
+[
+  "PostInvocation",
+  "PostToolUse",
+  "PreInvocation",
+  "PreToolUse",
+  "Stop"
+]
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> agy
+
+Resume with:
+  agy --conversation=7e7f8fbd-f545-4777-b38f-718d3c29e576
+  agy -c
+
+
+      ▄▀▀▄        Antigravity CLI 1.0.0
+     ▀▀▀▀▀▀       peyton@entire.io
+    ▀▀▀▀▀▀▀▀      Gemini 3.5 Flash (High)
+   ▄▀▀    ▀▀▄     /tmp/agy-smoke
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> create a file called hello.txt with the text "world"
+
+● Create(/tmp/agy-smoke/hello.txt) (ctrl+o to expand)
+
+  I have created the file  hello.txt  containing the text "world" at  /tmp/agy-smoke/hello.txt
+  .
+
+─────────────────────────────────────────────────────────────────────────────────────────────────
+>
+─────────────────────────────────────────────────────────────────────────────────────────────────
+
+Resume: agy --conversation=7e7f8fbd-f545-4777-b38f-718d3c29e576 (or -c)
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> ls .git/entire-sessions/
+4d2b9e05-fbdf-471c-a939-3bf92e90650c.json  7e7f8fbd-f545-4777-b38f-718d3c29e576.json  diag-conv.json
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> git add . && git commit -m "agy smoke"
+[main 99d26e0] agy smoke
+ 5 files changed, 54 insertions(+)
+ create mode 100644 .agents/hooks.json
+ create mode 120000 .antigravitycli/bd77b549-43df-4dcb-8916-7914cac459cc.json
+ create mode 100644 .entire/.gitignore
+ create mode 100644 .entire/settings.json
+ create mode 100644 hello.txt
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> $ENTIRE checkpoint list
+  branch       main
+  checkpoints  0
+
+No checkpoints found on this branch.
+Checkpoints will appear here after you save changes during an agent session.
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> $ENTIRE status
+● Enabled · manual-commit · branch main
+  Agents · Antigravity
+
+── Active Sessions ─────────────────────────────────────────────────────────────
+
+Antigravity · diag-conv
+started 25m ago
+
+────────────────────────────────────────────────────────────────────────────────
+1 session
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> $ENTIRE session list
+── Sessions ────────────────────────────────────────────────────────────────────
+
+Antigravity · agy-smoke · session diag-conv
+active · started 26m ago
+
+────────────────────────────────────────────────────────────────────────────────
+1 session
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> tail -20 ~/.gemini/antigravity-cli/cli.log | grep -E
+                                                      "hook|executor"
+usage: grep [REDACTED] [-A num] [-B num] [-C[num]]
+        [-e pattern] [-f file] [--binary-files=value] [--color=when]
+        [--context[=num]] [--directories=action] [--label] [--line-buffered]
+        [--null] [pattern] [file ...]
+fish: Unknown command: 'hook|executor'
+fish:
+"hook|executor"
+^~~~~~~~~~~~~~^
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main) [127]> tail -20 ~/.gemini/antigravity-cli/cli.log | grep -E "hook|executor"
+I0521 12:45:20.190331 31738 jsonhook.go:152] Loaded hooks.json from /tmp/agy-smoke/.agents/hooks.json: 1 named hooks, 5 total handlers
+I0521 12:45:20.193104 31738 json_hook_caller.go:144] JSON hook "jsonhook__entire_PreInvocation_0_0": executing command
+I0521 12:45:20.766641 31738 json_hook_caller.go:144] JSON hook "jsonhook__entire_PostToolUse_0_0": executing command
+I0521 12:45:22.255508 31738 json_hook_caller.go:144] JSON hook "jsonhook__entire_PreToolUse_0_0": executing command
+I0521 12:45:22.303515 31738 json_hook_caller.go:144] JSON hook "jsonhook__entire_PostToolUse_0_0": executing command
+I0521 12:45:22.349386 31738 json_hook_caller.go:144] JSON hook "jsonhook__entire_PostInvocation_0_0": executing command
+I0521 12:45:23.335549 31738 json_hook_caller.go:144] JSON hook "jsonhook__entire_PostToolUse_0_0": executing command
+I0521 12:45:23.378321 31738 json_hook_caller.go:144] JSON hook "jsonhook__entire_PreInvocation_0_0": executing command
+I0521 12:45:24.596783 31738 json_hook_caller.go:144] JSON hook "jsonhook__entire_PostInvocation_0_0": executing command
+I0521 12:45:24.645658 31738 json_hook_caller.go:144] JSON hook "jsonhook__entire_Stop_0_0": executing command - so still we see the resume prompt twice which is strange and then we also don't have the warning/note that entire is trackign
+
+---
+
+we should address this now, No tracked-by-entire banner" — known v1 gap, documented in
+   the deferred table
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> ls .git/hooks/ | grep -v sample
+commit-msg
+post-commit
+post-rewrite
+pre-push
+prepare-commit-msg
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> cat .git/entire-sessions/7e7f8fbd-f545-4777-b38f-718d3c29e576.json| jq
+cat: .git/entire-sessions/7e7f8fbd-f545-4777-b38f-718d3c29e576.json: No such file or directory
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> git log --oneline entire/checkpoints/v1 2>&1
+84a140f (entire/checkpoints/v1) Initialize metadata branch
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> git log -1 --format="%B"
+agy smoke
+
+---
+
+i don't see banner peytonmontei@Peytons-MacBook-Pro /t/smoke-test (main)> cd /tmp/agy-smoke
+                                                       agy
+
+      ▄▀▀▄        Antigravity CLI 1.0.0
+     ▀▀▀▀▀▀       peyton@entire.io
+    ▀▀▀▀▀▀▀▀      Gemini 3.5 Flash (High)
+   ▄▀▀    ▀▀▄     /tmp/agy-smoke
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> create a file called hello.txt with the text "world"
+
+▸ Thought for 1s, 547 tokens
+  Verifying Basic File Creation
+
+● Create(/tmp/agy-smoke/hello.txt) (ctrl+o to expand)
+
+  I have created the file hello.txt with the content  "world" .
