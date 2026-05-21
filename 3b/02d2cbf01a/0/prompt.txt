@@ -617,3 +617,97 @@ i don't see banner peytonmontei@Peytons-MacBook-Pro /t/smoke-test (main)> cd /tm
 ● Create(/tmp/agy-smoke/hello.txt) (ctrl+o to expand)
 
   I have created the file hello.txt with the content  "world" .
+
+---
+
+● Create(/tmp/agy-smoke/hello.txt) (ctrl+o to expand)
+
+  I have created the file  hello.txt  with the text "world" at  /tmp/agy-smoke/hello.txt .
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Resume: agy --conversation=f8cf862b-b685-4799-bff8-b8873ea59e38 (or -c)
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> ls .git/entire-sessions/
+diag-conv.json                             fd76eb13-6977-4d4f-b5c3-4d43718155fd.json
+f8cf862b-b685-4799-bff8-b8873ea59e38.json
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> ls .git/entire-sessions/
+diag-conv.json                             f8cf862b-b685-4799-bff8-b8873ea59e38.json  fd76eb13-6977-4d4f-b5c3-4d43718155fd.json
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> git add . && git commit -m "agy smoke 2"
+On branch main
+nothing to commit, working tree clean
+
+---
+
+Resume: agy --conversation=f8cf862b-b685-4799-bff8-b8873ea59e38 (or -c)
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> $ENTIRE status
+fish: The expanded command was empty.
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main) [123]> ls .git/entire-sessions/
+diag-conv.json                             f8cf862b-b685-4799-bff8-b8873ea59e38.json  fd76eb13-6977-4d4f-b5c3-4d43718155fd.json
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> git add . && git commit -m "agy smoke 2"
+[main fae4cb1] agy smoke 2
+ 1 file changed, 1 insertion(+)
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> $ENTIRE checkpoint list
+fish: The expanded command was empty.
+
+---
+
+Resume: agy --conversation=2a744ab4-55b7-4ff2-98f0-5a8bd08f643c (or -c)
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> git add . && git commit -m "agy smoke 2"
+[main bff164d] agy smoke 2
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> git push
+fatal: No configured push destination.
+Either specify the URL from the command-line or configure a remote repository using
+
+    git remote add <name> <url>
+
+and then push using the remote name
+
+    git push <name>
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main) [128]> git push agy-smoke
+fatal: The current branch main has no upstream branch.
+To push the current branch and set the remote as upstream, use
+
+    git push --set-upstream agy-smoke main
+
+To have this happen automatically for branches without a tracking
+upstream, see 'push.autoSetupRemote' in 'git help config'.
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main) [128]> git push --set-upstream agy-smoke main
+fatal: 'agy-smoke' does not appear to be a git repository
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> ls -lt .git/entire-sessions/
+total 8
+-rw-------@ 1 peytonmontei  wheel  995 May 21 13:19 diag-conv.json
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> cat .git/entire-sessions/2a744ab4-55b7-4ff2-98f0-5a8bd08f643c.json 2>/dev/null | jq .
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)>
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> git log -1 --format="%B"
+agy smoke 2
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> $ENTIRE checkpoint list
+  branch       main
+  checkpoints  0
+
+No checkpoints found on this branch.
+Checkpoints will appear here after you save changes during an agent session.
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> $ENTIRE status
+● Enabled · manual-commit · branch main
+  Agents · Antigravity
+
+── Active Sessions ─────────────────────────────────────────────────────────────
+
+Antigravity · diag-conv
+started 1h ago · stale (run 'entire doctor')
+
+────────────────────────────────────────────────────────────────────────────────
+1 session
