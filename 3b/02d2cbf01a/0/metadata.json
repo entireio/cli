@@ -3,38 +3,44 @@
   "checkpoint_id": "3b02d2cbf01a",
   "session_id": "27c10fbd-3055-4d96-8e88-8a95ee2d9e1e",
   "strategy": "manual-commit",
-  "created_at": "2026-05-21T14:58:31.42394Z",
+  "created_at": "2026-05-21T16:44:17.134701Z",
   "branch": "feat/antigravity-agent",
   "checkpoints_count": 1,
   "files_touched": [
-    "cmd/entire/cli/agent/antigravity/antigravity.go",
-    "cmd/entire/cli/agent/antigravity/antigravity_test.go",
-    "e2e/agents/antigravity.go",
-    "e2e/agents/antigravity_test.go"
+    "cmd/entire/cli/integration_test/antigravity_test.go"
   ],
   "agent": "Claude Code",
   "model": "claude-opus-4-7[1m]",
-  "turn_id": "72e24002d221",
+  "turn_id": "d9c8a9351500",
   "token_usage": {
-    "input_tokens": 6221,
-    "cache_creation_tokens": 1742382,
-    "cache_read_tokens": 88964945,
-    "output_tokens": 289558,
-    "api_call_count": 219
+    "input_tokens": 6345,
+    "cache_creation_tokens": 2446144,
+    "cache_read_tokens": 124186820,
+    "output_tokens": 346038,
+    "api_call_count": 274
   },
   "session_metrics": {
-    "turn_count": 14
+    "turn_count": 26
   },
   "initial_attribution": {
-    "calculated_at": "2026-05-21T14:58:31.231329Z",
+    "calculated_at": "2026-05-21T16:44:16.86499Z",
     "agent_lines": 0,
     "agent_removed": 0,
-    "human_added": 0,
-    "human_modified": 11,
-    "human_removed": 11,
-    "total_committed": 0,
-    "total_lines_changed": 22,
+    "human_added": 221,
+    "human_modified": 1,
+    "human_removed": 0,
+    "total_committed": 221,
+    "total_lines_changed": 265,
     "agent_percentage": 0,
     "metric_version": 2
-  }
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
 }

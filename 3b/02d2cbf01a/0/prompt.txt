@@ -220,3 +220,266 @@ peytonmontei@Peytons-MacBook-Pro /t/agy-fixture-repo (main)> cp /Users/peytonmon
                                                              wc -l /Users/peytonmontei/Documents/entire/devenv/entireio/cli/cmd/entire/cli/agent/antigravity/testdata/transcript_sample.jsonl
 copied:
       13 /Users/peytonmontei/Documents/entire/devenv/entireio/cli/cmd/entire/cli/agent/antigravity/testdata/transcript_sample.jsonl
+
+---
+
+we need to test first
+
+---
+
+i would like to test the hooks and all commands too with the hooks
+
+---
+
+i would like to smoke test on my own
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/opf-perf-test (main)> set -x ENTIRE /tmp/entire-smoke
+peytonmontei@Peytons-MacBook-Pro /t/opf-perf-test (main)> go build -o $ENTIRE./cmd/entire
+go: cannot find main module, but found .git/config in /tmp/opf-perf-test
+        to create a module there, run:
+        go mod init
+peytonmontei@Peytons-MacBook-Pro /t/opf-perf-test (main) [1]> go build -o $ENTIRE ./cmd/entire
+go: cannot find main module, but found .git/config in /tmp/opf-perf-test
+        to create a module there, run:
+        go mod init
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/opf-perf-test (main) [1]> set -x ENTIRE /tmp/entire-smoke
+                                                              ls -la $ENTIRE
+-rwxr-xr-x@ 1 peytonmontei  staff  59280786 May 21 11:18 /tmp/entire-smoke*
+
+---
+
+if i want to actually start a session with antigravity after enabling, is this how i do it, peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> $ENTIRE agent list
+Agents:
+  ✓ antigravity
+    claude-code
+    codex
+    copilot-cli
+    cursor
+    factoryai-droid
+    gemini
+    opencode
+    pi
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> test -f .gemini/settings.json; and echo "WRONG"; or echo "OK"
+OK
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> agy
+
+---
+
+it's not working and does not say at the top that the conversation is being tracked by entire either ────────────────────────────────────────────────────────────
+> create a file called hello.txt with the text "world"
+
+⚠ Agent execution terminated due to error.
+
+────────────────────────────────────────────────────────────
+> create a file called hello.txt with the text "world"
+
+⚠ Agent execution terminated due to error.
+
+────────────────────────────────────────────────────────────
+> agy --conversation=9a788e4e-ad5e-46dc-972d-a27173112ec2
+
+⚠ Agent execution terminated due to error.
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> tail -50 ~/.gemini/antigravity-cli/cli.log
+W0521 12:18:02.947929 84816 client.go:81] failed to set auth token
+I0521 12:18:02.948048 84816 project.go:64] project: discovered project "/tmp/agy-smoke" (id=bd77b549-43df-4dcb-8916-7914cac459cc) via /tmp/agy-smoke/.antigravitycli
+I0521 12:18:02.948059 84816 common.go:156] project: using project "/tmp/agy-smoke" (id=bd77b549-43df-4dcb-8916-7914cac459cc) at /Users/peytonmontei/.gemini/config/projects/bd77b549-43df-4dcb-8916-7914cac459cc.json
+E0521 12:18:02.948073 84816 common.go:188] Failed to resolve GeminiDir ".gemini": .gemini must be an absolute path: path is not absolute, falling back to default
+I0521 12:18:02.948083 84816 common.go:197] CLI app data directory: /Users/peytonmontei/.gemini/antigravity-cli
+I0521 12:18:02.948090 84816 server.go:200] Creating CLI server backend: product=antigravity workspaceDirs=[] appDataDir=/Users/peytonmontei/.gemini/antigravity-cli cascadeManager=true codeAssist=true
+I0521 12:18:02.949284 84816 manager.go:249] Initializing CLI store manager for workspace /tmp/agy-smoke
+E0521 12:18:02.949500 84816 cli_setting_manager.go:350] failed to propagate telemetry setting: error getting token source: You are not logged into Antigravity.
+I0521 12:18:02.949510 84816 cli_setting_manager.go:65] CLI settings initialized: permissions=<nil>, toolPermission=request-review
+W0521 12:18:02.949536 84816 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+W0521 12:18:02.949543 84816 log_context.go:117] Cache(availableModels): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0521 12:18:02.949548 84816 server.go:392] failed to get model config: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+I0521 12:18:02.949607 84816 manager.go:313] CLI store manager initialized successfully
+I0521 12:18:02.949619 84816 common.go:312] CLI store manager created successfully
+W0521 12:18:02.949628 84816 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+W0521 12:18:02.949641 84816 log_context.go:117] Cache(userInfo): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0521 12:18:02.949649 84816 server.go:604] Failed to get OAuth token: error getting token source from auth provider: You are not logged into Antigravity.
+W0521 12:18:02.949657 84816 client.go:81] failed to set auth token
+I0521 12:18:02.951980 84816 common.go:397] Resuming conversation 9a788e4e-ad5e-46dc-972d-a27173112ec2
+I0521 12:18:02.952036 84816 conversation_manager.go:373] Streaming conversation 9a788e4e-ad5e-46dc-972d-a27173112ec2
+I0521 12:18:02.952019 84816 common.go:402] Starting CLI program
+CLI ready for user input (startup took 4.132042ms)
+I0521 12:18:02.952359 84816 server.go:766] Starting conversation update stream for 9a788e4e-ad5e-46dc-972d-a27173112ec2
+ERROR: logging before google.Init: I0521 12:18:02.953285     170 terminal_info_manager.go:160] Terminal detection: TERM="xterm-ghostty" altScreen=true ssh=false
+I0521 12:18:02.953651 84816 gemini_extensions.go:28] Detecting Gemini extensions in /Users/peytonmontei/.gemini/extensions
+I0521 12:18:02.953674 84816 gemini_extensions.go:49] No extensions found
+I0521 12:18:03.003631 84816 manager.go:543] Full redraw completed (rerenderAll) for conversation 9a788e4e-ad5e-46dc-972d-a27173112ec2 (epoch 0, items 5)
+I0521 12:18:03.119127 84816 auth.go:114] ChainedAuth: authenticated via keyring (effective: keyring)
+I0521 12:18:03.536257 84816 http_helpers.go:178] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist Trace: 0xe2bd49f230eb827b
+I0521 12:18:03.821722 84816 http_helpers.go:178] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist Trace: 0x24e35a0f653de36f
+I0521 12:18:04.043810 84816 http_helpers.go:178] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels Trace: 0x9d7fcf081f68fb7f
+I0521 12:18:04.052488 84816 model_config_manager.go:157] Propagating selected model override to backend: label="Gemini 3.5 Flash (High)"
+I0521 12:18:04.052515 84816 input_loop.go:493] Auth done received, triggering experiment refresh
+I0521 12:18:04.052538 84816 experiment_manager.go:35] Starting experiment refresh after login
+I0521 12:18:04.111955 84816 experiment_manager.go:39] Experiments refreshed after login
+I0521 12:18:04.112023 84816 manager.go:932] Reloading system slash commands
+I0521 12:18:05.873462 84816 input_loop.go:34] HandleUserInput called with text: "agy --conversation=9a788e4e-ad5e-46dc-972d-a27173112ec2"
+I0521 12:18:05.873496 84816 conversation_manager.go:316] Forwarding user message to conversation 9a788e4e-ad5e-46dc-972d-a27173112ec2 (items=1, media=0)
+I0521 12:18:05.873504 84816 server.go:1072] Sending user message to conversation 9a788e4e-ad5e-46dc-972d-a27173112ec2 (items=1, media=0)
+E0521 12:18:05.875603 84816 discovery.go:335] Failed to load JSON config file /Users/peytonmontei/.gemini/config/mcp_config.json: unexpected end of JSON input
+I0521 12:18:05.880731 84816 jsonhook.go:152] Loaded hooks.json from /tmp/agy-smoke/.agents/hooks.json: 1 named hooks, 5 total handlers
+I0521 12:18:05.883576 84816 json_hook_caller.go:144] JSON hook "jsonhook__entire_PreInvocation_0_0": executing command
+I0521 12:18:05.927399 84816 json_hook_caller.go:302] JSON hook command stderr: unknown agent "antigravity" (not found as built-in or external plugin)
+
+I0521 12:18:05.927560 84816 json_hook_caller.go:144] JSON hook "jsonhook__entire_Stop_0_0": executing command
+I0521 12:18:05.966761 84816 json_hook_caller.go:302] JSON hook command stderr: unknown agent "antigravity" (not found as built-in or external plugin)
+
+E0521 12:18:05.967061 84816 log.go:398] agent executor error: failed to call custom hook jsonhook__entire_PreInvocation_0_0: JSON hook "jsonhook__entire_PreInvocation_0_0" command failed: command failed: exit status 1, stderr: unknown agent "antigravity" (not found as built-in or external plugin)
+E0521 12:18:05.967647 84816 log.go:398] failed to call custom hook jsonhook__entire_PreInvocation_0_0: JSON hook "jsonhook__entire_PreInvocation_0_0" command failed: command failed: exit status 1, stderr: unknown agent "antigravity" (not found as built-in or external plugin)
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> cp /tmp/entire-smoke /Users/peytonmontei/.local/share/mise/installs/go/1.26.2/bin/entire
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> which entire
+/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/opf-prepush/entire
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> entire version
+Entire CLI dev (unknown)
+Go version: go1.26.2
+OS/Arch: darwin/arm64
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> which entire
+/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/opf-prepush/entire
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> entire version
+Entire CLI dev (unknown)
+Go version: go1.26.2
+OS/Arch: darwin/arm64
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> entire hooks antigravity --help
+Antigravity CLI - Google's agentic coding CLI (Gemini CLI successor) hook handlers
+
+Usage:
+
+Flags:
+  -h, --help   help for antigravity
+
+---
+
+i got the same thing, peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> cd /tmp/agy-smoke
+                                                      agy
+
+Resume with:
+  agy --conversation=4d2b9e05-fbdf-471c-a939-3bf92e90650c
+  agy -c
+
+
+      ▄▀▀▄        Antigravity CLI 1.0.0
+     ▀▀▀▀▀▀       peyton@entire.io
+    ▀▀▀▀▀▀▀▀      Gemini 3.5 Flash (High)
+   ▄▀▀    ▀▀▄     /tmp/agy-smoke
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> create a file called hello.txt with the text "world"
+
+● Create(/tmp/agy-smoke/hello.txt) (ctrl+o to expand)
+
+⚠ Agent execution terminated due to error.
+
+──────────────────────────────────────────────────────────────────────
+>
+──────────────────────────────────────────────────────────────────────
+
+Resume: agy --conversation=4d2b9e05-fbdf-471c-a939-3bf92e90650c (or -c) and the formatting is odd, i still don't see the this session,conversation or whatever is tracked by entire like the other agents. but i also think the error is a sign in error but i don't know what command in anitgravity it si to fix
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> tail -80 ~/.gemini/antigravity-cli/cli.log
+W0521 12:33:06.325211 87986 launchmanager.go:68] Entering local chrome mode! This is WRONG unless you are running tests or in eval mode on Linux.
+E0521 12:33:06.328842 87986 log.go:398] Failed to poll ListExperiments: error getting token source: You are not logged into Antigravity.
+W0521 12:33:06.329182 87986 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+W0521 12:33:06.329221 87986 log_context.go:117] Cache(availableModels): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0521 12:33:06.329263 87986 log.go:398] Failed to poll FetchAvailableModels: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+I0521 12:33:06.329853 87986 server.go:2240] Auth succeeded, refreshing features and managers
+E0521 12:33:06.329890 87986 log.go:398] Failed to poll ListExperiments: error getting token source: You are not logged into Antigravity.
+W0521 12:33:06.329995 87986 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+W0521 12:33:06.330004 87986 log_context.go:117] Cache(availableModels): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0521 12:33:06.330018 87986 log.go:398] Failed to poll FetchAvailableModels: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+I0521 12:33:06.330128 87986 server.go:2246] State refresh took 0ms
+I0521 12:33:06.333147 87986 server.go:1904] initialized server successfully in 243.71725ms
+W0521 12:33:06.333427 87986 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+W0521 12:33:06.333443 87986 log_context.go:117] Cache(userInfo): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0521 12:33:06.333453 87986 server.go:604] Failed to get OAuth token: error getting token source from auth provider: You are not logged into Antigravity.
+W0521 12:33:06.333465 87986 client.go:81] failed to set auth token
+I0521 12:33:06.334642 87986 auto_updater.go:253] Spawned background update process with PID 87989
+I0521 12:33:06.334727 87986 common.go:103] Launching CLI mode
+I0521 12:33:06.335086 87986 project.go:64] project: discovered project "/tmp/agy-smoke" (id=bd77b549-43df-4dcb-8916-7914cac459cc) via /tmp/agy-smoke/.antigravitycli
+I0521 12:33:06.335094 87986 common.go:156] project: using project "/tmp/agy-smoke" (id=bd77b549-43df-4dcb-8916-7914cac459cc) at /Users/peytonmontei/.gemini/config/projects/bd77b549-43df-4dcb-8916-7914cac459cc.json
+E0521 12:33:06.335108 87986 common.go:188] Failed to resolve GeminiDir ".gemini": .gemini must be an absolute path: path is not absolute, falling back to default
+I0521 12:33:06.335117 87986 common.go:197] CLI app data directory: /Users/peytonmontei/.gemini/antigravity-cli
+I0521 12:33:06.335125 87986 server.go:200] Creating CLI server backend: product=antigravity workspaceDirs=[] appDataDir=/Users/peytonmontei/.gemini/antigravity-cli cascadeManager=true codeAssist=true
+I0521 12:33:06.335156 87986 manager.go:249] Initializing CLI store manager for workspace /tmp/agy-smoke
+E0521 12:33:06.335821 87986 cli_setting_manager.go:350] failed to propagate telemetry setting: error getting token source: You are not logged into Antigravity.
+I0521 12:33:06.335834 87986 cli_setting_manager.go:65] CLI settings initialized: permissions=<nil>, toolPermission=request-review
+W0521 12:33:06.335877 87986 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+W0521 12:33:06.335887 87986 log_context.go:117] Cache(availableModels): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0521 12:33:06.335893 87986 server.go:392] failed to get model config: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+W0521 12:33:06.336024 87986 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+W0521 12:33:06.336046 87986 log_context.go:117] Cache(userInfo): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+I0521 12:33:06.336061 87986 manager.go:313] CLI store manager initialized successfully
+I0521 12:33:06.336073 87986 common.go:312] CLI store manager created successfully
+E0521 12:33:06.336074 87986 server.go:604] Failed to get OAuth token: error getting token source from auth provider: You are not logged into Antigravity.
+W0521 12:33:06.336113 87986 client.go:81] failed to set auth token
+I0521 12:33:06.337442 87986 common.go:402] Starting CLI program
+CLI ready for user input (startup took 2.704791ms)
+ERROR: logging before google.Init: I0521 12:33:06.339841      70 terminal_info_manager.go:160] Terminal detection: TERM="xterm-ghostty" altScreen=true ssh=false
+I0521 12:33:06.340825 87986 gemini_extensions.go:28] Detecting Gemini extensions in /Users/peytonmontei/.gemini/extensions
+I0521 12:33:06.340854 87986 gemini_extensions.go:49] No extensions found
+I0521 12:33:06.390369 87986 manager.go:543] Full redraw completed (rerenderAll) for conversation  (epoch 0, items 1)
+I0521 12:33:06.504355 87986 auth.go:114] ChainedAuth: authenticated via keyring (effective: keyring)
+I0521 12:33:07.073028 87986 http_helpers.go:178] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist Trace: 0x1675bd885c8d5a91
+I0521 12:33:07.386960 87986 http_helpers.go:178] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist Trace: 0x5f9208eb91b6c362
+I0521 12:33:07.712290 87986 http_helpers.go:178] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels Trace: 0xe36ac1dc0ce6d80c
+I0521 12:33:07.712982 87986 model_config_manager.go:157] Propagating selected model override to backend: label="Gemini 3.5 Flash (High)"
+I0521 12:33:07.713009 87986 input_loop.go:493] Auth done received, triggering experiment refresh
+I0521 12:33:07.713024 87986 experiment_manager.go:35] Starting experiment refresh after login
+I0521 12:33:07.943133 87986 experiment_manager.go:39] Experiments refreshed after login
+I0521 12:33:07.943209 87986 manager.go:932] Reloading system slash commands
+I0521 12:33:12.315369 87986 input_loop.go:34] HandleUserInput called with text: "create a file called hello.txt with the text \"world\""
+I0521 12:33:12.315407 87986 conversation_manager.go:279] Starting new conversation (agent=false)
+I0521 12:33:12.315416 87986 server.go:718] Creating new cascade trajectory (agentScript=false)
+I0521 12:33:12.315422 87986 server.go:726] Conversation using project ID: bd77b549-43df-4dcb-8916-7914cac459cc
+I0521 12:33:12.315818 87986 server.go:747] Created conversation 4d2b9e05-fbdf-471c-a939-3bf92e90650c
+I0521 12:33:12.315967 87986 conversation_manager.go:373] Streaming conversation 4d2b9e05-fbdf-471c-a939-3bf92e90650c
+I0521 12:33:12.316095 87986 server.go:766] Starting conversation update stream for 4d2b9e05-fbdf-471c-a939-3bf92e90650c
+I0521 12:33:12.316107 87986 conversation_manager.go:316] Forwarding user message to conversation 4d2b9e05-fbdf-471c-a939-3bf92e90650c (items=1, media=0)
+I0521 12:33:12.316113 87986 server.go:1072] Sending user message to conversation 4d2b9e05-fbdf-471c-a939-3bf92e90650c (items=1, media=0)
+E0521 12:33:12.319607 87986 discovery.go:335] Failed to load JSON config file /Users/peytonmontei/.gemini/config/mcp_config.json: unexpected end of JSON input
+I0521 12:33:12.323638 87986 jsonhook.go:152] Loaded hooks.json from /tmp/agy-smoke/.agents/hooks.json: 1 named hooks, 5 total handlers
+I0521 12:33:12.326464 87986 json_hook_caller.go:144] JSON hook "jsonhook__entire_PreInvocation_0_0": executing command
+I0521 12:33:12.507689 87986 json_hook_caller.go:144] JSON hook "jsonhook__entire_PostToolUse_0_0": executing command
+I0521 12:33:13.790115 87986 http_helpers.go:178] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0x5c4ac041a226c0ce
+I0521 12:33:13.816472 87986 json_hook_caller.go:144] JSON hook "jsonhook__entire_PreToolUse_0_0": executing command
+I0521 12:33:13.865847 87986 tool_confirmation_manager.go:77] Surfacing tool confirmation: "Edit" at step 3
+I0521 12:33:15.303192 87986 input_loop.go:430] Responding to tool confirmation: convID=4d2b9e05-fbdf-471c-a939-3bf92e90650c, stepIdx=3, approved=true, sandboxOverride=false, turnGrants=[]
+I0521 12:33:15.303240 87986 server.go:1515] Tool confirmation for conversation 4d2b9e05-fbdf-471c-a939-3bf92e90650c step 3 (type=*gemini_coder_go_proto.Step_CodeAction approved=true)
+I0521 12:33:15.304501 87986 json_hook_caller.go:144] JSON hook "jsonhook__entire_PostToolUse_0_0": executing command
+I0521 12:33:15.349475 87986 json_hook_caller.go:144] JSON hook "jsonhook__entire_PostInvocation_0_0": executing command
+I0521 12:33:15.400091 87986 json_hook_caller.go:302] JSON hook command stderr: transcript file not found: /Users/peytonmontei/.gemini/antigravity-cli/brain/4d2b9e05-fbdf-471c-a939-3bf92e90650c/.system_generated/logs/transcript.jsonl
+
+I0521 12:33:15.400315 87986 json_hook_caller.go:144] JSON hook "jsonhook__entire_Stop_0_0": executing command
+E0521 12:33:15.462593 87986 log.go:398] agent executor error: failed to call custom hook jsonhook__entire_PostInvocation_0_0: JSON hook "jsonhook__entire_PostInvocation_0_0" command failed: command failed: exit status 1, stderr: transcript file not found: /Users/peytonmontei/.gemini/antigravity-cli/brain/4d2b9e05-fbdf-471c-a939-3bf92e90650c/.system_generated/logs/transcript.jsonl
+E0521 12:33:15.463077 87986 log.go:398] failed to call custom hook jsonhook__entire_PostInvocation_0_0: JSON hook "jsonhook__entire_PostInvocation_0_0" command failed: command failed: exit status 1, stderr: transcript file not found: /Users/peytonmontei/.gemini/antigravity-cli/brain/4d2b9e05-fbdf-471c-a939-3bf92e90650c/.system_generated/logs/transcript.jsonl
+
+I0521 12:33:32.164315 87986 common.go:407] CLI program exited, shutting down
+I0521 12:33:32.164566 87986 manager.go:451] CLI store manager shutting down
+I0521 12:33:32.165480 87986 conversation_manager.go:341] Stopping conversation stream
+I0521 12:33:32.165739 87986 server.go:2152] Language server shutting down
+
+---
+
+so did the hooks not work, or was i not signed in? or what happened

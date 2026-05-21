@@ -5,10 +5,7 @@
   "branch": "feat/antigravity-agent",
   "checkpoints_count": 1,
   "files_touched": [
-    "cmd/entire/cli/agent/antigravity/antigravity.go",
-    "cmd/entire/cli/agent/antigravity/antigravity_test.go",
-    "e2e/agents/antigravity.go",
-    "e2e/agents/antigravity_test.go"
+    "cmd/entire/cli/integration_test/antigravity_test.go"
   ],
   "sessions": [
     {
@@ -19,10 +16,10 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 6221,
-    "cache_creation_tokens": 1742382,
-    "cache_read_tokens": 88964945,
-    "output_tokens": 289558,
-    "api_call_count": 219
+    "input_tokens": 6345,
+    "cache_creation_tokens": 2446144,
+    "cache_read_tokens": 124186820,
+    "output_tokens": 346038,
+    "api_call_count": 274
   }
 }
