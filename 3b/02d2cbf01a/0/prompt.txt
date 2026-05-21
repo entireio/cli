@@ -1,0 +1,222 @@
+can you check and see if entire's hook config for gemini will work automatically with antigravity cli because per the docs, Hooks are configured in a hooks.json file located in your customization directory (e.g., .agents/ in your workspace or ~/.gemini/config/), here https://antigravity.google/docs/hooks so check on this and if not, can we do shared config for gemini and antigravity
+
+---
+
+review this, - Transcript Analysis: Implement JSONL parsing (shared with `claudecode` or new) and `SubagentAwareExtractor` for tracking subagent tasks.
+- Session Discovery: Look in `~/.gemini/tmp/` for transcripts (likely JSONL format).
+
+### [CLI Commands]
+
+#### [MODIFY] [hooks_cmd.go](file:///Users/peytonmontei/Documents/entire/devenv/entireio/cli/cmd/entire/cli/hooks_cmd.go)
+Add a blank import for the new `antigravity` agent to ensure it's registered.
+
+## Verification Plan
+
+### Automated Tests
+- `go test ./cmd/entire/cli/agent/antigravity/...`: Verify hook installation and transcript parsing.
+- `go test ./cmd/entire/cli/agent/geminicli/...`: Ensure no regressions for existing Gemini CLI users.
+
+### Manual Verification
+- Run `entire agent add antigravity` and verify hooks are written to `~/.gemini/config/settings.json`.
+- Start an Antigravity session and verify it appears in `entire status`.
+- Make changes with Antigravity and verify `entire` saves checkpoints.
+(END)
+
+---
+
+yes use /superpowers:writing-plans for this plan, but first check latest in cli main and github to make sure no one is working on this yet
+
+---
+
+can you give me full path
+
+---
+
+are all the new files you mentioned consistent with the other agents?
+
+---
+
+yes please
+
+---
+
+okay looks pretty good, we'll need to test every cli command/capability with antigravity too. do you have this?
+
+---
+
+ready
+
+---
+
+ready, make sure you create a new branch adn have latest main
+
+---
+
+either
+
+---
+
+did we do all necessary tests for chunk 1
+
+---
+
+we don't need to add a ton of tests, unless we really are missing coverage, but also like you just run individual smoke tests
+
+---
+
+it's actually agy to open cli peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/cli (feat/antigravity-agent) [123]> ! agy --help 2>&1 | head -40
+Usage of agy:
+  --add-dir                       Add a directory to the workspace (repeatable) (default [])
+  -c                              Short alias for --continue
+  --continue                      Continue the most recent conversation
+  --conversation                  Resume a previous conversation by ID
+  --dangerously-skip-permissions  Auto-approve all tool permission requests without prompting
+  -i                              Short alias for --prompt-interactive
+  --log-file                      Override CLI log file path
+  -p                              Short alias for --print
+  --print                         Run a single prompt non-interactively and print the response
+  --print-timeout                 Timeout for print mode wait (default 5m0s)
+  --prompt                        Alias for --print
+  --prompt-interactive            Run an initial prompt interactively and continue the session
+  --sandbox                       Run in a sandbox with terminal restrictions enabled
+
+Available subcommands:
+  changelog       Show changelog and release notes
+  help            Show help for subcommands
+  install         Configure environment paths and shell settings
+  plugin          Manage plugins (install, uninstall, list, enable, disable)
+  plugins         Alias for plugin
+  update          Update CLI
+peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/cli (feat/antigravit
+
+---
+
+this took a while, peytonmontei@Peytons-MacBook-Pro ~/D/e/d/e/cli (feat/antigravity-agent) [0|0] 1> mkdir -p /tmp/agy-fixture-repo
+                                                                                 cd /tmp/agy-fixture-repo
+                                                                                 git init -q
+                                                                                 echo "hello" > a.txt
+                                                                                 git add . && git commit -m init -q
+                                                                                 ! agy --print "read a.txt and tell me what it says, then exit"
+
+^CError: timed out waiting for response
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-fixture-repo (main) [0] 1> ls -la ~/.gemini/ 2>&1 | head -20
+                                                                   ls -la ~/.gemini/config/ 2>&1 | head -10
+                                                                   ls -la ~/.antigravity/ 2>&1 | head -10
+total 568
+drwxr-xr-x@  15 peytonmontei  staff     480 May 19 15:23 .
+drwxr-x---+  68 peytonmontei  staff    2176 May 20 19:47 ..
+drwxr-xr-x@  17 peytonmontei  staff     544 May 20 19:46 antigravity-cli
+drwxr-xr-x@   5 peytonmontei  staff     160 May 19 15:23 config
+-rw-r--r--@   1 peytonmontei  staff      47 Mar  2 15:57 google_accounts.json
+drwxr-xr-x@ 119 peytonmontei  staff    3808 May 15 16:42 history
+-rw-r--r--@   1 peytonmontei  staff      36 Jan  8 18:55 installation_id
+-rw-------@   1 peytonmontei  staff    1673 May 19 14:55 oauth_creds.json
+-rw-r--r--@   1 peytonmontei  staff   11761 May 15 16:42 projects.json
+-rw-r--r--@   1 peytonmontei  staff     123 Mar  2 15:57 settings.json
+-rw-r--r--@   1 peytonmontei  staff     120 Jan  9 17:58 settings.json.orig
+-rw-r--r--@   1 peytonmontei  staff     263 Apr 22 15:11 state.json
+drwxr-xr-x@ 321 peytonmontei  staff   10272 May 15 16:42 tmp
+-rw-r--r--@   1 peytonmontei  staff  249785 May 15 16:42 trusted_hooks.json
+-rw-------@   1 peytonmontei  staff     734 Apr 22 15:09 trustedFolders.json
+total 0
+drwxr-xr-x@  5 peytonmontei  staff  160 May 19 15:23 .
+drwxr-xr-x@ 15 peytonmontei  staff  480 May 19 15:23 ..
+-rw-r--r--@  1 peytonmontei  staff    0 May 19 15:23 .migrated
+-rw-r--r--@  1 peytonmontei  staff    0 May 19 15:23 mcp_config.json
+drwxr-xr-x@  4 peytonmontei  staff  128 May 20 19:46 projects
+ls: /Users/peytonmontei/.antigravity/: No such file or directory
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-fixture-repo (main)> ls -la ~/.gemini/antigravity-cli/ 2>&1
+                                                             find ~/.gemini/antigravity-cli/ -name 'transcript*' -o -name '*.jsonl' -o -name 'conversation*' 2>/dev/null | head -20
+total 32
+drwxr-xr-x@ 17 peytonmontei  staff   544 May 20 19:46 ./
+drwxr-xr-x@ 15 peytonmontei  staff   480 May 19 15:23 ../
+drwxr-xr-x@  4 peytonmontei  staff   128 May 19 15:27 bin/
+drwxr-xr-x@  5 peytonmontei  staff   160 May 20 19:46 brain/
+drwxr-xr-x@  4 peytonmontei  staff   128 May 20 19:46 cache/
+lrwxr-xr-x@  1 peytonmontei  staff    27 May 20 19:46 cli.log@ -> log/cli-20260520_194628.log
+drwxr-xr-x@  5 peytonmontei  staff   160 May 20 19:46 conversations/
+-rw-------@  1 peytonmontei  staff  1536 May 19 15:40 history.jsonl
+drwxr-xr-x@  4 peytonmontei  staff   128 May 20 19:44 implicit/
+-rw-r--r--@  1 peytonmontei  staff    36 May 19 15:23 installation_id
+-rw-------@  1 peytonmontei  staff   798 May 19 15:23 keybindings.json
+drwxr-xr-x@  3 peytonmontei  staff    96 May 19 15:23 knowledge/
+-rw-r--r--@  1 peytonmontei  staff     0 May 20 19:46 last_check.timestamp
+drwxr-xr-x@  4 peytonmontei  staff   128 May 20 19:46 log/
+drwxr-xr-x@  2 peytonmontei  staff    64 May 20 19:46 scratch/
+-rw-------@  1 peytonmontei  staff   131 May 19 15:24 settings.json
+drwxr-xr-x@  3 peytonmontei  staff    96 May 19 15:23 updater/
+/Users/peytonmontei/.gemini/antigravity-cli/conversations
+/Users/peytonmontei/.gemini/antigravity-cli/brain/fd874856-8453-4f63-be51-35196f6d87f5/.system_generated/logs/transcript.jsonl
+/Users/peytonmontei/.gemini/antigravity-cli/brain/f0e8c19f-c153-46ad-a4cb-c1cd5826cae0/.system_generated/logs/transcript.jsonl
+/Users/peytonmontei/.gemini/antigravity-cli/brain/ddece68e-3392-4f0d-bee0-937196633638/.system_generated/logs/transcript.jsonl
+/Users/peytonmontei/.gemini/antigravity-cli/history.jsonl
+
+---
+
+m_generated/logs/transcript.jsonl 2>/dev/null | head -1)
+                                                             echo "Most recent transcript: $newest"
+                                                             wc -l $newest
+                                                             echo "---first 3 lines---"
+                                                             head -3 $newest | jq . 2>&1 | head -60
+                                                             echo "---"
+                                                             echo "---last line (may have final state)---"
+                                                             tail -1 $newest | jq . 2>&1 | head -40
+Most recent transcript: /Users/peytonmontei/.gemini/antigravity-cli/brain/fd874856-8453-4f63-be51-35196f6d87f5/.system_generated/logs/transcript.jsonl
+      13 /Users/peytonmontei/.gemini/antigravity-cli/brain/fd874856-8453-4f63-be51-35196f6d87f5/.system_generated/logs/transcript.jsonl
+---first 3 lines---
+{
+  "step_index": 0,
+  "source": "USER_EXPLICIT",
+  "type": "USER_INPUT",
+  "status": "DONE",
+  "created_at": "2026-05-20T23:46:29Z",
+  "content": "<USER_REQUEST>\nread a.txt and tell me what it says, then exit\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-05-20T19:46:29-04:00.\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 3.5 Flash (High). No need to comment on this change if the user doesn't ask about it. If reporting what model you are, please use a human readable name instead of the exact string.\n</USER_SETTINGS_CHANGE>"
+}
+{
+  "step_index": 1,
+  "source": "SYSTEM",
+  "type": "CONVERSATION_HISTORY",
+  "status": "DONE",
+  "created_at": "2026-05-20T23:46:29Z"
+}
+{
+  "step_index": 2,
+  "source": "MODEL",
+  "type": "PLANNER_RESPONSE",
+  "status": "DONE",
+  "created_at": "2026-05-20T23:46:29Z",
+  "tool_calls": [
+    {
+      "name": "list_dir",
+      "args": {
+        "DirectoryPath": "\"/Users/peytonmontei/.gemini/antigravity-cli/scratch\"",
+        "toolAction": "\"Listing the scratch directory\"",
+        "toolSummary": "\"Directory listing\""
+      }
+    }
+  ]
+}
+---
+---last line (may have final state)---
+{
+  "step_index": 13,
+  "source": "MODEL",
+  "type": "PLANNER_RESPONSE",
+  "status": "DONE",
+  "created_at": "2026-05-20T23:46:39Z",
+  "content": "An asynchronous background search has been started to locate `a.txt` on your filesystem. I will wait for it to complete."
+}
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-fixture-repo (main)> cp /Users/peytonmontei/.gemini/antigravity-cli/brain/fd874856-8453-4f63-be51-35196f6d87f5/.system_generated/logs/transcript.jsonl /Users/peytonmontei/Documents/entire/devenv/entireio/cli/cmd/entire/cli/agent/antigravity/testdata/transcript_sample.jsonl
+                                                             echo "copied:"
+                                                             wc -l /Users/peytonmontei/Documents/entire/devenv/entireio/cli/cmd/entire/cli/agent/antigravity/testdata/transcript_sample.jsonl
+copied:
+      13 /Users/peytonmontei/Documents/entire/devenv/entireio/cli/cmd/entire/cli/agent/antigravity/testdata/transcript_sample.jsonl
