@@ -2,7 +2,6 @@ package antigravity
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -34,7 +33,7 @@ func TestAgent_Registered(t *testing.T) {
 }
 
 func TestDetectPresence(t *testing.T) {
-	t.Run("no antigravity directories", func(t *testing.T) {
+	t.Run("no hooks installed", func(t *testing.T) {
 		tempDir := t.TempDir()
 		t.Chdir(tempDir)
 
@@ -48,20 +47,20 @@ func TestDetectPresence(t *testing.T) {
 		}
 	})
 
-	t.Run("with .agents directory", func(t *testing.T) {
+	t.Run("hooks installed", func(t *testing.T) {
 		tempDir := t.TempDir()
 		t.Chdir(tempDir)
-		if err := os.Mkdir(".agents", 0o755); err != nil {
-			t.Fatalf("failed to create .agents: %v", err)
-		}
 
 		ag := &AntigravityAgent{}
+		if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+			t.Fatalf("InstallHooks: %v", err)
+		}
 		present, err := ag.DetectPresence(context.Background())
 		if err != nil {
 			t.Fatalf("DetectPresence() error = %v", err)
 		}
 		if !present {
-			t.Error("DetectPresence() = false, want true")
+			t.Error("DetectPresence() = false, want true after InstallHooks")
 		}
 	})
 }

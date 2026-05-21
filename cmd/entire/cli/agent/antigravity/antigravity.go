@@ -4,12 +4,9 @@ package antigravity
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -38,19 +35,12 @@ func (a *AntigravityAgent) Description() string {
 }
 func (a *AntigravityAgent) IsPreview() bool { return true }
 
-// DetectPresence reports whether Antigravity hooks are configured for this
-// workspace. Antigravity 2.0 stores runtime data in ~/.gemini/antigravity-cli/
-// (user-scope, not workspace-scope), so the only reliable per-workspace signal
-// is the .agents/ hooks directory we manage.
+// DetectPresence reports whether Entire's Antigravity hooks are configured for
+// this workspace. Antigravity 2.0 stores runtime data user-scope in
+// ~/.gemini/antigravity-cli/, so the only meaningful workspace-level signal is
+// whether our entry exists in .agents/hooks.json.
 func (a *AntigravityAgent) DetectPresence(ctx context.Context) (bool, error) {
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		repoRoot = "."
-	}
-	if _, err := os.Stat(filepath.Join(repoRoot, ".agents")); err == nil {
-		return true, nil
-	}
-	return false, nil
+	return a.AreHooksInstalled(ctx), nil
 }
 
 func (a *AntigravityAgent) ProtectedDirs() []string { return []string{".agents", ".gemini"} }

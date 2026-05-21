@@ -74,7 +74,7 @@ func TestAntigravity_FullEventFlow(t *testing.T) {
 		"initialNumSteps": 2,
 	})
 	require.NoError(t, runAntigravityHook(t, env.RepoDir, "post-invocation", postInv),
-		"post-invocation hook should emit TurnEnd")
+		"post-invocation hook should be a no-op (Antigravity writes its transcript after Stop, so emitting TurnEnd here would fail with transcript-not-found)")
 
 	stopBackgroundActive := mergeMaps(common, map[string]any{
 		"executionNum":      1,
