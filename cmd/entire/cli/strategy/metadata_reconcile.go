@@ -522,7 +522,8 @@ func loadShallowHashes(ctx context.Context, repoPath string) (map[plumbing.Hash]
 	if !filepath.IsAbs(gitDir) {
 		gitDir = filepath.Join(repoPath, gitDir)
 	}
-	data, err := os.ReadFile(filepath.Join(gitDir, "shallow"))
+	// Path is constructed from git's own --git-common-dir output, not user input.
+	data, err := os.ReadFile(filepath.Join(gitDir, "shallow")) //nolint:gosec // see comment above
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return map[plumbing.Hash]bool{}, nil

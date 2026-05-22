@@ -331,9 +331,21 @@ func isShallowRepository(ctx context.Context, dir string) bool {
 
 func fetchWorkingDir(dir string) (string, error) {
 	if dir != "" {
-		return filepath.Abs(dir)
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return "", fmt.Errorf("resolve absolute path for %q: %w", dir, err)
+		}
+		return abs, nil
 	}
-	return os.Getwd()
+	// Falling back to os.Getwd is intentional: the caller passed an empty Dir,
+	// meaning "use the inherited working directory of the git invocation".
+	// paths.RepoRoot() would impose a worktree-relative resolution that isn't
+	// always correct for fetch helpers called outside a repo context (tests).
+	cwd, err := os.Getwd() //nolint:forbidigo // see comment above
+	if err != nil {
+		return "", fmt.Errorf("get working dir: %w", err)
+	}
+	return cwd, nil
 }
 
 func isShallowRepositoryInDir(ctx context.Context, dir string) (bool, error) {
