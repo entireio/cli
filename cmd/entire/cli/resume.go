@@ -456,35 +456,26 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 		)
 	}
 
-	// Fetch first so the local lookup below doesn't return stale data when a
-	// collaborator pushed new checkpoints since our last fetch. Tree-only when
-	// filtered_fetches is on (cheaper); full fetch otherwise (tree-only would
-	// degenerate into a full fetch anyway).
-	firstFetch, firstFetchLabel := FetchMetadataTreeOnly, "treeless-fetch"
-	if !settings.IsFilteredFetchesEnabled(ctx) {
-		firstFetch, firstFetchLabel = FetchMetadataBranch, "full-fetch"
-	}
-	if fetchErr := firstFetch(ctx); fetchErr == nil {
+	// Tip-only fetch (--depth=1) is cheap and always runs so the local lookup
+	// below doesn't return stale data.
+	if fetchErr := FetchMetadataTreeOnly(ctx); fetchErr == nil {
 		freshRepo, repoErr := openRepository(ctx)
 		if repoErr == nil {
-			logRefHash(freshRepo, firstFetchLabel)
+			logRefHash(freshRepo, "treeless-fetch")
 			metadataTree, treeErr := strategy.GetMetadataBranchTree(freshRepo)
 			if treeErr == nil {
-				logging.Debug(logCtx, "metadata tree obtained via first-attempt fetch",
+				logging.Debug(logCtx, "metadata tree obtained via treeless fetch",
 					slog.String("tree_hash", metadataTree.Hash.String()),
-					slog.String("label", firstFetchLabel),
 				)
 				return metadataTree, freshRepo, nil
 			}
-			logging.Debug(logCtx, "first-attempt fetch succeeded but tree read failed",
+			logging.Debug(logCtx, "treeless fetch succeeded but tree read failed",
 				slog.String("error", treeErr.Error()),
-				slog.String("label", firstFetchLabel),
 			)
 		}
 	} else {
-		logging.Debug(logCtx, "first-attempt fetch failed, trying local",
+		logging.Debug(logCtx, "treeless fetch failed, trying local",
 			slog.String("error", fetchErr.Error()),
-			slog.String("label", firstFetchLabel),
 		)
 	}
 
@@ -547,18 +538,7 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 // getV2MetadataTree resolves the v2 /main ref tree with the same
 // fetch fallback pattern as getMetadataTree, including checkpoint remote support.
 func getV2MetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error) {
-	// Fetch first so the local lookup doesn't return stale data. When
-	// filtered_fetches is off, use the full fetch directly (tree-only would
-	// degenerate into the same call) and pass nil as the fallback to avoid a
-	// duplicate round-trip.
-	firstFetch := checkpoint.FetchRefFunc(FetchV2MainTreeOnly)
-	secondFetch := checkpoint.FetchRefFunc(FetchV2MainRef)
-	if !settings.IsFilteredFetchesEnabled(ctx) {
-		firstFetch = FetchV2MainRef
-		secondFetch = nil
-	}
-
-	tree, repo, err := checkpoint.GetV2MetadataTree(ctx, firstFetch, secondFetch, openRepository)
+	tree, repo, err := checkpoint.GetV2MetadataTree(ctx, FetchV2MainTreeOnly, FetchV2MainRef, openRepository)
 	if err == nil {
 		return tree, repo, nil
 	}

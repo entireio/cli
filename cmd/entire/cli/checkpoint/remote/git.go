@@ -29,21 +29,28 @@ var sshTokenWarningOnce sync.Once //nolint:gochecknoglobals // intentional per-p
 
 // FetchOptions configures a git fetch operation.
 type FetchOptions struct {
-	Remote    string   // remote name or URL (required)
-	RefSpecs  []string // one or more refspecs / object hashes
-	NoTags    bool     // adds --no-tags
-	NoFilter  bool     // when true, skips --filter=blob:none even if filtered fetches are enabled
+	Remote   string   // remote name or URL (required)
+	RefSpecs []string // one or more refspecs / object hashes
+	NoTags   bool     // adds --no-tags
+	NoFilter bool     // when true, skips --filter=blob:none even if filtered fetches are enabled
+	// Shallow adds --depth=1 to fetch only the tip commit and its tree. Use
+	// for tip-only probes (e.g. resolving the latest checkpoint metadata)
+	// where ancestry isn't needed. Creates .git/shallow state — callers that
+	// later require full history should opt into Unshallow on a follow-up
+	// fetch.
+	Shallow bool
+	// Unshallow adds --unshallow when the repository is currently shallow,
+	// triggering git to download the rest of the history for the fetched ref.
+	// Set this on metadata-repair / reconcile paths that need complete
+	// checkpoint ancestry. Do not set on generic branch fetches — it would
+	// silently convert a deliberately-shallow user clone into a full one.
+	Unshallow bool
 	Dir       string   // working directory (empty = CWD)
 	ExtraArgs []string // additional flags before remote (e.g., "--no-write-fetch-head")
 }
 
 // Fetch runs git fetch with checkpoint token injection and optional
 // filtered fetches (--filter=blob:none when settings enable it).
-// When the repository is shallow, Fetch also adds --unshallow. This migrates
-// users away from any shallow checkpoint history (whether produced by an old
-// CLI --depth=1 fetch or by an unrelated tool) because the reconcile and
-// rebase paths walk parent chains via go-git, which ignores .git/shallow and
-// would otherwise traverse stale objects past the shallow boundary.
 // GIT_TERMINAL_PROMPT=0 is always set.
 //
 // Callers that pass a remote name (e.g., "origin") and want filtered fetches to
@@ -55,10 +62,10 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 		args = append(args, "--no-tags")
 	}
 	args = append(args, opts.ExtraArgs...)
-	if isShallowRepository(ctx, opts.Dir) {
-		// Unshallow whenever the repo is shallow so commands that rely on
-		// checkpoint ancestry/history can operate correctly, regardless of
-		// how the shallow state was introduced.
+	switch {
+	case opts.Shallow:
+		args = append(args, "--depth=1")
+	case opts.Unshallow && isShallowRepository(ctx, opts.Dir):
 		args = append(args, "--unshallow")
 	}
 	if !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx) {

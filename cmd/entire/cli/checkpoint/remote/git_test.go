@@ -257,36 +257,71 @@ func TestResolveFetchTarget(t *testing.T) {
 	})
 }
 
-func TestFetch_UnshallowsShallowRepository(t *testing.T) {
+func TestFetch_Unshallow(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		name             string
-		settingsContents string
-	}{
-		{"filtered_fetches enabled", `{"enabled": true, "strategy_options": {"filtered_fetches": true}}`},
-		{"filtered_fetches disabled", `{"enabled": true}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ctx := context.Background()
+	t.Run("Unshallow=true deepens a shallow repo", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
 
-			bareDir, cloneDir := setupShallowClone(ctx, t)
-			testutil.WriteFile(t, cloneDir, ".entire/settings.json", tc.settingsContents)
-			require.True(t, isShallowRepository(ctx, cloneDir), "test setup should produce a shallow repo")
+		bareDir, cloneDir := setupShallowClone(ctx, t)
+		require.True(t, isShallowRepository(ctx, cloneDir), "test setup should produce a shallow repo")
 
-			_, err := Fetch(ctx, FetchOptions{
-				Remote:   "file://" + bareDir,
-				RefSpecs: []string{"+refs/heads/main:refs/remotes/origin/main"},
-				NoTags:   true,
-				Dir:      cloneDir,
-			})
-			require.NoError(t, err)
-
-			assert.False(t, isShallowRepository(ctx, cloneDir),
-				"fetch should unshallow any shallow repository, regardless of filtered_fetches")
+		out, err := Fetch(ctx, FetchOptions{
+			Remote:    "file://" + bareDir,
+			RefSpecs:  []string{"+refs/heads/main:refs/remotes/origin/main"},
+			NoTags:    true,
+			Unshallow: true,
+			Dir:       cloneDir,
 		})
-	}
+		require.NoError(t, err, "fetch output: %s", out)
+
+		assert.False(t, isShallowRepository(ctx, cloneDir),
+			"Unshallow=true should remove shallow state when the repo is shallow")
+	})
+
+	t.Run("Unshallow=false leaves shallow state alone", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+
+		bareDir, cloneDir := setupShallowClone(ctx, t)
+		require.True(t, isShallowRepository(ctx, cloneDir))
+
+		out, err := Fetch(ctx, FetchOptions{
+			Remote:   "file://" + bareDir,
+			RefSpecs: []string{"+refs/heads/main:refs/remotes/origin/main"},
+			NoTags:   true,
+			Dir:      cloneDir,
+		})
+		require.NoError(t, err, "fetch output: %s", out)
+
+		assert.True(t, isShallowRepository(ctx, cloneDir),
+			"a fetch without Unshallow must not silently convert a shallow repo to a full one")
+	})
+}
+
+func TestFetch_Shallow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	bareDir, _ := setupShallowClone(ctx, t)
+	// Make a fresh non-shallow clone, then fetch with Shallow=true and check
+	// .git/shallow appears.
+	cloneDir := t.TempDir()
+	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+bareDir, cloneDir)
+	require.False(t, isShallowRepository(ctx, cloneDir), "fresh clone should not be shallow")
+
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   "file://" + bareDir,
+		RefSpecs: []string{"+refs/heads/main:refs/remotes/origin/main"},
+		NoTags:   true,
+		Shallow:  true,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	assert.True(t, isShallowRepository(ctx, cloneDir),
+		"Shallow=true should request --depth=1 and leave the repo shallow")
 }
 
 // setupShallowClone creates a bare origin, a seed repo with one commit pushed

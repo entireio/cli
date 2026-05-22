@@ -398,24 +398,28 @@ func FetchAndCheckoutRemoteBranch(ctx context.Context, branchName string) error 
 }
 
 // FetchMetadataBranch fetches the entire/checkpoints/v1 branch from origin and
-// creates/updates the local branch. The fetch is unfiltered (no --filter=blob:none)
-// because callers (resume, explain) need blob content, not just tree structure.
+// creates/updates the local branch with full ancestry. Unshallows the repo if
+// it was previously left shallow by a tip-only probe, so callers that need
+// history (reconcile, rebase) can operate on a complete chain.
 func FetchMetadataBranch(ctx context.Context) error {
-	return fetchMetadataFromOrigin(ctx, true /* noFilter */)
+	return fetchMetadataFromOrigin(ctx, fetchMetadataOpts{NoFilter: true, Unshallow: true})
 }
 
-// FetchMetadataTreeOnly fetches the entire/checkpoints/v1 branch from origin
-// without blobs. After this call, tree navigation via go-git works but blob
-// reads will fail for objects that weren't previously fetched.
+// FetchMetadataTreeOnly fetches just the tip of the entire/checkpoints/v1
+// branch (--depth=1). Used by resume/explain to resolve the latest checkpoint
+// cheaply without pulling the entire history. May leave .git/shallow set;
+// FetchMetadataBranch will undo that when full ancestry is later needed.
 func FetchMetadataTreeOnly(ctx context.Context) error {
-	return fetchMetadataFromOrigin(ctx, false /* noFilter */)
+	return fetchMetadataFromOrigin(ctx, fetchMetadataOpts{Shallow: true})
 }
 
-// fetchMetadataFromOrigin fetches the v1 metadata branch from origin into the
-// remote-tracking ref refs/remotes/origin/<branch>, then safely advances the
-// local branch to match. When noFilter is true, --filter=blob:none is suppressed
-// so blob content is included.
-func fetchMetadataFromOrigin(ctx context.Context, noFilter bool) error {
+type fetchMetadataOpts struct {
+	NoFilter  bool
+	Shallow   bool
+	Unshallow bool
+}
+
+func fetchMetadataFromOrigin(ctx context.Context, fopts fetchMetadataOpts) error {
 	branchName := paths.MetadataBranchName
 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -429,10 +433,12 @@ func fetchMetadataFromOrigin(ctx context.Context, noFilter bool) error {
 	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
 
 	output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refSpec},
-		NoTags:   true,
-		NoFilter: noFilter,
+		Remote:    fetchTarget,
+		RefSpecs:  []string{refSpec},
+		NoTags:    true,
+		NoFilter:  fopts.NoFilter,
+		Shallow:   fopts.Shallow,
+		Unshallow: fopts.Unshallow,
 	})
 	if fetchErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -456,23 +462,20 @@ func fetchMetadataFromOrigin(ctx context.Context, noFilter bool) error {
 	return nil
 }
 
-// FetchV2MainTreeOnly fetches the v2 /main ref from origin without blobs.
-// Uses explicit refspec since v2 refs are under refs/entire/, not refs/heads/.
+// FetchV2MainTreeOnly fetches just the tip of the v2 /main ref (--depth=1).
+// Cheap probe used by resume/explain; may leave .git/shallow set.
 func FetchV2MainTreeOnly(ctx context.Context) error {
-	return fetchV2MainFromOrigin(ctx, false /* noFilter */)
+	return fetchV2MainFromOrigin(ctx, fetchMetadataOpts{Shallow: true})
 }
 
-// FetchV2MainRef fetches the v2 /main ref from origin with full blob content.
-// The fetch is unfiltered so resume/explain can read metadata JSON blobs.
-// Uses explicit refspec since v2 refs are under refs/entire/, not refs/heads/.
+// FetchV2MainRef fetches the v2 /main ref from origin with full blob content
+// and unshallows the repo if it was previously left shallow by a tip-only
+// probe. Used by paths that need complete ancestry (reconcile, rebase).
 func FetchV2MainRef(ctx context.Context) error {
-	return fetchV2MainFromOrigin(ctx, true /* noFilter */)
+	return fetchV2MainFromOrigin(ctx, fetchMetadataOpts{NoFilter: true, Unshallow: true})
 }
 
-// fetchV2MainFromOrigin fetches the v2 /main ref from origin into the shared
-// staging ref, then promotes it via strategy.PromoteTmpRefSafely. When noFilter
-// is true, --filter=blob:none is suppressed.
-func fetchV2MainFromOrigin(ctx context.Context, noFilter bool) error {
+func fetchV2MainFromOrigin(ctx context.Context, fopts fetchMetadataOpts) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
@@ -484,10 +487,12 @@ func fetchV2MainFromOrigin(ctx context.Context, noFilter bool) error {
 	refSpec := fmt.Sprintf("+%s:%s", paths.V2MainRefName, strategy.V2MainFetchTmpRef)
 
 	output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refSpec},
-		NoTags:   true,
-		NoFilter: noFilter,
+		Remote:    fetchTarget,
+		RefSpecs:  []string{refSpec},
+		NoTags:    true,
+		NoFilter:  fopts.NoFilter,
+		Shallow:   fopts.Shallow,
+		Unshallow: fopts.Unshallow,
 	})
 	if fetchErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {

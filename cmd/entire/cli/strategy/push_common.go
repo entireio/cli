@@ -327,13 +327,14 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 	}
 
 	// Use git CLI for fetch (go-git's fetch can be tricky with auth).
-	// Use --filter=blob:none for a partial fetch that downloads only commits
-	// and trees, skipping blobs. The merge only needs the tree structure to
-	// combine entries; blobs are already local or fetched on demand.
+	// Unshallow when needed so merge-base and ancestry walks see the real
+	// shared history rather than the local shallow view, which would
+	// otherwise misread a healthy chain as "disconnected".
 	if output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refSpec},
-		NoTags:   true,
+		Remote:    fetchTarget,
+		RefSpecs:  []string{refSpec},
+		NoTags:    true,
+		Unshallow: true,
 	}); fetchErr != nil {
 		return fmt.Errorf("fetch failed: %s", output)
 	}

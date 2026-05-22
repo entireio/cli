@@ -411,10 +411,11 @@ func fetchRefToTemp(ctx context.Context, repoPath, remoteName, srcRef, dstRef st
 
 	refspec := fmt.Sprintf("+%s:%s", srcRef, dstRef)
 	output, err := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refspec},
-		NoTags:   true,
-		Dir:      repoPath,
+		Remote:    fetchTarget,
+		RefSpecs:  []string{refspec},
+		NoTags:    true,
+		Unshallow: true,
+		Dir:       repoPath,
 	})
 	if err != nil {
 		redactedURL := remote.RedactURL(fetchTarget)
