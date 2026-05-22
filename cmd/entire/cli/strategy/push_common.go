@@ -327,14 +327,16 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 	}
 
 	// Use git CLI for fetch (go-git's fetch can be tricky with auth).
-	// Unshallow when needed so merge-base and ancestry walks see the real
-	// shared history rather than the local shallow view, which would
-	// otherwise misread a healthy chain as "disconnected".
+	// Do NOT --unshallow here: on a shallow repo with deep history (e.g. a
+	// shared monorepo), --unshallow downloads the whole repository because
+	// git treats shallow as a global property of the clone, not per-ref.
+	// The downstream reconcile/rebase paths walk only commits visible past
+	// .git/shallow (collectCommitChain / collectCommitsSince), so the
+	// missing pre-shallow history isn't needed to produce a correct rebase.
 	if output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:    fetchTarget,
-		RefSpecs:  []string{refSpec},
-		NoTags:    true,
-		Unshallow: true,
+		Remote:   fetchTarget,
+		RefSpecs: []string{refSpec},
+		NoTags:   true,
 	}); fetchErr != nil {
 		return fmt.Errorf("fetch failed: %s", output)
 	}

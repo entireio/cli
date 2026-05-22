@@ -397,12 +397,13 @@ func FetchAndCheckoutRemoteBranch(ctx context.Context, branchName string) error 
 	return CheckoutBranch(ctx, branchName)
 }
 
-// FetchMetadataBranch fetches the entire/checkpoints/v1 branch from origin and
-// creates/updates the local branch with full ancestry. Unshallows the repo if
-// it was previously left shallow by a tip-only probe, so callers that need
-// history (reconcile, rebase) can operate on a complete chain.
+// FetchMetadataBranch fetches the entire/checkpoints/v1 branch from origin
+// with full blob content. Used as a fallback by resume/explain when the
+// tree-only probe is insufficient (e.g. the metadata.json blob is missing).
+// Does NOT --unshallow: --unshallow is a global property of the clone, so on
+// shallow checkpoint repos it would also deepen unrelated branches.
 func FetchMetadataBranch(ctx context.Context) error {
-	return fetchMetadataFromOrigin(ctx, fetchMetadataOpts{NoFilter: true, Unshallow: true})
+	return fetchMetadataFromOrigin(ctx, fetchMetadataOpts{NoFilter: true})
 }
 
 // FetchMetadataTreeOnly fetches just the tip of the entire/checkpoints/v1
@@ -468,11 +469,10 @@ func FetchV2MainTreeOnly(ctx context.Context) error {
 	return fetchV2MainFromOrigin(ctx, fetchMetadataOpts{Shallow: true})
 }
 
-// FetchV2MainRef fetches the v2 /main ref from origin with full blob content
-// and unshallows the repo if it was previously left shallow by a tip-only
-// probe. Used by paths that need complete ancestry (reconcile, rebase).
+// FetchV2MainRef fetches the v2 /main ref from origin with full blob content.
+// Does NOT --unshallow: see FetchMetadataBranch for the reasoning.
 func FetchV2MainRef(ctx context.Context) error {
-	return fetchV2MainFromOrigin(ctx, fetchMetadataOpts{NoFilter: true, Unshallow: true})
+	return fetchV2MainFromOrigin(ctx, fetchMetadataOpts{NoFilter: true})
 }
 
 func fetchV2MainFromOrigin(ctx context.Context, fopts fetchMetadataOpts) error {
