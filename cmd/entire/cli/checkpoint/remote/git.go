@@ -316,47 +316,18 @@ func ResolveFetchTarget(ctx context.Context, target string) (string, error) {
 	return url, nil
 }
 
+// isShallowRepository returns true when the git repository at dir is shallow.
+// An empty dir inherits the parent process's working directory, matching the
+// semantics callers use when invoking Fetch with empty FetchOptions.Dir.
 func isShallowRepository(ctx context.Context, dir string) bool {
-	repoDir, err := fetchWorkingDir(dir)
-	if err != nil {
-		return false
-	}
-
-	shallow, err := isShallowRepositoryInDir(ctx, repoDir)
-	if err != nil {
-		return false
-	}
-	return shallow
-}
-
-func fetchWorkingDir(dir string) (string, error) {
-	if dir != "" {
-		abs, err := filepath.Abs(dir)
-		if err != nil {
-			return "", fmt.Errorf("resolve absolute path for %q: %w", dir, err)
-		}
-		return abs, nil
-	}
-	// Falling back to os.Getwd is intentional: the caller passed an empty Dir,
-	// meaning "use the inherited working directory of the git invocation".
-	// paths.RepoRoot() would impose a worktree-relative resolution that isn't
-	// always correct for fetch helpers called outside a repo context (tests).
-	cwd, err := os.Getwd() //nolint:forbidigo // see comment above
-	if err != nil {
-		return "", fmt.Errorf("get working dir: %w", err)
-	}
-	return cwd, nil
-}
-
-func isShallowRepositoryInDir(ctx context.Context, dir string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-shallow-repository")
 	cmd.Dir = dir
 	disableTerminalPrompt(cmd)
 	out, err := cmd.Output()
 	if err != nil {
-		return false, fmt.Errorf("git rev-parse --is-shallow-repository: %w", err)
+		return false
 	}
-	return strings.TrimSpace(string(out)) == "true", nil
+	return strings.TrimSpace(string(out)) == "true"
 }
 
 // newCommand creates an exec.Cmd for a git operation that may need

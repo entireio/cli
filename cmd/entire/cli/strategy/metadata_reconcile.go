@@ -507,10 +507,8 @@ func collectCommitChain(repo *git.Repository, tip plumbing.Hash, shallow map[plu
 	return chain, nil
 }
 
-// loadShallowHashes returns the set of commit hashes listed in the repository's
-// shallow file (one hash per line). For a non-shallow repository, returns an
-// empty (non-nil) map. The shallow file lives under the git common dir, so this
-// works for linked worktrees as well as the primary worktree.
+// loadShallowHashes returns the commit hashes listed in the repository's
+// shallow file, or an empty map if the repository is not shallow.
 func loadShallowHashes(ctx context.Context, repoPath string) (map[plumbing.Hash]bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
 	cmd.Dir = repoPath
@@ -591,10 +589,7 @@ func treeChangesForCherryPick(ctx context.Context, repo *git.Repository, commit 
 	}
 
 	var parentTree *object.Tree
-	// Skip parent lookup for shallow-boundary commits: their stored ParentHashes
-	// point past the boundary into objects we may have but that no longer
-	// represent the actual checkpoint history. Treat them as roots — diff against
-	// an empty tree so the cherry-pick contributes the commit's full content.
+	// Shallow-boundary commits are treated as roots — see cherryPickOnto for why.
 	if len(commit.ParentHashes) > 0 && !shallow[commit.Hash] {
 		parentCommit, pErr := repo.CommitObject(commit.ParentHashes[0])
 		if pErr != nil {

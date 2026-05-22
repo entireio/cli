@@ -456,17 +456,13 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 		)
 	}
 
-	// First-attempt fetch ensures we have fresh remote data before trusting
-	// the local ref. Use the tree-only fetch when filtered_fetches is enabled
-	// (cheaper); otherwise it would degenerate into a full fetch, so call
-	// FetchMetadataBranch directly. Either way, fetch first so the local
-	// lookup below doesn't return stale data when a collaborator pushed new
-	// checkpoints since our last fetch.
-	firstFetch := FetchMetadataTreeOnly
-	firstFetchLabel := "treeless-fetch"
+	// Fetch first so the local lookup below doesn't return stale data when a
+	// collaborator pushed new checkpoints since our last fetch. Tree-only when
+	// filtered_fetches is on (cheaper); full fetch otherwise (tree-only would
+	// degenerate into a full fetch anyway).
+	firstFetch, firstFetchLabel := FetchMetadataTreeOnly, "treeless-fetch"
 	if !settings.IsFilteredFetchesEnabled(ctx) {
-		firstFetch = FetchMetadataBranch
-		firstFetchLabel = "full-fetch"
+		firstFetch, firstFetchLabel = FetchMetadataBranch, "full-fetch"
 	}
 	if fetchErr := firstFetch(ctx); fetchErr == nil {
 		freshRepo, repoErr := openRepository(ctx)
@@ -551,12 +547,10 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 // getV2MetadataTree resolves the v2 /main ref tree with the same
 // fetch fallback pattern as getMetadataTree, including checkpoint remote support.
 func getV2MetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error) {
-	// First-attempt fetch ensures we have fresh remote data before trusting
-	// the local ref (which may be stale, e.g., a collaborator pushed a new
-	// checkpoint since the last fetch). When filtered_fetches is enabled the
-	// tree-only fetch is the cheaper option; otherwise it would degenerate
-	// into a full fetch, so call the full-fetch helper directly and pass nil
-	// as the secondary fallback to avoid a duplicate network round-trip.
+	// Fetch first so the local lookup doesn't return stale data. When
+	// filtered_fetches is off, use the full fetch directly (tree-only would
+	// degenerate into the same call) and pass nil as the fallback to avoid a
+	// duplicate round-trip.
 	firstFetch := checkpoint.FetchRefFunc(FetchV2MainTreeOnly)
 	secondFetch := checkpoint.FetchRefFunc(FetchV2MainRef)
 	if !settings.IsFilteredFetchesEnabled(ctx) {

@@ -262,62 +262,17 @@ func TestFetch_UnshallowsShallowRepository(t *testing.T) {
 
 	for _, tc := range []struct {
 		name             string
-		filteredFetches  bool
 		settingsContents string
 	}{
-		{
-			name:             "filtered_fetches enabled",
-			settingsContents: `{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
-		},
-		{
-			name:             "filtered_fetches disabled",
-			settingsContents: `{"enabled": true}`,
-		},
+		{"filtered_fetches enabled", `{"enabled": true, "strategy_options": {"filtered_fetches": true}}`},
+		{"filtered_fetches disabled", `{"enabled": true}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 
-			tmpDir := t.TempDir()
-			bareDir := filepath.Join(tmpDir, "bare.git")
-			seedDir := filepath.Join(tmpDir, "seed")
-			cloneDir := filepath.Join(tmpDir, "clone")
-
-			testutil.InitRepo(t, seedDir)
-			testutil.WriteFile(t, seedDir, "f.txt", "init")
-			testutil.GitAdd(t, seedDir, "f.txt")
-			testutil.GitCommit(t, seedDir, "init")
-
-			cmd := exec.CommandContext(ctx, "git", "init", "--bare", bareDir)
-			cmd.Env = testutil.GitIsolatedEnv()
-			require.NoError(t, cmd.Run())
-
-			cmd = exec.CommandContext(ctx, "git", "remote", "add", "origin", bareDir)
-			cmd.Dir = seedDir
-			cmd.Env = testutil.GitIsolatedEnv()
-			require.NoError(t, cmd.Run())
-
-			cmd = exec.CommandContext(ctx, "git", "push", "origin", "HEAD:refs/heads/main")
-			cmd.Dir = seedDir
-			cmd.Env = testutil.GitIsolatedEnv()
-			require.NoError(t, cmd.Run())
-
-			cmd = exec.CommandContext(ctx, "git", "clone", "--depth=1", "--branch", "main", "file://"+bareDir, cloneDir)
-			cmd.Env = testutil.GitIsolatedEnv()
-			require.NoError(t, cmd.Run())
-
-			// Advance the remote after the shallow clone so the subsequent fetch has
-			// new history to bring in while also deepening the repository.
-			testutil.WriteFile(t, seedDir, "f.txt", "init\nnext\n")
-			testutil.GitAdd(t, seedDir, "f.txt")
-			testutil.GitCommit(t, seedDir, "next")
-			cmd = exec.CommandContext(ctx, "git", "push", "origin", "HEAD:refs/heads/main")
-			cmd.Dir = seedDir
-			cmd.Env = testutil.GitIsolatedEnv()
-			require.NoError(t, cmd.Run())
-
+			bareDir, cloneDir := setupShallowClone(ctx, t)
 			testutil.WriteFile(t, cloneDir, ".entire/settings.json", tc.settingsContents)
-
 			require.True(t, isShallowRepository(ctx, cloneDir), "test setup should produce a shallow repo")
 
 			_, err := Fetch(ctx, FetchOptions{
@@ -332,6 +287,45 @@ func TestFetch_UnshallowsShallowRepository(t *testing.T) {
 				"fetch should unshallow any shallow repository, regardless of filtered_fetches")
 		})
 	}
+}
+
+// setupShallowClone creates a bare origin, a seed repo with one commit pushed
+// to it, a shallow (--depth=1) clone, and then advances origin by one more
+// commit so that a subsequent fetch into the clone has work to do. Returns the
+// bare origin path and the shallow clone path.
+func setupShallowClone(ctx context.Context, t *testing.T) (bareDir, cloneDir string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	bareDir = filepath.Join(tmpDir, "bare.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	cloneDir = filepath.Join(tmpDir, "clone")
+
+	testutil.InitRepo(t, seedDir)
+	testutil.WriteFile(t, seedDir, "f.txt", "init")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "init")
+
+	runIsolatedGit(ctx, t, "", "init", "--bare", bareDir)
+	runIsolatedGit(ctx, t, seedDir, "remote", "add", "origin", bareDir)
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, "", "clone", "--depth=1", "--branch", "main", "file://"+bareDir, cloneDir)
+
+	testutil.WriteFile(t, seedDir, "f.txt", "init\nnext\n")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "next")
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+
+	return bareDir, cloneDir
+}
+
+func runIsolatedGit(ctx context.Context, t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run(), "git %v", args)
 }
 
 func TestAppendCheckpointTokenEnv(t *testing.T) {
