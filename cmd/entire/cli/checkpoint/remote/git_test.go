@@ -257,67 +257,81 @@ func TestResolveFetchTarget(t *testing.T) {
 	})
 }
 
-// Not parallel: uses t.Chdir()
-func TestFetch_FilteredFetches_UnshallowsRepository(t *testing.T) {
-	ctx := context.Background()
+func TestFetch_UnshallowsShallowRepository(t *testing.T) {
+	t.Parallel()
 
-	tmpDir := t.TempDir()
-	bareDir := filepath.Join(tmpDir, "bare.git")
-	seedDir := filepath.Join(tmpDir, "seed")
-	cloneDir := filepath.Join(tmpDir, "clone")
+	for _, tc := range []struct {
+		name             string
+		filteredFetches  bool
+		settingsContents string
+	}{
+		{
+			name:             "filtered_fetches enabled",
+			settingsContents: `{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
+		},
+		{
+			name:             "filtered_fetches disabled",
+			settingsContents: `{"enabled": true}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
 
-	testutil.InitRepo(t, seedDir)
-	testutil.WriteFile(t, seedDir, "f.txt", "init")
-	testutil.GitAdd(t, seedDir, "f.txt")
-	testutil.GitCommit(t, seedDir, "init")
+			tmpDir := t.TempDir()
+			bareDir := filepath.Join(tmpDir, "bare.git")
+			seedDir := filepath.Join(tmpDir, "seed")
+			cloneDir := filepath.Join(tmpDir, "clone")
 
-	cmd := exec.CommandContext(ctx, "git", "init", "--bare", bareDir)
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+			testutil.InitRepo(t, seedDir)
+			testutil.WriteFile(t, seedDir, "f.txt", "init")
+			testutil.GitAdd(t, seedDir, "f.txt")
+			testutil.GitCommit(t, seedDir, "init")
 
-	cmd = exec.CommandContext(ctx, "git", "remote", "add", "origin", bareDir)
-	cmd.Dir = seedDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+			cmd := exec.CommandContext(ctx, "git", "init", "--bare", bareDir)
+			cmd.Env = testutil.GitIsolatedEnv()
+			require.NoError(t, cmd.Run())
 
-	cmd = exec.CommandContext(ctx, "git", "push", "origin", "HEAD:refs/heads/main")
-	cmd.Dir = seedDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+			cmd = exec.CommandContext(ctx, "git", "remote", "add", "origin", bareDir)
+			cmd.Dir = seedDir
+			cmd.Env = testutil.GitIsolatedEnv()
+			require.NoError(t, cmd.Run())
 
-	cmd = exec.CommandContext(ctx, "git", "clone", "--depth=1", "--branch", "main", "file://"+bareDir, cloneDir)
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+			cmd = exec.CommandContext(ctx, "git", "push", "origin", "HEAD:refs/heads/main")
+			cmd.Dir = seedDir
+			cmd.Env = testutil.GitIsolatedEnv()
+			require.NoError(t, cmd.Run())
 
-	// Advance the remote after the shallow clone so the subsequent fetch has
-	// new history to bring in while also deepening the repository.
-	testutil.WriteFile(t, seedDir, "f.txt", "init\nnext\n")
-	testutil.GitAdd(t, seedDir, "f.txt")
-	testutil.GitCommit(t, seedDir, "next")
-	cmd = exec.CommandContext(ctx, "git", "push", "origin", "HEAD:refs/heads/main")
-	cmd.Dir = seedDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+			cmd = exec.CommandContext(ctx, "git", "clone", "--depth=1", "--branch", "main", "file://"+bareDir, cloneDir)
+			cmd.Env = testutil.GitIsolatedEnv()
+			require.NoError(t, cmd.Run())
 
-	testutil.WriteFile(
-		t,
-		cloneDir,
-		".entire/settings.json",
-		`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
-	)
+			// Advance the remote after the shallow clone so the subsequent fetch has
+			// new history to bring in while also deepening the repository.
+			testutil.WriteFile(t, seedDir, "f.txt", "init\nnext\n")
+			testutil.GitAdd(t, seedDir, "f.txt")
+			testutil.GitCommit(t, seedDir, "next")
+			cmd = exec.CommandContext(ctx, "git", "push", "origin", "HEAD:refs/heads/main")
+			cmd.Dir = seedDir
+			cmd.Env = testutil.GitIsolatedEnv()
+			require.NoError(t, cmd.Run())
 
-	require.True(t, isShallowRepository(ctx, cloneDir), "test setup should produce a shallow repo")
+			testutil.WriteFile(t, cloneDir, ".entire/settings.json", tc.settingsContents)
 
-	_, err := Fetch(ctx, FetchOptions{
-		Remote:   "file://" + bareDir,
-		RefSpecs: []string{"+refs/heads/main:refs/remotes/origin/main"},
-		NoTags:   true,
-		Dir:      cloneDir,
-	})
-	require.NoError(t, err)
+			require.True(t, isShallowRepository(ctx, cloneDir), "test setup should produce a shallow repo")
 
-	assert.False(t, isShallowRepository(ctx, cloneDir),
-		"filtered fetch should unshallow legacy shallow repositories")
+			_, err := Fetch(ctx, FetchOptions{
+				Remote:   "file://" + bareDir,
+				RefSpecs: []string{"+refs/heads/main:refs/remotes/origin/main"},
+				NoTags:   true,
+				Dir:      cloneDir,
+			})
+			require.NoError(t, err)
+
+			assert.False(t, isShallowRepository(ctx, cloneDir),
+				"fetch should unshallow any shallow repository, regardless of filtered_fetches")
+		})
+	}
 }
 
 func TestAppendCheckpointTokenEnv(t *testing.T) {

@@ -39,9 +39,11 @@ type FetchOptions struct {
 
 // Fetch runs git fetch with checkpoint token injection and optional
 // filtered fetches (--filter=blob:none when settings enable it).
-// When filtered_fetches is enabled and the repository is shallow, Fetch also
-// adds --unshallow. This migrates users away from legacy shallow checkpoint
-// repositories because some Entire commands need checkpoint history.
+// When the repository is shallow, Fetch also adds --unshallow. This migrates
+// users away from any shallow checkpoint history (whether produced by an old
+// CLI --depth=1 fetch or by an unrelated tool) because the reconcile and
+// rebase paths walk parent chains via go-git, which ignores .git/shallow and
+// would otherwise traverse stale objects past the shallow boundary.
 // GIT_TERMINAL_PROMPT=0 is always set.
 //
 // Callers that pass a remote name (e.g., "origin") and want filtered fetches to
@@ -53,14 +55,13 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 		args = append(args, "--no-tags")
 	}
 	args = append(args, opts.ExtraArgs...)
-	filteredFetchesEnabled := settings.IsFilteredFetchesEnabled(ctx)
-	if filteredFetchesEnabled && isShallowRepository(ctx, opts.Dir) {
-		// Filtered checkpoint fetches used to create shallow repositories.
-		// Unshallow on subsequent filtered fetches so commands that rely on
-		// checkpoint ancestry/history can operate correctly.
+	if isShallowRepository(ctx, opts.Dir) {
+		// Unshallow whenever the repo is shallow so commands that rely on
+		// checkpoint ancestry/history can operate correctly, regardless of
+		// how the shallow state was introduced.
 		args = append(args, "--unshallow")
 	}
-	if !opts.NoFilter && filteredFetchesEnabled {
+	if !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx) {
 		args = append(args, "--filter=blob:none")
 	}
 	args = append(args, opts.Remote)
@@ -316,10 +317,6 @@ func ResolveFetchTarget(ctx context.Context, target string) (string, error) {
 }
 
 func isShallowRepository(ctx context.Context, dir string) bool {
-	if !settings.IsFilteredFetchesEnabled(ctx) {
-		return false
-	}
-
 	repoDir, err := fetchWorkingDir(dir)
 	if err != nil {
 		return false
