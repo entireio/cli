@@ -1243,15 +1243,21 @@ func TestPrintSettingsCommitHint(t *testing.T) {
 func captureStderr(t *testing.T) func() string {
 	t.Helper()
 	old := os.Stderr
+	oldPushStderr := pushStderr
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
 	os.Stderr = w
+	// push_common.go writes user-facing output to the package-level pushStderr,
+	// not directly to os.Stderr. Patch both so legacy tests that only redirect
+	// os.Stderr still see the same output captured.
+	pushStderr = w
 
 	// Safety net: restore stderr and close pipe ends on test failure/panic.
 	// In the normal path the returned function handles cleanup first;
 	// duplicate Close calls return an error that we intentionally ignore.
 	t.Cleanup(func() {
 		os.Stderr = old
+		pushStderr = oldPushStderr
 		_ = w.Close()
 		_ = r.Close()
 	})
@@ -1263,6 +1269,7 @@ func captureStderr(t *testing.T) func() string {
 		require.NoError(t, readErr)
 		_ = r.Close()
 		os.Stderr = old
+		pushStderr = oldPushStderr
 		return buf.String()
 	}
 }

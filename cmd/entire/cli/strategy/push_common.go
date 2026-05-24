@@ -21,6 +21,38 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
+// pushStderr is the destination for output emitted by doPushBranch itself
+// (the dot lines, "Warning:" lines, hints). The standalone hint helpers
+// (printCheckpointRemoteHint, printSettingsCommitHint, …) deliberately keep
+// writing to os.Stderr because they pre-date this var and have their own
+// inline-redirect tests. captureStderr patches both so end-to-end tests of
+// doPushBranch still see hint output.
+var pushStderr io.Writer = os.Stderr
+
+// pushAttemptTimeout caps a single tryPushSessionsCommon invocation. Two
+// minutes is generous for a healthy network and short enough that a hung
+// helper does not hold the hook open indefinitely.
+var pushAttemptTimeout = 2 * time.Minute
+
+var fetchAttemptTimeout = 2 * time.Minute
+
+// errPushTimedOut signals that tryPushSessionsCommon's inner deadline fired
+// before git push completed. doPushBranch uses it to suppress the
+// sync-and-retry cascade — fetch would just time out on the same condition.
+var errPushTimedOut = errors.New("push timed out")
+
+var errFetchTimedOut = errors.New("fetch timed out")
+
+// Log-field values for the "class" attribute on push-related INFO logs.
+// Kept as constants so log consumers and tests share one source of truth and
+// the function stays free of bare string literals.
+const (
+	pushClassTimedOut       = "timed_out"
+	pushClassProtectedRef   = "protected_ref"
+	pushClassNonFastForward = "non_fast_forward"
+	pushClassOther          = "other"
+)
+
 // pushBranchIfNeeded pushes a branch to the given target if it has unpushed changes.
 // The target can be a remote name (e.g., "origin") or a URL for direct push.
 // When pushing to a URL, the "has unpushed" optimization is skipped since there are
@@ -77,49 +109,172 @@ func displayPushTarget(target string) string {
 func doPushBranch(ctx context.Context, target, branchName string) error {
 	displayTarget := displayPushTarget(target)
 
-	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", branchName, displayTarget)
-	stop := startProgressDots(os.Stderr)
+	fmt.Fprintf(pushStderr, "[entire] Pushing %s to %s...", branchName, displayTarget)
+	stop := startProgressDots(pushStderr)
 
-	// Try pushing first
+	pushStart := time.Now()
+	logging.Info(ctx, "push attempt start",
+		slog.String("branch", branchName),
+		slog.String("target", displayTarget),
+	)
+
 	result, err := tryPushSessionsCommon(ctx, target, branchName)
 	if err == nil {
+		logging.Info(ctx, "push attempt completed",
+			slog.String("branch", branchName),
+			slog.String("target", displayTarget),
+			slog.Duration("elapsed", time.Since(pushStart)),
+			slog.Bool("up_to_date", result.upToDate),
+		)
 		finishPush(ctx, stop, result, target)
 		return nil
 	}
+
+	logging.Info(ctx, "push attempt failed",
+		slog.String("branch", branchName),
+		slog.String("target", displayTarget),
+		slog.Duration("elapsed", time.Since(pushStart)),
+		slog.String("class", classifyForLog(err)),
+	)
+
+	// Outer context cancelled (user Ctrl-C, hook timeout) — bail quietly
+	// rather than cascading into a sync that will also fail. doPushBranch
+	// is best-effort: never fail the user's main push because of checkpoint
+	// sync, mirroring the existing graceful-degradation pattern below.
+	if ctx.Err() != nil {
+		stop("")
+		return nil //nolint:nilerr // intentional graceful degradation
+	}
+
+	// Inner attempt timed out. Sync will also time out, so skip the cascade
+	// and give the user a clear next step instead.
+	if errors.Is(err, errPushTimedOut) {
+		stop(" timed out")
+		fmt.Fprintf(pushStderr, "[entire] Warning: push of %s to %s timed out after %s. Network or proxy issue?\n",
+			branchName, displayTarget, pushAttemptTimeout)
+		fmt.Fprintln(pushStderr, `[entire] Hint: set "log_level": "DEBUG" in .entire/settings.local.json to capture git's underlying output next time.`)
+		printCheckpointRemoteHint(target)
+		return nil
+	}
+
 	stop("")
 
 	// Protected refs cannot be fixed by syncing and retrying.
 	var protectedErr *protectedRefError
 	if errors.As(err, &protectedErr) {
-		printProtectedRefBlock(os.Stderr, branchName, target)
+		printProtectedRefBlock(pushStderr, branchName, target)
 		return nil
 	}
 
-	// Push failed - likely non-fast-forward. Try to fetch and rebase.
-	fmt.Fprintf(os.Stderr, "[entire] Syncing %s with remote...", branchName)
-	stop = startProgressDots(os.Stderr)
+	fmt.Fprintf(pushStderr, "[entire] Syncing %s with remote...", branchName)
+	stop = startProgressDots(pushStderr)
+	syncStart := time.Now()
 
-	if err := fetchAndRebaseSessionsCommon(ctx, target, branchName); err != nil {
-		stop("")
-		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync %s: %v\n", branchName, err)
-		printCheckpointRemoteHint(target)
-		return nil // Don't fail the main push
+	if syncErr := fetchAndRebaseSessionsCommon(ctx, target, branchName); syncErr != nil {
+		reportPushFailure(ctx, reportPushFailureArgs{
+			out:     pushStderr,
+			stop:    stop,
+			err:     syncErr,
+			logMsg:  "push sync failed",
+			warnMsg: fmt.Sprintf("[entire] Warning: couldn't sync %s: %v\n", branchName, syncErr),
+			branch:  branchName,
+			target:  target,
+			start:   syncStart,
+		})
+		return nil
 	}
 	stop(" done")
 
-	// Try pushing again after rebase
-	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", branchName, displayTarget)
-	stop = startProgressDots(os.Stderr)
+	fmt.Fprintf(pushStderr, "[entire] Pushing %s to %s...", branchName, displayTarget)
+	stop = startProgressDots(pushStderr)
+	retryStart := time.Now()
 
-	if result, err := tryPushSessionsCommon(ctx, target, branchName); err != nil {
-		stop("")
-		fmt.Fprintf(os.Stderr, "[entire] Warning: failed to push %s after sync: %v\n", branchName, err)
-		printCheckpointRemoteHint(target)
-	} else {
-		finishPush(ctx, stop, result, target)
+	retryResult, retryErr := tryPushSessionsCommon(ctx, target, branchName)
+	if retryErr != nil {
+		reportPushFailure(ctx, reportPushFailureArgs{
+			out:     pushStderr,
+			stop:    stop,
+			err:     retryErr,
+			logMsg:  "push retry failed",
+			warnMsg: fmt.Sprintf("[entire] Warning: failed to push %s after sync: %v\n", branchName, retryErr),
+			branch:  branchName,
+			target:  target,
+			start:   retryStart,
+		})
+		return nil
 	}
-
+	logging.Info(ctx, "push retry completed",
+		slog.String("branch", branchName),
+		slog.String("target", displayTarget),
+		slog.Duration("elapsed", time.Since(retryStart)),
+		slog.Bool("up_to_date", retryResult.upToDate),
+	)
+	finishPush(ctx, stop, retryResult, target)
 	return nil
+}
+
+// reportPushFailureArgs groups the inputs to reportPushFailure to keep the
+// recoverable-failure paths in doPushBranch readable. out is taken as a
+// parameter (rather than reaching into the package-global pushStderr) so
+// tests can capture without racing on shared state.
+type reportPushFailureArgs struct {
+	out     io.Writer
+	stop    func(string)
+	err     error
+	logMsg  string
+	warnMsg string
+	branch  string
+	target  string
+	start   time.Time
+}
+
+// reportPushFailure handles the common tail of a failed sync or retry-push:
+// pick the dot-line suffix (`" timed out"` vs blank), log at INFO with a
+// classification label, print the warning, and surface the
+// checkpoint-remote hint when the target is a URL.
+//
+// If the outer context is done (user Ctrl-C or hook deadline arrived after
+// the first push attempt), this collapses to a silent bail: empty dot suffix,
+// no log, no warning. Matches the early bail-out in doPushBranch's
+// first-attempt path so that every cancellation point behaves the same.
+func reportPushFailure(ctx context.Context, a reportPushFailureArgs) {
+	if ctx.Err() != nil {
+		a.stop("")
+		return
+	}
+	suffix := ""
+	if errors.Is(a.err, errPushTimedOut) || errors.Is(a.err, errFetchTimedOut) {
+		suffix = " timed out"
+	}
+	a.stop(suffix)
+	logging.Info(ctx, a.logMsg,
+		slog.String("branch", a.branch),
+		slog.String("target", displayPushTarget(a.target)),
+		slog.Duration("elapsed", time.Since(a.start)),
+		slog.String("class", classifyForLog(a.err)),
+	)
+	fmt.Fprint(a.out, a.warnMsg)
+	printCheckpointRemoteHint(a.target)
+}
+
+// classifyForLog maps a push/fetch error to a short string suitable for log
+// fields. Avoids leaking the raw error (which may contain URLs or tokens
+// embedded in git's output) — only the category is logged.
+func classifyForLog(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, errPushTimedOut) || errors.Is(err, errFetchTimedOut) {
+		return pushClassTimedOut
+	}
+	var protectedErr *protectedRefError
+	if errors.As(err, &protectedErr) {
+		return pushClassProtectedRef
+	}
+	if errors.Is(err, errNonFastForward) {
+		return pushClassNonFastForward
+	}
+	return pushClassOther
 }
 
 // printCheckpointRemoteHint prints a hint when a push to a checkpoint URL fails.
@@ -208,13 +363,22 @@ func finishPush(ctx context.Context, stop func(string), result pushResult, targe
 
 // tryPushSessionsCommon attempts to push the sessions branch.
 func tryPushSessionsCommon(ctx context.Context, remoteName, branchName string) (pushResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	localCtx, cancel := context.WithTimeout(ctx, pushAttemptTimeout)
 	defer cancel()
 
-	result, err := remote.Push(ctx, remoteName, branchName)
+	result, err := remote.Push(localCtx, remoteName, branchName)
 	outputStr := result.Output
 	if err != nil {
-		return pushResult{}, classifyPushFailure(ctx, outputStr, err)
+		// Inner deadline fired: distinct sentinel so doPushBranch can pick
+		// the right messaging and skip the sync-retry cascade.
+		if errors.Is(localCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			logging.Debug(ctx, "git push timed out",
+				slog.String("error", err.Error()),
+				slog.Duration("after", pushAttemptTimeout),
+			)
+			return pushResult{}, errPushTimedOut
+		}
+		return pushResult{}, classifyPushFailure(localCtx, outputStr, err)
 	}
 
 	return parsePushResult(outputStr), nil
@@ -303,10 +467,10 @@ func printProtectedRefBlock(w io.Writer, ref, target string) {
 // always apply cleanly.
 // The target can be a remote name or a URL.
 func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	localCtx, cancel := context.WithTimeout(ctx, fetchAttemptTimeout)
 	defer cancel()
 
-	fetchTarget, err := remote.ResolveFetchTarget(ctx, target)
+	fetchTarget, err := remote.ResolveFetchTarget(localCtx, target)
 	if err != nil {
 		return fmt.Errorf("resolve fetch target: %w", err)
 	}
@@ -330,15 +494,34 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 	// Use --filter=blob:none for a partial fetch that downloads only commits
 	// and trees, skipping blobs. The merge only needs the tree structure to
 	// combine entries; blobs are already local or fetched on demand.
-	if output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+	if output, fetchErr := remote.Fetch(localCtx, remote.FetchOptions{
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
 	}); fetchErr != nil {
-		return fmt.Errorf("fetch failed: %s", output)
+		// Inner deadline fired (but outer is still alive): distinct sentinel
+		// so doPushBranch can render " timed out" instead of an empty trailing
+		// colon. When the outer context fired, let the wrapped error propagate
+		// so the caller sees the real cancellation cause instead of an inner-
+		// timeout mislabel.
+		if errors.Is(localCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			logging.Debug(ctx, "git fetch timed out",
+				slog.String("error", fetchErr.Error()),
+				slog.Duration("after", fetchAttemptTimeout),
+			)
+			return errFetchTimedOut
+		}
+		msg := strings.TrimSpace(string(output))
+		if msg == "" {
+			// When git is SIGKILLed (kill-on-cancel from execx.KillOnCancel) the
+			// child writes nothing to stderr; fall back to the wrapper's error
+			// text so users don't see a bare "fetch failed:" with no detail.
+			msg = fetchErr.Error()
+		}
+		return fmt.Errorf("fetch failed: %s", msg)
 	}
 
-	repo, err := OpenRepository(ctx)
+	repo, err := OpenRepository(localCtx)
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
@@ -349,7 +532,7 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 	// this cherry-picks local commits onto remote tip, updating the local ref.
 	// If reconciliation fails, abort — proceeding to rebase on disconnected
 	// branches would silently combine unrelated histories.
-	if reconcileErr := ReconcileDisconnectedMetadataBranch(ctx, repo, fetchedRefName, os.Stderr); reconcileErr != nil {
+	if reconcileErr := ReconcileDisconnectedMetadataBranch(localCtx, repo, fetchedRefName, pushStderr); reconcileErr != nil {
 		return fmt.Errorf("metadata reconciliation failed: %w", reconcileErr)
 	}
 
@@ -375,7 +558,7 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 	if err != nil {
 		return fmt.Errorf("failed to get repo path: %w", err)
 	}
-	mergeBase, err := getMergeBase(ctx, repoPath, localRef.Hash().String(), remoteRef.Hash().String())
+	mergeBase, err := getMergeBase(localCtx, repoPath, localRef.Hash().String(), remoteRef.Hash().String())
 	if err != nil {
 		return fmt.Errorf("failed to find merge base: %w", err)
 	}
@@ -396,7 +579,7 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 	// them onto the remote tip. This preserves local-only commits even when the
 	// local metadata branch already contains old merge commits, while avoiding
 	// replaying shared ancestors older than the true merge-base.
-	localCommits, err := collectCommitsSince(ctx, repo, repoPath, localRef.Hash(), remoteRef.Hash())
+	localCommits, err := collectCommitsSince(localCtx, repo, repoPath, localRef.Hash(), remoteRef.Hash())
 	if err != nil {
 		return fmt.Errorf("failed to collect local commits: %w", err)
 	}
@@ -413,7 +596,7 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 		return nil
 	}
 
-	newTip, err := cherryPickOnto(ctx, repo, remoteRef.Hash(), localCommits)
+	newTip, err := cherryPickOnto(localCtx, repo, remoteRef.Hash(), localCommits)
 	if err != nil {
 		return fmt.Errorf("failed to rebase local commits onto remote: %w", err)
 	}

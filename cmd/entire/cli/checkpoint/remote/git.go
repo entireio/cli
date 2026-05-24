@@ -13,9 +13,17 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
+
+// cancelWaitDelay caps how long Wait blocks reading from inherited pipes after
+// the context is cancelled and the process group has been killed. Five seconds
+// is generous enough to drain legitimate buffered output but short enough to
+// keep a stuck push from holding the hook open indefinitely.
+const cancelWaitDelay = 5 * time.Second
 
 // CheckpointTokenEnvVar is the environment variable for providing an access token
 // used to authenticate git push/fetch operations for checkpoint branches.
@@ -330,6 +338,11 @@ func newCommand(ctx context.Context, args ...string) *exec.Cmd {
 	mkCmd := func(finalArgs []string) *exec.Cmd {
 		c := exec.CommandContext(ctx, "git", finalArgs...)
 		c.Stdin = nil // Disconnect stdin to prevent hanging in hook context
+		// git push/fetch over HTTPS spawns helpers (git-remote-https, credential
+		// helpers) that inherit our stdio pipes. Without process-group kill +
+		// WaitDelay, ctx cancellation only SIGKILLs git itself; the helpers keep
+		// the pipe open and CombinedOutput blocks indefinitely.
+		execx.KillOnCancel(c, cancelWaitDelay)
 		return c
 	}
 
