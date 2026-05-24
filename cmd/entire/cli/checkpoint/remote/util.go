@@ -22,6 +22,11 @@ const (
 // Info is an alias for gitremote.Info.
 type Info = gitremote.Info
 
+// FetchURLOptions configures FetchURL.
+type FetchURLOptions struct {
+	WorktreeRoot string
+}
+
 // FetchURL returns the effective checkpoint fetch URL for the current repository.
 // If strategy_options.checkpoint_remote is configured, the returned URL is derived
 // from the origin remote's protocol/host and the configured checkpoint repo.
@@ -29,10 +34,23 @@ type Info = gitremote.Info
 //
 // If ENTIRE_CHECKPOINT_TOKEN is set and a checkpoint remote is configured, HTTPS is
 // forced so the token can be used even when origin is configured via SSH.
-func FetchURL(ctx context.Context) (string, error) {
+func FetchURL(ctx context.Context, opts ...FetchURLOptions) (string, error) {
+	var opt FetchURLOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
+	getRemoteURL := GetRemoteURL
+	if opt.WorktreeRoot != "" {
+		ctx = settings.WithWorktreeRoot(ctx, opt.WorktreeRoot)
+		getRemoteURL = func(ctx context.Context, remoteName string) (string, error) {
+			return GetRemoteURLInDir(ctx, opt.WorktreeRoot, remoteName)
+		}
+	}
+
 	withToken := strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)) != ""
 
-	originURL, originErr := GetRemoteURL(ctx, originRemote)
+	originURL, originErr := getRemoteURL(ctx, originRemote)
 	if originErr != nil {
 		originURL = ""
 	}
@@ -214,6 +232,15 @@ func Configured(ctx context.Context) bool {
 // GetRemoteURL returns the URL configured for the named git remote.
 func GetRemoteURL(ctx context.Context, remoteName string) (string, error) {
 	url, err := gitremote.GetRemoteURL(ctx, remoteName)
+	if err != nil {
+		return "", fmt.Errorf("get remote URL: %w", err)
+	}
+	return url, nil
+}
+
+// GetRemoteURLInDir returns the URL configured for the named git remote in dir.
+func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, error) {
+	url, err := gitremote.GetRemoteURLInDir(ctx, dir, remoteName)
 	if err != nil {
 		return "", fmt.Errorf("get remote URL: %w", err)
 	}

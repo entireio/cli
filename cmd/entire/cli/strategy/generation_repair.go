@@ -41,7 +41,7 @@ func RepairV2GenerationMetadata(ctx context.Context, excludeRefs []plumbing.Refe
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
 
-	store := checkpoint.NewV2GitStore(repo, "origin")
+	store := checkpoint.NewV2GitStore(repo)
 	return repairV2GenerationMetadata(ctx, repo, store, excludeRefs)
 }
 

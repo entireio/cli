@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
@@ -62,7 +63,7 @@ func setupExportRepo(t *testing.T) *git.Repository {
 
 func writeV2CheckpointForExport(t *testing.T, repo *git.Repository, cpID id.CheckpointID, opts checkpoint.WriteCommittedOptions) {
 	t.Helper()
-	store := checkpoint.NewV2GitStore(repo, "origin")
+	store := checkpoint.NewV2GitStore(repo)
 	opts.CheckpointID = cpID
 	if opts.AuthorName == "" {
 		opts.AuthorName = exportTestAuthorName
@@ -102,6 +103,63 @@ func TestRunExplainExport_JSONSingleCheckpoint(t *testing.T) {
 	require.Len(t, envelope.Sessions, 1)
 	require.Equal(t, "session-json", envelope.Sessions[0].SessionID)
 	require.Equal(t, 0, envelope.Sessions[0].Index)
+}
+
+func TestRunExplainExport_JSONFetchesRemoteV2WhenLocalV2RefSelectsDualMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "origin.git")
+	producerDir := filepath.Join(tmpDir, "producer")
+	localDir := filepath.Join(tmpDir, "local")
+
+	runGit(t, tmpDir, "init", "--bare", bareDir)
+
+	testutil.InitRepo(t, producerDir)
+	testutil.WriteFile(t, producerDir, "README.md", "init")
+	testutil.GitAdd(t, producerDir, "README.md")
+	testutil.GitCommit(t, producerDir, "init")
+	runGit(t, producerDir, "remote", "add", "origin", bareDir)
+
+	producerRepo, err := git.PlainOpen(producerDir)
+	require.NoError(t, err)
+	oldID := id.MustCheckpointID("111122223333")
+	writeV2CheckpointForExport(t, producerRepo, oldID, checkpoint.WriteCommittedOptions{
+		SessionID:  "old-local-v2-session",
+		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"old"}]}}` + "\n")),
+	})
+	runGit(t, producerDir, "push", "origin", "HEAD:refs/heads/main", paths.V2MainRefName+":"+paths.V2MainRefName)
+	runGit(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	runGit(t, tmpDir, "clone", "--branch", "main", bareDir, localDir)
+	runGit(t, localDir, "fetch", "origin", paths.V2MainRefName+":"+paths.V2MainRefName)
+
+	targetID := id.MustCheckpointID("aaaa99998888")
+	writeV2CheckpointForExport(t, producerRepo, targetID, checkpoint.WriteCommittedOptions{
+		SessionID:  "remote-v2-session",
+		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"remote"}]}}` + "\n")),
+	})
+	runGit(t, producerDir, "push", "origin", paths.V2MainRefName+":"+paths.V2MainRefName)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(localDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(localDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true}`),
+		0o600,
+	))
+	t.Chdir(localDir)
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       "aaaa9999",
+		json:         true,
+		sessionIndex: -1,
+	})
+	require.NoError(t, err, "stderr: %s", stderr.String())
+
+	var envelope checkpointExportJSON
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope), "output: %s", stdout.String())
+	require.Equal(t, targetID.String(), envelope.CheckpointID)
+	require.Len(t, envelope.Sessions, 1)
+	require.Equal(t, "remote-v2-session", envelope.Sessions[0].SessionID)
 }
 
 // TestRunExplainExport_JSONUsesMetadataOnlyReader verifies the codex finding 3:

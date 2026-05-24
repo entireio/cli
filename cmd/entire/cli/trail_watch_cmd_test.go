@@ -38,10 +38,21 @@ func fakeSSEServer(t *testing.T, frames []string) (*httptest.Server, *string) {
 	return srv, &lastEventID
 }
 
-func TestStreamOnce_PrintsReadyAndComment(t *testing.T) {
+func TestReviewEventsPath(t *testing.T) {
+	got := reviewEventsPath("trail id/with slash")
+	want := "/api/v1/trails/trail%20id%2Fwith%20slash/reviews/events"
+	if got != want {
+		t.Fatalf("reviewEventsPath = %q, want %q", got, want)
+	}
+}
+
+func TestStreamOnce_PrintsReadyAndReviewEvents(t *testing.T) {
 	frames := []string{
-		"event: ready\ndata: {\"repo\":\"acme/web\",\"trailNumber\":42,\"commentCount\":1,\"resumed\":false}\nid: 1700000000000:ready\n\n",
-		"event: comment\ndata: {\"repo\":\"acme/web\",\"trailNumber\":42,\"updatedAt\":\"2026-01-01T00:00:00Z\",\"comment\":{\"id\":\"c1\",\"author\":\"alice\",\"body\":\"hello world\",\"created_at\":\"2026-01-01T00:00:00Z\",\"resolved\":false,\"resolved_by\":null,\"resolved_at\":null}}\nid: 1700000000000:c1\n\n",
+		"event: ready\ndata: {\"trail_id\":\"trl_1\",\"cursor\":0}\n\n",
+		"id: 1\nevent: session.started\ndata: {\"id\":\"1\",\"trail_id\":\"trl_1\",\"review_session_id\":\"ses_123\",\"actor_id\":\"agent:reviewer\",\"event_type\":\"session.started\",\"target_type\":\"review_session\",\"target_id\":\"ses_123\",\"payload\":{\"code_version_id\":\"cv_1\"},\"created_at\":\"2026-01-01T00:00:00Z\"}\n\n",
+		"id: 2\nevent: comment.created\ndata: {\"id\":\"2\",\"trail_id\":\"trl_1\",\"review_session_id\":\"ses_123\",\"actor_id\":\"agent:reviewer\",\"event_type\":\"comment.created\",\"target_type\":\"review_comment\",\"target_id\":\"c1\",\"payload\":{\"severity\":\"high\",\"file_path\":\"src/foo.ts\",\"granularity\":\"line\"},\"created_at\":\"2026-01-01T00:00:01Z\"}\n\n",
+		"id: 3\nevent: session.ended\ndata: {\"id\":\"3\",\"trail_id\":\"trl_1\",\"review_session_id\":\"ses_123\",\"actor_id\":\"agent:reviewer\",\"event_type\":\"session.ended\",\"target_type\":\"review_session\",\"target_id\":\"ses_123\",\"payload\":{\"reason\":\"done\"},\"created_at\":\"2026-01-01T00:00:02Z\"}\n\n",
+		"event: reconnect\ndata: {\"reason\":\"max_duration\"}\n\n",
 	}
 	srv, _ := fakeSSEServer(t, frames)
 	defer srv.Close()
@@ -53,29 +64,31 @@ func TestStreamOnce_PrintsReadyAndComment(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	reason, lastID, err := streamOnce(ctx, client, "/stream", "", false, false, false, true, &stdout, &stderr)
-	// `--once` with commentCount=1 should exit cleanly after seeing ready+comment.
+	reason, lastID, err := streamOnce(ctx, client, "/stream", "", false, false, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("streamOnce error: %v", err)
 	}
-	if reason != streamCloseDone {
-		t.Errorf("close reason = %d, want streamCloseDone", reason)
+	if reason != streamCloseReconnect {
+		t.Errorf("close reason = %d, want streamCloseReconnect", reason)
 	}
-	if lastID != "1700000000000:c1" {
-		t.Errorf("lastID = %q, want %q", lastID, "1700000000000:c1")
+	if lastID != "3" {
+		t.Errorf("lastID = %q, want %q", lastID, "3")
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "trail #42") {
-		t.Errorf("expected ready summary in output, got: %q", out)
+	for _, want := range []string{"trail trl_1", "session started", "comment created", "src/foo.ts", "session ended"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output, got: %q", want, out)
+		}
 	}
-	if !strings.Contains(out, "alice") || !strings.Contains(out, "hello world") {
-		t.Errorf("expected comment line in output, got: %q", out)
+	if !strings.Contains(stderr.String(), "server requested reconnect") {
+		t.Errorf("expected reconnect notice in stderr, got: %q", stderr.String())
 	}
 }
 
 func TestStreamOnce_JSONOutputEnvelope(t *testing.T) {
 	frames := []string{
-		"event: ready\ndata: {\"commentCount\":0}\nid: x\n\n",
+		"event: ready\ndata: {\"trail_id\":\"trl_1\",\"cursor\":0}\n\n",
+		"event: reconnect\ndata: {\"reason\":\"max_duration\"}\n\n",
 	}
 	srv, _ := fakeSSEServer(t, frames)
 	defer srv.Close()
@@ -87,11 +100,11 @@ func TestStreamOnce_JSONOutputEnvelope(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	if _, _, err := streamOnce(ctx, client, "/stream", "", false, true, false, true, &stdout, &stderr); err != nil {
+	if _, _, err := streamOnce(ctx, client, "/stream", "", true, false, &stdout, &stderr); err != nil {
 		t.Fatalf("streamOnce error: %v", err)
 	}
 
-	line := strings.TrimSpace(stdout.String())
+	line := strings.Split(strings.TrimSpace(stdout.String()), "\n")[0]
 	var env map[string]any
 	if err := json.Unmarshal([]byte(line), &env); err != nil {
 		t.Fatalf("output is not JSON: %v\nline=%q", err, line)
@@ -115,7 +128,7 @@ func TestStreamOnce_ShowPingsTrimsSSECommentWhitespace(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, _, err := streamOnce(ctx, client, "/stream", "", false, false, true, false, &stdout, &stderr)
+	_, _, err := streamOnce(ctx, client, "/stream", "", false, true, &stdout, &stderr)
 	if err == nil {
 		t.Errorf("expected EOF after fixed test stream")
 	}
@@ -126,7 +139,8 @@ func TestStreamOnce_ShowPingsTrimsSSECommentWhitespace(t *testing.T) {
 
 func TestStreamOnce_ReconnectEvent(t *testing.T) {
 	frames := []string{
-		"event: ready\ndata: {\"commentCount\":0}\nid: r1\n\n",
+		"event: ready\ndata: {\"trail_id\":\"trl_1\",\"cursor\":0}\n\n",
+		"id: 1\nevent: session.started\ndata: {\"id\":\"1\",\"event_type\":\"session.started\",\"target_type\":\"review_session\",\"target_id\":\"ses_123\",\"actor_id\":\"agent\",\"payload\":{}}\n\n",
 		"event: reconnect\ndata: {\"reason\":\"max_duration\"}\n\n",
 	}
 	srv, _ := fakeSSEServer(t, frames)
@@ -139,15 +153,41 @@ func TestStreamOnce_ReconnectEvent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	reason, lastID, err := streamOnce(ctx, client, "/stream", "", false, false, false, false, &stdout, &stderr)
+	reason, lastID, err := streamOnce(ctx, client, "/stream", "", false, false, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("streamOnce error: %v", err)
 	}
 	if reason != streamCloseReconnect {
 		t.Errorf("reason = %d, want streamCloseReconnect", reason)
 	}
-	if lastID != "r1" {
-		t.Errorf("lastID = %q, want r1 (reconnect frame has no id; should preserve last ready id)", lastID)
+	if lastID != "1" {
+		t.Errorf("lastID = %q, want 1 (reconnect frame has no id; should preserve last event id)", lastID)
+	}
+}
+
+func TestStreamOnce_ForbiddenEvent(t *testing.T) {
+	frames := []string{
+		"event: forbidden\ndata: {\"reason\":\"access_revoked\"}\n\n",
+	}
+	srv, _ := fakeSSEServer(t, frames)
+	defer srv.Close()
+
+	t.Setenv(api.BaseURLEnvVar, srv.URL)
+	client := api.NewClient("tok")
+
+	var stdout, stderr bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	reason, _, err := streamOnce(ctx, client, "/stream", "", false, false, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("streamOnce error: %v", err)
+	}
+	if reason != streamCloseForbidden {
+		t.Errorf("reason = %d, want streamCloseForbidden", reason)
+	}
+	if !strings.Contains(stderr.String(), "access revoked") {
+		t.Errorf("stderr = %q, want access revoked notice", stderr.String())
 	}
 }
 
@@ -176,7 +216,7 @@ func TestStreamOnce_TerminalHTTPStatusesDoNotReconnect(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 
-			reason, _, err := streamOnce(ctx, client, "/stream", "", false, false, false, false, &stdout, &stderr)
+			reason, _, err := streamOnce(ctx, client, "/stream", "", false, false, &stdout, &stderr)
 			if reason != streamCloseTerminal {
 				t.Errorf("reason = %d, want streamCloseTerminal for %d", reason, tc.code)
 			}
@@ -201,7 +241,7 @@ func TestStreamOnce_TooManyRequestsIsRecoverable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	reason, _, err := streamOnce(ctx, client, "/stream", "", false, false, false, false, &stdout, &stderr)
+	reason, _, err := streamOnce(ctx, client, "/stream", "", false, false, &stdout, &stderr)
 	if reason != streamCloseTransport {
 		t.Errorf("reason = %d, want streamCloseTransport (429 should be retryable)", reason)
 	}
@@ -212,7 +252,7 @@ func TestStreamOnce_TooManyRequestsIsRecoverable(t *testing.T) {
 
 func TestStreamOnce_SendsLastEventIDHeader(t *testing.T) {
 	frames := []string{
-		"event: deleted\ndata: {}\n\n",
+		"event: reconnect\ndata: {\"reason\":\"max_duration\"}\n\n",
 	}
 	srv, gotLastID := fakeSSEServer(t, frames)
 	defer srv.Close()
@@ -224,10 +264,10 @@ func TestStreamOnce_SendsLastEventIDHeader(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	if _, _, err := streamOnce(ctx, client, "/stream", "abc:c1", true, false, false, false, &stdout, &stderr); err != nil {
+	if _, _, err := streamOnce(ctx, client, "/stream", "42", false, false, &stdout, &stderr); err != nil {
 		t.Fatalf("streamOnce error: %v", err)
 	}
-	if *gotLastID != "abc:c1" {
-		t.Errorf("server saw Last-Event-ID = %q, want %q", *gotLastID, "abc:c1")
+	if *gotLastID != "42" {
+		t.Errorf("server saw Last-Event-ID = %q, want %q", *gotLastID, "42")
 	}
 }

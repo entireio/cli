@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // NoDescription is the default description for sessions without one.
@@ -181,34 +182,49 @@ func GetSession(ctx context.Context, sessionID string) (*Session, error) {
 	return findSessionByID(sessions, sessionID)
 }
 
-// getDescriptionForCheckpoint reads the description for a checkpoint from the entire/checkpoints/v1 branch.
+// getDescriptionForCheckpoint reads the description for a checkpoint from committed checkpoint storage.
 // It reads from the latest session subdirectory in the new storage format.
 func getDescriptionForCheckpoint(repo *git.Repository, checkpointID id.CheckpointID) string {
 	tree, err := GetMetadataBranchTree(repo)
+	if err == nil {
+		description, readErr := readDescriptionForCheckpointFromTree(tree, checkpointID)
+		if readErr == nil {
+			return description
+		}
+	}
+
+	tree, err = GetV2MetadataBranchTree(repo)
 	if err != nil {
 		return NoDescription
 	}
+	description, err := readDescriptionForCheckpointFromTree(tree, checkpointID)
+	if err != nil {
+		return NoDescription
+	}
+	return description
+}
 
+func readDescriptionForCheckpointFromTree(tree *object.Tree, checkpointID id.CheckpointID) (string, error) {
 	// Get the checkpoint tree
 	checkpointTree, err := tree.Tree(checkpointID.Path())
 	if err != nil {
-		return NoDescription
+		return NoDescription, fmt.Errorf("read checkpoint tree: %w", err)
 	}
 
 	// Read root metadata.json to get session count and sessions map
 	metadataFile, err := checkpointTree.File(paths.MetadataFileName)
 	if err != nil {
-		return NoDescription
+		return NoDescription, fmt.Errorf("read checkpoint metadata: %w", err)
 	}
 
 	content, err := metadataFile.Contents()
 	if err != nil {
-		return NoDescription
+		return NoDescription, fmt.Errorf("read checkpoint metadata contents: %w", err)
 	}
 
 	var summary checkpoint.CheckpointSummary
 	if err := json.Unmarshal([]byte(content), &summary); err != nil {
-		return NoDescription
+		return NoDescription, fmt.Errorf("parse checkpoint metadata: %w", err)
 	}
 
 	// Find the first session's prompt/context path
@@ -220,10 +236,10 @@ func getDescriptionForCheckpoint(repo *git.Repository, checkpointID id.Checkpoin
 
 	sessionTree, err := checkpointTree.Tree(sessionDir)
 	if err != nil {
-		return NoDescription
+		return NoDescription, fmt.Errorf("read checkpoint session tree: %w", err)
 	}
 
-	return getSessionDescriptionFromTree(sessionTree, "")
+	return getSessionDescriptionFromTree(sessionTree, ""), nil
 }
 
 // findSessionByID finds a session by exact ID or prefix match.

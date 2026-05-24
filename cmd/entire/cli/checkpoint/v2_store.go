@@ -33,11 +33,6 @@ type V2GitStore struct {
 	// Zero means use DefaultMaxCheckpointsPerGeneration.
 	maxCheckpointsPerGeneration int
 
-	// FetchRemote is the git remote used for fetch-on-demand operations (e.g.,
-	// fetching /full/* refs during entire resume). Defaults to "origin".
-	// Set to the checkpoint remote URL when checkpoint_remote is configured.
-	FetchRemote string
-
 	// blobFetcher fetches missing blobs by hash. When set, read paths wrap
 	// trees with FetchingTree so missing blobs are auto-recovered (and the
 	// cat-file fallback covers partial-clone-filtered blobs that go-git's
@@ -58,16 +53,10 @@ func (s *V2GitStore) maxCheckpoints() int {
 }
 
 // NewV2GitStore creates a new v2 checkpoint store backed by the given git repository.
-// fetchRemote is the git remote used for fetch-on-demand operations (e.g., fetching
-// /full/* refs during entire resume). Pass "origin" or the checkpoint remote URL.
-func NewV2GitStore(repo *git.Repository, fetchRemote string) *V2GitStore {
-	if fetchRemote == "" {
-		fetchRemote = "origin"
-	}
+func NewV2GitStore(repo *git.Repository) *V2GitStore {
 	return &V2GitStore{
-		repo:        repo,
-		gs:          &GitStore{repo: repo},
-		FetchRemote: fetchRemote,
+		repo: repo,
+		gs:   &GitStore{repo: repo},
 	}
 }
 

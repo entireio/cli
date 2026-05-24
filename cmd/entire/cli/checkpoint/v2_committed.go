@@ -1240,3 +1240,9 @@ func (s *V2GitStore) UpdateSummary(ctx context.Context, checkpointID id.Checkpoi
 	commitMsg := fmt.Sprintf("Update summary for checkpoint %s (session: %s)", checkpointID, metadata.SessionID)
 	return s.updateRef(ctx, refName, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
 }
+
+// GetCheckpointAuthor retrieves the author of a checkpoint from the v2 /main
+// commit history.
+func (s *V2GitStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (Author, error) {
+	return getCheckpointAuthorFromRef(ctx, s.repo, plumbing.ReferenceName(paths.V2MainRefName), checkpointID)
+}

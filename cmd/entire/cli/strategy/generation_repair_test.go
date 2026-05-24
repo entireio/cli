@@ -48,7 +48,7 @@ func TestRepairV2GenerationMetadata_RewritesGenerationJSONFromRawTranscripts(t *
 	require.Len(t, commit.ParentHashes, 1)
 	assert.Equal(t, oldCommitHash, commit.ParentHashes[0])
 
-	store := checkpoint.NewV2GitStore(repo, "origin")
+	store := checkpoint.NewV2GitStore(repo)
 	gen, err := store.ReadGenerationFromRef(refName)
 	require.NoError(t, err)
 	assert.True(t, gen.OldestCheckpointAt.Equal(rawOldest))
@@ -96,7 +96,7 @@ func TestRepairV2GenerationMetadata_RepairsRemoteOnlyGenerationWithLease(t *test
 	require.Len(t, remoteCommit.ParentHashes, 1)
 	assert.Equal(t, oldCommitHash, remoteCommit.ParentHashes[0])
 
-	remoteStore := checkpoint.NewV2GitStore(remoteRepo, "origin")
+	remoteStore := checkpoint.NewV2GitStore(remoteRepo)
 	gen, err := remoteStore.ReadGenerationFromRef(refName)
 	require.NoError(t, err)
 	assert.True(t, gen.OldestCheckpointAt.Equal(rawOldest))

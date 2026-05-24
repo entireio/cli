@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
@@ -92,41 +92,7 @@ func (s *V2GitStore) ListCommitted(ctx context.Context) ([]CommittedInfo, error)
 			return nil
 		}
 
-		info := CommittedInfo{CheckpointID: checkpointID}
-
-		if metadataFile, fileErr := checkpointTree.File(paths.MetadataFileName); fileErr == nil {
-			if content, contentErr := metadataFile.Contents(); contentErr == nil {
-				var summary CheckpointSummary
-				if unmarshalErr := json.Unmarshal([]byte(content), &summary); unmarshalErr != nil {
-					logging.Debug(ctx, "v2 ListCommitted: skipping malformed metadata",
-						slog.String("checkpoint_id", checkpointID.String()),
-						slog.String("error", unmarshalErr.Error()))
-				} else {
-					info.CheckpointsCount = summary.CheckpointsCount
-					info.FilesTouched = summary.FilesTouched
-					info.SessionCount = len(summary.Sessions)
-
-					if len(summary.Sessions) > 0 {
-						latestIndex := len(summary.Sessions) - 1
-						latestDir := strconv.Itoa(latestIndex)
-						if sessionTree, treeErr := checkpointTree.Tree(latestDir); treeErr == nil {
-							if sessionMetadataFile, smErr := sessionTree.File(paths.MetadataFileName); smErr == nil {
-								if sessionContent, scErr := sessionMetadataFile.Contents(); scErr == nil {
-									var sessionMetadata CommittedMetadata
-									if json.Unmarshal([]byte(sessionContent), &sessionMetadata) == nil {
-										info.Agent = sessionMetadata.Agent
-										info.SessionID = sessionMetadata.SessionID
-										info.CreatedAt = sessionMetadata.CreatedAt
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		checkpoints = append(checkpoints, info)
+		checkpoints = append(checkpoints, readCommittedInfoFromCheckpointTree(checkpointID, checkpointTree))
 		return nil
 	})
 
@@ -272,6 +238,27 @@ func (s *V2GitStore) ReadSessionMetadataAndPrompts(ctx context.Context, checkpoi
 	return result, nil
 }
 
+func (s *V2GitStore) ReadSessionPrompts(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (string, error) {
+	sessionTree, err := s.sessionTreeFromMain(ctx, checkpointID, sessionIndex)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr //nolint:wrapcheck // Propagating context cancellation
+		}
+		return "", ErrCheckpointNotFound
+	}
+
+	sessionFT := s.wrapWithFetcher(ctx, sessionTree)
+	file, err := sessionFT.File(paths.PromptFileName)
+	if err != nil {
+		return "", nil //nolint:nilerr // Missing prompt.txt means no recorded prompts.
+	}
+	content, err := file.Contents()
+	if err != nil {
+		return "", nil //nolint:nilerr // Keep committed prompt reads best-effort.
+	}
+	return content, nil
+}
+
 // ReadSessionContent reads a session's metadata and prompts from the v2 /main ref,
 // and the raw transcript (raw_transcript) from /full/* refs (current + archived generations).
 // This is the v2 equivalent of GitStore.ReadSessionContent — it reads the raw agent
@@ -408,14 +395,19 @@ func (s *V2GitStore) readTranscriptFromFullRefs(ctx context.Context, checkpointI
 	return nil, nil
 }
 
-// fetchRemoteFullRefs discovers and fetches /full/* refs from the configured
-// FetchRemote that aren't local.
+// fetchRemoteFullRefs discovers and fetches /full/* refs from the effective
+// checkpoint fetch target that aren't local.
 func (s *V2GitStore) fetchRemoteFullRefs(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	lsCmd := exec.CommandContext(ctx, "git", "ls-remote", s.FetchRemote, paths.V2FullRefPrefix+"*")
-	output, err := lsCmd.Output()
+	repoRoot, _, err := s.gs.repoDirs(ctx)
+	if err != nil {
+		return err
+	}
+
+	fetchTarget := v2FullRefsFetchTarget(ctx, repoRoot)
+	output, err := remote.LsRemoteInDir(ctx, repoRoot, fetchTarget, paths.V2FullRefPrefix+"*")
 	if err != nil {
 		return fmt.Errorf("ls-remote failed: %w", err)
 	}
@@ -443,13 +435,25 @@ func (s *V2GitStore) fetchRemoteFullRefs(ctx context.Context) error {
 		return nil
 	}
 
-	args := append([]string{"fetch", "--no-tags", s.FetchRemote}, refSpecs...)
-	fetchCmd := exec.CommandContext(ctx, "git", args...)
-	if fetchOutput, fetchErr := fetchCmd.CombinedOutput(); fetchErr != nil {
-		return fmt.Errorf("fetch failed: %s", fetchOutput)
+	if fetchOutput, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+		Remote:   fetchTarget,
+		RefSpecs: refSpecs,
+		NoTags:   true,
+		NoFilter: true,
+		Dir:      repoRoot,
+	}); fetchErr != nil {
+		return fmt.Errorf("fetch failed: %s: %w", fetchOutput, fetchErr)
 	}
 
 	return nil
+}
+
+func v2FullRefsFetchTarget(ctx context.Context, repoRoot string) string {
+	target, err := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: repoRoot})
+	if err == nil && target != "" {
+		return target
+	}
+	return "origin"
 }
 
 // readTranscriptFromRef reads the raw transcript from a specific /full/* ref.

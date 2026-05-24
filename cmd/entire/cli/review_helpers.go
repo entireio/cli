@@ -34,7 +34,7 @@ import (
 // headHasReviewCheckpoint checks whether HEAD's checkpoint metadata includes
 // a review session. Returns (true, infoString) if HasReview is set.
 // Single lookup: read the Entire-Checkpoint trailer from HEAD, then resolve
-// the CheckpointSummary through the configured committed checkpoint reader.
+// the CheckpointSummary through the configured committed checkpoint store.
 func headHasReviewCheckpoint(ctx context.Context) (bool, string) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -57,14 +57,12 @@ func headHasReviewCheckpoint(ctx context.Context) (bool, string) {
 		logging.Debug(ctx, "head review check: open repository", slog.String("error", err.Error()))
 		return false, ""
 	}
-	checkpointReader, readerErr := newCommittedCheckpointReader(ctx, repo, committedCheckpointReaderOptions{
-		fetchRemoteLog: "head review check: no configured v2 fetch remote",
-	})
-	if readerErr != nil {
-		logging.Debug(ctx, "head review check: checkpoint reader unavailable", slog.String("error", readerErr.Error()))
+	store, storeErr := checkpoint.NewCommittedReader(ctx, repo, checkpoint.CommittedReaderOptions{})
+	if storeErr != nil {
+		logging.Debug(ctx, "head review check: checkpoint store unavailable", slog.String("error", storeErr.Error()))
 		return false, ""
 	}
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, checkpointReader.reader, cpID)
+	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
 	if err != nil {
 		logging.Debug(ctx, "head review check: resolve checkpoint summary",
 			slog.String("checkpoint_id", cpID.String()),

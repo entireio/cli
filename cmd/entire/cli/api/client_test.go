@@ -247,6 +247,31 @@ func TestCheckResponse_ErrorWithJSON(t *testing.T) {
 	}
 }
 
+func TestCheckResponse_ErrorWithObjectEnvelope(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":{"code":"not_found","message":"session not found","field":null,"retryable":false}}`)) //nolint:errcheck // test handler
+	}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL) //nolint:noctx // test helper
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	err = CheckResponse(resp)
+	if err == nil {
+		t.Fatal("CheckResponse(404) = nil, want error")
+	}
+	if got := err.Error(); got != "API error: session not found (status 404)" {
+		t.Errorf("error = %q", got)
+	}
+}
+
 func TestCheckResponse_ErrorWithPlainText(t *testing.T) {
 	t.Parallel()
 

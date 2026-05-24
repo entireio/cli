@@ -517,29 +517,150 @@ func TestResolveLatestCheckpoint(t *testing.T) {
 	// Pass checkpoint IDs in reverse chronological order (newest first),
 	// simulating git CLI squash merge trailer order.
 	reverseOrderIDs := []id.CheckpointID{cpID3, cpID2, cpID1}
-	latest, tree, _, err := resolveLatestCheckpoint(context.Background(), reverseOrderIDs)
+	reader := checkpoint.NewGitStore(repo)
+	latest, err := resolveLatestCheckpoint(context.Background(), repo, reader, reverseOrderIDs)
 	if err != nil {
 		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
 	}
 
 	// Should return the newest checkpoint regardless of input order
-	if latest.String() != cpID3.String() {
-		t.Errorf("resolveLatestCheckpoint() = %s, want newest %s", latest, cpID3)
-	}
-
-	// Should return a non-nil tree for reuse
-	if tree == nil {
-		t.Error("resolveLatestCheckpoint() returned nil tree")
+	if latest.CheckpointID.String() != cpID3.String() {
+		t.Errorf("resolveLatestCheckpoint() = %s, want newest %s", latest.CheckpointID, cpID3)
 	}
 
 	// Also verify with chronological order
 	chronologicalIDs := []id.CheckpointID{cpID1, cpID2, cpID3}
-	latest2, _, _, err := resolveLatestCheckpoint(context.Background(), chronologicalIDs)
+	latest2, err := resolveLatestCheckpoint(context.Background(), repo, reader, chronologicalIDs)
 	if err != nil {
 		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
 	}
-	if latest2.String() != cpID3.String() {
-		t.Errorf("resolveLatestCheckpoint() = %s, want newest %s", latest2, cpID3)
+	if latest2.CheckpointID.String() != cpID3.String() {
+		t.Errorf("resolveLatestCheckpoint() = %s, want newest %s", latest2.CheckpointID, cpID3)
+	}
+}
+
+func TestReadCheckpointInfoFromStoreUsesLatestSessionMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	store := checkpoint.NewGitStore(repo)
+	cpID := id.MustCheckpointID("112233445566")
+	ctx := context.Background()
+	oldCreatedAt := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
+	latestCreatedAt := time.Date(2025, 1, 1, 11, 0, 0, 0, time.UTC)
+
+	sessions := []struct {
+		sessionID string
+		createdAt time.Time
+		agent     types.AgentType
+	}{
+		{
+			sessionID: "session-old",
+			createdAt: oldCreatedAt,
+			agent:     agent.AgentTypeClaudeCode,
+		},
+		{
+			sessionID: "session-latest",
+			createdAt: latestCreatedAt,
+			agent:     agent.AgentTypeCursor,
+		},
+	}
+	for _, session := range sessions {
+		if err := store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+			CheckpointID: cpID,
+			SessionID:    session.sessionID,
+			CreatedAt:    session.createdAt,
+			Strategy:     "manual-commit",
+			Transcript:   redact.AlreadyRedacted([]byte(`{"type":"test"}` + "\n")),
+			Prompts:      []string{"prompt for " + session.sessionID},
+			AuthorName:   "Test",
+			AuthorEmail:  "test@example.com",
+			Agent:        session.agent,
+		}); err != nil {
+			t.Fatalf("WriteCommitted(%s) error = %v", session.sessionID, err)
+		}
+	}
+
+	info, err := readCheckpointInfoFromStore(ctx, store, cpID)
+	if err != nil {
+		t.Fatalf("readCheckpointInfoFromStore() error = %v", err)
+	}
+	if info.SessionID != "session-latest" {
+		t.Errorf("SessionID = %q, want latest session", info.SessionID)
+	}
+	if !info.CreatedAt.Equal(latestCreatedAt) {
+		t.Errorf("CreatedAt = %s, want %s", info.CreatedAt, latestCreatedAt)
+	}
+	if info.Agent != agent.AgentTypeCursor {
+		t.Errorf("Agent = %q, want %q", info.Agent, agent.AgentTypeCursor)
+	}
+	if len(info.SessionIDs) != 2 || info.SessionIDs[0] != "session-old" || info.SessionIDs[1] != "session-latest" {
+		t.Errorf("SessionIDs = %#v, want [session-old session-latest]", info.SessionIDs)
+	}
+}
+
+func TestResolveLatestCheckpointUsesLocalV2WhenSettingsDisabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	cpID := id.MustCheckpointID("dd11ee22ff33")
+	v2Store := checkpoint.NewV2GitStore(repo)
+	if err := v2Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-v2-local",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"from v2"}]}}` + "\n")),
+		Prompts:      []string{"Use local v2 data"},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}); err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	latest, err := resolveLatestCheckpoint(context.Background(), repo, v2Store, []id.CheckpointID{cpID})
+	if err != nil {
+		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
+	}
+	if latest.CheckpointID != cpID {
+		t.Errorf("resolveLatestCheckpoint() = %s, want %s", latest.CheckpointID, cpID)
+	}
+}
+
+func TestResolveLatestCheckpointFallsBackToV1WhenLocalV2MissesCheckpoint(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+
+	v2Store := checkpoint.NewV2GitStore(repo)
+	if err := v2Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID: id.MustCheckpointID("dd11ee22ff33"),
+		SessionID:    "session-v2-other",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"from v2"}]}}` + "\n")),
+		Prompts:      []string{"Use local v2 data"},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}); err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	targetID := createCheckpointOnMetadataBranchFull(
+		t,
+		repo,
+		"session-v1-target",
+		id.MustCheckpointID("aa11bb22cc33"),
+		time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
+	)
+
+	latest, err := resolveLatestCheckpoint(context.Background(), repo, v2Store, []id.CheckpointID{targetID})
+	if err != nil {
+		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
+	}
+	if latest.CheckpointID != targetID {
+		t.Errorf("resolveLatestCheckpoint() = %s, want %s", latest.CheckpointID, targetID)
 	}
 }
 
@@ -678,7 +799,7 @@ func TestResumeSingleSession_FallsBackToV1WhenV2FullMissing(t *testing.T) {
 		t.Fatalf("failed to write v1 checkpoint: %v", err)
 	}
 
-	v2Store := checkpoint.NewV2GitStore(repo, "origin")
+	v2Store := checkpoint.NewV2GitStore(repo)
 	if err := v2Store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
 		CheckpointID:      cpID,
 		SessionID:         sessionID,

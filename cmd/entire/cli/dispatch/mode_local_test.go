@@ -71,6 +71,63 @@ func TestLocalMode_EnumeratesCheckpoints(t *testing.T) {
 	}
 }
 
+func TestLocalMode_ExplicitRepoUsesTargetRepoCheckpointSettings(t *testing.T) {
+	cwdDir := t.TempDir()
+	targetDir := t.TempDir()
+	stubGeneratedLocalDispatch(t)
+
+	testutil.InitRepo(t, cwdDir)
+	if err := os.MkdirAll(filepath.Join(cwdDir, ".entire"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(cwdDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": 2}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	testutil.InitRepo(t, targetDir)
+	testutil.WriteFile(t, targetDir, "a.txt", "x")
+	testutil.GitAdd(t, targetDir, "a.txt")
+	testutil.GitCommit(t, targetDir, "initial")
+	addOriginRemote(t, targetDir)
+
+	createdAt := time.Now().UTC()
+	seedCommittedCheckpoint(t, targetDir, seededCheckpoint{
+		id:           testCheckpointID,
+		branch:       "main",
+		createdAt:    createdAt,
+		filesTouched: []string{"a.txt"},
+		outcome:      testLocalFallbackText,
+	})
+
+	oldNow := nowUTC
+	nowUTC = func() time.Time { return createdAt.Add(2 * time.Hour) }
+	t.Cleanup(func() {
+		nowUTC = oldNow
+	})
+
+	t.Chdir(cwdDir)
+
+	got, err := Run(context.Background(), Options{
+		Mode:      ModeLocal,
+		RepoPaths: []string{targetDir},
+		Since:     "7d",
+		Branches:  []string{"main"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Repos) != 1 {
+		t.Fatalf("expected target repo checkpoint, got %+v", got.Repos)
+	}
+	if got.Repos[0].Sections[0].Bullets[0].Text != testLocalFallbackText {
+		t.Fatalf("unexpected bullet: %+v", got.Repos[0].Sections[0].Bullets[0])
+	}
+}
+
 func TestLocalMode_UsesUntilWindow(t *testing.T) {
 	dir := t.TempDir()
 	stubGeneratedLocalDispatch(t)

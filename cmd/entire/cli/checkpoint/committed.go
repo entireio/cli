@@ -1016,6 +1016,81 @@ func (s *GitStore) ReadSessionMetadata(ctx context.Context, checkpointID id.Chec
 	return &metadata, nil
 }
 
+// ReadSessionMetadataAndPrompts reads session metadata and prompt text without
+// requiring the raw transcript blob.
+func (s *GitStore) ReadSessionMetadataAndPrompts(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*SessionContent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err //nolint:wrapcheck // Propagating context cancellation
+	}
+
+	ft, err := s.getFetchingTree(ctx)
+	if err != nil {
+		return nil, ErrCheckpointNotFound
+	}
+
+	checkpointTree, err := ft.Tree(checkpointID.Path())
+	if err != nil {
+		return nil, ErrCheckpointNotFound
+	}
+
+	sessionTree, err := checkpointTree.Tree(strconv.Itoa(sessionIndex))
+	if err != nil {
+		return nil, fmt.Errorf("%w: session %d not found: %w", ErrCheckpointNotFound, sessionIndex, err)
+	}
+
+	result := &SessionContent{}
+	metadataFile, err := sessionTree.File(paths.MetadataFileName)
+	if err != nil {
+		return nil, fmt.Errorf("metadata.json not found for session %d: %w", sessionIndex, err)
+	}
+	metadataContent, err := metadataFile.Contents()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read session metadata: %w", err)
+	}
+	if err := json.Unmarshal([]byte(metadataContent), &result.Metadata); err != nil {
+		return nil, fmt.Errorf("failed to parse session metadata: %w", err)
+	}
+
+	if file, fileErr := sessionTree.File(paths.PromptFileName); fileErr == nil {
+		if content, contentErr := file.Contents(); contentErr == nil {
+			result.Prompts = content
+		}
+	}
+
+	return result, nil
+}
+
+func (s *GitStore) ReadSessionPrompts(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err //nolint:wrapcheck // Propagating context cancellation
+	}
+
+	ft, err := s.getFetchingTree(ctx)
+	if err != nil {
+		return "", ErrCheckpointNotFound
+	}
+
+	checkpointTree, err := ft.Tree(checkpointID.Path())
+	if err != nil {
+		return "", ErrCheckpointNotFound
+	}
+
+	sessionTree, err := checkpointTree.Tree(strconv.Itoa(sessionIndex))
+	if err != nil {
+		return "", fmt.Errorf("%w: session %d not found: %w", ErrCheckpointNotFound, sessionIndex, err)
+	}
+
+	file, err := sessionTree.File(paths.PromptFileName)
+	if err != nil {
+		return "", nil //nolint:nilerr // Missing prompt.txt means no recorded prompts.
+	}
+	content, err := file.Contents()
+	if err != nil {
+		return "", nil //nolint:nilerr // Keep committed prompt reads best-effort.
+	}
+	return content, nil
+}
+
 // ReadSessionContent reads the actual content for a specific session within a checkpoint.
 // sessionIndex is 0-based (0 for first session, 1 for second, etc.).
 // Returns the session's metadata, transcript, prompts, and context.
@@ -1144,41 +1219,7 @@ func (s *GitStore) ListCommitted(ctx context.Context) ([]CommittedInfo, error) {
 			return nil //nolint:nilerr // skip unreadable entries, continue walking
 		}
 
-		info := CommittedInfo{
-			CheckpointID: checkpointID,
-		}
-
-		// Get details from root metadata file (CheckpointSummary format)
-		if metadataFile, fileErr := checkpointTree.File(paths.MetadataFileName); fileErr == nil {
-			if content, contentErr := metadataFile.Contents(); contentErr == nil {
-				var summary CheckpointSummary
-				if err := json.Unmarshal([]byte(content), &summary); err == nil {
-					info.CheckpointsCount = summary.CheckpointsCount
-					info.FilesTouched = summary.FilesTouched
-					info.SessionCount = len(summary.Sessions)
-
-					// Read session metadata from latest session to get Agent, SessionID, CreatedAt
-					if len(summary.Sessions) > 0 {
-						latestIndex := len(summary.Sessions) - 1
-						latestDir := strconv.Itoa(latestIndex)
-						if sessionTree, treeErr := checkpointTree.Tree(latestDir); treeErr == nil {
-							if sessionMetadataFile, smErr := sessionTree.File(paths.MetadataFileName); smErr == nil {
-								if sessionContent, scErr := sessionMetadataFile.Contents(); scErr == nil {
-									var sessionMetadata CommittedMetadata
-									if json.Unmarshal([]byte(sessionContent), &sessionMetadata) == nil {
-										info.Agent = sessionMetadata.Agent
-										info.SessionID = sessionMetadata.SessionID
-										info.CreatedAt = sessionMetadata.CreatedAt
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		checkpoints = append(checkpoints, info)
+		checkpoints = append(checkpoints, readCommittedInfoFromCheckpointTree(checkpointID, checkpointTree))
 		return nil
 	})
 
@@ -1188,6 +1229,68 @@ func (s *GitStore) ListCommitted(ctx context.Context) ([]CommittedInfo, error) {
 	})
 
 	return checkpoints, nil
+}
+
+func readCommittedInfoFromCheckpointTree(checkpointID id.CheckpointID, checkpointTree *object.Tree) CommittedInfo {
+	info := CommittedInfo{
+		CheckpointID: checkpointID,
+	}
+
+	metadataFile, fileErr := checkpointTree.File(paths.MetadataFileName)
+	if fileErr != nil {
+		return info
+	}
+	content, contentErr := metadataFile.Contents()
+	if contentErr != nil {
+		return info
+	}
+	var summary CheckpointSummary
+	if err := json.Unmarshal([]byte(content), &summary); err != nil {
+		return info
+	}
+
+	info.CheckpointsCount = summary.CheckpointsCount
+	info.FilesTouched = summary.FilesTouched
+	info.SessionCount = len(summary.Sessions)
+
+	for i := range summary.Sessions {
+		sessionMetadata, ok := readCommittedMetadataFromCheckpointTree(checkpointTree, i)
+		if !ok {
+			continue
+		}
+		if sessionMetadata.SessionID != "" {
+			info.SessionIDs = append(info.SessionIDs, sessionMetadata.SessionID)
+		}
+		if i == len(summary.Sessions)-1 {
+			info.Agent = sessionMetadata.Agent
+			info.SessionID = sessionMetadata.SessionID
+			info.CreatedAt = sessionMetadata.CreatedAt
+			info.IsTask = sessionMetadata.IsTask
+			info.ToolUseID = sessionMetadata.ToolUseID
+		}
+	}
+
+	return info
+}
+
+func readCommittedMetadataFromCheckpointTree(checkpointTree *object.Tree, sessionIndex int) (CommittedMetadata, bool) {
+	sessionTree, treeErr := checkpointTree.Tree(strconv.Itoa(sessionIndex))
+	if treeErr != nil {
+		return CommittedMetadata{}, false
+	}
+	sessionMetadataFile, fileErr := sessionTree.File(paths.MetadataFileName)
+	if fileErr != nil {
+		return CommittedMetadata{}, false
+	}
+	sessionContent, contentErr := sessionMetadataFile.Contents()
+	if contentErr != nil {
+		return CommittedMetadata{}, false
+	}
+	var sessionMetadata CommittedMetadata
+	if err := json.Unmarshal([]byte(sessionContent), &sessionMetadata); err != nil {
+		return CommittedMetadata{}, false
+	}
+	return sessionMetadata, true
 }
 
 // GetTranscript retrieves the transcript for a specific checkpoint ID.
@@ -2040,12 +2143,15 @@ type Author struct {
 // Finds the commit whose subject matches "Checkpoint: <id>" and returns its author.
 // Returns empty Author if the checkpoint is not found or the sessions branch doesn't exist.
 func (s *GitStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (Author, error) {
+	return getCheckpointAuthorFromRef(ctx, s.repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName), checkpointID)
+}
+
+func getCheckpointAuthorFromRef(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, checkpointID id.CheckpointID) (Author, error) {
 	if err := ctx.Err(); err != nil {
 		return Author{}, err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	ref, err := s.repo.Reference(refName, true)
+	ref, err := repo.Reference(refName, true)
 	if err != nil {
 		return Author{}, nil
 	}
@@ -2053,7 +2159,7 @@ func (s *GitStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.Chec
 	// Search for the commit whose subject matches "Checkpoint: <id>"
 	targetSubject := "Checkpoint: " + checkpointID.String()
 
-	iter, err := s.repo.Log(&git.LogOptions{
+	iter, err := repo.Log(&git.LogOptions{
 		From:  ref.Hash(),
 		Order: git.LogOrderCommitterTime,
 	})

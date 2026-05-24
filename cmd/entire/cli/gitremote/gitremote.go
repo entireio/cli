@@ -38,7 +38,15 @@ func (i *Info) HostPort() string {
 
 // GetRemoteURL returns the URL configured for the named git remote.
 func GetRemoteURL(ctx context.Context, remoteName string) (string, error) {
+	return GetRemoteURLInDir(ctx, "", remoteName)
+}
+
+// GetRemoteURLInDir returns the URL configured for the named git remote in dir.
+func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", remoteName)
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("remote %q not found", remoteName)

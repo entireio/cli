@@ -20,6 +20,7 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/utils/merkletrie"
 )
 
 // disconnectedOnce ensures the disconnection warning runs at most once per process.
@@ -491,76 +492,22 @@ func cherryPickOnto(ctx context.Context, repo *git.Repository, base plumbing.Has
 	currentTip := base
 
 	for _, commit := range commits {
-		// Get the commit's tree entries
-		commitTree, err := commit.Tree()
+		changes, err := treeChangesForCherryPick(ctx, repo, commit)
 		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to get tree for commit %s: %w", commit.Hash, err)
+			return plumbing.ZeroHash, err
 		}
-
-		commitEntries := make(map[string]object.TreeEntry)
-		if err := checkpoint.FlattenTree(repo, commitTree, "", commitEntries); err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to flatten commit tree: %w", err)
-		}
-
-		// Get parent's tree entries (empty if root commit)
-		parentEntries := make(map[string]object.TreeEntry)
-		if len(commit.ParentHashes) > 0 {
-			parentCommit, pErr := repo.CommitObject(commit.ParentHashes[0])
-			if pErr != nil {
-				return plumbing.ZeroHash, fmt.Errorf("failed to get parent commit %s: %w", commit.ParentHashes[0], pErr)
-			}
-			parentTree, ptErr := parentCommit.Tree()
-			if ptErr != nil {
-				return plumbing.ZeroHash, fmt.Errorf("failed to get parent tree for commit %s: %w", commit.ParentHashes[0], ptErr)
-			}
-			if err := checkpoint.FlattenTree(repo, parentTree, "", parentEntries); err != nil {
-				return plumbing.ZeroHash, fmt.Errorf("failed to flatten parent tree for commit %s: %w", commit.ParentHashes[0], err)
-			}
-		}
-
-		// Compute full delta: additions, modifications, and deletions
-		added := make(map[string]object.TreeEntry)
-		for path, entry := range commitEntries {
-			parentEntry, exists := parentEntries[path]
-			if !exists || parentEntry.Hash != entry.Hash {
-				added[path] = entry // New or modified
-			}
-		}
-		var deleted []string
-		for path := range parentEntries {
-			if _, exists := commitEntries[path]; !exists {
-				deleted = append(deleted, path) // Removed in this commit
-			}
-		}
-
-		if len(added) == 0 && len(deleted) == 0 {
+		if len(changes) == 0 {
 			continue // Skip no-op commits
 		}
 
-		// Get current tip's tree and apply delta
 		tipCommit, err := repo.CommitObject(currentTip)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to get tip commit: %w", err)
 		}
-		tipTree, err := tipCommit.Tree()
-		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to get tip tree: %w", err)
-		}
 
-		mergedEntries := make(map[string]object.TreeEntry)
-		if err := checkpoint.FlattenTree(repo, tipTree, "", mergedEntries); err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to flatten tip tree: %w", err)
-		}
-		for path, entry := range added {
-			mergedEntries[path] = entry
-		}
-		for _, path := range deleted {
-			delete(mergedEntries, path)
-		}
-
-		mergedTreeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, mergedEntries)
+		mergedTreeHash, err := checkpoint.ApplyTreeChanges(ctx, repo, tipCommit.TreeHash, changes)
 		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to build merged tree: %w", err)
+			return plumbing.ZeroHash, fmt.Errorf("failed to apply cherry-pick changes: %w", err)
 		}
 
 		// Create new commit on top of current tip, preserving original message/author
@@ -573,6 +520,64 @@ func cherryPickOnto(ctx context.Context, repo *git.Repository, base plumbing.Has
 	}
 
 	return currentTip, nil
+}
+
+func treeChangesForCherryPick(ctx context.Context, repo *git.Repository, commit *object.Commit) ([]checkpoint.TreeChange, error) {
+	commitTree, err := commit.Tree()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tree for commit %s: %w", commit.Hash, err)
+	}
+
+	var parentTree *object.Tree
+	if len(commit.ParentHashes) > 0 {
+		parentCommit, pErr := repo.CommitObject(commit.ParentHashes[0])
+		if pErr != nil {
+			return nil, fmt.Errorf("failed to get parent commit %s: %w", commit.ParentHashes[0], pErr)
+		}
+		parentTree, err = parentCommit.Tree()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get parent tree for commit %s: %w", commit.ParentHashes[0], err)
+		}
+	}
+
+	changes, err := object.DiffTreeContext(ctx, parentTree, commitTree)
+	if err != nil {
+		return nil, fmt.Errorf("failed to diff commit %s against parent: %w", commit.Hash, err)
+	}
+
+	treeChanges := make([]checkpoint.TreeChange, 0, len(changes))
+	for _, change := range changes {
+		treeChange, changeErr := changeToTreeChange(change)
+		if changeErr != nil {
+			return nil, fmt.Errorf("failed to convert change in commit %s: %w", commit.Hash, changeErr)
+		}
+		treeChanges = append(treeChanges, treeChange)
+	}
+	return treeChanges, nil
+}
+
+func changeToTreeChange(change *object.Change) (checkpoint.TreeChange, error) {
+	action, err := change.Action()
+	if err != nil {
+		return checkpoint.TreeChange{}, fmt.Errorf("change action: %w", err)
+	}
+
+	switch action {
+	case merkletrie.Insert, merkletrie.Modify:
+		entry := change.To.TreeEntry
+		return checkpoint.TreeChange{
+			Path: change.To.Name,
+			Entry: &object.TreeEntry{
+				Name: entry.Name,
+				Mode: entry.Mode,
+				Hash: entry.Hash,
+			},
+		}, nil
+	case merkletrie.Delete:
+		return checkpoint.TreeChange{Path: change.From.Name}, nil
+	default:
+		return checkpoint.TreeChange{}, fmt.Errorf("unsupported action %s", action)
+	}
 }
 
 // createCherryPickCommit creates a new commit on top of parent, preserving the

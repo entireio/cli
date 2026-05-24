@@ -29,7 +29,6 @@ import (
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
@@ -37,8 +36,6 @@ import (
 const (
 	branchMain   = "main"
 	branchMaster = "master"
-	// originRemote is the default git remote name used for fetch/push fallbacks.
-	originRemote = "origin"
 	// Strategy name constants
 	StrategyNameManualCommit = "manual-commit"
 )
@@ -189,8 +186,7 @@ func IsAncestorOf(ctx context.Context, repo *git.Repository, commit, target plum
 	return found
 }
 
-// ListCheckpoints returns all checkpoints from the entire/checkpoints/v1 branch.
-// Scans sharded paths: <id[:2]>/<id[2:]>/ directories containing metadata.json.
+// ListCheckpoints returns all checkpoints from committed checkpoint storage.
 func ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -200,104 +196,37 @@ func ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 	// Warn (once per process) if metadata branches are disconnected
 	WarnIfMetadataDisconnected()
 
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	ref, err := repo.Reference(refName, true)
+	store, err := checkpoint.NewCommittedReader(ctx, repo, checkpoint.CommittedReaderOptions{})
 	if err != nil {
-		//nolint:nilerr // No sessions branch yet is expected, return empty list
-		return []CheckpointInfo{}, nil
+		return nil, fmt.Errorf("failed to prepare checkpoint store: %w", err)
 	}
-
-	commit, err := repo.CommitObject(ref.Hash())
+	committed, err := store.ListCommitted(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get commit object: %w", err)
+		return nil, fmt.Errorf("failed to list committed checkpoints: %w", err)
 	}
+	return checkpointInfosFromCommitted(committed), nil
+}
 
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit tree: %w", err)
+func checkpointInfosFromCommitted(committed []checkpoint.CommittedInfo) []CheckpointInfo {
+	result := make([]CheckpointInfo, 0, len(committed))
+	for _, c := range committed {
+		result = append(result, CheckpointInfo{
+			CheckpointID:     c.CheckpointID,
+			SessionID:        c.SessionID,
+			CreatedAt:        c.CreatedAt,
+			CheckpointsCount: c.CheckpointsCount,
+			FilesTouched:     c.FilesTouched,
+			Agent:            c.Agent,
+			IsTask:           c.IsTask,
+			ToolUseID:        c.ToolUseID,
+			SessionCount:     c.SessionCount,
+			SessionIDs:       c.SessionIDs,
+		})
 	}
-
-	var checkpoints []CheckpointInfo
-
-	// Scan sharded structure: <2-char-prefix>/<remaining-id>/metadata.json
-	// The tree has 2-character directories (hex buckets)
-	for _, bucketEntry := range tree.Entries {
-		if bucketEntry.Mode != filemode.Dir {
-			continue
-		}
-		// Bucket should be 2 hex chars
-		if len(bucketEntry.Name) != 2 {
-			continue
-		}
-
-		bucketTree, treeErr := repo.TreeObject(bucketEntry.Hash)
-		if treeErr != nil {
-			continue
-		}
-
-		// Each entry in the bucket is the remaining part of the checkpoint ID
-		for _, checkpointEntry := range bucketTree.Entries {
-			if checkpointEntry.Mode != filemode.Dir {
-				continue
-			}
-
-			checkpointTree, cpTreeErr := repo.TreeObject(checkpointEntry.Hash)
-			if cpTreeErr != nil {
-				continue
-			}
-
-			// Reconstruct checkpoint ID: <bucket><remaining>
-			checkpointIDStr := bucketEntry.Name + checkpointEntry.Name
-			checkpointID, cpErr := id.NewCheckpointID(checkpointIDStr)
-			if cpErr != nil {
-				// Skip invalid checkpoint IDs
-				continue
-			}
-
-			info := CheckpointInfo{
-				CheckpointID: checkpointID,
-			}
-
-			// Get details from metadata file (CheckpointSummary format)
-			if summary, ok := decodeSummaryLiteFromTree(checkpointTree); ok {
-				info.CheckpointsCount = summary.CheckpointsCount
-				info.FilesTouched = summary.FilesTouched
-				info.SessionCount = len(summary.Sessions)
-
-				// Read session-level metadata for Agent, SessionID, CreatedAt, SessionIDs
-				for i, sessionPaths := range summary.Sessions {
-					if sessionPaths.Metadata == "" {
-						continue
-					}
-					// SessionFilePaths contains absolute paths with leading "/"
-					// Strip the leading "/" for tree.File() which expects paths without leading slash
-					sessionMetadataPath := strings.TrimPrefix(sessionPaths.Metadata, "/")
-					sessionMeta, sErr := decodeSessionMetadataLite(tree, sessionMetadataPath)
-					if sErr != nil {
-						continue
-					}
-					info.SessionIDs = append(info.SessionIDs, sessionMeta.SessionID)
-					// Use first session's metadata for Agent, SessionID, CreatedAt
-					if i == 0 {
-						info.Agent = sessionMeta.Agent
-						info.SessionID = sessionMeta.SessionID
-						info.CreatedAt = sessionMeta.CreatedAt
-						info.IsTask = sessionMeta.IsTask
-						info.ToolUseID = sessionMeta.ToolUseID
-					}
-				}
-			}
-
-			checkpoints = append(checkpoints, info)
-		}
-	}
-
-	// Sort by time (most recent first)
-	sort.Slice(checkpoints, func(i, j int) bool {
-		return checkpoints[i].CreatedAt.After(checkpoints[j].CreatedAt)
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.After(result[j].CreatedAt)
 	})
-
-	return checkpoints, nil
+	return result
 }
 
 const (

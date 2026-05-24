@@ -89,10 +89,7 @@ var errCannotGenerateTemporaryCheckpoint = errors.New("cannot generate summary f
 
 type explainCheckpointLookup struct {
 	repo      *git.Repository
-	v1Store   *checkpoint.GitStore
-	v2Store   *checkpoint.V2GitStore
-	reader    checkpoint.CommittedListReader
-	readMode  checkpoint.CommittedReadMode
+	store     checkpoint.CommittedStore
 	committed []checkpoint.CommittedInfo
 }
 
@@ -617,7 +614,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		// layer, so rawTranscript is always false when generate is true; the
 		// direct-to-w write path inside explainTemporaryCheckpoint is not
 		// reachable here and won't leak partial output on error.
-		output, found, tempErr := explainTemporaryCheckpoint(ctx, w, errW, lookup.repo, lookup.v1Store, checkpointIDPrefix, verbose, full, rawTranscript)
+		output, found, tempErr := explainTemporaryCheckpoint(ctx, w, errW, lookup.repo, checkpoint.NewGitStore(lookup.repo), checkpointIDPrefix, verbose, full, rawTranscript)
 		if tempErr != nil {
 			return tempErr
 		}
@@ -657,7 +654,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	// Handle summary generation — uses raw transcript.
 	if generate {
 		stopLoad(false) // generation prints its own progress to w/errW
-		if err := generateCheckpointSummary(ctx, w, errW, lookup.v1Store, lookup.v2Store, fullCheckpointID, summary, content, force, summaryTimeoutSeconds); err != nil {
+		if err := generateCheckpointSummary(ctx, w, errW, lookup.store, fullCheckpointID, summary, content, force, summaryTimeoutSeconds); err != nil {
 			return err
 		}
 		// Reload to get the updated summary. After generation, display can
@@ -688,7 +685,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	associatedCommits, _ := getAssociatedCommits(ctx, lookup.repo, fullCheckpointID, searchAll) //nolint:errcheck // Best-effort
 
 	// Derive author from the first associated commit (the user who made the commit).
-	// Fall back to GetCheckpointAuthor (walks entire/checkpoints/v1) for checkpoints
+	// Fall back to the committed checkpoint store for checkpoints
 	// not reachable from the current branch.
 	var author checkpoint.Author
 	if len(associatedCommits) > 0 {
@@ -697,7 +694,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 			Email: associatedCommits[0].Email,
 		}
 	} else {
-		author, _ = lookup.v1Store.GetCheckpointAuthor(ctx, fullCheckpointID) //nolint:errcheck // Author is optional
+		author, _ = lookup.store.GetCheckpointAuthor(ctx, fullCheckpointID) //nolint:errcheck // Author is optional
 	}
 
 	// Format and output. Stop spinner BEFORE any write to w to keep stderr
@@ -714,24 +711,24 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 // function stays under maintidx limits. Caller is responsible for the
 // surrounding spinner.
 func loadCheckpointForExplain(ctx context.Context, errW io.Writer, lookup *explainCheckpointLookup, cpID id.CheckpointID, full, generate, rawTranscript bool) (checkpoint.CommittedReader, *checkpoint.CheckpointSummary, *checkpoint.SessionContent, error) {
-	prefetchCheckpointBlobs(ctx, errW, lookup.repo, cpID, committedCheckpointReadUsesV2(lookup.readMode))
+	prefetchCheckpointBlobs(ctx, errW, lookup.repo, cpID)
 
-	reader := lookup.reader
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, reader, cpID)
+	store := lookup.store
+	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
 
 	needsRawTranscript := full || generate || rawTranscript
-	content, contentErr := readCheckpointContentForExplain(ctx, reader, cpID, summary, !needsRawTranscript)
+	content, contentErr := readCheckpointContentForExplain(ctx, store, cpID, summary, !needsRawTranscript)
 	if contentErr != nil {
 		return nil, nil, nil, fmt.Errorf("failed to read checkpoint content: %w", contentErr)
 	}
-	return reader, summary, content, nil
+	return store, summary, content, nil
 }
 
-// prefetchCheckpointBlobs navigates to the checkpoint's subtree(s) — v1
-// always, v2 when enabled — collects every locally-missing blob, and
+// prefetchCheckpointBlobs navigates to the checkpoint's local subtree(s),
+// collects every locally-missing blob, and
 // fetches them all in a single `git fetch-pack` invocation per store.
 // Best-effort — failure is logged and the read path falls back to the
 // FetchingTree's per-File fetcher.
@@ -740,12 +737,9 @@ func loadCheckpointForExplain(ctx context.Context, errW io.Writer, lookup *expla
 // analysis (one cat-file -e per blob) and the actual fetch are silent
 // inside this function so the caller's spinner provides continuous
 // feedback.
-func prefetchCheckpointBlobs(ctx context.Context, _ io.Writer, repo *git.Repository, cpID id.CheckpointID, preferV2 bool) {
+func prefetchCheckpointBlobs(ctx context.Context, _ io.Writer, repo *git.Repository, cpID id.CheckpointID) {
 	v1FT := buildCheckpointFetchingTree(ctx, repo, cpID, "v1", loadV1MetadataRootTree)
-	var v2FT *checkpoint.FetchingTree
-	if preferV2 {
-		v2FT = buildCheckpointFetchingTree(ctx, repo, cpID, "v2", loadV2MainRootTree)
-	}
+	v2FT := buildCheckpointFetchingTree(ctx, repo, cpID, "v2", loadV2MainRootTree)
 
 	missingCount := 0
 	if v1FT != nil {
@@ -845,40 +839,24 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 	// `git fetch` fails against partial-clone repos with "did not send all
 	// necessary objects"). Falls back to a full metadata-branch fetch if
 	// fetch-pack also can't reach the blobs.
-	checkpointReader, err := newCommittedCheckpointReader(ctx, repo, committedCheckpointReaderOptions{
-		blobFetcher:    FetchBlobsByHash,
-		fetchRemoteLog: "explain: using origin for v2 store fetch remote",
+	store, err := checkpoint.NewCommittedReader(ctx, repo, checkpoint.CommittedReaderOptions{
+		BlobFetcher: FetchBlobsByHash,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("prepare checkpoint reader: %w", err)
+		return nil, fmt.Errorf("prepare checkpoint store: %w", err)
 	}
 
 	lookup := &explainCheckpointLookup{
-		repo:     repo,
-		v1Store:  checkpointReader.v1Store,
-		v2Store:  checkpointReader.v2Store,
-		reader:   checkpointReader.reader,
-		readMode: checkpointReader.readMode,
+		repo:  repo,
+		store: store,
 	}
 
-	committed, err := checkpointReader.reader.ListCommitted(ctx)
+	committed, err := store.ListCommitted(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list checkpoints: %w", err)
 	}
 	lookup.committed = committed
 	return lookup, nil
-}
-
-// resolvePromptTree picks the best metadata tree for reading session prompts.
-// Prefers v2 when enabled (same sharded layout as v1), falls back to v1.
-func resolvePromptTree(v1Tree, v2Tree *object.Tree, preferV2 bool) *object.Tree {
-	if preferV2 && v2Tree != nil {
-		return v2Tree
-	}
-	if v1Tree != nil {
-		return v1Tree
-	}
-	return v2Tree // Last resort: use v2 even if not preferred
 }
 
 type v2MainContentReader interface {
@@ -954,7 +932,7 @@ func readV2ContentFromMain(ctx context.Context, v2Reader v2MainContentReader, ch
 // summaryTimeoutSeconds is the per-invocation --summary-timeout-seconds flag
 // value (0 = unset). Effective precedence for the deadline: flag > settings >
 // package default. See resolveSummaryTimeout for the resolution.
-func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, v1Store *checkpoint.GitStore, v2Store *checkpoint.V2GitStore, checkpointID id.CheckpointID, cpSummary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, force bool, summaryTimeoutSeconds int) error {
+func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store checkpoint.CommittedStore, checkpointID id.CheckpointID, cpSummary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, force bool, summaryTimeoutSeconds int) error {
 	// Check if summary already exists
 	if content.Metadata.Summary != nil && !force {
 		return renderExplainFailure(errW, "Summary already exists", []explainRow{
@@ -1001,30 +979,8 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, v1Store *
 	}
 	elapsed := time.Since(start)
 
-	// Persist to both stores; at least one must succeed.
-	v1Err := v1Store.UpdateSummary(ctx, checkpointID, summary)
-	var v2Err error
-	if v2Store != nil {
-		v2Err = v2Store.UpdateSummary(ctx, checkpointID, summary)
-	}
-
-	switch {
-	case v1Err != nil && (v2Store == nil || v2Err != nil):
-		// No store succeeded — hard error.
-		if v2Err != nil {
-			return fmt.Errorf("failed to save summary: v1: %w, v2: %w", v1Err, v2Err)
-		}
-		return fmt.Errorf("failed to save summary: %w", v1Err)
-	case v1Err != nil:
-		logging.Debug(ctx, "v1 UpdateSummary failed (v2 succeeded)",
-			slog.String("checkpoint_id", checkpointID.String()),
-			slog.String("error", v1Err.Error()),
-		)
-	case v2Err != nil:
-		logging.Debug(ctx, "v2 UpdateSummary failed (v1 succeeded)",
-			slog.String("checkpoint_id", checkpointID.String()),
-			slog.String("error", v2Err.Error()),
-		)
+	if err := store.UpdateSummary(ctx, checkpointID, summary); err != nil {
+		return fmt.Errorf("failed to save summary: %w", err)
 	}
 
 	styles := newStatusStyles(w)
@@ -2100,15 +2056,13 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	// Warn (once per process) if metadata branches are disconnected
 	strategy.WarnIfMetadataDisconnected()
 
-	checkpointReader, err := newCommittedCheckpointReader(ctx, repo, committedCheckpointReaderOptions{
-		fetchRemoteLog: "explain: using origin for branch checkpoint v2 store fetch remote",
-	})
+	store, err := checkpoint.NewCommittedReader(ctx, repo, checkpoint.CommittedReaderOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("prepare checkpoint reader: %w", err)
+		return nil, fmt.Errorf("prepare checkpoint store: %w", err)
 	}
 
 	// Get all committed checkpoints for lookup (v2-aware with v1 fallback).
-	committedInfos, err := checkpointReader.reader.ListCommitted(ctx)
+	committedInfos, err := store.ListCommitted(ctx)
 	if err != nil {
 		committedInfos = nil // Continue without committed checkpoints
 	}
@@ -2133,12 +2087,6 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	// Check if we're on the default branch (needed for getReachableTemporaryCheckpoints)
 	isOnDefault, _ := strategy.IsOnDefaultBranch(repo)
 
-	// Fetch metadata trees for reading session prompts (cheap tree lookups).
-	// Try v2 /main first, fall back to v1 metadata branch.
-	v1MetadataTree, _ := strategy.GetMetadataBranchTree(repo)   //nolint:errcheck // Best-effort
-	v2MetadataTree, _ := strategy.GetV2MetadataBranchTree(repo) //nolint:errcheck // Best-effort
-	promptTree := resolvePromptTree(v1MetadataTree, v2MetadataTree, committedCheckpointReadUsesV2(checkpointReader.readMode))
-
 	var points []strategy.RewindPoint
 
 	collectCheckpoint := func(c *object.Commit) {
@@ -2159,16 +2107,13 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 			IsLogsOnly:       true, // Committed checkpoints are logs-only
 			CheckpointID:     cpID,
 			SessionID:        cpInfo.SessionID,
+			SessionCount:     cpInfo.SessionCount,
+			SessionIDs:       cpInfo.SessionIDs,
 			IsTaskCheckpoint: cpInfo.IsTask,
 			ToolUseID:        cpInfo.ToolUseID,
 			Agent:            cpInfo.Agent,
 		}
-		// Read session prompt from metadata tree (best-effort).
-		// Read prompt.txt directly from the latest session subdirectory instead of
-		// parsing the full transcript — prompt.txt is tiny vs multi-MB transcripts.
-		if promptTree != nil {
-			point.SessionPrompt = strategy.ReadLatestSessionPromptFromCommittedTree(promptTree, cpID, cpInfo.SessionCount)
-		}
+		point.SessionPrompt = readLatestCommittedSessionPrompt(ctx, store, cpID, cpInfo.SessionCount)
 
 		points = append(points, point)
 	}
@@ -2218,7 +2163,7 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	}
 
 	// Get temporary checkpoints from ALL shadow branches whose base commit is reachable from HEAD.
-	tempPoints := getReachableTemporaryCheckpoints(ctx, repo, checkpointReader.v1Store, head.Hash(), isOnDefault, limit)
+	tempPoints := getReachableTemporaryCheckpoints(ctx, repo, checkpoint.NewGitStore(repo), head.Hash(), isOnDefault, limit)
 	points = append(points, tempPoints...)
 
 	// Sort by date, most recent first
@@ -2232,6 +2177,22 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	}
 
 	return points, nil
+}
+
+func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.CommittedListReader, cpID id.CheckpointID, sessionCount int) string {
+	if sessionCount <= 0 {
+		return ""
+	}
+	for i := sessionCount - 1; i >= 0; i-- {
+		prompts, err := store.ReadSessionPrompts(ctx, cpID, i)
+		if err != nil {
+			continue
+		}
+		if prompt := strategy.ExtractFirstPrompt(prompts); prompt != "" {
+			return prompt
+		}
+	}
+	return ""
 }
 
 // getReachableTemporaryCheckpoints returns temporary checkpoints from shadow branches

@@ -19,7 +19,9 @@ jobs:
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
-          go-version: 'stable'
+          # Track go.mod so future Go bumps don't need a parallel workflow
+          # edit; release.yml uses the same pattern.
+          go-version-file: go.mod
 
       - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
 

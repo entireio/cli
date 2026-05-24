@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
@@ -196,7 +197,7 @@ func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer
 	stop := startSpinner(errW, "Fetching checkpoint metadata from remote")
 	_, _, v1Err := getMetadataTree(ctx)
 	v2OK := false
-	if committedCheckpointReadUsesV2(lookup.readMode) {
+	if shouldFetchV2Metadata(ctx, lookup) {
 		if _, _, v2Err := getV2MetadataTree(ctx); v2Err == nil {
 			v2OK = true
 		}
@@ -210,6 +211,21 @@ func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer
 		return nil, lookup
 	}
 	return matchCheckpointPrefix(fresh, prefix), fresh
+}
+
+func shouldFetchV2Metadata(ctx context.Context, lookup *explainCheckpointLookup) bool {
+	if settings.IsCheckpointsV2Enabled(ctx) {
+		return true
+	}
+	if lookup == nil {
+		return false
+	}
+	switch lookup.store.(type) {
+	case *checkpoint.V2GitStore, *checkpoint.DualCheckpointReader:
+		return true
+	default:
+		return false
+	}
 }
 
 func matchCheckpointPrefix(lookup *explainCheckpointLookup, prefix string) []id.CheckpointID {
@@ -259,13 +275,13 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 		return err
 	}
 
-	reader := lookup.reader
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, reader, cpID)
+	store := lookup.store
+	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
 	if err != nil {
 		return fmt.Errorf("failed to read checkpoint: %w", err)
 	}
 
-	compactReader, hasCompact := reader.(compactTranscriptReader)
+	compactReader, hasCompact := store.(compactTranscriptReader)
 	wantCompact := !opts.rawTranscript
 
 	idx, err := resolveSessionIndex(summary, opts.sessionIndex)
@@ -281,7 +297,7 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 	}
 
 	if !wantCompact {
-		content, readErr := reader.ReadSessionContent(ctx, cpID, idx)
+		content, readErr := store.ReadSessionContent(ctx, cpID, idx)
 		if readErr != nil {
 			return fmt.Errorf("failed to read session content: %w", readErr)
 		}
@@ -295,7 +311,7 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 	if err != nil {
 		if errors.Is(err, checkpoint.ErrCheckpointNotFound) || errors.Is(err, checkpoint.ErrNoTranscript) {
 			fmt.Fprintln(errW, "note: compact transcript unavailable, falling back to raw transcript")
-			content, readErr := reader.ReadSessionContent(ctx, cpID, idx)
+			content, readErr := store.ReadSessionContent(ctx, cpID, idx)
 			if readErr != nil {
 				return fmt.Errorf("failed to read session content: %w", readErr)
 			}
@@ -375,13 +391,13 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 		return err
 	}
 
-	reader := lookup.reader
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, reader, cpID)
+	store := lookup.store
+	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
 	if err != nil {
 		return fmt.Errorf("failed to read checkpoint: %w", err)
 	}
 
-	envelope, failedSessions := buildCheckpointJSONEnvelope(ctx, reader, summary, cpID)
+	envelope, failedSessions := buildCheckpointJSONEnvelope(ctx, store, summary, cpID)
 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

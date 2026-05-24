@@ -361,7 +361,7 @@ func ListEligibleV2Generations(ctx context.Context, s *settings.EntireSettings) 
 		return nil, nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
 
-	store := checkpoint.NewV2GitStore(repo, "origin")
+	store := checkpoint.NewV2GitStore(repo)
 	candidates, tempRefs, warnings, err := listArchivedV2GenerationCandidates(ctx, repo, store)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to list archived generations: %w", err)

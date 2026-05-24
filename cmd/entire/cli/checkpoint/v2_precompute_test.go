@@ -19,7 +19,7 @@ import (
 func setupV2ForUpdate(t *testing.T, initialTranscript []byte) (*git.Repository, *V2GitStore, id.CheckpointID) {
 	t.Helper()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
 
 	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{

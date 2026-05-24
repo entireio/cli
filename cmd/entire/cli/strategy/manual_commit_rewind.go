@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,10 +16,8 @@ import (
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"charm.land/huh/v2"
@@ -625,32 +622,11 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 		return nil, errors.New("missing checkpoint ID")
 	}
 
-	v1Store, err := s.getCheckpointStore()
+	store, err := s.committedCheckpointStore(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
+		return nil, fmt.Errorf("failed to prepare checkpoint store: %w", err)
 	}
-
-	var v2Store *cpkg.V2GitStore
-	readMode := cpkg.CommittedReadModeForOptions(settings.IsCheckpointsV2Enabled(ctx), settings.CheckpointsVersion(ctx))
-	if readMode != cpkg.CommittedReadV1 {
-		var v2Err error
-		v2Store, v2Err = s.getV2CheckpointStore(ctx)
-		if v2Err != nil {
-			if readMode == cpkg.CommittedReadV2 {
-				return nil, fmt.Errorf("failed to get v2 checkpoint store: %w", v2Err)
-			}
-			logging.Debug(ctx, "failed to get v2 checkpoint store, using v1 only",
-				slog.String("checkpoint_id", string(point.CheckpointID)),
-				slog.String("error", v2Err.Error()),
-			)
-		}
-	}
-
-	reader, err := cpkg.NewCommittedReader(v1Store, v2Store, readMode)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare checkpoint reader: %w", err)
-	}
-	summary, err := cpkg.ReadCommittedCheckpoint(ctx, reader, point.CheckpointID)
+	summary, err := cpkg.ReadCommittedCheckpoint(ctx, store, point.CheckpointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
@@ -663,7 +639,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 
 	// Check for newer local logs if not forcing
 	if !force {
-		sessions := s.classifySessionsForRestore(ctx, repoRoot, reader, point.CheckpointID, summary)
+		sessions := s.classifySessionsForRestore(ctx, repoRoot, store, point.CheckpointID, summary)
 		hasConflicts := false
 		for _, sess := range sessions {
 			if sess.Status == StatusLocalNewer {
@@ -692,7 +668,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 	// Restore all sessions (oldest to newest, using 0-based indexing)
 	var restored []RestoredSession
 	for i := range totalSessions {
-		content, readErr := reader.ReadSessionContent(ctx, point.CheckpointID, i)
+		content, readErr := store.ReadSessionContent(ctx, point.CheckpointID, i)
 		if readErr != nil {
 			if !errors.Is(readErr, cpkg.ErrNoTranscript) {
 				fmt.Fprintf(errW, "  Warning: failed to read session %d: %v\n", i, readErr)

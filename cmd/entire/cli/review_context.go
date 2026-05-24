@@ -97,14 +97,11 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 		logging.Debug(ctx, "review checkpoint context: open repo", slog.String("error", err.Error()))
 		return ""
 	}
-	checkpointReader, readerErr := newCommittedCheckpointReader(ctx, repo, committedCheckpointReaderOptions{
-		fetchRemoteLog: "review checkpoint context: no v2 fetch remote",
-	})
-	if readerErr != nil {
-		logging.Debug(ctx, "review checkpoint context: checkpoint reader unavailable", slog.String("error", readerErr.Error()))
+	store, storeErr := checkpoint.NewCommittedReader(ctx, repo, checkpoint.CommittedReaderOptions{})
+	if storeErr != nil {
+		logging.Debug(ctx, "review checkpoint context: checkpoint store unavailable", slog.String("error", storeErr.Error()))
 		return ""
 	}
-	reader := checkpointReader.reader
 
 	var lines []string
 	seen := map[checkpointid.CheckpointID]bool{}
@@ -121,12 +118,12 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 				continue
 			}
 
-			summary, err := checkpoint.ReadCommittedCheckpoint(ctx, reader, cpID)
+			summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
 			if err != nil {
 				lines = append(lines, fmt.Sprintf("- %s: checkpoint metadata unavailable", cpID))
 				continue
 			}
-			detail := reviewCheckpointDetail(ctx, reader, cpID, summary)
+			detail := reviewCheckpointDetail(ctx, store, cpID, summary)
 			if detail == "" {
 				detail = "no summary or prompt recorded"
 			}

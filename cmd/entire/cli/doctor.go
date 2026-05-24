@@ -513,7 +513,7 @@ func checkV2GenerationHealth(cmd *cobra.Command, repo *git.Repository) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
-	v2Store := checkpoint.NewV2GitStore(repo, "origin")
+	v2Store := checkpoint.NewV2GitStore(repo)
 
 	archived, err := v2Store.ListArchivedGenerations()
 	if err != nil {
@@ -604,7 +604,7 @@ func checkV2CheckpointCounts(cmd *cobra.Command, repo *git.Repository) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
-	v2Store := checkpoint.NewV2GitStore(repo, "origin")
+	v2Store := checkpoint.NewV2GitStore(repo)
 
 	mainRefName := plumbing.ReferenceName(paths.V2MainRefName)
 	fullRefName := plumbing.ReferenceName(paths.V2FullCurrentRefName)

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -34,7 +35,25 @@ const (
 	defaultGenerationRetentionDays = 14
 )
 
-var checkpointsVersionWarningOnce sync.Once
+var (
+	checkpointsVersionWarningOnce sync.Once
+)
+
+type worktreeRootContextKey struct{}
+
+// WithWorktreeRoot returns a context that makes settings.Load resolve project
+// and clone-local settings relative to worktreeRoot instead of the process cwd.
+func WithWorktreeRoot(ctx context.Context, worktreeRoot string) context.Context {
+	if worktreeRoot == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, worktreeRootContextKey{}, filepath.Clean(worktreeRoot))
+}
+
+func worktreeRootFromContext(ctx context.Context) (string, bool) {
+	root, ok := ctx.Value(worktreeRootContextKey{}).(string)
+	return root, ok && root != ""
+}
 
 // Commit linking mode constants.
 const (
@@ -267,6 +286,10 @@ func (s *EntireSettings) ReviewConfigFor(agentName string) ReviewConfig {
 // Returns default settings if no settings or preferences file exists.
 // Works correctly from any subdirectory within the repository.
 func Load(ctx context.Context) (*EntireSettings, error) {
+	if worktreeRoot, ok := worktreeRootFromContext(ctx); ok {
+		return loadForWorktreeRoot(ctx, worktreeRoot)
+	}
+
 	// Get absolute paths for settings files
 	settingsFileAbs, err := paths.AbsPath(ctx, EntireSettingsFile)
 	if err != nil {
@@ -290,6 +313,33 @@ func Load(ctx context.Context) (*EntireSettings, error) {
 	}
 
 	return loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAbs)
+}
+
+func loadForWorktreeRoot(ctx context.Context, worktreeRoot string) (*EntireSettings, error) {
+	settingsFileAbs := filepath.Join(worktreeRoot, EntireSettingsFile)
+	preferencesFileAbs := ""
+	if path, prefErr := clonePreferencesPathForWorktreeRoot(ctx, worktreeRoot); prefErr == nil {
+		preferencesFileAbs = path
+	} else {
+		logging.Debug(ctx, "clone preferences path unresolved; skipping preferences layer",
+			slog.String("error", prefErr.Error()))
+	}
+	localSettingsFileAbs := filepath.Join(worktreeRoot, EntireSettingsLocalFile)
+	return loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAbs)
+}
+
+func clonePreferencesPathForWorktreeRoot(ctx context.Context, worktreeRoot string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", worktreeRoot, "rev-parse", "--git-common-dir")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("resolve git common dir: %w", err)
+	}
+
+	commonDir := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(worktreeRoot, commonDir)
+	}
+	return filepath.Join(filepath.Clean(commonDir), ClonePreferencesFile), nil
 }
 
 func loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAbs string) (*EntireSettings, error) {
@@ -919,14 +969,15 @@ func CheckpointsVersion(ctx context.Context) int {
 	return version
 }
 
-// IsPushV2RefsEnabled checks if pushing v2 refs is enabled in settings.
-// Returns false by default if settings cannot be loaded or flags are missing.
-func IsPushV2RefsEnabled(ctx context.Context) bool {
+// WarnIfCheckpointsV2Disallowed emits the user-facing fallback warning when a
+// settings file still requests checkpoints v2. Call this from push-time flows
+// so users learn why v1 metadata is being pushed instead.
+func WarnIfCheckpointsV2Disallowed(ctx context.Context) {
 	s, err := Load(ctx)
 	if err != nil {
-		return false
+		return
 	}
-	return s.IsPushV2RefsEnabled()
+	s.WarnIfCheckpointsV2Disallowed()
 }
 
 // IsFilteredFetchesEnabled checks if filtered fetches should be used.
@@ -1010,14 +1061,17 @@ func (s *EntireSettings) GetCheckpointRemote() *CheckpointRemoteConfig {
 	return &CheckpointRemoteConfig{Provider: provider, Repo: repo}
 }
 
-// IsCheckpointsV2Enabled checks if checkpoints v2 is enabled.
-// Returns true when either checkpoints_v2 is set or checkpoints_version is 2.
+// IsCheckpointsV2Enabled checks if checkpoints v2 is enabled for read paths.
+// Existing v2 checkpoint metadata remains readable while new writes use v1.
 func (s *EntireSettings) IsCheckpointsV2Enabled() bool {
-	if s.CheckpointsVersion() == 2 {
-		return true
-	}
 	if s.StrategyOptions == nil {
 		return false
+	}
+	if val, ok := s.StrategyOptions["checkpoints_version"]; ok {
+		version, supported := parseCheckpointsVersion(val)
+		if supported && version == 2 {
+			return true
+		}
 	}
 	val, ok := s.StrategyOptions["checkpoints_v2"].(bool)
 	return ok && val
@@ -1025,7 +1079,9 @@ func (s *EntireSettings) IsCheckpointsV2Enabled() bool {
 
 // CheckpointsVersion returns the configured checkpoints format version from
 // strategy_options.checkpoints_version. Returns 1 when unset, invalid, or
-// unsupported. The currently supported versions are 1 and 2.
+// unsupported. Version 2 is no longer an exclusive storage mode; reads use
+// IsCheckpointsV2Enabled to enable dual v2/v1 lookup when legacy settings are
+// present.
 func (s *EntireSettings) CheckpointsVersion() int {
 	if s.StrategyOptions == nil {
 		return 1
@@ -1035,10 +1091,43 @@ func (s *EntireSettings) CheckpointsVersion() int {
 		return 1
 	}
 	version, ok := parseCheckpointsVersion(val)
-	if ok {
-		return version
+	if ok && version == 1 {
+		return 1
 	}
 	return 1
+}
+
+// WarnIfCheckpointsV2Disallowed emits the v2 fallback warning when any legacy
+// settings key requests v2 writes or pushes.
+func (s *EntireSettings) WarnIfCheckpointsV2Disallowed() {
+	if val, ok := s.disallowedCheckpointsV2Value(); ok {
+		warnCheckpointsV2Disallowed(val)
+	}
+}
+
+func (s *EntireSettings) disallowedCheckpointsV2Value() (any, bool) {
+	if s.StrategyOptions == nil {
+		return nil, false
+	}
+	if val, ok := s.StrategyOptions["checkpoints_version"]; ok {
+		version, supported := parseCheckpointsVersion(val)
+		if supported && version == 2 {
+			return val, true
+		}
+	}
+	for _, key := range []string{"checkpoints_v2", "push_v2_refs", "push_v2"} {
+		if val, ok := s.StrategyOptions[key].(bool); ok && val {
+			return 2, true
+		}
+	}
+	return nil, false
+}
+
+func warnCheckpointsV2Disallowed(val any) {
+	fmt.Fprintf(os.Stderr,
+		"[entire] strategy_options.checkpoints_version %v is no longer supported. Falling back to version 1\n",
+		val,
+	)
 }
 
 func parseCheckpointsVersion(val any) (int, bool) {
@@ -1058,22 +1147,6 @@ func parseCheckpointsVersion(val any) (int, bool) {
 		}
 	}
 	return 1, false
-}
-
-// IsPushV2RefsEnabled checks if pushing v2 refs is enabled.
-// checkpoints_version: 2 forces v2 ref pushes on, regardless of push_v2_refs.
-func (s *EntireSettings) IsPushV2RefsEnabled() bool {
-	if s.CheckpointsVersion() == 2 {
-		return true
-	}
-	if !s.IsCheckpointsV2Enabled() {
-		return false
-	}
-	if s.StrategyOptions == nil {
-		return false
-	}
-	val, ok := s.StrategyOptions["push_v2_refs"].(bool)
-	return ok && val
 }
 
 // GetFullTranscriptGenerationRetentionDays returns the retention window for

@@ -8,26 +8,25 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
-	"github.com/entireio/cli/cmd/entire/cli/trail"
 
 	"github.com/spf13/cobra"
 )
 
-// SSE constants for the trail code-review stream. Field names mirror the
-// client spec in entirehq/entire.io docs/trail-code-review-stream.md.
+// SSE control events for the agent-native code-review stream. Domain events
+// (for example "session.started" or "comment.created") are emitted as their
+// code_review_events.event_type values.
 const (
-	sseEventReady          = "ready"
-	sseEventComment        = "comment"
-	sseEventCommentDeleted = "comment_deleted"
-	sseEventReconnect      = "reconnect"
-	sseEventDeleted        = "deleted"
-	sseEventError          = "error"
+	sseEventReady     = "ready"
+	sseEventReconnect = "reconnect"
+	sseEventForbidden = "forbidden"
+	sseEventError     = "error"
 )
 
 // reconnectBackoffInitial / reconnectBackoffCap bound the exponential backoff
@@ -49,19 +48,21 @@ func newTrailWatchCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "watch [<number>]",
-		Short: "Tail a trail's code review (discussion) live",
-		Long: `Subscribe to the SSE stream of a trail's code-review discussion and
-print events as they arrive. Reconnects automatically when the server
-caps the connection (~50s) and on transient network errors.
+		Short: "Tail a trail's code-review events live",
+		Long: `Subscribe to the trail-scoped agent-native code-review SSE stream and
+print events as they arrive. Reconnects automatically when the server caps the
+connection (~50s) and on transient network errors.
 
 If <number> is omitted, the trail for the current branch is used.
 
+This command resolves the trail's id internally and streams
+GET /api/v1/trails/<id>/reviews/events with Accept: text/event-stream.
+
 Events emitted by the server:
-  ready              initial frame, includes existing comment count
-  comment            comment added or edited (with full payload)
-  comment_deleted    comment removed
+  ready              initial frame, includes trail and cursor
+  <event_type>       code-review domain event (session.started, comment.created, ...)
   reconnect          server cap reached; re-establishing
-  deleted            trail row deleted; stream ends
+  forbidden          access was revoked; stream ends
   error              server-side error; treated as reconnect`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -78,7 +79,7 @@ Events emitted by the server:
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print each event as a single JSON line")
 	cmd.Flags().BoolVar(&showPings, "show-pings", false, "Print SSE keepalive pings (otherwise suppressed)")
-	cmd.Flags().BoolVar(&once, "once", false, "Drain the initial replay then exit (no reconnect, no live tail)")
+	cmd.Flags().BoolVar(&once, "once", false, "Open one SSE connection then exit instead of reconnecting")
 
 	return cmd
 }
@@ -93,40 +94,19 @@ func runTrailWatch(cmd *cobra.Command, number int, jsonOutput, showPings, once b
 		return fmt.Errorf("authentication required: %w", err)
 	}
 
-	host, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
+	trailID, description, err := resolveTrailWatchTarget(ctx, client, number)
 	if err != nil {
-		return fmt.Errorf("failed to resolve repository: %w", err)
+		return err
 	}
+	streamPath := reviewEventsPath(trailID)
 
-	// Resolve trail number if not provided: look it up by current branch.
-	if number == 0 {
-		branch, err := GetCurrentBranch(ctx)
-		if err != nil {
-			return fmt.Errorf("no trail number given and current branch is unknown: %w", err)
-		}
-		found, err := findTrailByBranch(ctx, client, host, owner, repo, branch)
-		if err != nil {
-			return err
-		}
-		if found == nil {
-			return fmt.Errorf("no trail found for branch %q (pass an explicit trail number)", branch)
-		}
-		if found.Number <= 0 {
-			return fmt.Errorf("trail for branch %q has no numeric identifier yet", branch)
-		}
-		number = found.Number
-	}
-
-	streamPath := fmt.Sprintf("%s/%d/code-review/stream", trailsBasePath(host, owner, repo), number)
-
-	fmt.Fprintf(errW, "Watching trail #%d on %s/%s/%s — Ctrl+C to stop\n", number, host, owner, repo)
+	fmt.Fprintf(errW, "Watching %s — Ctrl+C to stop\n", description)
 
 	backoff := reconnectBackoffInitial
 	lastEventID := ""
-	resumed := false
 
 	for {
-		closeReason, lastSeenID, err := streamOnce(ctx, client, streamPath, lastEventID, resumed, jsonOutput, showPings, once, w, errW)
+		closeReason, lastSeenID, err := streamOnce(ctx, client, streamPath, lastEventID, jsonOutput, showPings, w, errW)
 		if lastSeenID != "" {
 			lastEventID = lastSeenID
 		}
@@ -136,14 +116,33 @@ func runTrailWatch(cmd *cobra.Command, number int, jsonOutput, showPings, once b
 			return nil //nolint:nilerr // ctx.Err() is the expected cancellation path; surface as clean exit
 		}
 
+		if once {
+			switch closeReason {
+			case streamCloseTerminal:
+				return err
+			case streamCloseForbidden:
+				return NewSilentError(errors.New("stream access revoked"))
+			case streamCloseError:
+				if err == nil {
+					err = errors.New("stream error reported by server")
+				}
+				return NewSilentError(err)
+			case streamCloseTransport:
+				return err
+			case streamCloseReconnect, streamCloseDone:
+				return nil
+			}
+		}
+
 		switch closeReason {
 		case streamCloseTerminal:
 			return err
-		case streamCloseDeleted, streamCloseDone:
+		case streamCloseDone:
 			return nil
+		case streamCloseForbidden:
+			return NewSilentError(errors.New("stream access revoked"))
 		case streamCloseReconnect:
 			// Clean server-initiated reconnect (max_duration). No backoff.
-			resumed = true
 			backoff = reconnectBackoffInitial
 			continue
 		case streamCloseError:
@@ -166,8 +165,62 @@ func runTrailWatch(cmd *cobra.Command, number int, jsonOutput, showPings, once b
 		if backoff > reconnectBackoffCap {
 			backoff = reconnectBackoffCap
 		}
-		resumed = true
 	}
+}
+
+func resolveTrailWatchTarget(ctx context.Context, client *api.Client, number int) (trailID, description string, err error) {
+	if number > 0 {
+		return resolveTrailWatchNumber(ctx, client, number)
+	}
+
+	host, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve repository: %w", err)
+	}
+	branch, err := GetCurrentBranch(ctx)
+	if err != nil {
+		return "", "", fmt.Errorf("no trail number given and current branch is unknown: %w", err)
+	}
+	found, err := findTrailByBranch(ctx, client, host, owner, repo, branch)
+	if err != nil {
+		return "", "", err
+	}
+	if found == nil {
+		return "", "", fmt.Errorf("no trail found for branch %q (pass an explicit trail number)", branch)
+	}
+	if found.ID == "" {
+		return "", "", fmt.Errorf("trail for branch %q has no id yet", branch)
+	}
+	return found.ID, trailWatchDescription(host, owner, repo, found.Number, found.ID), nil
+}
+
+func resolveTrailWatchNumber(ctx context.Context, client *api.Client, number int) (trailID, description string, err error) {
+	host, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve repository: %w", err)
+	}
+	found, err := findTrailByNumber(ctx, client, host, owner, repo, number)
+	if err != nil {
+		return "", "", err
+	}
+	if found == nil {
+		return "", "", fmt.Errorf("no trail #%d found in %s/%s/%s", number, host, owner, repo)
+	}
+	if found.ID == "" {
+		return "", "", fmt.Errorf("trail #%d has no id yet", number)
+	}
+	return found.ID, trailWatchDescription(host, owner, repo, found.Number, found.ID), nil
+}
+
+func trailWatchDescription(host, owner, repo string, number int, trailID string) string {
+	if number > 0 {
+		return fmt.Sprintf("trail #%d (%s/%s/%s, id %s)", number, host, owner, repo, trailID)
+	}
+	return fmt.Sprintf("trail %s (%s/%s/%s)", trailID, host, owner, repo)
+}
+
+func reviewEventsPath(trailID string) string {
+	return "/api/v1/trails/" + url.PathEscape(trailID) + "/reviews/events"
 }
 
 type streamCloseReason int
@@ -175,9 +228,9 @@ type streamCloseReason int
 const (
 	streamCloseTransport streamCloseReason = iota // network/transport error
 	streamCloseReconnect                          // server `event: reconnect`
-	streamCloseDeleted                            // server `event: deleted`
+	streamCloseForbidden                          // server `event: forbidden`
 	streamCloseError                              // server `event: error`
-	streamCloseDone                               // local --once / EOF after replay
+	streamCloseDone                               // context cancellation
 	streamCloseTerminal                           // non-recoverable HTTP status (401/403/404/410)
 )
 
@@ -211,8 +264,7 @@ func streamOnce(
 	client *api.Client,
 	path string,
 	lastEventID string,
-	resumed bool,
-	jsonOutput, showPings, once bool,
+	jsonOutput, showPings bool,
 	w, errW io.Writer,
 ) (streamCloseReason, string, error) {
 	headers := http.Header{}
@@ -220,10 +272,6 @@ func streamOnce(
 	headers.Set("Cache-Control", "no-cache")
 	if lastEventID != "" {
 		headers.Set("Last-Event-ID", lastEventID)
-	} else if resumed {
-		// First reconnect after a transport error with no id seen: use the
-		// query-param form to suppress replay anyway.
-		path += "?replay=false"
 	}
 
 	resp, err := client.GetStream(ctx, path, headers)
@@ -243,18 +291,15 @@ func streamOnce(
 
 	scanner := bufio.NewScanner(resp.Body)
 	// SSE frames can be larger than the default 64KiB scanner buffer when a
-	// trail has long comment bodies; bump to 1 MiB to match the API's
+	// review event carries long comment bodies; bump to 1 MiB to match the API's
 	// per-comment limits.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 
 	var (
-		eventName    string
-		dataLines    []string
-		eventID      string // id of the in-progress frame (reset on flush)
-		lastSeenID   string // most recent SSE id from any frame that includes one
-		seenReady    bool
-		remainReplay int  // --once: comment events still to drain after ready
-		onceExitNext bool // --once: exit after this flush
+		eventName  string
+		dataLines  []string
+		eventID    string // id of the in-progress frame (reset on flush)
+		lastSeenID string // most recent SSE id from any frame that includes one
 	)
 
 	flush := func() (streamCloseReason, bool) {
@@ -274,38 +319,12 @@ func streamOnce(
 		}
 
 		switch eventName {
-		case sseEventReady:
-			seenReady = true
-			if once {
-				var p struct {
-					CommentCount int  `json:"commentCount"`
-					Resumed      bool `json:"resumed"`
-				}
-				if jerr := json.Unmarshal([]byte(data), &p); jerr != nil {
-					fmt.Fprintf(errW, "Warning: malformed ready payload: %v\n", jerr)
-				}
-				if p.Resumed || p.CommentCount == 0 {
-					onceExitNext = true
-				} else {
-					remainReplay = p.CommentCount
-				}
-			}
-		case sseEventComment:
-			if once && seenReady && remainReplay > 0 {
-				remainReplay--
-				if remainReplay == 0 {
-					onceExitNext = true
-				}
-			}
 		case sseEventReconnect:
 			return streamCloseReconnect, true
-		case sseEventDeleted:
-			return streamCloseDeleted, true
+		case sseEventForbidden:
+			return streamCloseForbidden, true
 		case sseEventError:
 			return streamCloseError, true
-		}
-		if onceExitNext {
-			return streamCloseDone, true
 		}
 		return streamCloseTransport, false
 	}
@@ -388,75 +407,173 @@ func printSSEEvent(w, errW io.Writer, eventName, data string, jsonOutput bool) {
 
 	switch eventName {
 	case sseEventReady:
-		var p struct {
-			Repo         string `json:"repo"`
-			TrailNumber  int    `json:"trailNumber"`
-			CommentCount int    `json:"commentCount"`
-			Resumed      bool   `json:"resumed"`
-		}
-		if err := json.Unmarshal([]byte(data), &p); err == nil {
-			if p.Resumed {
-				fmt.Fprintf(w, "● connected to %s trail #%d (resumed; %d comment(s))\n",
-					p.Repo, p.TrailNumber, p.CommentCount)
-			} else {
-				fmt.Fprintf(w, "● connected to %s trail #%d (%d comment(s))\n",
-					p.Repo, p.TrailNumber, p.CommentCount)
-			}
-			return
-		}
-	case sseEventComment:
-		var p struct {
-			UpdatedAt time.Time     `json:"updatedAt"`
-			Comment   trail.Comment `json:"comment"`
-		}
-		if err := json.Unmarshal([]byte(data), &p); err == nil {
-			ts := p.UpdatedAt.Local().Format("15:04:05")
-			body := truncateForLog(p.Comment.Body, 200)
-			fmt.Fprintf(w, "[%s] %s: %s\n", ts, p.Comment.Author, body)
-			for _, r := range p.Comment.Replies {
-				fmt.Fprintf(w, "    └─ %s: %s\n", r.Author, truncateForLog(r.Body, 200))
-			}
-			return
-		}
-	case sseEventCommentDeleted:
-		var p struct {
-			UpdatedAt time.Time `json:"updatedAt"`
-			CommentID string    `json:"commentId"`
-		}
-		if err := json.Unmarshal([]byte(data), &p); err == nil {
-			ts := p.UpdatedAt.Local().Format("15:04:05")
-			fmt.Fprintf(w, "[%s] (deleted comment %s)\n", ts, p.CommentID)
-			return
-		}
+		printReadyEvent(w, data)
+		return
 	case sseEventReconnect:
 		fmt.Fprintln(errW, "↻ server requested reconnect")
 		return
-	case sseEventDeleted:
-		fmt.Fprintln(errW, "✖ trail was deleted")
+	case sseEventForbidden:
+		fmt.Fprintln(errW, "✖ stream access revoked")
 		return
 	case sseEventError:
-		var p struct {
-			Message string `json:"message"`
-		}
-		if jerr := json.Unmarshal([]byte(data), &p); jerr != nil {
-			// Best-effort: server payload may be missing or malformed; we still
-			// want to surface that an error event arrived.
-			fmt.Fprintf(errW, "Warning: malformed error payload: %v\n", jerr)
-		}
-		if p.Message != "" {
-			fmt.Fprintf(errW, "✖ stream error: %s\n", p.Message)
-		} else {
-			fmt.Fprintln(errW, "✖ stream error")
-		}
+		printStreamError(errW, data)
+		return
+	}
+
+	if ev, ok := parseReviewStreamEvent(eventName, data); ok {
+		printReviewStreamEvent(w, ev)
 		return
 	}
 
 	// Fallback for unknown events or unparseable payloads: print raw.
-	fmt.Fprintf(w, "%s: %s\n", eventName, data)
+	fmt.Fprintf(w, "%s: %s\n", eventName, truncateForLog(data, 500))
+}
+
+type reviewReadyPayload struct {
+	TrailID string `json:"trail_id"`
+	Cursor  int    `json:"cursor"`
+}
+
+type reviewStreamEvent struct {
+	ID              any            `json:"id"`
+	TrailID         string         `json:"trail_id"`
+	ReviewSessionID *string        `json:"review_session_id"`
+	ActorID         string         `json:"actor_id"`
+	EventType       string         `json:"event_type"`
+	TargetType      string         `json:"target_type"`
+	TargetID        string         `json:"target_id"`
+	Payload         map[string]any `json:"payload"`
+	CreatedAt       time.Time      `json:"created_at"`
+}
+
+func printReadyEvent(w io.Writer, data string) {
+	var p reviewReadyPayload
+	if err := json.Unmarshal([]byte(data), &p); err == nil {
+		parts := []string{"● connected"}
+		if p.TrailID != "" {
+			parts = append(parts, "to trail "+p.TrailID)
+		}
+		if p.Cursor > 0 {
+			parts = append(parts, fmt.Sprintf("after event %d", p.Cursor))
+		}
+		fmt.Fprintln(w, strings.Join(parts, " "))
+		return
+	}
+	fmt.Fprintf(w, "ready: %s\n", truncateForLog(data, 500))
+}
+
+func printStreamError(errW io.Writer, data string) {
+	var p struct {
+		Message string `json:"message"`
+	}
+	if jerr := json.Unmarshal([]byte(data), &p); jerr != nil {
+		// Best-effort: server payload may be missing or malformed; we still
+		// want to surface that an error event arrived.
+		fmt.Fprintf(errW, "Warning: malformed error payload: %v\n", jerr)
+	}
+	if p.Message != "" {
+		fmt.Fprintf(errW, "✖ stream error: %s\n", p.Message)
+	} else {
+		fmt.Fprintln(errW, "✖ stream error")
+	}
+}
+
+func parseReviewStreamEvent(eventName, data string) (reviewStreamEvent, bool) {
+	var ev reviewStreamEvent
+	if err := json.Unmarshal([]byte(data), &ev); err != nil {
+		return ev, false
+	}
+	if ev.EventType == "" {
+		ev.EventType = eventName
+	}
+	if ev.EventType == "" && ev.TargetType == "" && ev.TargetID == "" {
+		return ev, false
+	}
+	return ev, true
+}
+
+func printReviewStreamEvent(w io.Writer, ev reviewStreamEvent) {
+	prefix := ""
+	if !ev.CreatedAt.IsZero() {
+		prefix = "[" + ev.CreatedAt.Local().Format("15:04:05") + "] "
+	}
+	actor := ev.ActorID
+	if actor == "" {
+		actor = "unknown actor"
+	}
+
+	switch ev.EventType {
+	case "code_version.created":
+		fmt.Fprintf(w, "%scode version %s created (head %s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "head_sha"))
+	case "code_version.base_sha_set":
+		fmt.Fprintf(w, "%scode version %s base set to %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "base_sha"))
+	case "session.started":
+		fmt.Fprintf(w, "%ssession started by %s (code version %s)\n", prefix, actor, payloadString(ev.Payload, "code_version_id"))
+	case "session.ended":
+		reason := payloadString(ev.Payload, "reason")
+		if reason != "" {
+			fmt.Fprintf(w, "%ssession ended by %s (%s)\n", prefix, actor, reason)
+		} else {
+			fmt.Fprintf(w, "%ssession ended by %s\n", prefix, actor)
+		}
+	case "comment.created":
+		file := payloadString(ev.Payload, "file_path")
+		severity := payloadString(ev.Payload, "severity")
+		switch {
+		case file != "" && severity != "":
+			fmt.Fprintf(w, "%scomment created by %s on %s (%s) — %s\n", prefix, actor, file, severity, ev.TargetID)
+		case file != "":
+			fmt.Fprintf(w, "%scomment created by %s on %s — %s\n", prefix, actor, file, ev.TargetID)
+		default:
+			fmt.Fprintf(w, "%scomment created by %s — %s\n", prefix, actor, ev.TargetID)
+		}
+	case "comment.status_changed":
+		fmt.Fprintf(w, "%scomment %s status %s → %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "from"), payloadString(ev.Payload, "to"))
+	case "comment.updated":
+		fmt.Fprintf(w, "%scomment %s updated by %s\n", prefix, ev.TargetID, actor)
+	case "comment.stale_checked":
+		fmt.Fprintf(w, "%scomment %s marked %s (%s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "outcome"), payloadString(ev.Payload, "reason"))
+	case "suggested_change.created":
+		fmt.Fprintf(w, "%ssuggested change %s created for comment %s (%s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "review_comment_id"), payloadString(ev.Payload, "change_type"))
+	case "suggested_change.updated":
+		fmt.Fprintf(w, "%ssuggested change %s updated by %s\n", prefix, ev.TargetID, actor)
+	case "suggested_change.check_result", "suggested_change.apply_result":
+		fmt.Fprintf(w, "%s%s for %s: %s\n", prefix, ev.EventType, payloadString(ev.Payload, "suggested_change_id"), payloadString(ev.Payload, "status"))
+	case "thread.created":
+		fmt.Fprintf(w, "%sthread %s created for comment %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "review_comment_id"))
+	case "thread.message_added":
+		fmt.Fprintf(w, "%sthread message %s added by %s\n", prefix, ev.TargetID, actor)
+	case "thread.message_edited":
+		fmt.Fprintf(w, "%sthread message %s edited by %s\n", prefix, ev.TargetID, actor)
+	case "comment.linked":
+		fmt.Fprintf(w, "%scomment link created: %s → %s\n", prefix, payloadString(ev.Payload, "source_comment_id"), payloadString(ev.Payload, "target_comment_id"))
+	case "comment.unlinked":
+		fmt.Fprintf(w, "%scomment link removed: %s → %s\n", prefix, payloadString(ev.Payload, "source_comment_id"), payloadString(ev.Payload, "target_comment_id"))
+	default:
+		fmt.Fprintf(w, "%s%s %s/%s by %s\n", prefix, ev.EventType, ev.TargetType, ev.TargetID, actor)
+	}
+}
+
+func payloadString(payload map[string]any, key string) string {
+	if payload == nil {
+		return ""
+	}
+	v, ok := payload[key]
+	if !ok || v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return t
+	case fmt.Stringer:
+		return t.String()
+	default:
+		return fmt.Sprint(t)
+	}
 }
 
 // truncateForLog clips body text on a rune boundary so a single multi-line
-// comment doesn't blow up the watch view. Newlines collapse to spaces.
+// payload doesn't blow up the watch view. Newlines collapse to spaces.
 func truncateForLog(s string, maxRunes int) string {
 	s = strings.ReplaceAll(s, "\r\n", " ")
 	s = strings.ReplaceAll(s, "\n", " ")

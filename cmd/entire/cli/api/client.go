@@ -159,9 +159,27 @@ func DecodeJSON(resp *http.Response, dest any) error {
 	return nil
 }
 
-// ErrorResponse represents a standard API error response.
+// ErrorResponse represents a standard API error response. Older endpoints
+// return {"error":"message"}; newer endpoints return
+// {"error":{"code":"...","message":"...",...}}.
 type ErrorResponse struct {
-	Error string `json:"error"`
+	Error any `json:"error"`
+}
+
+// Message extracts the human-readable error message from either envelope shape.
+func (e ErrorResponse) Message() string {
+	switch v := e.Error.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]any:
+		if message, ok := v["message"].(string); ok && strings.TrimSpace(message) != "" {
+			return strings.TrimSpace(message)
+		}
+		if code, ok := v["code"].(string); ok && strings.TrimSpace(code) != "" {
+			return strings.TrimSpace(code)
+		}
+	}
+	return ""
 }
 
 // HTTPError is returned by CheckResponse for non-2xx responses. Callers can use
@@ -200,9 +218,11 @@ func CheckResponse(resp *http.Response) error {
 	}
 
 	var parsed ErrorResponse
-	if err := json.Unmarshal(body, &parsed); err == nil && strings.TrimSpace(parsed.Error) != "" {
-		apiError.Message = parsed.Error
-		return apiError
+	if err := json.Unmarshal(body, &parsed); err == nil {
+		if message := parsed.Message(); message != "" {
+			apiError.Message = message
+			return apiError
+		}
 	}
 
 	if text := strings.TrimSpace(string(body)); text != "" {

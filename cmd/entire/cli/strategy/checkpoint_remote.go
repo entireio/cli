@@ -82,27 +82,14 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 
 	ps.checkpointURL = checkpointURL
 
-	// Skip the v1 metadata-branch fetch entirely when checkpoints_version is 2 —
-	// there is no v1 branch being written or pushed, so there is nothing to sync.
-	if s.CheckpointsVersion() != 2 {
-		// If the v1 checkpoint branch doesn't exist locally, try to fetch it from the URL.
-		// This is a one-time operation — once the branch exists locally, subsequent pushes
-		// skip the fetch entirely. Only fetch the metadata branch; trails are always pushed
-		// to the user's push remote, not the checkpoint remote.
-		if err := fetchMetadataBranchIfMissing(ctx, checkpointURL); err != nil {
-			logging.Warn(ctx, "checkpoint-remote: failed to fetch metadata branch",
-				slog.String("error", err.Error()),
-			)
-		}
-	}
-
-	// Also fetch v2 /main ref if v2 refs are enabled
-	if s.IsPushV2RefsEnabled() {
-		if err := fetchV2MainRefIfMissing(ctx, checkpointURL); err != nil {
-			logging.Warn(ctx, "checkpoint-remote: failed to fetch v2 /main ref",
-				slog.String("error", err.Error()),
-			)
-		}
+	// If the v1 checkpoint branch doesn't exist locally, try to fetch it from the URL.
+	// This is a one-time operation — once the branch exists locally, subsequent pushes
+	// skip the fetch entirely. Only fetch the metadata branch; trails are always pushed
+	// to the user's push remote, not the checkpoint remote.
+	if err := fetchMetadataBranchIfMissing(ctx, checkpointURL); err != nil {
+		logging.Warn(ctx, "checkpoint-remote: failed to fetch metadata branch",
+			slog.String("error", err.Error()),
+		)
 	}
 
 	return ps
@@ -194,26 +181,5 @@ func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) error {
 	}
 
 	logging.Info(ctx, "checkpoint-remote: fetched metadata branch from URL")
-	return nil
-}
-
-// fetchV2MainRefIfMissing fetches the v2 /main ref from a URL only if it doesn't
-// exist locally. Delegates to FetchV2MainFromURL for the actual fetch.
-func fetchV2MainRefIfMissing(ctx context.Context, remoteURL string) error {
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-
-	refName := plumbing.ReferenceName(paths.V2MainRefName)
-	if _, err := repo.Reference(refName, true); err == nil {
-		return nil // Ref exists locally, skip fetch
-	}
-
-	if err := FetchV2MainFromURL(ctx, remoteURL); err != nil {
-		return nil //nolint:nilerr // Fetch failure is not fatal — ref may not exist on remote yet
-	}
-
-	logging.Info(ctx, "checkpoint-remote: fetched v2 /main ref from URL")
 	return nil
 }

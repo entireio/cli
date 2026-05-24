@@ -1529,6 +1529,9 @@ func TestListCommitted_MultiSessionInfo(t *testing.T) {
 		t.Errorf("SessionID = %q, want %q (latest session)", found.SessionID, "list-session-2")
 	}
 
+	// Verify SessionIDs contains all sessions in order
+	require.Equal(t, []string{"list-session-1", "list-session-2"}, found.SessionIDs)
+
 	// Verify Agent comes from latest session metadata
 	if found.Agent != agent.AgentTypeClaudeCode {
 		t.Errorf("Agent = %q, want %q", found.Agent, agent.AgentTypeClaudeCode)

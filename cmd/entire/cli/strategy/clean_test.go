@@ -323,7 +323,7 @@ func TestListArchivedV2GenerationCandidates_SkipsDivergedLocalAndRemote(t *testi
 		time.Date(2026, 3, 1, 1, 0, 0, 0, time.UTC),
 	)
 
-	store := checkpoint.NewV2GitStore(repo, "origin")
+	store := checkpoint.NewV2GitStore(repo)
 	candidates, tempRefs, warnings, err := listArchivedV2GenerationCandidates(context.Background(), repo, store)
 	if err != nil {
 		t.Fatalf("listArchivedV2GenerationCandidates() error = %v", err)

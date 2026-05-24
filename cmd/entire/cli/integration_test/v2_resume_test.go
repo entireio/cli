@@ -51,7 +51,7 @@ func TestV2Resume_SwitchBranchWithSession(t *testing.T) {
 	err = env.SimulateStop(session.ID, session.TranscriptPath)
 	require.NoError(t, err)
 
-	// Commit (triggers dual-write to v1 + v2)
+	// Commit writes v1 metadata; the v2-enabled reader should still resolve it.
 	env.GitCommitWithShadowHooks("Create hello script", "hello.rb")
 
 	featureBranch := env.GetCurrentBranch()
@@ -184,10 +184,10 @@ func TestV2Resume_FallsBackToV1(t *testing.T) {
 	assert.Contains(t, output, "claude -r")
 }
 
-// TestCheckpointsVersion2Resume_SwitchBranchWithSession verifies that resume
-// works in strict v2-only mode. The session should be restorable from v2 refs
-// even though no v1 committed metadata was written.
-func TestCheckpointsVersion2Resume_SwitchBranchWithSession(t *testing.T) {
+// TestCheckpointsVersion2DisallowedResume_SwitchBranchWithSession verifies
+// that resume works when checkpoints_version: 2 is configured but disallowed.
+// The session is restored from v1 (the fallback target) rather than v2.
+func TestCheckpointsVersion2DisallowedResume_SwitchBranchWithSession(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -198,35 +198,35 @@ func TestCheckpointsVersion2Resume_SwitchBranchWithSession(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitAdd(".gitignore")
 	env.GitCommit("Initial commit")
-	env.GitCheckoutNewBranch("feature/v2-only-resume-test")
+	env.GitCheckoutNewBranch("feature/v2-disallowed-resume-test")
 
 	env.InitEntireWithOptions(map[string]any{
 		"checkpoints_version": 2,
 	})
 
 	session := env.NewSession()
-	err := env.SimulateUserPromptSubmitWithPrompt(session.ID, "Create hello script in v2 only mode")
+	err := env.SimulateUserPromptSubmitWithPrompt(session.ID, "Create hello script with v2 disallowed")
 	require.NoError(t, err)
 
-	content := "puts 'Hello from v2-only session'"
-	env.WriteFile("hello_v2_only.rb", content)
+	content := "puts 'Hello from v2-disallowed session'"
+	env.WriteFile("hello_v2_disallowed.rb", content)
 
 	session.CreateTranscript(
-		"Create hello script in v2 only mode",
-		[]FileChange{{Path: "hello_v2_only.rb", Content: content}},
+		"Create hello script with v2 disallowed",
+		[]FileChange{{Path: "hello_v2_disallowed.rb", Content: content}},
 	)
 	err = env.SimulateStop(session.ID, session.TranscriptPath)
 	require.NoError(t, err)
 
-	env.GitCommitWithShadowHooks("Create hello script in v2 only mode", "hello_v2_only.rb")
+	env.GitCommitWithShadowHooks("Create hello script with v2 disallowed", "hello_v2_disallowed.rb")
 
 	cpIDStr := env.GetLatestCheckpointIDFromHistory()
 	require.NotEmpty(t, cpIDStr, "checkpoint ID should be in commit trailer")
 
 	cpID, err := id.NewCheckpointID(cpIDStr)
 	require.NoError(t, err)
-	_, found := env.ReadFileFromBranch(paths.MetadataBranchName, cpID.Path()+"/"+paths.MetadataFileName)
-	assert.False(t, found, "v1 committed checkpoint metadata should not exist when checkpoints_version is 2")
+	_, found := env.ReadFileFromBranch(paths.MetadataBranchName, cpID.Path()+"/0/"+paths.MetadataFileName)
+	assert.True(t, found, "v1 committed metadata should be written when checkpoints_version: 2 is disallowed")
 
 	featureBranch := env.GetCurrentBranch()
 	env.GitCheckoutBranch("master")

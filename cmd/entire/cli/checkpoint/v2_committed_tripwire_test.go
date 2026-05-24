@@ -20,7 +20,7 @@ import (
 // corruption / stale-summary shape that we catch in v1.
 func TestV2WriteMainCheckpointEntries_RefusesUnexpectedSessionZeroOverwrite(t *testing.T) {
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	if err := logging.Init(context.Background(), ""); err != nil {
 		t.Fatalf("logging.Init() error = %v", err)

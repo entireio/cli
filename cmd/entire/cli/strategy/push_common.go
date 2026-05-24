@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -509,37 +508,4 @@ func startProgressDots(w io.Writer) func(suffix string) {
 		<-stopped // Wait for goroutine to finish before writing suffix
 		fmt.Fprintln(w, suffix)
 	}
-}
-
-// createMergeCommitCommon creates a merge commit with multiple parents.
-func createMergeCommitCommon(ctx context.Context, repo *git.Repository, treeHash plumbing.Hash, parents []plumbing.Hash, message string) (plumbing.Hash, error) {
-	authorName, authorEmail := GetGitAuthorFromRepo(repo)
-	now := time.Now()
-	sig := object.Signature{
-		Name:  authorName,
-		Email: authorEmail,
-		When:  now,
-	}
-
-	commit := &object.Commit{
-		TreeHash:     treeHash,
-		ParentHashes: parents,
-		Author:       sig,
-		Committer:    sig,
-		Message:      message,
-	}
-
-	checkpoint.SignCommitBestEffort(ctx, commit)
-
-	obj := repo.Storer.NewEncodedObject()
-	if err := commit.Encode(obj); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to encode commit: %w", err)
-	}
-
-	hash, err := repo.Storer.SetEncodedObject(obj)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to store commit: %w", err)
-	}
-
-	return hash, nil
 }

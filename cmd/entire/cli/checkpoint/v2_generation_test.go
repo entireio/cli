@@ -24,7 +24,7 @@ import (
 func TestReadGeneration_EmptyTree_ReturnsDefault(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	// Build an empty tree
 	emptyTree, err := BuildTreeFromEntries(context.Background(), repo, map[string]object.TreeEntry{})
@@ -40,7 +40,7 @@ func TestReadGeneration_EmptyTree_ReturnsDefault(t *testing.T) {
 func TestReadGeneration_ParsesJSON(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	now := time.Date(2026, 3, 25, 12, 0, 0, 0, time.UTC)
 	original := GenerationMetadata{
@@ -66,7 +66,7 @@ func TestReadGeneration_ParsesJSON(t *testing.T) {
 func TestWriteGeneration_RoundTrips(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	original := GenerationMetadata{
@@ -95,7 +95,7 @@ func TestWriteGeneration_RoundTrips(t *testing.T) {
 func TestReadGenerationFromRef(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	// Create a ref with generation.json in its tree
 	now := time.Date(2026, 3, 25, 14, 0, 0, 0, time.UTC)
@@ -126,14 +126,17 @@ func TestReadGenerationFromRef(t *testing.T) {
 func TestAddGenerationJSONToTree(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	// Start with a root tree that has a shard directory entry (simulating checkpoint data)
+	transcriptBlobHash, err := CreateBlobFromContent(repo, []byte("test transcript"))
+	require.NoError(t, err)
+
 	shardEntries := map[string]object.TreeEntry{}
 	shardEntries["aa/bbccddeeff/0/"+paths.V2RawTranscriptFileName] = object.TreeEntry{
 		Name: paths.V2RawTranscriptFileName,
 		Mode: 0o100644,
-		Hash: plumbing.ZeroHash, // dummy
+		Hash: transcriptBlobHash,
 	}
 	rootTreeHash, err := BuildTreeFromEntries(context.Background(), repo, shardEntries)
 	require.NoError(t, err)
@@ -168,7 +171,7 @@ func TestAddGenerationJSONToTree(t *testing.T) {
 func TestCountCheckpointsInTree_EmptyTree(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	count, err := store.CountCheckpointsInTree(t.Context(), plumbing.ZeroHash)
 	require.NoError(t, err)
@@ -178,7 +181,7 @@ func TestCountCheckpointsInTree_EmptyTree(t *testing.T) {
 func TestCountCheckpointsInTree_CountsShardDirectories(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 	ctx := context.Background()
 
 	// Write 3 checkpoints to /full/current
@@ -213,7 +216,7 @@ func TestCountCheckpointsInTree_CountsShardDirectories(t *testing.T) {
 func TestWriteCommittedFull_NoGenerationJSON(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 	ctx := context.Background()
 
 	cpID := id.MustCheckpointID("d1e2f3a4b5c6")
@@ -243,7 +246,7 @@ func TestWriteCommittedFull_NoGenerationJSON(t *testing.T) {
 func TestUpdateCommitted_DoesNotAddGenerationJSON(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 	ctx := context.Background()
 
 	cpID := id.MustCheckpointID("a4b5c6d1e2f3")
@@ -286,7 +289,7 @@ func TestUpdateCommitted_DoesNotAddGenerationJSON(t *testing.T) {
 // createArchivedRef creates a dummy archived generation ref for testing.
 func createArchivedRef(t *testing.T, repo *git.Repository, number int) {
 	t.Helper()
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	// Build a minimal tree with just generation.json
 	now := time.Now().UTC()
@@ -319,7 +322,7 @@ func TestArchivedGenerationRefName(t *testing.T) {
 func TestListArchivedGenerations_Empty(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	archived, err := store.ListArchivedGenerations()
 	require.NoError(t, err)
@@ -329,7 +332,7 @@ func TestListArchivedGenerations_Empty(t *testing.T) {
 func TestListArchivedGenerations_FindsArchived(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	createArchivedRef(t, repo, 1)
 	createArchivedRef(t, repo, 2)
@@ -342,7 +345,7 @@ func TestListArchivedGenerations_FindsArchived(t *testing.T) {
 func TestListArchivedGenerations_ExcludesCurrent(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	// Create /full/current ref
 	require.NoError(t, store.ensureRef(context.Background(), plumbing.ReferenceName(paths.V2FullCurrentRefName)))
@@ -358,7 +361,7 @@ func TestListArchivedGenerations_ExcludesCurrent(t *testing.T) {
 func TestNextGenerationNumber_NoArchives(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	next, err := store.NextGenerationNumber()
 	require.NoError(t, err)
@@ -368,7 +371,7 @@ func TestNextGenerationNumber_NoArchives(t *testing.T) {
 func TestNextGenerationNumber_WithExisting(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	createArchivedRef(t, repo, 1)
 	createArchivedRef(t, repo, 2)
@@ -403,7 +406,7 @@ func populateFullCurrent(t *testing.T, store *V2GitStore, n, offset int) []id.Ch
 func TestRotateGeneration_ArchivesCurrentAndCreatesNewOrphan(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 	store.maxCheckpointsPerGeneration = 3
 
 	// Write 3 checkpoints — the 3rd triggers auto-rotation via writeCommittedFullTranscript
@@ -452,7 +455,7 @@ func TestRotateGeneration_ArchivesCurrentAndCreatesNewOrphan(t *testing.T) {
 func TestRotateGeneration_FailsBeforeResetWhenPendingMarkerCannotBeRecorded(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 	ctx := context.Background()
 
 	populateFullCurrent(t, store, 3, 0)
@@ -481,7 +484,7 @@ func TestRotateGeneration_FailsBeforeResetWhenPendingMarkerCannotBeRecorded(t *t
 func TestRemovePendingFullGenerationPublications_PreservesLaterQueuedEntries(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 	ctx := context.Background()
 
 	first := PendingV2FullGenerationPublication{
@@ -511,7 +514,7 @@ func TestRemovePendingFullGenerationPublications_PreservesLaterQueuedEntries(t *
 func TestResetFullCurrentRefIfUnchangedRejectsConcurrentChange(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 	ctx := context.Background()
 
 	treeHash, err := BuildTreeFromEntries(ctx, repo, map[string]object.TreeEntry{})
@@ -543,7 +546,7 @@ func TestResetFullCurrentRefIfUnchangedRejectsConcurrentChange(t *testing.T) {
 func TestRotateGeneration_UsesCheckpointCreatedAt(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 	store.maxCheckpointsPerGeneration = 2
 	ctx := context.Background()
 
@@ -577,7 +580,7 @@ func TestRotateGeneration_UsesCheckpointCreatedAt(t *testing.T) {
 func TestComputeGenerationCheckpointTimestamps_FallsBackToRawTranscript(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	oldest := time.Date(2025, 12, 23, 10, 27, 44, 0, time.UTC)
 	newest := time.Date(2025, 12, 23, 10, 31, 37, 0, time.UTC)
@@ -609,7 +612,7 @@ func TestComputeGenerationCheckpointTimestamps_FallsBackToRawTranscript(t *testi
 func TestComputeGenerationTimestampsFromTrees_IgnoresMainMetadataWhenNil(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	cpID := id.MustCheckpointID("aabbccddeeff")
 	mainCreatedAt := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -654,7 +657,7 @@ func TestComputeGenerationTimestampsFromTrees_IgnoresMainMetadataWhenNil(t *test
 func TestComputeGenerationCheckpointTimestamps_UnreadableCheckpointForcesFallback(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	timestamp := time.Date(2025, 12, 23, 10, 27, 44, 0, time.UTC)
 	transcript := fmt.Sprintf("{\"type\":\"user\",\"timestamp\":%q}\n", timestamp.Format(time.RFC3339Nano))
@@ -703,7 +706,7 @@ func TestComputeGenerationCheckpointTimestamps_UnreadableCheckpointForcesFallbac
 func TestUpdateCommittedFullTranscript_UpdatesArchivedGeneration(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 	store.maxCheckpointsPerGeneration = 1
 	ctx := context.Background()
 
@@ -755,7 +758,7 @@ func TestUpdateCommittedFullTranscript_UpdatesArchivedGeneration(t *testing.T) {
 func TestRotateGeneration_SequentialNumbering(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 	store.maxCheckpointsPerGeneration = 2
 	ctx := context.Background()
 
@@ -795,7 +798,7 @@ func TestRotateGeneration_SequentialNumbering(t *testing.T) {
 func TestReadGeneration_BackwardCompatible(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo, "origin")
+	store := NewV2GitStore(repo)
 
 	// Simulate old format with a checkpoints field
 	oldJSON := `{
