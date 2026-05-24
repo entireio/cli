@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1856,5 +1857,49 @@ func TestRunStatusJSON_DeduplicatesSessions(t *testing.T) {
 	}
 	if s.Model != "codex-mini" {
 		t.Errorf("Expected model='codex-mini' from active session, got %q", s.Model)
+	}
+}
+
+// TestRunStatus_DiscoversExternalAgents verifies that `entire status` registers
+// external agents on PATH even when external_agents is not enabled in settings.
+// Without DiscoverAndRegisterAlways in runStatus, an external agent that is
+// otherwise correctly installed on the user's PATH would never appear in the
+// status command's agent enumeration.
+func TestRunStatus_DiscoversExternalAgents(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	setupTestRepo(t)
+	// Settings deliberately omit external_agents — the point is to verify
+	// discovery runs regardless of that flag.
+	writeSettings(t, testSettingsEnabled)
+
+	agentName := types.AgentName("statustest-discovery-agent")
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "entire-agent-"+string(agentName))
+	infoJSON := `{
+  "protocol_version": 1,
+  "name": "` + string(agentName) + `",
+  "type": "Status Test Agent",
+  "description": "Agent for status discovery test",
+  "is_preview": false,
+  "protected_dirs": [],
+  "hook_names": [],
+  "capabilities": {}
+}`
+	script := "#!/bin/sh\nif [ \"$1\" = \"info\" ]; then\n  echo '" + infoJSON + "'\nfi\n"
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write mock agent binary: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if _, err := agent.Get(agentName); err != nil {
+		t.Errorf("expected external agent %q in registry after runStatus, got: %v", agentName, err)
 	}
 }

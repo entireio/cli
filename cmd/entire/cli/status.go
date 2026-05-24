@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -51,6 +52,8 @@ func newStatusCmd() *cobra.Command {
 }
 
 func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) error {
+	external.DiscoverAndRegisterAlways(ctx)
+
 	if jsonOutput {
 		return runStatusJSON(ctx, w)
 	}
