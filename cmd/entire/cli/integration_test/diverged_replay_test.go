@@ -29,32 +29,33 @@ func TestResume_StaleLocalMetadata_RemoteHasNewerCheckpoint(t *testing.T) {
 	bareDir := env.SetupBareRemote()
 	branchName := env.GetCurrentBranch()
 
-	// Repo A: produce K1, push everything.
-	cpK1 := createCheckpointedCommit(t, env, "Build A", "a.go", "package a", "Build A")
+	// Repo A: produce the first checkpoint and push everything.
+	firstCheckpoint := createCheckpointedCommit(t, env, "Build A", "a.go", "package a", "Build A")
 	env.GitPush("origin", "HEAD")
 	env.RunPrePush("origin")
 
-	// Clone B clones at the K1 state. Pull the metadata branch explicitly so
-	// Clone B has a local refs/heads/entire/checkpoints/v1 at K1 — the PR
-	// #1252 bug requires the local ref to *exist* (early-return guard);
+	// Clone B clones at the first-checkpoint state. Pull the metadata branch
+	// explicitly so Clone B has a local refs/heads/entire/checkpoints/v1 —
+	// the PR #1252 bug requires the local ref to *exist* (early-return guard);
 	// a fresh `git clone` only populates refs/remotes/origin/*.
 	cloneB := env.CloneFrom(bareDir)
 	cloneB.FetchMetadataBranch(bareDir)
 
-	// Repo A: produce K2 on top of K1 and push. Origin's metadata branch
-	// advances; Clone B doesn't know yet.
-	cpK2 := createCheckpointedCommit(t, env, "Build B", "b.go", "package b", "Build B")
+	// Repo A: produce a second checkpoint on top of the first and push.
+	// Origin's metadata branch advances; Clone B doesn't know yet.
+	secondCheckpoint := createCheckpointedCommit(t, env, "Build B", "b.go", "package b", "Build B")
 	env.GitPush("origin", "HEAD")
 	env.RunPrePush("origin")
 
 	// Clone B does a vanilla `git fetch origin`. The default refspec writes
 	// new state into refs/remotes/origin/* but leaves refs/heads/* alone —
-	// Clone B's local refs/heads/entire/checkpoints/v1 is now stale (still K1)
-	// while refs/remotes/origin/entire/checkpoints/v1 sits at K2.
+	// Clone B's local refs/heads/entire/checkpoints/v1 is now stale (at the
+	// first checkpoint) while refs/remotes/origin/entire/checkpoints/v1 sits
+	// at the second.
 	gitInDir(t, cloneB.RepoDir, "fetch", "origin")
 
 	// Pull the feature branch fast-forward so Clone B's HEAD has the commit
-	// whose trailer points at K2.
+	// whose trailer points at the second checkpoint.
 	gitInDir(t, cloneB.RepoDir, "pull", "--ff-only", "origin", branchName)
 
 	// Sanity: confirm we set up the "stale local + advanced remote" shape
@@ -73,14 +74,14 @@ func TestResume_StaleLocalMetadata_RemoteHasNewerCheckpoint(t *testing.T) {
 	}
 
 	if strings.Contains(output, "session log not available") {
-		t.Errorf("resume reported missing log for K2 (%s) when origin already had its metadata; output:\n%s", cpK2, output)
+		t.Errorf("resume reported missing log for the second checkpoint (%s) when origin already had its metadata; output:\n%s", secondCheckpoint, output)
 	}
 
-	// K1's metadata should still be accessible too — sanity that we didn't
-	// break the easy case.
-	explain, err := cloneB.RunCLIWithError("checkpoint", "explain", "--checkpoint", cpK1)
+	// The first checkpoint's metadata should still be accessible too — sanity
+	// that we didn't break the easy case.
+	explain, err := cloneB.RunCLIWithError("checkpoint", "explain", "--checkpoint", firstCheckpoint)
 	if err != nil {
-		t.Errorf("checkpoint explain for K1 (%s) failed after resume: %v\n%s", cpK1, err, explain)
+		t.Errorf("checkpoint explain for the first checkpoint (%s) failed after resume: %v\n%s", firstCheckpoint, err, explain)
 	}
 }
 
