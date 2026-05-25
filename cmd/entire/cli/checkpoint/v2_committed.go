@@ -960,6 +960,7 @@ func (s *V2GitStore) writeMainSessionToSubdirectory(opts WriteCommittedOptions, 
 		Kind:                        opts.Kind,
 		ReviewSkills:                opts.ReviewSkills,
 		ReviewPrompt:                opts.ReviewPrompt,
+		AttachReason:                opts.AttachReason,
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(sessionMetadata, "", "  ")

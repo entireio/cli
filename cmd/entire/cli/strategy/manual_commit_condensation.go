@@ -82,13 +82,14 @@ func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointI
 
 // condenseOpts provides pre-resolved git objects to avoid redundant reads.
 type condenseOpts struct {
-	shadowRef        *plumbing.Reference // Pre-resolved shadow branch ref (nil = resolve from repo)
-	headTree         *object.Tree        // Pre-resolved HEAD tree (passed through to calculateSessionAttributions)
-	parentTree       *object.Tree        // Pre-resolved parent tree (nil for initial commits, for consistent non-agent line counting)
-	repoDir          string              // Repository worktree path for git CLI commands
-	parentCommitHash string              // HEAD's first parent hash for per-commit non-agent file detection
-	headCommitHash   string              // HEAD commit hash (passed through for attribution)
-	allAgentFiles    map[string]struct{} // Union of all sessions' FilesTouched for cross-session exclusion (nil = single-session)
+	shadowRef        *plumbing.Reference  // Pre-resolved shadow branch ref (nil = resolve from repo)
+	headTree         *object.Tree         // Pre-resolved HEAD tree (passed through to calculateSessionAttributions)
+	parentTree       *object.Tree         // Pre-resolved parent tree (nil for initial commits, for consistent non-agent line counting)
+	repoDir          string               // Repository worktree path for git CLI commands
+	parentCommitHash string               // HEAD's first parent hash for per-commit non-agent file detection
+	headCommitHash   string               // HEAD commit hash (passed through for attribution)
+	allAgentFiles    map[string]struct{}  // Union of all sessions' FilesTouched for cross-session exclusion (nil = single-session)
+	attachReason     session.AttachReason // Why this session was attached to the checkpoint (persisted on CommittedMetadata; empty = not set)
 }
 
 var redactSessionJSONLBytes = redact.JSONLBytes
@@ -230,6 +231,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		ReviewSkills:                state.ReviewSkills,
 		ReviewPrompt:                state.ReviewPrompt,
 		HasReview:                   state.Kind.IsReview(),
+		AttachReason:                string(o.attachReason),
 	}
 
 	writeV1Start := time.Now()

@@ -115,6 +115,50 @@ func TestPostCommit_IdleSession_Condenses(t *testing.T) {
 		"shadow branch should be deleted after condensation for IDLE session")
 }
 
+// TestPostCommit_ManualAttach_BypassesFilesTouchedGate verifies that a
+// session marked AttachedManually=true is condensed even when its
+// FilesTouched list is empty, and that the persisted CommittedMetadata
+// records the "manual_attach" reason. `entire attach` / `entire review
+// attach` import sessions whose transcript is the load-bearing artifact;
+// file evidence may be missing, so the heuristic gates must be bypassed.
+func TestPostCommit_ManualAttach_BypassesFilesTouchedGate(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-postcommit-manual-attach"
+
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseEnded
+	state.FilesTouched = nil
+	state.AttachedManually = true
+	now := time.Now()
+	state.LastInteractionTime = &now
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	const cpIDStr = "ee99dd88cc77"
+	commitWithCheckpointTrailer(t, repo, dir, cpIDStr)
+
+	err = s.PostCommit(context.Background())
+	require.NoError(t, err)
+
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err,
+		"entire/checkpoints/v1 should exist — manual_attach bypasses the no-tracked-files gate")
+
+	store := checkpoint.NewGitStore(repo)
+	content, err := store.ReadSessionContent(context.Background(), id.MustCheckpointID(cpIDStr), 0)
+	require.NoError(t, err)
+	assert.Equal(t, "manual_attach", content.Metadata.AttachReason,
+		"manually-attached session should record manual_attach on CommittedMetadata")
+}
+
 // TestPostCommit_RebaseDuringActive_SkipsTransition verifies that PostCommit
 // is a no-op during rebase operations, leaving the session phase unchanged.
 func TestPostCommit_RebaseDuringActive_SkipsTransition(t *testing.T) {

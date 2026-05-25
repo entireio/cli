@@ -4334,6 +4334,77 @@ func TestCommittedMetadata_ReviewFields(t *testing.T) {
 	}
 }
 
+// TestWriteCommitted_PersistsAttachReason verifies that the AttachReason
+// passed via WriteCommittedOptions actually lands on the persisted
+// metadata.json and reads back through ReadSessionContent — the diagnostic
+// is only useful if it survives the full Write → Read path.
+func TestWriteCommitted_PersistsAttachReason(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aa11bb22cc33")
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        "session-attach",
+		Strategy:         "manual-commit",
+		Transcript:       redact.AlreadyRedacted([]byte(`{"message": "attached"}`)),
+		FilesTouched:     []string{"a.go"},
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+		AttachReason:     "file_overlap",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	content, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent() error = %v", err)
+	}
+	if content.Metadata.AttachReason != "file_overlap" {
+		t.Errorf("AttachReason = %q, want %q", content.Metadata.AttachReason, "file_overlap")
+	}
+}
+
+// TestCommittedMetadata_AttachReason pins the JSON wire format for the
+// AttachReason field on CommittedMetadata. The whole point of persisting
+// the field is that consumers can read it back from metadata.json, so a
+// silent rename of the struct field or its JSON tag would break the
+// diagnostic — even a self-consistent round-trip wouldn't catch that.
+// Also asserts omitempty: older checkpoints without the field must not
+// gain a misleading "attach_reason":"" key.
+func TestCommittedMetadata_AttachReason(t *testing.T) {
+	t.Parallel()
+
+	// Populated case: key marshals as "attach_reason":"manual_attach".
+	bSet, err := json.Marshal(CommittedMetadata{AttachReason: "manual_attach"})
+	if err != nil {
+		t.Fatalf("marshal set: %v", err)
+	}
+	var rawSet map[string]any
+	if err := json.Unmarshal(bSet, &rawSet); err != nil {
+		t.Fatalf("unmarshal set: %v", err)
+	}
+	if got, ok := rawSet["attach_reason"].(string); !ok || got != "manual_attach" {
+		t.Errorf(`expected "attach_reason":"manual_attach", got %v (raw: %s)`, rawSet["attach_reason"], string(bSet))
+	}
+
+	// Empty case: omitempty must drop the key for legacy/zero-value metadata.
+	bZero, err := json.Marshal(CommittedMetadata{})
+	if err != nil {
+		t.Fatalf("marshal zero: %v", err)
+	}
+	var rawZero map[string]any
+	if err := json.Unmarshal(bZero, &rawZero); err != nil {
+		t.Fatalf("unmarshal zero: %v", err)
+	}
+	if _, present := rawZero["attach_reason"]; present {
+		t.Errorf(`expected "attach_reason" to be omitted when empty, got %v (raw: %s)`, rawZero["attach_reason"], string(bZero))
+	}
+}
+
 // TestCheckpointSummary_HasReview pins the JSON wire format for the HasReview
 // umbrella flag on CheckpointSummary. Callers such as the re-run guard in
 // `entire review` and `entire status` depend on the on-disk shape, so we

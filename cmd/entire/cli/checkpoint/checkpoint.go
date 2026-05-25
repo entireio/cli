@@ -336,6 +336,14 @@ type WriteCommittedOptions struct {
 	// session.Kind.IsReview) because checkpoint can't import session
 	// — the session package imports checkpoint, creating a cycle.
 	HasReview bool
+
+	// AttachReason names which decision branch in PostCommit caused this
+	// session to be attached to the checkpoint (e.g. "active_recent_interaction",
+	// "file_overlap"). Empty for callers that don't track this (e.g. doctor
+	// backfills) or for legacy writers. Stored as a plain string here because
+	// the checkpoint package cannot import session (cycle); the typed enum
+	// lives in session.AttachReason.
+	AttachReason string
 }
 
 // UpdateCommittedOptions contains options for updating an existing committed checkpoint.
@@ -517,6 +525,14 @@ type CommittedMetadata struct {
 	// for spawn, first user prompt for attach). Only set when Kind is a
 	// review kind.
 	ReviewPrompt string `json:"review_prompt,omitempty"`
+
+	// AttachReason names which PostCommit decision branch caused this session
+	// to be attached to the checkpoint — e.g. "active_recent_interaction"
+	// or "file_overlap". Useful for diagnosing why a particular session
+	// shows up under a checkpoint, especially when multiple sessions share
+	// one. Empty for checkpoints written by older CLI versions or by code
+	// paths that don't track this (e.g. doctor-driven backfill).
+	AttachReason string `json:"attach_reason,omitempty"`
 }
 
 // GetTranscriptStart returns the transcript line offset at which this checkpoint's data begins.
