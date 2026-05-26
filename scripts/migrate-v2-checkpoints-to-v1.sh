@@ -94,6 +94,13 @@ list_full_refs() {
 		'
 }
 
+find_bulk_migration_ancestor() {
+	local head_hash="$1"
+
+	git log --first-parent --format='%H%x09%s' "$head_hash" |
+		awk -F '\t' '$2 == "Migrate checkpoints v2 to v1" { print $1; exit }'
+}
+
 write_checkpoint_commit_index_between() {
 	local since="$1"
 	local head="$2"
@@ -954,15 +961,17 @@ if [[ "$apply" == "true" ]]; then
 	old_ref_hash=""
 	base_tree_hash=""
 	parent_hash=""
+	bulk_migration_hash=""
 	rewriting_bulk_migration=false
 	if git show-ref --verify --quiet "$V1_REF"; then
 		old_ref_hash=$(git rev-parse "$V1_REF^{commit}")
 		parent_hash="$old_ref_hash"
 		base_tree_hash=$(git rev-parse "$old_ref_hash^{tree}")
 
-		if [[ "$(git log -1 --format=%s "$old_ref_hash")" == "Migrate checkpoints v2 to v1" ]]; then
+		bulk_migration_hash=$(find_bulk_migration_ancestor "$old_ref_hash")
+		if [[ -n "$bulk_migration_hash" ]]; then
 			rewriting_bulk_migration=true
-			if parent_hash=$(git rev-parse --verify --quiet "$old_ref_hash^"); then
+			if parent_hash=$(git rev-parse --verify --quiet "${bulk_migration_hash}^"); then
 				base_tree_hash=$(git rev-parse "$parent_hash^{tree}")
 			else
 				parent_hash=""
