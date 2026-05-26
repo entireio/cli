@@ -37,13 +37,19 @@ type historyTip struct {
 	hash plumbing.Hash
 }
 
+type discoveryScope struct {
+	excluded  map[plumbing.Hash]bool
+	sinceHash plumbing.Hash
+	hasSince  bool
+}
+
 func discoverCheckpointHistory(ctx context.Context, repo *git.Repository, opts discoveryOptions) ([]discoveredCheckpoint, error) {
-	excluded, err := excludedCommits(ctx, repo, opts.since)
+	scope, err := newDiscoveryScope(ctx, repo, opts.since)
 	if err != nil {
 		return nil, err
 	}
 
-	tips, err := historyTips(repo, opts.head)
+	tips, err := historyTips(ctx, repo, opts.head, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +59,7 @@ func discoverCheckpointHistory(ctx context.Context, repo *git.Repository, opts d
 	checkpoints := make([]discoveredCheckpoint, 0)
 
 	for _, tip := range tips {
-		if err := scanTip(ctx, repo, tip, excluded, seenCommits, checkpointIndexes, &checkpoints); err != nil {
+		if err := scanTip(ctx, repo, tip, scope.excluded, seenCommits, checkpointIndexes, &checkpoints); err != nil {
 			return nil, err
 		}
 	}
@@ -62,23 +68,34 @@ func discoverCheckpointHistory(ctx context.Context, repo *git.Repository, opts d
 	return checkpoints, nil
 }
 
-func excludedCommits(ctx context.Context, repo *git.Repository, since string) (map[plumbing.Hash]bool, error) {
+func newDiscoveryScope(ctx context.Context, repo *git.Repository, since string) (discoveryScope, error) {
 	if since == "" {
-		return make(map[plumbing.Hash]bool), nil
+		return discoveryScope{excluded: make(map[plumbing.Hash]bool)}, nil
 	}
 
 	sinceHash, err := resolveRevision(repo, since)
 	if err != nil {
-		return nil, fmt.Errorf("resolve --since %q: %w", since, err)
+		return discoveryScope{}, fmt.Errorf("resolve --since %q: %w", since, err)
 	}
-	return reachableCommits(ctx, repo, sinceHash)
+	excluded, err := reachableCommits(ctx, repo, sinceHash)
+	if err != nil {
+		return discoveryScope{}, err
+	}
+	return discoveryScope{
+		excluded:  excluded,
+		sinceHash: sinceHash,
+		hasSince:  true,
+	}, nil
 }
 
-func historyTips(repo *git.Repository, head string) ([]historyTip, error) {
+func historyTips(ctx context.Context, repo *git.Repository, head string, scope discoveryScope) ([]historyTip, error) {
 	if head != "" {
 		hash, err := resolveRevision(repo, head)
 		if err != nil {
 			return nil, fmt.Errorf("resolve --head %q: %w", head, err)
+		}
+		if err := requireTipContainsSince(ctx, repo, hash, head, scope); err != nil {
+			return nil, err
 		}
 		return []historyTip{{name: head, hash: hash}}, nil
 	}
@@ -100,6 +117,13 @@ func historyTips(repo *git.Repository, head string) ([]historyTip, error) {
 		if seenHashes[hash] {
 			return nil
 		}
+		include, includeErr := tipContainsSince(ctx, repo, hash, scope)
+		if includeErr != nil {
+			return fmt.Errorf("check whether %s contains --since: %w", ref.Name(), includeErr)
+		}
+		if !include {
+			return nil
+		}
 		seenHashes[hash] = true
 		tips = append(tips, historyTip{name: ref.Name().String(), hash: hash})
 		return nil
@@ -113,13 +137,37 @@ func historyTips(repo *git.Repository, head string) ([]historyTip, error) {
 		if headErr != nil {
 			return nil, fmt.Errorf("find HEAD: %w", headErr)
 		}
-		tips = append(tips, historyTip{name: headRef.Name().String(), hash: headRef.Hash()})
+		include, includeErr := tipContainsSince(ctx, repo, headRef.Hash(), scope)
+		if includeErr != nil {
+			return nil, fmt.Errorf("check whether HEAD contains --since: %w", includeErr)
+		}
+		if include {
+			tips = append(tips, historyTip{name: headRef.Name().String(), hash: headRef.Hash()})
+		}
 	}
 
 	sort.Slice(tips, func(i, j int) bool {
 		return tips[i].name < tips[j].name
 	})
 	return tips, nil
+}
+
+func requireTipContainsSince(ctx context.Context, repo *git.Repository, tipHash plumbing.Hash, tipName string, scope discoveryScope) error {
+	contains, err := tipContainsSince(ctx, repo, tipHash, scope)
+	if err != nil {
+		return fmt.Errorf("check whether --head %q contains --since: %w", tipName, err)
+	}
+	if !contains {
+		return fmt.Errorf("%s is not an ancestor of --head %q", scope.sinceHash, tipName)
+	}
+	return nil
+}
+
+func tipContainsSince(ctx context.Context, repo *git.Repository, tipHash plumbing.Hash, scope discoveryScope) (bool, error) {
+	if !scope.hasSince {
+		return true, nil
+	}
+	return commitReachableFrom(ctx, repo, tipHash, scope.sinceHash)
 }
 
 func isHistoryRef(ref *plumbing.Reference) bool {
@@ -163,6 +211,29 @@ func reachableCommits(ctx context.Context, repo *git.Repository, from plumbing.H
 		return nil, fmt.Errorf("iterate commits reachable from %s: %w", from, err)
 	}
 	return commits, nil
+}
+
+func commitReachableFrom(ctx context.Context, repo *git.Repository, from, target plumbing.Hash) (bool, error) {
+	iter, err := repo.Log(&git.LogOptions{From: from, Order: git.LogOrderCommitterTime})
+	if err != nil {
+		return false, fmt.Errorf("get log from %s: %w", from, err)
+	}
+	defer iter.Close()
+
+	found := false
+	err = iter.ForEach(func(commit *object.Commit) error {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("context canceled while checking ancestry: %w", err)
+		}
+		if commit.Hash == target {
+			found = true
+		}
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("iterate commits from %s: %w", from, err)
+	}
+	return found, nil
 }
 
 func scanTip(ctx context.Context, repo *git.Repository, tip historyTip, excluded, seenCommits map[plumbing.Hash]bool, checkpointIndexes map[string]int, checkpoints *[]discoveredCheckpoint) error {

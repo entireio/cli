@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,6 +28,7 @@ const (
 	mainCheckpointID      = "111111111111"
 	featureCheckpointID   = "222222222222"
 	featureCheckpointID2  = "333333333333"
+	unrelatedCheckpointID = "444444444444"
 	testSinceRevision     = "abc123"
 	testHeadRevision      = "HEAD"
 	testRepoFlag          = "--repo"
@@ -101,6 +103,33 @@ func TestDiscoverCheckpointHistory_HeadLimitsScan(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, []string{mainCheckpointID}, discoveredCheckpointIDs(checkpoints))
+}
+
+func TestDiscoverCheckpointHistory_SkipsRefsThatDoNotContainSince(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	commitUnrelatedMigrationTestFile(t, fixture.dir)
+
+	checkpoints, err := discoverCheckpointHistory(context.Background(), fixture.repo, discoveryOptions{
+		since: fixture.baseHash.String(),
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, []string{mainCheckpointID, featureCheckpointID, featureCheckpointID2}, discoveredCheckpointIDs(checkpoints))
+}
+
+func TestDiscoverCheckpointHistory_HeadMustContainSince(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	unrelatedHash := commitUnrelatedMigrationTestFile(t, fixture.dir)
+
+	_, err := discoverCheckpointHistory(context.Background(), fixture.repo, discoveryOptions{
+		since: fixture.baseHash.String(),
+		head:  unrelatedHash.String(),
+	})
+	require.ErrorContains(t, err, "is not an ancestor of --head")
 }
 
 func TestRunListModeOpensRepoFromSubdirectory(t *testing.T) {
@@ -317,6 +346,25 @@ func commitMigrationTestFile(t *testing.T, dir, name, content, message string) p
 	testutil.GitAdd(t, dir, name)
 	testutil.GitCommit(t, dir, message)
 	return plumbing.NewHash(testutil.GetHeadHash(t, dir))
+}
+
+func commitUnrelatedMigrationTestFile(t *testing.T, dir string) plumbing.Hash {
+	t.Helper()
+
+	runMigrationGit(t, dir, "checkout", "--orphan", "unrelated")
+	runMigrationGit(t, dir, "rm", "-rf", ".")
+	return commitMigrationTestFile(t, dir, "unrelated.txt", "unrelated\n",
+		"unrelated checkpoint\n\nEntire-Checkpoint: "+unrelatedCheckpointID)
+}
+
+func runMigrationGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+
+	cmd := exec.CommandContext(context.Background(), "git", args...)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %s failed: %s", strings.Join(args, " "), output)
 }
 
 func writeTestV2Checkpoint(t *testing.T, repo *git.Repository, opts checkpoint.WriteCommittedOptions) {
