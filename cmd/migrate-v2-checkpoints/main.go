@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/spf13/pflag"
@@ -47,10 +48,11 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return nil
 	}
 
-	_, repo, err := openRepository(ctx, opts.repoPath)
+	repoRoot, repo, err := openRepository(ctx, opts.repoPath)
 	if err != nil {
 		return err
 	}
+	ctx = settings.WithWorktreeRoot(ctx, repoRoot)
 
 	checkpoints, err := discoverCheckpointHistory(ctx, repo, discoveryOptions{
 		since: opts.since,
@@ -65,11 +67,19 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		writeCheckpointList(stdout, checkpoints)
 		return nil
 	case modePlan, modeDryRun:
-		fmt.Fprintf(stdout, "Discovered %d checkpoint(s) with Entire-Checkpoint trailers.\n", len(checkpoints))
-		fmt.Fprintln(stdout, "V2-to-v1 migration planning will be added in the next implementation step.")
+		report, err := migrateDiscoveredCheckpoints(ctx, repo, checkpoints, migrationOptions{apply: false})
+		if err != nil {
+			return err
+		}
+		writeMigrationReport(stdout, report, false)
 		return nil
 	case modeApply:
-		return errors.New("--apply migration is not implemented yet")
+		report, err := migrateDiscoveredCheckpoints(ctx, repo, checkpoints, migrationOptions{apply: true})
+		if err != nil {
+			return err
+		}
+		writeMigrationReport(stdout, report, true)
+		return nil
 	default:
 		return fmt.Errorf("unknown mode %q", opts.mode)
 	}
@@ -158,5 +168,9 @@ func openRepository(ctx context.Context, repoPath string) (string, *git.Reposito
 	if err != nil {
 		return "", nil, fmt.Errorf("open repository %q: %w", repoPath, err)
 	}
-	return repoPath, repo, nil
+	repoRoot := repoPath
+	if worktree, worktreeErr := repo.Worktree(); worktreeErr == nil {
+		repoRoot = worktree.Filesystem().Root()
+	}
+	return repoRoot, repo, nil
 }

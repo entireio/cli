@@ -5,9 +5,17 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -108,6 +116,80 @@ func TestRunListModeOpensRepoFromSubdirectory(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, mainCheckpointID+" "+shortHash(fixture.mainHash)+"\n", stdout.String())
+}
+
+func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	cpID := id.MustCheckpointID(mainCheckpointID)
+	createdAt := time.Date(2024, 5, 6, 7, 8, 9, 0, time.UTC)
+	transcript := []byte("{\"type\":\"assistant\",\"message\":\"migrated\"}\n")
+
+	err := checkpoint.NewV2GitStore(fixture.repo).WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID:              cpID,
+		SessionID:                 "session-to-migrate",
+		CreatedAt:                 createdAt,
+		Strategy:                  "manual-commit",
+		Branch:                    "main",
+		Transcript:                redact.AlreadyRedacted(transcript),
+		Prompts:                   []string{"first prompt", "second prompt"},
+		FilesTouched:              []string{"main.go"},
+		CheckpointsCount:          2,
+		AuthorName:                "Test",
+		AuthorEmail:               "test@example.com",
+		Agent:                     agent.AgentTypeClaudeCode,
+		Model:                     "claude-test-model",
+		TurnID:                    "turn-1",
+		CheckpointTranscriptStart: 42,
+		CompactTranscriptStart:    9,
+		Kind:                      string(session.KindAgentReview),
+		ReviewSkills:              []string{"review-skill"},
+		ReviewPrompt:              "review this",
+		HasReview:                 true,
+	})
+	require.NoError(t, err)
+
+	var stdout bytes.Buffer
+	err = run(context.Background(), []string{
+		testRepoFlag, fixture.dir,
+		testSinceFlag, fixture.baseHash.String(),
+		testHeadFlag, fixture.mainHash.String(),
+		testApplyFlag,
+	}, &stdout)
+	require.NoError(t, err)
+	require.Contains(t, stdout.String(), "migrated checkpoints: 1")
+	require.Contains(t, stdout.String(), "migrated sessions: 1")
+
+	v1Store := checkpoint.NewGitStore(fixture.repo)
+	summary, err := v1Store.ReadCommitted(context.Background(), cpID)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	require.Len(t, summary.Sessions, 1)
+	require.Equal(t, 2, summary.CheckpointsCount)
+	require.Equal(t, []string{"main.go"}, summary.FilesTouched)
+	require.True(t, summary.HasReview)
+
+	content, err := v1Store.ReadSessionContent(context.Background(), cpID, 0)
+	require.NoError(t, err)
+	require.Equal(t, transcript, content.Transcript)
+	require.Equal(t, strings.Join([]string{"first prompt", "second prompt"}, checkpoint.PromptSeparator), content.Prompts)
+	require.Equal(t, createdAt, content.Metadata.CreatedAt)
+	require.Equal(t, "manual-commit", content.Metadata.Strategy)
+	require.Equal(t, "main", content.Metadata.Branch)
+	require.Equal(t, agent.AgentTypeClaudeCode, content.Metadata.Agent)
+	require.Equal(t, "claude-test-model", content.Metadata.Model)
+	require.Equal(t, "turn-1", content.Metadata.TurnID)
+	require.Equal(t, 0, content.Metadata.CheckpointTranscriptStart)
+	require.Equal(t, string(session.KindAgentReview), content.Metadata.Kind)
+	require.Equal(t, []string{"review-skill"}, content.Metadata.ReviewSkills)
+	require.Equal(t, "review this", content.Metadata.ReviewPrompt)
+
+	ref, err := fixture.repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	commit, err := fixture.repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	require.True(t, commit.Author.When.Equal(createdAt), "author time = %s, want %s", commit.Author.When, createdAt)
 }
 
 type migrationHistoryFixture struct {
