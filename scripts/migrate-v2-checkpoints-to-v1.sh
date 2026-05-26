@@ -11,7 +11,7 @@ set -euo pipefail
 #   -h, --help            Show this help message
 #   --list                Print checkpoint IDs and associated commit IDs only
 #   --dry-run             Print every v2 folder/file that would be migrated
-#   --apply               Write one local refs/heads/entire/checkpoints/v1 migration commit
+#   --apply               Write local refs/heads/entire/checkpoints/v1 migration commits
 #   --repo <path>         Local repository path to inspect
 #   --since <commit>      Commit before the checkpoints to inspect
 #   --head <commit>       Limit scan to one history tip (default: all branches/remotes)
@@ -25,8 +25,8 @@ set -euo pipefail
 #     refs/entire/checkpoints/v2/full/*:<checkpoint-path>/<session>/raw_transcript*
 #
 #   The default mode prints a migration plan without writing refs. --dry-run
-#   prints every source folder/file. --apply writes one local migration commit to
-#   refs/heads/entire/checkpoints/v1.
+#   prints every source folder/file. --apply writes one local migration commit
+#   per checkpoint to refs/heads/entire/checkpoints/v1.
 #
 #   If --repo or SINCE_COMMIT is omitted, the script prompts for it.
 #
@@ -162,18 +162,17 @@ write_unique_mktree_input() {
 		sort -k2
 }
 
-build_v1_tree_from_plan() {
-	local entries_file="$1"
+build_v1_tree_from_entries() {
+	local base_tree_hash="$1"
+	local entries_file="$2"
 	local combined index_file
 	combined="$tmp_dir/combined_index_info"
 	index_file="$tmp_dir/migration.index"
 
 	rm -f "$index_file"
-	if git show-ref --verify --quiet "$V1_REF"; then
-		cat "$entries_file" > "$combined"
-		git ls-tree -r "$V1_REF" >> "$combined"
-	else
-		cat "$entries_file" > "$combined"
+	cat "$entries_file" > "$combined"
+	if [[ -n "$base_tree_hash" ]]; then
+		git ls-tree -r "$base_tree_hash" >> "$combined"
 	fi
 
 	write_unique_mktree_input "$combined" |
@@ -181,17 +180,29 @@ build_v1_tree_from_plan() {
 	GIT_INDEX_FILE="$index_file" git write-tree
 }
 
-create_v1_migration_commit() {
-	local tree_hash="$1"
-	local parent_hash commit_hash
+create_v1_checkpoint_migration_commit() {
+	local checkpoint_id="$1"
+	local tree_hash="$2"
+	local parent_hash="$3"
+	local commit_date="$4"
+	local commit_hash
 
-	if git show-ref --verify --quiet "$V1_REF"; then
-		parent_hash=$(git rev-parse "$V1_REF^{commit}")
-		commit_hash=$(printf 'Migrate checkpoints v2 to v1\n\nSource refs: %s and %s/*\n' "$V2_MAIN_REF" "$V2_FULL_REF_PREFIX" |
-			git commit-tree "$tree_hash" -p "$parent_hash")
+	if [[ -n "$parent_hash" ]]; then
+		if [[ -n "$commit_date" ]]; then
+			commit_hash=$(printf 'Checkpoint: %s\n\nMigrated from checkpoints v2.\nSource refs: %s and %s/*\n' "$checkpoint_id" "$V2_MAIN_REF" "$V2_FULL_REF_PREFIX" |
+				GIT_AUTHOR_DATE="$commit_date" GIT_COMMITTER_DATE="$commit_date" git commit-tree "$tree_hash" -p "$parent_hash")
+		else
+			commit_hash=$(printf 'Checkpoint: %s\n\nMigrated from checkpoints v2.\nSource refs: %s and %s/*\n' "$checkpoint_id" "$V2_MAIN_REF" "$V2_FULL_REF_PREFIX" |
+				git commit-tree "$tree_hash" -p "$parent_hash")
+		fi
 	else
-		commit_hash=$(printf 'Migrate checkpoints v2 to v1\n\nSource refs: %s and %s/*\n' "$V2_MAIN_REF" "$V2_FULL_REF_PREFIX" |
-			git commit-tree "$tree_hash")
+		if [[ -n "$commit_date" ]]; then
+			commit_hash=$(printf 'Checkpoint: %s\n\nMigrated from checkpoints v2.\nSource refs: %s and %s/*\n' "$checkpoint_id" "$V2_MAIN_REF" "$V2_FULL_REF_PREFIX" |
+				GIT_AUTHOR_DATE="$commit_date" GIT_COMMITTER_DATE="$commit_date" git commit-tree "$tree_hash")
+		else
+			commit_hash=$(printf 'Checkpoint: %s\n\nMigrated from checkpoints v2.\nSource refs: %s and %s/*\n' "$checkpoint_id" "$V2_MAIN_REF" "$V2_FULL_REF_PREFIX" |
+				git commit-tree "$tree_hash")
+		fi
 	fi
 
 	printf '%s\n' "$commit_hash"
@@ -200,6 +211,188 @@ create_v1_migration_commit() {
 write_checkpoint_id_files() {
 	awk -F '\t' 'NF >= 2 && !seen[$1]++ { print $1 }' "$checkpoint_commits_file" > "$checkpoint_ids_file"
 	awk 'NF { print $0 "\t" substr($0, 1, 2) "/" substr($0, 3) }' "$checkpoint_ids_file" > "$checkpoint_paths_file"
+}
+
+write_apply_checkpoint_ids() {
+	local output_file="$1"
+
+	awk '
+		NR == FNR {
+			raw[$1] = 1
+			next
+		}
+		NF && ($1 in raw) {
+			ids[++n] = $1
+		}
+		END {
+			for (i = n; i >= 1; i--) {
+				print ids[i]
+			}
+		}
+	' "$raw_checkpoint_ids_file" "$checkpoint_ids_file" > "$output_file"
+}
+
+write_bulk_migration_entries() {
+	local bulk_commit="$1"
+	local parent_commit="$2"
+	local output_entries_file="$3"
+	local output_ids_file="$4"
+	local changed_paths_file checkpoint_dirs_file
+
+	changed_paths_file="$tmp_dir/bulk_changed_paths"
+	checkpoint_dirs_file="$tmp_dir/bulk_checkpoint_dirs"
+
+	if [[ -n "$parent_commit" ]]; then
+		git diff --name-only "$parent_commit" "$bulk_commit" > "$changed_paths_file"
+	else
+		git ls-tree -r --name-only "$bulk_commit" > "$changed_paths_file"
+	fi
+
+	awk -F '/' '
+		NF >= 3 && $1 ~ /^[0-9a-f][0-9a-f]$/ && $2 ~ /^[0-9a-f]{10}$/ {
+			dir = $1 "/" $2
+			if (!seen[dir]++) {
+				print dir
+			}
+		}
+	' "$changed_paths_file" > "$checkpoint_dirs_file"
+
+	awk -F '/' 'NF >= 2 { print $1 $2 }' "$checkpoint_dirs_file" > "$output_ids_file"
+
+	git ls-tree -r "$bulk_commit" |
+		awk -F '\t' -v checkpoint_dirs_file="$checkpoint_dirs_file" '
+			BEGIN {
+				while ((getline dir < checkpoint_dirs_file) > 0) {
+					prefixes[dir "/"] = 1
+				}
+				close(checkpoint_dirs_file)
+			}
+			NF >= 2 {
+				for (prefix in prefixes) {
+					if (index($2, prefix) == 1) {
+						print
+						next
+					}
+				}
+			}
+		' > "$output_entries_file"
+}
+
+write_checkpoint_entries() {
+	local checkpoint_id="$1"
+	local output_file="$2"
+	local source_entries_file="$3"
+	local checkpoint_path
+
+	checkpoint_path=$(checkpoint_to_path "$checkpoint_id")
+	awk -F '\t' -v prefix="${checkpoint_path}/" 'NF >= 2 && index($2, prefix) == 1 { print }' "$source_entries_file" > "$output_file"
+}
+
+write_checkpoint_commit_dates() {
+	local source_entries_file="$1"
+	local output_file="$2"
+
+	command -v python3 >/dev/null 2>&1 || die "python3 is required for --apply metadata date extraction"
+
+	python3 - "$source_entries_file" "$output_file" <<'PY'
+import json
+import re
+import subprocess
+import sys
+
+source_entries_file, output_file = sys.argv[1:]
+metadata_re = re.compile(r"^([0-9a-f]{2})/([0-9a-f]{10})/[0-9]+/metadata\.json$")
+
+records = []
+with open(source_entries_file, "r", encoding="utf-8") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        if not line or "\t" not in line:
+            continue
+        object_info, path = line.split("\t", 1)
+        match = metadata_re.match(path)
+        if not match:
+            continue
+        object_parts = object_info.split()
+        if len(object_parts) != 3 or object_parts[1] != "blob":
+            continue
+        checkpoint_id = match.group(1) + match.group(2)
+        records.append((checkpoint_id, object_parts[2]))
+
+if not records:
+    open(output_file, "w", encoding="utf-8").close()
+    sys.exit(0)
+
+batch_input = "".join(blob + "\n" for _, blob in records).encode("ascii")
+batch = subprocess.run(
+    ["git", "cat-file", "--batch"],
+    input=batch_input,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    check=False,
+)
+if batch.returncode != 0:
+    sys.stderr.write(batch.stderr.decode("utf-8", errors="replace"))
+    sys.exit(batch.returncode)
+
+dates = {}
+out = batch.stdout
+offset = 0
+for checkpoint_id, blob in records:
+    header_end = out.find(b"\n", offset)
+    if header_end < 0:
+        sys.stderr.write(f"missing git cat-file header for {blob}\n")
+        sys.exit(1)
+    header = out[offset:header_end].decode("ascii", errors="replace")
+    offset = header_end + 1
+    parts = header.split()
+    if len(parts) < 3 or parts[1] != "blob":
+        sys.stderr.write(f"unexpected git cat-file header for {blob}: {header}\n")
+        sys.exit(1)
+    size = int(parts[2])
+    data = out[offset:offset + size]
+    offset += size
+    if offset >= len(out) or out[offset:offset + 1] != b"\n":
+        sys.stderr.write(f"missing git cat-file record separator for {blob}\n")
+        sys.exit(1)
+    offset += 1
+
+    metadata = json.loads(data.decode("utf-8"))
+    created_at = metadata.get("created_at")
+    if created_at and (checkpoint_id not in dates or created_at < dates[checkpoint_id]):
+        dates[checkpoint_id] = created_at
+
+with open(output_file, "w", encoding="utf-8") as f:
+    for checkpoint_id in sorted(dates):
+        f.write(f"{checkpoint_id}\t{dates[checkpoint_id]}\n")
+PY
+}
+
+order_checkpoint_ids_by_date() {
+	local checkpoint_ids_source_file="$1"
+	local checkpoint_dates_file="$2"
+	local output_file="$3"
+
+	awk -F '\t' '
+		NR == FNR {
+			date[$1] = $2
+			next
+		}
+		NF {
+			order++
+			sort_date = ($1 in date && date[$1] != "") ? date[$1] : sprintf("9999-12-31T23:59:59Z-%09d", order)
+			print sort_date "\t" sprintf("%09d", order) "\t" $1
+		}
+	' "$checkpoint_dates_file" "$checkpoint_ids_source_file" |
+		sort -t $'\t' -k1,1 -k2,2 |
+		cut -f3 > "$output_file"
+}
+
+checkpoint_commit_date() {
+	local checkpoint_id="$1"
+	local checkpoint_dates_file="$2"
+
+	awk -F '\t' -v checkpoint_id="$checkpoint_id" '$1 == checkpoint_id { print $2; exit }' "$checkpoint_dates_file"
 }
 
 write_full_artifact_index() {
@@ -759,34 +952,80 @@ if [[ "$apply" == "true" ]]; then
 	fi
 
 	old_ref_hash=""
+	base_tree_hash=""
+	parent_hash=""
+	rewriting_bulk_migration=false
 	if git show-ref --verify --quiet "$V1_REF"; then
 		old_ref_hash=$(git rev-parse "$V1_REF^{commit}")
+		parent_hash="$old_ref_hash"
+		base_tree_hash=$(git rev-parse "$old_ref_hash^{tree}")
+
+		if [[ "$(git log -1 --format=%s "$old_ref_hash")" == "Migrate checkpoints v2 to v1" ]]; then
+			rewriting_bulk_migration=true
+			if parent_hash=$(git rev-parse --verify --quiet "$old_ref_hash^"); then
+				base_tree_hash=$(git rev-parse "$parent_hash^{tree}")
+			else
+				parent_hash=""
+				base_tree_hash=""
+			fi
+		fi
 	fi
 
-	if [[ -n "$old_ref_hash" ]]; then
-		old_tree_hash=$(git rev-parse "$old_ref_hash^{tree}")
+	source_plan_entries_file="$plan_entries_file"
+	apply_checkpoint_ids_source_file="$tmp_dir/apply_checkpoint_ids_source"
+	if [[ "$rewriting_bulk_migration" == "true" ]]; then
+		source_plan_entries_file="$tmp_dir/bulk_plan_entries"
+		write_bulk_migration_entries "$old_ref_hash" "$parent_hash" "$source_plan_entries_file" "$apply_checkpoint_ids_source_file"
 	else
-		old_tree_hash=""
+		write_apply_checkpoint_ids "$apply_checkpoint_ids_source_file"
 	fi
 
-	tree_hash=$(build_v1_tree_from_plan "$plan_entries_file")
-	if [[ -n "$old_tree_hash" && "$old_tree_hash" == "$tree_hash" ]]; then
+	checkpoint_dates_file="$tmp_dir/checkpoint_dates"
+	apply_checkpoint_ids_file="$tmp_dir/apply_checkpoint_ids"
+	write_checkpoint_commit_dates "$source_plan_entries_file" "$checkpoint_dates_file"
+	order_checkpoint_ids_by_date "$apply_checkpoint_ids_source_file" "$checkpoint_dates_file" "$apply_checkpoint_ids_file"
+
+	commit_count=0
+	current_tree_hash="$base_tree_hash"
+	final_commit_hash="$parent_hash"
+	while IFS= read -r checkpoint_id; do
+		[[ -n "$checkpoint_id" ]] || continue
+		checkpoint_entries_file="$tmp_dir/checkpoint-${checkpoint_id}.entries"
+		write_checkpoint_entries "$checkpoint_id" "$checkpoint_entries_file" "$source_plan_entries_file"
+		[[ -s "$checkpoint_entries_file" ]] || continue
+
+		new_tree_hash=$(build_v1_tree_from_entries "$current_tree_hash" "$checkpoint_entries_file")
+		if [[ -n "$current_tree_hash" && "$new_tree_hash" == "$current_tree_hash" ]]; then
+			continue
+		fi
+
+		commit_date=$(checkpoint_commit_date "$checkpoint_id" "$checkpoint_dates_file")
+		final_commit_hash=$(create_v1_checkpoint_migration_commit "$checkpoint_id" "$new_tree_hash" "$final_commit_hash" "$commit_date")
+		current_tree_hash="$new_tree_hash"
+		commit_count=$((commit_count + 1))
+	done < "$apply_checkpoint_ids_file"
+
+	if (( commit_count == 0 )); then
 		printf '%s is already up to date; no migration commit created.\n' "$V1_REF"
 		exit 0
 	fi
 
-	commit_hash=$(create_v1_migration_commit "$tree_hash")
 	if [[ -n "$old_ref_hash" ]]; then
-		git update-ref "$V1_REF" "$commit_hash" "$old_ref_hash"
+		git update-ref "$V1_REF" "$final_commit_hash" "$old_ref_hash"
 	else
-		git update-ref "$V1_REF" "$commit_hash"
+		git update-ref "$V1_REF" "$final_commit_hash"
 	fi
 
-	printf 'Wrote migration commit: %s\n' "$commit_hash"
+	if [[ "$rewriting_bulk_migration" == "true" ]]; then
+		printf 'Rewrote previous bulk migration into %s per-checkpoint commit(s).\n' "$commit_count"
+	else
+		printf 'Wrote %s per-checkpoint migration commit(s).\n' "$commit_count"
+	fi
+	printf 'Latest migration commit: %s\n' "$final_commit_hash"
 	printf 'Updated %s\n' "$V1_REF"
 	exit 0
 fi
 
 if [[ "$dry_run" != "true" ]]; then
-	printf 'Plan only: no refs were written. Use --dry-run to print every source and target artifact, or --apply to write the migration commit.\n'
+	printf 'Plan only: no refs were written. Use --dry-run to print every source and target artifact, or --apply to write migration commits.\n'
 fi
