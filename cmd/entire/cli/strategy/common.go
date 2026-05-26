@@ -126,13 +126,24 @@ func PromoteTmpRefSafely(ctx context.Context, tmpRefName, destRefName plumbing.R
 	return nil
 }
 
-// SafelyAdvanceLocalRef updates localRefName to point at targetHash, except
-// when the existing local ref is already at or ahead of targetHash. In that
-// case it leaves the local ref unchanged to avoid rewinding locally-ahead
-// work. Otherwise (local missing, behind, or diverged) it updates the ref to
-// targetHash.
+// SafelyAdvanceLocalRef updates localRefName to point at targetHash only when
+// the move is non-destructive:
 //
-// The ancestry check walks from the local ref (which has full history), so
+//   - local missing → create at target
+//   - local == target → no-op
+//   - local at or ahead of target (target is an ancestor of local) → no-op
+//   - local strictly behind target (local is an ancestor of target) → fast-forward
+//   - diverged or unrelated history (neither ref is an ancestor of the other)
+//     → no-op, logged at debug level
+//
+// The diverged case is the dangerous one this guard exists for. The CLI
+// maintains orphan-style refs (entire/checkpoints/v1, the V2 main ref) where
+// unpushed local commits encode user work — a fetch that landed sibling
+// commits from another machine must not silently rewind that work. In the
+// diverged case readers fall through to the remote-tracking tree or to v1,
+// so resume keeps working while local-only commits stay reachable.
+//
+// The ancestry checks walk from the local ref (which has full history), so
 // callers that fetched with --depth=1 do not break the check.
 func SafelyAdvanceLocalRef(ctx context.Context, repo *git.Repository, localRefName plumbing.ReferenceName, targetHash plumbing.Hash) error {
 	currentLocal, localErr := repo.Reference(localRefName, true)
@@ -141,6 +152,14 @@ func SafelyAdvanceLocalRef(ctx context.Context, repo *git.Repository, localRefNa
 			return nil
 		}
 		if IsAncestorOf(ctx, repo, targetHash, currentLocal.Hash()) {
+			return nil
+		}
+		if !IsAncestorOf(ctx, repo, currentLocal.Hash(), targetHash) {
+			logging.Debug(ctx, "skipping advance: local ref has diverged from target",
+				slog.String("ref", string(localRefName)),
+				slog.String("local", currentLocal.Hash().String()),
+				slog.String("target", targetHash.String()),
+			)
 			return nil
 		}
 	}

@@ -2074,81 +2074,6 @@ func TestRunExplainCheckpoint_V2OnlyRawTranscript(t *testing.T) {
 	}
 }
 
-func TestRunExplainCheckpoint_V2CheckpointRemoteFallbackResolvesRawTranscript(t *testing.T) {
-	ctx := context.Background()
-
-	emptyConfig := filepath.Join(t.TempDir(), "empty-git-config")
-	require.NoError(t, os.WriteFile(emptyConfig, []byte(""), 0o644))
-	t.Setenv("GIT_CONFIG_GLOBAL", emptyConfig)
-	t.Setenv("GIT_CONFIG_SYSTEM", emptyConfig)
-
-	checkpointDir := t.TempDir()
-	testutil.InitRepo(t, checkpointDir)
-	testutil.WriteFile(t, checkpointDir, "checkpoint.txt", "checkpoint")
-	testutil.GitAdd(t, checkpointDir, "checkpoint.txt")
-	testutil.GitCommit(t, checkpointDir, "checkpoint init")
-
-	checkpointRepo, err := git.PlainOpen(checkpointDir)
-	require.NoError(t, err)
-
-	cpID := id.MustCheckpointID("121212121212")
-	rawTranscript := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"raw from checkpoint_remote"}]}}` + "\n")
-	checkpointStore := checkpoint.NewV2GitStore(checkpointRepo)
-	require.NoError(t, checkpointStore.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
-		CheckpointID: cpID,
-		SessionID:    "session-checkpoint-remote",
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted(rawTranscript),
-		AuthorName:   "Test",
-		AuthorEmail:  "test@example.com",
-	}))
-
-	localDir := t.TempDir()
-	t.Chdir(localDir)
-
-	testutil.InitRepo(t, localDir)
-	testutil.WriteFile(t, localDir, "local.txt", "local")
-	testutil.GitAdd(t, localDir, "local.txt")
-	testutil.GitCommit(t, localDir, "local init")
-
-	cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", "git@github.com:user/source.git")
-	cmd.Dir = localDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
-
-	sshScript := filepath.Join(t.TempDir(), "fake-ssh")
-	require.NoError(t, os.WriteFile(sshScript, []byte(`#!/bin/bash
-set -euo pipefail
-cmd="${@: -1}"
-case "$cmd" in
-  *"user/source.git"*)
-    echo "origin intentionally unavailable" >&2
-    exit 1
-    ;;
-  *"org/checkpoints.git"*) repo="$CHECKPOINT_REPO" ;;
-  *)
-    echo "unexpected ssh command: $cmd" >&2
-    exit 1
-    ;;
-esac
-exec git-upload-pack "$repo"
-`), 0o755))
-	t.Setenv("GIT_SSH", sshScript)
-	t.Setenv("CHECKPOINT_REPO", checkpointDir)
-
-	require.NoError(t, os.MkdirAll(filepath.Join(localDir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(localDir, ".entire", "settings.json"),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_v2": true, "checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
-		0o644,
-	))
-
-	var buf, errBuf bytes.Buffer
-	err = runExplainCheckpoint(ctx, &buf, &errBuf, "121212", false, false, false, true, false, false, false, 0)
-	require.NoError(t, err)
-	require.Contains(t, buf.String(), "raw from checkpoint_remote")
-}
-
 func TestRunExplainCheckpoint_V2UsesCompactTranscriptForIntent(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -2757,19 +2682,19 @@ func TestListCommittedForExplain_MergesV1AndV2(t *testing.T) {
 		AuthorEmail:  "t@t.com",
 	}))
 
-	// Write a dual-write checkpoint (exists in both v1 and v2).
-	dualID := id.MustCheckpointID("bbb444555666")
+	// Write one checkpoint to both stores to verify merged reads deduplicate it.
+	overlapID := id.MustCheckpointID("bbb444555666")
 	require.NoError(t, v1Store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
-		CheckpointID: dualID,
-		SessionID:    "session-dual",
+		CheckpointID: overlapID,
+		SessionID:    "session-overlap",
 		Strategy:     "manual-commit",
 		Transcript:   redact.AlreadyRedacted(transcript),
 		AuthorName:   "T",
 		AuthorEmail:  "t@t.com",
 	}))
 	require.NoError(t, v2Store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
-		CheckpointID: dualID,
-		SessionID:    "session-dual",
+		CheckpointID: overlapID,
+		SessionID:    "session-overlap",
 		Strategy:     "manual-commit",
 		Transcript:   redact.AlreadyRedacted(transcript),
 		AuthorName:   "T",
@@ -2779,7 +2704,7 @@ func TestListCommittedForExplain_MergesV1AndV2(t *testing.T) {
 	store, err := checkpoint.NewCommittedReader(ctx, repo, checkpoint.CommittedReaderOptions{})
 	require.NoError(t, err)
 
-	// In dual-read mode: should return both the dual-write AND the v1-only checkpoint.
+	// In dual-read mode: should return both the overlap and the v1-only checkpoint.
 	results, err := store.ListCommitted(ctx)
 	require.NoError(t, err)
 
@@ -2788,16 +2713,16 @@ func TestListCommittedForExplain_MergesV1AndV2(t *testing.T) {
 		foundIDs[r.CheckpointID] = true
 	}
 	require.True(t, foundIDs[v1OnlyID], "v1-only checkpoint should be visible when v2 is preferred")
-	require.True(t, foundIDs[dualID], "dual-write checkpoint should be visible")
+	require.True(t, foundIDs[overlapID], "overlapping checkpoint should be visible")
 
-	// No duplicates: dual checkpoint should appear exactly once.
-	dualCount := 0
+	// No duplicates: overlapping checkpoint should appear exactly once.
+	overlapCount := 0
 	for _, r := range results {
-		if r.CheckpointID == dualID {
-			dualCount++
+		if r.CheckpointID == overlapID {
+			overlapCount++
 		}
 	}
-	require.Equal(t, 1, dualCount, "dual-write checkpoint should not be duplicated")
+	require.Equal(t, 1, overlapCount, "overlapping checkpoint should not be duplicated")
 }
 
 func TestListCommittedForExplain_NoLocalV2RefReturnsV1Only(t *testing.T) {
@@ -6277,7 +6202,8 @@ func TestGetBranchCheckpoints_V2OnlyCheckpointDiscoverable(t *testing.T) {
 }
 
 func TestGetBranchCheckpoints_V2PromptFallbackWhenV1Deleted(t *testing.T) {
-	// When v2 is preferred and v1 metadata branch is deleted after dual-write,
+	// When v2 is preferred and v1 metadata branch is deleted after a checkpoint
+	// exists in both stores,
 	// prompts should still be readable from v2 /main.
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)

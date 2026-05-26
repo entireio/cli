@@ -1,7 +1,6 @@
 package strategy
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -14,7 +13,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/entireio/cli/redact"
 	"github.com/stretchr/testify/require"
 
 	// Register agents so GetByAgentType works in tests.
@@ -23,59 +21,6 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 )
-
-type fakeTranscriptCompactorAgent struct {
-	name         types.AgentName
-	agentType    types.AgentType
-	fullCompact  []byte
-	scopedByPath map[string][]byte
-	err          error
-	returnNil    bool
-	caps         agent.DeclaredCaps
-}
-
-func (f *fakeTranscriptCompactorAgent) Name() types.AgentName { return f.name }
-func (f *fakeTranscriptCompactorAgent) Type() types.AgentType { return f.agentType }
-func (f *fakeTranscriptCompactorAgent) Description() string   { return "fake transcript compactor" }
-func (f *fakeTranscriptCompactorAgent) IsPreview() bool       { return false }
-func (f *fakeTranscriptCompactorAgent) DetectPresence(context.Context) (bool, error) {
-	return true, nil
-}
-func (f *fakeTranscriptCompactorAgent) ProtectedDirs() []string               { return nil }
-func (f *fakeTranscriptCompactorAgent) ReadTranscript(string) ([]byte, error) { return nil, nil }
-func (f *fakeTranscriptCompactorAgent) ChunkTranscript(context.Context, []byte, int) ([][]byte, error) {
-	return nil, nil
-}
-func (f *fakeTranscriptCompactorAgent) ReassembleTranscript([][]byte) ([]byte, error) {
-	return nil, nil
-}
-func (f *fakeTranscriptCompactorAgent) GetSessionID(*agent.HookInput) string { return "" }
-func (f *fakeTranscriptCompactorAgent) GetSessionDir(string) (string, error) { return "", nil }
-func (f *fakeTranscriptCompactorAgent) ResolveSessionFile(_, sessionID string) string {
-	return sessionID
-}
-func (f *fakeTranscriptCompactorAgent) ReadSession(*agent.HookInput) (*agent.AgentSession, error) {
-	return nil, nil //nolint:nilnil // test stub
-}
-func (f *fakeTranscriptCompactorAgent) WriteSession(context.Context, *agent.AgentSession) error {
-	return nil
-}
-func (f *fakeTranscriptCompactorAgent) FormatResumeCommand(string) string { return "" }
-func (f *fakeTranscriptCompactorAgent) DeclaredCapabilities() agent.DeclaredCaps {
-	return f.caps
-}
-func (f *fakeTranscriptCompactorAgent) CompactTranscript(_ context.Context, sessionRef string) (*agent.CompactedTranscript, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	if f.returnNil {
-		return nil, nil //nolint:nilnil // test stub for external agent bug path
-	}
-	if compacted, ok := f.scopedByPath[sessionRef]; ok {
-		return &agent.CompactedTranscript{Transcript: compacted}, nil
-	}
-	return &agent.CompactedTranscript{Transcript: f.fullCompact}, nil
-}
 
 // calculateTokenUsage is a test helper that looks up an agent by type and
 // calculates token usage from pre-loaded transcript bytes.
@@ -181,198 +126,6 @@ func TestBuildSummaryGenerator_BuiltInProviderSkipsExternalDiscovery(t *testing.
 	if generator := buildSummaryGenerator(context.Background()); generator == nil {
 		t.Fatal("buildSummaryGenerator() = nil for registered built-in provider")
 	}
-}
-
-func TestBuildCompactTranscript_UsesAgentTranscriptCompactor(t *testing.T) { //nolint:paralleltest // uses t.Chdir
-	dir := t.TempDir()
-	t.Chdir(dir)
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(testCheckpointsV2SettingsJSON), 0o644))
-
-	ag := &fakeTranscriptCompactorAgent{
-		name:        types.AgentName("test-external-compactor"),
-		agentType:   types.AgentType("Test External Compactor"),
-		fullCompact: []byte("{\"v\":1,\"type\":\"assistant\"}\n"),
-		caps:        agent.DeclaredCaps{CompactTranscript: true},
-	}
-	state := &SessionState{
-		SessionID:                 "sess-1",
-		AgentType:                 ag.agentType,
-		TranscriptPath:            "/tmp/session.jsonl",
-		CheckpointTranscriptStart: 0,
-	}
-
-	result := buildExternalCompactTranscript(context.Background(), ag, state)
-	require.NotNil(t, result)
-	// The transcript passes through redaction, so compare the redacted form.
-	redacted, err := redact.JSONLBytes(ag.fullCompact)
-	require.NoError(t, err)
-	require.Equal(t, redacted.Bytes(), result.Transcript)
-	require.Equal(t, 0, result.StartLine)
-}
-
-func TestBuildExternalCompactTranscript_UsesExistingCompactOffset(t *testing.T) { //nolint:paralleltest // uses t.Chdir
-	dir := t.TempDir()
-	t.Chdir(dir)
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(testCheckpointsV2SettingsJSON), 0o644))
-
-	ag := &fakeTranscriptCompactorAgent{
-		name:        types.AgentName("test-external-offset"),
-		agentType:   types.AgentType("Test External Offset"),
-		fullCompact: []byte("{\"v\":1,\"type\":\"user\"}\n{\"v\":1,\"type\":\"assistant\"}\n"),
-		caps:        agent.DeclaredCaps{CompactTranscript: true},
-	}
-
-	state := &SessionState{
-		SessionID:                 "sess-1",
-		AgentType:                 ag.agentType,
-		TranscriptPath:            "/tmp/session.jsonl",
-		CheckpointTranscriptStart: 1,
-		CompactTranscriptStart:    1,
-	}
-
-	result := buildExternalCompactTranscript(context.Background(), ag, state)
-	require.NotNil(t, result)
-	redacted, err := redact.JSONLBytes(ag.fullCompact)
-	require.NoError(t, err)
-	require.Equal(t, redacted.Bytes(), result.Transcript)
-	require.Equal(t, 1, result.StartLine)
-}
-
-func TestBuildExternalCompactTranscript_ShorterThanOffset_ResetsStart(t *testing.T) { //nolint:paralleltest // uses t.Chdir
-	dir := t.TempDir()
-	t.Chdir(dir)
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(testCheckpointsV2SettingsJSON), 0o644))
-
-	ag := &fakeTranscriptCompactorAgent{
-		name:        types.AgentName("test-external-short"),
-		agentType:   types.AgentType("Test External Short"),
-		fullCompact: []byte("{\"v\":1,\"type\":\"assistant\"}\n"),
-		caps:        agent.DeclaredCaps{CompactTranscript: true},
-	}
-
-	state := &SessionState{
-		SessionID:              "sess-1",
-		AgentType:              ag.agentType,
-		TranscriptPath:         "/tmp/session.jsonl",
-		CompactTranscriptStart: 2,
-	}
-
-	result := buildExternalCompactTranscript(context.Background(), ag, state)
-	require.NotNil(t, result)
-	redacted, err := redact.JSONLBytes(ag.fullCompact)
-	require.NoError(t, err)
-	require.Equal(t, redacted.Bytes(), result.Transcript)
-	require.Equal(t, 0, result.StartLine)
-}
-
-func TestBuildExternalCompactTranscript_NilResultDoesNotPanic(t *testing.T) { //nolint:paralleltest // uses t.Chdir
-	dir := t.TempDir()
-	t.Chdir(dir)
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(testCheckpointsV2SettingsJSON), 0o644))
-
-	ag := &fakeTranscriptCompactorAgent{
-		name:      types.AgentName("test-external-nil"),
-		agentType: types.AgentType("Test External Nil"),
-		returnNil: true,
-		caps:      agent.DeclaredCaps{CompactTranscript: true},
-	}
-	state := &SessionState{
-		SessionID:      "sess-1",
-		AgentType:      ag.agentType,
-		TranscriptPath: "/tmp/session.jsonl",
-	}
-
-	var result *compactTranscriptResult
-	require.NotPanics(t, func() {
-		result = buildExternalCompactTranscript(context.Background(), ag, state)
-	})
-	require.NotNil(t, result)
-	require.Nil(t, result.Transcript)
-}
-
-func TestBuildExternalCompactTranscript_RedactsTranscript(t *testing.T) { //nolint:paralleltest // uses t.Chdir
-	dir := t.TempDir()
-	t.Chdir(dir)
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(testCheckpointsV2SettingsJSON), 0o644))
-
-	var redactCalled bool
-	originalRedact := redactSessionJSONLBytes
-	redactSessionJSONLBytes = func(data []byte) (redact.RedactedBytes, error) {
-		redactCalled = true
-		return originalRedact(data)
-	}
-	t.Cleanup(func() { redactSessionJSONLBytes = originalRedact })
-
-	ag := &fakeTranscriptCompactorAgent{
-		name:        types.AgentName("test-external-redact"),
-		agentType:   types.AgentType("Test External Redact"),
-		fullCompact: []byte("{\"v\":1,\"type\":\"assistant\",\"content\":\"hello\"}\n"),
-		caps:        agent.DeclaredCaps{CompactTranscript: true},
-	}
-	state := &SessionState{
-		SessionID:      "sess-1",
-		AgentType:      ag.agentType,
-		TranscriptPath: "/tmp/session.jsonl",
-	}
-
-	result := buildExternalCompactTranscript(context.Background(), ag, state)
-	require.NotNil(t, result)
-	require.True(t, redactCalled, "redactSessionJSONLBytes must be called for external agent transcripts")
-	require.NotNil(t, result.Transcript)
-}
-
-func TestBuildExternalCompactTranscript_ReturnsNilForInternalAgent(t *testing.T) { //nolint:paralleltest // uses t.Chdir
-	dir := t.TempDir()
-	t.Chdir(dir)
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(testCheckpointsV2SettingsJSON), 0o644))
-
-	ag, err := agent.GetByAgentType(agent.AgentTypeClaudeCode)
-	require.NoError(t, err)
-
-	state := &SessionState{
-		SessionID:      "sess-1",
-		AgentType:      agent.AgentTypeClaudeCode,
-		TranscriptPath: "/tmp/session.jsonl",
-	}
-
-	result := buildExternalCompactTranscript(context.Background(), ag, state)
-	require.Nil(t, result, "should return nil for built-in agents so caller falls through to internal path")
-}
-
-func TestCompactTranscriptForExternalAgent_RejectsWhitespaceOnlyOutput(t *testing.T) {
-	t.Parallel()
-
-	ag := &fakeTranscriptCompactorAgent{
-		name:        types.AgentName("test-external-whitespace"),
-		agentType:   types.AgentType("Test External Whitespace"),
-		fullCompact: []byte(" \n\t "),
-		caps:        agent.DeclaredCaps{CompactTranscript: true},
-	}
-
-	compacted := compactTranscriptForExternalAgent(context.Background(), ag, "sess-1", "/tmp/session.jsonl")
-	require.Nil(t, compacted)
-}
-
-func TestCompactTranscriptForExternalAgent_AppendsTrailingNewline(t *testing.T) {
-	t.Parallel()
-
-	ag := &fakeTranscriptCompactorAgent{
-		name:        types.AgentName("test-external-newline"),
-		agentType:   types.AgentType("Test External Newline"),
-		fullCompact: []byte("{\"v\":1,\"type\":\"assistant\"}"),
-		caps:        agent.DeclaredCaps{CompactTranscript: true},
-	}
-
-	compacted := compactTranscriptForExternalAgent(context.Background(), ag, "sess-1", "/tmp/session.jsonl")
-	require.NotNil(t, compacted)
-	require.True(t, bytes.HasSuffix(compacted.Transcript, []byte{'\n'}), "expected trailing newline")
-	require.JSONEq(t, "{\"v\":1,\"type\":\"assistant\"}", strings.TrimSpace(string(compacted.Transcript)))
 }
 
 func TestCalculateTokenUsage_EmptyData(t *testing.T) {

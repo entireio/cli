@@ -144,6 +144,36 @@ func TestPushBranchIfNeeded_UnreachableTarget_ReturnsNil(t *testing.T) {
 	assert.NoError(t, err, "pushBranchIfNeeded should return nil when target is unreachable")
 }
 
+// TestPrePush_WarnsForDisallowedV2Settings verifies that push-time keeps
+// telling users legacy v2 settings fall back to v1 until they remove them.
+//
+// Not parallel: uses t.Chdir() and os.Stderr redirection.
+func TestPrePush_WarnsForDisallowedV2Settings(t *testing.T) {
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tmpDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`),
+		0o644,
+	))
+	t.Chdir(tmpDir)
+
+	restore := captureStderr(t)
+	err := (&ManualCommitStrategy{}).PrePush(context.Background(), "origin")
+	output := restore()
+
+	require.NoError(t, err)
+	assert.Contains(t, output, "[entire] strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1")
+
+	restore = captureStderr(t)
+	err = (&ManualCommitStrategy{}).PrePush(context.Background(), "origin")
+	output = restore()
+
+	require.NoError(t, err)
+	assert.Contains(t, output, "[entire] strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1")
+}
+
 // TestPushBranchIfNeeded_LocalBareRepo_PushesSuccessfully verifies that
 // pushBranchIfNeeded works with a local bare repo path as the target.
 // This exercises the same code path that PrePush uses when pushTarget()

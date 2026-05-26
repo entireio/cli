@@ -15,7 +15,7 @@ import (
 
 // TestDoctorNoIssues verifies the manual-plan "no issues detected" scenario.
 // After a normal checkpointed commit and push, doctor should report clean
-// metadata/session health for the active suite-wide checkpoints mode.
+// metadata/session health.
 func TestDoctorNoIssues(t *testing.T) {
 	testutil.ForEachNamedAgent(t, 3*time.Minute, []string{"vogon"}, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		_ = testutil.SetupBareRemote(t, s)
@@ -39,18 +39,9 @@ func TestDoctorNoIssues(t *testing.T) {
 
 		assert.Contains(t, out, "Metadata branches: OK", "doctor should report healthy metadata state")
 		assert.Contains(t, out, "No stuck sessions found.", "doctor should report no stuck sessions")
-
-		switch testutil.CheckpointsMode() {
-		case "legacy":
-			assert.NotContains(t, out, "v2 refs", "legacy mode should not run v2 doctor checks")
-			assert.NotContains(t, out, "v2 checkpoint counts", "legacy mode should not run v2 count checks")
-			assert.NotContains(t, out, "v2 generations", "legacy mode should not run v2 generation checks")
-			assert.NotContains(t, out, "v2 /main ref", "legacy mode should not run v2 connectivity checks")
-		default:
-			assert.Contains(t, out, "v2 /main ref: OK", "doctor should report healthy v2 /main connectivity")
-			assert.Contains(t, out, "v2 refs: OK", "doctor should report healthy v2 refs")
-			assert.Contains(t, out, "v2 checkpoint counts: OK", "doctor should report healthy v2 checkpoint counts")
-			assert.Contains(t, out, "v2 generations: OK", "doctor should report healthy v2 generation state")
-		}
+		assert.NotContains(t, out, "v2 refs", "doctor should not run v2 doctor checks")
+		assert.NotContains(t, out, "v2 checkpoint counts", "doctor should not run v2 count checks")
+		assert.NotContains(t, out, "v2 generations", "doctor should not run v2 generation checks")
+		assert.NotContains(t, out, "v2 /main ref", "doctor should not run v2 connectivity checks")
 	})
 }

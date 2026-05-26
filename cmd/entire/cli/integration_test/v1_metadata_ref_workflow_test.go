@@ -3,12 +3,14 @@
 package integration
 
 import (
+	"os/exec"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // TestV1MetadataRef_FreshRepo_ManualOptIn_FullWorkflow exercises the
@@ -105,4 +107,12 @@ func TestV1MetadataRef_PushAndFetch_NonFF(t *testing.T) {
 		"custom ref should still exist on bare remote after second push")
 	assert.False(t, bareRefExists(t, bareDir, "refs/heads/"+paths.MetadataBranchName),
 		"legacy branch should NOT be pushed by a 1.1 repo")
+}
+
+func bareRefExists(t *testing.T, bareDir, refName string) bool {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", "show-ref", "--verify", "--quiet", refName)
+	cmd.Dir = bareDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	return cmd.Run() == nil
 }

@@ -29,12 +29,11 @@ const (
 	EntireSettingsLocalFile = ".entire/settings.local.json"
 	// ClonePreferencesFile is the path inside the git common dir for clone-local preferences.
 	ClonePreferencesFile = "entire/preferences.json"
-	// defaultGenerationRetentionDays is the default retention window for archived
-	// checkpoints v2 raw-transcript generations when no override is configured.
-	defaultGenerationRetentionDays = 14
 )
 
-var checkpointsVersionWarningOnce sync.Once
+var (
+	checkpointsVersionWarningOnce sync.Once
+)
 
 type worktreeRootContextKey struct{}
 
@@ -966,14 +965,15 @@ func CheckpointsVersion(ctx context.Context) int {
 	return version
 }
 
-// IsPushV2RefsEnabled checks if pushing v2 refs is enabled in settings.
-// Returns false by default if settings cannot be loaded or flags are missing.
-func IsPushV2RefsEnabled(ctx context.Context) bool {
+// WarnIfCheckpointsV2Disallowed emits the user-facing fallback warning when a
+// settings file still requests checkpoints v2. Call this from push-time flows
+// so users learn why v1 metadata is being pushed instead.
+func WarnIfCheckpointsV2Disallowed(ctx context.Context) {
 	s, err := Load(ctx)
 	if err != nil {
-		return false
+		return
 	}
-	return s.IsPushV2RefsEnabled()
+	s.WarnIfCheckpointsV2Disallowed()
 }
 
 // IsFilteredFetchesEnabled checks if filtered fetches should be used.
@@ -1057,14 +1057,17 @@ func (s *EntireSettings) GetCheckpointRemote() *CheckpointRemoteConfig {
 	return &CheckpointRemoteConfig{Provider: provider, Repo: repo}
 }
 
-// IsCheckpointsV2Enabled checks if checkpoints v2 is enabled.
-// Returns true when either checkpoints_v2 is set or checkpoints_version is 2.
+// IsCheckpointsV2Enabled checks if checkpoints v2 is enabled for read paths.
+// Existing v2 checkpoint metadata remains readable while new writes use v1.
 func (s *EntireSettings) IsCheckpointsV2Enabled() bool {
-	if s.CheckpointsVersion() == 2 {
-		return true
-	}
 	if s.StrategyOptions == nil {
 		return false
+	}
+	if val, ok := s.StrategyOptions["checkpoints_version"]; ok {
+		version, supported := parseCheckpointsVersion(val)
+		if supported && version == 2 {
+			return true
+		}
 	}
 	val, ok := s.StrategyOptions["checkpoints_v2"].(bool)
 	return ok && val
@@ -1114,7 +1117,9 @@ func UsesCustomMetadataRef(ctx context.Context) bool {
 
 // CheckpointsVersion returns the configured checkpoints format version from
 // strategy_options.checkpoints_version. Returns 1 when unset, invalid, or
-// unsupported. The currently supported versions are 1 and 2.
+// unsupported. Version 2 is no longer an exclusive storage mode; reads use
+// IsCheckpointsV2Enabled to enable dual v2/v1 lookup when legacy settings are
+// present.
 func (s *EntireSettings) CheckpointsVersion() int {
 	if s.StrategyOptions == nil {
 		return 1
@@ -1124,10 +1129,43 @@ func (s *EntireSettings) CheckpointsVersion() int {
 		return 1
 	}
 	version, ok := parseCheckpointsVersion(val)
-	if ok {
-		return version
+	if ok && version == 1 {
+		return 1
 	}
 	return 1
+}
+
+// WarnIfCheckpointsV2Disallowed emits the v2 fallback warning when any legacy
+// settings key requests v2 writes or pushes.
+func (s *EntireSettings) WarnIfCheckpointsV2Disallowed() {
+	if val, ok := s.disallowedCheckpointsV2Value(); ok {
+		warnCheckpointsV2Disallowed(val)
+	}
+}
+
+func (s *EntireSettings) disallowedCheckpointsV2Value() (any, bool) {
+	if s.StrategyOptions == nil {
+		return nil, false
+	}
+	if val, ok := s.StrategyOptions["checkpoints_version"]; ok {
+		version, supported := parseCheckpointsVersion(val)
+		if supported && version == 2 {
+			return val, true
+		}
+	}
+	for _, key := range []string{"checkpoints_v2", "push_v2_refs", "push_v2"} {
+		if val, ok := s.StrategyOptions[key].(bool); ok && val {
+			return 2, true
+		}
+	}
+	return nil, false
+}
+
+func warnCheckpointsV2Disallowed(val any) {
+	fmt.Fprintf(os.Stderr,
+		"[entire] strategy_options.checkpoints_version %v is no longer supported. Falling back to version 1\n",
+		val,
+	)
 }
 
 func parseCheckpointsVersion(val any) (int, bool) {
@@ -1152,50 +1190,6 @@ func parseCheckpointsVersion(val any) (int, bool) {
 		}
 	}
 	return 1, false
-}
-
-// IsPushV2RefsEnabled checks if pushing v2 refs is enabled.
-// checkpoints_version: 2 forces v2 ref pushes on, regardless of push_v2_refs.
-func (s *EntireSettings) IsPushV2RefsEnabled() bool {
-	if s.CheckpointsVersion() == 2 {
-		return true
-	}
-	if !s.IsCheckpointsV2Enabled() {
-		return false
-	}
-	if s.StrategyOptions == nil {
-		return false
-	}
-	val, ok := s.StrategyOptions["push_v2_refs"].(bool)
-	return ok && val
-}
-
-// GetFullTranscriptGenerationRetentionDays returns the retention window for
-// archived checkpoints v2 /full/* generations. Invalid, missing, or
-// non-positive values fall back to the documented default.
-func (s *EntireSettings) GetFullTranscriptGenerationRetentionDays() int {
-	if s.StrategyOptions == nil {
-		return defaultGenerationRetentionDays
-	}
-
-	val, ok := s.StrategyOptions["full_transcript_generation_retention_days"]
-	if !ok {
-		return defaultGenerationRetentionDays
-	}
-
-	switch days := val.(type) {
-	case int:
-		if days > 0 {
-			return days
-		}
-	case float64:
-		intDays := int(days)
-		if intDays > 0 && days == float64(intDays) {
-			return intDays
-		}
-	}
-
-	return defaultGenerationRetentionDays
 }
 
 // IsFilteredFetchesEnabled checks if fetches should use --filter=blob:none.

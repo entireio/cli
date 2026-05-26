@@ -1376,7 +1376,6 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	state.RealignAttributionBase(newHead)
 	state.StepCount = 0
 	state.CheckpointTranscriptStart = result.TotalTranscriptLines
-	state.CompactTranscriptStart += result.CompactTranscriptLines
 	state.CheckpointTranscriptSize = int64(len(result.Transcript))
 
 	// Clear attribution tracking — condensation already used these values
@@ -2759,35 +2758,8 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	}
 
 	store := checkpoint.NewGitStore(repo)
-	v2 := settings.CheckpointsVersion(logCtx) == 2
-
-	// Evaluate v2 flag once before the loop to avoid re-reading settings per checkpoint
-	var v2Store *checkpoint.V2GitStore
-	if settings.IsCheckpointsV2Enabled(logCtx) {
-		v2Store = checkpoint.NewV2GitStore(repo)
-	}
 
 	precomputed := precomputeTranscriptBlobsForFinalize(logCtx, repo, redactedTranscript, state)
-
-	// Resolve the agent and produce the compact transcripts once before the loop.
-	// Compact transcripts are invariant across checkpoints within a turn: v2 /main
-	// stores a single cumulative transcript.jsonl per session and each checkpoint's
-	// metadata.json indexes into it via checkpoint_transcript_start. Producing a
-	// per-checkpoint scoped delta here would replace the cumulative transcript with
-	// only the latest turn's lines while leaving each metadata's start offset pointing
-	// at the original cumulative position — yielding metadata that claims start=N for
-	// a transcript with K<N lines. Always pass startLine=0 to keep the cumulative
-	// invariant from buildInternalCompactTranscript intact.
-	finalAg, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil; compactTranscriptForV2 handles nil
-	var externalCompact []byte
-	var internalCompact []byte
-	var isExternalAgent bool
-	if v2Store != nil {
-		externalCompact, isExternalAgent = compactAndRedactExternalTranscript(logCtx, finalAg, state)
-		if !isExternalAgent && redactedTranscript.Len() > 0 {
-			internalCompact = compactTranscriptForV2(logCtx, finalAg, redactedTranscript, 0)
-		}
-	}
 
 	// Update each checkpoint with the full transcript
 	for _, cpIDStr := range state.TurnCheckpointIDs {
@@ -2810,40 +2782,14 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			PrecomputedBlobs: precomputed,
 		}
 
-		// Generate compact transcript for v2 /main
-		if v2Store != nil {
-			if isExternalAgent {
-				updateOpts.CompactTranscript = externalCompact
-			} else {
-				updateOpts.CompactTranscript = internalCompact
-			}
-		}
-
-		if !v2 {
-			updateErr := store.UpdateCommitted(ctx, updateOpts)
-			if updateErr != nil {
-				logging.Warn(logCtx, "finalize: failed to update checkpoint",
-					slog.String("checkpoint_id", cpIDStr),
-					slog.String("error", updateErr.Error()),
-				)
-				errCount++
-				continue
-			}
-		}
-
-		if v2Store != nil {
-			if v2Err := v2Store.UpdateCommitted(logCtx, updateOpts); v2Err != nil {
-				attrs := []any{
-					slog.String("checkpoint_id", cpIDStr),
-					slog.String("error", v2Err.Error()),
-				}
-				if v2 {
-					logging.Warn(logCtx, "finalize: failed to update checkpoint in v2", attrs...)
-					errCount++
-					continue
-				}
-				logging.Warn(logCtx, "v2 dual-write update failed", attrs...)
-			}
+		updateErr := store.UpdateCommitted(ctx, updateOpts)
+		if updateErr != nil {
+			logging.Warn(logCtx, "finalize: failed to update checkpoint",
+				slog.String("checkpoint_id", cpIDStr),
+				slog.String("error", updateErr.Error()),
+			)
+			errCount++
+			continue
 		}
 
 		logging.Info(logCtx, "finalize: checkpoint updated with full transcript",
