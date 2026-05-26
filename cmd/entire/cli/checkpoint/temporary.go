@@ -846,7 +846,7 @@ func (s *GitStore) buildTreeWithChanges(
 
 // createCommit creates a commit object.
 func (s *GitStore) createCommit(ctx context.Context, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) {
-	return s.createCommitAt(ctx, treeHash, parentHash, message, authorName, authorEmail, time.Now())
+	return CreateCommit(ctx, s.repo, treeHash, parentHash, message, authorName, authorEmail)
 }
 
 func (s *GitStore) createCommitAt(ctx context.Context, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string, commitTime time.Time) (plumbing.Hash, error) {
