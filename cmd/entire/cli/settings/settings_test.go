@@ -934,63 +934,6 @@ func captureSettingsStderr(t *testing.T, fn func()) string {
 	return string(buf)
 }
 
-func TestGetFullTranscriptGenerationRetentionDays(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		opts map[string]any
-		want int
-	}{
-		{
-			name: "defaults to fourteen when missing",
-			opts: nil,
-			want: 14,
-		},
-		{
-			name: "returns configured integer",
-			opts: map[string]any{"full_transcript_generation_retention_days": 30},
-			want: 30,
-		},
-		{
-			name: "returns configured float from json decode",
-			opts: map[string]any{"full_transcript_generation_retention_days": float64(21)},
-			want: 21,
-		},
-		{
-			name: "returns default for wrong type",
-			opts: map[string]any{"full_transcript_generation_retention_days": "30"},
-			want: 14,
-		},
-		{
-			name: "returns default for zero",
-			opts: map[string]any{"full_transcript_generation_retention_days": 0},
-			want: 14,
-		},
-		{
-			name: "returns default for negative",
-			opts: map[string]any{"full_transcript_generation_retention_days": -5},
-			want: 14,
-		},
-		{
-			name: "returns default for non integral float",
-			opts: map[string]any{"full_transcript_generation_retention_days": 1.5},
-			want: 14,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			s := &EntireSettings{StrategyOptions: tt.opts}
-			if got := s.GetFullTranscriptGenerationRetentionDays(); got != tt.want {
-				t.Fatalf("GetFullTranscriptGenerationRetentionDays() = %d, want %d", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestIsFilteredFetchesEnabled_DefaultsFalse(t *testing.T) {
 	t.Parallel()
 	s := &EntireSettings{Enabled: true}

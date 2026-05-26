@@ -14,14 +14,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
 
-func cleanLongDescription(ctx context.Context) string {
+func cleanLongDescription() string {
 	description := `Clean up Entire session data for the current HEAD commit.
 
 By default, cleans session state and shadow branches for the current HEAD:
@@ -32,12 +30,6 @@ Use --all to clean all Entire session data across the repository:
   - All session state files (.git/entire-sessions/)
   - All shadow branches
   - Temporary files (.entire/tmp/)`
-
-	s, err := settings.Load(ctx)
-	if err == nil && s.IsCheckpointsV2Enabled() {
-		description += fmt.Sprintf(`
-  - Archived v2 full transcripts older than the configured %d-day retention window`, s.GetFullTranscriptGenerationRetentionDays())
-	}
 
 	description += `
 
@@ -58,7 +50,7 @@ func newCleanCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "clean",
 		Short: "Clean up Entire session data",
-		Long:  cleanLongDescription(context.Background()),
+		Long:  cleanLongDescription(),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 
@@ -273,48 +265,12 @@ func runCleanSession(ctx context.Context, cmd *cobra.Command, strat *strategy.Ma
 
 // runCleanAll cleans all session data across the repository.
 func runCleanAll(ctx context.Context, cmd *cobra.Command, force, dryRun bool) error {
-	s, err := settings.Load(ctx)
+	items, err := strategy.ListAllItems(ctx)
 	if err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to load settings: %v\n", err)
-		s = &settings.EntireSettings{}
-	}
-
-	var (
-		items      []strategy.CleanupItem
-		v2Items    []strategy.CleanupItem
-		v2Warnings []string
-	)
-	g, gCtx := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		var err error
-		items, err = strategy.ListAllItems(gCtx)
-		if err != nil {
-			return fmt.Errorf("failed to list items: %w", err)
-		}
-		return nil
-	})
-	if s.IsCheckpointsV2Enabled() {
-		g.Go(func() error {
-			var err error
-			v2Items, v2Warnings, err = strategy.ListEligibleV2Generations(gCtx, s)
-			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return err //nolint:wrapcheck // propagate cancellation unwrapped so callers map it to SilentError
-				}
-				return fmt.Errorf("failed to list v2 generations: %w", err)
-			}
-			return nil
-		})
-	}
-	if err := g.Wait(); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return NewSilentError(err)
 		}
-		return err //nolint:wrapcheck // already wrapped inside the goroutine closures
-	}
-	items = append(items, v2Items...)
-	for _, warning := range v2Warnings {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning)
+		return fmt.Errorf("failed to list items: %w", err)
 	}
 
 	tempFiles, err := listAllTempFiles(ctx)
@@ -360,7 +316,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	}
 
 	// Group items by type for display
-	var branches, states, checkpoints, v2Generations []strategy.CleanupItem
+	var branches, states, checkpoints []strategy.CleanupItem
 	for _, item := range items {
 		switch item.Type {
 		case strategy.CleanupTypeShadowBranch:
@@ -369,8 +325,6 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 			states = append(states, item)
 		case strategy.CleanupTypeCheckpoint:
 			checkpoints = append(checkpoints, item)
-		case strategy.CleanupTypeV2Generation:
-			v2Generations = append(v2Generations, item)
 		}
 	}
 
@@ -382,7 +336,6 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printSection(w, "Shadow branches", cleanupItemIDs(branches))
 		printSection(w, "Session states", cleanupItemIDs(states))
 		printSection(w, "Checkpoint metadata", cleanupItemIDs(checkpoints))
-		printSection(w, "Archived v2 generations", cleanupItemIDs(v2Generations))
 		printSection(w, "Temp files", tempFiles)
 
 		if dryRun {
@@ -420,8 +373,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	deletedTempFiles, failedTempFiles := deleteTempFiles(ctx, tempFiles)
 
 	// Report results
-	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(result.V2Generations) + len(deletedTempFiles)
-	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(result.FailedV2Refs) + len(failedTempFiles)
+	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(deletedTempFiles)
+	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(failedTempFiles)
 
 	if totalDeleted > 0 {
 		fmt.Fprintf(w, "✓ Deleted %d %s:\n", totalDeleted, itemWord(totalDeleted))
@@ -429,7 +382,6 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printResultSection(w, "Shadow branches", result.ShadowBranches)
 		printResultSection(w, "Session states", result.SessionStates)
 		printResultSection(w, "Checkpoints", result.Checkpoints)
-		printResultSection(w, "Archived v2 generations", result.V2Generations)
 
 		printResultSection(w, "Temp files", deletedTempFiles)
 	}
@@ -440,7 +392,6 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printResultSection(errW, "Shadow branches", result.FailedBranches)
 		printResultSection(errW, "Session states", result.FailedStates)
 		printResultSection(errW, "Checkpoints", result.FailedCheckpoints)
-		printResultSection(errW, "Archived v2 generations", result.FailedV2Refs)
 
 		if len(failedTempFiles) > 0 {
 			fmt.Fprintf(errW, "\nTemp files:\n")

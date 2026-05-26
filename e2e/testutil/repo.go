@@ -22,14 +22,7 @@ import (
 const droidRepoSettingsPath = ".factory/settings.json"
 
 const (
-	checkpointsModeLegacy      = "legacy"
-	checkpointsModeV2DualWrite = "v2-dual-write"
-	checkpointsModeV2Only      = "v2-only"
-
-	checkpointRefV1            = "entire/checkpoints/v1"
-	checkpointRefV2Main        = "refs/entire/checkpoints/v2/main"
-	checkpointRefV2FullCurrent = "refs/entire/checkpoints/v2/full/current"
-	checkpointRefV2FullPrefix  = "refs/entire/checkpoints/v2/full/"
+	checkpointRefV1 = "entire/checkpoints/v1"
 )
 
 // RepoState holds the working state for a single test's cloned repository.
@@ -127,7 +120,6 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	// exercise the !CanPromptInteractively() fast path since they have no TTY
 	// regardless of this setting.
 	PatchSettings(t, dir, map[string]any{"log_level": "debug", "commit_linking": "always"})
-	ApplySuiteCheckpointsMode(t, dir)
 
 	// Copilot CLI blocks on a "No copilot instructions found" notice in fresh
 	// repos that lack .github/copilot-instructions.md, preventing the interactive
@@ -182,41 +174,8 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	return state
 }
 
-// ApplySuiteCheckpointsMode configures an arbitrary repo for the current
-// suite-wide E2E checkpoints mode. Useful for repos created outside SetupRepo,
-// such as fresh clones in remote-resume scenarios.
-func ApplySuiteCheckpointsMode(t *testing.T, dir string) {
-	t.Helper()
-
-	switch CheckpointsMode() {
-	case checkpointsModeLegacy:
-		return
-	case checkpointsModeV2DualWrite:
-		EnableCheckpointsV2(t, dir)
-	case checkpointsModeV2Only:
-		EnableCheckpointsVersion2(t, dir)
-	default:
-		t.Fatalf("unsupported E2E_CHECKPOINTS_MODE %q (expected legacy, v2-dual-write, or v2-only)", CheckpointsMode())
-	}
-}
-
-// CheckpointsMode returns the active E2E checkpoints mode from E2E_CHECKPOINTS_MODE,
-// defaulting to "legacy".
-func CheckpointsMode() string {
-	mode := os.Getenv("E2E_CHECKPOINTS_MODE")
-	if mode == "" || mode == checkpointsModeLegacy {
-		return checkpointsModeLegacy
-	}
-	return mode
-}
-
 func checkpointReadRef() string {
-	switch CheckpointsMode() {
-	case checkpointsModeV2DualWrite, checkpointsModeV2Only:
-		return checkpointRefV2Main
-	default:
-		return checkpointRefV1
-	}
+	return checkpointRefV1
 }
 
 // CurrentCheckpointRef returns the current hash of the checkpoint ref used for
@@ -229,56 +188,15 @@ func CurrentCheckpointRef(t *testing.T, dir string) string {
 // CheckpointVerifyRef returns the exact local metadata ref name tests should
 // use for presence checks such as rev-parse --verify.
 func CheckpointVerifyRef() string {
-	switch CheckpointsMode() {
-	case checkpointsModeLegacy:
-		return "refs/heads/" + checkpointRefV1
-	default:
-		return checkpointReadRef()
-	}
+	return "refs/heads/" + checkpointRefV1
 }
 
-// PushCheckpointRefs pushes the checkpoint refs used by the active suite mode
-// to the origin remote. Remote-resume tests use this instead of hardcoding
-// legacy v1 branch pushes.
+// PushCheckpointRefs pushes the checkpoint ref to the origin remote.
+// Remote-resume tests use this instead of hardcoding v1 branch pushes.
 func PushCheckpointRefs(t *testing.T, dir string) {
 	t.Helper()
 
-	switch CheckpointsMode() {
-	case checkpointsModeLegacy:
-		Git(t, dir, "push", "origin", checkpointRefV1+":"+checkpointRefV1)
-	case checkpointsModeV2DualWrite:
-		Git(t, dir, "push", "origin", checkpointRefV1+":"+checkpointRefV1)
-		Git(t, dir, "push", "origin", checkpointRefV2Main+":"+checkpointRefV2Main)
-		Git(t, dir, "push", "origin", checkpointRefV2FullCurrent+":"+checkpointRefV2FullCurrent)
-	case checkpointsModeV2Only:
-		Git(t, dir, "push", "origin", checkpointRefV2Main+":"+checkpointRefV2Main)
-		Git(t, dir, "push", "origin", checkpointRefV2FullCurrent+":"+checkpointRefV2FullCurrent)
-	default:
-		t.Fatalf("unsupported E2E_CHECKPOINTS_MODE %q", CheckpointsMode())
-	}
-
-	if latestArchived := latestArchivedCheckpointFullRef(dir); latestArchived != "" {
-		Git(t, dir, "push", "origin", latestArchived+":"+latestArchived)
-	}
-}
-
-func latestArchivedCheckpointFullRef(dir string) string {
-	out := strings.TrimSpace(gitOutputSafe(dir, "for-each-ref", "--format=%(refname)", checkpointRefV2FullPrefix))
-	if out == "" {
-		return ""
-	}
-
-	var latest string
-	for _, ref := range strings.Split(out, "\n") {
-		ref = strings.TrimSpace(ref)
-		if ref == "" || ref == checkpointRefV2FullCurrent {
-			continue
-		}
-		if latest == "" || ref > latest {
-			latest = ref
-		}
-	}
-	return latest
+	Git(t, dir, "push", "origin", checkpointRefV1+":"+checkpointRefV1)
 }
 
 func setupGeminiTestHome(t *testing.T, repoDir string) {
@@ -683,27 +601,6 @@ func PatchSettings(t *testing.T, dir string, extra map[string]any) {
 	}
 }
 
-// EnableCheckpointsV2 switches an E2E repo into v2 dual-write mode while
-// preserving existing strategy_options written during setup.
-func EnableCheckpointsV2(t *testing.T, dir string) {
-	t.Helper()
-	PatchSettings(t, dir, map[string]any{
-		"strategy_options": map[string]any{
-			"checkpoints_v2": true,
-		},
-	})
-}
-
-// EnableCheckpointsVersion2 switches an E2E repo into strict v2-only mode.
-func EnableCheckpointsVersion2(t *testing.T, dir string) {
-	t.Helper()
-	PatchSettings(t, dir, map[string]any{
-		"strategy_options": map[string]any{
-			"checkpoints_version": 2,
-		},
-	})
-}
-
 func mergeSettings(dst, src map[string]any) {
 	for k, v := range src {
 		srcMap, ok := v.(map[string]any)
@@ -904,8 +801,8 @@ func SetupBareRemote(t *testing.T, s *RepoState) string {
 }
 
 // CloneAndEnableEntire clones a bare remote into a fresh temp dir, configures
-// a test git identity, enables Entire for the given agent, applies the active
-// suite checkpoints mode, and commits the enable changes if needed.
+// a test git identity, enables Entire for the given agent, and commits the
+// enable changes if needed.
 func CloneAndEnableEntire(t *testing.T, bareDir string, agentName string) string {
 	t.Helper()
 
@@ -922,7 +819,6 @@ func CloneAndEnableEntire(t *testing.T, bareDir string, agentName string) string
 	Git(t, cloneDir, "config", "user.email", "e2e-clone@test.local")
 
 	entire.Enable(t, cloneDir, agentName)
-	ApplySuiteCheckpointsMode(t, cloneDir)
 	CommitIfDirty(t, cloneDir, "Enable entire in clone")
 
 	return cloneDir

@@ -133,7 +133,7 @@ func TestCleanLongDescription_DefaultIsGeneric(t *testing.T) {
 
 	writeCleanSettingsFile(t, repoRoot, `{"enabled": true, "strategy_options": {}}`)
 
-	description := cleanLongDescription(context.Background())
+	description := cleanLongDescription()
 	if strings.Contains(description, "checkpoints v2") {
 		t.Fatalf("did not expect v2-specific help text by default, got: %s", description)
 	}
@@ -580,7 +580,7 @@ func TestCleanCmd_All_NotGitRepository(t *testing.T) {
 	}
 }
 
-func TestCleanCmd_All_InvalidSettingsWarnsAndContinues(t *testing.T) {
+func TestCleanCmd_All_InvalidSettingsIgnoredWithoutV2Scan(t *testing.T) {
 	repo, _ := setupCleanTestRepo(t)
 
 	wt, err := repo.Worktree()
@@ -601,8 +601,8 @@ func TestCleanCmd_All_InvalidSettingsWarnsAndContinues(t *testing.T) {
 		t.Fatalf("clean --all --dry-run error = %v", err)
 	}
 
-	if !strings.Contains(stderr.String(), "Warning: failed to load settings") {
-		t.Fatalf("expected settings warning, got stderr=%q", stderr.String())
+	if stderr.String() != "" {
+		t.Fatalf("expected no settings warning, got stderr=%q", stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "No items to clean up.") {
 		t.Fatalf("expected command to continue cleanup flow, got stdout=%q", stdout.String())
