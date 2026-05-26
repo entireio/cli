@@ -918,10 +918,12 @@ func TestFetchV2MainFromURL_UpdatesExistingRef(t *testing.T) {
 	require.NoError(t, err)
 	hash1 := strings.TrimSpace(string(hash1Out))
 
-	// Add a second commit on the remote's v2 ref
-	createV2MainRef(ctx, t, remoteDir) // Creates a new orphan commit, updating the ref
+	// Advance the remote's v2 /main with a child commit so the new tip is a
+	// strict descendant of hash1 (the realistic CLI flow — condensation
+	// appends a new checkpoint commit on top of the previous tip).
+	advanceV2MainOnTop(ctx, t, remoteDir, hash1)
 
-	// Fetch again — should update
+	// Fetch again — should fast-forward
 	require.NoError(t, FetchV2MainFromURL(ctx, remoteDir))
 
 	hashCmd = exec.CommandContext(ctx, "git", "rev-parse", paths.V2MainRefName)

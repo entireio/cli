@@ -845,12 +845,13 @@ func checkRemoteMetadata(ctx context.Context, w, errW io.Writer, checkpointID id
 	return nil
 }
 
+// promoteRemoteTrackingMetadataBranch advances the local entire/checkpoints/v1
+// ref to match origin's remote-tracking ref. Without this, callers reading
+// checkpoint metadata via the local ref miss checkpoints already fetched into
+// refs/remotes/origin/...: the committed-checkpoint store only falls back to
+// origin/... when the local ref is *missing*, not when it's behind.
 func promoteRemoteTrackingMetadataBranch(ctx context.Context, repo *git.Repository) {
 	localRefName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	if _, err := repo.Reference(localRefName, true); err == nil {
-		return
-	}
-
 	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), true)
 	if err != nil {
 		return
