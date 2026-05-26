@@ -53,7 +53,7 @@ raw_checkpoint_ids_file=""
 main_metadata_file=""
 
 show_help() {
-	sed -n '3,/^$/p' "$0" | sed -E 's/^# ?//'
+	sed -n '5,/^$/p' "$0" | sed -E 's/^# ?//'
 }
 
 die() {
@@ -75,20 +75,6 @@ trap cleanup EXIT
 checkpoint_to_path() {
 	local checkpoint_id="$1"
 	printf '%s/%s' "${checkpoint_id:0:2}" "${checkpoint_id:2}"
-}
-
-tree_path_exists() {
-	local ref_name="$1"
-	local path="$2"
-	git cat-file -e "${ref_name}:${path}" 2>/dev/null
-}
-
-list_numeric_dirs() {
-	local ref_name="$1"
-	local path="$2"
-	local entries
-	entries=$(git ls-tree -d --name-only "${ref_name}:${path}" 2>/dev/null || true)
-	printf '%s\n' "$entries" | sed -nE '/^[0-9]+$/p'
 }
 
 list_full_refs() {
@@ -136,8 +122,21 @@ write_checkpoint_commit_index_between() {
 write_checkpoint_commit_index_from_all_refs() {
 	local since="$1"
 	local output_file="$2"
+	local refs_file="$tmp_dir/refs_containing_since"
 
-	git log HEAD --branches --remotes --format='__ENTIRE_COMMIT__%H%n%B' --not "$since" |
+	: > "$refs_file"
+	git for-each-ref --contains "$since" --format='%(refname)' refs/heads refs/remotes > "$refs_file"
+	if git merge-base --is-ancestor "$since" HEAD 2>/dev/null; then
+		printf 'HEAD\n' >> "$refs_file"
+	fi
+	sort -u "$refs_file" -o "$refs_file"
+
+	if [[ ! -s "$refs_file" ]]; then
+		: > "$output_file"
+		return
+	fi
+
+	xargs git log --format='__ENTIRE_COMMIT__%H%n%B' "$since".. < "$refs_file" |
 		awk -v key="$TRAILER_KEY" '
 			/^__ENTIRE_COMMIT__/ {
 				commit = substr($0, length("__ENTIRE_COMMIT__") + 1)
@@ -155,24 +154,6 @@ write_checkpoint_commit_index_from_all_refs() {
 				}
 			}
 		' > "$output_file"
-}
-
-v1_raw_artifact_name() {
-	local artifact="$1"
-	case "$artifact" in
-		raw_transcript)
-			printf 'full.jsonl'
-			;;
-		raw_transcript.[0-9][0-9][0-9])
-			printf 'full.jsonl%s' "${artifact#raw_transcript}"
-			;;
-		raw_transcript_hash.txt)
-			printf 'content_hash.txt'
-			;;
-		*)
-			return 1
-			;;
-	esac
 }
 
 write_unique_mktree_input() {
@@ -475,10 +456,14 @@ compute_plan_counts() {
 	planned_checkpoints=$(wc -l < "$raw_checkpoint_ids_file" | tr -d '[:space:]')
 	planned_sessions=$(wc -l < "$raw_sessions_file" | tr -d '[:space:]')
 	planned_raw_transcripts=$(awk -F '\t' '$5 == "raw_transcript" { count++ } END { print count + 0 }' "$full_artifacts_file")
-	missing_raw_checkpoints=$(awk '
-		NR == FNR {
-			raw[$1] = 1
-			next
+	missing_raw_checkpoints=$(awk -v raw_file="$raw_checkpoint_ids_file" '
+		BEGIN {
+			while ((getline line < raw_file) > 0) {
+				if (line != "") {
+					raw[line] = 1
+				}
+			}
+			close(raw_file)
 		}
 		NF && !($1 in raw) {
 			count++
@@ -486,13 +471,16 @@ compute_plan_counts() {
 		END {
 			print count + 0
 		}
-	' "$raw_checkpoint_ids_file" "$checkpoint_ids_file")
-	missing_metadata_checkpoints=$(awk -F '\t' '
-		NR == FNR {
-			if ($4 == "checkpoint_metadata") {
-				have[$1] = 1
+	' "$checkpoint_ids_file")
+	missing_metadata_checkpoints=$(awk -F '\t' -v metadata_file="$main_metadata_file" '
+		BEGIN {
+			while ((getline line < metadata_file) > 0) {
+				split(line, fields, "\t")
+				if (fields[4] == "checkpoint_metadata") {
+					have[fields[1]] = 1
+				}
 			}
-			next
+			close(metadata_file)
 		}
 		NF && !($1 in have) {
 			count++
@@ -500,13 +488,16 @@ compute_plan_counts() {
 		END {
 			print count + 0
 		}
-	' "$main_metadata_file" "$raw_checkpoint_ids_file")
-	missing_metadata_sessions=$(awk -F '\t' '
-		NR == FNR {
-			if ($4 == "session_metadata") {
-				have[$1 "\t" $3] = 1
+	' "$raw_checkpoint_ids_file")
+	missing_metadata_sessions=$(awk -F '\t' -v metadata_file="$main_metadata_file" '
+		BEGIN {
+			while ((getline line < metadata_file) > 0) {
+				split(line, fields, "\t")
+				if (fields[4] == "session_metadata") {
+					have[fields[1] "\t" fields[3]] = 1
+				}
 			}
-			next
+			close(metadata_file)
 		}
 		NF {
 			key = $1 "\t" $3
@@ -517,7 +508,7 @@ compute_plan_counts() {
 		END {
 			print count + 0
 		}
-	' "$main_metadata_file" "$raw_sessions_file")
+	' "$raw_sessions_file")
 }
 
 while [[ $# -gt 0 ]]; do
@@ -625,7 +616,7 @@ if [[ ! -s "$checkpoint_commits_file" ]]; then
 	if [[ -n "$head_hash" ]]; then
 		printf 'No %s trailers found in %s..%s\n' "$TRAILER_KEY" "$since_hash" "$head_hash"
 	else
-		printf 'No %s trailers found on local branches/remotes after %s\n' "$TRAILER_KEY" "$since_hash"
+		printf 'No %s trailers found on local branches/remotes containing %s\n' "$TRAILER_KEY" "$since_hash"
 	fi
 	exit 0
 fi
@@ -668,7 +659,7 @@ printf 'Repository: %s\n' "$repo_root"
 if [[ -n "$head_hash" ]]; then
 	printf 'Scanning commits: %s..%s\n' "$since_hash" "$head_hash"
 else
-	printf 'Scanning commits: local branches/remotes after %s\n' "$since_hash"
+	printf 'Scanning commits: local branches/remotes containing %s\n' "$since_hash"
 fi
 if [[ "$main_ref_available" == "true" ]]; then
 	printf 'Companion metadata ref: %s\n' "$V2_MAIN_REF"
