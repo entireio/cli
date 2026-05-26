@@ -1336,6 +1336,49 @@ func TestDoPushBranch_NewContent_SaysDone(t *testing.T) {
 	assert.NotContains(t, output, "already up-to-date", "should not say 'already up-to-date' when content was pushed")
 }
 
+// TestDoPushBranch_AmbiguousLocalRefs verifies that checkpoint pushes qualify
+// the branch refspec. A stale refs/entire/checkpoints/v1 ref can otherwise make
+// git reject the unqualified source ref as ambiguous.
+//
+// Not parallel: uses t.Chdir() and os.Stderr redirection.
+func TestDoPushBranch_AmbiguousLocalRefs(t *testing.T) {
+	workDir := setupRepoWithCheckpointBranch(t)
+
+	headCmd := exec.CommandContext(context.Background(), "git", "rev-parse", "HEAD")
+	headCmd.Dir = workDir
+	headCmd.Env = testutil.GitIsolatedEnv()
+	headOut, err := headCmd.Output()
+	require.NoError(t, err)
+
+	staleRefCmd := exec.CommandContext(
+		context.Background(),
+		"git",
+		"update-ref",
+		"refs/entire/checkpoints/v1",
+		strings.TrimSpace(string(headOut)),
+	)
+	staleRefCmd.Dir = workDir
+	staleRefCmd.Env = testutil.GitIsolatedEnv()
+	out, err := staleRefCmd.CombinedOutput()
+	require.NoError(t, err, "stale ref setup failed: %s", out)
+
+	bareDir := t.TempDir()
+	initCmd := exec.CommandContext(context.Background(), "git", "init", "--bare")
+	initCmd.Dir = bareDir
+	initCmd.Env = testutil.GitIsolatedEnv()
+	out, err = initCmd.CombinedOutput()
+	require.NoError(t, err, "git init --bare failed: %s", out)
+
+	t.Chdir(workDir)
+
+	restore := captureStderr(t)
+	err = doPushBranch(context.Background(), bareDir, paths.MetadataBranchName)
+	output := restore()
+
+	require.NoError(t, err)
+	assert.Contains(t, output, " done", "should push despite ambiguous local refs")
+}
+
 func TestIsProtectedRefRejection(t *testing.T) {
 	t.Parallel()
 

@@ -211,13 +211,18 @@ func tryPushSessionsCommon(ctx context.Context, remoteName, branchName string) (
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	result, err := remote.Push(ctx, remoteName, branchName)
+	result, err := remote.Push(ctx, remoteName, branchPushRefSpec(branchName))
 	outputStr := result.Output
 	if err != nil {
 		return pushResult{}, classifyPushFailure(ctx, outputStr, err)
 	}
 
 	return parsePushResult(outputStr), nil
+}
+
+func branchPushRefSpec(branchName string) string {
+	branchRef := plumbing.NewBranchReferenceName(branchName).String()
+	return branchRef + ":" + branchRef
 }
 
 // protectedRefError means the remote is blocking writes to the ref itself.
