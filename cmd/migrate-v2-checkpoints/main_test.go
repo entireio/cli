@@ -40,6 +40,10 @@ const (
 	testMainFilename      = "main.txt"
 	testFeatureFilename   = "feature.txt"
 	testFeatureBranchName = "feature"
+	testStrategy          = "manual-commit"
+	testAuthorName        = "Test"
+	testAuthorEmail       = "test@example.com"
+	testBranchName        = "main"
 )
 
 func TestParseOptions(t *testing.T) {
@@ -130,14 +134,14 @@ func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 		CheckpointID:              cpID,
 		SessionID:                 "session-to-migrate",
 		CreatedAt:                 createdAt,
-		Strategy:                  "manual-commit",
-		Branch:                    "main",
+		Strategy:                  testStrategy,
+		Branch:                    testBranchName,
 		Transcript:                redact.AlreadyRedacted(transcript),
 		Prompts:                   []string{"first prompt", "second prompt"},
 		FilesTouched:              []string{"main.go"},
 		CheckpointsCount:          2,
-		AuthorName:                "Test",
-		AuthorEmail:               "test@example.com",
+		AuthorName:                testAuthorName,
+		AuthorEmail:               testAuthorEmail,
 		Agent:                     agent.AgentTypeClaudeCode,
 		Model:                     "claude-test-model",
 		TurnID:                    "turn-1",
@@ -175,8 +179,8 @@ func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 	require.Equal(t, transcript, content.Transcript)
 	require.Equal(t, strings.Join([]string{"first prompt", "second prompt"}, checkpoint.PromptSeparator), content.Prompts)
 	require.Equal(t, createdAt, content.Metadata.CreatedAt)
-	require.Equal(t, "manual-commit", content.Metadata.Strategy)
-	require.Equal(t, "main", content.Metadata.Branch)
+	require.Equal(t, testStrategy, content.Metadata.Strategy)
+	require.Equal(t, testBranchName, content.Metadata.Branch)
 	require.Equal(t, agent.AgentTypeClaudeCode, content.Metadata.Agent)
 	require.Equal(t, "claude-test-model", content.Metadata.Model)
 	require.Equal(t, "turn-1", content.Metadata.TurnID)
@@ -190,6 +194,85 @@ func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 	commit, err := fixture.repo.CommitObject(ref.Hash())
 	require.NoError(t, err)
 	require.True(t, commit.Author.When.Equal(createdAt), "author time = %s, want %s", commit.Author.When, createdAt)
+}
+
+func TestRunDryRunPlansWithoutWritingV1(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	cpID := id.MustCheckpointID(mainCheckpointID)
+	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-dry-run",
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"dry run\"}\n")),
+	})
+
+	stdout := runMigrationCommand(t, fixture, fixture.mainHash, testDryRunFlag)
+	require.Contains(t, stdout, "Migration plan:")
+	require.Contains(t, stdout, "checkpoints with raw transcripts: 1")
+	require.Contains(t, stdout, "sessions with raw transcripts: 1")
+
+	summary, err := checkpoint.NewGitStore(fixture.repo).ReadCommitted(context.Background(), cpID)
+	require.NoError(t, err)
+	require.Nil(t, summary)
+}
+
+func TestRunApplySkipsExistingV1Checkpoint(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	cpID := id.MustCheckpointID(mainCheckpointID)
+	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-v2",
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"from v2\"}\n")),
+	})
+
+	existingTranscript := []byte("{\"message\":\"already v1\"}\n")
+	err := checkpoint.NewGitStore(fixture.repo).WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-existing-v1",
+		CreatedAt:    time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC),
+		Strategy:     testStrategy,
+		Branch:       testBranchName,
+		Transcript:   redact.AlreadyRedacted(existingTranscript),
+		AuthorName:   testAuthorName,
+		AuthorEmail:  testAuthorEmail,
+	})
+	require.NoError(t, err)
+
+	stdout := runMigrationCommand(t, fixture, fixture.mainHash, testApplyFlag)
+	require.Contains(t, stdout, "already present in v1: 1")
+	require.Contains(t, stdout, "migrated checkpoints: 0")
+	require.Contains(t, stdout, "migrated sessions: 0")
+
+	content, err := checkpoint.NewGitStore(fixture.repo).ReadSessionContent(context.Background(), cpID, 0)
+	require.NoError(t, err)
+	require.Equal(t, existingTranscript, content.Transcript)
+	require.Equal(t, "session-existing-v1", content.Metadata.SessionID)
+}
+
+func TestRunDryRunReportsMissingV2MetadataAndRawTranscripts(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
+		CheckpointID: id.MustCheckpointID(featureCheckpointID),
+		SessionID:    "session-missing-raw",
+	})
+
+	var stdout bytes.Buffer
+	err := run(context.Background(), []string{
+		testRepoFlag, fixture.dir,
+		testSinceFlag, fixture.baseHash.String(),
+		testDryRunFlag,
+	}, &stdout)
+	require.NoError(t, err)
+
+	require.Contains(t, stdout.String(), "missing v2 metadata: 2")
+	require.Contains(t, stdout.String(), "missing raw transcripts: 1")
+	require.Contains(t, stdout.String(), "checkpoints with raw transcripts: 0")
+	require.Contains(t, stdout.String(), "sessions with raw transcripts: 0")
 }
 
 type migrationHistoryFixture struct {
@@ -234,6 +317,44 @@ func commitMigrationTestFile(t *testing.T, dir, name, content, message string) p
 	testutil.GitAdd(t, dir, name)
 	testutil.GitCommit(t, dir, message)
 	return plumbing.NewHash(testutil.GetHeadHash(t, dir))
+}
+
+func writeTestV2Checkpoint(t *testing.T, repo *git.Repository, opts checkpoint.WriteCommittedOptions) {
+	t.Helper()
+
+	if opts.CreatedAt.IsZero() {
+		opts.CreatedAt = time.Date(2024, 5, 6, 7, 8, 9, 0, time.UTC)
+	}
+	if opts.Strategy == "" {
+		opts.Strategy = testStrategy
+	}
+	if opts.Branch == "" {
+		opts.Branch = testBranchName
+	}
+	if opts.AuthorName == "" {
+		opts.AuthorName = testAuthorName
+	}
+	if opts.AuthorEmail == "" {
+		opts.AuthorEmail = testAuthorEmail
+	}
+
+	err := checkpoint.NewV2GitStore(repo).WriteCommitted(context.Background(), opts)
+	require.NoError(t, err)
+}
+
+func runMigrationCommand(t *testing.T, fixture migrationHistoryFixture, head plumbing.Hash, mode string) string {
+	t.Helper()
+
+	args := []string{
+		testRepoFlag, fixture.dir,
+		testSinceFlag, fixture.baseHash.String(),
+		testHeadFlag, head.String(),
+		mode,
+	}
+	var stdout bytes.Buffer
+	err := run(context.Background(), args, &stdout)
+	require.NoError(t, err)
+	return stdout.String()
 }
 
 func discoveredCheckpointIDs(checkpoints []discoveredCheckpoint) []string {
