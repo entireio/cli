@@ -123,6 +123,14 @@ func extractCommandLine(hookContent string) string {
 // localDev controls whether the warning references "go run" or the "entire" binary.
 // absolutePath embeds the full binary path for GUI git clients.
 func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, localDev, absolutePath bool) {
+	// External backend = user explicitly opted into a hook manager (Husky / Rush /
+	// etc.) and configured Entire to coexist via marker detection. Warning that
+	// the manager exists would be noise, and the suggested "add these lines"
+	// fix is already the user's own setup path.
+	if _, ok := externalGitHooksDir(ctx); ok {
+		return
+	}
+
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return

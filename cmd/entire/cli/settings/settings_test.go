@@ -1330,3 +1330,121 @@ func TestMergeReviewProfiles_PureAndPrecedence(t *testing.T) {
 		t.Error("merge(nil, emptyNonNil) should return a non-nil empty map, got nil")
 	}
 }
+
+func TestLoad_GitHooks_ExternalParsesCorrectly(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`,
+		"",
+	)
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !s.IsExternalGitHooks() {
+		t.Error("IsExternalGitHooks() = false, want true")
+	}
+	if got := s.ExternalHookDir(); got != ".husky" {
+		t.Errorf("ExternalHookDir() = %q, want %q", got, ".husky")
+	}
+}
+
+func TestLoad_GitHooks_DirectIsDefault(t *testing.T) {
+	setupSettingsDir(t, `{"enabled": true}`, "")
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if s.IsExternalGitHooks() {
+		t.Error("IsExternalGitHooks() = true, want false for missing git_hooks")
+	}
+	if got := s.ExternalHookDir(); got != "" {
+		t.Errorf("ExternalHookDir() = %q, want empty", got)
+	}
+}
+
+func TestLoad_GitHooks_ExplicitDirectBackend(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "direct"}}`,
+		"",
+	)
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if s.IsExternalGitHooks() {
+		t.Error("IsExternalGitHooks() = true, want false for backend=direct")
+	}
+}
+
+func TestLoad_GitHooks_ExternalMissingExternalDir_ReturnsError(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "external"}}`,
+		"",
+	)
+	_, err := Load(context.Background())
+	if err == nil {
+		t.Fatal("Load() should return error when backend=external but external_dir is missing")
+	}
+	if !strings.Contains(err.Error(), "external_dir") {
+		t.Errorf("error should mention external_dir, got: %v", err)
+	}
+}
+
+func TestLoad_GitHooks_ExternalDir_RejectsPathTraversal(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": "../escape"}}`,
+		"",
+	)
+	_, err := Load(context.Background())
+	if err == nil {
+		t.Fatal("Load() should reject external_dir containing '..'")
+	}
+	if !strings.Contains(err.Error(), "..") {
+		t.Errorf("error should mention '..', got: %v", err)
+	}
+}
+
+func TestLoad_GitHooks_ExternalDir_RejectsAbsolutePath(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": "/tmp/hooks"}}`,
+		"",
+	)
+	_, err := Load(context.Background())
+	if err == nil {
+		t.Fatal("Load() should reject absolute external_dir")
+	}
+	if !strings.Contains(err.Error(), "repo-relative") {
+		t.Errorf("error should mention 'repo-relative', got: %v", err)
+	}
+}
+
+func TestLoad_GitHooks_InvalidBackend_ReturnsError(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "externl"}}`,
+		"",
+	)
+	_, err := Load(context.Background())
+	if err == nil {
+		t.Fatal("Load() should return error for typo in backend value")
+	}
+	if !strings.Contains(err.Error(), "externl") {
+		t.Errorf("error should contain the invalid value, got: %v", err)
+	}
+}
+
+func TestMergeJSON_GitHooks_LocalOverridesProjectWholeBlock(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`,
+		`{"git_hooks": {"backend": "direct"}}`,
+	)
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if s.IsExternalGitHooks() {
+		t.Error("IsExternalGitHooks() = true, want false after local override to direct")
+	}
+	if got := s.ExternalHookDir(); got != "" {
+		t.Errorf("ExternalHookDir() = %q, want empty after whole-block override", got)
+	}
+}

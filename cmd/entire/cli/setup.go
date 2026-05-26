@@ -309,7 +309,9 @@ func updateGlobalSettings(ctx context.Context, cmd *cobra.Command, w io.Writer, 
 			return fmt.Errorf("failed to reinstall git hook: %w", err)
 		}
 		strategy.CheckAndWarnHookManagers(ctx, w, s.LocalDev, s.AbsoluteGitHookPath)
-		fmt.Fprintln(w, "  ✓ Reinstalled git hook")
+		if !strategy.PrintExternalHookStatusIfActive(ctx, w) {
+			fmt.Fprintln(w, "  ✓ Reinstalled git hook")
+		}
 	}
 
 	fmt.Fprintf(w, "✓ Settings updated (%s)\n", configDisplay)
@@ -871,6 +873,15 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				return NewSilentError(errors.New("missing agent name"))
 			}
 
+			// External git hooks health gate: if user opted into external mode
+			// but external_dir is missing on disk, every enable variant (bare,
+			// --force, --agent) should refuse with the same instructional
+			// message. Centralized here so all downstream branches get the
+			// same protection rather than duplicating the check in each.
+			if extErr := verifyExternalGitHooksPrecondition(ctx, cmd.ErrOrStderr()); extErr != nil {
+				return extErr
+			}
+
 			if agentName != "" {
 				ag, err := agent.Get(types.AgentName(agentName))
 				if err != nil {
@@ -1161,7 +1172,9 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
 	strategy.CheckAndWarnHookManagers(ctx, w, settings.LocalDev, settings.AbsoluteGitHookPath)
-	fmt.Fprintln(w, "  ✓ Installed hooks")
+	if !strategy.PrintExternalHookStatusIfActive(ctx, w) {
+		fmt.Fprintln(w, "  ✓ Installed hooks")
+	}
 
 	configDisplay := configDisplayProject
 	if shouldUseLocal {
@@ -1223,10 +1236,48 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 }
 
 // printEnabledStatus prints agents and a hint about `entire agent`.
+// verifyExternalGitHooksPrecondition fails fast when the external git hooks
+// backend is configured but external_dir does not exist on disk. The error
+// carries the same instructional message used by `entire doctor`, so users
+// see one canonical setup procedure regardless of which command exposed the
+// issue first. Returns nil in direct mode and in healthy external mode.
+//
+// Called early in enable's RunE so every variant (bare, --force, --agent)
+// is gated by the same check; duplicating it in each branch would invite
+// drift.
+func verifyExternalGitHooksPrecondition(ctx context.Context, errW io.Writer) error {
+	s, err := settings.Load(ctx)
+	if err != nil {
+		// Settings can't be loaded — could mean fresh repo (no .entire/ yet).
+		// The actual setup flow will surface a more specific error if needed;
+		// don't block enable here on a load failure that may be expected.
+		return nil //nolint:nilerr // intentional: skip the precondition, let the main flow report
+	}
+	if !s.IsExternalGitHooks() {
+		return nil
+	}
+	extDir := s.ExternalHookDir()
+	root, rErr := paths.WorktreeRoot(ctx)
+	if rErr != nil {
+		fmt.Fprintf(errW, "external git hooks: cannot resolve repo root: %v\n", rErr)
+		return NewSilentError(fmt.Errorf("external git hooks: %w", rErr))
+	}
+	absDir := filepath.Clean(filepath.Join(root, extDir))
+	if _, statErr := os.Stat(absDir); os.IsNotExist(statErr) {
+		fmt.Fprintf(errW, "external_dir %q not found in repo root\n\n%s", extDir, strategy.FormatExternalDirMissingHelp(extDir))
+		return NewSilentError(fmt.Errorf("external_dir %q not found", extDir))
+	}
+	return nil
+}
+
 func printEnabledStatus(ctx context.Context, w io.Writer) {
 	if displayNames := InstalledAgentDisplayNames(ctx); len(displayNames) > 0 {
 		fmt.Fprintf(w, "Agents: %s\n", strings.Join(displayNames, ", "))
 	}
+	// Surface external git hooks state on re-enable too, so users running
+	// `entire enable` repeatedly see the same one-line acknowledgement that
+	// Entire is wired up to their hook manager rather than to .git/hooks/.
+	strategy.PrintExternalHookStatusIfActive(ctx, w)
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
 }
 
@@ -1638,6 +1689,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
 	strategy.CheckAndWarnHookManagers(ctx, w, settings.LocalDev, settings.AbsoluteGitHookPath)
+	strategy.PrintExternalHookStatusIfActive(ctx, w)
 
 	if installedHooks == 0 {
 		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())

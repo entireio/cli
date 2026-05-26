@@ -563,3 +563,65 @@ func TestConfirmDoctorFix_CancelledContext(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, proceed)
 }
+
+// TestCheckExternalGitHooks_SilentInDirectMode — direct mode (no git_hooks
+// block) should produce no doctor output, matching the codex check pattern:
+// checks only appear when they apply. Adding a "(not applicable)" line for
+// the default mode would be noise for the 95% case.
+func TestCheckExternalGitHooks_SilentInDirectMode(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, checkExternalGitHooks(cmd))
+	require.Empty(t, stdout.String(), "direct mode should produce no output")
+}
+
+// TestCheckExternalGitHooks_OKWhenDirExists — happy path. external_dir
+// exists, doctor reports it with the canonical ✓ marker.
+func TestCheckExternalGitHooks_OKWhenDirExists(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		0o644,
+	))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".husky"), 0o755))
+
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, checkExternalGitHooks(cmd))
+	out := stdout.String()
+	require.Contains(t, out, "✓ External git hooks")
+	require.Contains(t, out, ".husky")
+}
+
+// TestCheckExternalGitHooks_FailsWithFullHelpWhenDirMissing — failure path.
+// external_dir missing → ✗ marker + the same instructional message used by
+// `entire enable`. Doctor does NOT abort; the issue surfaces in the final
+// exit code (verified separately).
+func TestCheckExternalGitHooks_FailsWithFullHelpWhenDirMissing(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		0o644,
+	))
+
+	cmd, stdout := newTestCmd(t)
+	require.Error(t, checkExternalGitHooks(cmd), "missing external_dir should produce non-nil status")
+	out := stdout.String()
+	require.Contains(t, out, "✗ External git hooks")
+	require.Contains(t, out, ".husky")
+	// Same key phrases as InstallGitHook's error message — single source of truth.
+	for _, s := range []string{"Required setup", "# Entire CLI hooks", "prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite", "pre-push"} {
+		require.Contains(t, out, s, "missing %q from doctor help text", s)
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v6"
@@ -97,6 +98,13 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Agent-specific: Codex hook trust state.
 	checkCodexHookTrust(cmd)
+
+	// External git hooks backend health (opt-in via .entire/settings.json).
+	if extErr := checkExternalGitHooks(cmd); extErr != nil {
+		if finalErr == nil {
+			finalErr = NewSilentError(extErr)
+		}
+	}
 
 	// Stuck sessions
 	// Load all session states
@@ -420,6 +428,41 @@ func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, err
 		fmt.Fprintln(w, "  -> Skipped")
 	}
 	return confirmed, nil
+}
+
+// checkExternalGitHooks reports the health of the external git hooks
+// backend when configured. Direct mode (the default) is silent — matching
+// the codex check pattern where opt-in features are only surfaced when the
+// repo has opted in. external mode with a missing external_dir surfaces
+// the full instructional message and returns a non-nil error so doctor's
+// final exit code reflects the issue. Doctor itself does NOT abort.
+func checkExternalGitHooks(cmd *cobra.Command) error {
+	ctx := cmd.Context()
+	s, err := settings.Load(ctx)
+	if err != nil {
+		// Settings unloadable in a doctor context = either not in a repo or
+		// a malformed file; the relevant errors surface from the upstream
+		// metadata checks. Don't double-report here.
+		return nil //nolint:nilerr // intentional: skip the check, do not propagate
+	}
+	if !s.IsExternalGitHooks() {
+		return nil
+	}
+
+	w := cmd.OutOrStdout()
+	extDir := s.ExternalHookDir()
+	root, rErr := paths.WorktreeRoot(ctx)
+	if rErr != nil {
+		fmt.Fprintf(w, "✗ External git hooks: cannot resolve repo root: %v\n", rErr)
+		return fmt.Errorf("external git hooks: %w", rErr)
+	}
+	absDir := filepath.Clean(filepath.Join(root, extDir))
+	if _, statErr := os.Stat(absDir); os.IsNotExist(statErr) {
+		fmt.Fprintf(w, "✗ External git hooks: external_dir %q not found\n\n%s", extDir, strategy.FormatExternalDirMissingHelp(extDir))
+		return fmt.Errorf("external_dir %q not found", extDir)
+	}
+	fmt.Fprintf(w, "✓ External git hooks: external_dir %q exists\n", extDir)
+	return nil
 }
 
 // checkCodexHookTrust warns about two kinds of drift in the Codex hook

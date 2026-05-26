@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- External git hooks backend (`git_hooks.backend = "external"`): Entire
+  detects user-managed hook scripts via marker presence in a configured
+  `external_dir` (e.g. `.husky/`, `common/git-hooks/`) instead of writing
+  to `.git/hooks/`. Compatible with Husky, Rush, and similar managers.
+  Entire never writes to `external_dir` in this mode — users own the hook
+  scripts. See `docs/architecture/external-git-hooks.md` for the required
+  marker contract and dispatch invocations. Closes [#1250](https://github.com/entireio/cli/issues/1250).
+
 ## [0.7.8] - 2026-06-30
 
 ### Added

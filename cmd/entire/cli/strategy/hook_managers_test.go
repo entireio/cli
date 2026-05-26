@@ -493,3 +493,34 @@ func TestCheckAndWarnHookManagers_WithHusky(t *testing.T) {
 		t.Errorf("expected warning output, got %q", output)
 	}
 }
+
+func TestCheckAndWarnHookManagers_ExternalBackend_IsSilent(t *testing.T) {
+	// Needs t.Chdir (via initHooksTestRepo), cannot be parallel
+	tmpDir, _ := initHooksTestRepo(t)
+
+	// Create .husky/_/ directory (Husky fingerprint that would normally trigger warning)
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".husky", "_"), 0o755); err != nil {
+		t.Fatalf("failed to create .husky/_/: %v", err)
+	}
+
+	// External settings: user explicitly opted into external mode, so the warning
+	// is noise (user already knows about Husky and chose to integrate with it).
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	CheckAndWarnHookManagers(context.Background(), &buf, false, false)
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no output in external mode, got %q", buf.String())
+	}
+}

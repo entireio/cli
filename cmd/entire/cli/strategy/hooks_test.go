@@ -1699,3 +1699,317 @@ func TestRemoveGitHook_PermissionDenied(t *testing.T) {
 		t.Errorf("error should mention 'failed to remove hooks', got: %v", err)
 	}
 }
+
+func TestInstallGitHook_ExternalBackend_MissingDir_ReturnsHelpError(t *testing.T) {
+	repoDir, hooksDir := initHooksTestRepo(t)
+
+	// External settings pointing to a directory that does NOT exist on disk
+	entireDir := filepath.Join(repoDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	hooksBefore := snapshotDir(t, hooksDir)
+
+	ctx := context.Background()
+	installed, err := InstallGitHook(ctx, false, false, false)
+	if err == nil {
+		t.Fatal("InstallGitHook() should return error when external_dir does not exist")
+	}
+	if installed != 0 {
+		t.Errorf("InstallGitHook() installed %d hooks on error, want 0", installed)
+	}
+
+	// Error message must contain: the missing dir name, the marker contract,
+	// all 5 hook script names, and a path back to direct mode.
+	msg := err.Error()
+	mustContain := []string{
+		".husky",
+		"# Entire CLI hooks",
+		"prepare-commit-msg",
+		"commit-msg",
+		"post-commit",
+		"post-rewrite",
+		"pre-push",
+		"direct",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(msg, s) {
+			t.Errorf("error message missing %q\nfull message:\n%s", s, msg)
+		}
+	}
+
+	// .git/hooks/ must still be untouched (no partial install)
+	hooksAfter := snapshotDir(t, hooksDir)
+	if !dirSnapshotsEqual(hooksBefore, hooksAfter) {
+		t.Error(".git/hooks/ was modified by failed InstallGitHook in external mode")
+	}
+}
+
+// Variant-3 status line ("✓ Git hooks: external (.husky)") is emitted by
+// strategy.PrintExternalHookStatusIfActive at the setup.go call sites, not
+// by InstallGitHook itself (production always calls InstallGitHook with
+// silent=true). The user-visible output is exercised end-to-end in
+// integration_test/external_hooks_test.go.
+func TestPrintExternalHookStatusIfActive_ExternalMode(t *testing.T) {
+	repoDir, _ := initHooksTestRepo(t)
+
+	entireDir := filepath.Join(repoDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	if printed := PrintExternalHookStatusIfActive(context.Background(), &buf); !printed {
+		t.Error("PrintExternalHookStatusIfActive returned false in external mode")
+	}
+	if !strings.Contains(buf.String(), "Git hooks: external (.husky)") {
+		t.Errorf("output missing variant-3 line; got:\n%s", buf.String())
+	}
+}
+
+func TestPrintExternalHookStatusIfActive_DirectMode(t *testing.T) {
+	repoDir, _ := initHooksTestRepo(t)
+
+	entireDir := filepath.Join(repoDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	if printed := PrintExternalHookStatusIfActive(context.Background(), &buf); printed {
+		t.Error("PrintExternalHookStatusIfActive returned true in direct mode")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("output should be empty in direct mode; got:\n%s", buf.String())
+	}
+}
+
+func TestInstallGitHook_ExternalBackend_SkipsAndPreservesGitHooks(t *testing.T) {
+	repoDir, hooksDir := initHooksTestRepo(t)
+
+	// Write external settings
+	entireDir := filepath.Join(repoDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create external_dir (must exist for this test path)
+	huskyDir := filepath.Join(repoDir, ".husky")
+	if err := os.MkdirAll(huskyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Snapshot .git/hooks/ before install
+	hooksBefore := snapshotDir(t, hooksDir)
+
+	ctx := context.Background()
+	installed, err := InstallGitHook(ctx, false, false, false)
+	if err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+	if installed != 0 {
+		t.Errorf("InstallGitHook() installed %d hooks, want 0 in external mode", installed)
+	}
+
+	// .git/hooks/ must be byte-identical
+	hooksAfter := snapshotDir(t, hooksDir)
+	if !dirSnapshotsEqual(hooksBefore, hooksAfter) {
+		t.Error(".git/hooks/ was modified by InstallGitHook in external mode")
+	}
+}
+
+// snapshotDir returns a map of filename→content for all regular files in dir.
+func snapshotDir(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	result := make(map[string]string)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return result
+		}
+		t.Fatalf("ReadDir(%s) error: %v", dir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error: %v", e.Name(), err)
+		}
+		result[e.Name()] = string(data)
+	}
+	return result
+}
+
+func dirSnapshotsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func TestRemoveGitHook_ExternalBackend_IsNoOp(t *testing.T) {
+	repoDir, hooksDir := initHooksTestRepo(t)
+
+	entireDir := filepath.Join(repoDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate leftover Entire hooks in .git/hooks/ from a previous direct-mode
+	// install (user switched direct → external). The design contract says
+	// external mode = detection-only, never touch anything. So even these
+	// leftover files must be left alone.
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, hook := range gitHookNames {
+		content := "#!/bin/sh\n# " + entireHookMarker + "\n"
+		if err := os.WriteFile(filepath.Join(hooksDir, hook), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Pre-populate .husky/ as well (user-owned, must also remain intact)
+	huskyDir := filepath.Join(repoDir, ".husky")
+	if err := os.MkdirAll(huskyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, hook := range gitHookNames {
+		content := "#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git " + hook + " \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(huskyDir, hook), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	gitHooksBefore := snapshotDir(t, hooksDir)
+	huskyBefore := snapshotDir(t, huskyDir)
+
+	ctx := context.Background()
+	removed, err := RemoveGitHook(ctx)
+	if err != nil {
+		t.Fatalf("RemoveGitHook() error = %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("RemoveGitHook() removed %d, want 0 in external mode", removed)
+	}
+
+	if !dirSnapshotsEqual(gitHooksBefore, snapshotDir(t, hooksDir)) {
+		t.Error(".git/hooks/ was modified by RemoveGitHook in external mode")
+	}
+	if !dirSnapshotsEqual(huskyBefore, snapshotDir(t, huskyDir)) {
+		t.Error("external_dir was modified by RemoveGitHook in external mode")
+	}
+}
+
+func TestIsGitHookInstalled_ExternalBackend_ReadsExternalDir(t *testing.T) {
+	repoDir, _ := initHooksTestRepo(t)
+
+	// Write external settings
+	entireDir := filepath.Join(repoDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create external_dir with marker-containing hook files
+	huskyDir := filepath.Join(repoDir, ".husky")
+	if err := os.MkdirAll(huskyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, hook := range gitHookNames {
+		content := "#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git " + hook + " \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(huskyDir, hook), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// .git/hooks/ should have NO Entire hooks
+	// (initHooksTestRepo doesn't install any, so this is already the case)
+
+	ctx := context.Background()
+	if !IsGitHookInstalled(ctx) {
+		t.Error("IsGitHookInstalled() = false, want true when external_dir has marker files")
+	}
+}
+
+func TestIsGitHookInstalled_ExternalBackend_IgnoresGitHooksDir(t *testing.T) {
+	repoDir, hooksDir := initHooksTestRepo(t)
+
+	// External settings pointing to .husky (which does NOT exist)
+	entireDir := filepath.Join(repoDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Put marker files in .git/hooks/ (should be ignored in external mode)
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, hook := range gitHookNames {
+		content := "#!/bin/sh\n# " + entireHookMarker + "\n"
+		if err := os.WriteFile(filepath.Join(hooksDir, hook), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx := context.Background()
+	if IsGitHookInstalled(ctx) {
+		t.Error("IsGitHookInstalled() = true, want false when external_dir has no marker files (even though .git/hooks/ does)")
+	}
+}

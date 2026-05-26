@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -138,9 +140,37 @@ func getHooksDirInPath(ctx context.Context, dir string) (string, error) {
 	return filepath.Clean(hooksDir), nil
 }
 
+// externalGitHooksDir reports whether the external git hooks backend is
+// configured and, if so, returns the configured external_dir verbatim
+// (still repo-relative). Returns ("", false) in direct mode and when
+// settings cannot be loaded — callers fall through to direct-mode logic.
+// Centralizing this load+check keeps every external-mode short-circuit
+// site uniform.
+func externalGitHooksDir(ctx context.Context) (string, bool) {
+	s, err := settings.Load(ctx)
+	if err != nil || !s.IsExternalGitHooks() {
+		return "", false
+	}
+	return s.ExternalHookDir(), true
+}
+
+// GetGitHookDetectionDir returns the directory whose files prove Entire's
+// Git hooks are installed. Direct mode returns the active git hooks dir;
+// external mode returns repoRoot/external_dir.
+func GetGitHookDetectionDir(ctx context.Context) (string, error) {
+	if extDir, ok := externalGitHooksDir(ctx); ok {
+		root, rErr := paths.WorktreeRoot(ctx)
+		if rErr != nil {
+			return "", fmt.Errorf("resolve worktree root for external git hooks: %w", rErr)
+		}
+		return filepath.Clean(filepath.Join(root, extDir)), nil
+	}
+	return GetHooksDir(ctx)
+}
+
 // IsGitHookInstalled checks if all generic Entire CLI hooks are installed.
 func IsGitHookInstalled(ctx context.Context) bool {
-	hooksDir, err := GetHooksDir(ctx)
+	hooksDir, err := GetGitHookDetectionDir(ctx)
 	if err != nil {
 		return false
 	}
@@ -288,6 +318,23 @@ func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
 // absolutePath embeds the full binary path in hooks for GUI git clients.
 // Returns the number of hooks that were installed (0 if all already up to date).
 func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (int, error) {
+	if extDir, ok := externalGitHooksDir(ctx); ok {
+		root, rErr := paths.WorktreeRoot(ctx)
+		if rErr != nil {
+			return 0, fmt.Errorf("external git hooks: cannot resolve repo root: %w", rErr)
+		}
+		absDir := filepath.Clean(filepath.Join(root, extDir))
+		if _, statErr := os.Stat(absDir); os.IsNotExist(statErr) {
+			return 0, fmt.Errorf("external_dir %q not found in repo root\n\n%s", extDir, FormatExternalDirMissingHelp(extDir))
+		}
+		// External mode = no install. The variant-3 status line is emitted by
+		// PrintExternalHookStatusIfActive at the setup.go call sites, so it
+		// honors the surrounding section formatting and isn't suppressed by
+		// the silent flag (which exists to silence the verbose direct-mode
+		// "✓ Installed git hooks (...)" line during non-interactive flows).
+		return 0, nil
+	}
+
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
 		return 0, err
@@ -366,6 +413,12 @@ func writeHookFile(path, content string) (bool, error) {
 // If a .pre-entire backup exists, it is restored.
 // Returns the number of hooks removed.
 func RemoveGitHook(ctx context.Context) (int, error) {
+	// External backend = Entire never installed hooks (neither in .git/hooks/
+	// nor in external_dir). Detection-only contract: removal must touch nothing.
+	if _, ok := externalGitHooksDir(ctx); ok {
+		return 0, nil
+	}
+
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
 		return 0, err
@@ -485,4 +538,78 @@ func hookSettingsFromConfig(ctx context.Context) (localDev, absoluteHookPath boo
 		return false, false
 	}
 	return s.LocalDev, s.AbsoluteGitHookPath
+}
+
+// PrintExternalHookStatusIfActive writes the variant-3 status line ("✓ Git
+// hooks: external (<dir>)") to w when the external backend is configured,
+// and returns true so the caller can skip its direct-mode status line.
+// Returns false (and writes nothing) in direct mode, so callers can fall
+// through to their existing print.
+//
+// Lives in the strategy package next to InstallGitHook so the wording stays
+// adjacent to the implementation it summarizes — direct-mode call sites
+// inside setup.go just gate their existing prints on this helper's return.
+func PrintExternalHookStatusIfActive(ctx context.Context, w io.Writer) bool {
+	extDir, ok := externalGitHooksDir(ctx)
+	if !ok {
+		return false
+	}
+	fmt.Fprintf(w, "  ✓ Git hooks: external (%s)\n", extDir)
+	return true
+}
+
+// FormatExternalDirMissingHelp returns the instructional message shown when
+// git_hooks.backend == "external" but external_dir does not exist on disk.
+//
+// Design philosophy: external git hooks are explicitly the user's
+// responsibility. Entire never writes to external_dir; it only detects the
+// marker "Entire CLI hooks" in user-owned scripts. This message is therefore
+// *instructional* ("here is what you must create") rather than *directive*
+// ("run this command to fix it") — the latter would suggest Entire could
+// auto-resolve the situation, which is the inverse of the design intent.
+//
+// Both `entire enable` (aborts on missing dir) and `entire doctor`
+// (continues, reports as health issue) use this same text so users see one
+// canonical setup procedure regardless of which command surfaced the issue
+// first.
+func FormatExternalDirMissingHelp(extDir string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Required setup for external git hooks:\n\n")
+	fmt.Fprintf(&b, "  External backend means Entire reads hook scripts from your repo, but\n")
+	fmt.Fprintf(&b, "  does not write them. You are responsible for creating these %d scripts\n", len(gitHookNames))
+	fmt.Fprintf(&b, "  under external_dir (%s/).\n\n", extDir)
+	fmt.Fprintf(&b, "  Each script must:\n")
+	fmt.Fprintf(&b, "    1. Be executable (chmod +x).\n")
+	fmt.Fprintf(&b, "    2. Contain the marker comment:  # %s\n", entireHookMarker)
+	fmt.Fprintf(&b, "    3. Invoke Entire's dispatcher with the matching event name.\n\n")
+	for _, h := range gitHookNames {
+		fmt.Fprintf(&b, "  %s/%s:\n", extDir, h)
+		fmt.Fprintf(&b, "      #!/bin/sh\n")
+		fmt.Fprintf(&b, "      # %s\n", entireHookMarker)
+		fmt.Fprintf(&b, "      %s\n\n", externalDispatchInvocation(h))
+	}
+	fmt.Fprintf(&b, "  To switch back to direct mode (Entire writes .git/hooks itself),\n")
+	fmt.Fprintf(&b, "  remove the \"git_hooks\" block from .entire/settings.json (the\n")
+	fmt.Fprintf(&b, "  default is \"direct\").\n")
+	return b.String()
+}
+
+// externalDispatchInvocation returns the recommended dispatch line for the
+// given hook in external mode. The args mirror what direct-mode install
+// scripts pass (see buildHookSpecs) so users get the same wiring.
+func externalDispatchInvocation(hookName string) string {
+	switch hookName {
+	case "prepare-commit-msg":
+		return `entire hooks git prepare-commit-msg "$1" "$2" 2>/dev/null || true`
+	case "commit-msg":
+		return `entire hooks git commit-msg "$1" || true`
+	case "post-commit":
+		return `entire hooks git post-commit 2>/dev/null || true`
+	case "post-rewrite":
+		return `entire hooks git post-rewrite "$1" 2>/dev/null || true`
+	case "pre-push":
+		return `entire hooks git pre-push "$1" || true`
+	default:
+		return fmt.Sprintf(`entire hooks git %s "$@"`, hookName)
+	}
 }

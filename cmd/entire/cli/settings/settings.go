@@ -150,9 +150,64 @@ type EntireSettings struct {
 	// settings loader (DisallowUnknownFields) accepts a "checkpoints" key.
 	Checkpoints *CheckpointsConfig `json:"checkpoints,omitempty"`
 
+	// GitHooks configures which directory Entire uses for git hook detection
+	// and installation. When nil or backend="direct", Entire manages hooks in
+	// .git/hooks/ directly. When backend="external", Entire only detects
+	// marker presence in the user-owned external_dir and never writes hooks.
+	GitHooks *GitHooksSettings `json:"git_hooks,omitempty"`
+
 	// Deprecated: no longer used. Exists to tolerate old settings files
 	// that still contain "strategy": "auto-commit" or similar.
 	Strategy string `json:"strategy,omitempty"`
+}
+
+// GitHooksSettings configures git hook backend behavior.
+type GitHooksSettings struct {
+	// Backend selects the hook management mode: "direct" (default) or "external".
+	Backend string `json:"backend"`
+
+	// ExternalDir is a repo-relative path to the user-owned hook directory
+	// (e.g. ".husky" for Husky v9, "common/git-hooks" for Rush).
+	// Required when Backend == "external".
+	ExternalDir string `json:"external_dir,omitempty"`
+}
+
+// Validate returns an error if the git hooks configuration is invalid.
+func (g *GitHooksSettings) Validate() error {
+	if g == nil {
+		return nil
+	}
+	switch g.Backend {
+	case "", "direct":
+		return nil
+	case "external":
+		if g.ExternalDir == "" {
+			return errors.New(`git_hooks.external_dir is required when backend = "external"`)
+		}
+		if filepath.IsAbs(g.ExternalDir) {
+			return fmt.Errorf("git_hooks.external_dir must be repo-relative (got %q)", g.ExternalDir)
+		}
+		if strings.Contains(g.ExternalDir, "..") {
+			return fmt.Errorf("git_hooks.external_dir must not contain %q (got %q)", "..", g.ExternalDir)
+		}
+		return nil
+	default:
+		return fmt.Errorf("git_hooks.backend must be %q or %q (got %q)", "direct", "external", g.Backend)
+	}
+}
+
+// IsExternalGitHooks reports whether the external git hooks backend is active.
+func (s *EntireSettings) IsExternalGitHooks() bool {
+	return s != nil && s.GitHooks != nil && s.GitHooks.Backend == "external"
+}
+
+// ExternalHookDir returns the configured external hook directory, or empty
+// string when the external backend is not active.
+func (s *EntireSettings) ExternalHookDir() string {
+	if !s.IsExternalGitHooks() {
+		return ""
+	}
+	return s.GitHooks.ExternalDir
 }
 
 // ClonePreferences stores clone-local, uncommitted preferences that should be
@@ -537,6 +592,9 @@ func loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAb
 	if err := settings.SummaryGeneration.Validate(); err != nil {
 		return nil, fmt.Errorf("merged settings invalid: %w", err)
 	}
+	if err := settings.GitHooks.Validate(); err != nil {
+		return nil, fmt.Errorf("merged settings invalid: %w", err)
+	}
 
 	return settings, nil
 }
@@ -737,6 +795,10 @@ func loadFromFile(filePath string) (*EntireSettings, error) {
 		return nil, fmt.Errorf("invalid commit_linking value %q: must be %q or %q", settings.CommitLinking, CommitLinkingAlways, CommitLinkingPrompt)
 	}
 
+	if err := settings.GitHooks.Validate(); err != nil {
+		return nil, fmt.Errorf("settings invalid: %w", err)
+	}
+
 	// SummaryGeneration is NOT validated here — individual files may
 	// legitimately contain only a model (provider comes from another file).
 	// Validation happens after merge in Load().
@@ -905,6 +967,17 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 			return fmt.Errorf("parsing review field: %w", err)
 		}
 		settings.Review = review
+	}
+
+	// git_hooks is a discriminated union (backend selects the shape), so it
+	// uses wholesale replace like review — field-level merge could produce
+	// illegal combinations such as {backend:"direct", external_dir:".husky"}.
+	if gitHooksRaw, ok := raw["git_hooks"]; ok {
+		var gh GitHooksSettings
+		if err := json.Unmarshal(gitHooksRaw, &gh); err != nil {
+			return fmt.Errorf("parsing git_hooks field: %w", err)
+		}
+		settings.GitHooks = &gh
 	}
 
 	// Merge redaction sub-fields if present (field-level, not wholesale replace).
