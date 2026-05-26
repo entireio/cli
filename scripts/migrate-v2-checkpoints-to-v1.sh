@@ -187,28 +187,46 @@ build_v1_tree_from_entries() {
 	GIT_INDEX_FILE="$index_file" git write-tree
 }
 
+write_original_associated_commit_trailers() {
+	local checkpoint_id="$1"
+
+	awk -F '\t' -v checkpoint_id="$checkpoint_id" '
+		NF >= 2 && $1 == checkpoint_id && !seen[$2]++ {
+			printf "Original-Associated-Commit: %s\n", $2
+		}
+	' "$checkpoint_commits_file"
+}
+
+write_v1_checkpoint_migration_message() {
+	local checkpoint_id="$1"
+
+	printf 'Checkpoint: %s\n\n' "$checkpoint_id"
+	printf 'Migrated from checkpoints v2.\n'
+	write_original_associated_commit_trailers "$checkpoint_id"
+	printf 'Source refs: %s and %s/*\n' "$V2_MAIN_REF" "$V2_FULL_REF_PREFIX"
+}
+
 create_v1_checkpoint_migration_commit() {
 	local checkpoint_id="$1"
 	local tree_hash="$2"
 	local parent_hash="$3"
 	local commit_date="$4"
-	local commit_hash
+	local commit_hash message_file
+
+	message_file="$tmp_dir/commit-message-${checkpoint_id}"
+	write_v1_checkpoint_migration_message "$checkpoint_id" > "$message_file"
 
 	if [[ -n "$parent_hash" ]]; then
 		if [[ -n "$commit_date" ]]; then
-			commit_hash=$(printf 'Checkpoint: %s\n\nMigrated from checkpoints v2.\nSource refs: %s and %s/*\n' "$checkpoint_id" "$V2_MAIN_REF" "$V2_FULL_REF_PREFIX" |
-				GIT_AUTHOR_DATE="$commit_date" GIT_COMMITTER_DATE="$commit_date" git commit-tree "$tree_hash" -p "$parent_hash")
+			commit_hash=$(GIT_AUTHOR_DATE="$commit_date" GIT_COMMITTER_DATE="$commit_date" git commit-tree "$tree_hash" -p "$parent_hash" < "$message_file")
 		else
-			commit_hash=$(printf 'Checkpoint: %s\n\nMigrated from checkpoints v2.\nSource refs: %s and %s/*\n' "$checkpoint_id" "$V2_MAIN_REF" "$V2_FULL_REF_PREFIX" |
-				git commit-tree "$tree_hash" -p "$parent_hash")
+			commit_hash=$(git commit-tree "$tree_hash" -p "$parent_hash" < "$message_file")
 		fi
 	else
 		if [[ -n "$commit_date" ]]; then
-			commit_hash=$(printf 'Checkpoint: %s\n\nMigrated from checkpoints v2.\nSource refs: %s and %s/*\n' "$checkpoint_id" "$V2_MAIN_REF" "$V2_FULL_REF_PREFIX" |
-				GIT_AUTHOR_DATE="$commit_date" GIT_COMMITTER_DATE="$commit_date" git commit-tree "$tree_hash")
+			commit_hash=$(GIT_AUTHOR_DATE="$commit_date" GIT_COMMITTER_DATE="$commit_date" git commit-tree "$tree_hash" < "$message_file")
 		else
-			commit_hash=$(printf 'Checkpoint: %s\n\nMigrated from checkpoints v2.\nSource refs: %s and %s/*\n' "$checkpoint_id" "$V2_MAIN_REF" "$V2_FULL_REF_PREFIX" |
-				git commit-tree "$tree_hash")
+			commit_hash=$(git commit-tree "$tree_hash" < "$message_file")
 		fi
 	fi
 
