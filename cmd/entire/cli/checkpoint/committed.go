@@ -117,7 +117,11 @@ func (s *GitStore) WriteCommitted(ctx context.Context, opts WriteCommittedOption
 	}
 
 	commitMsg := s.buildCommitMessage(opts, taskMetadataPath)
-	newCommitHash, err := s.createCommit(ctx, newTreeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
+	commitTime := opts.CommitTime
+	if commitTime.IsZero() {
+		commitTime = time.Now()
+	}
+	newCommitHash, err := s.createCommitAt(ctx, newTreeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail, commitTime)
 	if err != nil {
 		return err
 	}
@@ -1932,11 +1936,14 @@ func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
 // CreateCommit creates a git commit object with the given tree, parent, message, and author.
 // If parentHash is ZeroHash, the commit is created without a parent (orphan commit).
 func CreateCommit(ctx context.Context, repo *git.Repository, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) {
-	now := time.Now()
+	return createCommitObject(ctx, repo, treeHash, parentHash, message, authorName, authorEmail, time.Now())
+}
+
+func createCommitObject(ctx context.Context, repo *git.Repository, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string, commitTime time.Time) (plumbing.Hash, error) {
 	sig := object.Signature{
 		Name:  authorName,
 		Email: authorEmail,
-		When:  now,
+		When:  commitTime,
 	}
 
 	commit := &object.Commit{

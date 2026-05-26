@@ -212,6 +212,10 @@ type WriteCommittedOptions struct {
 	// the original v1 checkpoint time in v2 metadata and retention decisions.
 	CreatedAt time.Time
 
+	// CommitTime is the optional git author/committer timestamp for the
+	// metadata-branch commit. When zero, writers use the current time.
+	CommitTime time.Time
+
 	// Strategy is the name of the strategy that created this checkpoint
 	Strategy string
 
