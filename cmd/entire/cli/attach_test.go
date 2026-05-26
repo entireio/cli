@@ -299,54 +299,6 @@ func TestAttach_OutputContainsCheckpointID(t *testing.T) {
 	}
 }
 
-// TestAttach_CheckpointsVersion2_FallsBackToV1 verifies that
-// strategy_options.checkpoints_version: 2 is now ignored — attach writes
-// v1 metadata only, and never creates v2 refs solely because of the setting.
-func TestAttach_CheckpointsVersion2_FallsBackToV1(t *testing.T) {
-	setupAttachTestRepo(t)
-
-	repoDir := mustGetwd(t)
-	setAttachCheckpointsV2Only(t, repoDir)
-
-	sessionID := "test-attach-v2-disallowed"
-	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"create hello.txt"},"uuid":"uuid-1"}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Write","input":{"file_path":"hello.txt","content":"hello"}}]},"uuid":"uuid-2"}
-{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1","content":"wrote file"}]},"uuid":"uuid-3"}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]},"uuid":"uuid-4"}
-`)
-
-	var out bytes.Buffer
-	if err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
-		t.Fatalf("runAttach failed: %v", err)
-	}
-
-	store, err := session.NewStateStore(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	state, err := store.Load(context.Background(), sessionID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state == nil || state.LastCheckpointID.IsEmpty() {
-		t.Fatal("expected attach to persist a checkpoint ID")
-	}
-
-	repo, err := git.PlainOpen(repoDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cpPath := state.LastCheckpointID.Path()
-	v1Ref := string(plumbing.NewBranchReferenceName(paths.MetadataBranchName))
-	if _, found := readFileFromRef(t, repo, v1Ref, cpPath+"/"+paths.MetadataFileName); !found {
-		t.Fatalf("expected v1 metadata at %s for %s — checkpoints_version: 2 should fall back to v1", paths.MetadataBranchName, cpPath)
-	}
-	if _, err := repo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true); err == nil {
-		t.Fatalf("did not expect %s when checkpoints_version: 2 is configured but disallowed", paths.V2MainRefName)
-	}
-}
-
 func TestAttach_AppendsAsAdditionalSessionWhenIDDiffers(t *testing.T) {
 	setupAttachTestRepo(t)
 
@@ -528,35 +480,6 @@ func TestAttach_RefusesWhenCheckpointOnlyInRemoteTrackingRef(t *testing.T) {
 	}
 	if remoteRef.Hash() != populated.Hash() {
 		t.Errorf("remote-tracking ref moved from %s to %s", populated.Hash(), remoteRef.Hash())
-	}
-}
-
-// TestAttach_RefuseHint_CheckpointsVersion2IgnoredFallsBackToV1 verifies that
-// strategy_options.checkpoints_version: 2 no longer flips attach into v2-only
-// mode — the refuse hint references the v1 metadata branch, not the v2 /main
-// ref, because v2 is disallowed and the system falls back to v1.
-func TestAttach_RefuseHint_CheckpointsVersion2IgnoredFallsBackToV1(t *testing.T) {
-	setupAttachTestRepo(t)
-
-	repoRoot := mustGetwd(t)
-	setAttachCheckpointsV2Only(t, repoRoot)
-
-	runGitInDir(t, repoRoot, "commit", "--amend", "-m", "init\n\nEntire-Checkpoint: ffffffffeeee")
-
-	sessionID := "v2-disallowed-attach"
-	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hi"},"uuid":"u1"}
-`)
-
-	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
-	if err == nil {
-		t.Fatal("expected attach to refuse when checkpoint is missing")
-	}
-	if !strings.Contains(err.Error(), "missing from the local entire/checkpoints/v1 branch") {
-		t.Errorf("error should describe the v1 branch (v2 is disallowed); got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "entire/checkpoints/v1:entire/checkpoints/v1") {
-		t.Errorf("error should include v1 refspec; got: %v", err)
 	}
 }
 
@@ -1532,18 +1455,6 @@ func enableEntire(t *testing.T, repoDir string) {
 	}
 }
 
-func setAttachCheckpointsV2Only(t *testing.T, repoDir string) {
-	t.Helper()
-	entireDir := filepath.Join(repoDir, ".entire")
-	if err := os.MkdirAll(entireDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	settingsContent := `{"enabled": true, "strategy_options": {"checkpoints_version": 2}}`
-	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(settingsContent), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func mustGetwd(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
@@ -1551,32 +1462,6 @@ func mustGetwd(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
-}
-
-func readFileFromRef(t *testing.T, repo *git.Repository, refName, filePath string) (string, bool) {
-	t.Helper()
-
-	ref, err := repo.Reference(plumbing.ReferenceName(refName), true)
-	if err != nil {
-		return "", false
-	}
-	commit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return "", false
-	}
-	tree, err := commit.Tree()
-	if err != nil {
-		return "", false
-	}
-	file, err := tree.File(filePath)
-	if err != nil {
-		return "", false
-	}
-	content, err := file.Contents()
-	if err != nil {
-		return "", false
-	}
-	return content, true
 }
 
 // TestAttach_DiscoversExternalAgents verifies that `entire attach --agent <external>`

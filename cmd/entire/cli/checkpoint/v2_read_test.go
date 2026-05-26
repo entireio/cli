@@ -87,35 +87,62 @@ func TestV2ReadSessionContent_TranscriptFromArchivedGeneration(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
 	store := NewV2GitStore(repo)
-	store.maxCheckpointsPerGeneration = 1
 	ctx := context.Background()
 
-	cpID1 := id.MustCheckpointID("d1d2d3d4d5d6")
-	err := store.WriteCommitted(ctx, WriteCommittedOptions{
-		CheckpointID: cpID1,
-		SessionID:    "session-1",
+	cpID := id.MustCheckpointID("d1d2d3d4d5d6")
+	require.NoError(t, store.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-archived",
 		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte(`{"first": true}`)),
+		Transcript:   redact.AlreadyRedacted([]byte(`{"archived": true}`)),
 		AuthorName:   "Test",
 		AuthorEmail:  "test@test.com",
-	})
-	require.NoError(t, err)
+	}))
 
-	cpID2 := id.MustCheckpointID("e1e2e3e4e5e6")
-	err = store.WriteCommitted(ctx, WriteCommittedOptions{
-		CheckpointID: cpID2,
-		SessionID:    "session-2",
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte(`{"second": true}`)),
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	})
-	require.NoError(t, err)
+	archiveV2FullCurrentRef(t, repo, "0000000000001")
+	resetV2FullCurrentRef(ctx, t, repo)
 
-	content, err := store.ReadSessionContent(ctx, cpID1, 0)
+	content, err := store.ReadSessionContent(ctx, cpID, 0)
 	require.NoError(t, err)
 	require.NotNil(t, content)
-	assert.NotEmpty(t, content.Transcript, "transcript should be found in archived generation")
+	assert.Contains(t, string(content.Transcript), `"archived": true`)
+}
+
+func TestV2ReadSessionContent_FetchesRemoteArchivedGeneration(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	remoteRepo := initTestRepo(t)
+	remoteRoot := repoRootForTest(t, remoteRepo)
+	remoteStore := NewV2GitStore(remoteRepo)
+	cpID := id.MustCheckpointID("d2d3d4d5d6d7")
+	require.NoError(t, remoteStore.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-remote-archive",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"remoteArchived": true}` + "\n")),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}))
+	archiveRefName := archiveV2FullCurrentRef(t, remoteRepo, "0000000000002")
+	resetV2FullCurrentRef(ctx, t, remoteRepo)
+
+	localRepo := initTestRepo(t)
+	localRoot := repoRootForTest(t, localRepo)
+	addOriginRemote(t, localRoot, remoteRoot)
+	fetchRef(t, localRoot, paths.V2MainRefName)
+
+	reopenedLocalRepo, err := git.PlainOpen(localRoot)
+	require.NoError(t, err)
+	localStore := NewV2GitStore(reopenedLocalRepo)
+
+	content, err := localStore.ReadSessionContent(ctx, cpID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, content)
+	assert.Contains(t, string(content.Transcript), `"remoteArchived": true`)
+
+	_, err = reopenedLocalRepo.Reference(archiveRefName, true)
+	require.NoError(t, err, "remote archived full ref should be fetched locally")
 }
 
 func TestV2ReadSessionContent_MissingTranscript_ReturnsError(t *testing.T) {
@@ -182,6 +209,29 @@ func TestV2FetchRemoteFullRefsUsesStoreRepository(t *testing.T) {
 	require.Error(t, err)
 }
 
+func archiveV2FullCurrentRef(t *testing.T, repo *git.Repository, generation string) plumbing.ReferenceName {
+	t.Helper()
+
+	fullRefName := plumbing.ReferenceName(paths.V2FullCurrentRefName)
+	fullRef, err := repo.Reference(fullRefName, true)
+	require.NoError(t, err)
+
+	archiveRefName := plumbing.ReferenceName(v2FullRefPrefix() + generation)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(archiveRefName, fullRef.Hash())))
+	return archiveRefName
+}
+
+func resetV2FullCurrentRef(ctx context.Context, t *testing.T, repo *git.Repository) {
+	t.Helper()
+
+	emptyTreeHash, err := BuildTreeFromEntries(ctx, repo, map[string]object.TreeEntry{})
+	require.NoError(t, err)
+	authorName, authorEmail := GetGitAuthorFromRepo(repo)
+	emptyCommitHash, err := CreateCommit(ctx, repo, emptyTreeHash, plumbing.ZeroHash, "Reset v2 full current", authorName, authorEmail)
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(paths.V2FullCurrentRefName), emptyCommitHash)))
+}
+
 func TestV2ReadSessionMetadataAndPrompts_ReturnsWithoutTranscript(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
@@ -230,6 +280,16 @@ func addOriginRemote(t *testing.T, repoRoot, remoteRoot string) {
 	cmd.Env = testutil.GitIsolatedEnv()
 	output, err := cmd.CombinedOutput()
 	require.NoErrorf(t, err, "git remote add origin output:\n%s", output)
+}
+
+func fetchRef(t *testing.T, repoRoot, refName string) {
+	t.Helper()
+
+	cmd := exec.CommandContext(context.Background(), "git", "fetch", "origin", "+"+refName+":"+refName)
+	cmd.Dir = repoRoot
+	cmd.Env = testutil.GitIsolatedEnv()
+	output, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "git fetch %s output:\n%s", refName, output)
 }
 
 func TestV2ReadSessionMetadata_DoesNotRequireRawTranscript(t *testing.T) {

@@ -30,9 +30,6 @@ const (
 	EntireSettingsLocalFile = ".entire/settings.local.json"
 	// ClonePreferencesFile is the path inside the git common dir for clone-local preferences.
 	ClonePreferencesFile = "entire/preferences.json"
-	// defaultGenerationRetentionDays is the default retention window for archived
-	// checkpoints v2 raw-transcript generations when no override is configured.
-	defaultGenerationRetentionDays = 14
 )
 
 var (
@@ -1147,34 +1144,6 @@ func parseCheckpointsVersion(val any) (int, bool) {
 		}
 	}
 	return 1, false
-}
-
-// GetFullTranscriptGenerationRetentionDays returns the retention window for
-// archived checkpoints v2 /full/* generations. Invalid, missing, or
-// non-positive values fall back to the documented default.
-func (s *EntireSettings) GetFullTranscriptGenerationRetentionDays() int {
-	if s.StrategyOptions == nil {
-		return defaultGenerationRetentionDays
-	}
-
-	val, ok := s.StrategyOptions["full_transcript_generation_retention_days"]
-	if !ok {
-		return defaultGenerationRetentionDays
-	}
-
-	switch days := val.(type) {
-	case int:
-		if days > 0 {
-			return days
-		}
-	case float64:
-		intDays := int(days)
-		if intDays > 0 && days == float64(intDays) {
-			return intDays
-		}
-	}
-
-	return defaultGenerationRetentionDays
 }
 
 // IsFilteredFetchesEnabled checks if fetches should use --filter=blob:none.

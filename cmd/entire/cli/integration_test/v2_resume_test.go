@@ -16,7 +16,7 @@ import (
 
 // TestV2Resume_SwitchBranchWithSession verifies that resume works when
 // checkpoints_v2 is enabled. The session transcript should be read from
-// v2 refs (/main for metadata, /full/* for raw transcript).
+// v2 refs (/main for metadata, /full/current for raw transcript).
 func TestV2Resume_SwitchBranchWithSession(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)

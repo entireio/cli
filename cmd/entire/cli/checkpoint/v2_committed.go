@@ -329,8 +329,8 @@ func (s *V2GitStore) buildCheckpointSubtree(ctx context.Context, basePath string
 // session transcript.
 //
 // On /main: replaces prompts and compact transcript (if provided).
-// On /full/*: replaces the raw transcript where the session artifacts already
-// live, or writes to /full/current if the session has no full artifacts yet.
+// On /full/current: replaces the raw transcript where the session artifacts
+// already live, or writes it there if the session has no full artifacts yet.
 //
 // Returns ErrCheckpointNotFound if the checkpoint doesn't exist on /main.
 func (s *V2GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOptions) error {
@@ -345,7 +345,7 @@ func (s *V2GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOp
 
 	if opts.Transcript.Len() > 0 {
 		if err := s.updateCommittedFullTranscript(ctx, opts, sessionIndex); err != nil {
-			return fmt.Errorf("v2 /full/* update failed: %w", err)
+			return fmt.Errorf("v2 /full/current update failed: %w", err)
 		}
 	}
 
@@ -353,7 +353,7 @@ func (s *V2GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOp
 }
 
 // fullSessionArtifacts describes where a checkpoint session's raw transcript
-// artifacts live across the v2 /full/* refs.
+// artifacts live on the v2 /full/current ref.
 type fullSessionArtifacts struct {
 	RefName       plumbing.ReferenceName
 	Found         bool
@@ -362,7 +362,7 @@ type fullSessionArtifacts struct {
 }
 
 // HasFullSessionArtifacts reports whether the raw transcript and content hash
-// for a checkpoint session exist in any local v2 /full/* ref.
+// for a checkpoint session exist in the local v2 /full/current ref.
 func (s *V2GitStore) HasFullSessionArtifacts(checkpointID id.CheckpointID, sessionIndex int) (bool, error) {
 	artifacts, err := s.findFullSessionArtifacts(checkpointID, sessionIndex)
 	if err != nil {
@@ -401,13 +401,13 @@ func (s *V2GitStore) findFullSessionArtifacts(checkpointID id.CheckpointID, sess
 	return fullSessionArtifacts{}, nil
 }
 
-// FullSessionArtifactsIndex answers "does this session have complete /full/*
+// FullSessionArtifactsIndex answers "does this session have complete /full/current
 // artifacts?" with an O(1) map lookup. Build it once via
 // BuildFullSessionArtifactsIndex.
 type FullSessionArtifactsIndex map[string]struct{}
 
 // Has reports whether the given session has a complete pair of
-// raw_transcript and raw_transcript_hash.txt entries in some /full/* ref.
+// raw_transcript and raw_transcript_hash.txt entries in /full/current.
 func (idx FullSessionArtifactsIndex) Has(checkpointID id.CheckpointID, sessionIndex int) bool {
 	if idx == nil {
 		return false
@@ -420,11 +420,10 @@ func fullArtifactsIndexKey(checkpointID id.CheckpointID, sessionIndex int) strin
 	return string(checkpointID) + "/" + strconv.Itoa(sessionIndex)
 }
 
-// BuildFullSessionArtifactsIndex walks every /full/* ref's tree once and
+// BuildFullSessionArtifactsIndex walks the /full/current ref's tree once and
 // records sessions whose subtree contains both raw_transcript[/.NNN] and
 // raw_transcript_hash.txt. Amortizes per-session HasFullSessionArtifacts
-// calls — each of which would otherwise list every git ref and re-walk every
-// /full/* tree — across the rest of the run.
+// calls across the rest of the run.
 func (s *V2GitStore) BuildFullSessionArtifactsIndex() (FullSessionArtifactsIndex, error) {
 	refNames, err := s.fullRefSearchOrder()
 	if err != nil {
@@ -512,17 +511,7 @@ func sessionHasCompleteFullArtifacts(entries []object.TreeEntry) bool {
 }
 
 func (s *V2GitStore) fullRefSearchOrder() ([]plumbing.ReferenceName, error) {
-	refNames := []plumbing.ReferenceName{plumbing.ReferenceName(paths.V2FullCurrentRefName)}
-
-	archived, err := s.ListArchivedGenerations()
-	if err != nil {
-		return nil, err
-	}
-	for i := len(archived) - 1; i >= 0; i-- {
-		refNames = append(refNames, plumbing.ReferenceName(paths.V2FullRefPrefix+archived[i]))
-	}
-
-	return refNames, nil
+	return []plumbing.ReferenceName{plumbing.ReferenceName(paths.V2FullCurrentRefName)}, nil
 }
 
 func (s *V2GitStore) inspectFullSessionArtifacts(refName plumbing.ReferenceName, checkpointID id.CheckpointID, sessionIndex int) (fullSessionArtifacts, error) {
@@ -673,7 +662,7 @@ func (s *V2GitStore) updateCommittedMain(ctx context.Context, opts UpdateCommitt
 }
 
 // updateCommittedFullTranscript replaces the transcript for a specific checkpoint
-// on the /full/* ref where that checkpoint session already lives, while
+// on /full/current where that checkpoint session already lives, while
 // preserving other checkpoints' transcripts in the tree. If the session has no
 // full-transcript artifacts yet, it writes to /full/current.
 func (s *V2GitStore) updateCommittedFullTranscript(ctx context.Context, opts UpdateCommittedOptions, sessionIndex int) error {
@@ -771,10 +760,6 @@ func (s *V2GitStore) updateCommittedFullTranscript(ctx context.Context, opts Upd
 	commitMsg := fmt.Sprintf("Finalize checkpoint: %s\n", opts.CheckpointID)
 	if err := s.updateRef(ctx, refName, newTreeHash, parentHash, commitMsg, authorName, authorEmail); err != nil {
 		return err
-	}
-
-	if refName == plumbing.ReferenceName(paths.V2FullCurrentRefName) {
-		s.rotateCurrentIfNeeded(ctx, newTreeHash)
 	}
 
 	return nil
@@ -997,8 +982,7 @@ func (s *V2GitStore) writeCompactTranscriptHash(compactTranscript []byte, sessio
 
 // writeCommittedFullTranscript writes the raw transcript to the /full/current ref.
 // Transcripts accumulate across checkpoints — each write splices into the existing
-// tree. Generation metadata (generation.json) at the tree root is updated on every
-// write with the new checkpoint ID and timestamps.
+// tree.
 //
 // sessionIndex is the session slot (0-based), determined by the caller to stay
 // consistent with the /main ref's session numbering.
@@ -1073,28 +1057,7 @@ func (s *V2GitStore) writeCommittedFullTranscript(ctx context.Context, opts Writ
 		return err
 	}
 
-	s.rotateCurrentIfNeeded(ctx, newTreeHash)
 	return nil
-}
-
-func (s *V2GitStore) rotateCurrentIfNeeded(ctx context.Context, treeHash plumbing.Hash) {
-	checkpointCount, countErr := s.CountCheckpointsInTree(ctx, treeHash)
-	if countErr != nil {
-		logging.Warn(ctx, "failed to count checkpoints for rotation check",
-			slog.String("error", countErr.Error()),
-		)
-		return
-	}
-	if checkpointCount < s.maxCheckpoints() {
-		return
-	}
-	if rotErr := s.rotateGeneration(ctx); rotErr != nil {
-		logging.Warn(ctx, "generation rotation failed",
-			slog.String("error", rotErr.Error()),
-			slog.Int("checkpoint_count", checkpointCount),
-		)
-		// Non-fatal: rotation failure doesn't invalidate the write
-	}
 }
 
 // writeTranscriptBlobs writes pre-redacted, chunked transcript blobs to entries.

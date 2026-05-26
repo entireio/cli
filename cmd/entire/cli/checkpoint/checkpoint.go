@@ -209,7 +209,7 @@ type WriteCommittedOptions struct {
 
 	// CreatedAt is when the checkpoint was originally created.
 	// When zero, writers use the current time. Migration sets this to preserve
-	// the original v1 checkpoint time in v2 metadata and retention decisions.
+	// the original v1 checkpoint time in v2 metadata.
 	CreatedAt time.Time
 
 	// CommitTime is the optional git author/committer timestamp for the

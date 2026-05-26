@@ -459,8 +459,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - `manual_commit_logs.go` - Session log retrieval and session listing
 - `manual_commit_hooks.go` - Git hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push)
 - `manual_commit_reset.go` - Shadow branch reset/cleanup functionality
-- `cleanup.go` - Cleanup discovery/deletion, including archived v2 generation retention
-- `generation_repair.go` - Archived v2 generation metadata repair from raw transcript timestamps
+- `cleanup.go` - Cleanup discovery/deletion for shadow branches, session states, and checkpoint metadata
 - `session_state.go` - Package-level session state functions (`LoadSessionState`, `SaveSessionState`, `ListSessionStates`, `FindMostRecentSession`)
 - `hooks.go` - Git hook installation
 

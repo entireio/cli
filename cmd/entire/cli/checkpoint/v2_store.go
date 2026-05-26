@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
-	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 
@@ -19,7 +18,7 @@ import (
 // V2GitStore provides checkpoint storage operations for the v2 ref layout.
 // It writes to two custom refs under refs/entire/:
 //   - /main: permanent metadata + compact transcripts
-//   - /full/current: active generation of raw transcripts
+//   - /full/current: raw transcripts
 //
 // V2GitStore is separate from GitStore (v1) to keep concerns isolated
 // and simplify future v1 removal. It composes GitStore internally to
@@ -29,27 +28,11 @@ type V2GitStore struct {
 	repo *git.Repository
 	gs   *GitStore // shared entry-building helpers (same package)
 
-	// maxCheckpointsPerGeneration overrides the rotation threshold for testing.
-	// Zero means use DefaultMaxCheckpointsPerGeneration.
-	maxCheckpointsPerGeneration int
-
 	// blobFetcher fetches missing blobs by hash. When set, read paths wrap
 	// trees with FetchingTree so missing blobs are auto-recovered (and the
 	// cat-file fallback covers partial-clone-filtered blobs that go-git's
 	// storer can't see).
 	blobFetcher BlobFetchFunc
-
-	commonDirOnce sync.Once
-	commonDir     string
-	commonDirErr  error
-}
-
-// maxCheckpoints returns the effective rotation threshold.
-func (s *V2GitStore) maxCheckpoints() int {
-	if s.maxCheckpointsPerGeneration > 0 {
-		return s.maxCheckpointsPerGeneration
-	}
-	return DefaultMaxCheckpointsPerGeneration
 }
 
 // NewV2GitStore creates a new v2 checkpoint store backed by the given git repository.
