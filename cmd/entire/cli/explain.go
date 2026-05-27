@@ -311,6 +311,7 @@ Checkpoint detail view shows:
   - Author of the checkpoint
   - Associated git commits that reference the checkpoint
   - Prompts and responses from the session
+  - Semantic entity changes when the entire-sem plugin is installed
 
 Note: --session filters the list view; the positional arg, --commit, and --checkpoint are mutually exclusive.`,
 		Args: func(_ *cobra.Command, args []string) error {
@@ -707,6 +708,10 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 
 	// Find associated commits (git commits with matching Entire-Checkpoint trailer)
 	associatedCommits, _ := getAssociatedCommits(ctx, lookup.repo, fullCheckpointID, searchAll) //nolint:errcheck // Best-effort
+	semanticChanges := semanticDiffForAssociatedCommits(ctx, lookup.repo, associatedCommits)
+	if semanticChanges != nil {
+		semanticChanges.Checkpoint = fullCheckpointID.String()
+	}
 
 	// Derive author from the first associated commit (the user who made the commit).
 	// Fall back to the committed checkpoint store for checkpoints
@@ -724,7 +729,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	// Format and output. Stop spinner BEFORE any write to w to keep stderr
 	// frames and stdout content from interleaving.
 	stopLoad(false)
-	output := formatCheckpointOutput(summary, content, fullCheckpointID, associatedCommits, author, verbose, full, w)
+	output := formatCheckpointOutput(summary, content, fullCheckpointID, associatedCommits, author, verbose, full, w, semanticChanges)
 	outputExplainContent(w, output, noPager)
 	return nil
 }
@@ -1678,7 +1683,7 @@ func renderExplainBody(w io.Writer, md string) string {
 //
 // Author is displayed when available (only for committed checkpoints).
 // Associated commits are git commits that reference this checkpoint via Entire-Checkpoint trailer.
-func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, checkpointID id.CheckpointID, associatedCommits []associatedCommit, author checkpoint.Author, verbose, full bool, w io.Writer) string {
+func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, checkpointID id.CheckpointID, associatedCommits []associatedCommit, author checkpoint.Author, verbose, full bool, w io.Writer, semanticChanges ...*semanticDiffResult) string {
 	var sb strings.Builder
 	meta := content.Metadata
 	styles := newStatusStyles(w)
@@ -1697,6 +1702,7 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 
 	if meta.Summary != nil {
 		md := buildSummaryMarkdown(meta.Summary)
+		md += buildSemanticChangesMarkdown(firstSemanticResult(semanticChanges))
 		if verbose || full {
 			md += buildFilesMarkdown(meta.FilesTouched)
 		}
@@ -1721,6 +1727,7 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 
 		hint := fmt.Sprintf("Not generated yet. Run `entire explain --generate %s` to create an AI summary.", checkpointID)
 		md := buildNoSummaryMarkdown(intent, files, hint)
+		md += buildSemanticChangesMarkdown(firstSemanticResult(semanticChanges))
 		sb.WriteString(renderExplainBody(w, md))
 	}
 
@@ -1736,6 +1743,13 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 	}
 
 	return sb.String()
+}
+
+func firstSemanticResult(values []*semanticDiffResult) *semanticDiffResult {
+	if len(values) == 0 {
+		return nil
+	}
+	return values[0]
 }
 
 // appendTranscriptSection appends the appropriate transcript section to the builder

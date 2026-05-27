@@ -10,8 +10,7 @@ import "slices"
 //
 //nolint:gochecknoglobals // package-level allowlist; mutated by tests via snapshot/restore.
 var officialPlugins = []string{
-	// Add Entire-shipped plugin names here as they're released.
-	// e.g. "pgr"
+	"sem",
 }
 
 func IsOfficialPlugin(name string) bool {

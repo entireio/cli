@@ -1,0 +1,18 @@
+[tools]
+go = { version = "1.26.2" }
+
+[tasks.fmt]
+description = "Run gofmt"
+run = "gofmt -s -w ."
+
+[tasks.test]
+description = "Run tests"
+run = "go test ./..."
+
+[tasks.build]
+description = "Build the plugin binary"
+run = "go build -o entire-sem ./cmd/entire-sem"
+
+[tasks.check]
+description = "Run formatting, tests, and build"
+depends = ["fmt", "test", "build"]

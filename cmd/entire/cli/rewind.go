@@ -217,6 +217,7 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 		// Shadow checkpoint - no sha
 		fmt.Fprintf(w, "\nSelected: %s\n", sanitizeForTerminal(selectedPoint.Message))
 	}
+	printSemanticRewindPreview(ctx, w, *selectedPoint)
 
 	// Handle logs-only points with a sub-choice menu
 	if selectedPoint.IsLogsOnly {
@@ -440,6 +441,7 @@ func runRewindToInternal(ctx context.Context, w, errW io.Writer, commitID string
 	if selectedPoint == nil {
 		return fmt.Errorf("rewind point not found: %s", commitID)
 	}
+	printSemanticRewindPreview(ctx, w, *selectedPoint)
 
 	// Handle reset mode (for logs-only points)
 	if reset {

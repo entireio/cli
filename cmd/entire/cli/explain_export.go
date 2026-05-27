@@ -362,6 +362,7 @@ type checkpointExportJSON struct {
 	Branch           string                  `json:"branch,omitempty"`
 	CheckpointsCount int                     `json:"checkpoints_count"`
 	FilesTouched     []string                `json:"files_touched,omitempty"`
+	SemanticChanges  *semanticDiffResult     `json:"semantic_changes,omitempty"`
 	HasReview        bool                    `json:"has_review,omitempty"`
 	SessionCount     int                     `json:"session_count"`
 	Sessions         []checkpointSessionJSON `json:"sessions"`
@@ -421,6 +422,7 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 	}
 
 	envelope, failedSessions := buildCheckpointJSONEnvelope(ctx, store, summary, cpID)
+	envelope.SemanticChanges = semanticDiffForCheckpointID(ctx, lookup.repo, cpID, false)
 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
