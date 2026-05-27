@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v6"
@@ -84,6 +85,62 @@ func readTestRef(t *testing.T, repo *git.Repository) plumbing.Hash {
 	return ref.Hash()
 }
 
+func makeTreeCommit(t *testing.T, repo *git.Repository, parents []plumbing.Hash, msg string, files map[string]string) plumbing.Hash {
+	t.Helper()
+	entries := make(map[string]object.TreeEntry, len(files))
+	for path, contents := range files {
+		blobHash, err := checkpoint.CreateBlobFromContent(repo, []byte(contents))
+		if err != nil {
+			t.Fatalf("create blob %s: %v", path, err)
+		}
+		entries[path] = object.TreeEntry{Name: path, Mode: 0o100644, Hash: blobHash}
+	}
+	treeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, entries)
+	if err != nil {
+		t.Fatalf("build tree for %q: %v", msg, err)
+	}
+	sig := object.Signature{Name: "T", Email: "t@example.com", When: time.Unix(0, 0).UTC()}
+	commit := &object.Commit{
+		TreeHash:     treeHash,
+		Message:      msg,
+		Author:       sig,
+		Committer:    sig,
+		ParentHashes: parents,
+	}
+	obj := repo.Storer.NewEncodedObject()
+	if err := commit.Encode(obj); err != nil {
+		t.Fatalf("encode commit %q: %v", msg, err)
+	}
+	hash, err := repo.Storer.SetEncodedObject(obj)
+	if err != nil {
+		t.Fatalf("store commit %q: %v", msg, err)
+	}
+	return hash
+}
+
+func assertCommitFile(t *testing.T, repo *git.Repository, commitHash plumbing.Hash, path, want string) {
+	t.Helper()
+	commit, err := repo.CommitObject(commitHash)
+	if err != nil {
+		t.Fatalf("commit %s: %v", commitHash, err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("tree for %s: %v", commitHash, err)
+	}
+	file, err := tree.File(path)
+	if err != nil {
+		t.Fatalf("file %s in %s: %v", path, commitHash, err)
+	}
+	got, err := file.Contents()
+	if err != nil {
+		t.Fatalf("contents for %s in %s: %v", path, commitHash, err)
+	}
+	if got != want {
+		t.Fatalf("contents for %s in %s = %q, want %q", path, commitHash, got, want)
+	}
+}
+
 func TestSafelyAdvanceLocalRef_LocalMissing_SetsToTarget(t *testing.T) {
 	t.Parallel()
 	repo := newSafelyAdvanceTestRepo(t)
@@ -141,43 +198,60 @@ func TestSafelyAdvanceLocalRef_LocalBehind_FastForwards(t *testing.T) {
 	}
 }
 
-// Before this fix, SafelyAdvanceLocalRef overwrote any local ref whose history
-// the target couldn't reach. That destroyed unpushed local commits on orphan
-// refs the CLI maintains (entire/checkpoints/v1, the V2 main ref) whenever a
-// fetch landed sibling commits — e.g. checkpoint metadata produced on another
-// machine. The objects survived in the loose-objects pool until git gc, but
-// the branch ref no longer pointed at them.
-func TestSafelyAdvanceLocalRef_Diverged_PreservesLocal(t *testing.T) {
+func TestSafelyAdvanceLocalRef_Diverged_ReplaysLocalOntoTarget(t *testing.T) {
 	t.Parallel()
 	repo := newSafelyAdvanceTestRepo(t)
-	base := makeEmptyTreeCommit(t, repo, nil, "base")
-	localTip := makeEmptyTreeCommit(t, repo, []plumbing.Hash{base}, "local-only-work")
-	targetTip := makeEmptyTreeCommit(t, repo, []plumbing.Hash{base}, "remote-only-work")
+	base := makeTreeCommit(t, repo, nil, "base", map[string]string{"base.txt": "base"})
+	localTip := makeTreeCommit(t, repo, []plumbing.Hash{base}, "local-only-work", map[string]string{
+		"base.txt":  "base",
+		"local.txt": "local",
+	})
+	targetTip := makeTreeCommit(t, repo, []plumbing.Hash{base}, "remote-only-work", map[string]string{
+		"base.txt":   "base",
+		"remote.txt": "remote",
+	})
 	forceSetTestRef(t, repo, localTip)
 
 	if err := SafelyAdvanceLocalRef(context.Background(), repo, safelyAdvanceTestRef, targetTip); err != nil {
 		t.Fatalf("SafelyAdvanceLocalRef: %v", err)
 	}
-	if got := readTestRef(t, repo); got != localTip {
-		t.Errorf("diverged local ref must be preserved: got %s, want %s (overwrote to target %s?)",
-			got, localTip, targetTip)
+	got := readTestRef(t, repo)
+	if got == localTip || got == targetTip {
+		t.Fatalf("diverged ref should be replayed onto target: got %s, local %s, target %s", got, localTip, targetTip)
 	}
+	replayedCommit, err := repo.CommitObject(got)
+	if err != nil {
+		t.Fatalf("replayed commit %s: %v", got, err)
+	}
+	if len(replayedCommit.ParentHashes) != 1 || replayedCommit.ParentHashes[0] != targetTip {
+		t.Fatalf("replayed commit parents = %v, want [%s]", replayedCommit.ParentHashes, targetTip)
+	}
+	assertCommitFile(t, repo, got, "base.txt", "base")
+	assertCommitFile(t, repo, got, "local.txt", "local")
+	assertCommitFile(t, repo, got, "remote.txt", "remote")
 }
 
-// Unrelated histories (no common ancestor at all) are a strict subset of
-// "diverged" — neither ref is an ancestor of the other. Confirms the
-// protection extends to that case.
-func TestSafelyAdvanceLocalRef_UnrelatedHistory_PreservesLocal(t *testing.T) {
+func TestSafelyAdvanceLocalRef_UnrelatedHistory_ReplaysLocalOntoTarget(t *testing.T) {
 	t.Parallel()
 	repo := newSafelyAdvanceTestRepo(t)
-	localOnly := makeEmptyTreeCommit(t, repo, nil, "local-orphan")
-	targetOnly := makeEmptyTreeCommit(t, repo, nil, "target-orphan")
+	localOnly := makeTreeCommit(t, repo, nil, "local-orphan", map[string]string{"local.txt": "local"})
+	targetOnly := makeTreeCommit(t, repo, nil, "target-orphan", map[string]string{"remote.txt": "remote"})
 	forceSetTestRef(t, repo, localOnly)
 
 	if err := SafelyAdvanceLocalRef(context.Background(), repo, safelyAdvanceTestRef, targetOnly); err != nil {
 		t.Fatalf("SafelyAdvanceLocalRef: %v", err)
 	}
-	if got := readTestRef(t, repo); got != localOnly {
-		t.Errorf("unrelated-history local ref must be preserved: got %s, want %s", got, localOnly)
+	got := readTestRef(t, repo)
+	if got == localOnly || got == targetOnly {
+		t.Fatalf("unrelated-history ref should be replayed onto target: got %s, local %s, target %s", got, localOnly, targetOnly)
 	}
+	replayedCommit, err := repo.CommitObject(got)
+	if err != nil {
+		t.Fatalf("replayed commit %s: %v", got, err)
+	}
+	if len(replayedCommit.ParentHashes) != 1 || replayedCommit.ParentHashes[0] != targetOnly {
+		t.Fatalf("replayed commit parents = %v, want [%s]", replayedCommit.ParentHashes, targetOnly)
+	}
+	assertCommitFile(t, repo, got, "local.txt", "local")
+	assertCommitFile(t, repo, got, "remote.txt", "remote")
 }

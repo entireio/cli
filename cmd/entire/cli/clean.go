@@ -157,6 +157,7 @@ func previewCurrentHead(ctx context.Context, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
@@ -494,6 +495,7 @@ func activeSessionsOnCurrentHead(ctx context.Context) ([]*session.State, error) 
 	if err != nil {
 		return nil, err
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {

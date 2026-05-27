@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -50,6 +51,8 @@ const MaxCommitTraversalDepth = 1000
 // Each package needs its own package-scoped sentinel for git log iteration patterns.
 var errStop = errors.New("stop iteration")
 
+var errNoMergeBase = errors.New("no merge base")
+
 // IsEmptyRepository returns true if the repository has no commits yet.
 // After git-init, HEAD points to an unborn branch (e.g., refs/heads/main)
 // whose target does not yet exist. repo.Head() returns ErrReferenceNotFound
@@ -70,6 +73,7 @@ func EnsureSetup(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 	if err := vercelconfig.InitSettings(ctx); err != nil {
 		return fmt.Errorf("failed to initialize vercel settings: %w", err)
 	}
@@ -114,6 +118,7 @@ func PromoteTmpRefSafely(ctx context.Context, tmpRefName, destRefName plumbing.R
 	if err != nil {
 		return fmt.Errorf("failed to open repository for %s promote: %w", label, err)
 	}
+	defer repo.Close()
 	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
 
 	tmpRef, err := repo.Reference(tmpRefName, true)
@@ -126,47 +131,139 @@ func PromoteTmpRefSafely(ctx context.Context, tmpRefName, destRefName plumbing.R
 	return nil
 }
 
-// SafelyAdvanceLocalRef updates localRefName to point at targetHash only when
-// the move is non-destructive:
-//
-//   - local missing → create at target
-//   - local == target → no-op
-//   - local at or ahead of target (target is an ancestor of local) → no-op
-//   - local strictly behind target (local is an ancestor of target) → fast-forward
-//   - diverged or unrelated history (neither ref is an ancestor of the other)
-//     → no-op, logged at debug level
-//
-// The diverged case is the dangerous one this guard exists for. The CLI
-// maintains orphan-style refs (entire/checkpoints/v1, the V2 main ref) where
-// unpushed local commits encode user work — a fetch that landed sibling
-// commits from another machine must not silently rewind that work. In the
-// diverged case readers fall through to the remote-tracking tree or to v1,
-// so resume keeps working while local-only commits stay reachable.
-//
-// The ancestry checks walk from the local ref (which has full history), so
-// callers that fetched with --depth=1 do not break the check.
+// SafelyAdvanceLocalRef updates localRefName to include targetHash without
+// dropping local-only commits. Missing and behind refs advance to targetHash;
+// already-current or locally-ahead refs are left unchanged; diverged refs replay
+// commits after the merge-base onto targetHash and move localRefName to the
+// replayed tip. If there is no merge-base and the reachable histories are
+// complete, the full local chain is replayed.
 func SafelyAdvanceLocalRef(ctx context.Context, repo *git.Repository, localRefName plumbing.ReferenceName, targetHash plumbing.Hash) error {
 	currentLocal, localErr := repo.Reference(localRefName, true)
-	if localErr == nil {
-		if currentLocal.Hash() == targetHash {
-			return nil
+	if localErr != nil {
+		if !errors.Is(localErr, plumbing.ErrReferenceNotFound) {
+			return fmt.Errorf("failed to read local ref %s: %w", localRefName, localErr)
 		}
-		if IsAncestorOf(ctx, repo, targetHash, currentLocal.Hash()) {
-			return nil
-		}
-		if !IsAncestorOf(ctx, repo, currentLocal.Hash(), targetHash) {
-			logging.Debug(ctx, "skipping advance: local ref has diverged from target",
-				slog.String("ref", string(localRefName)),
-				slog.String("local", currentLocal.Hash().String()),
-				slog.String("target", targetHash.String()),
-			)
-			return nil
-		}
+		return setRefHash(repo, localRefName, targetHash)
 	}
 
-	newRef := plumbing.NewHashReference(localRefName, targetHash)
+	localHash := currentLocal.Hash()
+	if localHash == targetHash {
+		return nil
+	}
+
+	repoPath, err := getRepoPath(repo)
+	if err != nil {
+		return fmt.Errorf("failed to get repo path: %w", err)
+	}
+
+	mergeBase, err := getMergeBase(ctx, repoPath, localHash.String(), targetHash.String())
+	if errors.Is(err, errNoMergeBase) {
+		shallow, shallowErr := hasReachableShallowBoundary(ctx, repo, repoPath, localHash.String(), targetHash.String())
+		if shallowErr != nil {
+			return fmt.Errorf("failed to check shallow history for %s: %w", localRefName, shallowErr)
+		}
+		if shallow {
+			return fmt.Errorf("no merge base for %s, and reachable shallow history prevents proving refs are disconnected; run 'entire doctor' or 'git fetch --unshallow' and try again", localRefName)
+		}
+		return replayDisconnectedLocalRef(ctx, repo, repoPath, localRefName, localHash, targetHash)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to find merge base for %s: %w", localRefName, err)
+	}
+	if mergeBase == targetHash {
+		return nil
+	}
+	if mergeBase == localHash {
+		return setRefHash(repo, localRefName, targetHash)
+	}
+
+	return replayLocalRefFromBase(ctx, repo, repoPath, localRefName, localHash, targetHash, mergeBase)
+}
+
+func replayLocalRefFromBase(ctx context.Context, repo *git.Repository, repoPath string, localRefName plumbing.ReferenceName, localHash, targetHash, baseHash plumbing.Hash) error {
+	localCommits, err := collectCommitsSince(ctx, repo, repoPath, localHash, baseHash)
+	if err != nil {
+		return fmt.Errorf("failed to collect local replay commits for %s: %w", localRefName, err)
+	}
+	shallow, err := loadShallowHashes(ctx, repoPath)
+	if err != nil {
+		return fmt.Errorf("failed to load shallow boundaries for %s: %w", localRefName, err)
+	}
+	return replayLocalCommits(ctx, repo, localRefName, targetHash, localCommits, shallow)
+}
+
+func replayDisconnectedLocalRef(ctx context.Context, repo *git.Repository, repoPath string, localRefName plumbing.ReferenceName, localHash, targetHash plumbing.Hash) error {
+	shallow, err := loadShallowHashes(ctx, repoPath)
+	if err != nil {
+		return fmt.Errorf("failed to load shallow boundaries for %s: %w", localRefName, err)
+	}
+	localCommits, err := collectCommitChain(repo, localHash, shallow)
+	if err != nil {
+		return fmt.Errorf("failed to collect disconnected local commits for %s: %w", localRefName, err)
+	}
+	return replayLocalCommits(ctx, repo, localRefName, targetHash, localCommits, shallow)
+}
+
+func replayLocalCommits(ctx context.Context, repo *git.Repository, localRefName plumbing.ReferenceName, targetHash plumbing.Hash, localCommits []*object.Commit, shallow map[plumbing.Hash]bool) error {
+	if len(localCommits) == 0 {
+		return setRefHash(repo, localRefName, targetHash)
+	}
+
+	newTip, err := cherryPickOnto(ctx, repo, targetHash, localCommits, shallow)
+	if err != nil {
+		return fmt.Errorf("failed to replay local commits for %s: %w", localRefName, err)
+	}
+
+	return setRefHash(repo, localRefName, newTip)
+}
+
+func hasReachableShallowBoundary(ctx context.Context, repo *git.Repository, repoPath string, hashes ...string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	shallowHashes, err := repo.Storer.Shallow()
+	if err != nil {
+		return false, fmt.Errorf("read shallow commits: %w", err)
+	}
+	if len(shallowHashes) == 0 {
+		return false, nil
+	}
+
+	shallowCommits := make(map[string]struct{}, len(shallowHashes))
+	for _, hash := range shallowHashes {
+		shallowCommits[hash.String()] = struct{}{}
+	}
+	for _, hash := range hashes {
+		reachesBoundary, err := historyReachesShallowBoundary(ctx, repoPath, hash, shallowCommits)
+		if err != nil {
+			return false, err
+		}
+		if reachesBoundary {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func historyReachesShallowBoundary(ctx context.Context, repoPath, hash string, shallowCommits map[string]struct{}) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-list", hash)
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git rev-list %s failed: %w", hash, err)
+	}
+	for _, commitHash := range strings.Fields(string(output)) {
+		if _, ok := shallowCommits[commitHash]; ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func setRefHash(repo *git.Repository, refName plumbing.ReferenceName, hash plumbing.Hash) error {
+	newRef := plumbing.NewHashReference(refName, hash)
 	if err := repo.Storer.SetReference(newRef); err != nil {
-		return fmt.Errorf("failed to update local ref %s: %w", localRefName, err)
+		return fmt.Errorf("failed to update local ref %s: %w", refName, err)
 	}
 	return nil
 }
@@ -211,6 +308,7 @@ func ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Warn (once per process) if metadata branches are disconnected
 	WarnIfMetadataDisconnected()
@@ -924,14 +1022,7 @@ func GetRemoteMetadataBranchTree(repo *git.Repository) (*object.Tree, error) {
 // It uses 'git rev-parse --show-toplevel' to find the repository root,
 // which works correctly even when called from a subdirectory or a linked worktree.
 func OpenRepository(ctx context.Context) (*git.Repository, error) {
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		// Fallback to current directory if git command fails
-		// (e.g., if git is not installed or we're not in a repo)
-		repoRoot = "."
-	}
-
-	repo, err := git.PlainOpen(repoRoot)
+	repo, err := gitrepo.OpenCurrent(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
@@ -1079,17 +1170,18 @@ func checkCanRewindWithWarning(ctx context.Context) (bool, string, error) {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		// Can't open repo - still allow rewind but without stats
-		return true, "", nil //nolint:nilerr // Rewind allowed even if repo can't be opened
+		return true, "", nil
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even if worktree can't be accessed
+		return true, "", nil
 	}
 
 	status, err := worktree.Status()
 	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even if status can't be retrieved
+		return true, "", nil
 	}
 
 	if status.IsClean() {
@@ -1099,17 +1191,17 @@ func checkCanRewindWithWarning(ctx context.Context) (bool, string, error) {
 	// Get HEAD commit tree for comparison - if we can't get it, just return without stats
 	head, err := repo.Head()
 	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even without HEAD (e.g., empty repo)
+		return true, "", nil
 	}
 
 	headCommit, err := repo.CommitObject(head.Hash())
 	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even if commit lookup fails
+		return true, "", nil
 	}
 
 	headTree, err := headCommit.Tree()
 	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even if tree lookup fails
+		return true, "", nil
 	}
 
 	type fileChange struct {
@@ -1123,7 +1215,7 @@ func checkCanRewindWithWarning(ctx context.Context) (bool, string, error) {
 	// Use repo root, not cwd - git status returns paths relative to repo root
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even if worktree root lookup fails
+		return true, "", nil
 	}
 
 	for file, st := range status {
@@ -1298,6 +1390,7 @@ func getTaskCheckpointFromTree(ctx context.Context, point RewindPoint) (*TaskChe
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	commitHash := plumbing.NewHash(point.ID)
 	commit, err := repo.CommitObject(commitHash)
@@ -1341,6 +1434,7 @@ func getTaskTranscriptFromTree(ctx context.Context, point RewindPoint) ([]byte, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	commitHash := plumbing.NewHash(point.ID)
 	commit, err := repo.CommitObject(commitHash)

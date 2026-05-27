@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
@@ -38,6 +39,7 @@ func InitRepo(t *testing.T, repoDir string) {
 	if err != nil {
 		t.Fatalf("failed to init git repo: %v", err)
 	}
+	defer repo.Close()
 
 	// Configure git user for commits
 	cfg, err := repo.Config()
@@ -116,10 +118,11 @@ func FileExists(repoDir, path string) bool {
 func GitAdd(t *testing.T, repoDir string, paths ...string) {
 	t.Helper()
 
-	repo, err := git.PlainOpen(repoDir)
+	repo, err := gitrepo.OpenPath(repoDir)
 	if err != nil {
 		t.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -137,10 +140,11 @@ func GitAdd(t *testing.T, repoDir string, paths ...string) {
 func GitCommit(t *testing.T, repoDir, message string) {
 	t.Helper()
 
-	repo, err := git.PlainOpen(repoDir)
+	repo, err := gitrepo.OpenPath(repoDir)
 	if err != nil {
 		t.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -176,10 +180,11 @@ func GitCheckoutNewBranch(t *testing.T, repoDir, branchName string) {
 func GetHeadHash(t *testing.T, repoDir string) string {
 	t.Helper()
 
-	repo, err := git.PlainOpen(repoDir)
+	repo, err := gitrepo.OpenPath(repoDir)
 	if err != nil {
 		t.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
@@ -215,10 +220,11 @@ func GitReset(t *testing.T, dir string, ref string) {
 func BranchExists(t *testing.T, repoDir, branchName string) bool {
 	t.Helper()
 
-	repo, err := git.PlainOpen(repoDir)
+	repo, err := gitrepo.OpenPath(repoDir)
 	if err != nil {
 		t.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	refs, err := repo.References()
 	if err != nil {
@@ -241,10 +247,11 @@ func BranchExists(t *testing.T, repoDir, branchName string) bool {
 func GetCommitMessage(t *testing.T, repoDir, hash string) string {
 	t.Helper()
 
-	repo, err := git.PlainOpen(repoDir)
+	repo, err := gitrepo.OpenPath(repoDir)
 	if err != nil {
 		t.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	commitHash := plumbing.NewHash(hash)
 	commit, err := repo.CommitObject(commitHash)
@@ -261,10 +268,11 @@ func GetCommitMessage(t *testing.T, repoDir, hash string) string {
 func GetLatestCheckpointIDFromHistory(t *testing.T, repoDir string) (string, error) {
 	t.Helper()
 
-	repo, err := git.PlainOpen(repoDir)
+	repo, err := gitrepo.OpenPath(repoDir)
 	if err != nil {
 		t.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {

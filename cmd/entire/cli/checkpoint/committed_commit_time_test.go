@@ -71,33 +71,6 @@ func TestWriteCommitted_ZeroCommitTimeUsesCurrentTime(t *testing.T) {
 	require.True(t, commit.Committer.When.Equal(commit.Author.When), "committer time = %s, want author time %s", commit.Committer.When, commit.Author.When)
 }
 
-func TestV2WriteCommitted_CommitTime(t *testing.T) {
-	t.Parallel()
-
-	repo, _ := setupCommittedCommitTimeRepo(t)
-	store := NewV2GitStore(repo)
-	commitTime := time.Date(2024, 4, 5, 6, 7, 8, 0, time.UTC)
-
-	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
-		CheckpointID: id.MustCheckpointID("c3d4e5f6a1b2"),
-		SessionID:    "session-v2-commit-time",
-		CreatedAt:    time.Date(2024, 4, 1, 2, 3, 4, 0, time.UTC),
-		CommitTime:   commitTime,
-		Strategy:     commitTimeStrategy,
-		Transcript:   redact.AlreadyRedacted([]byte("transcript line\n")),
-		AuthorName:   "Migration",
-		AuthorEmail:  "migration@example.com",
-	})
-	require.NoError(t, err)
-
-	mainCommit := refHeadCommit(t, repo, plumbing.ReferenceName(paths.V2MainRefName))
-	fullCommit := refHeadCommit(t, repo, plumbing.ReferenceName(paths.V2FullCurrentRefName))
-	for _, commit := range []*object.Commit{mainCommit, fullCommit} {
-		require.True(t, commit.Author.When.Equal(commitTime), "author time = %s, want %s", commit.Author.When, commitTime)
-		require.True(t, commit.Committer.When.Equal(commitTime), "committer time = %s, want %s", commit.Committer.When, commitTime)
-	}
-}
-
 func setupCommittedCommitTimeRepo(t *testing.T) (*git.Repository, *GitStore) {
 	t.Helper()
 

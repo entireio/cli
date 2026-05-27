@@ -117,6 +117,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Identify stuck sessions
 	now := time.Now()
@@ -332,6 +333,7 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	ctx := cmd.Context()
 	remoteRefName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)

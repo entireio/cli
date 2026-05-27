@@ -284,11 +284,6 @@ type WriteCommittedOptions struct {
 	// CheckpointTranscriptStart is written to both CommittedMetadata.CheckpointTranscriptStart
 	// and the deprecated CommittedMetadata.TranscriptLinesAtStart for backward compatibility.
 
-	// CompactTranscriptStart is the transcript.jsonl line offset at checkpoint start.
-	// V2 /main writes this to checkpoint_transcript_start; v1 continues to use
-	// CheckpointTranscriptStart (full.jsonl).
-	CompactTranscriptStart int
-
 	// TokenUsage contains the token usage for this checkpoint
 	TokenUsage *agent.TokenUsage
 
@@ -317,11 +312,6 @@ type WriteCommittedOptions struct {
 	//   - the transcript was empty or too short to summarize
 	//   - the checkpoint predates the summarization feature
 	Summary *Summary
-
-	// CompactTranscript is the Entire Transcript Format (transcript.jsonl) bytes.
-	// Written to v2 /main ref alongside metadata. May be nil if compaction
-	// was not performed (unknown agent, compaction error, empty transcript).
-	CompactTranscript []byte
 
 	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
 	Kind string
@@ -363,10 +353,6 @@ type UpdateCommittedOptions struct {
 	// Agent identifies the agent type (needed for transcript chunking)
 	Agent types.AgentType
 
-	// CompactTranscript is the updated Entire Transcript Format bytes.
-	// If non-nil, replaces the existing transcript.jsonl on v2 /main.
-	CompactTranscript []byte
-
 	// PrecomputedBlobs, if non-nil, provides chunk blob hashes and the
 	// content-hash blob hash computed once for this transcript. When set,
 	// UpdateCommitted skips the per-call ChunkTranscript + zlib work and
@@ -378,11 +364,6 @@ type UpdateCommittedOptions struct {
 // PrecomputedTranscriptBlobs holds blob hashes for a transcript that was
 // chunked and written to the object store once, for reuse across multiple
 // UpdateCommitted calls sharing the same transcript content.
-//
-// Blob hashes are content-addressed (SHA-1 of chunk bytes), so the same
-// PrecomputedTranscriptBlobs works for both v1 (full.jsonl) and v2
-// (raw_transcript) paths — only the tree-entry filename differs.
-//
 // Callers should avoid constructing this for empty transcripts; agent.ChunkTranscript
 // would otherwise produce a single zero-length chunk and a hash for an empty
 // blob, which downstream stores would never reference.

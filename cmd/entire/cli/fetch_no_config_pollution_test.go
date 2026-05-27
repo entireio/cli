@@ -8,8 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/redact"
+	"github.com/go-git/go-git/v6"
+	"github.com/stretchr/testify/require"
 )
 
 // TestFetchDoesNotPolluteOriginConfig is a regression test for #712.
@@ -91,6 +95,56 @@ func TestFetchDoesNotPolluteOriginConfig(t *testing.T) {
 				t.Errorf("%s: remote.origin.partialclonefilter was set to %q — fetch leaked partial-clone config onto origin", tc.name, got)
 			}
 		})
+	}
+}
+
+// TestFetchV2MainTreeOnly_DoesNotCreateShallowRepository guards the explain
+// remote-fetch path for stale local v2 refs. V2 fetches promote through
+// SafelyAdvanceLocalRef, which needs ancestry to prove a fast-forward. If this
+// helper creates a shallow boundary, a remote descendant can look diverged and
+// the local v2 ref stays stale.
+func TestFetchV2MainTreeOnly_DoesNotCreateShallowRepository(t *testing.T) {
+	// Uses t.Chdir() — cannot run in parallel.
+
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "bare.git")
+	producerDir := filepath.Join(tmpDir, "producer")
+	localDir := filepath.Join(tmpDir, "local")
+
+	runGit(t, tmpDir, "init", "--bare", bareDir)
+
+	testutil.InitRepo(t, producerDir)
+	testutil.WriteFile(t, producerDir, "README.md", "hello")
+	testutil.GitAdd(t, producerDir, "README.md")
+	testutil.GitCommit(t, producerDir, "init")
+	runGit(t, producerDir, "remote", "add", "origin", bareDir)
+
+	producerRepo, err := git.PlainOpen(producerDir)
+	if err != nil {
+		t.Fatalf("failed to open producer repo: %v", err)
+	}
+	writeV2CheckpointForExport(t, producerRepo, id.MustCheckpointID("121212121212"), v2CheckpointFixtureOptions{
+		SessionID:  "fetch-v2-shallow-guard",
+		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n")),
+	})
+
+	runGit(t, producerDir, "push", "origin", "HEAD:refs/heads/main", paths.V2MainRefName+":"+paths.V2MainRefName)
+	runGit(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGit(t, tmpDir, "clone", "--branch", "main", bareDir, localDir)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(localDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(localDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`),
+		0o644,
+	))
+
+	t.Chdir(localDir)
+
+	require.NoError(t, FetchV2MainTreeOnly(context.Background()))
+
+	if got := gitOutput(t, localDir, "rev-parse", "--is-shallow-repository"); got != "false" {
+		t.Fatalf("FetchV2MainTreeOnly left repository shallow = %s, want false", got)
 	}
 }
 

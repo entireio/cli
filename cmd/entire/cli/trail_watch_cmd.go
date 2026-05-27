@@ -89,7 +89,7 @@ func runTrailWatch(cmd *cobra.Command, number int, jsonOutput, showPings, once b
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
-	client, err := NewAuthenticatedAPIClient(trailInsecureHTTP(cmd))
+	client, err := NewAuthenticatedAPIClient(ctx, trailInsecureHTTP(cmd))
 	if err != nil {
 		return fmt.Errorf("authentication required: %w", err)
 	}

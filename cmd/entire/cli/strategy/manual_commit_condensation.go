@@ -42,7 +42,13 @@ var (
 
 // listCheckpoints returns all checkpoints from committed checkpoint storage.
 func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
-	store, err := s.committedCheckpointStore(ctx)
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open git repository: %w", err)
+	}
+	defer repo.Close()
+
+	store, err := s.committedCheckpointStore(ctx, repo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
 	}
@@ -57,7 +63,13 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 
 // getCheckpointLog returns the transcript for a specific checkpoint ID.
 func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointID id.CheckpointID) ([]byte, error) {
-	store, err := s.committedCheckpointStore(ctx)
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open git repository: %w", err)
+	}
+	defer repo.Close()
+
+	store, err := s.committedCheckpointStore(ctx, repo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
 	}
@@ -166,11 +178,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		return skipped, nil
 	}
 
-	// Get checkpoint store
-	store, err := s.getCheckpointStore()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
-	}
+	store := s.getCheckpointStore(repo)
 
 	// Get author info
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
@@ -203,7 +211,6 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		summary = generateSummary(ctx, redactedTranscript, sessionData.FilesTouched, state)
 	}
 
-	// Build write options (shared by v1 and v2)
 	writeOpts := cpkg.WriteCommittedOptions{
 		CheckpointID:                checkpointID,
 		SessionID:                   state.SessionID,
@@ -1100,6 +1107,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	checkpointID, err := id.Generate()
 	if err != nil {
@@ -1198,6 +1206,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		)
 		return nil // fail-open
 	}
+	defer repo.Close()
 
 	checkpointID, err := id.Generate()
 	if err != nil {

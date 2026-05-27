@@ -93,6 +93,16 @@ type explainCheckpointLookup struct {
 	committed []checkpoint.CommittedInfo
 }
 
+func (l *explainCheckpointLookup) Close() error {
+	if l == nil || l.repo == nil {
+		return nil
+	}
+	if err := l.repo.Close(); err != nil {
+		return fmt.Errorf("close repository: %w", err)
+	}
+	return nil
+}
+
 // generateOrRawLabel returns the user-facing verb for the action the user
 // requested, used in error messages when a commit target has no trailer.
 func generateOrRawLabel(generate bool) string {
@@ -472,6 +482,9 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 	stop := startSpinner(errW, "Loading checkpoints")
 	lookup, lookupErr := newExplainCheckpointLookup(ctx)
 	stop(false)
+	if lookup != nil {
+		defer lookup.Close()
+	}
 	if generate {
 		if err := runExplainAutoAmbiguityGuard(ctx, target, lookup, lookupErr); err != nil {
 			return err
@@ -586,15 +599,26 @@ func runExplainCheckpoint(ctx context.Context, w, errW io.Writer, checkpointIDPr
 }
 
 func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, checkpointIDPrefix string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool, lookup *explainCheckpointLookup, lookupErr error, summaryTimeoutSeconds int) error {
+	ownLookup := false
 	if lookup == nil {
 		var err error
 		lookup, err = newExplainCheckpointLookup(ctx)
 		if err != nil {
 			return err
 		}
+		ownLookup = true
 	} else if lookupErr != nil {
 		return lookupErr
 	}
+	initialLookup := lookup
+	defer func() {
+		if ownLookup && initialLookup != nil {
+			_ = initialLookup.Close()
+		}
+		if lookup != nil && lookup != initialLookup {
+			_ = lookup.Close()
+		}
+	}()
 
 	// Match the prefix locally; on miss, fetch from remote and retry once.
 	matches, lookup := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, checkpointIDPrefix)
@@ -834,6 +858,12 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 	if err != nil {
 		return nil, fmt.Errorf("not a git repository: %w", err)
 	}
+	closeOnError := true
+	defer func() {
+		if closeOnError {
+			_ = repo.Close()
+		}
+	}()
 
 	// FetchBlobsByHash uses `git fetch-pack` for blob SHAs (porcelain
 	// `git fetch` fails against partial-clone repos with "did not send all
@@ -856,6 +886,7 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 		return nil, fmt.Errorf("failed to list checkpoints: %w", err)
 	}
 	lookup.committed = committed
+	closeOnError = false
 	return lookup, nil
 }
 
@@ -2303,6 +2334,7 @@ func runExplainBranchWithFilter(ctx context.Context, w io.Writer, noPager bool, 
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Get current branch name
 	branchName := strategy.GetCurrentBranchName(repo)
@@ -2363,6 +2395,7 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Resolve the commit reference, erroring on hex-prefix ambiguity
 	// instead of silently picking the first matching commit.

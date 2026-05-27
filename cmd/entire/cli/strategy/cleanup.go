@@ -38,7 +38,6 @@ const (
 type CleanupItem struct {
 	Type   CleanupType
 	ID     string // Branch name, session ID, or checkpoint ID
-	RefOID string // For ref-based items: the OID observed at listing time (compare-and-swap)
 	Reason string // Why this item is being cleaned
 }
 
@@ -81,6 +80,7 @@ func ListShadowBranches(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	refs, err := repo.References()
 	if err != nil {
@@ -151,6 +151,7 @@ func ListOrphanedSessionStates(ctx context.Context) ([]CleanupItem, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Get all session states
 	store, err := session.NewStateStore(ctx)
@@ -249,6 +250,7 @@ func DeleteOrphanedCheckpoints(ctx context.Context, checkpointIDs []string) (del
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Get sessions branch
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)

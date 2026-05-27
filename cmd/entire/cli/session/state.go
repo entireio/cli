@@ -153,11 +153,6 @@ type State struct {
 	// against this value without reading the full transcript content.
 	CheckpointTranscriptSize int64 `json:"checkpoint_transcript_size,omitempty"`
 
-	// CompactTranscriptStart is the transcript.jsonl line offset where the current
-	// checkpoint cycle began. It parallels CheckpointTranscriptStart (full.jsonl)
-	// and is updated after each condensation.
-	CompactTranscriptStart int `json:"compact_transcript_start,omitempty"`
-
 	// Deprecated: CondensedTranscriptLines is replaced by CheckpointTranscriptStart.
 	// Kept for backward compatibility with existing state files.
 	// Use NormalizeAfterLoad() to migrate.

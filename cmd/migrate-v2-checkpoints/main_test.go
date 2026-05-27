@@ -225,7 +225,7 @@ func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 	createdAt := time.Date(2024, 5, 6, 7, 8, 9, 0, time.UTC)
 	transcript := []byte("{\"type\":\"assistant\",\"message\":\"migrated\"}\n")
 
-	err := checkpoint.NewV2GitStore(fixture.repo).WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
 		CheckpointID:              cpID,
 		SessionID:                 "session-to-migrate",
 		CreatedAt:                 createdAt,
@@ -247,10 +247,9 @@ func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 		ReviewPrompt:              "review this",
 		HasReview:                 true,
 	})
-	require.NoError(t, err)
 
 	var stdout bytes.Buffer
-	err = run(context.Background(), []string{
+	err := run(context.Background(), []string{
 		testRepoFlag, fixture.dir,
 		testSinceFlag, fixture.baseHash.String(),
 		testHeadFlag, fixture.mainHash.String(),
@@ -296,7 +295,7 @@ func TestRunDryRunPlansWithoutWritingV1(t *testing.T) {
 
 	fixture := setupMigrationHistoryRepo(t)
 	cpID := id.MustCheckpointID(mainCheckpointID)
-	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-dry-run",
 		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"dry run\"}\n")),
@@ -317,12 +316,12 @@ func TestRunApplySkipsExistingV1SessionsAndMigratesMissingSessions(t *testing.T)
 
 	fixture := setupMigrationHistoryRepo(t)
 	cpID := id.MustCheckpointID(mainCheckpointID)
-	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-existing-v1",
 		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"from v2 existing\"}\n")),
 	})
-	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-v2-missing-from-v1",
 		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"from v2 new\"}\n")),
@@ -364,7 +363,7 @@ func TestRunApplyMigratesTaskMetadata(t *testing.T) {
 
 	fixture := setupMigrationHistoryRepo(t)
 	cpID := id.MustCheckpointID(mainCheckpointID)
-	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
 		CheckpointID: cpID,
 		SessionID:    "task-session",
 		IsTask:       true,
@@ -396,12 +395,12 @@ func TestRunApplyHasReviewReflectsOnlyMigratedSessions(t *testing.T) {
 
 	fixture := setupMigrationHistoryRepo(t)
 	cpID := id.MustCheckpointID(mainCheckpointID)
-	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
 		CheckpointID: cpID,
 		SessionID:    "normal-session",
 		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"normal\"}\n")),
 	})
-	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
 		CheckpointID:      cpID,
 		SessionID:         "review-session-without-raw-transcript",
 		Kind:              string(session.KindAgentReview),
@@ -427,7 +426,7 @@ func TestRunDryRunReportsMissingV2MetadataAndRawTranscripts(t *testing.T) {
 	t.Parallel()
 
 	fixture := setupMigrationHistoryRepo(t)
-	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
 		CheckpointID: id.MustCheckpointID(featureCheckpointID),
 		SessionID:    "session-missing-raw",
 	})
@@ -508,29 +507,6 @@ func runMigrationGit(t *testing.T, dir string, args ...string) {
 	cmd.Env = testutil.GitIsolatedEnv()
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git %s failed: %s", strings.Join(args, " "), output)
-}
-
-func writeTestV2Checkpoint(t *testing.T, repo *git.Repository, opts checkpoint.WriteCommittedOptions) {
-	t.Helper()
-
-	if opts.CreatedAt.IsZero() {
-		opts.CreatedAt = time.Date(2024, 5, 6, 7, 8, 9, 0, time.UTC)
-	}
-	if opts.Strategy == "" {
-		opts.Strategy = testStrategy
-	}
-	if opts.Branch == "" {
-		opts.Branch = testBranchName
-	}
-	if opts.AuthorName == "" {
-		opts.AuthorName = testAuthorName
-	}
-	if opts.AuthorEmail == "" {
-		opts.AuthorEmail = testAuthorEmail
-	}
-
-	err := checkpoint.NewV2GitStore(repo).WriteCommitted(context.Background(), opts)
-	require.NoError(t, err)
 }
 
 func runMigrationCommand(t *testing.T, fixture migrationHistoryFixture, head plumbing.Hash, mode string) string {

@@ -29,15 +29,16 @@ import (
 func pushBranchIfNeeded(ctx context.Context, target, branchName string) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
-		return nil //nolint:nilerr // Hook must be silent on failure
+		return nil
 	}
+	defer repo.Close()
 
 	// Check if branch exists locally
 	branchRef := plumbing.NewBranchReferenceName(branchName)
 	localRef, err := repo.Reference(branchRef, true)
 	if err != nil {
 		// No branch, nothing to push
-		return nil //nolint:nilerr // Expected when no sessions exist yet
+		return nil
 	}
 
 	// Only check remote tracking refs when target is a remote name (not a URL).
@@ -74,7 +75,7 @@ func displayPushTarget(target string) string {
 
 // doPushBranch pushes the given branch to the target with fetch+merge recovery.
 // The target can be a remote name or a URL.
-func doPushBranch(ctx context.Context, target, branchName string) error {
+func doPushBranch(ctx context.Context, target, branchName string) error { //nolint:unparam // callers treat push failures as non-fatal but keep an error-shaped boundary.
 	displayTarget := displayPushTarget(target)
 
 	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", branchName, displayTarget)
@@ -332,9 +333,12 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 	}
 
 	// Use git CLI for fetch (go-git's fetch can be tricky with auth).
-	// Use --filter=blob:none for a partial fetch that downloads only commits
-	// and trees, skipping blobs. The merge only needs the tree structure to
-	// combine entries; blobs are already local or fetched on demand.
+	// Do NOT --unshallow here: on a shallow repo with deep history (e.g. a
+	// shared monorepo), --unshallow downloads the whole repository because
+	// git treats shallow as a global property of the clone, not per-ref.
+	// The downstream reconcile/rebase paths walk only commits visible past
+	// .git/shallow (collectCommitChain / collectCommitsSince), so the
+	// missing pre-shallow history isn't needed to produce a correct rebase.
 	if output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
@@ -347,6 +351,7 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Reconcile disconnected metadata branches before rebasing.
 	// The fetch above updated the remote-tracking ref, so reconciliation
@@ -418,7 +423,12 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 		return nil
 	}
 
-	newTip, err := cherryPickOnto(ctx, repo, remoteRef.Hash(), localCommits)
+	shallow, err := loadShallowHashes(ctx, repoPath)
+	if err != nil {
+		return fmt.Errorf("failed to load shallow boundaries: %w", err)
+	}
+
+	newTip, err := cherryPickOnto(ctx, repo, remoteRef.Hash(), localCommits, shallow)
 	if err != nil {
 		return fmt.Errorf("failed to rebase local commits onto remote: %w", err)
 	}
@@ -447,10 +457,18 @@ func getMergeBase(ctx context.Context, repoPath, hashA, hashB string) (plumbing.
 	cmd.Dir = repoPath
 	output, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return plumbing.ZeroHash, errNoMergeBase
+		}
 		return plumbing.ZeroHash, fmt.Errorf("git merge-base failed: %w", err)
 	}
 
-	return plumbing.NewHash(strings.TrimSpace(string(output))), nil
+	mergeBase := strings.TrimSpace(string(output))
+	if mergeBase == "" {
+		return plumbing.ZeroHash, errNoMergeBase
+	}
+	return plumbing.NewHash(mergeBase), nil
 }
 
 // collectCommitsSince returns non-merge commits reachable from tip but not from

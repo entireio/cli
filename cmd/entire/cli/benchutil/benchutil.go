@@ -109,6 +109,7 @@ func NewBenchRepo(b *testing.B, opts RepoOpts) *BenchRepo {
 	if err != nil {
 		b.Fatalf("git init: %v", err)
 	}
+	b.Cleanup(func() { _ = repo.Close() })
 
 	// Create .gitignore and .entire settings
 	writeFile(b, dir, ".gitignore", ".entire/\n")

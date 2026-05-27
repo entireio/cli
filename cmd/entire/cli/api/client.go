@@ -21,10 +21,39 @@ const (
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
+
+	// authTokensPath is the base path for the auth-tokens management
+	// endpoints (list / revoke). Set via WithAuthTokensPath when the
+	// client targets the auth host. Empty for data-API-only clients;
+	// auth-tokens methods error out if called against an empty path.
+	authTokensPath string
 }
 
-// NewClient creates a new authenticated API client with an explicit bearer token.
+// WithAuthTokensPath sets the base path used by ListTokens,
+// RevokeCurrentToken, and RevokeToken. The path is supplied by the
+// auth shim from auth.CurrentProvider().AuthTokensPath, which is the
+// single source of truth for provider-version routing — the api
+// package no longer reads ENTIRE_AUTH_PROVIDER_VERSION itself.
+//
+// Returns the receiver for chaining at construction:
+//
+//	c := api.NewClientWithBaseURL(token, base).WithAuthTokensPath(p)
+func (c *Client) WithAuthTokensPath(path string) *Client {
+	c.authTokensPath = path
+	return c
+}
+
+// NewClient creates a new authenticated API client with an explicit bearer
+// token, targeting the data API base URL (BaseURL()).
 func NewClient(token string) *Client {
+	return NewClientWithBaseURL(token, BaseURL())
+}
+
+// NewClientWithBaseURL creates a new authenticated API client targeting an
+// explicit base URL. Use this for endpoints that live on the auth host (e.g.
+// auth-token management) when ENTIRE_AUTH_BASE_URL splits the auth origin
+// from the data API origin.
+func NewClientWithBaseURL(token, baseURL string) *Client {
 	return &Client{
 		httpClient: &http.Client{
 			Transport: &bearerTransport{
@@ -32,11 +61,18 @@ func NewClient(token string) *Client {
 				base:  http.DefaultTransport,
 			},
 		},
-		baseURL: BaseURL(),
+		baseURL: baseURL,
 	}
 }
 
 // bearerTransport is an http.RoundTripper that injects the Authorization header.
+//
+// When token is empty, the Authorization header is omitted (rather than sent
+// as a malformed "Authorization: Bearer "). This supports endpoints like
+// recap that deliberately want the unauthenticated request to reach the
+// server so it can return a typed 401 — callers that want a local fast-fail
+// for missing auth should check ErrNotLoggedIn at construction time, not
+// rely on the transport.
 type bearerTransport struct {
 	token string
 	base  http.RoundTripper
@@ -45,7 +81,9 @@ type bearerTransport struct {
 func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Clone the request to avoid mutating the caller's request.
 	r := req.Clone(req.Context())
-	r.Header.Set("Authorization", "Bearer "+t.token)
+	if t.token != "" {
+		r.Header.Set("Authorization", "Bearer "+t.token)
+	}
 	r.Header.Set("User-Agent", userAgent)
 	if r.Header.Get("Accept") == "" {
 		r.Header.Set("Accept", "application/json")

@@ -17,6 +17,16 @@ const (
 
 	// BaseURLEnvVar overrides the Entire API origin for local development.
 	BaseURLEnvVar = "ENTIRE_API_BASE_URL"
+
+	// AuthBaseURLEnvVar overrides only the auth/login origin (device flow,
+	// auth-tokens management, keyring key). Falls back to BaseURLEnvVar when
+	// unset, which is the right behavior for single-host deployments. Split
+	// hosts (e.g. auth on us.console.partial.to, data on partial.to) set
+	// both.
+	AuthBaseURLEnvVar = "ENTIRE_AUTH_BASE_URL"
+
+	schemeHTTP  = "http"
+	schemeHTTPS = "https"
 )
 
 // BaseURL returns the effective Entire API base URL.
@@ -27,6 +37,27 @@ func BaseURL() string {
 	}
 
 	return DefaultBaseURL
+}
+
+// AuthBaseURL returns the origin used for the device-flow login, auth-token
+// management endpoints, and the keyring key under which the bearer token is
+// stored. ENTIRE_AUTH_BASE_URL takes precedence; otherwise it falls back to
+// BaseURL() so single-host deployments keep working unchanged.
+//
+// The result is canonicalised — lowercased scheme/host, default port stripped,
+// path/query/fragment dropped, trailing slash collapsed — so the value that
+// flows into store.SaveToken keys matches what tokenmanager.New emits after
+// its own NormalizeOriginURL pass. Without this, a user setting
+// ENTIRE_AUTH_BASE_URL=https://AUTH.example.com:443/ would log in successfully
+// (saved under the raw form) but every subsequent data-API command would
+// resolve "not logged in" because the manager probes under the normalised
+// "https://auth.example.com".
+func AuthBaseURL() string {
+	raw := strings.TrimSpace(os.Getenv(AuthBaseURLEnvVar))
+	if raw == "" {
+		raw = BaseURL()
+	}
+	return NormalizeOriginURL(raw)
 }
 
 // ResolveURL joins an API-relative path against the effective base URL.
@@ -42,7 +73,7 @@ func ResolveURLFromBase(baseURL, path string) (string, error) {
 		return "", fmt.Errorf("parse base URL: %w", err)
 	}
 
-	if base.Scheme != "http" && base.Scheme != "https" {
+	if base.Scheme != schemeHTTP && base.Scheme != schemeHTTPS {
 		return "", fmt.Errorf("unsupported base URL scheme %q (must be http or https)", base.Scheme)
 	}
 
@@ -62,7 +93,7 @@ func RequireSecureURL(baseURL string) error {
 		return fmt.Errorf("parse base URL: %w", err)
 	}
 
-	if u.Scheme == "http" {
+	if u.Scheme == schemeHTTP {
 		return ErrInsecureHTTP
 	}
 
@@ -71,4 +102,48 @@ func RequireSecureURL(baseURL string) error {
 
 func normalizeBaseURL(raw string) string {
 	return strings.TrimRight(strings.TrimSpace(raw), "/")
+}
+
+// NormalizeOriginURL canonicalises an origin URL the same way auth-go's
+// tokenmanager does internally: lowercase scheme/host, default port stripped
+// (80 for http, 443 for https), path/query/fragment dropped, trailing slash
+// collapsed. On parse failure, raw is returned unchanged so non-URL audience
+// values still compare byte-for-byte.
+//
+// Mirrors auth-go's internal/oauthhttp.NormalizeOriginURL so the value the
+// CLI hands to the manager as Issuer survives the manager's own normalisation
+// pass byte-for-byte — see AuthBaseURL.
+func NormalizeOriginURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return trimmed
+	}
+	scheme := strings.ToLower(u.Scheme)
+	hostname := strings.ToLower(u.Hostname())
+	port := u.Port()
+	dropPort := port == "" ||
+		(scheme == schemeHTTP && port == "80") ||
+		(scheme == schemeHTTPS && port == "443")
+
+	out := url.URL{Scheme: scheme}
+	switch {
+	case dropPort && strings.Contains(hostname, ":"):
+		out.Host = "[" + hostname + "]"
+	case dropPort:
+		out.Host = hostname
+	case strings.Contains(hostname, ":"):
+		out.Host = "[" + hostname + "]:" + port
+	default:
+		out.Host = hostname + ":" + port
+	}
+	return out.String()
+}
+
+// OriginOnly is a backwards-compatible alias for NormalizeOriginURL.
+// Callers reading raw URLs (e.g. ENTIRE_SEARCH_URL) and feeding them into
+// tokenmanager.TokenRequest.Resource use this to strip path/query/fragment
+// before the lib's stricter origin-only validator runs.
+func OriginOnly(raw string) string {
+	return NormalizeOriginURL(raw)
 }

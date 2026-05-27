@@ -33,7 +33,7 @@ func newLogoutCmd() *cobra.Command {
 				return err
 			}
 			return runLogout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
-				auth.NewStore(), defaultRevokeCurrentToken, api.BaseURL())
+				auth.NewStore(), defaultRevokeCurrentToken, api.AuthBaseURL())
 		},
 	}
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
@@ -41,7 +41,7 @@ func newLogoutCmd() *cobra.Command {
 }
 
 func defaultRevokeCurrentToken(ctx context.Context, token string) error {
-	return api.NewClient(token).RevokeCurrentToken(ctx) //nolint:wrapcheck // RevokeCurrentToken already wraps with action context
+	return newAPITokensClient(token).RevokeCurrentToken(ctx) //nolint:wrapcheck // RevokeCurrentToken already wraps with action context
 }
 
 func runLogout(ctx context.Context, outW, errW io.Writer, store tokenStore, revoke revokeCurrentFunc, baseURL string) error {

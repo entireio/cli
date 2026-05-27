@@ -4,13 +4,17 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
 
 func TestRun_ServerAllowsRepos(t *testing.T) {
-	oldLookup := lookupCurrentToken
-	lookupCurrentToken = func() (string, error) { return "", nil }
+	oldResource := lookupResourceToken
+	lookupResourceToken = func(_ context.Context, _ string) (string, error) {
+		return "", auth.ErrNotLoggedIn
+	}
 	t.Cleanup(func() {
-		lookupCurrentToken = oldLookup
+		lookupResourceToken = oldResource
 	})
 
 	_, err := Run(context.Background(), Options{

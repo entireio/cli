@@ -18,13 +18,13 @@ import (
 	"log/slog"
 	"os/exec"
 
-	git "github.com/go-git/go-git/v6"
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
@@ -52,11 +52,12 @@ func headHasReviewCheckpoint(ctx context.Context) (bool, string) {
 		logging.Debug(ctx, "head review check: no Entire-Checkpoint trailer on HEAD")
 		return false, ""
 	}
-	repo, err := git.PlainOpen(repoRoot)
+	repo, err := gitrepo.OpenPath(repoRoot)
 	if err != nil {
 		logging.Debug(ctx, "head review check: open repository", slog.String("error", err.Error()))
 		return false, ""
 	}
+	defer repo.Close()
 	store, storeErr := checkpoint.NewCommittedReader(ctx, repo, checkpoint.CommittedReaderOptions{})
 	if storeErr != nil {
 		logging.Debug(ctx, "head review check: checkpoint store unavailable", slog.String("error", storeErr.Error()))

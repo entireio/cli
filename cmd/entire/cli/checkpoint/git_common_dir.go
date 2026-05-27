@@ -22,8 +22,17 @@ func resolveGitCommonDir(ctx context.Context, repo *git.Repository) (string, err
 	}
 
 	cmd := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--git-common-dir")
+	// Use Output (not CombinedOutput) so stderr never pollutes the resolved
+	// path on success. Output populates ExitError.Stderr when cmd.Stderr is
+	// nil, so error detail is still available without merging streams.
 	output, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if detail := strings.TrimSpace(string(exitErr.Stderr)); detail != "" {
+				return "", fmt.Errorf("resolve git common dir: %w: %s", err, detail)
+			}
+		}
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
 	commonDir := strings.TrimSpace(string(output))

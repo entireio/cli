@@ -61,27 +61,20 @@ func setupExportRepo(t *testing.T) *git.Repository {
 	return repo
 }
 
-func writeV2CheckpointForExport(t *testing.T, repo *git.Repository, cpID id.CheckpointID, opts checkpoint.WriteCommittedOptions) {
+func writeV2CheckpointForExport(t *testing.T, repo *git.Repository, cpID id.CheckpointID, opts v2CheckpointFixtureOptions) {
 	t.Helper()
-	store := checkpoint.NewV2GitStore(repo)
 	opts.CheckpointID = cpID
-	if opts.AuthorName == "" {
-		opts.AuthorName = exportTestAuthorName
-	}
-	if opts.AuthorEmail == "" {
-		opts.AuthorEmail = exportTestAuthorEmail
-	}
 	if opts.Strategy == "" {
 		opts.Strategy = "manual-commit"
 	}
-	require.NoError(t, store.WriteCommitted(context.Background(), opts))
+	writeV2CheckpointFixture(t, repo, opts)
 }
 
 func TestRunExplainExport_JSONSingleCheckpoint(t *testing.T) {
 	repo := setupExportRepo(t)
 
 	cpID := id.MustCheckpointID("aaaa11112222")
-	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeV2CheckpointForExport(t, repo, cpID, v2CheckpointFixtureOptions{
 		SessionID:         "session-json",
 		Transcript:        redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
 		CompactTranscript: []byte(`{"v":1,"type":"user"}` + "\n"),
@@ -122,7 +115,7 @@ func TestRunExplainExport_JSONFetchesRemoteV2WhenLocalV2RefSelectsDualMode(t *te
 	producerRepo, err := git.PlainOpen(producerDir)
 	require.NoError(t, err)
 	oldID := id.MustCheckpointID("111122223333")
-	writeV2CheckpointForExport(t, producerRepo, oldID, checkpoint.WriteCommittedOptions{
+	writeV2CheckpointForExport(t, producerRepo, oldID, v2CheckpointFixtureOptions{
 		SessionID:  "old-local-v2-session",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"old"}]}}` + "\n")),
 	})
@@ -133,7 +126,7 @@ func TestRunExplainExport_JSONFetchesRemoteV2WhenLocalV2RefSelectsDualMode(t *te
 	runGit(t, localDir, "fetch", "origin", paths.V2MainRefName+":"+paths.V2MainRefName)
 
 	targetID := id.MustCheckpointID("aaaa99998888")
-	writeV2CheckpointForExport(t, producerRepo, targetID, checkpoint.WriteCommittedOptions{
+	writeV2CheckpointForExport(t, producerRepo, targetID, v2CheckpointFixtureOptions{
 		SessionID:  "remote-v2-session",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"remote"}]}}` + "\n")),
 	})
@@ -205,7 +198,7 @@ func TestRunExplainExport_JSONNeverEmbedsTranscript(t *testing.T) {
 	repo := setupExportRepo(t)
 
 	cpID := id.MustCheckpointID("bbbb11112222")
-	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeV2CheckpointForExport(t, repo, cpID, v2CheckpointFixtureOptions{
 		SessionID:         "session-no-leak",
 		Transcript:        redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"SECRET-RAW"}]}}` + "\n")),
 		CompactTranscript: []byte(`{"v":1,"text":"SECRET-COMPACT"}` + "\n"),
@@ -229,7 +222,7 @@ func TestRunExplainExport_TranscriptStreamsCompactBytes(t *testing.T) {
 
 	cpID := id.MustCheckpointID("cccc11112222")
 	compact := []byte(`{"v":1,"type":"user","content":[{"text":"compact line 1"}]}` + "\n" + `{"v":1,"type":"assistant","content":[{"text":"compact line 2"}]}` + "\n")
-	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeV2CheckpointForExport(t, repo, cpID, v2CheckpointFixtureOptions{
 		SessionID:         "session-compact",
 		Transcript:        redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"raw line"}]}}` + "\n")),
 		CompactTranscript: compact,
@@ -250,7 +243,7 @@ func TestRunExplainExport_RawTranscriptStreamsRawBytes(t *testing.T) {
 
 	cpID := id.MustCheckpointID("dddd11112222")
 	raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello raw"}]}}` + "\n")
-	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeV2CheckpointForExport(t, repo, cpID, v2CheckpointFixtureOptions{
 		SessionID:         "session-raw",
 		Transcript:        redact.AlreadyRedacted(raw),
 		CompactTranscript: []byte(`{"v":1,"type":"user"}` + "\n"),
@@ -280,7 +273,7 @@ func TestRunExplainExport_RawTranscriptFallsBackToV1WhenV2FullMissing(t *testing
 		AuthorName:   exportTestAuthorName,
 		AuthorEmail:  exportTestAuthorEmail,
 	}))
-	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeV2CheckpointForExport(t, repo, cpID, v2CheckpointFixtureOptions{
 		SessionID:         "session-export-fallback",
 		CompactTranscript: []byte(`{"v":1,"type":"user"}` + "\n"),
 	})
@@ -305,7 +298,7 @@ func TestExplainCmd_RawTranscriptWithSessionIndexRoutesToExportPath(t *testing.T
 
 	cpID := id.MustCheckpointID("ffff11112222")
 	raw0 := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello session 0"}]}}` + "\n")
-	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeV2CheckpointForExport(t, repo, cpID, v2CheckpointFixtureOptions{
 		SessionID:  "session-zero",
 		Transcript: redact.AlreadyRedacted(raw0),
 	})
@@ -333,12 +326,12 @@ func TestExplainCmd_RawTranscriptMultiSessionDistinctContent(t *testing.T) {
 	rawSession0 := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"SESSION-ZERO-MARKER"}]}}` + "\n")
 	rawSession1 := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"SESSION-ONE-DIFFERENT-MARKER"}]}}` + "\n")
 
-	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeV2CheckpointForExport(t, repo, cpID, v2CheckpointFixtureOptions{
 		SessionID:  "session-zero",
 		Transcript: redact.AlreadyRedacted(rawSession0),
 	})
-	// Second WriteCommitted with the same checkpoint ID appends session 1.
-	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	// Second fixture write with the same checkpoint ID appends session 1.
+	writeV2CheckpointForExport(t, repo, cpID, v2CheckpointFixtureOptions{
 		SessionID:  "session-one",
 		Transcript: redact.AlreadyRedacted(rawSession1),
 	})
@@ -380,7 +373,7 @@ func TestRunExplainExport_TranscriptOutOfRangeSessionIndex(t *testing.T) {
 	repo := setupExportRepo(t)
 
 	cpID := id.MustCheckpointID("eeee11112222")
-	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeV2CheckpointForExport(t, repo, cpID, v2CheckpointFixtureOptions{
 		SessionID:         "session-only",
 		Transcript:        redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
 		CompactTranscript: []byte(`{"v":1}` + "\n"),
@@ -468,7 +461,7 @@ func TestRunExplainExport_PositionalCommitSHAFallback(t *testing.T) {
 	repo := setupExportRepo(t)
 
 	cpID := id.MustCheckpointID("aaaabbbb1234")
-	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeV2CheckpointForExport(t, repo, cpID, v2CheckpointFixtureOptions{
 		SessionID:         "session-via-commit",
 		Transcript:        redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
 		CompactTranscript: []byte(`{"v":1}` + "\n"),

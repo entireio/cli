@@ -114,7 +114,11 @@ func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explai
 		return id.CheckpointID(""), nil, lookupErr
 	}
 
-	matches, lookup := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, prefix)
+	matches, resolvedLookup := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, prefix)
+	if resolvedLookup != lookup {
+		_ = lookup.Close()
+		lookup = resolvedLookup
+	}
 	switch len(matches) {
 	case 1:
 		return matches[0], lookup, nil
@@ -125,6 +129,7 @@ func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explai
 		if opts.target != "" && opts.checkpointFlag == "" {
 			cpID, freshLookup, commitErr := resolveCheckpointFromCommitRef(ctx, errW, opts.target)
 			if commitErr == nil {
+				_ = lookup.Close()
 				return cpID, freshLookup, nil
 			}
 		}
@@ -145,6 +150,7 @@ func resolveCheckpointFromCommitRef(ctx context.Context, errW io.Writer, commitR
 	if err != nil {
 		return id.CheckpointID(""), nil, fmt.Errorf("not a git repository: %w", err)
 	}
+	defer repo.Close()
 	hash, _, err := resolveCommitUnambiguous(repo, commitRef)
 	if err != nil {
 		return id.CheckpointID(""), nil, fmt.Errorf("commit not found: %s: %w", commitRef, err)
@@ -167,6 +173,9 @@ func resolveCheckpointFromCommitRef(ctx context.Context, errW io.Writer, commitR
 	// metadata reads would fail with an immediate "not found".
 	if !lookupHasCheckpoint(lookup, cpID) {
 		if matches, fresh := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, cpID.String()); len(matches) == 1 {
+			if fresh != lookup {
+				_ = lookup.Close()
+			}
 			lookup = fresh
 		}
 	}
@@ -195,10 +204,16 @@ func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer
 	}
 
 	stop := startSpinner(errW, "Fetching checkpoint metadata from remote")
-	_, _, v1Err := getMetadataTree(ctx)
+	_, v1Repo, v1Err := getMetadataTree(ctx)
+	if v1Repo != nil {
+		_ = v1Repo.Close()
+	}
 	v2OK := false
 	if shouldFetchV2Metadata(ctx, lookup) {
-		if _, _, v2Err := getV2MetadataTree(ctx); v2Err == nil {
+		if _, v2Repo, v2Err := getV2MetadataTree(ctx); v2Err == nil {
+			if v2Repo != nil {
+				_ = v2Repo.Close()
+			}
 			v2OK = true
 		}
 	}
@@ -221,7 +236,7 @@ func shouldFetchV2Metadata(ctx context.Context, lookup *explainCheckpointLookup)
 		return false
 	}
 	switch lookup.store.(type) {
-	case *checkpoint.V2GitStore, *checkpoint.DualCheckpointReader:
+	case *checkpoint.DualCheckpointReader:
 		return true
 	default:
 		return false
@@ -272,8 +287,12 @@ func resolveSessionIndex(summary *checkpoint.CheckpointSummary, requested int) (
 func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts explainExportOptions) error {
 	cpID, lookup, err := resolveExplainCheckpointID(ctx, errW, opts)
 	if err != nil {
+		if lookup != nil {
+			_ = lookup.Close()
+		}
 		return err
 	}
+	defer lookup.Close()
 
 	store := lookup.store
 	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
@@ -388,8 +407,12 @@ type checkpointSessionSummary struct {
 func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts explainExportOptions) error {
 	cpID, lookup, err := resolveExplainCheckpointID(ctx, errW, opts)
 	if err != nil {
+		if lookup != nil {
+			_ = lookup.Close()
+		}
 		return err
 	}
+	defer lookup.Close()
 
 	store := lookup.store
 	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
@@ -545,6 +568,7 @@ func runExplainListJSON(ctx context.Context, w, errW io.Writer, sessionFilter st
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
 	}
+	defer repo.Close()
 
 	limit := listLimit
 	if limit <= 0 {

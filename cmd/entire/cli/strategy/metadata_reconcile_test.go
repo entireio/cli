@@ -665,10 +665,101 @@ func TestCollectCommitChain_DepthLimit(t *testing.T) {
 		tip = h
 	}
 
-	_, err = collectCommitChain(repo, tip)
+	_, err = collectCommitChain(repo, tip, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeded")
 	assert.Contains(t, err.Error(), "without reaching root")
+}
+
+// TestCollectCommitChain_StopsAtShallowBoundary verifies that collectCommitChain
+// treats commits listed in the shallow set as roots, stopping the walk at the
+// boundary even when the boundary commit has a parent SHA recorded in the object
+// store. Without this behaviour, a shallow checkpoint repo whose remote v1 was
+// rebuilt elsewhere would produce a phantom chain of stale commits.
+func TestCollectCommitChain_StopsAtShallowBoundary(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+
+	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
+	treeObj := repo.Storer.NewEncodedObject()
+	require.NoError(t, emptyTree.Encode(treeObj))
+	treeHash, err := repo.Storer.SetEncodedObject(treeObj)
+	require.NoError(t, err)
+
+	// Build a linear chain of 10 commits. Without shallow, the walk should
+	// return all 10. With the 4th from the tip marked shallow, it should stop
+	// at that commit, returning 4 entries (tip + 3 below it, including the
+	// shallow boundary itself, treated as a root).
+	var tip plumbing.Hash
+	hashes := make([]plumbing.Hash, 0, 10)
+	for i := range 10 {
+		c := &object.Commit{
+			TreeHash:  treeHash,
+			Author:    object.Signature{Name: "test", Email: "test@test.com", When: time.Now().Add(time.Duration(i) * time.Second)},
+			Committer: object.Signature{Name: "test", Email: "test@test.com", When: time.Now().Add(time.Duration(i) * time.Second)},
+			Message:   "commit\n",
+		}
+		if tip != plumbing.ZeroHash {
+			c.ParentHashes = []plumbing.Hash{tip}
+		}
+		obj := repo.Storer.NewEncodedObject()
+		require.NoError(t, c.Encode(obj))
+		h, sErr := repo.Storer.SetEncodedObject(obj)
+		require.NoError(t, sErr)
+		hashes = append(hashes, h)
+		tip = h
+	}
+
+	// Without shallow set: full chain of 10.
+	chain, err := collectCommitChain(repo, tip, nil)
+	require.NoError(t, err)
+	assert.Len(t, chain, 10, "without shallow, expect full chain")
+
+	// With the 4th-from-tip (index 6 in build order) marked shallow: walk
+	// stops there. Result is oldest-first: shallow boundary, then up to tip
+	// = 4 commits.
+	shallow := map[plumbing.Hash]bool{hashes[6]: true}
+	chain, err = collectCommitChain(repo, tip, shallow)
+	require.NoError(t, err)
+	require.Len(t, chain, 4, "expect tip + 3 commits down to the shallow boundary inclusive")
+	assert.Equal(t, hashes[6], chain[0].Hash, "oldest entry should be the shallow boundary")
+	assert.Equal(t, tip, chain[3].Hash, "newest entry should be the tip")
+}
+
+func TestLoadShallowHashes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("non-shallow repo returns empty set", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		_, err := git.PlainInit(dir, false)
+		require.NoError(t, err)
+
+		set, err := loadShallowHashes(context.Background(), dir)
+		require.NoError(t, err)
+		assert.Empty(t, set)
+	})
+
+	t.Run("reads .git/shallow hash list", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		_, err := git.PlainInit(dir, false)
+		require.NoError(t, err)
+
+		shallowFile := filepath.Join(dir, ".git", "shallow")
+		require.NoError(t, os.WriteFile(shallowFile,
+			[]byte("be156aa7cc38c2c6117246cb8adad068a3886351\n82b2a8554cccd19f5aa60f520f645b32d8bc2400\n"),
+			0o644))
+
+		set, err := loadShallowHashes(context.Background(), dir)
+		require.NoError(t, err)
+		assert.Len(t, set, 2)
+		assert.True(t, set[plumbing.NewHash("be156aa7cc38c2c6117246cb8adad068a3886351")])
+		assert.True(t, set[plumbing.NewHash("82b2a8554cccd19f5aa60f520f645b32d8bc2400")])
+	})
 }
 
 // TestReconcileDisconnected_AllEmptyOrphans verifies that when all local commits

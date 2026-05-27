@@ -16,20 +16,16 @@ import (
 func TestGetV2MetadataTree_LocalRef(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo)
 	cpID := id.MustCheckpointID("a1a2a3a4a5a6")
 	ctx := context.Background()
 
-	// Write a checkpoint so the /main ref exists
-	err := store.WriteCommitted(ctx, WriteCommittedOptions{
+	// Write a checkpoint fixture so the /main ref exists.
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-1",
 		Strategy:     "manual-commit",
 		Transcript:   redact.AlreadyRedacted([]byte(`{"test": true}`)),
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
 	})
-	require.NoError(t, err)
 
 	openRepoFn := func(_ context.Context) (*git.Repository, error) {
 		return repo, nil
@@ -65,20 +61,16 @@ func TestGetV2MetadataTree_NoRef_ReturnsError(t *testing.T) {
 func TestGetV2MetadataTree_FetchSucceeds(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo)
 	cpID := id.MustCheckpointID("b1b2b3b4b5b6")
 	ctx := context.Background()
 
-	// Write checkpoint so the ref exists after "fetch"
-	err := store.WriteCommitted(ctx, WriteCommittedOptions{
+	// Write checkpoint fixture so the ref exists after "fetch".
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-1",
 		Strategy:     "manual-commit",
 		Transcript:   redact.AlreadyRedacted([]byte(`{"test": true}`)),
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
 	})
-	require.NoError(t, err)
 
 	fetchCalled := false
 	treelessFetchFn := func(_ context.Context) error {
@@ -99,19 +91,15 @@ func TestGetV2MetadataTree_FetchSucceeds(t *testing.T) {
 func TestGetV2MetadataTree_TreelessFetchFails_FallsBackToFullFetch(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
-	store := NewV2GitStore(repo)
 	cpID := id.MustCheckpointID("c1c2c3c4c5c6")
 	ctx := context.Background()
 
-	err := store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-1",
 		Strategy:     "manual-commit",
 		Transcript:   redact.AlreadyRedacted([]byte(`{"test": true}`)),
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
 	})
-	require.NoError(t, err)
 
 	treelessFetchFn := func(_ context.Context) error {
 		return errors.New("treeless fetch failed")
@@ -126,11 +114,8 @@ func TestGetV2MetadataTree_TreelessFetchFails_FallsBackToFullFetch(t *testing.T)
 		return repo, nil
 	}
 
-	// Treeless fails, local finds it (since we wrote to the repo), so full fetch may not be called.
-	// But the function should still succeed.
 	tree, _, err := GetV2MetadataTree(ctx, treelessFetchFn, fullFetchFn, openRepoFn)
 	require.NoError(t, err)
 	require.NotNil(t, tree)
-	// Local ref lookup succeeds before full fetch is needed
-	_ = fullFetchCalled
+	assert.True(t, fullFetchCalled, "full fetch should be tried before accepting a stale local ref")
 }

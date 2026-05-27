@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -19,13 +20,14 @@ import (
 
 func newSearchCmd() *cobra.Command {
 	var (
-		jsonOutput bool
-		limitFlag  int
-		pageFlag   int
-		authorFlag string
-		dateFlag   string
-		branchFlag string
-		repoFlag   string
+		jsonOutput       bool
+		limitFlag        int
+		pageFlag         int
+		authorFlag       string
+		dateFlag         string
+		branchFlag       string
+		repoFlag         string
+		insecureHTTPAuth bool
 	)
 
 	cmd := &cobra.Command{
@@ -76,14 +78,6 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				return errors.New("query required when using --json, accessible mode, or piped output. Usage: entire search <query>")
 			}
 
-			ghToken, err := auth.LookupCurrentToken()
-			if err != nil {
-				return fmt.Errorf("reading credentials: %w", err)
-			}
-			if ghToken == "" {
-				return errors.New("not authenticated. Run 'entire login' to authenticate")
-			}
-
 			// Get the repo's GitHub remote URL
 			repo, err := strategy.OpenRepository(ctx)
 			if err != nil {
@@ -91,6 +85,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Run this command from within a git repository.")
 				return NewSilentError(err)
 			}
+			defer repo.Close()
 
 			remote, err := repo.Remote("origin")
 			if err != nil {
@@ -108,7 +103,16 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			serviceURL := os.Getenv("ENTIRE_SEARCH_URL")
 			if serviceURL == "" {
-				serviceURL = search.DefaultServiceURL
+				// Search lives on the data API host. Fall back to
+				// api.BaseURL() so ENTIRE_API_BASE_URL applies; the search
+				// package's DefaultServiceURL is only consulted by callers
+				// that bypass this entry point.
+				serviceURL = api.BaseURL()
+			}
+
+			ghToken, err := resolveSearchToken(ctx, serviceURL, insecureHTTPAuth)
+			if err != nil {
+				return err
 			}
 
 			searchCfg := search.Config{
@@ -191,6 +195,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	cmd.Flags().StringVar(&dateFlag, "date", "", "Filter by time period (week or month)")
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Filter by branch name")
 	cmd.Flags().StringVar(&repoFlag, "repo", "", "Filter by repository (owner/name or *)")
+	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
 	cmd.RegisterFlagCompletionFunc("date", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) { //nolint:errcheck,gosec // only fails if the flag isn't defined; defined directly above
 		return []string{"week", "month"}, cobra.ShellCompDirectiveNoFileComp
@@ -200,6 +205,27 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	return cmd
 }
 
+// resolveSearchToken returns a bearer scoped to the search service host.
+// In split-host deployments this triggers an RFC 8693 exchange so the bearer
+// carries the data-API audience rather than the auth-host one; single-host
+// setups hit the same-host shortcut and return the core token unchanged.
+// insecureHTTPAuth opts into non-loopback http:// resources at the
+// tokenmanager layer, matching the per-command --insecure-http-auth pattern
+// used by NewAuthenticatedAPIClient and newRecapClient.
+func resolveSearchToken(ctx context.Context, serviceURL string, insecureHTTPAuth bool) (string, error) {
+	if insecureHTTPAuth {
+		auth.EnableInsecureHTTP()
+	}
+	token, err := auth.TokenForResource(ctx, api.OriginOnly(serviceURL))
+	if errors.Is(err, auth.ErrNotLoggedIn) {
+		return "", errors.New("not authenticated. Run 'entire login' to authenticate")
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading credentials: %w", err)
+	}
+	return token, nil
+}
+
 // completeRepoFlag returns shell-completion suggestions for the search
 // command's --repo flag. "*" is always offered so the wildcard works
 // regardless of auth state. Errors are swallowed (rather than surfaced via
@@ -207,7 +233,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 // must never pollute the user's prompt with error output.
 func completeRepoFlag(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 	suggestions := []string{"*"}
-	client, err := NewAuthenticatedAPIClient(false)
+	client, err := NewAuthenticatedAPIClient(cmd.Context(), false)
 	if err != nil {
 		return suggestions, cobra.ShellCompDirectiveNoFileComp
 	}

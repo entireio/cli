@@ -33,7 +33,6 @@ type checkpointMigrator struct {
 	v1Store     *checkpoint.GitStore
 	v2Store     *checkpoint.V2GitStore
 	opts        migrationOptions
-	fullIndex   checkpoint.FullSessionArtifactsIndex
 	authorName  string
 	authorEmail string
 	report      *migrationReport
@@ -43,19 +42,10 @@ func migrateDiscoveredCheckpoints(ctx context.Context, repo *git.Repository, dis
 	authorName, authorEmail := checkpoint.GetGitAuthorFromRepo(repo)
 	v2Store := checkpoint.NewV2GitStore(repo)
 	report := migrationReport{DiscoveredCheckpoints: len(discovered)}
-	var fullIndex checkpoint.FullSessionArtifactsIndex
-	if !opts.apply {
-		var err error
-		fullIndex, err = v2Store.BuildFullSessionArtifactsIndex()
-		if err != nil {
-			return report, fmt.Errorf("build v2 full artifact index: %w", err)
-		}
-	}
 	migrator := checkpointMigrator{
 		v1Store:     checkpoint.NewGitStore(repo),
 		v2Store:     v2Store,
 		opts:        opts,
-		fullIndex:   fullIndex,
 		authorName:  authorName,
 		authorEmail: authorEmail,
 		report:      &report,
@@ -115,7 +105,7 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 			continue
 		}
 
-		content, err := m.readV2SessionContent(ctx, discovered, sessionIndex, metadataContent)
+		content, err := m.readV2SessionContent(ctx, discovered, sessionIndex)
 		if err != nil {
 			if errors.Is(err, checkpoint.ErrNoTranscript) {
 				m.report.MissingRawTranscripts++
@@ -167,15 +157,12 @@ func (m checkpointMigrator) readV2SessionMetadata(ctx context.Context, discovere
 	return content, nil
 }
 
-func (m checkpointMigrator) readV2SessionContent(ctx context.Context, discovered discoveredCheckpoint, sessionIndex int, metadataContent *checkpoint.SessionContent) (*checkpoint.SessionContent, error) {
-	if m.opts.apply || !m.fullIndex.Has(discovered.ID, sessionIndex) {
-		content, err := m.v2Store.ReadSessionContent(ctx, discovered.ID, sessionIndex)
-		if err != nil {
-			return nil, fmt.Errorf("read full v2 session content: %w", err)
-		}
-		return content, nil
+func (m checkpointMigrator) readV2SessionContent(ctx context.Context, discovered discoveredCheckpoint, sessionIndex int) (*checkpoint.SessionContent, error) {
+	content, err := m.v2Store.ReadSessionContent(ctx, discovered.ID, sessionIndex)
+	if err != nil {
+		return nil, fmt.Errorf("read full v2 session content: %w", err)
 	}
-	return metadataContent, nil
+	return content, nil
 }
 
 func hasRequiredV2Metadata(content *checkpoint.SessionContent) bool {

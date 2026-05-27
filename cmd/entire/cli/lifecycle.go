@@ -124,8 +124,11 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// Build informational message — warn early if repo has no commits yet,
 	// since checkpoints require at least one commit to work.
 	message := sessionStartMessage(ag.Name(), false)
-	if repo, err := strategy.OpenRepository(ctx); err == nil && strategy.IsEmptyRepository(repo) {
-		message = sessionStartMessage(ag.Name(), true)
+	if repo, err := strategy.OpenRepository(ctx); err == nil {
+		defer repo.Close()
+		if strategy.IsEmptyRepository(repo) {
+			message = sessionStartMessage(ag.Name(), true)
+		}
 	}
 
 	// Check for concurrent sessions and append count if any
@@ -485,10 +488,13 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Early check: bail out quickly if the repo has no commits yet.
 	// Return nil (not an error) so the hook exits 0 — agents treat non-zero
 	// exit codes as hook failures. The user was already warned at session start.
-	if repo, err := strategy.OpenRepository(ctx); err == nil && strategy.IsEmptyRepository(repo) {
-		prepareSpan.End()
-		logging.Info(logCtx, "skipping checkpoint - will activate after first commit")
-		return nil
+	if repo, err := strategy.OpenRepository(ctx); err == nil {
+		defer repo.Close()
+		if strategy.IsEmptyRepository(repo) {
+			prepareSpan.End()
+			logging.Info(logCtx, "skipping checkpoint - will activate after first commit")
+			return nil
+		}
 	}
 	prepareSpan.End()
 

@@ -301,18 +301,13 @@ func TestGetDescriptionForCheckpointFallsForwardToV2WhenV1MissesCheckpoint(t *te
 
 	targetCheckpointID := id.MustCheckpointID("222222222222")
 	expectedDesc := "prompt from v2"
-	v2Store := checkpoint.NewV2GitStore(repo)
-	if err := v2Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	writeV2CheckpointFixture(t, repo, v2CheckpointFixtureOptions{
 		CheckpointID: targetCheckpointID,
 		SessionID:    "session-v2-description",
 		Strategy:     StrategyNameManualCommit,
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"test"}` + "\n")),
 		Prompts:      []string{expectedDesc},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@example.com",
-	}); err != nil {
-		t.Fatalf("WriteCommitted() error = %v", err)
-	}
+	})
 
 	if got := getDescriptionForCheckpoint(repo, targetCheckpointID); got != expectedDesc {
 		t.Errorf("getDescriptionForCheckpoint() = %q, want %q", got, expectedDesc)

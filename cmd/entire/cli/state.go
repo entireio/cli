@@ -264,6 +264,7 @@ func DetectFileChanges(ctx context.Context, previouslyUntracked []string) (*File
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -324,6 +325,7 @@ func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot stri
 	if err != nil {
 		return files // fail open
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
@@ -431,6 +433,7 @@ func getUntrackedFilesForState(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
