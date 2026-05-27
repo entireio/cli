@@ -463,10 +463,15 @@ func fetchMetadataFromOrigin(ctx context.Context, fopts fetchMetadataOpts) error
 	return nil
 }
 
-// FetchV2MainTreeOnly fetches just the tip of the v2 /main ref (--depth=1).
-// Cheap probe used by resume/explain; may leave .git/shallow set.
+// FetchV2MainTreeOnly fetches the v2 /main ref for read-only lookup paths.
+//
+// Unlike the v1 metadata branch, v2 custom refs do not have a remote-tracking
+// fallback tree. Avoid --depth=1 here: a shallow fetch can make a remote
+// descendant look unrelated to go-git, causing SafelyAdvanceLocalRef to
+// preserve a stale local ref and explain/resume to miss freshly fetched
+// checkpoints.
 func FetchV2MainTreeOnly(ctx context.Context) error {
-	return fetchV2MainFromOrigin(ctx, fetchMetadataOpts{Shallow: true})
+	return fetchV2MainFromOrigin(ctx, fetchMetadataOpts{})
 }
 
 // FetchV2MainRef fetches the v2 /main ref from origin with full blob content.
