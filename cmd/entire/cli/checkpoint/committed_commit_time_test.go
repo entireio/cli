@@ -90,13 +90,7 @@ func setupCommittedCommitTimeRepo(t *testing.T) (*git.Repository, *GitStore) {
 func metadataHeadCommit(t *testing.T, repo *git.Repository) *object.Commit {
 	t.Helper()
 
-	return refHeadCommit(t, repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
-}
-
-func refHeadCommit(t *testing.T, repo *git.Repository, refName plumbing.ReferenceName) *object.Commit {
-	t.Helper()
-
-	ref, err := repo.Reference(refName, true)
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, err)
 
 	commit, err := repo.CommitObject(ref.Hash())

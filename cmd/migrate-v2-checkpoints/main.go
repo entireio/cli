@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 
@@ -164,13 +165,21 @@ func openRepository(ctx context.Context, repoPath string) (string, *git.Reposito
 		repoPath = root
 	}
 
-	repo, err := git.PlainOpenWithOptions(repoPath, &git.PlainOpenOptions{DetectDotGit: true})
+	// DetectDotGit walks up from a subdir to find the worktree root; then
+	// re-open via gitrepo.OpenPath so shared clones with object alternates
+	// resolve correctly.
+	detector, err := git.PlainOpenWithOptions(repoPath, &git.PlainOpenOptions{DetectDotGit: true})
 	if err != nil {
 		return "", nil, fmt.Errorf("open repository %q: %w", repoPath, err)
 	}
 	repoRoot := repoPath
-	if worktree, worktreeErr := repo.Worktree(); worktreeErr == nil {
+	if worktree, worktreeErr := detector.Worktree(); worktreeErr == nil {
 		repoRoot = worktree.Filesystem().Root()
+	}
+
+	repo, err := gitrepo.OpenPath(repoRoot)
+	if err != nil {
+		return "", nil, fmt.Errorf("open repository %q: %w", repoRoot, err)
 	}
 	return repoRoot, repo, nil
 }

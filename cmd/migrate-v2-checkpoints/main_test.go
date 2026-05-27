@@ -33,12 +33,6 @@ const (
 	unrelatedCheckpointID = "444444444444"
 	testSinceRevision     = "abc123"
 	testHeadRevision      = "HEAD"
-	testRepoFlag          = "--repo"
-	testSinceFlag         = "--since"
-	testHeadFlag          = "--head"
-	testListFlag          = "--list"
-	testDryRunFlag        = "--dry-run"
-	testApplyFlag         = "--apply"
 	testRepoPath          = "/tmp/repo"
 	testBaseFilename      = "base.txt"
 	testMainFilename      = "main.txt"
@@ -56,10 +50,10 @@ func TestParseOptions(t *testing.T) {
 	t.Parallel()
 
 	opts, err := parseOptions([]string{
-		testRepoFlag, testRepoPath,
-		testSinceFlag, testSinceRevision,
-		testHeadFlag, testHeadRevision,
-		testListFlag,
+		"--repo", testRepoPath,
+		"--since", testSinceRevision,
+		"--head", testHeadRevision,
+		"--list",
 	})
 	require.NoError(t, err)
 	require.Equal(t, testRepoPath, opts.repoPath)
@@ -67,15 +61,15 @@ func TestParseOptions(t *testing.T) {
 	require.Equal(t, testHeadRevision, opts.head)
 	require.Equal(t, modeList, opts.mode)
 
-	opts, err = parseOptions([]string{testDryRunFlag, testSinceRevision})
+	opts, err = parseOptions([]string{"--dry-run", testSinceRevision})
 	require.NoError(t, err)
 	require.Equal(t, testSinceRevision, opts.since)
 	require.Equal(t, modeDryRun, opts.mode)
 
-	_, err = parseOptions([]string{testSinceFlag, testSinceRevision, "def456"})
+	_, err = parseOptions([]string{"--since", testSinceRevision, "def456"})
 	require.ErrorContains(t, err, "use either --since or positional since commit")
 
-	_, err = parseOptions([]string{testListFlag, testApplyFlag})
+	_, err = parseOptions([]string{"--list", "--apply"})
 	require.ErrorContains(t, err, "use only one")
 }
 
@@ -207,10 +201,10 @@ func TestRunListModeOpensRepoFromSubdirectory(t *testing.T) {
 
 	var stdout bytes.Buffer
 	err := run(context.Background(), []string{
-		testRepoFlag, subdir,
-		testSinceFlag, fixture.baseHash.String(),
-		testHeadFlag, fixture.mainHash.String(),
-		testListFlag,
+		"--repo", subdir,
+		"--since", fixture.baseHash.String(),
+		"--head", fixture.mainHash.String(),
+		"--list",
 	}, &stdout)
 	require.NoError(t, err)
 
@@ -250,10 +244,10 @@ func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 
 	var stdout bytes.Buffer
 	err := run(context.Background(), []string{
-		testRepoFlag, fixture.dir,
-		testSinceFlag, fixture.baseHash.String(),
-		testHeadFlag, fixture.mainHash.String(),
-		testApplyFlag,
+		"--repo", fixture.dir,
+		"--since", fixture.baseHash.String(),
+		"--head", fixture.mainHash.String(),
+		"--apply",
 	}, &stdout)
 	require.NoError(t, err)
 	require.Contains(t, stdout.String(), "migrated checkpoints: 1")
@@ -301,7 +295,7 @@ func TestRunDryRunPlansWithoutWritingV1(t *testing.T) {
 		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"dry run\"}\n")),
 	})
 
-	stdout := runMigrationCommand(t, fixture, fixture.mainHash, testDryRunFlag)
+	stdout := runMigrationCommand(t, fixture, fixture.mainHash, "--dry-run")
 	require.Contains(t, stdout, "Migration plan:")
 	require.Contains(t, stdout, "checkpoints eligible for migration: 1")
 	require.Contains(t, stdout, "sessions eligible for migration: 1")
@@ -340,7 +334,7 @@ func TestRunApplySkipsExistingV1SessionsAndMigratesMissingSessions(t *testing.T)
 	})
 	require.NoError(t, err)
 
-	stdout := runMigrationCommand(t, fixture, fixture.mainHash, testApplyFlag)
+	stdout := runMigrationCommand(t, fixture, fixture.mainHash, "--apply")
 	require.Contains(t, stdout, "already present v1 sessions: 1")
 	require.Contains(t, stdout, "migrated checkpoints: 1")
 	require.Contains(t, stdout, "migrated sessions: 1")
@@ -371,7 +365,7 @@ func TestRunApplyMigratesTaskMetadata(t *testing.T) {
 		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"task\"}\n")),
 	})
 
-	stdout := runMigrationCommand(t, fixture, fixture.mainHash, testApplyFlag)
+	stdout := runMigrationCommand(t, fixture, fixture.mainHash, "--apply")
 	require.Contains(t, stdout, "migrated sessions: 1")
 
 	v1Store := checkpoint.NewGitStore(fixture.repo)
@@ -410,7 +404,7 @@ func TestRunApplyHasReviewReflectsOnlyMigratedSessions(t *testing.T) {
 		CompactTranscript: []byte("{\"message\":\"compact review only\"}\n"),
 	})
 
-	stdout := runMigrationCommand(t, fixture, fixture.mainHash, testApplyFlag)
+	stdout := runMigrationCommand(t, fixture, fixture.mainHash, "--apply")
 	require.Contains(t, stdout, "missing raw transcripts: 1")
 	require.Contains(t, stdout, "migrated checkpoints: 1")
 	require.Contains(t, stdout, "migrated sessions: 1")
@@ -433,9 +427,9 @@ func TestRunDryRunReportsMissingV2MetadataAndRawTranscripts(t *testing.T) {
 
 	var stdout bytes.Buffer
 	err := run(context.Background(), []string{
-		testRepoFlag, fixture.dir,
-		testSinceFlag, fixture.baseHash.String(),
-		testDryRunFlag,
+		"--repo", fixture.dir,
+		"--since", fixture.baseHash.String(),
+		"--dry-run",
 	}, &stdout)
 	require.NoError(t, err)
 
@@ -513,9 +507,9 @@ func runMigrationCommand(t *testing.T, fixture migrationHistoryFixture, head plu
 	t.Helper()
 
 	args := []string{
-		testRepoFlag, fixture.dir,
-		testSinceFlag, fixture.baseHash.String(),
-		testHeadFlag, head.String(),
+		"--repo", fixture.dir,
+		"--since", fixture.baseHash.String(),
+		"--head", head.String(),
 		mode,
 	}
 	var stdout bytes.Buffer

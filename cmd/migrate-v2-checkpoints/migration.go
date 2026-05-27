@@ -88,7 +88,7 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 
 	migratedSessions := 0
 	for sessionIndex := range summary.Sessions {
-		metadataContent, err := m.readV2SessionMetadata(ctx, discovered, sessionIndex)
+		metadataContent, err := m.v2Store.ReadSessionMetadataAndPrompts(ctx, discovered.ID, sessionIndex)
 		if err != nil {
 			if errors.Is(err, checkpoint.ErrCheckpointNotFound) {
 				m.report.MissingV2SessionMetadata++
@@ -105,17 +105,13 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 			continue
 		}
 
-		content, err := m.readV2SessionContent(ctx, discovered, sessionIndex)
+		content, err := m.v2Store.ReadSessionContent(ctx, discovered.ID, sessionIndex)
 		if err != nil {
 			if errors.Is(err, checkpoint.ErrNoTranscript) {
 				m.report.MissingRawTranscripts++
 				continue
 			}
 			return migratedSessions, fmt.Errorf("read v2 checkpoint %s session %d: %w", discovered.ID, sessionIndex, err)
-		}
-		if !hasRequiredV2Metadata(content) {
-			m.report.MissingV2SessionMetadata++
-			continue
 		}
 
 		m.report.EligibleSessions++
@@ -147,22 +143,6 @@ func (m checkpointMigrator) existingV1SessionIDs(ctx context.Context, discovered
 		existing[content.Metadata.SessionID] = struct{}{}
 	}
 	return existing, nil
-}
-
-func (m checkpointMigrator) readV2SessionMetadata(ctx context.Context, discovered discoveredCheckpoint, sessionIndex int) (*checkpoint.SessionContent, error) {
-	content, err := m.v2Store.ReadSessionMetadataAndPrompts(ctx, discovered.ID, sessionIndex)
-	if err != nil {
-		return nil, fmt.Errorf("read v2 session metadata and prompts: %w", err)
-	}
-	return content, nil
-}
-
-func (m checkpointMigrator) readV2SessionContent(ctx context.Context, discovered discoveredCheckpoint, sessionIndex int) (*checkpoint.SessionContent, error) {
-	content, err := m.v2Store.ReadSessionContent(ctx, discovered.ID, sessionIndex)
-	if err != nil {
-		return nil, fmt.Errorf("read full v2 session content: %w", err)
-	}
-	return content, nil
 }
 
 func hasRequiredV2Metadata(content *checkpoint.SessionContent) bool {
