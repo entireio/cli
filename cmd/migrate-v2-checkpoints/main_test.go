@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -456,6 +457,43 @@ func TestRunApplySkipsExistingV1SessionsAndMigratesMissingSessions(t *testing.T)
 	require.JSONEq(t, `{"message":"from v2 new"}`, string(content.Transcript))
 }
 
+func TestRunDryRunReadsSparseExistingV1SessionPaths(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	cpID := id.MustCheckpointID(mainCheckpointID)
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-existing-zero",
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"from v2 existing\"}\n")),
+	})
+
+	v1Store := checkpoint.NewGitStore(fixture.repo)
+	require.NoError(t, v1Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-existing-zero",
+		Strategy:     testStrategy,
+		Branch:       testBranchName,
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"already v1 zero\"}\n")),
+		AuthorName:   testAuthorName,
+		AuthorEmail:  testAuthorEmail,
+	}))
+	require.NoError(t, v1Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-existing-two",
+		Strategy:     testStrategy,
+		Branch:       testBranchName,
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"already v1 two\"}\n")),
+		AuthorName:   testAuthorName,
+		AuthorEmail:  testAuthorEmail,
+	}))
+	rewriteV1SecondSessionToSparseSlot(t, fixture.repo, cpID)
+
+	stdout := runMigrationCommand(t, fixture, fixture.mainHash, "--dry-run")
+	require.Contains(t, stdout, "already present v1 sessions: 1")
+	require.Contains(t, stdout, "checkpoints eligible for migration: 0")
+}
+
 func TestRunApplyMigratesTaskMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -600,6 +638,50 @@ func setupMigrationOrphanRepo(t *testing.T, checkpointID string) migrationHistor
 		repo:     repo,
 		baseHash: baseHash,
 	}
+}
+
+func rewriteV1SecondSessionToSparseSlot(t *testing.T, repo *git.Repository, cpID id.CheckpointID) {
+	t.Helper()
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	parentHash, entries := readTestV2RefEntries(t, repo, refName)
+	basePath := cpID.Path() + "/"
+	rootMetadataPath := basePath + paths.MetadataFileName
+	rootEntry := entries[rootMetadataPath]
+	summary := readTestJSONFromBlob[checkpoint.CheckpointSummary](t, repo, rootEntry.Hash)
+	require.Len(t, summary.Sessions, 2)
+	summary.Sessions[1] = rewriteSessionFilePathSlot(summary.Sessions[1], "/1/", "/2/")
+
+	summaryJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")
+	require.NoError(t, err)
+	summaryBlob, err := checkpoint.CreateBlobFromContent(repo, summaryJSON)
+	require.NoError(t, err)
+	entries[rootMetadataPath] = object.TreeEntry{
+		Name: rootMetadataPath,
+		Mode: rootEntry.Mode,
+		Hash: summaryBlob,
+	}
+
+	oldPrefix := basePath + "1/"
+	newPrefix := basePath + "2/"
+	for entryPath, entry := range entries {
+		if !strings.HasPrefix(entryPath, oldPrefix) {
+			continue
+		}
+		newPath := newPrefix + strings.TrimPrefix(entryPath, oldPrefix)
+		entry.Name = newPath
+		entries[newPath] = entry
+		delete(entries, entryPath)
+	}
+	writeTestV2RefEntries(t, repo, refName, parentHash, entries, "test sparse v1 fixture")
+}
+
+func rewriteSessionFilePathSlot(sessionPaths checkpoint.SessionFilePaths, oldSlot, newSlot string) checkpoint.SessionFilePaths {
+	sessionPaths.Metadata = strings.Replace(sessionPaths.Metadata, oldSlot, newSlot, 1)
+	sessionPaths.Transcript = strings.Replace(sessionPaths.Transcript, oldSlot, newSlot, 1)
+	sessionPaths.ContentHash = strings.Replace(sessionPaths.ContentHash, oldSlot, newSlot, 1)
+	sessionPaths.Prompt = strings.Replace(sessionPaths.Prompt, oldSlot, newSlot, 1)
+	return sessionPaths
 }
 
 func commitMigrationTestFile(t *testing.T, dir, name, content, message string) plumbing.Hash {

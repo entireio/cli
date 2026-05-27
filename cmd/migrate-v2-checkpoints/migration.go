@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	checkpointID "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/redact"
 
@@ -157,9 +160,19 @@ func (m checkpointMigrator) existingV1SessionIDs(ctx context.Context, discovered
 	if summary == nil {
 		return existing, nil
 	}
-	for sessionIndex := range summary.Sessions {
+	for summaryIndex, sessionPaths := range summary.Sessions {
+		sessionIndex, ok, err := v1SessionIndexFromSummary(discovered.ID, sessionPaths)
+		if err != nil {
+			return nil, fmt.Errorf("resolve v1 checkpoint %s session %d metadata path: %w", discovered.ID, summaryIndex, err)
+		}
+		if !ok {
+			continue
+		}
 		content, err := m.v1Store.ReadSessionMetadataAndPrompts(ctx, discovered.ID, sessionIndex)
 		if err != nil {
+			if errors.Is(err, checkpoint.ErrCheckpointNotFound) {
+				continue
+			}
 			return nil, fmt.Errorf("read v1 checkpoint %s session %d metadata: %w", discovered.ID, sessionIndex, err)
 		}
 		if content.Metadata.SessionID == "" {
@@ -168,6 +181,30 @@ func (m checkpointMigrator) existingV1SessionIDs(ctx context.Context, discovered
 		existing[content.Metadata.SessionID] = struct{}{}
 	}
 	return existing, nil
+}
+
+func v1SessionIndexFromSummary(cpID checkpointID.CheckpointID, sessionPaths checkpoint.SessionFilePaths) (int, bool, error) {
+	if sessionPaths.Metadata == "" {
+		return 0, false, nil
+	}
+
+	metadataPath := strings.TrimPrefix(sessionPaths.Metadata, "/")
+	expectedPrefix := cpID.Path() + "/"
+	relativePath, ok := strings.CutPrefix(metadataPath, expectedPrefix)
+	if !ok {
+		return 0, false, fmt.Errorf("metadata path %q is outside checkpoint path %q", sessionPaths.Metadata, cpID.Path())
+	}
+
+	sessionDir, fileName, ok := strings.Cut(relativePath, "/")
+	if !ok || fileName != paths.MetadataFileName {
+		return 0, false, fmt.Errorf("metadata path %q does not point to a session metadata file", sessionPaths.Metadata)
+	}
+
+	sessionIndex, err := strconv.Atoi(sessionDir)
+	if err != nil || sessionIndex < 0 {
+		return 0, false, fmt.Errorf("metadata path %q has invalid session index %q", sessionPaths.Metadata, sessionDir)
+	}
+	return sessionIndex, true, nil
 }
 
 func hasRequiredV2Metadata(content *checkpoint.SessionContent) bool {
