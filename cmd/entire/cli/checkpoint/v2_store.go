@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 
@@ -130,7 +131,11 @@ func commitTreeHashViaCLI(ctx context.Context, commitHash plumbing.Hash) (plumbi
 
 // updateRef creates a new commit on a ref with the given tree, updating the ref to point to it.
 func (s *V2GitStore) updateRef(ctx context.Context, refName plumbing.ReferenceName, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) error {
-	commitHash, err := CreateCommit(ctx, s.repo, treeHash, parentHash, message, authorName, authorEmail)
+	return s.updateRefAt(ctx, refName, treeHash, parentHash, message, authorName, authorEmail, time.Now())
+}
+
+func (s *V2GitStore) updateRefAt(ctx context.Context, refName plumbing.ReferenceName, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string, commitTime time.Time) error {
+	commitHash, err := createCommitObject(ctx, s.repo, treeHash, parentHash, message, authorName, authorEmail, commitTime)
 	if err != nil {
 		return fmt.Errorf("failed to create commit: %w", err)
 	}

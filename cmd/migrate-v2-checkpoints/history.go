@@ -9,6 +9,7 @@ import (
 	"time"
 
 	checkpointID "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v6"
@@ -178,10 +179,38 @@ func isHistoryRef(ref *plumbing.Reference) bool {
 	if !name.IsBranch() && !name.IsRemote() {
 		return false
 	}
+	if isInternalHistoryRefName(name) {
+		return false
+	}
 	return !strings.HasSuffix(name.String(), "/HEAD")
 }
 
+func isInternalHistoryRefName(name plumbing.ReferenceName) bool {
+	if name == plumbing.NewBranchReferenceName(paths.MetadataBranchName) ||
+		name == plumbing.NewBranchReferenceName(paths.TrailsBranchName) {
+		return true
+	}
+
+	remotePrefix := "refs/remotes/"
+	nameString := name.String()
+	if !strings.HasPrefix(nameString, remotePrefix) {
+		return false
+	}
+	remoteAndBranch := strings.TrimPrefix(nameString, remotePrefix)
+	_, branchName, ok := strings.Cut(remoteAndBranch, "/")
+	if !ok {
+		return false
+	}
+	return branchName == paths.MetadataBranchName || branchName == paths.TrailsBranchName
+}
+
 func resolveRevision(repo *git.Repository, revision string) (plumbing.Hash, error) {
+	if isShortHexRevision(revision) {
+		if err := rejectAmbiguousCommitPrefix(repo, revision); err != nil {
+			return plumbing.ZeroHash, err
+		}
+	}
+
 	hash, err := repo.ResolveRevision(plumbing.Revision(revision))
 	if err != nil {
 		return plumbing.ZeroHash, err //nolint:wrapcheck // callers add flag-specific context
@@ -190,6 +219,48 @@ func resolveRevision(repo *git.Repository, revision string) (plumbing.Hash, erro
 		return plumbing.ZeroHash, fmt.Errorf("revision %q resolved to no commit", revision)
 	}
 	return *hash, nil
+}
+
+func isShortHexRevision(revision string) bool {
+	if revision == "" || len(revision) >= len(plumbing.ZeroHash.String()) {
+		return false
+	}
+	for _, r := range revision {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func rejectAmbiguousCommitPrefix(repo *git.Repository, revision string) error {
+	prefix := strings.ToLower(revision)
+	iter, err := repo.CommitObjects()
+	if err != nil {
+		return fmt.Errorf("list commit objects for revision %q: %w", revision, err)
+	}
+	defer iter.Close()
+
+	var matches []plumbing.Hash
+	if err := iter.ForEach(func(commit *object.Commit) error {
+		if strings.HasPrefix(commit.Hash.String(), prefix) {
+			matches = append(matches, commit.Hash)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("scan commit objects for revision %q: %w", revision, err)
+	}
+	if len(matches) < 2 {
+		return nil
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].String() < matches[j].String()
+	})
+	return fmt.Errorf("ambiguous revision %q matches commit prefixes %s and %s", revision, matches[0], matches[1])
 }
 
 func reachableCommits(ctx context.Context, repo *git.Repository, from plumbing.Hash) (map[plumbing.Hash]bool, error) {
@@ -269,7 +340,7 @@ func addCheckpointCommit(commit *object.Commit, checkpointIndexes map[string]int
 	discovered := discoveredCommit{
 		Hash:     commit.Hash,
 		ShortSHA: shortHash(commit.Hash),
-		Date:     commit.Author.When,
+		Date:     commit.Committer.When,
 	}
 
 	for _, id := range ids {

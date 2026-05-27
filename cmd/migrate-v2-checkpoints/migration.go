@@ -18,20 +18,22 @@ type migrationOptions struct {
 }
 
 type migrationReport struct {
-	DiscoveredChecks      int
-	ExistingV1Checkpoints int
-	MissingV2Metadata     int
-	MissingRawTranscripts int
-	PlannedCheckpoints    int
-	PlannedSessions       int
-	MigratedCheckpoints   int
-	MigratedSessions      int
+	DiscoveredCheckpoints       int
+	ExistingV1Sessions          int
+	MissingV2CheckpointMetadata int
+	MissingV2SessionMetadata    int
+	MissingRawTranscripts       int
+	EligibleCheckpoints         int
+	EligibleSessions            int
+	MigratedCheckpoints         int
+	MigratedSessions            int
 }
 
 type checkpointMigrator struct {
 	v1Store     *checkpoint.GitStore
 	v2Store     *checkpoint.V2GitStore
 	opts        migrationOptions
+	fullIndex   checkpoint.FullSessionArtifactsIndex
 	authorName  string
 	authorEmail string
 	report      *migrationReport
@@ -39,11 +41,21 @@ type checkpointMigrator struct {
 
 func migrateDiscoveredCheckpoints(ctx context.Context, repo *git.Repository, discovered []discoveredCheckpoint, opts migrationOptions) (migrationReport, error) {
 	authorName, authorEmail := checkpoint.GetGitAuthorFromRepo(repo)
-	report := migrationReport{DiscoveredChecks: len(discovered)}
+	v2Store := checkpoint.NewV2GitStore(repo)
+	report := migrationReport{DiscoveredCheckpoints: len(discovered)}
+	var fullIndex checkpoint.FullSessionArtifactsIndex
+	if !opts.apply {
+		var err error
+		fullIndex, err = v2Store.BuildFullSessionArtifactsIndex()
+		if err != nil {
+			return report, fmt.Errorf("build v2 full artifact index: %w", err)
+		}
+	}
 	migrator := checkpointMigrator{
 		v1Store:     checkpoint.NewGitStore(repo),
-		v2Store:     checkpoint.NewV2GitStore(repo),
+		v2Store:     v2Store,
 		opts:        opts,
+		fullIndex:   fullIndex,
 		authorName:  authorName,
 		authorEmail: authorEmail,
 		report:      &report,
@@ -54,11 +66,12 @@ func migrateDiscoveredCheckpoints(ctx context.Context, repo *git.Repository, dis
 		if err != nil {
 			return report, err
 		}
-		if migratedSessions > 0 {
-			report.PlannedCheckpoints++
-			if opts.apply {
-				report.MigratedCheckpoints++
-			}
+		if migratedSessions == 0 {
+			continue
+		}
+		report.EligibleCheckpoints++
+		if opts.apply {
+			report.MigratedCheckpoints++
 		}
 	}
 	return report, nil
@@ -69,9 +82,9 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 	if err != nil {
 		return 0, fmt.Errorf("read v1 checkpoint %s: %w", discovered.ID, err)
 	}
-	if existing != nil {
-		m.report.ExistingV1Checkpoints++
-		return 0, nil
+	existingSessionIDs, err := m.existingV1SessionIDs(ctx, discovered, existing)
+	if err != nil {
+		return 0, err
 	}
 
 	summary, err := m.v2Store.ReadCommitted(ctx, discovered.ID)
@@ -79,13 +92,30 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 		return 0, fmt.Errorf("read v2 checkpoint %s: %w", discovered.ID, err)
 	}
 	if summary == nil || len(summary.Sessions) == 0 {
-		m.report.MissingV2Metadata++
+		m.report.MissingV2CheckpointMetadata++
 		return 0, nil
 	}
 
 	migratedSessions := 0
 	for sessionIndex := range summary.Sessions {
-		content, err := m.v2Store.ReadSessionContent(ctx, discovered.ID, sessionIndex)
+		metadataContent, err := m.readV2SessionMetadata(ctx, discovered, sessionIndex)
+		if err != nil {
+			if errors.Is(err, checkpoint.ErrCheckpointNotFound) {
+				m.report.MissingV2SessionMetadata++
+				continue
+			}
+			return migratedSessions, fmt.Errorf("read v2 checkpoint %s session %d metadata: %w", discovered.ID, sessionIndex, err)
+		}
+		if !hasRequiredV2Metadata(metadataContent) {
+			m.report.MissingV2SessionMetadata++
+			continue
+		}
+		if _, exists := existingSessionIDs[metadataContent.Metadata.SessionID]; exists {
+			m.report.ExistingV1Sessions++
+			continue
+		}
+
+		content, err := m.readV2SessionContent(ctx, discovered, sessionIndex, metadataContent)
 		if err != nil {
 			if errors.Is(err, checkpoint.ErrNoTranscript) {
 				m.report.MissingRawTranscripts++
@@ -94,11 +124,11 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 			return migratedSessions, fmt.Errorf("read v2 checkpoint %s session %d: %w", discovered.ID, sessionIndex, err)
 		}
 		if !hasRequiredV2Metadata(content) {
-			m.report.MissingV2Metadata++
+			m.report.MissingV2SessionMetadata++
 			continue
 		}
 
-		m.report.PlannedSessions++
+		m.report.EligibleSessions++
 		if m.opts.apply {
 			writeOpts := writeOptionsFromV2Content(content, summary, m.authorName, m.authorEmail)
 			if err := m.v1Store.WriteCommitted(ctx, writeOpts); err != nil {
@@ -109,6 +139,43 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 		migratedSessions++
 	}
 	return migratedSessions, nil
+}
+
+func (m checkpointMigrator) existingV1SessionIDs(ctx context.Context, discovered discoveredCheckpoint, summary *checkpoint.CheckpointSummary) (map[string]struct{}, error) {
+	existing := make(map[string]struct{})
+	if summary == nil {
+		return existing, nil
+	}
+	for sessionIndex := range summary.Sessions {
+		content, err := m.v1Store.ReadSessionMetadataAndPrompts(ctx, discovered.ID, sessionIndex)
+		if err != nil {
+			return nil, fmt.Errorf("read v1 checkpoint %s session %d metadata: %w", discovered.ID, sessionIndex, err)
+		}
+		if content.Metadata.SessionID == "" {
+			continue
+		}
+		existing[content.Metadata.SessionID] = struct{}{}
+	}
+	return existing, nil
+}
+
+func (m checkpointMigrator) readV2SessionMetadata(ctx context.Context, discovered discoveredCheckpoint, sessionIndex int) (*checkpoint.SessionContent, error) {
+	content, err := m.v2Store.ReadSessionMetadataAndPrompts(ctx, discovered.ID, sessionIndex)
+	if err != nil {
+		return nil, fmt.Errorf("read v2 session metadata and prompts: %w", err)
+	}
+	return content, nil
+}
+
+func (m checkpointMigrator) readV2SessionContent(ctx context.Context, discovered discoveredCheckpoint, sessionIndex int, metadataContent *checkpoint.SessionContent) (*checkpoint.SessionContent, error) {
+	if m.opts.apply || !m.fullIndex.Has(discovered.ID, sessionIndex) {
+		content, err := m.v2Store.ReadSessionContent(ctx, discovered.ID, sessionIndex)
+		if err != nil {
+			return nil, fmt.Errorf("read full v2 session content: %w", err)
+		}
+		return content, nil
+	}
+	return metadataContent, nil
 }
 
 func hasRequiredV2Metadata(content *checkpoint.SessionContent) bool {
@@ -133,8 +200,10 @@ func writeOptionsFromV2Content(content *checkpoint.SessionContent, summary *chec
 		Agent:                       meta.Agent,
 		Model:                       meta.Model,
 		TurnID:                      meta.TurnID,
+		IsTask:                      meta.IsTask,
+		ToolUseID:                   meta.ToolUseID,
 		TranscriptIdentifierAtStart: meta.TranscriptIdentifierAtStart,
-		CheckpointTranscriptStart:   0,
+		CheckpointTranscriptStart:   meta.GetTranscriptStart(),
 		TokenUsage:                  meta.TokenUsage,
 		SessionMetrics:              meta.SessionMetrics,
 		InitialAttribution:          meta.InitialAttribution,
@@ -154,12 +223,13 @@ func writeMigrationReport(w io.Writer, report migrationReport, applied bool) {
 	} else {
 		fmt.Fprintln(w, "Migration plan:")
 	}
-	fmt.Fprintf(w, "  discovered checkpoint trailers: %d\n", report.DiscoveredChecks)
-	fmt.Fprintf(w, "  already present in v1: %d\n", report.ExistingV1Checkpoints)
-	fmt.Fprintf(w, "  missing v2 metadata: %d\n", report.MissingV2Metadata)
+	fmt.Fprintf(w, "  discovered checkpoints: %d\n", report.DiscoveredCheckpoints)
+	fmt.Fprintf(w, "  already present v1 sessions: %d\n", report.ExistingV1Sessions)
+	fmt.Fprintf(w, "  missing v2 checkpoint metadata: %d\n", report.MissingV2CheckpointMetadata)
+	fmt.Fprintf(w, "  missing required v2 session metadata: %d\n", report.MissingV2SessionMetadata)
 	fmt.Fprintf(w, "  missing raw transcripts: %d\n", report.MissingRawTranscripts)
-	fmt.Fprintf(w, "  checkpoints with raw transcripts: %d\n", report.PlannedCheckpoints)
-	fmt.Fprintf(w, "  sessions with raw transcripts: %d\n", report.PlannedSessions)
+	fmt.Fprintf(w, "  checkpoints eligible for migration: %d\n", report.EligibleCheckpoints)
+	fmt.Fprintf(w, "  sessions eligible for migration: %d\n", report.EligibleSessions)
 	if applied {
 		fmt.Fprintf(w, "  migrated checkpoints: %d\n", report.MigratedCheckpoints)
 		fmt.Fprintf(w, "  migrated sessions: %d\n", report.MigratedSessions)

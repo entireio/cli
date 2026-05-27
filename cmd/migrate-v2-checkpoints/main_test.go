@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,6 +49,7 @@ const (
 	testAuthorEmail       = "test@example.com"
 	testBranchName        = "main"
 	testReviewSkill       = "review-skill"
+	testToolUseID         = "toolu_test123"
 )
 
 func TestParseOptions(t *testing.T) {
@@ -133,6 +136,68 @@ func TestDiscoverCheckpointHistory_HeadMustContainSince(t *testing.T) {
 	require.ErrorContains(t, err, "is not an ancestor of --head")
 }
 
+func TestDiscoverCheckpointHistory_ExcludesInternalRefs(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	runMigrationGit(t, fixture.dir, "checkout", "-b", paths.MetadataBranchName, fixture.mainHash.String())
+	commitMigrationTestFile(t, fixture.dir, "internal.txt", "internal\n",
+		"internal checkpoint\n\nEntire-Checkpoint: "+unrelatedCheckpointID)
+
+	repo, err := git.PlainOpen(fixture.dir)
+	require.NoError(t, err)
+	checkpoints, err := discoverCheckpointHistory(context.Background(), repo, discoveryOptions{
+		since: fixture.baseHash.String(),
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, []string{mainCheckpointID, featureCheckpointID, featureCheckpointID2}, discoveredCheckpointIDs(checkpoints))
+}
+
+func TestResolveRevisionRejectsAmbiguousShortCommitPrefix(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	prefixes := map[string]struct{}{}
+	ambiguousPrefix := ""
+	for i := range 17 {
+		hash := commitMigrationTestFile(t, fixture.dir, fmt.Sprintf("ambiguous-%02d.txt", i), fmt.Sprintf("%d\n", i), fmt.Sprintf("ambiguous %d", i))
+		prefix := hash.String()[:1]
+		if _, exists := prefixes[prefix]; exists {
+			ambiguousPrefix = prefix
+			break
+		}
+		prefixes[prefix] = struct{}{}
+	}
+	require.NotEmpty(t, ambiguousPrefix)
+
+	repo, err := git.PlainOpen(fixture.dir)
+	require.NoError(t, err)
+	_, err = resolveRevision(repo, ambiguousPrefix)
+	require.ErrorContains(t, err, "ambiguous revision")
+}
+
+func TestAddCheckpointCommitUsesCommitterTime(t *testing.T) {
+	t.Parallel()
+
+	authorTime := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	committerTime := time.Date(2024, 2, 3, 4, 5, 6, 0, time.UTC)
+	commit := &object.Commit{
+		Hash:      plumbing.NewHash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		Author:    object.Signature{When: authorTime},
+		Committer: object.Signature{When: committerTime},
+		Message:   "commit\n\nEntire-Checkpoint: " + mainCheckpointID,
+	}
+	checkpointIndexes := map[string]int{}
+	checkpoints := []discoveredCheckpoint{}
+
+	addCheckpointCommit(commit, checkpointIndexes, &checkpoints)
+
+	require.Len(t, checkpoints, 1)
+	require.Len(t, checkpoints[0].Commits, 1)
+	require.Equal(t, committerTime, checkpoints[0].Commits[0].Date)
+}
+
 func TestRunListModeOpensRepoFromSubdirectory(t *testing.T) {
 	t.Parallel()
 
@@ -214,7 +279,7 @@ func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 	require.Equal(t, agent.AgentTypeClaudeCode, content.Metadata.Agent)
 	require.Equal(t, "claude-test-model", content.Metadata.Model)
 	require.Equal(t, "turn-1", content.Metadata.TurnID)
-	require.Equal(t, 0, content.Metadata.CheckpointTranscriptStart)
+	require.Equal(t, 9, content.Metadata.CheckpointTranscriptStart)
 	require.Equal(t, string(session.KindAgentReview), content.Metadata.Kind)
 	require.Equal(t, []string{testReviewSkill}, content.Metadata.ReviewSkills)
 	require.Equal(t, "review this", content.Metadata.ReviewPrompt)
@@ -239,23 +304,28 @@ func TestRunDryRunPlansWithoutWritingV1(t *testing.T) {
 
 	stdout := runMigrationCommand(t, fixture, fixture.mainHash, testDryRunFlag)
 	require.Contains(t, stdout, "Migration plan:")
-	require.Contains(t, stdout, "checkpoints with raw transcripts: 1")
-	require.Contains(t, stdout, "sessions with raw transcripts: 1")
+	require.Contains(t, stdout, "checkpoints eligible for migration: 1")
+	require.Contains(t, stdout, "sessions eligible for migration: 1")
 
 	summary, err := checkpoint.NewGitStore(fixture.repo).ReadCommitted(context.Background(), cpID)
 	require.NoError(t, err)
 	require.Nil(t, summary)
 }
 
-func TestRunApplySkipsExistingV1Checkpoint(t *testing.T) {
+func TestRunApplySkipsExistingV1SessionsAndMigratesMissingSessions(t *testing.T) {
 	t.Parallel()
 
 	fixture := setupMigrationHistoryRepo(t)
 	cpID := id.MustCheckpointID(mainCheckpointID)
 	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
 		CheckpointID: cpID,
-		SessionID:    "session-v2",
-		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"from v2\"}\n")),
+		SessionID:    "session-existing-v1",
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"from v2 existing\"}\n")),
+	})
+	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-v2-missing-from-v1",
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"from v2 new\"}\n")),
 	})
 
 	existingTranscript := []byte("{\"message\":\"already v1\"}\n")
@@ -272,14 +342,53 @@ func TestRunApplySkipsExistingV1Checkpoint(t *testing.T) {
 	require.NoError(t, err)
 
 	stdout := runMigrationCommand(t, fixture, fixture.mainHash, testApplyFlag)
-	require.Contains(t, stdout, "already present in v1: 1")
-	require.Contains(t, stdout, "migrated checkpoints: 0")
-	require.Contains(t, stdout, "migrated sessions: 0")
+	require.Contains(t, stdout, "already present v1 sessions: 1")
+	require.Contains(t, stdout, "migrated checkpoints: 1")
+	require.Contains(t, stdout, "migrated sessions: 1")
 
-	content, err := checkpoint.NewGitStore(fixture.repo).ReadSessionContent(context.Background(), cpID, 0)
+	v1Store := checkpoint.NewGitStore(fixture.repo)
+	summary, err := v1Store.ReadCommitted(context.Background(), cpID)
+	require.NoError(t, err)
+	require.Len(t, summary.Sessions, 2)
+	content, err := v1Store.ReadSessionContentByID(context.Background(), cpID, "session-existing-v1")
 	require.NoError(t, err)
 	require.Equal(t, existingTranscript, content.Transcript)
 	require.Equal(t, "session-existing-v1", content.Metadata.SessionID)
+	content, err = v1Store.ReadSessionContentByID(context.Background(), cpID, "session-v2-missing-from-v1")
+	require.NoError(t, err)
+	require.JSONEq(t, `{"message":"from v2 new"}`, string(content.Transcript))
+}
+
+func TestRunApplyMigratesTaskMetadata(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	cpID := id.MustCheckpointID(mainCheckpointID)
+	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "task-session",
+		IsTask:       true,
+		ToolUseID:    testToolUseID,
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"task\"}\n")),
+	})
+
+	stdout := runMigrationCommand(t, fixture, fixture.mainHash, testApplyFlag)
+	require.Contains(t, stdout, "migrated sessions: 1")
+
+	v1Store := checkpoint.NewGitStore(fixture.repo)
+	content, err := v1Store.ReadSessionContent(context.Background(), cpID, 0)
+	require.NoError(t, err)
+	require.True(t, content.Metadata.IsTask)
+	require.Equal(t, testToolUseID, content.Metadata.ToolUseID)
+
+	ref, err := fixture.repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	commit, err := fixture.repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+	_, err = tree.File(cpID.Path() + "/tasks/" + testToolUseID + "/checkpoint.json")
+	require.NoError(t, err)
 }
 
 func TestRunApplyHasReviewReflectsOnlyMigratedSessions(t *testing.T) {
@@ -331,10 +440,11 @@ func TestRunDryRunReportsMissingV2MetadataAndRawTranscripts(t *testing.T) {
 	}, &stdout)
 	require.NoError(t, err)
 
-	require.Contains(t, stdout.String(), "missing v2 metadata: 2")
+	require.Contains(t, stdout.String(), "missing v2 checkpoint metadata: 2")
+	require.Contains(t, stdout.String(), "missing required v2 session metadata: 0")
 	require.Contains(t, stdout.String(), "missing raw transcripts: 1")
-	require.Contains(t, stdout.String(), "checkpoints with raw transcripts: 0")
-	require.Contains(t, stdout.String(), "sessions with raw transcripts: 0")
+	require.Contains(t, stdout.String(), "checkpoints eligible for migration: 0")
+	require.Contains(t, stdout.String(), "sessions eligible for migration: 0")
 }
 
 type migrationHistoryFixture struct {

@@ -174,7 +174,12 @@ func TestV2GitStore_UpdateRef_CreatesCommit(t *testing.T) {
 // v2MainTree returns the root tree from the /main ref for test assertions.
 func v2MainTree(t *testing.T, repo *git.Repository) *object.Tree {
 	t.Helper()
-	ref, err := repo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true)
+	return v2TreeFromRef(t, repo, plumbing.ReferenceName(paths.V2MainRefName))
+}
+
+func v2TreeFromRef(t *testing.T, repo *git.Repository, refName plumbing.ReferenceName) *object.Tree {
+	t.Helper()
+	ref, err := repo.Reference(refName, true)
 	require.NoError(t, err)
 	commit, err := repo.CommitObject(ref.Hash())
 	require.NoError(t, err)
@@ -507,13 +512,7 @@ func TestV2GitStore_WriteCommittedMain_MultiSession(t *testing.T) {
 // v2FullTree returns the root tree from the /full/current ref for test assertions.
 func v2FullTree(t *testing.T, repo *git.Repository) *object.Tree {
 	t.Helper()
-	ref, err := repo.Reference(plumbing.ReferenceName(paths.V2FullCurrentRefName), true)
-	require.NoError(t, err)
-	commit, err := repo.CommitObject(ref.Hash())
-	require.NoError(t, err)
-	tree, err := commit.Tree()
-	require.NoError(t, err)
-	return tree
+	return v2TreeFromRef(t, repo, plumbing.ReferenceName(paths.V2FullCurrentRefName))
 }
 
 func TestV2GitStore_WriteCommittedFull_WritesTranscript(t *testing.T) {
@@ -852,6 +851,42 @@ func TestV2GitStore_UpdateCommitted_NoTranscript_OnlyUpdatesMain(t *testing.T) {
 	assert.Contains(t, content, "original")
 }
 
+func TestV2GitStore_UpdateCommitted_WritesCurrentWhenOnlyArchiveHasArtifacts(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo)
+	ctx := context.Background()
+
+	cpID := id.MustCheckpointID("aa44bb55cc66")
+	require.NoError(t, store.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "test-session-archive-update",
+		Strategy:     commitTimeStrategy,
+		Agent:        agent.AgentTypeClaudeCode,
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"assistant","message":"archived"}`)),
+		AuthorName:   commitTimeTestAuthor,
+		AuthorEmail:  commitTimeTestEmail,
+	}))
+	archiveRefName := archiveV2FullCurrentRef(t, repo, "0000000000001")
+	resetV2FullCurrentRef(ctx, t, repo)
+
+	require.NoError(t, store.UpdateCommitted(ctx, UpdateCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "test-session-archive-update",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"assistant","message":"current"}`)),
+		Agent:        agent.AgentTypeClaudeCode,
+	}))
+
+	currentTree := v2FullTree(t, repo)
+	currentContent := v2ReadFile(t, currentTree, cpID.Path()+"/0/"+paths.V2RawTranscriptFileName)
+	assert.Contains(t, currentContent, "current")
+
+	archiveTree := v2TreeFromRef(t, repo, archiveRefName)
+	archivedContent := v2ReadFile(t, archiveTree, cpID.Path()+"/0/"+paths.V2RawTranscriptFileName)
+	assert.Contains(t, archivedContent, "archived")
+	assert.NotContains(t, archivedContent, "current")
+}
+
 func TestV2GitStore_UpdateCommitted_CheckpointNotFound(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
@@ -974,6 +1009,34 @@ func TestV2GitStore_BuildFullSessionArtifactsIndex_AgreesWithHasFullSessionArtif
 	// Unknown checkpoints must not be in the index.
 	missing := id.MustCheckpointID("999999999999")
 	assert.False(t, index.Has(missing, 0))
+}
+
+func TestV2GitStore_BuildFullSessionArtifactsIndex_IncludesArchivedGenerations(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo)
+	ctx := context.Background()
+
+	cpID := id.MustCheckpointID("ab12cd34ef56")
+	require.NoError(t, store.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-archived-index",
+		Strategy:     commitTimeStrategy,
+		Agent:        agent.AgentTypeClaudeCode,
+		Transcript:   redact.AlreadyRedacted([]byte(`{"archived":true}`)),
+		AuthorName:   commitTimeTestAuthor,
+		AuthorEmail:  commitTimeTestEmail,
+	}))
+	archiveV2FullCurrentRef(t, repo, "0000000000001")
+	resetV2FullCurrentRef(ctx, t, repo)
+
+	index, err := store.BuildFullSessionArtifactsIndex()
+	require.NoError(t, err)
+	require.True(t, index.Has(cpID, 0))
+
+	hasArtifacts, err := store.HasFullSessionArtifacts(cpID, 0)
+	require.NoError(t, err)
+	require.True(t, hasArtifacts)
 }
 
 // A nil index — the documented test-only fallback — must not panic on Has.

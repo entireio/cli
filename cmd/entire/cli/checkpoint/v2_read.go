@@ -260,7 +260,7 @@ func (s *V2GitStore) ReadSessionPrompts(ctx context.Context, checkpointID id.Che
 }
 
 // ReadSessionContent reads a session's metadata and prompts from the v2 /main ref,
-// and the raw transcript (raw_transcript) from /full/current.
+// and the raw transcript (raw_transcript) from local or remote /full refs.
 // This is the v2 equivalent of GitStore.ReadSessionContent — it reads the raw agent
 // transcript, not the compact transcript.jsonl. Used by resume and RestoreLogsOnly.
 // Returns ErrNoTranscript if the session exists but no raw transcript is available.
