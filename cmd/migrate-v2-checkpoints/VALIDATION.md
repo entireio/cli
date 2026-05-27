@@ -464,10 +464,19 @@ passes.
 This section assumes `--apply` has been run and
 `/tmp/migrate-${REPO_NAME}.applied` holds the report. The
 `migrated sessions=...` count is the population you will validate below.
+Extract the migrated checkpoint IDs once and reuse that list for every
+bulk check:
+
+```sh
+MIGRATED_IDS="/tmp/migrate-${REPO_NAME}.migrated-checkpoints"
+awk '/^    [0-9a-f]{12} sessions=/ {print $1}' "$APPLIED_REPORT" \
+  > "$MIGRATED_IDS"
+wc -l "$MIGRATED_IDS"
+```
 
 ### 5.1 Step E — root `metadata.json` (CheckpointSummary) on v1
 
-For each candidate, decode the v1 root metadata and confirm:
+For each migrated checkpoint, decode the v1 root metadata and confirm:
 
 ```sh
 ID=02d9783342a2
@@ -733,26 +742,101 @@ Once the per-checkpoint procedure is established, sweep every migrated
 checkpoint:
 
 ```sh
-TOOL=~/entire/cli/.worktrees/review/migrate-v2-checkpoints
-"$TOOL" --repo "$REPO" --dry-run \
-  | awk '/^    [0-9a-f]{12} sessions=/ {print $1}' > /tmp/candidates.txt
-wc -l /tmp/candidates.txt
+wc -l "$MIGRATED_IDS"
 ```
 
-Then for each ID in `/tmp/candidates.txt`, run:
+Then for each ID in `$MIGRATED_IDS`, run:
 
-- §4.1 root metadata diff (`grep -q` for errors).
-- §4.2 per-session field diff for every session ID that the candidate
+- §5.1 root metadata diff (`grep -q` for errors).
+- §5.2 per-session field diff for every session ID that the checkpoint
   brought in.
-- §4.4 hash check on every transcript chunk set.
+- §5.4 hash check on every transcript chunk set.
 
 A single shell loop is fine, and the validation completes in seconds per
 checkpoint. Surface any non-empty diffs or any `MISMATCH` lines.
 
-### 5.6 After validation passes
+### 5.6 Step J — `entire explain` parity after removing v2 dual reads
+
+Validate every migrated checkpoint with a current build from the branch that
+removes v2-first dual reads, and compare it to the Homebrew-installed
+`entire`. The outputs must be identical. Any mismatch means the migration
+did not restore enough v1 data for the new read path, or the two binaries
+changed explain behavior independently; flag it and keep the diff for
+investigation.
+
+Build the comparison binary immediately before the sweep:
+
+```sh
+FIX_WORKTREE=/Users/pfleidi/entire/cli/.worktrees/fix/checkpoints-v2-remove-dual-reads
+FIX_ENTIRE="/tmp/entire-${REPO_NAME}-remove-dual-reads"
+BREW_ENTIRE="$(brew --prefix)/bin/entire"
+
+git -C "$FIX_WORKTREE" status --short --branch
+(cd "$FIX_WORKTREE" && go build -o "$FIX_ENTIRE" ./cmd/entire)
+
+"$FIX_ENTIRE" version
+"$BREW_ENTIRE" version
+```
+
+Run both binaries from the migrated repo and compare exit status, stdout, and
+stderr for every migrated checkpoint:
+
+```sh
+EXPLAIN_DIR="/tmp/migrate-${REPO_NAME}-explain"
+mkdir -p "$EXPLAIN_DIR"
+: > "$EXPLAIN_DIR/mismatches.txt"
+set +e
+
+while IFS= read -r ID; do
+    FIX_RESULT="$EXPLAIN_DIR/$ID.fix"
+    BREW_RESULT="$EXPLAIN_DIR/$ID.brew"
+    DIFF_FILE="$EXPLAIN_DIR/$ID.diff"
+
+    (cd "$REPO" && "$FIX_ENTIRE" explain "$ID") \
+        > "$FIX_RESULT.out" 2> "$FIX_RESULT.err"
+    FIX_STATUS=$?
+    (cd "$REPO" && "$BREW_ENTIRE" explain "$ID") \
+        > "$BREW_RESULT.out" 2> "$BREW_RESULT.err"
+    BREW_STATUS=$?
+
+    {
+        echo "status=$FIX_STATUS"
+        cat "$FIX_RESULT.out"
+        printf '\n--- stderr ---\n'
+        cat "$FIX_RESULT.err"
+    } > "$FIX_RESULT"
+    {
+        echo "status=$BREW_STATUS"
+        cat "$BREW_RESULT.out"
+        printf '\n--- stderr ---\n'
+        cat "$BREW_RESULT.err"
+    } > "$BREW_RESULT"
+
+    if ! diff -u "$BREW_RESULT" "$FIX_RESULT" > "$DIFF_FILE"; then
+        echo "$ID" >> "$EXPLAIN_DIR/mismatches.txt"
+        echo "MISMATCH $ID (see $DIFF_FILE)"
+    else
+        rm -f "$DIFF_FILE"
+    fi
+done < "$MIGRATED_IDS"
+
+if [ -s "$EXPLAIN_DIR/mismatches.txt" ]; then
+    echo "explain mismatches:"
+    cat "$EXPLAIN_DIR/mismatches.txt"
+    exit 1
+fi
+
+echo "all migrated checkpoints matched entire explain output"
+```
+
+Do not ignore mismatches, even if the rendered output looks close. Record the
+checkpoint ID and keep the corresponding `.diff`, `.fix`, and `.brew` files
+for follow-up.
+
+### 5.7 After validation passes
 
 You're done with this runbook only after every step in §5 produced the
-expected result on every candidate. Publishing the migration is **out of
+expected result on every migrated checkpoint. Publishing the migration is **out of
 scope for this runbook** and explicitly a manual decision.
 
 When the operator is satisfied and ready to publish:
