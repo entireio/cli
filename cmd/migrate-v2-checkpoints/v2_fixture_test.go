@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"testing"
@@ -229,9 +230,10 @@ func readTestV2RefEntries(t *testing.T, repo *git.Repository, refName plumbing.R
 
 	entries := make(map[string]object.TreeEntry)
 	ref, err := repo.Reference(refName, true)
-	if err != nil {
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return plumbing.ZeroHash, entries
 	}
+	require.NoError(t, err)
 	commit, err := repo.CommitObject(ref.Hash())
 	require.NoError(t, err)
 	tree, err := commit.Tree()

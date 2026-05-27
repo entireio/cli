@@ -248,12 +248,16 @@ func rejectAmbiguousCommitPrefix(repo *git.Repository, revision string) error {
 	defer iter.Close()
 
 	var matches []plumbing.Hash
-	if err := iter.ForEach(func(commit *object.Commit) error {
+	err = iter.ForEach(func(commit *object.Commit) error {
 		if strings.HasPrefix(commit.Hash.String(), prefix) {
 			matches = append(matches, commit.Hash)
+			if len(matches) == 2 {
+				return storer.ErrStop
+			}
 		}
 		return nil
-	}); err != nil {
+	})
+	if err != nil && !errors.Is(err, storer.ErrStop) {
 		return fmt.Errorf("scan commit objects for revision %q: %w", revision, err)
 	}
 	if len(matches) < 2 {

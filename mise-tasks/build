@@ -9,3 +9,5 @@ OUTPUT="entire"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*|Windows_NT) OUTPUT="entire.exe" ;; esac
 
 go build -ldflags "-X github.com/entireio/cli/cmd/entire/cli/versioninfo.Version=${VERSION} -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Commit=${COMMIT}" -o "$OUTPUT" ./cmd/entire
+
+go build -ldflags "-X github.com/entireio/cli/cmd/entire/cli/versioninfo.Version=${VERSION} -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Commit=${COMMIT}" -o "migrate-v2-checkpoints" ./cmd/migrate-v2-checkpoints/

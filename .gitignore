@@ -40,6 +40,7 @@ mise.local.toml
 
 # Binary output (only in root)
 /entire
+/migrate-v2-checkpoints
 /vogon
 /testreport
 /bin

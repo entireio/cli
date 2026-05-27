@@ -172,6 +172,7 @@ func openRepository(ctx context.Context, repoPath string) (string, *git.Reposito
 	if err != nil {
 		return "", nil, fmt.Errorf("open repository %q: %w", repoPath, err)
 	}
+	defer detector.Close()
 	repoRoot := repoPath
 	if worktree, worktreeErr := detector.Worktree(); worktreeErr == nil {
 		repoRoot = worktree.Filesystem().Root()
