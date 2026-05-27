@@ -240,6 +240,55 @@ func TestRunListModePrintsV2Orphans(t *testing.T) {
 	require.Equal(t, "666666666666 (orphan)\n", stdout.String())
 }
 
+func TestRunDryRunFetchesRemoteV2RefsBeforePlanning(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	cpID := id.MustCheckpointID(mainCheckpointID)
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-remote-v2",
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"remote v2\"}\n")),
+	})
+	cloneDir := cloneMigrationRepoWithOrigin(t, fixture)
+	cloneRepo, err := git.PlainOpen(cloneDir)
+	require.NoError(t, err)
+	_, err = cloneRepo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound)
+
+	var stdout bytes.Buffer
+	err = run(context.Background(), []string{
+		"--repo", cloneDir,
+		"--since", fixture.baseHash.String(),
+		"--head", fixture.mainHash.String(),
+		"--dry-run",
+	}, &stdout)
+	require.NoError(t, err)
+	require.Contains(t, stdout.String(), "checkpoints eligible for migration: 1")
+	require.Contains(t, stdout.String(), "sessions eligible for migration: 1")
+
+	_, err = cloneRepo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true)
+	require.NoError(t, err)
+	_, err = cloneRepo.Reference(plumbing.ReferenceName(paths.V2FullCurrentRefName), true)
+	require.NoError(t, err)
+}
+
+func TestRunDryRunFailsWhenRemoteV2MainIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	cloneDir := cloneMigrationRepoWithOrigin(t, fixture)
+
+	var stdout bytes.Buffer
+	err := run(context.Background(), []string{
+		"--repo", cloneDir,
+		"--since", fixture.baseHash.String(),
+		"--head", fixture.mainHash.String(),
+		"--dry-run",
+	}, &stdout)
+	require.ErrorContains(t, err, paths.V2MainRefName+" not found on remote")
+}
+
 func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 	t.Parallel()
 
@@ -638,6 +687,42 @@ func setupMigrationOrphanRepo(t *testing.T, checkpointID string) migrationHistor
 		repo:     repo,
 		baseHash: baseHash,
 	}
+}
+
+func cloneMigrationRepoWithOrigin(t *testing.T, fixture migrationHistoryFixture) string {
+	t.Helper()
+
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	runMigrationGit(t, "", "init", "--bare", remoteDir)
+	runMigrationGit(t, remoteDir, "symbolic-ref", "HEAD", "refs/heads/main")
+	runMigrationGit(t, fixture.dir, "remote", "add", "origin", remoteDir)
+
+	refspecs := []string{
+		fixture.mainHash.String() + ":refs/heads/main",
+		fixture.featureHash.String() + ":refs/heads/" + testFeatureBranchName,
+	}
+	if refExists(t, fixture.repo, plumbing.ReferenceName(paths.V2MainRefName)) {
+		refspecs = append(refspecs, paths.V2MainRefName+":"+paths.V2MainRefName)
+	}
+	if refExists(t, fixture.repo, plumbing.ReferenceName(paths.V2FullCurrentRefName)) {
+		refspecs = append(refspecs, paths.V2FullCurrentRefName+":"+paths.V2FullCurrentRefName)
+	}
+	runMigrationGit(t, fixture.dir, append([]string{"push", "origin"}, refspecs...)...)
+
+	cloneDir := filepath.Join(t.TempDir(), "clone")
+	runMigrationGit(t, "", "clone", remoteDir, cloneDir)
+	return cloneDir
+}
+
+func refExists(t *testing.T, repo *git.Repository, refName plumbing.ReferenceName) bool {
+	t.Helper()
+
+	_, err := repo.Reference(refName, true)
+	if err == nil {
+		return true
+	}
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound)
+	return false
 }
 
 func rewriteV1SecondSessionToSparseSlot(t *testing.T, repo *git.Repository, cpID id.CheckpointID) {

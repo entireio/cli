@@ -55,6 +55,12 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	ctx = settings.WithWorktreeRoot(ctx, repoRoot)
 
+	if shouldEnsureV2Refs(opts) {
+		if err := ensureLatestV2Refs(ctx, repoRoot, repo); err != nil {
+			return err
+		}
+	}
+
 	checkpoints, v2OrphansSkipped, err := discoverCheckpointHistoryWithSkippedOrphans(ctx, repo, discoveryOptions{
 		since: opts.since,
 		head:  opts.head,
@@ -85,6 +91,10 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	default:
 		return fmt.Errorf("unknown mode %q", opts.mode)
 	}
+}
+
+func shouldEnsureV2Refs(opts options) bool {
+	return opts.mode == modePlan || opts.mode == modeDryRun || opts.mode == modeApply
 }
 
 func parseOptions(args []string) (options, error) {
