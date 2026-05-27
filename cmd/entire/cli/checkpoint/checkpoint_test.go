@@ -221,6 +221,11 @@ func TestWriteCommitted_AgentField(t *testing.T) {
 		t.Errorf("commit message should contain %s trailer with value %q, got:\n%s",
 			trailers.AgentTrailerKey, agentType, commit.Message)
 	}
+
+	// metadata.json records the enriched build identity in cli_version.
+	if want := versioninfo.CheckpointVersion(); summary.CLIVersion != want {
+		t.Errorf("summary.CLIVersion = %q, want %q", summary.CLIVersion, want)
+	}
 }
 
 // readLatestSessionMetadata reads the session-specific metadata from the latest session subdirectory.
@@ -3447,8 +3452,8 @@ func TestCopyMetadataDir_RedactsSecrets(t *testing.T) {
 	}
 }
 
-// TestWriteCommitted_CLIVersionField verifies that versioninfo.Version is written
-// to both the root CheckpointSummary and session-level CommittedMetadata.
+// TestWriteCommitted_CLIVersionField verifies that versioninfo.CheckpointVersion is
+// written to both the root CheckpointSummary and session-level CommittedMetadata.
 func TestWriteCommitted_CLIVersionField(t *testing.T) {
 	t.Parallel()
 
@@ -3532,8 +3537,8 @@ func TestWriteCommitted_CLIVersionField(t *testing.T) {
 		t.Fatalf("failed to parse root metadata.json: %v", err)
 	}
 
-	if summary.CLIVersion != versioninfo.Version {
-		t.Errorf("CheckpointSummary.CLIVersion = %q, want %q", summary.CLIVersion, versioninfo.Version)
+	if want := versioninfo.CheckpointVersion(); summary.CLIVersion != want {
+		t.Errorf("CheckpointSummary.CLIVersion = %q, want %q", summary.CLIVersion, want)
 	}
 
 	// Verify session-level metadata.json (CommittedMetadata) has CLIVersion
@@ -3557,8 +3562,8 @@ func TestWriteCommitted_CLIVersionField(t *testing.T) {
 		t.Fatalf("failed to parse session metadata.json: %v", err)
 	}
 
-	if sessionMetadata.CLIVersion != versioninfo.Version {
-		t.Errorf("CommittedMetadata.CLIVersion = %q, want %q", sessionMetadata.CLIVersion, versioninfo.Version)
+	if want := versioninfo.CheckpointVersion(); sessionMetadata.CLIVersion != want {
+		t.Errorf("CommittedMetadata.CLIVersion = %q, want %q", sessionMetadata.CLIVersion, want)
 	}
 }
 

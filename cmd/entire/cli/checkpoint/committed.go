@@ -454,7 +454,7 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCom
 		InitialAttribution:          opts.InitialAttribution,
 		PromptAttributions:          opts.PromptAttributionsJSON,
 		Summary:                     redactSummary(opts.Summary),
-		CLIVersion:                  versioninfo.Version,
+		CLIVersion:                  versioninfo.CheckpointVersion(),
 		Kind:                        opts.Kind,
 		ReviewSkills:                opts.ReviewSkills,
 		ReviewPrompt:                opts.ReviewPrompt,
@@ -503,7 +503,7 @@ func (s *GitStore) writeCheckpointSummary(opts WriteCommittedOptions, basePath s
 
 	summary := CheckpointSummary{
 		CheckpointID:        opts.CheckpointID,
-		CLIVersion:          versioninfo.Version,
+		CLIVersion:          versioninfo.CheckpointVersion(),
 		Strategy:            opts.Strategy,
 		Branch:              opts.Branch,
 		CheckpointsCount:    checkpointsCount,
