@@ -46,6 +46,7 @@ const (
 	testAuthorName        = "Test"
 	testAuthorEmail       = "test@example.com"
 	testBranchName        = "main"
+	testReviewSkill       = "review-skill"
 )
 
 func TestParseOptions(t *testing.T) {
@@ -177,7 +178,7 @@ func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 		CheckpointTranscriptStart: 42,
 		CompactTranscriptStart:    9,
 		Kind:                      string(session.KindAgentReview),
-		ReviewSkills:              []string{"review-skill"},
+		ReviewSkills:              []string{testReviewSkill},
 		ReviewPrompt:              "review this",
 		HasReview:                 true,
 	})
@@ -215,7 +216,7 @@ func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 	require.Equal(t, "turn-1", content.Metadata.TurnID)
 	require.Equal(t, 0, content.Metadata.CheckpointTranscriptStart)
 	require.Equal(t, string(session.KindAgentReview), content.Metadata.Kind)
-	require.Equal(t, []string{"review-skill"}, content.Metadata.ReviewSkills)
+	require.Equal(t, []string{testReviewSkill}, content.Metadata.ReviewSkills)
 	require.Equal(t, "review this", content.Metadata.ReviewPrompt)
 
 	ref, err := fixture.repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
@@ -279,6 +280,38 @@ func TestRunApplySkipsExistingV1Checkpoint(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, existingTranscript, content.Transcript)
 	require.Equal(t, "session-existing-v1", content.Metadata.SessionID)
+}
+
+func TestRunApplyHasReviewReflectsOnlyMigratedSessions(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	cpID := id.MustCheckpointID(mainCheckpointID)
+	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "normal-session",
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"normal\"}\n")),
+	})
+	writeTestV2Checkpoint(t, fixture.repo, checkpoint.WriteCommittedOptions{
+		CheckpointID:      cpID,
+		SessionID:         "review-session-without-raw-transcript",
+		Kind:              string(session.KindAgentReview),
+		ReviewSkills:      []string{testReviewSkill},
+		ReviewPrompt:      "review this",
+		HasReview:         true,
+		CompactTranscript: []byte("{\"message\":\"compact review only\"}\n"),
+	})
+
+	stdout := runMigrationCommand(t, fixture, fixture.mainHash, testApplyFlag)
+	require.Contains(t, stdout, "missing raw transcripts: 1")
+	require.Contains(t, stdout, "migrated checkpoints: 1")
+	require.Contains(t, stdout, "migrated sessions: 1")
+
+	summary, err := checkpoint.NewGitStore(fixture.repo).ReadCommitted(context.Background(), cpID)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	require.False(t, summary.HasReview)
+	require.Len(t, summary.Sessions, 1)
 }
 
 func TestRunDryRunReportsMissingV2MetadataAndRawTranscripts(t *testing.T) {

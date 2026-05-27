@@ -144,7 +144,7 @@ func writeOptionsFromV2Content(content *checkpoint.SessionContent, summary *chec
 		Kind:                        meta.Kind,
 		ReviewSkills:                meta.ReviewSkills,
 		ReviewPrompt:                meta.ReviewPrompt,
-		HasReview:                   summary.HasReview || session.Kind(meta.Kind).IsReview(),
+		HasReview:                   session.Kind(meta.Kind).IsReview(),
 	}
 }
 
