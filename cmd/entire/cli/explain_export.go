@@ -11,7 +11,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
@@ -50,10 +49,6 @@ type explainExportOptions struct {
 	// listLimit caps the JSON list view at N entries. 0 means use the
 	// default (branchCheckpointsLimit). Only consulted in list mode.
 	listLimit int
-}
-
-type compactTranscriptReader interface {
-	ReadSessionCompactTranscript(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) ([]byte, error)
 }
 
 // runExplainExport handles --json, --transcript, and --raw-transcript with an
@@ -208,17 +203,8 @@ func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer
 	if v1Repo != nil {
 		_ = v1Repo.Close()
 	}
-	v2OK := false
-	if shouldFetchV2Metadata(ctx, lookup) {
-		if _, v2Repo, v2Err := getV2MetadataTree(ctx); v2Err == nil {
-			if v2Repo != nil {
-				_ = v2Repo.Close()
-			}
-			v2OK = true
-		}
-	}
 	stop(false)
-	if v1Err != nil && !v2OK {
+	if v1Err != nil {
 		return nil, lookup
 	}
 	fresh, freshErr := newExplainCheckpointLookup(ctx)
@@ -226,21 +212,6 @@ func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer
 		return nil, lookup
 	}
 	return matchCheckpointPrefix(fresh, prefix), fresh
-}
-
-func shouldFetchV2Metadata(ctx context.Context, lookup *explainCheckpointLookup) bool {
-	if settings.IsCheckpointsV2Enabled(ctx) {
-		return true
-	}
-	if lookup == nil {
-		return false
-	}
-	switch lookup.store.(type) {
-	case *checkpoint.DualCheckpointReader:
-		return true
-	default:
-		return false
-	}
 }
 
 func matchCheckpointPrefix(lookup *explainCheckpointLookup, prefix string) []id.CheckpointID {
@@ -277,13 +248,8 @@ func resolveSessionIndex(summary *checkpoint.CheckpointSummary, requested int) (
 	return requested, nil
 }
 
-// runExplainStreamTranscript streams either the compact transcript (default)
-// or the raw transcript (when --raw-transcript is set) for the selected
-// session of the resolved checkpoint. When --transcript is used on a
-// v1-only checkpoint (compact transcripts are a v2-only artifact), falls
-// through to the raw transcript with a one-line stderr note rather than
-// erroring — the consumer's stated intent is "give me transcript bytes",
-// and we have a way to satisfy it without making them re-run.
+// runExplainStreamTranscript streams the v1 raw transcript for the selected
+// session of the resolved checkpoint.
 func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts explainExportOptions) error {
 	cpID, lookup, err := resolveExplainCheckpointID(ctx, errW, opts)
 	if err != nil {
@@ -300,48 +266,16 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 		return fmt.Errorf("failed to read checkpoint: %w", err)
 	}
 
-	compactReader, hasCompact := store.(compactTranscriptReader)
-	wantCompact := !opts.rawTranscript
-
 	idx, err := resolveSessionIndex(summary, opts.sessionIndex)
 	if err != nil {
 		return err
 	}
 
-	// Compact transcripts are only stored on v2; transparently fall through
-	// to raw on v1 so consumers don't need to retry.
-	if wantCompact && !hasCompact {
-		fmt.Fprintln(errW, "note: compact transcript unavailable on v1 checkpoint, falling back to raw transcript")
-		wantCompact = false
+	content, readErr := store.ReadSessionContent(ctx, cpID, idx)
+	if readErr != nil {
+		return fmt.Errorf("failed to read session content: %w", readErr)
 	}
-
-	if !wantCompact {
-		content, readErr := store.ReadSessionContent(ctx, cpID, idx)
-		if readErr != nil {
-			return fmt.Errorf("failed to read session content: %w", readErr)
-		}
-		if _, err := w.Write(content.Transcript); err != nil {
-			return fmt.Errorf("failed to write transcript: %w", err)
-		}
-		return nil
-	}
-
-	compact, err := compactReader.ReadSessionCompactTranscript(ctx, cpID, idx)
-	if err != nil {
-		if errors.Is(err, checkpoint.ErrCheckpointNotFound) || errors.Is(err, checkpoint.ErrNoTranscript) {
-			fmt.Fprintln(errW, "note: compact transcript unavailable, falling back to raw transcript")
-			content, readErr := store.ReadSessionContent(ctx, cpID, idx)
-			if readErr != nil {
-				return fmt.Errorf("failed to read session content: %w", readErr)
-			}
-			if _, writeErr := w.Write(content.Transcript); writeErr != nil {
-				return fmt.Errorf("failed to write transcript: %w", writeErr)
-			}
-			return nil
-		}
-		return fmt.Errorf("failed to read compact transcript: %w", err)
-	}
-	if _, err := w.Write(compact); err != nil {
+	if _, err := w.Write(content.Transcript); err != nil {
 		return fmt.Errorf("failed to write transcript: %w", err)
 	}
 	return nil
@@ -445,8 +379,7 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 // plus the list of session indexes that failed to read; a non-empty failed
 // list means envelope.Partial is true. Extracted from runExplainCheckpointJSON
 // so the envelope-building behavior (per-session error fields, partial flag)
-// can be tested independently of the v2 git tree, which the cli package
-// can't easily corrupt.
+// can be tested independently of git tree corruption.
 func buildCheckpointJSONEnvelope(ctx context.Context, reader checkpoint.CommittedReader, summary *checkpoint.CheckpointSummary, cpID id.CheckpointID) (checkpointExportJSON, []int) {
 	envelope := checkpointExportJSON{
 		CheckpointID:     cpID.String(),
@@ -481,10 +414,8 @@ func buildCheckpointJSONEnvelope(ctx context.Context, reader checkpoint.Committe
 }
 
 // readSessionMetadataForExport reads only metadata.json for a session — no
-// transcript or prompt bytes. Both v1 and v2 stores expose a metadata-only
-// reader, so this never depends on transcript availability (which would
-// cause an unrelated ErrNoTranscript on v1 checkpoints whose raw transcript
-// has been pruned).
+// transcript or prompt bytes. The v1 store exposes a metadata-only reader, so
+// this never depends on transcript availability.
 func readSessionMetadataForExport(ctx context.Context, reader checkpoint.CommittedReader, cpID id.CheckpointID, idx int) (*checkpoint.CommittedMetadata, error) {
 	if r, ok := reader.(interface {
 		ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.CommittedMetadata, error)

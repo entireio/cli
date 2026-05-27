@@ -71,7 +71,7 @@ func TestLocalMode_EnumeratesCheckpoints(t *testing.T) {
 	}
 }
 
-func TestLocalMode_ExplicitRepoUsesTargetRepoCheckpointSettings(t *testing.T) {
+func TestLocalMode_ExplicitRepoUsesTargetRepoCheckpoints(t *testing.T) {
 	cwdDir := t.TempDir()
 	targetDir := t.TempDir()
 	stubGeneratedLocalDispatch(t)
@@ -82,7 +82,7 @@ func TestLocalMode_ExplicitRepoUsesTargetRepoCheckpointSettings(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(cwdDir, ".entire", "settings.json"),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": 2}}`),
+		[]byte(`{"enabled": true}`),
 		0o600,
 	); err != nil {
 		t.Fatal(err)

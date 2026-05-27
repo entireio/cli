@@ -2988,7 +2988,7 @@ func TestWriteCommitted_DuplicateSessionIDUpdatesInPlace(t *testing.T) {
 		CheckpointID:     checkpointID,
 		SessionID:        "session-X",
 		Strategy:         "manual-commit",
-		Transcript:       redact.AlreadyRedacted([]byte(`{"message": "session X v2"}`)),
+		Transcript:       redact.AlreadyRedacted([]byte(`{"message": "session X updated"}`)),
 		FilesTouched:     []string{"a.go", "c.go"},
 		CheckpointsCount: 5,
 		TokenUsage: &agent.TokenUsage{
@@ -3000,7 +3000,7 @@ func TestWriteCommitted_DuplicateSessionIDUpdatesInPlace(t *testing.T) {
 		AuthorEmail: "test@example.com",
 	})
 	if err != nil {
-		t.Fatalf("WriteCommitted() session X v2 error = %v", err)
+		t.Fatalf("WriteCommitted() session X updated error = %v", err)
 	}
 
 	// Read the checkpoint summary
@@ -3015,7 +3015,7 @@ func TestWriteCommitted_DuplicateSessionIDUpdatesInPlace(t *testing.T) {
 		t.Errorf("len(summary.Sessions) = %d, want 2 (not 3 - duplicate should be replaced)", len(summary.Sessions))
 	}
 
-	// Verify session 0 has updated data (session X v2)
+	// Verify session 0 has updated data.
 	content0, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
 	if err != nil {
 		t.Fatalf("ReadSessionContent(0) error = %v", err)
@@ -3026,8 +3026,8 @@ func TestWriteCommitted_DuplicateSessionIDUpdatesInPlace(t *testing.T) {
 	if content0.Metadata.CheckpointsCount != 5 {
 		t.Errorf("session 0 CheckpointsCount = %d, want 5", content0.Metadata.CheckpointsCount)
 	}
-	if !strings.Contains(string(content0.Transcript), "session X v2") {
-		t.Errorf("session 0 transcript should contain 'session X v2', got %s", string(content0.Transcript))
+	if !strings.Contains(string(content0.Transcript), "session X updated") {
+		t.Errorf("session 0 transcript should contain 'session X updated', got %s", string(content0.Transcript))
 	}
 
 	// Verify session 1 is still "Y" (unchanged)
@@ -3039,7 +3039,7 @@ func TestWriteCommitted_DuplicateSessionIDUpdatesInPlace(t *testing.T) {
 		t.Errorf("session 1 SessionID = %q, want %q", content1.Metadata.SessionID, "session-Y")
 	}
 
-	// Verify aggregated stats: count = 5 (X v2) + 2 (Y) = 7
+	// Verify aggregated stats: count = 5 (X updated) + 2 (Y) = 7
 	if summary.CheckpointsCount != 7 {
 		t.Errorf("summary.CheckpointsCount = %d, want 7", summary.CheckpointsCount)
 	}
@@ -3055,7 +3055,7 @@ func TestWriteCommitted_DuplicateSessionIDUpdatesInPlace(t *testing.T) {
 		}
 	}
 
-	// Verify aggregated tokens: 200 (X v2) + 50 (Y) = 250
+	// Verify aggregated tokens: 200 (X updated) + 50 (Y) = 250
 	if summary.TokenUsage == nil {
 		t.Fatal("summary.TokenUsage should not be nil")
 	}
@@ -3083,14 +3083,14 @@ func TestWriteCommitted_DuplicateSessionIDSingleSession(t *testing.T) {
 		CheckpointID:     checkpointID,
 		SessionID:        "session-X",
 		Strategy:         "manual-commit",
-		Transcript:       redact.AlreadyRedacted([]byte(`{"message": "v1"}`)),
+		Transcript:       redact.AlreadyRedacted([]byte(`{"message": "initial"}`)),
 		FilesTouched:     []string{"old.go"},
 		CheckpointsCount: 1,
 		AuthorName:       "Test Author",
 		AuthorEmail:      "test@example.com",
 	})
 	if err != nil {
-		t.Fatalf("WriteCommitted() v1 error = %v", err)
+		t.Fatalf("WriteCommitted() initial error = %v", err)
 	}
 
 	// Write session "X" again with updated data
@@ -3098,14 +3098,14 @@ func TestWriteCommitted_DuplicateSessionIDSingleSession(t *testing.T) {
 		CheckpointID:     checkpointID,
 		SessionID:        "session-X",
 		Strategy:         "manual-commit",
-		Transcript:       redact.AlreadyRedacted([]byte(`{"message": "v2"}`)),
+		Transcript:       redact.AlreadyRedacted([]byte(`{"message": "updated"}`)),
 		FilesTouched:     []string{"new.go"},
 		CheckpointsCount: 5,
 		AuthorName:       "Test Author",
 		AuthorEmail:      "test@example.com",
 	})
 	if err != nil {
-		t.Fatalf("WriteCommitted() v2 error = %v", err)
+		t.Fatalf("WriteCommitted() updated error = %v", err)
 	}
 
 	// Read the checkpoint summary
@@ -3131,8 +3131,8 @@ func TestWriteCommitted_DuplicateSessionIDSingleSession(t *testing.T) {
 	if content.Metadata.CheckpointsCount != 5 {
 		t.Errorf("session 0 CheckpointsCount = %d, want 5 (updated value)", content.Metadata.CheckpointsCount)
 	}
-	if !strings.Contains(string(content.Transcript), "v2") {
-		t.Errorf("session 0 transcript should contain 'v2', got %s", string(content.Transcript))
+	if !strings.Contains(string(content.Transcript), "updated") {
+		t.Errorf("session 0 transcript should contain 'updated', got %s", string(content.Transcript))
 	}
 
 	// Verify aggregated stats match the single session
@@ -3193,7 +3193,7 @@ func TestWriteCommitted_DuplicateSessionIDReusesIndex(t *testing.T) {
 		AuthorEmail:      "test@example.com",
 	})
 	if err != nil {
-		t.Fatalf("WriteCommitted() session A v2 error = %v", err)
+		t.Fatalf("WriteCommitted() session A update error = %v", err)
 	}
 
 	summary, err := store.ReadCommitted(context.Background(), checkpointID)
@@ -3250,7 +3250,7 @@ func TestWriteCommitted_DuplicateSessionIDClearsStaleFiles(t *testing.T) {
 		AuthorEmail:      "test@example.com",
 	})
 	if err != nil {
-		t.Fatalf("WriteCommitted() A v1 error = %v", err)
+		t.Fatalf("WriteCommitted() A initial error = %v", err)
 	}
 
 	// Write session B with prompts
@@ -3280,7 +3280,7 @@ func TestWriteCommitted_DuplicateSessionIDClearsStaleFiles(t *testing.T) {
 		AuthorEmail:      "test@example.com",
 	})
 	if err != nil {
-		t.Fatalf("WriteCommitted() A v2 error = %v", err)
+		t.Fatalf("WriteCommitted() A update error = %v", err)
 	}
 
 	// Session A: stale prompts should be cleared

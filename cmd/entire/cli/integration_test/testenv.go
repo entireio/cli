@@ -1001,7 +1001,7 @@ func (env *TestEnv) ReadFileFromBranch(branchName, filePath string) (string, boo
 }
 
 // ReadFileFromRef reads a file's content from a specific ref's tree.
-// Unlike ReadFileFromBranch, this takes a full ref name (e.g., "refs/entire/checkpoints/v2/main")
+// Unlike ReadFileFromBranch, this takes a full ref name (e.g., "refs/notes/review")
 // and does not prepend "refs/heads/".
 // Returns the content and true if found, empty string and false if not found.
 func (env *TestEnv) ReadFileFromRef(refName, filePath string) (string, bool) {

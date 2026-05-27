@@ -3,7 +3,6 @@ package settings
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,8 +52,8 @@ func TestLoad_WithWorktreeRootReadsSettingsFromExplicitRepo(t *testing.T) {
 	testutil.InitRepo(t, targetDir)
 
 	for dir, content := range map[string]string{
-		cwdDir:    `{"enabled": true, "strategy_options": {"checkpoints_version": 2}}`,
-		targetDir: `{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`,
+		cwdDir:    `{"enabled": true, "strategy_options": {"filtered_fetches": false}}`,
+		targetDir: `{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
 	} {
 		entireDir := filepath.Join(dir, ".entire")
 		if err := os.MkdirAll(entireDir, 0o755); err != nil {
@@ -71,11 +70,8 @@ func TestLoad_WithWorktreeRootReadsSettingsFromExplicitRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.CheckpointsVersion() != 1 {
-		t.Fatalf("CheckpointsVersion() = %d, want target repo default v1", got.CheckpointsVersion())
-	}
-	if !got.IsCheckpointsV2Enabled() {
-		t.Fatal("IsCheckpointsV2Enabled() = false, want target repo checkpoints_v2 setting")
+	if !got.IsFilteredFetchesEnabled() {
+		t.Fatal("IsFilteredFetchesEnabled() = false, want target repo setting")
 	}
 }
 
@@ -701,237 +697,6 @@ func TestMergeJSON_SummaryGeneration_SameProviderPreservesModel(t *testing.T) {
 	if s.SummaryGeneration.Provider != "claude-code" || s.SummaryGeneration.Model != "sonnet" {
 		t.Errorf("Provider/Model = %q/%q, want claude-code/sonnet", s.SummaryGeneration.Provider, s.SummaryGeneration.Model)
 	}
-}
-
-func TestIsCheckpointsV2Enabled_DefaultsFalse(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{Enabled: true}
-	if s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to default to false")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_EmptyStrategyOptions(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{Enabled: true, StrategyOptions: map[string]any{}}
-	if s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be false with empty strategy_options")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_True(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{
-		Enabled:         true,
-		StrategyOptions: map[string]any{"checkpoints_v2": true},
-	}
-	if !s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be true")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_CheckpointsVersion2(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{
-		Enabled:         true,
-		StrategyOptions: map[string]any{"checkpoints_version": 2},
-	}
-	if !s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be true when checkpoints_version is 2")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_ExplicitlyFalse(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{
-		Enabled:         true,
-		StrategyOptions: map[string]any{"checkpoints_v2": false},
-	}
-	if s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be false when explicitly set to false")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_WrongType(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{
-		Enabled:         true,
-		StrategyOptions: map[string]any{"checkpoints_v2": "yes"},
-	}
-	if s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be false for non-bool value")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_LoadFromFile(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	entireDir := filepath.Join(tmpDir, ".entire")
-	if err := os.MkdirAll(entireDir, 0o755); err != nil {
-		t.Fatalf("failed to create .entire directory: %v", err)
-	}
-
-	settingsFile := filepath.Join(entireDir, "settings.json")
-	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`), 0o644); err != nil {
-		t.Fatalf("failed to write settings file: %v", err)
-	}
-
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
-		t.Fatalf("failed to create .git directory: %v", err)
-	}
-
-	t.Chdir(tmpDir)
-
-	s, err := Load(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be true after loading from file")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_LocalOverride(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	entireDir := filepath.Join(tmpDir, ".entire")
-	if err := os.MkdirAll(entireDir, 0o755); err != nil {
-		t.Fatalf("failed to create .entire directory: %v", err)
-	}
-
-	settingsFile := filepath.Join(entireDir, "settings.json")
-	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true}`), 0o644); err != nil {
-		t.Fatalf("failed to write settings file: %v", err)
-	}
-
-	localFile := filepath.Join(entireDir, "settings.local.json")
-	if err := os.WriteFile(localFile, []byte(`{"strategy_options": {"checkpoints_v2": true}}`), 0o644); err != nil {
-		t.Fatalf("failed to write local settings file: %v", err)
-	}
-
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
-		t.Fatalf("failed to create .git directory: %v", err)
-	}
-
-	t.Chdir(tmpDir)
-
-	s, err := Load(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be true from local override")
-	}
-}
-
-func TestCheckpointsVersion(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		opts map[string]any
-		want int
-	}{
-		{"unset defaults to one", nil, 1},
-		{"empty options defaults to one", map[string]any{}, 1},
-		{"integer 2 falls back to default", map[string]any{"checkpoints_version": 2}, 1},
-		{"float 2 falls back to default", map[string]any{"checkpoints_version": float64(2)}, 1},
-		{"string 2 falls back to default", map[string]any{"checkpoints_version": "2"}, 1},
-		{"integer 3 falls back to default", map[string]any{"checkpoints_version": 3}, 1},
-		{"zero falls back to default", map[string]any{"checkpoints_version": 0}, 1},
-		{"negative falls back to default", map[string]any{"checkpoints_version": -1}, 1},
-		{"non-integer float falls back to default", map[string]any{"checkpoints_version": 2.5}, 1},
-		{"bool falls back to default", map[string]any{"checkpoints_version": true}, 1},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			s := &EntireSettings{StrategyOptions: tt.opts}
-			if got := s.CheckpointsVersion(); got != tt.want {
-				t.Errorf("CheckpointsVersion() = %d, want %d", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestWarnIfCheckpointsV2Disallowed(t *testing.T) {
-	tests := []struct {
-		name     string
-		opts     map[string]any
-		wantWarn bool
-		wantText string
-	}{
-		{"unset", nil, false, ""},
-		{"version 1", map[string]any{"checkpoints_version": 1}, false, ""},
-		{"integer version 2", map[string]any{"checkpoints_version": 2}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
-		{"float version 2", map[string]any{"checkpoints_version": float64(2)}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
-		{"string version 2", map[string]any{"checkpoints_version": "2"}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
-		{"checkpoints_v2 true", map[string]any{"checkpoints_v2": true}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
-		{"push_v2_refs true", map[string]any{"push_v2_refs": true}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
-		{"push_v2 true", map[string]any{"push_v2": true}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
-		{"false flags", map[string]any{"checkpoints_v2": false, "push_v2_refs": false, "push_v2": false}, false, ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Cannot use t.Parallel(): inspects global stderr.
-			s := &EntireSettings{StrategyOptions: tt.opts}
-			stderr := captureSettingsStderr(t, s.WarnIfCheckpointsV2Disallowed)
-
-			gotWarn := stderr != ""
-			if gotWarn != tt.wantWarn {
-				t.Fatalf("warning emitted = %v, want %v (stderr: %q)", gotWarn, tt.wantWarn, stderr)
-			}
-			if tt.wantText != "" && !strings.Contains(stderr, tt.wantText) {
-				t.Fatalf("warning text mismatch: got %q, want it to contain %q", stderr, tt.wantText)
-			}
-		})
-	}
-}
-
-func TestWarnIfCheckpointsV2Disallowed_RepeatsUntilV2SettingRemoved(t *testing.T) {
-	// Cannot use t.Parallel(): inspects global stderr.
-	const warning = "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"
-
-	s := &EntireSettings{StrategyOptions: map[string]any{"checkpoints_version": 2}}
-	stderr := captureSettingsStderr(t, func() {
-		s.WarnIfCheckpointsV2Disallowed()
-		s.WarnIfCheckpointsV2Disallowed()
-	})
-	if count := strings.Count(stderr, warning); count != 2 {
-		t.Fatalf("warning count = %d, want 2 (stderr: %q)", count, stderr)
-	}
-
-	s.StrategyOptions = map[string]any{}
-	stderr = captureSettingsStderr(t, s.WarnIfCheckpointsV2Disallowed)
-	if stderr != "" {
-		t.Fatalf("warning after removing v2 setting = %q, want empty", stderr)
-	}
-}
-
-func captureSettingsStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	origStderr := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Stderr = w
-	t.Cleanup(func() { os.Stderr = origStderr })
-
-	fn()
-
-	if err := w.Close(); err != nil {
-		t.Fatalf("close stderr write end: %v", err)
-	}
-	buf, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read stderr: %v", err)
-	}
-	_ = r.Close()
-	os.Stderr = origStderr
-	return string(buf)
 }
 
 func TestIsFilteredFetchesEnabled_DefaultsFalse(t *testing.T) {

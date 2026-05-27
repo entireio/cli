@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-const migrateDeprecationMessage = "Migration to checkpoints v2 has been halted for now."
+const migrateDeprecationMessage = "The migrate command is deprecated."
 
 // TestMigrateCmd_DeprecationStub verifies the migrate command is a stub that
 // prints the deprecation message to stderr and returns a SilentError for any
@@ -20,7 +20,7 @@ func TestMigrateCmd_DeprecationStub(t *testing.T) {
 		args []string
 	}{
 		{"no args", []string{"migrate"}},
-		{"legacy --checkpoints v2", []string{"migrate", "--checkpoints", "v2"}},
+		{"legacy --checkpoints flag", []string{"migrate", "--checkpoints", "legacy"}},
 		{"unknown flag", []string{"migrate", "--bogus"}},
 	}
 

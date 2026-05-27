@@ -4,13 +4,11 @@ import (
 	"context"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/perf"
 )
 
 // PrePush is called by the git pre-push hook before pushing to a remote.
 // It pushes the entire/checkpoints/v1 branch alongside the user's push.
-// Legacy checkpoints v2 settings are ignored and warn before falling back to v1.
 //
 // If a checkpoint_remote is configured in settings, checkpoint branches/refs
 // are pushed to the derived URL instead of the user's push remote.
@@ -25,8 +23,6 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 	if ps.pushDisabled {
 		return nil
 	}
-
-	settings.WarnIfCheckpointsV2Disallowed(ctx)
 
 	var err error
 	_, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoints_branch")

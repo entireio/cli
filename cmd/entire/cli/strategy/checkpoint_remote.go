@@ -113,18 +113,6 @@ func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
 	return PromoteTmpRefSafely(ctx, plumbing.ReferenceName(tmpRef), plumbing.NewBranchReferenceName(branchName), branchName)
 }
 
-// FetchV2MainFromURL fetches the v2 /main ref from a remote URL and advances
-// the local ref only when doing so cannot rewind locally-ahead commits.
-// Uses explicit refspec since v2 refs are under refs/entire/, not refs/heads/.
-//
-// The fetch is unfiltered (NoFilter: true) because resume needs full metadata.
-func FetchV2MainFromURL(ctx context.Context, remoteURL string) error {
-	if err := fetchURLIntoTmpRef(ctx, remoteURL, paths.V2MainRefName, V2MainFetchTmpRef, "v2 /main", true); err != nil {
-		return err
-	}
-	return PromoteTmpRefSafely(ctx, V2MainFetchTmpRef, paths.V2MainRefName, "v2 /main")
-}
-
 // fetchURLIntoTmpRef runs `git fetch <remoteURL> +<srcRef>:<tmpRef>` via the
 // checkpoint git wrapper, disabling the terminal prompt so a misconfigured
 // credential helper doesn't hang the process. Errors include the redacted URL

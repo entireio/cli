@@ -134,8 +134,8 @@ func TestCleanLongDescription_DefaultIsGeneric(t *testing.T) {
 	writeCleanSettingsFile(t, repoRoot, `{"enabled": true, "strategy_options": {}}`)
 
 	description := cleanLongDescription()
-	if strings.Contains(description, "checkpoints v2") {
-		t.Fatalf("did not expect v2-specific help text by default, got: %s", description)
+	if strings.Contains(description, "checkpoint-version-specific") {
+		t.Fatalf("did not expect checkpoint-version-specific help text by default, got: %s", description)
 	}
 	if strings.Contains(description, "entire/checkpoints/v1") {
 		t.Fatalf("did not expect stale v1 preservation text, got: %s", description)
@@ -580,7 +580,7 @@ func TestCleanCmd_All_NotGitRepository(t *testing.T) {
 	}
 }
 
-func TestCleanCmd_All_InvalidSettingsIgnoredWithoutV2Scan(t *testing.T) {
+func TestCleanCmd_All_InvalidSettingsIgnored(t *testing.T) {
 	repo, _ := setupCleanTestRepo(t)
 
 	wt, err := repo.Worktree()

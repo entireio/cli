@@ -93,15 +93,8 @@ func EnsureSetup(ctx context.Context) error {
 
 // FetchTmpRefPrefix is the namespace for temporary refs used by fetch helpers
 // to land a fetched hash before safely promoting it to a final ref (via
-// PromoteTmpRefSafely). Prefer using the named constants below when possible.
+// PromoteTmpRefSafely).
 const FetchTmpRefPrefix = "refs/entire-fetch-tmp/"
-
-// V2MainFetchTmpRef is the staging ref for fetches that target V2MainRefName.
-// Shared between the cli package's origin-based fetches and the strategy
-// package's checkpoint_remote URL-based fetch — those code paths never run
-// concurrently (they are sequenced in explain and resume), so reusing one
-// staging ref is safe and avoids divergent conventions.
-const V2MainFetchTmpRef = FetchTmpRefPrefix + "v2-main"
 
 // PromoteTmpRefSafely reads tmpRefName (the ref a fetch just landed into),
 // advances destRefName to its hash via SafelyAdvanceLocalRef, then removes
@@ -109,10 +102,7 @@ const V2MainFetchTmpRef = FetchTmpRefPrefix + "v2-main"
 // the advance fails.
 //
 // label is a short human-readable name used in error messages (e.g.
-// "v2 /main", "entire/checkpoints/v1"). Typical use:
-//
-//	// fetch with refspec "+<src>:<V2MainFetchTmpRef>"
-//	return PromoteTmpRefSafely(ctx, V2MainFetchTmpRef, paths.V2MainRefName, "v2 /main")
+// "entire/checkpoints/v1").
 func PromoteTmpRefSafely(ctx context.Context, tmpRefName, destRefName plumbing.ReferenceName, label string) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -784,28 +774,6 @@ func GetMetadataBranchTree(repo *git.Repository) (*object.Tree, error) {
 	tree, err := commit.Tree()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get metadata branch tree: %w", err)
-	}
-	return tree, nil
-}
-
-// GetV2MetadataBranchTree returns the tree object at the tip of the v2 /main ref.
-// The v2 /main ref uses the same sharded checkpoint layout as v1, so
-// ReadLatestSessionPromptFromCommittedTree works with either tree.
-func GetV2MetadataBranchTree(repo *git.Repository) (*object.Tree, error) {
-	refName := plumbing.ReferenceName(paths.V2MainRefName)
-	ref, err := repo.Reference(refName, true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get v2 /main reference: %w", err)
-	}
-
-	commit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get v2 /main commit: %w", err)
-	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get v2 /main tree: %w", err)
 	}
 	return tree, nil
 }

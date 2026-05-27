@@ -600,59 +600,26 @@ func TestReadCheckpointInfoFromStoreUsesLatestSessionMetadata(t *testing.T) {
 	}
 }
 
-func TestResolveLatestCheckpointUsesLocalV2WhenSettingsDisabled(t *testing.T) {
+func TestResolveLatestCheckpointUsesV1Metadata(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
 	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
 	cpID := id.MustCheckpointID("dd11ee22ff33")
-	v2Store := checkpoint.NewV2GitStore(repo)
-	writeV2CheckpointFixture(t, repo, v2CheckpointFixtureOptions{
-		CheckpointID: cpID,
-		SessionID:    "session-v2-local",
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"from v2"}]}}` + "\n")),
-		Prompts:      []string{"Use local v2 data"},
-	})
+	createCheckpointOnMetadataBranchFull(
+		t,
+		repo,
+		"session-v1-local",
+		cpID,
+		time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
+	)
 
-	latest, err := resolveLatestCheckpoint(context.Background(), repo, v2Store, []id.CheckpointID{cpID})
+	latest, err := resolveLatestCheckpoint(context.Background(), repo, checkpoint.NewGitStore(repo), []id.CheckpointID{cpID})
 	if err != nil {
 		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
 	}
 	if latest.CheckpointID != cpID {
 		t.Errorf("resolveLatestCheckpoint() = %s, want %s", latest.CheckpointID, cpID)
-	}
-}
-
-func TestResolveLatestCheckpointFallsBackToV1WhenLocalV2MissesCheckpoint(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
-
-	v2Store := checkpoint.NewV2GitStore(repo)
-	writeV2CheckpointFixture(t, repo, v2CheckpointFixtureOptions{
-		CheckpointID: id.MustCheckpointID("dd11ee22ff33"),
-		SessionID:    "session-v2-other",
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"from v2"}]}}` + "\n")),
-		Prompts:      []string{"Use local v2 data"},
-	})
-
-	targetID := createCheckpointOnMetadataBranchFull(
-		t,
-		repo,
-		"session-v1-target",
-		id.MustCheckpointID("aa11bb22cc33"),
-		time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
-	)
-
-	latest, err := resolveLatestCheckpoint(context.Background(), repo, v2Store, []id.CheckpointID{targetID})
-	if err != nil {
-		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
-	}
-	if latest.CheckpointID != targetID {
-		t.Errorf("resolveLatestCheckpoint() = %s, want %s", latest.CheckpointID, targetID)
 	}
 }
 
@@ -757,27 +724,16 @@ func TestFindBranchCheckpoint_SquashMergeMultipleCheckpoints(t *testing.T) {
 	}
 }
 
-func TestResumeSingleSession_FallsBackToV1WhenV2FullMissing(t *testing.T) {
+func TestResumeSingleSession_RestoresV1Transcript(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
 	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
 
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
-		t.Fatalf("failed to create settings dir: %v", err)
-	}
-	if err := os.WriteFile(
-		filepath.Join(tmpDir, ".entire", "settings.json"),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`),
-		0o644,
-	); err != nil {
-		t.Fatalf("failed to write settings: %v", err)
-	}
-
 	ctx := context.Background()
 	cpID := id.MustCheckpointID("abc123abc123")
-	sessionID := "resume-v1-fallback-session"
-	raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"resume v1 fallback"}]}}` + "\n")
+	sessionID := "resume-v1-session"
+	raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"resume v1"}]}}` + "\n")
 
 	v1Store := checkpoint.NewGitStore(repo)
 	if err := v1Store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
@@ -790,13 +746,6 @@ func TestResumeSingleSession_FallsBackToV1WhenV2FullMissing(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("failed to write v1 checkpoint: %v", err)
 	}
-
-	writeV2CheckpointFixture(t, repo, v2CheckpointFixtureOptions{
-		CheckpointID:      cpID,
-		SessionID:         sessionID,
-		Strategy:          "manual-commit",
-		CompactTranscript: []byte(`{"v":1,"type":"user"}` + "\n"),
-	})
 
 	ag := &recordingResumeAgent{sessionDir: filepath.Join(tmpDir, "sessions")}
 	var stdout, stderr bytes.Buffer
