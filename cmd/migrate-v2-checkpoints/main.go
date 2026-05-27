@@ -55,13 +55,14 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	ctx = settings.WithWorktreeRoot(ctx, repoRoot)
 
-	checkpoints, err := discoverCheckpointHistory(ctx, repo, discoveryOptions{
+	checkpoints, v2OrphansSkipped, err := discoverCheckpointHistoryWithSkippedOrphans(ctx, repo, discoveryOptions{
 		since: opts.since,
 		head:  opts.head,
 	})
 	if err != nil {
 		return err
 	}
+	writeDiscoveryWarnings(stdout, v2OrphansSkipped)
 
 	switch opts.mode {
 	case modeList:

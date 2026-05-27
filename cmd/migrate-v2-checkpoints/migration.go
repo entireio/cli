@@ -25,6 +25,7 @@ type migrationReport struct {
 	MissingV2SessionMetadata    int
 	MissingRawTranscripts       int
 	EligibleCheckpoints         int
+	V2OrphanCheckpoints         int
 	EligibleSessions            int
 	MigratedCheckpoints         int
 	MigratedSessions            int
@@ -68,6 +69,9 @@ func migrateDiscoveredCheckpoints(ctx context.Context, repo *git.Repository, dis
 			continue
 		}
 		report.EligibleCheckpoints++
+		if len(discoveredCheckpoint.Commits) == 0 {
+			report.V2OrphanCheckpoints++
+		}
 		report.Candidates = append(report.Candidates, migrationCandidateFromDiscovered(discoveredCheckpoint, eligibleSessions))
 		if opts.apply {
 			report.MigratedCheckpoints++
@@ -217,6 +221,7 @@ func writeMigrationReport(w io.Writer, report migrationReport, applied bool) {
 	fmt.Fprintf(w, "  missing required v2 session metadata: %d\n", report.MissingV2SessionMetadata)
 	fmt.Fprintf(w, "  missing raw transcripts: %d\n", report.MissingRawTranscripts)
 	fmt.Fprintf(w, "  checkpoints eligible for migration: %d\n", report.EligibleCheckpoints)
+	fmt.Fprintf(w, "  v2 orphan checkpoints eligible for migration: %d\n", report.V2OrphanCheckpoints)
 	fmt.Fprintf(w, "  sessions eligible for migration: %d\n", report.EligibleSessions)
 	if applied {
 		fmt.Fprintf(w, "  migrated checkpoints: %d\n", report.MigratedCheckpoints)
@@ -238,7 +243,14 @@ func writeMigrationCandidates(w io.Writer, candidates []migrationCandidate, appl
 		fmt.Fprintf(w, "    %s sessions=%d commits=%s\n",
 			candidate.CheckpointID,
 			candidate.SessionCount,
-			strings.Join(candidate.CommitSHAs, ","),
+			candidateCommitLabel(candidate),
 		)
 	}
+}
+
+func candidateCommitLabel(candidate migrationCandidate) string {
+	if len(candidate.CommitSHAs) == 0 {
+		return "(orphan)"
+	}
+	return strings.Join(candidate.CommitSHAs, ",")
 }

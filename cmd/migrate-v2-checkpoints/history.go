@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointID "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -47,14 +48,34 @@ type discoveryScope struct {
 }
 
 func discoverCheckpointHistory(ctx context.Context, repo *git.Repository, opts discoveryOptions) ([]discoveredCheckpoint, error) {
+	checkpoints, _, err := discoverCheckpointHistoryWithSkippedOrphans(ctx, repo, opts)
+	return checkpoints, err
+}
+
+func discoverCheckpointHistoryWithSkippedOrphans(ctx context.Context, repo *git.Repository, opts discoveryOptions) ([]discoveredCheckpoint, int, error) {
+	checkpoints, checkpointIndexes, err := discoverTrailerCheckpointHistory(ctx, repo, opts)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	v2OrphansSkipped, err := addV2OrphanCheckpoints(ctx, repo, opts, checkpointIndexes, &checkpoints)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	sortDiscoveredCheckpoints(checkpoints)
+	return checkpoints, v2OrphansSkipped, nil
+}
+
+func discoverTrailerCheckpointHistory(ctx context.Context, repo *git.Repository, opts discoveryOptions) ([]discoveredCheckpoint, map[string]int, error) {
 	scope, err := newDiscoveryScope(ctx, repo, opts.since)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	tips, err := historyTips(ctx, repo, opts.head, scope)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	seenCommits := make(map[plumbing.Hash]bool)
@@ -63,12 +84,11 @@ func discoverCheckpointHistory(ctx context.Context, repo *git.Repository, opts d
 
 	for _, tip := range tips {
 		if err := scanTip(ctx, repo, tip, scope.excluded, seenCommits, checkpointIndexes, &checkpoints); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
-	sortDiscoveredCheckpoints(checkpoints)
-	return checkpoints, nil
+	return checkpoints, checkpointIndexes, nil
 }
 
 func newDiscoveryScope(ctx context.Context, repo *git.Repository, since string) (discoveryScope, error) {
@@ -341,6 +361,86 @@ func scanTip(ctx context.Context, repo *git.Repository, tip historyTip, excluded
 	return nil
 }
 
+func addV2OrphanCheckpoints(ctx context.Context, repo *git.Repository, opts discoveryOptions, checkpointIndexes map[string]int, checkpoints *[]discoveredCheckpoint) (int, error) {
+	v2CheckpointIDs, err := listV2MainCheckpointIDs(ctx, repo)
+	if err != nil {
+		return 0, err
+	}
+	if len(v2CheckpointIDs) == 0 {
+		return 0, nil
+	}
+
+	if hasCommitScope(opts) {
+		_, unscopedIndexes, err := discoverTrailerCheckpointHistory(ctx, repo, discoveryOptions{})
+		if err != nil {
+			return 0, err
+		}
+
+		return countMissingCheckpointIDs(v2CheckpointIDs, unscopedIndexes), nil
+	}
+
+	for _, cpID := range v2CheckpointIDs {
+		key := cpID.String()
+		if _, exists := checkpointIndexes[key]; exists {
+			continue
+		}
+		checkpointIndexes[key] = len(*checkpoints)
+		*checkpoints = append(*checkpoints, discoveredCheckpoint{ID: cpID})
+	}
+
+	return 0, nil
+}
+
+func hasCommitScope(opts discoveryOptions) bool {
+	return opts.since != "" || opts.head != ""
+}
+
+func countMissingCheckpointIDs(ids []checkpointID.CheckpointID, indexes map[string]int) int {
+	missing := 0
+	for _, cpID := range ids {
+		if _, exists := indexes[cpID.String()]; !exists {
+			missing++
+		}
+	}
+	return missing
+}
+
+func listV2MainCheckpointIDs(ctx context.Context, repo *git.Repository) ([]checkpointID.CheckpointID, error) {
+	v2Store := checkpoint.NewV2GitStore(repo)
+	_, rootTreeHash, err := v2Store.GetRefState(plumbing.ReferenceName(paths.V2MainRefName))
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s ref state: %w", paths.V2MainRefName, err)
+	}
+
+	rootTree, err := repo.TreeObject(rootTreeHash)
+	if err != nil {
+		return nil, fmt.Errorf("read %s root tree: %w", paths.V2MainRefName, err)
+	}
+
+	var ids []checkpointID.CheckpointID
+	err = checkpoint.WalkCheckpointShards(ctx, repo, rootTree, func(cpID checkpointID.CheckpointID, cpTreeHash plumbing.Hash) error {
+		cpTree, cpTreeErr := repo.TreeObject(cpTreeHash)
+		if cpTreeErr != nil {
+			return fmt.Errorf("read v2 checkpoint %s tree: %w", cpID, cpTreeErr)
+		}
+		if _, fileErr := cpTree.File(paths.MetadataFileName); fileErr == nil {
+			ids = append(ids, cpID)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk %s checkpoints: %w", paths.V2MainRefName, err)
+	}
+
+	sort.Slice(ids, func(i, j int) bool {
+		return ids[i].String() < ids[j].String()
+	})
+	return ids, nil
+}
+
 func addCheckpointCommit(commit *object.Commit, checkpointIndexes map[string]int, checkpoints *[]discoveredCheckpoint) {
 	ids := trailers.ParseAllCheckpoints(commit.Message)
 	if len(ids) == 0 {
@@ -384,11 +484,21 @@ func sortDiscoveredCheckpoints(checkpoints []discoveredCheckpoint) {
 func writeCheckpointList(w io.Writer, checkpoints []discoveredCheckpoint) {
 	for _, checkpoint := range checkpoints {
 		fmt.Fprint(w, checkpoint.ID)
+		if len(checkpoint.Commits) == 0 {
+			fmt.Fprint(w, " (orphan)")
+		}
 		for _, commit := range checkpoint.Commits {
 			fmt.Fprintf(w, " %s", commit.ShortSHA)
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+func writeDiscoveryWarnings(w io.Writer, v2OrphansSkipped int) {
+	if v2OrphansSkipped == 0 {
+		return
+	}
+	fmt.Fprintf(w, "warning: %d v2 orphans skipped; re-run without --since/--head to include them\n", v2OrphansSkipped)
 }
 
 func shortHash(hash plumbing.Hash) string {

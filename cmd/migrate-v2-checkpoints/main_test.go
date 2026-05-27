@@ -149,6 +149,18 @@ func TestDiscoverCheckpointHistory_ExcludesInternalRefs(t *testing.T) {
 	require.Equal(t, []string{mainCheckpointID, featureCheckpointID, featureCheckpointID2}, discoveredCheckpointIDs(checkpoints))
 }
 
+func TestDiscoverCheckpointHistory_IncludesV2OrphansWithoutScope(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationOrphanRepo(t, "555555555555")
+
+	checkpoints, err := discoverCheckpointHistory(context.Background(), fixture.repo, discoveryOptions{})
+	require.NoError(t, err)
+
+	require.Equal(t, []string{"555555555555"}, discoveredCheckpointIDs(checkpoints))
+	require.Empty(t, checkpoints[0].Commits)
+}
+
 func TestResolveRevisionRejectsAmbiguousShortCommitPrefix(t *testing.T) {
 	t.Parallel()
 
@@ -210,6 +222,21 @@ func TestRunListModeOpensRepoFromSubdirectory(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, mainCheckpointID+" "+shortHash(fixture.mainHash)+"\n", stdout.String())
+}
+
+func TestRunListModePrintsV2Orphans(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationOrphanRepo(t, "666666666666")
+
+	var stdout bytes.Buffer
+	err := run(context.Background(), []string{
+		"--repo", fixture.dir,
+		"--list",
+	}, &stdout)
+	require.NoError(t, err)
+
+	require.Equal(t, "666666666666 (orphan)\n", stdout.String())
 }
 
 func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
@@ -285,6 +312,45 @@ func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 	require.True(t, commit.Author.When.Equal(createdAt), "author time = %s, want %s", commit.Author.When, createdAt)
 }
 
+func TestRunApplyMigratesV2OrphanCheckpointAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("777777777777")
+	fixture := setupMigrationOrphanRepo(t, cpID.String())
+
+	var stdout bytes.Buffer
+	err := run(context.Background(), []string{
+		"--repo", fixture.dir,
+		"--apply",
+	}, &stdout)
+	require.NoError(t, err)
+	require.Contains(t, stdout.String(), "checkpoints eligible for migration: 1")
+	require.Contains(t, stdout.String(), "v2 orphan checkpoints eligible for migration: 1")
+	require.Contains(t, stdout.String(), "migrated checkpoints: 1")
+	require.Contains(t, stdout.String(), cpID.String()+" sessions=1 commits=(orphan)")
+
+	v1Store := checkpoint.NewGitStore(fixture.repo)
+	summary, err := v1Store.ReadCommitted(context.Background(), cpID)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	require.Len(t, summary.Sessions, 1)
+	content, err := v1Store.ReadSessionContent(context.Background(), cpID, 0)
+	require.NoError(t, err)
+	require.Equal(t, "orphan-session", content.Metadata.SessionID)
+	require.JSONEq(t, `{"message":"orphan"}`, string(content.Transcript))
+
+	stdout.Reset()
+	err = run(context.Background(), []string{
+		"--repo", fixture.dir,
+		"--apply",
+	}, &stdout)
+	require.NoError(t, err)
+	require.Contains(t, stdout.String(), "already present v1 sessions: 1")
+	require.Contains(t, stdout.String(), "checkpoints eligible for migration: 0")
+	require.Contains(t, stdout.String(), "v2 orphan checkpoints eligible for migration: 0")
+	require.NotContains(t, stdout.String(), cpID.String()+" sessions=1 commits=(orphan)")
+}
+
 func TestRunDryRunPlansWithoutWritingV1(t *testing.T) {
 	t.Parallel()
 
@@ -306,6 +372,39 @@ func TestRunDryRunPlansWithoutWritingV1(t *testing.T) {
 	summary, err := checkpoint.NewGitStore(fixture.repo).ReadCommitted(context.Background(), cpID)
 	require.NoError(t, err)
 	require.Nil(t, summary)
+}
+
+func TestRunDryRunSkipsV2OrphansWhenScoped(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		flag string
+		id   string
+	}{
+		{name: "since", flag: "--since", id: "888888888888"},
+		{name: "head", flag: "--head", id: "999999999999"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			fixture := setupMigrationOrphanRepo(t, tc.id)
+			args := []string{
+				"--repo", fixture.dir,
+				tc.flag, fixture.baseHash.String(),
+				"--dry-run",
+			}
+			var stdout bytes.Buffer
+			err := run(context.Background(), args, &stdout)
+			require.NoError(t, err)
+
+			require.Contains(t, stdout.String(), "warning: 1 v2 orphans skipped; re-run without --since/--head to include them")
+			require.Contains(t, stdout.String(), "discovered checkpoints: 0")
+			require.Contains(t, stdout.String(), "checkpoints eligible for migration: 0")
+			require.NotContains(t, stdout.String(), tc.id+" sessions=1 commits=(orphan)")
+		})
+	}
 }
 
 func TestRunApplySkipsExistingV1SessionsAndMigratesMissingSessions(t *testing.T) {
@@ -477,6 +576,29 @@ func setupMigrationHistoryRepo(t *testing.T) migrationHistoryFixture {
 		baseHash:    baseHash,
 		mainHash:    mainHash,
 		featureHash: featureHash,
+	}
+}
+
+func setupMigrationOrphanRepo(t *testing.T, checkpointID string) migrationHistoryFixture {
+	t.Helper()
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+
+	baseHash := commitMigrationTestFile(t, dir, "initial.txt", "initial\n", "initial commit")
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	writeTestV2Checkpoint(t, repo, testV2CheckpointOptions{
+		CheckpointID: id.MustCheckpointID(checkpointID),
+		SessionID:    "orphan-session",
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"orphan\"}\n")),
+	})
+
+	return migrationHistoryFixture{
+		dir:      dir,
+		repo:     repo,
+		baseHash: baseHash,
 	}
 }
 
