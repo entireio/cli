@@ -379,17 +379,19 @@ a separate, explicit decision once the post-apply checks in §5 pass.
 
 ```sh
 REPO=/path/to/some-repo
+REPO_NAME=$(basename "$REPO")
 TOOL=~/entire/cli/.worktrees/review/migrate-v2-checkpoints
+APPLIED_REPORT="/tmp/migrate-${REPO_NAME}.applied"
 
 # Snapshot the v1 branch tip so you can roll back deterministically.
 PRE_APPLY_TIP=$(git -C "$REPO" rev-parse entire/checkpoints/v1 2>/dev/null || echo "none")
 echo "pre-apply v1 tip: $PRE_APPLY_TIP"
 
-# Apply. Tee the report into /tmp/migrate.applied — §5 reads it back.
-"$TOOL" --repo "$REPO" --apply | tee /tmp/migrate.applied
+# Apply. Tee the report into /tmp/migrate-${REPO_NAME}.applied — §5 reads it back.
+"$TOOL" --repo "$REPO" --apply | tee "$APPLIED_REPORT"
 
 # Sanity-check the report.
-grep -E "^  (checkpoints eligible|sessions eligible|migrated)" /tmp/migrate.applied
+grep -E "^  (checkpoints eligible|sessions eligible|migrated)" "$APPLIED_REPORT"
 #   migrated checkpoints == checkpoints eligible
 #   migrated sessions    == sessions eligible
 # Anything less means at least one write failed silently — re-run --apply
@@ -438,7 +440,7 @@ git -C "$REPO" log --format='%h %ci %s' \
 2. `migrated sessions` equals `sessions eligible for migration` from the
    dry-run.
 3. `git rev-parse entire/checkpoints/v1` advanced.
-4. `/tmp/migrate.applied` contains the full report for §5 to reference.
+4. `/tmp/migrate-${REPO_NAME}.applied` contains the full report for §5 to reference.
 5. **You have NOT pushed `entire/checkpoints/v1`.** Confirm by checking
    that no remote tracking ref has advanced:
 
@@ -459,9 +461,9 @@ passes.
 
 ## 5. Post-apply validation
 
-This section assumes `--apply` has been run and `/tmp/migrate.applied`
-holds the report. The `migrated sessions=...` count is the population you
-will validate below.
+This section assumes `--apply` has been run and
+`/tmp/migrate-${REPO_NAME}.applied` holds the report. The
+`migrated sessions=...` count is the population you will validate below.
 
 ### 5.1 Step E — root `metadata.json` (CheckpointSummary) on v1
 
