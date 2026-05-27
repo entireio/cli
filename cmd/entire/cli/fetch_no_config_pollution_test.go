@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -124,7 +123,7 @@ func TestFetchV2MainTreeOnly_DoesNotCreateShallowRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open producer repo: %v", err)
 	}
-	writeV2CheckpointForExport(t, producerRepo, id.MustCheckpointID("121212121212"), checkpoint.WriteCommittedOptions{
+	writeV2CheckpointForExport(t, producerRepo, id.MustCheckpointID("121212121212"), v2CheckpointFixtureOptions{
 		SessionID:  "fetch-v2-shallow-guard",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n")),
 	})
