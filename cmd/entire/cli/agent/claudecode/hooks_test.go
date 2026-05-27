@@ -3,6 +3,7 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -433,6 +434,87 @@ func readClaudeSettings(t *testing.T, tempDir string) ClaudeSettings {
 		t.Fatalf("failed to parse settings.json: %v", err)
 	}
 	return settings
+}
+
+func TestInstallHooks_AddsTimeoutToNewProductionSessionStart(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	agent := &ClaudeCodeAgent{}
+	_, err := agent.InstallHooks(context.Background(), false, false)
+	if err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	settings := readClaudeSettings(t, tempDir)
+	wantCommand := agentpkg.WrapProductionJSONWarningHookCommand(
+		"entire hooks claude-code session-start",
+		agentpkg.WarningFormatMultiLine,
+	)
+
+	for _, matcher := range settings.Hooks.SessionStart {
+		if matcher.Matcher != "" {
+			continue
+		}
+		for _, hook := range matcher.Hooks {
+			if hook.Command == wantCommand {
+				if hook.Timeout != productionSessionStartHookTimeoutSeconds {
+					t.Fatalf("SessionStart timeout = %d, want %d", hook.Timeout, productionSessionStartHookTimeoutSeconds)
+				}
+				return
+			}
+		}
+	}
+
+	t.Fatal("production SessionStart hook not found")
+}
+
+func TestInstallHooks_BackfillsTimeoutOnExistingProductionSessionStart(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	existingCommand := agentpkg.WrapProductionJSONWarningHookCommand(
+		"entire hooks claude-code session-start",
+		agentpkg.WarningFormatMultiLine,
+	)
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [{"type": "command", "command": %q}]
+      }
+    ]
+  }
+}`, existingCommand))
+
+	before := readClaudeSettings(t, tempDir)
+	if before.Hooks.SessionStart[0].Hooks[0].Timeout != 0 {
+		t.Fatalf("precondition SessionStart timeout = %d, want 0", before.Hooks.SessionStart[0].Hooks[0].Timeout)
+	}
+
+	agent := &ClaudeCodeAgent{}
+	_, err := agent.InstallHooks(context.Background(), false, false)
+	if err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	settings := readClaudeSettings(t, tempDir)
+	for _, matcher := range settings.Hooks.SessionStart {
+		if matcher.Matcher != "" {
+			continue
+		}
+		for _, hook := range matcher.Hooks {
+			if hook.Command == existingCommand {
+				if hook.Timeout != productionSessionStartHookTimeoutSeconds {
+					t.Fatalf("SessionStart timeout = %d, want %d", hook.Timeout, productionSessionStartHookTimeoutSeconds)
+				}
+				return
+			}
+		}
+	}
+
+	t.Fatal("production SessionStart hook not found")
 }
 
 //nolint:tparallel // Parent uses t.Chdir() which prevents t.Parallel(); subtests only read from pre-loaded data

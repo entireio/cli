@@ -27,6 +27,7 @@ type ClaudeHookMatcher struct {
 type ClaudeHookEntry struct {
 	Type    string `json:"type"`
 	Command string `json:"command"`
+	Timeout int    `json:"timeout,omitempty"`
 }
 
 // sessionInfoRaw is the JSON structure from SessionStart/SessionEnd/Stop hooks.

@@ -34,6 +34,8 @@ const ClaudeSettingsFileName = "settings.json"
 // metadataDenyRule blocks Claude from reading Entire session metadata
 const metadataDenyRule = "Read(./.entire/metadata/**)"
 
+const productionSessionStartHookTimeoutSeconds = 5
+
 // entireHookPrefixes are command prefixes that identify Entire hooks (both old and new formats)
 var entireHookPrefixes = []string{
 	"entire ",
@@ -133,9 +135,15 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 
 	count := 0
 
+	sessionStartTimeout := 0
+	if !localDev {
+		sessionStartTimeout = productionSessionStartHookTimeoutSeconds
+	}
+
 	// Add hooks if they don't exist
-	if !hookCommandExists(sessionStart, sessionStartCmd) {
-		sessionStart = addHookToMatcher(sessionStart, "", sessionStartCmd)
+	var sessionStartChanged bool
+	sessionStart, sessionStartChanged = ensureHookInMatcherWithTimeout(sessionStart, "", sessionStartCmd, sessionStartTimeout)
+	if sessionStartChanged {
 		count++
 	}
 	if !hookCommandExists(sessionEnd, sessionEndCmd) {
@@ -426,37 +434,46 @@ func hookCommandExistsWithMatcher(matchers []ClaudeHookMatcher, matcherName, com
 }
 
 func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string) []ClaudeHookMatcher {
+	return addHookToMatcherWithTimeout(matchers, matcherName, command, 0)
+}
+
+func addHookToMatcherWithTimeout(matchers []ClaudeHookMatcher, matcherName, command string, timeout int) []ClaudeHookMatcher {
+	matchers, _ = ensureHookInMatcherWithTimeout(matchers, matcherName, command, timeout)
+	return matchers
+}
+
+func ensureHookInMatcherWithTimeout(matchers []ClaudeHookMatcher, matcherName, command string, timeout int) ([]ClaudeHookMatcher, bool) {
 	entry := ClaudeHookEntry{
 		Type:    "command",
 		Command: command,
+		Timeout: timeout,
 	}
 
-	// If no matcher name, add to a matcher with empty string
-	if matcherName == "" {
-		for i, matcher := range matchers {
-			if matcher.Matcher == "" {
-				matchers[i].Hooks = append(matchers[i].Hooks, entry)
-				return matchers
-			}
-		}
-		return append(matchers, ClaudeHookMatcher{
-			Matcher: "",
-			Hooks:   []ClaudeHookEntry{entry},
-		})
-	}
-
-	// Find or create matcher with the given name
 	for i, matcher := range matchers {
-		if matcher.Matcher == matcherName {
-			matchers[i].Hooks = append(matchers[i].Hooks, entry)
-			return matchers
+		if matcher.Matcher != matcherName {
+			continue
 		}
+
+		for j, hook := range matcher.Hooks {
+			if hook.Command != command {
+				continue
+			}
+			if hook.Type == entry.Type && hook.Timeout == entry.Timeout {
+				return matchers, false
+			}
+			matchers[i].Hooks[j].Type = entry.Type
+			matchers[i].Hooks[j].Timeout = entry.Timeout
+			return matchers, true
+		}
+
+		matchers[i].Hooks = append(matchers[i].Hooks, entry)
+		return matchers, true
 	}
 
 	return append(matchers, ClaudeHookMatcher{
 		Matcher: matcherName,
 		Hooks:   []ClaudeHookEntry{entry},
-	})
+	}), true
 }
 
 // isEntireHook checks if a command is an Entire hook (old or new format)
