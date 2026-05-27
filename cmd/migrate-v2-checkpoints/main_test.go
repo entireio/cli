@@ -1,3 +1,4 @@
+//nolint:goconst // Repeated CLI flag literals keep argument-list tests readable.
 package main
 
 import (
@@ -299,6 +300,8 @@ func TestRunDryRunPlansWithoutWritingV1(t *testing.T) {
 	require.Contains(t, stdout, "Migration plan:")
 	require.Contains(t, stdout, "checkpoints eligible for migration: 1")
 	require.Contains(t, stdout, "sessions eligible for migration: 1")
+	require.Contains(t, stdout, "checkpoints to migrate:")
+	require.Contains(t, stdout, mainCheckpointID+" sessions=1 commits="+shortHash(fixture.mainHash))
 
 	summary, err := checkpoint.NewGitStore(fixture.repo).ReadCommitted(context.Background(), cpID)
 	require.NoError(t, err)
@@ -338,6 +341,8 @@ func TestRunApplySkipsExistingV1SessionsAndMigratesMissingSessions(t *testing.T)
 	require.Contains(t, stdout, "already present v1 sessions: 1")
 	require.Contains(t, stdout, "migrated checkpoints: 1")
 	require.Contains(t, stdout, "migrated sessions: 1")
+	require.Contains(t, stdout, "migrated checkpoint details:")
+	require.Contains(t, stdout, mainCheckpointID+" sessions=1 commits="+shortHash(fixture.mainHash))
 
 	v1Store := checkpoint.NewGitStore(fixture.repo)
 	summary, err := v1Store.ReadCommitted(context.Background(), cpID)

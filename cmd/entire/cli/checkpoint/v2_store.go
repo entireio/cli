@@ -73,7 +73,7 @@ func (s *V2GitStore) GetRefState(refName plumbing.ReferenceName) (parentHash, tr
 		if cliErr != nil {
 			return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("failed to get commit for ref %s: %w", refName, errors.Join(err, cliErr))
 		}
-		logging.Warn(context.Background(), "GetRefState: go-git commit read failed, used git rev-parse fallback",
+		logging.Debug(context.Background(), "GetRefState: go-git commit read failed, used git rev-parse fallback",
 			slog.String("ref", refName.String()),
 			slog.String("commit", ref.Hash().String()[:12]),
 			slog.String("gogit_error", err.Error()),

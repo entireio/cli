@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -27,6 +28,13 @@ type migrationReport struct {
 	EligibleSessions            int
 	MigratedCheckpoints         int
 	MigratedSessions            int
+	Candidates                  []migrationCandidate
+}
+
+type migrationCandidate struct {
+	CheckpointID string
+	SessionCount int
+	CommitSHAs   []string
 }
 
 type checkpointMigrator struct {
@@ -52,19 +60,32 @@ func migrateDiscoveredCheckpoints(ctx context.Context, repo *git.Repository, dis
 	}
 
 	for _, discoveredCheckpoint := range discovered {
-		migratedSessions, err := migrator.migrateCheckpoint(ctx, discoveredCheckpoint)
+		eligibleSessions, err := migrator.migrateCheckpoint(ctx, discoveredCheckpoint)
 		if err != nil {
 			return report, err
 		}
-		if migratedSessions == 0 {
+		if eligibleSessions == 0 {
 			continue
 		}
 		report.EligibleCheckpoints++
+		report.Candidates = append(report.Candidates, migrationCandidateFromDiscovered(discoveredCheckpoint, eligibleSessions))
 		if opts.apply {
 			report.MigratedCheckpoints++
 		}
 	}
 	return report, nil
+}
+
+func migrationCandidateFromDiscovered(discovered discoveredCheckpoint, sessionCount int) migrationCandidate {
+	commitSHAs := make([]string, len(discovered.Commits))
+	for i, commit := range discovered.Commits {
+		commitSHAs[i] = commit.ShortSHA
+	}
+	return migrationCandidate{
+		CheckpointID: discovered.ID.String(),
+		SessionCount: sessionCount,
+		CommitSHAs:   commitSHAs,
+	}
 }
 
 func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered discoveredCheckpoint) (int, error) {
@@ -86,7 +107,7 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 		return 0, nil
 	}
 
-	migratedSessions := 0
+	eligibleSessions := 0
 	for sessionIndex := range summary.Sessions {
 		metadataContent, err := m.v2Store.ReadSessionMetadataAndPrompts(ctx, discovered.ID, sessionIndex)
 		if err != nil {
@@ -94,7 +115,7 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 				m.report.MissingV2SessionMetadata++
 				continue
 			}
-			return migratedSessions, fmt.Errorf("read v2 checkpoint %s session %d metadata: %w", discovered.ID, sessionIndex, err)
+			return eligibleSessions, fmt.Errorf("read v2 checkpoint %s session %d metadata: %w", discovered.ID, sessionIndex, err)
 		}
 		if !hasRequiredV2Metadata(metadataContent) {
 			m.report.MissingV2SessionMetadata++
@@ -111,20 +132,20 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 				m.report.MissingRawTranscripts++
 				continue
 			}
-			return migratedSessions, fmt.Errorf("read v2 checkpoint %s session %d: %w", discovered.ID, sessionIndex, err)
+			return eligibleSessions, fmt.Errorf("read v2 checkpoint %s session %d: %w", discovered.ID, sessionIndex, err)
 		}
 
 		m.report.EligibleSessions++
 		if m.opts.apply {
 			writeOpts := writeOptionsFromV2Content(content, summary, m.authorName, m.authorEmail)
 			if err := m.v1Store.WriteCommitted(ctx, writeOpts); err != nil {
-				return migratedSessions, fmt.Errorf("write v1 checkpoint %s session %d: %w", discovered.ID, sessionIndex, err)
+				return eligibleSessions, fmt.Errorf("write v1 checkpoint %s session %d: %w", discovered.ID, sessionIndex, err)
 			}
 			m.report.MigratedSessions++
 		}
-		migratedSessions++
+		eligibleSessions++
 	}
-	return migratedSessions, nil
+	return eligibleSessions, nil
 }
 
 func (m checkpointMigrator) existingV1SessionIDs(ctx context.Context, discovered discoveredCheckpoint, summary *checkpoint.CheckpointSummary) (map[string]struct{}, error) {
@@ -200,5 +221,24 @@ func writeMigrationReport(w io.Writer, report migrationReport, applied bool) {
 	if applied {
 		fmt.Fprintf(w, "  migrated checkpoints: %d\n", report.MigratedCheckpoints)
 		fmt.Fprintf(w, "  migrated sessions: %d\n", report.MigratedSessions)
+	}
+	writeMigrationCandidates(w, report.Candidates, applied)
+}
+
+func writeMigrationCandidates(w io.Writer, candidates []migrationCandidate, applied bool) {
+	if len(candidates) == 0 {
+		return
+	}
+	if applied {
+		fmt.Fprintln(w, "  migrated checkpoint details:")
+	} else {
+		fmt.Fprintln(w, "  checkpoints to migrate:")
+	}
+	for _, candidate := range candidates {
+		fmt.Fprintf(w, "    %s sessions=%d commits=%s\n",
+			candidate.CheckpointID,
+			candidate.SessionCount,
+			strings.Join(candidate.CommitSHAs, ","),
+		)
 	}
 }

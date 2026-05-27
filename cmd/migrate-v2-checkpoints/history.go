@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -15,6 +16,7 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing/storer"
 )
 
 type discoveryOptions struct {
@@ -298,9 +300,13 @@ func commitReachableFrom(ctx context.Context, repo *git.Repository, from, target
 		}
 		if commit.Hash == target {
 			found = true
+			return storer.ErrStop
 		}
 		return nil
 	})
+	if errors.Is(err, storer.ErrStop) {
+		return true, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("iterate commits from %s: %w", from, err)
 	}
