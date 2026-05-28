@@ -34,18 +34,20 @@ func TestHookNames(t *testing.T) {
 
 func TestParseHookEvent_PreInvocation_FirstInvocationEmitsTurnStart(t *testing.T) {
 	t.Parallel()
-	// Synthesize a payload with invocationNum=1 (the first model invocation
-	// of a conversation — this IS a fresh turn start). Each PreInvocation
-	// past invocationNum=1 is a follow-up model call within the same turn
-	// and must NOT re-fire TurnStart; see the matching nil test below.
+	// Payload values mirror real agy 1.0.0 wire format captured from the agy
+	// binary: the first PreInvocation of a fresh conversation has
+	// invocationNum=0 (yes, zero — agy is 0-indexed despite the docs reading
+	// like 1-based) and initialNumSteps=1 (agy inserts the user prompt as
+	// step 0 before the first model call fires). See the comment block on
+	// parsePreInvocation for the captured stdin samples.
 	payload := InvocationPayload{
 		CommonPayload: CommonPayload{
 			ConversationID: testConversationID,
 			TranscriptPath: testTranscriptPath,
 			WorkspacePaths: []string{testWorkspacePath},
 		},
-		InvocationNum:   1,
-		InitialNumSteps: 0,
+		InvocationNum:   0,
+		InitialNumSteps: 1,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -57,7 +59,7 @@ func TestParseHookEvent_PreInvocation_FirstInvocationEmitsTurnStart(t *testing.T
 		t.Fatalf("ParseHookEvent: %v", err)
 	}
 	if ev == nil {
-		t.Fatal("expected non-nil event for invocationNum=1 pre-invocation")
+		t.Fatal("expected non-nil event for invocationNum=0 pre-invocation")
 	}
 	if ev.Type != agent.TurnStart {
 		t.Errorf("Type = %v, want TurnStart", ev.Type)
@@ -71,13 +73,17 @@ func TestParseHookEvent_PreInvocation_FirstInvocationEmitsTurnStart(t *testing.T
 }
 
 // TestParseHookEvent_PreInvocation_FollowUpReturnsNil verifies that agy's
-// per-model-call PreInvocations (invocationNum > 1) do NOT re-fire TurnStart.
+// per-model-call PreInvocations (invocationNum > 0) do NOT re-fire TurnStart.
 // This is the bug that produced "no files modified during session, skipping
 // checkpoint" in real-agy testing: each PreInvocation that emits TurnStart
 // causes the framework to re-capture pre-prompt state, clobbering the
-// baseline used by TurnEnd's file-diff. The captured fixture
-// (testdata/hook_stdin_pre_invocation.json) has invocationNum=3, which is
-// the follow-up case.
+// baseline used by TurnEnd's file-diff.
+//
+// agy 1.0.0 ships invocationNum **0-indexed** (the first call is 0, the
+// second is 1, etc.) — captured from real stdin, not from the docs which
+// describe invocationNum ambiguously. The fixture
+// testdata/hook_stdin_pre_invocation.json carries invocationNum=1 for this
+// reason — that's a follow-up under the real-agy numbering.
 func TestParseHookEvent_PreInvocation_FollowUpReturnsNil(t *testing.T) {
 	t.Parallel()
 	data, err := os.ReadFile("testdata/hook_stdin_pre_invocation.json")

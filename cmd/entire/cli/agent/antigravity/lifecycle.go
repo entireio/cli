@@ -54,7 +54,7 @@ func (a *AntigravityAgent) ParseHookEvent(_ context.Context, hookName string, st
 // parsePreInvocation handles the PreInvocation hook.
 //
 // Emits TurnStart ONLY on the first model invocation of a conversation
-// (invocationNum == 1). Subsequent PreInvocations within the same
+// (invocationNum == 0). Subsequent PreInvocations within the same
 // conversation return nil.
 //
 // Background: agy's PreInvocation fires per *model invocation*, but Entire's
@@ -67,8 +67,19 @@ func (a *AntigravityAgent) ParseHookEvent(_ context.Context, hookName string, st
 // skipping checkpoint"). Confirmed by agy traces showing two PreInvocations
 // per single-prompt conversation.
 //
+// agy wire-format quirk: invocationNum is **0-indexed** despite the docs
+// describing it as "the sequence number of the current model invocation"
+// (which most CLI tools interpret as 1-based). Real captured stdin from
+// agy 1.0.0:
+//
+//	PreInvocation #1: {"invocationNum":0,"initialNumSteps":1,...}  ← turn start
+//	PreInvocation #2: {"invocationNum":1,"initialNumSteps":5,...}  ← follow-up
+//
+// (initialNumSteps is not a usable "first?" signal — agy inserts the user
+// prompt as a step before the first model call, so it's already 1.)
+//
 // Limitation: agy resumes (agy --continue / --conversation) start with
-// invocationNum > 1, so they won't fire TurnStart. If the prior session state
+// invocationNum > 0, so they won't fire TurnStart. If the prior session state
 // was already cleaned up (FullyCondensed), the resumed turn won't be tracked
 // until the user starts a fresh conversation. Tracked in deferred work.
 //
@@ -81,7 +92,7 @@ func parsePreInvocation(stdin io.Reader) (*agent.Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	if raw.InvocationNum != 1 {
+	if raw.InvocationNum != 0 {
 		return nil, nil //nolint:nilnil // follow-up model invocation, not a new turn
 	}
 	return &agent.Event{

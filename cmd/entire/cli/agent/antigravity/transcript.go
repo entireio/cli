@@ -50,7 +50,9 @@ func (a *AntigravityAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error)
 // — so we use it to handle agy's asynchronous transcript write.
 //
 // Background: agy writes its transcript file at
-//   ~/.gemini/antigravity-cli/brain/<conv-id>/.system_generated/logs/transcript.jsonl
+//
+//	~/.gemini/antigravity-cli/brain/<conv-id>/.system_generated/logs/transcript.jsonl
+//
 // AFTER the Stop hook fires (sometimes seconds later, depending on session
 // shutdown timing). Our TurnEnd event maps to Stop, so we routinely race the
 // transcript write. Without PrepareTranscript, the framework's fileExists

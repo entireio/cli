@@ -1,6 +1,6 @@
 {
-  "invocationNum": 3,
-  "initialNumSteps": 10,
+  "invocationNum": 1,
+  "initialNumSteps": 5,
   "conversationId": "ec33ebf9-0cba-4100-8142-c61503f6c587",
   "workspacePaths": ["/workspace/project"],
   "transcriptPath": "/workspace/project/.gemini/jetski/transcript.jsonl",

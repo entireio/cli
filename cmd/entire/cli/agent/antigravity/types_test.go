@@ -76,10 +76,14 @@ func TestParsePreInvocationPayload(t *testing.T) {
 	if p.ConversationID != testConversationID {
 		t.Errorf("ConversationID = %q", p.ConversationID)
 	}
-	if p.InvocationNum != 3 {
+	// Fixture mirrors a real agy 1.0.0 follow-up PreInvocation: invocationNum=1
+	// (0-indexed in agy's wire format despite docs reading like 1-based) and
+	// initialNumSteps=5 (the user prompt as step 0 plus four steps added by
+	// the first model invocation). See parsePreInvocation comment block.
+	if p.InvocationNum != 1 {
 		t.Errorf("InvocationNum = %d", p.InvocationNum)
 	}
-	if p.InitialNumSteps != 10 {
+	if p.InitialNumSteps != 5 {
 		t.Errorf("InitialNumSteps = %d", p.InitialNumSteps)
 	}
 	if p.TranscriptPath != testTranscriptPath {
