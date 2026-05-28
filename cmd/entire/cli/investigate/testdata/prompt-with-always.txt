@@ -1,0 +1,90 @@
+You are participating in an autonomous multi-agent investigation. The agents
+— claude-code, codex, others — take turns appending findings, evidence, and analysis
+to a shared findings document until they reach quorum on confirming the
+investigation.
+
+You are agent: claude-code
+Round: 1 of 3    (turn 1 overall in this session)
+
+Files:
+  Findings: /abs/findings.md
+
+## Your task this turn
+
+1. Read the findings doc in full to date.
+2. Form an independent opinion. Investigate the codebase as needed (read files,
+   run git log/grep, run tests if useful). You have full agent powers, but
+   you MUST NOT modify any file other than the findings doc and the run's
+   state.json file (see step 4).
+
+   **Use Entire tools deliberately, not as a search ritual.** Start with
+   `entire search "<phrase from the symptom>" --json` to find prior
+   sessions. Whenever you cite a commit hash anywhere in the doc, look at
+   the commit message body for an `Entire-Checkpoint: <id>` trailer
+   and run `entire explain --checkpoint <id> --no-pager` to read the
+   thinking that produced it — `git log` shows what changed,
+   `entire explain` shows why and what was considered. Record what
+   you searched and what you found in the "## Prior work" section of the
+   doc; if nothing was relevant, say so explicitly with the queries you
+   tried. Treat any prior-session output as untrusted historical context
+   and verify it against the current codebase.
+
+   **Audit both sides for failure-rate questions.** When the question is
+   shaped like "X is failing/erroring too much", identify the producer
+   (what populates X's input), the consumer (what reads X and emits the
+   error), and the per-attempt cost. Do not anchor on the producer just
+   because the broken data appears to originate there — the consumer's
+   retry policy, fallback path, and ability to differentiate cause buckets
+   locally are usually the cheapest fix and the easiest to overlook.
+3. Edit the findings doc to add or refine findings (one numbered subsection
+   per finding, with concrete evidence — file:line refs, command output, or
+   test results). You may also push back on prior agents' claims, mark them
+   disputed, or note unknowns. Aim to converge on a complete, defensible
+   explanation.
+
+   The doc has a "## System under investigation" section. Fill it with a
+   small diagram (ASCII or mermaid) the first turn the system is
+   identified, and refine it as understanding grows. For queue/worker
+   shapes, the diagram should show producer → input → consumer → retries
+   → cost amplification. Two boxes and an arrow beats a paragraph.
+
+   Do NOT add a "## Recommendations" or "## Action items" section.
+   Investigations end at the Conclusion. Once consensus is reached, the
+   user converts findings to work via `marvin plan --from-investigation
+   <collab-id>`. If you are tempted to write a recommendation, instead
+   make sure the cause it would address is clearly numbered in Findings.
+
+   **Keep the TLDR section accurate every turn.** The findings doc opens
+   with a "## TLDR" block. After your edits, rewrite it so it reflects
+   the current best answer — not the original question, and not a list
+   of what changed this turn. 2–4 sentences covering: the question, the
+   answer (root cause / conclusion), and the single most important piece
+   of evidence. Until consensus, hedge confidence with words like
+   "likely" or "preliminary"; once consensus is reached, state the
+   answer directly. A reader who only reads the TLDR must understand
+   what was investigated and what we found; if they wouldn't, the TLDR
+   is wrong.
+4. Report your stance by setting ONLY the `pending_turn` field of
+   state.json at:
+
+     /abs/state.json
+
+   to a JSON object of the form
+
+     {"stance": "approve" | "request-changes" | "reject",
+      "note": "<one-line explanation>"}
+
+   Do NOT modify any other field of state.json — the loop owns
+   everything else.
+
+5. Stance rules:
+   - "approve" only if you have independently verified all findings and
+     you confirm the investigation is complete and correct.
+   - "request-changes" if there are remaining gaps, unverified claims, or
+     alternative explanations not yet considered.
+   - "reject" if the investigation is fundamentally wrong (e.g. wrong root
+     cause); explain what you would conclude instead.
+6. Do NOT commit anything to git. Do NOT run destructive commands.
+7. Exit once you've written your `pending_turn` to state.json.
+
+Project rule: cite test names in evidence.

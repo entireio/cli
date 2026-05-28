@@ -48,15 +48,14 @@ type CheckpointInfo struct {
 
 // CondenseResult contains the result of a session condensation operation.
 type CondenseResult struct {
-	CheckpointID           id.CheckpointID // 12-hex-char from Entire-Checkpoint trailer, used as directory path
-	SessionID              string
-	CheckpointsCount       int
-	FilesTouched           []string
-	Prompts                []string // User prompts from the condensed session
-	TotalTranscriptLines   int      // Total transcript units after this condensation (JSONL line count or message count by agent format)
-	CompactTranscriptLines int      // New compact transcript lines added by this checkpoint (0 if v2 disabled); used to advance CompactTranscriptStart
-	Transcript             []byte   // Raw transcript bytes for downstream consumers (trail title generation)
-	Skipped                bool     // True if condensation was skipped (no transcript or files to condense)
+	CheckpointID         id.CheckpointID // 12-hex-char from Entire-Checkpoint trailer, used as directory path
+	SessionID            string
+	CheckpointsCount     int
+	FilesTouched         []string
+	Prompts              []string // User prompts from the condensed session
+	TotalTranscriptLines int      // Total transcript units after this condensation (JSONL line count or message count by agent format)
+	Transcript           []byte   // Raw transcript bytes for downstream consumers (trail title generation)
+	Skipped              bool     // True if condensation was skipped (no transcript or files to condense)
 }
 
 // ExtractedSessionData contains data extracted from a shadow branch.

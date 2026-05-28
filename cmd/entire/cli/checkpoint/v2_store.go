@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
-	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 
@@ -16,40 +15,22 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// V2GitStore provides checkpoint storage operations for the v2 ref layout.
-// It writes to two custom refs under refs/entire/:
+// V2GitStore provides read operations for the v2 ref layout.
+// It reads from two custom refs under refs/entire/:
 //   - /main: permanent metadata + compact transcripts
-//   - /full/current: active generation of raw transcripts
+//   - /full/current: raw transcripts
 //
 // V2GitStore is separate from GitStore (v1) to keep concerns isolated
-// and simplify future v1 removal. It composes GitStore internally to
-// reuse ref-agnostic entry-building helpers (tree surgery, session
-// indexing, summary aggregation).
+// and simplify future v1 removal.
 type V2GitStore struct {
 	repo *git.Repository
 	gs   *GitStore // shared entry-building helpers (same package)
-
-	// maxCheckpointsPerGeneration overrides the rotation threshold for testing.
-	// Zero means use DefaultMaxCheckpointsPerGeneration.
-	maxCheckpointsPerGeneration int
 
 	// blobFetcher fetches missing blobs by hash. When set, read paths wrap
 	// trees with FetchingTree so missing blobs are auto-recovered (and the
 	// cat-file fallback covers partial-clone-filtered blobs that go-git's
 	// storer can't see).
 	blobFetcher BlobFetchFunc
-
-	commonDirOnce sync.Once
-	commonDir     string
-	commonDirErr  error
-}
-
-// maxCheckpoints returns the effective rotation threshold.
-func (s *V2GitStore) maxCheckpoints() int {
-	if s.maxCheckpointsPerGeneration > 0 {
-		return s.maxCheckpointsPerGeneration
-	}
-	return DefaultMaxCheckpointsPerGeneration
 }
 
 // NewV2GitStore creates a new v2 checkpoint store backed by the given git repository.
@@ -74,33 +55,6 @@ func (s *V2GitStore) SetBlobFetcher(f BlobFetchFunc) {
 // recovered via the fetcher and the cat-file fallback.
 func (s *V2GitStore) wrapWithFetcher(ctx context.Context, tree *object.Tree) *FetchingTree {
 	return NewFetchingTree(ctx, tree, s.repo.Storer, s.blobFetcher)
-}
-
-// ensureRef ensures that a custom ref exists, creating an orphan commit
-// with an empty tree if it does not.
-func (s *V2GitStore) ensureRef(ctx context.Context, refName plumbing.ReferenceName) error {
-	_, err := s.repo.Reference(refName, true)
-	if err == nil {
-		return nil // Already exists
-	}
-
-	emptyTreeHash, err := BuildTreeFromEntries(ctx, s.repo, make(map[string]object.TreeEntry))
-	if err != nil {
-		return fmt.Errorf("failed to build empty tree: %w", err)
-	}
-
-	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
-	commitHash, err := CreateCommit(ctx, s.repo, emptyTreeHash, plumbing.ZeroHash, "Initialize v2 ref", authorName, authorEmail)
-	if err != nil {
-		return fmt.Errorf("failed to create initial commit: %w", err)
-	}
-
-	ref := plumbing.NewHashReference(refName, commitHash)
-	if err := s.repo.Storer.SetReference(ref); err != nil {
-		return fmt.Errorf("failed to set ref %s: %w", refName, err)
-	}
-
-	return nil
 }
 
 // GetRefState returns the parent commit hash and root tree hash for a ref.
@@ -143,19 +97,4 @@ func commitTreeHashViaCLI(ctx context.Context, commitHash plumbing.Hash) (plumbi
 		return plumbing.ZeroHash, fmt.Errorf("git rev-parse %s^{tree}: empty output", commitHash.String()[:12])
 	}
 	return plumbing.NewHash(hex), nil
-}
-
-// updateRef creates a new commit on a ref with the given tree, updating the ref to point to it.
-func (s *V2GitStore) updateRef(ctx context.Context, refName plumbing.ReferenceName, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) error {
-	commitHash, err := CreateCommit(ctx, s.repo, treeHash, parentHash, message, authorName, authorEmail)
-	if err != nil {
-		return fmt.Errorf("failed to create commit: %w", err)
-	}
-
-	ref := plumbing.NewHashReference(refName, commitHash)
-	if err := s.repo.Storer.SetReference(ref); err != nil {
-		return fmt.Errorf("failed to update ref %s: %w", refName, err)
-	}
-
-	return nil
 }

@@ -143,27 +143,6 @@ func TestRecapFlags_ColorEnabled(t *testing.T) {
 	}
 }
 
-func TestKeyringReadError_PreservesCauseAndMatchesAs(t *testing.T) {
-	t.Parallel()
-
-	cause := errors.New("keychain locked")
-	err := error(&keyringReadError{Cause: cause})
-
-	if !errors.Is(err, cause) {
-		t.Fatalf("errors.Is should match wrapped cause; got false for %v", err)
-	}
-	var keyringErr *keyringReadError
-	if !errors.As(err, &keyringErr) {
-		t.Fatalf("errors.As should extract *keyringReadError; got false for %v", err)
-	}
-	if !errors.Is(keyringErr.Cause, cause) {
-		t.Fatalf("Cause = %v, want %v", keyringErr.Cause, cause)
-	}
-	if !strings.Contains(err.Error(), "keychain locked") {
-		t.Fatalf("Error() should include cause text; got %q", err.Error())
-	}
-}
-
 func TestRunRecap_PrerequisiteErrorsUseErrorWriter(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)

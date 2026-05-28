@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/utils/merkletrie"
 )
 
 // disconnectedOnce ensures the disconnection warning runs at most once per process.
@@ -74,6 +76,7 @@ func WarnIfMetadataDisconnected() {
 				slog.String("error", err.Error()))
 			return
 		}
+		defer repo.Close()
 		disconnected, err := IsMetadataDisconnected(ctx, repo, plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName))
 		if err != nil {
 			logging.Debug(ctx, "metadata disconnection check failed",
@@ -152,8 +155,13 @@ func ReconcileDisconnectedMetadataBranch(
 	// Disconnected — cherry-pick local commits onto remote tip
 	fmt.Fprintln(w, "[entire] Detected disconnected session metadata (local and remote share no common ancestor)")
 
+	shallow, err := loadShallowHashes(ctx, repoPath)
+	if err != nil {
+		return fmt.Errorf("failed to load shallow boundaries: %w", err)
+	}
+
 	// Collect local commits oldest-first
-	localCommits, err := collectCommitChain(repo, localHash)
+	localCommits, err := collectCommitChain(repo, localHash, shallow)
 	if err != nil {
 		return fmt.Errorf("failed to collect local commits: %w", err)
 	}
@@ -182,7 +190,7 @@ func ReconcileDisconnectedMetadataBranch(
 
 	fmt.Fprintf(w, "[entire] Cherry-picking %d local checkpoint(s) onto remote...\n", len(dataCommits))
 
-	newTip, err := cherryPickOnto(ctx, repo, remoteHash, dataCommits)
+	newTip, err := cherryPickOnto(ctx, repo, remoteHash, dataCommits, shallow)
 	if err != nil {
 		return fmt.Errorf("failed to cherry-pick local commits onto remote: %w", err)
 	}
@@ -317,7 +325,12 @@ func ReconcileDisconnectedV2Ref(
 
 	fmt.Fprintln(w, "[entire] Detected disconnected v2 /main refs (local and remote share no common ancestor)")
 
-	localCommits, err := collectCommitChain(repo, localRef.Hash())
+	shallow, err := loadShallowHashes(ctx, repoPath)
+	if err != nil {
+		return fmt.Errorf("failed to load shallow boundaries: %w", err)
+	}
+
+	localCommits, err := collectCommitChain(repo, localRef.Hash(), shallow)
 	if err != nil {
 		return fmt.Errorf("failed to collect local commits: %w", err)
 	}
@@ -344,7 +357,7 @@ func ReconcileDisconnectedV2Ref(
 
 	fmt.Fprintf(w, "[entire] Cherry-picking %d local checkpoint(s) onto remote...\n", len(dataCommits))
 
-	newTip, err := cherryPickOnto(ctx, repo, fetchedHash, dataCommits)
+	newTip, err := cherryPickOnto(ctx, repo, fetchedHash, dataCommits, shallow)
 	if err != nil {
 		return fmt.Errorf("failed to cherry-pick local commits onto remote: %w", err)
 	}
@@ -399,10 +412,11 @@ func fetchRefToTemp(ctx context.Context, repoPath, remoteName, srcRef, dstRef st
 
 	refspec := fmt.Sprintf("+%s:%s", srcRef, dstRef)
 	output, err := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refspec},
-		NoTags:   true,
-		Dir:      repoPath,
+		Remote:    fetchTarget,
+		RefSpecs:  []string{refspec},
+		NoTags:    true,
+		Unshallow: true,
+		Dir:       repoPath,
 	})
 	if err != nil {
 		redactedURL := remote.RedactURL(fetchTarget)
@@ -453,7 +467,13 @@ func isDisconnected(ctx context.Context, repoPath, hashA, hashB string) (bool, e
 }
 
 // collectCommitChain walks from tip to root following first parent, returns oldest-first.
-func collectCommitChain(repo *git.Repository, tip plumbing.Hash) ([]*object.Commit, error) {
+// Commits listed in shallow are treated as roots — the walk stops at them without
+// traversing into their parents. go-git's repo.CommitObject().ParentHashes does not
+// consult .git/shallow on its own, so without this check the walk would stroll past
+// shallow boundaries into stale objects left in the pack (e.g., when the remote
+// branch has been rebuilt since the last full fetch), producing a phantom chain of
+// commits that no longer represent the actual checkpoint history.
+func collectCommitChain(repo *git.Repository, tip plumbing.Hash, shallow map[plumbing.Hash]bool) ([]*object.Commit, error) {
 	var chain []*object.Commit
 	current := tip
 
@@ -466,6 +486,11 @@ func collectCommitChain(repo *git.Repository, tip plumbing.Hash) ([]*object.Comm
 		chain = append(chain, commit)
 
 		if len(commit.ParentHashes) == 0 {
+			reachedRoot = true
+			break
+		}
+		if shallow[current] {
+			// Shallow boundary — treat as a root.
 			reachedRoot = true
 			break
 		}
@@ -484,83 +509,67 @@ func collectCommitChain(repo *git.Repository, tip plumbing.Hash) ([]*object.Comm
 	return chain, nil
 }
 
+// loadShallowHashes returns the commit hashes listed in the repository's
+// shallow file, or an empty map if the repository is not shallow.
+func loadShallowHashes(ctx context.Context, repoPath string) (map[plumbing.Hash]bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git rev-parse --git-common-dir: %w", err)
+	}
+	gitDir := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(repoPath, gitDir)
+	}
+	// Path is constructed from git's own --git-common-dir output, not user input.
+	data, err := os.ReadFile(filepath.Join(gitDir, "shallow")) //nolint:gosec // see comment above
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return map[plumbing.Hash]bool{}, nil
+		}
+		return nil, fmt.Errorf("read shallow file: %w", err)
+	}
+	set := map[plumbing.Hash]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		set[plumbing.NewHash(line)] = true
+	}
+	return set, nil
+}
+
 // cherryPickOnto applies each commit's delta onto base, building a linear chain.
 // For each commit, it computes the full diff from its parent (additions, modifications,
 // and deletions), then applies that delta onto the current tip's tree.
-func cherryPickOnto(ctx context.Context, repo *git.Repository, base plumbing.Hash, commits []*object.Commit) (plumbing.Hash, error) {
+//
+// Commits listed in shallow are treated as roots: their delta is computed against
+// an empty tree rather than against their (past-the-boundary) parent. Without this,
+// a shallow-boundary commit would be diffed against a stale parent tree whose
+// objects live in the local pack but no longer represent the actual checkpoint
+// history — producing nonsense changes when replayed onto the remote tip.
+func cherryPickOnto(ctx context.Context, repo *git.Repository, base plumbing.Hash, commits []*object.Commit, shallow map[plumbing.Hash]bool) (plumbing.Hash, error) {
 	currentTip := base
 
 	for _, commit := range commits {
-		// Get the commit's tree entries
-		commitTree, err := commit.Tree()
+		changes, err := treeChangesForCherryPick(ctx, repo, commit, shallow)
 		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to get tree for commit %s: %w", commit.Hash, err)
+			return plumbing.ZeroHash, err
 		}
-
-		commitEntries := make(map[string]object.TreeEntry)
-		if err := checkpoint.FlattenTree(repo, commitTree, "", commitEntries); err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to flatten commit tree: %w", err)
-		}
-
-		// Get parent's tree entries (empty if root commit)
-		parentEntries := make(map[string]object.TreeEntry)
-		if len(commit.ParentHashes) > 0 {
-			parentCommit, pErr := repo.CommitObject(commit.ParentHashes[0])
-			if pErr != nil {
-				return plumbing.ZeroHash, fmt.Errorf("failed to get parent commit %s: %w", commit.ParentHashes[0], pErr)
-			}
-			parentTree, ptErr := parentCommit.Tree()
-			if ptErr != nil {
-				return plumbing.ZeroHash, fmt.Errorf("failed to get parent tree for commit %s: %w", commit.ParentHashes[0], ptErr)
-			}
-			if err := checkpoint.FlattenTree(repo, parentTree, "", parentEntries); err != nil {
-				return plumbing.ZeroHash, fmt.Errorf("failed to flatten parent tree for commit %s: %w", commit.ParentHashes[0], err)
-			}
-		}
-
-		// Compute full delta: additions, modifications, and deletions
-		added := make(map[string]object.TreeEntry)
-		for path, entry := range commitEntries {
-			parentEntry, exists := parentEntries[path]
-			if !exists || parentEntry.Hash != entry.Hash {
-				added[path] = entry // New or modified
-			}
-		}
-		var deleted []string
-		for path := range parentEntries {
-			if _, exists := commitEntries[path]; !exists {
-				deleted = append(deleted, path) // Removed in this commit
-			}
-		}
-
-		if len(added) == 0 && len(deleted) == 0 {
+		if len(changes) == 0 {
 			continue // Skip no-op commits
 		}
 
-		// Get current tip's tree and apply delta
 		tipCommit, err := repo.CommitObject(currentTip)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to get tip commit: %w", err)
 		}
-		tipTree, err := tipCommit.Tree()
-		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to get tip tree: %w", err)
-		}
 
-		mergedEntries := make(map[string]object.TreeEntry)
-		if err := checkpoint.FlattenTree(repo, tipTree, "", mergedEntries); err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to flatten tip tree: %w", err)
-		}
-		for path, entry := range added {
-			mergedEntries[path] = entry
-		}
-		for _, path := range deleted {
-			delete(mergedEntries, path)
-		}
-
-		mergedTreeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, mergedEntries)
+		mergedTreeHash, err := checkpoint.ApplyTreeChanges(ctx, repo, tipCommit.TreeHash, changes)
 		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to build merged tree: %w", err)
+			return plumbing.ZeroHash, fmt.Errorf("failed to apply cherry-pick changes: %w", err)
 		}
 
 		// Create new commit on top of current tip, preserving original message/author
@@ -573,6 +582,65 @@ func cherryPickOnto(ctx context.Context, repo *git.Repository, base plumbing.Has
 	}
 
 	return currentTip, nil
+}
+
+func treeChangesForCherryPick(ctx context.Context, repo *git.Repository, commit *object.Commit, shallow map[plumbing.Hash]bool) ([]checkpoint.TreeChange, error) {
+	commitTree, err := commit.Tree()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tree for commit %s: %w", commit.Hash, err)
+	}
+
+	var parentTree *object.Tree
+	// Shallow-boundary commits are treated as roots — see cherryPickOnto for why.
+	if len(commit.ParentHashes) > 0 && !shallow[commit.Hash] {
+		parentCommit, pErr := repo.CommitObject(commit.ParentHashes[0])
+		if pErr != nil {
+			return nil, fmt.Errorf("failed to get parent commit %s: %w", commit.ParentHashes[0], pErr)
+		}
+		parentTree, err = parentCommit.Tree()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get parent tree for commit %s: %w", commit.ParentHashes[0], err)
+		}
+	}
+
+	changes, err := object.DiffTreeContext(ctx, parentTree, commitTree)
+	if err != nil {
+		return nil, fmt.Errorf("failed to diff commit %s against parent: %w", commit.Hash, err)
+	}
+
+	treeChanges := make([]checkpoint.TreeChange, 0, len(changes))
+	for _, change := range changes {
+		treeChange, changeErr := changeToTreeChange(change)
+		if changeErr != nil {
+			return nil, fmt.Errorf("failed to convert change in commit %s: %w", commit.Hash, changeErr)
+		}
+		treeChanges = append(treeChanges, treeChange)
+	}
+	return treeChanges, nil
+}
+
+func changeToTreeChange(change *object.Change) (checkpoint.TreeChange, error) {
+	action, err := change.Action()
+	if err != nil {
+		return checkpoint.TreeChange{}, fmt.Errorf("change action: %w", err)
+	}
+
+	switch action {
+	case merkletrie.Insert, merkletrie.Modify:
+		entry := change.To.TreeEntry
+		return checkpoint.TreeChange{
+			Path: change.To.Name,
+			Entry: &object.TreeEntry{
+				Name: entry.Name,
+				Mode: entry.Mode,
+				Hash: entry.Hash,
+			},
+		}, nil
+	case merkletrie.Delete:
+		return checkpoint.TreeChange{Path: change.From.Name}, nil
+	default:
+		return checkpoint.TreeChange{}, fmt.Errorf("unsupported action %s", action)
+	}
 }
 
 // createCherryPickCommit creates a new commit on top of parent, preserving the

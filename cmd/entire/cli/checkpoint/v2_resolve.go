@@ -17,15 +17,37 @@ import (
 type FetchRefFunc func(ctx context.Context) error
 
 // GetV2MetadataTree resolves the v2 /main ref tree with fetch fallback.
-// Follows the same pattern as getMetadataTree() in resume.go:
+// Fallback order:
 //  1. Treeless fetch → open fresh repo → read /main ref tree
-//  2. Local ref lookup
-//  3. Full fetch → read tree
+//  2. Full fetch when the treeless refresh did not produce a readable tree
+//  3. Local ref lookup
+//  4. Full fetch when no treeless refresh was attempted
 //
 // Takes fetch functions as dependencies to avoid importing the cli package.
 // openRepoFn opens a fresh repository (needed after fetch to see new packfiles).
 func GetV2MetadataTree(ctx context.Context, treelessFetchFn, fullFetchFn FetchRefFunc, openRepoFn func(context.Context) (*git.Repository, error)) (*object.Tree, *git.Repository, error) {
 	refName := plumbing.ReferenceName(paths.V2MainRefName)
+	fullFetchTried := false
+
+	tryFullFetch := func() (*object.Tree, *git.Repository, bool) {
+		if fullFetchFn == nil || fullFetchTried {
+			return nil, nil, false
+		}
+		fullFetchTried = true
+		if fetchErr := fullFetchFn(ctx); fetchErr != nil {
+			return nil, nil, false
+		}
+		freshRepo, repoErr := openRepoFn(ctx)
+		if repoErr != nil {
+			return nil, nil, false
+		}
+		tree, treeErr := getV2RefTree(freshRepo, refName)
+		if treeErr != nil {
+			_ = freshRepo.Close()
+			return nil, nil, false
+		}
+		return tree, freshRepo, true
+	}
 
 	if treelessFetchFn != nil {
 		if fetchErr := treelessFetchFn(ctx); fetchErr == nil {
@@ -35,7 +57,11 @@ func GetV2MetadataTree(ctx context.Context, treelessFetchFn, fullFetchFn FetchRe
 				if treeErr == nil {
 					return tree, freshRepo, nil
 				}
+				_ = freshRepo.Close()
 			}
+		}
+		if tree, repo, ok := tryFullFetch(); ok {
+			return tree, repo, nil
 		}
 	}
 
@@ -45,18 +71,11 @@ func GetV2MetadataTree(ctx context.Context, treelessFetchFn, fullFetchFn FetchRe
 		if err == nil {
 			return tree, localRepo, nil
 		}
+		_ = localRepo.Close()
 	}
 
-	if fullFetchFn != nil {
-		if fetchErr := fullFetchFn(ctx); fetchErr == nil {
-			freshRepo, repoErr := openRepoFn(ctx)
-			if repoErr == nil {
-				tree, treeErr := getV2RefTree(freshRepo, refName)
-				if treeErr == nil {
-					return tree, freshRepo, nil
-				}
-			}
-		}
+	if tree, repo, ok := tryFullFetch(); ok {
+		return tree, repo, nil
 	}
 
 	return nil, nil, errors.New("v2 /main ref not available")

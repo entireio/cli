@@ -11,10 +11,9 @@ import (
 	"strconv"
 	"strings"
 
-	git "github.com/go-git/go-git/v6"
-
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -62,11 +61,12 @@ func joinReviewContextSections(sections ...string) string {
 // in-progress session context is surfaced even when there are no committed
 // checkpoints in scope (the common case: branch with only uncommitted work).
 func reviewSessionContextForCurrentHead(ctx context.Context, worktreeRoot string) string {
-	repo, err := git.PlainOpen(worktreeRoot)
+	repo, err := gitrepo.OpenPath(worktreeRoot)
 	if err != nil {
 		logging.Debug(ctx, "review session context: open repo", slog.String("error", err.Error()))
 		return ""
 	}
+	defer repo.Close()
 	head, err := repo.Head()
 	if err != nil {
 		logging.Debug(ctx, "review session context: resolve HEAD", slog.String("error", err.Error()))
@@ -92,11 +92,12 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 		return ""
 	}
 
-	repo, err := git.PlainOpen(worktreeRoot)
+	repo, err := gitrepo.OpenPath(worktreeRoot)
 	if err != nil {
 		logging.Debug(ctx, "review checkpoint context: open repo", slog.String("error", err.Error()))
 		return ""
 	}
+	defer repo.Close()
 	store, storeErr := checkpoint.NewCommittedReader(ctx, repo, checkpoint.CommittedReaderOptions{})
 	if storeErr != nil {
 		logging.Debug(ctx, "review checkpoint context: checkpoint store unavailable", slog.String("error", storeErr.Error()))

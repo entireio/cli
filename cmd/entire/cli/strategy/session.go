@@ -69,6 +69,7 @@ func ListSessions(ctx context.Context) ([]Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Get checkpoints from the entire/checkpoints/v1 branch
 	checkpoints, err := ListCheckpoints(ctx)

@@ -61,6 +61,16 @@ func TestParseURL(t *testing.T) {
 			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "github.com", Owner: "org", Repo: "repo"},
 		},
 		{
+			name:     "entire:// gh prefix stripped",
+			url:      "entire://entirehost/gh/entireio/cli",
+			wantInfo: &Info{Protocol: ProtocolEntire, Host: "entirehost", Owner: "entireio", Repo: "cli"},
+		},
+		{
+			name:     "entire:// non-gh prefix stripped",
+			url:      "entire://abc/jk/myproject/repo",
+			wantInfo: &Info{Protocol: ProtocolEntire, Host: "abc", Owner: "myproject", Repo: "repo"},
+		},
+		{
 			name:    "empty string",
 			url:     "",
 			wantErr: true,

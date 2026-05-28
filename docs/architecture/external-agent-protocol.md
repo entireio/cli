@@ -54,7 +54,6 @@ Returns agent metadata and declared capabilities.
   "capabilities": {
     "hooks": true,
     "transcript_analyzer": true,
-    "compact_transcript": true,
     "transcript_preparer": false,
     "token_calculator": false,
     "text_generator": false,
@@ -317,87 +316,6 @@ Prepares/processes a transcript file (e.g., converting from raw format).
 - `--session-ref` — Path to the transcript file
 
 **Output:** Exit 0 on success.
-
-### Capability: `compact_transcript`
-
-Required when `capabilities.compact_transcript` is `true`.
-
-#### `compact-transcript --session-ref <path>`
-
-Builds a compact transcript representation for checkpoints v2.
-
-**Arguments:**
-- `--session-ref` — Path to the transcript file
-
-**Output (stdout):** JSON
-
-```json
-{
-  "transcript": "eyJ0eXBlIjoiLi4uIn0K",
-  "assets": [
-    {
-      "name": "image-1.png",
-      "media_type": "image/png",
-      "data": "iVBORw0KGgoAAAANSUhEUgAA..."
-    }
-  ]
-}
-```
-
-The `transcript` field is required and must contain base64-encoded `transcript.jsonl` bytes.
-
-Those bytes must be the complete cumulative compact **Entire Transcript Format** JSONL for the session up to the current point in time (not a delta/scoped slice since the previous checkpoint).
-
-The CLI writes these bytes byte-for-byte as the full `transcript.jsonl` file for the checkpoint, so external agents must always return the entire compact transcript accumulated so far.
-
-Those bytes must satisfy the checkpoints v2 format requirements:
-
-- UTF-8 JSONL, written byte-for-byte by the CLI to `transcript.jsonl`
-- Newline-terminated JSONL: each record must end with `\n`, including the final record
-- Every line includes format metadata (`v`, `agent`, `cli_version`) alongside the entry data
-- Supported top-level entry types are currently:
-  - `user`
-  - `assistant`
-
-`user` entries use `content` as an array of user blocks, typically text and optionally images:
-
-```json
-{"v":1,"agent":"opencode","cli_version":"0.42.0","type":"user","ts":"2026-01-13T12:00:00Z","content":[{"text":"Fix the login bug"}]}
-```
-
-`assistant` entries use `content` as either a string or an array of assistant blocks. They may optionally include `input_tokens` and `output_tokens` fields for token usage tracking. The structured array form supports at least:
-
-- `{"type":"text","text":"..."}`
-- `{"type":"tool_use","id":"...","name":"...","input":{...}}`
-
-Tool output is represented inline on the preceding `tool_use` block via an optional `result` object (there is no separate top-level `user_tool_result` entry):
-
-- `"result": {"output":"...","status":"success|error", ...}`
-
-Examples:
-
-```json
-{"v":1,"agent":"opencode","cli_version":"0.42.0","type":"user","ts":"2026-01-13T12:00:00Z","content":[{"text":"Fix the login bug"}]}
-{"v":1,"agent":"opencode","cli_version":"0.42.0","type":"assistant","ts":"2026-01-13T12:00:02Z","id":"msg_123","input_tokens":150,"output_tokens":42,"content":[{"type":"text","text":"I updated the file."},{"type":"tool_use","id":"toolu_123","name":"Read","input":{"file_path":"src/main.go"},"result":{"output":"package main","status":"success","file":{"filePath":"src/main.go","numLines":1}}}]}
-```
-
-For complete examples of the expected output format, see the [compact transcript test fixtures](../../cmd/entire/cli/transcript/compact/testdata/).
-
-The compact transcript should exclude agent-native envelope/progress/system noise and retain only the normalized content needed by Entire's checkpoint readers.
-
-The optional `assets` field is reserved for externalized checkpoint assets. Each asset object contains:
-
-| Field | Type | Description |
-|---|---|---|
-| `name` | string | Asset filename |
-| `media_type` | string | MIME type for the asset |
-| `data` | string | Base64-encoded asset bytes |
-
-Current CLI behavior:
-- If `compact_transcript` is missing or `false`, the CLI will skip compact transcript generation for that external agent, fall back to raw transcript storage, and log a warning.
-- If `compact-transcript` fails or returns invalid output, the CLI will also fall back to raw transcript storage and log a warning.
-- The CLI normalizes `transcript` bytes by appending a trailing newline when missing, and treats whitespace-only transcript output as invalid.
-- If `assets` are returned, the CLI accepts them in the protocol shape but currently ignores them for storage and read paths.
 
 ### Capability: `token_calculator`
 

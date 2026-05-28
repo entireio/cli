@@ -1,187 +1,178 @@
 package auth
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
+	"errors"
 	"net/http"
-	"net/url"
 	"strings"
+	"time"
 
+	"github.com/entireio/auth-go/deviceflow"
+	"github.com/entireio/auth-go/tokens"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
-const (
-	maxResponseBytes = 1 << 20
-	clientID         = "entire-cli"
-)
+// nowFunc is the package's clock. Override in tests.
+var nowFunc = time.Now
 
-type Client struct {
-	httpClient *http.Client
-	baseURL    string
-}
+// DeviceAuthStart preserves the historical type name; the shape now
+// matches deviceflow.DeviceCode field-for-field.
+type DeviceAuthStart = deviceflow.DeviceCode
 
-type DeviceAuthStart struct {
-	DeviceCode              string `json:"device_code"`
-	UserCode                string `json:"user_code"`
-	VerificationURI         string `json:"verification_uri"`
-	VerificationURIComplete string `json:"verification_uri_complete"`
-	ExpiresIn               int    `json:"expires_in"`
-	Interval                int    `json:"interval"`
-}
-
+// DeviceAuthPoll is the historical token-poll response shape. The shim
+// flattens deviceflow's typed errors back into the Error field so
+// existing login.go logic that switches on result.Error keeps working.
+//
+// ErrorDescription carries the optional `error_description` from the
+// server's RFC 8628 §3.5 error response, when present. Used to give
+// callers a more actionable message than the bare error code.
 type DeviceAuthPoll struct {
-	AccessToken string `json:"access_token,omitempty"`
-	TokenType   string `json:"token_type,omitempty"`
-	ExpiresIn   int    `json:"expires_in,omitempty"`
-	Scope       string `json:"scope,omitempty"`
-	Error       string `json:"error,omitempty"`
+	AccessToken      string
+	TokenType        string
+	ExpiresIn        int
+	Scope            string
+	Error            string
+	ErrorDescription string
 }
 
-type errorResponse struct {
-	Error string `json:"error"`
+// Client wraps a deviceflow.Client preconfigured for whichever provider
+// version is selected via ENTIRE_AUTH_PROVIDER_VERSION (defaulting to
+// v1).
+type Client struct {
+	inner *deviceflow.Client
 }
 
-func NewClient(httpClient *http.Client) *Client {
-	if httpClient == nil {
-		httpClient = &http.Client{}
+// NewClient constructs a Client targeting the active provider version.
+// httpClient.Transport is reused when non-nil (its TLS / proxy config
+// flows through); a nil httpClient or nil Transport falls back to the
+// deviceflow default (http.DefaultTransport).
+//
+// HTTPS is required by default. Loopback http:// (localhost, 127.0.0.1,
+// ::1) is always permitted — see isLoopbackHTTP. allowInsecureHTTP=true
+// additionally permits non-loopback http:// for cases like local-dev
+// auth hosts on a private network (e.g. http://devbox.internal); the
+// CLI plumbs this from the --insecure-http-auth flag.
+func NewClient(httpClient *http.Client, allowInsecureHTTP bool) *Client {
+	p := CurrentProvider()
+	issuer := api.AuthBaseURL()
+	var transport http.RoundTripper
+	if httpClient != nil {
+		transport = httpClient.Transport
 	}
-
-	return &Client{
-		httpClient: httpClient,
-		baseURL:    api.BaseURL(),
-	}
+	return &Client{inner: &deviceflow.Client{
+		Transport:         transport,
+		BaseURL:           issuer,
+		ClientID:          p.ClientID,
+		Scope:             "cli",
+		UserAgent:         p.ClientID,
+		DeviceCodePath:    p.DeviceCodePath,
+		TokenPath:         p.TokenPath,
+		AllowInsecureHTTP: allowInsecureHTTP || isLoopbackHTTP(issuer),
+	}}
 }
 
-func (c *Client) BaseURL() string {
-	return c.baseURL
-}
+// BaseURL returns the issuer base URL this client talks to.
+func (c *Client) BaseURL() string { return c.inner.BaseURL }
 
+// StartDeviceAuth requests a fresh device code.
 func (c *Client) StartDeviceAuth(ctx context.Context) (*DeviceAuthStart, error) {
-	body := url.Values{}
-	body.Set("client_id", clientID)
-	body.Set("scope", "cli")
-
-	resp, err := c.postForm(ctx, "/oauth/device/code", body)
-	if err != nil {
-		return nil, fmt.Errorf("start device auth: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, readAPIError(resp, "start device auth")
-	}
-
-	var result DeviceAuthStart
-	if err := decodeJSONStrict(resp.Body, &result); err != nil {
-		return nil, fmt.Errorf("decode device auth start response: %w", err)
-	}
-
-	return &result, nil
+	return c.inner.StartDeviceAuth(ctx) //nolint:wrapcheck // shim preserves the lib's wrapped errors verbatim
 }
 
+// PollDeviceAuth polls the token endpoint. On any OAuth-protocol error
+// (recognised RFC 8628 §3.5 sentinel or unknown but spec-shaped code
+// like invalid_request / invalid_client / server_error), the wire-side
+// code is returned in DeviceAuthPoll.Error so the existing polling
+// loop in login.go can branch on it — known codes hit the dedicated
+// switch arms, unknown codes fall through to the default arm and fail
+// fast. Non-protocol errors (network, decode) are returned as a real
+// error and treated as transient by the polling loop.
 func (c *Client) PollDeviceAuth(ctx context.Context, deviceCode string) (*DeviceAuthPoll, error) {
-	body := url.Values{}
-	body.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
-	body.Set("client_id", clientID)
-	body.Set("device_code", deviceCode)
-
-	resp, err := c.postForm(ctx, "/oauth/token", body)
+	t, err := c.inner.PollDeviceAuth(ctx, deviceCode)
 	if err != nil {
-		return nil, fmt.Errorf("poll device auth: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		apiErr, err := readAPIErrorResponse(resp)
-		if err != nil {
-			return nil, fmt.Errorf("poll device auth: %w", err)
+		if code, description, ok := oauthErrorParts(err); ok {
+			return &DeviceAuthPoll{
+				Error:            code,
+				ErrorDescription: description,
+			}, nil
 		}
-		return &DeviceAuthPoll{Error: apiErr.Error}, nil
+		return nil, err //nolint:wrapcheck // shim returns deviceflow errors verbatim so callers can errors.Is on sentinels
 	}
 
-	var result DeviceAuthPoll
-	if err := decodeJSON(resp.Body, &result); err != nil {
-		return nil, fmt.Errorf("decode device auth poll response: %w", err)
-	}
-
-	return &result, nil
+	return &DeviceAuthPoll{
+		AccessToken: t.AccessToken,
+		TokenType:   t.TokenType,
+		ExpiresIn:   secondsUntil(t),
+		Scope:       t.Scope,
+	}, nil
 }
 
-// postForm sends a POST request with form-encoded body to an API-relative path.
-func (c *Client) postForm(ctx context.Context, path string, body url.Values) (*http.Response, error) {
-	endpoint, err := api.ResolveURLFromBase(c.baseURL, path)
-	if err != nil {
-		return nil, fmt.Errorf("resolve URL %s: %w", path, err)
+// oauthErrorParts inspects err for either a recognised RFC 8628 §3.5
+// sentinel or the generic "oauth error: <code>" wrapper deviceflow uses
+// for unrecognised but spec-shaped codes (RFC 6749 §5.2: invalid_request,
+// invalid_client, server_error, …).
+//
+// On a match, returns the wire-side code, any error_description the
+// server included, and ok=true. Otherwise returns "", "", false — the
+// caller should treat the error as a transport/decode failure.
+//
+// Surfacing unknown codes as ok=true is what keeps login.go's polling
+// loop fast-failing on terminal OAuth rejections instead of treating
+// them as transient and retrying ~5 times.
+func oauthErrorParts(err error) (code, description string, ok bool) {
+	switch {
+	case errors.Is(err, deviceflow.ErrAuthorizationPending):
+		code = "authorization_pending"
+	case errors.Is(err, deviceflow.ErrSlowDown):
+		code = "slow_down"
+	case errors.Is(err, deviceflow.ErrAccessDenied):
+		code = "access_denied"
+	case errors.Is(err, deviceflow.ErrExpiredToken):
+		code = "expired_token"
+	case errors.Is(err, deviceflow.ErrInvalidGrant):
+		code = "invalid_grant"
+	default:
+		// Unknown but legitimate OAuth codes come back from
+		// deviceflow.errCodeToSentinel as fmt.Errorf("oauth error: %s",
+		// code), optionally wrapped a second time with ": <description>"
+		// when the server supplied error_description.
+		const oauthPrefix = "oauth error: "
+		rest, hadPrefix := strings.CutPrefix(err.Error(), oauthPrefix)
+		if !hadPrefix {
+			return "", "", false
+		}
+		if c, d, hasDesc := strings.Cut(rest, ": "); hasDesc {
+			return c, d, true
+		}
+		return rest, "", true
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(body.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", clientID)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request %s: %w", path, err)
-	}
-
-	return resp, nil
+	description = descriptionFromSentinelError(err, code)
+	return code, description, true
 }
 
-func readAPIErrorResponse(resp *http.Response) (*errorResponse, error) {
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	if err != nil {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
+// descriptionFromSentinelError pulls the description suffix out of a
+// wrapped sentinel error. The deviceflow lib uses
+// fmt.Errorf("%w: %s", sentinel, description) when the server included
+// an error_description, so the formatted error reads
+// "<code>: <description>". Stripping the "<code>: " prefix yields the
+// description; absent prefix means the server didn't supply one.
+func descriptionFromSentinelError(err error, code string) string {
+	msg := err.Error()
+	prefix := code + ": "
+	if rest, ok := strings.CutPrefix(msg, prefix); ok {
+		return rest
 	}
-
-	var apiErr errorResponse
-	if err := json.Unmarshal(body, &apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
-		return &apiErr, nil
-	}
-
-	text := strings.TrimSpace(string(body))
-	if text != "" {
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, text)
-	}
-
-	return nil, fmt.Errorf("status %d", resp.StatusCode)
+	return ""
 }
 
-func readAPIError(resp *http.Response, action string) error {
-	apiErr, err := readAPIErrorResponse(resp)
-	if err == nil {
-		return fmt.Errorf("%s: %s", action, apiErr.Error)
+// secondsUntil computes seconds-until-expiry for a TokenSet with an
+// absolute ExpiresAt. Returns 0 when no expiry is set or when ExpiresAt
+// is already in the past (clock skew, scheduling delays) — historically
+// ExpiresIn was non-negative and downstream loggers / display code don't
+// expect to see a negative value.
+func secondsUntil(t *tokens.TokenSet) int {
+	if t.ExpiresAt.IsZero() {
+		return 0
 	}
-	return fmt.Errorf("%s: %w", action, err)
-}
-
-func decodeJSON(r io.Reader, dest any) error {
-	return decodeJSONWithOptions(r, dest, false)
-}
-
-func decodeJSONStrict(r io.Reader, dest any) error {
-	return decodeJSONWithOptions(r, dest, true)
-}
-
-func decodeJSONWithOptions(r io.Reader, dest any, strict bool) error {
-	body, err := io.ReadAll(io.LimitReader(r, maxResponseBytes))
-	if err != nil {
-		return fmt.Errorf("read JSON response: %w", err)
-	}
-
-	dec := json.NewDecoder(bytes.NewReader(body))
-	if strict {
-		dec.DisallowUnknownFields()
-	}
-	if err := dec.Decode(dest); err != nil {
-		return fmt.Errorf("decode JSON response: %w", err)
-	}
-
-	return nil
+	return max(0, int(t.ExpiresAt.Unix()-nowFunc().Unix()))
 }

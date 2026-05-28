@@ -47,7 +47,6 @@ type committedReadMode int
 const (
 	committedReadV1 committedReadMode = iota
 	committedReadDual
-	committedReadV2
 )
 
 // CommittedReaderOptions configures NewCommittedReader.
@@ -55,7 +54,7 @@ type CommittedReaderOptions struct {
 	BlobFetcher BlobFetchFunc
 }
 
-func NewCommittedReader(ctx context.Context, repo *git.Repository, opts CommittedReaderOptions) (CommittedStore, error) { //nolint:ireturn // Factory selects among v1, v2, and dual reader implementations.
+func NewCommittedReader(ctx context.Context, repo *git.Repository, opts CommittedReaderOptions) (CommittedStore, error) { //nolint:ireturn // Factory selects between v1 and dual reader implementations.
 	if repo == nil {
 		return nil, errors.New("git repository is required")
 	}
@@ -82,8 +81,6 @@ func NewCommittedReader(ctx context.Context, repo *git.Repository, opts Committe
 	}
 
 	switch mode {
-	case committedReadV2:
-		return v2Store, nil
 	case committedReadDual:
 		return &DualCheckpointReader{v2: v2Store, v1: v1Store}, nil
 	case committedReadV1:
@@ -94,10 +91,7 @@ func NewCommittedReader(ctx context.Context, repo *git.Repository, opts Committe
 }
 
 func resolveCommittedReadMode(checkpointsV2Enabled bool, checkpointsVersion int, localV2MainRef bool) committedReadMode {
-	if checkpointsVersion == 2 {
-		return committedReadV2
-	}
-	if checkpointsV2Enabled || localV2MainRef {
+	if checkpointsV2Enabled || checkpointsVersion == 2 || localV2MainRef {
 		return committedReadDual
 	}
 	return committedReadV1
@@ -332,21 +326,7 @@ func (r *DualCheckpointReader) ListCommitted(ctx context.Context) ([]CommittedIn
 }
 
 func (r *DualCheckpointReader) UpdateSummary(ctx context.Context, checkpointID id.CheckpointID, summary *Summary) error {
-	err := r.v2.UpdateSummary(ctx, checkpointID, summary)
-	if err == nil {
-		return nil
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr //nolint:wrapcheck // Propagating context cancellation
-	}
-	if !errors.Is(err, ErrCheckpointNotFound) {
-		return fmt.Errorf("update v2 checkpoint summary: %w", err)
-	}
-	fallbackErr := r.v1.UpdateSummary(ctx, checkpointID, summary)
-	if fallbackErr == nil {
-		return nil
-	}
-	return fallbackReadError(err, "update v1 checkpoint summary", fallbackErr)
+	return r.v1.UpdateSummary(ctx, checkpointID, summary)
 }
 
 func (r *DualCheckpointReader) GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (Author, error) {

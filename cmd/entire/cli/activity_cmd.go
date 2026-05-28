@@ -56,7 +56,7 @@ func newActivityCmd() *cobra.Command {
 }
 
 func runActivity(ctx context.Context, w, errW io.Writer) error {
-	client, err := NewAuthenticatedAPIClient(false)
+	client, err := NewAuthenticatedAPIClient(ctx, false)
 	if err != nil {
 		fmt.Fprintln(errW, "Not logged in. Run 'entire login' to authenticate.")
 		return NewSilentError(err)

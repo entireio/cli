@@ -3,6 +3,7 @@ package settings
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 const (
 	baseSettingsClaudeSonnet = `{"enabled": true, "summary_generation": {"provider": "claude-code", "model": "sonnet"}}`
 	providerCodex            = "codex"
+	agentClaudeCode          = "claude-code"
 )
 
 // setupSettingsDir creates a temp repo directory with the provided settings
@@ -798,13 +800,11 @@ func TestIsCheckpointsV2Enabled_LocalOverride(t *testing.T) {
 		t.Fatalf("failed to create .entire directory: %v", err)
 	}
 
-	// Base settings without checkpoints_v2
 	settingsFile := filepath.Join(entireDir, "settings.json")
 	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true}`), 0o644); err != nil {
 		t.Fatalf("failed to write settings file: %v", err)
 	}
 
-	// Local override enables checkpoints_v2
 	localFile := filepath.Join(entireDir, "settings.local.json")
 	if err := os.WriteFile(localFile, []byte(`{"strategy_options": {"checkpoints_v2": true}}`), 0o644); err != nil {
 		t.Fatalf("failed to write local settings file: %v", err)
@@ -835,13 +835,13 @@ func TestCheckpointsVersion(t *testing.T) {
 	}{
 		{"unset defaults to one", nil, 1},
 		{"empty options defaults to one", map[string]any{}, 1},
-		{"integer 2", map[string]any{"checkpoints_version": 2}, 2},
-		{"float 2 from json", map[string]any{"checkpoints_version": float64(2)}, 2},
+		{"integer 2 falls back to default", map[string]any{"checkpoints_version": 2}, 1},
+		{"float 2 falls back to default", map[string]any{"checkpoints_version": float64(2)}, 1},
+		{"string 2 falls back to default", map[string]any{"checkpoints_version": "2"}, 1},
 		{"integer 3 falls back to default", map[string]any{"checkpoints_version": 3}, 1},
 		{"zero falls back to default", map[string]any{"checkpoints_version": 0}, 1},
 		{"negative falls back to default", map[string]any{"checkpoints_version": -1}, 1},
 		{"non-integer float falls back to default", map[string]any{"checkpoints_version": 2.5}, 1},
-		{"string 2", map[string]any{"checkpoints_version": "2"}, 2},
 		{"bool falls back to default", map[string]any{"checkpoints_version": true}, 1},
 	}
 
@@ -856,100 +856,83 @@ func TestCheckpointsVersion(t *testing.T) {
 	}
 }
 
-func TestIsPushV2RefsEnabled_DefaultsFalse(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{Enabled: true}
-	if s.IsPushV2RefsEnabled() {
-		t.Error("expected IsPushV2RefsEnabled to default to false")
-	}
-}
-
-func TestIsPushV2RefsEnabled_RequiresBothFlags(t *testing.T) {
-	t.Parallel()
-
+func TestWarnIfCheckpointsV2Disallowed(t *testing.T) {
 	tests := []struct {
 		name     string
 		opts     map[string]any
-		expected bool
+		wantWarn bool
+		wantText string
 	}{
-		{"checkpoints_version 2 supersedes both", map[string]any{"checkpoints_v2": false, "push_v2_refs": false, "checkpoints_version": 2}, true},
-		{"both true", map[string]any{"checkpoints_v2": true, "push_v2_refs": true}, true},
-		{"only checkpoints_v2", map[string]any{"checkpoints_v2": true}, false},
-		{"only push_v2_refs", map[string]any{"push_v2_refs": true}, false},
-		{"both false", map[string]any{"checkpoints_v2": false, "push_v2_refs": false}, false},
-		{"push_v2_refs wrong type", map[string]any{"checkpoints_v2": true, "push_v2_refs": "yes"}, false},
-		{"empty options", map[string]any{}, false},
+		{"unset", nil, false, ""},
+		{"version 1", map[string]any{"checkpoints_version": 1}, false, ""},
+		{"integer version 2", map[string]any{"checkpoints_version": 2}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
+		{"float version 2", map[string]any{"checkpoints_version": float64(2)}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
+		{"string version 2", map[string]any{"checkpoints_version": "2"}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
+		{"checkpoints_v2 true", map[string]any{"checkpoints_v2": true}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
+		{"push_v2_refs true", map[string]any{"push_v2_refs": true}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
+		{"push_v2 true", map[string]any{"push_v2": true}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
+		{"false flags", map[string]any{"checkpoints_v2": false, "push_v2_refs": false, "push_v2": false}, false, ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			s := &EntireSettings{
-				Enabled:         true,
-				StrategyOptions: tt.opts,
+			// Cannot use t.Parallel(): inspects global stderr.
+			s := &EntireSettings{StrategyOptions: tt.opts}
+			stderr := captureSettingsStderr(t, s.WarnIfCheckpointsV2Disallowed)
+
+			gotWarn := stderr != ""
+			if gotWarn != tt.wantWarn {
+				t.Fatalf("warning emitted = %v, want %v (stderr: %q)", gotWarn, tt.wantWarn, stderr)
 			}
-			if got := s.IsPushV2RefsEnabled(); got != tt.expected {
-				t.Errorf("IsPushV2RefsEnabled() = %v, want %v", got, tt.expected)
+			if tt.wantText != "" && !strings.Contains(stderr, tt.wantText) {
+				t.Fatalf("warning text mismatch: got %q, want it to contain %q", stderr, tt.wantText)
 			}
 		})
 	}
 }
 
-func TestGetFullTranscriptGenerationRetentionDays(t *testing.T) {
-	t.Parallel()
+func TestWarnIfCheckpointsV2Disallowed_RepeatsUntilV2SettingRemoved(t *testing.T) {
+	// Cannot use t.Parallel(): inspects global stderr.
+	const warning = "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"
 
-	tests := []struct {
-		name string
-		opts map[string]any
-		want int
-	}{
-		{
-			name: "defaults to fourteen when missing",
-			opts: nil,
-			want: 14,
-		},
-		{
-			name: "returns configured integer",
-			opts: map[string]any{"full_transcript_generation_retention_days": 30},
-			want: 30,
-		},
-		{
-			name: "returns configured float from json decode",
-			opts: map[string]any{"full_transcript_generation_retention_days": float64(21)},
-			want: 21,
-		},
-		{
-			name: "returns default for wrong type",
-			opts: map[string]any{"full_transcript_generation_retention_days": "30"},
-			want: 14,
-		},
-		{
-			name: "returns default for zero",
-			opts: map[string]any{"full_transcript_generation_retention_days": 0},
-			want: 14,
-		},
-		{
-			name: "returns default for negative",
-			opts: map[string]any{"full_transcript_generation_retention_days": -5},
-			want: 14,
-		},
-		{
-			name: "returns default for non integral float",
-			opts: map[string]any{"full_transcript_generation_retention_days": 1.5},
-			want: 14,
-		},
+	s := &EntireSettings{StrategyOptions: map[string]any{"checkpoints_version": 2}}
+	stderr := captureSettingsStderr(t, func() {
+		s.WarnIfCheckpointsV2Disallowed()
+		s.WarnIfCheckpointsV2Disallowed()
+	})
+	if count := strings.Count(stderr, warning); count != 2 {
+		t.Fatalf("warning count = %d, want 2 (stderr: %q)", count, stderr)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			s := &EntireSettings{StrategyOptions: tt.opts}
-			if got := s.GetFullTranscriptGenerationRetentionDays(); got != tt.want {
-				t.Fatalf("GetFullTranscriptGenerationRetentionDays() = %d, want %d", got, tt.want)
-			}
-		})
+	s.StrategyOptions = map[string]any{}
+	stderr = captureSettingsStderr(t, s.WarnIfCheckpointsV2Disallowed)
+	if stderr != "" {
+		t.Fatalf("warning after removing v2 setting = %q, want empty", stderr)
 	}
+}
+
+func captureSettingsStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stderr write end: %v", err)
+	}
+	buf, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	_ = r.Close()
+	os.Stderr = origStderr
+	return string(buf)
 }
 
 func TestIsFilteredFetchesEnabled_DefaultsFalse(t *testing.T) {
@@ -1230,5 +1213,141 @@ func TestReviewConfig_IsZero(t *testing.T) {
 				t.Errorf("IsZero() = %v, want %v (cfg=%+v)", got, tc.want, tc.cfg)
 			}
 		})
+	}
+}
+
+// TestEntireSettings_InvestigateRoundTrip pins the JSON wire format for the
+// investigate config: all four fields must round-trip through Unmarshal.
+func TestEntireSettings_InvestigateRoundTrip(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{
+      "enabled": true,
+      "investigate": {
+        "agents": ["` + agentClaudeCode + `", "` + providerCodex + `"],
+        "max_turns": 5,
+        "quorum": 2,
+        "always_prompt": "Be terse."
+      }
+    }`)
+	var s EntireSettings
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if s.Investigate == nil {
+		t.Fatalf("expected investigate config, got nil")
+	}
+	if len(s.Investigate.Agents) != 2 || s.Investigate.Agents[0] != agentClaudeCode || s.Investigate.Agents[1] != providerCodex {
+		t.Errorf("Agents = %v", s.Investigate.Agents)
+	}
+	if s.Investigate.MaxTurns != 5 {
+		t.Errorf("MaxTurns = %d, want 5", s.Investigate.MaxTurns)
+	}
+	if s.Investigate.Quorum != 2 {
+		t.Errorf("Quorum = %d, want 2", s.Investigate.Quorum)
+	}
+	if s.Investigate.AlwaysPrompt != "Be terse." {
+		t.Errorf("AlwaysPrompt = %q", s.Investigate.AlwaysPrompt)
+	}
+}
+
+// TestInvestigateConfig_IsZero pins the truth table for IsZero, including the
+// nil-receiver case (callers can ask "do we have any config?" without
+// nil-checking first).
+func TestInvestigateConfig_IsZero(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		cfg  *InvestigateConfig
+		want bool
+	}{
+		{"nil", nil, true},
+		{"empty", &InvestigateConfig{}, true},
+		{"agents", &InvestigateConfig{Agents: []string{"x"}}, false},
+		{"max_turns", &InvestigateConfig{MaxTurns: 1}, false},
+		{"quorum", &InvestigateConfig{Quorum: 1}, false},
+		{"always_prompt", &InvestigateConfig{AlwaysPrompt: "hello"}, false},
+		{"empty-slice", &InvestigateConfig{Agents: []string{}}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.cfg.IsZero(); got != tc.want {
+				t.Errorf("IsZero() = %v, want %v (cfg=%+v)", got, tc.want, tc.cfg)
+			}
+		})
+	}
+}
+
+// TestEntireSettings_InvestigateConfig pins the receiver helper, including
+// the nil-receiver case used by callers that don't want to nil-check first.
+func TestEntireSettings_InvestigateConfig(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil_receiver", func(t *testing.T) {
+		t.Parallel()
+		var s *EntireSettings
+		if got := s.InvestigateConfig(); got != nil {
+			t.Errorf("nil receiver: got %+v, want nil", got)
+		}
+	})
+
+	t.Run("unset", func(t *testing.T) {
+		t.Parallel()
+		s := &EntireSettings{}
+		if got := s.InvestigateConfig(); got != nil {
+			t.Errorf("unset: got %+v, want nil", got)
+		}
+	})
+
+	t.Run("set", func(t *testing.T) {
+		t.Parallel()
+		s := &EntireSettings{Investigate: &InvestigateConfig{Agents: []string{agentClaudeCode}}}
+		got := s.InvestigateConfig()
+		if got == nil || len(got.Agents) != 1 || got.Agents[0] != agentClaudeCode {
+			t.Errorf("set: got %+v", got)
+		}
+	})
+}
+
+// TestLoad_MergesInvestigateLocalOverride pins that a local settings file
+// overrides the base file's investigate config wholesale (whole-object
+// replacement, parallel to mergeSummaryGeneration but simpler).
+func TestLoad_MergesInvestigateLocalOverride(t *testing.T) {
+	base := `{
+      "enabled": true,
+      "investigate": {
+        "agents": ["` + agentClaudeCode + `"],
+        "max_turns": 3
+      }
+    }`
+	local := `{
+      "investigate": {
+        "agents": ["` + providerCodex + `"],
+        "max_turns": 5,
+        "quorum": 1,
+        "always_prompt": "Be brief."
+      }
+    }`
+	setupSettingsDir(t, base, local)
+
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	cfg := s.InvestigateConfig()
+	if cfg == nil {
+		t.Fatalf("expected investigate config after merge")
+	}
+	if len(cfg.Agents) != 1 || cfg.Agents[0] != providerCodex {
+		t.Errorf("Agents = %v, want [%s]", cfg.Agents, providerCodex)
+	}
+	if cfg.MaxTurns != 5 {
+		t.Errorf("MaxTurns = %d, want 5", cfg.MaxTurns)
+	}
+	if cfg.Quorum != 1 {
+		t.Errorf("Quorum = %d, want 1", cfg.Quorum)
+	}
+	if cfg.AlwaysPrompt != "Be brief." {
+		t.Errorf("AlwaysPrompt = %q, want %q", cfg.AlwaysPrompt, "Be brief.")
 	}
 }

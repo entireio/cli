@@ -110,7 +110,7 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 
 	cmd := exec.CommandContext(ctx, a.Binary(), args...)
 	cmd.Dir = dir
-	cmd.Env = filterEnv(os.Environ(), "ENTIRE_TEST_TTY")
+	cmd.Env = openCodePromptEnv(os.Environ(), dir)
 
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -134,6 +134,17 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 	}
 
 	return out, nil
+}
+
+// openCodePromptEnv builds the child environment for a headless `opencode run`.
+// cmd.Dir chdirs the child but does NOT update the inherited PWD env var, which
+// still points at the `go test` package dir. opencode (Node) resolves its
+// project/worktree root from process.env.PWD, so without forcing PWD to match
+// cmd.Dir all file operations land in the wrong repo and the per-repo entire
+// plugin never loads. The tmux/interactive path is unaffected because
+// `tmux new-session -c dir` already sets PWD correctly.
+func openCodePromptEnv(base []string, dir string) []string {
+	return append(filterEnv(base, "ENTIRE_TEST_TTY", "PWD"), "PWD="+dir)
 }
 
 func (a *openCodeAgent) StartSession(ctx context.Context, dir string) (Session, error) {

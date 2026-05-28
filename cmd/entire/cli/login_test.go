@@ -282,6 +282,47 @@ func TestWaitForApproval_TransientErrorCounterResets(t *testing.T) {
 	}
 }
 
+// TestChooseApprovalURL locks in that the CLI opens the URI with the
+// user_code embedded (RFC 8628 §3.3.1) when the AS supplies one, falling
+// back to the bare verification_uri otherwise. Most AS verification pages
+// prefill the code input from the query param in the complete form; without
+// this, the user has to type the code by hand even when the AS provided a
+// click-through URL.
+func TestChooseApprovalURL(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		start *auth.DeviceAuthStart
+		want  string
+	}{
+		{
+			name: "prefers complete URI when supplied",
+			start: &auth.DeviceAuthStart{
+				VerificationURI:         "http://test/cli/auth",
+				VerificationURIComplete: "http://test/cli/auth?user_code=ABCD-1234",
+			},
+			want: "http://test/cli/auth?user_code=ABCD-1234",
+		},
+		{
+			name: "falls back to bare verification_uri",
+			start: &auth.DeviceAuthStart{
+				VerificationURI: "http://test/cli/auth",
+			},
+			want: "http://test/cli/auth",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := chooseApprovalURL(tc.start); got != tc.want {
+				t.Errorf("chooseApprovalURL = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWaitForApproval_ContextCancelled(t *testing.T) {
 	t.Parallel()
 

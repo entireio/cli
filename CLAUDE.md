@@ -459,8 +459,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - `manual_commit_logs.go` - Session log retrieval and session listing
 - `manual_commit_hooks.go` - Git hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push)
 - `manual_commit_reset.go` - Shadow branch reset/cleanup functionality
-- `cleanup.go` - Cleanup discovery/deletion, including archived v2 generation retention
-- `generation_repair.go` - Archived v2 generation metadata repair from raw transcript timestamps
+- `cleanup.go` - Cleanup discovery/deletion for shadow branches, session states, and checkpoint metadata
 - `session_state.go` - Package-level session state functions (`LoadSessionState`, `SaveSessionState`, `ListSessionStates`, `FindMostRecentSession`)
 - `hooks.go` - Git hook installation
 
@@ -470,6 +469,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - `store.go` - `GitStore` struct wrapping git repository
 - `temporary.go` - Shadow branch operations (`WriteTemporary`, `ReadTemporary`, `ListTemporary`)
 - `committed.go` - Metadata branch operations (`WriteCommitted`, `ReadCommitted`, `ListCommitted`)
+- `configloader.go` - Overrides go-git's default global/system config loader with a symlink-following `billy.Basic` (`osSymlinkFS`). go-git's default reads config via `os.Root`, which rejects absolute symlinks in any path component (e.g. a `~/.config` managed by a dotfile tool) with "path escapes from parent" — silently dropping global config so commit author identity fell back to "Unknown", signing was skipped, and the push hook spammed a warning per commit.
 
 #### Session Package (`cmd/entire/cli/session/`)
 

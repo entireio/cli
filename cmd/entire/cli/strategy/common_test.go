@@ -1280,6 +1280,108 @@ func TestEnsureMetadataBranch_DoesNotFastForwardWhenBehind(t *testing.T) {
 	}
 }
 
+func TestSafelyAdvanceLocalRef_DoesNotAdvanceOnRefReadError(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	initTestRepo(t, dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	refPath := filepath.Join(dir, ".git", "refs", "heads", "entire", "checkpoints", "v1")
+	packedRefsPath := filepath.Join(dir, ".git", "packed-refs")
+	require.NoError(t, os.WriteFile(packedRefsPath, []byte("malformed packed refs\n"), 0o644))
+
+	repo, err = git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	err = SafelyAdvanceLocalRef(context.Background(), repo, refName, head.Hash())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to read local ref")
+
+	_, err = os.Stat(refPath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestSafelyAdvanceLocalRef_DoesNotReplayDisconnectedChainWhenTargetIsShallow(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	bareDir := t.TempDir()
+	setupDir := t.TempDir()
+	cloneDir := filepath.Join(t.TempDir(), "clone")
+	require.NoError(t, os.MkdirAll(cloneDir, 0o755))
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = dir
+		cmd.Env = testutil.GitIsolatedEnv()
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v in %s failed: %s", args, dir, out)
+	}
+
+	run(bareDir, "init", "--bare", "-b", "main")
+	run(setupDir, "clone", bareDir, ".")
+	run(setupDir, "config", "user.email", "test@test.com")
+	run(setupDir, "config", "user.name", "Test User")
+	run(setupDir, "config", "commit.gpgsign", "false")
+	require.NoError(t, os.WriteFile(filepath.Join(setupDir, "README.md"), []byte("# Test"), 0o644))
+	run(setupDir, "add", ".")
+	run(setupDir, "commit", "-m", "init")
+	run(setupDir, "push", "origin", "main")
+
+	run(setupDir, "checkout", "--orphan", paths.MetadataBranchName)
+	run(setupDir, "rm", "-rf", ".")
+	localOnlyDir := filepath.Join(setupDir, "aa", "aaaaaaaaaa")
+	require.NoError(t, os.MkdirAll(localOnlyDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(localOnlyDir, "metadata.json"), []byte(`{"checkpoint_id":"aaaaaaaaaaaa"}`), 0o644))
+	run(setupDir, "add", ".")
+	run(setupDir, "commit", "-m", "Checkpoint: aaaaaaaaaaaa")
+	run(setupDir, "push", "origin", paths.MetadataBranchName)
+
+	run(cloneDir, "clone", bareDir, ".")
+	run(cloneDir, "config", "user.email", "test@test.com")
+	run(cloneDir, "config", "user.name", "Test User")
+	run(cloneDir, "config", "commit.gpgsign", "false")
+	run(cloneDir, "branch", paths.MetadataBranchName, "origin/"+paths.MetadataBranchName)
+
+	run(setupDir, "rm", "-rf", "aa")
+	remoteOnlyDir := filepath.Join(setupDir, "bb", "bbbbbbbbbb")
+	require.NoError(t, os.MkdirAll(remoteOnlyDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(remoteOnlyDir, "metadata.json"), []byte(`{"checkpoint_id":"bbbbbbbbbbbb"}`), 0o644))
+	run(setupDir, "add", ".")
+	run(setupDir, "commit", "-m", "Checkpoint: bbbbbbbbbbbb")
+	run(setupDir, "push", "origin", paths.MetadataBranchName)
+
+	run(cloneDir, "fetch", "--depth=1", "origin", "+refs/heads/"+paths.MetadataBranchName+":refs/remotes/origin/"+paths.MetadataBranchName)
+
+	repo, err := git.PlainOpen(cloneDir)
+	require.NoError(t, err)
+	localRefName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	localBefore, err := repo.Reference(localRefName, true)
+	require.NoError(t, err)
+	targetRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), true)
+	require.NoError(t, err)
+
+	_, mergeBaseErr := getMergeBase(ctx, cloneDir, localBefore.Hash().String(), targetRef.Hash().String())
+	require.ErrorIs(t, mergeBaseErr, errNoMergeBase)
+
+	err = SafelyAdvanceLocalRef(ctx, repo, localRefName, targetRef.Hash())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reachable shallow history")
+	assert.Contains(t, err.Error(), "entire doctor")
+	assert.Contains(t, err.Error(), "git fetch --unshallow")
+
+	localAfter, err := repo.Reference(localRefName, true)
+	require.NoError(t, err)
+	assert.Equal(t, localBefore.Hash(), localAfter.Hash())
+}
+
 // buildCommittedTree creates a git tree with the sharded committed checkpoint layout
 // used by entire/checkpoints/v1. files is a map of path -> content relative to the tree root.
 // Example: {"a3/b2c4d5e6f7/0/prompt.txt": "Hello"} creates the nested directory structure.

@@ -42,20 +42,14 @@ const (
 // MetadataBranchName is the orphan branch used by manual-commit strategy to store metadata
 const MetadataBranchName = "entire/checkpoints/v1"
 
-// V2 ref names use custom refs under refs/entire/ (not refs/heads/).
-// These are invisible in GitHub's branch UI and not fetched by default.
+// Legacy v2 ref names use custom refs under refs/entire/ (not refs/heads/).
+// They are retained for read fallback while checkpoints v2 is rolled back.
 const (
-	// V2MainRefName stores permanent metadata + compact transcripts.
+	// V2MainRefName is the legacy v2 metadata ref.
 	V2MainRefName = "refs/entire/checkpoints/v2/main"
 
-	// V2FullCurrentRefName stores the active generation of raw transcripts.
+	// V2FullCurrentRefName is the legacy v2 raw transcript ref.
 	V2FullCurrentRefName = "refs/entire/checkpoints/v2/full/current"
-
-	// V2FullRefPrefix is the common prefix for all /full/* refs (current + archived).
-	V2FullRefPrefix = "refs/entire/checkpoints/v2/full/"
-
-	// GenerationFileName is the metadata file at the root of each /full/* generation tree.
-	GenerationFileName = "generation.json"
 )
 
 // TrailsBranchName is the orphan branch used to store trail metadata.

@@ -209,7 +209,7 @@ type WriteCommittedOptions struct {
 
 	// CreatedAt is when the checkpoint was originally created.
 	// When zero, writers use the current time. Migration sets this to preserve
-	// the original v1 checkpoint time in v2 metadata and retention decisions.
+	// the original v1 checkpoint time in v2 metadata.
 	CreatedAt time.Time
 
 	// Strategy is the name of the strategy that created this checkpoint
@@ -280,11 +280,6 @@ type WriteCommittedOptions struct {
 	// CheckpointTranscriptStart is written to both CommittedMetadata.CheckpointTranscriptStart
 	// and the deprecated CommittedMetadata.TranscriptLinesAtStart for backward compatibility.
 
-	// CompactTranscriptStart is the transcript.jsonl line offset at checkpoint start.
-	// V2 /main writes this to checkpoint_transcript_start; v1 continues to use
-	// CheckpointTranscriptStart (full.jsonl).
-	CompactTranscriptStart int
-
 	// TokenUsage contains the token usage for this checkpoint
 	TokenUsage *agent.TokenUsage
 
@@ -314,11 +309,6 @@ type WriteCommittedOptions struct {
 	//   - the checkpoint predates the summarization feature
 	Summary *Summary
 
-	// CompactTranscript is the Entire Transcript Format (transcript.jsonl) bytes.
-	// Written to v2 /main ref alongside metadata. May be nil if compaction
-	// was not performed (unknown agent, compaction error, empty transcript).
-	CompactTranscript []byte
-
 	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
 	Kind string
 
@@ -336,6 +326,21 @@ type WriteCommittedOptions struct {
 	// session.Kind.IsReview) because checkpoint can't import session
 	// — the session package imports checkpoint, creating a cycle.
 	HasReview bool
+
+	// InvestigateRunID is the 12-hex-char ID of the parent investigation
+	// run (only meaningful when Kind is an investigate kind).
+	InvestigateRunID string
+
+	// InvestigateTopic is the human-readable topic the investigation was
+	// asked to investigate (only meaningful when Kind is an investigate
+	// kind).
+	InvestigateTopic string
+
+	// HasInvestigation is set by the caller when this session should mark
+	// its checkpoint as part of an investigation. The caller computes this
+	// (e.g. via session.Kind.IsInvestigate) because checkpoint can't import
+	// session — the session package imports checkpoint, creating a cycle.
+	HasInvestigation bool
 }
 
 // UpdateCommittedOptions contains options for updating an existing committed checkpoint.
@@ -359,10 +364,6 @@ type UpdateCommittedOptions struct {
 	// Agent identifies the agent type (needed for transcript chunking)
 	Agent types.AgentType
 
-	// CompactTranscript is the updated Entire Transcript Format bytes.
-	// If non-nil, replaces the existing transcript.jsonl on v2 /main.
-	CompactTranscript []byte
-
 	// PrecomputedBlobs, if non-nil, provides chunk blob hashes and the
 	// content-hash blob hash computed once for this transcript. When set,
 	// UpdateCommitted skips the per-call ChunkTranscript + zlib work and
@@ -374,11 +375,6 @@ type UpdateCommittedOptions struct {
 // PrecomputedTranscriptBlobs holds blob hashes for a transcript that was
 // chunked and written to the object store once, for reuse across multiple
 // UpdateCommitted calls sharing the same transcript content.
-//
-// Blob hashes are content-addressed (SHA-1 of chunk bytes), so the same
-// PrecomputedTranscriptBlobs works for both v1 (full.jsonl) and v2
-// (raw_transcript) paths — only the tree-entry filename differs.
-//
 // Callers should avoid constructing this for empty transcripts; agent.ChunkTranscript
 // would otherwise produce a single zero-length chunk and a hash for an empty
 // blob, which downstream stores would never reference.
@@ -517,6 +513,14 @@ type CommittedMetadata struct {
 	// for spawn, first user prompt for attach). Only set when Kind is a
 	// review kind.
 	ReviewPrompt string `json:"review_prompt,omitempty"`
+
+	// InvestigateRunID is the 12-hex-char ID of the parent investigation
+	// run. Only set when Kind is an investigate kind.
+	InvestigateRunID string `json:"investigate_run_id,omitempty"`
+
+	// InvestigateTopic is the human-readable topic the investigation was
+	// asked to investigate. Only set when Kind is an investigate kind.
+	InvestigateTopic string `json:"investigate_topic,omitempty"`
 }
 
 // GetTranscriptStart returns the transcript line offset at which this checkpoint's data begins.
@@ -574,6 +578,14 @@ type CheckpointSummary struct {
 	// cause this flag to be set so callers can keep asking "was this reviewed
 	// in any way?" without caring about the variant.
 	HasReview bool `json:"has_review,omitempty"`
+
+	// HasInvestigation is the umbrella "any investigation happened" flag:
+	// true when at least one session in this checkpoint has an
+	// investigate-kind Kind (currently "agent_investigate"). When new
+	// investigate kinds are introduced they should also cause this flag to
+	// be set so callers can keep asking "was this investigated in any way?"
+	// without caring about the variant.
+	HasInvestigation bool `json:"has_investigation,omitempty"`
 }
 
 // SessionMetrics contains hook-provided session metrics from agents that report

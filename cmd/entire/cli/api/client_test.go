@@ -55,6 +55,46 @@ func TestBearerTransport_InjectsAuthHeader(t *testing.T) {
 	}
 }
 
+func TestBearerTransport_EmptyTokenOmitsAuthHeader(t *testing.T) {
+	t.Parallel()
+
+	// recap's logged-out path constructs a client with token="" and expects
+	// the request to reach the server (which then returns a typed 401 that
+	// recap handles specially). The transport must omit the Authorization
+	// header rather than fail locally or send a malformed "Bearer ".
+	var gotAuth string
+	var gotUA string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotUA = r.Header.Get("User-Agent")
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	transport := &bearerTransport{token: "", base: http.DefaultTransport}
+	client := &http.Client{Transport: transport}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, server.URL+"/test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("unexpected transport error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if gotAuth != "" {
+		t.Errorf("Authorization = %q, want empty", gotAuth)
+	}
+	if gotUA != "entire-cli" {
+		t.Errorf("User-Agent = %q, want entire-cli", gotUA)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (server should have decided, not the transport)", resp.StatusCode)
+	}
+}
+
 func TestBearerTransport_PreservesExistingAcceptHeader(t *testing.T) {
 	t.Parallel()
 
@@ -243,6 +283,31 @@ func TestCheckResponse_ErrorWithJSON(t *testing.T) {
 		t.Fatal("CheckResponse(403) = nil, want error")
 	}
 	if got := err.Error(); got != "API error: insufficient permissions (status 403)" {
+		t.Errorf("error = %q", got)
+	}
+}
+
+func TestCheckResponse_ErrorWithObjectEnvelope(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":{"code":"not_found","message":"session not found","field":null,"retryable":false}}`)) //nolint:errcheck // test handler
+	}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL) //nolint:noctx // test helper
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	err = CheckResponse(resp)
+	if err == nil {
+		t.Fatal("CheckResponse(404) = nil, want error")
+	}
+	if got := err.Error(); got != "API error: session not found (status 404)" {
 		t.Errorf("error = %q", got)
 	}
 }

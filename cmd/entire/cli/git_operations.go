@@ -64,6 +64,7 @@ func GetGitAuthor(ctx context.Context) (*GitAuthor, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	name, email := strategy.GetGitAuthorFromRepo(repo)
 
@@ -108,6 +109,7 @@ func IsOnDefaultBranch(ctx context.Context) (bool, string, error) {
 	if err != nil {
 		return false, "", fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Get current branch
 	head, err := repo.Head()
@@ -181,6 +183,7 @@ func GetCurrentBranch(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
@@ -201,6 +204,7 @@ func GetMergeBase(ctx context.Context, branch1, branch2 string) (*plumbing.Hash,
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Resolve branch references
 	ref1, err := repo.Reference(plumbing.NewBranchReferenceName(branch1), true)
@@ -278,6 +282,7 @@ func BranchExistsOnRemote(ctx context.Context, branchName string) (bool, error) 
 	if err != nil {
 		return false, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Check for remote reference: refs/remotes/origin/<branchName>
 	_, err = repo.Reference(plumbing.NewRemoteReferenceName("origin", branchName), true)
@@ -308,6 +313,7 @@ func BranchExistsLocally(ctx context.Context, branchName string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
 	if err != nil {
@@ -379,6 +385,7 @@ func FetchAndCheckoutRemoteBranch(ctx context.Context, branchName string) error 
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Get the remote branch reference
 	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", branchName), true)
@@ -397,27 +404,30 @@ func FetchAndCheckoutRemoteBranch(ctx context.Context, branchName string) error 
 	return CheckoutBranch(ctx, branchName)
 }
 
-// FetchMetadataBranch fetches the entire/checkpoints/v1 branch from origin and
-// creates/updates the local branch. The fetch is unfiltered (no --filter=blob:none)
-// because callers (resume, explain) need blob content, not just tree structure.
+// FetchMetadataBranch fetches the entire/checkpoints/v1 branch from origin
+// with full blob content. Used as a fallback by resume/explain when the
+// tree-only probe is insufficient (e.g. the metadata.json blob is missing).
+// Does NOT --unshallow: --unshallow is a global property of the clone, so on
+// shallow checkpoint repos it would also deepen unrelated branches.
 func FetchMetadataBranch(ctx context.Context) error {
-	return fetchMetadataFromOrigin(ctx, false /* shallow */, true /* noFilter */)
+	return fetchMetadataFromOrigin(ctx, fetchMetadataOpts{NoFilter: true})
 }
 
-// FetchMetadataTreeOnly fetches the tip of the entire/checkpoints/v1 branch
-// from origin with --depth=1, downloading only the latest commit and its tree
-// objects. After this call, tree navigation via go-git works but blob reads
-// will fail for objects that weren't previously fetched.
+// FetchMetadataTreeOnly fetches just the tip of the entire/checkpoints/v1
+// branch (--depth=1). Used by resume/explain to resolve the latest checkpoint
+// cheaply without pulling the entire history. May leave .git/shallow set;
+// FetchMetadataBranch will undo that when full ancestry is later needed.
 func FetchMetadataTreeOnly(ctx context.Context) error {
-	return fetchMetadataFromOrigin(ctx, true /* shallow */, false /* noFilter */)
+	return fetchMetadataFromOrigin(ctx, fetchMetadataOpts{Shallow: true})
 }
 
-// fetchMetadataFromOrigin fetches the v1 metadata branch from origin into the
-// remote-tracking ref refs/remotes/origin/<branch>, then safely advances the
-// local branch to match. When shallow is true, --depth=1 is added so only
-// the tip is downloaded. When noFilter is true, --filter=blob:none is suppressed
-// so blob content is included.
-func fetchMetadataFromOrigin(ctx context.Context, shallow, noFilter bool) error {
+type fetchMetadataOpts struct {
+	NoFilter  bool
+	Shallow   bool
+	Unshallow bool
+}
+
+func fetchMetadataFromOrigin(ctx context.Context, fopts fetchMetadataOpts) error {
 	branchName := paths.MetadataBranchName
 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -431,11 +441,12 @@ func fetchMetadataFromOrigin(ctx context.Context, shallow, noFilter bool) error 
 	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
 
 	output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refSpec},
-		NoTags:   true,
-		Shallow:  shallow,
-		NoFilter: noFilter,
+		Remote:    fetchTarget,
+		RefSpecs:  []string{refSpec},
+		NoTags:    true,
+		NoFilter:  fopts.NoFilter,
+		Shallow:   fopts.Shallow,
+		Unshallow: fopts.Unshallow,
 	})
 	if fetchErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -448,6 +459,7 @@ func fetchMetadataFromOrigin(ctx context.Context, shallow, noFilter bool) error 
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", branchName), true)
 	if err != nil {
@@ -459,25 +471,24 @@ func fetchMetadataFromOrigin(ctx context.Context, shallow, noFilter bool) error 
 	return nil
 }
 
-// FetchV2MainTreeOnly fetches the tip of the v2 /main ref from origin with
-// --depth=1, downloading only the latest commit and its tree objects.
-// Uses explicit refspec since v2 refs are under refs/entire/, not refs/heads/.
+// FetchV2MainTreeOnly fetches the v2 /main ref for read-only lookup paths.
+//
+// Unlike the v1 metadata branch, v2 custom refs do not have a remote-tracking
+// fallback tree. Avoid --depth=1 here: a shallow fetch can make a remote
+// descendant look unrelated to go-git, causing SafelyAdvanceLocalRef to
+// preserve a stale local ref and explain/resume to miss freshly fetched
+// checkpoints.
 func FetchV2MainTreeOnly(ctx context.Context) error {
-	return fetchV2MainFromOrigin(ctx, true /* shallow */, false /* noFilter */)
+	return fetchV2MainFromOrigin(ctx, fetchMetadataOpts{})
 }
 
 // FetchV2MainRef fetches the v2 /main ref from origin with full blob content.
-// The fetch is unfiltered so resume/explain can read metadata JSON blobs.
-// Uses explicit refspec since v2 refs are under refs/entire/, not refs/heads/.
+// Does NOT --unshallow: see FetchMetadataBranch for the reasoning.
 func FetchV2MainRef(ctx context.Context) error {
-	return fetchV2MainFromOrigin(ctx, false /* shallow */, true /* noFilter */)
+	return fetchV2MainFromOrigin(ctx, fetchMetadataOpts{NoFilter: true})
 }
 
-// fetchV2MainFromOrigin fetches the v2 /main ref from origin into the shared
-// staging ref, then promotes it via strategy.PromoteTmpRefSafely. When
-// shallow is true, --depth=1 is added so only the tip is downloaded.
-// When noFilter is true, --filter=blob:none is suppressed.
-func fetchV2MainFromOrigin(ctx context.Context, shallow, noFilter bool) error {
+func fetchV2MainFromOrigin(ctx context.Context, fopts fetchMetadataOpts) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
@@ -489,11 +500,12 @@ func fetchV2MainFromOrigin(ctx context.Context, shallow, noFilter bool) error {
 	refSpec := fmt.Sprintf("+%s:%s", paths.V2MainRefName, strategy.V2MainFetchTmpRef)
 
 	output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refSpec},
-		NoTags:   true,
-		Shallow:  shallow,
-		NoFilter: noFilter,
+		Remote:    fetchTarget,
+		RefSpecs:  []string{refSpec},
+		NoTags:    true,
+		NoFilter:  fopts.NoFilter,
+		Shallow:   fopts.Shallow,
+		Unshallow: fopts.Unshallow,
 	})
 	if fetchErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {

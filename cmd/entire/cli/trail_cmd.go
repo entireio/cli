@@ -94,7 +94,7 @@ func runTrailShow(ctx context.Context, w io.Writer, insecureHTTP bool) error {
 		return runTrailListAll(ctx, w, defaultTrailListOptions(insecureHTTP))
 	}
 
-	client, err := NewAuthenticatedAPIClient(insecureHTTP)
+	client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
 	if err != nil {
 		return fmt.Errorf("authentication required: %w", err)
 	}
@@ -171,7 +171,7 @@ func runTrailListAll(ctx context.Context, w io.Writer, opts trailListOptions) er
 	if err != nil {
 		return err
 	}
-	client, err := NewAuthenticatedAPIClient(opts.InsecureHTTP)
+	client, err := NewAuthenticatedAPIClient(ctx, opts.InsecureHTTP)
 	if err != nil {
 		return fmt.Errorf("authentication required: %w", err)
 	}
@@ -523,6 +523,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr str
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Determine base branch
 	if base == "" {
@@ -579,7 +580,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr str
 
 	// --- Phase 2: API operations ---
 
-	client, err := NewAuthenticatedAPIClient(trailInsecureHTTP(cmd))
+	client, err := NewAuthenticatedAPIClient(ctx, trailInsecureHTTP(cmd))
 	if err != nil {
 		return fmt.Errorf("authentication required: %w", err)
 	}
@@ -611,7 +612,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr str
 		return fmt.Errorf("failed to decode create response: %w", err)
 	}
 
-	fmt.Fprintf(w, "Created trail %q for branch %s (ID: %s)\n", createResp.Trail.Title, createResp.Trail.Branch, createResp.Trail.TrailID)
+	fmt.Fprintf(w, "Created trail %q for branch %s (ID: %s)\n", createResp.Trail.Title, createResp.Trail.Branch, createResp.Trail.ID)
 
 	// --- Phase 3: Post-creation local operations ---
 
@@ -666,7 +667,7 @@ func newTrailUpdateCmd() *cobra.Command {
 func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, statusStr, title, body, branch string, labelAdd, labelRemove []string) error {
 	_ = errW // reserved for future warnings
 
-	client, err := NewAuthenticatedAPIClient(insecureHTTP)
+	client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
 	if err != nil {
 		return fmt.Errorf("authentication required: %w", err)
 	}
@@ -743,7 +744,7 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, s
 	// Build update request with only changed fields
 	updateReq := buildTrailUpdateRequest(found, statusStr, title, body, labelAdd, labelRemove)
 
-	resp, err := client.Patch(ctx, trailsBasePath(host, owner, repoName)+"/"+found.TrailID, updateReq)
+	resp, err := client.Patch(ctx, trailsBasePath(host, owner, repoName)+"/"+found.ID, updateReq)
 	if err != nil {
 		return fmt.Errorf("failed to update trail: %w", err)
 	}
@@ -886,6 +887,19 @@ func runTrailCreateInteractive(title, body, branch, statusStr *string) error {
 
 // findTrailByBranch looks up a trail by branch name via the list API.
 func findTrailByBranch(ctx context.Context, client *api.Client, host, owner, repo, branch string) (*api.TrailResource, error) {
+	return findTrail(ctx, client, host, owner, repo, func(t api.TrailResource) bool {
+		return t.Branch == branch
+	})
+}
+
+// findTrailByNumber looks up a trail by numeric identifier via the list API.
+func findTrailByNumber(ctx context.Context, client *api.Client, host, owner, repo string, number int) (*api.TrailResource, error) {
+	return findTrail(ctx, client, host, owner, repo, func(t api.TrailResource) bool {
+		return t.Number == number
+	})
+}
+
+func findTrail(ctx context.Context, client *api.Client, host, owner, repo string, match func(api.TrailResource) bool) (*api.TrailResource, error) {
 	resp, err := client.Get(ctx, trailsBasePath(host, owner, repo))
 	if err != nil {
 		return nil, fmt.Errorf("list trails: %w", err)
@@ -901,7 +915,7 @@ func findTrailByBranch(ctx context.Context, client *api.Client, host, owner, rep
 	}
 
 	for i := range listResp.Trails {
-		if listResp.Trails[i].Branch == branch {
+		if match(listResp.Trails[i]) {
 			return &listResp.Trails[i], nil
 		}
 	}

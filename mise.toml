@@ -1,6 +1,6 @@
 [tools]
 # Please also keep the version aligned in the go.mod file
-go = { version = '1.26.2', postinstall = "go install github.com/go-delve/delve/cmd/dlv@latest && go install gotest.tools/gotestsum@latest" }
+go = { version = '1.26.3', postinstall = "go install github.com/go-delve/delve/cmd/dlv@latest && go install gotest.tools/gotestsum@latest" }
 golangci-lint = '2.11.3'
 shellcheck = 'latest'
 tmux = 'latest'

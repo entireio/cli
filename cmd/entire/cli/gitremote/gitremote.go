@@ -14,6 +14,9 @@ import (
 const (
 	ProtocolSSH   = "ssh"
 	ProtocolHTTPS = "https"
+	// ProtocolEntire is the scheme of Entire's git remote helper (entire://).
+	// These URLs carry a forge/namespace prefix before owner/repo.
+	ProtocolEntire = "entire"
 )
 
 // Info holds the parsed components of a git remote URL.
@@ -88,12 +91,25 @@ func ParseURL(rawURL string) (*Info, error) {
 	}
 
 	pathPart := strings.TrimPrefix(u.Path, "/")
+	if u.Scheme == ProtocolEntire {
+		pathPart = stripForgePrefix(pathPart)
+	}
 	owner, repo, err := splitOwnerRepo(pathPart)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Info{Protocol: u.Scheme, Host: u.Hostname(), Port: u.Port(), Owner: owner, Repo: repo}, nil
+}
+
+// stripForgePrefix removes the leading forge/namespace segment from an entire://
+// URL path (e.g. "gh/owner/repo" -> "owner/repo"). Paths without a separator are
+// returned unchanged.
+func stripForgePrefix(path string) string {
+	if _, rest, found := strings.Cut(path, "/"); found {
+		return rest
+	}
+	return path
 }
 
 // RedactURL removes credentials and query parameters from a URL for safe logging.

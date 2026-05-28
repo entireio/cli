@@ -109,6 +109,7 @@ linters:
         - grpc.DialOption
         - github.com/entireio/cli/cmd/entire/cli/summarize.Generator
         - github.com/entireio/cli/cmd/entire/cli/agent\..+
+        - github.com/entireio/cli/cmd/entire/cli/agent/spawn.Spawner
         - github.com/entireio/cli/cmd/entire/cli/review/types.Process
         - github.com/entireio/cli/cmd/entire/cli/review/types.AgentReviewer
         - github.com/entireio/cli/cmd/entire/cli/review.SynthesisProvider
@@ -120,6 +121,7 @@ linters:
         - github.com/go-git/go-git/v6/storage.Storer
         - github.com/go-git/go-git/v6/plumbing/storer.EncodedObjectIter
         - github.com/entireio/cli/e2e/agents.Session
+        - github.com/go-git/go-billy/v6.File
         - github.com/go-git/go-billy/v6.Filesystem
         - golang.org/x/crypto/ssh/agent.Agent
     nolintlint:
@@ -160,6 +162,15 @@ linters:
       - path: ^cmd/entire/cli/review/tui_model\.go$
         linters:
           - ireturn
+      - path: ^cmd/entire/cli/investigate/cmd\.go$
+        linters:
+          - ireturn
+      # configloader.go is a thin os-backed billy.Basic adapter. It must return
+      # raw os errors unwrapped so go-git's os.IsNotExist() fall-through (for
+      # absent config files) keeps working; wrapping would break it.
+      - path: ^cmd/entire/cli/checkpoint/configloader\.go$
+        linters:
+          - wrapcheck
       - text: "`strat` is a misspelling"
         linters:
           - misspell

@@ -50,6 +50,13 @@ const (
 	// distinct Kind values AND added to Kind.IsReview so the checkpoint's
 	// HasReview umbrella flag keeps covering them.
 	KindAgentReview Kind = "agent_review"
+
+	// KindAgentInvestigate tags a session created by `entire investigate`
+	// (agent-driven investigation). A session is review OR investigate, not
+	// both — Kind is single-valued. Future investigate kinds should be added
+	// to Kind.IsInvestigate so the checkpoint's HasInvestigation umbrella
+	// flag keeps covering them.
+	KindAgentInvestigate Kind = "agent_investigate"
 )
 
 // IsReview reports whether this Kind counts as "a review happened" for the
@@ -61,6 +68,15 @@ func (k Kind) IsReview() bool {
 	// singleCaseSwitch flags a one-case switch — so we keep it as a list of
 	// equality checks. Add new review-kind values to the disjunction below.
 	return k == KindAgentReview
+}
+
+// IsInvestigate reports whether this Kind counts as "an investigation
+// happened" for the purpose of CheckpointSummary.HasInvestigation. Extend
+// this when adding new investigate-kind Kind values so the umbrella flag
+// stays accurate without string-literal coupling across packages.
+func (k Kind) IsInvestigate() bool {
+	// See IsReview for why this is an equality check rather than a switch.
+	return k == KindAgentInvestigate
 }
 
 // State represents the state of an active session.
@@ -116,6 +132,18 @@ type State struct {
 	// prompt (attach path). Always populated when Kind is a review kind.
 	ReviewPrompt string `json:"review_prompt,omitempty"`
 
+	// InvestigateRunID is the 12-hex-char ID of the parent investigation
+	// run when Kind is an investigate kind. Multiple sessions across rounds
+	// share this ID so the loop driver can correlate them. Empty for
+	// non-investigate sessions.
+	InvestigateRunID string `json:"investigate_run_id,omitempty"`
+
+	// InvestigateTopic is the human-readable topic the investigation was
+	// asked to investigate. Snapshot at session start so checkpoint
+	// metadata records what the agent was investigating. Only meaningful
+	// when Kind is an investigate kind.
+	InvestigateTopic string `json:"investigate_topic,omitempty"`
+
 	// TurnID is a unique identifier for the current agent turn.
 	// Lifecycle:
 	//   - Generated fresh in InitializeSession at each turn start
@@ -152,11 +180,6 @@ type State struct {
 	// Used for fast "has new content?" checks in PostCommit: compare the git blob size
 	// against this value without reading the full transcript content.
 	CheckpointTranscriptSize int64 `json:"checkpoint_transcript_size,omitempty"`
-
-	// CompactTranscriptStart is the transcript.jsonl line offset where the current
-	// checkpoint cycle began. It parallels CheckpointTranscriptStart (full.jsonl)
-	// and is updated after each condensation.
-	CompactTranscriptStart int `json:"compact_transcript_start,omitempty"`
 
 	// Deprecated: CondensedTranscriptLines is replaced by CheckpointTranscriptStart.
 	// Kept for backward compatibility with existing state files.

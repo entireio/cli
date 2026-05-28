@@ -11,10 +11,14 @@ import (
 	"syscall"
 
 	"github.com/entireio/cli/cmd/entire/cli"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
 
 func main() {
+	// Resolve version/commit from build info before anything reads them.
+	versioninfo.Load()
+
 	// Create context that cancels on interrupt
 	ctx, cancel := context.WithCancel(context.Background())
 

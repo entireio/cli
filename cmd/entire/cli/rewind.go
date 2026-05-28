@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -690,6 +691,7 @@ func restoreSessionTranscriptFromStrategy(ctx context.Context, cpID id.Checkpoin
 	if err != nil {
 		return "", fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	store, err := checkpoint.NewCommittedReader(ctx, repo, checkpoint.CommittedReaderOptions{})
 	if err != nil {
@@ -729,10 +731,11 @@ func restoreSessionTranscriptFromStrategy(ctx context.Context, cpID id.Checkpoin
 // This is used for uncommitted checkpoints where the transcript is stored in the shadow branch tree.
 func restoreSessionTranscriptFromShadow(ctx context.Context, commitHash, metadataDir, sessionID string, agent agentpkg.Agent) (string, error) {
 	// Open repository
-	repo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{DetectDotGit: true})
+	repo, err := gitrepo.OpenCurrent(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Parse commit hash
 	hash := plumbing.NewHash(commitHash)
@@ -1069,6 +1072,7 @@ func getCurrentHeadHash(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
@@ -1088,6 +1092,7 @@ func checkResetSafety(ctx context.Context, targetCommitHash string, uncommittedC
 	if err != nil {
 		return nil, err
 	}
+	defer repo.Close()
 
 	// Check for uncommitted changes
 	if uncommittedChangesWarning != "" {
