@@ -81,9 +81,17 @@ func displayPushTarget(target string) string {
 	return target
 }
 
+// checkpointPushBudget is one shared deadline across the initial push,
+// fetch+rebase, and retry — per-attempt timeouts can stack to ~3x. var so tests
+// can shrink it.
+var checkpointPushBudget = 2 * time.Minute
+
 // doPushRef pushes localRef to the target with fetch+merge recovery.
 // The target can be a remote name or a URL.
-func doPushRef(ctx context.Context, target string, localRef, trackingRef plumbing.ReferenceName) error { //nolint:unparam // callers treat push failures as non-fatal but keep an error-shaped boundary.
+func doPushRef(ctx context.Context, target string, localRef, trackingRef plumbing.ReferenceName) error {
+	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
+	defer cancel()
+
 	displayTarget := displayPushTarget(target)
 	refDisplay := refDisplayName(localRef)
 	pushRefSpec := string(localRef) + ":" + string(localRef)
@@ -226,11 +234,9 @@ func finishPush(ctx context.Context, stop func(string), result pushResult, targe
 // tryPushSessionsCommon attempts to push an explicit refspec.
 // pushRefSpec is either a bare branch name (legacy, expanded by git to
 // refs/heads/<name>:refs/heads/<name>) or a full "<localRef>:<remoteRef>"
-// refspec for custom refs outside refs/heads/.
+// refspec for custom refs outside refs/heads/. No timeout of its own —
+// runs under doPushRef's shared budget.
 func tryPushSessionsCommon(ctx context.Context, remoteName, pushRefSpec string) (pushResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
 	// Span the actual `git push` subprocess: on a slow remote (e.g. a custom
 	// git transport) this is typically where pre-push time is spent. Called once
 	// per push attempt, so a retry after fetch+rebase shows up as a second
@@ -334,10 +340,8 @@ func printProtectedRefBlock(w io.Writer, ref, target string) {
 // localRef is the full local ref name. trackingRef is the local
 // remote-tracking ref to update on fetch. The target can be a remote name
 // or a URL (URLs use a temp fetched ref to avoid clobbering tracking).
+// No timeout of its own — runs under doPushRef's shared budget.
 func fetchAndRebaseSessionsCommon(ctx context.Context, target string, localRef, trackingRef plumbing.ReferenceName) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
 	fetchTarget, err := remote.ResolveFetchTarget(ctx, target)
 	if err != nil {
 		return fmt.Errorf("resolve fetch target: %w", err)
