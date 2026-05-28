@@ -1135,7 +1135,7 @@ func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error 
 }
 
 // installMetadataRefspec appends a fetch refspec on origin so subsequent
-// `git fetch` calls pull refs/entire/checkpoints/v1 into the non-clobbering
+// `git fetch` calls pull refs/entire/checkpoints/v1.1 into the non-clobbering
 // remote-tracking ref. Idempotent. No-op when origin is absent or the
 // refspec is already present.
 func installMetadataRefspec(ctx context.Context) error {

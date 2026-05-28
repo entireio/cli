@@ -448,11 +448,13 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 
 When `strategy_options.checkpoints_version` is set to `1.1` (number `1.1`
 or string `"1.1"`) in `.entire/settings.json`, metadata is stored at the
-custom ref `refs/entire/checkpoints/v1` instead of the branch
+custom ref `refs/entire/checkpoints/v1.1` instead of the branch
 `refs/heads/entire/checkpoints/v1`. Same format, same trailers, same
 sharded tree layout; only the ref location differs. The custom ref is
 invisible to `git branch -a` and to GitHub's branch UI, and is not pulled
-by default `git clone`.
+by default `git clone`. The `v1.1` suffix (vs. plain `v1`) keeps the
+custom ref distinct from the legacy branch so a single repo can hold
+both refs side-by-side while history is being migrated.
 
 Activation is **manual opt-in**: edit `.entire/settings.json` to set
 `strategy_options.checkpoints_version` to `1.1`. `entire enable` does not
@@ -462,11 +464,11 @@ automatically reachable under 1.1. A future migration command can handle
 that; today, a user who wants their old history reachable can run, once:
 
 ```
-git update-ref refs/entire/checkpoints/v1 refs/heads/entire/checkpoints/v1
+git update-ref refs/entire/checkpoints/v1.1 refs/heads/entire/checkpoints/v1
 ```
 
 The fetch refspec
-`+refs/entire/checkpoints/v1:refs/entire/remotes/origin/checkpoints/v1`
+`+refs/entire/checkpoints/v1.1:refs/entire/remotes/origin/checkpoints/v1.1`
 is installed on origin by `entire enable` whenever settings already
 specify 1.1. Push and rebase-on-non-FF use the same machinery as the
 legacy branch path via `strategy.pushRefIfNeeded`.

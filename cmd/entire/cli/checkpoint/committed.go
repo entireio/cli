@@ -1738,7 +1738,7 @@ func (s *GitStore) getSessionsBranchTree(ctx context.Context) (*object.Tree, err
 		remoteRefName := MetadataTrackingRef(ctx)
 		ref, err = s.repo.Reference(remoteRefName, true)
 		if err != nil {
-			return nil, fmt.Errorf("sessions branch not found: %w", err)
+			return nil, fmt.Errorf("metadata ref %q not found: %w", RefDisplayName(refName), err)
 		}
 	}
 

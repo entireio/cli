@@ -13,7 +13,7 @@ import (
 // RefDisplayName produces a short, log-friendly name for a metadata ref by
 // stripping the refs/heads/ or refs/entire/ prefix. Use this for user-facing
 // messages so legacy v1 ("entire/checkpoints/v1") and 1.1
-// ("checkpoints/v1") both display naturally. Returns the input unchanged
+// ("checkpoints/v1.1") both display naturally. Returns the input unchanged
 // when neither prefix matches.
 func RefDisplayName(ref plumbing.ReferenceName) string {
 	s := string(ref)
@@ -30,14 +30,14 @@ func RefDisplayName(ref plumbing.ReferenceName) string {
 //
 // Legacy v1 repos return the branch ref (refs/heads/entire/checkpoints/v1).
 // checkpoints_version 1.1 repos return the custom ref
-// (refs/entire/checkpoints/v1). Falls back to the legacy branch ref when
+// (refs/entire/checkpoints/v1.1). Falls back to the legacy branch ref when
 // settings cannot be loaded.
 //
 // 1.1 repos start with an empty custom ref — prior history on the legacy
 // branch is NOT automatically reachable from the new ref. Users who want
 // the old checkpoints under 1.1 can run, once:
 //
-//	git update-ref refs/entire/checkpoints/v1 refs/heads/entire/checkpoints/v1
+//	git update-ref refs/entire/checkpoints/v1.1 refs/heads/entire/checkpoints/v1
 func MetadataRef(ctx context.Context) plumbing.ReferenceName {
 	if settings.UsesCustomMetadataRef(ctx) {
 		return plumbing.ReferenceName(paths.MetadataRefName)
@@ -53,7 +53,7 @@ func MetadataRef(ctx context.Context) plumbing.ReferenceName {
 // MetadataTrackingRefForRemote with the actual push remote.
 //
 // For legacy v1: refs/remotes/origin/entire/checkpoints/v1.
-// For 1.1: refs/entire/remotes/origin/checkpoints/v1.
+// For 1.1: refs/entire/remotes/origin/checkpoints/v1.1.
 //
 // The 1.1 tracking ref is intentionally NOT the same as the local ref —
 // mapping a fetched ref to itself would clobber local writes on every
@@ -69,7 +69,7 @@ func MetadataTrackingRef(ctx context.Context) plumbing.ReferenceName {
 // the right tracking ref, not always origin's.
 //
 // For legacy v1: refs/remotes/<remoteName>/entire/checkpoints/v1.
-// For 1.1: refs/entire/remotes/<remoteName>/checkpoints/v1.
+// For 1.1: refs/entire/remotes/<remoteName>/checkpoints/v1.1.
 //
 // Note: for 1.1, only the origin refspec is installed by `entire enable`
 // (see installMetadataRefspec). Tracking refs for non-origin remotes will

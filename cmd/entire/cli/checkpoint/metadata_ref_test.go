@@ -55,8 +55,8 @@ func TestRefDisplayName(t *testing.T) {
 		want string
 	}{
 		{"legacy v1 branch", plumbing.NewBranchReferenceName(paths.MetadataBranchName), "entire/checkpoints/v1"},
-		{"v1.1 custom ref", plumbing.ReferenceName(paths.MetadataRefName), "checkpoints/v1"},
-		{"v1.1 tracking ref", plumbing.ReferenceName(paths.MetadataTrackingRefName), "remotes/origin/checkpoints/v1"},
+		{"v1.1 custom ref", plumbing.ReferenceName(paths.MetadataRefName), "checkpoints/v1.1"},
+		{"v1.1 tracking ref", plumbing.ReferenceName(paths.MetadataTrackingRefName), "remotes/origin/checkpoints/v1.1"},
 		{"unrecognized prefix returned verbatim", plumbing.ReferenceName("refs/tags/v1"), "refs/tags/v1"},
 		{"empty", plumbing.ReferenceName(""), ""},
 	}
@@ -100,7 +100,7 @@ func TestMetadataTrackingRefForRemote_UsesActualRemoteName(t *testing.T) {
 	// 1.1 with a non-origin remote.
 	writeSettings(t, dir, `{"strategy_options":{"checkpoints_version":"1.1"}}`)
 	got = checkpoint.MetadataTrackingRefForRemote(context.Background(), "upstream")
-	want = plumbing.ReferenceName("refs/entire/remotes/upstream/checkpoints/v1")
+	want = plumbing.ReferenceName("refs/entire/remotes/upstream/checkpoints/v1.1")
 	if got != want {
 		t.Fatalf("1.1 tracking for upstream = %s; want %s", got, want)
 	}

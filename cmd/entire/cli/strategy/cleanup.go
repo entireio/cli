@@ -64,7 +64,7 @@ var shadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}(-[0-9a-fA-
 // Shadow branches have the format "entire/<commit-hash>-<worktree-hash>" where the
 // commit hash is at least 7 hex characters and worktree hash is 6 hex characters.
 // The "entire/checkpoints/v1" branch (legacy v1 metadata) is NOT a shadow branch.
-// On 1.1 repos the metadata lives at the custom ref refs/entire/checkpoints/v1
+// On 1.1 repos the metadata lives at the custom ref refs/entire/checkpoints/v1.1
 // (outside refs/heads/), so it never enters this comparison at all.
 func IsShadowBranch(branchName string) bool {
 	// Explicitly exclude metadata and trails branches
@@ -256,7 +256,7 @@ func DeleteOrphanedCheckpoints(ctx context.Context, checkpointIDs []string) (del
 	refName := checkpoint.MetadataRef(ctx)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {
-		return nil, nil, fmt.Errorf("sessions branch not found: %w", err)
+		return nil, nil, fmt.Errorf("metadata ref %q not found: %w", checkpoint.RefDisplayName(refName), err)
 	}
 
 	parentCommit, err := repo.CommitObject(ref.Hash())

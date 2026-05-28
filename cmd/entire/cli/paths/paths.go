@@ -45,14 +45,18 @@ const MetadataBranchName = "entire/checkpoints/v1"
 // MetadataRefName is the custom ref used when checkpoints_version is "1.1".
 // Lives under refs/entire/ for the same reasons V2*RefName does: invisible
 // in GitHub's branch UI and not fetched by default by `git clone`.
-const MetadataRefName = "refs/entire/checkpoints/v1"
+//
+// The v1.1 suffix (vs. plain v1) keeps the ref name distinct from the
+// legacy branch refs/heads/entire/checkpoints/v1, so a single repo can
+// hold both without colliding while history is being migrated.
+const MetadataRefName = "refs/entire/checkpoints/v1.1"
 
 // MetadataTrackingRefPrefix and MetadataTrackingRefSuffix build the local
 // remote-tracking ref for the 1.1 custom metadata namespace. The remote
 // name goes between them — see paths.BuildMetadataTrackingRef.
 const (
 	MetadataTrackingRefPrefix = "refs/entire/remotes/"
-	MetadataTrackingRefSuffix = "/checkpoints/v1"
+	MetadataTrackingRefSuffix = "/checkpoints/v1.1"
 )
 
 // MetadataTrackingRefName is the local tracking ref for MetadataRefName on
@@ -62,7 +66,7 @@ const (
 const MetadataTrackingRefName = MetadataTrackingRefPrefix + "origin" + MetadataTrackingRefSuffix
 
 // BuildMetadataTrackingRef returns the 1.1 tracking-ref name for the given
-// remote (e.g. "origin" → refs/entire/remotes/origin/checkpoints/v1).
+// remote (e.g. "origin" → refs/entire/remotes/origin/checkpoints/v1.1).
 func BuildMetadataTrackingRef(remoteName string) string {
 	return MetadataTrackingRefPrefix + remoteName + MetadataTrackingRefSuffix
 }

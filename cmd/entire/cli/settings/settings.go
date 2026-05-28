@@ -1086,7 +1086,7 @@ const (
 )
 
 // UsesCustomMetadataRef reports whether checkpoints metadata is stored at the
-// custom ref (refs/entire/checkpoints/v1) rather than the legacy branch
+// custom ref (refs/entire/checkpoints/v1.1) rather than the legacy branch
 // (refs/heads/entire/checkpoints/v1). True iff checkpoints_version is 1.1.
 func (s *EntireSettings) UsesCustomMetadataRef() bool {
 	if s == nil || s.StrategyOptions == nil {

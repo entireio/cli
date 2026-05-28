@@ -364,7 +364,7 @@ func resolveAgentType(ctxAgentType types.AgentType, state *SessionState) types.A
 
 // EnsureMetadataBranch creates or updates the local metadata ref.
 // On legacy v1 repos this is the branch refs/heads/entire/checkpoints/v1;
-// on 1.1 repos it is the custom ref refs/entire/checkpoints/v1, resolved
+// on 1.1 repos it is the custom ref refs/entire/checkpoints/v1.1, resolved
 // via checkpoint.MetadataRef. If the remote-tracking ref exists and the
 // local ref is missing or empty, creates/updates the local ref from it.
 // Otherwise creates an empty orphan.

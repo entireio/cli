@@ -16,7 +16,7 @@ import (
 // TestV1MetadataRef_FreshRepo_ManualOptIn_FullWorkflow exercises the
 // manual-opt-in path: a fresh repo gets checkpoints_version=1.1 in
 // settings.json, then runs a session and commit. The custom ref
-// refs/entire/checkpoints/v1 should be created; the legacy branch
+// refs/entire/checkpoints/v1.1 should be created; the legacy branch
 // refs/heads/entire/checkpoints/v1 should not exist.
 func TestV1MetadataRef_FreshRepo_ManualOptIn_FullWorkflow(t *testing.T) {
 	t.Parallel()

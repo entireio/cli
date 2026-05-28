@@ -26,7 +26,7 @@ import (
 // trackingRef. The target can be a remote name (e.g., "origin") or a URL.
 //
 // localRef is the full local ref name (e.g., refs/heads/entire/checkpoints/v1
-// or refs/entire/checkpoints/v1). trackingRef is the local remote-tracking
+// or refs/entire/checkpoints/v1.1). trackingRef is the local remote-tracking
 // counterpart. The push refspec sent on the wire is "<localRef>:<localRef>".
 //
 // When pushing to a URL, the "has unpushed" optimization is skipped since
