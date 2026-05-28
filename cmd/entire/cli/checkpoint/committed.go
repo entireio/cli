@@ -43,11 +43,25 @@ import (
 // errStopIteration is used to stop commit iteration early in GetCheckpointAuthor.
 var errStopIteration = errors.New("stop iteration")
 
+type commitSigningDisabledContextKey struct{}
+
 // chunkTranscript is an indirection over agent.ChunkTranscript so tests can
 // count or intercept chunking calls (e.g., to verify the short-circuit avoids
 // re-chunking identical content). Production code paths always use the
 // unwrapped function.
 var chunkTranscript = agent.ChunkTranscript
+
+// WithCommitSigningDisabled returns a context that prevents metadata branch
+// commit signing. Use for replay/migration writes whose author line is sourced
+// from historical data rather than the local operator.
+func WithCommitSigningDisabled(ctx context.Context) context.Context {
+	return context.WithValue(ctx, commitSigningDisabledContextKey{}, true)
+}
+
+func commitSigningDisabled(ctx context.Context) bool {
+	disabled, ok := ctx.Value(commitSigningDisabledContextKey{}).(bool)
+	return ok && disabled
+}
 
 // WriteCommitted writes a committed checkpoint to the entire/checkpoints/v1 branch.
 // Checkpoints are stored at sharded paths: <id[:2]>/<id[2:]>/
@@ -1985,6 +1999,9 @@ func createCommitObject(ctx context.Context, repo *git.Repository, treeHash, par
 // If signing is disabled, no signer can be created, or signing fails, the commit
 // is left unsigned and the error is logged.
 func SignCommitBestEffort(ctx context.Context, commit *object.Commit) {
+	if commitSigningDisabled(ctx) {
+		return
+	}
 	if !settings.IsSignCheckpointCommitsEnabled(ctx) {
 		return
 	}

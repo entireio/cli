@@ -433,6 +433,7 @@ func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 	require.Equal(t, v2AuthorName, commit.Author.Name)
 	require.Equal(t, v2AuthorEmail, commit.Author.Email)
 	require.True(t, commit.Author.When.Equal(v2AuthorWhen), "author time = %s, want %s", commit.Author.When, v2AuthorWhen)
+	require.Empty(t, commit.Signature)
 }
 
 func TestRunApplyMigratesV2OrphanCheckpointAndIsIdempotent(t *testing.T) {
@@ -476,6 +477,7 @@ func TestRunApplyMigratesV2OrphanCheckpointAndIsIdempotent(t *testing.T) {
 	require.Equal(t, v2AuthorName, commit.Author.Name)
 	require.Equal(t, v2AuthorEmail, commit.Author.Email)
 	require.True(t, commit.Author.When.Equal(v2AuthorWhen), "author time = %s, want %s", commit.Author.When, v2AuthorWhen)
+	require.Empty(t, commit.Signature)
 
 	stdout.Reset()
 	err = run(context.Background(), []string{

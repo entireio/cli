@@ -100,6 +100,22 @@ func TestSignCommitBestEffort_SkipsWhenDisabled(t *testing.T) { //nolint:paralle
 	}
 }
 
+func TestSignCommitBestEffort_SkipsWhenContextDisabled(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
+	setupSigningEnv(t, false)
+
+	objectSignerLoader = func(context.Context) (plugin.Signer, bool) {
+		t.Fatal("signer should not be called when commit signing is disabled by context")
+		return nil, true
+	}
+
+	commit := newTestCommit()
+	SignCommitBestEffort(WithCommitSigningDisabled(context.Background()), commit)
+
+	if commit.Signature != "" {
+		t.Errorf("expected empty signature, got %q", commit.Signature)
+	}
+}
+
 func TestSignCommitBestEffort_ErrorIsBestEffort(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
 	setupSigningEnv(t, false)
 

@@ -147,7 +147,8 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 				return eligibleSessions, fmt.Errorf("resolve v2 checkpoint %s session %d author: %w", discovered.ID, sessionIndex, err)
 			}
 			writeOpts := writeOptionsFromV2Content(content, summary, author)
-			if err := m.v1Store.WriteCommitted(ctx, writeOpts); err != nil {
+			writeCtx := checkpoint.WithCommitSigningDisabled(ctx)
+			if err := m.v1Store.WriteCommitted(writeCtx, writeOpts); err != nil {
 				return eligibleSessions, fmt.Errorf("write v1 checkpoint %s session %d: %w", discovered.ID, sessionIndex, err)
 			}
 			m.report.MigratedSessions++
