@@ -1,4 +1,3 @@
-//nolint:goconst // Repeated CLI flag literals keep argument-list tests readable.
 package main
 
 import (

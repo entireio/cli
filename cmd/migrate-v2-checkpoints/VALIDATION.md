@@ -111,7 +111,7 @@ value.
 `<N>` is the v1 slot. New sessions append (`findSessionIndex` in
 `committed.go:610`); if v1 already had session 0 and v2 contributes one new
 session, it lands in v1 slot 1. v1 indices and v2 indices for the **same**
-checkpoint can differ; only `session_id` is invariant across the two stores.
+checkpoint can differ; `session_id` is the stable cross-store identifier.
 
 Chunking note: `full.jsonl` is chunked via `agent.ChunkTranscript`. Chunks
 are `full.jsonl`, `full.jsonl.001`, `full.jsonl.002`, …
@@ -137,8 +137,10 @@ For `--dry-run` and `--apply` (but not `--list`), the tool resolves the
 checkpoint fetch remote and refreshes `refs/entire/checkpoints/v2/main` plus
 every `refs/entire/checkpoints/v2/full/*` ref before discovery (see
 `ensureLatestV2Refs` in `v2_preflight.go`). If the remote can't be resolved
-and a local v2 /main ref exists, fetch is skipped silently; if neither
-condition holds, the tool errors out before doing any work.
+and a local v2 /main ref exists, fetch is skipped silently. If the remote
+does resolve, the remote must advertise v2 /main; a stale local v2 /main does
+not bypass a missing remote v2 /main. If neither a usable remote nor local v2
+/main is available, the tool errors out before doing any work.
 
 `--list` produces one line per checkpoint:
 ```text
@@ -174,7 +176,7 @@ the report:
 warning: N v2 orphans skipped; re-run without --since/--head to include them
 ```
 
-Invariants that should always hold on the report:
+Checks that should always hold on the report:
 
 - `EC ≤ D`.
 - `EO ≤ EC` (orphan-eligible is a subset of eligible).
@@ -208,6 +210,22 @@ The procedure below is the same regardless of repo. Substitute `$REPO` and
 REPO=/path/to/some-repo                 # e.g. ~/entire/marvin
 TOOL=~/entire/cli/.worktrees/review/migrate-v2-checkpoints
 cd "$REPO"
+
+sha256_stdin() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    else
+        shasum -a 256 | awk '{print $1}'
+    fi
+}
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
 ```
 
 ### 3.1 Pre-flight: confirm both stores exist
@@ -324,31 +342,32 @@ comm -23 /tmp/v2_ids.txt /tmp/v1_ids.txt > /tmp/v2_only_ids.txt
 wc -l /tmp/v2_only_ids.txt
 ```
 
-Every ID in `v2_only_ids.txt` should be either a candidate, or — if v2 has
-no session metadata for it / no raw transcript — a contributor to the
-`missing v2 checkpoint metadata` / `missing raw transcripts` counters.
-Orphan candidates also live in this set: they are exactly v2 /main IDs
-with no commit attribution but with intact v2 metadata + transcripts.
+Every ID in `v2_only_ids.txt` should be either a candidate or accounted for
+by missing v2 checkpoint metadata, missing required v2 session metadata, or
+missing raw transcript skips. Orphan candidates also live in this set: they
+are exactly v2 /main IDs with no commit attribution but with intact v2
+metadata + transcripts.
 
-A quick predicate: the eligible candidate count plus the missing-metadata
-and missing-raw counters should equal or exceed the v2-only set. If it's
-less, something is being silently dropped.
+A quick predicate: the eligible candidate count plus the missing summary,
+required-metadata, and missing-raw counters should equal or exceed the
+v2-only set. If it's less, something is being silently dropped.
 
 ```sh
 EC=$(grep "checkpoints eligible for migration" /tmp/migrate.plan | awk '{print $NF}')
 EO=$(grep "v2 orphan checkpoints" /tmp/migrate.plan | awk '{print $NF}')
 M1=$(grep "missing v2 checkpoint metadata" /tmp/migrate.plan | awk '{print $NF}')
+M2=$(grep "missing required v2 session metadata" /tmp/migrate.plan | awk '{print $NF}')
 M3=$(grep "missing raw transcripts" /tmp/migrate.plan | awk '{print $NF}')
 echo "v2-only on disk: $(wc -l < /tmp/v2_only_ids.txt)"
-echo "EC=$EC  EO=$EO  M1=$M1  M3=$M3"
-echo "  EC + M1 + M3 must be >= v2-only count"
+echo "EC=$EC  EO=$EO  M1=$M1  M2=$M2  M3=$M3"
+echo "  EC + M1 + M2 + M3 must be >= v2-only count"
 echo "  EO <= EC must hold (orphan is a subset of eligible)"
 ```
 
-(`>=` rather than `=` because `M1`/`M3` are counted per-checkpoint /
-per-session over the entire discovered universe, not only the v2-only
-set. `EO` is exactly the subset of `EC` whose discovery came from v2
-/main alone.)
+(`>=` rather than `=` because `M1`, `M2`, and `M3` are counted over the
+entire discovered universe, not only the v2-only set; `M2` and `M3` are
+also per-session counters. `EO` is exactly the subset of `EC` whose
+discovery came from v2 /main alone.)
 
 ### 3.4 Step C — confirm commit-list accuracy
 
@@ -379,27 +398,20 @@ merge with multiple trailers; that's expected.
 
 ### 3.5 Step D — DRY-RUN INSPECTION of session count
 
-For each candidate, the report claims `sessions=N`. Confirm:
+For each candidate, the report claims `sessions=N`. Confirm by counting v2
+sessions that are not already in v1 **and** are eligible by the same filters
+the migration applies: required metadata present and raw transcript present on
+`/full/current` or an archived `/full/*` ref.
 
 ```sh
 ID=02d9783342a2
 SHARD=${ID:0:2}/${ID:2}
+EXPECTED_SESSIONS=1   # report's sessions=N for this checkpoint
 
 # Sessions advertised by the v2 summary (from /main).
-git -C "$REPO" cat-file -p \
-    refs/entire/checkpoints/v2/main:"$SHARD/metadata.json" \
-    | jq -r '.sessions | length'
-
-# Session IDs in v2 (read each session's own metadata.json — that field is
-# what the migration tool dedupes against, not summary order).
 V2_SESSION_COUNT=$(git -C "$REPO" cat-file -p \
     refs/entire/checkpoints/v2/main:"$SHARD/metadata.json" \
     | jq -r '.sessions | length')
-for i in $(seq 0 $((V2_SESSION_COUNT-1))); do
-    git -C "$REPO" cat-file -p \
-        refs/entire/checkpoints/v2/main:"$SHARD/$i/metadata.json" \
-        | jq -r '.session_id'
-done | sort -u > /tmp/v2_sids.txt
 
 # Session IDs already in v1 for this checkpoint.
 if git -C "$REPO" cat-file -e \
@@ -416,9 +428,45 @@ else
     : > /tmp/v1_sids.txt
 fi
 
-# Expected eligible: v2 minus v1, by session ID.
-comm -23 /tmp/v2_sids.txt /tmp/v1_sids.txt | wc -l
-# This number must equal the report's "sessions=N" for this checkpoint.
+FULL_REFS=$(git -C "$REPO" for-each-ref \
+    --format='%(refname)' 'refs/entire/checkpoints/v2/full/*' \
+  | awk '/full\/current$/ {print "1 " $0; next} {print "0 " $0}' \
+  | sort -k1,1nr -k2,2r \
+  | awk '{print $2}')
+
+eligible=0
+for i in $(seq 0 $((V2_SESSION_COUNT-1))); do
+    META=$(git -C "$REPO" cat-file -p \
+        refs/entire/checkpoints/v2/main:"$SHARD/$i/metadata.json" 2>/dev/null) \
+        || continue
+
+    SID=$(echo "$META" | jq -r '.session_id // ""')
+    CPID=$(echo "$META" | jq -r '.checkpoint_id // ""')
+    if [ -z "$SID" ] || [ -z "$CPID" ]; then
+        continue
+    fi
+    if grep -qxF "$SID" /tmp/v1_sids.txt; then
+        continue
+    fi
+
+    has_raw=0
+    for r in $FULL_REFS; do
+        if git -C "$REPO" cat-file -e \
+              "$r:$SHARD/$i/raw_transcript" 2>/dev/null ||
+           git -C "$REPO" ls-tree --name-only "$r:$SHARD/$i" 2>/dev/null \
+              | grep -qE '^raw_transcript\.[0-9]{3}$'; then
+            has_raw=1
+            break
+        fi
+    done
+    if [ "$has_raw" = 1 ]; then
+        eligible=$((eligible+1))
+    fi
+done
+
+echo "eligible sessions from v2: $eligible"
+echo "report sessions=N:        $EXPECTED_SESSIONS"
+[ "$eligible" -eq "$EXPECTED_SESSIONS" ] && echo OK || echo MISMATCH
 ```
 
 Repeat for a random sample (5–10) across the candidate list. If your
@@ -460,14 +508,15 @@ a separate, explicit decision once the post-apply checks in §5 pass.
 - §3 ran clean: the candidate list looks plausible, counter math adds up,
   and a spot sample (Steps C and D) confirmed the candidates really are
   v2-only / partial migrations.
-- The repo has a resolvable checkpoint fetch remote, OR a local
-  `refs/entire/checkpoints/v2/main` ref. `--apply` calls
-  `ensureLatestV2Refs` first and will refresh v2 /main and every
+- The repo has either a checkpoint fetch remote that advertises
+  `refs/entire/checkpoints/v2/main`, or no resolvable fetch remote but an
+  already-present local `refs/entire/checkpoints/v2/main` ref. `--apply`
+  calls `ensureLatestV2Refs` first and will refresh v2 /main and every
   `refs/entire/checkpoints/v2/full/*` ref from the remote (forced fetch of
   `/full/current`, fast-forward fetch of archives). If the fetch target
-  can't be resolved and no local v2 /main exists, the tool errors out
-  before doing any work. A manual pre-fetch is no longer required, but
-  remains a safe no-op:
+  resolves but lacks v2 /main, the tool errors out even if a local v2 /main
+  ref exists; that prevents silently using stale local rollback data. A
+  manual pre-fetch is no longer required, but remains a safe no-op:
 
   ```sh
   git -C "$REPO" fetch origin \
@@ -524,15 +573,25 @@ git -C "$REPO" log --format='%h %ci %s' \
   `checkpoint_remote` mirror it. Push is a separate manual procedure
   that is explicitly out of scope here, and is only safe **after** every
   step in §5 passes and the operator is satisfied.
-- **Per-checkpoint atomicity, not transactional.** Each candidate is
+- **Per-session atomicity, not transactional.** Each migrated session is
   written as its own commit on v1. If `--apply` errors out partway
-  through, earlier candidates remain written and later ones are
-  un-written; the next run will pick up the rest.
+  through a checkpoint with multiple eligible sessions, earlier sessions
+  remain written and later sessions reappear on the next run.
+- **v1 commit author matches v2.** Each new v1 commit is authored with
+  the same name, email, and author timestamp as the v2 `/main` commit that
+  wrote the migrated session's `metadata.json`, so `git log` against v1
+  and v2 attributes the same checkpoint session to the same author. §5.6
+  treats the `author` header in `entire explain` as a required check; a
+  mismatch is a regression, not an accepted divergence.
 - **Roll back** by resetting v1 back to `$PRE_APPLY_TIP`:
 
   ```sh
   # Only if you need to undo — this discards the new commits locally.
-  git -C "$REPO" update-ref refs/heads/entire/checkpoints/v1 "$PRE_APPLY_TIP"
+  if [ "$PRE_APPLY_TIP" = "none" ]; then
+      git -C "$REPO" update-ref -d refs/heads/entire/checkpoints/v1
+  else
+      git -C "$REPO" update-ref refs/heads/entire/checkpoints/v1 "$PRE_APPLY_TIP"
+  fi
   ```
 
   Safe before any push. Destructive after push.
@@ -617,7 +676,8 @@ Expected shape (schema lives at
 }
 ```
 
-Field-by-field check against the v2 summary on `/main` for the same ID:
+For checkpoints that were fully v2-only and whose v2 sessions all migrated,
+the root summary should match the v2 summary for the stable fields below:
 
 ```sh
 diff <(git -C "$REPO" cat-file -p \
@@ -638,13 +698,15 @@ Acceptable differences:
   (`full.jsonl`, `content_hash.txt`), not v2's compact format.
 - If v1 already had sessions, `sessions[]` length on v1 may exceed v2's;
   the candidate's contributions are appended.
-- `combined_attribution`/`token_usage` may differ if the v1 store
-  aggregates across all sessions present and v1 already had different
-  sessions. For purely v2-only checkpoints (the typical case, which
-  includes all orphan candidates) these should match the v2 summary
-  exactly, since the migration uses `summary.CombinedAttribution` from
-  v2 verbatim (`migration.go:242`) and per-session token usage is
-  replayed from v2.
+- If only some v2 sessions migrated (because others were already present,
+  lacked required metadata, or lacked raw transcripts), aggregate fields
+  such as `checkpoints_count`, `files_touched`, `token_usage`, and
+  `has_review` may differ. The v1 writer reaggregates those fields from
+  the sessions actually present in v1, not from every session in v2.
+- `combined_attribution` may also differ when v1 already had sessions. For
+  purely v2-only checkpoints with all v2 sessions migrated, it should match
+  the v2 summary exactly because the migration uses
+  `summary.CombinedAttribution` from v2 verbatim (`migration.go:242`).
 
 Hard requirements:
 
@@ -716,10 +778,10 @@ Expected: no diff. Special cases:
   doesn't pass `CLIVersion`, so v1 inherits whatever default the writer
   applies — generally an empty value or the current binary's version. Not
   a correctness issue.
-- v1 writes the new `combined_attribution` and aggregated `token_usage`
-  onto the **root** `metadata.json` from the migrating session's data. If
-  there were prior v1 sessions, the root summary on v1 already aggregated
-  them; only the new session's session-level metadata matters for §4.2.
+- Root summary aggregation is covered in §5.1. Session-level comparison here
+  should ignore root-only fields such as `combined_attribution`; per-session
+  `token_usage` is copied from v2 and then folded into the root summary by
+  the v1 writer.
 
 Schema sanity per session:
 
@@ -749,21 +811,32 @@ commit trailer exists.
 ### 5.3 Step G — `prompt.txt` content
 
 The migration joins v2 prompts (split form on disk) back into a single
-`prompt.txt` via `SplitPromptContent` round-trip. The bytes should match
-the v2 content:
+`prompt.txt` via `SplitPromptContent` round-trip. If `prompt.txt` exists on
+v2, the v1 bytes should match. If it is absent on v2, it should also be
+absent on v1.
 
 ```sh
-git -C "$REPO" cat-file -p \
-    "refs/entire/checkpoints/v2/main:$SHARD/$V2_SLOT/prompt.txt" \
-    | sha256sum
-git -C "$REPO" cat-file -p \
-    "entire/checkpoints/v1:$SHARD/$V1_SLOT/prompt.txt" \
-    | sha256sum
+if git -C "$REPO" cat-file -e \
+      "refs/entire/checkpoints/v2/main:$SHARD/$V2_SLOT/prompt.txt" 2>/dev/null; then
+    V2_PROMPT_HASH=$(git -C "$REPO" cat-file -p \
+        "refs/entire/checkpoints/v2/main:$SHARD/$V2_SLOT/prompt.txt" \
+        | sha256_stdin)
+    V1_PROMPT_HASH=$(git -C "$REPO" cat-file -p \
+        "entire/checkpoints/v1:$SHARD/$V1_SLOT/prompt.txt" \
+        | sha256_stdin)
+    echo "v2 prompt: $V2_PROMPT_HASH"
+    echo "v1 prompt: $V1_PROMPT_HASH"
+    [ "$V1_PROMPT_HASH" = "$V2_PROMPT_HASH" ] && echo OK || echo MISMATCH
+else
+    git -C "$REPO" cat-file -e \
+        "entire/checkpoints/v1:$SHARD/$V1_SLOT/prompt.txt" 2>/dev/null \
+        && echo "MISMATCH: v1 prompt exists but v2 prompt is absent" \
+        || echo "OK: prompt absent in both stores"
+fi
 ```
 
-Both digests should match. If they don't, inspect with a `diff -u` between
-the two `cat-file -p` outputs to see whether it's an ordering / separator
-issue.
+If the digests don't match, inspect with a `diff -u` between the two
+`cat-file -p` outputs to see whether it's an ordering / separator issue.
 
 ### 5.4 Step H — raw transcript & `content_hash.txt`
 
@@ -817,7 +890,7 @@ while IFS= read -r f; do
 done < /tmp/chunks.txt
 
 # Recompute and compare.
-COMPUTED="sha256:$(sha256sum "$tmp" | awk '{print $1}')"
+COMPUTED="sha256:$(sha256_file "$tmp")"
 STORED=$(git -C "$REPO" cat-file -p \
             "entire/checkpoints/v1:$SHARD/$V1_SLOT/content_hash.txt")
 echo "stored:   $STORED"
@@ -876,19 +949,55 @@ Then for each ID in `$MIGRATED_IDS`, run:
 - §5.1 root metadata diff (`grep -q` for errors).
 - §5.2 per-session field diff for every session ID that the checkpoint
   brought in.
+- §5.3 prompt presence/content check for every migrated session.
 - §5.4 hash check on every transcript chunk set.
+- §5.6 `entire explain` comparison against the dual-reads-removed binary.
 
 A single shell loop is fine, and the validation completes in seconds per
 checkpoint. Surface any non-empty diffs or any `MISMATCH` lines.
 
 ### 5.6 Step J — `entire explain` parity after removing v2 dual reads
 
-Validate every migrated checkpoint with a current build from the branch that
-removes v2-first dual reads, and compare it to the Homebrew-installed
-`entire`. The outputs must be identical. Any mismatch means the migration
-did not restore enough v1 data for the new read path, or the two binaries
-changed explain behavior independently; flag it and keep the diff for
-investigation.
+Run a current build from the branch that removes v2-first dual reads and
+compare it to the Homebrew-installed `entire` for every migrated checkpoint.
+On a real repo the two binaries will **not** produce identical output —
+some divergence is structural and expected. The gate here is that every
+diff falls into a known, bounded category and the required checks hold: the
+file list, displayed session id, author header, and exit status agree on
+every checkpoint.
+
+#### Expected divergences
+
+1. **Codex sessions: sanitized transcript on v1** (§1.3).
+   `codex.SanitizePortableTranscript` runs at write time, so the v1
+   transcript bytes are not equal to v2's raw transcript bytes for any
+   session with `agent == "Codex"`. Self-consistency on each side still
+   holds — verified in §5.4.
+2. **v2 compact transcript not migrated** (§7). The v2 store holds two
+   transcripts per session: the raw form on `/full/*` (migrated to v1) and
+   the compact form on `/main/transcript.jsonl` (not migrated). BREW
+   renders explain output from the compact form when available; FIX has to
+   parse the raw JSONL on v1 and pick fields ad hoc. Two visible
+   consequences:
+   - For Claude Code multi-argument tools (`Glob`, `Grep`, …), the tool
+     summary line picks different arguments. BREW tends to surface
+     `path`; FIX tends to surface `pattern`. Both arguments are present
+     in the raw JSONL.
+   - For the **Intent** block, BREW shows a prompt derived from the
+     compact transcript; FIX picks a user message from the raw
+     transcript. The underlying `prompt.txt` blobs are byte-identical
+     between v1 and v2 — only the renderer's selection differs.
+
+#### Required checks that must still hold
+
+- Exit status of both binaries matches per checkpoint.
+- `## Files` (the touched-files list) is byte-identical.
+- The displayed `session ` header line is identical (both binaries
+  choose the same session id on both sides).
+- The `author` header is identical (the migration preserves the v2
+  author identity onto v1 — see §4 Behavior notes).
+
+Anything that violates one of those is **unaccounted for** — flag it.
 
 Build the comparison binary immediately before the sweep:
 
@@ -904,13 +1013,13 @@ git -C "$FIX_WORKTREE" status --short --branch
 "$BREW_ENTIRE" version
 ```
 
-Run both binaries from the migrated repo and compare exit status, stdout, and
-stderr for every migrated checkpoint:
+Run both binaries from the migrated repo for every migrated checkpoint and
+audit each diff against the required checks above:
 
 ```sh
 EXPLAIN_DIR="/tmp/migrate-${REPO_NAME}-explain"
 mkdir -p "$EXPLAIN_DIR"
-: > "$EXPLAIN_DIR/mismatches.txt"
+: > "$EXPLAIN_DIR/unaccounted.txt"
 set +e
 
 while IFS= read -r ID; do
@@ -938,26 +1047,97 @@ while IFS= read -r ID; do
         cat "$BREW_RESULT.err"
     } > "$BREW_RESULT"
 
-    if ! diff -u "$BREW_RESULT" "$FIX_RESULT" > "$DIFF_FILE"; then
-        echo "$ID" >> "$EXPLAIN_DIR/mismatches.txt"
-        echo "MISMATCH $ID (see $DIFF_FILE)"
-    else
+    if diff -u "$BREW_RESULT" "$FIX_RESULT" > "$DIFF_FILE" 2>&1; then
         rm -f "$DIFF_FILE"
+        continue
     fi
+
+    # --- Required checks ---------------------------------------------------
+    if [ "$FIX_STATUS" != "$BREW_STATUS" ]; then
+        echo "$ID reason=exit-status brew=$BREW_STATUS fix=$FIX_STATUS" \
+            >> "$EXPLAIN_DIR/unaccounted.txt"
+        continue
+    fi
+    BREW_FILES=$(awk '/^## Files/{f=1} /^── Transcript/{f=0} f' \
+                   "$BREW_RESULT" | sha256_stdin)
+    FIX_FILES=$(awk '/^## Files/{f=1} /^── Transcript/{f=0} f' \
+                  "$FIX_RESULT" | sha256_stdin)
+    if [ "$BREW_FILES" != "$FIX_FILES" ]; then
+        echo "$ID reason=files-list-diverges" \
+            >> "$EXPLAIN_DIR/unaccounted.txt"
+        continue
+    fi
+    BREW_SID=$(awk '/^  session /{print $2; exit}' "$BREW_RESULT")
+    FIX_SID=$(awk '/^  session /{print $2; exit}' "$FIX_RESULT")
+    if [ "$BREW_SID" != "$FIX_SID" ]; then
+        echo "$ID reason=session-id-mismatch brew=$BREW_SID fix=$FIX_SID" \
+            >> "$EXPLAIN_DIR/unaccounted.txt"
+        continue
+    fi
+    BREW_AUTHOR=$(grep -m1 '^  author ' "$BREW_RESULT")
+    FIX_AUTHOR=$(grep -m1 '^  author ' "$FIX_RESULT")
+    if [ "$BREW_AUTHOR" != "$FIX_AUTHOR" ]; then
+        echo "$ID reason=author-mismatch" \
+            >> "$EXPLAIN_DIR/unaccounted.txt"
+        continue
+    fi
+    # Remaining diffs fall in the expected buckets above. Leave $DIFF_FILE
+    # on disk for spot-checking.
 done < "$MIGRATED_IDS"
 
-if [ -s "$EXPLAIN_DIR/mismatches.txt" ]; then
-    echo "explain mismatches:"
-    cat "$EXPLAIN_DIR/mismatches.txt"
+if [ -s "$EXPLAIN_DIR/unaccounted.txt" ]; then
+    echo "unaccounted-for explain divergences:"
+    cat "$EXPLAIN_DIR/unaccounted.txt"
     exit 1
 fi
 
-echo "all migrated checkpoints matched entire explain output"
+echo "all explain divergences fall in accepted buckets"
 ```
 
-Do not ignore mismatches, even if the rendered output looks close. Record the
-checkpoint ID and keep the corresponding `.diff`, `.fix`, and `.brew` files
-for follow-up.
+#### Optional: divergence distribution
+
+Useful for spotting a sudden shift in divergence shape between releases.
+Bucket each checkpoint as `identical`, `body-with-codex` (sanitization +
+compact-rendering), or `body-without-codex` (compact-rendering only):
+
+```sh
+identical=0; codex_body=0; non_codex_body=0
+while IFS= read -r ID; do
+    DIFF="$EXPLAIN_DIR/$ID.diff"
+    if [ ! -f "$DIFF" ]; then
+        identical=$((identical+1)); continue
+    fi
+    SHARD=${ID:0:2}/${ID:2}
+    has_codex=0
+    V1_LEN=$(git -C "$REPO" cat-file -p \
+                "entire/checkpoints/v1:$SHARD/metadata.json" \
+              | jq -r '.sessions | length')
+    for i in $(seq 0 $((V1_LEN-1))); do
+        AGENT=$(git -C "$REPO" cat-file -p \
+                  "entire/checkpoints/v1:$SHARD/$i/metadata.json" \
+                | jq -r '.agent // ""')
+        if [ "$AGENT" = "Codex" ] || [ "$AGENT" = "codex" ]; then
+            has_codex=1; break
+        fi
+    done
+    if [ "$has_codex" = 1 ]; then
+        codex_body=$((codex_body+1))
+    else
+        non_codex_body=$((non_codex_body+1))
+    fi
+done < "$MIGRATED_IDS"
+
+printf 'identical:            %4d\n' "$identical"
+printf 'body diff, has codex: %4d  (expected: §1.3 sanitization + §7 compact-not-migrated)\n' \
+    "$codex_body"
+printf 'body diff, no codex:  %4d  (expected: §7 compact-not-migrated)\n' \
+    "$non_codex_body"
+```
+
+`$EXPLAIN_DIR/*.diff`, `*.fix`, and `*.brew` are kept on disk for
+inspection. If a body diff in the no-codex bucket touches anything other
+than transcript-tool-argument rendering or Intent text, file a bug — that
+would be a real read-path regression.
 
 ### 5.7 After validation passes
 
@@ -1030,9 +1210,11 @@ from §4's "Behavior notes" — cheap and local, because you did not push.
   `fetchV2FullRefs` (line 101).
 - Migration loop: `cmd/migrate-v2-checkpoints/migration.go` —
   `migrateDiscoveredCheckpoints` (line 53), `migrateCheckpoint`
-  (line 98), `writeOptionsFromV2Content` (line 214),
-  `writeMigrationReport` (line 249), `candidateCommitLabel` (line 288,
+  (line 96), `writeOptionsFromV2Content` (line 216),
+  `writeMigrationReport` (line 251), `candidateCommitLabel` (line 290,
   emits `(orphan)`).
+- v2 session author lookup: `cmd/migrate-v2-checkpoints/v2_author.go` —
+  `findV2SessionAuthor` (line 19), `v2SessionMetadataPath` (line 59).
 - v1 write: `cmd/entire/cli/checkpoint/committed.go` — `WriteCommitted`
   (line 58), `writeStandardCheckpointEntries` (line 310),
   `writeSessionToSubdirectory` (line 404), `writeTranscript` (line 720),
@@ -1061,9 +1243,10 @@ from §4's "Behavior notes" — cheap and local, because you did not push.
 - `--dry-run` / `--apply` auto-fetch v2 refs from the repo's checkpoint
   remote (`ensureLatestV2Refs`). If the remote resolves, you get an
   up-to-date local copy of `refs/entire/checkpoints/v2/main` and every
-  `refs/entire/checkpoints/v2/full/*`; if it doesn't, the tool only
-  proceeds when a local v2 /main ref is already present. `--list` does
-  **not** auto-fetch — if you want a candidate universe that reflects
+  `refs/entire/checkpoints/v2/full/*`, and the tool errors if that remote
+  does not advertise v2 /main. If the remote cannot be resolved at all, the
+  tool only proceeds when a local v2 /main ref is already present. `--list`
+  does **not** auto-fetch — if you want a candidate universe that reflects
   the remote, refresh manually first:
   ```sh
   git -C "$REPO" fetch origin \
