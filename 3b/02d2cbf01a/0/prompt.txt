@@ -782,3 +782,179 @@ entire.log
 
 peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> grep -E "FilterAndNormalize|RecordFilesTouched" .entire/logs/*.log 2>/dev/null | tail -10
 peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)>
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> cd /tmp/agy-smoke
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> cp .agents/hooks.json.bak .agents/hooks.json
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> rm -f .entire/settings.local.json
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> agy
+
+      ▄▀▀▄        Antigravity CLI 1.0.0
+     ▀▀▀▀▀▀       peyton@entire.io
+    ▀▀▀▀▀▀▀▀      Gemini 3.5 Flash (High)
+   ▄▀▀    ▀▀▄     /tmp/agy-smoke
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> create a file called final-test.md with the text "final
+    smoke"
+
+⚠ Agent execution terminated due to error.
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+───────────────────────────────
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> tail -60 ~/.gemini/antigravity-cli/cli.log
+E0521 14:54:36.513358 84749 server.go:604] Failed to get OAuth token: error getting token source from auth provider: You are not logged into Antigravity.
+W0521 14:54:36.513560 84749 client.go:81] failed to set auth token
+I0521 14:54:36.514513 84749 auto_updater.go:253] Spawned background update process with PID 84752
+I0521 14:54:36.514580 84749 common.go:103] Launching CLI mode
+I0521 14:54:36.514973 84749 project.go:64] project: discovered project "/tmp/agy-smoke" (id=bd77b549-43df-4dcb-8916-7914cac459cc) via /tmp/agy-smoke/.antigravitycli
+I0521 14:54:36.514986 84749 common.go:156] project: using project "/tmp/agy-smoke" (id=bd77b549-43df-4dcb-8916-7914cac459cc) at /Users/peytonmontei/.gemini/config/projects/bd77b549-43df-4dcb-8916-7914cac459cc.json
+E0521 14:54:36.515010 84749 common.go:188] Failed to resolve GeminiDir ".gemini": .gemini must be an absolute path: path is not absolute, falling back to default
+I0521 14:54:36.515035 84749 common.go:197] CLI app data directory: /Users/peytonmontei/.gemini/antigravity-cli
+I0521 14:54:36.515043 84749 server.go:200] Creating CLI server backend: product=antigravity workspaceDirs=[] appDataDir=/Users/peytonmontei/.gemini/antigravity-cli cascadeManager=true codeAssist=true
+I0521 14:54:36.515077 84749 manager.go:249] Initializing CLI store manager for workspace /tmp/agy-smoke
+E0521 14:54:36.515811 84749 cli_setting_manager.go:350] failed to propagate telemetry setting: error getting token source: You are not logged into Antigravity.
+I0521 14:54:36.515821 84749 cli_setting_manager.go:65] CLI settings initialized: permissions=<nil>, toolPermission=request-review
+W0521 14:54:36.515850 84749 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+W0521 14:54:36.515859 84749 log_context.go:117] Cache(availableModels): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0521 14:54:36.515864 84749 server.go:392] failed to get model config: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+W0521 14:54:36.515992 84749 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+W0521 14:54:36.516012 84749 log_context.go:117] Cache(userInfo): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0521 14:54:36.516022 84749 server.go:604] Failed to get OAuth token: error getting token source from auth provider: You are not logged into Antigravity.
+W0521 14:54:36.516028 84749 client.go:81] failed to set auth token
+I0521 14:54:36.516241 84749 manager.go:313] CLI store manager initialized successfully
+I0521 14:54:36.516251 84749 common.go:312] CLI store manager created successfully
+I0521 14:54:36.517545 84749 common.go:402] Starting CLI program
+CLI ready for user input (startup took 2.954ms)
+ERROR: logging before google.Init: I0521 14:54:36.518818     178 terminal_info_manager.go:160] Terminal detection: TERM="xterm-ghostty" altScreen=true ssh=false
+I0521 14:54:36.519193 84749 gemini_extensions.go:28] Detecting Gemini extensions in /Users/peytonmontei/.gemini/extensions
+I0521 14:54:36.519209 84749 gemini_extensions.go:49] No extensions found
+I0521 14:54:36.569088 84749 manager.go:543] Full redraw completed (rerenderAll) for conversation  (epoch 0, items 1)
+I0521 14:54:36.694074 84749 auth.go:114] ChainedAuth: authenticated via keyring (effective: keyring)
+I0521 14:54:37.247257 84749 http_helpers.go:178] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist Trace: 0x4f207ce2b4c27ce3
+I0521 14:54:37.557273 84749 http_helpers.go:178] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist Trace: 0x9167c3129451a4e0
+I0521 14:54:37.893274 84749 http_helpers.go:178] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels Trace: 0x70339afc4d6837e4
+I0521 14:54:37.897640 84749 model_config_manager.go:157] Propagating selected model override to backend: label="Gemini 3.5 Flash (High)"
+I0521 14:54:37.897669 84749 input_loop.go:493] Auth done received, triggering experiment refresh
+I0521 14:54:37.897687 84749 experiment_manager.go:35] Starting experiment refresh after login
+I0521 14:54:38.037427 84749 experiment_manager.go:39] Experiments refreshed after login
+I0521 14:54:38.037491 84749 manager.go:932] Reloading system slash commands
+I0521 14:54:45.360727 84749 input_loop.go:34] HandleUserInput called with text: "create a file called final-test.md with the text \"final\n  smoke\""
+I0521 14:54:45.360761 84749 conversation_manager.go:279] Starting new conversation (agent=false)
+I0521 14:54:45.360769 84749 server.go:718] Creating new cascade trajectory (agentScript=false)
+I0521 14:54:45.360774 84749 server.go:726] Conversation using project ID: bd77b549-43df-4dcb-8916-7914cac459cc
+I0521 14:54:45.361382 84749 server.go:747] Created conversation a44ce7b8-8c21-415b-8f64-7fd2384bdc44
+I0521 14:54:45.361555 84749 conversation_manager.go:373] Streaming conversation a44ce7b8-8c21-415b-8f64-7fd2384bdc44
+I0521 14:54:45.361693 84749 server.go:766] Starting conversation update stream for a44ce7b8-8c21-415b-8f64-7fd2384bdc44
+I0521 14:54:45.361705 84749 conversation_manager.go:316] Forwarding user message to conversation a44ce7b8-8c21-415b-8f64-7fd2384bdc44 (items=1, media=0)
+I0521 14:54:45.361710 84749 server.go:1072] Sending user message to conversation a44ce7b8-8c21-415b-8f64-7fd2384bdc44 (items=1, media=0)
+E0521 14:54:45.363784 84749 discovery.go:335] Failed to load JSON config file /Users/peytonmontei/.gemini/config/mcp_config.json: unexpected end of JSON input
+I0521 14:54:45.367566 84749 jsonhook.go:152] Loaded hooks.json from /tmp/agy-smoke/.agents/hooks.json: 1 named hooks, 5 total handlers
+I0521 14:54:45.371189 84749 json_hook_caller.go:144] JSON hook "jsonhook__entire_PreInvocation_0_0": executing command
+I0521 14:54:46.044839 84749 json_hook_caller.go:302] JSON hook command stderr: unknown agent "antigravity" (not found as built-in or external plugin)
+
+I0521 14:54:46.045152 84749 json_hook_caller.go:144] JSON hook "jsonhook__entire_Stop_0_0": executing command
+I0521 14:54:46.086008 84749 json_hook_caller.go:302] JSON hook command stderr: unknown agent "antigravity" (not found as built-in or external plugin)
+
+E0521 14:54:46.086284 84749 log.go:398] agent executor error: failed to call custom hook jsonhook__entire_PreInvocation_0_0: JSON hook "jsonhook__entire_PreInvocation_0_0" command failed: command failed: exit status 1, stderr: unknown agent "antigravity" (not found as built-in or external plugin)
+E0521 14:54:46.086863 84749 log.go:398] failed to call custom hook jsonhook__entire_PreInvocation_0_0: JSON hook "jsonhook__entire_PreInvocation_0_0" command failed: command failed: exit status 1, stderr: unknown agent "antigravity" (not found as built-in or external plugin)
+
+I0521 14:57:07.700322 84749 common.go:407] CLI program exited, shutting down
+I0521 14:57:07.700500 84749 manager.go:451] CLI store manager shutting down
+I0521 14:57:07.701931 84749 conversation_manager.go:341] Stopping conversation stream
+I0521 14:57:07.702730 84749 server.go:2152] Language server shutting down
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> type -a entire
+entire is /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/opf-prepush/entire
+entire is /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/opf-prepush/entire
+entire is /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/opf-batching/entire
+entire is /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/opf-batching/entire
+entire is /Users/peytonmontei/.local/bin/entire
+entire is /Users/peytonmontei/.local/share/mise/installs/go/1.26.2/bin/entire
+entire is /opt/homebrew/bin/entire
+entire is /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/opf-prepush/entire peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> entire hooks antigravity --help
+Commands called by hooks. These are internal and not for direct user use.
+
+Usage:
+  entire hooks [flags]
+
+Flags:
+  -h, --help   help for hookspeytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> for p in (type -a entire 2>/dev/null | string match -r'/.*entire$')
+                                                          echo "$p:"
+                                                          md5 $p
+                                                      end
+string match: -r/.*entire$: unknown option
+
+in command substitution
+
+(Type 'help string' for related documentation)peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main) [0|2]> md5 /tmp/entire-smoke
+MD5 (/tmp/entire-smoke) = b1864e8f37f8811fd9ee3ad65db15c3e
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> mise current
+                                                      mise which entire 2>&1
+go 1.26.2
+golangci-lint 2.8.0
+node 24.12.0
+python 3.12.12
+/Users/peytonmontei/.local/share/mise/installs/go/1.26.2/bin/entire
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> find /Users/peytonmontei /tmp -maxdepth 6 -name entire -type f 2>/dev/null
+/Users/peytonmontei/go/bin/entire
+/Users/peytonmontei/.local/bin/entire
+/Users/peytonmontei/Library/Caches/go-build/ca/caa166c94ebf274f4264eb7ffe4373b5915ca755d398738a4abbcbee4f60f6cc-d/entire
+/Users/peytonmontei/Library/Caches/go-build/c8/c8271ed60d75e397a93c9c53511f721ec74753a3e5a85d1f4440d275de4a14dc-d/entire
+/Users/peytonmontei/Documents/entire/devenv/entireio/cli/entire
+/Users/peytonmontei/Documents/entire/devenv/entire/entire
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main) [1]> md5 /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/opf-prepush/entire
+                                                          md5 /tmp/entire-smoke
+MD5 (/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/opf-prepush/entire) = b6a35bef93981e56a975973660f0e150
+MD5 (/tmp/entire-smoke) = b1864e8f37f8811fd9ee3ad65db15c3e
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> set NEWEST (ls -t .git/entire-sessions/ | head -1)
+                                                      cat .git/entire-sessions/$NEWEST | jq '{session_id,
+                                                        files_touched, phase}'
+                                                      git add . && git commit -m "race smoke"
+{
+  "session_id": "4f1519ac-1240-47c8-a892-604576c3a5dc",
+  "files_touched": [
+    "race-test.md"
+  ],
+  "phase": "ended"
+}
+[main b9e3270] race smoke
+ 4 files changed, 48 insertions(+)
+ create mode 100644 .agents/hooks.json.bak
+ create mode 100644 brandnew.md
+ create mode 100644 race-test.md
+ create mode 100644 wire.txt
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> git log -1 --format="%B"
+race smoke
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> $ENTIRE checkpoint list
+  branch       main
+  checkpoints  0
+
+No checkpoints found on this branch.
+Checkpoints will appear here after you save changes during an agent session.
+peytonmontei@Peytons-MacBook-Pro /t/agy-smoke (main)> - maybe need to push?
+
+---
+
+can you run all these first and tet all entire commands first, e2e tests like we have for other agents then I test? Make sure you're using correct build
+
+---
+
+proceed, but specifically asked to run smoke tests
