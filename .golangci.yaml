@@ -159,6 +159,33 @@ linters:
       - path: ^internal/sim/
         linters:
           - wrapcheck
+      # Vendored entiredb plugin sources. Tracked upstream in the entiredb
+      # repo and refreshed in batches; held to its own house style there
+      # rather than cli's stricter defaults.
+      - path: ^internal/entiredb/
+        linters:
+          - decorder
+          - errorlint
+          - forbidigo
+          - gochecknoinits
+          - goconst
+          - gocritic
+          - gosec
+          - iface
+          - inamedparam
+          - ireturn
+          - maintidx
+          - misspell
+          - musttag
+          - nilnil
+          - perfsprint
+          - recvcheck
+          - revive
+          - sloglint
+          - unparam
+          - unused
+          - usestdlibvars
+          - wrapcheck
       - path: ^cmd/entire/cli/review/tui_model\.go$
         linters:
           - ireturn
