@@ -1,3 +1,4 @@
+//nolint:goconst // Repeated CLI flag literals keep argument-list tests readable.
 package main
 
 import (
@@ -135,7 +136,7 @@ func TestDiscoverCheckpointHistory_ExcludesInternalRefs(t *testing.T) {
 	t.Parallel()
 
 	fixture := setupMigrationHistoryRepo(t)
-	runMigrationGit(t, fixture.dir, "checkout", "-b", paths.MetadataBranchName, fixture.mainHash.String())
+	runMigrationGit(t, fixture.dir, "checkout", paths.MetadataBranchName)
 	commitMigrationTestFile(t, fixture.dir, "internal.txt", "internal\n",
 		"internal checkpoint\n\nEntire-Checkpoint: "+unrelatedCheckpointID)
 
@@ -286,6 +287,73 @@ func TestRunDryRunFailsWhenRemoteV2MainIsUnavailable(t *testing.T) {
 		"--dry-run",
 	}, &stdout)
 	require.ErrorContains(t, err, paths.V2MainRefName+" not found on remote")
+}
+
+func TestRunDryRunFailsWhenRemoteV1RefIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepoWithoutV1(t)
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
+		CheckpointID: id.MustCheckpointID(mainCheckpointID),
+		SessionID:    "session-remote-v2",
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"remote v2\"}\n")),
+	})
+	cloneDir := cloneMigrationRepoWithOrigin(t, fixture)
+
+	var stdout bytes.Buffer
+	err := run(context.Background(), []string{
+		"--repo", cloneDir,
+		"--since", fixture.baseHash.String(),
+		"--head", fixture.mainHash.String(),
+		"--dry-run",
+	}, &stdout)
+
+	require.ErrorContains(t, err, plumbing.NewBranchReferenceName(paths.MetadataBranchName).String()+" not found on remote")
+}
+
+func TestRunApplySeedsLocalV1FromRemoteBeforeMigrating(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	cpID := id.MustCheckpointID(mainCheckpointID)
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-seeded-v1",
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"seeded v1\"}\n")),
+	})
+	cloneDir := cloneMigrationRepoWithOrigin(t, fixture)
+	cloneRepo, err := git.PlainOpen(cloneDir)
+	require.NoError(t, err)
+
+	localV1RefName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	_, err = cloneRepo.Reference(localV1RefName, true)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound)
+	remoteV1Ref, err := cloneRepo.Reference(plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), true)
+	require.NoError(t, err)
+
+	var stdout bytes.Buffer
+	err = run(context.Background(), []string{
+		"--repo", cloneDir,
+		"--since", fixture.baseHash.String(),
+		"--head", fixture.mainHash.String(),
+		"--apply",
+	}, &stdout)
+	require.NoError(t, err)
+	require.Contains(t, stdout.String(), "migrated checkpoints: 1")
+	require.Contains(t, stdout.String(), "migrated sessions: 1")
+
+	cloneRepo, err = git.PlainOpen(cloneDir)
+	require.NoError(t, err)
+	localV1Ref, err := cloneRepo.Reference(localV1RefName, true)
+	require.NoError(t, err)
+	commit, err := cloneRepo.CommitObject(localV1Ref.Hash())
+	require.NoError(t, err)
+	require.Equal(t, []plumbing.Hash{remoteV1Ref.Hash()}, commit.ParentHashes)
+
+	summary, err := checkpoint.NewGitStore(cloneRepo).ReadCommitted(context.Background(), cpID)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	require.Len(t, summary.Sessions, 1)
 }
 
 func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
@@ -662,6 +730,18 @@ type migrationHistoryFixture struct {
 func setupMigrationHistoryRepo(t *testing.T) migrationHistoryFixture {
 	t.Helper()
 
+	return setupMigrationHistoryRepoWithV1(t, true)
+}
+
+func setupMigrationHistoryRepoWithoutV1(t *testing.T) migrationHistoryFixture {
+	t.Helper()
+
+	return setupMigrationHistoryRepoWithV1(t, false)
+}
+
+func setupMigrationHistoryRepoWithV1(t *testing.T, seedV1 bool) migrationHistoryFixture {
+	t.Helper()
+
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 
@@ -676,6 +756,9 @@ func setupMigrationHistoryRepo(t *testing.T) migrationHistoryFixture {
 
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
+	if seedV1 {
+		writeTestV1Baseline(t, repo)
+	}
 
 	return migrationHistoryFixture{
 		dir:         dir,
@@ -701,6 +784,7 @@ func setupMigrationOrphanRepoWithOptions(t *testing.T, checkpointID string, opts
 	baseHash := commitMigrationTestFile(t, dir, "initial.txt", "initial\n", "initial commit")
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
+	writeTestV1Baseline(t, repo)
 
 	opts.CheckpointID = id.MustCheckpointID(checkpointID)
 	if opts.SessionID == "" {
@@ -730,6 +814,10 @@ func cloneMigrationRepoWithOrigin(t *testing.T, fixture migrationHistoryFixture)
 		fixture.mainHash.String() + ":refs/heads/main",
 		fixture.featureHash.String() + ":refs/heads/" + testFeatureBranchName,
 	}
+	v1RefName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	if refExists(t, fixture.repo, v1RefName) {
+		refspecs = append(refspecs, v1RefName.String()+":"+v1RefName.String())
+	}
 	if refExists(t, fixture.repo, plumbing.ReferenceName(paths.V2MainRefName)) {
 		refspecs = append(refspecs, paths.V2MainRefName+":"+paths.V2MainRefName)
 	}
@@ -741,6 +829,16 @@ func cloneMigrationRepoWithOrigin(t *testing.T, fixture migrationHistoryFixture)
 	cloneDir := filepath.Join(t.TempDir(), "clone")
 	runMigrationGit(t, "", "clone", remoteDir, cloneDir)
 	return cloneDir
+}
+
+func writeTestV1Baseline(t *testing.T, repo *git.Repository) {
+	t.Helper()
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	if refExists(t, repo, refName) {
+		return
+	}
+	writeTestV2RefEntries(t, repo, refName, plumbing.ZeroHash, map[string]object.TreeEntry{}, "test v1 baseline")
 }
 
 func refExists(t *testing.T, repo *git.Repository, refName plumbing.ReferenceName) bool {

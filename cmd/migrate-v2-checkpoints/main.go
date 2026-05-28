@@ -55,7 +55,10 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	ctx = settings.WithWorktreeRoot(ctx, repoRoot)
 
-	if shouldEnsureV2Refs(opts) {
+	if shouldEnsureCheckpointRefs(opts) {
+		if err := ensureLatestV1Ref(ctx, repoRoot, repo); err != nil {
+			return err
+		}
 		if err := ensureLatestV2Refs(ctx, repoRoot, repo); err != nil {
 			return err
 		}
@@ -93,7 +96,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 }
 
-func shouldEnsureV2Refs(opts options) bool {
+func shouldEnsureCheckpointRefs(opts options) bool {
 	return opts.mode == modePlan || opts.mode == modeDryRun || opts.mode == modeApply
 }
 
