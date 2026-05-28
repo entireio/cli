@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 type migrationOptions struct {
@@ -42,25 +43,22 @@ type migrationCandidate struct {
 }
 
 type checkpointMigrator struct {
-	v1Store     *checkpoint.GitStore
-	v2Store     *checkpoint.V2GitStore
-	opts        migrationOptions
-	authorName  string
-	authorEmail string
-	report      *migrationReport
+	repo    *git.Repository
+	v1Store *checkpoint.GitStore
+	v2Store *checkpoint.V2GitStore
+	opts    migrationOptions
+	report  *migrationReport
 }
 
 func migrateDiscoveredCheckpoints(ctx context.Context, repo *git.Repository, discovered []discoveredCheckpoint, opts migrationOptions) (migrationReport, error) {
-	authorName, authorEmail := checkpoint.GetGitAuthorFromRepo(repo)
 	v2Store := checkpoint.NewV2GitStore(repo)
 	report := migrationReport{DiscoveredCheckpoints: len(discovered)}
 	migrator := checkpointMigrator{
-		v1Store:     checkpoint.NewGitStore(repo),
-		v2Store:     v2Store,
-		opts:        opts,
-		authorName:  authorName,
-		authorEmail: authorEmail,
-		report:      &report,
+		repo:    repo,
+		v1Store: checkpoint.NewGitStore(repo),
+		v2Store: v2Store,
+		opts:    opts,
+		report:  &report,
 	}
 
 	for _, discoveredCheckpoint := range discovered {
@@ -144,7 +142,11 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 
 		m.report.EligibleSessions++
 		if m.opts.apply {
-			writeOpts := writeOptionsFromV2Content(content, summary, m.authorName, m.authorEmail)
+			author, err := findV2SessionAuthor(ctx, m.repo, discovered.ID, sessionIndex)
+			if err != nil {
+				return eligibleSessions, fmt.Errorf("resolve v2 checkpoint %s session %d author: %w", discovered.ID, sessionIndex, err)
+			}
+			writeOpts := writeOptionsFromV2Content(content, summary, author)
 			if err := m.v1Store.WriteCommitted(ctx, writeOpts); err != nil {
 				return eligibleSessions, fmt.Errorf("write v1 checkpoint %s session %d: %w", discovered.ID, sessionIndex, err)
 			}
@@ -211,21 +213,21 @@ func hasRequiredV2Metadata(content *checkpoint.SessionContent) bool {
 	return !content.Metadata.CheckpointID.IsEmpty() && content.Metadata.SessionID != ""
 }
 
-func writeOptionsFromV2Content(content *checkpoint.SessionContent, summary *checkpoint.CheckpointSummary, authorName, authorEmail string) checkpoint.WriteCommittedOptions {
+func writeOptionsFromV2Content(content *checkpoint.SessionContent, summary *checkpoint.CheckpointSummary, author object.Signature) checkpoint.WriteCommittedOptions {
 	meta := content.Metadata
 	return checkpoint.WriteCommittedOptions{
 		CheckpointID:                meta.CheckpointID,
 		SessionID:                   meta.SessionID,
 		CreatedAt:                   meta.CreatedAt,
-		CommitTime:                  meta.CreatedAt,
+		CommitTime:                  author.When,
 		Strategy:                    meta.Strategy,
 		Branch:                      meta.Branch,
 		Transcript:                  redact.AlreadyRedacted(content.Transcript),
 		Prompts:                     checkpoint.SplitPromptContent(content.Prompts),
 		FilesTouched:                meta.FilesTouched,
 		CheckpointsCount:            meta.CheckpointsCount,
-		AuthorName:                  authorName,
-		AuthorEmail:                 authorEmail,
+		AuthorName:                  author.Name,
+		AuthorEmail:                 author.Email,
 		Agent:                       meta.Agent,
 		Model:                       meta.Model,
 		TurnID:                      meta.TurnID,

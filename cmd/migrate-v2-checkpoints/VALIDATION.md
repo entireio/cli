@@ -29,17 +29,31 @@ Tested against the `tmp-migrate-v2-script-go` branch of the CLI at
 ### 1.1 Discovery (`cmd/migrate-v2-checkpoints/history.go`)
 
 - Walks every history tip (branches under `refs/heads/*` and `refs/remotes/*/*`,
-  excluding `entire/checkpoints/v1` and `entire/trails/v1`).
+  excluding `entire/checkpoints/v1`, `entire/trails/v1`, and any `*/HEAD`
+  symbolic ref). Falls back to `HEAD` if no other tips qualify.
 - For each commit on those tips, parses `Entire-Checkpoint: <id>` trailers
   (`trailers.ParseAllCheckpoints`, key constant
   `trailers/trailers.go:41`). One commit can carry many trailers (squash
   merges).
-- Produces a list of `discoveredCheckpoint{ID, Commits}` — every checkpoint ID
-  ever referenced in commit history, plus the commits that mention it.
+- After the trailer walk, lists every checkpoint ID on
+  `refs/entire/checkpoints/v2/main` (`addV2OrphanCheckpoints`). Any v2 /main
+  ID not already discovered through a commit trailer is appended as an
+  **orphan** — a `discoveredCheckpoint{ID, Commits: nil}` with no commit
+  attribution. Orphans flow through the migration filter the same way as
+  commit-attributed candidates; only their reporting label differs.
+- Produces a list of `discoveredCheckpoint{ID, Commits}` — every checkpoint
+  ID ever referenced in commit history plus every v2 /main ID, sorted by ID.
 - `--since <commit>`/positional commit narrows to commits not reachable from
-  the named commit. `--head <commit>` restricts to a single tip.
-- Discovery is **not** v2-specific. It is a universe of "every checkpoint we
-  ever ran on a commit reachable from a real ref."
+  the named commit. `--head <commit>` restricts to a single tip. **Either
+  flag suppresses the v2 /main orphan augmentation**: when commit scope is
+  set the tool re-runs the trailer walk unscoped, counts how many v2 /main
+  IDs would have been newly discovered as orphans, and prints
+  `warning: N v2 orphans skipped; re-run without --since/--head to include
+  them` to stdout before the report. Those IDs are **not** added to the
+  migration plan in the scoped run.
+- Discovery is **not** v2-specific by default, but the orphan augmentation
+  reaches into v2 /main, so v2 refs (or at least the local copy) influence
+  the candidate set.
 
 ### 1.2 Migration filter (`cmd/migrate-v2-checkpoints/migration.go`)
 
@@ -47,7 +61,9 @@ For each discovered checkpoint:
 
 1. Read v1 summary from `entire/checkpoints/v1`. If present, collect existing
    v1 session IDs by reading each session's `metadata.json` (`session_id`
-   field).
+   field). v1 session paths are recovered from
+   `summary.Sessions[*].Metadata` via `v1SessionIndexFromSummary`, so sparse
+   or non-contiguous v1 indices are handled correctly.
 2. Read v2 summary from `refs/entire/checkpoints/v2/main`. If absent or has
    no sessions → `missing v2 checkpoint metadata` and skip.
 3. For every session index in the v2 summary:
@@ -58,11 +74,21 @@ For each discovered checkpoint:
      `/full/<13-digit-suffix>` refs. `ErrNoTranscript` →
      `missing raw transcripts`.
    - Otherwise: count `sessions eligible for migration`, and on `--apply`
-     write to v1 via `GitStore.WriteCommitted` using v2-sourced fields.
+     resolve the v2 `/main` commit that last touched that session's
+     `metadata.json`, then write to v1 via `GitStore.WriteCommitted` using
+     v2-sourced fields and that original v2 commit author line. The transcript
+     is wrapped in `redact.AlreadyRedacted(...)` so the v1 writer does not
+     re-redact bytes that were already redacted on v2.
 
 A checkpoint is **eligible** if at least one v2 session is missing from v1 and
 fully readable from v2. The candidate's `sessions=N` is that net count, not
 the v2 session count.
+
+Additionally, the report tracks how many eligible checkpoints were orphans
+(discovered through v2 /main alone, with no commit trailer attribution). An
+eligible checkpoint with `len(discovered.Commits) == 0` increments the
+`v2 orphan checkpoints eligible for migration` counter; this is a subset of
+`checkpoints eligible for migration`, never larger than `EC`.
 
 ### 1.3 What ends up on v1 after `--apply`
 
@@ -77,21 +103,26 @@ For each migrated session, the v1 tree at `<id[:2]>/<id[2:]>/<N>/` gains:
 
 Plus the root `<id[:2]>/<id[2:]>/metadata.json` gets rewritten to add the new
 session to `sessions[]` and recompute aggregate fields (see §3.2).
+Each migrated v1 metadata-branch commit uses the author name, email, and author
+timestamp from the v2 `/main` commit that wrote the corresponding v2 session
+`metadata.json`; the session metadata's own `created_at` remains the v2 JSON
+value.
 
 `<N>` is the v1 slot. New sessions append (`findSessionIndex` in
-`committed.go:326`); if v1 already had session 0 and v2 contributes one new
+`committed.go:610`); if v1 already had session 0 and v2 contributes one new
 session, it lands in v1 slot 1. v1 indices and v2 indices for the **same**
 checkpoint can differ; only `session_id` is invariant across the two stores.
 
-Chunking note: `full.jsonl` is chunked via `agent.ChunkTranscript`. Chunks are
-`full.jsonl`, `full.jsonl.001`, `full.jsonl.002`, … (`agent/chunking.go:122`
-with `ChunkSuffix = ".%03d"`). Index 0 has no suffix.
+Chunking note: `full.jsonl` is chunked via `agent.ChunkTranscript`. Chunks
+are `full.jsonl`, `full.jsonl.001`, `full.jsonl.002`, …
+(`agent/chunking.go:126` `ChunkFileName`, with
+`ChunkSuffix = ".%03d"` at line 19). Index 0 has no suffix.
 
 Codex caveat: for sessions whose agent is `codex`, `writeTranscript` applies
 `codex.SanitizePortableTranscript` before chunking and hashing
-(`committed.go:745-747`). The bytes written to v1 may differ from the bytes
-read out of v2's `/full/*`, but they are still self-consistent against the new
-v1 `content_hash.txt`.
+(`committed.go:746`). The bytes written to v1 may differ from the bytes
+read out of v2's `/full/*`, but they are still self-consistent against the
+new v1 `content_hash.txt`.
 
 ## 2. Run modes & expected report shape
 
@@ -102,11 +133,21 @@ $ migrate-v2-checkpoints [--repo PATH] [--since SHA | SHA] [--head SHA] \
 
 Default mode is `plan` (same output as `--dry-run`).
 
+For `--dry-run` and `--apply` (but not `--list`), the tool resolves the
+checkpoint fetch remote and refreshes `refs/entire/checkpoints/v2/main` plus
+every `refs/entire/checkpoints/v2/full/*` ref before discovery (see
+`ensureLatestV2Refs` in `v2_preflight.go`). If the remote can't be resolved
+and a local v2 /main ref exists, fetch is skipped silently; if neither
+condition holds, the tool errors out before doing any work.
+
 `--list` produces one line per checkpoint:
 ```text
 <checkpoint-id> <commit-short-sha> [<commit-short-sha> ...]
+<checkpoint-id> (orphan)
 ```
-This is the **universe** discovered in history — NOT the eligible set.
+The first form is for commit-attributed IDs; the second is for orphans
+(IDs present on v2 /main with no commit trailer in history). This is the
+**universe** discovered — NOT the eligible set.
 
 `--dry-run` / `--apply` produces:
 ```text
@@ -117,27 +158,46 @@ Migration plan:                          (or "Migration result:" on --apply)
   missing required v2 session metadata: M2
   missing raw transcripts: M3
   checkpoints eligible for migration: EC
+  v2 orphan checkpoints eligible for migration: EO
   sessions eligible for migration: ES
   migrated checkpoints: ...              (--apply only)
   migrated sessions: ...                 (--apply only)
-  checkpoints to migrate:
+  checkpoints to migrate:                (or "migrated checkpoint details:" on --apply)
     <id> sessions=N commits=<sha>[,<sha>...]
+    <id> sessions=N commits=(orphan)
+```
+
+If `--since` or `--head` is set and the v2 /main ref carries IDs the scoped
+trailer walk wouldn't have found, the tool prints a single line **before**
+the report:
+```text
+warning: N v2 orphans skipped; re-run without --since/--head to include them
 ```
 
 Invariants that should always hold on the report:
 
 - `EC ≤ D`.
+- `EO ≤ EC` (orphan-eligible is a subset of eligible).
 - `ES ≥ EC` (each eligible checkpoint contributes ≥ 1 eligible session).
 - `ES = Σ candidate.SessionCount`. The candidate list is exhaustive.
+- The candidate list is sorted by `<id>` ascending; commit SHAs within
+  a candidate are sorted by commit date descending (most recent first),
+  ties broken by hash. Orphan candidates print `commits=(orphan)` instead
+  of a SHA list.
 - On `--apply`: `migrated checkpoints = EC` and `migrated sessions = ES` if
-  no write errors. Anything less means a partial write failure — re-run the
-  tool and the remainder should re-appear as eligible.
-- `D = EC + (checkpoints with all v2 sessions in v1) + (checkpoints with
-  any missing-metadata / missing-transcript failure modes)`.
+  no write errors. Anything less means a partial write failure — re-run
+  the tool and the remainder should re-appear as eligible.
+- `D = EC + (checkpoints with v2 summary but eligibleSessions==0) + M1`.
+  The middle term covers both "all v2 sessions already in v1" and "every
+  v2 session was unreadable (missing metadata or transcript)" — those land
+  in the per-session counters `A`, `M2`, `M3` rather than dropping the
+  checkpoint at the summary level.
 - Counter sums for skipped sessions:
   `A + M2 + M3 = (Σ over all v2 sessions in checkpoints whose v2 summary
-  exists) − ES`. Useful for spot-checking after `--apply`: if `A` is large
-  and `EC` is small, most v2 checkpoints are already mirrored.
+  exists) − ES`. Useful for spot-checking after `--apply`: if `A` is
+  large and `EC` is small, most v2 checkpoints are already mirrored. If
+  `EO` is close to `EC` and `A` is small, this repo skipped v2 entirely
+  and the migration is largely "import from v2 /main."
 
 ## 3. Validation procedure
 
@@ -160,11 +220,21 @@ git -C "$REPO" for-each-ref 'refs/entire/checkpoints/v2/full/*' \
     --format='%(refname)'
 ```
 
-If `entire/checkpoints/v1` is missing the migration can still apply (it will
-be created), but if the v2 refs are missing there is nothing to migrate.
+If `entire/checkpoints/v1` is missing the migration can still apply (it
+will be created), but if the v2 refs are missing there is nothing to
+migrate.
 
-Also sanity-check the head of v2 isn't surprising — a recent commit means v2
-was being dual-written; a long-stale v2 head matches the rollback narrative:
+`--dry-run` and `--apply` auto-fetch v2 refs from the repo's checkpoint
+remote before discovery (`ensureLatestV2Refs`), so the local state
+*after* those modes runs will reflect the remote. Pre-flight is still
+useful to (a) catch a missing local v1 branch and (b) sanity-check that
+the local v2 /main looks like it's frozen rather than actively
+advancing. `--list` does **not** auto-fetch; if you intend to inspect
+the universe via `--list`, pre-fetch manually (see §9).
+
+Also sanity-check the head of v2 isn't surprising — a recent commit
+means v2 was being dual-written; a long-stale v2 head matches the
+rollback narrative:
 
 ```sh
 git -C "$REPO" log -1 --format='%h %ci %s' refs/entire/checkpoints/v2/main
@@ -179,17 +249,28 @@ git -C "$REPO" log -1 --format='%h %ci %s' refs/entire/checkpoints/v2/main
 Spot-check the counter math against §2:
 
 ```sh
-grep -E "^  (discovered|already|missing|checkpoints eligible|sessions eligible)" \
+grep -E "^  (discovered|already|missing|checkpoints eligible|v2 orphan|sessions eligible)" \
     /tmp/migrate.plan
 ```
 
-- `EC ≤ D` and `ES ≥ EC`.
+- `EC ≤ D` and `EO ≤ EC` and `ES ≥ EC`.
 - For each candidate line, parse `sessions=N` and sum — must equal `ES`.
+- The number of candidate lines with `commits=(orphan)` must equal `EO`.
 
 ```sh
 awk '/^    [0-9a-f]{12} sessions=/ {sub(/sessions=/,"",$2); s+=$2} END {print s}' \
     /tmp/migrate.plan
 # Should equal the "sessions eligible for migration" value.
+
+grep -cE '^    [0-9a-f]{12} sessions=[0-9]+ commits=\(orphan\)$' /tmp/migrate.plan
+# Should equal the "v2 orphan checkpoints eligible for migration" value.
+```
+
+If the run was launched with `--since` or `--head`, also confirm the
+orphan-skip warning matches expectations:
+
+```sh
+grep "^warning: " /tmp/migrate.plan || echo "(no scope-orphan warning)"
 ```
 
 ### 3.3 Step B — confirm every candidate is genuinely v2-only-or-partial
@@ -246,26 +327,33 @@ wc -l /tmp/v2_only_ids.txt
 Every ID in `v2_only_ids.txt` should be either a candidate, or — if v2 has
 no session metadata for it / no raw transcript — a contributor to the
 `missing v2 checkpoint metadata` / `missing raw transcripts` counters.
+Orphan candidates also live in this set: they are exactly v2 /main IDs
+with no commit attribution but with intact v2 metadata + transcripts.
 
 A quick predicate: the eligible candidate count plus the missing-metadata
 and missing-raw counters should equal or exceed the v2-only set. If it's
 less, something is being silently dropped.
 
 ```sh
-EC=$(grep "checkpoints eligible" /tmp/migrate.plan | awk '{print $NF}')
+EC=$(grep "checkpoints eligible for migration" /tmp/migrate.plan | awk '{print $NF}')
+EO=$(grep "v2 orphan checkpoints" /tmp/migrate.plan | awk '{print $NF}')
 M1=$(grep "missing v2 checkpoint metadata" /tmp/migrate.plan | awk '{print $NF}')
 M3=$(grep "missing raw transcripts" /tmp/migrate.plan | awk '{print $NF}')
 echo "v2-only on disk: $(wc -l < /tmp/v2_only_ids.txt)"
-echo "EC=$EC  M1=$M1  M3=$M3   (EC + M1 + M3 must be >= v2-only count)"
+echo "EC=$EC  EO=$EO  M1=$M1  M3=$M3"
+echo "  EC + M1 + M3 must be >= v2-only count"
+echo "  EO <= EC must hold (orphan is a subset of eligible)"
 ```
 
-(`>=` rather than `=` because `M1`/`M3` are counted per-checkpoint over the
-entire discovered universe, not only the v2-only set.)
+(`>=` rather than `=` because `M1`/`M3` are counted per-checkpoint /
+per-session over the entire discovered universe, not only the v2-only
+set. `EO` is exactly the subset of `EC` whose discovery came from v2
+/main alone.)
 
 ### 3.4 Step C — confirm commit-list accuracy
 
-The report's `commits=...` are short SHAs of commits in history whose message
-carries `Entire-Checkpoint: <id>`. Verify directly:
+The report's `commits=...` are short SHAs of commits in history whose
+message carries `Entire-Checkpoint: <id>`. Verify directly:
 
 ```sh
 ID=02d9783342a2
@@ -275,11 +363,16 @@ git -C "$REPO" log --all --format='%h %s' --grep "Entire-Checkpoint: $ID"
 The set of short SHAs that this prints should match the report's
 `commits=…` for that ID. If they differ:
 
+- `commits=(orphan)` in the report means the ID is on v2 /main but no
+  reachable commit message carries its trailer. `git log --grep` should
+  produce **no** output for that ID. If it does produce output, something
+  is wrong — either the trailer walk dropped the commit or the orphan
+  pass mislabelled the candidate.
 - Extra in the report but absent here: the discovery walk picked up a tip
   this `--all` view doesn't include (rare).
 - Extra here but absent in the report: a tip was filtered out
-  (`entire/checkpoints/v1`, `entire/trails/v1`, or `HEAD` aliases — the
-  filter is in `history.go:182-205`).
+  (`entire/checkpoints/v1`, `entire/trails/v1`, or `*/HEAD` symbolic refs
+  — see `isInternalHistoryRefName` / `isHistoryRef` in `history.go`).
 
 A commit may also appear under multiple candidate IDs if it's a squash
 merge with multiple trailers; that's expected.
@@ -333,6 +426,13 @@ sample matches 1:1, the report's accounting is trustworthy.
 
 ## 4. Apply the migration
 
+> ⛔ **Human operator only. Agents must not run `--apply`.** If an agent is
+> helping with this runbook, it may prepare commands, inspect dry-run output,
+> update documentation, and analyze validation results, but it must stop before
+> executing any command that includes `--apply`. The repository owner/operator
+> runs the apply command manually in their own terminal and then shares the
+> resulting report/output for follow-up validation.
+
 > ⛔ **No `git push` for `entire/checkpoints/v1` from this point until §5
 > has fully passed and the operator has consciously decided to publish.**
 > The migration itself never pushes — but the v1 branch is the same ref
@@ -360,10 +460,14 @@ a separate, explicit decision once the post-apply checks in §5 pass.
 - §3 ran clean: the candidate list looks plausible, counter math adds up,
   and a spot sample (Steps C and D) confirmed the candidates really are
   v2-only / partial migrations.
-- The local repo has the v2 refs. If `git -C "$REPO" show-ref
-  refs/entire/checkpoints/v2/main` is empty, the migration will silently
-  count everything as "missing v2 checkpoint metadata" and write nothing.
-  Pre-fetch:
+- The repo has a resolvable checkpoint fetch remote, OR a local
+  `refs/entire/checkpoints/v2/main` ref. `--apply` calls
+  `ensureLatestV2Refs` first and will refresh v2 /main and every
+  `refs/entire/checkpoints/v2/full/*` ref from the remote (forced fetch of
+  `/full/current`, fast-forward fetch of archives). If the fetch target
+  can't be resolved and no local v2 /main exists, the tool errors out
+  before doing any work. A manual pre-fetch is no longer required, but
+  remains a safe no-op:
 
   ```sh
   git -C "$REPO" fetch origin \
@@ -387,13 +491,15 @@ APPLIED_REPORT="/tmp/migrate-${REPO_NAME}.applied"
 PRE_APPLY_TIP=$(git -C "$REPO" rev-parse entire/checkpoints/v1 2>/dev/null || echo "none")
 echo "pre-apply v1 tip: $PRE_APPLY_TIP"
 
+# USER ONLY: an agent must not execute this command.
 # Apply. Tee the report into /tmp/migrate-${REPO_NAME}.applied — §5 reads it back.
 "$TOOL" --repo "$REPO" --apply | tee "$APPLIED_REPORT"
 
 # Sanity-check the report.
-grep -E "^  (checkpoints eligible|sessions eligible|migrated)" "$APPLIED_REPORT"
+grep -E "^  (checkpoints eligible|v2 orphan|sessions eligible|migrated)" "$APPLIED_REPORT"
 #   migrated checkpoints == checkpoints eligible
 #   migrated sessions    == sessions eligible
+#   v2 orphan ...        == subset of EC (informational; not a pass/fail gate)
 # Anything less means at least one write failed silently — re-run --apply
 # (idempotent) and inspect logs.
 
@@ -433,7 +539,8 @@ git -C "$REPO" log --format='%h %ci %s' \
 
 ### Operator checkpoint
 
-**Stop here. Run the apply command yourself and confirm:**
+**Stop here. If you are an agent, do not run `--apply`. The human operator
+must run the apply command themselves and confirm:**
 
 1. `migrated checkpoints` equals `checkpoints eligible for migration` from
    the dry-run.
@@ -486,7 +593,7 @@ git -C "$REPO" cat-file -p "entire/checkpoints/v1:$SHARD/metadata.json" | jq .
 ```
 
 Expected shape (schema lives at
-`cmd/entire/cli/checkpoint/checkpoint.go:527-562`):
+`cmd/entire/cli/checkpoint/checkpoint.go:545-563`):
 
 ```jsonc
 {
@@ -533,10 +640,11 @@ Acceptable differences:
   the candidate's contributions are appended.
 - `combined_attribution`/`token_usage` may differ if the v1 store
   aggregates across all sessions present and v1 already had different
-  sessions. For purely v2-only checkpoints (the typical case the user
-  cares about) these should match the v2 summary exactly, since the
-  migration uses `summary.CombinedAttribution` from v2 verbatim
-  (`migration.go:199`) and per-session token usage is replayed from v2.
+  sessions. For purely v2-only checkpoints (the typical case, which
+  includes all orphan candidates) these should match the v2 summary
+  exactly, since the migration uses `summary.CombinedAttribution` from
+  v2 verbatim (`migration.go:242`) and per-session token usage is
+  replayed from v2.
 
 Hard requirements:
 
@@ -568,7 +676,7 @@ echo "session $WANT_SID lives in v1 slot $V1_SLOT"
 ```
 
 Then diff the per-session metadata, comparing **fields that are expected to
-survive migration** (`migration.go:173-205` lists them explicitly):
+survive migration** (`migration.go:216-248` lists them explicitly):
 
 ```sh
 V2_SLOT=…   # slot the session occupied on v2 (its index in v2 summary)
@@ -597,12 +705,13 @@ diff <(git -C "$REPO" cat-file -p \
 
 Expected: no diff. Special cases:
 
-- `created_at` is replayed from v2's `created_at` and also used as v1's
-  `CommitTime` (`migration.go:178-179`). The two timestamps in the v1 file
-  should be identical when serialised.
+- `created_at` is replayed from v2's `created_at` into the v1 metadata JSON.
+  The v1 metadata-branch commit timestamp is a separate git author timestamp
+  copied from the v2 `/main` commit that last touched this session's
+  `metadata.json`.
 - The migration sets `HasReview = session.Kind(meta.Kind).IsReview()`
-  (`migration.go:204`). For non-review kinds this is `false` and may have
-  been absent (omitempty) in v2; that's still a match.
+  (`migration.go:247`). For non-review kinds this is `false` and may
+  have been absent (omitempty) in v2; that's still a match.
 - `cli_version` on the v1 session may differ from v2's. The migration
   doesn't pass `CLIVersion`, so v1 inherits whatever default the writer
   applies — generally an empty value or the current binary's version. Not
@@ -619,6 +728,23 @@ git -C "$REPO" cat-file -p "entire/checkpoints/v1:$SHARD/$V1_SLOT/metadata.json"
   | jq -e 'has("checkpoint_id") and has("session_id") and has("created_at")' \
   > /dev/null && echo OK
 ```
+
+Author parity for the metadata-branch commit:
+
+```sh
+V2_AUTHOR=$(git -C "$REPO" log -1 --format='%an <%ae> %aI' \
+    refs/entire/checkpoints/v2/main -- "$SHARD/$V2_SLOT/metadata.json")
+V1_AUTHOR=$(git -C "$REPO" log -1 --format='%an <%ae> %aI' \
+    entire/checkpoints/v1 -- "$SHARD/$V1_SLOT/metadata.json")
+
+echo "v2: $V2_AUTHOR"
+echo "v1: $V1_AUTHOR"
+[ "$V1_AUTHOR" = "$V2_AUTHOR" ] && echo OK || echo MISMATCH
+```
+
+Expected: exact match. For orphan candidates this is still valid: the v2
+`/main` path history is the source of the author line even though no user
+commit trailer exists.
 
 ### 5.3 Step G — `prompt.txt` content
 
@@ -651,13 +777,13 @@ This is the most important check. Two layers:
 
 Reassemble logic: ordered list `full.jsonl`, `full.jsonl.001`,
 `full.jsonl.002`, … For most agents this is JSONL with `\n` separators
-between chunks (`agent/chunking.go:108-118`); for `vogon`, OpenCode etc.
-the agent's own `ReassembleTranscript` is used at read time. For
-validation, byte-concatenation in chunk order is what the v1 writer
-hashed (`committed.go:784` — the hash is over `transcriptBytes` BEFORE
-chunking), so the easier check is to read the original v1 input bytes
-back via the v1 store API, OR to validate that each chunk blob is what
-the v1 writer would have produced.
+between chunks (`agent.ReassembleJSONL` in `agent/chunking.go:109-118`);
+for `vogon`, OpenCode etc. the agent's own `ReassembleTranscript` is
+used at read time. For validation, byte-concatenation in chunk order is
+what the v1 writer hashed (`committed.go:784` — the hash is over
+`transcriptBytes` BEFORE chunking), so the easier check is to read the
+original v1 input bytes back via the v1 store API, OR to validate that
+each chunk blob is what the v1 writer would have produced.
 
 The simplest robust shell check: reconstruct via ordered concat and
 compute the digest, then compare to `content_hash.txt`. This is exact for
@@ -733,7 +859,7 @@ echo "v2 raw_transcript:  $RAW_HASH"
 For non-Codex agents, the two hashes should match. For Codex (agent
 field on the session metadata is `codex`), they are allowed to differ —
 v1 sanitizes via `codex.SanitizePortableTranscript` before hashing
-(`committed.go:745-747`). The v1 self-consistency check above is still
+(`committed.go:746`). The v1 self-consistency check above is still
 required in that case.
 
 ### 5.5 Step I — bulk sweep
@@ -861,7 +987,9 @@ from §4's "Behavior notes" — cheap and local, because you did not push.
 | `missing v2 checkpoint metadata: N (large)`                    | v2 `/main` is missing or its tree lacks summaries for many discovered IDs.                                          | Confirm `refs/entire/checkpoints/v2/main` exists, was fetched, and is reasonably recent. |
 | `missing required v2 session metadata: > 0`                    | v2 session `metadata.json` lacks `checkpoint_id` or `session_id`. Could indicate corruption or a partial v2 write.  | Inspect the affected sessions manually; they will be skipped, not failed.               |
 | `missing raw transcripts: > 0`                                 | v2 `/main` has a session but `/full/current` and archived `/full/*` don't carry its `raw_transcript*` data.         | Confirm archived `/full/*` refs are present locally (or accessible via remote fetch).   |
-| Candidate `commits=` is empty                                  | Shouldn't happen by construction (discovery groups by commit). Investigate the bug.                                | File a bug.                                                                             |
+| Candidate `commits=(orphan)`                                   | The ID is on v2 /main with no commit-trailer attribution in history. Expected and benign; counted by `EO`.          | None — verify against `git log --grep` in §3.4 to confirm there's no missed trailer.    |
+| `warning: N v2 orphans skipped` on a `--since`/`--head` run    | Commit-scoped run found N v2 /main IDs that an unscoped walk would have surfaced as orphan candidates.              | Re-run without `--since`/`--head` to include them, or accept the scope deliberately.    |
+| `v2 orphan checkpoints eligible for migration > checkpoints eligible for migration` | Should be impossible (`EO ⊆ EC` by construction).                                              | File a bug.                                                                             |
 | `sessions=N` for a candidate doesn't match the §3.5 expected   | Either v1 already has the session (so report should have lower N), or session IDs are non-unique within v2.        | Inspect; non-unique session IDs are a v2 corruption.                                    |
 | Post-apply, `content_hash.txt` ≠ recomputed SHA-256            | Codex agent + ours-vs-original sanitization difference, OR a bug. Confirm `agent` field on the session.            | If non-Codex, file a bug with chunk listing + bytes.                                    |
 | Post-apply, `content_hash.txt` matches but v2's `raw_transcript_hash.txt` doesn't | Codex sanitization (expected) OR transcript was rewritten in transit. Confirm agent first.               | If non-Codex, file a bug.                                                               |
@@ -891,19 +1019,32 @@ from §4's "Behavior notes" — cheap and local, because you did not push.
 ## 8. Source map
 
 - Tool entry: `cmd/migrate-v2-checkpoints/main.go`
-- History walk: `cmd/migrate-v2-checkpoints/history.go`
-- Migration loop: `cmd/migrate-v2-checkpoints/migration.go`
+- History walk: `cmd/migrate-v2-checkpoints/history.go` —
+  `discoverCheckpointHistoryWithSkippedOrphans` (line 55),
+  `addV2OrphanCheckpoints` (line 364), `listV2MainCheckpointIDs`
+  (line 408), `writeCheckpointList` (line 484, includes the `(orphan)`
+  label), `writeDiscoveryWarnings` (line 497, prints the scope-skip
+  warning).
+- v2 ref auto-fetch: `cmd/migrate-v2-checkpoints/v2_preflight.go` —
+  `ensureLatestV2Refs` (line 24), `fetchV2MainRef` (line 75),
+  `fetchV2FullRefs` (line 101).
+- Migration loop: `cmd/migrate-v2-checkpoints/migration.go` —
+  `migrateDiscoveredCheckpoints` (line 53), `migrateCheckpoint`
+  (line 98), `writeOptionsFromV2Content` (line 214),
+  `writeMigrationReport` (line 249), `candidateCommitLabel` (line 288,
+  emits `(orphan)`).
 - v1 write: `cmd/entire/cli/checkpoint/committed.go` — `WriteCommitted`
-  (line 52), `writeStandardCheckpointEntries` (line 310),
+  (line 58), `writeStandardCheckpointEntries` (line 310),
   `writeSessionToSubdirectory` (line 404), `writeTranscript` (line 720),
-  `findSessionIndex` (line 326).
+  `findSessionIndex` (line 610).
 - v2 read: `cmd/entire/cli/checkpoint/v2_read.go` — `ReadCommitted`
-  (line 24), `ReadSessionMetadataAndPrompts` (line 205),
+  (line 26), `ReadSessionMetadataAndPrompts` (line 205),
   `ReadSessionContent` (line 274), `readTranscriptFromFullRefs`
-  (line 339), `readTranscriptFromRef` (line 540).
+  (line 342), `readTranscriptFromRef` (line 540),
+  `isV2ArchivedFullRefSuffix` (line 523).
 - Schemas: `cmd/entire/cli/checkpoint/checkpoint.go` — `CheckpointSummary`
-  (line 527), `CommittedMetadata` (line 443), `SessionFilePaths`
-  (line 517).
+  (line 545), `CommittedMetadata` (line 444), `SessionFilePaths`
+  (line 520).
 - Trailer parsing: `cmd/entire/cli/trailers/trailers.go`.
 - Chunking: `cmd/entire/cli/agent/chunking.go`.
 - Sanitization (Codex only): `cmd/entire/cli/agent/codex/`
@@ -917,16 +1058,23 @@ from §4's "Behavior notes" — cheap and local, because you did not push.
   remote refs the candidate list may include IDs whose underlying commits
   are only reachable via those remotes. That's still correct — those
   commits really did reference the IDs.
-- If the v2 refs aren't fetched locally (the default refspec excludes
-  `refs/entire/*`), discovery will still find IDs from trailers but the
-  per-checkpoint v2 reads will fail with "missing v2 checkpoint metadata."
-  Pre-fetch with:
+- `--dry-run` / `--apply` auto-fetch v2 refs from the repo's checkpoint
+  remote (`ensureLatestV2Refs`). If the remote resolves, you get an
+  up-to-date local copy of `refs/entire/checkpoints/v2/main` and every
+  `refs/entire/checkpoints/v2/full/*`; if it doesn't, the tool only
+  proceeds when a local v2 /main ref is already present. `--list` does
+  **not** auto-fetch — if you want a candidate universe that reflects
+  the remote, refresh manually first:
   ```sh
   git -C "$REPO" fetch origin \
       'refs/entire/checkpoints/v2/*:refs/entire/checkpoints/v2/*'
   ```
+- Orphan augmentation is enabled by default. Pass `--since` or `--head`
+  if you intentionally want to exclude v2-only IDs from migration; the
+  tool will still print a single-line warning summarising how many were
+  skipped.
 - The tool is **idempotent** in `--apply` mode. Re-running after a
   successful apply should produce `checkpoints eligible for migration: 0`
   modulo any new v2 data that landed in the meantime.
 - The tool only writes to the local repo. After `--apply`, push the
-  updated v1 branch yourself when ready.
+  updated v1 branch yourself when ready (and only after §5 passes).

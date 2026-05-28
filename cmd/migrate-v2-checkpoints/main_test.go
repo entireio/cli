@@ -295,7 +295,10 @@ func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 	fixture := setupMigrationHistoryRepo(t)
 	cpID := id.MustCheckpointID(mainCheckpointID)
 	createdAt := time.Date(2024, 5, 6, 7, 8, 9, 0, time.UTC)
+	v2AuthorWhen := time.Date(2024, 5, 6, 8, 9, 10, 0, time.UTC)
 	transcript := []byte("{\"type\":\"assistant\",\"message\":\"migrated\"}\n")
+	v2AuthorName := "Original V2 Author"
+	v2AuthorEmail := "original-v2@example.com"
 
 	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
 		CheckpointID:              cpID,
@@ -307,8 +310,9 @@ func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 		Prompts:                   []string{"first prompt", "second prompt"},
 		FilesTouched:              []string{"main.go"},
 		CheckpointsCount:          2,
-		AuthorName:                testAuthorName,
-		AuthorEmail:               testAuthorEmail,
+		AuthorName:                v2AuthorName,
+		AuthorEmail:               v2AuthorEmail,
+		AuthorWhen:                v2AuthorWhen,
 		Agent:                     agent.AgentTypeClaudeCode,
 		Model:                     "claude-test-model",
 		TurnID:                    "turn-1",
@@ -359,14 +363,23 @@ func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 	require.NoError(t, err)
 	commit, err := fixture.repo.CommitObject(ref.Hash())
 	require.NoError(t, err)
-	require.True(t, commit.Author.When.Equal(createdAt), "author time = %s, want %s", commit.Author.When, createdAt)
+	require.Equal(t, v2AuthorName, commit.Author.Name)
+	require.Equal(t, v2AuthorEmail, commit.Author.Email)
+	require.True(t, commit.Author.When.Equal(v2AuthorWhen), "author time = %s, want %s", commit.Author.When, v2AuthorWhen)
 }
 
 func TestRunApplyMigratesV2OrphanCheckpointAndIsIdempotent(t *testing.T) {
 	t.Parallel()
 
 	cpID := id.MustCheckpointID("777777777777")
-	fixture := setupMigrationOrphanRepo(t, cpID.String())
+	v2AuthorWhen := time.Date(2024, 7, 8, 9, 10, 11, 0, time.UTC)
+	v2AuthorName := "Original Orphan Author"
+	v2AuthorEmail := "original-orphan@example.com"
+	fixture := setupMigrationOrphanRepoWithOptions(t, cpID.String(), testV2CheckpointOptions{
+		AuthorName:  v2AuthorName,
+		AuthorEmail: v2AuthorEmail,
+		AuthorWhen:  v2AuthorWhen,
+	})
 
 	var stdout bytes.Buffer
 	err := run(context.Background(), []string{
@@ -388,6 +401,14 @@ func TestRunApplyMigratesV2OrphanCheckpointAndIsIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "orphan-session", content.Metadata.SessionID)
 	require.JSONEq(t, `{"message":"orphan"}`, string(content.Transcript))
+
+	ref, err := fixture.repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	commit, err := fixture.repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	require.Equal(t, v2AuthorName, commit.Author.Name)
+	require.Equal(t, v2AuthorEmail, commit.Author.Email)
+	require.True(t, commit.Author.When.Equal(v2AuthorWhen), "author time = %s, want %s", commit.Author.When, v2AuthorWhen)
 
 	stdout.Reset()
 	err = run(context.Background(), []string{
@@ -669,6 +690,12 @@ func setupMigrationHistoryRepo(t *testing.T) migrationHistoryFixture {
 func setupMigrationOrphanRepo(t *testing.T, checkpointID string) migrationHistoryFixture {
 	t.Helper()
 
+	return setupMigrationOrphanRepoWithOptions(t, checkpointID, testV2CheckpointOptions{})
+}
+
+func setupMigrationOrphanRepoWithOptions(t *testing.T, checkpointID string, opts testV2CheckpointOptions) migrationHistoryFixture {
+	t.Helper()
+
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 
@@ -676,11 +703,14 @@ func setupMigrationOrphanRepo(t *testing.T, checkpointID string) migrationHistor
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	writeTestV2Checkpoint(t, repo, testV2CheckpointOptions{
-		CheckpointID: id.MustCheckpointID(checkpointID),
-		SessionID:    "orphan-session",
-		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"orphan\"}\n")),
-	})
+	opts.CheckpointID = id.MustCheckpointID(checkpointID)
+	if opts.SessionID == "" {
+		opts.SessionID = "orphan-session"
+	}
+	if opts.Transcript.Len() == 0 {
+		opts.Transcript = redact.AlreadyRedacted([]byte("{\"message\":\"orphan\"}\n"))
+	}
+	writeTestV2Checkpoint(t, repo, opts)
 
 	return migrationHistoryFixture{
 		dir:      dir,

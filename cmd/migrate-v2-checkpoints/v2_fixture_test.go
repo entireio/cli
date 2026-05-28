@@ -39,6 +39,7 @@ type testV2CheckpointOptions struct {
 	CheckpointsCount          int
 	AuthorName                string
 	AuthorEmail               string
+	AuthorWhen                time.Time
 	Agent                     types.AgentType
 	Model                     string
 	TurnID                    string
@@ -75,6 +76,9 @@ func writeTestV2Checkpoint(t *testing.T, repo *git.Repository, opts testV2Checkp
 	}
 	if opts.AuthorEmail == "" {
 		opts.AuthorEmail = testAuthorEmail
+	}
+	if opts.AuthorWhen.IsZero() {
+		opts.AuthorWhen = opts.CreatedAt
 	}
 
 	sessionIndex := writeTestV2MainCheckpoint(t, repo, opts)
@@ -197,7 +201,11 @@ func writeTestV2MainCheckpoint(t *testing.T, repo *git.Repository, opts testV2Ch
 		Hash: summaryBlob,
 	}
 
-	writeTestV2RefEntries(t, repo, refName, parentHash, entries, "test v2 main fixture")
+	writeTestV2RefEntriesWithAuthor(t, repo, refName, parentHash, entries, "test v2 main fixture", object.Signature{
+		Name:  opts.AuthorName,
+		Email: opts.AuthorEmail,
+		When:  opts.AuthorWhen,
+	})
 	return sessionIndex
 }
 
@@ -251,10 +259,31 @@ func readTestV2RefEntries(t *testing.T, repo *git.Repository, refName plumbing.R
 func writeTestV2RefEntries(t *testing.T, repo *git.Repository, refName plumbing.ReferenceName, parentHash plumbing.Hash, entries map[string]object.TreeEntry, message string) {
 	t.Helper()
 
+	authorName, authorEmail := checkpoint.GetGitAuthorFromRepo(repo)
+	writeTestV2RefEntriesWithAuthor(t, repo, refName, parentHash, entries, message, object.Signature{
+		Name:  authorName,
+		Email: authorEmail,
+		When:  time.Now(),
+	})
+}
+
+func writeTestV2RefEntriesWithAuthor(t *testing.T, repo *git.Repository, refName plumbing.ReferenceName, parentHash plumbing.Hash, entries map[string]object.TreeEntry, message string, author object.Signature) {
+	t.Helper()
+
 	treeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, entries)
 	require.NoError(t, err)
-	authorName, authorEmail := checkpoint.GetGitAuthorFromRepo(repo)
-	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, parentHash, message, authorName, authorEmail)
+	commit := &object.Commit{
+		TreeHash:  treeHash,
+		Author:    author,
+		Committer: author,
+		Message:   message,
+	}
+	if parentHash != plumbing.ZeroHash {
+		commit.ParentHashes = []plumbing.Hash{parentHash}
+	}
+	encoded := repo.Storer.NewEncodedObject()
+	require.NoError(t, commit.Encode(encoded))
+	commitHash, err := repo.Storer.SetEncodedObject(encoded)
 	require.NoError(t, err)
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, commitHash)))
 }
