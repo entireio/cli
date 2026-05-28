@@ -11,9 +11,15 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
+
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 
 	// Register agents so GetByAgentType works in tests.
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
@@ -420,4 +426,105 @@ func TestCalculateTokenUsage_DroidStartOffsetBeyondEnd(t *testing.T) {
 	if usage.APICallCount != 0 {
 		t.Errorf("APICallCount = %d, want 0", usage.APICallCount)
 	}
+}
+
+// TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation verifies that
+// when state.Kind is KindAgentInvestigate, condensation propagates the kind
+// through to CheckpointSummary.HasInvestigation on the metadata branch and
+// writes the per-session investigate fields into the per-session
+// CommittedMetadata. Mirrors the (untested) review-tagging path so future
+// regressions in either flow are caught here.
+//
+// Tests in this file use t.Chdir for CWD-based git resolution, so this
+// cannot be a parallel test.
+func TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-05-08-investigate-condensation"
+
+	// Stage a transcript and a SaveStep so condensation has something to
+	// process. Then mark the session as KindAgentInvestigate before
+	// CondenseSession runs.
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	transcript := `{"type":"human","message":{"content":"investigate flake"}}
+{"type":"assistant","message":{"content":"On it."}}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
+
+	// Modify a tracked file so SaveStep produces a non-empty session.
+	trackedFile := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(trackedFile, []byte("agent-modified content"), 0o644))
+
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"test.txt"},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Investigate checkpoint 1",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	}))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+
+	// Tag the session as an investigation BEFORE condensation. Mirrors what
+	// adoptInvestigateEnv does on the live session-state file.
+	state.Kind = session.KindAgentInvestigate
+	state.InvestigateRunID = "0123456789ab"
+	state.InvestigateTopic = "Why is checkout flaky?"
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	checkpointID := id.MustCheckpointID("aabbccdd1122")
+	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped, "condensation must not skip when files are touched")
+
+	// Read CheckpointSummary off the metadata branch and assert the
+	// HasInvestigation umbrella flag flowed through.
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+
+	checkpointTree, err := tree.Tree(checkpointID.Path())
+	require.NoError(t, err)
+
+	rootMeta, err := checkpointTree.File(paths.MetadataFileName)
+	require.NoError(t, err)
+	rootBytes, err := rootMeta.Contents()
+	require.NoError(t, err)
+	var summary checkpoint.CheckpointSummary
+	require.NoError(t, json.Unmarshal([]byte(rootBytes), &summary))
+
+	require.True(t, summary.HasInvestigation, "CheckpointSummary.HasInvestigation must be true after investigate condensation")
+	require.False(t, summary.HasReview, "CheckpointSummary.HasReview must remain false")
+
+	// Per-session metadata must round-trip the investigate fields.
+	sessionMeta, err := checkpointTree.File(checkpointID.Path() + "/0/" + paths.MetadataFileName)
+	if err != nil {
+		// Path style varies by tree iteration. Fall back to subtree lookup.
+		subtree, subErr := checkpointTree.Tree("0")
+		require.NoError(t, subErr)
+		sessionMeta, err = subtree.File(paths.MetadataFileName)
+		require.NoError(t, err)
+	}
+	sessionBytes, err := sessionMeta.Contents()
+	require.NoError(t, err)
+	var meta checkpoint.CommittedMetadata
+	require.NoError(t, json.Unmarshal([]byte(sessionBytes), &meta))
+
+	require.Equal(t, string(session.KindAgentInvestigate), meta.Kind, "per-session Kind")
+	require.Equal(t, "0123456789ab", meta.InvestigateRunID, "per-session InvestigateRunID")
+	require.Equal(t, "Why is checkout flaky?", meta.InvestigateTopic, "per-session InvestigateTopic")
 }

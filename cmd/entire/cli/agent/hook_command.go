@@ -25,6 +25,14 @@ func MissingEntireWarning(format WarningFormat) string {
 	}
 }
 
+// LocalDevHookScript is the local-development hook launcher, with the repo root
+// resolved at hook runtime via git. It points at scripts/entire-dev, which
+// compiles the CLI on demand and falls back to the entire binary on PATH when
+// the tree does not build (e.g. mid merge-conflict-fix). Agents that locate the
+// repo root with `git rev-parse` build their local-dev command prefix from
+// this; claude-code uses ${CLAUDE_PROJECT_DIR} and defines its own prefix.
+const LocalDevHookScript = `"$(git rev-parse --show-toplevel)"/scripts/entire-dev`
+
 // WrapProductionSilentHookCommand exits successfully without output when the
 // Entire CLI is missing from PATH.
 func WrapProductionSilentHookCommand(command string) string {

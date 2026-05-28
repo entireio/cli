@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -214,6 +215,7 @@ func (env *TestEnv) InitRepo() {
 	if err != nil {
 		env.T.Fatalf("failed to init git repo: %v", err)
 	}
+	defer repo.Close()
 
 	// Configure git user for commits
 	cfg, err := repo.Config()
@@ -440,10 +442,11 @@ func (env *TestEnv) FileExists(path string) bool {
 func (env *TestEnv) GitAdd(paths ...string) {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -461,10 +464,11 @@ func (env *TestEnv) GitAdd(paths ...string) {
 func (env *TestEnv) GitCommit(message string) {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -491,10 +495,11 @@ func (env *TestEnv) GitCommitWithMetadata(message, metadataDir string) {
 	// Format message with metadata trailer
 	fullMessage := message + "\n\nEntire-Metadata: " + metadataDir + "\n"
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -521,10 +526,11 @@ func (env *TestEnv) GitCommitWithCheckpointID(message, checkpointID string) {
 	// Format message with checkpoint trailer
 	fullMessage := message + "\n\nEntire-Checkpoint: " + checkpointID + "\n"
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -556,10 +562,11 @@ func (env *TestEnv) GitCommitWithMultipleSessions(message string, sessionIDs []s
 	}
 	fullMessage += fullMessageSb404.String()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -592,10 +599,11 @@ func (env *TestEnv) GitCommitWithMultipleCheckpoints(message string, checkpointI
 		sb.WriteString("Entire-Checkpoint: " + cpID + "\n")
 	}
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -651,10 +659,11 @@ func composeReviewPromptForTest(skills []string) string {
 func (env *TestEnv) GetHeadHash() string {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
@@ -693,10 +702,11 @@ func (env *TestEnv) GetShadowBranchNameForCommit(commitHash string) string {
 func (env *TestEnv) GetGitLog() []string {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
@@ -738,10 +748,11 @@ func (env *TestEnv) GitCheckoutNewBranch(branchName string) {
 func (env *TestEnv) GetCurrentBranch() string {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
@@ -875,10 +886,11 @@ func (env *TestEnv) RewindReset(commitID string) error {
 func (env *TestEnv) BranchExists(branchName string) bool {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
 	return err == nil
@@ -888,10 +900,11 @@ func (env *TestEnv) BranchExists(branchName string) bool {
 func (env *TestEnv) GetCommitMessage(hash string) string {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	commitHash := plumbing.NewHash(hash)
 	commit, err := repo.CommitObject(commitHash)
@@ -906,10 +919,11 @@ func (env *TestEnv) GetCommitMessage(hash string) string {
 func (env *TestEnv) FileExistsInBranch(branchName, filePath string) bool {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	// Get the branch reference
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
@@ -943,10 +957,11 @@ func (env *TestEnv) FileExistsInBranch(branchName, filePath string) bool {
 func (env *TestEnv) ReadFileFromBranch(branchName, filePath string) (string, bool) {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	// Get the branch reference
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
@@ -992,10 +1007,11 @@ func (env *TestEnv) ReadFileFromBranch(branchName, filePath string) (string, boo
 func (env *TestEnv) ReadFileFromRef(refName, filePath string) (string, bool) {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	ref, err := repo.Reference(plumbing.ReferenceName(refName), true)
 	if err != nil {
@@ -1070,10 +1086,11 @@ func (env *TestEnv) sessionMetadataMatchesID(metadataPath, sessionID string) boo
 func (env *TestEnv) RefExists(refName string) bool {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	_, err = repo.Reference(plumbing.ReferenceName(refName), true)
 	return err == nil
@@ -1083,10 +1100,11 @@ func (env *TestEnv) RefExists(refName string) bool {
 func (env *TestEnv) GetLatestCommitMessageOnBranch(branchName string) string {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	// Get the branch reference
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
@@ -1167,10 +1185,11 @@ func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, f
 	}
 
 	// Create the commit using go-git with the modified message
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -1240,10 +1259,11 @@ func (env *TestEnv) GitCommitAmendWithShadowHooks(message string, files ...strin
 	}
 
 	// Amend the commit using go-git
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -1345,10 +1365,11 @@ func (env *TestEnv) GitCommitWithTrailerRemoved(message string, files ...string)
 	cleanedMsg := strings.TrimRight(strings.Join(cleanedLines, "\n"), "\n") + "\n"
 
 	// Create the commit using go-git with the cleaned message (no trailer)
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -1419,10 +1440,11 @@ func (env *TestEnv) gitCommitStagedWithShadowHooks(message string, simulateTTY b
 	}
 
 	// Create the commit using go-git with the modified message
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -1453,10 +1475,11 @@ func (env *TestEnv) gitCommitStagedWithShadowHooks(message string, simulateTTY b
 func (env *TestEnv) ListBranchesWithPrefix(prefix string) []string {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	refs, err := repo.References()
 	if err != nil {
@@ -1482,10 +1505,11 @@ func (env *TestEnv) ListBranchesWithPrefix(prefix string) []string {
 func (env *TestEnv) GetLatestCheckpointID() string {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	// Get the entire/checkpoints/v1 branch
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
@@ -1519,10 +1543,11 @@ func (env *TestEnv) GetLatestCheckpointID() string {
 func (env *TestEnv) TryGetLatestCheckpointID() string {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		return ""
 	}
+	defer repo.Close()
 
 	// Get the entire/checkpoints/v1 branch
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
@@ -1573,10 +1598,11 @@ func (env *TestEnv) GetCheckpointIDFromCommitMessage(commitSHA string) string {
 func (env *TestEnv) GetLatestCheckpointIDFromHistory() string {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
@@ -2096,10 +2122,11 @@ func (env *TestEnv) FetchMetadataBranch(remoteURL string) {
 func (env *TestEnv) GetBranchTipParentCount(branchName string) int {
 	env.T.Helper()
 
-	repo, err := git.PlainOpen(env.RepoDir)
+	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
 	if err != nil {

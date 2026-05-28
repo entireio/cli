@@ -34,10 +34,26 @@ const ClaudeSettingsFileName = "settings.json"
 // metadataDenyRule blocks Claude from reading Entire session metadata
 const metadataDenyRule = "Read(./.entire/metadata/**)"
 
-// entireHookPrefixes are command prefixes that identify Entire hooks (both old and new formats)
+// localDevHookCmdPrefix is the command prefix used for hooks in local-dev mode.
+// It points at scripts/entire-dev, which compiles the CLI on demand and falls
+// back to the entire binary on PATH when the tree does not build (e.g. mid
+// merge-conflict-fix). ${CLAUDE_PROJECT_DIR} is set by Claude Code to the
+// repository root when it runs hooks.
+const localDevHookCmdPrefix = "${CLAUDE_PROJECT_DIR}/scripts/entire-dev "
+
+// entireHookPrefixes are command prefixes that identify Entire hooks. The
+// "go run" prefix is retained so hooks installed by older versions are still
+// recognized for removal/upgrade.
 var entireHookPrefixes = []string{
 	"entire ",
+	localDevHookCmdPrefix,
 	"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go ",
+}
+
+// localDevHookCommand builds a local-dev hook command for the given hook name,
+// delegating to scripts/entire-dev for the build-probe-and-fallback logic.
+func localDevHookCommand(hookName string) string {
+	return fmt.Sprintf("%shooks claude-code %s", localDevHookCmdPrefix, hookName)
 }
 
 // InstallHooks installs Claude Code hooks in .claude/settings.json.
@@ -114,13 +130,13 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 	// Define hook commands
 	var sessionStartCmd, sessionEndCmd, stopCmd, userPromptSubmitCmd, preTaskCmd, postTaskCmd, postTodoCmd string
 	if localDev {
-		sessionStartCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code session-start"
-		sessionEndCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code session-end"
-		stopCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code stop"
-		userPromptSubmitCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code user-prompt-submit"
-		preTaskCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code pre-task"
-		postTaskCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-task"
-		postTodoCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-todo"
+		sessionStartCmd = localDevHookCommand(HookNameSessionStart)
+		sessionEndCmd = localDevHookCommand(HookNameSessionEnd)
+		stopCmd = localDevHookCommand(HookNameStop)
+		userPromptSubmitCmd = localDevHookCommand(HookNameUserPromptSubmit)
+		preTaskCmd = localDevHookCommand(HookNamePreTask)
+		postTaskCmd = localDevHookCommand(HookNamePostTask)
+		postTodoCmd = localDevHookCommand(HookNamePostTodo)
 	} else {
 		sessionStartCmd = agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine)
 		sessionEndCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end")

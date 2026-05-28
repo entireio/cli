@@ -607,17 +607,13 @@ func TestResolveLatestCheckpointUsesLocalV2WhenSettingsDisabled(t *testing.T) {
 	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
 	cpID := id.MustCheckpointID("dd11ee22ff33")
 	v2Store := checkpoint.NewV2GitStore(repo)
-	if err := v2Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	writeV2CheckpointFixture(t, repo, v2CheckpointFixtureOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-v2-local",
 		Strategy:     "manual-commit",
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"from v2"}]}}` + "\n")),
 		Prompts:      []string{"Use local v2 data"},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@example.com",
-	}); err != nil {
-		t.Fatalf("WriteCommitted() error = %v", err)
-	}
+	})
 
 	latest, err := resolveLatestCheckpoint(context.Background(), repo, v2Store, []id.CheckpointID{cpID})
 	if err != nil {
@@ -635,17 +631,13 @@ func TestResolveLatestCheckpointFallsBackToV1WhenLocalV2MissesCheckpoint(t *test
 	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
 
 	v2Store := checkpoint.NewV2GitStore(repo)
-	if err := v2Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	writeV2CheckpointFixture(t, repo, v2CheckpointFixtureOptions{
 		CheckpointID: id.MustCheckpointID("dd11ee22ff33"),
 		SessionID:    "session-v2-other",
 		Strategy:     "manual-commit",
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"from v2"}]}}` + "\n")),
 		Prompts:      []string{"Use local v2 data"},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@example.com",
-	}); err != nil {
-		t.Fatalf("WriteCommitted() error = %v", err)
-	}
+	})
 
 	targetID := createCheckpointOnMetadataBranchFull(
 		t,
@@ -799,17 +791,12 @@ func TestResumeSingleSession_FallsBackToV1WhenV2FullMissing(t *testing.T) {
 		t.Fatalf("failed to write v1 checkpoint: %v", err)
 	}
 
-	v2Store := checkpoint.NewV2GitStore(repo)
-	if err := v2Store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	writeV2CheckpointFixture(t, repo, v2CheckpointFixtureOptions{
 		CheckpointID:      cpID,
 		SessionID:         sessionID,
 		Strategy:          "manual-commit",
 		CompactTranscript: []byte(`{"v":1,"type":"user"}` + "\n"),
-		AuthorName:        "Test",
-		AuthorEmail:       "test@example.com",
-	}); err != nil {
-		t.Fatalf("failed to write v2 checkpoint: %v", err)
-	}
+	})
 
 	ag := &recordingResumeAgent{sessionDir: filepath.Join(tmpDir, "sessions")}
 	var stdout, stderr bytes.Buffer

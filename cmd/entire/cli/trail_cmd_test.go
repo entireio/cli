@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trail"
 )
 
@@ -15,6 +17,70 @@ const (
 	trailListTestAuthorAlice = "alice"
 	trailListTestAuthorBob   = "bob"
 )
+
+func TestTrailsBasePath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		forge, owner, rp string
+		want             string
+	}{
+		{"gh forge", "gh", "acme", "repo", "/api/v1/trails/gh/acme/repo"},
+		{"et forge", "et", "acme", "repo", "/api/v1/trails/et/acme/repo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := trailsBasePath(tt.forge, tt.owner, tt.rp)
+			if got != tt.want {
+				t.Fatalf("trailsBasePath(%q, %q, %q) = %q, want %q", tt.forge, tt.owner, tt.rp, got, tt.want)
+			}
+		})
+	}
+}
+
+// Not parallel: uses t.Chdir() to point ResolveRemoteRepo at a fake repo.
+func TestResolveTrailRemote_RejectsUnsupportedForge(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@gitlab.com:acme/my-app.git")
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git remote add: %v", err)
+	}
+	t.Chdir(repoDir)
+
+	_, _, _, err := resolveTrailRemote(context.Background())
+	if err == nil {
+		t.Fatal("expected error for gitlab.com origin, got nil")
+	}
+	if !strings.Contains(err.Error(), "not on a forge supported by Entire trails") {
+		t.Fatalf("error message does not mention unsupported forge: %v", err)
+	}
+}
+
+func TestTrailWatchDescription(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		forge, owner, rp string
+		number           int
+		trailID, want    string
+	}{
+		{"with number", "gh", "acme", "repo", 5, "abc123", "trail #5 (gh/acme/repo, id abc123)"},
+		{"without number", "gh", "acme", "repo", 0, "abc123", "trail abc123 (gh/acme/repo)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := trailWatchDescription(tt.forge, tt.owner, tt.rp, tt.number, tt.trailID)
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestLimitTrailsKeepsMostRecentPrefix(t *testing.T) {
 	t.Parallel()

@@ -28,6 +28,7 @@ func (s *ManualCommitStrategy) GetSessionInfo(ctx context.Context) (*SessionInfo
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Check if we're on a shadow branch
 	head, err := repo.Head()
@@ -72,6 +73,7 @@ func (s *ManualCommitStrategy) GetSessionMetadataRef(ctx context.Context, _ stri
 	if err != nil {
 		return ""
 	}
+	defer repo.Close()
 
 	refName := checkpoint.MetadataRef(ctx)
 	ref, err := repo.Reference(refName, true)
@@ -131,6 +133,7 @@ func (s *ManualCommitStrategy) getDescriptionFromShadowBranch(ctx context.Contex
 	if err != nil {
 		return ""
 	}
+	defer repo.Close()
 
 	shadowBranchName := getShadowBranchNameForCommit(baseCommit, worktreeID)
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)

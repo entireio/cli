@@ -259,6 +259,12 @@ func (s *V2GitStore) ReadSessionPrompts(ctx context.Context, checkpointID id.Che
 	return content, nil
 }
 
+// GetCheckpointAuthor retrieves the author of a checkpoint from the v2 /main
+// commit history.
+func (s *V2GitStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (Author, error) {
+	return getCheckpointAuthorFromRef(ctx, s.repo, plumbing.ReferenceName(paths.V2MainRefName), checkpointID)
+}
+
 // ReadSessionContent reads a session's metadata and prompts from the v2 /main ref,
 // and the raw transcript (raw_transcript) from /full/current.
 // This is the v2 equivalent of GitStore.ReadSessionContent — it reads the raw agent
@@ -372,12 +378,24 @@ func (s *V2GitStore) readTranscriptFromFullRefs(ctx context.Context, checkpointI
 		return transcript, nil
 	}
 
+	// Skip refs already scanned pre-fetch. Use a membership set rather than a
+	// length boundary: archive ref names can interleave in lex order across
+	// machines (clocks diverge per the fetchRemoteFullRefs comment), so a new
+	// ref may sort before existing local ones.
+	checkedArchived := make(map[plumbing.ReferenceName]struct{}, len(archived))
+	for _, ref := range archived {
+		checkedArchived[ref] = struct{}{}
+	}
 	archived, err = s.listArchivedFullRefs()
 	if err != nil {
 		return nil, nil //nolint:nilerr // Best-effort: fetch-on-demand failure shouldn't block resume.
 	}
 	for i := len(archived) - 1; i >= 0; i-- {
-		transcript, err := s.readTranscriptFromRef(archived[i], sessionPath, agentType)
+		ref := archived[i]
+		if _, checked := checkedArchived[ref]; checked {
+			continue
+		}
+		transcript, err := s.readTranscriptFromRef(ref, sessionPath, agentType)
 		if err == nil && len(transcript) > 0 {
 			return transcript, nil
 		}

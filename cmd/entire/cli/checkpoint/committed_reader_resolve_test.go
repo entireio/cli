@@ -27,14 +27,12 @@ func TestCommittedReader_UsesV2WhenFound(t *testing.T) {
 	ctx := context.Background()
 	cpID := id.MustCheckpointID("111111111111")
 
-	require.NoError(t, v2Store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-v2",
 		Strategy:     "manual-commit",
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n")),
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	}))
+	})
 
 	reader := &DualCheckpointReader{v2: v2Store, v1: v1Store}
 	summary, err := ReadCommittedCheckpoint(ctx, reader, cpID)
@@ -44,6 +42,47 @@ func TestCommittedReader_UsesV2WhenFound(t *testing.T) {
 	content, err := reader.ReadSessionContent(ctx, cpID, 0)
 	require.NoError(t, err)
 	require.Equal(t, "session-v2", content.Metadata.SessionID)
+}
+
+func TestDualCheckpointReader_UpdateSummaryUpdatesV1Only(t *testing.T) {
+	t.Parallel()
+
+	repo := initTestRepo(t)
+	v1Store := NewGitStore(repo)
+	v2Store := NewV2GitStore(repo)
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("121212121212")
+
+	require.NoError(t, v1Store.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-v1",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"text":"from-v1"}` + "\n")),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}))
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-v2",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"text":"from-v2"}` + "\n")),
+	})
+
+	reader := &DualCheckpointReader{v2: v2Store, v1: v1Store}
+	require.NoError(t, reader.UpdateSummary(ctx, cpID, &Summary{
+		Intent:  "summarize intent",
+		Outcome: "summarize outcome",
+	}))
+
+	v1Content, err := v1Store.ReadSessionContent(ctx, cpID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, v1Content.Metadata.Summary)
+	require.Equal(t, "summarize intent", v1Content.Metadata.Summary.Intent)
+	require.Equal(t, "summarize outcome", v1Content.Metadata.Summary.Outcome)
+
+	v2Content, err := v2Store.ReadSessionContent(ctx, cpID, 0)
+	require.NoError(t, err)
+	require.Nil(t, v2Content.Metadata.Summary)
 }
 
 func TestDualCheckpointReader_ReadSessionPromptsFallsBackWhenV2PromptMissing(t *testing.T) {
@@ -64,14 +103,12 @@ func TestDualCheckpointReader_ReadSessionPromptsFallsBackWhenV2PromptMissing(t *
 		AuthorName:   "Test",
 		AuthorEmail:  "test@test.com",
 	}))
-	require.NoError(t, v2Store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-with-v1-prompt",
 		Strategy:     "manual-commit",
 		Transcript:   redact.AlreadyRedacted([]byte(`{"text":"from-v2"}` + "\n")),
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	}))
+	})
 
 	reader := &DualCheckpointReader{v2: v2Store, v1: v1Store}
 	prompts, err := reader.ReadSessionPrompts(ctx, cpID, 0)
@@ -106,14 +143,12 @@ func TestDualCheckpointReader_ReadSessionMetadataAndPromptsFallsBackWhenV2Prompt
 		AuthorName:   "Test",
 		AuthorEmail:  "test@test.com",
 	}))
-	require.NoError(t, v2Store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID:      cpID,
 		SessionID:         "session-b",
 		Strategy:          "manual-commit",
 		CompactTranscript: []byte(`{"text":"compact-session-b"}` + "\n"),
-		AuthorName:        "Test",
-		AuthorEmail:       "test@test.com",
-	}))
+	})
 
 	reader := &DualCheckpointReader{v2: v2Store, v1: v1Store}
 	content, err := reader.ReadSessionMetadataAndPrompts(ctx, cpID, 0)
@@ -127,10 +162,10 @@ func TestCommittedReadModeForAvailability(t *testing.T) {
 
 	require.Equal(t, committedReadV1, resolveCommittedReadMode(false, 1, false))
 	require.Equal(t, committedReadDual, resolveCommittedReadMode(true, 1, false))
-	require.Equal(t, committedReadV2, resolveCommittedReadMode(true, 2, false))
-	require.Equal(t, committedReadV2, resolveCommittedReadMode(false, 2, false))
+	require.Equal(t, committedReadDual, resolveCommittedReadMode(true, 2, false))
+	require.Equal(t, committedReadDual, resolveCommittedReadMode(false, 2, false))
 	require.Equal(t, committedReadDual, resolveCommittedReadMode(false, 1, true))
-	require.Equal(t, committedReadV2, resolveCommittedReadMode(false, 2, true))
+	require.Equal(t, committedReadDual, resolveCommittedReadMode(false, 2, true))
 }
 
 func TestReadSessionPromptsUsesPromptOnlyReader(t *testing.T) {
@@ -204,14 +239,12 @@ func TestDualCheckpointReader_FallsBackToV1RawTranscriptBySessionID(t *testing.T
 		AuthorName:   "Test",
 		AuthorEmail:  "test@test.com",
 	}))
-	require.NoError(t, v2Store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID:      cpID,
 		SessionID:         "session-b",
 		Strategy:          "manual-commit",
 		CompactTranscript: []byte(`{"text":"compact-session-b"}` + "\n"),
-		AuthorName:        "Test",
-		AuthorEmail:       "test@test.com",
-	}))
+	})
 
 	reader := &DualCheckpointReader{v2: v2Store, v1: v1Store}
 	summary, err := ReadCommittedCheckpoint(ctx, reader, cpID)
@@ -254,14 +287,12 @@ func TestDualCheckpointReader_DoesNotUseIndexFallbackWhenV2CheckpointExists(t *t
 	require.NoError(t, err)
 	require.Equal(t, "session-a", v1IndexZero.Metadata.SessionID)
 
-	require.NoError(t, v2Store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID:      cpID,
 		SessionID:         "session-b",
 		Strategy:          "manual-commit",
 		CompactTranscript: []byte(`{"text":"compact-session-b"}` + "\n"),
-		AuthorName:        "Test",
-		AuthorEmail:       "test@test.com",
-	}))
+	})
 	removeV2MainSessionTree(t, repo, cpID)
 
 	reader := &DualCheckpointReader{v2: v2Store, v1: v1Store}
@@ -294,14 +325,12 @@ func TestDualCheckpointReader_ReadSessionMetadataAndPromptsDoesNotUseSingleV1Fal
 		AuthorName:   "Test",
 		AuthorEmail:  "test@test.com",
 	}))
-	require.NoError(t, v2Store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID:      cpID,
 		SessionID:         "session-b",
 		Strategy:          "manual-commit",
 		CompactTranscript: []byte(`{"text":"compact-session-b"}` + "\n"),
-		AuthorName:        "Test",
-		AuthorEmail:       "test@test.com",
-	}))
+	})
 	removeV2MainSessionTree(t, repo, cpID)
 
 	reader := &DualCheckpointReader{v2: v2Store, v1: v1Store}
@@ -339,15 +368,13 @@ func TestDualCheckpointReader_ReadSessionMetadataAndPromptsDoesNotFallbackByInde
 		AuthorName:   "Test",
 		AuthorEmail:  "test@test.com",
 	}))
-	require.NoError(t, v2Store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID:      cpID,
 		SessionID:         "session-b",
 		Strategy:          "manual-commit",
 		CompactTranscript: []byte(`{"text":"compact-session-b"}` + "\n"),
 		Prompts:           []string{"v2 prompt"},
-		AuthorName:        "Test",
-		AuthorEmail:       "test@test.com",
-	}))
+	})
 	corruptV2MainSessionMetadata(t, repo, cpID, 0)
 
 	reader := &DualCheckpointReader{v2: v2Store, v1: v1Store}
@@ -367,14 +394,12 @@ func TestDualCheckpointReader_ReadSessionContentReturnsV2AndFallbackErrors(t *te
 	ctx := context.Background()
 	cpID := id.MustCheckpointID("565656565656")
 
-	require.NoError(t, v2Store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID:      cpID,
 		SessionID:         "session-missing-v1",
 		Strategy:          "manual-commit",
 		CompactTranscript: []byte(`{"text":"compact-only"}` + "\n"),
-		AuthorName:        "Test",
-		AuthorEmail:       "test@test.com",
-	}))
+	})
 
 	reader := &DualCheckpointReader{v2: v2Store, v1: v1Store}
 
@@ -411,14 +436,12 @@ func TestReadRawSessionLogForCheckpoint_FallsBackToV1RawTranscriptByV2SessionID(
 		AuthorName:   "Test",
 		AuthorEmail:  "test@test.com",
 	}))
-	require.NoError(t, v2Store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID:      cpID,
 		SessionID:         "session-b",
 		Strategy:          "manual-commit",
 		CompactTranscript: []byte(`{"text":"compact-session-b"}` + "\n"),
-		AuthorName:        "Test",
-		AuthorEmail:       "test@test.com",
-	}))
+	})
 
 	reader := &DualCheckpointReader{v2: v2Store, v1: v1Store}
 	logContent, sessionID, err := ReadRawSessionLogForCheckpoint(ctx, reader, cpID)
@@ -461,18 +484,15 @@ func TestCommittedReader_PrefersV1WhenV2Disabled(t *testing.T) {
 
 	repo := initTestRepo(t)
 	v1Store := NewGitStore(repo)
-	v2Store := NewV2GitStore(repo)
 	ctx := context.Background()
 	cpID := id.MustCheckpointID("333333333333")
 
-	require.NoError(t, v2Store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-v2",
 		Strategy:     "manual-commit",
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n")),
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	}))
+	})
 
 	require.NoError(t, v1Store.WriteCommitted(ctx, WriteCommittedOptions{
 		CheckpointID: cpID,
@@ -499,14 +519,12 @@ func TestReadRawSessionLogForCheckpoint_UsesV2WhenFound(t *testing.T) {
 	ctx := context.Background()
 	cpID := id.MustCheckpointID("444444444444")
 
-	require.NoError(t, v2Store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-v2",
 		Strategy:     "manual-commit",
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"from-v2"}]}}` + "\n")),
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	}))
+	})
 
 	reader := &DualCheckpointReader{v2: v2Store, v1: v1Store}
 	logContent, sessionID, err := ReadRawSessionLogForCheckpoint(ctx, reader, cpID)
@@ -547,15 +565,13 @@ func TestDualCheckpointReader_ListCommittedMergesV2AndV1(t *testing.T) {
 		AuthorName:   "Test",
 		AuthorEmail:  "test@test.com",
 	}))
-	require.NoError(t, v2Store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID: dualID,
 		SessionID:    "session-dual",
 		CreatedAt:    older,
 		Strategy:     "manual-commit",
 		Transcript:   transcript,
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	}))
+	})
 
 	reader := &DualCheckpointReader{v2: v2Store, v1: v1Store}
 
@@ -628,18 +644,15 @@ func TestReadRawSessionLogForCheckpoint_PrefersV1WhenV2Disabled(t *testing.T) {
 
 	repo := initTestRepo(t)
 	v1Store := NewGitStore(repo)
-	v2Store := NewV2GitStore(repo)
 	ctx := context.Background()
 	cpID := id.MustCheckpointID("666666666666")
 
-	require.NoError(t, v2Store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-v2",
 		Strategy:     "manual-commit",
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"from-v2"}]}}` + "\n")),
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	}))
+	})
 
 	require.NoError(t, v1Store.WriteCommitted(ctx, WriteCommittedOptions{
 		CheckpointID: cpID,
@@ -685,14 +698,12 @@ func TestCommittedReader_DoesNotUseIndexFallbackWhenV2Malformed(t *testing.T) {
 	}))
 
 	// Write valid v2 checkpoint, then corrupt its metadata.json.
-	require.NoError(t, v2Store.WriteCommitted(ctx, WriteCommittedOptions{
+	writeV2TestCheckpoint(t, repo, v2TestCheckpointOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-v2",
 		Strategy:     "manual-commit",
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"from-v2"}]}}` + "\n")),
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	}))
+	})
 	corruptV2MainMetadata(t, repo, cpID)
 
 	reader := &DualCheckpointReader{v2: v2Store, v1: v1Store}

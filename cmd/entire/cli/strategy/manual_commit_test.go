@@ -52,18 +52,16 @@ func TestManualCommitStrategy_ListCheckpointsUsesLocalV2WhenSettingsDisabled(t *
 
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
+	defer repo.Close()
 
 	cpID := id.MustCheckpointID("dd11ee22ff33")
-	v2Store := checkpoint.NewV2GitStore(repo)
-	require.NoError(t, v2Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	writeV2CheckpointFixture(t, repo, v2CheckpointFixtureOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-v2-local",
 		Strategy:     "manual-commit",
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"from v2"}]}}` + "\n")),
 		Prompts:      []string{"Use local v2 data"},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@example.com",
-	}))
+	})
 
 	s := NewManualCommitStrategy()
 	checkpoints, err := s.listCheckpoints(context.Background())
@@ -4209,8 +4207,7 @@ func TestCondenseSession_RedactionFailure_DropsTranscriptButWritesMetadata(t *te
 	require.NoError(t, err, "redaction failure should not abort condensation")
 	require.NotNil(t, result)
 
-	store, err := s.getCheckpointStore()
-	require.NoError(t, err)
+	store := s.getCheckpointStore(repo)
 
 	committed, err := store.ListCommitted(context.Background())
 	require.NoError(t, err)

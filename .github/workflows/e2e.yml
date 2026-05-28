@@ -104,6 +104,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           E2E_CODEX_MODEL: ${{ matrix.agent == 'codex' && 'gpt-5.4-mini' || '' }}
+          E2E_GEMINI_MODEL: ${{ matrix.agent == 'gemini-cli' && 'gemini-3.1-flash-lite' || '' }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
           COPILOT_GITHUB_TOKEN: ${{ github.token }}

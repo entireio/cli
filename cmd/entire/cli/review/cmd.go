@@ -14,15 +14,15 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"strings"
 
 	"charm.land/huh/v2"
-	git "github.com/go-git/go-git/v6"
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitexec"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -453,7 +453,7 @@ func runSingleAgentPath(
 // Otherwise (auto-detection failed): returns "" and the caller proceeds in
 // degraded mode without a scope banner.
 func detectScope(ctx context.Context, worktreeRoot, baseOverride string, out io.Writer) (string, error) {
-	repo, openErr := git.PlainOpen(worktreeRoot)
+	repo, openErr := gitrepo.OpenPath(worktreeRoot)
 	if openErr != nil {
 		logging.Debug(ctx, "review repo open failed", slog.String("error", openErr.Error()))
 		// Fail-loud when the user explicitly asked for a base. Without this
@@ -465,6 +465,7 @@ func detectScope(ctx context.Context, worktreeRoot, baseOverride string, out io.
 		}
 		return "", nil
 	}
+	defer repo.Close()
 	stats, statsErr := ComputeScopeStats(ctx, repo, baseOverride)
 	if statsErr != nil {
 		// With an override, the user explicitly asked for a specific base.
@@ -832,9 +833,5 @@ var _ reviewtypes.AgentReviewer = (*perAgentConfiguredReviewer)(nil)
 
 // currentHeadSHA returns the current HEAD commit hash as a 40-char hex string.
 func currentHeadSHA(ctx context.Context, repoRoot string) (string, error) {
-	out, err := runGit(ctx, repoRoot, "rev-parse", "HEAD")
-	if err != nil {
-		return "", fmt.Errorf("git rev-parse HEAD: %w", err)
-	}
-	return strings.TrimSpace(out), nil
+	return gitexec.HeadSHA(ctx, repoRoot) //nolint:wrapcheck // gitexec already wraps
 }

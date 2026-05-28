@@ -19,9 +19,11 @@ type tokenStore interface {
 	DeleteToken(baseURL string) error
 }
 
-// revokeCurrentFunc revokes the supplied token server-side. Mirrors the
-// openURL injection pattern in login.go so tests can replace the real HTTP call.
-type revokeCurrentFunc func(ctx context.Context, token string) error
+// revokeCurrentFunc revokes the CLI's current token server-side. The
+// implementation resolves its own data-API bearer (same audience-
+// matching rule as authTokenLister); callers don't pass the keyring
+// entry through.
+type revokeCurrentFunc func(ctx context.Context) error
 
 func newLogoutCmd() *cobra.Command {
 	var insecureHTTPAuth bool
@@ -33,15 +35,19 @@ func newLogoutCmd() *cobra.Command {
 				return err
 			}
 			return runLogout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
-				auth.NewStore(), defaultRevokeCurrentToken, api.BaseURL())
+				auth.NewStore(), defaultRevokeCurrentToken, api.AuthBaseURL())
 		},
 	}
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	return cmd
 }
 
-func defaultRevokeCurrentToken(ctx context.Context, token string) error {
-	return api.NewClient(token).RevokeCurrentToken(ctx) //nolint:wrapcheck // RevokeCurrentToken already wraps with action context
+func defaultRevokeCurrentToken(ctx context.Context) error {
+	token, err := resolveDataAPIToken(ctx)
+	if err != nil {
+		return err
+	}
+	return newAPITokensClient(token).RevokeCurrentToken(ctx) //nolint:wrapcheck // RevokeCurrentToken already wraps with action context
 }
 
 func runLogout(ctx context.Context, outW, errW io.Writer, store tokenStore, revoke revokeCurrentFunc, baseURL string) error {
@@ -52,7 +58,7 @@ func runLogout(ctx context.Context, outW, errW io.Writer, store tokenStore, revo
 		fmt.Fprintf(errW, "Warning: failed to read token before revocation: %v\n", err)
 	}
 	if token != "" {
-		if err := revoke(ctx, token); err != nil && !api.IsHTTPErrorStatus(err, http.StatusUnauthorized) {
+		if err := revoke(ctx); err != nil && !api.IsHTTPErrorStatus(err, http.StatusUnauthorized) {
 			// Best-effort: a transient network error shouldn't block local
 			// logout. A 401 means the token is already invalid server-side,
 			// so the desired state is achieved — no warning needed.

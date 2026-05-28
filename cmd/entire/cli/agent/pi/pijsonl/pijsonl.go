@@ -1,7 +1,7 @@
 // Package pijsonl provides shared parsing primitives for Pi's session JSONL
 // format. It is consumed both by the in-tree pi agent (cmd/entire/cli/agent/pi)
-// and by the v2 compact-transcript dispatcher
-// (cmd/entire/cli/transcript/compact). Keeping these in one place ensures
+// and by the transcript compaction package (cmd/entire/cli/transcript/compact).
+// Keeping these in one place ensures
 // active-branch resolution, line counting, and offset slicing stay byte-
 // compatible across both call sites.
 package pijsonl

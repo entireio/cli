@@ -19,8 +19,13 @@ import (
 //   - push_sessions: false to disable automatic pushing of checkpoints
 //   - checkpoint_remote: {"provider": "github", "repo": "org/repo"} to push to a separate repo
 func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error {
-	// Load settings once for remote resolution and push_sessions check
-	ps := resolvePushSettings(ctx, remote)
+	// Load settings once for remote resolution and push_sessions check.
+	// Spanned because checkpoint-remote resolution can perform a one-time
+	// network fetch of the metadata branch (fetchMetadataBranchIfMissing),
+	// which is otherwise invisible in the pre-push trace.
+	resolveCtx, resolveSpan := perf.Start(ctx, "resolve_push_settings")
+	ps := resolvePushSettings(resolveCtx, remote)
+	resolveSpan.End()
 
 	if ps.pushDisabled {
 		return nil
@@ -28,18 +33,17 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 
 	settings.WarnIfCheckpointsV2Disallowed(ctx)
 
-	var err error
-	_, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoints_branch")
-	// Use ps.remote (the user's actual push remote, e.g. "upstream"), not
-	// pushTarget() which can be the checkpoint_remote URL — the tracking ref
-	// must be the local mirror of the remote being pushed to, not the URL push
-	// target.
-	err = pushRefIfNeeded(ctx, ps.pushTarget(),
+	// Thread the span's context into the push so the network push and any
+	// fetch+rebase recovery nest beneath it as child steps in the perf trace.
+	// Use ps.remote (the user's actual push remote, e.g. "upstream") for the
+	// tracking ref, not pushTarget() which can be the checkpoint_remote URL —
+	// the tracking ref must be the local mirror of the remote being pushed
+	// to, not the URL push target.
+	pushCtx, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoints_branch")
+	err := pushRefIfNeeded(pushCtx, ps.pushTarget(),
 		checkpoint.MetadataRef(ctx),
 		checkpoint.MetadataTrackingRefForRemote(ctx, ps.remote))
-	if err != nil {
-		pushCheckpointsSpan.RecordError(err)
-	}
+	pushCheckpointsSpan.RecordError(err)
 	pushCheckpointsSpan.End()
 
 	return err

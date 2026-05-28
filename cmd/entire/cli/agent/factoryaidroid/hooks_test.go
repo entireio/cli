@@ -115,8 +115,9 @@ func TestInstallHooks_LocalDev(t *testing.T) {
 
 	settings := readFactorySettings(t, tempDir)
 
-	// Verify local dev commands use git rev-parse for runtime repo root resolution
-	prefix := `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks factoryai-droid `
+	// Verify local dev commands delegate to the entire-dev launcher, resolving
+	// the repo root at runtime via git.
+	prefix := `"$(git rev-parse --show-toplevel)"/scripts/entire-dev hooks factoryai-droid `
 	assertFactoryHookExists(t, settings.Hooks.SessionStart, "",
 		prefix+"session-start", "SessionStart localDev")
 	assertFactoryHookExists(t, settings.Hooks.SessionStart, "",

@@ -808,6 +808,166 @@ func TestFetchMetadataBranch_DoesNotRewindLocalAhead(t *testing.T) {
 		bHash, afterHash, aHash)
 }
 
+// TestFetchMetadataBranch_DivergedPreservesLocalCheckpoint verifies that a
+// metadata fetch used by read paths does not replace a diverged local branch
+// with the remote tip. In the real failure mode, local has checkpoint B and
+// remote has checkpoint C, both based on checkpoint A; fetching remote metadata
+// must preserve B so a later push can replay it onto C.
+//
+// Not parallel: uses os.Chdir().
+func TestFetchMetadataBranch_DivergedPreservesLocalCheckpoint(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	remoteDefaultBranch := checkpointRemoteCurrentBranch(ctx, t, remoteDir)
+
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, remoteDir, "aaaaaaaaaaaa", "base")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", remoteDefaultBranch)
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	localDefaultBranch := checkpointRemoteCurrentBranch(ctx, t, localDir)
+	t.Chdir(localDir)
+
+	require.NoError(t, FetchMetadataBranch(ctx, remoteDir))
+	aHash := checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName)
+
+	// Local advances to B without pushing.
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", paths.MetadataBranchName)
+	commitCheckpointRemoteMetadata(ctx, t, localDir, "bbbbbbbbbbbb", "local-only")
+	bHash := checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName)
+	require.NotEqual(t, aHash, bHash, "test setup: local checkpoint branch should advance to B")
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", localDefaultBranch)
+
+	// Remote independently advances from A to C.
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", paths.MetadataBranchName)
+	commitCheckpointRemoteMetadata(ctx, t, remoteDir, "cccccccccccc", "remote-only")
+	cHash := checkpointRemoteRevParse(ctx, t, remoteDir, paths.MetadataBranchName)
+	require.NotEqual(t, aHash, cHash, "test setup: remote checkpoint branch should advance to C")
+	require.NotEqual(t, bHash, cHash, "test setup: local and remote tips should diverge")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", remoteDefaultBranch)
+
+	require.NoError(t, FetchMetadataBranch(ctx, remoteDir))
+
+	files := checkpointRemoteMetadataFiles(ctx, t, localDir)
+	assert.Contains(t, files, "aa/aaaaaaaaaa/metadata.json", "base checkpoint should be preserved")
+	assert.Contains(t, files, "cc/cccccccccc/metadata.json", "remote checkpoint should be present after fetch")
+	assert.Contains(t, files, "bb/bbbbbbbbbb/metadata.json", "local-only checkpoint should be preserved after diverged metadata fetch")
+
+	afterHash := checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName)
+	assert.Equal(t, cHash, checkpointRemoteRevParse(ctx, t, localDir, afterHash+"^"),
+		"diverged fetch promotion should replay local commits directly onto the fetched remote tip")
+}
+
+// TestFetchMetadataBranch_DisconnectedPreservesLocalCheckpoint verifies the
+// safety fallback when the local and fetched checkpoint branches share no
+// ancestry. There is no previous base to compute, so all local checkpoint
+// commits are replayed onto the fetched tip instead of replacing local state.
+//
+// Not parallel: uses os.Chdir().
+func TestFetchMetadataBranch_DisconnectedPreservesLocalCheckpoint(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	remoteDefaultBranch := checkpointRemoteCurrentBranch(ctx, t, remoteDir)
+
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, remoteDir, "aaaaaaaaaaaa", "old-base")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", remoteDefaultBranch)
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	localDefaultBranch := checkpointRemoteCurrentBranch(ctx, t, localDir)
+	t.Chdir(localDir)
+
+	require.NoError(t, FetchMetadataBranch(ctx, remoteDir))
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", paths.MetadataBranchName)
+	commitCheckpointRemoteMetadata(ctx, t, localDir, "bbbbbbbbbbbb", "local-only")
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", localDefaultBranch)
+
+	// Replace the remote checkpoint branch with an unrelated orphan history.
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", "--orphan", "replacement-checkpoints")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, remoteDir, "cccccccccccc", "remote-rewrite")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "branch", "-M", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", remoteDefaultBranch)
+
+	require.NoError(t, FetchMetadataBranch(ctx, remoteDir))
+
+	files := checkpointRemoteMetadataFiles(ctx, t, localDir)
+	assert.Contains(t, files, "cc/cccccccccc/metadata.json", "rewritten remote checkpoint should be present after fetch")
+	assert.Contains(t, files, "bb/bbbbbbbbbb/metadata.json", "local-only checkpoint should be replayed when there is no common ancestor")
+}
+
+func runCheckpointRemoteGit(ctx context.Context, t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %v in %s failed: %s", args, dir, out)
+}
+
+func checkpointRemoteCurrentBranch(ctx context.Context, t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	return strings.TrimSpace(string(out))
+}
+
+func checkpointRemoteRevParse(ctx context.Context, t *testing.T, dir, rev string) string {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", rev)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	return strings.TrimSpace(string(out))
+}
+
+func commitCheckpointRemoteMetadata(ctx context.Context, t *testing.T, dir, checkpointID, label string) {
+	t.Helper()
+	checkpointDir := filepath.Join(dir, checkpointID[:2], checkpointID[2:])
+	require.NoError(t, os.MkdirAll(checkpointDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(checkpointDir, paths.MetadataFileName),
+		[]byte(fmt.Sprintf(`{"checkpoint_id":%q}`, checkpointID)),
+		0o644,
+	))
+	runCheckpointRemoteGit(ctx, t, dir, "add", ".")
+	runCheckpointRemoteGit(ctx, t, dir, "commit", "-m", "Checkpoint: "+checkpointID+" "+label)
+}
+
+func checkpointRemoteMetadataFiles(ctx context.Context, t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", "ls-tree", "-r", "--name-only", "refs/heads/"+paths.MetadataBranchName)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	return string(out)
+}
+
 // v2RefSeq is a counter to ensure each call to createV2MainRef produces a distinct commit.
 var v2RefSeq int
 

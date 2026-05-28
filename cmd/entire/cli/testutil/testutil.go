@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
@@ -38,6 +39,7 @@ func InitRepo(t *testing.T, repoDir string) {
 	if err != nil {
 		t.Fatalf("failed to init git repo: %v", err)
 	}
+	defer repo.Close()
 
 	// Configure git user for commits
 	cfg, err := repo.Config()
@@ -116,10 +118,11 @@ func FileExists(repoDir, path string) bool {
 func GitAdd(t *testing.T, repoDir string, paths ...string) {
 	t.Helper()
 
-	repo, err := git.PlainOpen(repoDir)
+	repo, err := gitrepo.OpenPath(repoDir)
 	if err != nil {
 		t.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -137,10 +140,11 @@ func GitAdd(t *testing.T, repoDir string, paths ...string) {
 func GitCommit(t *testing.T, repoDir, message string) {
 	t.Helper()
 
-	repo, err := git.PlainOpen(repoDir)
+	repo, err := gitrepo.OpenPath(repoDir)
 	if err != nil {
 		t.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -176,10 +180,11 @@ func GitCheckoutNewBranch(t *testing.T, repoDir, branchName string) {
 func GetHeadHash(t *testing.T, repoDir string) string {
 	t.Helper()
 
-	repo, err := git.PlainOpen(repoDir)
+	repo, err := gitrepo.OpenPath(repoDir)
 	if err != nil {
 		t.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
@@ -215,10 +220,11 @@ func GitReset(t *testing.T, dir string, ref string) {
 func BranchExists(t *testing.T, repoDir, branchName string) bool {
 	t.Helper()
 
-	repo, err := git.PlainOpen(repoDir)
+	repo, err := gitrepo.OpenPath(repoDir)
 	if err != nil {
 		t.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	refs, err := repo.References()
 	if err != nil {
@@ -241,10 +247,11 @@ func BranchExists(t *testing.T, repoDir, branchName string) bool {
 func GetCommitMessage(t *testing.T, repoDir, hash string) string {
 	t.Helper()
 
-	repo, err := git.PlainOpen(repoDir)
+	repo, err := gitrepo.OpenPath(repoDir)
 	if err != nil {
 		t.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	commitHash := plumbing.NewHash(hash)
 	commit, err := repo.CommitObject(commitHash)
@@ -261,10 +268,11 @@ func GetCommitMessage(t *testing.T, repoDir, hash string) string {
 func GetLatestCheckpointIDFromHistory(t *testing.T, repoDir string) (string, error) {
 	t.Helper()
 
-	repo, err := git.PlainOpen(repoDir)
+	repo, err := gitrepo.OpenPath(repoDir)
 	if err != nil {
 		t.Fatalf("failed to open git repo: %v", err)
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
@@ -331,13 +339,15 @@ func gitEmptyConfigPath() string {
 //
 // See https://git-scm.com/docs/git#Documentation/git.txt-GITCONFIGGLOBAL
 //
-// Existing GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM entries are filtered out before
-// appending overrides to ensure they take effect regardless of parent env.
+// Every inherited GIT_CONFIG_* entry is filtered out — including
+// GIT_CONFIG_PARAMETERS and the indexed KEY_/VALUE_ pairs that can inject
+// `git -c` overrides — so our explicit isolation overrides take effect
+// regardless of parent env.
 func GitIsolatedEnv() []string {
 	env := os.Environ()
 	filtered := make([]string, 0, len(env)+2)
 	for _, e := range env {
-		if strings.HasPrefix(e, "GIT_CONFIG_GLOBAL=") || strings.HasPrefix(e, "GIT_CONFIG_SYSTEM=") {
+		if isGitConfigEnv(e) {
 			continue
 		}
 		filtered = append(filtered, e)
@@ -346,4 +356,33 @@ func GitIsolatedEnv() []string {
 		"GIT_CONFIG_GLOBAL="+gitEmptyConfigPath(), // Isolate from user's global git config (e.g. global gitignore)
 		"GIT_CONFIG_SYSTEM="+gitEmptyConfigPath(), // Isolate from system git config
 	)
+}
+
+// IsolateGitConfigEnv applies the same git config isolation to the current
+// process. Use this in tests that exercise production code paths which invoke
+// git with os.Environ(). All inherited GIT_CONFIG_* variables are cleared
+// before the isolation overrides are set, so values such as
+// GIT_CONFIG_PARAMETERS or indexed KEY_/VALUE_ overrides cannot leak into
+// child git invocations.
+func IsolateGitConfigEnv(t *testing.T) {
+	t.Helper()
+
+	for _, e := range os.Environ() {
+		key, _, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(key, "GIT_CONFIG_") {
+			t.Setenv(key, "")
+		}
+	}
+
+	t.Setenv("GIT_CONFIG_GLOBAL", gitEmptyConfigPath())
+	t.Setenv("GIT_CONFIG_SYSTEM", gitEmptyConfigPath())
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_COUNT", "0")
+}
+
+func isGitConfigEnv(e string) bool {
+	return strings.HasPrefix(e, "GIT_CONFIG_")
 }
