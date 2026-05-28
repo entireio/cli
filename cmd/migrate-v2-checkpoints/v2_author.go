@@ -44,6 +44,14 @@ func findV2SessionAuthor(ctx context.Context, repo *git.Repository, cpID checkpo
 		if err := ctx.Err(); err != nil {
 			return err //nolint:wrapcheck // Propagating context cancellation
 		}
+		if commit.NumParents() > 1 {
+			return nil
+		}
+		if _, err := commit.File(metadataPath); errors.Is(err, object.ErrFileNotFound) {
+			return nil
+		} else if err != nil {
+			return fmt.Errorf("read %s from %s: %w", metadataPath, commit.Hash, err)
+		}
 		author = commit.Author
 		return errFoundV2SessionAuthor
 	})
