@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -79,17 +78,24 @@ func (a *Antigravity) RunPrompt(ctx context.Context, dir string, prompt string, 
 	promptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	args := []string{"-p", prompt, "--dangerously-skip-permissions"}
-	displayArgs := []string{"-p", fmt.Sprintf("%q", prompt), "--dangerously-skip-permissions"}
-	if cfg.Model != "" {
-		args = append(args, "--model", cfg.Model)
-		displayArgs = append(displayArgs, "--model", cfg.Model)
-	}
+	// agy (as of 1.0.2) has no --model flag — model selection happens via
+	// settings.json (selectedModel) or the in-product picker. Passing a
+	// `--model <name>` arg made agy exit 2 with the flag-not-defined error.
+	// We accept the agy default here; tests that need a specific model
+	// should seed settings.json instead.
+	_ = cfg.Model
+	// agy -p ignores cwd: without --add-dir it runs in
+	// ~/.gemini/antigravity-cli/scratch/ instead of the test repo
+	// (observed in PR #1287 validation — agy initialized a brand-new git
+	// repo in scratch and committed the requested file there). --add-dir
+	// pins agy to the workspace we actually want it to modify.
+	args := []string{"-p", prompt, "--dangerously-skip-permissions", "--add-dir", dir}
+	displayArgs := []string{"-p", fmt.Sprintf("%q", prompt), "--dangerously-skip-permissions", "--add-dir", dir}
 
 	cmd := exec.CommandContext(promptCtx, a.Binary(), args...)
 	cmd.Dir = dir
 	cmd.Stdin = nil
-	cmd.Env = antigravityPromptEnv(dir)
+	cmd.Env = antigravityPromptEnv()
 	setupProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
@@ -122,7 +128,7 @@ func (a *Antigravity) RunPrompt(ctx context.Context, dir string, prompt string, 
 func (a *Antigravity) StartSession(_ context.Context, dir string) (Session, error) {
 	name := fmt.Sprintf("antigravity-test-%d", time.Now().UnixNano())
 
-	envArgs := []string{"ACCESSIBLE=1", "HOME=" + antigravityTestHomeDir(dir)}
+	envArgs := []string{"ACCESSIBLE=1"}
 	for _, key := range []string{"TERM"} {
 		if v := os.Getenv(key); v != "" {
 			envArgs = append(envArgs, key+"="+v)
@@ -131,7 +137,7 @@ func (a *Antigravity) StartSession(_ context.Context, dir string) (Session, erro
 
 	args := append([]string{"env"}, envArgs...)
 	args = append(args, a.Binary(), "--dangerously-skip-permissions")
-	s, err := NewTmuxSession(name, dir, []string{"CI", "GITHUB_ACTIONS", "ENTIRE_TEST_TTY", "HOME"}, args[0], args[1:]...)
+	s, err := NewTmuxSession(name, dir, []string{"CI", "GITHUB_ACTIONS", "ENTIRE_TEST_TTY"}, args[0], args[1:]...)
 	if err != nil {
 		return nil, err
 	}
@@ -153,19 +159,18 @@ func (a *Antigravity) StartSession(_ context.Context, dir string) (Session, erro
 	return s, nil
 }
 
-func antigravityTestHomeDir(repoDir string) string {
-	return filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-antigravity-home")
-}
-
-func antigravityPromptEnv(repoDir string) []string {
-	// HOME must be filtered out before appending the test-home override,
-	// otherwise the parent process's HOME (first in os.Environ() order)
-	// shadows the appended value and getenv("HOME") returns the user's
-	// real home. Mirrors codex.go's filtering of CODEX_HOME and pi.go's
-	// filtering of PI_CODING_AGENT_DIR.
-	return append(
-		filterEnv(os.Environ(), "ENTIRE_TEST_TTY", "HOME"),
-		"ACCESSIBLE=1",
-		"HOME="+antigravityTestHomeDir(repoDir),
-	)
+// antigravityPromptEnv returns the env for spawning agy in print mode.
+//
+// Local-validation NOTE: HOME isolation was removed because agy stores its
+// OAuth, installation id, and onboarding state under HOME/.gemini/, and
+// pointing HOME at a fresh dir (even with selective symlinks) made agy
+// re-trigger the browser auth flow. Sharing the user's real HOME lets agy
+// authenticate; the test repo (cmd.Dir) still provides workspace isolation
+// for files agy creates. Side effect: test conversations and brain state
+// land in the user's real ~/.gemini/antigravity-cli/ and need manual
+// cleanup. The harness should grow a proper HOME-isolation mechanism (e.g.
+// importing the auth/state surface from the real home) before this is run
+// in CI — tracked as PR review feedback on #1287.
+func antigravityPromptEnv() []string {
+	return append(filterEnv(os.Environ(), "ENTIRE_TEST_TTY"), "ACCESSIBLE=1")
 }
