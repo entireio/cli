@@ -628,6 +628,11 @@ git -C "$REPO" log --format='%h %ci %s' \
   and v2 attributes the same checkpoint session to the same author. §5.6
   treats the `author` header in `entire explain` as a required check; a
   mismatch is a regression, not an accepted divergence.
+- **Migration commits are unsigned.** The tool disables checkpoint commit
+  signing for migrated writes, even if normal checkpoint signing is enabled
+  in the repo. The v1 author line is replayed from v2 history; adding a local
+  operator signature to that replayed author would be misleading. Any signed
+  migrated v1 commit is a bug.
 - **Roll back** by resetting v1 back to `$PRE_APPLY_TIP`:
 
   ```sh
@@ -875,20 +880,26 @@ git -C "$REPO" cat-file -p "entire/checkpoints/v1:$SHARD/$V1_SLOT/metadata.json"
   > /dev/null && echo OK
 ```
 
-Author parity for the metadata-branch commit:
+Author and signature status for the metadata-branch commit:
 
 ```sh
 V2_AUTHOR=$(git -C "$REPO" log -1 --format='%an <%ae> %aI' \
     refs/entire/checkpoints/v2/main -- "$SHARD/$V2_SLOT/metadata.json")
 V1_AUTHOR=$(git -C "$REPO" log -1 --format='%an <%ae> %aI' \
     entire/checkpoints/v1 -- "$SHARD/$V1_SLOT/metadata.json")
+V1_SIGNATURE_STATUS=$(git -C "$REPO" log -1 --format='%G?' \
+    entire/checkpoints/v1 -- "$SHARD/$V1_SLOT/metadata.json")
 
 echo "v2: $V2_AUTHOR"
 echo "v1: $V1_AUTHOR"
 [ "$V1_AUTHOR" = "$V2_AUTHOR" ] && echo OK || echo MISMATCH
+
+echo "v1 signature status: $V1_SIGNATURE_STATUS"
+[ "$V1_SIGNATURE_STATUS" = "N" ] && echo OK || echo MISMATCH
 ```
 
-Expected: exact match. For orphan candidates this is still valid: the v2
+Expected: exact author match, and v1 signature status `N` (`%G? = N` means
+no signature). For orphan candidates the author check is still valid: the v2
 `/main` path history is the source of the author line even though no user
 commit trailer exists.
 
@@ -1257,6 +1268,7 @@ from §4's "Behavior notes" — cheap and local, because you did not push.
 | `sessions=N` for a candidate doesn't match the §3.5 expected   | Either v1 already has the session (so report should have lower N), or session IDs are non-unique within v2.        | Inspect; non-unique session IDs are a v2 corruption.                                    |
 | Post-apply, `content_hash.txt` ≠ recomputed SHA-256            | Codex agent + ours-vs-original sanitization difference, OR a bug. Confirm `agent` field on the session.            | If non-Codex, file a bug with chunk listing + bytes.                                    |
 | Post-apply, `content_hash.txt` matches but v2's `raw_transcript_hash.txt` doesn't | Codex sanitization (expected) OR transcript was rewritten in transit. Confirm agent first.               | If non-Codex, file a bug.                                                               |
+| Post-apply, migrated v1 commit has signature status other than `N` | The migration signed a replayed-author commit. This should not happen.                                      | File a bug and do not publish the migrated v1 branch until re-run with an unsigned tool. |
 | Re-running `--dry-run` after `--apply` still lists the same candidates | Apply failed silently or didn't get pushed before re-fetch. Look at the `migrated sessions` count.         | Re-run with verbose logging; check that v1 branch actually advanced.                    |
 
 The report does not enumerate the exact checkpoint/session IDs behind `M1`,
@@ -1301,15 +1313,17 @@ refs as shown in §3.3 and §3.5.
   `fetchV1Ref` (line 70).
 - Migration loop: `cmd/migrate-v2-checkpoints/migration.go` —
   `migrateDiscoveredCheckpoints` (line 53), `migrateCheckpoint`
-  (line 96), `writeOptionsFromV2Content` (line 216),
-  `writeMigrationReport` (line 251), `candidateCommitLabel` (line 290,
+  (line 96, disables commit signing before v1 writes),
+  `writeOptionsFromV2Content` (line 217),
+  `writeMigrationReport` (line 252), `candidateCommitLabel` (line 291,
   emits `(orphan)`).
 - v2 session author lookup: `cmd/migrate-v2-checkpoints/v2_author.go` —
   `findV2SessionAuthor` (line 19), `v2SessionMetadataPath` (line 59).
 - v1 write: `cmd/entire/cli/checkpoint/committed.go` — `WriteCommitted`
-  (line 58), `writeStandardCheckpointEntries` (line 310),
-  `writeSessionToSubdirectory` (line 404), `writeTranscript` (line 720),
-  `findSessionIndex` (line 610).
+  (line 72), `WithCommitSigningDisabled` (line 57),
+  `writeStandardCheckpointEntries` (line 324),
+  `writeSessionToSubdirectory` (line 418), `writeTranscript` (line 741),
+  `findSessionIndex` (line 631), `SignCommitBestEffort` (line 2001).
 - v2 read: `cmd/entire/cli/checkpoint/v2_read.go` — `ReadCommitted`
   (line 26), `ReadSessionMetadataAndPrompts` (line 205),
   `ReadSessionContent` (line 274), `readTranscriptFromFullRefs`
