@@ -1,0 +1,30 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "7bfaeb05bf4d",
+  "strategy": "manual-commit",
+  "branch": "feat/antigravity-agent",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/agent/antigravity/lifecycle.go",
+    "cmd/entire/cli/agent/antigravity/lifecycle_test.go",
+    "cmd/entire/cli/agent/antigravity/testdata/hook_stdin_pre_invocation.json",
+    "cmd/entire/cli/agent/antigravity/transcript.go",
+    "cmd/entire/cli/agent/antigravity/types_test.go",
+    "cmd/entire/cli/integration_test/antigravity_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/7b/faeb05bf4d/0/metadata.json",
+      "transcript": "/7b/faeb05bf4d/0/transcript.jsonl",
+      "content_hash": "/7b/faeb05bf4d/0/transcript_hash.txt",
+      "prompt": "/7b/faeb05bf4d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 6689,
+    "cache_creation_tokens": 5405448,
+    "cache_read_tokens": 271717749,
+    "output_tokens": 562663,
+    "api_call_count": 489
+  }
+}
