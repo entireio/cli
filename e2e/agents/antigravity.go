@@ -158,8 +158,13 @@ func antigravityTestHomeDir(repoDir string) string {
 }
 
 func antigravityPromptEnv(repoDir string) []string {
+	// HOME must be filtered out before appending the test-home override,
+	// otherwise the parent process's HOME (first in os.Environ() order)
+	// shadows the appended value and getenv("HOME") returns the user's
+	// real home. Mirrors codex.go's filtering of CODEX_HOME and pi.go's
+	// filtering of PI_CODING_AGENT_DIR.
 	return append(
-		filterEnv(os.Environ(), "ENTIRE_TEST_TTY"),
+		filterEnv(os.Environ(), "ENTIRE_TEST_TTY", "HOME"),
 		"ACCESSIBLE=1",
 		"HOME="+antigravityTestHomeDir(repoDir),
 	)

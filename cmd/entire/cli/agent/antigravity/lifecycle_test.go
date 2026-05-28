@@ -367,6 +367,50 @@ func TestResolveAgySymlinks_RelativePathUnchanged(t *testing.T) {
 	}
 }
 
+// TestResolveAgySymlinks_NewNestedDirectory verifies the symlink resolver
+// walks up to the deepest existing ancestor when agy's write_to_file is
+// creating both a new directory AND a file inside it. The original
+// implementation only EvalSymlinks'd the immediate parent and failed
+// (lstat: no such file or directory), silently returning the unresolved
+// path — which would then be filtered as "outside repo" on macOS due to
+// the /tmp → /private/tmp symlink.
+func TestResolveAgySymlinks_NewNestedDirectory(t *testing.T) {
+	t.Parallel()
+	realDir := t.TempDir()
+	linkDir := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+	// Path: symlinked-dir/<missing-subdir>/<missing-file>
+	// Both newdir and file.txt do not exist; resolver must walk up to
+	// linkDir, resolve the symlink, then reattach newdir/file.txt.
+	through := filepath.Join(linkDir, "newdir", "file.txt")
+	resolved := resolveAgySymlinks(through)
+
+	wantParent, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(realDir): %v", err)
+	}
+	want := filepath.Join(wantParent, "newdir", "file.txt")
+	if resolved != want {
+		t.Errorf("resolveAgySymlinks(%q) = %q, want %q", through, resolved, want)
+	}
+}
+
+// TestResolveAgySymlinks_NoExistingAncestor verifies the resolver returns
+// the input unchanged when no ancestor of the path exists at all (root is
+// reached without finding a resolvable directory). This is the only path
+// where the function gives up; the test pins that behavior so we don't
+// accidentally return "" or a partially-resolved bogus path.
+func TestResolveAgySymlinks_NoExistingAncestor(t *testing.T) {
+	t.Parallel()
+	// /<random>/<random>/<random> — extremely unlikely to exist.
+	p := "/nonexistent-prefix-" + filepath.Base(t.TempDir()) + "/a/b/c.txt"
+	if got := resolveAgySymlinks(p); got != p {
+		t.Errorf("expected unchanged input %q, got %q", p, got)
+	}
+}
+
 func TestParseHookEvent_PreToolUse_AgyDoubleEncodedArgs(t *testing.T) {
 	t.Parallel()
 	// Reproduce agy's actual wire format exactly:

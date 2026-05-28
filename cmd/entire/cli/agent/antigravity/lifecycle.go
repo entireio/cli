@@ -182,25 +182,36 @@ func parsePreToolUse(stdin io.Reader) (*agent.Event, error) {
 	}, nil
 }
 
-// resolveAgySymlinks resolves symlinks in the parent directory of an absolute
-// path so paths agy sends (e.g. /tmp/foo/bar.md on macOS) match the symlink-
-// resolved worktree root the framework uses (/private/tmp/foo). Without this,
-// the framework's FilterAndNormalizePaths produces a "../" relative path and
-// drops the file as "outside repo" — silently breaking files_touched capture.
+// resolveAgySymlinks resolves symlinks for an absolute path agy sends so it
+// matches the symlink-resolved worktree root the framework uses (e.g. macOS
+// /tmp → /private/tmp). Without this, FilterAndNormalizePaths produces a
+// "../" relative path and drops the file as "outside repo" — silently
+// breaking files_touched capture.
 //
-// We resolve the PARENT directory only, not the file itself, because during
-// PreToolUse the file may not exist yet (write_to_file is creating it).
-// Returns the input unchanged if it's not absolute or symlink resolution fails.
+// We can't EvalSymlinks the path itself because it may not exist yet
+// (write_to_file is creating it). We also can't rely on EvalSymlinks of the
+// immediate parent because agy can create files in *new* nested directories
+// — EvalSymlinks returns an error for any missing component. So we walk up
+// until we find an existing ancestor, resolve symlinks there, and reattach
+// the missing tail. Returns the input unchanged if the path isn't absolute
+// or no ancestor resolves.
 func resolveAgySymlinks(p string) string {
 	if !filepath.IsAbs(p) {
 		return p
 	}
-	parent := filepath.Dir(p)
-	resolved, err := filepath.EvalSymlinks(parent)
-	if err != nil {
-		return p
+	suffix := filepath.Base(p)
+	dir := filepath.Dir(p)
+	for {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(resolved, suffix)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p // reached root without finding a resolvable ancestor
+		}
+		suffix = filepath.Join(filepath.Base(dir), suffix)
+		dir = parent
 	}
-	return filepath.Join(resolved, filepath.Base(p))
 }
 
 // extractFilesFromToolCall inspects the tool call and returns the files it

@@ -71,11 +71,12 @@ func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, 
 // check PATH instead of repo-level DetectPresence, because a repo can use
 // one agent for development while a different agent generates summaries.
 var summaryProviderBinaries = map[types.AgentName]string{
-	AgentNameClaudeCode: "claude",
-	AgentNameCodex:      "codex",
-	AgentNameCopilotCLI: "copilot",
-	AgentNameCursor:     "agent",
-	AgentNameGemini:     "gemini",
+	AgentNameAntigravity: "agy",
+	AgentNameClaudeCode:  "claude",
+	AgentNameCodex:       "codex",
+	AgentNameCopilotCLI:  "copilot",
+	AgentNameCursor:      "agent",
+	AgentNameGemini:      "gemini",
 }
 
 // IsSummaryCLIAvailable reports whether the CLI binary for a summary-capable
