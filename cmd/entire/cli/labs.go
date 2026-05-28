@@ -24,6 +24,11 @@ var experimentalCommands = []experimentalCommandInfo{
 		Invocation: "entire investigate",
 		Summary:    "Run a multi-agent investigation against a topic, issue, or seed doc",
 	},
+	{
+		Name:       "repo",
+		Invocation: "entire repo",
+		Summary:    "Manage repositories on EntireDB clusters (clone, log, merge, lifecycle, mirror)",
+	},
 }
 
 func newLabsCmd() *cobra.Command {
@@ -66,6 +71,7 @@ Available experimental commands:
 Try:
   entire review --help
   entire investigate --help
+  entire repo --help
 `
 }
 

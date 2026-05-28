@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	_ "github.com/entireio/cli/internal/entiredb/gogitzlib" // registers klauspost zlib provider with go-git
 	"github.com/spf13/cobra"
 )
 
