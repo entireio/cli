@@ -958,3 +958,31 @@ can you run all these first and tet all entire commands first, e2e tests like we
 ---
 
 proceed, but specifically asked to run smoke tests
+
+---
+
+Resume: agy --conversation=300239ad-33df-4483-9964-230524f192be (or -c)
+peytonmontei@Peytons-MacBook-Pro /t/agy-final-verify (main)> ls .git/entire-sessions/
+300239ad-33df-4483-9964-230524f192be.json
+peytonmontei@Peytons-MacBook-Pro /t/agy-final-verify (main)> git add . && git commit -m "agy final verify"
+[main e32a5a6] agy final verify
+ 5 files changed, 54 insertions(+)
+ create mode 100644 .agents/hooks.json
+ create mode 120000 .antigravitycli/fb1d154a-12b1-42dd-81fc-a975295fe775.json
+ create mode 100644 .entire/.gitignore
+ create mode 100644 .entire/settings.json
+ create mode 100644 final.md
+peytonmontei@Peytons-MacBook-Pro /t/agy-final-verify (main)> git log -1 --format="%B"
+agy final verify
+
+---
+
+peytonmontei@Peytons-MacBook-Pro /t/agy-final-verify (main)> entire checkpoint list
+  branch       main
+  checkpoints  0
+
+No checkpoints found on this branch.
+Checkpoints will appear here after you save changes during an agent session.
+peytonmontei@Peytons-MacBook-Pro /t/agy-final-verify (main)> entire status
+● Enabled · manual-commit · branch main
+  Agents · Antigravity
