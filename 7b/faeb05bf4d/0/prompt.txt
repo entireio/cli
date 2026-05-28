@@ -1049,3 +1049,41 @@ started just now
 
 ────────────────────────────────────────────────────────────────────────────────
 1 session
+
+---
+
+peytonmontei@Peytons-MacBook-Pro ~/agy-truly-final (main)> cat .git/entire-sessions/1886c61a-640e-4630-b86c-ca98094f0d40.json
+{
+  "session_id": "1886c61a-640e-4630-b86c-ca98094f0d40",
+  "cli_version": "dev",
+  "base_commit": "63a3d99ee1dadec5eb3de902500768dce9f59d40",
+  "attribution_base_commit": "63a3d99ee1dadec5eb3de902500768dce9f59d40",
+  "worktree_path": "/Users/peytonmontei/agy-truly-final",
+  "started_at": "2026-05-28T10:37:33.848639+02:00",
+  "phase": "idle",
+  "turn_id": "f9271cf4997c",
+  "last_interaction_time": "2026-05-28T10:37:38.141151+02:00",
+  "checkpoint_count": 1,
+  "files_touched": [
+    "probe.md"
+  ],
+  "agent_type": "Antigravity",
+  "session_turn_count": 1,
+  "transcript_path": "/Users/peytonmontei/.gemini/antigravity-cli/brain/1886c61a-640e-4630-b86c-ca98094f0d40/.system_generated/logs/transcript.jsonl",
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}, peytonmontei@Peytons-MacBook-Pro ~/agy-truly-final (main)> git for-each-ref refs/heads/entire/ --format='%(refname:short)'
+entire/63a3d99-e3b0c4
+entire/checkpoints/v1, peytonmontei@Peytons-MacBook-Pro ~/agy-truly-final (main)> git log -1 --format='%B'
+smoke: agy creates probe.md
+
+Entire-Checkpoint: 2c755b04e069, peytonmontei@Peytons-MacBook-Pro ~/agy-truly-final (main)> git log entire/checkpoints/v1 --oneline | head -5
+94be137 Checkpoint: 2c755b04e069
+7b96be7 Initialize metadata branch
