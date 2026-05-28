@@ -74,9 +74,17 @@ func displayPushTarget(target string) string {
 	return target
 }
 
+// checkpointPushBudget is one shared deadline across the initial push,
+// fetch+rebase, and retry — per-attempt timeouts can stack to ~3x. var so tests
+// can shrink it.
+var checkpointPushBudget = 2 * time.Minute
+
 // doPushBranch pushes the given branch to the target with fetch+merge recovery.
 // The target can be a remote name or a URL.
-func doPushBranch(ctx context.Context, target, branchName string) error { //nolint:unparam // callers treat push failures as non-fatal but keep an error-shaped boundary.
+func doPushBranch(ctx context.Context, target, branchName string) error {
+	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
+	defer cancel()
+
 	displayTarget := displayPushTarget(target)
 
 	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", branchName, displayTarget)
@@ -214,11 +222,9 @@ func finishPush(ctx context.Context, stop func(string), result pushResult, targe
 	}
 }
 
-// tryPushSessionsCommon attempts to push the sessions branch.
+// tryPushSessionsCommon attempts to push the sessions branch. No timeout of its
+// own — runs under doPushBranch's shared budget.
 func tryPushSessionsCommon(ctx context.Context, remoteName, branchName string) (pushResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
 	// Span the actual `git push` subprocess: on a slow remote (e.g. a custom
 	// git transport) this is typically where pre-push time is spent. Called once
 	// per push attempt, so a retry after fetch+rebase shows up as a second
@@ -325,9 +331,7 @@ func printProtectedRefBlock(w io.Writer, ref, target string) {
 // always apply cleanly.
 // The target can be a remote name or a URL.
 func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
+	// No timeout: runs under doPushBranch's shared budget.
 	fetchTarget, err := remote.ResolveFetchTarget(ctx, target)
 	if err != nil {
 		return fmt.Errorf("resolve fetch target: %w", err)
