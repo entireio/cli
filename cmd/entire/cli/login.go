@@ -118,6 +118,17 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 		return fmt.Errorf("save auth token: %w", err)
 	}
 
+	// Mirror the token into the entiredb-format credential store (the
+	// keyring slot + contexts.json entry that the vendored entire-repo
+	// subtree reads) so `entire repo` works without a separate
+	// `entire-core auth login` call. Non-fatal on failure — the cli's
+	// own auth.Store write above is already done, and we'd rather
+	// finish "Login complete." than back out a working login. See
+	// writeEntiredbLoginContext for the rationale.
+	if bridgeErr := writeEntiredbLoginContext(errW, token); bridgeErr != nil {
+		fmt.Fprintf(errW, "Warning: could not write entiredb context: %v\n", bridgeErr)
+	}
+
 	fmt.Fprintln(outW, "Login complete.")
 	return nil
 }
