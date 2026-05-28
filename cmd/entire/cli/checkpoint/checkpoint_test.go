@@ -4334,6 +4334,50 @@ func TestCommittedMetadata_ReviewFields(t *testing.T) {
 	}
 }
 
+// TestCommittedMetadata_InvestigateFields pins the JSON wire format for the
+// investigate fields on CommittedMetadata. Mirrors
+// TestCommittedMetadata_ReviewFields: any silent rename or removal of these
+// JSON tags would corrupt the entire/checkpoints/v1 branch format.
+func TestCommittedMetadata_InvestigateFields(t *testing.T) {
+	t.Parallel()
+	m := CommittedMetadata{
+		Kind:             "agent_investigate",
+		InvestigateRunID: "abcdef012345",
+		InvestigateTopic: "Why is checkout flaky?",
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+	if got, ok := raw["kind"].(string); !ok || got != "agent_investigate" {
+		t.Errorf(`expected "kind":"agent_investigate", got %v`, raw["kind"])
+	}
+	if got, ok := raw["investigate_run_id"].(string); !ok || got != "abcdef012345" {
+		t.Errorf(`expected "investigate_run_id":"abcdef012345", got %v`, raw["investigate_run_id"])
+	}
+	if got, ok := raw["investigate_topic"].(string); !ok || got != "Why is checkout flaky?" {
+		t.Errorf(`expected "investigate_topic" present, got %v`, raw["investigate_topic"])
+	}
+
+	// Zero-value CommittedMetadata must omit all the investigate keys
+	// (omitempty tags) so older checkpoints aren't tagged as investigations.
+	bZero, err := json.Marshal(CommittedMetadata{})
+	if err != nil {
+		t.Fatalf("marshal zero: %v", err)
+	}
+	zs := string(bZero)
+	for _, key := range []string{"investigate_run_id", "investigate_topic"} {
+		if strings.Contains(zs, `"`+key+`"`) {
+			t.Errorf(`expected zero-value CommittedMetadata to omit %q, got %s`, key, zs)
+		}
+	}
+}
+
 // TestCheckpointSummary_HasReview pins the JSON wire format for the HasReview
 // umbrella flag on CheckpointSummary. Callers such as the re-run guard in
 // `entire review` and `entire status` depend on the on-disk shape, so we
@@ -4363,5 +4407,233 @@ func TestCheckpointSummary_HasReview(t *testing.T) {
 	}
 	if strings.Contains(string(bZero), "has_review") {
 		t.Errorf(`expected zero-value summary to omit "has_review" key, got %s`, string(bZero))
+	}
+}
+
+// TestCheckpointSummary_HasInvestigation pins the JSON wire format for the
+// HasInvestigation umbrella flag on CheckpointSummary. Mirrors the
+// HasReview test: callers depend on the on-disk shape, so this asserts on
+// the marshalled key directly (not a self-consistent round-trip).
+func TestCheckpointSummary_HasInvestigation(t *testing.T) {
+	t.Parallel()
+
+	// True case: the key must marshal as "has_investigation": true.
+	bTrue, err := json.Marshal(CheckpointSummary{HasInvestigation: true})
+	if err != nil {
+		t.Fatalf("marshal true: %v", err)
+	}
+	var rawTrue map[string]any
+	if err := json.Unmarshal(bTrue, &rawTrue); err != nil {
+		t.Fatalf("unmarshal true: %v", err)
+	}
+	if got, ok := rawTrue["has_investigation"].(bool); !ok || !got {
+		t.Errorf(`expected "has_investigation":true, got %v (raw: %s)`, rawTrue["has_investigation"], string(bTrue))
+	}
+
+	// Zero-value case: HasInvestigation has the omitempty tag, so a freshly-zeroed
+	// summary must NOT include the key.
+	bZero, err := json.Marshal(CheckpointSummary{})
+	if err != nil {
+		t.Fatalf("marshal zero: %v", err)
+	}
+	if strings.Contains(string(bZero), "has_investigation") {
+		t.Errorf(`expected zero-value summary to omit "has_investigation" key, got %s`, string(bZero))
+	}
+}
+
+// readSummaryFromBranch reads the root CheckpointSummary at <id[:2]>/<id[2:]>/metadata.json
+// from the latest commit on entire/checkpoints/v1.
+func readSummaryFromBranch(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID) CheckpointSummary {
+	t.Helper()
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("read metadata branch ref: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("read commit object: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("read tree: %v", err)
+	}
+	checkpointTree, err := tree.Tree(checkpointID.Path())
+	if err != nil {
+		t.Fatalf("get checkpoint subtree: %v", err)
+	}
+	rootFile, err := checkpointTree.File(paths.MetadataFileName)
+	if err != nil {
+		t.Fatalf("find root metadata.json: %v", err)
+	}
+	rootContent, err := rootFile.Contents()
+	if err != nil {
+		t.Fatalf("read root metadata.json: %v", err)
+	}
+	var summary CheckpointSummary
+	if err := json.Unmarshal([]byte(rootContent), &summary); err != nil {
+		t.Fatalf("parse root metadata.json: %v", err)
+	}
+	return summary
+}
+
+// readSessionMetadataAtIndex reads the per-session CommittedMetadata for
+// session at numbered subfolder `index` (0-based) under the checkpoint.
+func readSessionMetadataAtIndex(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID, index int) CommittedMetadata {
+	t.Helper()
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("read metadata branch ref: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("read commit object: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("read tree: %v", err)
+	}
+	checkpointTree, err := tree.Tree(checkpointID.Path())
+	if err != nil {
+		t.Fatalf("get checkpoint subtree: %v", err)
+	}
+	sessionTree, err := checkpointTree.Tree(strconv.Itoa(index))
+	if err != nil {
+		t.Fatalf("get session subtree %d: %v", index, err)
+	}
+	sessionFile, err := sessionTree.File(paths.MetadataFileName)
+	if err != nil {
+		t.Fatalf("find session metadata.json: %v", err)
+	}
+	content, err := sessionFile.Contents()
+	if err != nil {
+		t.Fatalf("read session metadata.json: %v", err)
+	}
+	var meta CommittedMetadata
+	if err := json.Unmarshal([]byte(content), &meta); err != nil {
+		t.Fatalf("parse session metadata.json: %v", err)
+	}
+	return meta
+}
+
+// initRepoForCheckpointTest initialises a temp git repo with one commit and
+// returns a *git.Repository ready for WriteCommitted. Mirrors the setup
+// pattern used by TestWriteCommitted_AgentField but factored to avoid
+// duplication across the new investigate-propagation tests.
+func initRepoForCheckpointTest(t *testing.T) *git.Repository {
+	t.Helper()
+	tempDir := t.TempDir()
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("init git repo: %v", err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("get worktree: %v", err)
+	}
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("add README: %v", err)
+	}
+	if _, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return repo
+}
+
+// TestWriteCommitted_PropagatesHasInvestigation verifies that
+// WriteCommittedOptions.HasInvestigation flows into CheckpointSummary, and
+// that on a second write into the SAME checkpoint, the existing-summary
+// OR-merge keeps HasInvestigation true even when the second session is not
+// itself an investigation. Mirrors the existing HasReview merge behaviour.
+func TestWriteCommitted_PropagatesHasInvestigation(t *testing.T) {
+	t.Parallel()
+
+	repo := initRepoForCheckpointTest(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeeff")
+
+	// First session: investigate session, sets HasInvestigation=true.
+	if err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        "investigate-session-1",
+		Strategy:         "manual-commit",
+		Agent:            agent.AgentTypeClaudeCode,
+		Transcript:       redact.AlreadyRedacted([]byte("transcript A")),
+		AuthorName:       "Test",
+		AuthorEmail:      "test@test.com",
+		Kind:             "agent_investigate",
+		HasInvestigation: true,
+		InvestigateRunID: "0123456789ab",
+		InvestigateTopic: "Why is X flaky?",
+	}); err != nil {
+		t.Fatalf("first WriteCommitted: %v", err)
+	}
+
+	summary := readSummaryFromBranch(t, repo, checkpointID)
+	if !summary.HasInvestigation {
+		t.Fatalf("after first write: HasInvestigation = false, want true")
+	}
+
+	// Second session: ordinary session, HasInvestigation=false. The OR-merge
+	// against the existing summary must keep HasInvestigation=true.
+	if err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        "ordinary-session-2",
+		Strategy:         "manual-commit",
+		Agent:            agent.AgentTypeClaudeCode,
+		Transcript:       redact.AlreadyRedacted([]byte("transcript B")),
+		AuthorName:       "Test",
+		AuthorEmail:      "test@test.com",
+		HasInvestigation: false,
+	}); err != nil {
+		t.Fatalf("second WriteCommitted: %v", err)
+	}
+
+	mergedSummary := readSummaryFromBranch(t, repo, checkpointID)
+	if !mergedSummary.HasInvestigation {
+		t.Errorf("after second write: HasInvestigation = false, want true (OR-merge from prior session)")
+	}
+}
+
+// TestCommittedMetadata_InvestigateFieldsRoundTrip verifies that
+// WriteCommittedOptions investigate fields are written into the per-session
+// CommittedMetadata and round-trip on read.
+func TestCommittedMetadata_InvestigateFieldsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	repo := initRepoForCheckpointTest(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("11223344aabb")
+
+	if err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        "investigate-roundtrip",
+		Strategy:         "manual-commit",
+		Agent:            agent.AgentTypeClaudeCode,
+		Transcript:       redact.AlreadyRedacted([]byte("transcript")),
+		AuthorName:       "Test",
+		AuthorEmail:      "test@test.com",
+		Kind:             "agent_investigate",
+		HasInvestigation: true,
+		InvestigateRunID: "abcdef012345",
+		InvestigateTopic: "topic-x",
+	}); err != nil {
+		t.Fatalf("WriteCommitted: %v", err)
+	}
+
+	meta := readSessionMetadataAtIndex(t, repo, checkpointID, 0)
+	if meta.Kind != "agent_investigate" {
+		t.Errorf("Kind: got %q, want agent_investigate", meta.Kind)
+	}
+	if meta.InvestigateRunID != "abcdef012345" {
+		t.Errorf("InvestigateRunID: got %q", meta.InvestigateRunID)
+	}
+	if meta.InvestigateTopic != "topic-x" {
+		t.Errorf("InvestigateTopic: got %q", meta.InvestigateTopic)
 	}
 }

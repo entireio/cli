@@ -102,8 +102,9 @@ func TestInstallHooks_LocalDev(t *testing.T) {
 
 	settings := readGeminiSettings(t, tempDir)
 
-	// Verify local dev commands use git rev-parse for runtime repo root resolution
-	prefix := `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks gemini `
+	// Verify local dev commands delegate to the entire-dev launcher, resolving
+	// the repo root at runtime via git.
+	prefix := `"$(git rev-parse --show-toplevel)"/scripts/entire-dev hooks gemini `
 	verifyHookCommand(t, settings.Hooks.SessionStart, "", prefix+"session-start")
 	verifyHookCommand(t, settings.Hooks.SessionEnd, "exit", prefix+"session-end")
 	verifyHookCommand(t, settings.Hooks.SessionEnd, "logout", prefix+"session-end")

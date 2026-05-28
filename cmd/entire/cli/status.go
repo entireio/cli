@@ -191,6 +191,17 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		b.WriteString(")")
 	}
 
+	// Show investigation status for HEAD's checkpoint, if any. Review and
+	// investigation can both be true on the same checkpoint, so we render
+	// both lines independently rather than gating one on the other.
+	if investigated, meta := headHasInvestigateCheckpoint(ctx); investigated {
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.dim, "  Investigation · "))
+		b.WriteString("investigated (")
+		b.WriteString(meta)
+		b.WriteString(")")
+	}
+
 	return b.String()
 }
 

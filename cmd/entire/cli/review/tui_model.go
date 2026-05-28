@@ -22,6 +22,7 @@ import (
 
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
 // Default terminal dimensions used before the first tea.WindowSizeMsg
@@ -642,15 +643,10 @@ func (m reviewTUIModel) countsLine() string {
 		len(m.summary.AgentRuns), succ, fail, canc)
 }
 
-// formatDuration formats a duration compactly for the table column.
+// formatDuration delegates to tuiutil.FormatDuration so the review and
+// investigate TUIs share one implementation.
 func formatDuration(d time.Duration) string {
-	if d < time.Second {
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	}
-	if d < time.Minute {
-		return fmt.Sprintf("%.1fs", d.Seconds())
-	}
-	return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
+	return tuiutil.FormatDuration(d)
 }
 
 // formatCompact formats a token count as e.g. "1.2k" or "450".

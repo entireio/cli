@@ -51,7 +51,7 @@ func (a *OpenCodeAgent) InstallHooks(ctx context.Context, localDev bool, force b
 	// Build the command prefix
 	var cmdPrefix string
 	if localDev {
-		cmdPrefix = `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go`
+		cmdPrefix = agent.LocalDevHookScript
 	} else {
 		cmdPrefix = "entire"
 	}

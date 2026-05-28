@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	agenttypes "github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/agentlaunch"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/mdrender"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -105,7 +104,10 @@ func runReviewFix(
 		return err
 	}
 	prompt := composeReviewFixPrompt(manifest, reviewFixSourcesFromFindings(findings))
-	return launchReviewFixAgent(ctx, fixAgent, prompt)
+	if err := agentlaunch.LaunchFixAgent(ctx, fixAgent, prompt); err != nil {
+		return fmt.Errorf("launch review fix agent: %w", err)
+	}
+	return nil
 }
 
 func wrapReviewSilentError(silentErr func(error) error, err error) error {
@@ -583,36 +585,6 @@ func promptForReviewFixAgent(ctx context.Context, choices []AgentChoice, saved s
 		return "", fmt.Errorf("fix agent picker: %w", err)
 	}
 	return picked, nil
-}
-
-func launchReviewFixAgent(ctx context.Context, agentName string, prompt string) error {
-	ag, err := agent.Get(agenttypes.AgentName(agentName))
-	if err != nil {
-		return fmt.Errorf("resolve fix agent %s: %w", agentName, err)
-	}
-	launcher, ok := agent.LauncherFor(ag.Name())
-	if !ok {
-		return fmt.Errorf("agent %s cannot be launched for review fixes", agentName)
-	}
-	cmd, err := launcher.LaunchCmd(ctx, prompt)
-	if err != nil {
-		return fmt.Errorf("build fix command: %w", err)
-	}
-	cmd.Env = withoutReviewEnv(cmd.Env)
-	if len(cmd.Env) == 0 {
-		cmd.Env = withoutReviewEnv(os.Environ())
-	}
-	if err := cmd.Run(); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return fmt.Errorf("fix agent cancelled: %w", err)
-		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return fmt.Errorf("fix agent exited with status %d: %w", exitErr.ExitCode(), err)
-		}
-		return fmt.Errorf("run fix agent: %w", err)
-	}
-	return nil
 }
 
 func writeReviewCompletionFooter(w io.Writer, manifest LocalReviewManifest) {

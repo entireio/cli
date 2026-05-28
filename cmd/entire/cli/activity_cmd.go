@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
@@ -58,8 +60,24 @@ func newActivityCmd() *cobra.Command {
 func runActivity(ctx context.Context, w, errW io.Writer) error {
 	client, err := NewAuthenticatedAPIClient(ctx, false)
 	if err != nil {
-		fmt.Fprintln(errW, "Not logged in. Run 'entire login' to authenticate.")
-		return NewSilentError(err)
+		// Ctrl+C during the keyring read or STS exchange surfaces as
+		// context.Canceled / DeadlineExceeded. Silence it to match the
+		// codebase convention (clean.go, explain.go, explain_export.go) —
+		// printing "context canceled" at a user who just hit Ctrl+C is
+		// noise, not diagnostic.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return NewSilentError(err)
+		}
+		// Only the "no core token in keyring" sentinel gets the friendly
+		// login hint. Other failures (STS exchange rejected, network
+		// error, malformed env config) used to be swallowed under the
+		// same hint, which sent users on wild goose chases trying to
+		// "re-login" their way out of unrelated server-side problems.
+		if errors.Is(err, auth.ErrNotLoggedIn) {
+			fmt.Fprintln(errW, "Not logged in. Run 'entire login' to authenticate.")
+			return NewSilentError(err)
+		}
+		return err
 	}
 
 	// Non-interactive fallback: piped output or accessibility mode

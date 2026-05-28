@@ -4,18 +4,13 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
-// ProviderVersionEnvVar selects which OAuth surface this CLI talks to.
-//
-// Recognised values:
-//
-//   - "v1" (or unset / unrecognised) — current device-flow surface
-//   - "v2"                            — next-generation device-flow surface
-//
-// Read once at process startup via CurrentProvider; later flips within
-// the same process are intentionally ignored. Tests inject via
-// SetProviderForTest rather than mutating the env mid-run.
+// ProviderVersionEnvVar overrides the auto-detected provider version.
+// Set to "v1" or "v2"; see effectiveProviderVersion for resolution.
+// Read once at process startup via CurrentProvider.
 const ProviderVersionEnvVar = "ENTIRE_AUTH_PROVIDER_VERSION"
 
 // Provider captures the per-surface bits of OAuth wiring.
@@ -77,6 +72,23 @@ func resolveProvider(version string) Provider {
 	}
 }
 
+// effectiveProviderVersion resolves the version string fed into
+// resolveProvider. Order: explicit env var > split-host auto-detect > v1.
+//
+// The split-host auto-detect can't extend to a default flip: as of
+// 2026-05 entire.io (the unset-env default data host) does not serve
+// the v2 OIDC surface, so picking v2 without an explicit split-host
+// signal would break login for every existing user.
+func effectiveProviderVersion() string {
+	if v := strings.TrimSpace(os.Getenv(ProviderVersionEnvVar)); v != "" {
+		return v
+	}
+	if api.IsSplitHost() {
+		return "v2"
+	}
+	return "v1"
+}
+
 var (
 	providerOnce     sync.Once
 	resolvedProvider Provider
@@ -91,11 +103,8 @@ var (
 )
 
 // CurrentProvider returns the active Provider for this process.
-//
-// Resolution: read ENTIRE_AUTH_PROVIDER_VERSION exactly once on first
-// call, freeze the result, and return the same Provider on every
-// subsequent call. Tests that need a different provider must use
-// SetProviderForTest before any auth call constructs the singleton.
+// Resolution freezes on the first call (env vars must be set before
+// then). Tests bypass the singleton via SetProviderForTest.
 func CurrentProvider() Provider {
 	providerTestMu.Lock()
 	override := providerForTest
@@ -104,7 +113,7 @@ func CurrentProvider() Provider {
 		return *override
 	}
 	providerOnce.Do(func() {
-		resolvedProvider = resolveProvider(os.Getenv(ProviderVersionEnvVar))
+		resolvedProvider = resolveProvider(effectiveProviderVersion())
 	})
 	return resolvedProvider
 }

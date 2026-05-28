@@ -44,7 +44,14 @@ func NewAuthenticatedAPIClient(ctx context.Context, insecureHTTP bool) (*api.Cli
 	token, err := auth.TokenForResource(ctx, api.OriginOnly(dataURL))
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {
-			return nil, errors.New("not logged in (run 'entire login' first)")
+			// Wrap the original err (not the sentinel) so any context
+			// the tokenmanager attached — keyring backend message,
+			// expired-token reason — survives to the caller. The
+			// errors.Is(err, auth.ErrNotLoggedIn) chain is preserved
+			// because err already wraps the sentinel; replacing it
+			// with the bare sentinel would drop that context for
+			// zero behavioural gain.
+			return nil, fmt.Errorf("not logged in (run 'entire login' first): %w", err)
 		}
 		return nil, fmt.Errorf("resolve API token: %w", err)
 	}

@@ -60,6 +60,17 @@ func AuthBaseURL() string {
 	return NormalizeOriginURL(raw)
 }
 
+// IsSplitHost reports whether the CLI is configured for split-host —
+// i.e. ENTIRE_AUTH_BASE_URL points at a different origin than the data
+// API. Both sides are canonicalised via NormalizeOriginURL before
+// comparison: AuthBaseURL already does this internally, but BaseURL
+// only trims whitespace and a trailing slash, so a cosmetically-
+// different ENTIRE_API_BASE_URL (uppercase host, explicit :443, path
+// suffix) would otherwise look split when it isn't.
+func IsSplitHost() bool {
+	return AuthBaseURL() != NormalizeOriginURL(BaseURL())
+}
+
 // ResolveURL joins an API-relative path against the effective base URL.
 func ResolveURL(path string) (string, error) {
 	return ResolveURLFromBase(BaseURL(), path)

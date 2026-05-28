@@ -469,6 +469,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - `store.go` - `GitStore` struct wrapping git repository
 - `temporary.go` - Shadow branch operations (`WriteTemporary`, `ReadTemporary`, `ListTemporary`)
 - `committed.go` - Metadata branch operations (`WriteCommitted`, `ReadCommitted`, `ListCommitted`)
+- `configloader.go` - Overrides go-git's default global/system config loader with a symlink-following `billy.Basic` (`osSymlinkFS`). go-git's default reads config via `os.Root`, which rejects absolute symlinks in any path component (e.g. a `~/.config` managed by a dotfile tool) with "path escapes from parent" — silently dropping global config so commit author identity fell back to "Unknown", signing was skipped, and the push hook spammed a warning per commit.
 
 #### Session Package (`cmd/entire/cli/session/`)
 

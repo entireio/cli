@@ -98,10 +98,14 @@ func openPathWithAlternates(repoRoot string) (*git.Repository, error) {
 		return nil, err
 	}
 
-	dotGitFS := osfs.New(dotGitPath, osfs.WithBoundOS())
+	// Wrap the git-dir filesystems so relative alternate object directories are
+	// rewritten to absolute paths on read; go-git cannot follow relative
+	// alternates on its own. The alternates file lives under the common git dir
+	// for linked worktrees, so wrap both.
+	dotGitFS := wrapAlternatesRewrite(osfs.New(dotGitPath, osfs.WithBoundOS()))
 	var commonGitFS billy.Filesystem
 	if commonGitPath != "" {
-		commonGitFS = osfs.New(commonGitPath, osfs.WithBoundOS())
+		commonGitFS = wrapAlternatesRewrite(osfs.New(commonGitPath, osfs.WithBoundOS()))
 	}
 
 	repositoryFS := dotgit.NewRepositoryFilesystem(dotGitFS, commonGitFS)

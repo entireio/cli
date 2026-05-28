@@ -8,74 +8,24 @@ package cli
 //   review → checkpoint → codex → review
 //   review → claudecode/codex/geminicli → review
 //
-// headHasReviewCheckpoint requires checkpoint access and stays here.
 // newReviewAttachCmd uses runAttachSurfaceReviewErrors (in attach.go)
-// and also stays here.
+// and stays here. HEAD-checkpoint flag resolution lives in
+// head_checkpoint_flags.go.
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os/exec"
 
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
-	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
-
-// headHasReviewCheckpoint checks whether HEAD's checkpoint metadata includes
-// a review session. Returns (true, infoString) if HasReview is set.
-// Single lookup: read the Entire-Checkpoint trailer from HEAD, then resolve
-// the CheckpointSummary through the configured committed checkpoint store.
-func headHasReviewCheckpoint(ctx context.Context) (bool, string) {
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		logging.Debug(ctx, "head review check: locate worktree root", slog.String("error", err.Error()))
-		return false, ""
-	}
-	execCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "log", "-1", "--format=%B")
-	output, err := execCmd.Output()
-	if err != nil {
-		logging.Debug(ctx, "head review check: read HEAD commit message", slog.String("error", err.Error()))
-		return false, ""
-	}
-	cpID, ok := trailers.ParseCheckpoint(string(output))
-	if !ok {
-		logging.Debug(ctx, "head review check: no Entire-Checkpoint trailer on HEAD")
-		return false, ""
-	}
-	repo, err := gitrepo.OpenPath(repoRoot)
-	if err != nil {
-		logging.Debug(ctx, "head review check: open repository", slog.String("error", err.Error()))
-		return false, ""
-	}
-	defer repo.Close()
-	store, storeErr := checkpoint.NewCommittedReader(ctx, repo, checkpoint.CommittedReaderOptions{})
-	if storeErr != nil {
-		logging.Debug(ctx, "head review check: checkpoint store unavailable", slog.String("error", storeErr.Error()))
-		return false, ""
-	}
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
-	if err != nil {
-		logging.Debug(ctx, "head review check: resolve checkpoint summary",
-			slog.String("checkpoint_id", cpID.String()),
-			slog.Any("error", err))
-		return false, ""
-	}
-	if !summary.HasReview {
-		logging.Debug(ctx, "head review check: summary HasReview is false", slog.String("checkpoint_id", cpID.String()))
-		return false, ""
-	}
-	return true, fmt.Sprintf("checkpoint %s", cpID)
-}
 
 // newReviewAttachCmd is a thin wrapper around `entire attach --review`. It
 // shares all wiring with runAttach; only the UX surface differs, letting

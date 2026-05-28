@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.3] - 2026-05-27
+
+### Added
+
+- `entire login` copies the device code to your clipboard, falling back to the printed code if clipboard access fails ([#1093](https://github.com/entireio/cli/pull/1093))
+
+### Fixed
+
+- Checkpoint metadata reconciliation (`cherryPickOnto`) is much faster — roughly 66s → 7s for 50 commits ([#1248](https://github.com/entireio/cli/pull/1248))
+- `entire activity` no longer fails with "unexpected end of JSON input" for active accounts — the API response body cap was raised from 1 MiB to 16 MiB ([#1228](https://github.com/entireio/cli/pull/1228))
+- Checkpoint sync reliability: replay local-only checkpoints when a fetch finds a diverged remote, and preserve diverged refs so `entire resume` no longer reports "session log not available" when the local metadata branch is stale ([#1251](https://github.com/entireio/cli/pull/1251), [#1252](https://github.com/entireio/cli/pull/1252))
+- Checkpoint commits reachable only through `.git/objects/info/alternates` (shared clones) are no longer treated as missing during metadata rebase and push ([#1268](https://github.com/entireio/cli/pull/1268))
+- Prevent a pack-file race during checkpoint sync by disabling auto-gc on fetches; legacy shallow checkpoint repos are auto-unshallowed so ancestry-dependent commands keep working ([#1276](https://github.com/entireio/cli/pull/1276))
+- Route checkpoint pushes to the provider host when the origin protocol can't be mapped to a git transport (e.g. `entire://`), fixing failed pushes and a wedged remote helper ([#1279](https://github.com/entireio/cli/pull/1279))
+- Read global git config stored behind symlinked directories (e.g. a dotfile-managed `~/.config`), silencing repeated "path escapes from parent" warnings during checkpoint push ([#1278](https://github.com/entireio/cli/pull/1278))
+
+### Housekeeping
+
+- Documentation: Pi added to agent listings, the hook table, and architecture guides ([#1233](https://github.com/entireio/cli/pull/1233))
+- Fixed gemini-cli and opencode E2E harness defects (test infrastructure, not product code) ([#1277](https://github.com/entireio/cli/pull/1277))
+- Go bumped to 1.26.3 ([#1243](https://github.com/entireio/cli/pull/1243))
+- Dependency bumps: go-dependencies group, `github/codeql-action` 4.35.4 → 4.36.0 ([#1255](https://github.com/entireio/cli/pull/1255), [#1254](https://github.com/entireio/cli/pull/1254))
+
+### Thanks
+
+Thanks to @godswillumukoro for adding Pi to the agent listings, hook table, and architecture guides!
+
 ## [0.6.2] - 2026-05-18
 
 ### Added

@@ -684,3 +684,109 @@ func TestExplainCmd_TranscriptAndJSONMutuallyExclusive(t *testing.T) {
 	err := cmd.ExecuteContext(context.Background())
 	require.Error(t, err)
 }
+
+// TestExplainExport_HasInvestigation pins the JSON wire format for the
+// has_investigation umbrella flag in the export envelope. omitempty: true
+// must marshal as "has_investigation":true; a freshly-zeroed envelope must
+// drop the field entirely (so older checkpoints don't look investigated).
+func TestExplainExport_HasInvestigation(t *testing.T) {
+	t.Parallel()
+
+	bTrue, err := json.Marshal(checkpointExportJSON{
+		CheckpointID:     "abcdef011111",
+		HasInvestigation: true,
+	})
+	require.NoError(t, err)
+
+	var rawTrue map[string]any
+	require.NoError(t, json.Unmarshal(bTrue, &rawTrue))
+	got, ok := rawTrue["has_investigation"].(bool)
+	require.True(t, ok, "expected has_investigation key, raw: %s", string(bTrue))
+	require.True(t, got, "expected has_investigation:true, raw: %s", string(bTrue))
+
+	bZero, err := json.Marshal(checkpointExportJSON{CheckpointID: "abcdef011111"})
+	require.NoError(t, err)
+	require.NotContains(t, string(bZero), "has_investigation",
+		"zero-value envelope must omit has_investigation key")
+}
+
+// TestExplainExport_PerSessionInvestigateFields pins the JSON wire format
+// for the per-session investigate fields. The fields are populated when
+// the session metadata carries them, and omitted when they are zero-valued.
+func TestExplainExport_PerSessionInvestigateFields(t *testing.T) {
+	t.Parallel()
+
+	bPopulated, err := json.Marshal(checkpointSessionJSON{
+		Index:            0,
+		SessionID:        "investigate-session",
+		InvestigateRunID: "0123456789ab",
+		InvestigateTopic: "the perf regression in foo()",
+	})
+	require.NoError(t, err)
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(bPopulated, &raw))
+	require.Equal(t, "0123456789ab", raw["investigate_run_id"])
+	require.Equal(t, "the perf regression in foo()", raw["investigate_topic"])
+
+	bZero, err := json.Marshal(checkpointSessionJSON{Index: 0, SessionID: "no-investigation"})
+	require.NoError(t, err)
+	for _, k := range []string{"investigate_run_id", "investigate_topic"} {
+		require.NotContains(t, string(bZero), k,
+			"zero-value session must omit %q", k)
+	}
+}
+
+// TestSessionMetadataToJSON_CopiesInvestigateFields pins that
+// sessionMetadataToJSON copies the investigate fields from CommittedMetadata
+// into the per-session JSON struct.
+func TestSessionMetadataToJSON_CopiesInvestigateFields(t *testing.T) {
+	t.Parallel()
+
+	meta := &checkpoint.CommittedMetadata{
+		SessionID:        "investigate-session",
+		Kind:             "agent_investigate",
+		InvestigateRunID: "0123456789ab",
+		InvestigateTopic: "topic from metadata.json",
+	}
+
+	got := sessionMetadataToJSON(0, meta)
+	require.Equal(t, "0123456789ab", got.InvestigateRunID)
+	require.Equal(t, "topic from metadata.json", got.InvestigateTopic)
+}
+
+// TestBuildCheckpointJSONEnvelope_PropagatesHasInvestigation verifies the
+// summary-level has_investigation flag propagates from CheckpointSummary to
+// the export envelope. Mirrors how HasReview is sourced.
+func TestBuildCheckpointJSONEnvelope_PropagatesHasInvestigation(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("aaaa11112222")
+	summary := &checkpoint.CheckpointSummary{
+		Strategy:         "manual-commit",
+		CheckpointsCount: 1,
+		HasInvestigation: true,
+		Sessions: []checkpoint.SessionFilePaths{
+			{Metadata: "aa/aa11112222/0/metadata.json"},
+		},
+	}
+	reader := &stubCommittedReader{
+		summary: summary,
+		contents: map[int]*checkpoint.SessionContent{
+			0: {Metadata: checkpoint.CommittedMetadata{
+				SessionID:        "investigate-session",
+				Kind:             "agent_investigate",
+				InvestigateRunID: "0123456789ab",
+				InvestigateTopic: "summary-level topic",
+			}},
+		},
+	}
+
+	envelope, failed := buildCheckpointJSONEnvelope(context.Background(), reader, summary, cpID)
+	require.Empty(t, failed)
+	require.True(t, envelope.HasInvestigation,
+		"envelope must mirror CheckpointSummary.HasInvestigation")
+	require.Len(t, envelope.Sessions, 1)
+	require.Equal(t, "0123456789ab", envelope.Sessions[0].InvestigateRunID)
+	require.Equal(t, "summary-level topic", envelope.Sessions[0].InvestigateTopic)
+}

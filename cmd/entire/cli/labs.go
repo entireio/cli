@@ -19,6 +19,11 @@ var experimentalCommands = []experimentalCommandInfo{
 		Invocation: "entire review",
 		Summary:    "Run configured review skills against the current branch",
 	},
+	{
+		Name:       "investigate",
+		Invocation: "entire investigate",
+		Summary:    "Run a multi-agent investigation against a topic, issue, or seed doc",
+	},
 }
 
 func newLabsCmd() *cobra.Command {
@@ -60,6 +65,7 @@ Available experimental commands:
 ` + renderExperimentalCommands(experimentalCommands) + `
 Try:
   entire review --help
+  entire investigate --help
 `
 }
 

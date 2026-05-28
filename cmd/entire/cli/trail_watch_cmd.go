@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
-	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 
 	"github.com/spf13/cobra"
 )
@@ -173,15 +172,15 @@ func resolveTrailWatchTarget(ctx context.Context, client *api.Client, number int
 		return resolveTrailWatchNumber(ctx, client, number)
 	}
 
-	host, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
+	forge, owner, repo, err := resolveTrailRemote(ctx)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to resolve repository: %w", err)
+		return "", "", err
 	}
 	branch, err := GetCurrentBranch(ctx)
 	if err != nil {
 		return "", "", fmt.Errorf("no trail number given and current branch is unknown: %w", err)
 	}
-	found, err := findTrailByBranch(ctx, client, host, owner, repo, branch)
+	found, err := findTrailByBranch(ctx, client, forge, owner, repo, branch)
 	if err != nil {
 		return "", "", err
 	}
@@ -191,32 +190,32 @@ func resolveTrailWatchTarget(ctx context.Context, client *api.Client, number int
 	if found.ID == "" {
 		return "", "", fmt.Errorf("trail for branch %q has no id yet", branch)
 	}
-	return found.ID, trailWatchDescription(host, owner, repo, found.Number, found.ID), nil
+	return found.ID, trailWatchDescription(forge, owner, repo, found.Number, found.ID), nil
 }
 
 func resolveTrailWatchNumber(ctx context.Context, client *api.Client, number int) (trailID, description string, err error) {
-	host, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
+	forge, owner, repo, err := resolveTrailRemote(ctx)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to resolve repository: %w", err)
+		return "", "", err
 	}
-	found, err := findTrailByNumber(ctx, client, host, owner, repo, number)
+	found, err := findTrailByNumber(ctx, client, forge, owner, repo, number)
 	if err != nil {
 		return "", "", err
 	}
 	if found == nil {
-		return "", "", fmt.Errorf("no trail #%d found in %s/%s/%s", number, host, owner, repo)
+		return "", "", fmt.Errorf("no trail #%d found in %s/%s/%s", number, forge, owner, repo)
 	}
 	if found.ID == "" {
 		return "", "", fmt.Errorf("trail #%d has no id yet", number)
 	}
-	return found.ID, trailWatchDescription(host, owner, repo, found.Number, found.ID), nil
+	return found.ID, trailWatchDescription(forge, owner, repo, found.Number, found.ID), nil
 }
 
-func trailWatchDescription(host, owner, repo string, number int, trailID string) string {
+func trailWatchDescription(forge, owner, repo string, number int, trailID string) string {
 	if number > 0 {
-		return fmt.Sprintf("trail #%d (%s/%s/%s, id %s)", number, host, owner, repo, trailID)
+		return fmt.Sprintf("trail #%d (%s/%s/%s, id %s)", number, forge, owner, repo, trailID)
 	}
-	return fmt.Sprintf("trail %s (%s/%s/%s)", trailID, host, owner, repo)
+	return fmt.Sprintf("trail %s (%s/%s/%s)", trailID, forge, owner, repo)
 }
 
 func reviewEventsPath(trailID string) string {

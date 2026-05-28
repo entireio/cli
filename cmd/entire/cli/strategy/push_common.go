@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/perf"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -97,12 +98,18 @@ func doPushBranch(ctx context.Context, target, branchName string) error { //noli
 	}
 
 	// Push failed - likely non-fast-forward. Try to fetch and rebase.
+	// Spanned (with the network fetch as a child) so the trace distinguishes
+	// "the raw push is slow" from "we keep hitting contention and re-syncing".
 	fmt.Fprintf(os.Stderr, "[entire] Syncing %s with remote...", branchName)
 	stop = startProgressDots(os.Stderr)
 
-	if err := fetchAndRebaseSessionsCommon(ctx, target, branchName); err != nil {
+	frCtx, fetchRebaseSpan := perf.Start(ctx, "fetch_and_rebase")
+	syncErr := fetchAndRebaseSessionsCommon(frCtx, target, branchName)
+	fetchRebaseSpan.RecordError(syncErr)
+	fetchRebaseSpan.End()
+	if syncErr != nil {
 		stop("")
-		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync %s: %v\n", branchName, err)
+		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync %s: %v\n", branchName, syncErr)
 		printCheckpointRemoteHint(target)
 		return nil // Don't fail the main push
 	}
@@ -212,7 +219,16 @@ func tryPushSessionsCommon(ctx context.Context, remoteName, branchName string) (
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
+	// Span the actual `git push` subprocess: on a slow remote (e.g. a custom
+	// git transport) this is typically where pre-push time is spent. Called once
+	// per push attempt, so a retry after fetch+rebase shows up as a second
+	// git_push step (git_push~1) in the trace. A rejected first push records an
+	// error flag, which signals the recovery path was taken.
+	_, pushSpan := perf.Start(ctx, "git_push")
 	result, err := remote.Push(ctx, remoteName, branchPushRefSpec(branchName))
+	pushSpan.RecordError(err)
+	pushSpan.End()
+
 	outputStr := result.Output
 	if err != nil {
 		return pushResult{}, classifyPushFailure(ctx, outputStr, err)
@@ -339,12 +355,18 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 	// The downstream reconcile/rebase paths walk only commits visible past
 	// .git/shallow (collectCommitChain / collectCommitsSince), so the
 	// missing pre-shallow history isn't needed to produce a correct rebase.
-	if output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+	// Span the fetch separately so a slow sync can be attributed to the network
+	// fetch versus the local reconcile/rebase that follows it.
+	_, fetchSpan := perf.Start(ctx, "git_fetch")
+	fetchOutput, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
-	}); fetchErr != nil {
-		return fmt.Errorf("fetch failed: %s", output)
+	})
+	fetchSpan.RecordError(fetchErr)
+	fetchSpan.End()
+	if fetchErr != nil {
+		return fmt.Errorf("fetch failed: %s", fetchOutput)
 	}
 
 	repo, err := OpenRepository(ctx)

@@ -13,8 +13,11 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -1856,5 +1859,95 @@ func TestRunStatusJSON_DeduplicatesSessions(t *testing.T) {
 	}
 	if s.Model != "codex-mini" {
 		t.Errorf("Expected model='codex-mini' from active session, got %q", s.Model)
+	}
+}
+
+// writeStatusHeadCheckpoint writes a v2 checkpoint with the requested
+// review/investigation flags, then amends HEAD to carry the
+// Entire-Checkpoint trailer. Mirrors the helper used in
+// head_checkpoint_flags_test.go but inlined to keep status_test.go
+// self-contained for readers comparing to other status tests.
+func writeStatusHeadCheckpoint(t *testing.T, hasReview, hasInvestigation bool) {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repo, err := git.PlainOpen(cwd)
+	if err != nil {
+		t.Fatalf("PlainOpen: %v", err)
+	}
+
+	// Use a deterministic id per (review, investigation) pairing so multiple
+	// status tests writing different combinations don't collide on the same id.
+	cpHex := "abcdef011234"
+	switch {
+	case hasReview && hasInvestigation:
+		cpHex = "abcdef011111"
+	case hasReview:
+		cpHex = "abcdef012222"
+	case hasInvestigation:
+		cpHex = "abcdef013333"
+	}
+	cpID := id.MustCheckpointID(cpHex)
+	store := checkpoint.NewGitStore(repo)
+	if err := store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID:     cpID,
+		SessionID:        "status-test-session",
+		Strategy:         "manual-commit",
+		Transcript:       redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
+		AuthorName:       "Status Test",
+		AuthorEmail:      "status-test@entire.local",
+		HasReview:        hasReview,
+		HasInvestigation: hasInvestigation,
+	}); err != nil {
+		t.Fatalf("WriteCommitted: %v", err)
+	}
+
+	runGitInDir(t, cwd, "commit", "--amend", "-m", "init\n\nEntire-Checkpoint: "+cpID.String())
+}
+
+func TestRunStatus_PrintsInvestigationLine(t *testing.T) {
+	setupTestRepo(t)
+	// Need an initial commit before we can amend it with the trailer.
+	testutil.WriteFile(t, ".", "init.txt", "init")
+	testutil.GitAdd(t, ".", "init.txt")
+	testutil.GitCommit(t, ".", "init")
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`)
+	writeStatusHeadCheckpoint(t, false, true)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Investigation") || !strings.Contains(out, "investigated") {
+		t.Errorf("expected 'Investigation' / 'investigated' line in status output; got:\n%s", out)
+	}
+	if strings.Contains(out, "Review · ") {
+		t.Errorf("Review line must not appear when only HasInvestigation is set; got:\n%s", out)
+	}
+}
+
+func TestRunStatus_PrintsBothReviewAndInvestigation(t *testing.T) {
+	setupTestRepo(t)
+	testutil.WriteFile(t, ".", "init.txt", "init")
+	testutil.GitAdd(t, ".", "init.txt")
+	testutil.GitCommit(t, ".", "init")
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`)
+	writeStatusHeadCheckpoint(t, true, true)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Review") || !strings.Contains(out, "reviewed") {
+		t.Errorf("expected 'Review' / 'reviewed' line in status output; got:\n%s", out)
+	}
+	if !strings.Contains(out, "Investigation") || !strings.Contains(out, "investigated") {
+		t.Errorf("expected 'Investigation' / 'investigated' line in status output; got:\n%s", out)
 	}
 }

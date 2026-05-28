@@ -36,8 +36,9 @@ type DeviceAuthPoll struct {
 }
 
 // Client wraps a deviceflow.Client preconfigured for whichever provider
-// version is selected via ENTIRE_AUTH_PROVIDER_VERSION (defaulting to
-// v1).
+// version is active. See CurrentProvider for the resolution rules
+// (ENTIRE_AUTH_PROVIDER_VERSION wins, then split-host auto-detect,
+// then v1 fallback).
 type Client struct {
 	inner *deviceflow.Client
 }

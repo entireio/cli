@@ -384,14 +384,17 @@ func (a *YourAgent) InstallHooks(localDev bool, force bool) (int, error) {
     // ... read and parse ...
 
     // 3. Build hook commands
-    // localDev mode uses $(git rev-parse --show-toplevel) to resolve the repo
-    // root at runtime via shell command substitution. This works regardless of
-    // where the repo is checked out on disk.
-    // Note: Only Claude Code provides a PROJECT_DIR env var (CLAUDE_PROJECT_DIR).
-    // Other agents should use the git rev-parse approach instead.
+    // localDev mode delegates to scripts/entire-dev (agent.LocalDevHookScript),
+    // which compiles the CLI on demand and falls back to the entire binary on
+    // PATH when the tree does not build. It uses $(git rev-parse --show-toplevel)
+    // to resolve the repo root at runtime, so it works regardless of where the
+    // repo is checked out on disk.
+    // Note: Only Claude Code provides a PROJECT_DIR env var (CLAUDE_PROJECT_DIR);
+    // its prefix uses ${CLAUDE_PROJECT_DIR}/scripts/entire-dev instead. Other
+    // agents should use agent.LocalDevHookScript as shown here.
     var cmdPrefix string
     if localDev {
-        cmdPrefix = `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks your-agent `
+        cmdPrefix = agent.LocalDevHookScript + " hooks your-agent "
     } else {
         cmdPrefix = "entire hooks your-agent "
     }

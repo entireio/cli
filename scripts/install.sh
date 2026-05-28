@@ -60,6 +60,14 @@ detect_os() {
         linux)
             echo "linux"
             ;;
+        mingw*|msys*|cygwin*)
+            error "install.sh does not support Windows, you can install the Entire CLI using scoop:
+
+    scoop install entire/cli
+
+  Or download the Windows zip from:
+    https://github.com/entireio/cli/releases/latest"
+            ;;
         *)
             error "Unsupported operating system: $os"
             ;;

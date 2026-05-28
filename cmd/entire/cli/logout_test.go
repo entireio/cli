@@ -52,9 +52,9 @@ func TestRunLogout_RevokesServerSideThenDeletesLocally(t *testing.T) {
 	store := newMockTokenStore()
 	store.tokens["https://entire.io"] = testLogoutToken
 
-	var gotToken string
-	revoke := func(_ context.Context, token string) error {
-		gotToken = token
+	revokeCalled := false
+	revoke := func(context.Context) error {
+		revokeCalled = true
 		return nil
 	}
 
@@ -64,8 +64,8 @@ func TestRunLogout_RevokesServerSideThenDeletesLocally(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if gotToken != testLogoutToken {
-		t.Errorf("revoke called with token %q, want %q", gotToken, testLogoutToken)
+	if !revokeCalled {
+		t.Error("revoke should be called when a local token exists")
 	}
 	if !store.deleted["https://entire.io"] {
 		t.Fatal("expected token to be deleted for https://entire.io")
@@ -84,7 +84,7 @@ func TestRunLogout_NoTokenSkipsRevoke(t *testing.T) {
 	store := newMockTokenStore() // no token stored
 
 	revokeCalled := false
-	revoke := func(context.Context, string) error {
+	revoke := func(context.Context) error {
 		revokeCalled = true
 		return nil
 	}
@@ -112,7 +112,7 @@ func TestRunLogout_RevokeFailureWarnsButSucceeds(t *testing.T) {
 	store := newMockTokenStore()
 	store.tokens["https://entire.io"] = testLogoutToken
 
-	revoke := func(context.Context, string) error {
+	revoke := func(context.Context) error {
 		return errors.New("connection refused")
 	}
 
@@ -142,7 +142,7 @@ func TestRunLogout_RevokeUnauthorizedIsSilent(t *testing.T) {
 	store := newMockTokenStore()
 	store.tokens["https://entire.io"] = testLogoutToken
 
-	revoke := func(context.Context, string) error {
+	revoke := func(context.Context) error {
 		return &api.HTTPError{StatusCode: http.StatusUnauthorized, Message: "Not authenticated"}
 	}
 
@@ -170,7 +170,7 @@ func TestRunLogout_GetTokenErrorWarnsAndFallsThrough(t *testing.T) {
 	store.getErr = errors.New("keyring locked for read")
 
 	revokeCalled := false
-	revoke := func(context.Context, string) error {
+	revoke := func(context.Context) error {
 		revokeCalled = true
 		return nil
 	}
@@ -199,7 +199,7 @@ func TestRunLogout_ReturnsErrorOnDeleteFailure(t *testing.T) {
 	store.tokens["https://entire.io"] = testLogoutToken
 	store.deleteErr = errors.New("keyring locked")
 
-	revoke := func(context.Context, string) error { return nil }
+	revoke := func(context.Context) error { return nil }
 
 	var out, errOut bytes.Buffer
 	err := runLogout(context.Background(), &out, &errOut, store, revoke, "https://entire.io")
