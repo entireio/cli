@@ -29,6 +29,21 @@ var experimentalCommands = []experimentalCommandInfo{
 		Invocation: "entire repo",
 		Summary:    "Manage repositories on EntireDB clusters (clone, log, merge, lifecycle, mirror)",
 	},
+	{
+		Name:       "org",
+		Invocation: "entire org",
+		Summary:    "Manage Entire orgs (create, list)",
+	},
+	{
+		Name:       "project",
+		Invocation: "entire project",
+		Summary:    "Manage Entire projects (create, list)",
+	},
+	{
+		Name:       "grant",
+		Invocation: "entire grant",
+		Summary:    "Manage membership and access grants (repo, project, org)",
+	},
 }
 
 func newLabsCmd() *cobra.Command {
@@ -72,6 +87,9 @@ Try:
   entire review --help
   entire investigate --help
   entire repo --help
+  entire org --help
+  entire project --help
+  entire grant --help
 `
 }
 
