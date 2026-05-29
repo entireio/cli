@@ -1319,8 +1319,9 @@ refs as shown in §3.3 and §3.5.
   `writeMigrationReport` (line 252), `candidateCommitLabel` (line 291,
   emits `(orphan)`).
 - v2 session author lookup: `cmd/migrate-v2-checkpoints/v2_author.go` —
-  `findV2SessionAuthor` (line 19), `commitChangedPath` (line 66),
-  `v2SessionMetadataPath` (line 95).
+  `buildV2SessionAuthorIndex` (line 30),
+  `changedV2SessionMetadataPaths` (line 79),
+  `v2SessionMetadataPath` (line 152).
 - v1 write: `cmd/entire/cli/checkpoint/committed.go` — `WriteCommitted`
   (line 72), `WithCommitSigningDisabled` (line 57),
   `writeStandardCheckpointEntries` (line 324),

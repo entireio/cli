@@ -43,11 +43,12 @@ type migrationCandidate struct {
 }
 
 type checkpointMigrator struct {
-	repo    *git.Repository
-	v1Store *checkpoint.GitStore
-	v2Store *checkpoint.V2GitStore
-	opts    migrationOptions
-	report  *migrationReport
+	repo        *git.Repository
+	v1Store     *checkpoint.GitStore
+	v2Store     *checkpoint.V2GitStore
+	authorIndex *v2SessionAuthorIndex
+	opts        migrationOptions
+	report      *migrationReport
 }
 
 func migrateDiscoveredCheckpoints(ctx context.Context, repo *git.Repository, discovered []discoveredCheckpoint, opts migrationOptions) (migrationReport, error) {
@@ -93,7 +94,7 @@ func migrationCandidateFromDiscovered(discovered discoveredCheckpoint, sessionCo
 	}
 }
 
-func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered discoveredCheckpoint) (int, error) {
+func (m *checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered discoveredCheckpoint) (int, error) {
 	existing, err := m.v1Store.ReadCommitted(ctx, discovered.ID)
 	if err != nil {
 		return 0, fmt.Errorf("read v1 checkpoint %s: %w", discovered.ID, err)
@@ -156,7 +157,7 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 			combinedAttribution = nil
 		}
 		for _, entry := range eligible {
-			author, err := findV2SessionAuthor(ctx, m.repo, discovered.ID, entry.sessionIndex)
+			author, err := m.findV2SessionAuthor(ctx, discovered.ID, entry.sessionIndex)
 			if err != nil {
 				return eligibleSessions, fmt.Errorf("resolve v2 checkpoint %s session %d author: %w", discovered.ID, entry.sessionIndex, err)
 			}
@@ -171,12 +172,23 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 	return eligibleSessions, nil
 }
 
+func (m *checkpointMigrator) findV2SessionAuthor(ctx context.Context, cpID checkpointID.CheckpointID, sessionIndex int) (object.Signature, error) {
+	if m.authorIndex == nil {
+		authorIndex, err := buildV2SessionAuthorIndex(ctx, m.repo)
+		if err != nil {
+			return object.Signature{}, err
+		}
+		m.authorIndex = authorIndex
+	}
+	return m.authorIndex.find(cpID, sessionIndex)
+}
+
 type eligibleV2Session struct {
 	sessionIndex int
 	content      *checkpoint.SessionContent
 }
 
-func (m checkpointMigrator) existingV1SessionIDs(ctx context.Context, discovered discoveredCheckpoint, summary *checkpoint.CheckpointSummary) (map[string]struct{}, error) {
+func (m *checkpointMigrator) existingV1SessionIDs(ctx context.Context, discovered discoveredCheckpoint, summary *checkpoint.CheckpointSummary) (map[string]struct{}, error) {
 	existing := make(map[string]struct{})
 	if summary == nil {
 		return existing, nil

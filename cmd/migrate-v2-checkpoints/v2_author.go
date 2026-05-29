@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	checkpointID "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -12,31 +12,37 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/utils/merkletrie"
 )
 
-var errFoundV2SessionAuthor = errors.New("found v2 session author")
+type v2SessionAuthorIndex struct {
+	authors map[string]object.Signature
+}
 
 func findV2SessionAuthor(ctx context.Context, repo *git.Repository, cpID checkpointID.CheckpointID, sessionIndex int) (object.Signature, error) {
-	if err := ctx.Err(); err != nil {
-		return object.Signature{}, err //nolint:wrapcheck // Propagating context cancellation
+	index, err := buildV2SessionAuthorIndex(ctx, repo)
+	if err != nil {
+		return object.Signature{}, err
 	}
+	return index.find(cpID, sessionIndex)
+}
 
+func buildV2SessionAuthorIndex(ctx context.Context, repo *git.Repository) (*v2SessionAuthorIndex, error) {
 	ref, err := repo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true)
 	if err != nil {
-		return object.Signature{}, fmt.Errorf("resolve %s: %w", paths.V2MainRefName, err)
+		return nil, fmt.Errorf("resolve %s: %w", paths.V2MainRefName, err)
 	}
 
-	metadataPath := v2SessionMetadataPath(cpID, sessionIndex)
 	iter, err := repo.Log(&git.LogOptions{
 		From:  ref.Hash(),
 		Order: git.LogOrderCommitterTime,
 	})
 	if err != nil {
-		return object.Signature{}, fmt.Errorf("read %s history: %w", paths.V2MainRefName, err)
+		return nil, fmt.Errorf("read %s history: %w", paths.V2MainRefName, err)
 	}
 	defer iter.Close()
 
-	var author object.Signature
+	index := &v2SessionAuthorIndex{authors: make(map[string]object.Signature)}
 	err = iter.ForEach(func(commit *object.Commit) error {
 		if err := ctx.Err(); err != nil {
 			return err //nolint:wrapcheck // Propagating context cancellation
@@ -44,52 +50,103 @@ func findV2SessionAuthor(ctx context.Context, repo *git.Repository, cpID checkpo
 		if commit.NumParents() > 1 {
 			return nil
 		}
-		changed, err := commitChangedPath(commit, metadataPath)
+		paths, err := changedV2SessionMetadataPaths(ctx, commit)
 		if err != nil {
-			return fmt.Errorf("check %s change in %s: %w", metadataPath, commit.Hash, err)
+			return fmt.Errorf("read changed v2 session metadata paths in %s: %w", commit.Hash, err)
 		}
-		if !changed {
-			return nil
+		for _, path := range paths {
+			if _, exists := index.authors[path]; !exists {
+				index.authors[path] = commit.Author
+			}
 		}
-		author = commit.Author
-		return errFoundV2SessionAuthor
+		return nil
 	})
-	if errors.Is(err, errFoundV2SessionAuthor) {
-		return author, nil
-	}
 	if err != nil {
-		return object.Signature{}, fmt.Errorf("walk %s history for %s: %w", paths.V2MainRefName, metadataPath, err)
+		return nil, fmt.Errorf("walk %s history: %w", paths.V2MainRefName, err)
 	}
-	return object.Signature{}, fmt.Errorf("%s not found in %s history", metadataPath, paths.V2MainRefName)
+	return index, nil
 }
 
-func commitChangedPath(commit *object.Commit, path string) (bool, error) {
-	file, err := commit.File(path)
-	if errors.Is(err, object.ErrFileNotFound) {
-		return false, nil
+func (index *v2SessionAuthorIndex) find(cpID checkpointID.CheckpointID, sessionIndex int) (object.Signature, error) {
+	metadataPath := v2SessionMetadataPath(cpID, sessionIndex)
+	author, ok := index.authors[metadataPath]
+	if !ok {
+		return object.Signature{}, fmt.Errorf("%s not found in %s history", metadataPath, paths.V2MainRefName)
 	}
+	return author, nil
+}
+
+func changedV2SessionMetadataPaths(ctx context.Context, commit *object.Commit) ([]string, error) {
+	commitTree, err := commit.Tree()
 	if err != nil {
-		return false, fmt.Errorf("read file: %w", err)
-	}
-	if commit.NumParents() == 0 {
-		return true, nil
-	}
-	if commit.NumParents() > 1 {
-		return false, nil
+		return nil, fmt.Errorf("read commit tree: %w", err)
 	}
 
-	parent, err := commit.Parent(0)
+	var parentTree *object.Tree
+	if commit.NumParents() > 0 {
+		parent, err := commit.Parent(0)
+		if err != nil {
+			return nil, fmt.Errorf("read parent: %w", err)
+		}
+		parentTree, err = parent.Tree()
+		if err != nil {
+			return nil, fmt.Errorf("read parent tree: %w", err)
+		}
+	}
+
+	changes, err := object.DiffTreeContext(ctx, parentTree, commitTree)
 	if err != nil {
-		return false, fmt.Errorf("read parent: %w", err)
+		return nil, fmt.Errorf("diff commit tree: %w", err)
 	}
-	parentFile, err := parent.File(path)
-	if errors.Is(err, object.ErrFileNotFound) {
-		return true, nil
+
+	var paths []string
+	for _, change := range changes {
+		path, ok, err := v2SessionMetadataPathFromChange(change)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			paths = append(paths, path)
+		}
 	}
+	return paths, nil
+}
+
+func v2SessionMetadataPathFromChange(change *object.Change) (string, bool, error) {
+	action, err := change.Action()
 	if err != nil {
-		return false, fmt.Errorf("read parent file: %w", err)
+		return "", false, fmt.Errorf("read change action: %w", err)
 	}
-	return file.Hash != parentFile.Hash || file.Mode != parentFile.Mode, nil
+	if action != merkletrie.Insert && action != merkletrie.Modify {
+		return "", false, nil
+	}
+	if !isV2SessionMetadataPath(change.To.Name) {
+		return "", false, nil
+	}
+	return change.To.Name, true, nil
+}
+
+func isV2SessionMetadataPath(path string) bool {
+	shard, rest, ok := strings.Cut(path, "/")
+	if !ok || len(shard) != 2 {
+		return false
+	}
+	suffix, rest, ok := strings.Cut(rest, "/")
+	if !ok || len(suffix) != 10 {
+		return false
+	}
+	if _, err := checkpointID.NewCheckpointID(shard + suffix); err != nil {
+		return false
+	}
+	sessionDir, fileName, ok := strings.Cut(rest, "/")
+	if !ok || fileName != paths.MetadataFileName {
+		return false
+	}
+	sessionIndex, err := strconv.Atoi(sessionDir)
+	if err != nil {
+		return false
+	}
+	return sessionIndex >= 0
 }
 
 func v2SessionMetadataPath(cpID checkpointID.CheckpointID, sessionIndex int) string {

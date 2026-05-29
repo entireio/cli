@@ -100,11 +100,6 @@ func TestFindV2SessionAuthorSkipsLaterCheckpointCommitsThatOnlyCarryPath(t *test
 		Committer:    checkpointAuthor,
 		Message:      "Checkpoint: 0b0206eed178",
 	})
-	checkpointCommit, err := repo.CommitObject(checkpointHash)
-	require.NoError(t, err)
-	changed, err := commitChangedPath(checkpointCommit, metadataPath)
-	require.NoError(t, err)
-	require.True(t, changed)
 
 	sideAuthor := object.Signature{
 		Name:  "Side Author",
@@ -155,11 +150,6 @@ func TestFindV2SessionAuthorSkipsLaterCheckpointCommitsThatOnlyCarryPath(t *test
 		Message:      "Checkpoint: 680da8552908",
 	})
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(paths.V2MainRefName), laterHash)))
-	laterCommit, err := repo.CommitObject(laterHash)
-	require.NoError(t, err)
-	changed, err = commitChangedPath(laterCommit, metadataPath)
-	require.NoError(t, err)
-	require.False(t, changed)
 
 	author, err := findV2SessionAuthor(context.Background(), repo, cpID, 0)
 
