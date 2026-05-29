@@ -114,10 +114,7 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 
 	eligibleSessions := 0
 	canPreserveCombinedAttribution := true
-	var eligibleContents []struct {
-		sessionIndex int
-		content      *checkpoint.SessionContent
-	}
+	var eligible []eligibleV2Session
 	for sessionIndex := range summary.Sessions {
 		metadataContent, err := m.v2Store.ReadSessionMetadataAndPrompts(ctx, discovered.ID, sessionIndex)
 		if err != nil {
@@ -149,10 +146,7 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 		}
 
 		m.report.EligibleSessions++
-		eligibleContents = append(eligibleContents, struct {
-			sessionIndex int
-			content      *checkpoint.SessionContent
-		}{sessionIndex: sessionIndex, content: content})
+		eligible = append(eligible, eligibleV2Session{sessionIndex: sessionIndex, content: content})
 		eligibleSessions++
 	}
 
@@ -161,20 +155,25 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 		if !canPreserveCombinedAttribution {
 			combinedAttribution = nil
 		}
-		for _, eligibleContent := range eligibleContents {
-			author, err := findV2SessionAuthor(ctx, m.repo, discovered.ID, eligibleContent.sessionIndex)
+		for _, entry := range eligible {
+			author, err := findV2SessionAuthor(ctx, m.repo, discovered.ID, entry.sessionIndex)
 			if err != nil {
-				return eligibleSessions, fmt.Errorf("resolve v2 checkpoint %s session %d author: %w", discovered.ID, eligibleContent.sessionIndex, err)
+				return eligibleSessions, fmt.Errorf("resolve v2 checkpoint %s session %d author: %w", discovered.ID, entry.sessionIndex, err)
 			}
-			writeOpts := writeOptionsFromV2Content(eligibleContent.content, combinedAttribution, author)
+			writeOpts := writeOptionsFromV2Content(entry.content, combinedAttribution, author)
 			writeCtx := checkpoint.WithCommitSigningDisabled(ctx)
 			if err := m.v1Store.WriteCommitted(writeCtx, writeOpts); err != nil {
-				return eligibleSessions, fmt.Errorf("write v1 checkpoint %s session %d: %w", discovered.ID, eligibleContent.sessionIndex, err)
+				return eligibleSessions, fmt.Errorf("write v1 checkpoint %s session %d: %w", discovered.ID, entry.sessionIndex, err)
 			}
 			m.report.MigratedSessions++
 		}
 	}
 	return eligibleSessions, nil
+}
+
+type eligibleV2Session struct {
+	sessionIndex int
+	content      *checkpoint.SessionContent
 }
 
 func (m checkpointMigrator) existingV1SessionIDs(ctx context.Context, discovered discoveredCheckpoint, summary *checkpoint.CheckpointSummary) (map[string]struct{}, error) {
