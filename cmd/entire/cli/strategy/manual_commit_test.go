@@ -893,7 +893,7 @@ func TestShadowStrategy_PrepareCommitMsg_SkipsSessionWhenContentCheckFails(t *te
 
 func TestAddCheckpointTrailer_NoComment(t *testing.T) {
 	// Test that addCheckpointTrailer adds trailer without any comment lines
-	message := "Test commit message\n" //nolint:goconst // already present in codebase
+	message := "Test commit message\n"
 
 	result := addCheckpointTrailer(message, testTrailerCheckpointID)
 

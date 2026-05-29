@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// Test constants to avoid goconst warnings
+// Shared test literals.
 const (
 	testSessionID = "2025-01-15-test-session"
 	testComponent = "hooks"

@@ -341,8 +341,7 @@ func TestParseGitHubRelease(t *testing.T) {
 }
 
 // brewUpgradeCmd is the install command produced for any brew-installed
-// binary on a stable channel. Hoisted to a const so tests can reference
-// it without tripping goconst on repeated string literals.
+// binary on a stable channel.
 const brewUpgradeCmd = "brew upgrade entire"
 
 func TestUpdateCommand(t *testing.T) {

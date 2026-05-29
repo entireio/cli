@@ -623,11 +623,11 @@ git -C "$REPO" log --format='%h %ci %s' \
   through a checkpoint with multiple eligible sessions, earlier sessions
   remain written and later sessions reappear on the next run.
 - **v1 commit author matches v2.** Each new v1 commit is authored with
-  the same name, email, and author timestamp as the v2 `/main` commit that
-  wrote the migrated session's `metadata.json`, so `git log` against v1
-  and v2 attributes the same checkpoint session to the same author. §5.6
-  treats the `author` header in `entire explain` as a required check; a
-  mismatch is a regression, not an accepted divergence.
+  the same name, email, and author timestamp as the v2 `/main` non-merge
+  commit that actually changed the migrated session's `metadata.json`.
+  Later commits that merely carry that path through their tree do not
+  count. §5.6 treats the `author` header in `entire explain` as a required
+  check; a mismatch is a regression, not an accepted divergence.
 - **Migration commits are unsigned.** The tool disables checkpoint commit
   signing for migrated writes, even if normal checkpoint signing is enabled
   in the repo. The v1 author line is replayed from v2 history; adding a local
@@ -1318,7 +1318,8 @@ refs as shown in §3.3 and §3.5.
   `writeMigrationReport` (line 252), `candidateCommitLabel` (line 291,
   emits `(orphan)`).
 - v2 session author lookup: `cmd/migrate-v2-checkpoints/v2_author.go` —
-  `findV2SessionAuthor` (line 19), `v2SessionMetadataPath` (line 59).
+  `findV2SessionAuthor` (line 19), `commitChangedPath` (line 66),
+  `v2SessionMetadataPath` (line 95).
 - v1 write: `cmd/entire/cli/checkpoint/committed.go` — `WriteCommitted`
   (line 72), `WithCommitSigningDisabled` (line 57),
   `writeStandardCheckpointEntries` (line 324),

@@ -30,12 +30,9 @@ func findV2SessionAuthor(ctx context.Context, repo *git.Repository, cpID checkpo
 	iter, err := repo.Log(&git.LogOptions{
 		From:  ref.Hash(),
 		Order: git.LogOrderCommitterTime,
-		PathFilter: func(path string) bool {
-			return path == metadataPath
-		},
 	})
 	if err != nil {
-		return object.Signature{}, fmt.Errorf("read %s history for %s: %w", paths.V2MainRefName, metadataPath, err)
+		return object.Signature{}, fmt.Errorf("read %s history: %w", paths.V2MainRefName, err)
 	}
 	defer iter.Close()
 
@@ -47,10 +44,12 @@ func findV2SessionAuthor(ctx context.Context, repo *git.Repository, cpID checkpo
 		if commit.NumParents() > 1 {
 			return nil
 		}
-		if _, err := commit.File(metadataPath); errors.Is(err, object.ErrFileNotFound) {
+		changed, err := commitChangedPath(commit, metadataPath)
+		if err != nil {
+			return fmt.Errorf("check %s change in %s: %w", metadataPath, commit.Hash, err)
+		}
+		if !changed {
 			return nil
-		} else if err != nil {
-			return fmt.Errorf("read %s from %s: %w", metadataPath, commit.Hash, err)
 		}
 		author = commit.Author
 		return errFoundV2SessionAuthor
@@ -62,6 +61,35 @@ func findV2SessionAuthor(ctx context.Context, repo *git.Repository, cpID checkpo
 		return object.Signature{}, fmt.Errorf("walk %s history for %s: %w", paths.V2MainRefName, metadataPath, err)
 	}
 	return object.Signature{}, fmt.Errorf("%s not found in %s history", metadataPath, paths.V2MainRefName)
+}
+
+func commitChangedPath(commit *object.Commit, path string) (bool, error) {
+	file, err := commit.File(path)
+	if errors.Is(err, object.ErrFileNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read file: %w", err)
+	}
+	if commit.NumParents() == 0 {
+		return true, nil
+	}
+	if commit.NumParents() > 1 {
+		return false, nil
+	}
+
+	parent, err := commit.Parent(0)
+	if err != nil {
+		return false, fmt.Errorf("read parent: %w", err)
+	}
+	parentFile, err := parent.File(path)
+	if errors.Is(err, object.ErrFileNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read parent file: %w", err)
+	}
+	return file.Hash != parentFile.Hash || file.Mode != parentFile.Mode, nil
 }
 
 func v2SessionMetadataPath(cpID checkpointID.CheckpointID, sessionIndex int) string {

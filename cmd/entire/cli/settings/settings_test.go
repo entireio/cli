@@ -172,7 +172,7 @@ func TestLoad_AcceptsValidKeys(t *testing.T) {
 	if settings.SummaryGeneration.Provider != "claude-code" {
 		t.Errorf("expected summary_generation.provider 'claude-code', got %q", settings.SummaryGeneration.Provider)
 	}
-	if settings.SummaryGeneration.Model != "sonnet" { //nolint:goconst // test literal
+	if settings.SummaryGeneration.Model != "sonnet" {
 		t.Errorf("expected summary_generation.model 'sonnet', got %q", settings.SummaryGeneration.Model)
 	}
 	if settings.Redaction == nil {

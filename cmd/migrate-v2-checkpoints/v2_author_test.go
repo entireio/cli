@@ -57,6 +57,118 @@ func TestFindV2SessionAuthorSkipsV2MainMergeCommits(t *testing.T) {
 	require.True(t, author.When.Equal(checkpointAuthor.When), "author time = %s, want %s", author.When, checkpointAuthor.When)
 }
 
+func TestFindV2SessionAuthorSkipsLaterCheckpointCommitsThatOnlyCarryPath(t *testing.T) {
+	t.Parallel()
+
+	repo := setupV2AuthorRepo(t)
+	cpID := checkpointID.MustCheckpointID("0b0206eed178")
+	metadataPath := v2SessionMetadataPath(cpID, 0)
+	metadataBlob, err := checkpoint.CreateBlobFromContent(repo, []byte(`{"session_id":"original"}`+"\n"))
+	require.NoError(t, err)
+	metadataEntries := map[string]object.TreeEntry{
+		metadataPath: {
+			Name: metadataPath,
+			Mode: filemode.Regular,
+			Hash: metadataBlob,
+		},
+	}
+	metadataTree, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, metadataEntries)
+	require.NoError(t, err)
+	emptyTree, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, map[string]object.TreeEntry{})
+	require.NoError(t, err)
+
+	checkpointAuthor := object.Signature{
+		Name:  "Checkpoint Author",
+		Email: "checkpoint@example.com",
+		When:  time.Date(2024, 5, 11, 17, 19, 31, 0, time.UTC),
+	}
+	baseAuthor := object.Signature{
+		Name:  "Base Author",
+		Email: "base@example.com",
+		When:  checkpointAuthor.When.Add(-24 * time.Hour),
+	}
+	baseHash := writeTestCommitObject(t, repo, &object.Commit{
+		TreeHash:  emptyTree,
+		Author:    baseAuthor,
+		Committer: baseAuthor,
+		Message:   "base v2/main",
+	})
+	checkpointHash := writeTestCommitObject(t, repo, &object.Commit{
+		TreeHash:     metadataTree,
+		ParentHashes: []plumbing.Hash{baseHash},
+		Author:       checkpointAuthor,
+		Committer:    checkpointAuthor,
+		Message:      "Checkpoint: 0b0206eed178",
+	})
+	checkpointCommit, err := repo.CommitObject(checkpointHash)
+	require.NoError(t, err)
+	changed, err := commitChangedPath(checkpointCommit, metadataPath)
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	sideAuthor := object.Signature{
+		Name:  "Side Author",
+		Email: "side@example.com",
+		When:  checkpointAuthor.When.Add(47 * time.Hour),
+	}
+	sideHash := writeTestCommitObject(t, repo, &object.Commit{
+		TreeHash:     emptyTree,
+		ParentHashes: []plumbing.Hash{baseHash},
+		Author:       sideAuthor,
+		Committer:    sideAuthor,
+		Message:      "side commit without metadata",
+	})
+	mergeAuthor := object.Signature{
+		Name:  "Merge Author",
+		Email: "merge@example.com",
+		When:  checkpointAuthor.When.Add(24 * time.Hour),
+	}
+	mergeHash := writeTestCommitObject(t, repo, &object.Commit{
+		TreeHash:     metadataTree,
+		ParentHashes: []plumbing.Hash{checkpointHash, sideHash},
+		Author:       mergeAuthor,
+		Committer:    mergeAuthor,
+		Message:      "Merge remote v2/main",
+	})
+	laterAuthor := object.Signature{
+		Name:  "Later Checkpoint Author",
+		Email: "later@example.com",
+		When:  checkpointAuthor.When.Add(48 * time.Hour),
+	}
+	laterBlob, err := checkpoint.CreateBlobFromContent(repo, []byte(`{"session_id":"later"}`+"\n"))
+	require.NoError(t, err)
+	laterEntries := map[string]object.TreeEntry{
+		metadataPath: metadataEntries[metadataPath],
+		"68/0da8552908/0/metadata.json": {
+			Name: "68/0da8552908/0/metadata.json",
+			Mode: filemode.Regular,
+			Hash: laterBlob,
+		},
+	}
+	laterTree, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, laterEntries)
+	require.NoError(t, err)
+	laterHash := writeTestCommitObject(t, repo, &object.Commit{
+		TreeHash:     laterTree,
+		ParentHashes: []plumbing.Hash{mergeHash},
+		Author:       laterAuthor,
+		Committer:    laterAuthor,
+		Message:      "Checkpoint: 680da8552908",
+	})
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(paths.V2MainRefName), laterHash)))
+	laterCommit, err := repo.CommitObject(laterHash)
+	require.NoError(t, err)
+	changed, err = commitChangedPath(laterCommit, metadataPath)
+	require.NoError(t, err)
+	require.False(t, changed)
+
+	author, err := findV2SessionAuthor(context.Background(), repo, cpID, 0)
+
+	require.NoError(t, err)
+	require.Equal(t, checkpointAuthor.Name, author.Name)
+	require.Equal(t, checkpointAuthor.Email, author.Email)
+	require.True(t, author.When.Equal(checkpointAuthor.When), "author time = %s, want %s", author.When, checkpointAuthor.When)
+}
+
 func TestFindV2SessionAuthorReturnsNotFoundWhenOnlyMergeTouchedPath(t *testing.T) {
 	t.Parallel()
 

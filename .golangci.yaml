@@ -140,6 +140,7 @@ linters:
     rules:
       - path: _test\.go
         linters:
+          - goconst
           - gosec
           - wrapcheck
           - forbidigo
