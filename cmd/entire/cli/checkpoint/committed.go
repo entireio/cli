@@ -381,12 +381,16 @@ func (s *GitStore) writeStandardCheckpointEntries(ctx context.Context, opts Writ
 	// Build the sessions array
 	var sessions []SessionFilePaths
 	if existingSummary != nil {
-		sessions = make([]SessionFilePaths, max(len(existingSummary.Sessions), sessionIndex+1))
-		copy(sessions, existingSummary.Sessions)
+		sessions = append([]SessionFilePaths(nil), existingSummary.Sessions...)
 	} else {
-		sessions = make([]SessionFilePaths, 1)
+		sessions = []SessionFilePaths{}
 	}
-	sessions[sessionIndex] = sessionFilePaths
+	if position := sessionFilePathsPosition(basePath, sessions, sessionIndex); position >= 0 {
+		sessions[position] = sessionFilePaths
+	} else {
+		sessions = append(sessions, sessionFilePaths)
+	}
+	sortSessionFilePaths(basePath, sessions)
 
 	// Tripwire: an unreproduced production report had session 0 silently
 	// replaced with a different sessionID's data. The symptom was
@@ -502,7 +506,7 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCom
 // writeCheckpointSummary writes the root-level CheckpointSummary with aggregated statistics.
 // sessions is the complete sessions array (already built by the caller).
 func (s *GitStore) writeCheckpointSummary(opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry, sessions []SessionFilePaths) error {
-	checkpointsCount, filesTouched, tokenUsage, err := s.reaggregateFromEntries(basePath, len(sessions), entries)
+	checkpointsCount, filesTouched, tokenUsage, err := s.reaggregateFromEntries(basePath, sessions, entries)
 	if err != nil {
 		return fmt.Errorf("failed to aggregate session stats: %w", err)
 	}
@@ -632,8 +636,15 @@ func (s *GitStore) findSessionIndex(ctx context.Context, basePath string, existi
 	if existingSummary == nil {
 		return 0
 	}
-	for i := range len(existingSummary.Sessions) {
-		path := fmt.Sprintf("%s%d/%s", basePath, i, paths.MetadataFileName)
+	usedIndexes := make(map[int]struct{}, len(existingSummary.Sessions))
+	for summaryIndex, sessionPaths := range existingSummary.Sessions {
+		sessionIndex, ok := sessionIndexFromFilePaths(basePath, sessionPaths)
+		if !ok {
+			sessionIndex = summaryIndex
+		}
+		usedIndexes[sessionIndex] = struct{}{}
+
+		path := fmt.Sprintf("%s%d/%s", basePath, sessionIndex, paths.MetadataFileName)
 		entry, exists := entries[path]
 		if !exists {
 			continue
@@ -641,35 +652,47 @@ func (s *GitStore) findSessionIndex(ctx context.Context, basePath string, existi
 		meta, err := s.readMetadataFromBlob(entry.Hash)
 		if err != nil {
 			logging.Warn(ctx, "failed to read session metadata during dedup check",
-				slog.Int("session_index", i),
+				slog.Int("session_index", sessionIndex),
 				slog.String("session_id", sessionID),
 				slog.String("error", err.Error()),
 			)
 			continue
 		}
 		if meta.SessionID == sessionID {
-			return i
+			return sessionIndex
 		}
 	}
-	return len(existingSummary.Sessions)
+	for sessionIndex := 0; ; sessionIndex++ {
+		if _, used := usedIndexes[sessionIndex]; used {
+			continue
+		}
+		if sessionPathHasEntries(basePath, sessionIndex, entries) {
+			continue
+		}
+		return sessionIndex
+	}
 }
 
 // reaggregateFromEntries reads all session metadata from the entries map and
 // reaggregates CheckpointsCount, FilesTouched, and TokenUsage.
-func (s *GitStore) reaggregateFromEntries(basePath string, sessionCount int, entries map[string]object.TreeEntry) (int, []string, *agent.TokenUsage, error) {
+func (s *GitStore) reaggregateFromEntries(basePath string, sessions []SessionFilePaths, entries map[string]object.TreeEntry) (int, []string, *agent.TokenUsage, error) {
 	var totalCount int
 	var allFiles []string
 	var totalTokens *agent.TokenUsage
 
-	for i := range sessionCount {
-		path := fmt.Sprintf("%s%d/%s", basePath, i, paths.MetadataFileName)
+	for summaryIndex, sessionPaths := range sessions {
+		sessionIndex, ok := sessionIndexFromFilePaths(basePath, sessionPaths)
+		if !ok {
+			return 0, nil, nil, fmt.Errorf("session %d metadata path %q is invalid", summaryIndex, sessionPaths.Metadata)
+		}
+		path := fmt.Sprintf("%s%d/%s", basePath, sessionIndex, paths.MetadataFileName)
 		entry, exists := entries[path]
 		if !exists {
-			return 0, nil, nil, fmt.Errorf("session %d metadata not found at %s", i, path)
+			return 0, nil, nil, fmt.Errorf("session %d metadata not found at %s", summaryIndex, path)
 		}
 		meta, err := s.readMetadataFromBlob(entry.Hash)
 		if err != nil {
-			return 0, nil, nil, fmt.Errorf("failed to read session %d metadata: %w", i, err)
+			return 0, nil, nil, fmt.Errorf("failed to read session %d metadata: %w", summaryIndex, err)
 		}
 		totalCount += meta.CheckpointsCount
 		allFiles = mergeFilesTouched(allFiles, meta.FilesTouched)
@@ -677,6 +700,57 @@ func (s *GitStore) reaggregateFromEntries(basePath string, sessionCount int, ent
 	}
 
 	return totalCount, allFiles, totalTokens, nil
+}
+
+func sessionFilePathsPosition(basePath string, sessions []SessionFilePaths, targetIndex int) int {
+	for i, sessionPaths := range sessions {
+		sessionIndex, ok := sessionIndexFromFilePaths(basePath, sessionPaths)
+		if ok && sessionIndex == targetIndex {
+			return i
+		}
+	}
+	return -1
+}
+
+func sortSessionFilePaths(basePath string, sessions []SessionFilePaths) {
+	sort.SliceStable(sessions, func(i, j int) bool {
+		left, leftOK := sessionIndexFromFilePaths(basePath, sessions[i])
+		right, rightOK := sessionIndexFromFilePaths(basePath, sessions[j])
+		if !leftOK || !rightOK {
+			return leftOK
+		}
+		return left < right
+	})
+}
+
+func sessionIndexFromFilePaths(basePath string, sessionPaths SessionFilePaths) (int, bool) {
+	if sessionPaths.Metadata == "" {
+		return 0, false
+	}
+	metadataPath := strings.TrimPrefix(sessionPaths.Metadata, "/")
+	relativePath, ok := strings.CutPrefix(metadataPath, basePath)
+	if !ok {
+		return 0, false
+	}
+	sessionDir, fileName, ok := strings.Cut(relativePath, "/")
+	if !ok || fileName != paths.MetadataFileName {
+		return 0, false
+	}
+	sessionIndex, err := strconv.Atoi(sessionDir)
+	if err != nil || sessionIndex < 0 {
+		return 0, false
+	}
+	return sessionIndex, true
+}
+
+func sessionPathHasEntries(basePath string, sessionIndex int, entries map[string]object.TreeEntry) bool {
+	prefix := fmt.Sprintf("%s%d/", basePath, sessionIndex)
+	for path := range entries {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func checkpointCreatedAt(opts WriteCommittedOptions) time.Time {

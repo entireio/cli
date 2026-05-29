@@ -23,8 +23,9 @@ import (
 // V2GitStore is separate from GitStore (v1) to keep concerns isolated
 // and simplify future v1 removal.
 type V2GitStore struct {
-	repo *git.Repository
-	gs   *GitStore // shared entry-building helpers (same package)
+	repo     *git.Repository
+	repoRoot string
+	gs       *GitStore // shared entry-building helpers (same package)
 
 	// blobFetcher fetches missing blobs by hash. When set, read paths wrap
 	// trees with FetchingTree so missing blobs are auto-recovered (and the
@@ -35,10 +36,14 @@ type V2GitStore struct {
 
 // NewV2GitStore creates a new v2 checkpoint store backed by the given git repository.
 func NewV2GitStore(repo *git.Repository) *V2GitStore {
-	return &V2GitStore{
+	store := &V2GitStore{
 		repo: repo,
 		gs:   &GitStore{repo: repo},
 	}
+	if worktree, err := repo.Worktree(); err == nil {
+		store.repoRoot = worktree.Filesystem().Root()
+	}
+	return store
 }
 
 // SetBlobFetcher configures the store to automatically fetch missing blobs
@@ -69,7 +74,7 @@ func (s *V2GitStore) GetRefState(refName plumbing.ReferenceName) (parentHash, tr
 
 	commit, err := s.repo.CommitObject(ref.Hash())
 	if err != nil {
-		cliTreeHash, cliErr := commitTreeHashViaCLI(context.Background(), ref.Hash())
+		cliTreeHash, cliErr := commitTreeHashViaCLI(context.Background(), s.repoRoot, ref.Hash())
 		if cliErr != nil {
 			return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("failed to get commit for ref %s: %w", refName, errors.Join(err, cliErr))
 		}
@@ -86,8 +91,9 @@ func (s *V2GitStore) GetRefState(refName plumbing.ReferenceName) (parentHash, tr
 
 // commitTreeHashViaCLI resolves the tree hash of a commit via
 // `git rev-parse <hash>^{tree}`. See GetRefState for the rationale.
-func commitTreeHashViaCLI(ctx context.Context, commitHash plumbing.Hash) (plumbing.Hash, error) {
+func commitTreeHashViaCLI(ctx context.Context, repoRoot string, commitHash plumbing.Hash) (plumbing.Hash, error) {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", commitHash.String()+"^{tree}")
+	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("git rev-parse %s^{tree}: %w", commitHash.String()[:12], err)

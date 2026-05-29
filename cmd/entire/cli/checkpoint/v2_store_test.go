@@ -64,7 +64,7 @@ func TestV2GitStore_GetRefState_FallsBackToGitCLIWhenCommitObjectMissing(t *test
 	testutil.WriteFile(t, dir, "README.md", "init")
 	testutil.GitAdd(t, dir, "README.md")
 	testutil.GitCommit(t, dir, "initial")
-	t.Chdir(dir)
+	t.Chdir(t.TempDir())
 
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
@@ -81,12 +81,13 @@ func TestV2GitStore_GetRefState_FallsBackToGitCLIWhenCommitObjectMissing(t *test
 	commit, err := repo.CommitObject(ref.Hash())
 	require.NoError(t, err)
 
-	store := NewV2GitStore(&git.Repository{
+	store := NewV2GitStore(repo)
+	store.repo = &git.Repository{
 		Storer: commitObjectMissingStorer{
 			Storer:  repo.Storer,
 			missing: ref.Hash(),
 		},
-	})
+	}
 	parentHash, treeHash, err := store.GetRefState(refName)
 	require.NoError(t, err)
 	require.Equal(t, ref.Hash(), parentHash)

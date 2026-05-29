@@ -57,6 +57,9 @@ type testV2CheckpointOptions struct {
 	ReviewSkills              []string
 	ReviewPrompt              string
 	HasReview                 bool
+	InvestigateRunID          string
+	InvestigateTopic          string
+	HasInvestigation          bool
 }
 
 func writeTestV2Checkpoint(t *testing.T, repo *git.Repository, opts testV2CheckpointOptions) {
@@ -104,6 +107,7 @@ func writeTestV2MainCheckpoint(t *testing.T, repo *git.Repository, opts testV2Ch
 		TokenUsage:          opts.TokenUsage,
 		CombinedAttribution: opts.CombinedAttribution,
 		HasReview:           opts.HasReview,
+		HasInvestigation:    opts.HasInvestigation,
 	}
 	if entry, ok := entries[basePath+paths.MetadataFileName]; ok {
 		existing := readTestJSONFromBlob[checkpoint.CheckpointSummary](t, repo, entry.Hash)
@@ -179,6 +183,8 @@ func writeTestV2MainCheckpoint(t *testing.T, repo *git.Repository, opts testV2Ch
 		Kind:                      opts.Kind,
 		ReviewSkills:              opts.ReviewSkills,
 		ReviewPrompt:              opts.ReviewPrompt,
+		InvestigateRunID:          opts.InvestigateRunID,
+		InvestigateTopic:          opts.InvestigateTopic,
 	}
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(metadata, "", "  ")
 	require.NoError(t, err)

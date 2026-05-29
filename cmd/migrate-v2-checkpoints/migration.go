@@ -113,17 +113,24 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 	}
 
 	eligibleSessions := 0
+	canPreserveCombinedAttribution := true
+	var eligibleContents []struct {
+		sessionIndex int
+		content      *checkpoint.SessionContent
+	}
 	for sessionIndex := range summary.Sessions {
 		metadataContent, err := m.v2Store.ReadSessionMetadataAndPrompts(ctx, discovered.ID, sessionIndex)
 		if err != nil {
 			if errors.Is(err, checkpoint.ErrCheckpointNotFound) {
 				m.report.MissingV2SessionMetadata++
+				canPreserveCombinedAttribution = false
 				continue
 			}
 			return eligibleSessions, fmt.Errorf("read v2 checkpoint %s session %d metadata: %w", discovered.ID, sessionIndex, err)
 		}
 		if !hasRequiredV2Metadata(metadataContent) {
 			m.report.MissingV2SessionMetadata++
+			canPreserveCombinedAttribution = false
 			continue
 		}
 		if _, exists := existingSessionIDs[metadataContent.Metadata.SessionID]; exists {
@@ -135,25 +142,37 @@ func (m checkpointMigrator) migrateCheckpoint(ctx context.Context, discovered di
 		if err != nil {
 			if errors.Is(err, checkpoint.ErrNoTranscript) {
 				m.report.MissingRawTranscripts++
+				canPreserveCombinedAttribution = false
 				continue
 			}
 			return eligibleSessions, fmt.Errorf("read v2 checkpoint %s session %d: %w", discovered.ID, sessionIndex, err)
 		}
 
 		m.report.EligibleSessions++
-		if m.opts.apply {
-			author, err := findV2SessionAuthor(ctx, m.repo, discovered.ID, sessionIndex)
+		eligibleContents = append(eligibleContents, struct {
+			sessionIndex int
+			content      *checkpoint.SessionContent
+		}{sessionIndex: sessionIndex, content: content})
+		eligibleSessions++
+	}
+
+	if m.opts.apply {
+		combinedAttribution := summary.CombinedAttribution
+		if !canPreserveCombinedAttribution {
+			combinedAttribution = nil
+		}
+		for _, eligibleContent := range eligibleContents {
+			author, err := findV2SessionAuthor(ctx, m.repo, discovered.ID, eligibleContent.sessionIndex)
 			if err != nil {
-				return eligibleSessions, fmt.Errorf("resolve v2 checkpoint %s session %d author: %w", discovered.ID, sessionIndex, err)
+				return eligibleSessions, fmt.Errorf("resolve v2 checkpoint %s session %d author: %w", discovered.ID, eligibleContent.sessionIndex, err)
 			}
-			writeOpts := writeOptionsFromV2Content(content, summary, author)
+			writeOpts := writeOptionsFromV2Content(eligibleContent.content, combinedAttribution, author)
 			writeCtx := checkpoint.WithCommitSigningDisabled(ctx)
 			if err := m.v1Store.WriteCommitted(writeCtx, writeOpts); err != nil {
-				return eligibleSessions, fmt.Errorf("write v1 checkpoint %s session %d: %w", discovered.ID, sessionIndex, err)
+				return eligibleSessions, fmt.Errorf("write v1 checkpoint %s session %d: %w", discovered.ID, eligibleContent.sessionIndex, err)
 			}
 			m.report.MigratedSessions++
 		}
-		eligibleSessions++
 	}
 	return eligibleSessions, nil
 }
@@ -214,7 +233,7 @@ func hasRequiredV2Metadata(content *checkpoint.SessionContent) bool {
 	return !content.Metadata.CheckpointID.IsEmpty() && content.Metadata.SessionID != ""
 }
 
-func writeOptionsFromV2Content(content *checkpoint.SessionContent, summary *checkpoint.CheckpointSummary, author object.Signature) checkpoint.WriteCommittedOptions {
+func writeOptionsFromV2Content(content *checkpoint.SessionContent, combinedAttribution *checkpoint.InitialAttribution, author object.Signature) checkpoint.WriteCommittedOptions {
 	meta := content.Metadata
 	return checkpoint.WriteCommittedOptions{
 		CheckpointID:                meta.CheckpointID,
@@ -240,12 +259,15 @@ func writeOptionsFromV2Content(content *checkpoint.SessionContent, summary *chec
 		SessionMetrics:              meta.SessionMetrics,
 		InitialAttribution:          meta.InitialAttribution,
 		PromptAttributionsJSON:      meta.PromptAttributions,
-		CombinedAttribution:         summary.CombinedAttribution,
+		CombinedAttribution:         combinedAttribution,
 		Summary:                     meta.Summary,
 		Kind:                        meta.Kind,
 		ReviewSkills:                meta.ReviewSkills,
 		ReviewPrompt:                meta.ReviewPrompt,
 		HasReview:                   session.Kind(meta.Kind).IsReview(),
+		InvestigateRunID:            meta.InvestigateRunID,
+		InvestigateTopic:            meta.InvestigateTopic,
+		HasInvestigation:            session.Kind(meta.Kind).IsInvestigate(),
 	}
 }
 

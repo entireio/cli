@@ -491,6 +491,36 @@ func TestRunApplyMigratesV2OrphanCheckpointAndIsIdempotent(t *testing.T) {
 	require.NotContains(t, stdout.String(), cpID.String()+" sessions=1 commits=(orphan)")
 }
 
+func TestRunApplyMigratesInvestigationMetadata(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	cpID := id.MustCheckpointID(mainCheckpointID)
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
+		CheckpointID:     cpID,
+		SessionID:        "investigation-session",
+		Transcript:       redact.AlreadyRedacted([]byte("{\"message\":\"investigate\"}\n")),
+		Kind:             string(session.KindAgentInvestigate),
+		InvestigateRunID: "0123456789ab",
+		InvestigateTopic: "Why is checkout flaky?",
+		HasInvestigation: true,
+	})
+
+	stdout := runMigrationCommand(t, fixture, fixture.mainHash, "--apply")
+	require.Contains(t, stdout, "migrated sessions: 1")
+
+	v1Store := checkpoint.NewGitStore(fixture.repo)
+	summary, err := v1Store.ReadCommitted(context.Background(), cpID)
+	require.NoError(t, err)
+	require.True(t, summary.HasInvestigation)
+
+	content, err := v1Store.ReadSessionContent(context.Background(), cpID, 0)
+	require.NoError(t, err)
+	require.Equal(t, string(session.KindAgentInvestigate), content.Metadata.Kind)
+	require.Equal(t, "0123456789ab", content.Metadata.InvestigateRunID)
+	require.Equal(t, "Why is checkout flaky?", content.Metadata.InvestigateTopic)
+}
+
 func TestRunDryRunPlansWithoutWritingV1(t *testing.T) {
 	t.Parallel()
 
@@ -633,6 +663,65 @@ func TestRunDryRunReadsSparseExistingV1SessionPaths(t *testing.T) {
 	require.Contains(t, stdout, "checkpoints eligible for migration: 0")
 }
 
+func TestRunApplyAppendsSparseExistingV1SessionWithoutOverwriting(t *testing.T) {
+	t.Parallel()
+
+	fixture := setupMigrationHistoryRepo(t)
+	cpID := id.MustCheckpointID(mainCheckpointID)
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-existing-zero",
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"from v2 existing\"}\n")),
+	})
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-v2-new",
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"from v2 new\"}\n")),
+	})
+
+	v1Store := checkpoint.NewGitStore(fixture.repo)
+	require.NoError(t, v1Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-existing-zero",
+		Strategy:     testStrategy,
+		Branch:       testBranchName,
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"already v1 zero\"}\n")),
+		AuthorName:   testAuthorName,
+		AuthorEmail:  testAuthorEmail,
+	}))
+	require.NoError(t, v1Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-existing-two",
+		Strategy:     testStrategy,
+		Branch:       testBranchName,
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"already v1 two\"}\n")),
+		AuthorName:   testAuthorName,
+		AuthorEmail:  testAuthorEmail,
+	}))
+	rewriteV1SecondSessionToSparseSlot(t, fixture.repo, cpID)
+
+	stdout := runMigrationCommand(t, fixture, fixture.mainHash, "--apply")
+	require.Contains(t, stdout, "already present v1 sessions: 1")
+	require.Contains(t, stdout, "migrated sessions: 1")
+
+	preserved, err := v1Store.ReadSessionContent(context.Background(), cpID, 2)
+	require.NoError(t, err)
+	require.Equal(t, "session-existing-two", preserved.Metadata.SessionID)
+	require.JSONEq(t, `{"message":"already v1 two"}`, string(preserved.Transcript))
+
+	migrated, err := v1Store.ReadSessionContent(context.Background(), cpID, 1)
+	require.NoError(t, err)
+	require.Equal(t, "session-v2-new", migrated.Metadata.SessionID)
+	require.JSONEq(t, `{"message":"from v2 new"}`, string(migrated.Transcript))
+
+	summary, err := v1Store.ReadCommitted(context.Background(), cpID)
+	require.NoError(t, err)
+	require.Len(t, summary.Sessions, 3)
+	require.Equal(t, "/"+cpID.Path()+"/0/metadata.json", summary.Sessions[0].Metadata)
+	require.Equal(t, "/"+cpID.Path()+"/1/metadata.json", summary.Sessions[1].Metadata)
+	require.Equal(t, "/"+cpID.Path()+"/2/metadata.json", summary.Sessions[2].Metadata)
+}
+
 func TestRunApplyMigratesTaskMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -674,6 +763,11 @@ func TestRunApplyHasReviewReflectsOnlyMigratedSessions(t *testing.T) {
 		CheckpointID: cpID,
 		SessionID:    "normal-session",
 		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"normal\"}\n")),
+		CombinedAttribution: &checkpoint.InitialAttribution{
+			AgentLines:        12,
+			TotalLinesChanged: 12,
+			AgentPercentage:   100,
+		},
 	})
 	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
 		CheckpointID:      cpID,
@@ -694,6 +788,7 @@ func TestRunApplyHasReviewReflectsOnlyMigratedSessions(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, summary)
 	require.False(t, summary.HasReview)
+	require.Nil(t, summary.CombinedAttribution)
 	require.Len(t, summary.Sessions, 1)
 }
 
