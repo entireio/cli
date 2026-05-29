@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -54,6 +55,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	ctx = settings.WithWorktreeRoot(ctx, repoRoot)
+	ctx = checkpoint.WithCommitSigningDisabled(ctx)
 
 	if shouldEnsureCheckpointRefs(opts) {
 		if err := ensureLatestV1Ref(ctx, repoRoot, repo); err != nil {

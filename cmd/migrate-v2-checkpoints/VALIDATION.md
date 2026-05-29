@@ -628,11 +628,12 @@ git -C "$REPO" log --format='%h %ci %s' \
   Later commits that merely carry that path through their tree do not
   count. §5.6 treats the `author` header in `entire explain` as a required
   check; a mismatch is a regression, not an accepted divergence.
-- **Migration commits are unsigned.** The tool disables checkpoint commit
-  signing for migrated writes, even if normal checkpoint signing is enabled
+- **Migration-run commits are unsigned.** The tool disables checkpoint commit
+  signing for the whole migration run, including the v1/v2 preflight ref
+  refresh and the migrated writes, even if normal checkpoint signing is enabled
   in the repo. The v1 author line is replayed from v2 history; adding a local
   operator signature to that replayed author would be misleading. Any signed
-  migrated v1 commit is a bug.
+  commit created by this tool is a bug.
 - **Roll back** by resetting v1 back to `$PRE_APPLY_TIP`:
 
   ```sh

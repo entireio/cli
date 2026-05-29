@@ -355,6 +355,58 @@ func TestRunApplySeedsLocalV1FromRemoteBeforeMigrating(t *testing.T) {
 	require.Len(t, summary.Sessions, 1)
 }
 
+func TestRunApplyDisablesSigningDuringPreflightRefReplay(t *testing.T) { //nolint:paralleltest // mutates git config env
+	markerPath := configureFailingCheckpointSigner(t)
+	fixture := setupMigrationHistoryRepo(t)
+	cpID := id.MustCheckpointID(mainCheckpointID)
+	writeTestV2Checkpoint(t, fixture.repo, testV2CheckpointOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-signing-disabled",
+		Transcript:   redact.AlreadyRedacted([]byte("{\"message\":\"signing disabled\"}\n")),
+	})
+	cloneDir := cloneMigrationRepoWithOrigin(t, fixture)
+	cloneRepo, err := git.PlainOpen(cloneDir)
+	require.NoError(t, err)
+
+	localV1RefName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	localOnlyBlob, err := checkpoint.CreateBlobFromContent(cloneRepo, []byte("local-only\n"))
+	require.NoError(t, err)
+	writeTestV2RefEntriesWithAuthor(t, cloneRepo, localV1RefName, plumbing.ZeroHash, map[string]object.TreeEntry{
+		"local-only.txt": {
+			Name: "local-only.txt",
+			Mode: 0o100644,
+			Hash: localOnlyBlob,
+		},
+	}, "local v1 commit", object.Signature{
+		Name:  testAuthorName,
+		Email: testAuthorEmail,
+		When:  time.Date(2024, 8, 9, 10, 11, 12, 0, time.UTC),
+	})
+
+	var stdout bytes.Buffer
+	err = run(context.Background(), []string{
+		"--repo", cloneDir,
+		"--since", fixture.baseHash.String(),
+		"--head", fixture.mainHash.String(),
+		"--apply",
+	}, &stdout)
+	require.NoError(t, err)
+	require.Contains(t, stdout.String(), "migrated sessions: 1")
+	require.NoFileExists(t, markerPath)
+
+	cloneRepo, err = git.PlainOpen(cloneDir)
+	require.NoError(t, err)
+	ref, err := cloneRepo.Reference(localV1RefName, true)
+	require.NoError(t, err)
+	migrationCommit, err := cloneRepo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	require.Empty(t, migrationCommit.Signature)
+	require.NotEmpty(t, migrationCommit.ParentHashes)
+	replayedCommit, err := cloneRepo.CommitObject(migrationCommit.ParentHashes[0])
+	require.NoError(t, err)
+	require.Empty(t, replayedCommit.Signature)
+}
+
 func TestRunApplyMigratesV2CheckpointToV1(t *testing.T) {
 	t.Parallel()
 
@@ -1018,6 +1070,29 @@ func runMigrationGit(t *testing.T, dir string, args ...string) {
 	cmd.Env = testutil.GitIsolatedEnv()
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git %s failed: %s", strings.Join(args, " "), output)
+}
+
+func configureFailingCheckpointSigner(t *testing.T) string {
+	t.Helper()
+
+	testutil.IsolateGitConfigEnv(t)
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "signer-called")
+	signerPath := filepath.Join(dir, "fake-gpg")
+	script := fmt.Sprintf("#!/bin/sh\nprintf called > %q\nexit 1\n", markerPath)
+	require.NoError(t, os.WriteFile(signerPath, []byte(script), 0o755))
+
+	globalConfig := fmt.Sprintf(`[commit]
+	gpgsign = true
+[user]
+	signingkey = TESTKEY
+[gpg]
+	program = %s
+`, signerPath)
+	globalConfigPath := filepath.Join(dir, "gitconfig")
+	require.NoError(t, os.WriteFile(globalConfigPath, []byte(globalConfig), 0o644))
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfigPath)
+	return markerPath
 }
 
 func runMigrationCommand(t *testing.T, fixture migrationHistoryFixture, head plumbing.Hash, mode string) string {
