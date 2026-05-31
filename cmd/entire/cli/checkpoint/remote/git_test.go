@@ -755,6 +755,74 @@ func TestIsLocalPath(t *testing.T) {
 	}
 }
 
+func TestFetchBlobs_EmptyHashesNoOp(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	withFetchBlobsBatchStub(t, func(_ context.Context, _ string, _ []string) error {
+		called = true
+		return nil
+	})
+
+	require.NoError(t, FetchBlobs(context.Background(), "https://example.com/repo.git", nil))
+	assert.False(t, called, "FetchBlobs with no hashes must not invoke git")
+}
+
+func TestFetchBlobs_BatchesLargeHashLists(t *testing.T) {
+	// Note: cannot t.Parallel() — overrides a package-level var.
+	const total = fetchBlobsBatchSize*2 + 3 // 1003 → expect 3 batches: 500, 500, 3
+
+	hashes := make([]string, total)
+	for i := range hashes {
+		hashes[i] = fmt.Sprintf("%040x", i)
+	}
+
+	var batches [][]string
+	withFetchBlobsBatchStub(t, func(_ context.Context, _ string, h []string) error {
+		// Copy: the slice header points at a sub-slice of the caller's hashes.
+		got := make([]string, len(h))
+		copy(got, h)
+		batches = append(batches, got)
+		return nil
+	})
+
+	require.NoError(t, FetchBlobs(context.Background(), "https://example.com/repo.git", hashes))
+
+	require.Len(t, batches, 3, "1003 hashes at batchSize=500 must produce 3 batches")
+	assert.Len(t, batches[0], fetchBlobsBatchSize)
+	assert.Len(t, batches[1], fetchBlobsBatchSize)
+	assert.Len(t, batches[2], 3)
+	assert.Equal(t, hashes[0], batches[0][0])
+	assert.Equal(t, hashes[fetchBlobsBatchSize], batches[1][0])
+	assert.Equal(t, hashes[total-1], batches[2][len(batches[2])-1])
+}
+
+func TestFetchBlobs_AbortsOnBatchFailure(t *testing.T) {
+	// Note: cannot t.Parallel() — overrides a package-level var.
+	hashes := make([]string, fetchBlobsBatchSize+10)
+	for i := range hashes {
+		hashes[i] = fmt.Sprintf("%040x", i)
+	}
+
+	calls := 0
+	wantErr := errors.New("fetch-pack failed")
+	withFetchBlobsBatchStub(t, func(_ context.Context, _ string, _ []string) error {
+		calls++
+		return wantErr
+	})
+
+	err := FetchBlobs(context.Background(), "https://example.com/repo.git", hashes)
+	require.ErrorIs(t, err, wantErr)
+	assert.Equal(t, 1, calls, "FetchBlobs must abort after the first failing batch")
+}
+
+func withFetchBlobsBatchStub(t *testing.T, stub func(context.Context, string, []string) error) {
+	t.Helper()
+	original := fetchBlobsBatchFn
+	fetchBlobsBatchFn = stub
+	t.Cleanup(func() { fetchBlobsBatchFn = original })
+}
+
 // envToMap converts an env slice to a map for easy assertions.
 // For duplicate keys, the last value wins.
 func envToMap(env []string) map[string]string {

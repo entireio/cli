@@ -75,10 +75,11 @@ func copyFile(src, dst string) error {
 		return fmt.Errorf("copyFile: dst must be absolute, got %q", dst)
 	}
 
-	input, err := os.ReadFile(src)
+	srcFile, err := os.Open(src)
 	if err != nil {
 		return err //nolint:wrapcheck // already present in codebase
 	}
+	defer srcFile.Close()
 
 	root, relPath, err := openAllowedRoot(dst)
 	if err != nil {
@@ -86,7 +87,7 @@ func copyFile(src, dst string) error {
 	}
 	defer root.Close()
 
-	if err := osroot.WriteFile(root, relPath, input, 0o600); err != nil {
+	if err := osroot.WriteFileFromReader(root, relPath, srcFile, 0o600); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 	return nil

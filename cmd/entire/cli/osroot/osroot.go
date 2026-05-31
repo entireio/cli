@@ -54,6 +54,27 @@ func WriteFile(root *os.Root, name string, data []byte, perm os.FileMode) (retEr
 	return nil
 }
 
+// WriteFileFromReader streams data from src to the named file relative to
+// root using os.Root for traversal-resistant access. Creates the file if it
+// doesn't exist, truncates it if it does. Unlike WriteFile, the source is
+// not buffered in memory — use this for files that could be large.
+func WriteFileFromReader(root *os.Root, name string, src io.Reader, perm os.FileMode) (retErr error) {
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err //nolint:wrapcheck // preserve original error for os.IsNotExist checks
+	}
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil && retErr == nil {
+			retErr = closeErr
+		}
+	}()
+
+	if _, err := io.Copy(f, src); err != nil {
+		return err //nolint:wrapcheck // preserve original error
+	}
+	return nil
+}
+
 // Remove removes the named file relative to root using os.Root for
 // traversal-resistant access. Returns nil if the file doesn't exist.
 func Remove(root *os.Root, name string) error {

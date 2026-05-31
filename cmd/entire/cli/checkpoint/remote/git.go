@@ -86,6 +86,13 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	return out, nil
 }
 
+// fetchBlobsBatchSize caps how many hashes are passed to a single
+// `git fetch-pack` invocation. Each hash adds 41 bytes (40 hex chars + a
+// separator) to the argv; with a typical Linux ARG_MAX of ~2 MiB we'd run
+// out of room around 50 k hashes. 500 keeps us comfortably below that
+// while still amortizing the per-call git startup cost.
+const fetchBlobsBatchSize = 500
+
 // FetchBlobs fetches specific objects (typically blobs) by hash from a remote.
 // Uses `git fetch-pack` rather than `git fetch` because the high-level
 // porcelain enforces partial-clone integrity checks that reject blob-only
@@ -94,9 +101,35 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 // and exits — which is exactly what we want when grabbing individual blobs
 // by SHA. Works against GitHub for any reachable object, including blobs.
 //
+// Hashes are submitted in batches (see fetchBlobsBatchSize) so that very
+// large fetches don't exceed the OS argv length limit. A failure on any
+// batch aborts the fetch and returns the error; callers handle fallback
+// (e.g. a full metadata branch fetch) at a higher layer.
+//
 // The remote should be a URL (not a remote name) to avoid persisting promisor
 // settings onto the named remote. Use FetchURL to obtain the URL.
 func FetchBlobs(ctx context.Context, remote string, hashes []string) error {
+	if len(hashes) == 0 {
+		return nil
+	}
+
+	for i := 0; i < len(hashes); i += fetchBlobsBatchSize {
+		end := i + fetchBlobsBatchSize
+		if end > len(hashes) {
+			end = len(hashes)
+		}
+		if err := fetchBlobsBatchFn(ctx, remote, hashes[i:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// fetchBlobsBatchFn is swappable for tests so the batching loop can be
+// exercised without running real git fetch-pack commands.
+var fetchBlobsBatchFn = fetchBlobsBatch //nolint:gochecknoglobals // intentional test seam
+
+func fetchBlobsBatch(ctx context.Context, remote string, hashes []string) error {
 	args := []string{"fetch-pack", remote}
 	args = append(args, hashes...)
 

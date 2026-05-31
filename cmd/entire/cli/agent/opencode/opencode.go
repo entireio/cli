@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -165,19 +164,28 @@ func (a *OpenCodeAgent) GetSessionID(input *agent.HookInput) string {
 	return input.SessionID
 }
 
+// openCodeSessionSubdir keeps the OpenCode session dir under a unique
+// prefix inside .entire/tmp/. Without it, sibling agents (or integration
+// tests) that scribble into .entire/tmp/ would prefix-match
+// agent.AgentForTranscriptPath onto OpenCode.
+const openCodeSessionSubdir = "opencode"
+
 // GetSessionDir returns the directory where Entire stores OpenCode session transcripts.
 // Transcripts are ephemeral handoff files between the TS plugin and the Go hook handler.
 // Once checkpointed, the data lives on git refs and the file is disposable.
-// Stored in os.TempDir()/entire-opencode/<sanitized-path>/ to avoid squatting on
-// OpenCode's own directories (~/.opencode/ is project-level, not home-level).
+// Stored under <repoPath>/.entire/tmp/opencode/ to keep handoff files inside the
+// repo (worktree-safe, gitignored via .entire/.gitignore) and out of a shared
+// os.TempDir() location where other local users could read restored transcripts.
+// The opencode/ subdir gives the directory a unique prefix so agent routing
+// based on GetSessionDir can't confuse OpenCode with siblings that share
+// .entire/tmp/ as a scratch space.
 func (a *OpenCodeAgent) GetSessionDir(repoPath string) (string, error) {
 	// Check for test environment override
 	if override := os.Getenv("ENTIRE_TEST_OPENCODE_PROJECT_DIR"); override != "" {
 		return override, nil
 	}
 
-	projectDir := SanitizePathForOpenCode(repoPath)
-	return filepath.Join(os.TempDir(), "entire-opencode", projectDir), nil
+	return filepath.Join(repoPath, paths.EntireTmpDir, openCodeSessionSubdir), nil
 }
 
 func (a *OpenCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
@@ -267,13 +275,4 @@ func (a *OpenCodeAgent) FormatResumeCommand(sessionID string) string {
 		return "opencode"
 	}
 	return "opencode -s " + sessionID
-}
-
-// nonAlphanumericRegex matches any non-alphanumeric character.
-var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]`)
-
-// SanitizePathForOpenCode converts a path to a safe directory name.
-// Replaces any non-alphanumeric character with a dash (same approach as Claude/Gemini).
-func SanitizePathForOpenCode(path string) string {
-	return nonAlphanumericRegex.ReplaceAllString(path, "-")
 }

@@ -110,6 +110,29 @@ func TestCopyFile_OutsideAllowedDirs(t *testing.T) {
 	assert.Contains(t, err.Error(), "outside allowed directories")
 }
 
+func TestCopyFile_LargePayloadStreams(t *testing.T) {
+	t.Parallel()
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	// 8 MiB exercises the streaming path well past any sane read buffer
+	// without making the test slow.
+	const size = 8 * 1024 * 1024
+	payload := bytes.Repeat([]byte{0xAB}, size)
+
+	srcFile := filepath.Join(srcDir, "big.bin")
+	require.NoError(t, os.WriteFile(srcFile, payload, 0o644))
+
+	dstFile := filepath.Join(dstDir, "big.bin")
+	require.NoError(t, copyFile(srcFile, dstFile))
+
+	got, err := os.ReadFile(dstFile)
+	require.NoError(t, err)
+	require.Len(t, got, size, "copied length must match source")
+	assert.True(t, bytes.Equal(payload, got), "copied bytes must match source")
+}
+
 func TestCopyFile_OverwritesExisting(t *testing.T) {
 	t.Parallel()
 

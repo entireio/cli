@@ -362,6 +362,62 @@ func TestParseHookEvent_TurnEnd_InvalidSessionID(t *testing.T) {
 	}
 }
 
+// Note: GetSessionDir tests cannot use t.Parallel() because t.Setenv()
+// modifies process-global state.
+
+func TestGetSessionDir_UnderRepoEntireTmpOpencode(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_OPENCODE_PROJECT_DIR", "")
+	ag := &OpenCodeAgent{}
+
+	repo := t.TempDir()
+	got, err := ag.GetSessionDir(repo)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(repo, paths.EntireTmpDir, openCodeSessionSubdir), got)
+}
+
+func TestGetSessionDir_UniquePrefixFromBareEntireTmp(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_OPENCODE_PROJECT_DIR", "")
+	ag := &OpenCodeAgent{}
+
+	repo := t.TempDir()
+	dir, err := ag.GetSessionDir(repo)
+	require.NoError(t, err)
+
+	// A bare .entire/tmp/<id>.jsonl file (e.g. another agent's scratch file)
+	// must NOT prefix-match opencode's session dir; otherwise
+	// agent.AgentForTranscriptPath would misroute it.
+	bare := filepath.Join(repo, paths.EntireTmpDir, "some-other-agent.jsonl")
+	require.False(t, strings.HasPrefix(bare, dir+string(filepath.Separator)),
+		"bare .entire/tmp file %q must not appear under opencode session dir %q", bare, dir)
+}
+
+func TestGetSessionDir_TestOverrideTakesPrecedence(t *testing.T) {
+	override := t.TempDir()
+	t.Setenv("ENTIRE_TEST_OPENCODE_PROJECT_DIR", override)
+
+	ag := &OpenCodeAgent{}
+	got, err := ag.GetSessionDir(t.TempDir())
+	require.NoError(t, err)
+	require.Equal(t, override, got)
+}
+
+func TestGetSessionDir_PerWorktreeIsolation(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_OPENCODE_PROJECT_DIR", "")
+	ag := &OpenCodeAgent{}
+
+	worktreeA := t.TempDir()
+	worktreeB := t.TempDir()
+
+	dirA, err := ag.GetSessionDir(worktreeA)
+	require.NoError(t, err)
+	dirB, err := ag.GetSessionDir(worktreeB)
+	require.NoError(t, err)
+
+	require.NotEqual(t, dirA, dirB, "different worktrees must map to different session dirs")
+	require.True(t, strings.HasPrefix(dirA, worktreeA), "session dir A must live inside worktree A")
+	require.True(t, strings.HasPrefix(dirB, worktreeB), "session dir B must live inside worktree B")
+}
+
 func TestFetchAndCacheExport_WritesAndValidatesExportFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)

@@ -3,6 +3,7 @@ package osroot_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -95,6 +96,53 @@ func TestWriteFile_TraversalBlocked(t *testing.T) {
 	defer root.Close()
 
 	err = osroot.WriteFile(root, "../escape.txt", []byte("bad"), 0o600)
+	assert.Error(t, err)
+}
+
+func TestWriteFileFromReader(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	src := strings.NewReader("streamed payload")
+	err = osroot.WriteFileFromReader(root, "stream.txt", src, 0o600)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, "stream.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "streamed payload", string(data))
+}
+
+func TestWriteFileFromReader_Overwrite(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "existing.txt"), []byte("old"), 0o644))
+
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	err = osroot.WriteFileFromReader(root, "existing.txt", strings.NewReader("new"), 0o600)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, "existing.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "new", string(data))
+}
+
+func TestWriteFileFromReader_TraversalBlocked(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	err = osroot.WriteFileFromReader(root, "../escape.txt", strings.NewReader("bad"), 0o600)
 	assert.Error(t, err)
 }
 
