@@ -1138,6 +1138,46 @@ func TestHandleLifecycleTurnStart_RecordsGenericSkillSlashEvent(t *testing.T) {
 	require.True(t, skillEvent.Collapse.DefaultCollapsed)
 }
 
+func TestHandleLifecycleTurnStart_DoesNotDuplicateGenericSkillSlashEventFromForwardedHook(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	sessionID := "test-generic-skill-forwarded"
+	ownerAgent := newMockAgent()
+	forwardedAgent := &mockLifecycleAgent{
+		name:           "forwarded-agent",
+		agentType:      "Forwarded Agent",
+		transcriptData: []byte(`{"type":"user","message":"test"}`),
+	}
+	prompt := "/skill:trigger-analysis inspect the implementation"
+
+	require.NoError(t, handleLifecycleTurnStart(context.Background(), ownerAgent, &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Prompt:    prompt,
+		Timestamp: time.Date(2026, 5, 25, 12, 34, 56, 0, time.UTC),
+	}))
+	require.NoError(t, handleLifecycleTurnStart(context.Background(), forwardedAgent, &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Prompt:    prompt,
+		Timestamp: time.Date(2026, 5, 25, 12, 34, 57, 0, time.UTC),
+	}))
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, ownerAgent.Type(), state.AgentType)
+	require.Len(t, state.SkillEvents, 1)
+	require.Equal(t, string(ownerAgent.Name()), state.SkillEvents[0].Source.Agent)
+}
+
 func TestHandleLifecycleTurnEnd_BackfillsPromptFromTranscript(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir()
 	tmpDir := t.TempDir()

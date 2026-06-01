@@ -367,10 +367,6 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		}
 	}
 
-	// Generic explicit skill signal for agents whose turn-start hook exposes the raw prompt.
-	// Agent adapters can still provide stronger/native events; those win over this fallback.
-	event.SkillEvents = agent.AppendPromptSlashCommandSkillEvent(event.SkillEvents, string(ag.Name()), event.Prompt, event.Timestamp)
-
 	// Capture pre-prompt state (including transcript position via TranscriptAnalyzer)
 	_, captureSpan := perf.Start(ctx, "capture_pre_prompt_state")
 	if err := CapturePrePromptState(ctx, ag, sessionID, event.SessionRef); err != nil {
@@ -434,7 +430,21 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		before.ReviewSkills = slices.Clone(state.ReviewSkills)
 		adoptReviewEnv(logCtx, state, string(ag.Name()))
 		adoptInvestigateEnv(logCtx, state, string(ag.Name()))
-		skillEventsChanged := appendEventSkillEventsToState(event, state)
+
+		skillEventSource := *event
+		// Generic explicit skill signal for agents whose turn-start hook exposes the raw prompt.
+		// TurnStart bypasses the dispatcher-level owner filter so InitializeSession can repair
+		// agent ownership. Only add the generic event after ownership is known; native
+		// adapter-provided events remain unchanged.
+		if state.AgentType == "" || state.AgentType == ag.Type() {
+			skillEventSource.SkillEvents = agent.AppendPromptSlashCommandSkillEvent(
+				skillEventSource.SkillEvents,
+				string(ag.Name()),
+				event.Prompt,
+				event.Timestamp,
+			)
+		}
+		skillEventsChanged := appendEventSkillEventsToState(&skillEventSource, state)
 		if state.Kind == before.Kind &&
 			state.ReviewPrompt == before.ReviewPrompt &&
 			slices.Equal(state.ReviewSkills, before.ReviewSkills) &&
