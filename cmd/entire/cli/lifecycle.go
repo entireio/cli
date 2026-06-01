@@ -367,6 +367,10 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		}
 	}
 
+	// Generic explicit skill signal for agents whose turn-start hook exposes the raw prompt.
+	// Agent adapters can still provide stronger/native events; those win over this fallback.
+	event.SkillEvents = agent.AppendPromptSlashCommandSkillEvent(event.SkillEvents, string(ag.Name()), event.Prompt, event.Timestamp)
+
 	// Capture pre-prompt state (including transcript position via TranscriptAnalyzer)
 	_, captureSpan := perf.Start(ctx, "capture_pre_prompt_state")
 	if err := CapturePrePromptState(ctx, ag, sessionID, event.SessionRef); err != nil {

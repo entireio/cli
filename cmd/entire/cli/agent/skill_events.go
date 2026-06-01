@@ -9,6 +9,7 @@ const (
 // Skill event source signals.
 const (
 	SkillSignalPiInputSlashCommand = "input_slash_command"
+	SkillSignalPromptSlashCommand  = "prompt_slash_command"
 	SkillSignalClaudeSkillToolUse  = "skill_tool_use"
 )
 
