@@ -432,7 +432,10 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		adoptInvestigateEnv(logCtx, state, string(ag.Name()))
 
 		skillEventSource := *event
-		// Generic explicit skill signal for agents whose turn-start hook exposes the raw prompt.
+		// Generic explicit skill signal for USER-INVOKED "/skill:<name>" prompts on
+		// agents whose turn-start hook exposes the raw prompt. Tool-call skills are
+		// handled by agent-specific SkillEventExtractors, not here. See
+		// agent.SkillEventFromPromptSlashCommand for the per-agent format validation.
 		// TurnStart bypasses the dispatcher-level owner filter so InitializeSession can repair
 		// agent ownership. Only add the generic event after ownership is known; native
 		// adapter-provided events remain unchanged.
