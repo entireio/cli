@@ -81,7 +81,6 @@ func TestExplainCheckpointFromClonedRepo(t *testing.T) {
 		require.Error(t, err, "checkpoint metadata ref should not exist locally in clone before explain")
 
 		entire.Enable(t, cloneDir, s.Agent.EntireAgent())
-		testutil.ApplySuiteCheckpointsMode(t, cloneDir)
 		testutil.CommitIfDirty(t, cloneDir, "Enable entire in clone")
 
 		out := entire.Explain(t, cloneDir, checkpointID)

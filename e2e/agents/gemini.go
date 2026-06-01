@@ -23,6 +23,38 @@ const geminiDefaultModel = "gemini-2.5-flash"
 const geminiTrustWorkspaceEnvKey = "GEMINI_CLI_TRUST_WORKSPACE"
 const geminiTrustWorkspaceEnv = geminiTrustWorkspaceEnvKey + "=true"
 
+// geminiAbortSignatures are stderr markers for a server-side turn abort
+// (empty/malformed model response). gemini-cli prints these to stderr but
+// still exits 0 with empty stdout, so RunPrompt must surface them as an error
+// for the transient-retry path (RepoState.RunPrompt -> IsTransientError) to
+// fire. Without this, the turn never completes, the after-agent lifecycle hook
+// never runs, no checkpoint is created, and tests fail with a misleading
+// "checkpoint ref did not advance" instead of retrying.
+var geminiAbortSignatures = []string{
+	"Invalid stream",
+	"empty response or malformed tool call",
+}
+
+func geminiAbortedTurn(stderr string) bool {
+	for _, sig := range geminiAbortSignatures {
+		if strings.Contains(stderr, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// geminiModel returns the model to use for e2e runs. E2E_GEMINI_MODEL overrides
+// the default so CI can pin a more reliable model than the cheap local default
+// (gemini-2.5-flash, which frequently aborts turns with "Invalid stream") without
+// a code change. Mirrors E2E_CODEX_MODEL / E2E_OPENCODE_MODEL.
+func geminiModel() string {
+	if m := os.Getenv("E2E_GEMINI_MODEL"); m != "" {
+		return m
+	}
+	return geminiDefaultModel
+}
+
 type Gemini struct{}
 
 func (g *Gemini) Name() string               { return "gemini-cli" }
@@ -33,6 +65,9 @@ func (g *Gemini) TimeoutMultiplier() float64 { return 2.5 }
 
 func (g *Gemini) IsTransientError(out Output, err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if geminiAbortedTurn(out.Stderr) {
 		return true
 	}
 	transientPatterns := []string{
@@ -58,7 +93,7 @@ func (g *Gemini) Bootstrap() error {
 }
 
 func (g *Gemini) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
-	cfg := &runConfig{Model: geminiDefaultModel}
+	cfg := &runConfig{Model: geminiModel()}
 	for _, o := range opts {
 		o(cfg)
 	}
@@ -101,6 +136,15 @@ func (g *Gemini) RunPrompt(ctx context.Context, dir string, prompt string, opts 
 		}
 	}
 
+	// gemini-cli can abort a turn server-side (empty/malformed model response)
+	// yet still exit 0 with empty stdout. Surface it as an error so the
+	// transient-retry path restarts the scenario instead of proceeding to fail
+	// on a missing checkpoint. The real abort marker stays in stderr, which
+	// IsTransientError matches via geminiAbortSignatures.
+	if err == nil && geminiAbortedTurn(stderr.String()) {
+		err = errors.New("gemini aborted turn: empty or malformed model response")
+	}
+
 	return Output{
 		Command:  g.Binary() + " " + strings.Join(displayArgs, " "),
 		Stdout:   stdout.String(),
@@ -122,7 +166,7 @@ func (g *Gemini) StartSession(_ context.Context, dir string) (Session, error) {
 	// Unset CI and GITHUB_ACTIONS so gemini doesn't force headless mode —
 	// it checks both in isHeadlessMode() and skips interactive TUI entirely.
 	args := append([]string{"env"}, envArgs...)
-	args = append(args, g.Binary(), "--model", geminiDefaultModel, "-y")
+	args = append(args, g.Binary(), "--model", geminiModel(), "-y")
 	s, err := NewTmuxSession(name, dir, []string{"CI", "GITHUB_ACTIONS", "ENTIRE_TEST_TTY", "HOME"}, args[0], args[1:]...)
 	if err != nil {
 		return nil, err

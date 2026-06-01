@@ -12,17 +12,15 @@ package review
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"time"
 
-	"charm.land/huh/v2"
-
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/mdrender"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
+	"github.com/entireio/cli/cmd/entire/cli/uiform"
 )
 
 // SynthesisProvider abstracts the LLM call that produces the cross-agent
@@ -148,22 +146,8 @@ func usableAgentCount(summary reviewtypes.RunSummary) int {
 	return len(usableAgentRuns(summary))
 }
 
-// realPromptYN is the production y/N prompt using a huh Confirm form.
-// Default is false (N). On user cancellation (Ctrl+C) returns false, nil so
-// the caller treats it as a "no" answer; on real form errors the error is
-// returned so RunFinished can log it via the debug-error path.
+// realPromptYN is the production y/N prompt; delegates to uiform.PromptYN
+// so the review and investigate packages share one implementation.
 func realPromptYN(ctx context.Context, question string, def bool) (bool, error) {
-	answer := def
-	form := newAccessibleForm(huh.NewGroup(
-		huh.NewConfirm().
-			Title(question).
-			Value(&answer),
-	))
-	if err := form.RunWithContext(ctx); err != nil {
-		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
-			return false, nil
-		}
-		return false, fmt.Errorf("synthesis confirm form: %w", err)
-	}
-	return answer, nil
+	return uiform.PromptYN(ctx, question, def) //nolint:wrapcheck // uiform already wraps
 }

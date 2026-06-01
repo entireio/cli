@@ -113,18 +113,6 @@ func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
 	return PromoteTmpRefSafely(ctx, plumbing.ReferenceName(tmpRef), plumbing.NewBranchReferenceName(branchName), branchName)
 }
 
-// FetchV2MainFromURL fetches the v2 /main ref from a remote URL and advances
-// the local ref only when doing so cannot rewind locally-ahead commits.
-// Uses explicit refspec since v2 refs are under refs/entire/, not refs/heads/.
-//
-// The fetch is unfiltered (NoFilter: true) because resume needs full metadata.
-func FetchV2MainFromURL(ctx context.Context, remoteURL string) error {
-	if err := fetchURLIntoTmpRef(ctx, remoteURL, paths.V2MainRefName, V2MainFetchTmpRef, "v2 /main", true); err != nil {
-		return err
-	}
-	return PromoteTmpRefSafely(ctx, V2MainFetchTmpRef, paths.V2MainRefName, "v2 /main")
-}
-
 // fetchURLIntoTmpRef runs `git fetch <remoteURL> +<srcRef>:<tmpRef>` via the
 // checkpoint git wrapper, disabling the terminal prompt so a misconfigured
 // credential helper doesn't hang the process. Errors include the redacted URL
@@ -167,6 +155,7 @@ func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Check if branch already exists locally - if so, nothing to do
 	branchRef := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
@@ -177,7 +166,7 @@ func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) error {
 	// Branch doesn't exist locally - try to fetch it from the URL.
 	// Fetch failures are not fatal: push will create it on the remote when it succeeds.
 	if err := FetchMetadataBranch(ctx, remoteURL); err != nil {
-		return nil //nolint:nilerr // Fetch failure is expected when remote is unreachable or branch doesn't exist yet
+		return nil
 	}
 
 	logging.Info(ctx, "checkpoint-remote: fetched metadata branch from URL")

@@ -1928,117 +1928,85 @@ func TestPostCommit_IdleSession_NoTranscriptFallbackForCarryForward(t *testing.T
 		"IDLE session should NOT be condensed via transcript fallback — only ACTIVE sessions get transcript extraction for carry-forward")
 }
 
-// TestPostCommit_IdleSession_SkipsSentinelWait is a regression test verifying that
-// PostCommit for an IDLE session with AgentType=ClaudeCode and a TranscriptPath
-// completes quickly without hitting the 3s sentinel timeout in PrepareTranscript.
+// TestPostCommit_NonActiveSession_SkipsSentinelWait is a regression test verifying
+// that PostCommit for an IDLE or ENDED session with AgentType=ClaudeCode and a
+// TranscriptPath completes quickly without hitting the 3s sentinel timeout in
+// PrepareTranscript. Both IDLE and ENDED sessions should skip the sentinel wait
+// since their transcripts are already fully flushed.
 //
-// Before the fix, the transcript extraction functions called PrepareTranscript unconditionally,
-// which triggered waitForTranscriptFlush (3s timeout) even for idle/ended sessions
-// where the transcript was already fully flushed.
+// Before the fix, the transcript extraction functions called PrepareTranscript
+// unconditionally, which triggered waitForTranscriptFlush (3s timeout) even for
+// idle/ended sessions where the transcript was already fully flushed.
 //
 // After the fix, PrepareTranscript is only called when state.Phase.IsActive().
-func TestPostCommit_IdleSession_SkipsSentinelWait(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
+func TestPostCommit_NonActiveSession_SkipsSentinelWait(t *testing.T) {
+	tests := []struct {
+		name         string
+		phase        session.Phase
+		setEndedAt   bool
+		sessionID    string
+		commitTrlSHA string
+	}{
+		{"idle", session.PhaseIdle, false, "test-idle-skip-sentinel", "a1a2a3a4a5a6"},
+		{"ended", session.PhaseEnded, true, "test-ended-skip-sentinel", "e1e2e3e4e5e6"},
+	}
 
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setupGitRepo(t)
+			t.Chdir(dir)
 
-	s := &ManualCommitStrategy{}
-	sessionID := "test-idle-skip-sentinel"
+			repo, err := git.PlainOpen(dir)
+			require.NoError(t, err)
 
-	// Initialize session and save a checkpoint
-	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+			s := &ManualCommitStrategy{}
 
-	// Set phase to IDLE, set AgentType to Claude Code, and set TranscriptPath
-	// Without TranscriptPath, the PrepareTranscript code path is never reached.
-	// Without AgentType=ClaudeCode, the sentinel wait is not triggered.
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	state.Phase = session.PhaseIdle
-	state.LastInteractionTime = nil
-	state.FilesTouched = []string{"test.txt"}
-	state.AgentType = agent.AgentTypeClaudeCode
+			// Initialize session and save a checkpoint
+			setupSessionWithCheckpoint(t, s, repo, dir, tt.sessionID)
 
-	// Create a transcript file so PrepareTranscript would be triggered if not guarded
-	transcriptFile := filepath.Join(dir, ".entire", "transcript-"+sessionID+".jsonl")
-	require.NoError(t, os.MkdirAll(filepath.Dir(transcriptFile), 0o755))
-	require.NoError(t, os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644))
-	state.TranscriptPath = transcriptFile
+			// Set phase, AgentType=ClaudeCode, and TranscriptPath. Without
+			// TranscriptPath the PrepareTranscript code path is never reached;
+			// without AgentType=ClaudeCode the sentinel wait is not triggered.
+			state, err := s.loadSessionState(context.Background(), tt.sessionID)
+			require.NoError(t, err)
+			state.Phase = tt.phase
+			if tt.setEndedAt {
+				now := time.Now()
+				state.EndedAt = &now
+			} else {
+				state.LastInteractionTime = nil
+			}
+			state.FilesTouched = []string{"test.txt"}
+			state.AgentType = agent.AgentTypeClaudeCode
 
-	require.NoError(t, s.saveSessionState(context.Background(), state))
+			// Create a transcript file so PrepareTranscript would be triggered if not guarded
+			transcriptFile := filepath.Join(dir, ".entire", "transcript-"+tt.sessionID+".jsonl")
+			require.NoError(t, os.MkdirAll(filepath.Dir(transcriptFile), 0o755))
+			require.NoError(t, os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644))
+			state.TranscriptPath = transcriptFile
 
-	// Create a commit WITH the Entire-Checkpoint trailer
-	commitWithCheckpointTrailer(t, repo, dir, "a1a2a3a4a5a6")
+			require.NoError(t, s.saveSessionState(context.Background(), state))
 
-	// Time PostCommit — before the fix this would take ~3s+ due to sentinel timeout
-	start := time.Now()
-	err = s.PostCommit(context.Background())
-	elapsed := time.Since(start)
-	require.NoError(t, err)
+			// Create a commit WITH the Entire-Checkpoint trailer
+			commitWithCheckpointTrailer(t, repo, dir, tt.commitTrlSHA)
 
-	// Assert it completes well under the 3s sentinel timeout.
-	// Normal PostCommit for these tests runs in <500ms (git operations only).
-	assert.Less(t, elapsed, 2*time.Second,
-		"IDLE session PostCommit should skip sentinel wait and complete in <2s, took %v", elapsed)
+			// Time PostCommit — before the fix this would take ~3s+ due to sentinel timeout.
+			// Normal PostCommit for these tests runs in <500ms (git operations only).
+			start := time.Now()
+			err = s.PostCommit(context.Background())
+			elapsed := time.Since(start)
+			require.NoError(t, err)
 
-	// Verify condensation still happened correctly
-	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensation")
-	assert.NotNil(t, sessionsRef)
-}
+			// Assert it completes well under the 3s sentinel timeout.
+			assert.Less(t, elapsed, 2*time.Second,
+				"%s session PostCommit should skip sentinel wait and complete in <2s, took %v", tt.name, elapsed)
 
-// TestPostCommit_EndedSession_SkipsSentinelWait is the same regression test as
-// TestPostCommit_IdleSession_SkipsSentinelWait but for ENDED phase sessions.
-// Both IDLE and ENDED sessions should skip the sentinel wait since their
-// transcripts are already fully flushed.
-func TestPostCommit_EndedSession_SkipsSentinelWait(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	s := &ManualCommitStrategy{}
-	sessionID := "test-ended-skip-sentinel"
-
-	// Initialize session and save a checkpoint
-	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
-
-	// Set phase to ENDED, set AgentType to Claude Code, and set TranscriptPath
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	now := time.Now()
-	state.Phase = session.PhaseEnded
-	state.EndedAt = &now
-	state.FilesTouched = []string{"test.txt"}
-	state.AgentType = agent.AgentTypeClaudeCode
-
-	// Create a transcript file so PrepareTranscript would be triggered if not guarded
-	transcriptFile := filepath.Join(dir, ".entire", "transcript-"+sessionID+".jsonl")
-	require.NoError(t, os.MkdirAll(filepath.Dir(transcriptFile), 0o755))
-	require.NoError(t, os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644))
-	state.TranscriptPath = transcriptFile
-
-	require.NoError(t, s.saveSessionState(context.Background(), state))
-
-	// Create a commit WITH the Entire-Checkpoint trailer
-	commitWithCheckpointTrailer(t, repo, dir, "e1e2e3e4e5e6")
-
-	// Time PostCommit — before the fix this would take ~3s+ due to sentinel timeout
-	start := time.Now()
-	err = s.PostCommit(context.Background())
-	elapsed := time.Since(start)
-	require.NoError(t, err)
-
-	// Assert it completes well under the 3s sentinel timeout
-	assert.Less(t, elapsed, 2*time.Second,
-		"ENDED session PostCommit should skip sentinel wait and complete in <2s, took %v", elapsed)
-
-	// Verify condensation still happened correctly
-	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensation")
-	assert.NotNil(t, sessionsRef)
+			// Verify condensation still happened correctly
+			sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+			require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensation")
+			assert.NotNil(t, sessionsRef)
+		})
+	}
 }
 
 // TestPostCommit_EndedSession_SetsFullyCondensed verifies that an ENDED session

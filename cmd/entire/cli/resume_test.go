@@ -600,52 +600,11 @@ func TestReadCheckpointInfoFromStoreUsesLatestSessionMetadata(t *testing.T) {
 	}
 }
 
-func TestResolveLatestCheckpointUsesLocalV2WhenSettingsDisabled(t *testing.T) {
+func TestResolveLatestCheckpointUsesV1Checkpoint(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
 	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
-	cpID := id.MustCheckpointID("dd11ee22ff33")
-	v2Store := checkpoint.NewV2GitStore(repo)
-	if err := v2Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
-		CheckpointID: cpID,
-		SessionID:    "session-v2-local",
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"from v2"}]}}` + "\n")),
-		Prompts:      []string{"Use local v2 data"},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@example.com",
-	}); err != nil {
-		t.Fatalf("WriteCommitted() error = %v", err)
-	}
-
-	latest, err := resolveLatestCheckpoint(context.Background(), repo, v2Store, []id.CheckpointID{cpID})
-	if err != nil {
-		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
-	}
-	if latest.CheckpointID != cpID {
-		t.Errorf("resolveLatestCheckpoint() = %s, want %s", latest.CheckpointID, cpID)
-	}
-}
-
-func TestResolveLatestCheckpointFallsBackToV1WhenLocalV2MissesCheckpoint(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
-
-	v2Store := checkpoint.NewV2GitStore(repo)
-	if err := v2Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
-		CheckpointID: id.MustCheckpointID("dd11ee22ff33"),
-		SessionID:    "session-v2-other",
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"from v2"}]}}` + "\n")),
-		Prompts:      []string{"Use local v2 data"},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@example.com",
-	}); err != nil {
-		t.Fatalf("WriteCommitted() error = %v", err)
-	}
 
 	targetID := createCheckpointOnMetadataBranchFull(
 		t,
@@ -655,7 +614,9 @@ func TestResolveLatestCheckpointFallsBackToV1WhenLocalV2MissesCheckpoint(t *test
 		time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
 	)
 
-	latest, err := resolveLatestCheckpoint(context.Background(), repo, v2Store, []id.CheckpointID{targetID})
+	store := checkpoint.NewGitStore(repo)
+
+	latest, err := resolveLatestCheckpoint(context.Background(), repo, store, []id.CheckpointID{targetID})
 	if err != nil {
 		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
 	}
@@ -765,7 +726,7 @@ func TestFindBranchCheckpoint_SquashMergeMultipleCheckpoints(t *testing.T) {
 	}
 }
 
-func TestResumeSingleSession_FallsBackToV1WhenV2FullMissing(t *testing.T) {
+func TestResumeSingleSession_UsesV1Transcript(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
@@ -776,7 +737,7 @@ func TestResumeSingleSession_FallsBackToV1WhenV2FullMissing(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(tmpDir, ".entire", "settings.json"),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`),
+		[]byte(`{"enabled": true}`),
 		0o644,
 	); err != nil {
 		t.Fatalf("failed to write settings: %v", err)
@@ -797,18 +758,6 @@ func TestResumeSingleSession_FallsBackToV1WhenV2FullMissing(t *testing.T) {
 		AuthorEmail:  "test@example.com",
 	}); err != nil {
 		t.Fatalf("failed to write v1 checkpoint: %v", err)
-	}
-
-	v2Store := checkpoint.NewV2GitStore(repo)
-	if err := v2Store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
-		CheckpointID:      cpID,
-		SessionID:         sessionID,
-		Strategy:          "manual-commit",
-		CompactTranscript: []byte(`{"v":1,"type":"user"}` + "\n"),
-		AuthorName:        "Test",
-		AuthorEmail:       "test@example.com",
-	}); err != nil {
-		t.Fatalf("failed to write v2 checkpoint: %v", err)
 	}
 
 	ag := &recordingResumeAgent{sessionDir: filepath.Join(tmpDir, "sessions")}

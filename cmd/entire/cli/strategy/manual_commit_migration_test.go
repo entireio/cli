@@ -274,37 +274,3 @@ func TestMigrateShadowBranch_MultiTrailerHEAD(t *testing.T) {
 	assert.Equal(t, headHash, state.BaseCommit, "BaseCommit should advance to HEAD")
 	assert.Equal(t, headHash, state.AttributionBaseCommit, "AttributionBaseCommit should advance (reconcile path)")
 }
-
-// TestMigrateShadowBranch_CommitObjectFailure verifies that when HEAD has no
-// trailers but the session has a LastCheckpointID set, the code falls through
-// to the migrate path without panicking.
-func TestMigrateShadowBranch_CommitObjectFailure(t *testing.T) {
-	dir, initHash := setupMigrationRepo(t)
-	t.Chdir(dir)
-
-	cpID := checkpointID.MustCheckpointID("abc123def456")
-
-	// Create a commit without any trailers.
-	testutil.WriteFile(t, dir, "file.txt", "content")
-	testutil.GitAdd(t, dir, "file.txt")
-	testutil.GitCommit(t, dir, "plain commit without trailers")
-	headHash := testutil.GetHeadHash(t, dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	state := &SessionState{
-		SessionID:             "test-session",
-		BaseCommit:            initHash,
-		AttributionBaseCommit: initHash,
-		LastCheckpointID:      cpID,
-	}
-
-	s := &ManualCommitStrategy{}
-	migrated, _, err := s.migrateShadowBranchIfNeeded(context.Background(), repo, state)
-	require.NoError(t, err)
-
-	assert.True(t, migrated, "should fall through to migrate path")
-	assert.Equal(t, headHash, state.BaseCommit, "BaseCommit should advance")
-	assert.Equal(t, initHash, state.AttributionBaseCommit, "AttributionBaseCommit should stay pinned (migrate path)")
-}

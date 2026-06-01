@@ -5,8 +5,6 @@ import (
 	"os"
 	"testing"
 
-	_ "unsafe"
-
 	"github.com/go-git/go-git/v6/x/plugin"
 	"github.com/go-git/go-git/v6/x/plugin/config"
 )
@@ -24,6 +22,3 @@ func TestMain(m *testing.M) {
 
 	os.Exit(m.Run())
 }
-
-//go:linkname resetPluginEntry github.com/go-git/go-git/v6/x/plugin.resetEntry
-func resetPluginEntry(name plugin.Name)

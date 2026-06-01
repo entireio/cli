@@ -355,61 +355,44 @@ func TestTUIModel_InitializesDetailViewport(t *testing.T) {
 	}
 }
 
-// TestTUIModel_DelegatesMouseWheelToViewport pins that mouse-wheel events in
-// detail mode reach the viewport's MouseWheelMsg handler. The bug this guards
-// against: setting View.MouseMode = MouseModeCellMotion on entry to detail
-// mode caused the Program to receive mouse events, but the Update switch
-// only routed tea.KeyPressMsg — mouse events fell through unhandled and the
-// viewport never got a chance to scroll.
-func TestTUIModel_DelegatesMouseWheelToViewport(t *testing.T) {
+// TestTUIModel_DelegatesScrollInputToViewport pins that scroll input (mouse
+// wheel and PgDn) in detail mode reaches the viewport and advances YOffset
+// instead of being swallowed by the model's Update switch.
+func TestTUIModel_DelegatesScrollInputToViewport(t *testing.T) {
 	t.Parallel()
-	m := newTestModel([]string{"agent-a"}, func() {})
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
-	m = mustModel(t, updated)
-	long := strings.Repeat("paragraph of text ", 20)
-	for range 5 {
-		updated, _ = m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: long}})
-		m = mustModel(t, updated)
-	}
-	updated, _ = m.Update(testCtrlKey('o'))
-	m = mustModel(t, updated)
-	m.detail.GotoTop()
-	startOffset := m.detail.YOffset()
 
-	updated, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
-	m = mustModel(t, updated)
-	if m.detail.YOffset() <= startOffset {
-		t.Errorf("expected mouse-wheel-down to advance viewport YOffset beyond %d; got %d", startOffset, m.detail.YOffset())
+	tests := []struct {
+		name  string
+		input tea.Msg
+	}{
+		{"mouse-wheel-down", tea.MouseWheelMsg{Button: tea.MouseWheelDown}},
+		{"pgdn", tea.KeyPressMsg{Code: tea.KeyPgDown}},
 	}
-}
 
-// TestTUIModel_DelegatesScrollKeysToViewport pins that pager keys (PgDn) in
-// detail mode reach the viewport's internal keymap and advance YOffset rather
-// than being swallowed by the model's switch.
-func TestTUIModel_DelegatesScrollKeysToViewport(t *testing.T) {
-	t.Parallel()
-	m := newTestModel([]string{"agent-a"}, func() {})
-	// Size the window so the viewport has a sensible height.
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
-	m = mustModel(t, updated)
-	// Populate enough content to scroll. AssistantText with long text wraps
-	// to many viewport lines.
-	long := strings.Repeat("paragraph of text ", 20)
-	for range 5 {
-		updated, _ = m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: long}})
-		m = mustModel(t, updated)
-	}
-	// Enter detail mode (auto-tails to bottom).
-	updated, _ = m.Update(testCtrlKey('o'))
-	m = mustModel(t, updated)
-	// Jump to top so PgDn has somewhere to scroll into.
-	m.detail.GotoTop()
-	startOffset := m.detail.YOffset()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestModel([]string{"agent-a"}, func() {})
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+			m = mustModel(t, updated)
+			// Fill the viewport with enough wrapped lines to scroll.
+			long := strings.Repeat("paragraph of text ", 20)
+			for range 5 {
+				updated, _ = m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: long}})
+				m = mustModel(t, updated)
+			}
+			// Enter detail mode, then jump to top so the input can scroll down.
+			updated, _ = m.Update(testCtrlKey('o'))
+			m = mustModel(t, updated)
+			m.detail.GotoTop()
+			startOffset := m.detail.YOffset()
 
-	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
-	m = mustModel(t, updated)
-	if m.detail.YOffset() <= startOffset {
-		t.Errorf("expected PgDn to advance viewport YOffset beyond %d; got %d", startOffset, m.detail.YOffset())
+			updated, _ = m.Update(tt.input)
+			m = mustModel(t, updated)
+			if m.detail.YOffset() <= startOffset {
+				t.Errorf("expected %s to advance viewport YOffset beyond %d; got %d", tt.name, startOffset, m.detail.YOffset())
+			}
+		})
 	}
 }
 

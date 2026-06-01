@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -1597,5 +1598,285 @@ func TestAdoptReviewEnv_AlreadyTaggedNotOverwritten(t *testing.T) {
 	}
 	if state.ReviewPrompt != "old prompt" {
 		t.Errorf("ReviewPrompt: got %q, want %q (must not be overwritten on second turn)", state.ReviewPrompt, "old prompt")
+	}
+}
+
+// testInvestigateRunID is the placeholder run ID used by the
+// adoptInvestigateEnv tests below. Production run IDs are 12 hex chars; the
+// adopter does not enforce the format itself, so a fixed test value is fine.
+const testInvestigateRunID = "abcdef012345"
+
+// setInvestigateEnv populates all ENTIRE_INVESTIGATE_* env vars for a test
+// using t.Setenv (so they are restored at test end). agentName must match
+// the hook's agent for adoption to succeed.
+func setInvestigateEnv(t *testing.T, agentName, startingSHA, topic string) {
+	t.Helper()
+	t.Setenv(investigate.EnvSession, "1")
+	t.Setenv(investigate.EnvAgent, agentName)
+	t.Setenv(investigate.EnvStartingSHA, startingSHA)
+	t.Setenv(investigate.EnvRunID, testInvestigateRunID)
+	t.Setenv(investigate.EnvTopic, topic)
+}
+
+// TestAdoptInvestigateEnv_Success verifies that adoptInvestigateEnv tags the
+// session state with Kind=agent_investigate and populates the investigate
+// fields when all ENTIRE_INVESTIGATE_* env vars are valid.
+func TestAdoptInvestigateEnv_Success(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	ag := newMockAgent()
+	headSHA := testutil.GetHeadHash(t, tmp)
+	setInvestigateEnv(t, string(ag.Name()), headSHA, "Why is checkout flaky?")
+
+	sessionID := "test-investigate-env-success"
+	state := &session.State{
+		SessionID:  sessionID,
+		BaseCommit: headSHA,
+	}
+	adoptInvestigateEnv(context.Background(), state, string(ag.Name()))
+
+	if state.Kind != session.KindAgentInvestigate {
+		t.Errorf("Kind: got %q, want agent_investigate", state.Kind)
+	}
+	if state.InvestigateRunID != testInvestigateRunID {
+		t.Errorf("InvestigateRunID: got %q", state.InvestigateRunID)
+	}
+	if state.InvestigateTopic != "Why is checkout flaky?" {
+		t.Errorf("InvestigateTopic: got %q", state.InvestigateTopic)
+	}
+}
+
+// TestAdoptInvestigateEnv_AgentMismatch verifies that adoption is skipped
+// (and state is left untouched) when the env's agent does not match the
+// expected hook agent.
+func TestAdoptInvestigateEnv_AgentMismatch(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	headSHA := testutil.GetHeadHash(t, tmp)
+	// Env says claude-code; the hook is "codex" — mismatch must skip adoption.
+	setInvestigateEnv(t, "claude-code", headSHA, "topic")
+
+	state := &session.State{
+		SessionID:  "test-investigate-env-agent-mismatch",
+		BaseCommit: headSHA,
+	}
+	adoptInvestigateEnv(context.Background(), state, "codex")
+
+	if state.Kind != "" {
+		t.Errorf("Kind: got %q, want empty for agent mismatch", state.Kind)
+	}
+	if state.InvestigateRunID != "" {
+		t.Errorf("InvestigateRunID: got %q, want empty", state.InvestigateRunID)
+	}
+}
+
+// TestAdoptInvestigateEnv_StaleStartingSHA verifies that adoption is skipped
+// when the env's starting SHA does not match the session's base commit
+// (stale env from an earlier HEAD).
+func TestAdoptInvestigateEnv_StaleStartingSHA(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	ag := newMockAgent()
+	// "deadbeef" vs state.BaseCommit "cafebabe" — different SHAs.
+	setInvestigateEnv(t, string(ag.Name()), "deadbeef", "topic")
+
+	state := &session.State{
+		SessionID:  "test-investigate-env-stale-sha",
+		BaseCommit: "cafebabe",
+	}
+	adoptInvestigateEnv(context.Background(), state, string(ag.Name()))
+
+	if state.Kind != "" {
+		t.Errorf("Kind: got %q, want empty for stale starting SHA", state.Kind)
+	}
+}
+
+// TestAdoptInvestigateEnv_AlreadyTaggedNotOverwritten verifies that when a
+// session is already tagged (e.g. as a review session by an outer adoption),
+// adoptInvestigateEnv short-circuits and does not modify state.
+func TestAdoptInvestigateEnv_AlreadyTaggedNotOverwritten(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	ag := newMockAgent()
+	headSHA := testutil.GetHeadHash(t, tmp)
+	setInvestigateEnv(t, string(ag.Name()), headSHA, "topic")
+
+	// Pre-tag the state as a review session.
+	state := &session.State{
+		SessionID:    "test-investigate-env-already-tagged",
+		BaseCommit:   headSHA,
+		Kind:         session.KindAgentReview,
+		ReviewPrompt: "review prompt",
+		ReviewSkills: []string{"/skill"},
+	}
+	adoptInvestigateEnv(context.Background(), state, string(ag.Name()))
+
+	if state.Kind != session.KindAgentReview {
+		t.Errorf("Kind: got %q, want agent_review (must not be overwritten)", state.Kind)
+	}
+	if state.InvestigateRunID != "" {
+		t.Errorf("InvestigateRunID: got %q, want empty (must not be set)", state.InvestigateRunID)
+	}
+	if state.InvestigateTopic != "" {
+		t.Errorf("InvestigateTopic: got %q, want empty (must not be set)", state.InvestigateTopic)
+	}
+}
+
+// TestAdoptInvestigateEnv_SessionEnvNotOne verifies that adoption is skipped
+// when ENTIRE_INVESTIGATE_SESSION is set to anything other than "1".
+func TestAdoptInvestigateEnv_SessionEnvNotOne(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	ag := newMockAgent()
+	headSHA := testutil.GetHeadHash(t, tmp)
+	t.Setenv(investigate.EnvSession, "0")
+	t.Setenv(investigate.EnvAgent, string(ag.Name()))
+	t.Setenv(investigate.EnvStartingSHA, headSHA)
+	t.Setenv(investigate.EnvRunID, testInvestigateRunID)
+	t.Setenv(investigate.EnvTopic, "topic")
+
+	state := &session.State{
+		SessionID:  "test-investigate-env-session-not-one",
+		BaseCommit: headSHA,
+	}
+	adoptInvestigateEnv(context.Background(), state, string(ag.Name()))
+
+	if state.Kind != "" {
+		t.Errorf("Kind: got %q, want empty when SESSION!=\"1\"", state.Kind)
+	}
+}
+
+// TestAdoptInvestigateEnv_RejectsBadRunID verifies that an env var
+// handshake with a malformed (non-12-hex) or empty RunID does not tag the
+// session. This protects downstream condensation from joining on junk run
+// IDs leaked via stale shell env or hand-set vars.
+// TestAdoptInvestigateEnv_TagsSessionViaHandleLifecycleTurnStart is the
+// investigate twin of TestAdoptReviewEnv_TagsSession: it drives
+// handleLifecycleTurnStart end-to-end and asserts the persisted session
+// state carries Kind=agent_investigate plus the run id/topic decoded from
+// the env vars. Distinct from the more focused TestAdoptInvestigateEnv_*
+// cases above, which call adoptInvestigateEnv directly.
+func TestAdoptInvestigateEnv_TagsSessionViaHandleLifecycleTurnStart(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	ag := newMockAgent()
+	headSHA := testutil.GetHeadHash(t, tmp)
+	setInvestigateEnv(t, string(ag.Name()), headSHA, "Why is checkout flaky?")
+
+	sessionID := "test-investigate-env-via-handle-001"
+	event := &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Prompt:    "Investigate this.",
+		Timestamp: time.Now(),
+	}
+	if err := handleLifecycleTurnStart(context.Background(), ag, event); err != nil {
+		t.Fatalf("handleLifecycleTurnStart: %v", err)
+	}
+
+	state, loadErr := strategy.LoadSessionState(context.Background(), sessionID)
+	if loadErr != nil {
+		t.Fatalf("load state: %v", loadErr)
+	}
+	if state == nil {
+		t.Fatal("state is nil after turn start")
+	}
+	if state.Kind != session.KindAgentInvestigate {
+		t.Errorf("Kind: got %q, want agent_investigate", state.Kind)
+	}
+	if state.InvestigateRunID != testInvestigateRunID {
+		t.Errorf("InvestigateRunID: got %q, want %q", state.InvestigateRunID, testInvestigateRunID)
+	}
+	if state.InvestigateTopic != "Why is checkout flaky?" {
+		t.Errorf("InvestigateTopic: got %q", state.InvestigateTopic)
+	}
+}
+
+func TestAdoptInvestigateEnv_RejectsBadRunID(t *testing.T) {
+	cases := []struct {
+		name  string
+		runID string
+	}{
+		{"empty", ""},
+		{"too short", "abcdef0"},
+		{"too long", "abcdef0123456789"},
+		{"uppercase", "ABCDEF012345"},
+		{"non-hex", "notatallhex!"},
+		{"path-traversal attempt", "../../../etc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Cannot use t.Parallel(): t.Chdir + t.Setenv.
+			tmp := t.TempDir()
+			testutil.InitRepo(t, tmp)
+			testutil.WriteFile(t, tmp, "f.txt", "x")
+			testutil.GitAdd(t, tmp, "f.txt")
+			testutil.GitCommit(t, tmp, "init")
+			t.Chdir(tmp)
+			paths.ClearWorktreeRootCache()
+
+			ag := newMockAgent()
+			headSHA := testutil.GetHeadHash(t, tmp)
+			t.Setenv(investigate.EnvSession, "1")
+			t.Setenv(investigate.EnvAgent, string(ag.Name()))
+			t.Setenv(investigate.EnvStartingSHA, headSHA)
+			t.Setenv(investigate.EnvRunID, tc.runID)
+			t.Setenv(investigate.EnvTopic, "topic")
+
+			state := &session.State{
+				SessionID:  "test-investigate-env-bad-run-id-" + tc.name,
+				BaseCommit: headSHA,
+			}
+			adoptInvestigateEnv(context.Background(), state, string(ag.Name()))
+
+			if state.Kind != "" {
+				t.Errorf("Kind: got %q, want empty for bad run ID %q", state.Kind, tc.runID)
+			}
+			if state.InvestigateRunID != "" {
+				t.Errorf("InvestigateRunID: got %q, want empty (must not be set)", state.InvestigateRunID)
+			}
+		})
 	}
 }

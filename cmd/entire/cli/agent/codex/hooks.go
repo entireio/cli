@@ -16,9 +16,11 @@ import (
 // HooksFileName is the hooks config file used by Codex.
 const HooksFileName = "hooks.json"
 
-// entireHookPrefixes identifies Entire hook commands.
+// entireHookPrefixes identifies Entire hook commands. The "go run" prefix is
+// retained so hooks installed by older versions are still recognized.
 var entireHookPrefixes = []string{
 	"entire ",
+	agent.LocalDevHookScript + " ",
 	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
 }
 
@@ -78,7 +80,7 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 	// Build hook commands
 	var cmdPrefix string
 	if localDev {
-		cmdPrefix = `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks codex `
+		cmdPrefix = agent.LocalDevHookScript + " hooks codex "
 	} else {
 		cmdPrefix = "entire hooks codex "
 	}

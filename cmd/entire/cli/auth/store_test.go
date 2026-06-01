@@ -133,7 +133,11 @@ func TestStoreDeleteToken_NotFoundIsNoop(t *testing.T) {
 }
 
 func TestLookupCurrentToken(t *testing.T) {
+	// Pin both URLs: tokens are keyed by AuthBaseURL, which defaults to the
+	// production auth host when the env override is unset. Setting only
+	// BaseURL would write to a key the lookup doesn't read.
 	t.Setenv(api.BaseURLEnvVar, "http://localhost:8787")
+	t.Setenv(api.AuthBaseURLEnvVar, "http://localhost:8787")
 
 	store := NewStore()
 	if err := store.SaveToken("http://localhost:8787", "local-token"); err != nil {

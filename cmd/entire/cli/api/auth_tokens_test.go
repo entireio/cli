@@ -23,7 +23,7 @@ func TestClient_RevokeCurrentToken_SendsDeleteWithBearer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
+	c := NewClient("tok").WithAuthTokensPath("/api/v1/auth/tokens")
 	c.baseURL = server.URL
 
 	if err := c.RevokeCurrentToken(context.Background()); err != nil {
@@ -51,7 +51,7 @@ func TestClient_RevokeCurrentToken_ReturnsHTTPErrorOn401(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
+	c := NewClient("tok").WithAuthTokensPath("/api/v1/auth/tokens")
 	c.baseURL = server.URL
 
 	err := c.RevokeCurrentToken(context.Background())
@@ -87,7 +87,7 @@ func TestClient_ListTokens_DecodesResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
+	c := NewClient("tok").WithAuthTokensPath("/api/v1/auth/tokens")
 	c.baseURL = server.URL
 
 	tokens, err := c.ListTokens(context.Background())
@@ -129,7 +129,7 @@ func TestClient_ListTokens_ReturnsHTTPErrorOn401(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
+	c := NewClient("tok").WithAuthTokensPath("/api/v1/auth/tokens")
 	c.baseURL = server.URL
 
 	_, err := c.ListTokens(context.Background())
@@ -155,7 +155,7 @@ func TestClient_RevokeToken_SendsDeleteWithEscapedID(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
+	c := NewClient("tok").WithAuthTokensPath("/api/v1/auth/tokens")
 	c.baseURL = server.URL
 
 	// Use an id that needs URL escaping to verify we don't blindly concat.
@@ -184,7 +184,7 @@ func TestClient_RevokeToken_ReturnsErrorBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
+	c := NewClient("tok").WithAuthTokensPath("/api/v1/auth/tokens")
 	c.baseURL = server.URL
 
 	err := c.RevokeToken(context.Background(), "missing")

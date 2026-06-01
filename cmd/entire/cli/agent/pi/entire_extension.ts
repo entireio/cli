@@ -12,6 +12,7 @@ import { execFile } from "node:child_process";
 
 export default function (pi: ExtensionAPI) {
   const ENTIRE_CMD = "__ENTIRE_CMD__";
+  let pendingSkillEvents: Array<{ skill_name: string; invocation: string; timestamp: string }> = [];
 
   function fireHook(hookName: string, data: Record<string, unknown>): Promise<void> {
     return new Promise((resolve) => {
@@ -29,6 +30,21 @@ export default function (pi: ExtensionAPI) {
       }
     });
   }
+
+  function parseSkillInvocation(text: string): { skill_name: string; invocation: string } | null {
+    const match = text.trimStart().match(/^\/skill:([a-z0-9][a-z0-9-]{0,63})(?:\s|$)/);
+    if (!match) return null;
+    const invocation = text.trimStart().split(/\s+/, 1)[0] ?? `/skill:${match[1]}`;
+    return { skill_name: match[1], invocation };
+  }
+
+  pi.on("input", async (event) => {
+    const skill = parseSkillInvocation(event.text);
+    if (skill) {
+      pendingSkillEvents.push({ ...skill, timestamp: new Date().toISOString() });
+    }
+    return { action: "continue" };
+  });
 
   // Agent-driven bash subprocesses inherit a real TTY but cannot answer
   // hook prompts. Disable git/Entire terminal prompts for bash calls so
@@ -51,11 +67,14 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
+    const skillEvents = pendingSkillEvents;
+    pendingSkillEvents = [];
     await fireHook("before_agent_start", {
       type: "before_agent_start",
       cwd: ctx.cwd,
       session_file: ctx.sessionManager.getSessionFile(),
       prompt: event.prompt,
+      skill_events: skillEvents,
     });
   });
 

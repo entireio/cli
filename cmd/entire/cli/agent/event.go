@@ -142,6 +142,10 @@ type Event struct {
 	ContextTokens     int   // Context window tokens used (e.g., Cursor PreCompact hook)
 	ContextWindowSize int   // Total context window size (e.g., Cursor PreCompact hook)
 
+	// SkillEvents records native agent skill signals surfaced by hooks.
+	// The lifecycle layer persists these to session state and later checkpoint metadata.
+	SkillEvents []SkillEvent
+
 	// Metadata holds agent-specific state that the framework stores and makes available
 	// on subsequent events. Examples: Pi's activeLeafId, Cursor's is_background_agent.
 	Metadata map[string]string

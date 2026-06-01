@@ -19,6 +19,31 @@ var experimentalCommands = []experimentalCommandInfo{
 		Invocation: "entire review",
 		Summary:    "Run configured review skills against the current branch",
 	},
+	{
+		Name:       "investigate",
+		Invocation: "entire investigate",
+		Summary:    "Run a multi-agent investigation against a topic, issue, or seed doc",
+	},
+	{
+		Name:       "org",
+		Invocation: "entire org",
+		Summary:    "Manage Entire organizations (create, list)",
+	},
+	{
+		Name:       "project",
+		Invocation: "entire project",
+		Summary:    "Manage Entire projects (create, list)",
+	},
+	{
+		Name:       "repo",
+		Invocation: "entire repo",
+		Summary:    "Manage Entire repositories (create, list, get, delete)",
+	},
+	{
+		Name:       "grant",
+		Invocation: "entire grant",
+		Summary:    "Manage access grants and org membership (org, project, repo)",
+	},
 }
 
 func newLabsCmd() *cobra.Command {
@@ -60,6 +85,11 @@ Available experimental commands:
 ` + renderExperimentalCommands(experimentalCommands) + `
 Try:
   entire review --help
+  entire investigate --help
+  entire org --help
+  entire project --help
+  entire repo --help
+  entire grant --help
 `
 }
 

@@ -43,6 +43,9 @@ func (s *Store) EnsureBranch(ctx context.Context) error {
 	if err == nil {
 		return nil // Branch already exists
 	}
+	if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return fmt.Errorf("failed to check trails branch: %w", err)
+	}
 
 	// Create orphan branch with empty tree
 	emptyTreeHash, err := checkpoint.BuildTreeFromEntries(ctx, s.repo, make(map[string]object.TreeEntry))

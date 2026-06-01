@@ -123,18 +123,19 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	if err != nil {
 		return err
 	}
-	client, err := newRecapClient(f.insecureHTTP)
+	client, err := newRecapClient(ctx, f.insecureHTTP)
 	if err != nil {
-		var keyringErr *keyringReadError
-		switch {
-		case errors.Is(err, api.ErrInsecureHTTP):
+		if errors.Is(err, api.ErrInsecureHTTP) {
 			fmt.Fprintf(errW, "ENTIRE_API_BASE_URL is set to an insecure http:// URL (%s). Use https:// for production, or pass --insecure-http-auth for local dev.\n", api.BaseURL())
-		case errors.As(err, &keyringErr):
-			fmt.Fprintf(errW, "Could not read your auth token from the system keyring: %v. Running `entire login` may not help — the keyring may be locked or inaccessible. Check your OS keychain settings.\n", keyringErr.Cause)
-		default:
-			return err
+			return NewSilentError(err)
 		}
-		return NewSilentError(err)
+		// Token resolution can fail for many reasons unrelated to the
+		// keyring — STS exchange rejected, network error, audience
+		// misconfiguration. Surface the underlying error verbatim
+		// rather than misattributing it to a missing or locked
+		// keyring entry; main.go's default printer is honest about
+		// what went wrong.
+		return err
 	}
 	rangeKey := f.rangeKey()
 	repoSlug := currentRepoSlug(ctx)
@@ -163,25 +164,30 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	return nil
 }
 
-// keyringReadError marks a failure to read the auth token from the system
-// keyring (locked, permission denied, etc.) — distinct from "no token saved",
-// which keyring.ErrNotFound resolves to (token=="", err==nil) upstream.
-type keyringReadError struct{ Cause error }
-
-func (e *keyringReadError) Error() string {
-	return "read auth token from keyring: " + e.Cause.Error()
-}
-func (e *keyringReadError) Unwrap() error { return e.Cause }
-
-// newRecapClient does not gate on a missing token; FetchMeRecap surfaces 401s
-// via recapLoadErrorMessage so flag effects (--week, --agent, ...) and the
-// real auth error are not collapsed into one "sign in" hint. A keyring read
-// failure is surfaced as *keyringReadError so the caller can show a targeted
-// message instead of misattributing it to a missing login.
-func newRecapClient(insecureHTTP bool) (*api.Client, error) {
-	token, err := auth.LookupCurrentToken()
+// newRecapClient does not gate on a missing token; FetchMeRecap surfaces
+// 401s via recapLoadErrorMessage so flag effects (--week, --agent, ...)
+// and the real auth error are not collapsed into one "sign in" hint.
+//
+// Goes through auth.TokenForResource so split-host deployments get a
+// resource-scoped bearer via RFC 8693 exchange. ErrNotLoggedIn is
+// collapsed back into an empty token so the caller's "render with no
+// bearer, let the server respond 401" path still fires. Every other
+// resolution failure (STS exchange rejected, network error, audience
+// misconfiguration, keyring locked) surfaces verbatim to the caller —
+// previously these were all relabelled as keyring read failures via
+// keyringReadError, which sent users on wild goose chases when the
+// keyring was fine and the real problem was downstream.
+func newRecapClient(ctx context.Context, insecureHTTP bool) (*api.Client, error) {
+	if insecureHTTP {
+		auth.EnableInsecureHTTP()
+	}
+	token, err := auth.TokenForResource(ctx, api.OriginOnly(api.BaseURL()))
+	if errors.Is(err, auth.ErrNotLoggedIn) {
+		token = ""
+		err = nil
+	}
 	if err != nil {
-		return nil, &keyringReadError{Cause: err}
+		return nil, err
 	}
 	if token != "" && !insecureHTTP {
 		if err := api.RequireSecureURL(api.BaseURL()); err != nil {

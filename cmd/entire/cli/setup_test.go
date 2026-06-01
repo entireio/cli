@@ -2786,7 +2786,7 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 
 	t.Run("yes with telemetry=false", func(t *testing.T) {
 		s := &EntireSettings{}
-		opts := EnableOptions{Yes: true, Telemetry: false}
+		opts := EnableOptions{Telemetry: false}
 		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
 			f := false
 			s.Telemetry = &f
@@ -2802,7 +2802,7 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 	t.Run("yes with ENTIRE_TELEMETRY_OPTOUT", func(t *testing.T) {
 		t.Setenv("ENTIRE_TELEMETRY_OPTOUT", "1")
 		s := &EntireSettings{}
-		opts := EnableOptions{Yes: true, Telemetry: true}
+		opts := EnableOptions{Telemetry: true}
 		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
 			f := false
 			s.Telemetry = &f
@@ -2817,7 +2817,7 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 
 	t.Run("yes defaults to telemetry enabled", func(t *testing.T) {
 		s := &EntireSettings{}
-		opts := EnableOptions{Yes: true, Telemetry: true}
+		opts := EnableOptions{Telemetry: true}
 		if !opts.Telemetry {
 			f := false
 			s.Telemetry = &f
@@ -2833,7 +2833,7 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 	t.Run("yes preserves existing telemetry setting", func(t *testing.T) {
 		existing := false
 		s := &EntireSettings{Telemetry: &existing}
-		opts := EnableOptions{Yes: true, Telemetry: true}
+		opts := EnableOptions{Telemetry: true}
 		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
 			f := false
 			s.Telemetry = &f

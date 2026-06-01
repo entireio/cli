@@ -8,7 +8,8 @@ before:
     - mise run completions
 
 builds:
-  - main: ./cmd/entire
+  - id: entire
+    main: ./cmd/entire
     binary: entire
     env:
       - CGO_ENABLED=0
@@ -25,6 +26,27 @@ builds:
       - -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Commit={{.ShortCommit}}
       - -X github.com/entireio/cli/cmd/entire/cli/telemetry.PostHogAPIKey={{.Env.POSTHOG_API_KEY}}
       - -X github.com/entireio/cli/cmd/entire/cli/telemetry.PostHogEndpoint={{.Env.POSTHOG_ENDPOINT}}
+
+  # git-remote-entire is the git remote helper for entire:// URLs (see
+  # cmd/git-remote-entire). A small, dedicated binary shipped alongside
+  # entire so `git clone entire://…` resolves it on PATH — no telemetry,
+  # only the versioninfo stamp it needs for its git agent string.
+  - id: git-remote-entire
+    main: ./cmd/git-remote-entire
+    binary: git-remote-entire
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Version={{.Version}}
+      - -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Commit={{.ShortCommit}}
 
 notarize:
   macos:
@@ -90,6 +112,7 @@ homebrew_casks:
     description: "CLI for Entire"
     binaries:
       - entire
+      - git-remote-entire
     generate_completions_from_executable:
       executable: entire
       shell_parameter_format: cobra
@@ -111,6 +134,7 @@ homebrew_casks:
     description: "CLI for Entire (nightly build)"
     binaries:
       - entire
+      - git-remote-entire
     generate_completions_from_executable:
       executable: entire
       shell_parameter_format: cobra

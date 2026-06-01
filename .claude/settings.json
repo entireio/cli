@@ -22,7 +22,7 @@
           },
           {
             "type": "command",
-            "command": "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code session-start"
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code session-start"
           }
         ]
       }
@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code session-end"
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code session-end"
           }
         ]
       }
@@ -44,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code user-prompt-submit"
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code user-prompt-submit"
           }
         ]
       }
@@ -55,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code stop"
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code stop"
           }
         ]
       }
@@ -66,7 +66,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code pre-task"
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code pre-task"
           }
         ]
       }
@@ -77,7 +77,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-task"
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code post-task"
           }
         ]
       },
@@ -86,7 +86,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-todo"
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code post-todo"
           }
         ]
       }

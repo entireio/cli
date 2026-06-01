@@ -188,6 +188,20 @@ type TokenCalculator interface {
 	CalculateTokenUsage(transcriptData []byte, fromOffset int) (*TokenUsage, error)
 }
 
+// ModelExtractor extracts the LLM model identifier from a transcript for agents
+// that do not report the model through lifecycle hooks. Pi, for example, records
+// the model on every assistant message (message.model) but its hook events carry
+// no model field, so the transcript is the only source. The framework calls this
+// during condensation to backfill session state when the model is otherwise
+// unknown.
+type ModelExtractor interface {
+	Agent
+
+	// ExtractModel returns the model identifier from the transcript (e.g.
+	// "gpt-5.5"), or "" if none can be determined.
+	ExtractModel(transcriptData []byte) (string, error)
+}
+
 // TextGenerator is an optional interface for agents whose CLI supports
 // non-interactive text generation (e.g., claude --print).
 // Used for AI-powered metadata generation (trail titles, summaries).

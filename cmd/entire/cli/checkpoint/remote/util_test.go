@@ -124,9 +124,21 @@ func TestFetchURL_EdgeCases(t *testing.T) {
 		wantErr      bool
 	}{
 		{
-			name:         "unsupported origin protocol without token falls back to origin",
+			name:         "unsupported origin protocol without token routes to provider checkpoint url (ssh default)",
 			addOrigin:    true,
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "git@github.com:acme/checkpoints.git",
+		},
+		{
+			name:         "entire:// origin without token routes to provider checkpoint url (ssh default)",
+			originURL:    "entire://app.entire.io/gh/acme/app",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "git@github.com:acme/checkpoints.git",
+		},
+		{
+			name:         "non-derivable origin with unknown provider falls back to origin",
+			originURL:    "entire://app.entire.io/gh/acme/app",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"bitbucket","repo":"acme/checkpoints"}}}`,
 			wantURL:      "",
 		},
 		{
@@ -299,6 +311,39 @@ func TestPushURL(t *testing.T) {
 			wantEnabled:  false,
 		},
 		{
+			name:         "entire:// origin routes to provider checkpoint url (ssh default)",
+			originURL:    "entire://app.entire.io/gh/acme/app",
+			pushRemote:   "origin",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "git@github.com:acme/checkpoints.git",
+			wantEnabled:  true,
+		},
+		{
+			name:         "file:// origin routes to provider checkpoint url (ssh default)",
+			originURL:    "file:///acme/app",
+			pushRemote:   "origin",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "git@github.com:acme/checkpoints.git",
+			wantEnabled:  true,
+		},
+		{
+			name:         "non-derivable origin with unknown provider falls back to origin",
+			originURL:    "entire://app.entire.io/gh/acme/app",
+			pushRemote:   "origin",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"bitbucket","repo":"acme/checkpoints"}}}`,
+			wantURL:      "entire://app.entire.io/gh/acme/app",
+			wantEnabled:  false,
+		},
+		{
+			name:         "token with entire:// origin routes to provider host not origin host",
+			originURL:    "entire://app.entire.io/gh/acme/app",
+			pushRemote:   "origin",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			token:        "push-token",
+			wantURL:      "https://github.com/acme/checkpoints.git",
+			wantEnabled:  true,
+		},
+		{
 			name:         "missing push remote falls back to origin when checkpoint remote configured",
 			originURL:    "https://github.com/acme/app.git",
 			pushRemote:   "upstream",
@@ -339,6 +384,99 @@ func TestPushURL(t *testing.T) {
 				}
 				return
 			}
+			if err != nil {
+				t.Fatalf("PushURL() error = %v", err)
+			}
+			if gotEnabled != tt.wantEnabled {
+				t.Fatalf("PushURL() enabled = %v, want %v", gotEnabled, tt.wantEnabled)
+			}
+			if gotURL != tt.wantURL {
+				t.Fatalf("PushURL() URL = %q, want %q", gotURL, tt.wantURL)
+			}
+		})
+	}
+}
+
+// TestPushURL_EntireOriginReusesProviderRemoteScheme reproduces the real-world
+// setup: origin migrated to an entire:// URL (forge-prefixed /gh/owner/repo)
+// with a github checkpoint_remote. The checkpoint URL must route to github
+// rather than fall back to the entire:// origin, reusing the auth/scheme the
+// repo had for that endpoint — first from the pre-mirror URL that
+// `entire-repo mirror use` saves (remote.origin.entiredb-original-url), then an
+// existing remote on the provider host, then defaulting to SSH.
+func TestPushURL_EntireOriginReusesProviderRemoteScheme(t *testing.T) {
+	const entireOrigin = "entire://aws-eu-central-1.entire.io/gh/entireio/cli"
+	tests := []struct {
+		name        string
+		githubURL   string
+		savedURL    string
+		token       string
+		wantURL     string
+		wantEnabled bool
+	}{
+		{
+			name:        "pre-mirror ssh url yields ssh checkpoint url",
+			savedURL:    "git@github.com:entireio/cli.git",
+			wantURL:     "git@github.com:entireio/cli-checkpoints.git",
+			wantEnabled: true,
+		},
+		{
+			name:        "pre-mirror https url yields https checkpoint url",
+			savedURL:    "https://github.com/entireio/cli.git",
+			wantURL:     "https://github.com/entireio/cli-checkpoints.git",
+			wantEnabled: true,
+		},
+		{
+			name:        "pre-mirror url wins over token",
+			savedURL:    "git@github.com:entireio/cli.git",
+			token:       "ci-token",
+			wantURL:     "git@github.com:entireio/cli-checkpoints.git",
+			wantEnabled: true,
+		},
+		{
+			name:        "ssh github remote yields ssh checkpoint url",
+			githubURL:   "git@github.com:entireio/cli.git",
+			wantURL:     "git@github.com:entireio/cli-checkpoints.git",
+			wantEnabled: true,
+		},
+		{
+			name:        "https github remote yields https checkpoint url",
+			githubURL:   "https://github.com/entireio/cli.git",
+			wantURL:     "https://github.com/entireio/cli-checkpoints.git",
+			wantEnabled: true,
+		},
+		{
+			name:        "no signal defaults to ssh",
+			wantURL:     "git@github.com:entireio/cli-checkpoints.git",
+			wantEnabled: true,
+		},
+		{
+			name:        "token forces https when no pre-mirror url",
+			githubURL:   "git@github.com:entireio/cli.git",
+			token:       "ci-token",
+			wantURL:     "https://github.com/entireio/cli-checkpoints.git",
+			wantEnabled: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			testutil.InitRepo(t, repoDir)
+			runGit(t, repoDir, "remote", "add", "origin", entireOrigin)
+			if tt.githubURL != "" {
+				runGit(t, repoDir, "remote", "add", "github", tt.githubURL)
+			}
+			if tt.savedURL != "" {
+				runGit(t, repoDir, "config", "remote.origin.entiredb-original-url", tt.savedURL)
+			}
+			writeSettings(t, repoDir, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"entireio/cli-checkpoints"}}}`)
+			t.Chdir(repoDir)
+			if tt.token != "" {
+				t.Setenv(CheckpointTokenEnvVar, tt.token)
+			}
+
+			gotURL, gotEnabled, err := PushURL(context.Background(), "origin")
 			if err != nil {
 				t.Fatalf("PushURL() error = %v", err)
 			}

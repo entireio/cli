@@ -24,6 +24,7 @@ func (s *ManualCommitStrategy) Reset(ctx context.Context, w, errW io.Writer) err
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Get current HEAD
 	head, err := repo.Head()
@@ -115,6 +116,7 @@ func (s *ManualCommitStrategy) ResetSession(ctx context.Context, w, errW io.Writ
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Clean up shadow branch if no other sessions need it
 	if err := s.cleanupShadowBranchIfUnused(ctx, repo, shadowBranchName, sessionID); err != nil {

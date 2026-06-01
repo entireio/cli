@@ -203,6 +203,10 @@ func runLoginProcess(t *testing.T, apiBaseURL string) *loginProcess {
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_API_BASE_URL="+apiBaseURL,
+		// AuthBaseURL no longer inherits from BaseURL; pin both at the test
+		// server so the device flow stays in-process instead of reaching
+		// out to the production us.auth.entire.io default.
+		"ENTIRE_AUTH_BASE_URL="+apiBaseURL,
 		"ENTIRE_TEST_AUTH_STORE_FILE="+filepath.Join(env.RepoDir, ".entire-test-auth-store.json"),
 	)
 

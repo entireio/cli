@@ -8,8 +8,9 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/go-git/go-git/v6"
 )
 
 // requireSecureDispatchURL is the secure-base-URL guard used before the cloud
@@ -19,19 +20,28 @@ import (
 var requireSecureDispatchURL = api.RequireSecureURL
 
 func runServer(ctx context.Context, opts Options) (*Dispatch, error) {
-	token, err := lookupCurrentToken()
-	if err != nil {
-		return nil, fmt.Errorf("reading credentials: %w", err)
-	}
-	if token == "" {
-		return nil, errors.New("dispatch requires login — run `entire login`")
-	}
-
 	baseURL := api.BaseURL()
-	if !opts.InsecureHTTPAuth {
+	if opts.InsecureHTTPAuth {
+		auth.EnableInsecureHTTP()
+	} else {
 		if err := requireSecureDispatchURL(baseURL); err != nil {
 			return nil, fmt.Errorf("dispatch base URL: %w", err)
 		}
+	}
+
+	// Resolve a bearer scoped to the dispatch service host. In split-host
+	// deployments the tokenmanager runs an RFC 8693 exchange so the
+	// bearer carries the data-API audience rather than the auth-host
+	// one; single-host setups hit the same-host shortcut and return the
+	// core token unchanged. OriginOnly strips any path the operator may
+	// have included in ENTIRE_API_BASE_URL — tokenmanager validates
+	// Resource as a strict origin URL.
+	token, err := lookupResourceToken(ctx, api.OriginOnly(baseURL))
+	if errors.Is(err, auth.ErrNotLoggedIn) {
+		return nil, errors.New("dispatch requires login — run `entire login`")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading credentials: %w", err)
 	}
 
 	now := nowUTC()
@@ -58,10 +68,12 @@ func runServer(ctx context.Context, opts Options) (*Dispatch, error) {
 		if err != nil {
 			return nil, fmt.Errorf("not in a git repository: %w", err)
 		}
-		repo, err := git.PlainOpenWithOptions(repoRoot, &git.PlainOpenOptions{DetectDotGit: true})
+		repo, err := gitrepo.OpenPath(repoRoot)
 		if err != nil {
 			return nil, fmt.Errorf("open repository: %w", err)
 		}
+		defer repo.Close()
+
 		repoFullName, err := resolveRepoFullName(ctx, repo)
 		if err != nil {
 			return nil, err

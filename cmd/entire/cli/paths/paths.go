@@ -26,37 +26,24 @@ const (
 
 // Metadata file names
 const (
-	PromptFileName                = "prompt.txt"
-	TranscriptFileName            = "full.jsonl"
-	TranscriptFileNameLegacy      = "full.log"
-	CompactTranscriptFileName     = "transcript.jsonl"
-	CompactTranscriptHashFileName = "transcript_hash.txt"
-	V2RawTranscriptFileName       = "raw_transcript"
-	V2RawTranscriptHashFileName   = "raw_transcript_hash.txt"
-	MetadataFileName              = "metadata.json"
-	CheckpointFileName            = "checkpoint.json"
-	ContentHashFileName           = "content_hash.txt"
-	SettingsFileName              = "settings.json"
+	PromptFileName           = "prompt.txt"
+	TranscriptFileName       = "full.jsonl"
+	TranscriptFileNameLegacy = "full.log"
+	MetadataFileName         = "metadata.json"
+	CheckpointFileName       = "checkpoint.json"
+	ContentHashFileName      = "content_hash.txt"
+	SettingsFileName         = "settings.json"
 )
 
 // MetadataBranchName is the orphan branch used by manual-commit strategy to store metadata
 const MetadataBranchName = "entire/checkpoints/v1"
 
-// V2 ref names use custom refs under refs/entire/ (not refs/heads/).
-// These are invisible in GitHub's branch UI and not fetched by default.
-const (
-	// V2MainRefName stores permanent metadata + compact transcripts.
-	V2MainRefName = "refs/entire/checkpoints/v2/main"
-
-	// V2FullCurrentRefName stores the active generation of raw transcripts.
-	V2FullCurrentRefName = "refs/entire/checkpoints/v2/full/current"
-
-	// V2FullRefPrefix is the common prefix for all /full/* refs (current + archived).
-	V2FullRefPrefix = "refs/entire/checkpoints/v2/full/"
-
-	// GenerationFileName is the metadata file at the root of each /full/* generation tree.
-	GenerationFileName = "generation.json"
-)
+// MetadataRefName is the v1 custom ref that committed metadata is mirrored to
+// when checkpoints_version is "1.1". It lives under refs/entire/ (not
+// refs/heads/) so it stays invisible to `git branch -a` and is not pulled by a
+// default `git clone`. v1 remains the source of truth; this ref is a local-only
+// mirror — nothing reads it and it is never pushed.
+const MetadataRefName = "refs/entire/checkpoints/v1.1"
 
 // TrailsBranchName is the orphan branch used to store trail metadata.
 // Trails are branch-centric work tracking abstractions that link to checkpoints by branch name.

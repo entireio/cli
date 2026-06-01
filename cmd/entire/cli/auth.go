@@ -17,11 +17,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// authTokenLister lists API tokens for the authenticated user.
-type authTokenLister func(ctx context.Context, token string) ([]api.Token, error)
+// authTokenLister lists API tokens for the authenticated user. The
+// implementation resolves its own data-API bearer via
+// auth.TokenForResource (RFC 8693 exchange in split-host setups, same-
+// host shortcut otherwise); callers don't pass a bearer through, which
+// removes the temptation to forward the wrong-audience keyring token.
+type authTokenLister func(ctx context.Context) ([]api.Token, error)
 
-// authTokenRevoker revokes a single API token by id.
-type authTokenRevoker func(ctx context.Context, callerToken, id string) error
+// authTokenRevoker revokes a single API token by id. Same bearer-
+// resolution contract as authTokenLister.
+type authTokenRevoker func(ctx context.Context, id string) error
 
 // User-visible placeholder strings. Promoted to constants so tests and
 // production share a single source of truth.
@@ -35,14 +40,92 @@ const (
 // command that sends a bearer token over the network (login, logout,
 // auth status/list/revoke) must call this so credentials don't leak over
 // plaintext HTTP without explicit opt-in.
+//
+// Both the auth and data API origins are checked: the bearer travels to the
+// auth host for login + auth-token management, and to the data host for
+// search/activity/dispatch/etc. When both origins resolve to the same host
+// (e.g. an explicitly collapsed single-host deployment) the redundant second
+// parse is skipped.
+//
+// When the opt-in flag is set, the tokenmanager's matching HTTP guard is
+// also relaxed via auth.EnableInsecureHTTP — otherwise an STS exchange
+// against a private-network http:// auth host would fail at the
+// tokenmanager layer even though the per-command TLS check was waived.
 func requireSecureBaseURL(insecureHTTPAuth bool) error {
 	if insecureHTTPAuth {
+		auth.EnableInsecureHTTP()
 		return nil
 	}
-	if err := api.RequireSecureURL(api.BaseURL()); err != nil {
+	dataURL, authURL := api.BaseURL(), api.AuthBaseURL()
+	if err := api.RequireSecureURL(dataURL); err != nil {
 		return fmt.Errorf("base URL check: %w", err)
 	}
+	if authURL == dataURL {
+		return nil
+	}
+	if err := api.RequireSecureURL(authURL); err != nil {
+		return fmt.Errorf("auth base URL check: %w", err)
+	}
 	return nil
+}
+
+// newAPITokensClient builds an api.Client for the auth-token management
+// endpoints (list / revoke / current). API tokens live on the data API
+// regardless of split-host config — the auth host (entire-core in v2)
+// mints OAuth tokens but doesn't host application API token management
+// endpoints — so this targets api.BaseURL().
+//
+// The supplied token must already be scoped for api.BaseURL(). Callers
+// must obtain it via resolveDataAPIToken (or auth.TokenForResource
+// directly) rather than handing through the raw keyring entry — the
+// keyring stores the auth-host-issued core token, which the data API
+// rejects in split-host setups.
+func newAPITokensClient(token string) *api.Client {
+	return api.NewClientWithBaseURL(token, api.BaseURL()).
+		WithAuthTokensPath(auth.CurrentProvider().AuthTokensPath)
+}
+
+// resolveDataAPIToken returns a bearer scoped for the data API. In
+// split-host setups this triggers an RFC 8693 exchange against the
+// auth host's STS endpoint; in single-host setups the tokenmanager
+// hits the same-host shortcut and returns the core token unchanged.
+// Centralised so the audience-mismatch bug that motivated this fix
+// can't be reintroduced piecemeal at individual call sites.
+func resolveDataAPIToken(ctx context.Context) (string, error) {
+	token, err := auth.TokenForResource(ctx, api.OriginOnly(api.BaseURL()))
+	if err != nil {
+		return "", fmt.Errorf("resolve API token: %w", err)
+	}
+	return token, nil
+}
+
+// isKeychainTokenRejected reports whether err indicates the stored
+// keyring token can't authenticate against the data API. Three failure
+// modes collapse into this single "the user must re-login" branch:
+//
+//   - data API returned 401 (single-host, or after a successful STS
+//     exchange whose result the data API then rejected),
+//   - tokenmanager's preflight rejected an expired core token JWT
+//     (surfacing as auth.ErrNotLoggedIn even though the keyring entry
+//     is still present),
+//   - the STS endpoint rejected the core token during exchange in a
+//     split-host setup. auth-go's sts package returns the response as
+//     "token exchange: status 4xx: <code>[: <desc>]" with no typed
+//     sentinel exposed, so detection has to be by prefix. The "status
+//     4" anchor catches the entire 4xx range — every 4xx from STS is
+//     a credential problem, none are retryable without user action.
+//
+// Other shapes (network errors, malformed STS response, manager
+// construction failures) deliberately don't match — the user sees the
+// real diagnostic instead of a misleading "re-login" hint.
+func isKeychainTokenRejected(err error) bool {
+	if api.IsHTTPErrorStatus(err, http.StatusUnauthorized) {
+		return true
+	}
+	if errors.Is(err, auth.ErrNotLoggedIn) {
+		return true
+	}
+	return strings.Contains(err.Error(), "token exchange: status 4")
 }
 
 // addInsecureHTTPAuthFlag attaches the hidden --insecure-http-auth flag used
@@ -69,6 +152,8 @@ func newAuthCmd() *cobra.Command {
 	cmd.AddCommand(newAuthStatusCmd())
 	cmd.AddCommand(newAuthListCmd())
 	cmd.AddCommand(newAuthRevokeCmd())
+	cmd.AddCommand(newAuthContextsCmd())
+	cmd.AddCommand(newAuthUseCmd())
 	return cmd
 }
 
@@ -84,15 +169,19 @@ func newAuthStatusCmd() *cobra.Command {
 				return err
 			}
 			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(),
-				auth.NewStore(), defaultListTokens, api.BaseURL())
+				auth.NewContextStore(), defaultListTokens, api.AuthBaseURL())
 		},
 	}
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	return cmd
 }
 
-func defaultListTokens(ctx context.Context, token string) ([]api.Token, error) {
-	return api.NewClient(token).ListTokens(ctx) //nolint:wrapcheck // ListTokens already wraps with action context
+func defaultListTokens(ctx context.Context) ([]api.Token, error) {
+	token, err := resolveDataAPIToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return newAPITokensClient(token).ListTokens(ctx) //nolint:wrapcheck // ListTokens already wraps with action context
 }
 
 func runAuthStatus(ctx context.Context, w io.Writer, store tokenStore, list authTokenLister, baseURL string) error {
@@ -106,9 +195,9 @@ func runAuthStatus(ctx context.Context, w io.Writer, store tokenStore, list auth
 		return nil
 	}
 
-	tokens, err := list(ctx, token)
+	tokens, err := list(ctx)
 	if err != nil {
-		if api.IsHTTPErrorStatus(err, http.StatusUnauthorized) {
+		if isKeychainTokenRejected(err) {
 			fmt.Fprintf(w, "Token in keychain for %s is no longer valid.\n", baseURL)
 			fmt.Fprintln(w, "Run 'entire login' to re-authenticate.")
 			return nil
@@ -135,7 +224,7 @@ func newAuthListCmd() *cobra.Command {
 				return err
 			}
 			return runAuthList(cmd.Context(), cmd.OutOrStdout(),
-				auth.NewStore(), defaultListTokens, api.BaseURL(), jsonOut)
+				auth.NewContextStore(), defaultListTokens, api.AuthBaseURL(), jsonOut)
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Print tokens as JSON")
@@ -152,7 +241,7 @@ func runAuthList(ctx context.Context, w io.Writer, store tokenStore, list authTo
 		return fmt.Errorf("not logged in to %s; run 'entire login' first", baseURL)
 	}
 
-	tokens, err := list(ctx, token)
+	tokens, err := list(ctx)
 	if err != nil {
 		return err
 	}
@@ -408,8 +497,8 @@ func newAuthRevokeCmd() *cobra.Command {
 				return err
 			}
 			return runAuthRevoke(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
-				auth.NewStore(), defaultListTokens, defaultRevokeTokenByID, defaultRevokeCurrentToken,
-				api.BaseURL(), id, revokeCurrent)
+				auth.NewContextStore(), defaultListTokens, defaultRevokeTokenByID, defaultRevokeCurrentToken,
+				auth.RemoveCurrentContext, api.AuthBaseURL(), id, revokeCurrent)
 		},
 	}
 	cmd.Flags().BoolVar(&revokeCurrent, "current", false, "Revoke the token used by this CLI and remove the local copy")
@@ -417,8 +506,12 @@ func newAuthRevokeCmd() *cobra.Command {
 	return cmd
 }
 
-func defaultRevokeTokenByID(ctx context.Context, callerToken, id string) error {
-	return api.NewClient(callerToken).RevokeToken(ctx, id) //nolint:wrapcheck // RevokeToken already wraps with action context
+func defaultRevokeTokenByID(ctx context.Context, id string) error {
+	token, err := resolveDataAPIToken(ctx)
+	if err != nil {
+		return err
+	}
+	return newAPITokensClient(token).RevokeToken(ctx, id) //nolint:wrapcheck // RevokeToken already wraps with action context
 }
 
 func runAuthRevoke(
@@ -428,6 +521,7 @@ func runAuthRevoke(
 	list authTokenLister,
 	revokeByID authTokenRevoker,
 	revokeCurrent revokeCurrentFunc,
+	clearContext clearContextFunc,
 	baseURL, id string,
 	current bool,
 ) error {
@@ -441,20 +535,24 @@ func runAuthRevoke(
 
 	if current {
 		// Revoking our own token is just logout — reuse that path so behavior
-		// stays identical (best-effort revoke + local delete).
-		return runLogout(ctx, outW, errW, store, revokeCurrent, baseURL)
+		// stays identical (best-effort revoke + local delete + context clear).
+		return runLogout(ctx, outW, errW, store, revokeCurrent, clearContext, baseURL)
 	}
 
-	if err := revokeByID(ctx, token, id); err != nil {
+	if err := revokeByID(ctx, id); err != nil {
 		return err
 	}
 
 	// The list endpoint requires bearer auth, so a 401 here means the id we
-	// just revoked was the same one this CLI is using — the keychain entry is
-	// now stale and would otherwise produce confusing 401s on every command.
-	if _, listErr := list(ctx, token); listErr != nil && api.IsHTTPErrorStatus(listErr, http.StatusUnauthorized) {
+	// just revoked was the same one this CLI is using — the local copy is now
+	// stale and would otherwise produce confusing 401s on every command, so
+	// remove both the legacy keyring entry and the active context.
+	if _, listErr := list(ctx); listErr != nil && api.IsHTTPErrorStatus(listErr, http.StatusUnauthorized) {
 		if delErr := store.DeleteToken(baseURL); delErr != nil {
 			return fmt.Errorf("revoked token %s but failed to remove local copy: %w", id, delErr)
+		}
+		if ctxErr := clearContext(); ctxErr != nil {
+			fmt.Fprintf(errW, "Warning: revoked token %s but failed to clear current context: %v\n", id, ctxErr)
 		}
 		fmt.Fprintf(outW, "Revoked token %s (this was your local token; removed from keychain).\n", id)
 		return nil

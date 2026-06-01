@@ -1,11 +1,90 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/auth-go/sts"
+	"github.com/entireio/auth-go/tokens"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
 
 func strPtr(v string) *string { return &v }
+
+// TestRunActivity_SilencesContextCanceled pins the codebase convention
+// (clean.go, explain.go, explain_export.go) for Ctrl+C during the auth
+// resolution: NewSilentError wraps the cancellation so cobra doesn't
+// print "context canceled" at a user who just chose to stop.
+//
+// Pre-PR runActivity silenced *every* auth-resolution error under the
+// "Not logged in" hint; that was wrong because real STS / network
+// failures got mis-labeled. This PR surfaces real errors but has to
+// keep the cancellation case silent.
+func TestRunActivity_SilencesContextCanceled(t *testing.T) {
+	// No t.Parallel: SetManagerForTest mutates package-level auth state.
+	store := newAuthMemStore()
+	saveCoreToken(t, store, authResolveTestIssuer, "opaque-core-token")
+
+	mgr := newResolveTestManager(t, store, func(context.Context, sts.ExchangeRequest) (*tokens.TokenSet, error) {
+		// Simulate the user hitting Ctrl+C mid-exchange. The real
+		// transport would return ctx.Err() wrapped; both shapes flow
+		// through errors.Is(err, context.Canceled) identically.
+		return nil, context.Canceled
+	})
+	t.Cleanup(auth.SetManagerForTest(t, mgr))
+
+	var out, errOut bytes.Buffer
+	err := runActivity(t.Context(), &out, &errOut)
+	if err == nil {
+		t.Fatal("expected error when STS exchange is cancelled")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error chain missing context.Canceled: %v", err)
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("error = %v, want SilentError wrap so cobra suppresses output", err)
+	}
+	if errOut.Len() != 0 {
+		t.Errorf("errOut = %q, want empty (no 'Not logged in' hint on cancellation)", errOut.String())
+	}
+}
+
+// TestRunActivity_PrintsLoginHintOnNotLoggedIn pins the other half of
+// the same branch: a missing keyring entry still produces the friendly
+// hint and a SilentError so the raw "not logged in" string doesn't
+// also print via cobra.
+func TestRunActivity_PrintsLoginHintOnNotLoggedIn(t *testing.T) {
+	// No t.Parallel: SetManagerForTest mutates package-level auth state.
+	store := newAuthMemStore() // empty: LookupCoreToken returns "" → ErrNotLoggedIn
+
+	mgr := newResolveTestManager(t, store, func(context.Context, sts.ExchangeRequest) (*tokens.TokenSet, error) {
+		t.Fatal("exchange should not run when no core token is stored")
+		return nil, errors.New("unreachable")
+	})
+	t.Cleanup(auth.SetManagerForTest(t, mgr))
+
+	var out, errOut bytes.Buffer
+	err := runActivity(t.Context(), &out, &errOut)
+	if err == nil {
+		t.Fatal("expected error when not logged in")
+	}
+	if !errors.Is(err, auth.ErrNotLoggedIn) {
+		t.Errorf("error chain missing ErrNotLoggedIn: %v", err)
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("error = %v, want SilentError wrap", err)
+	}
+	wantHint := "Not logged in. Run 'entire login' to authenticate."
+	if got := errOut.String(); !strings.Contains(got, wantHint) {
+		t.Errorf("errOut = %q, want hint %q", got, wantHint)
+	}
+}
 
 func TestNormalizeAgentString(t *testing.T) {
 	t.Parallel()

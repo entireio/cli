@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,25 +79,6 @@ func TestState_NormalizeAfterLoad(t *testing.T) {
 		assert.Equal(t, 0, state.TranscriptLinesAtStart)
 	})
 
-	t.Run("leaves_CompactTranscriptStart_zero_when_missing", func(t *testing.T) {
-		t.Parallel()
-		state := &State{
-			CheckpointTranscriptStart: 120,
-		}
-		state.NormalizeAfterLoad(context.Background())
-		assert.Equal(t, 0, state.CompactTranscriptStart)
-	})
-
-	t.Run("preserves_existing_CompactTranscriptStart", func(t *testing.T) {
-		t.Parallel()
-		state := &State{
-			CheckpointTranscriptStart: 120,
-			CompactTranscriptStart:    45,
-		}
-		state.NormalizeAfterLoad(context.Background())
-		assert.Equal(t, 45, state.CompactTranscriptStart)
-	})
-
 	t.Run("heals_stale_divergence_flag_when_attribution_aligned", func(t *testing.T) {
 		t.Parallel()
 		// DivergenceNoticeShown is only meaningful while attribution is diverged.
@@ -157,43 +139,32 @@ func TestState_RealignAttributionBase_ClearsDivergenceFlag(t *testing.T) {
 
 func TestState_NormalizeAfterLoad_JSONRoundTrip(t *testing.T) {
 	tests := []struct {
-		name        string
-		json        string
-		wantCTS     int // CheckpointTranscriptStart
-		wantCompact int // CompactTranscriptStart
-		wantStep    int // StepCount
+		name     string
+		json     string
+		wantCTS  int // CheckpointTranscriptStart
+		wantStep int // StepCount
 	}{
 		{
-			name:        "migrates old condensed_transcript_lines",
-			json:        `{"session_id":"s1","condensed_transcript_lines":42,"checkpoint_count":5}`,
-			wantCTS:     42,
-			wantCompact: 0,
-			wantStep:    5,
+			name:     "migrates old condensed_transcript_lines",
+			json:     `{"session_id":"s1","condensed_transcript_lines":42,"checkpoint_count":5}`,
+			wantCTS:  42,
+			wantStep: 5,
 		},
 		{
-			name:        "migrates old transcript_lines_at_start",
-			json:        `{"session_id":"s1","transcript_lines_at_start":75}`,
-			wantCTS:     75,
-			wantCompact: 0,
+			name:    "migrates old transcript_lines_at_start",
+			json:    `{"session_id":"s1","transcript_lines_at_start":75}`,
+			wantCTS: 75,
 		},
 		{
-			name:        "preserves new field over old",
-			json:        `{"session_id":"s1","condensed_transcript_lines":10,"checkpoint_transcript_start":50}`,
-			wantCTS:     50,
-			wantCompact: 0,
+			name:    "preserves new field over old",
+			json:    `{"session_id":"s1","condensed_transcript_lines":10,"checkpoint_transcript_start":50}`,
+			wantCTS: 50,
 		},
 		{
-			name:        "handles clean new format",
-			json:        `{"session_id":"s1","checkpoint_transcript_start":25,"checkpoint_count":3}`,
-			wantCTS:     25,
-			wantCompact: 0,
-			wantStep:    3,
-		},
-		{
-			name:        "preserves explicit compact_transcript_start",
-			json:        `{"session_id":"s1","checkpoint_transcript_start":25,"compact_transcript_start":9}`,
-			wantCTS:     25,
-			wantCompact: 9,
+			name:     "handles clean new format",
+			json:     `{"session_id":"s1","checkpoint_transcript_start":25,"checkpoint_count":3}`,
+			wantCTS:  25,
+			wantStep: 3,
 		},
 	}
 
@@ -204,7 +175,6 @@ func TestState_NormalizeAfterLoad_JSONRoundTrip(t *testing.T) {
 			state.NormalizeAfterLoad(context.Background())
 
 			assert.Equal(t, tt.wantCTS, state.CheckpointTranscriptStart)
-			assert.Equal(t, tt.wantCompact, state.CompactTranscriptStart)
 			assert.Equal(t, tt.wantStep, state.StepCount)
 			assert.Equal(t, 0, state.CondensedTranscriptLines, "deprecated field should be cleared")
 			assert.Equal(t, 0, state.TranscriptLinesAtStart, "deprecated field should be cleared")
@@ -675,5 +645,95 @@ func TestState_KindRoundTrip(t *testing.T) {
 	}
 	if len(got.ReviewSkills) != 1 || got.ReviewSkills[0] != "/review-pr" {
 		t.Errorf("ReviewSkills = %v", got.ReviewSkills)
+	}
+}
+
+// TestKind_IsInvestigate pins the umbrella-flag classifier for investigate
+// kinds. Mirrors the pattern used for IsReview: a session's Kind is asked
+// "do you count as an investigation?" without callers needing to know the
+// specific Kind variant.
+func TestKind_IsInvestigate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		k    Kind
+		want bool
+	}{
+		{"investigate", KindAgentInvestigate, true},
+		{"review_is_not_investigate", KindAgentReview, false},
+		{"empty", Kind(""), false},
+		{"unknown", Kind("something_else"), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.k.IsInvestigate(); got != tc.want {
+				t.Errorf("Kind(%q).IsInvestigate() = %v, want %v", tc.k, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestState_InvestigateRoundTrip pins the JSON wire format for the
+// investigate fields on State so a future tag rename or migration can't
+// silently drop persisted fields.
+func TestState_InvestigateRoundTrip(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	s := State{
+		SessionID:        "2026-04-20-uuid",
+		BaseCommit:       "abc",
+		StartedAt:        now,
+		Kind:             KindAgentInvestigate,
+		InvestigateRunID: "abcdef012345",
+		InvestigateTopic: "Why is checkout flaky?",
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Inspect raw JSON to pin the on-disk keys.
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := raw["kind"].(string); !ok || got != "agent_investigate" {
+		t.Errorf("kind = %v, want agent_investigate", raw["kind"])
+	}
+	if got, ok := raw["investigate_run_id"].(string); !ok || got != "abcdef012345" {
+		t.Errorf("investigate_run_id = %v", raw["investigate_run_id"])
+	}
+	if got, ok := raw["investigate_topic"].(string); !ok || got != "Why is checkout flaky?" {
+		t.Errorf("investigate_topic = %v", raw["investigate_topic"])
+	}
+
+	// Round-trip back into a State and verify field values survive.
+	var got State
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != KindAgentInvestigate {
+		t.Errorf("Kind = %q", got.Kind)
+	}
+	if got.InvestigateRunID != "abcdef012345" {
+		t.Errorf("InvestigateRunID = %q", got.InvestigateRunID)
+	}
+	if got.InvestigateTopic != "Why is checkout flaky?" {
+		t.Errorf("InvestigateTopic = %q", got.InvestigateTopic)
+	}
+
+	// Zero-value: omitempty must keep the keys out of marshalled output for a
+	// non-investigate session.
+	zero := State{SessionID: "x", BaseCommit: "y", StartedAt: now}
+	zb, err := json.Marshal(zero)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zs := string(zb)
+	for _, key := range []string{"investigate_run_id", "investigate_topic"} {
+		if strings.Contains(zs, `"`+key+`"`) {
+			t.Errorf("expected zero-value State to omit %q, got %s", key, zs)
+		}
 	}
 }

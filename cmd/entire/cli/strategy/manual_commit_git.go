@@ -30,6 +30,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		openRepoSpan.End()
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 	openRepoSpan.End()
 
 	sessionID := filepath.Base(step.MetadataDir)
@@ -51,10 +52,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		}
 		migrateSpan.End()
 
-		store, err := s.getCheckpointStore()
-		if err != nil {
-			return fmt.Errorf("failed to get checkpoint store: %w", err)
-		}
+		store := s.getCheckpointStore(repo)
 
 		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
@@ -173,6 +171,7 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	if err := s.ensureSessionInitialized(ctx, repo, step.SessionID, step.AgentType); err != nil {
 		return err
@@ -183,10 +182,7 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 			return fmt.Errorf("failed to check/migrate shadow branch: %w", err)
 		}
 
-		store, err := s.getCheckpointStore()
-		if err != nil {
-			return fmt.Errorf("failed to get checkpoint store: %w", err)
-		}
+		store := s.getCheckpointStore(repo)
 
 		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
