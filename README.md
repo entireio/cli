@@ -260,8 +260,10 @@ agent-eval task. Entire checks out the checkpoint's parent commit in an
 isolated temp worktree, runs the original prompt with the selected launchable
 agent, then compares the result to the original commit by changed files,
 optional tests, risk signals, and optional `entire-sem` semantic similarity.
-Use `entire eval run --from-checkpoints --agent claude-code,codex` to compare
-agents across recent checkpoint tasks.
+Replay and eval JSON is saved under the repository's git common directory, not
+tracked in the working tree. Use `entire replay report <run-id>` to revisit one
+run and `entire eval run --from-checkpoints --agent claude-code,codex` to
+compare agents across recent checkpoint tasks.
 
 ### `entire enable` Flags
 

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	agenttypes "github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -32,6 +33,7 @@ type replayCheckpointOptions struct {
 	TestCommand  string
 	KeepWorktree bool
 	JSON         bool
+	Timeout      time.Duration
 }
 
 type replayEvalOptions struct {
@@ -43,6 +45,7 @@ type replayEvalOptions struct {
 	TestCommand     string
 	KeepWorktrees   bool
 	JSON            bool
+	Timeout         time.Duration
 }
 
 type replayReportOptions struct {
@@ -62,23 +65,24 @@ type ReplaySpec struct {
 }
 
 type ReplayRun struct {
-	ID           string        `json:"id"`
-	Spec         ReplaySpec    `json:"spec"`
-	Agent        string        `json:"agent"`
-	Model        string        `json:"model,omitempty"`
-	Status       string        `json:"status"`
-	StartedAt    time.Time     `json:"started_at"`
-	FinishedAt   time.Time     `json:"finished_at"`
-	DurationMS   int64         `json:"duration_ms"`
-	WorktreePath string        `json:"worktree_path,omitempty"`
-	ChangedFiles []string      `json:"changed_files"`
-	Diff         string        `json:"diff,omitempty"`
-	Test         ReplayTestRun `json:"test"`
-	Metrics      ReplayMetrics `json:"metrics"`
-	Warnings     []string      `json:"warnings,omitempty"`
-	Error        string        `json:"error,omitempty"`
-	Output       string        `json:"output,omitempty"`
-	ResultPath   string        `json:"result_path,omitempty"`
+	ID           string            `json:"id"`
+	Spec         ReplaySpec        `json:"spec"`
+	Agent        string            `json:"agent"`
+	Model        string            `json:"model,omitempty"`
+	Status       string            `json:"status"`
+	StartedAt    time.Time         `json:"started_at"`
+	FinishedAt   time.Time         `json:"finished_at"`
+	DurationMS   int64             `json:"duration_ms"`
+	WorktreePath string            `json:"worktree_path,omitempty"`
+	ChangedFiles []string          `json:"changed_files"`
+	Diff         string            `json:"diff,omitempty"`
+	Test         ReplayTestRun     `json:"test"`
+	Metrics      ReplayMetrics     `json:"metrics"`
+	TokenUsage   *agent.TokenUsage `json:"token_usage,omitempty"`
+	Warnings     []string          `json:"warnings,omitempty"`
+	Error        string            `json:"error,omitempty"`
+	Output       string            `json:"output,omitempty"`
+	ResultPath   string            `json:"result_path,omitempty"`
 }
 
 type ReplayTestRun struct {
@@ -119,8 +123,9 @@ type ReplayRunnerRequest struct {
 }
 
 type ReplayRunnerResult struct {
-	Output   string
-	Warnings []string
+	Output     string
+	TokenUsage *agent.TokenUsage
+	Warnings   []string
 }
 
 type ReplayRunner interface {
@@ -158,6 +163,7 @@ func newReplayCmd() *cobra.Command {
 		Long:  "Replay historical Entire checkpoints against coding agents and compare their output to the original commit.",
 	}
 	cmd.AddCommand(newReplayCheckpointCmd())
+	cmd.AddCommand(newReplayReportCmd())
 	return cmd
 }
 
@@ -184,6 +190,29 @@ func newReplayCheckpointCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.TestCommand, "test-cmd", "", "Optional test command to run after replay")
 	cmd.Flags().BoolVar(&opts.KeepWorktree, "keep-worktree", false, "Keep the replay worktree for inspection")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output replay result as JSON")
+	cmd.Flags().DurationVar(&opts.Timeout, "timeout", 30*time.Minute, "Maximum duration for the replay agent and test command")
+	return cmd
+}
+
+func newReplayReportCmd() *cobra.Command {
+	var opts replayReportOptions
+	cmd := &cobra.Command{
+		Use:   "report <run-id>",
+		Short: "Show a saved checkpoint replay report",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			run, err := readReplayRun(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			if opts.JSON {
+				return writeReplayJSON(cmd.OutOrStdout(), run)
+			}
+			renderReplayRun(cmd.OutOrStdout(), run)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output replay report as JSON")
 	return cmd
 }
 
@@ -223,6 +252,7 @@ func newEvalRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.TestCommand, "test-cmd", "", "Optional test command to run after each replay")
 	cmd.Flags().BoolVar(&opts.KeepWorktrees, "keep-worktree", false, "Keep replay worktrees for inspection")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output eval result as JSON")
+	cmd.Flags().DurationVar(&opts.Timeout, "timeout", 30*time.Minute, "Maximum duration for each replay agent and test command")
 	return cmd
 }
 
@@ -291,12 +321,24 @@ func runReplayEval(ctx context.Context, opts replayEvalOptions) (*ReplayEvalRun,
 			continue
 		}
 		for _, agentName := range agents {
+			if replayRunnerFor(agentName) == nil {
+				eval.Runs = append(eval.Runs, ReplayRun{
+					ID:     newReplayID(),
+					Spec:   spec,
+					Agent:  agentName,
+					Model:  opts.Model,
+					Status: replayStatusSkipped,
+					Error:  fmt.Sprintf("agent %q is not launchable for replay yet", agentName),
+				})
+				continue
+			}
 			run, err := executeReplay(ctx, spec, replayCheckpointOptions{
 				Agent:        agentName,
 				Model:        opts.Model,
 				TestCommand:  opts.TestCommand,
 				KeepWorktree: opts.KeepWorktrees,
 				JSON:         opts.JSON,
+				Timeout:      opts.Timeout,
 			})
 			if err != nil {
 				run = &ReplayRun{
@@ -359,6 +401,9 @@ func buildReplaySpec(ctx context.Context, checkpointRef string) (ReplaySpec, err
 	if prompt == "" && content.Metadata.ReviewPrompt != "" {
 		prompt = strings.TrimSpace(content.Metadata.ReviewPrompt)
 	}
+	if prompt == "" {
+		prompt = replayPromptFromTranscript(content.Transcript, content.Metadata.Agent)
+	}
 	if prompt == "" && content.Metadata.Summary != nil {
 		prompt = strings.TrimSpace(content.Metadata.Summary.Intent)
 	}
@@ -383,6 +428,14 @@ func buildReplaySpec(ctx context.Context, checkpointRef string) (ReplaySpec, err
 	}, nil
 }
 
+func replayPromptFromTranscript(transcript []byte, agentType agenttypes.AgentType) string {
+	prompts := extractPromptsFromTranscript(transcript, agentType)
+	if len(prompts) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(strings.Join(prompts, "\n\n"))
+}
+
 func executeReplay(ctx context.Context, spec ReplaySpec, opts replayCheckpointOptions) (*ReplayRun, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -392,6 +445,12 @@ func executeReplay(ctx context.Context, spec ReplaySpec, opts replayCheckpointOp
 	if runner == nil {
 		return nil, fmt.Errorf("agent %q is not launchable for replay yet", opts.Agent)
 	}
+	runCtx := ctx
+	cancel := func() {}
+	if opts.Timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, opts.Timeout)
+	}
+	defer cancel()
 
 	run := &ReplayRun{
 		ID:        newReplayID(),
@@ -403,7 +462,7 @@ func executeReplay(ctx context.Context, spec ReplaySpec, opts replayCheckpointOp
 		Test:      ReplayTestRun{Status: replayTestStatusSkipped},
 	}
 
-	worktree, err := createReplayWorktree(ctx, repoRoot, spec.BaseCommit)
+	worktree, err := createReplayWorktree(runCtx, repoRoot, spec.BaseCommit)
 	if err != nil {
 		return nil, err
 	}
@@ -416,7 +475,7 @@ func executeReplay(ctx context.Context, spec ReplaySpec, opts replayCheckpointOp
 		}
 	}()
 
-	result, runnerErr := runner.Run(ctx, ReplayRunnerRequest{
+	result, runnerErr := runner.Run(runCtx, ReplayRunnerRequest{
 		Spec:         spec,
 		Agent:        runner.Name(),
 		Model:        opts.Model,
@@ -424,6 +483,7 @@ func executeReplay(ctx context.Context, spec ReplaySpec, opts replayCheckpointOp
 		WorktreePath: worktree,
 	})
 	run.Output = truncateReplayOutput(result.Output)
+	run.TokenUsage = result.TokenUsage
 	run.Warnings = append(run.Warnings, result.Warnings...)
 	if runnerErr != nil {
 		run.Status = replayStatusFailed
@@ -433,19 +493,19 @@ func executeReplay(ctx context.Context, spec ReplaySpec, opts replayCheckpointOp
 	}
 
 	if opts.TestCommand != "" {
-		run.Test = runReplayTestCommand(ctx, worktree, opts.TestCommand)
+		run.Test = runReplayTestCommand(runCtx, worktree, opts.TestCommand)
 		if run.Test.Status == replayStatusFailed && run.Status == replayStatusPassed {
 			run.Status = replayStatusFailed
 		}
 	}
-	files, diff, diffErr := replayChangedFilesAndDiff(ctx, worktree, spec.BaseCommit)
+	files, diff, diffErr := replayChangedFilesAndDiff(runCtx, worktree, spec.BaseCommit)
 	if diffErr != nil {
 		run.Warnings = append(run.Warnings, fmt.Sprintf("failed to read replay diff: %v", diffErr))
 	} else {
 		run.ChangedFiles = files
 		run.Diff = diff
 	}
-	run.Metrics = replayMetrics(ctx, repoRoot, worktree, spec, run.ChangedFiles)
+	run.Metrics = replayMetrics(runCtx, repoRoot, worktree, spec, run.ChangedFiles)
 
 	run.FinishedAt = time.Now().UTC()
 	run.DurationMS = run.FinishedAt.Sub(run.StartedAt).Milliseconds()
@@ -508,7 +568,8 @@ func runReplayProcess(ctx context.Context, dir, name string, args []string, stdi
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
-	output := strings.TrimSpace(stdout.String())
+	stdoutText := stdout.String()
+	output := strings.TrimSpace(stdoutText)
 	if stderr.Len() > 0 {
 		if output != "" {
 			output += "\n"
@@ -516,9 +577,9 @@ func runReplayProcess(ctx context.Context, dir, name string, args []string, stdi
 		output += strings.TrimSpace(stderr.String())
 	}
 	if err != nil {
-		return ReplayRunnerResult{Output: output}, fmt.Errorf("%s replay failed: %w", name, err)
+		return ReplayRunnerResult{Output: output, TokenUsage: extractReplayTokenUsage(stdoutText)}, fmt.Errorf("%s replay failed: %w", name, err)
 	}
-	return ReplayRunnerResult{Output: output}, nil
+	return ReplayRunnerResult{Output: output, TokenUsage: extractReplayTokenUsage(stdoutText)}, nil
 }
 
 func replayAgentEnv(env []string) []string {
@@ -541,6 +602,68 @@ func replayAgentEnv(env []string) []string {
 		"GIT_CONFIG_KEY_0=core.hooksPath",
 		"GIT_CONFIG_VALUE_0=/dev/null",
 	)
+}
+
+func extractReplayTokenUsage(output string) *agent.TokenUsage {
+	var usage *agent.TokenUsage
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var env map[string]any
+		if err := json.Unmarshal([]byte(line), &env); err != nil {
+			continue
+		}
+		eventType, ok := env["type"].(string)
+		if !ok {
+			continue
+		}
+		switch eventType {
+		case "result", "turn.completed":
+			if parsed := replayTokenUsageFromAny(env["usage"]); parsed != nil {
+				usage = parsed
+			}
+		}
+	}
+	return usage
+}
+
+func replayTokenUsageFromAny(value any) *agent.TokenUsage {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	input := replayIntField(raw, "input_tokens")
+	cacheCreate := replayIntField(raw, "cache_creation_input_tokens", "cache_creation_tokens")
+	cacheRead := replayIntField(raw, "cache_read_input_tokens", "cached_input_tokens", "cache_read_tokens")
+	output := replayIntField(raw, "output_tokens")
+	if input == 0 && cacheCreate == 0 && cacheRead == 0 && output == 0 {
+		return nil
+	}
+	return &agent.TokenUsage{
+		InputTokens:         input,
+		CacheCreationTokens: cacheCreate,
+		CacheReadTokens:     cacheRead,
+		OutputTokens:        output,
+		APICallCount:        1,
+	}
+}
+
+func replayIntField(raw map[string]any, keys ...string) int {
+	for _, key := range keys {
+		switch value := raw[key].(type) {
+		case float64:
+			return int(value)
+		case int:
+			return value
+		case json.Number:
+			if n, err := value.Int64(); err == nil {
+				return int(n)
+			}
+		}
+	}
+	return 0
 }
 
 func replayPrompt(spec ReplaySpec) string {
@@ -697,33 +820,55 @@ func replaySemanticSimilarity(ctx context.Context, repoRoot, worktree string, sp
 	if err != nil {
 		return 0, false
 	}
-	replayHead, err := commitReplayResultForSemantic(ctx, worktree)
+	replayHead, cleanup, err := commitReplayResultForSemantic(ctx, worktree)
 	if err != nil {
 		return 0, false
 	}
 	replayed, err := replaySemanticKeys(ctx, worktree, spec.BaseCommit, replayHead)
 	if err != nil {
+		cleanupReplaySemanticCommit(cleanup)
 		return 0, false
 	}
-	return jaccardPercent(gold, replayed), true
+	score := jaccardPercent(gold, replayed)
+	if !cleanupReplaySemanticCommit(cleanup) {
+		return 0, false
+	}
+	return score, true
 }
 
-func commitReplayResultForSemantic(ctx context.Context, worktree string) (string, error) {
+func cleanupReplaySemanticCommit(cleanup func() error) bool {
+	return cleanup() == nil
+}
+
+func commitReplayResultForSemantic(ctx context.Context, worktree string) (string, func() error, error) {
 	if _, err := replayGit(ctx, worktree, "diff", "--quiet"); err == nil {
 		head, headErr := replayGit(ctx, worktree, "rev-parse", "HEAD")
-		return head, headErr
+		if headErr != nil {
+			return "", func() error { return nil }, headErr
+		}
+		return head, func() error { return nil }, nil
 	}
 	if _, err := replayGit(ctx, worktree, "add", "-A"); err != nil {
-		return "", err
+		return "", func() error { return nil }, err
 	}
 	if _, err := replayGit(ctx, worktree,
 		"-c", "user.name=Entire Replay",
 		"-c", "user.email=replay@entire.local",
 		"commit", "--no-gpg-sign", "-m", "entire replay result",
 	); err != nil {
-		return "", err
+		return "", func() error { return nil }, err
 	}
-	return replayGit(ctx, worktree, "rev-parse", "HEAD")
+	head, err := replayGit(ctx, worktree, "rev-parse", "HEAD")
+	if err != nil {
+		return "", func() error { return nil }, err
+	}
+	cleanup := func() error {
+		if _, err := replayGit(context.Background(), worktree, "reset", "--mixed", "HEAD^"); err != nil {
+			return fmt.Errorf("reset temporary semantic replay commit: %w", err)
+		}
+		return nil
+	}
+	return head, cleanup, nil
 }
 
 func replaySemanticKeys(ctx context.Context, dir, base, head string) (map[string]struct{}, error) {
@@ -784,6 +929,25 @@ func saveReplayRun(ctx context.Context, run *ReplayRun) (string, error) {
 	path := filepath.Join(dir, run.ID+".json")
 	run.ResultPath = path
 	return path, writeReplayFile(path, run)
+}
+
+func readReplayRun(ctx context.Context, runID string) (*ReplayRun, error) {
+	dir, err := replayRunsDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSuffix(filepath.Base(runID), ".json")
+	path := filepath.Join(dir, name+".json")
+	data, err := os.ReadFile(path) //nolint:gosec // runID is filepath.Base'd above
+	if err != nil {
+		return nil, fmt.Errorf("read replay report: %w", err)
+	}
+	var run ReplayRun
+	if err := json.Unmarshal(data, &run); err != nil {
+		return nil, fmt.Errorf("parse replay report: %w", err)
+	}
+	run.ResultPath = path
+	return &run, nil
 }
 
 func saveReplayEval(ctx context.Context, run *ReplayEvalRun) (string, error) {
@@ -966,12 +1130,15 @@ func renderReplayRun(w io.Writer, run *ReplayRun) {
 	)
 	fmt.Fprintf(w, "  %s %s..%s\n", sty.render(sty.bold, "Range:"), shortReplaySHA(run.Spec.BaseCommit), shortReplaySHA(run.Spec.TargetCommit))
 	fmt.Fprintf(w, "  %s %s\n", sty.render(sty.bold, "Files:"), replayFileMetricText(run.Metrics))
-	if run.Test.Status != "skipped" {
+	if run.Test.Status != replayStatusSkipped {
 		fmt.Fprintf(w, "  %s %s", sty.render(sty.bold, "Tests:"), renderReplayStatus(sty, run.Test.Status))
 		if run.Test.Command != "" {
 			fmt.Fprintf(w, " %s %s", sty.render(sty.dim, "·"), run.Test.Command)
 		}
 		fmt.Fprintln(w)
+	}
+	if run.TokenUsage != nil {
+		fmt.Fprintf(w, "  %s %s\n", sty.render(sty.bold, "Tokens:"), replayTokenUsageText(run.TokenUsage))
 	}
 	if run.Metrics.SemanticAvailable {
 		fmt.Fprintf(w, "  %s %d%% semantic match\n", sty.render(sty.bold, "Semantic:"), run.Metrics.SemanticSimilarity)
@@ -1044,6 +1211,14 @@ func replayFileMetricText(metrics ReplayMetrics) string {
 		len(metrics.MissingFiles),
 		len(metrics.ExtraFiles),
 	)
+}
+
+func replayTokenUsageText(usage *agent.TokenUsage) string {
+	if usage == nil {
+		return ""
+	}
+	input := usage.InputTokens + usage.CacheCreationTokens + usage.CacheReadTokens
+	return fmt.Sprintf("%d in, %d out", input, usage.OutputTokens)
 }
 
 func replayGit(ctx context.Context, repoRoot string, args ...string) (string, error) {

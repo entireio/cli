@@ -57,6 +57,20 @@ func TestBuildReplaySpecFromCheckpoint(t *testing.T) {
 	}
 }
 
+func TestBuildReplaySpecFallsBackToTranscriptPrompt(t *testing.T) {
+	_, cpID, _, _ := newReplayRepoWithPrompts(t, nil, []byte(`{"type":"user","uuid":"u1","message":{"content":"Replay this transcript prompt"}}
+{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"Done"}]}}
+`))
+
+	spec, err := buildReplaySpec(context.Background(), cpID)
+	if err != nil {
+		t.Fatalf("buildReplaySpec() error = %v", err)
+	}
+	if spec.Prompt != "Replay this transcript prompt" {
+		t.Fatalf("Prompt = %q", spec.Prompt)
+	}
+}
+
 func TestReplayCheckpointUsesIsolatedWorktreeAndSavesResult(t *testing.T) {
 	repoRoot, cpID, _, _ := newReplayRepo(t)
 	restore := stubReplayRunner(func(_ context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {
@@ -201,6 +215,47 @@ func TestReplayEvalRunRanksAndPersistsResults(t *testing.T) {
 	}
 }
 
+func TestReplayReportReadsSavedRun(t *testing.T) {
+	_, cpID, _, _ := newReplayRepo(t)
+	restore := stubReplayRunner(func(_ context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {
+		if err := os.WriteFile(filepath.Join(req.WorktreePath, "app.py"), []byte(replayTargetContent), 0o644); err != nil {
+			return ReplayRunnerResult{}, err
+		}
+		return ReplayRunnerResult{Output: "fake replay completed"}, nil
+	})
+	defer restore()
+
+	run, err := runReplayCheckpoint(context.Background(), cpID, replayCheckpointOptions{Agent: fakeReplayAgent})
+	if err != nil {
+		t.Fatalf("runReplayCheckpoint() error = %v", err)
+	}
+	loaded, err := readReplayRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("readReplayRun() error = %v", err)
+	}
+	if loaded.ID != run.ID || loaded.Spec.CheckpointID != cpID {
+		t.Fatalf("loaded run = %+v", loaded)
+	}
+}
+
+func TestReplayEvalSkipsUnsupportedAgent(t *testing.T) {
+	_, cpID, _, _ := newReplayRepo(t)
+
+	eval, err := runReplayEval(context.Background(), replayEvalOptions{
+		Checkpoints: []string{cpID},
+		Agents:      []string{"unsupported-agent"},
+	})
+	if err != nil {
+		t.Fatalf("runReplayEval() error = %v", err)
+	}
+	if len(eval.Runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(eval.Runs))
+	}
+	if eval.Runs[0].Status != replayStatusSkipped {
+		t.Fatalf("status = %q, want skipped", eval.Runs[0].Status)
+	}
+}
+
 func TestReplayMetricsFlagsExtraAndRiskyFiles(t *testing.T) {
 	metrics := replayMetrics(context.Background(), "", "", ReplaySpec{FilesTouched: []string{"app.py"}}, []string{"app.py", "auth/config.yaml"})
 
@@ -218,6 +273,56 @@ func TestReplayMetricsFlagsExtraAndRiskyFiles(t *testing.T) {
 	}
 	if metrics.RiskScore == 0 {
 		t.Fatal("RiskScore should be non-zero")
+	}
+}
+
+func TestExtractReplayTokenUsage(t *testing.T) {
+	output := strings.Join([]string{
+		`{"type":"assistant","usage":{"input_tokens":999,"output_tokens":999}}`,
+		`{"type":"result","usage":{"input_tokens":10,"cache_creation_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":4}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":20,"cached_input_tokens":5,"output_tokens":6}}`,
+	}, "\n")
+	usage := extractReplayTokenUsage(output)
+	if usage == nil {
+		t.Fatal("usage is nil")
+	}
+	if usage.InputTokens != 20 || usage.CacheReadTokens != 5 || usage.OutputTokens != 6 || usage.APICallCount != 1 {
+		t.Fatalf("usage = %+v", usage)
+	}
+}
+
+func TestCommitReplayResultForSemanticCleanupPreservesWorkingTree(t *testing.T) {
+	repoRoot, _, base, _ := newReplayRepo(t)
+	worktree, err := createReplayWorktree(context.Background(), repoRoot, base)
+	if err != nil {
+		t.Fatalf("createReplayWorktree() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := removeReplayWorktree(context.Background(), repoRoot, worktree); err != nil {
+			t.Errorf("remove replay worktree: %v", err)
+		}
+	})
+	if err := os.WriteFile(filepath.Join(worktree, "app.py"), []byte(replayTargetContent), 0o644); err != nil {
+		t.Fatalf("write replay content: %v", err)
+	}
+
+	replayHead, cleanup, err := commitReplayResultForSemantic(context.Background(), worktree)
+	if err != nil {
+		t.Fatalf("commitReplayResultForSemantic() error = %v", err)
+	}
+	if replayHead == base {
+		t.Fatal("semantic commit did not advance HEAD")
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("semantic cleanup: %v", err)
+	}
+	head := replayGitForTest(t, worktree, "rev-parse", "HEAD")
+	if head != base {
+		t.Fatalf("HEAD after cleanup = %s, want %s", head, base)
+	}
+	diff := replayGitForTest(t, worktree, "diff", "--", "app.py")
+	if !strings.Contains(diff, "replay_helper") {
+		t.Fatalf("working tree diff lost replay changes:\n%s", diff)
 	}
 }
 
@@ -276,6 +381,13 @@ func TestRootCommandHasReplayAndEval(t *testing.T) {
 	if replayCmd.Name() != "checkpoint" {
 		t.Fatalf("replay command = %q", replayCmd.Name())
 	}
+	reportCmd, _, err := root.Find([]string{"replay", "report"})
+	if err != nil {
+		t.Fatalf("find replay report: %v", err)
+	}
+	if reportCmd.Name() != "report" {
+		t.Fatalf("replay report command = %q", reportCmd.Name())
+	}
 	evalCmd, _, err := root.Find([]string{"eval", "run"})
 	if err != nil {
 		t.Fatalf("find eval run: %v", err)
@@ -286,6 +398,11 @@ func TestRootCommandHasReplayAndEval(t *testing.T) {
 }
 
 func newReplayRepo(t *testing.T) (repoRoot, cpID, base, target string) {
+	return newReplayRepoWithPrompts(t, []string{"Add the replay helper."}, []byte(`{"type":"user","uuid":"u1","message":{"content":"Add the replay helper."}}
+`))
+}
+
+func newReplayRepoWithPrompts(t *testing.T, prompts []string, transcript []byte) (repoRoot, cpID, base, target string) {
 	t.Helper()
 	repoRoot = t.TempDir()
 	testutil.InitRepo(t, repoRoot)
@@ -317,8 +434,8 @@ func newReplayRepo(t *testing.T) (repoRoot, cpID, base, target string) {
 		SessionID:        "session-replay-12345678",
 		Strategy:         "manual-commit",
 		Branch:           "master",
-		Transcript:       redact.AlreadyRedacted([]byte(`{"type":"user"}` + "\n")),
-		Prompts:          []string{"Add the replay helper."},
+		Transcript:       redact.AlreadyRedacted(transcript),
+		Prompts:          prompts,
 		FilesTouched:     []string{"app.py"},
 		CheckpointsCount: 1,
 		Agent:            agentpkg.AgentTypeClaudeCode,
