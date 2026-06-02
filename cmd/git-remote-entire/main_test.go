@@ -121,6 +121,26 @@ func TestResolveEnvTokenCreds_TrustedAudSucceeds(t *testing.T) {
 	}
 }
 
+func TestResolveEnvTokenCreds_TrimsSurroundingWhitespace(t *testing.T) {
+	t.Parallel()
+	// A trusted token padded with whitespace (trailing newline from
+	// $(cat token)) must succeed: the trim applies to both aud-derivation and
+	// the subject_token used for exchange.
+	const core = "https://core.us.entire.io"
+	srv, clusterHost := wellKnownServer(t, []string{core})
+
+	creds, err := resolveEnvTokenCreds(
+		t.Context(), "  "+makeTestJWT(t, core)+"\n", clusterHost,
+		"https://cluster.example.com", t.TempDir(), srv.Client(),
+	)
+	if err != nil {
+		t.Fatalf("expected padded-but-valid token to succeed, got: %v", err)
+	}
+	if creds == nil {
+		t.Fatal("expected non-nil creds for padded trusted token")
+	}
+}
+
 func TestResolveEnvTokenCreds_UntrustedAudAborts(t *testing.T) {
 	t.Parallel()
 	// The cluster advertises only core.us; the token's aud points elsewhere.

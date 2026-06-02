@@ -123,6 +123,16 @@ func TestCoreURLFromEnvToken_BlankToken(t *testing.T) {
 	}
 }
 
+func TestCoreURLFromEnvToken_TrimsSurroundingWhitespace(t *testing.T) {
+	t.Parallel()
+	// A valid token padded with leading/trailing whitespace (e.g. a trailing
+	// newline from $(cat token)) must trim and parse, not fail.
+	token := makeJWT(t, `{"sub":"ci-runner","aud":"https://core.us.entire.io"}`)
+	got, err := CoreURLFromEnvToken("  " + token + "\n")
+	require.NoError(t, err)
+	assert.Equal(t, "https://core.us.entire.io", got)
+}
+
 func TestCoreURLFromEnvToken_RejectsAlgNone(t *testing.T) {
 	t.Parallel()
 	// alg:none with a URL-shaped aud must still be rejected at the parse layer.

@@ -182,6 +182,11 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, clusterBaseURL string
 // its /.well-known/entire-cluster.json), not to the token's own claims. Without
 // this gate a forged aud could redirect the token to an attacker-chosen host.
 func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, clusterBaseURL, cacheDir string, httpClient *http.Client) (*repocreds.Cache, error) {
+	// Trim once here so both the aud-derivation and the exchanged subject_token
+	// use the cleaned value. A token sourced via $(cat token) often carries a
+	// trailing newline that would otherwise be POSTed verbatim to /oauth/token
+	// and rejected. Whitespace-only still fails closed inside CoreURLFromEnvToken.
+	envToken = strings.TrimSpace(envToken)
 	coreURL, err := auth.CoreURLFromEnvToken(envToken)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // CoreURLFromEnvToken already returns a user-facing, ENTIRE_TOKEN-prefixed error
