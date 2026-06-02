@@ -263,7 +263,9 @@ optional tests, risk signals, and optional `entire-sem` semantic similarity.
 Replay and eval JSON is saved under the repository's git common directory, not
 tracked in the working tree. Use `entire replay report <run-id>` to revisit one
 run and `entire eval run --from-checkpoints --agent claude-code,codex` to
-compare agents across recent checkpoint tasks.
+compare agents across recent checkpoint tasks. Eval reports include an agent
+ranking by pass rate, file overlap, semantic match, risk, duration, and token
+usage when available.
 
 ### `entire enable` Flags
 

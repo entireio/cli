@@ -100,18 +100,37 @@ type ReplayMetrics struct {
 	MissingFiles       []string `json:"missing_files,omitempty"`
 	ExtraFiles         []string `json:"extra_files,omitempty"`
 	RiskyFiles         []string `json:"risky_files,omitempty"`
+	MissingTests       bool     `json:"missing_tests,omitempty"`
 	RiskScore          int      `json:"risk_score"`
 	SemanticAvailable  bool     `json:"semantic_available"`
 	SemanticSimilarity int      `json:"semantic_similarity,omitempty"`
 }
 
+type ReplayEvalAgentSummary struct {
+	Agent                 string `json:"agent"`
+	Runs                  int    `json:"runs"`
+	Passed                int    `json:"passed"`
+	Failed                int    `json:"failed"`
+	Skipped               int    `json:"skipped"`
+	PassRate              int    `json:"pass_rate"`
+	AvgFileRecall         int    `json:"avg_file_recall"`
+	AvgFilePrecision      int    `json:"avg_file_precision"`
+	AvgSemanticSimilarity int    `json:"avg_semantic_similarity,omitempty"`
+	SemanticRuns          int    `json:"semantic_runs,omitempty"`
+	AvgDurationMS         int64  `json:"avg_duration_ms"`
+	RiskScore             int    `json:"risk_score"`
+	InputTokens           int    `json:"input_tokens,omitempty"`
+	OutputTokens          int    `json:"output_tokens,omitempty"`
+}
+
 type ReplayEvalRun struct {
-	ID         string      `json:"id"`
-	StartedAt  time.Time   `json:"started_at"`
-	FinishedAt time.Time   `json:"finished_at"`
-	Agents     []string    `json:"agents"`
-	Runs       []ReplayRun `json:"runs"`
-	ResultPath string      `json:"result_path,omitempty"`
+	ID         string                   `json:"id"`
+	StartedAt  time.Time                `json:"started_at"`
+	FinishedAt time.Time                `json:"finished_at"`
+	Agents     []string                 `json:"agents"`
+	Summaries  []ReplayEvalAgentSummary `json:"summaries,omitempty"`
+	Runs       []ReplayRun              `json:"runs"`
+	ResultPath string                   `json:"result_path,omitempty"`
 }
 
 type ReplayRunnerRequest struct {
@@ -312,23 +331,31 @@ func runReplayEval(ctx context.Context, opts replayEvalOptions) (*ReplayEvalRun,
 	for _, cp := range checkpoints {
 		spec, err := buildReplaySpec(ctx, cp)
 		if err != nil {
+			now := time.Now().UTC()
 			eval.Runs = append(eval.Runs, ReplayRun{
-				ID:     newReplayID(),
-				Status: replayStatusFailed,
-				Error:  err.Error(),
-				Spec:   ReplaySpec{CheckpointID: cp},
+				ID:         newReplayID(),
+				Status:     replayStatusFailed,
+				StartedAt:  now,
+				FinishedAt: now,
+				Error:      err.Error(),
+				Spec:       ReplaySpec{CheckpointID: cp},
+				Test:       ReplayTestRun{Status: replayTestStatusSkipped},
 			})
 			continue
 		}
 		for _, agentName := range agents {
 			if replayRunnerFor(agentName) == nil {
+				now := time.Now().UTC()
 				eval.Runs = append(eval.Runs, ReplayRun{
-					ID:     newReplayID(),
-					Spec:   spec,
-					Agent:  agentName,
-					Model:  opts.Model,
-					Status: replayStatusSkipped,
-					Error:  fmt.Sprintf("agent %q is not launchable for replay yet", agentName),
+					ID:         newReplayID(),
+					Spec:       spec,
+					Agent:      agentName,
+					Model:      opts.Model,
+					Status:     replayStatusSkipped,
+					StartedAt:  now,
+					FinishedAt: now,
+					Test:       ReplayTestRun{Status: replayTestStatusSkipped},
+					Error:      fmt.Sprintf("agent %q is not launchable for replay yet", agentName),
 				})
 				continue
 			}
@@ -341,19 +368,24 @@ func runReplayEval(ctx context.Context, opts replayEvalOptions) (*ReplayEvalRun,
 				Timeout:      opts.Timeout,
 			})
 			if err != nil {
+				now := time.Now().UTC()
 				run = &ReplayRun{
-					ID:     newReplayID(),
-					Spec:   spec,
-					Agent:  agentName,
-					Model:  opts.Model,
-					Status: replayStatusFailed,
-					Error:  err.Error(),
+					ID:         newReplayID(),
+					Spec:       spec,
+					Agent:      agentName,
+					Model:      opts.Model,
+					Status:     replayStatusFailed,
+					StartedAt:  now,
+					FinishedAt: now,
+					Test:       ReplayTestRun{Status: replayTestStatusSkipped},
+					Error:      err.Error(),
 				}
 			}
 			eval.Runs = append(eval.Runs, *run)
 		}
 	}
 	sortReplayRuns(eval.Runs)
+	eval.Summaries = summarizeReplayEvalAgents(eval.Runs)
 	eval.FinishedAt = time.Now().UTC()
 	path, err := saveReplayEval(ctx, eval)
 	if err != nil {
@@ -809,7 +841,8 @@ func replayMetrics(ctx context.Context, repoRoot, worktree string, spec ReplaySp
 		FileRecall:    percent(len(overlap), len(original)),
 	}
 	metrics.RiskScore = len(metrics.ExtraFiles) + len(metrics.RiskyFiles)
-	if sourceChangedWithoutTests(produced) {
+	metrics.MissingTests = sourceChangedWithoutTests(produced)
+	if metrics.MissingTests {
 		metrics.RiskScore++
 	}
 	if score, ok := replaySemanticSimilarity(ctx, repoRoot, worktree, spec); ok {
@@ -1069,10 +1102,16 @@ func riskyReplayFiles(files []string) []string {
 		if strings.Contains(lower, "auth") ||
 			strings.Contains(lower, "token") ||
 			strings.Contains(lower, "secret") ||
+			strings.Contains(lower, "credential") ||
+			strings.Contains(lower, "permission") ||
 			strings.Contains(lower, "payment") ||
 			strings.Contains(lower, "billing") ||
+			strings.Contains(lower, "/db/") ||
 			strings.Contains(lower, "database") ||
 			strings.Contains(lower, "migration") ||
+			strings.Contains(lower, "schema") ||
+			strings.Contains(lower, "policy") ||
+			strings.HasSuffix(lower, ".sql") ||
 			strings.Contains(lower, "config") {
 			risky = append(risky, file)
 		}
@@ -1125,6 +1164,98 @@ func sortReplayRuns(runs []ReplayRun) {
 	})
 }
 
+func summarizeReplayEvalAgents(runs []ReplayRun) []ReplayEvalAgentSummary {
+	type totals struct {
+		summary      ReplayEvalAgentSummary
+		recall       int
+		precision    int
+		semantic     int
+		duration     int64
+		durationRuns int
+		qualityRuns  int
+	}
+	byAgent := make(map[string]*totals)
+	for _, run := range runs {
+		if strings.TrimSpace(run.Agent) == "" {
+			continue
+		}
+		total := byAgent[run.Agent]
+		if total == nil {
+			total = &totals{summary: ReplayEvalAgentSummary{Agent: run.Agent}}
+			byAgent[run.Agent] = total
+		}
+		total.summary.Runs++
+		switch run.Status {
+		case replayStatusPassed:
+			total.summary.Passed++
+		case replayStatusSkipped:
+			total.summary.Skipped++
+		default:
+			total.summary.Failed++
+		}
+		total.qualityRuns++
+		total.recall += run.Metrics.FileRecall
+		total.precision += run.Metrics.FilePrecision
+		if run.Metrics.SemanticAvailable {
+			total.summary.SemanticRuns++
+			total.semantic += run.Metrics.SemanticSimilarity
+		}
+		if run.DurationMS > 0 {
+			total.durationRuns++
+			total.duration += run.DurationMS
+		}
+		total.summary.RiskScore += run.Metrics.RiskScore
+		if run.TokenUsage != nil {
+			total.summary.InputTokens += run.TokenUsage.InputTokens + run.TokenUsage.CacheCreationTokens + run.TokenUsage.CacheReadTokens
+			total.summary.OutputTokens += run.TokenUsage.OutputTokens
+		}
+	}
+
+	summaries := make([]ReplayEvalAgentSummary, 0, len(byAgent))
+	for _, total := range byAgent {
+		summary := total.summary
+		summary.PassRate = percent(summary.Passed, summary.Runs)
+		if total.qualityRuns > 0 {
+			summary.AvgFileRecall = total.recall / total.qualityRuns
+			summary.AvgFilePrecision = total.precision / total.qualityRuns
+		}
+		if summary.SemanticRuns > 0 {
+			summary.AvgSemanticSimilarity = total.semantic / summary.SemanticRuns
+		}
+		if total.durationRuns > 0 {
+			summary.AvgDurationMS = total.duration / int64(total.durationRuns)
+		}
+		summaries = append(summaries, summary)
+	}
+	sortReplayEvalSummaries(summaries)
+	return summaries
+}
+
+func sortReplayEvalSummaries(summaries []ReplayEvalAgentSummary) {
+	sort.SliceStable(summaries, func(i, j int) bool {
+		a, b := summaries[i], summaries[j]
+		if a.PassRate != b.PassRate {
+			return a.PassRate > b.PassRate
+		}
+		if a.AvgFileRecall != b.AvgFileRecall {
+			return a.AvgFileRecall > b.AvgFileRecall
+		}
+		if a.AvgFilePrecision != b.AvgFilePrecision {
+			return a.AvgFilePrecision > b.AvgFilePrecision
+		}
+		if a.AvgSemanticSimilarity != b.AvgSemanticSimilarity {
+			return a.AvgSemanticSimilarity > b.AvgSemanticSimilarity
+		}
+		if a.RiskScore != b.RiskScore {
+			return a.RiskScore < b.RiskScore
+		}
+		if a.AvgDurationMS != b.AvgDurationMS {
+			return a.AvgDurationMS < b.AvgDurationMS
+		}
+		return a.Agent < b.Agent
+	})
+}
+
 func renderReplayRun(w io.Writer, run *ReplayRun) {
 	sty := newStatusStyles(w)
 	fmt.Fprintf(w, "\n  %s %s\n", sty.render(sty.bold, "Replay"), sty.render(sty.cyan, run.ID))
@@ -1150,8 +1281,8 @@ func renderReplayRun(w io.Writer, run *ReplayRun) {
 	if run.Metrics.SemanticAvailable {
 		fmt.Fprintf(w, "  %s %d%% semantic match\n", sty.render(sty.bold, "Semantic:"), run.Metrics.SemanticSimilarity)
 	}
-	if len(run.Metrics.RiskyFiles) > 0 || len(run.Metrics.ExtraFiles) > 0 {
-		fmt.Fprintf(w, "  %s risk score %d\n", sty.render(sty.bold, "Risk:"), run.Metrics.RiskScore)
+	if run.Metrics.RiskScore > 0 {
+		fmt.Fprintf(w, "  %s %s\n", sty.render(sty.bold, "Risk:"), replayRiskText(run.Metrics))
 	}
 	if run.WorktreePath != "" {
 		fmt.Fprintf(w, "  %s %s\n", sty.render(sty.bold, "Worktree:"), run.WorktreePath)
@@ -1178,12 +1309,31 @@ func renderReplayEval(w io.Writer, eval *ReplayEvalRun) {
 		fmt.Fprintf(w, "  %s\n\n", sty.render(sty.dim, "No runs recorded."))
 		return
 	}
-	fmt.Fprintf(w, "  %-12s  %-12s  %-8s  %-7s  %-7s  %-5s  %s\n", "Checkpoint", "Agent", "Status", "Recall", "Prec.", "Risk", "Tests")
-	fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", 76)))
+	if len(eval.Summaries) > 0 {
+		fmt.Fprintf(w, "  %s\n", sty.render(sty.bold, "Agent Ranking"))
+		fmt.Fprintf(w, "  %-18s  %-4s  %-5s  %-7s  %-7s  %-5s  %-8s  %s\n", "Agent", "Runs", "Pass", "Recall", "Prec.", "Risk", "Duration", "Tokens")
+		fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", 88)))
+		for _, summary := range eval.Summaries {
+			fmt.Fprintf(w, "  %-18s  %4d  %4d%%  %6d%%  %6d%%  %5d  %8s  %s\n",
+				stringutil.TruncateRunes(summary.Agent, 18, ""),
+				summary.Runs,
+				summary.PassRate,
+				summary.AvgFileRecall,
+				summary.AvgFilePrecision,
+				summary.RiskScore,
+				formatReplayDuration(summary.AvgDurationMS),
+				replayEvalTokenText(summary),
+			)
+		}
+		fmt.Fprintln(w)
+	}
+	fmt.Fprintf(w, "  %s\n", sty.render(sty.bold, "Runs"))
+	fmt.Fprintf(w, "  %-12s  %-18s  %-8s  %-7s  %-7s  %-5s  %s\n", "Checkpoint", "Agent", "Status", "Recall", "Prec.", "Risk", "Tests")
+	fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", 82)))
 	for _, run := range eval.Runs {
-		fmt.Fprintf(w, "  %-12s  %-12s  %-8s  %6d%%  %6d%%  %5d  %s\n",
+		fmt.Fprintf(w, "  %-12s  %-18s  %-8s  %6d%%  %6d%%  %5d  %s\n",
 			run.Spec.CheckpointID,
-			stringutil.TruncateRunes(run.Agent, 12, ""),
+			stringutil.TruncateRunes(run.Agent, 18, ""),
 			run.Status,
 			run.Metrics.FileRecall,
 			run.Metrics.FilePrecision,
@@ -1220,12 +1370,47 @@ func replayFileMetricText(metrics ReplayMetrics) string {
 	)
 }
 
+func replayRiskText(metrics ReplayMetrics) string {
+	var details []string
+	if len(metrics.ExtraFiles) > 0 {
+		details = append(details, fmt.Sprintf("%d extra", len(metrics.ExtraFiles)))
+	}
+	if len(metrics.RiskyFiles) > 0 {
+		details = append(details, fmt.Sprintf("%d risky", len(metrics.RiskyFiles)))
+	}
+	if metrics.MissingTests {
+		details = append(details, "missing tests")
+	}
+	if len(details) == 0 {
+		return fmt.Sprintf("risk score %d", metrics.RiskScore)
+	}
+	return fmt.Sprintf("risk score %d (%s)", metrics.RiskScore, strings.Join(details, ", "))
+}
+
 func replayTokenUsageText(usage *agent.TokenUsage) string {
 	if usage == nil {
 		return ""
 	}
 	input := usage.InputTokens + usage.CacheCreationTokens + usage.CacheReadTokens
 	return fmt.Sprintf("%d in, %d out", input, usage.OutputTokens)
+}
+
+func replayEvalTokenText(summary ReplayEvalAgentSummary) string {
+	if summary.InputTokens == 0 && summary.OutputTokens == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d/%d", summary.InputTokens, summary.OutputTokens)
+}
+
+func formatReplayDuration(ms int64) string {
+	switch {
+	case ms <= 0:
+		return "-"
+	case ms < 1000:
+		return fmt.Sprintf("%dms", ms)
+	default:
+		return fmt.Sprintf("%.1fs", float64(ms)/1000)
+	}
 }
 
 func replayGit(ctx context.Context, repoRoot string, args ...string) (string, error) {

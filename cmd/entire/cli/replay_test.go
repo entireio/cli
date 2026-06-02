@@ -222,6 +222,12 @@ func TestReplayEvalRunRanksAndPersistsResults(t *testing.T) {
 	if eval.ResultPath == "" {
 		t.Fatal("ResultPath is empty")
 	}
+	if len(eval.Summaries) != 1 {
+		t.Fatalf("summaries = %d, want 1", len(eval.Summaries))
+	}
+	if summary := eval.Summaries[0]; summary.Agent != fakeReplayAgent || summary.PassRate != 100 || summary.AvgFileRecall != 100 {
+		t.Fatalf("summary = %+v", summary)
+	}
 
 	loaded, err := readReplayEval(context.Background(), eval.ID)
 	if err != nil {
@@ -271,25 +277,67 @@ func TestReplayEvalSkipsUnsupportedAgent(t *testing.T) {
 	if eval.Runs[0].Status != replayStatusSkipped {
 		t.Fatalf("status = %q, want skipped", eval.Runs[0].Status)
 	}
+	if eval.Runs[0].Test.Status != replayTestStatusSkipped {
+		t.Fatalf("test status = %q, want skipped", eval.Runs[0].Test.Status)
+	}
 }
 
 func TestReplayMetricsFlagsExtraAndRiskyFiles(t *testing.T) {
-	metrics := replayMetrics(context.Background(), "", "", ReplaySpec{FilesTouched: []string{replayFixtureFile}}, []string{replayFixtureFile, "auth/config.yaml"})
+	metrics := replayMetrics(context.Background(), "", "", ReplaySpec{FilesTouched: []string{replayFixtureFile}}, []string{replayFixtureFile, "auth/config.yaml", "db/schema.sql"})
 
 	if metrics.FileRecall != 100 {
 		t.Fatalf("FileRecall = %d", metrics.FileRecall)
 	}
-	if metrics.FilePrecision != 50 {
+	if metrics.FilePrecision != 33 {
 		t.Fatalf("FilePrecision = %d", metrics.FilePrecision)
 	}
-	if got := strings.Join(metrics.ExtraFiles, ","); got != "auth/config.yaml" {
+	if got := strings.Join(metrics.ExtraFiles, ","); got != "auth/config.yaml,db/schema.sql" {
 		t.Fatalf("ExtraFiles = %q", got)
 	}
-	if got := strings.Join(metrics.RiskyFiles, ","); got != "auth/config.yaml" {
+	if got := strings.Join(metrics.RiskyFiles, ","); got != "auth/config.yaml,db/schema.sql" {
 		t.Fatalf("RiskyFiles = %q", got)
+	}
+	if !metrics.MissingTests {
+		t.Fatal("MissingTests = false, want true")
 	}
 	if metrics.RiskScore == 0 {
 		t.Fatal("RiskScore should be non-zero")
+	}
+}
+
+func TestReplayEvalAgentSummariesRankAgents(t *testing.T) {
+	summaries := summarizeReplayEvalAgents([]ReplayRun{
+		{
+			Agent:      "slow-risky",
+			Status:     replayStatusPassed,
+			DurationMS: 2000,
+			Metrics:    ReplayMetrics{FileRecall: 100, FilePrecision: 100, RiskScore: 3, SemanticAvailable: true, SemanticSimilarity: 50},
+			TokenUsage: &agentpkg.TokenUsage{InputTokens: 10, OutputTokens: 5},
+		},
+		{
+			Agent:      "fast-clean",
+			Status:     replayStatusPassed,
+			DurationMS: 1000,
+			Metrics:    ReplayMetrics{FileRecall: 100, FilePrecision: 100, RiskScore: 0, SemanticAvailable: true, SemanticSimilarity: 80},
+			TokenUsage: &agentpkg.TokenUsage{InputTokens: 3, CacheReadTokens: 2, OutputTokens: 1},
+		},
+		{
+			Agent:  "unsupported",
+			Status: replayStatusSkipped,
+		},
+	})
+
+	if len(summaries) != 3 {
+		t.Fatalf("summaries = %d, want 3", len(summaries))
+	}
+	if summaries[0].Agent != "fast-clean" {
+		t.Fatalf("top summary = %+v", summaries[0])
+	}
+	if summaries[0].InputTokens != 5 || summaries[0].OutputTokens != 1 {
+		t.Fatalf("token totals = %+v", summaries[0])
+	}
+	if summaries[2].Agent != "unsupported" || summaries[2].Skipped != 1 {
+		t.Fatalf("unsupported summary = %+v", summaries[2])
 	}
 }
 
