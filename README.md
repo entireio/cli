@@ -242,6 +242,8 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire disable` | Remove Entire hooks from repository                                                               |
 | `entire doctor`  | Fix or clean up stuck sessions                                                                    |
 | `entire enable`  | Enable Entire in your repository                                                                  |
+| `entire replay`  | Replay checkpoint tasks in isolated worktrees                                                     |
+| `entire eval`    | Run private agent evals from Entire checkpoints                                                   |
 | `entire checkpoint`        | List, explain, rewind, and search checkpoints                                           |
 | `entire checkpoint explain` | Explain a session, commit, or checkpoint                                               |
 | `entire checkpoint rewind` | Rewind to a previous checkpoint                                                         |
@@ -252,6 +254,14 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire status`  | Show current session info                                                                         |
 | `entire doctor trace` | Show hook performance traces                                                                 |
 | `entire version` | Show Entire CLI version                                                                           |
+
+`entire replay checkpoint <id>` turns a real checkpoint into a private
+agent-eval task. Entire checks out the checkpoint's parent commit in an
+isolated temp worktree, runs the original prompt with the selected launchable
+agent, then compares the result to the original commit by changed files,
+optional tests, risk signals, and optional `entire-sem` semantic similarity.
+Use `entire eval run --from-checkpoints --agent claude-code,codex` to compare
+agents across recent checkpoint tasks.
 
 ### `entire enable` Flags
 
