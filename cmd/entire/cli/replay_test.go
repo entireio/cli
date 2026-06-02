@@ -236,6 +236,45 @@ func TestReplayCheckpointTruncatesLargeDiff(t *testing.T) {
 	}
 }
 
+func TestReplayCheckpointMarksTruncatedOutput(t *testing.T) {
+	_, cpID, _, _ := newReplayRepo(t)
+	restore := stubReplayRunner(func(_ context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {
+		if err := os.WriteFile(filepath.Join(req.WorktreePath, replayFixtureFile), []byte(replayTargetContent), 0o644); err != nil {
+			return ReplayRunnerResult{}, err
+		}
+		return ReplayRunnerResult{Output: strings.Repeat("agent output\n", 7000)}, nil
+	})
+	defer restore()
+
+	run, err := runReplayCheckpoint(context.Background(), cpID, replayCheckpointOptions{
+		Agent:       fakeReplayAgent,
+		TestCommand: `python3 -c 'print("test output " * 7000)'`,
+	})
+	if err != nil {
+		t.Fatalf("runReplayCheckpoint() error = %v", err)
+	}
+	if !run.OutputTruncated {
+		t.Fatal("OutputTruncated = false, want true")
+	}
+	if !strings.Contains(run.Output, "...[truncated]") {
+		t.Fatalf("Output missing truncation marker")
+	}
+	if !run.Test.OutputTruncated {
+		t.Fatal("Test.OutputTruncated = false, want true")
+	}
+	if !strings.Contains(run.Test.Output, "...[truncated]") {
+		t.Fatalf("Test.Output missing truncation marker")
+	}
+
+	loaded, err := readReplayRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("readReplayRun() error = %v", err)
+	}
+	if !loaded.OutputTruncated || !loaded.Test.OutputTruncated {
+		t.Fatalf("loaded truncation flags = run:%v test:%v", loaded.OutputTruncated, loaded.Test.OutputTruncated)
+	}
+}
+
 func TestReplayCheckpointCapturesDiffAfterAgentTimeout(t *testing.T) {
 	_, cpID, _, _ := newReplayRepo(t)
 	restore := stubReplayRunner(func(ctx context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {

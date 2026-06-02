@@ -65,34 +65,36 @@ type ReplaySpec struct {
 }
 
 type ReplayRun struct {
-	SchemaVersion int               `json:"schema_version,omitempty"`
-	ID            string            `json:"id"`
-	Spec          ReplaySpec        `json:"spec"`
-	Agent         string            `json:"agent"`
-	Model         string            `json:"model,omitempty"`
-	Status        string            `json:"status"`
-	StartedAt     time.Time         `json:"started_at"`
-	FinishedAt    time.Time         `json:"finished_at"`
-	DurationMS    int64             `json:"duration_ms"`
-	WorktreePath  string            `json:"worktree_path,omitempty"`
-	ChangedFiles  []string          `json:"changed_files"`
-	Diff          string            `json:"diff,omitempty"`
-	DiffTruncated bool              `json:"diff_truncated,omitempty"`
-	Test          ReplayTestRun     `json:"test"`
-	Metrics       ReplayMetrics     `json:"metrics"`
-	TokenUsage    *agent.TokenUsage `json:"token_usage,omitempty"`
-	Warnings      []string          `json:"warnings,omitempty"`
-	Error         string            `json:"error,omitempty"`
-	Output        string            `json:"output,omitempty"`
-	ResultPath    string            `json:"result_path,omitempty"`
+	SchemaVersion   int               `json:"schema_version,omitempty"`
+	ID              string            `json:"id"`
+	Spec            ReplaySpec        `json:"spec"`
+	Agent           string            `json:"agent"`
+	Model           string            `json:"model,omitempty"`
+	Status          string            `json:"status"`
+	StartedAt       time.Time         `json:"started_at"`
+	FinishedAt      time.Time         `json:"finished_at"`
+	DurationMS      int64             `json:"duration_ms"`
+	WorktreePath    string            `json:"worktree_path,omitempty"`
+	ChangedFiles    []string          `json:"changed_files"`
+	Diff            string            `json:"diff,omitempty"`
+	DiffTruncated   bool              `json:"diff_truncated,omitempty"`
+	Test            ReplayTestRun     `json:"test"`
+	Metrics         ReplayMetrics     `json:"metrics"`
+	TokenUsage      *agent.TokenUsage `json:"token_usage,omitempty"`
+	Warnings        []string          `json:"warnings,omitempty"`
+	Error           string            `json:"error,omitempty"`
+	Output          string            `json:"output,omitempty"`
+	OutputTruncated bool              `json:"output_truncated,omitempty"`
+	ResultPath      string            `json:"result_path,omitempty"`
 }
 
 type ReplayTestRun struct {
-	Status     string `json:"status"`
-	Command    string `json:"command,omitempty"`
-	ExitCode   int    `json:"exit_code,omitempty"`
-	Output     string `json:"output,omitempty"`
-	DurationMS int64  `json:"duration_ms,omitempty"`
+	Status          string `json:"status"`
+	Command         string `json:"command,omitempty"`
+	ExitCode        int    `json:"exit_code,omitempty"`
+	Output          string `json:"output,omitempty"`
+	OutputTruncated bool   `json:"output_truncated,omitempty"`
+	DurationMS      int64  `json:"duration_ms,omitempty"`
 }
 
 type ReplayMetrics struct {
@@ -529,7 +531,7 @@ func executeReplay(ctx context.Context, spec ReplaySpec, opts replayCheckpointOp
 		Prompt:       replayPrompt(spec),
 		WorktreePath: worktree,
 	})
-	run.Output = truncateReplayOutput(result.Output)
+	run.Output, run.OutputTruncated = truncateReplayOutput(result.Output)
 	run.TokenUsage = result.TokenUsage
 	run.Warnings = append(run.Warnings, result.Warnings...)
 	if runnerErr != nil {
@@ -861,11 +863,13 @@ func runReplayTestCommand(ctx context.Context, worktree, command string) ReplayT
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	err := cmd.Run()
+	truncatedOutput, outputTruncated := truncateReplayOutput(output.String())
 	result := ReplayTestRun{
-		Status:     replayStatusPassed,
-		Command:    command,
-		Output:     truncateReplayOutput(output.String()),
-		DurationMS: time.Since(start).Milliseconds(),
+		Status:          replayStatusPassed,
+		Command:         command,
+		Output:          truncatedOutput,
+		OutputTruncated: outputTruncated,
+		DurationMS:      time.Since(start).Milliseconds(),
 	}
 	if err != nil {
 		result.Status = replayStatusFailed
@@ -1677,12 +1681,12 @@ func jaccardPercent(a, b map[string]struct{}) int {
 	return percent(intersection, len(union))
 }
 
-func truncateReplayOutput(output string) string {
+func truncateReplayOutput(output string) (string, bool) {
 	output = strings.TrimSpace(output)
 	if len(output) <= replayResultOutputLimit {
-		return output
+		return output, false
 	}
-	return output[:replayResultOutputLimit] + "\n...[truncated]"
+	return output[:replayResultOutputLimit] + "\n...[truncated]", true
 }
 
 func truncateReplayDiff(diff string) (string, bool) {
