@@ -110,6 +110,19 @@ func TestCoreURLFromEnvToken_MalformedToken(t *testing.T) {
 	assert.Contains(t, err.Error(), EnvTokenVar)
 }
 
+func TestCoreURLFromEnvToken_BlankToken(t *testing.T) {
+	t.Parallel()
+	// A whitespace-only value reaches here (truly empty is treated as unset by
+	// the caller) and must fail closed with a clear message, not the raw
+	// JWT-parse error.
+	for _, tok := range []string{" ", "\t", "\n", " \t\n "} {
+		_, err := CoreURLFromEnvToken(tok)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), EnvTokenVar)
+		assert.Contains(t, err.Error(), "blank")
+	}
+}
+
 func TestCoreURLFromEnvToken_RejectsAlgNone(t *testing.T) {
 	t.Parallel()
 	// alg:none with a URL-shaped aud must still be rejected at the parse layer.

@@ -136,7 +136,7 @@ func run(args []string) int {
 // resolveCreds builds the repo-scoped token cache, choosing the auth source:
 //
 //   - ENTIRE_TOKEN set: use the env JWT verbatim as the login token, deriving
-//     the core URL from its aud claim. Skips contexts.json and the keyring
+//     the login server URL from its aud claim. Skips contexts.json and the keyring
 //     entirely — the CI / workload-identity path. A non-URL aud is a hard
 //     error, never a silent fallback to context resolution.
 //   - otherwise: resolve the login context for this cluster from contexts.json
@@ -153,7 +153,7 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, clusterBaseURL string
 	}
 
 	// Resolve which login context authenticates this cluster: the cluster's
-	// cores are taken from the cluster_cores.json cache (or a live
+	// login servers are taken from the cluster_cores.json cache (or a live
 	// /.well-known fetch on miss/expiry), then the account is selected from
 	// local contexts — active context if eligible, else the sole eligible
 	// one, else an explicit-choice error.
@@ -164,7 +164,7 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, clusterBaseURL string
 	}
 
 	// Mint repo-scoped tokens by exchanging the context's login JWT at its
-	// core's /oauth/token, cached per (repo, action) for this invocation.
+	// login server's /oauth/token, cached per (repo, action) for this invocation.
 	return repocreds.New(clusterCtx.CoreURL, clusterBaseURL, func(context.Context) (string, error) {
 		return auth.LoginTokenForContext(clusterCtx)
 	}, httpClient), nil

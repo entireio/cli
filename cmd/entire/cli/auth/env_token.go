@@ -41,6 +41,14 @@ const EnvTokenVar = "ENTIRE_TOKEN"
 // validated strictly. A token with no URL-shaped aud is rejected with a clear
 // error rather than silently falling back to context resolution.
 func CoreURLFromEnvToken(rawToken string) (string, error) {
+	// A blank-but-present value (e.g. ENTIRE_TOKEN=" ") fails closed rather
+	// than silently falling back to context auth — but give it a clearer
+	// message than the raw JWT-parse error. Note: only whitespace-only values
+	// reach here; a truly empty ENTIRE_TOKEN is treated as unset by the caller
+	// and never enters the env-token path.
+	if strings.TrimSpace(rawToken) == "" {
+		return "", fmt.Errorf("%s is set but blank", EnvTokenVar)
+	}
 	claims, err := tokens.ParseClaims(rawToken)
 	if err != nil {
 		return "", fmt.Errorf("parse %s claims: %w", EnvTokenVar, err)
@@ -63,17 +71,17 @@ func CoreURLFromEnvToken(rawToken string) (string, error) {
 func validateCoreAudience(u *url.URL) (string, error) {
 	switch {
 	case u.Scheme != "https":
-		return "", fmt.Errorf("%s aud %q must use https; refusing to exchange the token over %s", EnvTokenVar, u.String(), u.Scheme)
+		return "", fmt.Errorf("%s aud %q must use https; refusing to exchange the token over %s", EnvTokenVar, u.Redacted(), u.Scheme)
 	case u.Host == "":
-		return "", fmt.Errorf("%s aud %q has no host", EnvTokenVar, u.String())
+		return "", fmt.Errorf("%s aud %q has no host", EnvTokenVar, u.Redacted())
 	case u.User != nil:
-		return "", fmt.Errorf("%s aud %q must not contain userinfo", EnvTokenVar, u.String())
+		return "", fmt.Errorf("%s aud %q must not contain userinfo", EnvTokenVar, u.Redacted())
 	case u.Path != "" && u.Path != "/":
-		return "", fmt.Errorf("%s aud %q must be a bare origin with no path", EnvTokenVar, u.String())
+		return "", fmt.Errorf("%s aud %q must be a bare origin with no path", EnvTokenVar, u.Redacted())
 	case u.RawQuery != "":
-		return "", fmt.Errorf("%s aud %q must not contain query parameters", EnvTokenVar, u.String())
+		return "", fmt.Errorf("%s aud %q must not contain query parameters", EnvTokenVar, u.Redacted())
 	case u.Fragment != "":
-		return "", fmt.Errorf("%s aud %q must not contain a fragment", EnvTokenVar, u.String())
+		return "", fmt.Errorf("%s aud %q must not contain a fragment", EnvTokenVar, u.Redacted())
 	}
 	return strings.TrimRight(u.Scheme+"://"+u.Host, "/"), nil
 }
