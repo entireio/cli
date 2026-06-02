@@ -105,7 +105,7 @@ func RecordLoginContext(rawToken string, activate bool) (string, error) {
 // uniqueness.
 func pickContextName(f *contexts.File, coreURL, handle string) string {
 	for _, c := range f.Contexts {
-		if sameIssuer(c.CoreURL, coreURL) && c.Handle == handle {
+		if EqualCoreURL(c.CoreURL, coreURL) && c.Handle == handle {
 			return c.Name
 		}
 	}
@@ -125,9 +125,14 @@ func pickContextName(f *contexts.File, coreURL, handle string) string {
 	}
 }
 
-// sameIssuer compares two core URLs ignoring a trailing slash.
-func sameIssuer(a, b string) bool {
-	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
+// EqualCoreURL reports whether two core URLs denote the same origin, ignoring
+// a trailing slash and host case. URL scheme and DNS host are case-insensitive
+// (RFC 3986 §3.1, §3.2.2); core URLs are validated bare origins (no path), so a
+// whole-string case fold is equivalent to folding only scheme+host here. Shared
+// by context matching and the ENTIRE_TOKEN trust gate so both agree on what
+// counts as "the same core".
+func EqualCoreURL(a, b string) bool {
+	return strings.EqualFold(strings.TrimRight(a, "/"), strings.TrimRight(b, "/"))
 }
 
 // MigrateLegacyLoginContext bridges users who logged in before the
@@ -165,7 +170,7 @@ func MigrateLegacyLoginContext() (migrated bool, err error) {
 	// issuer alone would skip a legacy bob@core just because alice@core (e.g.
 	// from another CLI) already exists, leaving Bob without a context.
 	for _, c := range f.Contexts {
-		if sameIssuer(c.CoreURL, claims.Issuer) && c.Handle == handle {
+		if EqualCoreURL(c.CoreURL, claims.Issuer) && c.Handle == handle {
 			return false, nil
 		}
 	}

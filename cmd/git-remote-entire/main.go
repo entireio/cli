@@ -201,12 +201,12 @@ func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, clusterBas
 }
 
 // coreTrusted reports whether coreURL is in the cluster's advertised core
-// set, comparing on trailing-slash-insensitive equality to match how core
-// URLs are compared elsewhere (contexts.ContextsForIssuer, auth.sameIssuer).
+// set, comparing via auth.EqualCoreURL (trailing-slash- and host-case-
+// insensitive) so the trust gate agrees with how core URLs are matched
+// during context resolution.
 func coreTrusted(coreURL string, trusted []string) bool {
-	want := strings.TrimRight(coreURL, "/")
 	for _, t := range trusted {
-		if strings.TrimRight(t, "/") == want {
+		if auth.EqualCoreURL(coreURL, t) {
 			return true
 		}
 	}

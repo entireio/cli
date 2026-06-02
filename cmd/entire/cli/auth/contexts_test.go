@@ -24,6 +24,27 @@ func makeJWT(t *testing.T, payloadJSON string) string {
 	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
 }
 
+func TestEqualCoreURL(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{"https://core.us.entire.io", "https://core.us.entire.io", true},
+		{"https://core.us.entire.io/", "https://core.us.entire.io", true},
+		{"https://Core.US.Entire.IO", "https://core.us.entire.io", true},
+		{"HTTPS://core.us.entire.io", "https://core.us.entire.io", true},
+		{"https://core.us.entire.io", "https://core.eu.entire.io", false},
+		{"", "https://core.us.entire.io", false},
+		{"", "", true},
+	}
+	for _, tc := range tests {
+		if got := EqualCoreURL(tc.a, tc.b); got != tc.want {
+			t.Errorf("EqualCoreURL(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
 func TestRecordLoginContext_WritesContextAndToken(t *testing.T) {
 	// Sets ENTIRE_CONFIG_DIR and swaps the keyring backend — process-global
 	// state, so this test cannot run in parallel.
