@@ -522,12 +522,6 @@ func executeReplay(ctx context.Context, spec ReplaySpec, opts replayCheckpointOp
 		run.Status = replayStatusPassed
 	}
 
-	if opts.TestCommand != "" {
-		run.Test = runReplayTestCommand(runCtx, worktree, opts.TestCommand)
-		if run.Test.Status == replayStatusFailed && run.Status == replayStatusPassed {
-			run.Status = replayStatusFailed
-		}
-	}
 	files, diff, diffErr := replayChangedFilesAndDiff(runCtx, worktree, spec.BaseCommit)
 	if diffErr != nil {
 		run.Warnings = append(run.Warnings, fmt.Sprintf("failed to read replay diff: %v", diffErr))
@@ -536,6 +530,17 @@ func executeReplay(ctx context.Context, spec ReplaySpec, opts replayCheckpointOp
 		run.Diff = diff
 	}
 	run.Metrics = replayMetrics(runCtx, repoRoot, worktree, spec, run.ChangedFiles)
+
+	if opts.TestCommand != "" {
+		if runnerErr == nil {
+			run.Test = runReplayTestCommand(runCtx, worktree, opts.TestCommand)
+			if run.Test.Status == replayStatusFailed && run.Status == replayStatusPassed {
+				run.Status = replayStatusFailed
+			}
+		} else {
+			run.Warnings = append(run.Warnings, "test command skipped because replay agent failed")
+		}
+	}
 
 	run.FinishedAt = time.Now().UTC()
 	run.DurationMS = run.FinishedAt.Sub(run.StartedAt).Milliseconds()

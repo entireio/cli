@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -193,6 +195,62 @@ func TestReplayCheckpointCapturesCommittedAgentResult(t *testing.T) {
 	}
 	if run.Metrics.FileRecall != 100 || run.Metrics.FilePrecision != 100 {
 		t.Fatalf("metrics = %+v", run.Metrics)
+	}
+}
+
+func TestReplayCheckpointMetricsIgnoreTestArtifacts(t *testing.T) {
+	_, cpID, _, _ := newReplayRepo(t)
+	restore := stubReplayRunner(func(_ context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {
+		if err := os.WriteFile(filepath.Join(req.WorktreePath, replayFixtureFile), []byte(replayTargetContent), 0o644); err != nil {
+			return ReplayRunnerResult{}, err
+		}
+		return ReplayRunnerResult{Output: "fake replay completed"}, nil
+	})
+	defer restore()
+
+	run, err := runReplayCheckpoint(context.Background(), cpID, replayCheckpointOptions{
+		Agent:       fakeReplayAgent,
+		TestCommand: "mkdir -p __pycache__ && printf artifact > __pycache__/artifact.pyc",
+	})
+	if err != nil {
+		t.Fatalf("runReplayCheckpoint() error = %v", err)
+	}
+	if got := strings.Join(run.ChangedFiles, ","); got != replayFixtureFile {
+		t.Fatalf("ChangedFiles = %q, want only replay output", got)
+	}
+	if run.Metrics.FileRecall != 100 || run.Metrics.FilePrecision != 100 {
+		t.Fatalf("metrics include test artifacts: %+v", run.Metrics)
+	}
+}
+
+func TestReplayCheckpointSkipsTestsWhenAgentFails(t *testing.T) {
+	_, cpID, _, _ := newReplayRepo(t)
+	restore := stubReplayRunner(func(_ context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {
+		if err := os.WriteFile(filepath.Join(req.WorktreePath, replayFixtureFile), []byte("def existing():\n    return 1\n"), 0o644); err != nil {
+			return ReplayRunnerResult{}, err
+		}
+		return ReplayRunnerResult{Output: "fake replay failed"}, errors.New("agent failed")
+	})
+	defer restore()
+
+	run, err := runReplayCheckpoint(context.Background(), cpID, replayCheckpointOptions{
+		Agent:       fakeReplayAgent,
+		TestCommand: "mkdir -p __pycache__ && printf artifact > __pycache__/artifact.pyc",
+	})
+	if err != nil {
+		t.Fatalf("runReplayCheckpoint() error = %v", err)
+	}
+	if run.Status != replayStatusFailed {
+		t.Fatalf("Status = %q, want failed", run.Status)
+	}
+	if run.Test.Status != replayTestStatusSkipped {
+		t.Fatalf("test status = %q, want skipped", run.Test.Status)
+	}
+	if slices.Contains(run.ChangedFiles, "__pycache__/artifact.pyc") {
+		t.Fatalf("ChangedFiles include test artifact: %q", strings.Join(run.ChangedFiles, ","))
+	}
+	if !slices.Contains(run.Warnings, "test command skipped because replay agent failed") {
+		t.Fatalf("warnings = %+v", run.Warnings)
 	}
 }
 
