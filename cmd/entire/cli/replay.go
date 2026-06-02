@@ -173,6 +173,7 @@ var (
 
 const (
 	replayAgentGeminiCLI    = "gemini-cli"
+	replayInspectionTimeout = 2 * time.Minute
 	replayResultDiffLimit   = 256 * 1024
 	replayResultOutputLimit = 64 * 1024
 	replaySchemaVersion     = 1
@@ -538,14 +539,16 @@ func executeReplay(ctx context.Context, spec ReplaySpec, opts replayCheckpointOp
 		run.Status = replayStatusPassed
 	}
 
-	files, diff, diffErr := replayChangedFilesAndDiff(runCtx, worktree, spec.BaseCommit)
+	inspectionCtx, inspectionCancel := context.WithTimeout(ctx, replayInspectionTimeout)
+	defer inspectionCancel()
+	files, diff, diffErr := replayChangedFilesAndDiff(inspectionCtx, worktree, spec.BaseCommit)
 	if diffErr != nil {
 		run.Warnings = append(run.Warnings, fmt.Sprintf("failed to read replay diff: %v", diffErr))
 	} else {
 		run.ChangedFiles = files
 		run.Diff, run.DiffTruncated = truncateReplayDiff(diff)
 	}
-	run.Metrics = replayMetrics(runCtx, repoRoot, worktree, spec, run.ChangedFiles)
+	run.Metrics = replayMetrics(inspectionCtx, repoRoot, worktree, spec, run.ChangedFiles)
 
 	if opts.TestCommand != "" {
 		if runnerErr == nil {

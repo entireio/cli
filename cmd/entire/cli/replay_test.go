@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -232,6 +233,41 @@ func TestReplayCheckpointTruncatesLargeDiff(t *testing.T) {
 	}
 	if !loaded.DiffTruncated {
 		t.Fatal("loaded DiffTruncated = false, want true")
+	}
+}
+
+func TestReplayCheckpointCapturesDiffAfterAgentTimeout(t *testing.T) {
+	_, cpID, _, _ := newReplayRepo(t)
+	restore := stubReplayRunner(func(ctx context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {
+		if err := os.WriteFile(filepath.Join(req.WorktreePath, replayFixtureFile), []byte(replayTargetContent), 0o644); err != nil {
+			return ReplayRunnerResult{}, err
+		}
+		<-ctx.Done()
+		return ReplayRunnerResult{Output: "agent timed out after writing files"}, ctx.Err()
+	})
+	defer restore()
+
+	run, err := runReplayCheckpoint(context.Background(), cpID, replayCheckpointOptions{
+		Agent:   fakeReplayAgent,
+		Timeout: 200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("runReplayCheckpoint() error = %v", err)
+	}
+	if run.Status != replayStatusFailed {
+		t.Fatalf("Status = %q, want failed", run.Status)
+	}
+	if got := strings.Join(run.ChangedFiles, ","); got != replayFixtureFile {
+		t.Fatalf("ChangedFiles = %q, want replay output after timeout", got)
+	}
+	if !strings.Contains(run.Diff, "replay_helper") {
+		t.Fatalf("Diff missing timed-out replay changes:\n%s", run.Diff)
+	}
+	if run.Metrics.FileRecall != 100 || run.Metrics.FilePrecision != 100 {
+		t.Fatalf("metrics = %+v", run.Metrics)
+	}
+	if len(run.Warnings) != 0 {
+		t.Fatalf("warnings = %+v, want no diff-inspection warning", run.Warnings)
 	}
 }
 
