@@ -1198,16 +1198,47 @@ func sourceChangedWithoutTests(files []string) bool {
 	hasSource := false
 	hasTest := false
 	for _, file := range files {
-		lower := strings.ToLower(file)
-		if strings.Contains(lower, "test") || strings.Contains(lower, "spec") {
+		if isReplayTestFile(file) {
 			hasTest = true
 			continue
 		}
+		lower := strings.ToLower(file)
 		if isReplaySourceFile(lower) {
 			hasSource = true
 		}
 	}
 	return hasSource && !hasTest
+}
+
+func isReplayTestFile(path string) bool {
+	normalized := filepath.ToSlash(strings.TrimSpace(path))
+	lowerPath := strings.ToLower(normalized)
+	for _, part := range strings.Split(lowerPath, "/") {
+		switch part {
+		case "__tests__", "spec", "specs", "test", "tests":
+			return true
+		}
+	}
+
+	base := filepath.Base(normalized)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	lowerName := strings.ToLower(name)
+	switch {
+	case strings.HasPrefix(lowerName, "test_"),
+		strings.HasPrefix(lowerName, "test-"),
+		strings.HasSuffix(lowerName, "_test"),
+		strings.HasSuffix(lowerName, "-test"),
+		strings.HasSuffix(lowerName, ".test"),
+		strings.HasSuffix(lowerName, ".spec"),
+		strings.HasSuffix(name, "Test"),
+		strings.HasSuffix(name, "Tests"),
+		strings.HasSuffix(name, "Spec"),
+		strings.HasSuffix(name, "Specs"):
+		return true
+	default:
+		return false
+	}
 }
 
 func isReplaySourceFile(lowerPath string) bool {

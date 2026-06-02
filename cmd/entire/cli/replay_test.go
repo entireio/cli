@@ -447,6 +447,38 @@ func TestReplayMetricsBroadSourceFilesNeedTests(t *testing.T) {
 	if sourceChangedWithoutTests([]string{"src/Auth.java", "src/AuthTest.java"}) {
 		t.Fatal("sourceChangedWithoutTests() = true when test file changed too")
 	}
+	if !sourceChangedWithoutTests([]string{"src/contest.go"}) {
+		t.Fatal("sourceChangedWithoutTests() = false for non-test source file containing test")
+	}
+	if !sourceChangedWithoutTests([]string{"src/specimen.py"}) {
+		t.Fatal("sourceChangedWithoutTests() = false for non-test source file containing spec")
+	}
+}
+
+func TestReplayTestFileDetectionUsesConventions(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"src/auth_test.go", true},
+		{"src/test_auth.py", true},
+		{"src/auth.test.ts", true},
+		{"src/auth.spec.tsx", true},
+		{"src/AuthTest.java", true},
+		{"src/AuthSpec.swift", true},
+		{"src/__tests__/auth.ts", true},
+		{"tests/auth.rs", true},
+		{"src/contest.go", false},
+		{"src/specimen.py", false},
+		{"src/latest.ts", false},
+		{"src/testimony.rb", false},
+	}
+
+	for _, tt := range tests {
+		if got := isReplayTestFile(tt.path); got != tt.want {
+			t.Fatalf("isReplayTestFile(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
 }
 
 func TestReplayRiskFlagsInfrastructureAndSecurityFiles(t *testing.T) {
