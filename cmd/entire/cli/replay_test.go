@@ -111,6 +111,9 @@ func TestReplayCheckpointUsesIsolatedWorktreeAndSavesResult(t *testing.T) {
 	if run.Status != replayStatusPassed {
 		t.Fatalf("Status = %q, error = %s", run.Status, run.Error)
 	}
+	if run.SchemaVersion != replaySchemaVersion {
+		t.Fatalf("SchemaVersion = %d, want %d", run.SchemaVersion, replaySchemaVersion)
+	}
 	if run.WorktreePath != "" {
 		t.Fatalf("WorktreePath should be empty when keep-worktree=false, got %q", run.WorktreePath)
 	}
@@ -274,6 +277,9 @@ func TestReplayEvalRunRanksAndPersistsResults(t *testing.T) {
 	if len(eval.Runs) != 1 {
 		t.Fatalf("runs = %d, want 1", len(eval.Runs))
 	}
+	if eval.SchemaVersion != replaySchemaVersion || eval.Runs[0].SchemaVersion != replaySchemaVersion {
+		t.Fatalf("schema versions = eval %d run %d, want %d", eval.SchemaVersion, eval.Runs[0].SchemaVersion, replaySchemaVersion)
+	}
 	if eval.Runs[0].Status != replayStatusPassed {
 		t.Fatalf("run status = %q", eval.Runs[0].Status)
 	}
@@ -291,7 +297,7 @@ func TestReplayEvalRunRanksAndPersistsResults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readReplayEval() error = %v", err)
 	}
-	if loaded.ID != eval.ID || len(loaded.Runs) != 1 {
+	if loaded.ID != eval.ID || len(loaded.Runs) != 1 || loaded.SchemaVersion != replaySchemaVersion || loaded.Runs[0].SchemaVersion != replaySchemaVersion {
 		t.Fatalf("loaded eval = %+v", loaded)
 	}
 }
@@ -314,7 +320,7 @@ func TestReplayReportReadsSavedRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readReplayRun() error = %v", err)
 	}
-	if loaded.ID != run.ID || loaded.Spec.CheckpointID != cpID {
+	if loaded.ID != run.ID || loaded.Spec.CheckpointID != cpID || loaded.SchemaVersion != replaySchemaVersion {
 		t.Fatalf("loaded run = %+v", loaded)
 	}
 }
@@ -416,6 +422,48 @@ func TestReplayMetricsFlagsExtraAndRiskyFiles(t *testing.T) {
 	}
 }
 
+func TestReplayMetricsBroadSourceFilesNeedTests(t *testing.T) {
+	for _, file := range []string{
+		"cmd/main.go",
+		"src/App.tsx",
+		"src/Auth.java",
+		"Sources/AuthService.swift",
+		"lib/token.rb",
+		"src/parser.rs",
+		"database/schema.sql",
+		"proto/service.proto",
+		"infra/main.tf",
+		"scripts/deploy.sh",
+		"src/lib.cpp",
+		"src/claims.cs",
+		"lib/module.ex",
+		"src/query.scala",
+		"src/plugin.php",
+	} {
+		if !sourceChangedWithoutTests([]string{file}) {
+			t.Fatalf("sourceChangedWithoutTests(%q) = false, want true", file)
+		}
+	}
+	if sourceChangedWithoutTests([]string{"src/Auth.java", "src/AuthTest.java"}) {
+		t.Fatal("sourceChangedWithoutTests() = true when test file changed too")
+	}
+}
+
+func TestReplayRiskFlagsInfrastructureAndSecurityFiles(t *testing.T) {
+	files := []string{
+		".github/workflows/deploy.yml",
+		".env",
+		"infra/main.tf",
+		"security/policy.yaml",
+		"docs/readme.md",
+	}
+	got := strings.Join(riskyReplayFiles(files), ",")
+	want := ".env,.github/workflows/deploy.yml,infra/main.tf,security/policy.yaml"
+	if got != want {
+		t.Fatalf("riskyReplayFiles() = %q, want %q", got, want)
+	}
+}
+
 func TestReplayEvalAgentSummariesRankAgents(t *testing.T) {
 	summaries := summarizeReplayEvalAgents([]ReplayRun{
 		{
@@ -449,6 +497,73 @@ func TestReplayEvalAgentSummariesRankAgents(t *testing.T) {
 	}
 	if summaries[2].Agent != "unsupported" || summaries[2].Skipped != 1 {
 		t.Fatalf("unsupported summary = %+v", summaries[2])
+	}
+}
+
+func TestReplayEvalAgentSummariesUseTokenTieBreaker(t *testing.T) {
+	summaries := summarizeReplayEvalAgents([]ReplayRun{
+		{
+			Agent:      "expensive",
+			Status:     replayStatusPassed,
+			DurationMS: 1000,
+			Metrics:    ReplayMetrics{FileRecall: 100, FilePrecision: 100, SemanticAvailable: true, SemanticSimilarity: 90},
+			TokenUsage: &agentpkg.TokenUsage{InputTokens: 100, OutputTokens: 20},
+		},
+		{
+			Agent:      "cheap",
+			Status:     replayStatusPassed,
+			DurationMS: 1000,
+			Metrics:    ReplayMetrics{FileRecall: 100, FilePrecision: 100, SemanticAvailable: true, SemanticSimilarity: 90},
+			TokenUsage: &agentpkg.TokenUsage{InputTokens: 10, OutputTokens: 2},
+		},
+	})
+
+	if len(summaries) != 2 {
+		t.Fatalf("summaries = %d, want 2", len(summaries))
+	}
+	if summaries[0].Agent != "cheap" {
+		t.Fatalf("top summary = %+v, want cheap token tie-breaker", summaries[0])
+	}
+}
+
+func TestSortReplayRunsUsesSemanticAndTokenTieBreakers(t *testing.T) {
+	runs := []ReplayRun{
+		{
+			ID:         "expensive",
+			Agent:      "expensive",
+			Status:     replayStatusPassed,
+			Test:       ReplayTestRun{Status: replayStatusPassed},
+			Metrics:    ReplayMetrics{FileRecall: 100, FilePrecision: 100, SemanticAvailable: true, SemanticSimilarity: 95},
+			TokenUsage: &agentpkg.TokenUsage{InputTokens: 100, OutputTokens: 10},
+			DurationMS: 1000,
+		},
+		{
+			ID:         "better-semantic",
+			Agent:      "better-semantic",
+			Status:     replayStatusPassed,
+			Test:       ReplayTestRun{Status: replayStatusPassed},
+			Metrics:    ReplayMetrics{FileRecall: 100, FilePrecision: 100, SemanticAvailable: true, SemanticSimilarity: 99},
+			TokenUsage: &agentpkg.TokenUsage{InputTokens: 1000, OutputTokens: 100},
+			DurationMS: 2000,
+		},
+		{
+			ID:         "cheap",
+			Agent:      "cheap",
+			Status:     replayStatusPassed,
+			Test:       ReplayTestRun{Status: replayStatusPassed},
+			Metrics:    ReplayMetrics{FileRecall: 100, FilePrecision: 100, SemanticAvailable: true, SemanticSimilarity: 95},
+			TokenUsage: &agentpkg.TokenUsage{InputTokens: 10, OutputTokens: 1},
+			DurationMS: 1000,
+		},
+	}
+
+	sortReplayRuns(runs)
+
+	if runs[0].ID != "better-semantic" {
+		t.Fatalf("first run = %+v, want better semantic match first", runs[0])
+	}
+	if runs[1].ID != "cheap" {
+		t.Fatalf("second run = %+v, want cheaper token tie-breaker", runs[1])
 	}
 }
 

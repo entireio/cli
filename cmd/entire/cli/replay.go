@@ -65,24 +65,25 @@ type ReplaySpec struct {
 }
 
 type ReplayRun struct {
-	ID           string            `json:"id"`
-	Spec         ReplaySpec        `json:"spec"`
-	Agent        string            `json:"agent"`
-	Model        string            `json:"model,omitempty"`
-	Status       string            `json:"status"`
-	StartedAt    time.Time         `json:"started_at"`
-	FinishedAt   time.Time         `json:"finished_at"`
-	DurationMS   int64             `json:"duration_ms"`
-	WorktreePath string            `json:"worktree_path,omitempty"`
-	ChangedFiles []string          `json:"changed_files"`
-	Diff         string            `json:"diff,omitempty"`
-	Test         ReplayTestRun     `json:"test"`
-	Metrics      ReplayMetrics     `json:"metrics"`
-	TokenUsage   *agent.TokenUsage `json:"token_usage,omitempty"`
-	Warnings     []string          `json:"warnings,omitempty"`
-	Error        string            `json:"error,omitempty"`
-	Output       string            `json:"output,omitempty"`
-	ResultPath   string            `json:"result_path,omitempty"`
+	SchemaVersion int               `json:"schema_version,omitempty"`
+	ID            string            `json:"id"`
+	Spec          ReplaySpec        `json:"spec"`
+	Agent         string            `json:"agent"`
+	Model         string            `json:"model,omitempty"`
+	Status        string            `json:"status"`
+	StartedAt     time.Time         `json:"started_at"`
+	FinishedAt    time.Time         `json:"finished_at"`
+	DurationMS    int64             `json:"duration_ms"`
+	WorktreePath  string            `json:"worktree_path,omitempty"`
+	ChangedFiles  []string          `json:"changed_files"`
+	Diff          string            `json:"diff,omitempty"`
+	Test          ReplayTestRun     `json:"test"`
+	Metrics       ReplayMetrics     `json:"metrics"`
+	TokenUsage    *agent.TokenUsage `json:"token_usage,omitempty"`
+	Warnings      []string          `json:"warnings,omitempty"`
+	Error         string            `json:"error,omitempty"`
+	Output        string            `json:"output,omitempty"`
+	ResultPath    string            `json:"result_path,omitempty"`
 }
 
 type ReplayTestRun struct {
@@ -124,13 +125,14 @@ type ReplayEvalAgentSummary struct {
 }
 
 type ReplayEvalRun struct {
-	ID         string                   `json:"id"`
-	StartedAt  time.Time                `json:"started_at"`
-	FinishedAt time.Time                `json:"finished_at"`
-	Agents     []string                 `json:"agents"`
-	Summaries  []ReplayEvalAgentSummary `json:"summaries,omitempty"`
-	Runs       []ReplayRun              `json:"runs"`
-	ResultPath string                   `json:"result_path,omitempty"`
+	SchemaVersion int                      `json:"schema_version,omitempty"`
+	ID            string                   `json:"id"`
+	StartedAt     time.Time                `json:"started_at"`
+	FinishedAt    time.Time                `json:"finished_at"`
+	Agents        []string                 `json:"agents"`
+	Summaries     []ReplayEvalAgentSummary `json:"summaries,omitempty"`
+	Runs          []ReplayRun              `json:"runs"`
+	ResultPath    string                   `json:"result_path,omitempty"`
 }
 
 type ReplayRunnerRequest struct {
@@ -171,6 +173,7 @@ var (
 const (
 	replayAgentGeminiCLI    = "gemini-cli"
 	replayResultOutputLimit = 64 * 1024
+	replaySchemaVersion     = 1
 	replayStatusFailed      = "failed"
 	replayStatusPassed      = "passed"
 	replayStatusRunning     = "running"
@@ -330,22 +333,24 @@ func runReplayEval(ctx context.Context, opts replayEvalOptions) (*ReplayEvalRun,
 	}
 
 	eval := &ReplayEvalRun{
-		ID:        newReplayID(),
-		StartedAt: time.Now().UTC(),
-		Agents:    agents,
+		SchemaVersion: replaySchemaVersion,
+		ID:            newReplayID(),
+		StartedAt:     time.Now().UTC(),
+		Agents:        agents,
 	}
 	for _, cp := range checkpoints {
 		spec, err := buildReplaySpec(ctx, cp)
 		if err != nil {
 			now := time.Now().UTC()
 			eval.Runs = append(eval.Runs, ReplayRun{
-				ID:         newReplayID(),
-				Status:     replayStatusFailed,
-				StartedAt:  now,
-				FinishedAt: now,
-				Error:      err.Error(),
-				Spec:       ReplaySpec{CheckpointID: cp},
-				Test:       ReplayTestRun{Status: replayTestStatusSkipped},
+				SchemaVersion: replaySchemaVersion,
+				ID:            newReplayID(),
+				Status:        replayStatusFailed,
+				StartedAt:     now,
+				FinishedAt:    now,
+				Error:         err.Error(),
+				Spec:          ReplaySpec{CheckpointID: cp},
+				Test:          ReplayTestRun{Status: replayTestStatusSkipped},
 			})
 			continue
 		}
@@ -353,15 +358,16 @@ func runReplayEval(ctx context.Context, opts replayEvalOptions) (*ReplayEvalRun,
 			if err := validateReplayAgentAvailable(agentName); err != nil {
 				now := time.Now().UTC()
 				eval.Runs = append(eval.Runs, ReplayRun{
-					ID:         newReplayID(),
-					Spec:       spec,
-					Agent:      agentName,
-					Model:      opts.Model,
-					Status:     replayStatusSkipped,
-					StartedAt:  now,
-					FinishedAt: now,
-					Test:       ReplayTestRun{Status: replayTestStatusSkipped},
-					Error:      err.Error(),
+					SchemaVersion: replaySchemaVersion,
+					ID:            newReplayID(),
+					Spec:          spec,
+					Agent:         agentName,
+					Model:         opts.Model,
+					Status:        replayStatusSkipped,
+					StartedAt:     now,
+					FinishedAt:    now,
+					Test:          ReplayTestRun{Status: replayTestStatusSkipped},
+					Error:         err.Error(),
 				})
 				continue
 			}
@@ -376,15 +382,16 @@ func runReplayEval(ctx context.Context, opts replayEvalOptions) (*ReplayEvalRun,
 			if err != nil {
 				now := time.Now().UTC()
 				run = &ReplayRun{
-					ID:         newReplayID(),
-					Spec:       spec,
-					Agent:      agentName,
-					Model:      opts.Model,
-					Status:     replayStatusFailed,
-					StartedAt:  now,
-					FinishedAt: now,
-					Test:       ReplayTestRun{Status: replayTestStatusSkipped},
-					Error:      err.Error(),
+					SchemaVersion: replaySchemaVersion,
+					ID:            newReplayID(),
+					Spec:          spec,
+					Agent:         agentName,
+					Model:         opts.Model,
+					Status:        replayStatusFailed,
+					StartedAt:     now,
+					FinishedAt:    now,
+					Test:          ReplayTestRun{Status: replayTestStatusSkipped},
+					Error:         err.Error(),
 				}
 			}
 			eval.Runs = append(eval.Runs, *run)
@@ -497,13 +504,14 @@ func executeReplay(ctx context.Context, spec ReplaySpec, opts replayCheckpointOp
 	defer cancel()
 
 	run := &ReplayRun{
-		ID:        newReplayID(),
-		Spec:      spec,
-		Agent:     runner.Name(),
-		Model:     opts.Model,
-		Status:    replayStatusRunning,
-		StartedAt: time.Now().UTC(),
-		Test:      ReplayTestRun{Status: replayTestStatusSkipped},
+		SchemaVersion: replaySchemaVersion,
+		ID:            newReplayID(),
+		Spec:          spec,
+		Agent:         runner.Name(),
+		Model:         opts.Model,
+		Status:        replayStatusRunning,
+		StartedAt:     time.Now().UTC(),
+		Test:          ReplayTestRun{Status: replayTestStatusSkipped},
 	}
 
 	worktree, err := createReplayWorktree(runCtx, repoRoot, spec.BaseCommit)
@@ -1004,6 +1012,9 @@ func saveReplayRun(ctx context.Context, run *ReplayRun) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if run.SchemaVersion == 0 {
+		run.SchemaVersion = replaySchemaVersion
+	}
 	path := filepath.Join(dir, run.ID+".json")
 	run.ResultPath = path
 	return path, writeReplayFile(path, run)
@@ -1024,6 +1035,9 @@ func readReplayRun(ctx context.Context, runID string) (*ReplayRun, error) {
 	if err := json.Unmarshal(data, &run); err != nil {
 		return nil, fmt.Errorf("parse replay report: %w", err)
 	}
+	if run.SchemaVersion == 0 {
+		run.SchemaVersion = replaySchemaVersion
+	}
 	run.ResultPath = path
 	return &run, nil
 }
@@ -1032,6 +1046,14 @@ func saveReplayEval(ctx context.Context, run *ReplayEvalRun) (string, error) {
 	dir, err := replayEvalsDir(ctx)
 	if err != nil {
 		return "", err
+	}
+	if run.SchemaVersion == 0 {
+		run.SchemaVersion = replaySchemaVersion
+	}
+	for i := range run.Runs {
+		if run.Runs[i].SchemaVersion == 0 {
+			run.Runs[i].SchemaVersion = replaySchemaVersion
+		}
 	}
 	path := filepath.Join(dir, run.ID+".json")
 	run.ResultPath = path
@@ -1052,6 +1074,14 @@ func readReplayEval(ctx context.Context, runID string) (*ReplayEvalRun, error) {
 	var run ReplayEvalRun
 	if err := json.Unmarshal(data, &run); err != nil {
 		return nil, fmt.Errorf("parse eval report: %w", err)
+	}
+	if run.SchemaVersion == 0 {
+		run.SchemaVersion = replaySchemaVersion
+	}
+	for i := range run.Runs {
+		if run.Runs[i].SchemaVersion == 0 {
+			run.Runs[i].SchemaVersion = replaySchemaVersion
+		}
 	}
 	run.ResultPath = path
 	return &run, nil
@@ -1142,6 +1172,7 @@ func riskyReplayFiles(files []string) []string {
 			strings.Contains(lower, "secret") ||
 			strings.Contains(lower, "credential") ||
 			strings.Contains(lower, "permission") ||
+			strings.Contains(lower, "security") ||
 			strings.Contains(lower, "payment") ||
 			strings.Contains(lower, "billing") ||
 			strings.Contains(lower, "/db/") ||
@@ -1150,7 +1181,12 @@ func riskyReplayFiles(files []string) []string {
 			strings.Contains(lower, "schema") ||
 			strings.Contains(lower, "policy") ||
 			strings.HasSuffix(lower, ".sql") ||
-			strings.Contains(lower, "config") {
+			strings.Contains(lower, "config") ||
+			strings.Contains(lower, "infra") ||
+			strings.Contains(lower, "deploy") ||
+			strings.Contains(lower, ".github/workflows/") ||
+			strings.HasSuffix(lower, ".env") ||
+			strings.HasSuffix(lower, ".tf") {
 			risky = append(risky, file)
 		}
 	}
@@ -1167,17 +1203,56 @@ func sourceChangedWithoutTests(files []string) bool {
 			hasTest = true
 			continue
 		}
-		switch {
-		case strings.HasSuffix(lower, ".go"),
-			strings.HasSuffix(lower, ".py"),
-			strings.HasSuffix(lower, ".js"),
-			strings.HasSuffix(lower, ".ts"),
-			strings.HasSuffix(lower, ".tsx"),
-			strings.HasSuffix(lower, ".rs"):
+		if isReplaySourceFile(lower) {
 			hasSource = true
 		}
 	}
 	return hasSource && !hasTest
+}
+
+func isReplaySourceFile(lowerPath string) bool {
+	switch filepath.Ext(lowerPath) {
+	case ".bash",
+		".c",
+		".cc",
+		".cpp",
+		".cs",
+		".cue",
+		".cxx",
+		".ex",
+		".exs",
+		".go",
+		".groovy",
+		".h",
+		".hcl",
+		".hpp",
+		".hs",
+		".hxx",
+		".java",
+		".js",
+		".jsx",
+		".kt",
+		".kts",
+		".lua",
+		".mli",
+		".ml",
+		".php",
+		".proto",
+		".py",
+		".rb",
+		".rs",
+		".scala",
+		".sc",
+		".sh",
+		".sql",
+		".swift",
+		".tf",
+		".ts",
+		".tsx":
+		return true
+	default:
+		return false
+	}
 }
 
 func sortReplayRuns(runs []ReplayRun) {
@@ -1195,8 +1270,22 @@ func sortReplayRuns(runs []ReplayRun) {
 		if a.Metrics.FilePrecision != b.Metrics.FilePrecision {
 			return a.Metrics.FilePrecision > b.Metrics.FilePrecision
 		}
+		if a.Metrics.SemanticAvailable != b.Metrics.SemanticAvailable {
+			return a.Metrics.SemanticAvailable
+		}
+		if a.Metrics.SemanticAvailable && a.Metrics.SemanticSimilarity != b.Metrics.SemanticSimilarity {
+			return a.Metrics.SemanticSimilarity > b.Metrics.SemanticSimilarity
+		}
 		if a.Metrics.RiskScore != b.Metrics.RiskScore {
 			return a.Metrics.RiskScore < b.Metrics.RiskScore
+		}
+		aTokens, aHasTokens := replayTokenCount(a.TokenUsage)
+		bTokens, bHasTokens := replayTokenCount(b.TokenUsage)
+		if aHasTokens != bHasTokens {
+			return aHasTokens
+		}
+		if aHasTokens && aTokens != bTokens {
+			return aTokens < bTokens
 		}
 		return a.DurationMS < b.DurationMS
 	})
@@ -1286,6 +1375,14 @@ func sortReplayEvalSummaries(summaries []ReplayEvalAgentSummary) {
 		}
 		if a.RiskScore != b.RiskScore {
 			return a.RiskScore < b.RiskScore
+		}
+		aTokens, aHasTokens := replaySummaryTokenCount(a)
+		bTokens, bHasTokens := replaySummaryTokenCount(b)
+		if aHasTokens != bHasTokens {
+			return aHasTokens
+		}
+		if aHasTokens && aTokens != bTokens {
+			return aTokens < bTokens
 		}
 		if a.AvgDurationMS != b.AvgDurationMS {
 			return a.AvgDurationMS < b.AvgDurationMS
@@ -1431,6 +1528,21 @@ func replayTokenUsageText(usage *agent.TokenUsage) string {
 	}
 	input := usage.InputTokens + usage.CacheCreationTokens + usage.CacheReadTokens
 	return fmt.Sprintf("%d in, %d out", input, usage.OutputTokens)
+}
+
+func replayTokenCount(usage *agent.TokenUsage) (int, bool) {
+	if usage == nil {
+		return 0, false
+	}
+	input := usage.InputTokens + usage.CacheCreationTokens + usage.CacheReadTokens
+	output := usage.OutputTokens
+	total := input + output
+	return total, total > 0
+}
+
+func replaySummaryTokenCount(summary ReplayEvalAgentSummary) (int, bool) {
+	total := summary.InputTokens + summary.OutputTokens
+	return total, total > 0
 }
 
 func replayEvalTokenText(summary ReplayEvalAgentSummary) string {
