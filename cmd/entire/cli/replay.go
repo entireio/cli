@@ -77,6 +77,7 @@ type ReplayRun struct {
 	WorktreePath  string            `json:"worktree_path,omitempty"`
 	ChangedFiles  []string          `json:"changed_files"`
 	Diff          string            `json:"diff,omitempty"`
+	DiffTruncated bool              `json:"diff_truncated,omitempty"`
 	Test          ReplayTestRun     `json:"test"`
 	Metrics       ReplayMetrics     `json:"metrics"`
 	TokenUsage    *agent.TokenUsage `json:"token_usage,omitempty"`
@@ -172,6 +173,7 @@ var (
 
 const (
 	replayAgentGeminiCLI    = "gemini-cli"
+	replayResultDiffLimit   = 256 * 1024
 	replayResultOutputLimit = 64 * 1024
 	replaySchemaVersion     = 1
 	replayStatusFailed      = "failed"
@@ -541,7 +543,7 @@ func executeReplay(ctx context.Context, spec ReplaySpec, opts replayCheckpointOp
 		run.Warnings = append(run.Warnings, fmt.Sprintf("failed to read replay diff: %v", diffErr))
 	} else {
 		run.ChangedFiles = files
-		run.Diff = diff
+		run.Diff, run.DiffTruncated = truncateReplayDiff(diff)
 	}
 	run.Metrics = replayMetrics(runCtx, repoRoot, worktree, spec, run.ChangedFiles)
 
@@ -1678,6 +1680,13 @@ func truncateReplayOutput(output string) string {
 		return output
 	}
 	return output[:replayResultOutputLimit] + "\n...[truncated]"
+}
+
+func truncateReplayDiff(diff string) (string, bool) {
+	if len(diff) <= replayResultDiffLimit {
+		return diff, false
+	}
+	return diff[:replayResultDiffLimit] + "\n...[diff truncated]", true
 }
 
 func shortReplaySHA(sha string) string {

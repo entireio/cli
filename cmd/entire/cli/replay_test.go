@@ -201,6 +201,40 @@ func TestReplayCheckpointCapturesCommittedAgentResult(t *testing.T) {
 	}
 }
 
+func TestReplayCheckpointTruncatesLargeDiff(t *testing.T) {
+	_, cpID, _, _ := newReplayRepo(t)
+	restore := stubReplayRunner(func(_ context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {
+		largeContent := "def greet():\n    return 'hello'\n\n" + strings.Repeat("# replay filler line\n", 40000)
+		if err := os.WriteFile(filepath.Join(req.WorktreePath, replayFixtureFile), []byte(largeContent), 0o644); err != nil {
+			return ReplayRunnerResult{}, err
+		}
+		return ReplayRunnerResult{Output: "large replay completed"}, nil
+	})
+	defer restore()
+
+	run, err := runReplayCheckpoint(context.Background(), cpID, replayCheckpointOptions{Agent: fakeReplayAgent})
+	if err != nil {
+		t.Fatalf("runReplayCheckpoint() error = %v", err)
+	}
+	if !run.DiffTruncated {
+		t.Fatal("DiffTruncated = false, want true")
+	}
+	if len(run.Diff) > replayResultDiffLimit+len("\n...[diff truncated]") {
+		t.Fatalf("diff length = %d, want capped", len(run.Diff))
+	}
+	if !strings.Contains(run.Diff, "...[diff truncated]") {
+		t.Fatalf("diff missing truncation marker")
+	}
+
+	loaded, err := readReplayRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("readReplayRun() error = %v", err)
+	}
+	if !loaded.DiffTruncated {
+		t.Fatal("loaded DiffTruncated = false, want true")
+	}
+}
+
 func TestReplayCheckpointMetricsIgnoreTestArtifacts(t *testing.T) {
 	_, cpID, _, _ := newReplayRepo(t)
 	restore := stubReplayRunner(func(_ context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {
