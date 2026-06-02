@@ -181,6 +181,12 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, clusterBaseURL string
 // actually advertises — anchored to the clone URL's host the user typed (TLS to
 // its /.well-known/entire-cluster.json), not to the token's own claims. Without
 // this gate a forged aud could redirect the token to an attacker-chosen host.
+//
+// The gate is only as strong as that TLS verification: with
+// ENTIRE_TLS_SKIP_VERIFY=true (a local-dev escape hatch) the well-known fetch
+// is no longer authenticated, so a MITM could advertise an attacker host as a
+// trusted core. Do not combine ENTIRE_TOKEN with ENTIRE_TLS_SKIP_VERIFY in
+// CI / workload-identity environments.
 func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, clusterBaseURL, cacheDir string, httpClient *http.Client) (*repocreds.Cache, error) {
 	// Trim once here so both the aud-derivation and the exchanged subject_token
 	// use the cleaned value. A token sourced via $(cat token) often carries a

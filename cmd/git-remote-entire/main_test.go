@@ -162,6 +162,24 @@ func TestResolveEnvTokenCreds_UntrustedAudAborts(t *testing.T) {
 	}
 }
 
+func TestResolveEnvTokenCreds_EmptyAdvertisedCoresAborts(t *testing.T) {
+	t.Parallel()
+	// Discovery succeeds (HTTP 200) but advertises no cores. With nothing to
+	// trust, the gate must fail closed rather than trusting the token's aud.
+	srv, clusterHost := wellKnownServer(t, []string{})
+
+	creds, err := resolveEnvTokenCreds(
+		t.Context(), makeTestJWT(t, "https://core.us.entire.io"), clusterHost,
+		"https://cluster.example.com", t.TempDir(), srv.Client(),
+	)
+	if err == nil {
+		t.Fatal("expected empty advertised core set to be rejected")
+	}
+	if creds != nil {
+		t.Fatal("expected nil creds when no cores are advertised")
+	}
+}
+
 func TestResolveEnvTokenCreds_DiscoveryFailureAborts(t *testing.T) {
 	t.Parallel()
 	// Cluster advertises no cores (HTTP 503) → discovery fails → we must abort
