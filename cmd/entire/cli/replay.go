@@ -174,16 +174,17 @@ var (
 )
 
 const (
-	replayAgentGeminiCLI    = "gemini-cli"
-	replayInspectionTimeout = 2 * time.Minute
-	replayResultDiffLimit   = 256 * 1024
-	replayResultOutputLimit = 64 * 1024
-	replaySchemaVersion     = 1
-	replayStatusFailed      = "failed"
-	replayStatusPassed      = "passed"
-	replayStatusRunning     = "running"
-	replayStatusSkipped     = "skipped"
-	replayTestStatusSkipped = replayStatusSkipped
+	replayAgentGeminiCLI          = "gemini-cli"
+	replayInspectionTimeout       = 2 * time.Minute
+	replayRenderedOutputLineLimit = 20
+	replayResultDiffLimit         = 256 * 1024
+	replayResultOutputLimit       = 64 * 1024
+	replaySchemaVersion           = 1
+	replayStatusFailed            = "failed"
+	replayStatusPassed            = "passed"
+	replayStatusRunning           = "running"
+	replayStatusSkipped           = "skipped"
+	replayTestStatusSkipped       = replayStatusSkipped
 )
 
 func newReplayCmd() *cobra.Command {
@@ -1490,10 +1491,24 @@ func renderReplayBlock(w io.Writer, sty statusStyles, text string, truncated boo
 	if text == "" {
 		return
 	}
-	for _, line := range strings.Split(text, "\n") {
+	lines := strings.Split(text, "\n")
+	visibleLines := lines
+	omittedLines := 0
+	if len(lines) > replayRenderedOutputLineLimit {
+		visibleLines = lines[:replayRenderedOutputLineLimit]
+		omittedLines = len(lines) - replayRenderedOutputLineLimit
+	}
+	visibleHasTruncationMarker := false
+	for _, line := range visibleLines {
+		if strings.Contains(line, "...[truncated]") {
+			visibleHasTruncationMarker = true
+		}
 		fmt.Fprintf(w, "  │ %s\n", sty.render(sty.dim, line))
 	}
-	if truncated && !strings.Contains(text, "...[truncated]") {
+	if omittedLines > 0 {
+		fmt.Fprintf(w, "  │ %s\n", sty.render(sty.dim, fmt.Sprintf("...[%d more lines in saved report]", omittedLines)))
+	}
+	if truncated && !visibleHasTruncationMarker {
 		fmt.Fprintf(w, "  │ %s\n", sty.render(sty.dim, "...[truncated]"))
 	}
 }

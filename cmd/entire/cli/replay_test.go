@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -841,6 +842,43 @@ func TestRenderReplayRunHidesSuccessfulOutput(t *testing.T) {
 	text := out.String()
 	if strings.Contains(text, "Agent output:") || strings.Contains(text, "successful but noisy") || strings.Contains(text, "Test output:") {
 		t.Fatalf("successful replay should not print noisy output:\n%s", text)
+	}
+}
+
+func TestRenderReplayRunLimitsFailureOutputLines(t *testing.T) {
+	var agentLines []string
+	for i := 1; i <= replayRenderedOutputLineLimit+5; i++ {
+		agentLines = append(agentLines, fmt.Sprintf("agent line %02d", i))
+	}
+	run := &ReplayRun{
+		ID:              "abc123def456",
+		Agent:           fakeReplayAgent,
+		Status:          replayStatusFailed,
+		Output:          strings.Join(agentLines, "\n"),
+		OutputTruncated: true,
+		Spec: ReplaySpec{
+			CheckpointID: "a1b2c3d4e5f6",
+			BaseCommit:   "1111111111111111111111111111111111111111",
+			TargetCommit: "2222222222222222222222222222222222222222",
+		},
+		Test:    ReplayTestRun{Status: replayTestStatusSkipped},
+		Metrics: ReplayMetrics{FileRecall: 50, FilePrecision: 100},
+	}
+
+	var out bytes.Buffer
+	renderReplayRun(&out, run)
+	text := out.String()
+	if !strings.Contains(text, "agent line 01") || !strings.Contains(text, fmt.Sprintf("agent line %02d", replayRenderedOutputLineLimit)) {
+		t.Fatalf("rendered output missing visible boundary lines:\n%s", text)
+	}
+	if strings.Contains(text, fmt.Sprintf("agent line %02d", replayRenderedOutputLineLimit+1)) {
+		t.Fatalf("rendered output leaked omitted line:\n%s", text)
+	}
+	if !strings.Contains(text, "...[5 more lines in saved report]") {
+		t.Fatalf("rendered output missing omitted line count:\n%s", text)
+	}
+	if !strings.Contains(text, "...[truncated]") {
+		t.Fatalf("rendered output missing truncation marker:\n%s", text)
 	}
 }
 
