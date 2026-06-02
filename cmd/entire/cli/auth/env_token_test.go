@@ -19,19 +19,49 @@ func TestCoreURLFromEnvToken(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "string aud",
+			name: "https string aud",
 			aud:  "https://core.us.entire.io",
 			want: "https://core.us.entire.io",
 		},
 		{
-			name: "string aud trailing slash trimmed",
+			name: "https aud trailing slash trimmed",
 			aud:  "https://core.us.entire.io/",
 			want: "https://core.us.entire.io",
 		},
 		{
-			name: "array aud picks first URL-shaped",
+			name: "array aud skips opaque, picks URL-shaped https",
 			aud:  []string{"entire-cli", "https://core.eu.entire.io"},
 			want: "https://core.eu.entire.io",
+		},
+		{
+			name:    "http aud rejected (cleartext)",
+			aud:     "http://core.us.entire.io",
+			wantErr: true,
+		},
+		{
+			name:    "aud with path rejected",
+			aud:     "https://core.us.entire.io/oauth/token",
+			wantErr: true,
+		},
+		{
+			name:    "aud with query rejected",
+			aud:     "https://core.us.entire.io?x=1",
+			wantErr: true,
+		},
+		{
+			name:    "aud with fragment rejected",
+			aud:     "https://core.us.entire.io#frag",
+			wantErr: true,
+		},
+		{
+			name:    "aud with userinfo rejected",
+			aud:     "https://user:pass@core.us.entire.io",
+			wantErr: true,
+		},
+		{
+			name:    "url-shaped non-https aud fails closed even with later https entry",
+			aud:     []string{"http://evil.example.com", "https://core.us.entire.io"},
+			wantErr: true,
 		},
 		{
 			name:    "opaque string aud rejected",

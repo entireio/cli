@@ -66,6 +66,20 @@ func ResolveContextForCluster(ctx context.Context, configDir, cacheDir, clusterH
 	return selectContext(f, clusterHost, coreURLs, debugf)
 }
 
+// ResolveClusterCores returns the trusted control-plane core URLs that
+// front clusterHost, using the same cache-then-/.well-known discovery as
+// ResolveContextForCluster (see resolveClusterCores). Exported for callers
+// that need the cluster's trusted-core set without account selection — e.g.
+// the ENTIRE_TOKEN path validates that the env token's audience is one of
+// these before exchanging it, so an unverified JWT can't redirect the
+// token exchange to an attacker-chosen host.
+func ResolveClusterCores(ctx context.Context, cacheDir, clusterHost string, httpClient *http.Client, debugf DebugFunc) ([]string, error) {
+	if debugf == nil {
+		debugf = func(string, ...any) {}
+	}
+	return resolveClusterCores(ctx, cacheDir, clusterHost, httpClient, debugf)
+}
+
 // resolveClusterCores returns the control-plane core URLs that front
 // clusterHost, from cluster_cores.json when fresh, otherwise via a live
 // /.well-known fetch (which is then cached). A stale-but-present cache

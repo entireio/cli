@@ -144,14 +144,7 @@ func run(args []string) int {
 //     login JWT.
 func resolveCreds(ctx context.Context, parsedURL *url.URL, clusterBaseURL string, httpClient *http.Client) (*repocreds.Cache, error) {
 	if envToken := os.Getenv(auth.EnvTokenVar); envToken != "" {
-		coreURL, err := auth.CoreURLFromEnvToken(envToken)
-		if err != nil {
-			return nil, err //nolint:wrapcheck // CoreURLFromEnvToken already returns a user-facing, ENTIRE_TOKEN-prefixed error
-		}
-		debuglog.Printf("authenticating via %s; core=%s", auth.EnvTokenVar, coreURL)
-		return repocreds.New(coreURL, clusterBaseURL, func(context.Context) (string, error) {
-			return envToken, nil
-		}, httpClient), nil
+		return resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, clusterBaseURL, discovery.DefaultCacheDir(), httpClient)
 	}
 
 	// Bridge any pre-contexts.json login so the resolver can find it.
@@ -175,6 +168,49 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, clusterBaseURL string
 	return repocreds.New(clusterCtx.CoreURL, clusterBaseURL, func(context.Context) (string, error) {
 		return auth.LoginTokenForContext(clusterCtx)
 	}, httpClient), nil
+}
+
+// resolveEnvTokenCreds builds the repo-cred cache for the ENTIRE_TOKEN path.
+// Split out of resolveCreds with explicit clusterHost/cacheDir params (no
+// os.Getenv / DefaultCacheDir globals) so the trust gate below is unit-testable
+// against a fake well-known server.
+//
+// SECURITY: coreURL is derived from the env token's *unverified* aud claim, and
+// it becomes the host the token is POSTed to as a subject_token during
+// exchange. Before trusting it, we confirm the core is one the target cluster
+// actually advertises — anchored to the clone URL's host the user typed (TLS to
+// its /.well-known/entire-cluster.json), not to the token's own claims. Without
+// this gate a forged aud could redirect the token to an attacker-chosen host.
+func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, clusterBaseURL, cacheDir string, httpClient *http.Client) (*repocreds.Cache, error) {
+	coreURL, err := auth.CoreURLFromEnvToken(envToken)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // CoreURLFromEnvToken already returns a user-facing, ENTIRE_TOKEN-prefixed error
+	}
+	cores, err := clusterdiscovery.ResolveClusterCores(ctx, cacheDir, clusterHost, httpClient, debuglog.Printf)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // ResolveClusterCores returns a user-facing discovery error
+	}
+	if !coreTrusted(coreURL, cores) {
+		return nil, fmt.Errorf("%s aud %q is not a trusted core for cluster %s (advertised: %s); the token belongs to a different cluster",
+			auth.EnvTokenVar, coreURL, clusterHost, strings.Join(cores, ", "))
+	}
+	debuglog.Printf("authenticating via %s; core=%s", auth.EnvTokenVar, coreURL)
+	return repocreds.New(coreURL, clusterBaseURL, func(context.Context) (string, error) {
+		return envToken, nil
+	}, httpClient), nil
+}
+
+// coreTrusted reports whether coreURL is in the cluster's advertised core
+// set, comparing on trailing-slash-insensitive equality to match how core
+// URLs are compared elsewhere (contexts.ContextsForIssuer, auth.sameIssuer).
+func coreTrusted(coreURL string, trusted []string) bool {
+	want := strings.TrimRight(coreURL, "/")
+	for _, t := range trusted {
+		if strings.TrimRight(t, "/") == want {
+			return true
+		}
+	}
+	return false
 }
 
 // gitActionFromRequest classifies a smart-HTTP request as "pull" or "push"
