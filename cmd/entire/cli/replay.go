@@ -163,7 +163,10 @@ func (f replayRunnerFunc) Run(ctx context.Context, req ReplayRunnerRequest) (Rep
 	return f.fn(ctx, req)
 }
 
-var replayRunnerFor = defaultReplayRunnerFor
+var (
+	replayRunnerFor       = defaultReplayRunnerFor
+	replayCommandForAgent = defaultReplayCommandForAgent
+)
 
 const (
 	replayAgentGeminiCLI    = "gemini-cli"
@@ -298,6 +301,9 @@ func newEvalReportCmd() *cobra.Command {
 }
 
 func runReplayCheckpoint(ctx context.Context, checkpointRef string, opts replayCheckpointOptions) (*ReplayRun, error) {
+	if err := validateReplayAgentAvailable(opts.Agent); err != nil {
+		return nil, err
+	}
 	spec, err := buildReplaySpec(ctx, checkpointRef)
 	if err != nil {
 		return nil, err
@@ -344,7 +350,7 @@ func runReplayEval(ctx context.Context, opts replayEvalOptions) (*ReplayEvalRun,
 			continue
 		}
 		for _, agentName := range agents {
-			if replayRunnerFor(agentName) == nil {
+			if err := validateReplayAgentAvailable(agentName); err != nil {
 				now := time.Now().UTC()
 				eval.Runs = append(eval.Runs, ReplayRun{
 					ID:         newReplayID(),
@@ -355,7 +361,7 @@ func runReplayEval(ctx context.Context, opts replayEvalOptions) (*ReplayEvalRun,
 					StartedAt:  now,
 					FinishedAt: now,
 					Test:       ReplayTestRun{Status: replayTestStatusSkipped},
-					Error:      fmt.Sprintf("agent %q is not launchable for replay yet", agentName),
+					Error:      err.Error(),
 				})
 				continue
 			}
@@ -570,6 +576,33 @@ func defaultReplayRunnerFor(agentName string) *replayRunnerFunc {
 	}
 }
 
+func validateReplayAgentAvailable(agentName string) error {
+	if replayRunnerFor(agentName) == nil {
+		return fmt.Errorf("agent %q is not launchable for replay yet", agentName)
+	}
+	command := replayCommandForAgent(agentName)
+	if command == "" {
+		return nil
+	}
+	if _, err := exec.LookPath(command); err != nil {
+		return fmt.Errorf("agent %q requires %q on PATH: %w", agentName, command, err)
+	}
+	return nil
+}
+
+func defaultReplayCommandForAgent(agentName string) string {
+	switch agentName {
+	case string(agent.AgentNameClaudeCode):
+		return "claude"
+	case string(agent.AgentNameCodex):
+		return string(agent.AgentNameCodex)
+	case string(agent.AgentNameGemini), replayAgentGeminiCLI:
+		return string(agent.AgentNameGemini)
+	default:
+		return ""
+	}
+}
+
 func runClaudeReplay(ctx context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {
 	args := []string{"-p", req.Prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits"}
 	if req.Model != "" {
@@ -584,7 +617,7 @@ func runCodexReplay(ctx context.Context, req ReplayRunnerRequest) (ReplayRunnerR
 		args = append(args, "--model", req.Model)
 	}
 	args = append(args, "-")
-	return runReplayProcess(ctx, req.WorktreePath, "codex", args, strings.NewReader(req.Prompt))
+	return runReplayProcess(ctx, req.WorktreePath, string(agent.AgentNameCodex), args, strings.NewReader(req.Prompt))
 }
 
 func runGeminiReplay(ctx context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {
@@ -592,7 +625,7 @@ func runGeminiReplay(ctx context.Context, req ReplayRunnerRequest) (ReplayRunner
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}
-	return runReplayProcess(ctx, req.WorktreePath, "gemini", args, strings.NewReader(req.Prompt))
+	return runReplayProcess(ctx, req.WorktreePath, string(agent.AgentNameGemini), args, strings.NewReader(req.Prompt))
 }
 
 func runReplayProcess(ctx context.Context, dir, name string, args []string, stdin io.Reader) (ReplayRunnerResult, error) {

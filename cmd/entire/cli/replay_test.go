@@ -340,6 +340,59 @@ func TestReplayEvalSkipsUnsupportedAgent(t *testing.T) {
 	}
 }
 
+func TestReplayCheckpointMissingAgentCommandFailsEarly(t *testing.T) {
+	restoreRunner := stubReplayRunner(func(_ context.Context, _ ReplayRunnerRequest) (ReplayRunnerResult, error) {
+		t.Fatal("runner should not execute when command is missing")
+		return ReplayRunnerResult{}, nil
+	})
+	defer restoreRunner()
+	restoreCommand := replayCommandForAgent
+	replayCommandForAgent = func(string) string {
+		return filepath.Join(t.TempDir(), "missing-agent-command")
+	}
+	defer func() { replayCommandForAgent = restoreCommand }()
+
+	_, err := runReplayCheckpoint(context.Background(), "does-not-need-a-real-checkpoint", replayCheckpointOptions{Agent: fakeReplayAgent})
+	if err == nil {
+		t.Fatal("runReplayCheckpoint() error = nil, want missing command error")
+	}
+	if !strings.Contains(err.Error(), "requires") || !strings.Contains(err.Error(), "missing-agent-command") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestReplayEvalSkipsMissingAgentCommand(t *testing.T) {
+	_, cpID, _, _ := newReplayRepo(t)
+	restoreRunner := stubReplayRunner(func(_ context.Context, _ ReplayRunnerRequest) (ReplayRunnerResult, error) {
+		t.Fatal("runner should not execute when command is missing")
+		return ReplayRunnerResult{}, nil
+	})
+	defer restoreRunner()
+	restoreCommand := replayCommandForAgent
+	replayCommandForAgent = func(string) string {
+		return filepath.Join(t.TempDir(), "missing-agent-command")
+	}
+	defer func() { replayCommandForAgent = restoreCommand }()
+
+	eval, err := runReplayEval(context.Background(), replayEvalOptions{
+		Checkpoints: []string{cpID},
+		Agents:      []string{fakeReplayAgent},
+	})
+	if err != nil {
+		t.Fatalf("runReplayEval() error = %v", err)
+	}
+	if len(eval.Runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(eval.Runs))
+	}
+	run := eval.Runs[0]
+	if run.Status != replayStatusSkipped || run.Test.Status != replayTestStatusSkipped {
+		t.Fatalf("run = %+v, want skipped run and skipped test", run)
+	}
+	if !strings.Contains(run.Error, "requires") || !strings.Contains(run.Error, "missing-agent-command") {
+		t.Fatalf("error = %q", run.Error)
+	}
+}
+
 func TestReplayMetricsFlagsExtraAndRiskyFiles(t *testing.T) {
 	metrics := replayMetrics(context.Background(), "", "", ReplaySpec{FilesTouched: []string{replayFixtureFile}}, []string{replayFixtureFile, "auth/config.yaml", "db/schema.sql"})
 
