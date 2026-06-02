@@ -132,13 +132,17 @@ func NewRefreshingLoginProvider(c *contexts.Context, transport http.RoundTripper
 		return nil, fmt.Errorf("init token manager for context %q: %w", c.Name, err)
 	}
 	name := c.Name
+	coreURL := strings.TrimRight(c.CoreURL, "/")
+	// Name the core in the re-login hint so a multi-core user logs back
+	// into the right one; matches clusterdiscovery.RenderLoginHint's idiom.
+	relogin := fmt.Sprintf("ENTIRE_AUTH_BASE_URL=%s entire login", coreURL)
 	return func(ctx context.Context) (string, error) {
 		tok, err := mgr.Refresh(ctx)
 		switch {
 		case errors.Is(err, tokenmanager.ErrReauthRequired):
-			return "", fmt.Errorf("login session for %q expired; run `entire login` to re-authenticate", name)
+			return "", fmt.Errorf("login session for %q (%s) expired; run `%s` to re-authenticate", name, coreURL, relogin)
 		case errors.Is(err, tokenmanager.ErrNotLoggedIn):
-			return "", fmt.Errorf("no usable login for %q; run `entire login`", name)
+			return "", fmt.Errorf("no usable login for %q (%s); run `%s`", name, coreURL, relogin)
 		case err != nil:
 			return "", fmt.Errorf("refresh login token: %w", err)
 		}

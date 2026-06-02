@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,8 +112,13 @@ func TestNewRefreshingLoginProvider_ExpiredNoRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRefreshingLoginProvider: %v", err)
 	}
-	if _, err := provider(context.Background()); err == nil {
+	_, err = provider(context.Background())
+	if err == nil {
 		t.Fatal("expired token with no refresh: want a re-login error")
+	}
+	// The hint must name the core so a multi-core user re-logs into the right one.
+	if got := err.Error(); !strings.Contains(got, "https://core.example") || !strings.Contains(got, "entire login") {
+		t.Fatalf("re-login error = %q, want it to name the core and the login command", got)
 	}
 }
 
