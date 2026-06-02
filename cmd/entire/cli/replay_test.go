@@ -724,6 +724,22 @@ func TestExtractReplayTokenUsage(t *testing.T) {
 	}
 }
 
+func TestRunReplayProcessPreservesTimeoutErrorAndOutput(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	result, err := runReplayProcess(ctx, t.TempDir(), "/bin/sh", []string{"-c", "printf replay-started; sleep 2"}, nil)
+	if err == nil {
+		t.Fatal("runReplayProcess() error = nil, want timeout")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want context deadline exceeded", err)
+	}
+	if !strings.Contains(result.Output, "replay-started") {
+		t.Fatalf("output = %q, want partial stdout before timeout", result.Output)
+	}
+}
+
 func TestCommitReplayResultForSemanticCleanupPreservesWorkingTree(t *testing.T) {
 	repoRoot, _, base, _ := newReplayRepo(t)
 	worktree, err := createReplayWorktree(context.Background(), repoRoot, base)

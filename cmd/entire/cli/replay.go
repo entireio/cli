@@ -662,6 +662,9 @@ func runReplayProcess(ctx context.Context, dir, name string, args []string, stdi
 		output += strings.TrimSpace(stderr.String())
 	}
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ReplayRunnerResult{Output: output, TokenUsage: extractReplayTokenUsage(stdoutText)}, fmt.Errorf("%s replay failed: %w (process: %w)", name, ctxErr, err)
+		}
 		return ReplayRunnerResult{Output: output, TokenUsage: extractReplayTokenUsage(stdoutText)}, fmt.Errorf("%s replay failed: %w", name, err)
 	}
 	return ReplayRunnerResult{Output: output, TokenUsage: extractReplayTokenUsage(stdoutText)}, nil
