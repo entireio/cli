@@ -783,6 +783,67 @@ func TestReplayJSONIsStable(t *testing.T) {
 	}
 }
 
+func TestRenderReplayRunShowsFailureOutput(t *testing.T) {
+	run := &ReplayRun{
+		ID:     "abc123def456",
+		Agent:  fakeReplayAgent,
+		Status: replayStatusFailed,
+		Spec: ReplaySpec{
+			CheckpointID: "a1b2c3d4e5f6",
+			BaseCommit:   "1111111111111111111111111111111111111111",
+			TargetCommit: "2222222222222222222222222222222222222222",
+		},
+		Output:          "agent stderr line",
+		OutputTruncated: true,
+		Test: ReplayTestRun{
+			Status:          replayStatusFailed,
+			Command:         "go test ./...",
+			Output:          "test failure line",
+			OutputTruncated: true,
+		},
+		Error:   "fake-agent replay failed: exit status 1",
+		Metrics: ReplayMetrics{FileRecall: 50, FilePrecision: 100},
+	}
+
+	var out bytes.Buffer
+	renderReplayRun(&out, run)
+	text := out.String()
+	for _, want := range []string{
+		"Agent output:",
+		"agent stderr line",
+		"Test output:",
+		"test failure line",
+		"...[truncated]",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("rendered output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestRenderReplayRunHidesSuccessfulOutput(t *testing.T) {
+	run := &ReplayRun{
+		ID:     "abc123def456",
+		Agent:  fakeReplayAgent,
+		Status: replayStatusPassed,
+		Spec: ReplaySpec{
+			CheckpointID: "a1b2c3d4e5f6",
+			BaseCommit:   "1111111111111111111111111111111111111111",
+			TargetCommit: "2222222222222222222222222222222222222222",
+		},
+		Output:  "successful but noisy agent output",
+		Test:    ReplayTestRun{Status: replayStatusPassed, Output: "successful test output"},
+		Metrics: ReplayMetrics{FileRecall: 100, FilePrecision: 100},
+	}
+
+	var out bytes.Buffer
+	renderReplayRun(&out, run)
+	text := out.String()
+	if strings.Contains(text, "Agent output:") || strings.Contains(text, "successful but noisy") || strings.Contains(text, "Test output:") {
+		t.Fatalf("successful replay should not print noisy output:\n%s", text)
+	}
+}
+
 func TestReplayAgentEnvDisablesGitHooks(t *testing.T) {
 	env := replayAgentEnv([]string{
 		"PATH=/usr/bin",

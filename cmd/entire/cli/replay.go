@@ -1468,6 +1468,14 @@ func renderReplayRun(w io.Writer, run *ReplayRun) {
 	if run.Error != "" {
 		fmt.Fprintf(w, "\n  %s %s\n", sty.render(sty.red, "Error:"), run.Error)
 	}
+	if run.Output != "" && run.Status != replayStatusPassed {
+		fmt.Fprintf(w, "\n  %s\n", sty.render(sty.dim, "Agent output:"))
+		renderReplayBlock(w, sty, run.Output, run.OutputTruncated)
+	}
+	if run.Test.Output != "" && run.Test.Status == replayStatusFailed {
+		fmt.Fprintf(w, "\n  %s\n", sty.render(sty.dim, "Test output:"))
+		renderReplayBlock(w, sty, run.Test.Output, run.Test.OutputTruncated)
+	}
 	if len(run.Warnings) > 0 {
 		fmt.Fprintf(w, "\n  %s\n", sty.render(sty.dim, "Warnings:"))
 		for _, warning := range run.Warnings {
@@ -1475,6 +1483,19 @@ func renderReplayRun(w io.Writer, run *ReplayRun) {
 		}
 	}
 	fmt.Fprintln(w)
+}
+
+func renderReplayBlock(w io.Writer, sty statusStyles, text string, truncated bool) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	for _, line := range strings.Split(text, "\n") {
+		fmt.Fprintf(w, "  │ %s\n", sty.render(sty.dim, line))
+	}
+	if truncated && !strings.Contains(text, "...[truncated]") {
+		fmt.Fprintf(w, "  │ %s\n", sty.render(sty.dim, "...[truncated]"))
+	}
 }
 
 func renderReplayEval(w io.Writer, eval *ReplayEvalRun) {
