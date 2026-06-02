@@ -89,28 +89,11 @@ func run(args []string) int {
 		Transport: httpclient.NewTransport(skipTLS),
 	}
 
-	// Bridge any pre-contexts.json login so the resolver can find it.
-	if _, err := auth.MigrateLegacyLoginContext(); err != nil {
-		debuglog.Printf("legacy login migration: %v", err)
-	}
-
-	// Resolve which login context authenticates this cluster: the cluster's
-	// cores are taken from the cluster_cores.json cache (or a live
-	// /.well-known fetch on miss/expiry), then the account is selected from
-	// local contexts — active context if eligible, else the sole eligible
-	// one, else an explicit-choice error.
-	cfgDir := contexts.DefaultConfigDir()
-	clusterCtx, err := clusterdiscovery.ResolveContextForCluster(ctx, cfgDir, discovery.DefaultCacheDir(), parsedURL.Host, httpClient, debuglog.Printf)
+	creds, err := resolveCreds(ctx, parsedURL, clusterBaseURL, httpClient)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		return 128
 	}
-
-	// Mint repo-scoped tokens by exchanging the context's login JWT at its
-	// core's /oauth/token, cached per (repo, action) for this invocation.
-	creds := repocreds.New(clusterCtx.CoreURL, clusterBaseURL, func(context.Context) (string, error) {
-		return auth.LoginTokenForContext(clusterCtx)
-	}, httpClient)
 
 	setAuth := func(req *http.Request) error {
 		action := gitActionFromRequest(req)
@@ -148,6 +131,50 @@ func run(args []string) int {
 		return 128
 	}
 	return 0
+}
+
+// resolveCreds builds the repo-scoped token cache, choosing the auth source:
+//
+//   - ENTIRE_TOKEN set: use the env JWT verbatim as the login token, deriving
+//     the core URL from its aud claim. Skips contexts.json and the keyring
+//     entirely — the CI / workload-identity path. A non-URL aud is a hard
+//     error, never a silent fallback to context resolution.
+//   - otherwise: resolve the login context for this cluster from contexts.json
+//     (migrating any pre-contexts.json login first) and exchange its stored
+//     login JWT.
+func resolveCreds(ctx context.Context, parsedURL *url.URL, clusterBaseURL string, httpClient *http.Client) (*repocreds.Cache, error) {
+	if envToken := os.Getenv(auth.EnvTokenVar); envToken != "" {
+		coreURL, err := auth.CoreURLFromEnvToken(envToken)
+		if err != nil {
+			return nil, err //nolint:wrapcheck // CoreURLFromEnvToken already returns a user-facing, ENTIRE_TOKEN-prefixed error
+		}
+		debuglog.Printf("authenticating via %s; core=%s", auth.EnvTokenVar, coreURL)
+		return repocreds.New(coreURL, clusterBaseURL, func(context.Context) (string, error) {
+			return envToken, nil
+		}, httpClient), nil
+	}
+
+	// Bridge any pre-contexts.json login so the resolver can find it.
+	if _, err := auth.MigrateLegacyLoginContext(); err != nil {
+		debuglog.Printf("legacy login migration: %v", err)
+	}
+
+	// Resolve which login context authenticates this cluster: the cluster's
+	// cores are taken from the cluster_cores.json cache (or a live
+	// /.well-known fetch on miss/expiry), then the account is selected from
+	// local contexts — active context if eligible, else the sole eligible
+	// one, else an explicit-choice error.
+	cfgDir := contexts.DefaultConfigDir()
+	clusterCtx, err := clusterdiscovery.ResolveContextForCluster(ctx, cfgDir, discovery.DefaultCacheDir(), parsedURL.Host, httpClient, debuglog.Printf)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // ResolveContextForCluster already returns a user-facing error; preserved verbatim for the "fatal: <msg>" surface
+	}
+
+	// Mint repo-scoped tokens by exchanging the context's login JWT at its
+	// core's /oauth/token, cached per (repo, action) for this invocation.
+	return repocreds.New(clusterCtx.CoreURL, clusterBaseURL, func(context.Context) (string, error) {
+		return auth.LoginTokenForContext(clusterCtx)
+	}, httpClient), nil
 }
 
 // gitActionFromRequest classifies a smart-HTTP request as "pull" or "push"
