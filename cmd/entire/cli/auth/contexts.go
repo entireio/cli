@@ -44,7 +44,7 @@ const defaultContextTokenTTL = time.Hour
 //
 // Returns the context name on success. Errors are returned (not swallowed)
 // so the caller can warn; login still succeeds on the legacy entry.
-func RecordLoginContext(rawToken string, activate bool) (string, error) {
+func RecordLoginContext(rawToken, refreshToken string, activate bool) (string, error) {
 	claims, err := tokens.ParseClaims(rawToken)
 	if err != nil {
 		return "", fmt.Errorf("parse login token claims: %w", err)
@@ -73,6 +73,19 @@ func RecordLoginContext(rawToken string, activate bool) (string, error) {
 	encoded := tokenstore.EncodeTokenWithExpiration(rawToken, expiresIn)
 	if err := tokenstore.Set(keychainService, handle, encoded); err != nil {
 		return "", fmt.Errorf("store login token in keyring: %w", err)
+	}
+
+	// The refresh token lives in the paired "<service>:refresh" slot (raw,
+	// no expiry suffix). Clear any prior one when this login carries none,
+	// so a stale token from an earlier session can't later be replayed
+	// against the server's single-use rotation and revoke the family.
+	refreshSlot := keychainService + ":refresh"
+	if refreshToken != "" {
+		if err := tokenstore.Set(refreshSlot, handle, refreshToken); err != nil {
+			return "", fmt.Errorf("store refresh token in keyring: %w", err)
+		}
+	} else {
+		_ = tokenstore.Delete(refreshSlot, handle) //nolint:errcheck // best-effort cleanup of a stale refresh token
 	}
 
 	var name string
@@ -172,7 +185,8 @@ func MigrateLegacyLoginContext() (migrated bool, err error) {
 	// activate=false: migrating an old login (e.g. on first `git clone`) must
 	// not silently switch the user's active context. RecordLoginContext still
 	// sets current_context when none exists yet.
-	if _, err := RecordLoginContext(legacy, false); err != nil {
+	// No refresh token: the legacy entry is access-token-only.
+	if _, err := RecordLoginContext(legacy, "", false); err != nil {
 		return false, err
 	}
 	return true, nil

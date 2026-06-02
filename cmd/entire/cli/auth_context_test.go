@@ -38,7 +38,7 @@ func TestRunAuthContexts(t *testing.T) {
 
 	exp := time.Now().Add(time.Hour).Unix()
 	token := makeContextJWT(t, fmt.Sprintf(`{"iss":"https://core.example.com","handle":"alice","exp":%d}`, exp))
-	if _, err := auth.RecordLoginContext(token, true); err != nil {
+	if _, err := auth.RecordLoginContext(token, "", true); err != nil {
 		t.Fatalf("RecordLoginContext: %v", err)
 	}
 
@@ -65,7 +65,7 @@ func TestWarnIfCrossCoreContext(t *testing.T) {
 	exp := time.Now().Add(time.Hour).Unix()
 
 	// Same core as the configured auth host: no warning.
-	sameName, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://auth.example.com","handle":"alice","exp":%d}`, exp)), true)
+	sameName, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://auth.example.com","handle":"alice","exp":%d}`, exp)), "", true)
 	if err != nil {
 		t.Fatalf("record same-core: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestWarnIfCrossCoreContext(t *testing.T) {
 	}
 
 	// Different core: warns that the control plane won't follow.
-	otherName, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://other.example.com","handle":"alice","exp":%d}`, exp)), true)
+	otherName, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://other.example.com","handle":"alice","exp":%d}`, exp)), "", true)
 	if err != nil {
 		t.Fatalf("record cross-core: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestNoteRemainingLogins(t *testing.T) {
 
 	// A surviving context: names it and points at --all.
 	exp := time.Now().Add(time.Hour).Unix()
-	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://core.example.com","handle":"alice","exp":%d}`, exp)), true); err != nil {
+	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://core.example.com","handle":"alice","exp":%d}`, exp)), "", true); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	var buf bytes.Buffer

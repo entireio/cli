@@ -28,6 +28,7 @@ type DeviceAuthStart = deviceflow.DeviceCode
 // callers a more actionable message than the bare error code.
 type DeviceAuthPoll struct {
 	AccessToken      string
+	RefreshToken     string
 	TokenType        string
 	ExpiresIn        int
 	Scope            string
@@ -61,10 +62,14 @@ func NewClient(httpClient *http.Client, allowInsecureHTTP bool) *Client {
 		transport = httpClient.Transport
 	}
 	return &Client{inner: &deviceflow.Client{
-		Transport:         transport,
-		BaseURL:           issuer,
-		ClientID:          p.ClientID,
-		Scope:             "cli",
+		Transport: transport,
+		BaseURL:   issuer,
+		ClientID:  p.ClientID,
+		// offline_access asks the authorization server for a refresh token.
+		// The server only mints one when it's requested (it's client-gated),
+		// so without this the device login is access-token-only and silent
+		// refresh is impossible.
+		Scope:             "cli offline_access",
 		UserAgent:         p.ClientID,
 		DeviceCodePath:    p.DeviceCodePath,
 		TokenPath:         p.TokenPath,
@@ -101,10 +106,11 @@ func (c *Client) PollDeviceAuth(ctx context.Context, deviceCode string) (*Device
 	}
 
 	return &DeviceAuthPoll{
-		AccessToken: t.AccessToken,
-		TokenType:   t.TokenType,
-		ExpiresIn:   secondsUntil(t),
-		Scope:       t.Scope,
+		AccessToken:  t.AccessToken,
+		RefreshToken: t.RefreshToken,
+		TokenType:    t.TokenType,
+		ExpiresIn:    secondsUntil(t),
+		Scope:        t.Scope,
 	}, nil
 }
 

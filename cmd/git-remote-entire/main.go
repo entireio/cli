@@ -107,11 +107,19 @@ func run(args []string) int {
 		return 128
 	}
 
+	// The login-JWT provider transparently refreshes an expired login JWT
+	// from the stored refresh token (serialised across processes, rotated
+	// tokens persisted) before repocreds exchanges it for repo-scoped
+	// tokens.
+	loginProvider, err := auth.NewRefreshingLoginProvider(clusterCtx, httpClient.Transport, skipTLS)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+		return 128
+	}
+
 	// Mint repo-scoped tokens by exchanging the context's login JWT at its
 	// core's /oauth/token, cached per (repo, action) for this invocation.
-	creds := repocreds.New(clusterCtx.CoreURL, clusterBaseURL, func(context.Context) (string, error) {
-		return auth.LoginTokenForContext(clusterCtx)
-	}, httpClient)
+	creds := repocreds.New(clusterCtx.CoreURL, clusterBaseURL, loginProvider, httpClient)
 
 	setAuth := func(req *http.Request) error {
 		action := gitActionFromRequest(req)

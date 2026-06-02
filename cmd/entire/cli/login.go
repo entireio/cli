@@ -96,7 +96,7 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 
 	fmt.Fprintln(outW, "Waiting for approval...")
 
-	token, err := waitForApproval(ctx, client, start.DeviceCode, start.ExpiresIn, time.Duration(start.Interval)*time.Second, defaultSlowDownBackoff)
+	token, refreshToken, err := waitForApproval(ctx, client, start.DeviceCode, start.ExpiresIn, time.Duration(start.Interval)*time.Second, defaultSlowDownBackoff)
 	if err != nil {
 		return fmt.Errorf("complete login: %w", err)
 	}
@@ -119,7 +119,7 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 	// entitled cluster from this login. Best-effort: the legacy entry
 	// above remains the control-plane source of truth, so a failure here
 	// must not fail the login — warn and continue.
-	if _, err := auth.RecordLoginContext(token, true); err != nil {
+	if _, err := auth.RecordLoginContext(token, refreshToken, true); err != nil {
 		fmt.Fprintf(errW, "Warning: logged in, but could not record a shareable context (clone via entire:// may need a re-login): %v\n", err)
 	}
 
@@ -183,7 +183,7 @@ func issMatches(claimed, expected string) error {
 	return nil
 }
 
-func waitForApproval(ctx context.Context, poller deviceAuthClient, deviceCode string, expiresIn int, interval, slowDownBackoff time.Duration) (string, error) {
+func waitForApproval(ctx context.Context, poller deviceAuthClient, deviceCode string, expiresIn int, interval, slowDownBackoff time.Duration) (accessToken, refreshToken string, err error) {
 	expiry := time.Duration(expiresIn) * time.Second
 	if expiry <= 0 || expiry > maxExpiresIn {
 		expiry = maxExpiresIn
@@ -198,19 +198,19 @@ func waitForApproval(ctx context.Context, poller deviceAuthClient, deviceCode st
 
 	for {
 		if time.Now().After(deadline) {
-			return "", errors.New("device authorization expired")
+			return "", "", errors.New("device authorization expired")
 		}
 
 		result, err := poller.PollDeviceAuth(ctx, deviceCode)
 		if err != nil {
 			consecutiveErrors++
 			if consecutiveErrors >= maxTransientErrors {
-				return "", fmt.Errorf("poll approval status (after %d consecutive failures): %w", consecutiveErrors, err)
+				return "", "", fmt.Errorf("poll approval status (after %d consecutive failures): %w", consecutiveErrors, err)
 			}
 			// Transient error — wait and retry.
 			select {
 			case <-ctx.Done():
-				return "", fmt.Errorf("wait for approval: %w", ctx.Err())
+				return "", "", fmt.Errorf("wait for approval: %w", ctx.Err())
 			case <-time.After(pollInterval):
 			}
 			continue
@@ -220,9 +220,9 @@ func waitForApproval(ctx context.Context, poller deviceAuthClient, deviceCode st
 		switch result.Error {
 		case "":
 			if result.AccessToken == "" {
-				return "", errors.New("device authorization completed without a token")
+				return "", "", errors.New("device authorization completed without a token")
 			}
-			return result.AccessToken, nil
+			return result.AccessToken, result.RefreshToken, nil
 		case "authorization_pending":
 			// no-op, will sleep and retry below
 		case "slow_down":
@@ -231,19 +231,19 @@ func waitForApproval(ctx context.Context, poller deviceAuthClient, deviceCode st
 				pollInterval = maxPollInterval
 			}
 		case "access_denied":
-			return "", errors.New("device authorization denied")
+			return "", "", errors.New("device authorization denied")
 		case "expired_token":
-			return "", errors.New("device authorization expired")
+			return "", "", errors.New("device authorization expired")
 		default:
 			if result.ErrorDescription != "" {
-				return "", fmt.Errorf("device authorization failed: %s: %s", result.Error, result.ErrorDescription)
+				return "", "", fmt.Errorf("device authorization failed: %s: %s", result.Error, result.ErrorDescription)
 			}
-			return "", fmt.Errorf("device authorization failed: %s", result.Error)
+			return "", "", fmt.Errorf("device authorization failed: %s", result.Error)
 		}
 
 		select {
 		case <-ctx.Done():
-			return "", fmt.Errorf("wait for approval: %w", ctx.Err())
+			return "", "", fmt.Errorf("wait for approval: %w", ctx.Err())
 		case <-time.After(pollInterval):
 		}
 	}

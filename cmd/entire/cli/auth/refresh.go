@@ -1,0 +1,147 @@
+package auth
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/entireio/auth-go/tokenmanager"
+	"github.com/entireio/auth-go/tokens"
+	authtokenstore "github.com/entireio/auth-go/tokenstore"
+
+	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
+)
+
+// refreshGrantPath is the token endpoint path where grant_type=refresh_token
+// is POSTed. Both provider versions multiplex grants at /oauth/token (the
+// same endpoint repocreds exchanges against), so it's stable across them.
+const refreshGrantPath = "/oauth/token"
+
+// defaultSavedTokenTTL is the encoded keychain expiry used when a refreshed
+// token carries no usable ExpiresAt. The server is the real authority; this
+// only governs when local readers consider the cached token stale.
+const defaultSavedTokenTTL = time.Hour
+
+// contextTokenStore adapts one login context's keyring slots to auth-go's
+// tokenstore.Store, so tokenmanager can load, refresh, and persist that
+// context's credentials. It is bound to a specific (service, handle) at
+// construction and ignores the profile argument: the cluster resolver has
+// already chosen exactly one context, so there is no per-issuer account
+// ambiguity to resolve here.
+//
+// Access token lives at `service`/`handle` (with the "|<expiry>" encoding
+// the rest of the CLI reads); the refresh token lives raw at
+// `service:refresh`/`handle`.
+type contextTokenStore struct {
+	service string
+	handle  string
+}
+
+func (s contextTokenStore) LoadTokens(string) (tokens.TokenSet, error) {
+	enc, err := tokenstore.Get(s.service, s.handle)
+	// Map "no credential stored" to auth-go's sentinel so tokenmanager
+	// reports "not logged in" rather than a hard store failure.
+	if errors.Is(err, tokenstore.ErrNotFound) || (err == nil && enc == "") {
+		return tokens.TokenSet{}, authtokenstore.ErrNotFound
+	}
+	if err != nil {
+		return tokens.TokenSet{}, fmt.Errorf("read access token: %w", err)
+	}
+	access, expiresAt := tokenstore.DecodeTokenWithExpiration(enc)
+	refresh, _ := tokenstore.Get(s.service+":refresh", s.handle) //nolint:errcheck // an absent refresh token is fine — treated as no-refresh
+	return tokens.TokenSet{
+		AccessToken:  access,
+		RefreshToken: refresh,
+		ExpiresAt:    expiresAt,
+	}, nil
+}
+
+func (s contextTokenStore) SaveTokens(_ string, t tokens.TokenSet) error {
+	if t.AccessToken == "" {
+		return errors.New("save tokens: empty access token")
+	}
+	expiresIn := int64(defaultSavedTokenTTL.Seconds())
+	if !t.ExpiresAt.IsZero() {
+		if secs := int64(time.Until(t.ExpiresAt).Seconds()); secs > 0 {
+			expiresIn = secs
+		}
+	}
+	if err := tokenstore.Set(s.service, s.handle, tokenstore.EncodeTokenWithExpiration(t.AccessToken, expiresIn)); err != nil {
+		return fmt.Errorf("store access token: %w", err)
+	}
+	// persistRefreshed carries a still-valid refresh token forward when the
+	// server doesn't rotate, so an empty value here means "leave as-is",
+	// never "clear".
+	if t.RefreshToken != "" {
+		if err := tokenstore.Set(s.service+":refresh", s.handle, t.RefreshToken); err != nil {
+			return fmt.Errorf("store refresh token: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s contextTokenStore) DeleteTokens(string) error {
+	_ = tokenstore.Delete(s.service+":refresh", s.handle) //nolint:errcheck // best-effort; the access-token delete below is what matters
+	if err := tokenstore.Delete(s.service, s.handle); err != nil {
+		return fmt.Errorf("delete access token: %w", err)
+	}
+	return nil
+}
+
+// NewRefreshingLoginProvider returns a login-JWT provider (the shape
+// repocreds wants) for context c that transparently re-mints an expired
+// login JWT from the stored refresh token.
+//
+// It is backed by auth-go's tokenmanager, which is what makes this safe
+// against the server's single-use refresh-token rotation: refreshes are
+// serialised across processes (an advisory file lock) and goroutines, the
+// store is re-read after locking so a late waiter reuses a peer's freshly
+// minted token, and the rotated refresh token is persisted. Without that,
+// two concurrent git-remote-entire processes (e.g. a recursive submodule
+// fetch) could replay the same single-use token and trip the server's
+// reuse detection, revoking the whole family.
+//
+// Behaviour is a strict superset of the old read-only provider: a still
+// valid token is returned with no network call; a context with no refresh
+// token (e.g. a login predating offline_access) behaves exactly as before
+// — valid token used, expired token surfaces a re-login error.
+//
+// transport carries the caller's TLS configuration; allowInsecureHTTP
+// permits an http:// core for loopback/dev.
+func NewRefreshingLoginProvider(c *contexts.Context, transport http.RoundTripper, allowInsecureHTTP bool) (func(context.Context) (string, error), error) {
+	if c == nil {
+		return nil, errors.New("nil context")
+	}
+	if c.KeychainService == "" || c.Handle == "" {
+		return nil, fmt.Errorf("context %q has no keychain slot", c.Name)
+	}
+	mgr, err := tokenmanager.New(tokenmanager.Config{
+		Issuer:            strings.TrimRight(c.CoreURL, "/"),
+		ClientID:          CurrentProvider().ClientID,
+		RefreshPath:       refreshGrantPath,
+		Store:             contextTokenStore{service: c.KeychainService, handle: c.Handle},
+		Transport:         transport,
+		AllowInsecureHTTP: allowInsecureHTTP,
+		UserAgent:         CurrentProvider().ClientID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("init token manager for context %q: %w", c.Name, err)
+	}
+	name := c.Name
+	return func(ctx context.Context) (string, error) {
+		tok, err := mgr.Refresh(ctx)
+		switch {
+		case errors.Is(err, tokenmanager.ErrReauthRequired):
+			return "", fmt.Errorf("login session for %q expired; run `entire login` to re-authenticate", name)
+		case errors.Is(err, tokenmanager.ErrNotLoggedIn):
+			return "", fmt.Errorf("no usable login for %q; run `entire login`", name)
+		case err != nil:
+			return "", fmt.Errorf("refresh login token: %w", err)
+		}
+		return tok, nil
+	}, nil
+}
