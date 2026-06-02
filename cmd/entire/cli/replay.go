@@ -415,6 +415,12 @@ func buildReplaySpec(ctx context.Context, checkpointRef string) (ReplaySpec, err
 	if len(files) == 0 {
 		files = normalizeReplayPaths(content.Metadata.FilesTouched)
 	}
+	if len(files) == 0 {
+		files, err = replayFilesChangedBetween(ctx, repoRoot, baseCommit, targetCommit)
+		if err != nil {
+			return ReplaySpec{}, fmt.Errorf("resolve checkpoint changed files: %w", err)
+		}
+	}
 	return ReplaySpec{
 		CheckpointID:  fullID,
 		SessionID:     content.Metadata.SessionID,
@@ -466,14 +472,6 @@ func executeReplay(ctx context.Context, spec ReplaySpec, opts replayCheckpointOp
 	if err != nil {
 		return nil, err
 	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			if err := removeReplayWorktree(context.Background(), repoRoot, worktree); err != nil {
-				run.Warnings = append(run.Warnings, fmt.Sprintf("failed to remove replay worktree: %v", err))
-			}
-		}
-	}()
 
 	result, runnerErr := runner.Run(runCtx, ReplayRunnerRequest{
 		Spec:         spec,
@@ -511,7 +509,8 @@ func executeReplay(ctx context.Context, spec ReplaySpec, opts replayCheckpointOp
 	run.DurationMS = run.FinishedAt.Sub(run.StartedAt).Milliseconds()
 	if opts.KeepWorktree {
 		run.WorktreePath = worktree
-		cleanup = false
+	} else if err := removeReplayWorktree(context.Background(), repoRoot, worktree); err != nil {
+		run.Warnings = append(run.Warnings, fmt.Sprintf("failed to remove replay worktree: %v", err))
 	}
 	path, err := saveReplayRun(ctx, run)
 	if err != nil {
@@ -761,6 +760,14 @@ func replayChangedFilesAndDiff(ctx context.Context, worktree, baseCommit string)
 		return files, "", err
 	}
 	return files, diff, nil
+}
+
+func replayFilesChangedBetween(ctx context.Context, repoRoot, baseCommit, targetCommit string) ([]string, error) {
+	out, err := replayGit(ctx, repoRoot, "diff", "--name-only", baseCommit, targetCommit, "--")
+	if err != nil {
+		return nil, err
+	}
+	return normalizeReplayPaths(strings.Fields(out)), nil
 }
 
 func runReplayTestCommand(ctx context.Context, worktree, command string) ReplayTestRun {

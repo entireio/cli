@@ -22,6 +22,7 @@ import (
 
 const (
 	fakeReplayAgent     = "fake-agent"
+	replayFixtureFile   = "app.py"
 	replayTargetContent = "def greet():\n    return 'hello'\n\n\ndef replay_helper():\n    return 'ok'\n"
 )
 
@@ -45,14 +46,14 @@ func TestBuildReplaySpecFromCheckpoint(t *testing.T) {
 	if spec.Prompt != "Add the replay helper." {
 		t.Fatalf("Prompt = %q", spec.Prompt)
 	}
-	if got := strings.Join(spec.FilesTouched, ","); got != "app.py" {
+	if got := strings.Join(spec.FilesTouched, ","); got != replayFixtureFile {
 		t.Fatalf("FilesTouched = %q", got)
 	}
 	if spec.OriginalAgent != string(agentpkg.AgentTypeClaudeCode) {
 		t.Fatalf("OriginalAgent = %q", spec.OriginalAgent)
 	}
 
-	if content, err := os.ReadFile(filepath.Join(repoRoot, "app.py")); err != nil || !strings.Contains(string(content), "replay_helper") {
+	if content, err := os.ReadFile(filepath.Join(repoRoot, replayFixtureFile)); err != nil || !strings.Contains(string(content), "replay_helper") {
 		t.Fatalf("fixture target file not written: %v", err)
 	}
 }
@@ -71,10 +72,26 @@ func TestBuildReplaySpecFallsBackToTranscriptPrompt(t *testing.T) {
 	}
 }
 
+func TestBuildReplaySpecFallsBackToGitDiffFiles(t *testing.T) {
+	_, cpID, _, _ := newReplayRepoWithOptions(t, replayRepoOptions{
+		Prompts:      []string{"Add the replay helper."},
+		Transcript:   []byte(`{"type":"user","uuid":"u1","message":{"content":"Add the replay helper."}}` + "\n"),
+		FilesTouched: nil,
+	})
+
+	spec, err := buildReplaySpec(context.Background(), cpID)
+	if err != nil {
+		t.Fatalf("buildReplaySpec() error = %v", err)
+	}
+	if got := strings.Join(spec.FilesTouched, ","); got != replayFixtureFile {
+		t.Fatalf("FilesTouched = %q, want git diff fallback %s", got, replayFixtureFile)
+	}
+}
+
 func TestReplayCheckpointUsesIsolatedWorktreeAndSavesResult(t *testing.T) {
 	repoRoot, cpID, _, _ := newReplayRepo(t)
 	restore := stubReplayRunner(func(_ context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {
-		if err := os.WriteFile(filepath.Join(req.WorktreePath, "app.py"), []byte(replayTargetContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(req.WorktreePath, replayFixtureFile), []byte(replayTargetContent), 0o644); err != nil {
 			return ReplayRunnerResult{}, err
 		}
 		return ReplayRunnerResult{Output: "fake replay completed"}, nil
@@ -83,7 +100,7 @@ func TestReplayCheckpointUsesIsolatedWorktreeAndSavesResult(t *testing.T) {
 
 	run, err := runReplayCheckpoint(context.Background(), cpID, replayCheckpointOptions{
 		Agent:       fakeReplayAgent,
-		TestCommand: "python3 -m py_compile app.py",
+		TestCommand: "python3 -m py_compile " + replayFixtureFile,
 	})
 	if err != nil {
 		t.Fatalf("runReplayCheckpoint() error = %v", err)
@@ -108,7 +125,7 @@ func TestReplayCheckpointUsesIsolatedWorktreeAndSavesResult(t *testing.T) {
 		t.Fatalf("saved result missing: %v", err)
 	}
 
-	mainContent, err := os.ReadFile(filepath.Join(repoRoot, "app.py"))
+	mainContent, err := os.ReadFile(filepath.Join(repoRoot, replayFixtureFile))
 	if err != nil {
 		t.Fatalf("read main worktree: %v", err)
 	}
@@ -147,10 +164,10 @@ func TestReplayCheckpointKeepWorktreePreservesPath(t *testing.T) {
 func TestReplayCheckpointCapturesCommittedAgentResult(t *testing.T) {
 	_, cpID, _, _ := newReplayRepo(t)
 	restore := stubReplayRunner(func(ctx context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {
-		if err := os.WriteFile(filepath.Join(req.WorktreePath, "app.py"), []byte(replayTargetContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(req.WorktreePath, replayFixtureFile), []byte(replayTargetContent), 0o644); err != nil {
 			return ReplayRunnerResult{}, err
 		}
-		if _, err := replayGit(ctx, req.WorktreePath, "add", "app.py"); err != nil {
+		if _, err := replayGit(ctx, req.WorktreePath, "add", replayFixtureFile); err != nil {
 			return ReplayRunnerResult{}, err
 		}
 		if _, err := replayGit(ctx, req.WorktreePath,
@@ -168,7 +185,7 @@ func TestReplayCheckpointCapturesCommittedAgentResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runReplayCheckpoint() error = %v", err)
 	}
-	if got := strings.Join(run.ChangedFiles, ","); got != "app.py" {
+	if got := strings.Join(run.ChangedFiles, ","); got != replayFixtureFile {
 		t.Fatalf("ChangedFiles = %q", got)
 	}
 	if !strings.Contains(run.Diff, "replay_helper") {
@@ -182,7 +199,7 @@ func TestReplayCheckpointCapturesCommittedAgentResult(t *testing.T) {
 func TestReplayEvalRunRanksAndPersistsResults(t *testing.T) {
 	_, cpID, _, _ := newReplayRepo(t)
 	restore := stubReplayRunner(func(_ context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {
-		if err := os.WriteFile(filepath.Join(req.WorktreePath, "app.py"), []byte(replayTargetContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(req.WorktreePath, replayFixtureFile), []byte(replayTargetContent), 0o644); err != nil {
 			return ReplayRunnerResult{}, err
 		}
 		return ReplayRunnerResult{Output: "fake replay completed"}, nil
@@ -218,7 +235,7 @@ func TestReplayEvalRunRanksAndPersistsResults(t *testing.T) {
 func TestReplayReportReadsSavedRun(t *testing.T) {
 	_, cpID, _, _ := newReplayRepo(t)
 	restore := stubReplayRunner(func(_ context.Context, req ReplayRunnerRequest) (ReplayRunnerResult, error) {
-		if err := os.WriteFile(filepath.Join(req.WorktreePath, "app.py"), []byte(replayTargetContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(req.WorktreePath, replayFixtureFile), []byte(replayTargetContent), 0o644); err != nil {
 			return ReplayRunnerResult{}, err
 		}
 		return ReplayRunnerResult{Output: "fake replay completed"}, nil
@@ -257,7 +274,7 @@ func TestReplayEvalSkipsUnsupportedAgent(t *testing.T) {
 }
 
 func TestReplayMetricsFlagsExtraAndRiskyFiles(t *testing.T) {
-	metrics := replayMetrics(context.Background(), "", "", ReplaySpec{FilesTouched: []string{"app.py"}}, []string{"app.py", "auth/config.yaml"})
+	metrics := replayMetrics(context.Background(), "", "", ReplaySpec{FilesTouched: []string{replayFixtureFile}}, []string{replayFixtureFile, "auth/config.yaml"})
 
 	if metrics.FileRecall != 100 {
 		t.Fatalf("FileRecall = %d", metrics.FileRecall)
@@ -302,7 +319,7 @@ func TestCommitReplayResultForSemanticCleanupPreservesWorkingTree(t *testing.T) 
 			t.Errorf("remove replay worktree: %v", err)
 		}
 	})
-	if err := os.WriteFile(filepath.Join(worktree, "app.py"), []byte(replayTargetContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(worktree, replayFixtureFile), []byte(replayTargetContent), 0o644); err != nil {
 		t.Fatalf("write replay content: %v", err)
 	}
 
@@ -320,7 +337,7 @@ func TestCommitReplayResultForSemanticCleanupPreservesWorkingTree(t *testing.T) 
 	if head != base {
 		t.Fatalf("HEAD after cleanup = %s, want %s", head, base)
 	}
-	diff := replayGitForTest(t, worktree, "diff", "--", "app.py")
+	diff := replayGitForTest(t, worktree, "diff", "--", replayFixtureFile)
 	if !strings.Contains(diff, "replay_helper") {
 		t.Fatalf("working tree diff lost replay changes:\n%s", diff)
 	}
@@ -398,11 +415,27 @@ func TestRootCommandHasReplayAndEval(t *testing.T) {
 }
 
 func newReplayRepo(t *testing.T) (repoRoot, cpID, base, target string) {
+	t.Helper()
 	return newReplayRepoWithPrompts(t, []string{"Add the replay helper."}, []byte(`{"type":"user","uuid":"u1","message":{"content":"Add the replay helper."}}
 `))
 }
 
 func newReplayRepoWithPrompts(t *testing.T, prompts []string, transcript []byte) (repoRoot, cpID, base, target string) {
+	t.Helper()
+	return newReplayRepoWithOptions(t, replayRepoOptions{
+		Prompts:      prompts,
+		Transcript:   transcript,
+		FilesTouched: []string{replayFixtureFile},
+	})
+}
+
+type replayRepoOptions struct {
+	Prompts      []string
+	Transcript   []byte
+	FilesTouched []string
+}
+
+func newReplayRepoWithOptions(t *testing.T, opts replayRepoOptions) (repoRoot, cpID, base, target string) {
 	t.Helper()
 	repoRoot = t.TempDir()
 	testutil.InitRepo(t, repoRoot)
@@ -413,14 +446,14 @@ func newReplayRepoWithPrompts(t *testing.T, prompts []string, transcript []byte)
 	t.Cleanup(session.ClearGitCommonDirCache)
 
 	testutil.WriteFile(t, repoRoot, ".gitignore", "__pycache__/\n")
-	testutil.WriteFile(t, repoRoot, "app.py", "def greet():\n    return 'hello'\n")
-	testutil.GitAdd(t, repoRoot, ".gitignore", "app.py")
+	testutil.WriteFile(t, repoRoot, replayFixtureFile, "def greet():\n    return 'hello'\n")
+	testutil.GitAdd(t, repoRoot, ".gitignore", replayFixtureFile)
 	testutil.GitCommit(t, repoRoot, "initial app")
 	base = replayGitForTest(t, repoRoot, "rev-parse", "HEAD")
 
 	cpID = "a1b2c3d4e5f6"
-	testutil.WriteFile(t, repoRoot, "app.py", "def greet():\n    return 'hello'\n\n\ndef replay_helper():\n    return 'ok'\n")
-	testutil.GitAdd(t, repoRoot, "app.py")
+	testutil.WriteFile(t, repoRoot, replayFixtureFile, "def greet():\n    return 'hello'\n\n\ndef replay_helper():\n    return 'ok'\n")
+	testutil.GitAdd(t, repoRoot, replayFixtureFile)
 	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("add replay helper", checkpointid.MustCheckpointID(cpID)))
 	target = replayGitForTest(t, repoRoot, "rev-parse", "HEAD")
 
@@ -434,9 +467,9 @@ func newReplayRepoWithPrompts(t *testing.T, prompts []string, transcript []byte)
 		SessionID:        "session-replay-12345678",
 		Strategy:         "manual-commit",
 		Branch:           "master",
-		Transcript:       redact.AlreadyRedacted(transcript),
-		Prompts:          prompts,
-		FilesTouched:     []string{"app.py"},
+		Transcript:       redact.AlreadyRedacted(opts.Transcript),
+		Prompts:          opts.Prompts,
+		FilesTouched:     opts.FilesTouched,
 		CheckpointsCount: 1,
 		Agent:            agentpkg.AgentTypeClaudeCode,
 		Model:            "claude-test-model",
