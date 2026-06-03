@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
 
 func TestGitActionFromRequest(t *testing.T) {
@@ -121,23 +123,23 @@ func TestResolveEnvTokenCreds_TrustedAudSucceeds(t *testing.T) {
 	}
 }
 
-func TestResolveEnvTokenCreds_TrimsSurroundingWhitespace(t *testing.T) {
-	t.Parallel()
-	// A trusted token padded with whitespace (trailing newline from
-	// $(cat token)) must succeed: the trim applies to both aud-derivation and
-	// the subject_token used for exchange.
-	const core = "https://core.us.entire.io"
-	srv, clusterHost := wellKnownServer(t, []string{core})
-
-	creds, err := resolveEnvTokenCreds(
-		t.Context(), "  "+makeTestJWT(t, core)+"\n", clusterHost,
-		"https://cluster.example.com", t.TempDir(), srv.Client(),
-	)
-	if err != nil {
-		t.Fatalf("expected padded-but-valid token to succeed, got: %v", err)
-	}
-	if creds == nil {
-		t.Fatal("expected non-nil creds for padded trusted token")
+func TestResolveCreds_BlankEnvTokenFailsClosed(t *testing.T) {
+	// A non-empty but whitespace-only ENTIRE_TOKEN is a genuinely mis-set token
+	// and must fail closed with a clear message — never silently fall back to
+	// context auth. Sets a process-global env var, so this test is not parallel.
+	dummyURL := &url.URL{Scheme: "entire", Host: "cluster.example.com"}
+	for _, blank := range []string{" ", "\t", "\n", " \t\n "} {
+		t.Setenv(auth.EnvTokenVar, blank)
+		creds, err := resolveCreds(t.Context(), dummyURL, "https://cluster.example.com", nil)
+		if err == nil {
+			t.Fatalf("blank ENTIRE_TOKEN %q should fail closed", blank)
+		}
+		if creds != nil {
+			t.Fatalf("expected nil creds for blank ENTIRE_TOKEN %q", blank)
+		}
+		if !strings.Contains(err.Error(), "blank") {
+			t.Fatalf("expected 'set but blank' error for %q, got: %v", blank, err)
+		}
 	}
 }
 

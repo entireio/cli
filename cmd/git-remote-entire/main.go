@@ -143,7 +143,21 @@ func run(args []string) int {
 //     (migrating any pre-contexts.json login first) and exchange its stored
 //     login JWT.
 func resolveCreds(ctx context.Context, parsedURL *url.URL, clusterBaseURL string, httpClient *http.Client) (*repocreds.Cache, error) {
-	if envToken := os.Getenv(auth.EnvTokenVar); envToken != "" {
+	// ENTIRE_TOKEN is read (and trimmed) once here, the only place we touch it,
+	// so every downstream consumer (aud derivation and the exchanged
+	// subject_token) sees the cleaned value. A trailing newline from
+	// $(cat token) is common.
+	//
+	// Set-but-empty ("") is treated as unset and falls back to context auth:
+	// os.Getenv can't tell empty from unset, and a CI templating slip like
+	// ENTIRE_TOKEN="${TOKEN}" (TOKEN undefined → "") shouldn't hard-fail the
+	// clone. But a non-empty value that is only whitespace is a genuinely
+	// mis-set token — it fails closed rather than silently falling back.
+	if raw := os.Getenv(auth.EnvTokenVar); raw != "" {
+		envToken := strings.TrimSpace(raw)
+		if envToken == "" {
+			return nil, fmt.Errorf("%s is set but blank", auth.EnvTokenVar)
+		}
 		return resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, clusterBaseURL, discovery.DefaultCacheDir(), httpClient)
 	}
 
@@ -188,11 +202,6 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, clusterBaseURL string
 // trusted core. Do not combine ENTIRE_TOKEN with ENTIRE_TLS_SKIP_VERIFY in
 // CI / workload-identity environments.
 func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, clusterBaseURL, cacheDir string, httpClient *http.Client) (*repocreds.Cache, error) {
-	// Trim once here so both the aud-derivation and the exchanged subject_token
-	// use the cleaned value. A token sourced via $(cat token) often carries a
-	// trailing newline that would otherwise be POSTed verbatim to /oauth/token
-	// and rejected. Whitespace-only still fails closed inside CoreURLFromEnvToken.
-	envToken = strings.TrimSpace(envToken)
 	coreURL, err := auth.CoreURLFromEnvToken(envToken)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // CoreURLFromEnvToken already returns a user-facing, ENTIRE_TOKEN-prefixed error

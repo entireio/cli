@@ -41,15 +41,6 @@ const EnvTokenVar = "ENTIRE_TOKEN"
 // validated strictly. A token with no URL-shaped aud is rejected with a clear
 // error rather than silently falling back to context resolution.
 func CoreURLFromEnvToken(rawToken string) (string, error) {
-	// Trim surrounding whitespace so a token sourced via $(cat token) or a
-	// here-doc — which commonly carries a trailing newline — still parses. A
-	// value that is *only* whitespace trims to empty and fails closed with a
-	// clear message; it never falls back to context auth (a truly empty
-	// ENTIRE_TOKEN is treated as unset by the caller and never reaches here).
-	rawToken = strings.TrimSpace(rawToken)
-	if rawToken == "" {
-		return "", fmt.Errorf("%s is set but blank", EnvTokenVar)
-	}
 	claims, err := tokens.ParseClaims(rawToken)
 	if err != nil {
 		return "", fmt.Errorf("parse %s claims: %w", EnvTokenVar, err)

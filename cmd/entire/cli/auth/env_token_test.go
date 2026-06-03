@@ -110,27 +110,15 @@ func TestCoreURLFromEnvToken_MalformedToken(t *testing.T) {
 	assert.Contains(t, err.Error(), EnvTokenVar)
 }
 
-func TestCoreURLFromEnvToken_BlankToken(t *testing.T) {
+func TestCoreURLFromEnvToken_DoesNotTrim(t *testing.T) {
 	t.Parallel()
-	// A whitespace-only value reaches here (truly empty is treated as unset by
-	// the caller) and must fail closed with a clear message, not the raw
-	// JWT-parse error.
-	for _, tok := range []string{" ", "\t", "\n", " \t\n "} {
-		_, err := CoreURLFromEnvToken(tok)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), EnvTokenVar)
-		assert.Contains(t, err.Error(), "blank")
-	}
-}
-
-func TestCoreURLFromEnvToken_TrimsSurroundingWhitespace(t *testing.T) {
-	t.Parallel()
-	// A valid token padded with leading/trailing whitespace (e.g. a trailing
-	// newline from $(cat token)) must trim and parse, not fail.
+	// Trimming is the caller's job (done once at the env-var read site in
+	// resolveCreds). This function takes the token verbatim, so a padded value
+	// is a malformed JWT here — guards against re-introducing a redundant trim.
 	token := makeJWT(t, `{"sub":"ci-runner","aud":"https://core.us.entire.io"}`)
-	got, err := CoreURLFromEnvToken("  " + token + "\n")
-	require.NoError(t, err)
-	assert.Equal(t, "https://core.us.entire.io", got)
+	_, err := CoreURLFromEnvToken("  " + token + "\n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), EnvTokenVar)
 }
 
 func TestCoreURLFromEnvToken_RejectsAlgNone(t *testing.T) {
