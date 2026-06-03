@@ -121,7 +121,7 @@ func TestRunAuthStatus_RendersSessionsTable(t *testing.T) {
 			t.Fatalf("output = %q, want table to contain %q", got, want)
 		}
 	}
-	if !strings.Contains(got, "entire logout --all") {
+	if !strings.Contains(got, "entire logout --everywhere") {
 		t.Fatalf("output = %q, want logout hint tying the table to logout", got)
 	}
 }

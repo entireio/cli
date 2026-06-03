@@ -33,7 +33,7 @@ type clearContextFunc func() error
 
 func newLogoutCmd() *cobra.Command {
 	var insecureHTTPAuth bool
-	var all bool
+	var everywhere bool
 	cmd := &cobra.Command{
 		Use:   "logout",
 		Short: "Log out of Entire",
@@ -66,14 +66,14 @@ func newLogoutCmd() *cobra.Command {
 			outW, errW := cmd.OutOrStdout(), cmd.ErrOrStderr()
 			if err := runLogout(cmd.Context(), outW, errW,
 				auth.NewContextStore(), revokeCurrent, revokeAll,
-				auth.RemoveCurrentContext, api.AuthBaseURL(), all); err != nil {
+				auth.RemoveCurrentContext, api.AuthBaseURL(), everywhere); err != nil {
 				return err
 			}
 			promoteNextLogin(outW, errW)
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&all, "all", false, "Also revoke every session on the active core server-side, not just the active one")
+	cmd.Flags().BoolVar(&everywhere, "everywhere", false, "Revoke every session server-side, not just the current one")
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	return cmd
 }
@@ -103,7 +103,7 @@ func revokeCurrentSession(ctx context.Context, coreURL, token string) error {
 }
 
 // revokeAllSessions revokes every active login session on coreURL (the
-// `entire logout --all` path): list the families, then delete each by id.
+// `entire logout --everywhere` path): list the families, then delete each by id.
 // Best-effort across sessions — it attempts them all and returns the first
 // failure, so one stuck session doesn't strand the rest.
 func revokeAllSessions(ctx context.Context, coreURL, token string) error {

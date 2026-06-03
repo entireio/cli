@@ -274,7 +274,7 @@ func defaultListSessions(ctx context.Context, coreURL, token string) ([]api.Sess
 // runAuthStatus reports auth state against the target core: GET /me validates
 // the token and supplies the profile header, the active login context is shown
 // locally, and the active sessions (refresh-token families) on that core are
-// listed so the effect of `logout` / `logout --all` is visible.
+// listed so the effect of `logout` / `logout --everywhere` is visible.
 func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher, listSessions sessionLister, t statusTarget) error {
 	if t.token == "" {
 		fmt.Fprintf(w, "Not logged in to %s\n", t.coreURL)
@@ -309,7 +309,7 @@ func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher
 		sortSessionsByRecency(sessions)
 		fmt.Fprintf(w, "\nActive sessions (%d):\n", len(sessions))
 		renderSessionsTable(w, newAuthTableStyles(w), sessions)
-		fmt.Fprintln(w, "\nRun 'entire logout' to end this session, or 'entire logout --all' to end all of them.")
+		fmt.Fprintln(w, "\nRun 'entire logout' to end this session, or 'entire logout --everywhere' to end all of them.")
 	}
 
 	if t.totalContexts > 1 {
