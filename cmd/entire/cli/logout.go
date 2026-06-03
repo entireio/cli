@@ -19,10 +19,10 @@ type tokenStore interface {
 	DeleteToken(baseURL string) error
 }
 
-// revokeCurrentFunc revokes the CLI's current token server-side. The
-// implementation resolves its own data-API bearer (same audience-
-// matching rule as sessionLister); callers don't pass the keyring
-// entry through.
+// revokeCurrentFunc revokes the CLI's current login session server-side.
+// The caller resolves the active context's core URL + bearer up-front and
+// binds them into the closure, so the revocation hits the same core that
+// `auth status` lists.
 type revokeCurrentFunc func(ctx context.Context) error
 
 // clearContextFunc removes the active contexts.json context (and its
