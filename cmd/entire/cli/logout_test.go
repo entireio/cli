@@ -4,12 +4,19 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
 )
 
 const testLogoutToken = "tok123"
@@ -431,4 +438,129 @@ func TestRunLogoutAll_InsecureCoreSkipsRevoke(t *testing.T) {
 	if !strings.Contains(errOut.String(), "skipping server-side revocation") {
 		t.Fatalf("stderr = %q, want the insecure-skip warning", errOut.String())
 	}
+}
+
+// coreRecorder counts the session-endpoint calls a fake entire-core sees, so
+// the flag-matrix test can assert exactly which revoke shape each context's
+// core received.
+type coreRecorder struct {
+	mu            sync.Mutex
+	listCount     int
+	deleteCurrent int
+	deleteByID    []string
+}
+
+func (r *coreRecorder) snapshot() (list, current, byID int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.listCount, r.deleteCurrent, len(r.deleteByID)
+}
+
+// newCoreServer stands up a fake entire-core that answers the three session
+// endpoints logout uses: GET (list), DELETE /current, DELETE /<id>. The list
+// returns two sessions so --everywhere has something to delete per core.
+func newCoreServer(t *testing.T) (*httptest.Server, *coreRecorder) {
+	t.Helper()
+	rec := &coreRecorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == coreSessionsPath:
+			rec.listCount++
+			fmt.Fprint(w, `{"tokens":[{"id":"s1"},{"id":"s2"}]}`)
+		case r.Method == http.MethodDelete && r.URL.Path == coreSessionsPath+"/current":
+			rec.deleteCurrent++
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, coreSessionsPath+"/"):
+			rec.deleteByID = append(rec.deleteByID, strings.TrimPrefix(r.URL.Path, coreSessionsPath+"/"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, rec
+}
+
+// seedTwoContexts records two login contexts pointing at two fake cores. The
+// second (recB) is recorded with activate=true, so it is the *active* context
+// — what a plain `logout` (no --all) targets.
+func seedTwoContexts(t *testing.T) (recA, recB *coreRecorder) {
+	t.Helper()
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	srvA, recA := newCoreServer(t)
+	srvB, recB := newCoreServer(t)
+	exp := time.Now().Add(time.Hour).Unix()
+	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"alice","exp":%d}`, srvA.URL, exp)), "", true); err != nil {
+		t.Fatalf("seed context A: %v", err)
+	}
+	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"bob","exp":%d}`, srvB.URL, exp)), "", true); err != nil {
+		t.Fatalf("seed context B: %v", err)
+	}
+	return recA, recB
+}
+
+// execLogout runs the real cobra logout command with --insecure-http-auth
+// (the fake cores are http loopback) plus the given flags.
+func execLogout(t *testing.T, flags ...string) {
+	t.Helper()
+	cmd := newLogoutCmd()
+	cmd.SetArgs(append([]string{"--insecure-http-auth"}, flags...))
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("logout %v: %v (stderr=%q)", flags, err, errOut.String())
+	}
+}
+
+// TestLogoutCommand_FlagMatrix pins all four quadrants of the --all/--everywhere
+// matrix end-to-end through the cobra command, asserting which revoke shape each
+// context's core actually received. Process-global env + keyring backend, so no
+// t.Parallel(); subtests run sequentially, each with fresh state.
+func TestLogoutCommand_FlagMatrix(t *testing.T) {
+	t.Run("logout: active context, current session", func(t *testing.T) {
+		recA, recB := seedTwoContexts(t)
+		execLogout(t)
+		if l, c, b := recA.snapshot(); l+c+b != 0 {
+			t.Errorf("inactive context A should be untouched, got list=%d current=%d byID=%d", l, c, b)
+		}
+		if l, c, b := recB.snapshot(); l != 0 || c != 1 || b != 0 {
+			t.Errorf("active context B: want one current-session revoke, got list=%d current=%d byID=%d", l, c, b)
+		}
+	})
+
+	t.Run("--everywhere: active context, all sessions", func(t *testing.T) {
+		recA, recB := seedTwoContexts(t)
+		execLogout(t, "--everywhere")
+		if l, c, b := recA.snapshot(); l+c+b != 0 {
+			t.Errorf("inactive context A should be untouched, got list=%d current=%d byID=%d", l, c, b)
+		}
+		if l, c, b := recB.snapshot(); l != 1 || c != 0 || b != 2 {
+			t.Errorf("active context B: want list + 2 by-id revokes, got list=%d current=%d byID=%d", l, c, b)
+		}
+	})
+
+	t.Run("--all: every context, current session each", func(t *testing.T) {
+		recA, recB := seedTwoContexts(t)
+		execLogout(t, "--all")
+		for name, rec := range map[string]*coreRecorder{"A": recA, "B": recB} {
+			if l, c, b := rec.snapshot(); l != 0 || c != 1 || b != 0 {
+				t.Errorf("context %s: want one current-session revoke, got list=%d current=%d byID=%d", name, l, c, b)
+			}
+		}
+	})
+
+	t.Run("--all --everywhere: every context, all sessions each", func(t *testing.T) {
+		recA, recB := seedTwoContexts(t)
+		execLogout(t, "--all", "--everywhere")
+		for name, rec := range map[string]*coreRecorder{"A": recA, "B": recB} {
+			if l, c, b := rec.snapshot(); l != 1 || c != 0 || b != 2 {
+				t.Errorf("context %s: want list + 2 by-id revokes, got list=%d current=%d byID=%d", name, l, c, b)
+			}
+		}
+	})
 }
