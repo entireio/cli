@@ -22,24 +22,20 @@ type Client struct {
 	httpClient *http.Client
 	baseURL    string
 
-	// authTokensPath is the base path for the auth-tokens management
-	// endpoints (list / revoke). Set via WithAuthTokensPath when the
-	// client targets the auth host. Empty for data-API-only clients;
-	// auth-tokens methods error out if called against an empty path.
-	authTokensPath string
+	// sessionsPath is the base path for entire-core's login-session
+	// endpoints (list / revoke / current). Set via WithSessionsPath when the
+	// client targets the auth host; empty otherwise, and the session methods
+	// error out if called against an empty path.
+	sessionsPath string
 }
 
-// WithAuthTokensPath sets the base path used by ListSessions,
-// RevokeCurrentSession, and RevokeSession. The path is supplied by the
-// auth shim from auth.CurrentProvider().AuthTokensPath, which is the
-// single source of truth for provider-version routing — the api
-// package no longer reads ENTIRE_AUTH_PROVIDER_VERSION itself.
+// WithSessionsPath sets the base path used by ListSessions,
+// RevokeCurrentSession, and RevokeSession. Returns the receiver for chaining
+// at construction:
 //
-// Returns the receiver for chaining at construction:
-//
-//	c := api.NewClientWithBaseURL(token, base).WithAuthTokensPath(p)
-func (c *Client) WithAuthTokensPath(path string) *Client {
-	c.authTokensPath = path
+//	c := api.NewClientWithBaseURL(token, base).WithSessionsPath(p)
+func (c *Client) WithSessionsPath(path string) *Client {
+	c.sessionsPath = path
 	return c
 }
 

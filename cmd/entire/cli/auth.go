@@ -17,11 +17,10 @@ import (
 )
 
 // coreSessionsPath is entire-core's login-session endpoint family
-// (list / revoke / current). These are OAuth refresh-token families, served
-// by the auth host (entire-core), NOT entire.io's `/api/v1/auth/tokens` —
-// that path is entire.io's legacy `ent_` personal-access-token surface, which
-// rejects entire-core JWTs. The CLI authenticates with a core JWT, so all
-// session management goes to core.
+// (list / revoke / current) on the auth host. Sessions are OAuth
+// refresh-token families; the CLI authenticates against them with its core
+// JWT. Session management must target the auth host (entire-core), never the
+// data host.
 const coreSessionsPath = "/api/auth/tokens"
 
 // User-visible placeholder strings. lastUsedJustNow is consumed by
@@ -73,7 +72,7 @@ func requireSecureBaseURL(insecureHTTPAuth bool) error {
 // routes require it).
 func newSessionsClient(token string) *api.Client {
 	return api.NewClientWithBaseURL(token, api.AuthBaseURL()).
-		WithAuthTokensPath(coreSessionsPath)
+		WithSessionsPath(coreSessionsPath)
 }
 
 // resolveAuthHostToken returns a bearer scoped for the auth host (entire-core).

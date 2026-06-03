@@ -36,9 +36,6 @@ func TestResolveProvider_V2(t *testing.T) {
 	if got.STSPath != "/oauth/token" {
 		t.Errorf("v2 STSPath = %q", got.STSPath)
 	}
-	if got.AuthTokensPath != "/api/v1/auth/tokens" {
-		t.Errorf("v2 AuthTokensPath = %q", got.AuthTokensPath)
-	}
 }
 
 // effectiveProviderVersion tests cannot be t.Parallel (they use t.Setenv).
@@ -110,7 +107,6 @@ func TestSetProviderForTest_Overrides(t *testing.T) {
 		DeviceCodePath: "/custom/device",
 		TokenPath:      "/custom/token",
 		STSPath:        "/custom/sts",
-		AuthTokensPath: "/custom/tokens",
 	}
 	SetProviderForTest(t, custom)
 

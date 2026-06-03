@@ -23,7 +23,7 @@ func TestClient_RevokeCurrentSession_SendsDeleteWithBearer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithAuthTokensPath("/api/v1/auth/tokens")
+	c := NewClient("tok").WithSessionsPath("/api/auth/tokens")
 	c.baseURL = server.URL
 
 	if err := c.RevokeCurrentSession(context.Background()); err != nil {
@@ -33,8 +33,8 @@ func TestClient_RevokeCurrentSession_SendsDeleteWithBearer(t *testing.T) {
 	if gotMethod != http.MethodDelete {
 		t.Errorf("method = %q, want DELETE", gotMethod)
 	}
-	if gotPath != "/api/v1/auth/tokens/current" {
-		t.Errorf("path = %q, want /api/v1/auth/tokens/current", gotPath)
+	if gotPath != "/api/auth/tokens/current" {
+		t.Errorf("path = %q, want /api/auth/tokens/current", gotPath)
 	}
 	if gotAuth != testBearerHeader {
 		t.Errorf("Authorization = %q, want %q", gotAuth, testBearerHeader)
@@ -51,7 +51,7 @@ func TestClient_RevokeCurrentSession_ReturnsHTTPErrorOn401(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithAuthTokensPath("/api/v1/auth/tokens")
+	c := NewClient("tok").WithSessionsPath("/api/auth/tokens")
 	c.baseURL = server.URL
 
 	err := c.RevokeCurrentSession(context.Background())
@@ -87,7 +87,7 @@ func TestClient_ListSessions_DecodesResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithAuthTokensPath("/api/v1/auth/tokens")
+	c := NewClient("tok").WithSessionsPath("/api/auth/tokens")
 	c.baseURL = server.URL
 
 	tokens, err := c.ListSessions(context.Background())
@@ -98,8 +98,8 @@ func TestClient_ListSessions_DecodesResponse(t *testing.T) {
 	if gotMethod != http.MethodGet {
 		t.Errorf("method = %q, want GET", gotMethod)
 	}
-	if gotPath != "/api/v1/auth/tokens" {
-		t.Errorf("path = %q, want /api/v1/auth/tokens", gotPath)
+	if gotPath != "/api/auth/tokens" {
+		t.Errorf("path = %q, want /api/auth/tokens", gotPath)
 	}
 	if gotAuth != testBearerHeader {
 		t.Errorf("Authorization = %q, want %q", gotAuth, testBearerHeader)
@@ -129,7 +129,7 @@ func TestClient_ListSessions_ReturnsHTTPErrorOn401(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithAuthTokensPath("/api/v1/auth/tokens")
+	c := NewClient("tok").WithSessionsPath("/api/auth/tokens")
 	c.baseURL = server.URL
 
 	_, err := c.ListSessions(context.Background())
@@ -155,7 +155,7 @@ func TestClient_RevokeSession_SendsDeleteWithEscapedID(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithAuthTokensPath("/api/v1/auth/tokens")
+	c := NewClient("tok").WithSessionsPath("/api/auth/tokens")
 	c.baseURL = server.URL
 
 	// Use an id that needs URL escaping to verify we don't blindly concat.
@@ -166,10 +166,10 @@ func TestClient_RevokeSession_SendsDeleteWithEscapedID(t *testing.T) {
 	if gotMethod != http.MethodDelete {
 		t.Errorf("method = %q, want DELETE", gotMethod)
 	}
-	if want := "/api/v1/auth/tokens/abc%2Fdef%201"; gotEscapedPath != want {
+	if want := "/api/auth/tokens/abc%2Fdef%201"; gotEscapedPath != want {
 		t.Errorf("escaped path = %q, want %q", gotEscapedPath, want)
 	}
-	if want := "/api/v1/auth/tokens/abc/def 1"; gotDecodedPath != want {
+	if want := "/api/auth/tokens/abc/def 1"; gotDecodedPath != want {
 		t.Errorf("decoded path = %q, want %q", gotDecodedPath, want)
 	}
 }
@@ -184,7 +184,7 @@ func TestClient_RevokeSession_ReturnsErrorBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithAuthTokensPath("/api/v1/auth/tokens")
+	c := NewClient("tok").WithSessionsPath("/api/auth/tokens")
 	c.baseURL = server.URL
 
 	err := c.RevokeSession(context.Background(), "missing")

@@ -21,17 +21,11 @@ const ProviderVersionEnvVar = "ENTIRE_AUTH_PROVIDER_VERSION"
 // STS is never invoked, so v1.STSPath is left empty. v2 exposes a
 // dedicated STS path because it's used in split-host deployments
 // (e.g. us.auth.partial.to mints, partial.to consumes).
-//
-// AuthTokensPath is the base path for the auth-tokens management
-// endpoint family (list / revoke). Routed at the api.Client layer via
-// (*api.Client).WithAuthTokensPath so the provider table is the single
-// source of truth — no env-var duplication between auth/ and api/.
 type Provider struct {
 	ClientID       string
 	DeviceCodePath string
 	TokenPath      string
 	STSPath        string
-	AuthTokensPath string
 }
 
 var providers = map[string]Provider{
@@ -39,7 +33,6 @@ var providers = map[string]Provider{
 		ClientID:       "entire-cli",
 		DeviceCodePath: "/oauth/device/code",
 		TokenPath:      "/oauth/token",
-		AuthTokensPath: "/api/v1/auth/tokens",
 	},
 	"v2": { //nolint:gosec // OAuth client_id and endpoint paths, not credentials
 		// Matches an OIDC-standard auth server's discovery doc — confirmed
@@ -51,11 +44,6 @@ var providers = map[string]Provider{
 		DeviceCodePath: "/device_authorization",
 		TokenPath:      "/oauth/token",
 		STSPath:        "/oauth/token",
-		// API token management lives on the data API (not the auth host).
-		// auth.go / logout.go pass api.AuthBaseURL() for the keyring key,
-		// but the AuthTokensPath calls should route to api.BaseURL() in
-		// split-host setups — see TODO in auth.go's newAuthHostAPIClient.
-		AuthTokensPath: "/api/v1/auth/tokens",
 	},
 }
 
