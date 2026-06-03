@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-06-03
+
+### Added
+
+- Added Replay Lab: `entire replay checkpoint` replays a committed checkpoint in an isolated worktree and compares the agent result to the real commit by file overlap, optional tests, risk signals, semantic similarity when `entire-sem` is installed, duration, and token usage when available.
+- Added `entire eval run` and `entire eval report` for private multi-agent benchmarks across explicit or recent Entire checkpoints, including per-agent rankings by pass rate, file recall, precision, risk, duration, and token use.
+- `entire labs` now lists Replay Lab commands alongside other experimental workflows.
+
 ## [0.7.3] - 2026-06-02
 
 ### Fixed

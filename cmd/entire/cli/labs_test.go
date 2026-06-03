@@ -25,7 +25,11 @@ func TestLabsCmd_PrintsExperimentalCommandList(t *testing.T) {
 		"newer Entire workflows",
 		"Available experimental commands",
 		"entire review",
+		"entire replay",
+		"entire eval",
 		"entire review --help",
+		"entire replay --help",
+		"entire eval --help",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("entire labs output missing %q:\n%s", want, got)
@@ -46,7 +50,7 @@ func TestLabsCmd_HelpShowsExperimentalCommandList(t *testing.T) {
 		t.Fatalf("entire labs --help failed: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"Labs", "entire review"} {
+	for _, want := range []string{"Labs", "entire review", "entire replay", "entire eval"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("entire labs --help output missing %q:\n%s", want, got)
 		}
@@ -74,6 +78,25 @@ func TestLabsCmd_RejectsTopicWithoutRunningIt(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "Run the review skills configured") {
 		t.Fatalf("entire labs review should not run or show review help, got stdout:\n%s", out.String())
+	}
+}
+
+func TestLabsCmd_UnknownTopicPointsBackToLabs(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+	var out, errOut bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&errOut)
+	root.SetArgs([]string{"labs", "unknown-topic"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("entire labs unknown-topic should return an error")
+	}
+	stderr := errOut.String()
+	if !strings.Contains(stderr, "entire labs") || strings.Contains(stderr, "entire unknown-topic --help") {
+		t.Fatalf("stderr should point unknown topics back to labs without inventing a command, got:\n%s", stderr)
 	}
 }
 

@@ -191,7 +191,13 @@ func newReplayCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "replay",
 		Short: "Replay checkpoint tasks in isolated worktrees",
-		Long:  "Replay historical Entire checkpoints against coding agents and compare their output to the original commit.",
+		Long: `Replay Lab turns historical Entire checkpoints into private agent benchmark
+tasks. Entire checks out the checkpoint parent commit in an isolated worktree,
+runs the original prompt with a selected agent, then compares the result to the
+real checkpoint commit.`,
+		Example: `  entire replay checkpoint <checkpoint-id> --agent codex --test-cmd "go test ./..." --timeout 20m
+  entire replay report <run-id>
+  entire eval run --from-checkpoints --agent claude-code,codex --test-cmd "go test ./..."`,
 	}
 	cmd.AddCommand(newReplayCheckpointCmd())
 	cmd.AddCommand(newReplayReportCmd())
@@ -203,7 +209,16 @@ func newReplayCheckpointCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "checkpoint <checkpoint-id>",
 		Short: "Replay one checkpoint with one agent",
-		Args:  cobra.ExactArgs(1),
+		Long: `Replay one committed Entire checkpoint with one launchable agent.
+
+The replay runs in a temporary git worktree created at the checkpoint parent
+commit. The saved report compares the agent's diff to the original checkpoint
+commit by file overlap, optional tests, risk signals, duration, and token usage
+when the agent reports it.`,
+		Example: `  entire replay checkpoint <checkpoint-id> --agent codex --test-cmd "go test ./..." --timeout 20m
+  entire replay checkpoint <checkpoint-id> --agent claude-code --keep-worktree
+  entire replay checkpoint <checkpoint-id> --agent gemini --json`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			run, err := runReplayCheckpoint(cmd.Context(), args[0], opts)
 			if err != nil {
@@ -230,7 +245,10 @@ func newReplayReportCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "report <run-id>",
 		Short: "Show a saved checkpoint replay report",
-		Args:  cobra.ExactArgs(1),
+		Long:  "Show a saved Replay Lab run from .git/entire-replay/runs.",
+		Example: `  entire replay report <run-id>
+  entire replay report <run-id> --json`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			run, err := readReplayRun(cmd.Context(), args[0])
 			if err != nil {
@@ -251,7 +269,12 @@ func newEvalCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "eval",
 		Short: "Run private agent evals from Entire checkpoints",
-		Long:  "Run checkpoint replay tasks across one or more agents and rank the results.",
+		Long: `Run Replay Lab tasks across one or more launchable agents and rank the
+results. Evals are private to the repository: they replay your own checkpoints
+and save JSON reports under the repository's git common directory.`,
+		Example: `  entire eval run --from-checkpoints --limit 5 --agent claude-code,codex --test-cmd "go test ./..."
+  entire eval run --checkpoint <checkpoint-id> --checkpoint <checkpoint-id> --agent codex
+  entire eval report <eval-id>`,
 	}
 	cmd.AddCommand(newEvalRunCmd())
 	cmd.AddCommand(newEvalReportCmd())
@@ -263,6 +286,14 @@ func newEvalRunCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run a replay eval",
+		Long: `Run checkpoint replay tasks across one or more agents.
+
+Select checkpoints explicitly with --checkpoint or let Entire choose recent
+committed checkpoints with --from-checkpoints. Each agent/checkpoint pair runs
+in its own isolated worktree and contributes to the final ranking.`,
+		Example: `  entire eval run --from-checkpoints --limit 5 --agent claude-code,codex --test-cmd "go test ./..." --timeout 20m
+  entire eval run --checkpoint <checkpoint-id> --agent codex --agent gemini
+  entire eval run --from-checkpoints --json`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			run, err := runReplayEval(cmd.Context(), opts)
 			if err != nil {
@@ -292,7 +323,10 @@ func newEvalReportCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "report <run-id>",
 		Short: "Show a saved replay eval report",
-		Args:  cobra.ExactArgs(1),
+		Long:  "Show a saved Replay Lab eval from .git/entire-replay/evals.",
+		Example: `  entire eval report <eval-id>
+  entire eval report <eval-id> --json`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			run, err := readReplayEval(cmd.Context(), args[0])
 			if err != nil {

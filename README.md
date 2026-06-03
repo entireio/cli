@@ -255,17 +255,54 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire doctor trace` | Show hook performance traces                                                                 |
 | `entire version` | Show Entire CLI version                                                                           |
 
-`entire replay checkpoint <id>` turns a real checkpoint into a private
-agent-eval task. Entire checks out the checkpoint's parent commit in an
-isolated temp worktree, runs the original prompt with the selected launchable
-agent, then compares the result to the original commit by changed files,
-optional tests, risk signals, and optional `entire-sem` semantic similarity.
-Replay and eval JSON is saved under the repository's git common directory, not
-tracked in the working tree. Use `entire replay report <run-id>` to revisit one
-run and `entire eval run --from-checkpoints --agent claude-code,codex` to
-compare agents across recent checkpoint tasks. Eval reports include an agent
-ranking by pass rate, file overlap, semantic match, risk, duration, and token
-usage when available.
+### Replay Lab
+
+Replay Lab turns real Entire checkpoints into private agent benchmarks. It
+checks out the checkpoint's parent commit in an isolated temp worktree, runs the
+original prompt with a launchable agent, then compares the result to the real
+checkpoint commit by changed files, optional tests, risk signals, duration, and
+token usage when available. If `entire-sem` is installed, reports also include
+semantic similarity.
+
+Replay one checkpoint:
+
+```bash
+entire replay checkpoint <checkpoint-id> \
+  --agent codex \
+  --test-cmd "go test ./..." \
+  --timeout 20m
+```
+
+Inspect or automate a run:
+
+```bash
+entire replay checkpoint <checkpoint-id> --agent claude-code --keep-worktree
+entire replay checkpoint <checkpoint-id> --agent gemini --json
+entire replay report <run-id>
+entire replay report <run-id> --json
+```
+
+Compare agents across recent checkpoints:
+
+```bash
+entire eval run \
+  --from-checkpoints \
+  --limit 5 \
+  --agent claude-code,codex \
+  --test-cmd "go test ./..." \
+  --timeout 20m
+
+entire eval report <eval-id>
+entire eval report <eval-id> --json
+```
+
+Supported replay agents are `claude-code`, `codex`, and `gemini`. Replay and
+eval JSON is saved under the repository's git common directory at
+`.git/entire-replay/`, so benchmark output is local to the repo and not tracked
+in the working tree. Eval rankings sort agents by pass rate, file recall,
+precision, risk, duration, and token use. See
+[`docs/architecture/replay-lab.md`](docs/architecture/replay-lab.md) for the
+storage, isolation, and scoring details.
 
 ### `entire enable` Flags
 

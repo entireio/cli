@@ -944,6 +944,52 @@ func TestRootCommandHasReplayAndEval(t *testing.T) {
 	}
 }
 
+func TestReplayCheckpointHelpShowsReleaseExamples(t *testing.T) {
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"replay", "checkpoint", "--help"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("entire replay checkpoint --help failed: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"Replay one committed Entire checkpoint",
+		`entire replay checkpoint <checkpoint-id> --agent codex --test-cmd "go test ./..."`,
+		"entire replay checkpoint <checkpoint-id> --agent gemini --json",
+		"--keep-worktree",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("replay checkpoint help missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestEvalRunHelpShowsReleaseExamples(t *testing.T) {
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"eval", "run", "--help"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("entire eval run --help failed: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"Run checkpoint replay tasks across one or more agents",
+		`entire eval run --from-checkpoints --limit 5 --agent claude-code,codex --test-cmd "go test ./..."`,
+		"entire eval run --checkpoint <checkpoint-id> --agent codex --agent gemini",
+		"--from-checkpoints",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("eval run help missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func newReplayRepo(t *testing.T) (repoRoot, cpID, base, target string) {
 	t.Helper()
 	return newReplayRepoWithPrompts(t, []string{"Add the replay helper."}, []byte(`{"type":"user","uuid":"u1","message":{"content":"Add the replay helper."}}

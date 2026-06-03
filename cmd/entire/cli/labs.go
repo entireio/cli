@@ -26,6 +26,16 @@ var experimentalCommands = []experimentalCommandInfo{
 		Summary:    "Run a multi-agent investigation against a topic, issue, or seed doc",
 	},
 	{
+		Name:       "replay",
+		Invocation: "entire replay",
+		Summary:    "Replay checkpoint tasks in isolated worktrees",
+	},
+	{
+		Name:       "eval",
+		Invocation: "entire eval",
+		Summary:    "Run private agent benchmarks from Entire checkpoints",
+	},
+	{
 		Name:       "org",
 		Invocation: "entire org",
 		Summary:    "Manage Entire organizations (create, list)",
@@ -57,9 +67,7 @@ func newLabsCmd() *cobra.Command {
 				return nil
 			}
 			err := fmt.Errorf("unknown labs topic %q", args[0])
-			fmt.Fprintf(cmd.ErrOrStderr(),
-				"%v\n\nRun `entire labs` to see available experimental commands, or run `entire review --help` for command-specific help.\n",
-				err)
+			fmt.Fprintf(cmd.ErrOrStderr(), "%v\n\n%s\n", err, labsTopicHint(args[0]))
 			return NewSilentError(err)
 		},
 		Run: func(cmd *cobra.Command, _ []string) {
@@ -87,11 +95,22 @@ Available experimental commands:
 Try:
   entire review --help
   entire investigate --help
+  entire replay --help
+  entire eval --help
   entire org --help
   entire project --help
   entire repo --help
   entire grant --help
 `
+}
+
+func labsTopicHint(topic string) string {
+	for _, info := range experimentalCommands {
+		if topic == info.Name {
+			return fmt.Sprintf("Run `entire labs` to see available experimental commands, or run `%s --help` for command-specific help.", info.Invocation)
+		}
+	}
+	return "Run `entire labs` to see available experimental commands and their command-specific help."
 }
 
 func renderExperimentalCommands(commands []experimentalCommandInfo) string {
