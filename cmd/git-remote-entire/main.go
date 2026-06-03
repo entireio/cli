@@ -143,17 +143,15 @@ func run(args []string) int {
 //     (migrating any pre-contexts.json login first) and exchange its stored
 //     login JWT.
 func resolveCreds(ctx context.Context, parsedURL *url.URL, clusterBaseURL string, httpClient *http.Client) (*repocreds.Cache, error) {
-	// ENTIRE_TOKEN is read (and trimmed) once here, the only place we touch it,
-	// so every downstream consumer (aud derivation and the exchanged
-	// subject_token) sees the cleaned value. A trailing newline from
-	// $(cat token) is common.
-	//
-	// Set-but-empty ("") is treated as unset and falls back to context auth:
-	// os.Getenv can't tell empty from unset, and a CI templating slip like
-	// ENTIRE_TOKEN="${TOKEN}" (TOKEN undefined → "") shouldn't hard-fail the
-	// clone. But a non-empty value that is only whitespace is a genuinely
-	// mis-set token — it fails closed rather than silently falling back.
-	if raw := os.Getenv(auth.EnvTokenVar); raw != "" {
+	// Presence of ENTIRE_TOKEN is the signal: if it's set at all (LookupEnv,
+	// not Getenv, so we can tell set-empty from unset), we commit to the
+	// env-token path and any failure to use it is fatal — never a silent
+	// fallback to context auth, which would mask a misconfigured CI runner.
+	// Read and trim once here, the only place we touch it, so every downstream
+	// consumer (aud derivation and the exchanged subject_token) sees the
+	// cleaned value; a trailing newline from $(cat token) is common. An empty
+	// or whitespace-only value fails closed.
+	if raw, ok := os.LookupEnv(auth.EnvTokenVar); ok {
 		envToken := strings.TrimSpace(raw)
 		if envToken == "" {
 			return nil, fmt.Errorf("%s is set but blank", auth.EnvTokenVar)

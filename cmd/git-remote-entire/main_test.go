@@ -122,11 +122,12 @@ func TestResolveEnvTokenCreds_TrustedAudSucceeds(t *testing.T) {
 }
 
 func TestResolveCreds_BlankEnvTokenFailsClosed(t *testing.T) {
-	// A non-empty but whitespace-only ENTIRE_TOKEN is a genuinely mis-set token
-	// and must fail closed with a clear message — never silently fall back to
-	// context auth. Sets a process-global env var, so this test is not parallel.
+	// If ENTIRE_TOKEN is set at all, presence commits us to the env-token path:
+	// an empty or whitespace-only value must fail closed with a clear message,
+	// never silently fall back to context auth. Sets a process-global env var,
+	// so this test is not parallel.
 	dummyURL := &url.URL{Scheme: "entire", Host: "cluster.example.com"}
-	for _, blank := range []string{" ", "\t", "\n", " \t\n "} {
+	for _, blank := range []string{"", " ", "\t", "\n", " \t\n "} {
 		t.Setenv(auth.EnvTokenVar, blank)
 		creds, err := resolveCreds(t.Context(), dummyURL, "https://cluster.example.com", nil)
 		if err == nil {
