@@ -108,14 +108,16 @@ func revokeCurrentSession(ctx context.Context, coreURL, token string) error {
 // failure, so one stuck session doesn't strand the rest.
 func revokeAllSessions(ctx context.Context, coreURL, token string) error {
 	client := newSessionsClient(coreURL, token)
+	// ListSessions and RevokeSession already wrap with their own action
+	// context (incl. the session id), so return their errors verbatim.
 	sessions, err := client.ListSessions(ctx)
 	if err != nil {
-		return fmt.Errorf("list sessions: %w", err)
+		return err //nolint:wrapcheck // ListSessions already wraps with "list sessions"
 	}
 	var firstErr error
 	for _, s := range sessions {
 		if err := client.RevokeSession(ctx, s.ID); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("revoke session %s: %w", s.ID, err)
+			firstErr = err
 		}
 	}
 	return firstErr
