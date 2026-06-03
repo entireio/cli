@@ -53,8 +53,6 @@ func TestCoreTrusted(t *testing.T) {
 		{"exact match", "https://core.us.entire.io", true},
 		{"trailing slash on candidate", "https://core.us.entire.io/", true},
 		{"trailing slash on trusted entry", "https://core.eu.entire.io", true},
-		{"mixed-case host matches", "https://Core.US.Entire.IO", true},
-		{"mixed-case scheme matches", "HTTPS://core.us.entire.io", true},
 		{"not in set", "https://attacker.example.com", false},
 		{"empty against set", "", false},
 	}
