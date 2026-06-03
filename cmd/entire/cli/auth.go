@@ -119,6 +119,13 @@ func isKeychainTokenRejected(err error) bool {
 	if errors.Is(err, auth.ErrNotLoggedIn) {
 		return true
 	}
+	// A 401 whose body isn't JSON (e.g. a gateway returning text/plain) fails
+	// the ogen typed decode, so it never becomes an ErrorModelStatusCode — it
+	// arrives as a decode error whose message carries "(code 401)". Match that
+	// so the user still gets the re-login hint, not a raw decode dump.
+	if strings.Contains(err.Error(), "code 401") {
+		return true
+	}
 	return strings.Contains(err.Error(), "token exchange: status 4")
 }
 
@@ -160,8 +167,15 @@ func newAuthStatusCmd() *cobra.Command {
 			if err := requireSecureBaseURL(insecureHTTPAuth); err != nil {
 				return err
 			}
-			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(),
-				auth.NewContextStore(), defaultFetchProfile, auth.Contexts, api.AuthBaseURL())
+			target := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, api.AuthBaseURL())
+			// We send the session token to target.coreURL; enforce TLS on it
+			// too (it may differ from AuthBaseURL when a context is active).
+			if !insecureHTTPAuth {
+				if err := api.RequireSecureURL(target.coreURL); err != nil {
+					return fmt.Errorf("context core URL check: %w", err)
+				}
+			}
+			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(), defaultFetchProfile, target)
 		},
 	}
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
@@ -178,23 +192,57 @@ type authProfile struct {
 	ProviderUserID string
 }
 
-// profileFetcher fetches the logged-in user's profile via GET /me on the core
-// API. Injected so status stays unit-testable without a live core.
-type profileFetcher func(ctx context.Context) (*authProfile, error)
+// profileFetcher fetches a user's profile via GET /me on coreURL, authenticated
+// with token. Injected so status stays unit-testable without a live core.
+type profileFetcher func(ctx context.Context, coreURL, token string) (*authProfile, error)
 
 // contextsProvider returns the stored login contexts and the active context
-// name, for the local-context lines in `entire auth status`. Injected for
-// testability; production wires auth.Contexts.
+// name. Injected for testability; production wires auth.Contexts.
 type contextsProvider func() ([]*contexts.Context, string, error)
 
-// defaultFetchProfile fetches the current user's profile from the core API's
-// GET /me. It doubles as the liveness check for `entire auth status`: a 401
-// (or an expired login that can't be exchanged) means the stored token is no
-// longer usable, which isKeychainTokenRejected maps to a re-login hint.
-func defaultFetchProfile(ctx context.Context) (*authProfile, error) {
-	client, err := coreapi.New()
+// statusTarget is the resolved core `entire auth status` should query: the
+// active context's CoreURL + its session token, or (no active context) the
+// configured AuthBaseURL + legacy keyring entry.
+type statusTarget struct {
+	coreURL       string
+	token         string
+	activeContext string // "" when falling back to the legacy entry
+	totalContexts int
+}
+
+// resolveStatusTarget picks the core + token for `entire auth status`. The
+// active contexts.json context wins (so `auth use` retargets status onto that
+// login server); otherwise it falls back to the legacy keyring entry keyed by
+// the configured auth host.
+func resolveStatusTarget(store tokenStore, listContexts contextsProvider, fallbackBaseURL string) statusTarget {
+	all, current, err := listContexts()
+	total := 0
+	if err == nil {
+		total = len(all)
+		for _, c := range all {
+			if c.Name != current || c.CoreURL == "" {
+				continue
+			}
+			if tok, terr := auth.LoginTokenForContext(c); terr == nil && tok != "" {
+				return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total}
+			}
+		}
+	}
+	tok, gerr := store.GetToken(fallbackBaseURL)
+	if gerr != nil {
+		tok = "" // best-effort: a keyring read failure just reads as "no token"
+	}
+	return statusTarget{coreURL: fallbackBaseURL, token: tok, totalContexts: total}
+}
+
+// defaultFetchProfile fetches a user's profile from coreURL's GET /me with the
+// given bearer. It doubles as the liveness check for `entire auth status`: a
+// 401 (or an expired login) means the token is no longer usable, which
+// isKeychainTokenRejected maps to a re-login hint.
+func defaultFetchProfile(ctx context.Context, coreURL, token string) (*authProfile, error) {
+	client, err := coreapi.NewWithBearer(coreURL, token)
 	if err != nil {
-		return nil, fmt.Errorf("connect to Entire control plane: %w", err)
+		return nil, fmt.Errorf("connect to %s: %w", coreURL, err)
 	}
 	me, err := client.GetMe(ctx)
 	if err != nil {
@@ -213,44 +261,36 @@ func defaultFetchProfile(ctx context.Context) (*authProfile, error) {
 }
 
 // runAuthStatus reports auth state without listing server-side sessions: GET
-// /me validates the token and supplies the profile header, and the active
-// login context is read locally. (Session listing/revocation lives on
-// entire-core and is reached only by logout — see newSessionsClient.)
-func runAuthStatus(ctx context.Context, w io.Writer, store tokenStore, fetchProfile profileFetcher, listContexts contextsProvider, baseURL string) error {
-	token, err := store.GetToken(baseURL)
-	if err != nil {
-		return fmt.Errorf("read keychain: %w", err)
-	}
-	if token == "" {
-		fmt.Fprintf(w, "Not logged in to %s\n", baseURL)
+// /me on the target core validates the token and supplies the profile header,
+// and the active login context is shown locally. (Session listing/revocation
+// lives on entire-core and is reached only by logout — see newSessionsClient.)
+func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher, t statusTarget) error {
+	if t.token == "" {
+		fmt.Fprintf(w, "Not logged in to %s\n", t.coreURL)
 		fmt.Fprintln(w, "Run 'entire login' to authenticate.")
 		return nil
 	}
 
-	profile, err := fetchProfile(ctx)
+	profile, err := fetchProfile(ctx, t.coreURL, t.token)
 	if err != nil {
 		if isKeychainTokenRejected(err) {
-			fmt.Fprintf(w, "Token in keychain for %s is no longer valid.\n", baseURL)
+			fmt.Fprintf(w, "Login for %s is no longer valid.\n", t.coreURL)
 			fmt.Fprintln(w, "Run 'entire login' to re-authenticate.")
 			return nil
 		}
 		return fmt.Errorf("validate token: %w", err)
 	}
 
-	fmt.Fprintf(w, "Logged in to %s\n", baseURL)
+	fmt.Fprintf(w, "Logged in to %s\n", t.coreURL)
 	writeProfileLines(w, profile)
-
-	// Local context info is informational; a read failure shouldn't fail the
-	// command, so on error we just skip the context lines.
-	all, current, ctxErr := listContexts()
-	if ctxErr == nil && current != "" {
-		fmt.Fprintf(w, "  %-9s %s\n", "Context:", current)
+	if t.activeContext != "" {
+		fmt.Fprintf(w, "  %-9s %s\n", "Context:", t.activeContext)
 	}
 	fmt.Fprintf(w, "  %-9s %s\n", "Token:", "stored in OS keychain")
 
-	if ctxErr == nil && len(all) > 1 {
+	if t.totalContexts > 1 {
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "%d login contexts saved; run 'entire auth contexts' to list or 'entire auth use <name>' to switch.\n", len(all))
+		fmt.Fprintf(w, "%d login contexts saved; run 'entire auth contexts' to list or 'entire auth use <name>' to switch.\n", t.totalContexts)
 	}
 	return nil
 }

@@ -13,6 +13,32 @@ import (
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 )
 
+// TestResolveStatusTarget_PrefersActiveContext pins the multi-core fix: status
+// targets the active context's CoreURL + its session token, recording a real
+// context and reading it back.
+func TestResolveStatusTarget_PrefersActiveContext(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	exp := time.Now().Add(time.Hour).Unix()
+	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://eu.auth.entire.io","handle":"alice","exp":%d}`, exp)), "", true); err != nil {
+		t.Fatalf("record context: %v", err)
+	}
+
+	got := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, "https://fallback.example.com")
+	if got.coreURL != "https://eu.auth.entire.io" {
+		t.Errorf("coreURL = %q, want the active context's CoreURL", got.coreURL)
+	}
+	if got.token == "" {
+		t.Error("token = empty, want the active context's session token")
+	}
+	if got.activeContext == "" {
+		t.Error("activeContext = empty, want the active context name")
+	}
+}
+
 // makeContextJWT builds a JWT-shaped token (non-"none" alg) carrying the
 // given claims, which is all RecordLoginContext needs.
 func makeContextJWT(t *testing.T, payloadJSON string) string {

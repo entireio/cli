@@ -43,6 +43,32 @@ func New() (*Client, error) {
 	return client, nil
 }
 
+// NewWithBearer returns a *Client targeting an explicit core origin with a
+// fixed bearer token — no per-request resolution or STS exchange. Used when a
+// command must hit a specific login server rather than the configured
+// AuthBaseURL: e.g. `entire auth status` querying /me on the active context's
+// core with that context's session token.
+func NewWithBearer(coreBaseURL, token string) (*Client, error) {
+	base := strings.TrimRight(coreBaseURL, "/")
+	client, err := NewClient(base+apiBasePath, staticBearer{token: token})
+	if err != nil {
+		return nil, fmt.Errorf("build core API client: %w", err)
+	}
+	return client, nil
+}
+
+// staticBearer is a SecuritySource that returns a fixed bearer token. Same
+// sessionAuth-skipping rationale as bearerSource.
+type staticBearer struct{ token string }
+
+func (s staticBearer) BearerAuth(context.Context, OperationName) (BearerAuth, error) {
+	return BearerAuth{Token: s.token}, nil
+}
+
+func (s staticBearer) SessionAuth(context.Context, OperationName) (SessionAuth, error) {
+	return SessionAuth{}, ogenerrors.ErrSkipClientSecurity
+}
+
 // bearerSource implements the generated SecuritySource, supplying the
 // logged-in user's bearer token for every request. The control plane
 // only uses bearerAuth from the CLI; the sessionAuth (browser cookie)
