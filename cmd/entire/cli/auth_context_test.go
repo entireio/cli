@@ -47,8 +47,16 @@ func TestRunAuthContexts(t *testing.T) {
 		t.Fatalf("runAuthContexts: %v", err)
 	}
 	got := out.String()
-	if !strings.Contains(got, "* core.example.com") {
-		t.Fatalf("listing = %q, want current-marked core.example.com", got)
+	for _, hdr := range []string{"CONTEXT", "HANDLE", "CORE URL"} {
+		if !strings.Contains(got, hdr) {
+			t.Fatalf("listing = %q, want column header %q", got, hdr)
+		}
+	}
+	if !strings.Contains(got, "*") {
+		t.Fatalf("listing = %q, want an active-context marker", got)
+	}
+	if !strings.Contains(got, "core.example.com") {
+		t.Fatalf("listing = %q, want context core.example.com", got)
 	}
 	if !strings.Contains(got, "alice") {
 		t.Fatalf("listing = %q, want handle alice", got)

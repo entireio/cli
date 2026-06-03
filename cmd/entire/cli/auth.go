@@ -215,7 +215,7 @@ func runAuthStatus(ctx context.Context, w io.Writer, store tokenStore, list auth
 
 	fmt.Fprintln(w, "Active sessions:")
 	sortSessionsByRecency(sessions)
-	renderSessionsTable(w, newSessionsTableStyles(w), sessions, time.Now())
+	renderSessionsTable(w, newAuthTableStyles(w), sessions, time.Now())
 	return nil
 }
 
@@ -236,13 +236,13 @@ func sortSessionsByRecency(sessions []api.Token) {
 	})
 }
 
-// --- active-sessions table ---------------------------------------------------
+// --- auth tables -------------------------------------------------------------
 
-// sessionsTableStyles holds the lipgloss styles for the `entire auth status`
-// active-sessions table. Mirrors the approach in activity_render.go: keep
-// style construction tied to color detection, and render plain text when
-// color is disabled.
-type sessionsTableStyles struct {
+// authTableStyles holds the lipgloss styles shared by the `entire auth status`
+// active-sessions table and the `entire auth contexts` table. Mirrors the
+// approach in activity_render.go: keep style construction tied to color
+// detection, and render plain text when color is disabled.
+type authTableStyles struct {
 	colorEnabled bool
 
 	header  lipgloss.Style // bold + dim, used for column headers
@@ -254,9 +254,9 @@ type sessionsTableStyles struct {
 	expired lipgloss.Style // already expired
 }
 
-func newSessionsTableStyles(w io.Writer) sessionsTableStyles {
+func newAuthTableStyles(w io.Writer) authTableStyles {
 	useColor := shouldUseColor(w)
-	s := sessionsTableStyles{colorEnabled: useColor}
+	s := authTableStyles{colorEnabled: useColor}
 	if !useColor {
 		return s
 	}
@@ -270,7 +270,7 @@ func newSessionsTableStyles(w io.Writer) sessionsTableStyles {
 	return s
 }
 
-func (s sessionsTableStyles) render(style lipgloss.Style, text string) string {
+func (s authTableStyles) render(style lipgloss.Style, text string) string {
 	if !s.colorEnabled {
 		return text
 	}
@@ -281,7 +281,7 @@ func (s sessionsTableStyles) render(style lipgloss.Style, text string) string {
 // Column padding is computed via lipgloss.Width — it strips ANSI escapes, so a
 // styled cell's visible width matches its plain text. tabwriter can't be used
 // here once cells contain ANSI codes.
-func renderSessionsTable(w io.Writer, sty sessionsTableStyles, tokens []api.Token, now time.Time) {
+func renderSessionsTable(w io.Writer, sty authTableStyles, tokens []api.Token, now time.Time) {
 	headerCells := []string{"ID", "NAME", "SCOPE", "CREATED", "LAST USED", "EXPIRES"}
 	header := make([]string, len(headerCells))
 	for i, h := range headerCells {
@@ -300,7 +300,15 @@ func renderSessionsTable(w io.Writer, sty sessionsTableStyles, tokens []api.Toke
 		})
 	}
 
-	widths := make([]int, len(headerCells))
+	renderAlignedTable(w, header, rows)
+}
+
+// renderAlignedTable writes header followed by rows in left-aligned columns,
+// sizing each column to its widest (possibly pre-styled) cell. Column widths
+// use lipgloss.Width so ANSI escapes don't inflate the padding. Shared by the
+// auth-status and auth-contexts tables.
+func renderAlignedTable(w io.Writer, header []string, rows [][]string) {
+	widths := make([]int, len(header))
 	for i, h := range header {
 		widths[i] = lipgloss.Width(h)
 	}
@@ -328,21 +336,21 @@ func writeRow(w io.Writer, cells []string, widths []int) {
 	fmt.Fprintln(w)
 }
 
-func styleName(sty sessionsTableStyles, name string) string {
+func styleName(sty authTableStyles, name string) string {
 	if name == "" {
 		return sty.render(sty.dim, placeholderDash)
 	}
 	return sty.render(sty.name, name)
 }
 
-func styleLastUsed(sty sessionsTableStyles, lastUsed *string, now time.Time) string {
+func styleLastUsed(sty authTableStyles, lastUsed *string, now time.Time) string {
 	if lastUsed == nil {
 		return sty.render(sty.dim, lastUsedNever)
 	}
 	return sty.render(sty.value, formatAuthLastUsed(lastUsed, now))
 }
 
-func styleExpires(sty sessionsTableStyles, expiresAt string, now time.Time) string {
+func styleExpires(sty authTableStyles, expiresAt string, now time.Time) string {
 	formatted := formatAuthDate(expiresAt)
 	switch classifyExpiresAt(expiresAt, now) {
 	case expiresExpired:

@@ -6,6 +6,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/spf13/cobra"
 )
 
@@ -91,12 +92,39 @@ func runAuthContexts(w io.Writer) error {
 		fmt.Fprintln(w, "No login contexts. Run 'entire login' to authenticate.")
 		return nil
 	}
+	renderContextsTable(w, all, current)
+	return nil
+}
+
+// renderContextsTable prints the saved login contexts as a styled, aligned
+// table with column headers. The active context is flagged with "*" in the
+// leading column. Purely local data — no network, no timestamps — so it
+// reuses the auth-table styles but only the header/name/value/accent slots.
+func renderContextsTable(w io.Writer, all []*contexts.Context, current string) {
+	sty := newAuthTableStyles(w)
+
+	header := []string{
+		"", // active marker
+		sty.render(sty.header, "CONTEXT"),
+		sty.render(sty.header, "HANDLE"),
+		sty.render(sty.header, "CORE URL"),
+	}
+
+	rows := make([][]string, 0, len(all))
 	for _, c := range all {
 		marker := " "
+		name := sty.render(sty.value, c.Name)
 		if c.Name == current {
-			marker = "*"
+			marker = sty.render(sty.id, "*")
+			name = sty.render(sty.name, c.Name)
 		}
-		fmt.Fprintf(w, "%s %s\t%s\t%s\n", marker, c.Name, c.Handle, c.CoreURL)
+		rows = append(rows, []string{
+			marker,
+			name,
+			sty.render(sty.value, fallback(c.Handle, placeholderDash)),
+			sty.render(sty.value, fallback(c.CoreURL, placeholderDash)),
+		})
 	}
-	return nil
+
+	renderAlignedTable(w, header, rows)
 }
