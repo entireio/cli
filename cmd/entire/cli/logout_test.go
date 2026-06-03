@@ -240,13 +240,13 @@ func TestRunLogout_AllRevokesAllSessions(t *testing.T) {
 	}
 
 	if currentCalled {
-		t.Error("--all should not call the current-session revoke")
+		t.Error("--everywhere should not call the current-session revoke")
 	}
 	if !allCalled {
-		t.Error("--all should call the revoke-all path")
+		t.Error("--everywhere should call the revoke-all path")
 	}
 	if !store.deleted["https://entire.io"] {
-		t.Fatal("local token should still be deleted under --all")
+		t.Fatal("local token should still be deleted under --everywhere")
 	}
 	if !strings.Contains(out.String(), "Logged out.") {
 		t.Fatalf("stdout = %q, want to contain %q", out.String(), "Logged out.")
@@ -270,7 +270,7 @@ func TestLogoutCmd_IsRegistered(t *testing.T) {
 }
 
 // makeLogoutContexts builds a contextsProvider returning the given contexts
-// with no active marker — `logout --all` ignores which one is current.
+// with no active marker — `logout --all-contexts` ignores which one is current.
 func makeLogoutContexts(cs ...*contexts.Context) contextsProvider {
 	return func() ([]*contexts.Context, string, error) { return cs, "", nil }
 }
@@ -306,7 +306,7 @@ func TestRunLogoutAll_RevokesAndRemovesEachContext(t *testing.T) {
 		t.Fatalf("both contexts should be removed locally, got %v", removed)
 	}
 	if !store.deleted["https://entire.io"] {
-		t.Error("legacy keyring entry should be cleared on logout --all")
+		t.Error("legacy keyring entry should be cleared on logout --all-contexts")
 	}
 	if !strings.Contains(out.String(), "Logged out of 2 saved login(s).") {
 		t.Fatalf("stdout = %q, want count of 2", out.String())
@@ -483,7 +483,7 @@ func newCoreServer(t *testing.T) (*httptest.Server, *coreRecorder) {
 
 // seedTwoContexts records two login contexts pointing at two fake cores. The
 // second (recB) is recorded with activate=true, so it is the *active* context
-// — what a plain `logout` (no --all) targets.
+// — what a plain `logout` (no --all-contexts) targets.
 func seedTwoContexts(t *testing.T) (recA, recB *coreRecorder) {
 	t.Helper()
 	cfgDir := t.TempDir()
@@ -517,7 +517,7 @@ func execLogout(t *testing.T, flags ...string) {
 	}
 }
 
-// TestLogoutCommand_FlagMatrix pins all four quadrants of the --all/--everywhere
+// TestLogoutCommand_FlagMatrix pins all four quadrants of the --all-contexts/--everywhere
 // matrix end-to-end through the cobra command, asserting which revoke shape each
 // context's core actually received. Process-global env + keyring backend, so no
 // t.Parallel(); subtests run sequentially, each with fresh state.
@@ -544,9 +544,9 @@ func TestLogoutCommand_FlagMatrix(t *testing.T) {
 		}
 	})
 
-	t.Run("--all: every context, current session each", func(t *testing.T) {
+	t.Run("--all-contexts: every context, current session each", func(t *testing.T) {
 		recA, recB := seedTwoContexts(t)
-		execLogout(t, "--all")
+		execLogout(t, "--all-contexts")
 		for name, rec := range map[string]*coreRecorder{"A": recA, "B": recB} {
 			if l, c, b := rec.snapshot(); l != 0 || c != 1 || b != 0 {
 				t.Errorf("context %s: want one current-session revoke, got list=%d current=%d byID=%d", name, l, c, b)
@@ -554,9 +554,9 @@ func TestLogoutCommand_FlagMatrix(t *testing.T) {
 		}
 	})
 
-	t.Run("--all --everywhere: every context, all sessions each", func(t *testing.T) {
+	t.Run("--all-contexts --everywhere: every context, all sessions each", func(t *testing.T) {
 		recA, recB := seedTwoContexts(t)
-		execLogout(t, "--all", "--everywhere")
+		execLogout(t, "--all-contexts", "--everywhere")
 		for name, rec := range map[string]*coreRecorder{"A": recA, "B": recB} {
 			if l, c, b := rec.snapshot(); l != 1 || c != 0 || b != 2 {
 				t.Errorf("context %s: want list + 2 by-id revokes, got list=%d current=%d byID=%d", name, l, c, b)

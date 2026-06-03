@@ -35,7 +35,7 @@ type clearContextFunc func() error
 func newLogoutCmd() *cobra.Command {
 	var insecureHTTPAuth bool
 	var everywhere bool
-	var all bool
+	var allContexts bool
 	cmd := &cobra.Command{
 		Use:   "logout",
 		Short: "Log out of Entire",
@@ -46,11 +46,12 @@ func newLogoutCmd() *cobra.Command {
 			"login server.\n\n" +
 			"Pass --everywhere to revoke every session on the active core server-side\n" +
 			"(all your devices), not just the current one.\n\n" +
-			"Pass --all to log out of every saved login (context) at once: each context's\n" +
-			"session is revoked server-side and the login is removed from this machine.\n" +
-			"Combine with --everywhere to revoke every session on every context's core.\n\n" +
-			"Without --all, logging out promotes the next saved login (if any) to active,\n" +
-			"so running `entire logout` repeatedly drains every saved login in turn.",
+			"Pass --all-contexts to log out of every saved login (context) at once: each\n" +
+			"context's session is revoked server-side and the login is removed from this\n" +
+			"machine. Combine with --everywhere to revoke every session on every context's\n" +
+			"core.\n\n" +
+			"Without --all-contexts, logging out promotes the next saved login (if any) to\n" +
+			"active, so running `entire logout` repeatedly drains every saved login in turn.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := requireSecureBaseURL(insecureHTTPAuth); err != nil {
 				return err
@@ -64,7 +65,7 @@ func newLogoutCmd() *cobra.Command {
 				revokeForTarget = revokeAllSessions
 			}
 
-			if all {
+			if allContexts {
 				return runLogoutAll(cmd.Context(), outW, errW, auth.Contexts,
 					auth.LoginTokenForContext, revokeForTarget, auth.RemoveContext,
 					auth.NewContextStore(), api.AuthBaseURL(), insecureHTTPAuth)
@@ -94,7 +95,7 @@ func newLogoutCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&everywhere, "everywhere", false, "Revoke every session server-side, not just the current one")
-	cmd.Flags().BoolVar(&all, "all", false, "Log out of every saved login (context), not just the active one")
+	cmd.Flags().BoolVar(&allContexts, "all-contexts", false, "Log out of every saved login (context), not just the active one")
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	return cmd
 }
@@ -184,7 +185,7 @@ func runLogout(ctx context.Context, outW, errW io.Writer, store tokenStore, revo
 
 // revokeTargetFunc revokes sessions on a specific core. The two production
 // implementations are revokeCurrentSession (just the bearer's own session)
-// and revokeAllSessions (every session on that core); `logout --all` picks
+// and revokeAllSessions (every session on that core); `logout --all-contexts` picks
 // one based on --everywhere and applies it to each saved context's core.
 type revokeTargetFunc func(ctx context.Context, coreURL, token string) error
 

@@ -55,9 +55,9 @@ func RemoveCurrentContext() error {
 }
 
 // RemoveContext deletes the named context from contexts.json and its keyring
-// tokens. A missing context is a no-op. Used by `logout --all` to drain every
-// saved login. File.Delete clears current_context when name was the active
-// one, so removing the current context this way also logs it out.
+// tokens. A missing context is a no-op. Used by `logout --all-contexts` to
+// drain every saved login. File.Delete clears current_context when name was
+// the active one, so removing the current context this way also logs it out.
 func RemoveContext(name string) error {
 	var svc, handle string
 	if err := contexts.Modify(contexts.DefaultConfigDir(), func(f *contexts.File) (bool, error) {
