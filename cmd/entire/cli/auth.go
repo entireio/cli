@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/coreapi"
 	"github.com/spf13/cobra"
 )
 
@@ -119,6 +120,12 @@ func isKeychainTokenRejected(err error) bool {
 	if api.IsHTTPErrorStatus(err, http.StatusUnauthorized) {
 		return true
 	}
+	// The /me liveness probe goes through the core API client, whose 401
+	// surfaces as *coreapi.ErrorModelStatusCode rather than api.HTTPError.
+	var coreErr *coreapi.ErrorModelStatusCode
+	if errors.As(err, &coreErr) && coreErr.StatusCode == http.StatusUnauthorized {
+		return true
+	}
 	if errors.Is(err, auth.ErrNotLoggedIn) {
 		return true
 	}
@@ -163,12 +170,51 @@ func newAuthStatusCmd() *cobra.Command {
 			if err := requireSecureBaseURL(insecureHTTPAuth); err != nil {
 				return err
 			}
-			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(),
-				auth.NewContextStore(), defaultListSessions, api.AuthBaseURL())
+			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
+				auth.NewContextStore(), defaultFetchProfile, defaultListSessions, api.AuthBaseURL())
 		},
 	}
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	return cmd
+}
+
+// authProfile is the subset of the core API's GET /me that `entire auth
+// status` renders.
+type authProfile struct {
+	Handle         string
+	DisplayName    string
+	Email          string
+	Provider       string
+	ProviderUserID string
+}
+
+// profileFetcher fetches the logged-in user's profile via GET /me on the core
+// API. Injected so status stays unit-testable without a live core.
+type profileFetcher func(ctx context.Context) (*authProfile, error)
+
+// defaultFetchProfile fetches the current user's profile from the core API's
+// GET /me. It doubles as the liveness check for `entire auth status`: a 401
+// (or an expired login that can't be exchanged) means the stored token is no
+// longer usable, which isKeychainTokenRejected maps to a re-login hint.
+func defaultFetchProfile(ctx context.Context) (*authProfile, error) {
+	client, err := coreapi.New()
+	if err != nil {
+		return nil, fmt.Errorf("connect to Entire control plane: %w", err)
+	}
+	me, err := client.GetMe(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("fetch profile: %w", err)
+	}
+	p := &authProfile{
+		Provider:       me.Auth.Provider,
+		ProviderUserID: me.Auth.ProviderUserId,
+	}
+	p.Handle, _ = me.Global.Handle.Get()
+	if reg, ok := me.Regional.Get(); ok {
+		p.DisplayName, _ = reg.DisplayName.Get()
+		p.Email, _ = reg.Email.Get()
+	}
+	return p, nil
 }
 
 // defaultListSessions fetches the authenticated user's active login sessions
@@ -181,40 +227,76 @@ func defaultListSessions(ctx context.Context) ([]api.Session, error) {
 	return newSessionsClient(token).ListSessions(ctx) //nolint:wrapcheck // ListSessions already wraps with action context
 }
 
-func runAuthStatus(ctx context.Context, w io.Writer, store tokenStore, list sessionLister, baseURL string) error {
+func runAuthStatus(ctx context.Context, outW, errW io.Writer, store tokenStore, fetchProfile profileFetcher, list sessionLister, baseURL string) error {
 	token, err := store.GetToken(baseURL)
 	if err != nil {
 		return fmt.Errorf("read keychain: %w", err)
 	}
 	if token == "" {
-		fmt.Fprintf(w, "Not logged in to %s\n", baseURL)
-		fmt.Fprintln(w, "Run 'entire login' to authenticate.")
+		fmt.Fprintf(outW, "Not logged in to %s\n", baseURL)
+		fmt.Fprintln(outW, "Run 'entire login' to authenticate.")
 		return nil
 	}
 
-	sessions, err := list(ctx)
+	// GET /me both validates the stored token (liveness) and supplies the
+	// profile header below.
+	profile, err := fetchProfile(ctx)
 	if err != nil {
 		if isKeychainTokenRejected(err) {
-			fmt.Fprintf(w, "Token in keychain for %s is no longer valid.\n", baseURL)
-			fmt.Fprintln(w, "Run 'entire login' to re-authenticate.")
+			fmt.Fprintf(outW, "Token in keychain for %s is no longer valid.\n", baseURL)
+			fmt.Fprintln(outW, "Run 'entire login' to re-authenticate.")
 			return nil
 		}
 		return fmt.Errorf("validate token: %w", err)
 	}
 
-	fmt.Fprintf(w, "Logged in to %s\n", baseURL)
-	fmt.Fprintln(w, "  Token: stored in OS keychain")
-	fmt.Fprintln(w)
+	fmt.Fprintf(outW, "Logged in to %s\n", baseURL)
+	writeProfileLines(outW, profile)
+	fmt.Fprintf(outW, "  %-9s %s\n", "Token:", "stored in OS keychain")
+	fmt.Fprintln(outW)
 
-	if len(sessions) == 0 {
-		fmt.Fprintln(w, "No active sessions.")
+	// The token is already known good; a sessions-list failure is non-fatal,
+	// so warn and still report logged-in rather than erroring the command.
+	sessions, err := list(ctx)
+	if err != nil {
+		fmt.Fprintf(errW, "Warning: could not list active sessions: %v\n", err)
 		return nil
 	}
 
-	fmt.Fprintln(w, "Active sessions:")
+	if len(sessions) == 0 {
+		fmt.Fprintln(outW, "No active sessions.")
+		return nil
+	}
+
+	fmt.Fprintln(outW, "Active sessions:")
 	sortSessionsByRecency(sessions)
-	renderSessionsTable(w, newAuthTableStyles(w), sessions, time.Now())
+	renderSessionsTable(outW, newAuthTableStyles(outW), sessions, time.Now())
 	return nil
+}
+
+// writeProfileLines renders the user identity from GET /me as aligned
+// label/value lines, omitting any field the server didn't populate.
+func writeProfileLines(w io.Writer, p *authProfile) {
+	var parts []string
+	if p.DisplayName != "" {
+		parts = append(parts, p.DisplayName)
+	}
+	if p.Handle != "" {
+		parts = append(parts, "@"+p.Handle)
+	}
+	if p.Email != "" {
+		parts = append(parts, "<"+p.Email+">")
+	}
+	if len(parts) > 0 {
+		fmt.Fprintf(w, "  %-9s %s\n", "User:", strings.Join(parts, " "))
+	}
+	if p.Provider != "" {
+		identity := p.Provider
+		if p.ProviderUserID != "" {
+			identity += "/" + p.ProviderUserID
+		}
+		fmt.Fprintf(w, "  %-9s %s\n", "Identity:", identity)
+	}
 }
 
 // sortSessionsByRecency orders sessions most-recently-used first, then most
