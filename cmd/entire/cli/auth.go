@@ -16,16 +16,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// authTokenLister lists the authenticated user's active login sessions —
-// the server-side refresh-token families (one per `entire login`, across
-// all devices), surfaced by `entire auth status` and used by revoke as a
-// liveness probe. Despite the api.Token name, these are sessions, not
-// personal access tokens; the CLI never mints them. The implementation
-// resolves its own data-API bearer via auth.TokenForResource (RFC 8693
-// exchange in split-host setups, same-host shortcut otherwise); callers
-// don't pass a bearer through, which removes the temptation to forward the
-// wrong-audience keyring token.
-type authTokenLister func(ctx context.Context) ([]api.Token, error)
+// sessionLister lists the authenticated user's active login sessions — the
+// server-side refresh-token families, one per `entire login` across all
+// devices — surfaced by `entire auth status`. The implementation resolves its
+// own data-API bearer via auth.TokenForResource (RFC 8693 exchange in
+// split-host setups, same-host shortcut otherwise); callers don't pass a
+// bearer through, which removes the temptation to forward the wrong-audience
+// keyring token.
+type sessionLister func(ctx context.Context) ([]api.Session, error)
 
 // User-visible placeholder strings. Promoted to constants so tests and
 // production share a single source of truth.
@@ -37,11 +35,11 @@ const (
 
 // requireSecureBaseURL enforces TLS unless insecureHTTPAuth is set. Every
 // command that sends a bearer token over the network (login, logout,
-// auth status/list/revoke) must call this so credentials don't leak over
-// plaintext HTTP without explicit opt-in.
+// auth status) must call this so credentials don't leak over plaintext HTTP
+// without explicit opt-in.
 //
 // Both the auth and data API origins are checked: the bearer travels to the
-// auth host for login + auth-token management, and to the data host for
+// auth host for login + session management, and to the data host for
 // search/activity/dispatch/etc. When both origins resolve to the same host
 // (e.g. an explicitly collapsed single-host deployment) the redundant second
 // parse is skipped.
@@ -68,18 +66,18 @@ func requireSecureBaseURL(insecureHTTPAuth bool) error {
 	return nil
 }
 
-// newAPITokensClient builds an api.Client for the auth-token management
-// endpoints (list / revoke / current). API tokens live on the data API
-// regardless of split-host config — the auth host (entire-core in v2)
-// mints OAuth tokens but doesn't host application API token management
-// endpoints — so this targets api.BaseURL().
+// newSessionsClient builds an api.Client for the session management endpoints
+// (list / revoke / current). These live on the data API regardless of
+// split-host config — the auth host (entire-core in v2) mints OAuth tokens but
+// doesn't host the session management endpoints — so this targets
+// api.BaseURL().
 //
 // The supplied token must already be scoped for api.BaseURL(). Callers
 // must obtain it via resolveDataAPIToken (or auth.TokenForResource
 // directly) rather than handing through the raw keyring entry — the
 // keyring stores the auth-host-issued core token, which the data API
 // rejects in split-host setups.
-func newAPITokensClient(token string) *api.Client {
+func newSessionsClient(token string) *api.Client {
 	return api.NewClientWithBaseURL(token, api.BaseURL()).
 		WithAuthTokensPath(auth.CurrentProvider().AuthTokensPath)
 }
@@ -166,24 +164,24 @@ func newAuthStatusCmd() *cobra.Command {
 				return err
 			}
 			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(),
-				auth.NewContextStore(), defaultListTokens, api.AuthBaseURL())
+				auth.NewContextStore(), defaultListSessions, api.AuthBaseURL())
 		},
 	}
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	return cmd
 }
 
-// defaultListTokens fetches the authenticated user's active login sessions
-// from the server. See authTokenLister for what these rows actually are.
-func defaultListTokens(ctx context.Context) ([]api.Token, error) {
+// defaultListSessions fetches the authenticated user's active login sessions
+// from the server. See sessionLister for what these rows actually are.
+func defaultListSessions(ctx context.Context) ([]api.Session, error) {
 	token, err := resolveDataAPIToken(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return newAPITokensClient(token).ListTokens(ctx) //nolint:wrapcheck // ListTokens already wraps with action context
+	return newSessionsClient(token).ListSessions(ctx) //nolint:wrapcheck // ListSessions already wraps with action context
 }
 
-func runAuthStatus(ctx context.Context, w io.Writer, store tokenStore, list authTokenLister, baseURL string) error {
+func runAuthStatus(ctx context.Context, w io.Writer, store tokenStore, list sessionLister, baseURL string) error {
 	token, err := store.GetToken(baseURL)
 	if err != nil {
 		return fmt.Errorf("read keychain: %w", err)
@@ -222,7 +220,7 @@ func runAuthStatus(ctx context.Context, w io.Writer, store tokenStore, list auth
 // sortSessionsByRecency orders sessions most-recently-used first, then most
 // recently created, then by id — a fully specified order independent of the
 // server's response ordering.
-func sortSessionsByRecency(sessions []api.Token) {
+func sortSessionsByRecency(sessions []api.Session) {
 	sort.Slice(sessions, func(i, j int) bool {
 		li := lastUsedSortKey(sessions[i])
 		lj := lastUsedSortKey(sessions[j])
@@ -281,7 +279,7 @@ func (s authTableStyles) render(style lipgloss.Style, text string) string {
 // Column padding is computed via lipgloss.Width — it strips ANSI escapes, so a
 // styled cell's visible width matches its plain text. tabwriter can't be used
 // here once cells contain ANSI codes.
-func renderSessionsTable(w io.Writer, sty authTableStyles, tokens []api.Token, now time.Time) {
+func renderSessionsTable(w io.Writer, sty authTableStyles, tokens []api.Session, now time.Time) {
 	headerCells := []string{"ID", "NAME", "SCOPE", "CREATED", "LAST USED", "EXPIRES"}
 	header := make([]string, len(headerCells))
 	for i, h := range headerCells {
@@ -363,7 +361,7 @@ func styleExpires(sty authTableStyles, expiresAt string, now time.Time) string {
 	return sty.render(sty.value, formatted)
 }
 
-func lastUsedSortKey(t api.Token) string {
+func lastUsedSortKey(t api.Session) string {
 	if t.LastUsedAt == nil {
 		return ""
 	}

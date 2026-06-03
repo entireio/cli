@@ -30,7 +30,7 @@ func TestRunAuthStatus_NotLoggedIn(t *testing.T) {
 	store := newMockTokenStore()
 
 	listCalled := false
-	list := func(context.Context) ([]api.Token, error) {
+	list := func(context.Context) ([]api.Session, error) {
 		listCalled = true
 		return nil, nil
 	}
@@ -41,7 +41,7 @@ func TestRunAuthStatus_NotLoggedIn(t *testing.T) {
 	}
 
 	if listCalled {
-		t.Fatal("ListTokens should not be called when no token is stored")
+		t.Fatal("ListSessions should not be called when no token is stored")
 	}
 	if !strings.Contains(out.String(), "Not logged in to "+testBaseURL) {
 		t.Fatalf("output = %q, want 'Not logged in' message", out.String())
@@ -54,8 +54,8 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	store := newMockTokenStore()
 	store.tokens[testBaseURL] = testAuthTok
 
-	list := func(context.Context) ([]api.Token, error) {
-		return []api.Token{
+	list := func(context.Context) ([]api.Session, error) {
+		return []api.Session{
 			{ID: "a", Name: "laptop"},
 			{ID: "b", Name: "ci"},
 		}, nil
@@ -83,7 +83,7 @@ func TestRunAuthStatus_TokenInvalid(t *testing.T) {
 	store := newMockTokenStore()
 	store.tokens[testBaseURL] = testAuthTok
 
-	list := func(context.Context) ([]api.Token, error) {
+	list := func(context.Context) ([]api.Session, error) {
 		return nil, &api.HTTPError{StatusCode: http.StatusUnauthorized, Message: "Not authenticated"}
 	}
 
@@ -111,7 +111,7 @@ func TestRunAuthStatus_STSRejectionRendersInvalidMessage(t *testing.T) {
 	store := newMockTokenStore()
 	store.tokens[testBaseURL] = testAuthTok
 
-	list := func(context.Context) ([]api.Token, error) {
+	list := func(context.Context) ([]api.Session, error) {
 		// Exact format auth-go's sts package emits for an invalid_grant
 		// 4xx (see internal/oauthhttp's readAPIError). Without the
 		// detection in isKeychainTokenRejected this would fall through
@@ -145,13 +145,13 @@ func TestRunAuthStatus_ExpiredCoreTokenRendersInvalidMessage(t *testing.T) {
 	store := newMockTokenStore()
 	store.tokens[testBaseURL] = testAuthTok
 
-	list := func(context.Context) ([]api.Token, error) {
+	list := func(context.Context) ([]api.Session, error) {
 		return nil, errors.New("resolve API token: " + auth.ErrNotLoggedIn.Error())
 	}
 	// errors.New above is intentionally string-only to defeat the
 	// detection — confirm the substring fallback alone isn't what's
 	// catching this case. The real production path wraps with %w.
-	listWithChain := func(context.Context) ([]api.Token, error) {
+	listWithChain := func(context.Context) ([]api.Session, error) {
 		return nil, &wrappedTestError{msg: "resolve API token", inner: auth.ErrNotLoggedIn}
 	}
 
@@ -187,7 +187,7 @@ func TestRunAuthStatus_ServerError(t *testing.T) {
 	store := newMockTokenStore()
 	store.tokens[testBaseURL] = testAuthTok
 
-	list := func(context.Context) ([]api.Token, error) {
+	list := func(context.Context) ([]api.Session, error) {
 		return nil, errors.New("connection refused")
 	}
 
@@ -210,8 +210,8 @@ func TestRunAuthStatus_SessionsTablePrintsRows(t *testing.T) {
 	store.tokens[testBaseURL] = testAuthTok
 
 	lastUsed := "2026-04-01T12:00:00Z"
-	list := func(context.Context) ([]api.Token, error) {
-		return []api.Token{
+	list := func(context.Context) ([]api.Session, error) {
+		return []api.Session{
 			{ID: "fam-1", Name: "laptop", Scope: "cli",
 				CreatedAt:  "2026-01-01T00:00:00Z",
 				ExpiresAt:  "2027-01-01T00:00:00Z",
@@ -253,7 +253,7 @@ func TestRunAuthStatus_NoSessionsPrintsMessage(t *testing.T) {
 	store := newMockTokenStore()
 	store.tokens[testBaseURL] = testAuthTok
 
-	list := func(context.Context) ([]api.Token, error) { return nil, nil }
+	list := func(context.Context) ([]api.Session, error) { return nil, nil }
 
 	var out bytes.Buffer
 	if err := runAuthStatus(context.Background(), &out, store, list, testBaseURL); err != nil {
@@ -373,7 +373,7 @@ func TestAuthCmd_RegistersExpectedSubcommands(t *testing.T) {
 // tokenmanager.Manager via auth.SetManagerForTest and stub only the
 // STS wire call via SetExchangeForTest. That covers the audience-
 // matching logic the function-injection tests above can't reach
-// (defaultListTokens / defaultRevokeTokenByID call resolveDataAPIToken
+// (defaultListSessions / defaultRevokeAllSessions call resolveDataAPIToken
 // directly, but unit tests for the surrounding flows inject fakes
 // that bypass it).
 

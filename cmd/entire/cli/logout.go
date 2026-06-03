@@ -21,7 +21,7 @@ type tokenStore interface {
 
 // revokeCurrentFunc revokes the CLI's current token server-side. The
 // implementation resolves its own data-API bearer (same audience-
-// matching rule as authTokenLister); callers don't pass the keyring
+// matching rule as sessionLister); callers don't pass the keyring
 // entry through.
 type revokeCurrentFunc func(ctx context.Context) error
 
@@ -51,7 +51,7 @@ func newLogoutCmd() *cobra.Command {
 			}
 			outW, errW := cmd.OutOrStdout(), cmd.ErrOrStderr()
 			if err := runLogout(cmd.Context(), outW, errW,
-				auth.NewContextStore(), defaultRevokeCurrentToken, defaultRevokeAllSessions,
+				auth.NewContextStore(), defaultRevokeCurrentSession, defaultRevokeAllSessions,
 				auth.RemoveCurrentContext, api.AuthBaseURL(), all); err != nil {
 				return err
 			}
@@ -82,12 +82,12 @@ func promoteNextLogin(outW, errW io.Writer) {
 	fmt.Fprintf(outW, "Now using %q (%d saved login(s) remain; run `entire logout` again to remove each).\n", next, len(all))
 }
 
-func defaultRevokeCurrentToken(ctx context.Context) error {
+func defaultRevokeCurrentSession(ctx context.Context) error {
 	token, err := resolveDataAPIToken(ctx)
 	if err != nil {
 		return err
 	}
-	return newAPITokensClient(token).RevokeCurrentToken(ctx) //nolint:wrapcheck // RevokeCurrentToken already wraps with action context
+	return newSessionsClient(token).RevokeCurrentSession(ctx) //nolint:wrapcheck // RevokeCurrentSession already wraps with action context
 }
 
 // defaultRevokeAllSessions revokes every active login session on the active
@@ -101,14 +101,14 @@ func defaultRevokeAllSessions(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	client := newAPITokensClient(token)
-	sessions, err := client.ListTokens(ctx)
+	client := newSessionsClient(token)
+	sessions, err := client.ListSessions(ctx)
 	if err != nil {
 		return fmt.Errorf("list sessions: %w", err)
 	}
 	var firstErr error
 	for _, s := range sessions {
-		if err := client.RevokeToken(ctx, s.ID); err != nil && firstErr == nil {
+		if err := client.RevokeSession(ctx, s.ID); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("revoke session %s: %w", s.ID, err)
 		}
 	}

@@ -29,8 +29,8 @@ type Client struct {
 	authTokensPath string
 }
 
-// WithAuthTokensPath sets the base path used by ListTokens,
-// RevokeCurrentToken, and RevokeToken. The path is supplied by the
+// WithAuthTokensPath sets the base path used by ListSessions,
+// RevokeCurrentSession, and RevokeSession. The path is supplied by the
 // auth shim from auth.CurrentProvider().AuthTokensPath, which is the
 // single source of truth for provider-version routing — the api
 // package no longer reads ENTIRE_AUTH_PROVIDER_VERSION itself.
