@@ -269,57 +269,6 @@ func TestRemoveCurrentContext(t *testing.T) {
 	}
 }
 
-func TestRemoveAllContexts(t *testing.T) {
-	cfgDir := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
-	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
-	t.Cleanup(restore)
-
-	exp := time.Now().Add(time.Hour).Unix()
-	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://a.example.com","handle":"alice","exp":%d}`, exp)), "entr_a", true); err != nil {
-		t.Fatalf("record a: %v", err)
-	}
-	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://b.example.com","handle":"bob","exp":%d}`, exp)), "entr_b", true); err != nil {
-		t.Fatalf("record b: %v", err)
-	}
-	n, err := RemoveAllContexts()
-	if err != nil {
-		t.Fatalf("RemoveAllContexts: %v", err)
-	}
-	if n != 2 {
-		t.Fatalf("removed %d, want 2", n)
-	}
-	f, err := contexts.Load(cfgDir)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if len(f.Contexts) != 0 || f.CurrentContext != "" {
-		t.Fatalf("expected fully cleared, got contexts=%d current=%q", len(f.Contexts), f.CurrentContext)
-	}
-	// Every refresh slot must be gone too, for both removed contexts.
-	for _, tc := range []struct{ iss, handle string }{
-		{"https://a.example.com", "alice"},
-		{"https://b.example.com", "bob"},
-	} {
-		svc := tokenstore.CoreKeyringService(tc.iss)
-		if v, err := tokenstore.Get(svc, tc.handle); !errors.Is(err, tokenstore.ErrNotFound) {
-			t.Fatalf("access slot for %s survived: value=%q err=%v", tc.handle, v, err)
-		}
-		if v, err := tokenstore.Get(tokenstore.RefreshService(svc), tc.handle); !errors.Is(err, tokenstore.ErrNotFound) {
-			t.Fatalf("refresh slot for %s survived: value=%q err=%v", tc.handle, v, err)
-		}
-	}
-
-	// Idempotent.
-	n2, err := RemoveAllContexts()
-	if err != nil {
-		t.Fatalf("second RemoveAllContexts: %v", err)
-	}
-	if n2 != 0 {
-		t.Fatalf("second call removed %d, want 0", n2)
-	}
-}
-
 func TestRemoveCurrentContext_DoesNotSwitchToAnother(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)

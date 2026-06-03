@@ -62,35 +62,6 @@ func RemoveCurrentContext() error {
 	return nil
 }
 
-// RemoveAllContexts deletes every stored context and its keyring token — a
-// full local logout. Returns the number of contexts removed. Best-effort on
-// the keyring deletes; the contexts.json clear is what makes the CLI fully
-// logged out.
-func RemoveAllContexts() (int, error) {
-	var removed int
-	if err := contexts.Modify(contexts.DefaultConfigDir(), func(f *contexts.File) (bool, error) {
-		if len(f.Contexts) == 0 && f.CurrentContext == "" {
-			return false, nil
-		}
-		for _, c := range f.Contexts {
-			if c.KeychainService != "" && c.Handle != "" {
-				// Delete both slots: the access token and its paired refresh
-				// token. Dropping the refresh slot is what actually scrubs the
-				// machine — otherwise a leftover refresh token outlives logout.
-				_ = tokenstore.Delete(c.KeychainService, c.Handle)                            //nolint:errcheck // best-effort; the contexts.json clear below is authoritative
-				_ = tokenstore.Delete(tokenstore.RefreshService(c.KeychainService), c.Handle) //nolint:errcheck // best-effort; absent refresh slot is fine
-			}
-			removed++
-		}
-		f.Contexts = nil
-		f.CurrentContext = ""
-		return true, nil
-	}); err != nil {
-		return 0, fmt.Errorf("remove all contexts: %w", err)
-	}
-	return removed, nil
-}
-
 // SetCurrentContext makes name the active context. Returns an error when
 // no context with that name exists (a stale current pointer is a foot-gun).
 func SetCurrentContext(name string) error {
