@@ -87,7 +87,7 @@ func TestWarnIfCrossCoreContext(t *testing.T) {
 	}
 }
 
-func TestNoteRemainingLogins(t *testing.T) {
+func TestPromoteNextLogin(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
 	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
@@ -95,19 +95,36 @@ func TestNoteRemainingLogins(t *testing.T) {
 
 	// No contexts: silent.
 	var empty bytes.Buffer
-	noteRemainingLogins(&empty)
+	promoteNextLogin(&empty, &empty)
 	if empty.Len() != 0 {
-		t.Fatalf("no remaining contexts should be silent, got %q", empty.String())
+		t.Fatalf("no contexts should be silent, got %q", empty.String())
 	}
 
-	// A surviving context: names it and points at --all.
 	exp := time.Now().Add(time.Hour).Unix()
-	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://core.example.com","handle":"alice","exp":%d}`, exp)), "", true); err != nil {
-		t.Fatalf("record: %v", err)
+	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://a.example.com","handle":"alice","exp":%d}`, exp)), "", true); err != nil {
+		t.Fatalf("record a: %v", err)
+	}
+	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://b.example.com","handle":"bob","exp":%d}`, exp)), "", true); err != nil {
+		t.Fatalf("record b: %v", err)
+	}
+
+	// A current context is set: promotion is a no-op (nothing to promote into).
+	var noop bytes.Buffer
+	promoteNextLogin(&noop, &noop)
+	if noop.Len() != 0 {
+		t.Fatalf("with a current context set, promote should be silent, got %q", noop.String())
+	}
+
+	// Clear the active context (as logout does): the remaining login is promoted.
+	if err := auth.RemoveCurrentContext(); err != nil {
+		t.Fatalf("remove current: %v", err)
 	}
 	var buf bytes.Buffer
-	noteRemainingLogins(&buf)
-	if !strings.Contains(buf.String(), "core.example.com") || !strings.Contains(buf.String(), "--all") {
-		t.Fatalf("expected note naming the context and --all, got %q", buf.String())
+	promoteNextLogin(&buf, &buf)
+	if !strings.Contains(buf.String(), "Now using") {
+		t.Fatalf("expected promotion message, got %q", buf.String())
+	}
+	if _, current, err := auth.Contexts(); err != nil || current == "" {
+		t.Fatalf("expected a context to be promoted to current (current=%q, err=%v)", current, err)
 	}
 }

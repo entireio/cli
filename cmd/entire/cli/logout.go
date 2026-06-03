@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
@@ -39,49 +38,48 @@ func newLogoutCmd() *cobra.Command {
 		Use:   "logout",
 		Short: "Log out of Entire",
 		Long: "Log out of Entire.\n\n" +
-			"By default this removes the active login only. Other saved logins (contexts)\n" +
-			"remain and can still authenticate `git clone entire://…` against any cluster\n" +
-			"fronted by their login server. Use --all to remove every saved login.",
+			"By default this ends the active session only (server-side) and removes the\n" +
+			"active login from this machine. Other saved logins (contexts) remain and can\n" +
+			"still authenticate `git clone entire://…` against clusters fronted by their\n" +
+			"login server. Pass --all to additionally revoke every session on the active\n" +
+			"core server-side.\n\n" +
+			"After logging out, the next saved login (if any) becomes active, so running\n" +
+			"`entire logout` repeatedly drains every saved login in turn.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := requireSecureBaseURL(insecureHTTPAuth); err != nil {
 				return err
 			}
 			outW, errW := cmd.OutOrStdout(), cmd.ErrOrStderr()
-			clearFn := auth.RemoveCurrentContext
-			if all {
-				clearFn = func() error { _, err := auth.RemoveAllContexts(); return err } //nolint:wrapcheck // RemoveAllContexts already returns a contextual error
-			}
 			if err := runLogout(cmd.Context(), outW, errW,
-				auth.NewContextStore(), defaultRevokeCurrentToken, clearFn, api.AuthBaseURL()); err != nil {
+				auth.NewContextStore(), defaultRevokeCurrentToken, defaultRevokeAllSessions,
+				auth.RemoveCurrentContext, api.AuthBaseURL(), all); err != nil {
 				return err
 			}
-			if !all {
-				noteRemainingLogins(errW)
-			}
+			promoteNextLogin(outW, errW)
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&all, "all", false, "Remove all saved logins (contexts), not just the active one")
+	cmd.Flags().BoolVar(&all, "all", false, "Also revoke every session on the active core server-side, not just the active one")
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	return cmd
 }
 
-// noteRemainingLogins warns when other saved contexts survive a default
-// logout — they can still authenticate clone/push against clusters bound to
-// them, so "Logged out." alone would overstate the result.
-func noteRemainingLogins(errW io.Writer) {
-	all, _, err := auth.Contexts()
-	if err != nil || len(all) == 0 {
+// promoteNextLogin makes the first remaining saved context active after a
+// logout cleared the previous one. This is what lets `entire logout` drain
+// every login when run repeatedly: each call ends the active login and
+// promotes the next, until none remain. Best-effort and informational —
+// logout already succeeded by the time we get here.
+func promoteNextLogin(outW, errW io.Writer) {
+	all, current, err := auth.Contexts()
+	if err != nil || current != "" || len(all) == 0 {
 		return
 	}
-	names := make([]string, 0, len(all))
-	for _, c := range all {
-		names = append(names, c.Name)
+	next := all[0].Name
+	if err := auth.SetCurrentContext(next); err != nil {
+		fmt.Fprintf(errW, "Note: %d saved login(s) remain; run `entire auth use <context>` to switch.\n", len(all))
+		return
 	}
-	fmt.Fprintf(errW,
-		"Note: %d other saved login(s) remain and can still authenticate clones: %s\n"+
-			"Run `entire logout --all` to remove them, or `entire auth use <context>` to switch.\n",
-		len(all), strings.Join(names, ", "))
+	fmt.Fprintf(outW, "Now using %q (%d saved login(s) remain; run `entire logout` again to remove each).\n", next, len(all))
 }
 
 func defaultRevokeCurrentToken(ctx context.Context) error {
@@ -92,7 +90,36 @@ func defaultRevokeCurrentToken(ctx context.Context) error {
 	return newAPITokensClient(token).RevokeCurrentToken(ctx) //nolint:wrapcheck // RevokeCurrentToken already wraps with action context
 }
 
-func runLogout(ctx context.Context, outW, errW io.Writer, store tokenStore, revoke revokeCurrentFunc, clearContext clearContextFunc, baseURL string) error {
+// defaultRevokeAllSessions revokes every active login session on the active
+// core (the `entire logout --all` path). It resolves a data-API bearer once,
+// lists the user's sessions, and deletes each by id. Best-effort across
+// sessions: it attempts them all and returns the first failure, so one stuck
+// session doesn't strand the rest. Cross-core revoke is out of scope — these
+// endpoints target api.AuthBaseURL()'s core only.
+func defaultRevokeAllSessions(ctx context.Context) error {
+	token, err := resolveDataAPIToken(ctx)
+	if err != nil {
+		return err
+	}
+	client := newAPITokensClient(token)
+	sessions, err := client.ListTokens(ctx)
+	if err != nil {
+		return fmt.Errorf("list sessions: %w", err)
+	}
+	var firstErr error
+	for _, s := range sessions {
+		if err := client.RevokeToken(ctx, s.ID); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("revoke session %s: %w", s.ID, err)
+		}
+	}
+	return firstErr
+}
+
+// runLogout ends the user's login. revokeCurrent revokes just the active
+// session; revokeAll (used when all is set) revokes every session on the
+// active core. Either way the local keyring entry and active context are
+// removed, so the CLI reports logged-out even if the server call fails.
+func runLogout(ctx context.Context, outW, errW io.Writer, store tokenStore, revokeCurrent, revokeAll revokeCurrentFunc, clearContext clearContextFunc, baseURL string, all bool) error {
 	token, err := store.GetToken(baseURL)
 	if err != nil {
 		// Fall through to the local delete: we still want the keyring entry
@@ -100,11 +127,15 @@ func runLogout(ctx context.Context, outW, errW io.Writer, store tokenStore, revo
 		fmt.Fprintf(errW, "Warning: failed to read token before revocation: %v\n", err)
 	}
 	if token != "" {
+		revoke := revokeCurrent
+		if all {
+			revoke = revokeAll
+		}
 		if err := revoke(ctx); err != nil && !api.IsHTTPErrorStatus(err, http.StatusUnauthorized) {
 			// Best-effort: a transient network error shouldn't block local
 			// logout. A 401 means the token is already invalid server-side,
 			// so the desired state is achieved — no warning needed.
-			fmt.Fprintf(errW, "Warning: server-side token revocation failed: %v\n", err)
+			fmt.Fprintf(errW, "Warning: server-side session revocation failed: %v\n", err)
 		}
 	}
 

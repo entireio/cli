@@ -27,10 +27,6 @@ import (
 // wrong-audience keyring token.
 type authTokenLister func(ctx context.Context) ([]api.Token, error)
 
-// authTokenRevoker revokes a single API token by id. Same bearer-
-// resolution contract as authTokenLister.
-type authTokenRevoker func(ctx context.Context, id string) error
-
 // User-visible placeholder strings. Promoted to constants so tests and
 // production share a single source of truth.
 const (
@@ -143,8 +139,8 @@ func addInsecureHTTPAuthFlag(cmd *cobra.Command, target *bool) {
 func newAuthCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auth",
-		Short: "Manage authentication and API tokens",
-		Long:  "Authentication subcommands. Includes login, logout, status, listing tokens, and revoking tokens.",
+		Short: "Manage authentication",
+		Long:  "Authentication subcommands. Includes login, logout, status, and login-context management (contexts, use).",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
@@ -153,7 +149,6 @@ func newAuthCmd() *cobra.Command {
 	cmd.AddCommand(newLoginCmd())
 	cmd.AddCommand(newLogoutCmd())
 	cmd.AddCommand(newAuthStatusCmd())
-	cmd.AddCommand(newAuthRevokeCmd())
 	cmd.AddCommand(newAuthContextsCmd())
 	cmd.AddCommand(newAuthUseCmd())
 	return cmd
@@ -434,94 +429,4 @@ func fallback(s, alt string) string {
 		return alt
 	}
 	return s
-}
-
-// --- revoke -----------------------------------------------------------------
-
-func newAuthRevokeCmd() *cobra.Command {
-	var revokeCurrent bool
-	var insecureHTTPAuth bool
-	cmd := &cobra.Command{
-		Use:   "revoke [id]",
-		Short: "Revoke an API token by id",
-		Long:  "Revoke a specific API token. Use --current to revoke the token used by this CLI (equivalent to 'entire logout').",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			id := ""
-			if len(args) == 1 {
-				id = args[0]
-			}
-			if id == "" && !revokeCurrent {
-				return cmd.Help()
-			}
-			if id != "" && revokeCurrent {
-				return errors.New("cannot use both <id> and --current")
-			}
-			if err := requireSecureBaseURL(insecureHTTPAuth); err != nil {
-				return err
-			}
-			return runAuthRevoke(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
-				auth.NewContextStore(), defaultListTokens, defaultRevokeTokenByID, defaultRevokeCurrentToken,
-				auth.RemoveCurrentContext, api.AuthBaseURL(), id, revokeCurrent)
-		},
-	}
-	cmd.Flags().BoolVar(&revokeCurrent, "current", false, "Revoke the token used by this CLI and remove the local copy")
-	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
-	return cmd
-}
-
-func defaultRevokeTokenByID(ctx context.Context, id string) error {
-	token, err := resolveDataAPIToken(ctx)
-	if err != nil {
-		return err
-	}
-	return newAPITokensClient(token).RevokeToken(ctx, id) //nolint:wrapcheck // RevokeToken already wraps with action context
-}
-
-func runAuthRevoke(
-	ctx context.Context,
-	outW, errW io.Writer,
-	store tokenStore,
-	list authTokenLister,
-	revokeByID authTokenRevoker,
-	revokeCurrent revokeCurrentFunc,
-	clearContext clearContextFunc,
-	baseURL, id string,
-	current bool,
-) error {
-	token, err := store.GetToken(baseURL)
-	if err != nil {
-		return fmt.Errorf("read keychain: %w", err)
-	}
-	if token == "" {
-		return fmt.Errorf("not logged in to %s; run 'entire login' first", baseURL)
-	}
-
-	if current {
-		// Revoking our own token is just logout — reuse that path so behavior
-		// stays identical (best-effort revoke + local delete + context clear).
-		return runLogout(ctx, outW, errW, store, revokeCurrent, clearContext, baseURL)
-	}
-
-	if err := revokeByID(ctx, id); err != nil {
-		return err
-	}
-
-	// The list endpoint requires bearer auth, so a 401 here means the id we
-	// just revoked was the same one this CLI is using — the local copy is now
-	// stale and would otherwise produce confusing 401s on every command, so
-	// remove both the legacy keyring entry and the active context.
-	if _, listErr := list(ctx); listErr != nil && api.IsHTTPErrorStatus(listErr, http.StatusUnauthorized) {
-		if delErr := store.DeleteToken(baseURL); delErr != nil {
-			return fmt.Errorf("revoked token %s but failed to remove local copy: %w", id, delErr)
-		}
-		if ctxErr := clearContext(); ctxErr != nil {
-			fmt.Fprintf(errW, "Warning: revoked token %s but failed to clear current context: %v\n", id, ctxErr)
-		}
-		fmt.Fprintf(outW, "Revoked token %s (this was your local token; removed from keychain).\n", id)
-		return nil
-	}
-
-	fmt.Fprintf(outW, "Revoked token %s.\n", id)
-	return nil
 }

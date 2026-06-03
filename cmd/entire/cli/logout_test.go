@@ -59,7 +59,7 @@ func TestRunLogout_RevokesServerSideThenDeletesLocally(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	err := runLogout(context.Background(), &out, &errOut, store, revoke, func() error { return nil }, "https://entire.io")
+	err := runLogout(context.Background(), &out, &errOut, store, revoke, func(context.Context) error { return nil }, func() error { return nil }, "https://entire.io", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestRunLogout_NoTokenSkipsRevoke(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	err := runLogout(context.Background(), &out, &errOut, store, revoke, func() error { return nil }, "https://entire.io")
+	err := runLogout(context.Background(), &out, &errOut, store, revoke, func(context.Context) error { return nil }, func() error { return nil }, "https://entire.io", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestRunLogout_RevokeFailureWarnsButSucceeds(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	err := runLogout(context.Background(), &out, &errOut, store, revoke, func() error { return nil }, "https://entire.io")
+	err := runLogout(context.Background(), &out, &errOut, store, revoke, func(context.Context) error { return nil }, func() error { return nil }, "https://entire.io", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestRunLogout_RevokeFailureWarnsButSucceeds(t *testing.T) {
 	if !store.deleted["https://entire.io"] {
 		t.Fatal("local token should still be deleted when server revoke fails")
 	}
-	if !strings.Contains(errOut.String(), "server-side token revocation failed") {
+	if !strings.Contains(errOut.String(), "server-side session revocation failed") {
 		t.Fatalf("stderr = %q, want warning about revoke failure", errOut.String())
 	}
 	if !strings.Contains(errOut.String(), "connection refused") {
@@ -147,7 +147,7 @@ func TestRunLogout_RevokeUnauthorizedIsSilent(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	err := runLogout(context.Background(), &out, &errOut, store, revoke, func() error { return nil }, "https://entire.io")
+	err := runLogout(context.Background(), &out, &errOut, store, revoke, func(context.Context) error { return nil }, func() error { return nil }, "https://entire.io", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestRunLogout_GetTokenErrorWarnsAndFallsThrough(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	err := runLogout(context.Background(), &out, &errOut, store, revoke, func() error { return nil }, "https://entire.io")
+	err := runLogout(context.Background(), &out, &errOut, store, revoke, func(context.Context) error { return nil }, func() error { return nil }, "https://entire.io", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestRunLogout_ReturnsErrorOnDeleteFailure(t *testing.T) {
 	revoke := func(context.Context) error { return nil }
 
 	var out, errOut bytes.Buffer
-	err := runLogout(context.Background(), &out, &errOut, store, revoke, func() error { return nil }, "https://entire.io")
+	err := runLogout(context.Background(), &out, &errOut, store, revoke, func(context.Context) error { return nil }, func() error { return nil }, "https://entire.io", false)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -211,6 +211,37 @@ func TestRunLogout_ReturnsErrorOnDeleteFailure(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "Logged out.") {
 		t.Fatal("should not print success message when local delete fails")
+	}
+}
+
+func TestRunLogout_AllRevokesAllSessions(t *testing.T) {
+	t.Parallel()
+
+	store := newMockTokenStore()
+	store.tokens["https://entire.io"] = testLogoutToken
+
+	currentCalled, allCalled := false, false
+	revokeCurrent := func(context.Context) error { currentCalled = true; return nil }
+	revokeAll := func(context.Context) error { allCalled = true; return nil }
+
+	var out, errOut bytes.Buffer
+	err := runLogout(context.Background(), &out, &errOut, store,
+		revokeCurrent, revokeAll, func() error { return nil }, "https://entire.io", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if currentCalled {
+		t.Error("--all should not call the current-session revoke")
+	}
+	if !allCalled {
+		t.Error("--all should call the revoke-all path")
+	}
+	if !store.deleted["https://entire.io"] {
+		t.Fatal("local token should still be deleted under --all")
+	}
+	if !strings.Contains(out.String(), "Logged out.") {
+		t.Fatalf("stdout = %q, want to contain %q", out.String(), "Logged out.")
 	}
 }
 
