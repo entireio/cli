@@ -48,12 +48,15 @@ func rejecting(err error) profileFetcher {
 	return func(context.Context, string, string) (*authProfile, error) { return nil, err }
 }
 
+// noSessions is a sessionLister returning an empty list (no table rendered).
+func noSessions(context.Context, string, string) ([]api.Session, error) { return nil, nil }
+
 func TestRunAuthStatus_NotLoggedIn(t *testing.T) {
 	t.Parallel()
 
 	var out bytes.Buffer
 	target := statusTarget{coreURL: testCoreURL} // empty token
-	if err := runAuthStatus(context.Background(), &out, unusedProfile(t), target); err != nil {
+	if err := runAuthStatus(context.Background(), &out, unusedProfile(t), noSessions, target); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !strings.Contains(out.String(), "Not logged in to "+testCoreURL) {
@@ -67,7 +70,7 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "eu.auth.entire.io", totalContexts: 1}
 
 	var out bytes.Buffer
-	if err := runAuthStatus(context.Background(), &out, okProfile, target); err != nil {
+	if err := runAuthStatus(context.Background(), &out, okProfile, noSessions, target); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -84,8 +87,63 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	if !strings.Contains(got, "Context:") || !strings.Contains(got, "eu.auth.entire.io") {
 		t.Fatalf("output = %q, want active-context line", got)
 	}
+	// noSessions returns an empty list, so no table is rendered.
 	if strings.Contains(got, "Active sessions") {
-		t.Fatalf("output = %q, should not list server-side sessions", got)
+		t.Fatalf("output = %q, empty session list should render no table", got)
+	}
+}
+
+func TestRunAuthStatus_RendersSessionsTable(t *testing.T) {
+	t.Parallel()
+
+	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "eu.auth.entire.io", totalContexts: 1}
+	lastUsed := "2026-05-01T00:00:00Z"
+	listSessions := func(_ context.Context, coreURL, token string) ([]api.Session, error) {
+		if coreURL != testCoreURL || token != "tok" {
+			t.Errorf("listSessions called with (%q, %q), want the active core+token", coreURL, token)
+		}
+		return []api.Session{
+			{ID: "fam-1", Name: "OIDC login", CreatedAt: "2026-01-01T00:00:00Z", ExpiresAt: "2026-12-01T00:00:00Z", LastUsedAt: &lastUsed},
+			{ID: "fam-2", Name: "OIDC login", CreatedAt: "2026-02-01T00:00:00Z", ExpiresAt: "2026-12-15T00:00:00Z"},
+		}, nil
+	}
+
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, okProfile, listSessions, target); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "Active sessions (2):") {
+		t.Fatalf("output = %q, want active-sessions heading with count", got)
+	}
+	for _, want := range []string{"NAME", "CREATED", "LAST USED", "EXPIRES", "2026-01-01", "never"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output = %q, want table to contain %q", got, want)
+		}
+	}
+	if !strings.Contains(got, "entire logout --all") {
+		t.Fatalf("output = %q, want logout hint tying the table to logout", got)
+	}
+}
+
+func TestRunAuthStatus_SessionListFailureIsSoftNote(t *testing.T) {
+	t.Parallel()
+
+	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "eu.auth.entire.io", totalContexts: 1}
+	listSessions := func(context.Context, string, string) ([]api.Session, error) {
+		return nil, errors.New("sessions endpoint unreachable")
+	}
+
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, okProfile, listSessions, target); err != nil {
+		t.Fatalf("unexpected error: %v", err) // liveness already passed via /me
+	}
+	got := out.String()
+	if !strings.Contains(got, "Logged in to "+testCoreURL) {
+		t.Fatalf("output = %q, want still-logged-in", got)
+	}
+	if !strings.Contains(got, "could not list active sessions") {
+		t.Fatalf("output = %q, want soft note about the listing failure", got)
 	}
 }
 
@@ -103,7 +161,7 @@ func TestRunAuthStatus_QueriesActiveContextCore(t *testing.T) {
 	target := statusTarget{coreURL: testCoreURL, token: "eu-session-tok", activeContext: "eu.auth.entire.io", totalContexts: 1}
 
 	var out bytes.Buffer
-	if err := runAuthStatus(context.Background(), &out, fetch, target); err != nil {
+	if err := runAuthStatus(context.Background(), &out, fetch, noSessions, target); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if gotCoreURL != testCoreURL {
@@ -120,7 +178,7 @@ func TestRunAuthStatus_MultipleContextsHint(t *testing.T) {
 	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "a", totalContexts: 3}
 
 	var out bytes.Buffer
-	if err := runAuthStatus(context.Background(), &out, okProfile, target); err != nil {
+	if err := runAuthStatus(context.Background(), &out, okProfile, noSessions, target); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !strings.Contains(out.String(), "3 login contexts saved") {
@@ -149,7 +207,7 @@ func TestRunAuthStatus_InvalidTokenShapes(t *testing.T) {
 			t.Parallel()
 			target := statusTarget{coreURL: testCoreURL, token: "tok"}
 			var out bytes.Buffer
-			if err := runAuthStatus(context.Background(), &out, rejecting(fetchErr), target); err != nil {
+			if err := runAuthStatus(context.Background(), &out, rejecting(fetchErr), noSessions, target); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if !strings.Contains(out.String(), "no longer valid") {
@@ -177,7 +235,7 @@ func TestRunAuthStatus_ServerError(t *testing.T) {
 	target := statusTarget{coreURL: testCoreURL, token: "tok"}
 
 	var out bytes.Buffer
-	err := runAuthStatus(context.Background(), &out, rejecting(errors.New("connection refused")), target)
+	err := runAuthStatus(context.Background(), &out, rejecting(errors.New("connection refused")), noSessions, target)
 	if err == nil {
 		t.Fatal("expected error for non-401 failure")
 	}

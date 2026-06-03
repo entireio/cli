@@ -49,9 +49,23 @@ func newLogoutCmd() *cobra.Command {
 			if err := requireSecureBaseURL(insecureHTTPAuth); err != nil {
 				return err
 			}
+			// Revoke against the active context's core (matching what
+			// `auth status` lists), not a static AuthBaseURL.
+			target := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, api.AuthBaseURL())
+			if !insecureHTTPAuth {
+				if err := api.RequireSecureURL(target.coreURL); err != nil {
+					return fmt.Errorf("context core URL check: %w", err)
+				}
+			}
+			revokeCurrent := func(ctx context.Context) error {
+				return revokeCurrentSession(ctx, target.coreURL, target.token)
+			}
+			revokeAll := func(ctx context.Context) error {
+				return revokeAllSessions(ctx, target.coreURL, target.token)
+			}
 			outW, errW := cmd.OutOrStdout(), cmd.ErrOrStderr()
 			if err := runLogout(cmd.Context(), outW, errW,
-				auth.NewContextStore(), defaultRevokeCurrentSession, defaultRevokeAllSessions,
+				auth.NewContextStore(), revokeCurrent, revokeAll,
 				auth.RemoveCurrentContext, api.AuthBaseURL(), all); err != nil {
 				return err
 			}
@@ -82,26 +96,18 @@ func promoteNextLogin(outW, errW io.Writer) {
 	fmt.Fprintf(outW, "Now using %q (%d saved login(s) remain; run `entire logout` again to remove each).\n", next, len(all))
 }
 
-func defaultRevokeCurrentSession(ctx context.Context) error {
-	token, err := resolveAuthHostToken(ctx)
-	if err != nil {
-		return err
-	}
-	return newSessionsClient(token).RevokeCurrentSession(ctx) //nolint:wrapcheck // RevokeCurrentSession already wraps with action context
+// revokeCurrentSession revokes the active session on coreURL (the family the
+// bearer belongs to) — the default `entire logout`.
+func revokeCurrentSession(ctx context.Context, coreURL, token string) error {
+	return newSessionsClient(coreURL, token).RevokeCurrentSession(ctx) //nolint:wrapcheck // RevokeCurrentSession already wraps with action context
 }
 
-// defaultRevokeAllSessions revokes every active login session on the active
-// core (the `entire logout --all` path). It resolves a data-API bearer once,
-// lists the user's sessions, and deletes each by id. Best-effort across
-// sessions: it attempts them all and returns the first failure, so one stuck
-// session doesn't strand the rest. Cross-core revoke is out of scope — these
-// endpoints target api.AuthBaseURL()'s core only.
-func defaultRevokeAllSessions(ctx context.Context) error {
-	token, err := resolveAuthHostToken(ctx)
-	if err != nil {
-		return err
-	}
-	client := newSessionsClient(token)
+// revokeAllSessions revokes every active login session on coreURL (the
+// `entire logout --all` path): list the families, then delete each by id.
+// Best-effort across sessions — it attempts them all and returns the first
+// failure, so one stuck session doesn't strand the rest.
+func revokeAllSessions(ctx context.Context, coreURL, token string) error {
+	client := newSessionsClient(coreURL, token)
 	sessions, err := client.ListSessions(ctx)
 	if err != nil {
 		return fmt.Errorf("list sessions: %w", err)
