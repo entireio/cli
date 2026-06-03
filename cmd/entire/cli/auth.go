@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,11 +16,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// authTokenLister lists API tokens for the authenticated user. The
-// implementation resolves its own data-API bearer via
-// auth.TokenForResource (RFC 8693 exchange in split-host setups, same-
-// host shortcut otherwise); callers don't pass a bearer through, which
-// removes the temptation to forward the wrong-audience keyring token.
+// authTokenLister lists the authenticated user's active login sessions —
+// the server-side refresh-token families (one per `entire login`, across
+// all devices), surfaced by `entire auth status` and used by revoke as a
+// liveness probe. Despite the api.Token name, these are sessions, not
+// personal access tokens; the CLI never mints them. The implementation
+// resolves its own data-API bearer via auth.TokenForResource (RFC 8693
+// exchange in split-host setups, same-host shortcut otherwise); callers
+// don't pass a bearer through, which removes the temptation to forward the
+// wrong-audience keyring token.
 type authTokenLister func(ctx context.Context) ([]api.Token, error)
 
 // authTokenRevoker revokes a single API token by id. Same bearer-
@@ -150,7 +153,6 @@ func newAuthCmd() *cobra.Command {
 	cmd.AddCommand(newLoginCmd())
 	cmd.AddCommand(newLogoutCmd())
 	cmd.AddCommand(newAuthStatusCmd())
-	cmd.AddCommand(newAuthListCmd())
 	cmd.AddCommand(newAuthRevokeCmd())
 	cmd.AddCommand(newAuthContextsCmd())
 	cmd.AddCommand(newAuthUseCmd())
@@ -176,6 +178,8 @@ func newAuthStatusCmd() *cobra.Command {
 	return cmd
 }
 
+// defaultListTokens fetches the authenticated user's active login sessions
+// from the server. See authTokenLister for what these rows actually are.
 func defaultListTokens(ctx context.Context) ([]api.Token, error) {
 	token, err := resolveDataAPIToken(ctx)
 	if err != nil {
@@ -195,7 +199,7 @@ func runAuthStatus(ctx context.Context, w io.Writer, store tokenStore, list auth
 		return nil
 	}
 
-	tokens, err := list(ctx)
+	sessions, err := list(ctx)
 	if err != nil {
 		if isKeychainTokenRejected(err) {
 			fmt.Fprintf(w, "Token in keychain for %s is no longer valid.\n", baseURL)
@@ -207,83 +211,43 @@ func runAuthStatus(ctx context.Context, w io.Writer, store tokenStore, list auth
 
 	fmt.Fprintf(w, "Logged in to %s\n", baseURL)
 	fmt.Fprintln(w, "  Token: stored in OS keychain")
-	fmt.Fprintf(w, "  Active tokens on this account: %d\n", len(tokens))
+	fmt.Fprintln(w)
+
+	if len(sessions) == 0 {
+		fmt.Fprintln(w, "No active sessions.")
+		return nil
+	}
+
+	fmt.Fprintln(w, "Active sessions:")
+	sortSessionsByRecency(sessions)
+	renderSessionsTable(w, newSessionsTableStyles(w), sessions, time.Now())
 	return nil
 }
 
-// --- list -------------------------------------------------------------------
-
-func newAuthListCmd() *cobra.Command {
-	var jsonOut bool
-	var insecureHTTPAuth bool
-	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List active API tokens for the authenticated user",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := requireSecureBaseURL(insecureHTTPAuth); err != nil {
-				return err
-			}
-			return runAuthList(cmd.Context(), cmd.OutOrStdout(),
-				auth.NewContextStore(), defaultListTokens, api.AuthBaseURL(), jsonOut)
-		},
-	}
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "Print tokens as JSON")
-	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
-	return cmd
-}
-
-func runAuthList(ctx context.Context, w io.Writer, store tokenStore, list authTokenLister, baseURL string, jsonOut bool) error {
-	token, err := store.GetToken(baseURL)
-	if err != nil {
-		return fmt.Errorf("read keychain: %w", err)
-	}
-	if token == "" {
-		return fmt.Errorf("not logged in to %s; run 'entire login' first", baseURL)
-	}
-
-	tokens, err := list(ctx)
-	if err != nil {
-		return err
-	}
-
-	if jsonOut {
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(tokens); err != nil {
-			return fmt.Errorf("encode JSON: %w", err)
-		}
-		return nil
-	}
-
-	if len(tokens) == 0 {
-		fmt.Fprintln(w, "No active tokens.")
-		return nil
-	}
-
-	// Deterministic order: most recently used first, then most recently
-	// created, then by id as a final tie-breaker so the output is fully
-	// specified regardless of the server's response order.
-	sort.Slice(tokens, func(i, j int) bool {
-		li := lastUsedSortKey(tokens[i])
-		lj := lastUsedSortKey(tokens[j])
+// sortSessionsByRecency orders sessions most-recently-used first, then most
+// recently created, then by id — a fully specified order independent of the
+// server's response ordering.
+func sortSessionsByRecency(sessions []api.Token) {
+	sort.Slice(sessions, func(i, j int) bool {
+		li := lastUsedSortKey(sessions[i])
+		lj := lastUsedSortKey(sessions[j])
 		if li != lj {
 			return li > lj
 		}
-		if tokens[i].CreatedAt != tokens[j].CreatedAt {
-			return tokens[i].CreatedAt > tokens[j].CreatedAt
+		if sessions[i].CreatedAt != sessions[j].CreatedAt {
+			return sessions[i].CreatedAt > sessions[j].CreatedAt
 		}
-		return tokens[i].ID < tokens[j].ID
+		return sessions[i].ID < sessions[j].ID
 	})
-
-	sty := newAuthListStyles(w)
-	renderAuthListTable(w, sty, tokens, time.Now())
-	return nil
 }
 
-// authListStyles holds the lipgloss styles for `entire auth list`. Mirrors the
-// approach in activity_render.go: keep style construction tied to color
-// detection, and render plain text when color is disabled.
-type authListStyles struct {
+// --- active-sessions table ---------------------------------------------------
+
+// sessionsTableStyles holds the lipgloss styles for the `entire auth status`
+// active-sessions table. Mirrors the approach in activity_render.go: keep
+// style construction tied to color detection, and render plain text when
+// color is disabled.
+type sessionsTableStyles struct {
 	colorEnabled bool
 
 	header  lipgloss.Style // bold + dim, used for column headers
@@ -295,9 +259,9 @@ type authListStyles struct {
 	expired lipgloss.Style // already expired
 }
 
-func newAuthListStyles(w io.Writer) authListStyles {
+func newSessionsTableStyles(w io.Writer) sessionsTableStyles {
 	useColor := shouldUseColor(w)
-	s := authListStyles{colorEnabled: useColor}
+	s := sessionsTableStyles{colorEnabled: useColor}
 	if !useColor {
 		return s
 	}
@@ -311,18 +275,18 @@ func newAuthListStyles(w io.Writer) authListStyles {
 	return s
 }
 
-func (s authListStyles) render(style lipgloss.Style, text string) string {
+func (s sessionsTableStyles) render(style lipgloss.Style, text string) string {
 	if !s.colorEnabled {
 		return text
 	}
 	return style.Render(text)
 }
 
-// renderAuthListTable prints a styled, column-aligned table of tokens. Column
-// padding is computed via lipgloss.Width — it strips ANSI escapes, so a styled
-// cell's visible width matches its plain text. tabwriter can't be used here
-// once cells contain ANSI codes.
-func renderAuthListTable(w io.Writer, sty authListStyles, tokens []api.Token, now time.Time) {
+// renderSessionsTable prints a styled, column-aligned table of login sessions.
+// Column padding is computed via lipgloss.Width — it strips ANSI escapes, so a
+// styled cell's visible width matches its plain text. tabwriter can't be used
+// here once cells contain ANSI codes.
+func renderSessionsTable(w io.Writer, sty sessionsTableStyles, tokens []api.Token, now time.Time) {
 	headerCells := []string{"ID", "NAME", "SCOPE", "CREATED", "LAST USED", "EXPIRES"}
 	header := make([]string, len(headerCells))
 	for i, h := range headerCells {
@@ -369,21 +333,21 @@ func writeRow(w io.Writer, cells []string, widths []int) {
 	fmt.Fprintln(w)
 }
 
-func styleName(sty authListStyles, name string) string {
+func styleName(sty sessionsTableStyles, name string) string {
 	if name == "" {
 		return sty.render(sty.dim, placeholderDash)
 	}
 	return sty.render(sty.name, name)
 }
 
-func styleLastUsed(sty authListStyles, lastUsed *string, now time.Time) string {
+func styleLastUsed(sty sessionsTableStyles, lastUsed *string, now time.Time) string {
 	if lastUsed == nil {
 		return sty.render(sty.dim, lastUsedNever)
 	}
 	return sty.render(sty.value, formatAuthLastUsed(lastUsed, now))
 }
 
-func styleExpires(sty authListStyles, expiresAt string, now time.Time) string {
+func styleExpires(sty sessionsTableStyles, expiresAt string, now time.Time) string {
 	formatted := formatAuthDate(expiresAt)
 	switch classifyExpiresAt(expiresAt, now) {
 	case expiresExpired:

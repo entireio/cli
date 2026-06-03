@@ -70,8 +70,11 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	if !strings.Contains(out.String(), "Logged in to "+testBaseURL) {
 		t.Fatalf("output = %q, want 'Logged in' message", out.String())
 	}
-	if !strings.Contains(out.String(), "Active tokens on this account: 2") {
-		t.Fatalf("output = %q, want token count", out.String())
+	if !strings.Contains(out.String(), "Active sessions:") {
+		t.Fatalf("output = %q, want active-sessions heading", out.String())
+	}
+	if !strings.Contains(out.String(), "laptop") || !strings.Contains(out.String(), "ci") {
+		t.Fatalf("output = %q, want session rows", out.String())
 	}
 }
 
@@ -199,26 +202,9 @@ func TestRunAuthStatus_ServerError(t *testing.T) {
 	}
 }
 
-// --- list -------------------------------------------------------------------
+// --- active-sessions table ---------------------------------------------------
 
-func TestRunAuthList_NotLoggedInErrors(t *testing.T) {
-	t.Parallel()
-
-	store := newMockTokenStore()
-
-	var out bytes.Buffer
-	err := runAuthList(context.Background(), &out, store,
-		func(context.Context) ([]api.Token, error) { return nil, nil },
-		testBaseURL, false)
-	if err == nil {
-		t.Fatal("expected error when not logged in")
-	}
-	if !strings.Contains(err.Error(), "not logged in") {
-		t.Fatalf("error = %v, want 'not logged in' message", err)
-	}
-}
-
-func TestRunAuthList_TablePrintsRows(t *testing.T) {
+func TestRunAuthStatus_SessionsTablePrintsRows(t *testing.T) {
 	t.Parallel()
 
 	store := newMockTokenStore()
@@ -227,11 +213,11 @@ func TestRunAuthList_TablePrintsRows(t *testing.T) {
 	lastUsed := "2026-04-01T12:00:00Z"
 	list := func(context.Context) ([]api.Token, error) {
 		return []api.Token{
-			{ID: "tok-1", Name: "laptop", Scope: "cli",
+			{ID: "fam-1", Name: "laptop", Scope: "cli",
 				CreatedAt:  "2026-01-01T00:00:00Z",
 				ExpiresAt:  "2027-01-01T00:00:00Z",
 				LastUsedAt: &lastUsed},
-			{ID: "tok-2", Name: "ci", Scope: "cli",
+			{ID: "fam-2", Name: "ci", Scope: "cli",
 				CreatedAt:  "2026-02-01T00:00:00Z",
 				ExpiresAt:  "2027-01-01T00:00:00Z",
 				LastUsedAt: nil},
@@ -239,51 +225,30 @@ func TestRunAuthList_TablePrintsRows(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := runAuthList(context.Background(), &out, store, list, testBaseURL, false); err != nil {
+	if err := runAuthStatus(context.Background(), &out, store, list, testBaseURL); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	output := out.String()
+	if !strings.Contains(output, "Active sessions:") {
+		t.Fatalf("output = %q, want active-sessions heading", output)
+	}
 	if !strings.Contains(output, "ID") || !strings.Contains(output, "NAME") {
 		t.Fatalf("output = %q, want table headers", output)
 	}
-	if !strings.Contains(output, "tok-1") || !strings.Contains(output, "laptop") {
+	if !strings.Contains(output, "fam-1") || !strings.Contains(output, "laptop") {
 		t.Fatalf("output = %q, want first row", output)
 	}
-	if !strings.Contains(output, "tok-2") || !strings.Contains(output, "never") {
+	if !strings.Contains(output, "fam-2") || !strings.Contains(output, "never") {
 		t.Fatalf("output = %q, want second row with 'never' last-used", output)
 	}
-	// tok-1 last-used recently so should sort before tok-2 in the table.
-	if strings.Index(output, "tok-1") > strings.Index(output, "tok-2") {
-		t.Fatalf("output = %q, want tok-1 before tok-2 (recent-first)", output)
+	// fam-1 used recently, so it should sort before fam-2 in the table.
+	if strings.Index(output, "fam-1") > strings.Index(output, "fam-2") {
+		t.Fatalf("output = %q, want fam-1 before fam-2 (recent-first)", output)
 	}
 }
 
-func TestRunAuthList_JSONOutput(t *testing.T) {
-	t.Parallel()
-
-	store := newMockTokenStore()
-	store.tokens[testBaseURL] = testAuthTok
-
-	list := func(context.Context) ([]api.Token, error) {
-		return []api.Token{{ID: "tok-1", Name: "laptop"}}, nil
-	}
-
-	var out bytes.Buffer
-	if err := runAuthList(context.Background(), &out, store, list, testBaseURL, true); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	output := out.String()
-	if !strings.HasPrefix(strings.TrimSpace(output), "[") {
-		t.Fatalf("output = %q, want JSON array", output)
-	}
-	if !strings.Contains(output, `"id": "tok-1"`) {
-		t.Fatalf("output = %q, want decoded id", output)
-	}
-}
-
-func TestRunAuthList_EmptyPrintsMessage(t *testing.T) {
+func TestRunAuthStatus_NoSessionsPrintsMessage(t *testing.T) {
 	t.Parallel()
 
 	store := newMockTokenStore()
@@ -292,11 +257,14 @@ func TestRunAuthList_EmptyPrintsMessage(t *testing.T) {
 	list := func(context.Context) ([]api.Token, error) { return nil, nil }
 
 	var out bytes.Buffer
-	if err := runAuthList(context.Background(), &out, store, list, testBaseURL, false); err != nil {
+	if err := runAuthStatus(context.Background(), &out, store, list, testBaseURL); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(out.String(), "No active tokens") {
-		t.Fatalf("output = %q, want 'No active tokens' message", out.String())
+	if !strings.Contains(out.String(), "Logged in to "+testBaseURL) {
+		t.Fatalf("output = %q, want 'Logged in' message", out.String())
+	}
+	if !strings.Contains(out.String(), "No active sessions") {
+		t.Fatalf("output = %q, want 'No active sessions' message", out.String())
 	}
 }
 
@@ -527,7 +495,7 @@ func TestAuthCmd_RegistersExpectedSubcommands(t *testing.T) {
 				name := strings.Fields(sub.Use)[0]
 				subcommands[name] = true
 			}
-			for _, want := range []string{"login", "logout", "status", "list", "revoke"} {
+			for _, want := range []string{"login", "logout", "status", "revoke"} {
 				if !subcommands[want] {
 					t.Errorf("auth missing subcommand %q (got: %v)", want, subcommands)
 				}
