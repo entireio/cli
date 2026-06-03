@@ -83,7 +83,7 @@ func promoteNextLogin(outW, errW io.Writer) {
 }
 
 func defaultRevokeCurrentSession(ctx context.Context) error {
-	token, err := resolveDataAPIToken(ctx)
+	token, err := resolveAuthHostToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -97,7 +97,7 @@ func defaultRevokeCurrentSession(ctx context.Context) error {
 // session doesn't strand the rest. Cross-core revoke is out of scope — these
 // endpoints target api.AuthBaseURL()'s core only.
 func defaultRevokeAllSessions(ctx context.Context) error {
-	token, err := resolveDataAPIToken(ctx)
+	token, err := resolveAuthHostToken(ctx)
 	if err != nil {
 		return err
 	}

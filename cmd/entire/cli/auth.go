@@ -6,31 +6,28 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
-	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/coreapi"
+	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/spf13/cobra"
 )
 
-// sessionLister lists the authenticated user's active login sessions — the
-// server-side refresh-token families, one per `entire login` across all
-// devices — surfaced by `entire auth status`. The implementation resolves its
-// own data-API bearer via auth.TokenForResource (RFC 8693 exchange in
-// split-host setups, same-host shortcut otherwise); callers don't pass a
-// bearer through, which removes the temptation to forward the wrong-audience
-// keyring token.
-type sessionLister func(ctx context.Context) ([]api.Session, error)
+// coreSessionsPath is entire-core's login-session endpoint family
+// (list / revoke / current). These are OAuth refresh-token families, served
+// by the auth host (entire-core), NOT entire.io's `/api/v1/auth/tokens` —
+// that path is entire.io's legacy `ent_` personal-access-token surface, which
+// rejects entire-core JWTs. The CLI authenticates with a core JWT, so all
+// session management goes to core.
+const coreSessionsPath = "/api/auth/tokens"
 
-// User-visible placeholder strings. Promoted to constants so tests and
-// production share a single source of truth.
+// User-visible placeholder strings. lastUsedJustNow is consumed by
+// formatRelativeDuration in status.go.
 const (
 	placeholderDash = "-"
-	lastUsedNever   = "never"
 	lastUsedJustNow = "just now"
 )
 
@@ -67,42 +64,36 @@ func requireSecureBaseURL(insecureHTTPAuth bool) error {
 	return nil
 }
 
-// newSessionsClient builds an api.Client for the session management endpoints
-// (list / revoke / current). These live on the data API regardless of
-// split-host config — the auth host (entire-core in v2) mints OAuth tokens but
-// doesn't host the session management endpoints — so this targets
-// api.BaseURL().
-//
-// The supplied token must already be scoped for api.BaseURL(). Callers
-// must obtain it via resolveDataAPIToken (or auth.TokenForResource
-// directly) rather than handing through the raw keyring entry — the
-// keyring stores the auth-host-issued core token, which the data API
-// rejects in split-host setups.
+// newSessionsClient builds an api.Client for entire-core's login-session
+// endpoints (coreSessionsPath). It targets the auth host (api.AuthBaseURL()),
+// since that's where the session/refresh-token families live; the supplied
+// bearer must be the session-scoped login JWT, obtained via
+// resolveAuthHostToken (a same-host resolution that returns the login token
+// unchanged, preserving its entire:session scope — entire-core's session
+// routes require it).
 func newSessionsClient(token string) *api.Client {
-	return api.NewClientWithBaseURL(token, api.BaseURL()).
-		WithAuthTokensPath(auth.CurrentProvider().AuthTokensPath)
+	return api.NewClientWithBaseURL(token, api.AuthBaseURL()).
+		WithAuthTokensPath(coreSessionsPath)
 }
 
-// resolveDataAPIToken returns a bearer scoped for the data API. In
-// split-host setups this triggers an RFC 8693 exchange against the
-// auth host's STS endpoint; in single-host setups the tokenmanager
-// hits the same-host shortcut and returns the core token unchanged.
-// Centralised so the audience-mismatch bug that motivated this fix
-// can't be reintroduced piecemeal at individual call sites.
-func resolveDataAPIToken(ctx context.Context) (string, error) {
-	token, err := auth.TokenForResource(ctx, api.OriginOnly(api.BaseURL()))
+// resolveAuthHostToken returns a bearer scoped for the auth host (entire-core).
+// For the auth host's own origin the tokenmanager hits the same-host shortcut
+// and returns the stored login JWT unchanged — keeping the entire:session
+// scope that core's session endpoints (and /me) require, with no STS exchange.
+func resolveAuthHostToken(ctx context.Context) (string, error) {
+	token, err := auth.TokenForResource(ctx, api.OriginOnly(api.AuthBaseURL()))
 	if err != nil {
-		return "", fmt.Errorf("resolve API token: %w", err)
+		return "", fmt.Errorf("resolve auth-host token: %w", err)
 	}
 	return token, nil
 }
 
 // isKeychainTokenRejected reports whether err indicates the stored
-// keyring token can't authenticate against the data API. Three failure
-// modes collapse into this single "the user must re-login" branch:
+// keyring token can't authenticate against entire-core. Failure modes that
+// collapse into the single "the user must re-login" branch:
 //
-//   - data API returned 401 (single-host, or after a successful STS
-//     exchange whose result the data API then rejected),
+//   - core API returned 401 (surfaces as *coreapi.ErrorModelStatusCode),
+//     or a data API 401 (api.HTTPError),
 //   - tokenmanager's preflight rejected an expired core token JWT
 //     (surfacing as auth.ErrNotLoggedIn even though the keyring entry
 //     is still present),
@@ -170,8 +161,8 @@ func newAuthStatusCmd() *cobra.Command {
 			if err := requireSecureBaseURL(insecureHTTPAuth); err != nil {
 				return err
 			}
-			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
-				auth.NewContextStore(), defaultFetchProfile, defaultListSessions, api.AuthBaseURL())
+			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(),
+				auth.NewContextStore(), defaultFetchProfile, auth.Contexts, api.AuthBaseURL())
 		},
 	}
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
@@ -191,6 +182,11 @@ type authProfile struct {
 // profileFetcher fetches the logged-in user's profile via GET /me on the core
 // API. Injected so status stays unit-testable without a live core.
 type profileFetcher func(ctx context.Context) (*authProfile, error)
+
+// contextsProvider returns the stored login contexts and the active context
+// name, for the local-context lines in `entire auth status`. Injected for
+// testability; production wires auth.Contexts.
+type contextsProvider func() ([]*contexts.Context, string, error)
 
 // defaultFetchProfile fetches the current user's profile from the core API's
 // GET /me. It doubles as the liveness check for `entire auth status`: a 401
@@ -217,60 +213,46 @@ func defaultFetchProfile(ctx context.Context) (*authProfile, error) {
 	return p, nil
 }
 
-// defaultListSessions fetches the authenticated user's active login sessions
-// from the server. See sessionLister for what these rows actually are.
-func defaultListSessions(ctx context.Context) ([]api.Session, error) {
-	token, err := resolveDataAPIToken(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return newSessionsClient(token).ListSessions(ctx) //nolint:wrapcheck // ListSessions already wraps with action context
-}
-
-func runAuthStatus(ctx context.Context, outW, errW io.Writer, store tokenStore, fetchProfile profileFetcher, list sessionLister, baseURL string) error {
+// runAuthStatus reports auth state without listing server-side sessions: GET
+// /me validates the token and supplies the profile header, and the active
+// login context is read locally. (Session listing/revocation lives on
+// entire-core and is reached only by logout — see newSessionsClient.)
+func runAuthStatus(ctx context.Context, w io.Writer, store tokenStore, fetchProfile profileFetcher, listContexts contextsProvider, baseURL string) error {
 	token, err := store.GetToken(baseURL)
 	if err != nil {
 		return fmt.Errorf("read keychain: %w", err)
 	}
 	if token == "" {
-		fmt.Fprintf(outW, "Not logged in to %s\n", baseURL)
-		fmt.Fprintln(outW, "Run 'entire login' to authenticate.")
+		fmt.Fprintf(w, "Not logged in to %s\n", baseURL)
+		fmt.Fprintln(w, "Run 'entire login' to authenticate.")
 		return nil
 	}
 
-	// GET /me both validates the stored token (liveness) and supplies the
-	// profile header below.
 	profile, err := fetchProfile(ctx)
 	if err != nil {
 		if isKeychainTokenRejected(err) {
-			fmt.Fprintf(outW, "Token in keychain for %s is no longer valid.\n", baseURL)
-			fmt.Fprintln(outW, "Run 'entire login' to re-authenticate.")
+			fmt.Fprintf(w, "Token in keychain for %s is no longer valid.\n", baseURL)
+			fmt.Fprintln(w, "Run 'entire login' to re-authenticate.")
 			return nil
 		}
 		return fmt.Errorf("validate token: %w", err)
 	}
 
-	fmt.Fprintf(outW, "Logged in to %s\n", baseURL)
-	writeProfileLines(outW, profile)
-	fmt.Fprintf(outW, "  %-9s %s\n", "Token:", "stored in OS keychain")
-	fmt.Fprintln(outW)
+	fmt.Fprintf(w, "Logged in to %s\n", baseURL)
+	writeProfileLines(w, profile)
 
-	// The token is already known good; a sessions-list failure is non-fatal,
-	// so warn and still report logged-in rather than erroring the command.
-	sessions, err := list(ctx)
-	if err != nil {
-		fmt.Fprintf(errW, "Warning: could not list active sessions: %v\n", err)
-		return nil
+	// Local context info is informational; a read failure shouldn't fail the
+	// command, so on error we just skip the context lines.
+	all, current, ctxErr := listContexts()
+	if ctxErr == nil && current != "" {
+		fmt.Fprintf(w, "  %-9s %s\n", "Context:", current)
 	}
+	fmt.Fprintf(w, "  %-9s %s\n", "Token:", "stored in OS keychain")
 
-	if len(sessions) == 0 {
-		fmt.Fprintln(outW, "No active sessions.")
-		return nil
+	if ctxErr == nil && len(all) > 1 {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "%d login contexts saved; run 'entire auth contexts' to list or 'entire auth use <name>' to switch.\n", len(all))
 	}
-
-	fmt.Fprintln(outW, "Active sessions:")
-	sortSessionsByRecency(sessions)
-	renderSessionsTable(outW, newAuthTableStyles(outW), sessions, time.Now())
 	return nil
 }
 
@@ -299,39 +281,18 @@ func writeProfileLines(w io.Writer, p *authProfile) {
 	}
 }
 
-// sortSessionsByRecency orders sessions most-recently-used first, then most
-// recently created, then by id — a fully specified order independent of the
-// server's response ordering.
-func sortSessionsByRecency(sessions []api.Session) {
-	sort.Slice(sessions, func(i, j int) bool {
-		li := lastUsedSortKey(sessions[i])
-		lj := lastUsedSortKey(sessions[j])
-		if li != lj {
-			return li > lj
-		}
-		if sessions[i].CreatedAt != sessions[j].CreatedAt {
-			return sessions[i].CreatedAt > sessions[j].CreatedAt
-		}
-		return sessions[i].ID < sessions[j].ID
-	})
-}
-
 // --- auth tables -------------------------------------------------------------
 
-// authTableStyles holds the lipgloss styles shared by the `entire auth status`
-// active-sessions table and the `entire auth contexts` table. Mirrors the
-// approach in activity_render.go: keep style construction tied to color
-// detection, and render plain text when color is disabled.
+// authTableStyles holds the lipgloss styles for the `entire auth contexts`
+// table. Mirrors the approach in activity_render.go: keep style construction
+// tied to color detection, and render plain text when color is disabled.
 type authTableStyles struct {
 	colorEnabled bool
 
-	header  lipgloss.Style // bold + dim, used for column headers
-	id      lipgloss.Style // yellow accent
-	name    lipgloss.Style // bold
-	value   lipgloss.Style // default fg for scope/dates (no color)
-	dim     lipgloss.Style // "never", "-"
-	warning lipgloss.Style // expires-soon
-	expired lipgloss.Style // already expired
+	header lipgloss.Style // bold + dim, used for column headers
+	id     lipgloss.Style // yellow accent (active-context marker)
+	name   lipgloss.Style // bold (active context name)
+	value  lipgloss.Style // default fg
 }
 
 func newAuthTableStyles(w io.Writer) authTableStyles {
@@ -344,9 +305,6 @@ func newAuthTableStyles(w io.Writer) authTableStyles {
 	s.id = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
 	s.name = lipgloss.NewStyle().Bold(true)
 	s.value = lipgloss.NewStyle() // default fg
-	s.dim = lipgloss.NewStyle().Faint(true)
-	s.warning = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
-	s.expired = lipgloss.NewStyle().Foreground(lipgloss.Color("1")) // red
 	return s
 }
 
@@ -357,36 +315,9 @@ func (s authTableStyles) render(style lipgloss.Style, text string) string {
 	return style.Render(text)
 }
 
-// renderSessionsTable prints a styled, column-aligned table of login sessions.
-// Column padding is computed via lipgloss.Width — it strips ANSI escapes, so a
-// styled cell's visible width matches its plain text. tabwriter can't be used
-// here once cells contain ANSI codes.
-func renderSessionsTable(w io.Writer, sty authTableStyles, tokens []api.Session, now time.Time) {
-	headerCells := []string{"ID", "NAME", "SCOPE", "CREATED", "LAST USED", "EXPIRES"}
-	header := make([]string, len(headerCells))
-	for i, h := range headerCells {
-		header[i] = sty.render(sty.header, h)
-	}
-
-	rows := make([][]string, 0, len(tokens))
-	for _, t := range tokens {
-		rows = append(rows, []string{
-			sty.render(sty.id, t.ID),
-			styleName(sty, t.Name),
-			sty.render(sty.value, fallback(t.Scope, placeholderDash)),
-			sty.render(sty.value, formatAuthDate(t.CreatedAt)),
-			styleLastUsed(sty, t.LastUsedAt, now),
-			styleExpires(sty, t.ExpiresAt, now),
-		})
-	}
-
-	renderAlignedTable(w, header, rows)
-}
-
 // renderAlignedTable writes header followed by rows in left-aligned columns,
 // sizing each column to its widest (possibly pre-styled) cell. Column widths
-// use lipgloss.Width so ANSI escapes don't inflate the padding. Shared by the
-// auth-status and auth-contexts tables.
+// use lipgloss.Width so ANSI escapes don't inflate the padding.
 func renderAlignedTable(w io.Writer, header []string, rows [][]string) {
 	widths := make([]int, len(header))
 	for i, h := range header {
@@ -414,102 +345,6 @@ func writeRow(w io.Writer, cells []string, widths []int) {
 		}
 	}
 	fmt.Fprintln(w)
-}
-
-func styleName(sty authTableStyles, name string) string {
-	if name == "" {
-		return sty.render(sty.dim, placeholderDash)
-	}
-	return sty.render(sty.name, name)
-}
-
-func styleLastUsed(sty authTableStyles, lastUsed *string, now time.Time) string {
-	if lastUsed == nil {
-		return sty.render(sty.dim, lastUsedNever)
-	}
-	return sty.render(sty.value, formatAuthLastUsed(lastUsed, now))
-}
-
-func styleExpires(sty authTableStyles, expiresAt string, now time.Time) string {
-	formatted := formatAuthDate(expiresAt)
-	switch classifyExpiresAt(expiresAt, now) {
-	case expiresExpired:
-		return sty.render(sty.expired, formatted)
-	case expiresSoon:
-		return sty.render(sty.warning, formatted)
-	case expiresNormal:
-		return sty.render(sty.value, formatted)
-	}
-	return sty.render(sty.value, formatted)
-}
-
-func lastUsedSortKey(t api.Session) string {
-	if t.LastUsedAt == nil {
-		return ""
-	}
-	return *t.LastUsedAt
-}
-
-// formatAuthDate renders an RFC3339 timestamp as YYYY-MM-DD in local time.
-func formatAuthDate(s string) string {
-	if s == "" {
-		return placeholderDash
-	}
-	if ts, err := time.Parse(time.RFC3339, s); err == nil {
-		return ts.Local().Format("2006-01-02")
-	}
-	return s
-}
-
-// formatAuthLastUsed renders a relative "last used" timestamp, with "yesterday"
-// and absolute-date branches that the shared formatRelativeDuration helper
-// doesn't cover.
-func formatAuthLastUsed(s *string, now time.Time) string {
-	if s == nil || *s == "" {
-		return lastUsedNever
-	}
-	ts, err := time.Parse(time.RFC3339, *s)
-	if err != nil {
-		return *s
-	}
-	delta := now.Sub(ts)
-	switch {
-	case delta < 0, delta >= 30*24*time.Hour:
-		return ts.Local().Format("2006-01-02")
-	case delta >= 24*time.Hour && delta < 48*time.Hour:
-		return "yesterday"
-	default:
-		return formatRelativeDuration(delta)
-	}
-}
-
-type expiresState int
-
-const (
-	expiresNormal expiresState = iota
-	expiresSoon
-	expiresExpired
-)
-
-// classifyExpiresAt classifies an RFC3339 expires-at relative to now. Used to
-// color the EXPIRES column so tokens worth rotating stand out.
-func classifyExpiresAt(s string, now time.Time) expiresState {
-	if s == "" {
-		return expiresNormal
-	}
-	ts, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		return expiresNormal
-	}
-	delta := ts.Sub(now)
-	switch {
-	case delta <= 0:
-		return expiresExpired
-	case delta < 7*24*time.Hour:
-		return expiresSoon
-	default:
-		return expiresNormal
-	}
 }
 
 func fallback(s, alt string) string {

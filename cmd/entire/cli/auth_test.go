@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/entireio/auth-go/sts"
 	"github.com/entireio/auth-go/tokenmanager"
@@ -16,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/coreapi"
+	"github.com/entireio/cli/internal/entireclient/contexts"
 )
 
 const (
@@ -37,13 +37,16 @@ func okProfile(context.Context) (*authProfile, error) {
 	}, nil
 }
 
-// unusedList is a sessionLister that fails the test if called — used by the
-// liveness tests where /me rejects the token before the list is reached.
-func unusedList(t *testing.T) sessionLister {
-	return func(context.Context) ([]api.Session, error) {
+// noContexts is a contextsProvider with nothing stored.
+func noContexts() ([]*contexts.Context, string, error) { return nil, "", nil }
+
+// unusedProfile is a profileFetcher that fails the test if called — for the
+// not-logged-in path, where the local token check short-circuits before /me.
+func unusedProfile(t *testing.T) profileFetcher {
+	return func(context.Context) (*authProfile, error) {
 		t.Helper()
-		t.Fatal("session list should not be called on the rejected-token path")
-		return nil, nil
+		t.Fatal("/me should not be called when no token is stored")
+		return nil, errors.New("unreachable")
 	}
 }
 
@@ -52,23 +55,9 @@ func TestRunAuthStatus_NotLoggedIn(t *testing.T) {
 
 	store := newMockTokenStore()
 
-	profileCalled, listCalled := false, false
-	fetchProfile := func(context.Context) (*authProfile, error) {
-		profileCalled = true
-		return &authProfile{}, nil
-	}
-	list := func(context.Context) ([]api.Session, error) {
-		listCalled = true
-		return nil, nil
-	}
-
-	var out, errOut bytes.Buffer
-	if err := runAuthStatus(context.Background(), &out, &errOut, store, fetchProfile, list, testBaseURL); err != nil {
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, store, unusedProfile(t), noContexts, testBaseURL); err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if profileCalled || listCalled {
-		t.Fatal("no network calls expected when no token is stored")
 	}
 	if !strings.Contains(out.String(), "Not logged in to "+testBaseURL) {
 		t.Fatalf("output = %q, want 'Not logged in' message", out.String())
@@ -81,15 +70,12 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	store := newMockTokenStore()
 	store.tokens[testBaseURL] = testAuthTok
 
-	list := func(context.Context) ([]api.Session, error) {
-		return []api.Session{
-			{ID: "a", Name: "laptop"},
-			{ID: "b", Name: "ci"},
-		}, nil
+	ctxs := func() ([]*contexts.Context, string, error) {
+		return []*contexts.Context{{Name: "us.auth.entire.io"}}, "us.auth.entire.io", nil
 	}
 
-	var out, errOut bytes.Buffer
-	if err := runAuthStatus(context.Background(), &out, &errOut, store, okProfile, list, testBaseURL); err != nil {
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, store, okProfile, ctxs, testBaseURL); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -103,11 +89,31 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	if !strings.Contains(got, "github/alice") {
 		t.Fatalf("output = %q, want provider identity", got)
 	}
-	if !strings.Contains(got, "Active sessions:") {
-		t.Fatalf("output = %q, want active-sessions heading", got)
+	if !strings.Contains(got, "us.auth.entire.io") {
+		t.Fatalf("output = %q, want active-context line", got)
 	}
-	if !strings.Contains(got, "laptop") || !strings.Contains(got, "ci") {
-		t.Fatalf("output = %q, want session rows", got)
+	// Status must no longer list server-side sessions.
+	if strings.Contains(got, "Active sessions") {
+		t.Fatalf("output = %q, should not list server-side sessions", got)
+	}
+}
+
+func TestRunAuthStatus_MultipleContextsHint(t *testing.T) {
+	t.Parallel()
+
+	store := newMockTokenStore()
+	store.tokens[testBaseURL] = testAuthTok
+
+	ctxs := func() ([]*contexts.Context, string, error) {
+		return []*contexts.Context{{Name: "a"}, {Name: "b"}, {Name: "c"}}, "a", nil
+	}
+
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, store, okProfile, ctxs, testBaseURL); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out.String(), "3 login contexts saved") {
+		t.Fatalf("output = %q, want multi-context hint", out.String())
 	}
 }
 
@@ -123,11 +129,10 @@ func TestRunAuthStatus_TokenInvalid(t *testing.T) {
 		return nil, &coreapi.ErrorModelStatusCode{StatusCode: http.StatusUnauthorized}
 	}
 
-	var out, errOut bytes.Buffer
-	if err := runAuthStatus(context.Background(), &out, &errOut, store, fetchProfile, unusedList(t), testBaseURL); err != nil {
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, store, fetchProfile, noContexts, testBaseURL); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	if !strings.Contains(out.String(), "no longer valid") {
 		t.Fatalf("output = %q, want invalid-token message", out.String())
 	}
@@ -136,11 +141,10 @@ func TestRunAuthStatus_TokenInvalid(t *testing.T) {
 	}
 }
 
-// TestRunAuthStatus_STSRejectionRendersInvalidMessage pins fix #2: in
-// split-host setups, STS rejection happens before any HTTP call to the
-// data API, so the friendly "Token in keychain ... is no longer valid"
-// message has to fire on the auth-go sts package's wrapped string
-// (no typed sentinel) as well as the data-API 401 case above.
+// TestRunAuthStatus_STSRejectionRendersInvalidMessage: in split-host setups,
+// STS rejection happens before /me resolves a bearer, surfacing as auth-go's
+// wrapped string (no typed sentinel). isKeychainTokenRejected must still map
+// it to the re-login hint.
 func TestRunAuthStatus_STSRejectionRendersInvalidMessage(t *testing.T) {
 	t.Parallel()
 
@@ -148,58 +152,44 @@ func TestRunAuthStatus_STSRejectionRendersInvalidMessage(t *testing.T) {
 	store.tokens[testBaseURL] = testAuthTok
 
 	fetchProfile := func(context.Context) (*authProfile, error) {
-		// Exact format auth-go's sts package emits for an invalid_grant
-		// 4xx (see internal/oauthhttp's readAPIError). Without the
-		// detection in isKeychainTokenRejected this would fall through
-		// to the generic "validate token: ..." error path and the user
-		// would see a raw STS string instead of the re-login hint.
 		return nil, errors.New("token exchange: status 400: invalid_grant: subject_token expired")
 	}
 
-	var out, errOut bytes.Buffer
-	if err := runAuthStatus(context.Background(), &out, &errOut, store, fetchProfile, unusedList(t), testBaseURL); err != nil {
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, store, fetchProfile, noContexts, testBaseURL); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	if !strings.Contains(out.String(), "no longer valid") {
 		t.Fatalf("output = %q, want invalid-token message", out.String())
 	}
-	if !strings.Contains(out.String(), "entire login") {
-		t.Fatalf("output = %q, want re-auth hint", out.String())
-	}
 }
 
-// TestRunAuthStatus_ExpiredCoreTokenRendersInvalidMessage pins the
-// other half of fix #2: the tokenmanager's preflight check returns
-// auth.ErrNotLoggedIn when a stored core JWT's exp claim is in the
-// past. The keyring read at the top of runAuthStatus still finds a
-// non-empty entry, so the "Not logged in" branch doesn't fire — the
-// helper has to route the wrapped sentinel to the same re-login hint.
+// TestRunAuthStatus_ExpiredCoreTokenRendersInvalidMessage: the tokenmanager's
+// preflight returns auth.ErrNotLoggedIn for an expired core JWT. The keyring
+// read still finds an entry, so the helper must route the wrapped sentinel to
+// the re-login hint (and a string-only lookalike must NOT match).
 func TestRunAuthStatus_ExpiredCoreTokenRendersInvalidMessage(t *testing.T) {
 	t.Parallel()
 
 	store := newMockTokenStore()
 	store.tokens[testBaseURL] = testAuthTok
 
-	fetchProfile := func(context.Context) (*authProfile, error) {
+	stringOnly := func(context.Context) (*authProfile, error) {
 		return nil, errors.New("fetch profile: " + auth.ErrNotLoggedIn.Error())
 	}
-	// errors.New above is intentionally string-only to defeat the
-	// detection — confirm the substring fallback alone isn't what's
-	// catching this case. The real production path wraps with %w.
-	fetchWithChain := func(context.Context) (*authProfile, error) {
+	wrapped := func(context.Context) (*authProfile, error) {
 		return nil, &wrappedTestError{msg: "fetch profile", inner: auth.ErrNotLoggedIn}
 	}
 
 	// Sanity: string-only does NOT match (no sentinel chain).
-	var out1, errOut1 bytes.Buffer
-	if err := runAuthStatus(context.Background(), &out1, &errOut1, store, fetchProfile, unusedList(t), testBaseURL); err == nil {
+	var out1 bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out1, store, stringOnly, noContexts, testBaseURL); err == nil {
 		t.Fatal("string-only ErrNotLoggedIn should not match — keep the test honest")
 	}
 
 	// Real path: errors.Is sees the sentinel through the %w chain.
-	var out2, errOut2 bytes.Buffer
-	if err := runAuthStatus(context.Background(), &out2, &errOut2, store, fetchWithChain, unusedList(t), testBaseURL); err != nil {
+	var out2 bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out2, store, wrapped, noContexts, testBaseURL); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !strings.Contains(out2.String(), "no longer valid") {
@@ -207,8 +197,7 @@ func TestRunAuthStatus_ExpiredCoreTokenRendersInvalidMessage(t *testing.T) {
 	}
 }
 
-// wrappedTestError is a tiny stand-in for fmt.Errorf("...: %w", inner) — kept
-// local so the test reads as "this is what production hands runAuthStatus".
+// wrappedTestError is a tiny stand-in for fmt.Errorf("...: %w", inner).
 type wrappedTestError struct {
 	msg   string
 	inner error
@@ -227,8 +216,8 @@ func TestRunAuthStatus_ServerError(t *testing.T) {
 		return nil, errors.New("connection refused")
 	}
 
-	var out, errOut bytes.Buffer
-	err := runAuthStatus(context.Background(), &out, &errOut, store, fetchProfile, unusedList(t), testBaseURL)
+	var out bytes.Buffer
+	err := runAuthStatus(context.Background(), &out, store, fetchProfile, noContexts, testBaseURL)
 	if err == nil {
 		t.Fatal("expected error for non-401 failure")
 	}
@@ -236,173 +225,6 @@ func TestRunAuthStatus_ServerError(t *testing.T) {
 		t.Fatalf("error = %v, want underlying message", err)
 	}
 }
-
-// --- active-sessions table ---------------------------------------------------
-
-func TestRunAuthStatus_SessionsTablePrintsRows(t *testing.T) {
-	t.Parallel()
-
-	store := newMockTokenStore()
-	store.tokens[testBaseURL] = testAuthTok
-
-	lastUsed := "2026-04-01T12:00:00Z"
-	list := func(context.Context) ([]api.Session, error) {
-		return []api.Session{
-			{ID: "fam-1", Name: "laptop", Scope: "cli",
-				CreatedAt:  "2026-01-01T00:00:00Z",
-				ExpiresAt:  "2027-01-01T00:00:00Z",
-				LastUsedAt: &lastUsed},
-			{ID: "fam-2", Name: "ci", Scope: "cli",
-				CreatedAt:  "2026-02-01T00:00:00Z",
-				ExpiresAt:  "2027-01-01T00:00:00Z",
-				LastUsedAt: nil},
-		}, nil
-	}
-
-	var out, errOut bytes.Buffer
-	if err := runAuthStatus(context.Background(), &out, &errOut, store, okProfile, list, testBaseURL); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "Active sessions:") {
-		t.Fatalf("output = %q, want active-sessions heading", output)
-	}
-	if !strings.Contains(output, "ID") || !strings.Contains(output, "NAME") {
-		t.Fatalf("output = %q, want table headers", output)
-	}
-	if !strings.Contains(output, "fam-1") || !strings.Contains(output, "laptop") {
-		t.Fatalf("output = %q, want first row", output)
-	}
-	if !strings.Contains(output, "fam-2") || !strings.Contains(output, "never") {
-		t.Fatalf("output = %q, want second row with 'never' last-used", output)
-	}
-	// fam-1 used recently, so it should sort before fam-2 in the table.
-	if strings.Index(output, "fam-1") > strings.Index(output, "fam-2") {
-		t.Fatalf("output = %q, want fam-1 before fam-2 (recent-first)", output)
-	}
-}
-
-func TestRunAuthStatus_NoSessionsPrintsMessage(t *testing.T) {
-	t.Parallel()
-
-	store := newMockTokenStore()
-	store.tokens[testBaseURL] = testAuthTok
-
-	list := func(context.Context) ([]api.Session, error) { return nil, nil }
-
-	var out, errOut bytes.Buffer
-	if err := runAuthStatus(context.Background(), &out, &errOut, store, okProfile, list, testBaseURL); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(out.String(), "Logged in to "+testBaseURL) {
-		t.Fatalf("output = %q, want 'Logged in' message", out.String())
-	}
-	if !strings.Contains(out.String(), "No active sessions") {
-		t.Fatalf("output = %q, want 'No active sessions' message", out.String())
-	}
-}
-
-// TestRunAuthStatus_SessionsListFailureIsSoftWarning pins that once /me has
-// confirmed the token, a sessions-list failure degrades to a stderr warning
-// rather than failing the command — the user is still logged in.
-func TestRunAuthStatus_SessionsListFailureIsSoftWarning(t *testing.T) {
-	t.Parallel()
-
-	store := newMockTokenStore()
-	store.tokens[testBaseURL] = testAuthTok
-
-	list := func(context.Context) ([]api.Session, error) {
-		return nil, errors.New("data API unreachable")
-	}
-
-	var out, errOut bytes.Buffer
-	if err := runAuthStatus(context.Background(), &out, &errOut, store, okProfile, list, testBaseURL); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(out.String(), "Logged in to "+testBaseURL) {
-		t.Fatalf("stdout = %q, want 'Logged in' message", out.String())
-	}
-	if !strings.Contains(errOut.String(), "could not list active sessions") {
-		t.Fatalf("stderr = %q, want sessions-list warning", errOut.String())
-	}
-	if !strings.Contains(errOut.String(), "data API unreachable") {
-		t.Fatalf("stderr = %q, want underlying error", errOut.String())
-	}
-}
-
-func TestFormatAuthLastUsed_RelativeBuckets(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
-
-	tests := map[string]struct {
-		input *string
-		want  string
-	}{
-		"nil": {nil, "never"},
-		"just now": {
-			ptr(now.Add(-30 * time.Second).Format(time.RFC3339)),
-			"just now",
-		},
-		"minutes ago": {
-			ptr(now.Add(-15 * time.Minute).Format(time.RFC3339)),
-			"15m ago",
-		},
-		"hours ago": {
-			ptr(now.Add(-3 * time.Hour).Format(time.RFC3339)),
-			"3h ago",
-		},
-		"yesterday": {
-			ptr(now.Add(-30 * time.Hour).Format(time.RFC3339)),
-			"yesterday",
-		},
-		"days ago": {
-			ptr(now.Add(-5 * 24 * time.Hour).Format(time.RFC3339)),
-			"5d ago",
-		},
-		"old absolute": {
-			ptr(now.Add(-90 * 24 * time.Hour).Format(time.RFC3339)),
-			now.Add(-90 * 24 * time.Hour).Local().Format("2006-01-02"),
-		},
-	}
-
-	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			if got := formatAuthLastUsed(tt.input, now); got != tt.want {
-				t.Errorf("formatAuthLastUsed(%v) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestClassifyExpiresAt_Buckets(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
-
-	tests := map[string]struct {
-		input string
-		want  expiresState
-	}{
-		"empty":   {"", expiresNormal},
-		"expired": {now.Add(-time.Hour).Format(time.RFC3339), expiresExpired},
-		"soon":    {now.Add(3 * 24 * time.Hour).Format(time.RFC3339), expiresSoon},
-		"normal":  {now.Add(60 * 24 * time.Hour).Format(time.RFC3339), expiresNormal},
-	}
-
-	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			if got := classifyExpiresAt(tt.input, now); got != tt.want {
-				t.Errorf("classifyExpiresAt(%q) = %v, want %v", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func ptr(s string) *string { return &s }
 
 // --- registration -----------------------------------------------------------
 
@@ -437,16 +259,15 @@ func TestAuthCmd_RegistersExpectedSubcommands(t *testing.T) {
 // tokenmanager.Manager via auth.SetManagerForTest and stub only the
 // STS wire call via SetExchangeForTest. That covers the audience-
 // matching logic the function-injection tests above can't reach
-// (defaultListSessions / defaultRevokeAllSessions call resolveDataAPIToken
-// directly, but unit tests for the surrounding flows inject fakes
-// that bypass it).
+// (defaultRevokeCurrentSession / defaultRevokeAllSessions call
+// resolveAuthHostToken directly, but unit tests for the surrounding flows
+// inject fakes that bypass it).
 
-// authResolveTestIssuer is intentionally distinct from the default
-// api.BaseURL() ("https://entire.io") so the manager's same-host
-// shortcut is skipped and the STS-exchange path runs.
+// authResolveTestIssuer is intentionally distinct from api.AuthBaseURL() so
+// the manager's same-host shortcut is skipped and the STS-exchange path runs.
 const authResolveTestIssuer = "https://auth.resolve-test.example.com"
 
-func TestResolveDataAPIToken_ScopesExchangeToDataAPIOrigin(t *testing.T) {
+func TestResolveAuthHostToken_ScopesExchangeToAuthHostOrigin(t *testing.T) {
 	// No t.Parallel: SetManagerForTest mutates package-level state in the
 	// auth package. Concurrent tests in this package don't reach the real
 	// auth.TokenForResource path (they inject lister/revoker fakes), so
@@ -458,29 +279,28 @@ func TestResolveDataAPIToken_ScopesExchangeToDataAPIOrigin(t *testing.T) {
 	var capturedResource string
 	mgr := newResolveTestManager(t, store, func(_ context.Context, req sts.ExchangeRequest) (*tokens.TokenSet, error) {
 		capturedResource = req.Resource
-		return &tokens.TokenSet{AccessToken: "exchanged-data-api-tok"}, nil
+		return &tokens.TokenSet{AccessToken: "exchanged-auth-host-tok"}, nil
 	})
 	t.Cleanup(auth.SetManagerForTest(t, mgr))
 
-	got, err := resolveDataAPIToken(t.Context())
+	got, err := resolveAuthHostToken(t.Context())
 	if err != nil {
-		t.Fatalf("resolveDataAPIToken: %v", err)
+		t.Fatalf("resolveAuthHostToken: %v", err)
 	}
 
-	if got != "exchanged-data-api-tok" {
-		t.Errorf("token = %q, want %q", got, "exchanged-data-api-tok")
+	if got != "exchanged-auth-host-tok" {
+		t.Errorf("token = %q, want %q", got, "exchanged-auth-host-tok")
 	}
-	// The whole point of the helper: the resource handed to the STS
-	// exchange must be the data API's origin, not the auth host's
-	// origin and not the raw env var value. The default api.BaseURL()
-	// is "https://entire.io" and api.OriginOnly leaves it unchanged.
-	if capturedResource != "https://entire.io" {
-		t.Errorf("STS exchange Resource = %q, want %q (api.OriginOnly(api.BaseURL()))",
-			capturedResource, "https://entire.io")
+	// The whole point of the helper: when an exchange happens, the resource
+	// handed to STS must be the auth host's origin (where the session
+	// endpoints live), not the raw env-var value.
+	if want := api.OriginOnly(api.AuthBaseURL()); capturedResource != want {
+		t.Errorf("STS exchange Resource = %q, want %q (api.OriginOnly(api.AuthBaseURL()))",
+			capturedResource, want)
 	}
 }
 
-func TestResolveDataAPIToken_WrapsManagerError(t *testing.T) {
+func TestResolveAuthHostToken_WrapsManagerError(t *testing.T) {
 	store := newAuthMemStore()
 	saveCoreToken(t, store, authResolveTestIssuer, "opaque-core-token")
 
@@ -489,12 +309,12 @@ func TestResolveDataAPIToken_WrapsManagerError(t *testing.T) {
 	})
 	t.Cleanup(auth.SetManagerForTest(t, mgr))
 
-	_, err := resolveDataAPIToken(t.Context())
+	_, err := resolveAuthHostToken(t.Context())
 	if err == nil {
 		t.Fatal("expected error when exchange fails")
 	}
-	if !strings.Contains(err.Error(), "resolve API token") {
-		t.Errorf("error = %v, want 'resolve API token' wrap prefix", err)
+	if !strings.Contains(err.Error(), "resolve auth-host token") {
+		t.Errorf("error = %v, want 'resolve auth-host token' wrap prefix", err)
 	}
 	if !strings.Contains(err.Error(), "simulated transport failure") {
 		t.Errorf("error = %v, want underlying message preserved", err)
@@ -538,7 +358,7 @@ func TestIsKeychainTokenRejected_AllShapes(t *testing.T) {
 	}
 }
 
-// --- helpers for resolveDataAPIToken tests ----------------------------------
+// --- helpers for resolveAuthHostToken tests ---------------------------------
 
 // authMemStore is an in-memory tokenstore.Store for tests that need a
 // real tokenmanager.Manager. Mirrors the private memStore in auth-go's
