@@ -304,6 +304,51 @@ func TestRemoveCurrentContext_DoesNotSwitchToAnother(t *testing.T) {
 	}
 }
 
+func TestRemoveContext(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	exp := time.Now().Add(time.Hour).Unix()
+	first, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://a.example.com","handle":"alice","exp":%d}`, exp)), "entr_a", true)
+	if err != nil {
+		t.Fatalf("record a: %v", err)
+	}
+	active, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://b.example.com","handle":"alice","exp":%d}`, exp)), "entr_b", true)
+	if err != nil {
+		t.Fatalf("record b: %v", err)
+	}
+
+	// Remove the non-current context by name: it must disappear (both slots)
+	// while the active context and current_context pointer are untouched.
+	if err := RemoveContext(first); err != nil {
+		t.Fatalf("RemoveContext: %v", err)
+	}
+	f, err := contexts.Load(cfgDir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if f.Find(first) != nil {
+		t.Fatalf("context %q should have been removed", first)
+	}
+	if f.CurrentContext != active {
+		t.Fatalf("current_context = %q, want the untouched active context %q", f.CurrentContext, active)
+	}
+	svcA := tokenstore.CoreKeyringService("https://a.example.com")
+	if v, err := tokenstore.Get(svcA, "alice"); !errors.Is(err, tokenstore.ErrNotFound) {
+		t.Fatalf("access slot survived RemoveContext: value=%q err=%v", v, err)
+	}
+	if v, err := tokenstore.Get(tokenstore.RefreshService(svcA), "alice"); !errors.Is(err, tokenstore.ErrNotFound) {
+		t.Fatalf("refresh slot survived RemoveContext: value=%q err=%v", v, err)
+	}
+
+	// Idempotent: removing a name that no longer exists is a no-op.
+	if err := RemoveContext(first); err != nil {
+		t.Fatalf("second RemoveContext: %v", err)
+	}
+}
+
 func TestSetCurrentContext(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
