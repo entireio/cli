@@ -50,6 +50,7 @@ func TestDetectPresence(t *testing.T) {
 	t.Run("hooks installed", func(t *testing.T) {
 		tempDir := t.TempDir()
 		t.Chdir(tempDir)
+		t.Setenv(configDirEnv, t.TempDir())
 
 		ag := &AntigravityAgent{}
 		if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {

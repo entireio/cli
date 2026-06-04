@@ -1,0 +1,227 @@
+package antigravity
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+)
+
+// agy reads its window-title command from the GLOBAL config
+// ~/.gemini/antigravity-cli/settings.json — a single slot:
+//
+//	{"title": {"type": "command", "command": "<cmd>"}}
+//
+// We occupy that slot with the title-tee shim (the title script receives the
+// same state JSON as the statusline script — agy's only token-usage surface).
+// A pre-existing user command is preserved INSIDE the shim invocation via
+// --wrap '<original>', making the config self-describing: uninstall restores
+// the original without any backup file. Because the slot is global, per-repo
+// `entire disable` does NOT uninstall it (other repos may rely on it); only
+// agent removal does.
+
+// configDirEnv overrides the agy config directory (tests).
+const configDirEnv = "ENTIRE_ANTIGRAVITY_CONFIG_DIR"
+
+const titleTeeMarker = "hooks antigravity title-tee"
+
+type titleConfig struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+}
+
+// agyConfigDir returns the agy config directory, honouring the override env var.
+func agyConfigDir() (string, error) {
+	if dir := os.Getenv(configDirEnv); dir != "" {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve home dir: %w", err)
+	}
+	return filepath.Join(home, ".gemini", "antigravity-cli"), nil
+}
+
+// titleTeeCommand returns the full shell command string for the title-tee shim.
+// If original is non-empty, the original command is wrapped via --wrap.
+func titleTeeCommand(localDev bool, original string) string {
+	var base string
+	if localDev {
+		base = `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks antigravity title-tee`
+	} else {
+		base = "entire hooks antigravity title-tee"
+	}
+	if original == "" {
+		return base
+	}
+	return base + " --wrap " + shellSingleQuote(original)
+}
+
+// shellSingleQuote wraps s in POSIX single quotes, escaping any embedded
+// single quotes using the '\” idiom.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// InstallTitleTee installs the title-tee shim into agy's global settings.json.
+// If a user's own title command is already present, it is preserved via --wrap.
+// The call is idempotent: if our marker is already in the command, it returns nil.
+func InstallTitleTee(localDev bool) error {
+	cfgDir, err := agyConfigDir()
+	if err != nil {
+		return err
+	}
+	settingsPath := filepath.Join(cfgDir, "settings.json")
+
+	rawFile, err := readAgySettings(settingsPath)
+	if err != nil {
+		return err
+	}
+
+	// Parse existing title entry (if any). Unparseable → treat as absent.
+	var existing titleConfig
+	if raw, ok := rawFile["title"]; ok {
+		_ = json.Unmarshal(raw, &existing) //nolint:errcheck // treat unparseable as absent
+	}
+
+	// Idempotency: already contains our marker.
+	if strings.Contains(existing.Command, titleTeeMarker) {
+		return nil
+	}
+
+	// Build new title config, wrapping any pre-existing command.
+	cfg := titleConfig{
+		Type:    "command",
+		Command: titleTeeCommand(localDev, existing.Command),
+	}
+
+	cfgBytes, err := jsonutil.MarshalWithNoHTMLEscape(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal title config: %w", err)
+	}
+	rawFile["title"] = cfgBytes
+
+	return writeAgySettings(rawFile, settingsPath)
+}
+
+// UninstallTitleTee removes or restores the title entry in agy's global settings.json:
+//   - bare tee (no --wrap)      → delete "title" key
+//   - tee with --wrap 'X'       → restore X
+//   - any other (foreign) cmd   → leave untouched
+//   - missing settings file     → no-op
+func UninstallTitleTee() error {
+	cfgDir, err := agyConfigDir()
+	if err != nil {
+		return err
+	}
+	settingsPath := filepath.Join(cfgDir, "settings.json")
+
+	// Missing file → nothing to uninstall.
+	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	rawFile, err := readAgySettings(settingsPath)
+	if err != nil {
+		return err
+	}
+
+	raw, ok := rawFile["title"]
+	if !ok {
+		return nil // no title key — nothing to do
+	}
+
+	var existing titleConfig
+	if err := json.Unmarshal(raw, &existing); err != nil {
+		return nil //nolint:nilerr // unparseable title entry — leave it alone rather than destroying user data
+	}
+
+	// Not our command → leave untouched.
+	if !strings.Contains(existing.Command, titleTeeMarker) {
+		return nil
+	}
+
+	wrapped, hasWrap := extractWrappedCommand(existing.Command)
+	if hasWrap {
+		// Restore the original command.
+		restored := titleConfig{
+			Type:    "command",
+			Command: wrapped,
+		}
+		restoredBytes, err := jsonutil.MarshalWithNoHTMLEscape(restored)
+		if err != nil {
+			return fmt.Errorf("failed to marshal restored title config: %w", err)
+		}
+		rawFile["title"] = restoredBytes
+	} else {
+		// Only delete the key when it is exactly one of the canonical bare-tee
+		// strings we would have written ourselves. Anything else containing the
+		// marker is either a user-authored wrapper (e.g. "my-wrapper.sh 'entire
+		// hooks antigravity title-tee'") or a corrupted command — leaving it
+		// alone is always safer than deleting the user's config.
+		bare := existing.Command == titleTeeCommand(false, "") ||
+			existing.Command == titleTeeCommand(true, "")
+		if !bare {
+			return nil
+		}
+		delete(rawFile, "title")
+	}
+
+	return writeAgySettings(rawFile, settingsPath)
+}
+
+// extractWrappedCommand parses the --wrap '<original>' portion of a title-tee
+// command string. It returns the original command and true if found and valid,
+// or ("", false) otherwise.
+func extractWrappedCommand(command string) (string, bool) {
+	const wrapFlag = " --wrap "
+	idx := strings.Index(command, wrapFlag)
+	if idx < 0 {
+		return "", false
+	}
+	rest := strings.TrimSpace(command[idx+len(wrapFlag):])
+	if len(rest) < 2 || rest[0] != '\'' || rest[len(rest)-1] != '\'' {
+		return "", false
+	}
+	// Strip outer single quotes and reverse the '\'' escaping.
+	inner := rest[1 : len(rest)-1]
+	return strings.ReplaceAll(inner, `'\''`, "'"), true
+}
+
+// readAgySettings reads and parses settings.json into a raw map.
+// A missing file returns an empty map (not an error).
+func readAgySettings(settingsPath string) (map[string]json.RawMessage, error) {
+	rawFile := make(map[string]json.RawMessage)
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from config dir + fixed filename
+	if os.IsNotExist(err) {
+		return rawFile, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to read agy settings: %w", err)
+	}
+	if err := json.Unmarshal(data, &rawFile); err != nil {
+		return nil, fmt.Errorf("failed to parse agy settings: %w", err)
+	}
+	return rawFile, nil
+}
+
+// writeAgySettings marshals rawFile and writes it to settingsPath, creating
+// parent directories as needed.
+func writeAgySettings(rawFile map[string]json.RawMessage, settingsPath string) error {
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
+		return fmt.Errorf("failed to create agy config directory: %w", err)
+	}
+
+	output, err := jsonutil.MarshalIndentWithNewline(rawFile, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal agy settings: %w", err)
+	}
+
+	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
+		return fmt.Errorf("failed to write agy settings: %w", err)
+	}
+	return nil
+}

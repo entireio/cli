@@ -10,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -83,6 +84,14 @@ func (a *AntigravityAgent) InstallHooks(ctx context.Context, localDev bool, forc
 
 	if err := writeHooksFile(rawFile, hooksPath); err != nil {
 		return 0, err
+	}
+
+	// Title tee: agy's only token-usage surface (same payload as the
+	// statusline script). Best-effort — a failure to claim the global title
+	// slot must not fail repo-level hook setup.
+	if err := InstallTitleTee(localDev); err != nil {
+		logging.Warn(ctx, "failed to install antigravity title tee",
+			"error", err.Error())
 	}
 
 	// 5 hooks: pre-tool-use, post-tool-use, pre-invocation, post-invocation, stop

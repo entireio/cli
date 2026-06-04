@@ -12,6 +12,7 @@ import (
 func TestInstallHooks_FreshRepo(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv(configDirEnv, t.TempDir())
 
 	a := &AntigravityAgent{}
 	n, err := a.InstallHooks(context.Background(), false, false)
@@ -49,6 +50,7 @@ func TestInstallHooks_FreshRepo(t *testing.T) {
 func TestInstallHooks_Idempotent(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv(configDirEnv, t.TempDir())
 
 	a := &AntigravityAgent{}
 
@@ -74,6 +76,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 func TestInstallHooks_PreservesForeignHooks(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv(configDirEnv, t.TempDir())
 
 	// Pre-seed .agents/hooks.json with a foreign entry
 	agentsDir := filepath.Join(tmpDir, ".agents")
@@ -127,6 +130,7 @@ func TestInstallHooks_PreservesForeignHooks(t *testing.T) {
 func TestUninstallHooks_LeavesForeignHooks(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv(configDirEnv, t.TempDir())
 
 	a := &AntigravityAgent{}
 
@@ -187,6 +191,7 @@ func TestUninstallHooks_LeavesForeignHooks(t *testing.T) {
 func TestInstallHooks_LocalDevWritesQuotedSubshell(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv(configDirEnv, t.TempDir())
 
 	a := &AntigravityAgent{}
 	if _, err := a.InstallHooks(context.Background(), true, false); err != nil {
@@ -211,6 +216,7 @@ func TestInstallHooks_LocalDevWritesQuotedSubshell(t *testing.T) {
 func TestAreHooksInstalled(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv(configDirEnv, t.TempDir())
 
 	a := &AntigravityAgent{}
 
