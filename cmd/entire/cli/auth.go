@@ -268,7 +268,7 @@ func defaultFetchProfile(ctx context.Context, coreURL, token string) (*authProfi
 
 // defaultListAuthSessions lists the user's active login sessions on coreURL.
 func defaultListAuthSessions(ctx context.Context, coreURL, token string) ([]api.AuthSession, error) {
-	return newAuthSessionsClient(coreURL, token).ListAuthSessions(ctx) //nolint:wrapcheck // ListSessions already wraps with action context
+	return newAuthSessionsClient(coreURL, token).ListAuthSessions(ctx) //nolint:wrapcheck // ListAuthSessions already wraps with action context
 }
 
 // runAuthStatus reports auth state against the target core: GET /me validates

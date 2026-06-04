@@ -79,15 +79,12 @@ func newLogoutCmd() *cobra.Command {
 					return fmt.Errorf("context core URL check: %w", err)
 				}
 			}
-			revokeCurrent := func(ctx context.Context) error {
-				return revokeCurrentAuthSession(ctx, target.coreURL, target.token)
-			}
-			revokeAll := func(ctx context.Context) error {
-				return revokeAllAuthSessions(ctx, target.coreURL, target.token)
+			revoke := func(ctx context.Context) error {
+				return revokeForTarget(ctx, target.coreURL, target.token)
 			}
 			if err := runLogout(cmd.Context(), outW, errW,
-				auth.NewContextStore(), revokeCurrent, revokeAll,
-				auth.RemoveCurrentContext, api.AuthBaseURL(), everywhere); err != nil {
+				auth.NewContextStore(), revoke,
+				auth.RemoveCurrentContext, api.AuthBaseURL()); err != nil {
 				return err
 			}
 			promoteNextLogin(outW, errW)
@@ -121,7 +118,7 @@ func promoteNextLogin(outW, errW io.Writer) {
 // revokeCurrentAuthSession revokes the active session on coreURL (the family the
 // bearer belongs to) — the default `entire logout`.
 func revokeCurrentAuthSession(ctx context.Context, coreURL, token string) error {
-	return newAuthSessionsClient(coreURL, token).RevokeCurrentAuthSession(ctx) //nolint:wrapcheck // RevokeCurrentSession already wraps with action context
+	return newAuthSessionsClient(coreURL, token).RevokeCurrentAuthSession(ctx) //nolint:wrapcheck // RevokeCurrentAuthSession already wraps with action context
 }
 
 // revokeAllAuthSessions revokes every active login session on coreURL (the
@@ -130,11 +127,11 @@ func revokeCurrentAuthSession(ctx context.Context, coreURL, token string) error 
 // failure, so one stuck session doesn't strand the rest.
 func revokeAllAuthSessions(ctx context.Context, coreURL, token string) error {
 	client := newAuthSessionsClient(coreURL, token)
-	// ListSessions and RevokeSession already wrap with their own action
+	// ListAuthSessions and RevokeAuthSession already wrap with their own action
 	// context (incl. the session id), so return their errors verbatim.
 	sessions, err := client.ListAuthSessions(ctx)
 	if err != nil {
-		return err //nolint:wrapcheck // ListSessions already wraps with "list sessions"
+		return err //nolint:wrapcheck // ListAuthSessions already wraps with "list sessions"
 	}
 	var firstErr error
 	for _, s := range sessions {
@@ -145,11 +142,12 @@ func revokeAllAuthSessions(ctx context.Context, coreURL, token string) error {
 	return firstErr
 }
 
-// runLogout ends the user's login. revokeCurrent revokes just the active
-// session; revokeAll (used when all is set) revokes every session on the
-// active core. Either way the local keyring entry and active context are
-// removed, so the CLI reports logged-out even if the server call fails.
-func runLogout(ctx context.Context, outW, errW io.Writer, store tokenStore, revokeCurrent, revokeAll revokeCurrentFunc, clearContext clearContextFunc, baseURL string, all bool) error {
+// runLogout ends the user's login. revoke is the caller-selected server-side
+// revocation — just the active session, or every session on the active core
+// when --everywhere is set. Either way the local keyring entry and active
+// context are removed, so the CLI reports logged-out even if the server call
+// fails.
+func runLogout(ctx context.Context, outW, errW io.Writer, store tokenStore, revoke revokeCurrentFunc, clearContext clearContextFunc, baseURL string) error {
 	token, err := store.GetToken(baseURL)
 	if err != nil {
 		// Fall through to the local delete: we still want the keyring entry
@@ -157,10 +155,6 @@ func runLogout(ctx context.Context, outW, errW io.Writer, store tokenStore, revo
 		fmt.Fprintf(errW, "Warning: failed to read token before revocation: %v\n", err)
 	}
 	if token != "" {
-		revoke := revokeCurrent
-		if all {
-			revoke = revokeAll
-		}
 		if err := revoke(ctx); err != nil && !api.IsHTTPErrorStatus(err, http.StatusUnauthorized) {
 			// Best-effort: a transient network error shouldn't block local
 			// logout. A 401 means the token is already invalid server-side,
