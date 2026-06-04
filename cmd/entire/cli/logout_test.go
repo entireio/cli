@@ -466,13 +466,13 @@ func newCoreServer(t *testing.T) (*httptest.Server, *coreRecorder) {
 		rec.mu.Lock()
 		defer rec.mu.Unlock()
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == coreSessionsPath:
+		case r.Method == http.MethodGet && r.URL.Path == coreAuthSessionsPath:
 			rec.listCount++
 			fmt.Fprint(w, `{"tokens":[{"id":"s1"},{"id":"s2"}]}`)
-		case r.Method == http.MethodDelete && r.URL.Path == coreSessionsPath+"/current":
+		case r.Method == http.MethodDelete && r.URL.Path == coreAuthSessionsPath+"/current":
 			rec.deleteCurrent++
-		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, coreSessionsPath+"/"):
-			rec.deleteByID = append(rec.deleteByID, strings.TrimPrefix(r.URL.Path, coreSessionsPath+"/"))
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, coreAuthSessionsPath+"/"):
+			rec.deleteByID = append(rec.deleteByID, strings.TrimPrefix(r.URL.Path, coreAuthSessionsPath+"/"))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

@@ -48,8 +48,8 @@ func rejecting(err error) profileFetcher {
 	return func(context.Context, string, string) (*authProfile, error) { return nil, err }
 }
 
-// noSessions is a sessionLister returning an empty list (no table rendered).
-func noSessions(context.Context, string, string) ([]api.Session, error) { return nil, nil }
+// noSessions is a authSessionLister returning an empty list (no table rendered).
+func noSessions(context.Context, string, string) ([]api.AuthSession, error) { return nil, nil }
 
 func TestRunAuthStatus_NotLoggedIn(t *testing.T) {
 	t.Parallel()
@@ -98,11 +98,11 @@ func TestRunAuthStatus_RendersSessionsTable(t *testing.T) {
 
 	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "eu.auth.entire.io", totalContexts: 1}
 	lastUsed := "2026-05-01T00:00:00Z"
-	listSessions := func(_ context.Context, coreURL, token string) ([]api.Session, error) {
+	listSessions := func(_ context.Context, coreURL, token string) ([]api.AuthSession, error) {
 		if coreURL != testCoreURL || token != "tok" {
 			t.Errorf("listSessions called with (%q, %q), want the active core+token", coreURL, token)
 		}
-		return []api.Session{
+		return []api.AuthSession{
 			{ID: "fam-1", Name: "OIDC login", CreatedAt: "2026-01-01T00:00:00Z", ExpiresAt: "2026-12-01T00:00:00Z", LastUsedAt: &lastUsed},
 			{ID: "fam-2", Name: "OIDC login", CreatedAt: "2026-02-01T00:00:00Z", ExpiresAt: "2026-12-15T00:00:00Z"},
 		}, nil
@@ -130,7 +130,7 @@ func TestRunAuthStatus_SessionListFailureIsSoftNote(t *testing.T) {
 	t.Parallel()
 
 	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "eu.auth.entire.io", totalContexts: 1}
-	listSessions := func(context.Context, string, string) ([]api.Session, error) {
+	listSessions := func(context.Context, string, string) ([]api.AuthSession, error) {
 		return nil, errors.New("sessions endpoint unreachable")
 	}
 
@@ -277,7 +277,7 @@ func TestAuthCmd_RegistersExpectedSubcommands(t *testing.T) {
 // tokenmanager.Manager via auth.SetManagerForTest and stub only the
 // STS wire call via SetExchangeForTest. That covers the audience-
 // matching logic the function-injection tests above can't reach
-// (defaultRevokeCurrentSession / defaultRevokeAllSessions call
+// (revokeCurrentAuthSession / revokeAllAuthSessions call
 // resolveAuthHostToken directly, but unit tests for the surrounding flows
 // inject fakes that bypass it).
 

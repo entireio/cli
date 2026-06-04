@@ -18,12 +18,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// coreSessionsPath is entire-core's login-session endpoint family
+// coreAuthSessionsPath is entire-core's login-session endpoint family
 // (list / revoke / current) on the auth host. Sessions are OAuth
 // refresh-token families; the CLI authenticates against them with its core
 // JWT. Session management must target the auth host (entire-core), never the
 // data host.
-const coreSessionsPath = "/api/auth/tokens"
+const coreAuthSessionsPath = "/api/auth/tokens"
 
 // User-visible placeholder strings. lastUsedJustNow is consumed by
 // formatRelativeDuration in status.go.
@@ -66,13 +66,13 @@ func requireSecureBaseURL(insecureHTTPAuth bool) error {
 	return nil
 }
 
-// newSessionsClient builds an api.Client for entire-core's login-session
-// endpoints (coreSessionsPath) on coreURL, authenticated with the
+// newAuthSessionsClient builds an api.Client for entire-core's login-session
+// endpoints (coreAuthSessionsPath) on coreURL, authenticated with the
 // session-scoped login JWT. coreURL is the active context's CoreURL (or the
 // configured auth host when no context is active) — session management always
 // targets a login server, never the data host.
-func newSessionsClient(coreURL, token string) *api.Client {
-	return api.NewClientWithBaseURL(token, coreURL).WithSessionsPath(coreSessionsPath)
+func newAuthSessionsClient(coreURL, token string) *api.Client {
+	return api.NewClientWithBaseURL(token, coreURL).WithAuthSessionsPath(coreAuthSessionsPath)
 }
 
 // resolveAuthHostToken returns a bearer scoped for the auth host (entire-core).
@@ -175,7 +175,7 @@ func newAuthStatusCmd() *cobra.Command {
 					return fmt.Errorf("context core URL check: %w", err)
 				}
 			}
-			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(), defaultFetchProfile, defaultListSessions, target)
+			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(), defaultFetchProfile, defaultListAuthSessions, target)
 		},
 	}
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
@@ -196,10 +196,10 @@ type authProfile struct {
 // with token. Injected so status stays unit-testable without a live core.
 type profileFetcher func(ctx context.Context, coreURL, token string) (*authProfile, error)
 
-// sessionLister lists the active login sessions on coreURL (the user's
+// authSessionLister lists the active login sessions on coreURL (the user's
 // refresh-token families). Injected for testability; production wires
-// defaultListSessions.
-type sessionLister func(ctx context.Context, coreURL, token string) ([]api.Session, error)
+// defaultListAuthSessions.
+type authSessionLister func(ctx context.Context, coreURL, token string) ([]api.AuthSession, error)
 
 // contextsProvider returns the stored login contexts and the active context
 // name. Injected for testability; production wires auth.Contexts.
@@ -266,16 +266,16 @@ func defaultFetchProfile(ctx context.Context, coreURL, token string) (*authProfi
 	return p, nil
 }
 
-// defaultListSessions lists the user's active login sessions on coreURL.
-func defaultListSessions(ctx context.Context, coreURL, token string) ([]api.Session, error) {
-	return newSessionsClient(coreURL, token).ListSessions(ctx) //nolint:wrapcheck // ListSessions already wraps with action context
+// defaultListAuthSessions lists the user's active login sessions on coreURL.
+func defaultListAuthSessions(ctx context.Context, coreURL, token string) ([]api.AuthSession, error) {
+	return newAuthSessionsClient(coreURL, token).ListAuthSessions(ctx) //nolint:wrapcheck // ListSessions already wraps with action context
 }
 
 // runAuthStatus reports auth state against the target core: GET /me validates
 // the token and supplies the profile header, the active login context is shown
 // locally, and the active sessions (refresh-token families) on that core are
 // listed so the effect of `logout` / `logout --everywhere` is visible.
-func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher, listSessions sessionLister, t statusTarget) error {
+func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher, listSessions authSessionLister, t statusTarget) error {
 	if t.token == "" {
 		fmt.Fprintf(w, "Not logged in to %s\n", t.coreURL)
 		fmt.Fprintln(w, "Run 'entire login' to authenticate.")
@@ -306,9 +306,9 @@ func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher
 	case serr != nil:
 		fmt.Fprintf(w, "\n(could not list active sessions: %v)\n", serr)
 	case len(sessions) > 0:
-		sortSessionsByRecency(sessions)
+		sortAuthSessionsByRecency(sessions)
 		fmt.Fprintf(w, "\nActive sessions (%d):\n", len(sessions))
-		renderSessionsTable(w, newAuthTableStyles(w), sessions)
+		renderAuthSessionsTable(w, newAuthTableStyles(w), sessions)
 		fmt.Fprintln(w, "\nRun 'entire logout' to end this session, or 'entire logout --everywhere' to end all of them.")
 	}
 
@@ -417,10 +417,10 @@ func fallback(s, alt string) string {
 	return s
 }
 
-// renderSessionsTable prints the active login sessions as an aligned table.
+// renderAuthSessionsTable prints the active login sessions as an aligned table.
 // No id column: there's no per-session CLI action (revoke-by-id is gone), so
 // NAME/CREATED/LAST USED/EXPIRES is what's useful.
-func renderSessionsTable(w io.Writer, sty authTableStyles, sessions []api.Session) {
+func renderAuthSessionsTable(w io.Writer, sty authTableStyles, sessions []api.AuthSession) {
 	header := []string{
 		sty.render(sty.header, "NAME"),
 		sty.render(sty.header, "CREATED"),
@@ -439,10 +439,10 @@ func renderSessionsTable(w io.Writer, sty authTableStyles, sessions []api.Sessio
 	renderAlignedTable(w, header, rows)
 }
 
-// sortSessionsByRecency orders sessions most-recently-used first, then most
+// sortAuthSessionsByRecency orders sessions most-recently-used first, then most
 // recently created, then by id — a fully specified order independent of the
 // server's response ordering.
-func sortSessionsByRecency(sessions []api.Session) {
+func sortAuthSessionsByRecency(sessions []api.AuthSession) {
 	sort.Slice(sessions, func(i, j int) bool {
 		li, lj := lastUsedSortKey(sessions[i]), lastUsedSortKey(sessions[j])
 		if li != lj {
@@ -455,7 +455,7 @@ func sortSessionsByRecency(sessions []api.Session) {
 	})
 }
 
-func lastUsedSortKey(s api.Session) string {
+func lastUsedSortKey(s api.AuthSession) string {
 	if s.LastUsedAt == nil {
 		return ""
 	}

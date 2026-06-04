@@ -60,9 +60,9 @@ func newLogoutCmd() *cobra.Command {
 
 			// Pick the per-target revocation: just the current session, or
 			// every session on that context's core when --everywhere is set.
-			revokeForTarget := revokeCurrentSession
+			revokeForTarget := revokeCurrentAuthSession
 			if everywhere {
-				revokeForTarget = revokeAllSessions
+				revokeForTarget = revokeAllAuthSessions
 			}
 
 			if allContexts {
@@ -80,10 +80,10 @@ func newLogoutCmd() *cobra.Command {
 				}
 			}
 			revokeCurrent := func(ctx context.Context) error {
-				return revokeCurrentSession(ctx, target.coreURL, target.token)
+				return revokeCurrentAuthSession(ctx, target.coreURL, target.token)
 			}
 			revokeAll := func(ctx context.Context) error {
-				return revokeAllSessions(ctx, target.coreURL, target.token)
+				return revokeAllAuthSessions(ctx, target.coreURL, target.token)
 			}
 			if err := runLogout(cmd.Context(), outW, errW,
 				auth.NewContextStore(), revokeCurrent, revokeAll,
@@ -118,27 +118,27 @@ func promoteNextLogin(outW, errW io.Writer) {
 	fmt.Fprintf(outW, "Now using %q (%d saved login(s) remain; run `entire logout` again to remove each).\n", next, len(all))
 }
 
-// revokeCurrentSession revokes the active session on coreURL (the family the
+// revokeCurrentAuthSession revokes the active session on coreURL (the family the
 // bearer belongs to) — the default `entire logout`.
-func revokeCurrentSession(ctx context.Context, coreURL, token string) error {
-	return newSessionsClient(coreURL, token).RevokeCurrentSession(ctx) //nolint:wrapcheck // RevokeCurrentSession already wraps with action context
+func revokeCurrentAuthSession(ctx context.Context, coreURL, token string) error {
+	return newAuthSessionsClient(coreURL, token).RevokeCurrentAuthSession(ctx) //nolint:wrapcheck // RevokeCurrentSession already wraps with action context
 }
 
-// revokeAllSessions revokes every active login session on coreURL (the
+// revokeAllAuthSessions revokes every active login session on coreURL (the
 // `entire logout --everywhere` path): list the families, then delete each by id.
 // Best-effort across sessions — it attempts them all and returns the first
 // failure, so one stuck session doesn't strand the rest.
-func revokeAllSessions(ctx context.Context, coreURL, token string) error {
-	client := newSessionsClient(coreURL, token)
+func revokeAllAuthSessions(ctx context.Context, coreURL, token string) error {
+	client := newAuthSessionsClient(coreURL, token)
 	// ListSessions and RevokeSession already wrap with their own action
 	// context (incl. the session id), so return their errors verbatim.
-	sessions, err := client.ListSessions(ctx)
+	sessions, err := client.ListAuthSessions(ctx)
 	if err != nil {
 		return err //nolint:wrapcheck // ListSessions already wraps with "list sessions"
 	}
 	var firstErr error
 	for _, s := range sessions {
-		if err := client.RevokeSession(ctx, s.ID); err != nil && firstErr == nil {
+		if err := client.RevokeAuthSession(ctx, s.ID); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -184,8 +184,8 @@ func runLogout(ctx context.Context, outW, errW io.Writer, store tokenStore, revo
 }
 
 // revokeTargetFunc revokes sessions on a specific core. The two production
-// implementations are revokeCurrentSession (just the bearer's own session)
-// and revokeAllSessions (every session on that core); `logout --all-contexts` picks
+// implementations are revokeCurrentAuthSession (just the bearer's own session)
+// and revokeAllAuthSessions (every session on that core); `logout --all-contexts` picks
 // one based on --everywhere and applies it to each saved context's core.
 type revokeTargetFunc func(ctx context.Context, coreURL, token string) error
 
@@ -197,7 +197,7 @@ type revokeTargetFunc func(ctx context.Context, coreURL, token string) error
 //
 // Dependencies are injected so the sweep is unit-testable without the real
 // keyring or config dir: listContexts (auth.Contexts), tokenForContext
-// (auth.LoginTokenForContext), revoke (revokeCurrentSession/revokeAllSessions),
+// (auth.LoginTokenForContext), revoke (revokeCurrentAuthSession/revokeAllAuthSessions),
 // and removeContext (auth.RemoveContext).
 func runLogoutAll(ctx context.Context, outW, errW io.Writer,
 	listContexts contextsProvider,

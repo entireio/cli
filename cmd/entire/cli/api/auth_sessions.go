@@ -7,12 +7,12 @@ import (
 	"net/url"
 )
 
-// Session is a single active login session — an OAuth refresh-token family —
+// AuthSession is a single active login session — an OAuth refresh-token family —
 // returned by entire-core's session endpoint. One is created per
 // `entire login`, across all of a user's devices. Plaintext token values are
 // never returned by the server, only metadata. (The list envelope's wire key
 // is "tokens"; the rows are sessions.)
-type Session struct {
+type AuthSession struct {
 	ID         string  `json:"id"`
 	UserID     string  `json:"user_id"`
 	Name       string  `json:"name"`
@@ -22,26 +22,26 @@ type Session struct {
 	CreatedAt  string  `json:"created_at"`
 }
 
-// SessionsResponse is the envelope returned by the list endpoint.
-type SessionsResponse struct {
-	Sessions []Session `json:"tokens"`
+// AuthSessionsResponse is the envelope returned by the list endpoint.
+type AuthSessionsResponse struct {
+	Sessions []AuthSession `json:"tokens"`
 }
 
-// errSessionsPathUnset surfaces when a session method is called on a Client
+// errAuthSessionsPathUnset surfaces when a session method is called on a Client
 // that wasn't given a base path. Construct via
-// NewClientWithBaseURL(...).WithSessionsPath(...).
-var errSessionsPathUnset = errors.New("api: sessions path is unset (call (*Client).WithSessionsPath before list/revoke)")
+// NewClientWithBaseURL(...).WithAuthSessionsPath(...).
+var errAuthSessionsPathUnset = errors.New("api: auth sessions path is unset (call (*Client).WithAuthSessionsPath before list/revoke)")
 
-func (c *Client) sessionsBasePath() (string, error) {
-	if c.sessionsPath == "" {
-		return "", errSessionsPathUnset
+func (c *Client) authSessionsBasePath() (string, error) {
+	if c.authSessionsPath == "" {
+		return "", errAuthSessionsPathUnset
 	}
-	return c.sessionsPath, nil
+	return c.authSessionsPath, nil
 }
 
-// ListSessions returns the authenticated user's active login sessions.
-func (c *Client) ListSessions(ctx context.Context) ([]Session, error) {
-	base, err := c.sessionsBasePath()
+// ListAuthSessions returns the authenticated user's active login sessions.
+func (c *Client) ListAuthSessions(ctx context.Context) ([]AuthSession, error) {
+	base, err := c.authSessionsBasePath()
 	if err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
 	}
@@ -55,17 +55,17 @@ func (c *Client) ListSessions(ctx context.Context) ([]Session, error) {
 		return nil, fmt.Errorf("list sessions: %w", err)
 	}
 
-	var out SessionsResponse
+	var out AuthSessionsResponse
 	if err := DecodeJSON(resp, &out); err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
 	}
 	return out.Sessions, nil
 }
 
-// RevokeCurrentSession revokes the login session this client is authenticating
+// RevokeCurrentAuthSession revokes the login session this client is authenticating
 // with (the family the current bearer belongs to).
-func (c *Client) RevokeCurrentSession(ctx context.Context) error {
-	base, err := c.sessionsBasePath()
+func (c *Client) RevokeCurrentAuthSession(ctx context.Context) error {
+	base, err := c.authSessionsBasePath()
 	if err != nil {
 		return fmt.Errorf("revoke current session: %w", err)
 	}
@@ -81,9 +81,9 @@ func (c *Client) RevokeCurrentSession(ctx context.Context) error {
 	return nil
 }
 
-// RevokeSession revokes the login session with the given id.
-func (c *Client) RevokeSession(ctx context.Context, id string) error {
-	base, err := c.sessionsBasePath()
+// RevokeAuthSession revokes the login session with the given id.
+func (c *Client) RevokeAuthSession(ctx context.Context, id string) error {
+	base, err := c.authSessionsBasePath()
 	if err != nil {
 		return fmt.Errorf("revoke session %s: %w", id, err)
 	}

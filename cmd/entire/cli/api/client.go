@@ -22,20 +22,20 @@ type Client struct {
 	httpClient *http.Client
 	baseURL    string
 
-	// sessionsPath is the base path for entire-core's login-session
-	// endpoints (list / revoke / current). Set via WithSessionsPath when the
+	// authSessionsPath is the base path for entire-core's login-session
+	// endpoints (list / revoke / current). Set via WithAuthSessionsPath when the
 	// client targets the auth host; empty otherwise, and the session methods
 	// error out if called against an empty path.
-	sessionsPath string
+	authSessionsPath string
 }
 
-// WithSessionsPath sets the base path used by ListSessions,
-// RevokeCurrentSession, and RevokeSession. Returns the receiver for chaining
+// WithAuthSessionsPath sets the base path used by ListAuthSessions,
+// RevokeCurrentAuthSession, and RevokeAuthSession. Returns the receiver for chaining
 // at construction:
 //
-//	c := api.NewClientWithBaseURL(token, base).WithSessionsPath(p)
-func (c *Client) WithSessionsPath(path string) *Client {
-	c.sessionsPath = path
+//	c := api.NewClientWithBaseURL(token, base).WithAuthSessionsPath(p)
+func (c *Client) WithAuthSessionsPath(path string) *Client {
+	c.authSessionsPath = path
 	return c
 }
 

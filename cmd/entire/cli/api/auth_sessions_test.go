@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestClient_RevokeCurrentSession_SendsDeleteWithBearer(t *testing.T) {
+func TestClient_RevokeCurrentAuthSession_SendsDeleteWithBearer(t *testing.T) {
 	t.Parallel()
 
 	var gotMethod, gotPath, gotAuth string
@@ -23,11 +23,11 @@ func TestClient_RevokeCurrentSession_SendsDeleteWithBearer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithSessionsPath("/api/auth/tokens")
+	c := NewClient("tok").WithAuthSessionsPath("/api/auth/tokens")
 	c.baseURL = server.URL
 
-	if err := c.RevokeCurrentSession(context.Background()); err != nil {
-		t.Fatalf("RevokeCurrentSession() error = %v", err)
+	if err := c.RevokeCurrentAuthSession(context.Background()); err != nil {
+		t.Fatalf("RevokeCurrentAuthSession() error = %v", err)
 	}
 
 	if gotMethod != http.MethodDelete {
@@ -41,7 +41,7 @@ func TestClient_RevokeCurrentSession_SendsDeleteWithBearer(t *testing.T) {
 	}
 }
 
-func TestClient_RevokeCurrentSession_ReturnsHTTPErrorOn401(t *testing.T) {
+func TestClient_RevokeCurrentAuthSession_ReturnsHTTPErrorOn401(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -51,10 +51,10 @@ func TestClient_RevokeCurrentSession_ReturnsHTTPErrorOn401(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithSessionsPath("/api/auth/tokens")
+	c := NewClient("tok").WithAuthSessionsPath("/api/auth/tokens")
 	c.baseURL = server.URL
 
-	err := c.RevokeCurrentSession(context.Background())
+	err := c.RevokeCurrentAuthSession(context.Background())
 	if err == nil {
 		t.Fatal("expected error for 401 response")
 	}
@@ -70,7 +70,7 @@ func TestClient_RevokeCurrentSession_ReturnsHTTPErrorOn401(t *testing.T) {
 	}
 }
 
-func TestClient_ListSessions_DecodesResponse(t *testing.T) {
+func TestClient_ListAuthSessions_DecodesResponse(t *testing.T) {
 	t.Parallel()
 
 	var gotMethod, gotPath, gotAuth string
@@ -87,12 +87,12 @@ func TestClient_ListSessions_DecodesResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithSessionsPath("/api/auth/tokens")
+	c := NewClient("tok").WithAuthSessionsPath("/api/auth/tokens")
 	c.baseURL = server.URL
 
-	tokens, err := c.ListSessions(context.Background())
+	tokens, err := c.ListAuthSessions(context.Background())
 	if err != nil {
-		t.Fatalf("ListSessions() error = %v", err)
+		t.Fatalf("ListAuthSessions() error = %v", err)
 	}
 
 	if gotMethod != http.MethodGet {
@@ -119,7 +119,7 @@ func TestClient_ListSessions_DecodesResponse(t *testing.T) {
 	}
 }
 
-func TestClient_ListSessions_ReturnsHTTPErrorOn401(t *testing.T) {
+func TestClient_ListAuthSessions_ReturnsHTTPErrorOn401(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -129,10 +129,10 @@ func TestClient_ListSessions_ReturnsHTTPErrorOn401(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithSessionsPath("/api/auth/tokens")
+	c := NewClient("tok").WithAuthSessionsPath("/api/auth/tokens")
 	c.baseURL = server.URL
 
-	_, err := c.ListSessions(context.Background())
+	_, err := c.ListAuthSessions(context.Background())
 	if err == nil {
 		t.Fatal("expected error for 401")
 	}
@@ -141,7 +141,7 @@ func TestClient_ListSessions_ReturnsHTTPErrorOn401(t *testing.T) {
 	}
 }
 
-func TestClient_RevokeSession_SendsDeleteWithEscapedID(t *testing.T) {
+func TestClient_RevokeAuthSession_SendsDeleteWithEscapedID(t *testing.T) {
 	t.Parallel()
 
 	var gotMethod, gotEscapedPath, gotDecodedPath string
@@ -155,12 +155,12 @@ func TestClient_RevokeSession_SendsDeleteWithEscapedID(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithSessionsPath("/api/auth/tokens")
+	c := NewClient("tok").WithAuthSessionsPath("/api/auth/tokens")
 	c.baseURL = server.URL
 
 	// Use an id that needs URL escaping to verify we don't blindly concat.
-	if err := c.RevokeSession(context.Background(), "abc/def 1"); err != nil {
-		t.Fatalf("RevokeSession() error = %v", err)
+	if err := c.RevokeAuthSession(context.Background(), "abc/def 1"); err != nil {
+		t.Fatalf("RevokeAuthSession() error = %v", err)
 	}
 
 	if gotMethod != http.MethodDelete {
@@ -174,7 +174,7 @@ func TestClient_RevokeSession_SendsDeleteWithEscapedID(t *testing.T) {
 	}
 }
 
-func TestClient_RevokeSession_ReturnsErrorBody(t *testing.T) {
+func TestClient_RevokeAuthSession_ReturnsErrorBody(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -184,10 +184,10 @@ func TestClient_RevokeSession_ReturnsErrorBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithSessionsPath("/api/auth/tokens")
+	c := NewClient("tok").WithAuthSessionsPath("/api/auth/tokens")
 	c.baseURL = server.URL
 
-	err := c.RevokeSession(context.Background(), "missing")
+	err := c.RevokeAuthSession(context.Background(), "missing")
 	if err == nil {
 		t.Fatal("expected error for 404")
 	}
