@@ -29,12 +29,15 @@ func ValidateSessionID(id string) error {
 	if id == "." || id == ".." {
 		return fmt.Errorf("invalid session ID %q: reserved path segment", id)
 	}
-	// Reject the Windows volume separator. A drive-relative path like "C:foo" is
+	// Reject Windows volume references. A drive-relative path like "C:foo" is
 	// separator-free and filepath.IsAbs reports it as non-absolute, yet
 	// filepath.Join discards the base directory when the appended element
 	// carries a volume name — escaping the intended directory on Windows.
-	if strings.Contains(id, ":") {
-		return fmt.Errorf("invalid session ID %q: contains volume separator", id)
+	// filepath.VolumeName is the idiomatic check but is a no-op off Windows, so
+	// also reject the ":" form directly for cross-platform coverage (and so the
+	// regression test is meaningful on a non-Windows CI host).
+	if filepath.VolumeName(id) != "" || strings.Contains(id, ":") {
+		return fmt.Errorf("invalid session ID %q: contains volume reference", id)
 	}
 	// Reject glob metacharacters. Session IDs are interpolated into
 	// filepath.Glob patterns in several places (agent transcript lookup,

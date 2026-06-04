@@ -95,7 +95,7 @@ func TestValidateSessionID(t *testing.T) {
 			name:      "windows drive-relative path",
 			sessionID: "C:foo",
 			wantErr:   true,
-			errMsg:    "volume separator",
+			errMsg:    "volume reference",
 		},
 		// Glob metacharacters (would match unrelated files when used in a pattern)
 		{
