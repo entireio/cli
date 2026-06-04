@@ -91,10 +91,9 @@ func AsTokenCalculator(ag Agent) (TokenCalculator, bool) {
 }
 
 // AsOutOfBandTokenSource returns the agent as OutOfBandTokenSource if supported.
-// External agents are excluded: the out-of-band store is fed by a built-in
-// shim subcommand, which external plugin binaries cannot provide. (This is the
-// intentional inverse of the other As* helpers, which let CapabilityDeclarer
-// agents opt in.)
+// External (CapabilityDeclarer) agents are excluded because the out-of-band
+// store is fed by a built-in shim subcommand they cannot provide, and
+// DeclaredCaps has no field for this capability to opt into.
 func AsOutOfBandTokenSource(ag Agent) (OutOfBandTokenSource, bool) {
 	if ag == nil {
 		return nil, false

@@ -144,13 +144,14 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	extractSessionDataSpan.End()
 	extractDuration := time.Since(extractStart)
 
-	// Out-of-band token fallback: agents without transcript-embedded token
-	// data (Antigravity) accumulate per-turn deltas into
-	// SessionState.TokenUsage at SaveStep time; the transcript recompute
-	// yields nil for them. Gate on the agent NOT being a TokenCalculator so
-	// transcript-based agents keep their recomputed, checkpoint-scoped values.
+	// Out-of-band token fallback: OutOfBandTokenSource agents (e.g. Antigravity)
+	// have their token usage captured out-of-band and accumulated into
+	// SessionState.TokenUsage at SaveStep time; the transcript recompute yields
+	// nil for them. Gate on the purpose-built capability so only those agents
+	// inherit the accumulated state value — transcript-based agents keep their
+	// recomputed, checkpoint-scoped values.
 	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.TokenUsage) {
-		if _, isTranscriptBased := agent.AsTokenCalculator(ag); !isTranscriptBased {
+		if _, ok := agent.AsOutOfBandTokenSource(ag); ok {
 			sessionData.TokenUsage = state.TokenUsage
 		}
 	}

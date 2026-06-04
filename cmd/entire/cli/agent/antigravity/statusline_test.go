@@ -501,3 +501,93 @@ func TestCalculateTokenUsageSince_UnparseableBaselineCountsAllLines(t *testing.T
 		t.Errorf("CacheReadTokens = %d, want 1600 (700+900)", usage.CacheReadTokens)
 	}
 }
+
+// TestAppendStatusSnapshot_CurrentUsageChangeIsNotDeduped proves that two
+// payloads with IDENTICAL total_input_tokens/total_output_tokens but DIFFERENT
+// current_usage are NOT deduped: both must be persisted. The delta calculation
+// sums per-line cache fields from current_usage, so collapsing two lines that
+// differ only in current_usage would silently drop cache accounting.
+func TestAppendStatusSnapshot_CurrentUsageChangeIsNotDeduped(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(statusDirEnv, dir)
+
+	// Same totals {1000,100}, different current_usage cache_read.
+	a := []byte(`{"conversation_id":"conv-cu","agent_state":"working","context_window":{"total_input_tokens":1000,"total_output_tokens":100,"current_usage":{"cache_read_input_tokens":700}}}`)
+	b := []byte(`{"conversation_id":"conv-cu","agent_state":"working","context_window":{"total_input_tokens":1000,"total_output_tokens":100,"current_usage":{"cache_read_input_tokens":900}}}`)
+
+	for _, p := range [][]byte{a, b} {
+		if err := AppendStatusSnapshot(p); err != nil {
+			t.Fatalf("AppendStatusSnapshot: %v", err)
+		}
+	}
+
+	snaps, err := readStatusSnapshots("conv-cu")
+	if err != nil {
+		t.Fatalf("readStatusSnapshots: %v", err)
+	}
+	if len(snaps) != 2 {
+		t.Fatalf("got %d snapshots, want 2 (current_usage change must not be deduped)", len(snaps))
+	}
+}
+
+// TestCalculateTokenUsageSince_NoDoubleCountWhenBaselineIsLatest proves the
+// load-bearing strictly-.After filter prevents double-counting across turns.
+// Simulating turn N+1: use turn N's LATEST snapshot as the baseline and append
+// nothing new. CalculateTokenUsageSince must return (nil, nil) — zero delta,
+// APICallCount 0 — because no snapshot is strictly after the baseline timestamp
+// and totals − baseline = 0.
+func TestCalculateTokenUsageSince_NoDoubleCountWhenBaselineIsLatest(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(statusDirEnv, dir)
+
+	snaps := []statusSnapshot{
+		{
+			Timestamp:      "2026-06-03T10:00:00.000000000Z",
+			ConversationID: "c1",
+			ContextWindow: statusContextWindow{
+				TotalInputTokens:  1000,
+				TotalOutputTokens: 100,
+				CurrentUsage:      &statusCurrentUsage{CacheCreationInputTokens: 200, CacheReadInputTokens: 700},
+			},
+		},
+		{
+			Timestamp:      "2026-06-03T10:05:00.000000000Z",
+			ConversationID: "c1",
+			ContextWindow: statusContextWindow{
+				TotalInputTokens:  3000,
+				TotalOutputTokens: 250,
+				CurrentUsage:      &statusCurrentUsage{CacheCreationInputTokens: 50, CacheReadInputTokens: 1900},
+			},
+		},
+	}
+	writeSnapshotFixture(t, "c1", snaps)
+
+	a := &AntigravityAgent{}
+
+	// Turn N: full usage from nil baseline.
+	full, err := a.CalculateTokenUsageSince(context.Background(), "c1", nil)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsageSince (full): %v", err)
+	}
+	if full == nil || full.InputTokens != 3000 {
+		t.Fatalf("full usage = %+v, want InputTokens 3000", full)
+	}
+
+	// Capture the latest snapshot (T2 line) exactly as the lifecycle does.
+	baseline, err := a.SnapshotTokenBaseline(context.Background(), "c1")
+	if err != nil {
+		t.Fatalf("SnapshotTokenBaseline: %v", err)
+	}
+	if len(baseline) == 0 {
+		t.Fatal("baseline is empty")
+	}
+
+	// Turn N+1: nothing new appended. Delta from the latest baseline is zero.
+	usage, err := a.CalculateTokenUsageSince(context.Background(), "c1", baseline)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsageSince (delta): %v", err)
+	}
+	if usage != nil {
+		t.Errorf("usage = %+v, want nil (no snapshot strictly after baseline; zero delta)", usage)
+	}
+}

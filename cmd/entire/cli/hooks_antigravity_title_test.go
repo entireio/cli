@@ -62,6 +62,35 @@ func TestTitleTee_WrapPipesPayloadThrough(t *testing.T) {
 	}
 }
 
+func TestTitleTee_WrapStillCapturesSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ENTIRE_ANTIGRAVITY_STATUS_DIR", dir)
+
+	payload := `{"conversation_id":"conv-11","agent_state":"working","context_window":{"total_input_tokens":700,"total_output_tokens":40}}`
+
+	cmd := newAntigravityTitleTeeCmd()
+	cmd.SetArgs([]string{"--wrap", "cat"})
+
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetIn(strings.NewReader(payload))
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	// --wrap cat must pipe the payload through verbatim...
+	if got, want := strings.TrimSpace(out.String()), strings.TrimSpace(payload); got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+
+	// ...AND the snapshot must still be captured.
+	snapFile := filepath.Join(dir, "conv-11.jsonl")
+	if _, err := os.Stat(snapFile); err != nil {
+		t.Errorf("snapshot file not created under --wrap: %v", err)
+	}
+}
+
 func TestTitleTee_GarbageInputAndFailingWrapNeverError(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("ENTIRE_ANTIGRAVITY_STATUS_DIR", dir)

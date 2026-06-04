@@ -736,7 +736,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 			}
 			oobUsage, oobErr := src.CalculateTokenUsageSince(ctx, sessionID, baseline)
 			if oobErr != nil {
-				logging.Warn(logCtx, "failed to compute out-of-band token usage", "error", oobErr.Error())
+				logging.Warn(logCtx, "failed to compute out-of-band token usage", slog.String("error", oobErr.Error()))
 			} else {
 				tokenUsage = oobUsage
 			}

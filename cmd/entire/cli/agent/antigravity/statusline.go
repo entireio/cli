@@ -224,8 +224,9 @@ func (a *AntigravityAgent) CalculateTokenUsageSince(_ context.Context, sessionID
 	return usage, nil
 }
 
-// readLastContextWindow reads only the last non-empty line from a JSONL file
-// and returns its context_window for dedup comparison.
+// readLastContextWindow streams the JSONL file line-by-line and returns the
+// context_window of the final non-empty line (O(1) memory, O(n) I/O), or nil
+// if the file has no usable line. Used for dedup comparison.
 func readLastContextWindow(filePath string) (*statusContextWindow, error) {
 	//nolint:gosec // filePath is derived from filepath.Base(conversationID)
 	f, err := os.Open(filePath)

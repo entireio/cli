@@ -6,6 +6,7 @@ import (
 	"os/exec"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/spf13/cobra"
 )
 
@@ -33,11 +34,19 @@ func newAntigravityTitleTeeCmd() *cobra.Command {
 			if err != nil {
 				return nil //nolint:nilerr // never break agy's title rendering
 			}
-			_ = antigravity.AppendStatusSnapshot(payload) //nolint:errcheck // best-effort capture
+			if err := antigravity.AppendStatusSnapshot(payload); err != nil {
+				// Best-effort capture: a persistent I/O failure (disk full,
+				// unwritable cache dir) leaves a breadcrumb without ever
+				// affecting stdout or the exit code.
+				logging.Debug(cmd.Context(), "antigravity title-tee: snapshot append failed", "error", err.Error())
+			}
 
 			if wrap == "" {
 				return nil
 			}
+			// wrap is the user's own original title command, preserved from
+			// settings.json and round-tripped via shellSingleQuote, so running
+			// it under `sh -c` is intentional — not an external-input injection surface.
 			wrapped := exec.CommandContext(cmd.Context(), "sh", "-c", wrap)
 			wrapped.Stdin = bytes.NewReader(payload)
 			wrapped.Stdout = cmd.OutOrStdout()

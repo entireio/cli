@@ -626,3 +626,95 @@ func TestCondenseSession_OutOfBandTokenFallback(t *testing.T) {
 	require.Equal(t, 3400, meta.TokenUsage.CacheReadTokens, "CacheReadTokens")
 	require.Equal(t, 2, meta.TokenUsage.APICallCount, "APICallCount")
 }
+
+// TestCondenseSession_NonOOBAgentDoesNotInheritStateTokens is the negative
+// branch of the out-of-band fallback: a non-OutOfBandTokenSource agent (Cursor)
+// must NOT inherit SessionState.TokenUsage when the transcript recompute yields
+// nil. The fallback gate (agent.AsOutOfBandTokenSource) is what excludes such
+// agents — without it, the populated state value would leak into per-session
+// CommittedMetadata.token_usage. This test must FAIL if the gate is reverted to
+// the old "not a TokenCalculator" form (Cursor is not a TokenCalculator, so the
+// old gate would copy the value).
+//
+// Tests in this file use t.Chdir for CWD-based git resolution, so this
+// cannot be a parallel test.
+func TestCondenseSession_NonOOBAgentDoesNotInheritStateTokens(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-06-03-cursor-tokens"
+
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	// Token-less transcript: the condensation recompute yields nil TokenUsage,
+	// mirroring the positive test so the only behavioral difference is the
+	// agent's OutOfBandTokenSource capability.
+	transcript := `{"type":"human","message":{"content":"add tokens"}}
+{"type":"assistant","message":{"content":"Done."}}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
+
+	trackedFile := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(trackedFile, []byte("agent-modified content"), 0o644))
+
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:      sessionID,
+		AgentType:      agent.AgentTypeCursor,
+		ModifiedFiles:  []string{"test.txt"},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Cursor checkpoint 1",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	}))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, agent.AgentTypeCursor, state.AgentType, "session must be tagged as Cursor")
+
+	// Populate SessionState.TokenUsage anyway. A non-OOB agent must NOT inherit
+	// this — the fallback gate excludes it.
+	state.TokenUsage = &agent.TokenUsage{
+		InputTokens:         3500,
+		OutputTokens:        300,
+		CacheCreationTokens: 50,
+		CacheReadTokens:     3400,
+		APICallCount:        2,
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	checkpointID := id.MustCheckpointID("ddee44556677")
+	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped, "condensation must not skip when files are touched")
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+
+	checkpointTree, err := tree.Tree(checkpointID.Path())
+	require.NoError(t, err)
+
+	sessionMeta, err := checkpointTree.File(checkpointID.Path() + "/0/" + paths.MetadataFileName)
+	if err != nil {
+		subtree, subErr := checkpointTree.Tree("0")
+		require.NoError(t, subErr)
+		sessionMeta, err = subtree.File(paths.MetadataFileName)
+		require.NoError(t, err)
+	}
+	sessionBytes, err := sessionMeta.Contents()
+	require.NoError(t, err)
+	var meta checkpoint.CommittedMetadata
+	require.NoError(t, json.Unmarshal([]byte(sessionBytes), &meta))
+
+	require.Nil(t, meta.TokenUsage, "non-OOB agent must NOT inherit SessionState.TokenUsage; per-session token_usage must be nil")
+}
