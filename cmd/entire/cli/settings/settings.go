@@ -284,11 +284,29 @@ func (r Role) IsReviewer() bool { return r == RoleReviewer || r == RoleBoth }
 type FixAfterReviewMode string
 
 const (
-	// FixAfterReviewAsk prompts the user inline (default).
-	FixAfterReviewAsk FixAfterReviewMode = ""
+	// FixAfterReviewUnset is the zero value: no explicit preference. Behaves
+	// as Ask. At the clone-local layer it additionally means "no override" —
+	// inherit the project value rather than forcing Ask.
+	FixAfterReviewUnset FixAfterReviewMode = ""
+	// FixAfterReviewAsk prompts the user inline. Distinct from Unset so a
+	// clone-local preference can override a project-level "always" back to
+	// Ask: a clone writes "ask" (non-empty) to express the override, whereas
+	// an empty clone value means "no override".
+	FixAfterReviewAsk FixAfterReviewMode = "ask"
 	// FixAfterReviewAlways skips the prompt and runs the Fixer automatically.
 	FixAfterReviewAlways FixAfterReviewMode = "always"
 )
+
+// Valid reports whether m is a recognized fix-after-review mode. The empty
+// string (Unset) is valid: it is the default and, clone-side, means "no
+// override".
+func (m FixAfterReviewMode) Valid() bool {
+	switch m {
+	case FixAfterReviewUnset, FixAfterReviewAsk, FixAfterReviewAlways:
+		return true
+	}
+	return false
+}
 
 // ReviewConfig holds the per-agent review configuration. Both fields are
 // optional; together they describe what `entire review` should ask the
@@ -437,7 +455,31 @@ func loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAb
 	// happens lazily on the next settings write (e.g. `entire review setup`).
 	_ = MigrateLegacyRoles(settings)
 
+	// Reject hand-edited review config that would otherwise load silently
+	// with surprising behavior. Mirrors the SummaryGeneration.Validate above.
+	if err := validateReviewSettings(settings); err != nil {
+		return nil, fmt.Errorf("merged settings invalid: %w", err)
+	}
+
 	return settings, nil
+}
+
+// validateReviewSettings rejects review configuration that loaded from disk
+// with an unrecognized value. An unknown role makes both IsReviewer and
+// IsFixer return false (the agent silently never participates); an unknown
+// fix_after_review mode is silently treated as Ask. Catching these at load
+// surfaces a typo to the user instead of producing confusing review behavior.
+func validateReviewSettings(s *EntireSettings) error {
+	if !s.FixAfterReview.Valid() {
+		return fmt.Errorf("invalid fix_after_review %q (want %q, %q, or %q)",
+			s.FixAfterReview, FixAfterReviewUnset, FixAfterReviewAsk, FixAfterReviewAlways)
+	}
+	for name, cfg := range s.Review {
+		if !cfg.Role.Valid() {
+			return fmt.Errorf("invalid role %q for review agent %q", cfg.Role, name)
+		}
+	}
+	return nil
 }
 
 // LoadFromFile loads settings from a specific file path without merging local overrides.

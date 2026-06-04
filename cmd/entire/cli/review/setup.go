@@ -133,12 +133,14 @@ func RunSetup(
 		}
 	}
 
-	if saved == nil {
-		saved = &settings.EntireSettings{}
-	}
-	saved.Review = result
-	if err := settings.Save(ctx, saved); err != nil {
-		return nil, fmt.Errorf("save settings: %w", err)
+	// Persist only the review map, and only to clone-local preferences
+	// (.git/entire/preferences.json). Saving the full merged settings object
+	// to the project file would promote clone-local and local-override values
+	// (and, on a Load error, an empty EntireSettings with Enabled=false) into
+	// the committed .entire/settings.json. SaveReviewConfig writes just the
+	// review keys and refuses to clobber a malformed preferences file.
+	if err := SaveReviewConfig(ctx, result); err != nil {
+		return nil, fmt.Errorf("save review config: %w", err)
 	}
 
 	PrintSetupBanner(out, result)
@@ -430,7 +432,8 @@ func newReviewSetupCmd(deps Deps) *cobra.Command {
 		Short: "Configure reviewers, fixer, and per-agent review skills",
 		Long: `Two-step picker: choose a role for each installed agent (Reviewer,
 Fixer, Both, or Skip), then choose skills + optional instructions
-for each Reviewer/Both agent. Saves to .entire/settings.json.`,
+for each Reviewer/Both agent. Saves to clone-local preferences
+(.git/entire/preferences.json) so the config stays private.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// External agents (e.g., cursor, opencode) need to be registered before
 			// RunSetup can offer them as Reviewer/Fixer/Both choices. Mirrors the
@@ -438,6 +441,13 @@ for each Reviewer/Both agent. Saves to .entire/settings.json.`,
 			external.DiscoverAndRegister(cmd.Context())
 			_, err := RunSetup(cmd.Context(), cmd.OutOrStdout(),
 				deps.GetAgentsWithHooksInstalled, SetupForms{})
+			// Ctrl+C during a huh form surfaces as context.Canceled
+			// (the cobra root cancels ctx on SIGINT). Wrap it as a
+			// SilentError so the root doesn't print a noisy
+			// "roles picker: ...: context canceled" on a normal abort.
+			if errors.Is(err, context.Canceled) {
+				return deps.NewSilentError(err)
+			}
 			return err
 		},
 	}

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -142,6 +144,45 @@ func TestRunSetup_EnforcesAtMostOneFixerAfterPick(t *testing.T) {
 	}
 	if fixers != 1 {
 		t.Errorf("expected 1 fixer after normalization, got %d", fixers)
+	}
+}
+
+// RunSetup must persist the review map to clone-local preferences
+// (.git/entire/preferences.json), NOT the committed project settings.json.
+// Writing the full merged settings object to the project file would promote
+// clone-local / local-override values into the committed file.
+func TestRunSetup_PersistsToCloneLocalNotProjectSettings(t *testing.T) {
+	// Note: uses t.Chdir, so cannot use t.Parallel().
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	forms := review.SetupForms{
+		PickRoles: func(_ context.Context, _ []string, _ map[string]settings.Role) (map[string]settings.Role, error) {
+			return map[string]settings.Role{"claude-code": settings.RoleBoth}, nil
+		},
+		PickSkills: func(context.Context, string, settings.ReviewConfig) (settings.ReviewConfig, error) {
+			return settings.ReviewConfig{Skills: []string{"/review"}}, nil
+		},
+	}
+	if _, err := review.RunSetup(context.Background(), io.Discard,
+		func(context.Context) []types.AgentName { return []types.AgentName{"claude-code"} },
+		forms); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// Landed in clone-local preferences.
+	prefs, err := settings.LoadClonePreferences(context.Background())
+	if err != nil {
+		t.Fatalf("load clone prefs: %v", err)
+	}
+	if prefs == nil || prefs.Review["claude-code"].Role != settings.RoleBoth {
+		t.Errorf("review config not persisted to clone-local prefs: %+v", prefs)
+	}
+
+	// Did NOT create the committed project settings file.
+	if _, err := os.Stat(filepath.Join(dir, ".entire", "settings.json")); !os.IsNotExist(err) {
+		t.Errorf("setup must not write .entire/settings.json (got stat err=%v)", err)
 	}
 }
 

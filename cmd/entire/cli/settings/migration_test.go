@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -195,5 +196,85 @@ func TestSave_RoundtripsMigratedSchema(t *testing.T) {
 	}
 	if loaded.FixAfterReview != settings.FixAfterReviewAlways {
 		t.Errorf("fix_after_review lost: %q", loaded.FixAfterReview)
+	}
+}
+
+func TestLoad_RejectsInvalidRole(t *testing.T) {
+	// Not t.Parallel(): t.Chdir cannot be combined with parallel tests.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	settingsPath := filepath.Join(dir, ".entire", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bad := []byte(`{"review": {"claude-code": {"role": "bogus"}}}`)
+	if err := os.WriteFile(settingsPath, bad, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := settings.Load(context.Background()); err == nil {
+		t.Fatal("expected error for invalid role, got nil")
+	} else if !strings.Contains(err.Error(), "invalid role") {
+		t.Errorf("error should mention invalid role, got: %v", err)
+	}
+}
+
+func TestLoad_RejectsInvalidFixAfterReview(t *testing.T) {
+	// Not t.Parallel(): t.Chdir cannot be combined with parallel tests.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	settingsPath := filepath.Join(dir, ".entire", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bad := []byte(`{"fix_after_review": "sometimes"}`)
+	if err := os.WriteFile(settingsPath, bad, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := settings.Load(context.Background()); err == nil {
+		t.Fatal("expected error for invalid fix_after_review, got nil")
+	} else if !strings.Contains(err.Error(), "invalid fix_after_review") {
+		t.Errorf("error should mention invalid fix_after_review, got: %v", err)
+	}
+}
+
+// A clone-local "ask" must override a project-level "always". The empty
+// string remains "no override"; "ask" is the explicit, non-empty token that
+// lets a clone opt back out of auto-fix.
+func TestLoad_CloneAskOverridesProjectAlways(t *testing.T) {
+	// Not t.Parallel(): t.Chdir cannot be combined with parallel tests.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	entireDir := filepath.Join(dir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	project := []byte(`{"enabled": true, "fix_after_review": "always"}`)
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), project, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prefsDir := filepath.Join(dir, ".git", "entire")
+	if err := os.MkdirAll(prefsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prefs := []byte(`{"fix_after_review": "ask"}`)
+	if err := os.WriteFile(filepath.Join(prefsDir, "preferences.json"), prefs, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := settings.Load(context.Background())
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if s.FixAfterReview != settings.FixAfterReviewAsk {
+		t.Errorf("clone 'ask' should override project 'always', got %q", s.FixAfterReview)
 	}
 }
