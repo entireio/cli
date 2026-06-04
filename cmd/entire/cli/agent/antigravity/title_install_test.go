@@ -282,3 +282,42 @@ func TestInstallUninstall_RoundTripsEmbeddedSingleQuotes(t *testing.T) {
 		t.Errorf("round-trip: got %q, want %q", got, original)
 	}
 }
+
+// TestTitleTeeInstalled covers the three states the doctor check cares about:
+// our marker present (true), no title key (false), and a foreign command (false).
+func TestTitleTeeInstalled(t *testing.T) {
+	t.Run("configured", func(t *testing.T) {
+		cfgDir := t.TempDir()
+		t.Setenv(configDirEnv, cfgDir)
+		if err := InstallTitleTee(false); err != nil {
+			t.Fatalf("InstallTitleTee: %v", err)
+		}
+		if !TitleTeeInstalled() {
+			t.Error("TitleTeeInstalled() = false, want true after InstallTitleTee")
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		cfgDir := t.TempDir()
+		t.Setenv(configDirEnv, cfgDir)
+		// No settings.json at all.
+		if TitleTeeInstalled() {
+			t.Error("TitleTeeInstalled() = true, want false with no settings file")
+		}
+		// settings.json with no title key.
+		writeAgySettingsFile(t, cfgDir, `{"theme":"dark"}`)
+		if TitleTeeInstalled() {
+			t.Error("TitleTeeInstalled() = true, want false with no title key")
+		}
+	})
+
+	t.Run("foreign command", func(t *testing.T) {
+		cfgDir := t.TempDir()
+		t.Setenv(configDirEnv, cfgDir)
+		writeAgySettingsFile(t, cfgDir,
+			`{"title":{"type":"command","command":"my-own-title-script.sh"}}`)
+		if TitleTeeInstalled() {
+			t.Error("TitleTeeInstalled() = true, want false for a foreign command")
+		}
+	})
+}

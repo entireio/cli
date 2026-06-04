@@ -107,6 +107,36 @@ func InstallTitleTee(localDev bool) error {
 	return writeAgySettings(rawFile, settingsPath)
 }
 
+// TitleTeeInstalled reports whether agy's global settings.json declares a
+// title command containing the title-tee marker. It is used by `entire doctor`
+// to warn when Antigravity hooks are installed in a repo but the global title
+// slot — agy's only token-usage surface — has not been claimed, which would
+// leave token counts missing from checkpoints. A missing or unparseable
+// settings file reports false.
+func TitleTeeInstalled() bool {
+	cfgDir, err := agyConfigDir()
+	if err != nil {
+		return false
+	}
+	settingsPath := filepath.Join(cfgDir, "settings.json")
+
+	rawFile, err := readAgySettings(settingsPath)
+	if err != nil {
+		return false
+	}
+
+	raw, ok := rawFile["title"]
+	if !ok {
+		return false
+	}
+
+	var existing titleConfig
+	if err := json.Unmarshal(raw, &existing); err != nil {
+		return false
+	}
+	return strings.Contains(existing.Command, titleTeeMarker)
+}
+
 // UninstallTitleTee removes or restores the title entry in agy's global settings.json:
 //   - bare tee (no --wrap)      → delete "title" key
 //   - tee with --wrap 'X'       → restore X

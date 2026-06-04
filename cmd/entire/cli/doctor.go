@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"charm.land/huh/v2"
+	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -96,6 +97,9 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Agent-specific: Codex hook trust state.
 	checkCodexHookTrust(cmd)
+
+	// Agent-specific: Antigravity title-tee (token-usage surface).
+	checkAntigravityTitleTee(cmd)
 
 	// Stuck sessions
 	// Load all session states
@@ -432,6 +436,30 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 		}
 		fmt.Fprintln(w, "  Open /hooks inside Codex to approve them.")
 	}
+}
+
+// checkAntigravityTitleTee warns when Antigravity hooks are installed in this
+// repo but agy's global title slot has NOT been claimed by the title-tee shim.
+// agy exposes token usage only through the title/statusline state JSON, so a
+// missing title-tee means token counts will be absent from every Antigravity
+// checkpoint. Stays silent when Antigravity hooks aren't installed here.
+// Warn-only.
+func checkAntigravityTitleTee(cmd *cobra.Command) {
+	ag := &antigravity.AntigravityAgent{}
+	if !ag.AreHooksInstalled(cmd.Context()) {
+		return
+	}
+
+	w := cmd.OutOrStdout()
+	if antigravity.TitleTeeInstalled() {
+		fmt.Fprintln(w, "✓ Antigravity title-tee: OK")
+		return
+	}
+
+	fmt.Fprintln(w, "Antigravity title-tee: NOT CONFIGURED")
+	fmt.Fprintln(w, "  agy's title command isn't routed through Entire, so token counts")
+	fmt.Fprintln(w, "  will be missing for Antigravity checkpoints.")
+	fmt.Fprintln(w, "  Re-run agent setup (`entire agent add`) to configure it.")
 }
 
 // canDeleteShadowBranch checks if a shadow branch can be safely deleted.
