@@ -79,6 +79,73 @@ func TestAnalyzeGitRangeDependentCounts(t *testing.T) {
 	}
 }
 
+func TestAnalyzeGitRangeIncludesGitHubWorkflowYAML(t *testing.T) {
+	repo := t.TempDir()
+	git(t, repo, "init")
+	git(t, repo, "config", "user.name", "Entire Sem Test")
+	git(t, repo, "config", "user.email", "sem@example.com")
+
+	write(t, repo, ".github/workflows/ci.yml", `name: CI
+on:
+  push:
+    branches: [main]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: go test ./...
+`)
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "initial")
+	base := rev(t, repo, "HEAD")
+
+	write(t, repo, ".github/workflows/ci.yml", `name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: go test -race ./...
+`)
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "update workflow")
+	head := rev(t, repo, "HEAD")
+
+	result, err := AnalyzeGitRange(context.Background(), repo, base, head, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Files) != 1 {
+		t.Fatalf("files = %#v", result.Files)
+	}
+	file := result.Files[0]
+	if file.Path != ".github/workflows/ci.yml" {
+		t.Fatalf("path = %q", file.Path)
+	}
+	if file.Language != "YAML" {
+		t.Fatalf("language = %q", file.Language)
+	}
+
+	var sawJob bool
+	var sawTrigger bool
+	for _, change := range file.Changes {
+		if change.Type == "body_changed" && change.Kind == "job" && change.Name == "jobs.test" {
+			sawJob = true
+		}
+		if change.Type == "body_changed" && change.Kind == "section" && change.Name == "on" {
+			sawTrigger = true
+		}
+	}
+	if !sawJob || !sawTrigger {
+		t.Fatalf("workflow changes missing job=%v trigger=%v in %#v", sawJob, sawTrigger, file.Changes)
+	}
+}
+
 func TestAnalyzeCheckpointResolvesAssociatedCommit(t *testing.T) {
 	repo := t.TempDir()
 	git(t, repo, "init")

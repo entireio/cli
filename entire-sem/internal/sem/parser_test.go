@@ -105,6 +105,29 @@ trait Run { fn run(&self); }
 `,
 			names: []string{"User", "validate", "Run", "Run.run"},
 		},
+		{
+			path:     ".github/workflows/ci.yml",
+			language: "YAML",
+			input: `name: CI
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: go test ./...
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./scripts/deploy.sh
+`,
+			names: []string{"ci", "on", "permissions", "jobs.test", "jobs.deploy"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -120,6 +143,40 @@ trait Run { fn run(&self); }
 			if !seen[name] {
 				t.Fatalf("%s missing entity %q in %#v", tt.path, name, entities)
 			}
+		}
+	}
+}
+
+func TestTreeSitterParserSupportsYAMLWorkflowExtensions(t *testing.T) {
+	if !Supported(".github/workflows/ci.yml") {
+		t.Fatal(".yml workflow should be supported")
+	}
+	if !Supported(".github/workflows/deploy.yaml") {
+		t.Fatal(".yaml workflow should be supported")
+	}
+
+	entities, language := TreeSitterParser{}.Parse(".github/workflows/deploy.yaml", `name: Deploy
+on: workflow_dispatch
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo deploy
+`)
+	if language != "YAML" {
+		t.Fatalf("language = %q", language)
+	}
+	seen := map[string]string{}
+	for _, entity := range entities {
+		seen[entity.Name] = entity.Kind
+	}
+	for name, kind := range map[string]string{
+		"deploy":       "workflow",
+		"on":           "section",
+		"jobs.publish": "job",
+	} {
+		if seen[name] != kind {
+			t.Fatalf("%s kind = %q, want %q in %#v", name, seen[name], kind, entities)
 		}
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/smacker/go-tree-sitter/rust"
 	treesittertsx "github.com/smacker/go-tree-sitter/typescript/tsx"
 	treesitterts "github.com/smacker/go-tree-sitter/typescript/typescript"
+	treesitteryaml "github.com/smacker/go-tree-sitter/yaml"
 )
 
 type languageSpec struct {
@@ -23,13 +24,15 @@ type languageSpec struct {
 }
 
 var treeSitterLanguages = map[string]languageSpec{
-	".go":  {language: "Go", grammar: golang.GetLanguage()},
-	".py":  {language: "Python", grammar: python.GetLanguage()},
-	".js":  {language: "JavaScript", grammar: javascript.GetLanguage()},
-	".jsx": {language: "JavaScript", grammar: treesittertsx.GetLanguage()},
-	".ts":  {language: "TypeScript", grammar: treesitterts.GetLanguage()},
-	".tsx": {language: "TypeScript", grammar: treesittertsx.GetLanguage()},
-	".rs":  {language: "Rust", grammar: rust.GetLanguage()},
+	".go":   {language: "Go", grammar: golang.GetLanguage()},
+	".py":   {language: "Python", grammar: python.GetLanguage()},
+	".js":   {language: "JavaScript", grammar: javascript.GetLanguage()},
+	".jsx":  {language: "JavaScript", grammar: treesittertsx.GetLanguage()},
+	".ts":   {language: "TypeScript", grammar: treesitterts.GetLanguage()},
+	".tsx":  {language: "TypeScript", grammar: treesittertsx.GetLanguage()},
+	".rs":   {language: "Rust", grammar: rust.GetLanguage()},
+	".yaml": {language: "YAML", grammar: treesitteryaml.GetLanguage()},
+	".yml":  {language: "YAML", grammar: treesitteryaml.GetLanguage()},
 }
 
 type TreeSitterParser struct{}
@@ -43,6 +46,9 @@ func (TreeSitterParser) Parse(path, content string) ([]Entity, string) {
 	root, err := sitter.ParseCtx(context.Background(), src, spec.grammar)
 	if err != nil || root == nil || root.IsNull() {
 		return nil, spec.language
+	}
+	if spec.language == "YAML" {
+		return yamlEntities(path, content), spec.language
 	}
 
 	var entities []Entity
