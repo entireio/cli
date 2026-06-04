@@ -437,15 +437,14 @@ func TestCalculateTokenUsageSince_ClampsWhenTotalsGoBackwards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CalculateTokenUsageSince: %v", err)
 	}
-	// max(0, ...) clamps negative deltas to zero.
-	if usage != nil && usage.InputTokens != 0 {
-		t.Errorf("InputTokens = %d, want 0 (clamped)", usage.InputTokens)
+	// The single line has no current_usage, so once max(0, ...) clamps the
+	// negative input/output deltas to zero, every field is zero and the method
+	// returns (nil, nil) — the all-zero "nothing observed" path. If the clamp
+	// were removed, the negative deltas would make usage non-nil, so asserting
+	// nil here pins the clamp behavior directly.
+	if usage != nil {
+		t.Errorf("usage = %+v, want nil (negative deltas clamped to zero -> all-zero -> nil)", usage)
 	}
-	if usage != nil && usage.OutputTokens != 0 {
-		t.Errorf("OutputTokens = %d, want 0 (clamped)", usage.OutputTokens)
-	}
-	// Note: cache fields (CacheCreationTokens, CacheReadTokens) are best-effort
-	// and intentionally not clamped — they are summed from current_usage per line.
 }
 
 func TestCalculateTokenUsageSince_UnparseableBaselineCountsAllLines(t *testing.T) {

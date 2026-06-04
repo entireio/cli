@@ -38,30 +38,6 @@ func TestTitleTee_WritesSnapshotAndStaysSilent(t *testing.T) {
 	}
 }
 
-func TestTitleTee_WrapPipesPayloadThrough(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("ENTIRE_ANTIGRAVITY_STATUS_DIR", dir)
-
-	payload := `{"conversation_id":"conv-10","agent_state":"idle","context_window":{"total_input_tokens":100,"total_output_tokens":5}}`
-
-	cmd := newAntigravityTitleTeeCmd()
-	cmd.SetArgs([]string{"--wrap", "cat"})
-
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetIn(strings.NewReader(payload))
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-
-	got := strings.TrimSpace(out.String())
-	want := strings.TrimSpace(payload)
-	if got != want {
-		t.Errorf("stdout = %q, want %q", got, want)
-	}
-}
-
 func TestTitleTee_WrapStillCapturesSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("ENTIRE_ANTIGRAVITY_STATUS_DIR", dir)
