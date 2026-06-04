@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -80,5 +81,39 @@ func TestPrepareTranscript_EmptyRefIsNoOp(t *testing.T) {
 	a := &AntigravityAgent{}
 	if err := a.PrepareTranscript(context.Background(), ""); err != nil {
 		t.Errorf("PrepareTranscript(\"\") should not error, got %v", err)
+	}
+}
+
+func TestExtractPrompts_StripsUserRequestWrapper(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "transcript.jsonl")
+	lines := []string{
+		`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<USER_REQUEST>\nread a.txt and exit\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: x.\n</ADDITIONAL_METADATA>"}`,
+		`{"step_index":1,"source":"SYSTEM","type":"CONVERSATION_HISTORY","status":"DONE"}`,
+		`{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"ok"}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &AntigravityAgent{}
+	prompts, err := a.ExtractPrompts(path, 0)
+	if err != nil {
+		t.Fatalf("ExtractPrompts: %v", err)
+	}
+	if len(prompts) != 1 {
+		t.Fatalf("want 1 prompt, got %d: %#v", len(prompts), prompts)
+	}
+	if prompts[0] != "read a.txt and exit" {
+		t.Errorf("want stripped request, got %q", prompts[0])
+	}
+}
+
+func TestExtractPrompts_RespectsOffsetAndMissingFile(t *testing.T) {
+	t.Parallel()
+	a := &AntigravityAgent{}
+	got, err := a.ExtractPrompts(filepath.Join(t.TempDir(), "nope.jsonl"), 0)
+	if err != nil || got != nil {
+		t.Fatalf("missing file: want (nil,nil), got (%#v,%v)", got, err)
 	}
 }

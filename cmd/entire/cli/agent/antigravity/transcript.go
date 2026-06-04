@@ -1,13 +1,20 @@
 package antigravity
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
+
+// Compile-time interface assertion.
+var _ agent.PromptExtractor = (*AntigravityAgent)(nil)
 
 // Antigravity 2.0 (agy) writes JSONL transcripts at
 //   ~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/transcript.jsonl
@@ -24,6 +31,66 @@ import (
 // v1 ships only the JSONL chunk/reassemble passthrough; field-aware decoding
 // (token counting, file-change replay, prompt extraction) is deferred to a
 // follow-up plan. See testdata/transcript_sample.jsonl for a captured fixture.
+
+// agyStep is one line of agy's step-based JSONL transcript.
+type agyStep struct {
+	StepIndex int               `json:"step_index"`
+	Source    string            `json:"source"`
+	Type      string            `json:"type"`
+	Content   string            `json:"content"`
+	ToolCalls []agyStepToolCall `json:"tool_calls"`
+}
+
+type agyStepToolCall struct {
+	Name string                     `json:"name"`
+	Args map[string]json.RawMessage `json:"args"`
+}
+
+var userRequestRe = regexp.MustCompile(`(?s)<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>`)
+
+// extractUserRequest returns the inner text of the first <USER_REQUEST> block,
+// or the whole trimmed content if no wrapper is present.
+func extractUserRequest(content string) string {
+	if m := userRequestRe.FindStringSubmatch(content); m != nil {
+		return strings.TrimSpace(m[1])
+	}
+	return strings.TrimSpace(content)
+}
+
+// ExtractPrompts implements agent.PromptExtractor. agy's PreInvocation hook
+// carries no prompt, so the user prompt is recovered from the transcript's
+// USER_INPUT steps. fromOffset is a count of non-blank lines already consumed.
+func (a *AntigravityAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, error) {
+	data, err := os.ReadFile(sessionRef) //nolint:gosec // path supplied by agent hook stdin
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("antigravity: read transcript for prompts: %w", err)
+	}
+	var prompts []string
+	lineNum := 0
+	for _, raw := range bytes.Split(data, []byte("\n")) {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue // skip blank lines BEFORE counting (matches codex splitJSONL)
+		}
+		lineNum++
+		if lineNum <= fromOffset {
+			continue
+		}
+		var step agyStep
+		if json.Unmarshal(raw, &step) != nil {
+			continue
+		}
+		if step.Type != "USER_INPUT" {
+			continue
+		}
+		if text := extractUserRequest(step.Content); text != "" {
+			prompts = append(prompts, text)
+		}
+	}
+	return prompts, nil
+}
 
 func (a *AntigravityAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 	data, err := os.ReadFile(sessionRef) //nolint:gosec // path supplied by agent hook stdin
