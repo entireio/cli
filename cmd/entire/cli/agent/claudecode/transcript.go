@@ -88,6 +88,35 @@ func ExtractModifiedFiles(lines []TranscriptLine) []string {
 	return files
 }
 
+// ExtractModel returns the LLM model recorded in the transcript, satisfying
+// agent.ModelExtractor. Claude review subprocesses spawned via `claude -p` do
+// not reliably report the model through lifecycle hooks (the ModelUpdate path
+// is flaky in headless mode), so condense backfills it from the transcript
+// here — the same mechanism codex/pi/etc. rely on. Returns the last non-empty
+// model seen on an assistant line, or "" when the transcript carries none.
+func (c *ClaudeCodeAgent) ExtractModel(transcriptData []byte) (string, error) {
+	lines, err := transcript.ParseFromBytes(transcriptData)
+	if err != nil {
+		return "", fmt.Errorf("parse transcript: %w", err)
+	}
+	model := ""
+	for _, line := range lines {
+		if line.Type != envelopeTypeAssistant {
+			continue
+		}
+		var msg struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal(line.Message, &msg); err != nil {
+			continue
+		}
+		if msg.Model != "" {
+			model = msg.Model
+		}
+	}
+	return model, nil
+}
+
 // TruncateAtUUID returns transcript lines up to and including the line with given UUID
 func TruncateAtUUID(lines []TranscriptLine, uuid string) []TranscriptLine {
 	if uuid == "" {

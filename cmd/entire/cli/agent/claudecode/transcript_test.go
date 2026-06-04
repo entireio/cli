@@ -869,3 +869,45 @@ func TestExtractAllModifiedFiles_SubagentOnlyChanges(t *testing.T) {
 		t.Errorf("missing expected file %q", f)
 	}
 }
+
+func TestExtractModel(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"type":"assistant","uuid":"a1","message":{"model":"claude-opus-4-7[1m]","content":[{"type":"text","text":"hi"}]}}` + "\n")
+	model, err := (&ClaudeCodeAgent{}).ExtractModel(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "claude-opus-4-7[1m]" {
+		t.Errorf("model = %q, want claude-opus-4-7[1m]", model)
+	}
+}
+
+func TestExtractModel_MostRecentWins(t *testing.T) {
+	t.Parallel()
+	data := []byte(strings.Join([]string{
+		`{"type":"assistant","uuid":"a1","message":{"model":"claude-sonnet-4-6","content":[]}}`,
+		`{"type":"assistant","uuid":"a2","message":{"model":"claude-opus-4-8","content":[]}}`,
+		"",
+	}, "\n"))
+	model, err := (&ClaudeCodeAgent{}).ExtractModel(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "claude-opus-4-8" {
+		t.Errorf("model = %q, want claude-opus-4-8 (most recent)", model)
+	}
+}
+
+func TestExtractModel_EmptyWhenAbsent(t *testing.T) {
+	t.Parallel()
+	// A review subprocess transcript with no model field on any assistant line
+	// yields "" (caller treats that as "no model available").
+	data := []byte(`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")
+	model, err := (&ClaudeCodeAgent{}).ExtractModel(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "" {
+		t.Errorf("model = %q, want empty", model)
+	}
+}
