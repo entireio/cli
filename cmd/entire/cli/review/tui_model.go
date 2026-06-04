@@ -524,9 +524,13 @@ func (m reviewTUIModel) currentTerminalSize() (int, int) {
 	return width, height
 }
 
+// reviewHeaderStyle dims the column header so it reads as a header without
+// adding colour — the dashboard stays calm and scannable (no per-cell colour).
+var reviewHeaderStyle = lipgloss.NewStyle().Faint(true)
+
 // headerLine returns the column header row.
 func (m reviewTUIModel) headerLine() string {
-	return m.renderTableLine("AGENT", "STATUS", "DURATION", "TOKENS", "PREVIEW")
+	return reviewHeaderStyle.Render(m.renderTableLine("AGENT", "STATUS", "DURATION", "TOKENS", "PREVIEW"))
 }
 
 // renderRow renders one agent row.
@@ -564,9 +568,22 @@ func (m reviewTUIModel) renderRow(row agentRow) string {
 		}
 	}
 
+	// Token display: claude's live stream-json carries input tokens
+	// throughout the run but only surfaces output_tokens on the final
+	// `result` envelope. Codex carries usage only at turn.completed. So
+	// during a run the parser may emit Tokens{In: N, Out: 0} (input known,
+	// output not yet). Render input-only as just "<in>" (no "/0" slash) so
+	// the column isn't misleading; render the finalized pair as "<in>/<out>".
 	tokStr := ""
-	if row.tokens.In > 0 || row.tokens.Out > 0 {
+	switch {
+	case row.tokens.In > 0 && row.tokens.Out > 0:
 		tokStr = fmt.Sprintf("%s/%s", formatCompact(row.tokens.In), formatCompact(row.tokens.Out))
+	case row.tokens.In > 0:
+		tokStr = formatCompact(row.tokens.In)
+	case row.tokens.Out > 0:
+		// Out > 0 with In == 0 is unlikely in practice but keep the symmetry
+		// so we never silently drop a real token count.
+		tokStr = "0/" + formatCompact(row.tokens.Out)
 	}
 
 	preview := row.preview

@@ -17,7 +17,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-const manifestTestCodexAgent = "codex"
+const (
+	manifestTestCodexAgent    = "codex"
+	manifestTestClaudeSession = "claude-session"
+)
 const manifestTokenTestAgentName agenttypes.AgentName = "review-token-test"
 const manifestTokenTestAgentType agenttypes.AgentType = "Review Token Test"
 
@@ -287,12 +290,40 @@ func TestWriteReviewCompletionFooter_PrintsExactFixCommands(t *testing.T) {
 	got := b.String()
 	for _, want := range []string{
 		"Review complete.",
-		"entire review --fix claude-session --all",
-		"entire review --fix claude-session",
+		"entire review fix claude-session --all",
+		"entire review fix claude-session",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("footer missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// A codex-only run has a source with output but no SessionID (codex exec
+// fires no hook to tag a session). The footer must still print, with the
+// handle omitted — `entire review fix --all` resolves to the latest run.
+func TestWriteReviewCompletionFooter_PrintsForSessionlessCodexManifest(t *testing.T) {
+	manifest := LocalReviewManifest{
+		Sources: []ManifestSource{{SessionID: "", Label: "Codex", Output: "H1. finding"}},
+	}
+	var b strings.Builder
+
+	writeReviewCompletionFooter(&b, manifest)
+
+	got := b.String()
+	if !strings.Contains(got, "Review complete.") {
+		t.Fatalf("codex-only footer should print:\n%s", got)
+	}
+	if !strings.Contains(got, "entire review fix --all") {
+		t.Fatalf("codex-only footer should offer handleless fix command:\n%s", got)
+	}
+}
+
+func TestWriteReviewCompletionFooter_SkipsEmptyManifest(t *testing.T) {
+	var b strings.Builder
+	writeReviewCompletionFooter(&b, LocalReviewManifest{})
+	if got := b.String(); strings.Contains(got, "Review complete.") {
+		t.Fatalf("empty manifest must not print a footer:\n%s", got)
 	}
 }
 
@@ -317,7 +348,7 @@ func TestPrintReviewFindingsList_PrintsProductionCommandName(t *testing.T) {
 	if strings.Contains(got, "/tmp/local-build/entire") {
 		t.Fatalf("findings list should not print local binary path:\n%s", got)
 	}
-	if !strings.Contains(got, "entire review --fix claude-session --all") {
+	if !strings.Contains(got, "entire review fix claude-session --all") {
 		t.Fatalf("findings list missing production command:\n%s", got)
 	}
 }
@@ -379,86 +410,6 @@ func TestReviewFixSourcePickerTitle_IncludesSessionHandle(t *testing.T) {
 	}
 }
 
-func TestReviewFixAgentFromSelectedSources_UsesSingleAgentSource(t *testing.T) {
-	got, ok := reviewFixAgentFromSelectedSources([]reviewFixSource{
-		{Kind: reviewFixSourceAgent, Agent: manifestTestCodexAgent, Label: "Codex findings"},
-	})
-
-	if !ok {
-		t.Fatal("expected single-source agent inference")
-	}
-	if got != manifestTestCodexAgent {
-		t.Fatalf("agent = %q, want codex", got)
-	}
-}
-
-func TestReviewFixAgentFromSelectedSources_DoesNotInferForAggregateOrMultiple(t *testing.T) {
-	tests := []struct {
-		name    string
-		sources []reviewFixSource
-	}{
-		{
-			name: "aggregate",
-			sources: []reviewFixSource{
-				{Kind: reviewFixSourceAggregate, Label: "Aggregate summary"},
-			},
-		},
-		{
-			name: "multiple agents",
-			sources: []reviewFixSource{
-				{Kind: reviewFixSourceAgent, Agent: "claude-code"},
-				{Kind: reviewFixSourceAgent, Agent: manifestTestCodexAgent},
-			},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, ok := reviewFixAgentFromSelectedSources(tc.sources)
-			if ok {
-				t.Fatalf("agent = %q, want no inference", got)
-			}
-		})
-	}
-}
-
-func TestSavedReviewFixAgentPick_UsesSavedWhenAvailable(t *testing.T) {
-	choices := []AgentChoice{
-		{Name: "claude-code", Label: "Claude Code"},
-		{Name: manifestTestCodexAgent, Label: "Codex"},
-	}
-
-	got, ok := savedReviewFixAgentPick(choices, manifestTestCodexAgent)
-
-	if !ok {
-		t.Fatal("expected saved agent match")
-	}
-	if got != manifestTestCodexAgent {
-		t.Fatalf("saved pick = %q, want codex", got)
-	}
-}
-
-func TestSavedReviewFixAgentPick_RejectsUnknownSavedAgent(t *testing.T) {
-	choices := []AgentChoice{{Name: "claude-code", Label: "Claude Code"}}
-
-	got, ok := savedReviewFixAgentPick(choices, manifestTestCodexAgent)
-
-	if ok {
-		t.Fatalf("saved pick = %q, want no match", got)
-	}
-}
-
-func TestPickReviewFixAgentPreference_PreservesCurrentWhenNoChoices(t *testing.T) {
-	t.Parallel()
-
-	got, err := pickReviewFixAgentPreference(context.Background(), nil, manifestTestCodexAgent)
-	if err != nil {
-		t.Fatalf("pickReviewFixAgentPreference: %v", err)
-	}
-	if got != manifestTestCodexAgent {
-		t.Fatalf("fix agent = %q, want codex", got)
-	}
-}
-
 func TestBuildLocalReviewManifestFromSummary_GroupsAgentSessionsAndAggregate(t *testing.T) {
 	started := time.Date(2026, 5, 7, 10, 0, 0, 0, time.UTC)
 	summary := reviewtypes.RunSummary{
@@ -515,6 +466,65 @@ func TestBuildLocalReviewManifestFromSummary_GroupsAgentSessionsAndAggregate(t *
 	}
 }
 
+// TestBuildLocalReviewManifestFromSummary_IncludesAgentWithOutputButNoSession
+// locks the codex case: codex fires no lifecycle hooks during `codex exec`, so
+// it never gets a tagged review session state — but its review narrative is
+// captured live in run.Buffer and must still become a fix source (otherwise
+// the [s] picker shows only claude + the aggregate, never codex).
+func TestBuildLocalReviewManifestFromSummary_IncludesAgentWithOutputButNoSession(t *testing.T) {
+	started := time.Date(2026, 5, 7, 10, 0, 0, 0, time.UTC)
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{
+			{
+				Name:   "claude-code",
+				Status: reviewtypes.AgentStatusSucceeded,
+				Buffer: []reviewtypes.Event{reviewtypes.AssistantText{Text: "Claude finding"}},
+			},
+			{
+				Name:   manifestTestCodexAgent,
+				Status: reviewtypes.AgentStatusSucceeded,
+				Buffer: []reviewtypes.Event{reviewtypes.AssistantText{Text: "Codex finding"}},
+			},
+		},
+	}
+	// Only claude has a tagged review session; codex has none (no exec hooks).
+	states := []*session.State{
+		{
+			SessionID:    manifestTestClaudeSession,
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+	}
+
+	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "")
+	if len(manifest.Sources) != 2 {
+		t.Fatalf("sources = %d, want 2 (codex included despite no session): %#v", len(manifest.Sources), manifest.Sources)
+	}
+	var codex *ManifestSource
+	for i := range manifest.Sources {
+		if manifest.Sources[i].Agent == manifestTestCodexAgent {
+			codex = &manifest.Sources[i]
+		}
+	}
+	if codex == nil {
+		t.Fatalf("codex source missing: %#v", manifest.Sources)
+	}
+	if codex.Output != "Codex finding" {
+		t.Errorf("codex Output = %q, want %q", codex.Output, "Codex finding")
+	}
+	if codex.SessionID != "" {
+		t.Errorf("codex SessionID = %q, want empty (no tagged session)", codex.SessionID)
+	}
+	// The handle still resolves via claude's real session id.
+	if got := reviewManifestHandle(manifest); got != manifestTestClaudeSession {
+		t.Errorf("handle = %q, want %q", got, manifestTestClaudeSession)
+	}
+}
+
 func TestWarnManifestNotWritten_PrintsReasonAndDiagnosticHints(t *testing.T) {
 	var b strings.Builder
 
@@ -547,7 +557,7 @@ func TestWritePostReviewManifest_WarnsWhenNoMatchingSessions(t *testing.T) {
 	}
 
 	// SHA is irrelevant: matcher never runs since no session states exist.
-	writePostReviewManifest(context.Background(), &out, repoRoot, "abc123", summary, "")
+	_ = writePostReviewManifestAndReturn(context.Background(), &out, repoRoot, "abc123", summary, "")
 
 	got := out.String()
 	if !strings.Contains(got, "Note: review skills ran but findings were not persisted.") {
@@ -813,11 +823,12 @@ func TestExplainEmptyManifest_MultiAgentNamesFailingAgent(t *testing.T) {
 
 // TestBuildLocalReviewManifestFromSummary_PartialMatch_NoWarning pins the
 // behavior that a partial-success run (one agent matched, another didn't)
-// produces a non-empty manifest. writePostReviewManifest only fires the
-// "findings were not persisted" warning when len(manifest.Sources) == 0,
-// so partial success silently succeeds — intentional behavior that this
-// test makes explicit. A future refactor that changes this would have to
-// update the test, forcing the change to be deliberate.
+// produces a non-empty manifest. writePostReviewManifestAndReturn only
+// fires the "findings were not persisted" warning when
+// len(manifest.Sources) == 0, so partial success silently succeeds —
+// intentional behavior that this test makes explicit. A future refactor
+// that changes this would have to update the test, forcing the change
+// to be deliberate.
 func TestBuildLocalReviewManifestFromSummary_PartialMatch_NoWarning(t *testing.T) {
 	t.Parallel()
 	started := time.Now()

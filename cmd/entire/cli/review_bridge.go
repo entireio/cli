@@ -42,7 +42,6 @@ func buildReviewDeps(attachCmd *cobra.Command) cliReview.Deps {
 		HeadHasReviewCheckpoint: headHasReviewCheckpoint,
 		ReviewCheckpointContext: reviewCheckpointContext,
 		ReviewerFor:             launchableReviewerFor,
-		PromptForAgentFn:        nil, // use real PromptForAgent
 		AttachCmd:               attachCmd,
 		SynthesisProvider:       lazySynthesisProvider{},
 	}

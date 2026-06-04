@@ -89,10 +89,12 @@ func (s DumpSink) dumpAgent(run reviewtypes.AgentRun) {
 		}
 	}
 
-	// RenderForWriter is TTY-aware: returns raw markdown for non-TTY writers,
-	// glamour-styled output otherwise. Errors are best-effort — fall back to
-	// raw markdown so the user always gets the content.
-	rendered, err := mdrender.RenderForWriter(s.W, b.String())
+	// RenderMutedForWriter is TTY-aware: raw markdown for non-TTY writers,
+	// low-chroma glamour output otherwise. The muted palette keeps review
+	// findings (markdown-dense: headings, bold severities, code paths, links)
+	// readable instead of a wall of colour. Errors are best-effort — fall back
+	// to raw markdown so the user always gets the content.
+	rendered, err := mdrender.RenderMutedForWriter(s.W, b.String())
 	if err != nil {
 		rendered = b.String()
 	}

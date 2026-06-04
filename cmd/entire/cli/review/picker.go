@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"sort"
 	"strings"
@@ -20,7 +19,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/skilldiscovery"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 )
@@ -38,200 +36,6 @@ type AgentChoice struct {
 // around uiform.New preserved so existing call sites don't change.
 func newAccessibleForm(groups ...*huh.Group) *huh.Form {
 	return uiform.New(groups...)
-}
-
-// ConfirmFirstRunSetup prints a banner framing the picker as first-run
-// setup (rather than the review itself) and waits for the user to confirm.
-// Returns false if the user cancels; caller should bail gracefully.
-//
-// Signposting matters here because `entire review` with no config silently
-// drops into the picker — users running the command to start a review can
-// mistake the picker for the review. The banner + confirmation makes the
-// setup phase explicit, and the trailing "running review now" line in the
-// caller closes the loop on what comes next.
-func ConfirmFirstRunSetup(ctx context.Context, out io.Writer) bool {
-	fmt.Fprintln(out, "No review config found — let's set one up first.")
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "You'll pick skills for each installed agent. They're saved to")
-	fmt.Fprintln(out, "local review preferences; edit later with `entire review --edit`.")
-	fmt.Fprintln(out, "After setup, the review will run with your selection.")
-	fmt.Fprintln(out)
-
-	proceed := true
-	form := newAccessibleForm(huh.NewGroup(
-		huh.NewConfirm().
-			Title("Set up review skills now?").
-			Affirmative("Yes").
-			Negative("Cancel").
-			Value(&proceed),
-	))
-	if err := form.RunWithContext(ctx); err != nil {
-		fmt.Fprintln(out, "Setup cancelled.")
-		return false
-	}
-	if !proceed {
-		fmt.Fprintln(out, "Setup cancelled.")
-	}
-	return proceed
-}
-
-// RunReviewConfigPicker presents a huh multi-select for each installed agent
-// that has curated review skills, and saves the selection to
-// clone-local review preferences. Previously-saved skills are pre-checked via
-// huh.Option.Selected(true), mirroring how `entire enable` preserves prior
-// selections in its own agent picker.
-//
-// getInstalled is injected to avoid an import cycle with the cli package.
-func RunReviewConfigPicker(ctx context.Context, out io.Writer, getInstalled func(context.Context) []types.AgentName) (map[string]settings.ReviewConfig, error) {
-	installed := getInstalled(ctx)
-	if len(installed) == 0 {
-		return nil, errors.New(
-			"no agents with hooks installed; " +
-				"run 'entire configure --agent <name>' to install hooks for one, " +
-				"or 'entire enable' to set up the repo",
-		)
-	}
-
-	// Narrow to agents that have a curated skills list; others need manual
-	// editing of clone-local preferences under review.<agent-name>.
-	type configurableAgent struct {
-		name types.AgentName
-		ag   agent.Agent
-	}
-	var configurable []configurableAgent
-	for _, name := range installed {
-		if !skilldiscovery.IsEligible(string(name)) {
-			continue
-		}
-		ag, err := agent.Get(name)
-		if err != nil {
-			continue
-		}
-		configurable = append(configurable, configurableAgent{name: name, ag: ag})
-	}
-	if len(configurable) == 0 {
-		prefsPath, pathErr := settings.ClonePreferencesPath(ctx)
-		if pathErr != nil {
-			return nil, errors.New(
-				"no installed agents have curated review skills; " +
-					"install an eligible agent and run `entire review --edit`, " +
-					"or edit clone-local review preferences under review.<agent-name>",
-			)
-		}
-		return nil, fmt.Errorf(
-			"no installed agents have curated review skills; "+
-				"install an eligible agent and run `entire review --edit`, "+
-				"or edit clone-local review preferences (%s) under review.<agent-name>",
-			prefsPath,
-		)
-	}
-
-	// Load existing config so we can pre-check saved skills and seed saved
-	// prompts. A load error here means the settings file is malformed; log
-	// at Warn so users debugging "my saved skills aren't pre-checked" can
-	// see why, but keep going with an empty prefill — runReview already
-	// surfaces the same error distinctly when it's the first load.
-	existing := map[string]settings.ReviewConfig{}
-	existingFixAgent := ""
-	if s, err := settings.Load(ctx); err != nil {
-		logging.Warn(ctx, "settings.Load failed when pre-filling picker", slog.String("error", err.Error()))
-	} else if s != nil {
-		existing = s.Review
-		existingFixAgent = s.ReviewFixAgent
-	}
-
-	// Up-front header: make the order and count obvious so users can spot
-	// when an agent they expected isn't being offered (e.g., hooks not
-	// installed for it yet).
-	labels := make([]string, 0, len(configurable))
-	for _, c := range configurable {
-		labels = append(labels, string(c.ag.Type()))
-	}
-	fmt.Fprintf(out, "Configuring review for %d agent(s): %s\n", len(configurable), strings.Join(labels, ", "))
-	fmt.Fprintln(out, "(Previously-saved skills are pre-checked. Space to toggle, enter to confirm.)")
-	fmt.Fprintln(out)
-
-	selected := map[string]settings.ReviewConfig{}
-	for i, c := range configurable {
-		curated := skilldiscovery.CuratedBuiltinsFor(string(c.name))
-
-		// Discover + dedupe + filter hints.
-		var discovered []agent.DiscoveredSkill
-		if d, ok := c.ag.(agent.SkillDiscoverer); ok {
-			if ds, dErr := d.DiscoverReviewSkills(ctx); dErr == nil {
-				discovered = ds
-			} else {
-				logging.Debug(ctx, "review discovery failed",
-					slog.String("agent", string(c.name)), slog.String("error", dErr.Error()))
-			}
-		}
-		builtinNames := builtinNameSet(curated)
-		discovered = filterOutBuiltinCollisions(discovered, builtinNames)
-
-		discoveredSet := make(map[string]struct{}, len(discovered))
-		for _, d := range discovered {
-			discoveredSet[d.Name] = struct{}{}
-		}
-		activeHints := skilldiscovery.ActiveInstallHintsFor(string(c.name), discoveredSet)
-
-		// Pre-populate pick slices from saved config so the picker preselects
-		// them. The header promises "previously-saved skills are pre-checked";
-		// without this split + Option.Selected(true) in BuildReviewPickerFields,
-		// --edit with accept-defaults silently wipes the agent's saved skills.
-		builtinPicks, discoveredPicks := SplitSavedPicks(
-			existing[string(c.name)].Skills, curated, discovered,
-		)
-		prompt := existing[string(c.name)].Prompt
-
-		fields := BuildReviewPickerFields(
-			string(c.name), curated, discovered, activeHints, prompt,
-			&builtinPicks, &discoveredPicks, &prompt,
-		)
-
-		// Prepend a non-blocking header Note so the agent being configured
-		// is always clearly visible.
-		header := huh.NewNote().
-			Title(string(c.ag.Type())).
-			Description(fmt.Sprintf("Agent %d of %d · pick review skills and optional instructions", i+1, len(configurable)))
-		fields = append([]huh.Field{header}, fields...)
-
-		form := newAccessibleForm(huh.NewGroup(fields...))
-		if err := form.RunWithContext(ctx); err != nil {
-			return nil, fmt.Errorf("picker for %s: %w", c.name, err)
-		}
-
-		cfg := settings.ReviewConfig{
-			Skills: dedupeStrings(append(builtinPicks, discoveredPicks...)),
-			Prompt: strings.TrimSpace(prompt),
-		}
-		if !cfg.IsZero() {
-			selected[string(c.name)] = cfg
-		}
-	}
-	// Merge the picker's output with existing entries the picker could not
-	// surface. Without the merge, save would replace s.Review wholesale and
-	// silently drop entries the user had configured for external agents,
-	// uncurated agents, or agents whose hooks are temporarily uninstalled.
-	offered := make(map[string]struct{}, len(configurable))
-	for _, c := range configurable {
-		offered[string(c.name)] = struct{}{}
-	}
-	merged := MergePickerResults(existing, offered, selected)
-
-	// The emptiness check runs on `merged`, not `selected`.
-	if len(merged) == 0 {
-		return nil, errors.New("no review skills or prompt configured")
-	}
-
-	fixAgent, err := pickReviewFixAgentPreference(ctx, merged, existingFixAgent)
-	if err != nil {
-		return nil, err
-	}
-	if err := saveReviewConfigAndFixAgent(ctx, merged, fixAgent); err != nil {
-		return nil, err
-	}
-	fmt.Fprintln(out, "Saved review config to local review preferences. Edit later with `entire review --edit`.")
-	return merged, nil
 }
 
 // MergePickerResults combines the picker's output with existing review
@@ -290,34 +94,6 @@ func SaveReviewFixAgent(ctx context.Context, agentName string) error {
 	return nil
 }
 
-func saveReviewConfigAndFixAgent(ctx context.Context, review map[string]settings.ReviewConfig, fixAgent string) error {
-	prefs, err := settings.LoadClonePreferences(ctx)
-	if err != nil {
-		return fmt.Errorf("load review preferences before save: %w", err)
-	}
-	if prefs == nil {
-		prefs = &settings.ClonePreferences{}
-	}
-	prefs.Review = review
-	prefs.ReviewFixAgent = fixAgent
-	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
-		return fmt.Errorf("save review preferences: %w", err)
-	}
-	return nil
-}
-
-func pickReviewFixAgentPreference(ctx context.Context, review map[string]settings.ReviewConfig, current string) (string, error) {
-	choices := reviewFixAgentChoices(review)
-	switch len(choices) {
-	case 0:
-		return current, nil
-	case 1:
-		return choices[0].Name, nil
-	default:
-		return promptForReviewFixAgent(ctx, choices, current)
-	}
-}
-
 // ComputeEligibleConfigured returns the sorted list of agents that are both
 // configured (non-zero ReviewConfig entry) AND have hooks installed. Only
 // eligible agents are valid picker targets — spawning a review for an agent
@@ -354,55 +130,6 @@ func labelForAgentChoice(name string, cfg settings.ReviewConfig) string {
 	default:
 		return name
 	}
-}
-
-// computeLaunchableEligible returns the subset of ComputeEligibleConfigured
-// that also have a non-nil AgentReviewer (i.e., are launchable by the CLI).
-// Used by the dispatch fork in cmd.go to decide whether to route to the
-// multi-agent path.
-//
-// reviewerFor is deps.ReviewerFor injected at the cmd layer; it returns nil
-// for non-launchable agents (cursor, opencode, factoryai-droid, copilot-cli).
-func computeLaunchableEligible(
-	s *settings.EntireSettings,
-	installed []types.AgentName,
-	reviewerFor func(string) reviewtypes.AgentReviewer,
-) []AgentChoice {
-	eligible := ComputeEligibleConfigured(s, installed)
-	out := make([]AgentChoice, 0, len(eligible))
-	for _, c := range eligible {
-		if reviewerFor(c.Name) != nil {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-// PromptForAgent renders the single-select agent picker shown when more than
-// one eligible agent is configured. Returns the chosen agent name. Respects
-// accessibility mode via newAccessibleForm.
-func PromptForAgent(ctx context.Context, eligible []AgentChoice) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("agent picker: %w", err)
-	}
-	if len(eligible) == 0 {
-		return "", errors.New("no eligible agents to prompt for")
-	}
-	options := make([]huh.Option[string], 0, len(eligible))
-	for _, c := range eligible {
-		options = append(options, huh.NewOption(c.Label, c.Name))
-	}
-	picked := eligible[0].Name
-	form := newAccessibleForm(huh.NewGroup(
-		huh.NewSelect[string]().
-			Title("Which agent should run this review?").
-			Options(options...).
-			Value(&picked),
-	))
-	if err := form.RunWithContext(ctx); err != nil {
-		return "", fmt.Errorf("agent picker: %w", err)
-	}
-	return picked, nil
 }
 
 // SelectReviewAgent picks an agent from the configured review map.
@@ -470,6 +197,16 @@ func VerifyConfiguredSkillsInstalled(ctx context.Context, ag agent.Agent, cfg se
 		missing = append(missing, s)
 	}
 	if len(missing) == 0 {
+		return nil
+	}
+	// Codex resolves skills by loose description match against the catalog it
+	// injects into every session — not exact slash commands — and legacy saved
+	// configs may still carry pre-$form invocations like "/review". On-disk
+	// presence is therefore not authoritative for codex: log a hint but don't
+	// block the spawn, since the named skill still loose-matches at runtime.
+	if string(ag.Name()) == string(agent.AgentNameCodex) {
+		logging.Debug(ctx, "codex review skill(s) not found on disk; relying on codex loose match",
+			slog.String("skills", strings.Join(missing, ", ")))
 		return nil
 	}
 	return fmt.Errorf(

@@ -2,6 +2,8 @@ package review_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -302,5 +304,74 @@ func TestSaveReviewFixAgent_PersistsSettings(t *testing.T) {
 	}
 	if prefs.ReviewFixAgent != testCodexAgent {
 		t.Fatalf("ReviewFixAgent = %q, want %s", prefs.ReviewFixAgent, testCodexAgent)
+	}
+}
+
+// TestSaveReviewConfig_ReturnsErrorOnMalformedSettings ensures SaveReviewConfig
+// does not overwrite existing preferences when preferences.json is malformed.
+func TestSaveReviewConfig_ReturnsErrorOnMalformedSettings(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	t.Chdir(tmp)
+
+	preferencesPath, err := settings.ClonePreferencesPath(context.Background())
+	if err != nil {
+		t.Fatalf("preferences path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(preferencesPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	malformed := []byte(`{"review": {`)
+	if err := os.WriteFile(preferencesPath, malformed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(preferencesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+		testAgentName: {Skills: []string{testReviewSkill}},
+	})
+	if err == nil {
+		t.Fatal("expected SaveReviewConfig to error on malformed preferences")
+	}
+
+	after, err := os.ReadFile(preferencesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("preferences.json was overwritten on load error:\nbefore=%q\nafter=%q", before, after)
+	}
+}
+
+// TestVerifyConfiguredSkillsInstalled_CodexIsAdvisory pins that codex skill
+// verification never hard-fails on a non-discovered skill — codex resolves
+// skills by loose description match, and legacy saved configs carry pre-$form
+// invocations like "/review" that must keep working. Claude Code stays strict.
+func TestVerifyConfiguredSkillsInstalled_CodexIsAdvisory(t *testing.T) {
+	// Cannot t.Parallel — t.Setenv isolates ~/.codex / ~/.claude so discovery
+	// finds nothing and every configured skill is "missing".
+	t.Setenv("HOME", t.TempDir())
+
+	codexAg, err := agent.Get("codex")
+	if err != nil {
+		t.Fatalf("agent.Get(codex): %v", err)
+	}
+	cfg := settings.ReviewConfig{Skills: []string{"/review", "$not-installed"}}
+	if err := review.VerifyConfiguredSkillsInstalled(context.Background(), codexAg, cfg); err != nil {
+		t.Errorf("codex verification should be advisory (nil), got: %v", err)
+	}
+
+	// Control: Claude Code still hard-fails on a missing skill.
+	claudeAg, err := agent.Get("claude-code")
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code): %v", err)
+	}
+	if err := review.VerifyConfiguredSkillsInstalled(
+		context.Background(), claudeAg, settings.ReviewConfig{Skills: []string{"/bogus:nope"}},
+	); err == nil {
+		t.Error("claude-code verification should still hard-fail on a missing skill")
 	}
 }

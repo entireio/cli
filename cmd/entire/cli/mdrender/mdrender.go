@@ -36,7 +36,19 @@ const DefaultTerminalWidth = 80
 // of which indicate a malformed StyleConfig (programmer error) rather
 // than a runtime condition. Renderer panics are recovered and returned as
 // errors so callers can fall back to raw markdown instead of crashing.
-func Render(markdown string, width int, darkBackground bool) (rendered string, err error) {
+func Render(markdown string, width int, darkBackground bool) (string, error) {
+	return renderWithStyles(markdown, width, stylesForBackground(darkBackground))
+}
+
+// RenderMuted is Render with a low-chroma palette: hierarchy is conveyed by
+// bold + indentation rather than colour, and inline-code/link highlighting is
+// dropped. Use it for dense, markdown-heavy output (e.g. the multi-agent
+// review dump) where the full palette reads as noisy and hard to scan.
+func RenderMuted(markdown string, width int, darkBackground bool) (string, error) {
+	return renderWithStyles(markdown, width, mutedStyles(darkBackground))
+}
+
+func renderWithStyles(markdown string, width int, styles ansi.StyleConfig) (rendered string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			rendered = ""
@@ -45,7 +57,7 @@ func Render(markdown string, width int, darkBackground bool) (rendered string, e
 	}()
 
 	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStyles(stylesForBackground(darkBackground)),
+		glamour.WithStyles(styles),
 		glamour.WithWordWrap(width),
 		glamour.WithPreservedNewLines(),
 	)
@@ -71,6 +83,15 @@ func RenderForWriter(w io.Writer, markdown string) (string, error) {
 		return markdown, nil
 	}
 	return Render(markdown, terminalWidth(w), termenv.HasDarkBackground())
+}
+
+// RenderMutedForWriter is RenderForWriter using the low-chroma palette (see
+// RenderMuted). Non-terminal / NO_COLOR writers still get raw markdown.
+func RenderMutedForWriter(w io.Writer, markdown string) (string, error) {
+	if !shouldRender(w) {
+		return markdown, nil
+	}
+	return RenderMuted(markdown, terminalWidth(w), termenv.HasDarkBackground())
 }
 
 // shouldRender returns true if w is a terminal writer and NO_COLOR is unset.
@@ -165,6 +186,36 @@ func stylesForBackground(darkBackground bool) ansi.StyleConfig {
 	styles.Table.ColumnSeparator = strPtr(" ")
 	styles.Table.RowSeparator = strPtr("-")
 
+	return styles
+}
+
+// mutedStyles returns a calmer variant of the CLI palette for dense,
+// markdown-heavy output (the multi-agent review dump). It KEEPS the coloured,
+// bold headings — they're sparse and give the same scannable structure as
+// dispatch — and only neutralises the HIGH-FREQUENCY inline elements that
+// multiply with dense findings and read as noise: the highlight block behind
+// inline code (file paths), coloured list bullets, and coloured links. Bold
+// emphasis (e.g. severity labels) is left intact.
+func mutedStyles(darkBackground bool) ansi.StyleConfig {
+	styles := stylesForBackground(darkBackground)
+	neutral := "252"
+	if !darkBackground {
+		neutral = "234"
+	}
+	// Inline code: drop the background highlight and the orange foreground —
+	// file paths appear in nearly every finding, so the block + accent read as
+	// a sea of colour. Keep it as plain (slightly emphasised by mono) text.
+	styles.Code.Color = strPtr(neutral)
+	styles.Code.BackgroundColor = nil
+	// List bullets / enumeration markers: neutral, not orange/indigo.
+	styles.Item.Color = strPtr(neutral)
+	styles.Enumeration.Color = strPtr(neutral)
+	// Links: keep the underline as the affordance, drop the colour + bold so a
+	// finding full of [file](path) links isn't multi-coloured.
+	styles.Link.Color = nil
+	styles.Link.Underline = boolPtrV(true)
+	styles.LinkText.Color = nil
+	styles.LinkText.Bold = boolPtrV(false)
 	return styles
 }
 

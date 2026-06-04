@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"sort"
 	"strings"
 
@@ -28,6 +29,108 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
+
+// Agent registry names used by DetectInvokingAgent. Declared as
+// constants so goconst doesn't flag the literals as duplicates of
+// strings used elsewhere in the package.
+const (
+	agentNameClaudeCode = "claude-code"
+	agentNameCodex      = "codex"
+	agentNameGemini     = "gemini-cli"
+	agentNameCopilot    = "copilot-cli"
+	agentNamePi         = "pi"
+)
+
+// DetectInvokingAgent reads the same env sentinels that
+// interactive.CanPromptInteractively() consults to detect when entire
+// is running inside an agent CLI. Returns the registry name of the
+// caller (e.g. "claude-code", "codex") or "" if none detected.
+//
+// IMPORTANT: keep this list in sync with the sentinels in the
+// interactive package — drift between the two would mean we'd detect
+// non-interactive correctly but fail to identify the caller.
+func DetectInvokingAgent() string {
+	switch {
+	case os.Getenv("CLAUDE_CODE") != "":
+		return agentNameClaudeCode
+	case os.Getenv("CODEX") != "":
+		return agentNameCodex
+	case os.Getenv("GEMINI_CLI") != "":
+		return agentNameGemini
+	case os.Getenv("COPILOT_CLI") != "":
+		return agentNameCopilot
+	case os.Getenv("PI_CODING_AGENT") != "":
+		return agentNamePi
+	}
+	return ""
+}
+
+// seedDefaultSkills returns the skill invocation tokens to use for an agent
+// that has no saved skills and no explicit per-run skill flags. It prefers
+// the agent's curated built-ins; when an agent ships none (e.g. codex, whose
+// review skills are discovered on disk rather than bundled in the binary) it
+// falls back to on-disk discovered skills whose name signals a review skill
+// (contains "review"). Without this, codex would fall back to a generic
+// scope-only prompt instead of invoking e.g. $code-reviewer.
+//
+// Best-effort: returns nil (the run still works — the agent reviews against
+// scope) if the agent can't be resolved or nothing matches.
+func seedDefaultSkills(ctx context.Context, agentName string) []string {
+	if curated := skilldiscovery.CuratedBuiltinsFor(agentName); len(curated) > 0 {
+		out := make([]string, 0, len(curated))
+		for _, b := range curated {
+			out = append(out, b.Name)
+		}
+		return out
+	}
+	ag, err := agent.Get(types.AgentName(agentName))
+	if err != nil {
+		return nil
+	}
+	d, ok := ag.(agent.SkillDiscoverer)
+	if !ok {
+		return nil
+	}
+	discovered, err := d.DiscoverReviewSkills(ctx)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, sk := range discovered {
+		if strings.Contains(strings.ToLower(sk.Name), "review") {
+			out = append(out, sk.Name)
+		}
+	}
+	return out
+}
+
+// invokerOnlyReviewConfig builds a default review map from a single
+// invoking agent. The agent gets Role Both (reviews AND fixes).
+// Returns an error if the agent isn't installed or has no launcher.
+func invokerOnlyReviewConfig(ctx context.Context, agentName string, installed []types.AgentName) (map[string]settings.ReviewConfig, error) {
+	installedSet := make(map[string]struct{}, len(installed))
+	for _, a := range installed {
+		installedSet[string(a)] = struct{}{}
+	}
+	if _, ok := installedSet[agentName]; !ok {
+		return nil, fmt.Errorf("invoking agent %q is not installed in this repo", agentName)
+	}
+	if _, ok := agent.LauncherFor(types.AgentName(agentName)); !ok {
+		return nil, fmt.Errorf("invoking agent %q has no launcher (cannot subprocess-spawn)", agentName)
+	}
+	cfg := settings.ReviewConfig{Role: settings.RoleBoth, Skills: seedDefaultSkills(ctx, agentName)}
+	return map[string]settings.ReviewConfig{agentName: cfg}, nil
+}
+
+// formatInvokerOnlyNote returns the one-line user-visible explanation
+// shown when an unconfigured review falls back to the invoking agent.
+func formatInvokerOnlyNote(agentName string) string {
+	return fmt.Sprintf(
+		"Note: %s as reviewer + fixer (no config). Customize with `entire review setup`, "+
+			"or tell your agent who should review/fix.",
+		agentName,
+	)
+}
 
 // SetupForms collects the form constructors RunSetup uses. Production
 // passes a zero value (uses the real huh forms); tests inject stubs.
@@ -43,6 +146,8 @@ type SetupForms struct {
 // seeded from existing settings when available. Step 2: for every agent that
 // landed on a Reviewer-side role, present a skills + instructions picker.
 // After both steps, NormalizeRoles enforces the at-most-one-fixer invariant.
+//
+//nolint:unparam // map return is consumed by setup tests; production callers ignore it intentionally.
 func RunSetup(
 	ctx context.Context,
 	out io.Writer,
@@ -63,10 +168,14 @@ func RunSetup(
 	}
 	sort.Strings(agentNames)
 
-	// Pre-seed current roles from saved settings; default to Reviewer when
-	// the agent has no prior entry. A load error is non-fatal here — we
-	// proceed with the default seeds and warn so users debugging "my saved
-	// roles aren't pre-selected" can find the reason.
+	// Pre-seed current roles from saved settings; default to Skip when the
+	// agent has no prior entry. Defaulting to Skip makes reviewing opt-in:
+	// every agent with Entire hooks installed is listed, but the user must
+	// explicitly choose Reviewer/Both for the ones they want — otherwise a
+	// machine with several agents enabled silently turns them all into
+	// reviewers (the "why is gemini/opencode reviewing?" surprise). The
+	// "at least one reviewer" guard below forces an explicit pick. A load
+	// error is non-fatal — proceed with Skip seeds and warn.
 	current := make(map[string]settings.Role, len(agentNames))
 	saved, loadErr := settings.Load(ctx)
 	if loadErr != nil {
@@ -80,7 +189,7 @@ func RunSetup(
 				continue
 			}
 		}
-		current[name] = settings.RoleReviewer
+		current[name] = settings.RoleSkip
 	}
 
 	pickRoles := forms.PickRoles
@@ -107,6 +216,27 @@ func RunSetup(
 		configMap[name] = cfg
 	}
 	normalized := NormalizeRoles(configMap)
+
+	// Guard against saving a non-functional config (zero reviewers).
+	// Without at least one agent in Role Reviewer or Both, `entire review`
+	// has nothing to run — refusing here surfaces the problem at setup
+	// time instead of after the user tries to invoke review. Checked
+	// against the normalized map so that pick-time edge cases (e.g.
+	// duplicate-fixer demotion creating a reviewer) are accounted for;
+	// only configs that are truly non-functional after normalization fail.
+	hasReviewer := false
+	for _, cfg := range normalized {
+		if cfg.Role.IsReviewer() {
+			hasReviewer = true
+			break
+		}
+	}
+	if !hasReviewer {
+		return nil, errors.New(
+			"no agents have role Reviewer or Both; entire review needs at least one " +
+				"(re-run `entire review setup` and pick Reviewer or Both for at least one agent)",
+		)
+	}
 
 	pickSkills := forms.PickSkills
 	if pickSkills == nil {
@@ -207,15 +337,15 @@ func BuildPickRolesFields(agents []string, ptrs map[string]*settings.Role) []huh
 }
 
 // realPickRoles is the production role picker. It allocates one pointer per
-// agent (seeded from current, defaulting to Reviewer when unset), passes the
-// pointer map to BuildPickRolesFields, runs the form, then copies values
-// back into current.
+// agent (seeded from current, defaulting to Skip when unset so reviewing is
+// opt-in), passes the pointer map to BuildPickRolesFields, runs the form, then
+// copies values back into current.
 func realPickRoles(ctx context.Context, agents []string, current map[string]settings.Role) (map[string]settings.Role, error) {
 	ptrs := make(map[string]*settings.Role, len(agents))
 	for _, name := range agents {
 		v := current[name]
 		if v == "" {
-			v = settings.RoleReviewer
+			v = settings.RoleSkip
 		}
 		ptrs[name] = &v
 	}
@@ -248,6 +378,15 @@ func BuildSetupSkillsFields(
 	promptOut *string,
 ) []huh.Field {
 	var fields []huh.Field
+
+	// Header identifying which agent these skills are being configured for.
+	// The per-agent setup loop reuses this form for each agent in turn, so
+	// without it the skill list is ambiguous (e.g. claude vs codex).
+	// Note: huh renders Note text as markdown, so backticks get mangled in the
+	// terminal — keep these strings backtick-free.
+	fields = append(fields, huh.NewNote().
+		Title("Review skills — "+displayLabelFor(agentName)).
+		Description("Skills this agent runs during entire review."))
 
 	if builtinPicksOut != nil && len(*builtinPicksOut) == 0 &&
 		len(builtins) == 1 && strings.TrimSpace(previousPrompt) == "" {
@@ -333,8 +472,8 @@ func BuildSetupSkillsFields(
 }
 
 // realPickSkills is the production skills picker for a single agent. It
-// mirrors the per-agent loop inside RunReviewConfigPicker but uses
-// BuildSetupSkillsFields (Input not Text for instructions).
+// uses BuildSetupSkillsFields (Input not Text for instructions) so a
+// single-line entry behaves like the rest of the setup wizard.
 func realPickSkills(ctx context.Context, agentName string, prefill settings.ReviewConfig) (settings.ReviewConfig, error) {
 	ag, err := agent.Get(types.AgentName(agentName))
 	if err != nil {
@@ -385,7 +524,7 @@ func PrintSetupBanner(out io.Writer, review map[string]settings.ReviewConfig) {
 	var fixer string
 	for name, cfg := range review {
 		if cfg.Role.IsReviewer() {
-			reviewers = append(reviewers, displayLabelFor(name))
+			reviewers = append(reviewers, displayLabelFor(name)+" "+reviewerSkillSuffix(cfg))
 		}
 		if cfg.Role.IsFixer() {
 			fixer = displayLabelFor(name)
@@ -395,7 +534,10 @@ func PrintSetupBanner(out io.Writer, review map[string]settings.ReviewConfig) {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Review configured.")
 	if len(reviewers) > 0 {
-		fmt.Fprintf(out, "  Reviewers: %s\n", strings.Join(reviewers, ", "))
+		fmt.Fprintln(out, "  Reviewers:")
+		for _, r := range reviewers {
+			fmt.Fprintf(out, "    %s\n", r)
+		}
 	} else {
 		fmt.Fprintln(out, "  Reviewers: (none)")
 	}
@@ -407,6 +549,24 @@ func PrintSetupBanner(out io.Writer, review map[string]settings.ReviewConfig) {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Edit later: entire review setup")
 	fmt.Fprintln(out, "Run: entire review")
+}
+
+// reviewerSkillSuffix annotates a reviewer with what will drive its review.
+// A configured prompt counts as guidance even with zero skills — that's how
+// skill-less agents (notably gemini, which has no skill system here) get a
+// focused review. Only an agent with neither skills nor a prompt does a truly
+// generic, scope-only pass, which is what the last branch flags.
+func reviewerSkillSuffix(cfg settings.ReviewConfig) string {
+	switch n := len(cfg.Skills); {
+	case n == 1:
+		return "(1 skill)"
+	case n > 1:
+		return fmt.Sprintf("(%d skills)", n)
+	case strings.TrimSpace(cfg.Prompt) != "":
+		return "(custom prompt)"
+	default:
+		return "(no skills — generic review)"
+	}
 }
 
 // displayLabelFor resolves an agent's human-readable name (Type) from the

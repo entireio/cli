@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -36,10 +37,21 @@ type reviewContextSessionMetadataPromptsReader interface {
 	ReadSessionMetadataAndPrompts(ctx context.Context, checkpointID checkpointid.CheckpointID, sessionIndex int) (*checkpoint.SessionContent, error)
 }
 
-func reviewCheckpointContext(ctx context.Context, worktreeRoot string, scopeBaseRef string) string {
-	committed := reviewCommittedCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
-	inProgress := reviewSessionContextForCurrentHead(ctx, worktreeRoot)
-	return joinReviewContextSections(committed, inProgress)
+// reviewCheckpointContext builds the composed checkpoint/session context for
+// the branch review scope and reports how many checkpoints and in-progress
+// sessions contributed to it. The cli package owns this helper (checkpoint
+// readers can't be imported into the review subpackage without a cycle), and
+// the result is plumbed into review.Deps.ReviewCheckpointContext.
+func reviewCheckpointContext(ctx context.Context, worktreeRoot string, scopeBaseRef string) cliReview.ContextResult {
+	committed, ckCount, ckItems := reviewCommittedCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
+	inProgress, sessionCount, sessItems := reviewSessionContextForCurrentHead(ctx, worktreeRoot)
+	return cliReview.ContextResult{
+		Prompt:          joinReviewContextSections(committed, inProgress),
+		Checkpoints:     ckCount,
+		Sessions:        sessionCount,
+		CheckpointItems: ckItems,
+		SessionItems:    sessItems,
+	}
 }
 
 // joinReviewContextSections concatenates non-empty review-context sections
@@ -60,17 +72,17 @@ func joinReviewContextSections(sections ...string) string {
 // reviewSessionContext. Kept separate from reviewCheckpointContext so that
 // in-progress session context is surfaced even when there are no committed
 // checkpoints in scope (the common case: branch with only uncommitted work).
-func reviewSessionContextForCurrentHead(ctx context.Context, worktreeRoot string) string {
+func reviewSessionContextForCurrentHead(ctx context.Context, worktreeRoot string) (string, int, []cliReview.SessionScopeItem) {
 	repo, err := gitrepo.OpenPath(worktreeRoot)
 	if err != nil {
 		logging.Debug(ctx, "review session context: open repo", slog.String("error", err.Error()))
-		return ""
+		return "", 0, nil
 	}
 	defer repo.Close()
 	head, err := repo.Head()
 	if err != nil {
 		logging.Debug(ctx, "review session context: resolve HEAD", slog.String("error", err.Error()))
-		return ""
+		return "", 0, nil
 	}
 	return reviewSessionContext(ctx, worktreeRoot, head.Hash().String())
 }
@@ -78,10 +90,11 @@ func reviewSessionContextForCurrentHead(ctx context.Context, worktreeRoot string
 // reviewCommittedCheckpointContext renders the "Checkpoint context from
 // commits in scope:" section. Previously the body of reviewCheckpointContext;
 // extracted so the parent can compose it with the in-progress session
-// section.
-func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, scopeBaseRef string) string {
+// section. Returns the rendered block plus the number of unique checkpoints
+// rendered (excluding the truncation tail).
+func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, scopeBaseRef string) (string, int, []cliReview.CheckpointScopeItem) {
 	if scopeBaseRef == "" {
-		return ""
+		return "", 0, nil
 	}
 
 	messages, commitsTruncated, err := reviewContextCommitMessages(ctx, worktreeRoot, scopeBaseRef, reviewContextMaxCommitScans)
@@ -89,21 +102,24 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 		if err != nil {
 			logging.Debug(ctx, "review checkpoint context: list commit messages", slog.String("error", err.Error()))
 		}
-		return ""
+		return "", 0, nil
 	}
 
 	repo, err := gitrepo.OpenPath(worktreeRoot)
 	if err != nil {
 		logging.Debug(ctx, "review checkpoint context: open repo", slog.String("error", err.Error()))
-		return ""
+		return "", 0, nil
 	}
 	defer repo.Close()
 	store := checkpoint.NewCommittedReadStore(ctx, repo)
 
 	var lines []string
+	var items []cliReview.CheckpointScopeItem
 	seen := map[checkpointid.CheckpointID]bool{}
 	omittedCheckpoints := 0
+	renderedCheckpoints := 0
 	for _, message := range messages {
+		subject := reviewContextCommitSubject(message)
 		for _, cpID := range trailers.ParseAllCheckpoints(message) {
 			if seen[cpID] {
 				continue
@@ -118,6 +134,8 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 			summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
 			if err != nil {
 				lines = append(lines, fmt.Sprintf("- %s: checkpoint metadata unavailable", cpID))
+				items = append(items, cliReview.CheckpointScopeItem{ID: shortCheckpointID(cpID), Summary: subject})
+				renderedCheckpoints++
 				continue
 			}
 			detail := reviewCheckpointDetail(ctx, store, cpID, summary)
@@ -125,10 +143,12 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 				detail = "no summary or prompt recorded"
 			}
 			lines = append(lines, fmt.Sprintf("- %s: %s", cpID, detail))
+			items = append(items, cliReview.CheckpointScopeItem{ID: shortCheckpointID(cpID), Summary: subject})
+			renderedCheckpoints++
 		}
 	}
 	if len(lines) == 0 {
-		return ""
+		return "", 0, nil
 	}
 	if omittedCheckpoints > 0 {
 		lines = append(lines, fmt.Sprintf("- ... %d more %s omitted", omittedCheckpoints, reviewContextCheckpointNoun(omittedCheckpoints)))
@@ -139,7 +159,7 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 
 	return "Checkpoint context from commits in scope:\n" +
 		strings.Join(lines, "\n") +
-		"\n\nUse `entire explain <id>` for full checkpoint context, or `entire explain <id> --raw-transcript` for raw transcripts."
+		"\n\nUse `entire explain <id>` for full checkpoint context, or `entire explain <id> --raw-transcript` for raw transcripts.", renderedCheckpoints, items
 }
 
 // reviewSessionContext returns a "In-progress session context (uncommitted):"
@@ -168,19 +188,19 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 // disk at lifecycle.go:294-310 on every turn for mid-turn commit availability,
 // before SaveStep copies them onto the shadow branch. Filesystem is canonical
 // for in-progress reads; the shadow-branch copy is only canonical post-condensation.
-func reviewSessionContext(ctx context.Context, worktreeRoot, headSHA string) string {
+func reviewSessionContext(ctx context.Context, worktreeRoot, headSHA string) (string, int, []cliReview.SessionScopeItem) {
 	if worktreeRoot == "" || headSHA == "" {
-		return ""
+		return "", 0, nil
 	}
 	store, err := session.NewStateStore(ctx)
 	if err != nil {
 		logging.Debug(ctx, "review session context: open state store", slog.String("error", err.Error()))
-		return ""
+		return "", 0, nil
 	}
 	states, err := store.List(ctx)
 	if err != nil {
 		logging.Debug(ctx, "review session context: list session states", slog.String("error", err.Error()))
-		return ""
+		return "", 0, nil
 	}
 
 	// Canonicalise the current worktree path once. State files written by
@@ -191,6 +211,7 @@ func reviewSessionContext(ctx context.Context, worktreeRoot, headSHA string) str
 	worktreeCanon := canonicalisePath(worktreeRoot)
 
 	var lines []string
+	var items []cliReview.SessionScopeItem
 	for _, st := range states {
 		if st == nil {
 			continue
@@ -207,16 +228,17 @@ func reviewSessionContext(ctx context.Context, worktreeRoot, headSHA string) str
 		if st.Kind == session.KindAgentReview {
 			continue
 		}
-		line := formatReviewSessionLine(worktreeRoot, st)
+		line, item := formatReviewSessionLine(worktreeRoot, st)
 		if line == "" {
 			continue
 		}
 		lines = append(lines, line)
+		items = append(items, item)
 	}
 	if len(lines) == 0 {
-		return ""
+		return "", 0, nil
 	}
-	return "In-progress session context (uncommitted):\n" + strings.Join(lines, "\n")
+	return "In-progress session context (uncommitted):\n" + strings.Join(lines, "\n"), len(lines), items
 }
 
 // canonicalisePath returns the symlink-resolved absolute form of p. Falls
@@ -232,17 +254,18 @@ func canonicalisePath(p string) string {
 	return p
 }
 
-// formatReviewSessionLine renders one entry of the in-progress section.
-// Returns "" when the session has no prompt content to report.
-func formatReviewSessionLine(worktreeRoot string, st *session.State) string {
+// formatReviewSessionLine renders one entry of the in-progress section and the
+// structured banner item for the same session. Returns ("", zero) when the
+// session has no prompt content to report.
+func formatReviewSessionLine(worktreeRoot string, st *session.State) (string, cliReview.SessionScopeItem) {
 	promptPath := filepath.Join(worktreeRoot, paths.SessionMetadataDirFromSessionID(st.SessionID), paths.PromptFileName)
 	raw, err := os.ReadFile(promptPath) //nolint:gosec // path constructed from validated session ID + fixed constants
 	if err != nil {
-		return ""
+		return "", cliReview.SessionScopeItem{}
 	}
 	promptText := reviewPromptText(string(raw))
 	if promptText == "" {
-		return ""
+		return "", cliReview.SessionScopeItem{}
 	}
 
 	short := st.SessionID
@@ -263,7 +286,7 @@ func formatReviewSessionLine(worktreeRoot string, st *session.State) string {
 		parts = append(parts, fmt.Sprintf("(touched: %d %s)", n, fileWord))
 	}
 	parts = append(parts, "prompt: "+promptText)
-	return strings.Join(parts, " ")
+	return strings.Join(parts, " "), cliReview.SessionScopeItem{ID: short, Agent: agentName}
 }
 
 func reviewCheckpointDetail(
@@ -397,6 +420,32 @@ func reviewContextCheckpointNoun(count int) string {
 		return "checkpoint"
 	}
 	return "checkpoints"
+}
+
+// shortCheckpointID returns the first 8 hex chars of a checkpoint ID for the
+// scope banner (full IDs are 12 chars; 8 is enough to recognise and to feed
+// `entire explain`).
+func shortCheckpointID(cpID checkpointid.CheckpointID) string {
+	s := string(cpID)
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
+}
+
+// reviewContextCommitSubject extracts the trimmed first line of a commit
+// message, capped for one-line display in the scope banner.
+func reviewContextCommitSubject(message string) string {
+	subject := message
+	if i := strings.IndexByte(subject, '\n'); i >= 0 {
+		subject = subject[:i]
+	}
+	subject = strings.TrimSpace(subject)
+	const maxSubjectLen = 72
+	if runes := []rune(subject); len(runes) > maxSubjectLen {
+		return strings.TrimSpace(string(runes[:maxSubjectLen-1])) + "…"
+	}
+	return subject
 }
 
 func reviewContextCommitMessages(ctx context.Context, repoRoot string, scopeBaseRef string, maxCommits int) ([]string, bool, error) {

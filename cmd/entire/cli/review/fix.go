@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,8 +13,7 @@ import (
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent"
-	agenttypes "github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agentlaunch"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/mdrender"
@@ -77,8 +77,16 @@ func runReviewFix(
 	target string,
 	all bool,
 	agentOverride string,
+	perRunPrompt string,
 	silentErr func(error) error,
 ) error {
+	if os.Getenv(EnvSession) != "" {
+		cmd.SilenceUsage = true
+		fmt.Fprintln(cmd.ErrOrStderr(), "Already in a review session — refusing to start a nested review.")
+		fmt.Fprintln(cmd.ErrOrStderr(), "If you reached this from a reviewer agent's prompt, this is likely a loop and you should exit the inner agent.")
+		return wrapReviewSilentError(silentErr, errors.New("nested review session refused"))
+	}
+
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		cmd.SilenceUsage = true
@@ -90,11 +98,18 @@ func runReviewFix(
 	if err != nil {
 		return err
 	}
-	sources, err := selectReviewFixSources(ctx, cmd, manifest, all)
-	if err != nil {
-		return err
+	// Interactive multi-source: one navigable form (source step ⇄ findings
+	// step) so the user can go back and change the source — e.g. to the
+	// aggregate — without restarting. Other cases keep the linear path.
+	var sources []reviewFixSource
+	var findings []reviewFinding
+	if !all && shouldUseInteractiveFixPicker(cmd, manifest) {
+		sources, findings, err = selectReviewFixInteractive(ctx, manifest)
+	} else {
+		if sources, err = selectReviewFixSources(ctx, cmd, manifest, all); err == nil {
+			findings, err = selectReviewFindings(ctx, cmd, sources, all)
+		}
 	}
-	findings, err := selectReviewFindings(ctx, cmd, sources, all)
 	if err != nil {
 		return err
 	}
@@ -104,6 +119,9 @@ func runReviewFix(
 		return err
 	}
 	prompt := composeReviewFixPrompt(manifest, reviewFixSourcesFromFindings(findings))
+	if perRunPrompt != "" {
+		prompt += "\n\nAdditional context for this run:\n" + perRunPrompt
+	}
 	if err := agentlaunch.LaunchFixAgent(ctx, fixAgent, prompt); err != nil {
 		return fmt.Errorf("launch review fix agent: %w", err)
 	}
@@ -242,6 +260,101 @@ func selectReviewFindings(ctx context.Context, cmd *cobra.Command, sources []rev
 		}
 	}
 	return selected, nil
+}
+
+// shouldUseInteractiveFixPicker reports whether the unified, navigable
+// source+findings picker applies: an interactive terminal with more than one
+// fix source (the only case where the back-and-forth between the source and
+// findings steps is useful).
+func shouldUseInteractiveFixPicker(cmd *cobra.Command, manifest LocalReviewManifest) bool {
+	if !interactive.IsTerminalWriter(cmd.OutOrStdout()) || !interactive.CanPromptInteractively() {
+		return false
+	}
+	return len(reviewFixSourcesForManifest(manifest)) > 1
+}
+
+// selectReviewFixInteractive presents source selection and findings selection
+// as a single huh form with two groups, so the user can move back to the
+// source step and change their mind — e.g. switch to the Aggregate source —
+// without restarting the command (mirrors the config wizard's navigation).
+//
+// The findings group's options are recomputed (OptionsFunc) from whichever
+// sources are currently selected, bound to the source selection so going back
+// and changing it refreshes the findings list. Returns the selected sources
+// (for fix-agent resolution) and the selected findings.
+func selectReviewFixInteractive(ctx context.Context, manifest LocalReviewManifest) ([]reviewFixSource, []reviewFinding, error) {
+	sources := reviewFixSourcesForManifest(manifest)
+	sourceValues := make([]string, len(sources))
+	sourceOptions := make([]huh.Option[string], len(sources))
+	for i, source := range sources {
+		value := strconv.Itoa(i)
+		sourceValues[i] = value
+		sourceOptions[i] = huh.NewOption(source.Label, value)
+	}
+	pickedSources := defaultReviewFixSourceSelection(sources)
+	var pickedFindings []string
+
+	selectedSources := func() []reviewFixSource {
+		out := make([]reviewFixSource, 0, len(pickedSources))
+		for _, value := range pickedSources {
+			if idx := slices.Index(sourceValues, value); idx >= 0 {
+				out = append(out, sources[idx])
+			}
+		}
+		return out
+	}
+	findingsOptions := func() []huh.Option[string] {
+		findings := extractReviewFindings(selectedSources())
+		opts := make([]huh.Option[string], len(findings))
+		for i, finding := range findings {
+			opts[i] = huh.NewOption(finding.Title, finding.ID)
+		}
+		return opts
+	}
+
+	form := newAccessibleForm(
+		huh.NewGroup(
+			huh.NewMultiSelect[string]().
+				Title(reviewFixSourcePickerTitle(manifest)).
+				Description("space toggle · ctrl+a all · enter next").
+				Options(sourceOptions...).
+				Height(reviewPickerHeight(len(sourceOptions))).
+				Value(&pickedSources).
+				Validate(func(value []string) error {
+					if len(value) == 0 {
+						return errors.New("select at least one source")
+					}
+					return nil
+				}),
+		),
+		huh.NewGroup(
+			huh.NewMultiSelect[string]().
+				Title("Select findings to fix").
+				Description("space toggle · ctrl+a all · shift+tab back to sources · enter fix").
+				OptionsFunc(findingsOptions, &pickedSources).
+				Height(reviewPickerHeight(len(extractReviewFindings(sources)))).
+				Value(&pickedFindings).
+				Validate(func(value []string) error {
+					if len(value) == 0 {
+						return errors.New("select at least one finding (or shift+tab to change sources)")
+					}
+					return nil
+				}),
+		),
+	)
+	if err := form.RunWithContext(ctx); err != nil {
+		return nil, nil, fmt.Errorf("review fix picker: %w", err)
+	}
+
+	chosenSources := selectedSources()
+	allFindings := extractReviewFindings(chosenSources)
+	selected := make([]reviewFinding, 0, len(pickedFindings))
+	for _, finding := range allFindings {
+		if slices.Contains(pickedFindings, finding.ID) {
+			selected = append(selected, finding)
+		}
+	}
+	return chosenSources, selected, nil
 }
 
 func composeReviewFixPrompt(manifest LocalReviewManifest, sources []reviewFixSource) string {
@@ -400,12 +513,24 @@ func reviewFindingTitle(line string) (string, bool) {
 		return line, true
 	}
 	lower := strings.ToLower(line)
-	for _, prefix := range []string{"blocker", "critical", "high", "medium", "low"} {
-		if strings.HasPrefix(lower, prefix+":") || strings.HasPrefix(lower, prefix+" -") || strings.HasPrefix(lower, prefix+".") {
+	for _, sev := range []string{"blocker", "critical", "high", "medium", "low"} {
+		if !strings.HasPrefix(lower, sev) {
+			continue
+		}
+		// Require a non-letter boundary after the severity word so we match the
+		// real formats agents emit — "Medium:", "High -", "Critical.", and
+		// codex's bolded "**Medium** [file]: …" (which arrives here as
+		// "Medium** [file]…" after the leading markdown is trimmed) — without
+		// matching ordinary words like "lower" or "highlight".
+		if rest := lower[len(sev):]; rest == "" || !isASCIILetter(rest[0]) {
 			return line, true
 		}
 	}
 	return "", false
+}
+
+func isASCIILetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 func isSeverityNumberedTitle(line string) bool {
@@ -446,160 +571,40 @@ func selectedSourcesOutput(sources []reviewFixSource) string {
 	return strings.TrimSpace(b.String())
 }
 
-func resolveReviewFixAgent(ctx context.Context, cmd *cobra.Command, sources []reviewFixSource, agentOverride string) (string, error) {
+func resolveReviewFixAgent(ctx context.Context, _ *cobra.Command, _ []reviewFixSource, agentOverride string) (string, error) {
 	if agentOverride != "" {
 		return agentOverride, nil
 	}
-	if agentName, ok := reviewFixAgentFromSelectedSources(sources); ok {
-		return agentName, nil
-	}
-
 	s, err := settings.Load(ctx)
 	if err != nil {
 		return "", fmt.Errorf("load review fix settings: %w", err)
 	}
-	choices := reviewFixAgentChoices(s.Review)
-	if len(choices) == 0 {
-		choices = reviewFixAgentChoicesFromSources(sources)
+	fixer := FixerOf(s)
+	if fixer == "" {
+		return "", errors.New("no Fixer configured — run: entire review setup")
 	}
-	switch len(choices) {
-	case 0:
-		return "", errors.New("cannot determine fix agent; rerun with --agent")
-	case 1:
-		return choices[0].Name, nil
-	}
-	if pick, ok := savedReviewFixAgentPick(choices, s.ReviewFixAgent); ok {
-		return pick, nil
-	}
-
-	if !interactive.IsTerminalWriter(cmd.OutOrStdout()) || !interactive.CanPromptInteractively() {
-		return "", errors.New("multiple fix agents configured; rerun with --agent or run `entire review --edit`")
-	}
-
-	picked, err := promptForReviewFixAgent(ctx, choices, s.ReviewFixAgent)
-	if err != nil {
-		return "", err
-	}
-	if err := SaveReviewFixAgent(ctx, picked); err != nil {
-		return "", err
-	}
-	return picked, nil
-}
-
-func reviewFixAgentFromSelectedSources(sources []reviewFixSource) (string, bool) {
-	if len(sources) != 1 {
-		return "", false
-	}
-	source := sources[0]
-	if source.Kind != reviewFixSourceAgent || source.Agent == "" {
-		return "", false
-	}
-	return source.Agent, true
-}
-
-func reviewFixAgentChoices(configured map[string]settings.ReviewConfig) []AgentChoice {
-	choices := make([]AgentChoice, 0, len(configured))
-	for name, cfg := range configured {
-		if cfg.IsZero() {
-			continue
-		}
-		choice, ok := reviewFixAgentChoice(name)
-		if ok {
-			choices = append(choices, choice)
-		}
-	}
-	slices.SortFunc(choices, func(a, b AgentChoice) int {
-		return strings.Compare(a.Name, b.Name)
-	})
-	return choices
-}
-
-func reviewFixAgentChoicesFromSources(sources []reviewFixSource) []AgentChoice {
-	seen := map[string]struct{}{}
-	var choices []AgentChoice
-	for _, source := range sources {
-		if source.Agent == "" {
-			continue
-		}
-		if _, ok := seen[source.Agent]; ok {
-			continue
-		}
-		choice, ok := reviewFixAgentChoice(source.Agent)
-		if !ok {
-			continue
-		}
-		seen[source.Agent] = struct{}{}
-		choices = append(choices, choice)
-	}
-	slices.SortFunc(choices, func(a, b AgentChoice) int {
-		return strings.Compare(a.Name, b.Name)
-	})
-	return choices
-}
-
-func reviewFixAgentChoice(name string) (AgentChoice, bool) {
-	if _, ok := agent.LauncherFor(agenttypes.AgentName(name)); !ok {
-		return AgentChoice{}, false
-	}
-	label := name
-	if ag, err := agent.Get(agenttypes.AgentName(name)); err == nil {
-		label = string(ag.Type())
-	}
-	return AgentChoice{Name: name, Label: label}, true
-}
-
-func defaultReviewFixAgentPick(choices []AgentChoice, saved string) string {
-	if pick, ok := savedReviewFixAgentPick(choices, saved); ok {
-		return pick
-	}
-	if len(choices) == 0 {
-		return ""
-	}
-	return choices[0].Name
-}
-
-func savedReviewFixAgentPick(choices []AgentChoice, saved string) (string, bool) {
-	for _, choice := range choices {
-		if choice.Name == saved {
-			return saved, true
-		}
-	}
-	return "", false
-}
-
-func promptForReviewFixAgent(ctx context.Context, choices []AgentChoice, saved string) (string, error) {
-	options := make([]huh.Option[string], 0, len(choices))
-	for _, choice := range choices {
-		options = append(options, huh.NewOption(choice.Label, choice.Name))
-	}
-	picked := defaultReviewFixAgentPick(choices, saved)
-	form := newAccessibleForm(huh.NewGroup(
-		huh.NewSelect[string]().
-			Title("Choose fix agent").
-			Description("Used for aggregate or multi-agent review findings. Saved for next time.").
-			Options(options...).
-			Height(reviewPickerHeight(len(options))).
-			Value(&picked),
-	))
-	if err := form.RunWithContext(ctx); err != nil {
-		return "", fmt.Errorf("fix agent picker: %w", err)
-	}
-	return picked, nil
+	return fixer, nil
 }
 
 func writeReviewCompletionFooter(w io.Writer, manifest LocalReviewManifest) {
-	handle := reviewManifestHandle(manifest)
-	if handle == "" {
+	// Skip only when the manifest is truly empty (review ran but nothing was
+	// persisted). A codex-only run has sources with output but no SessionID
+	// (codex exec fires no hook to tag a session) — it must still get the
+	// footer. `entire review fix` with no handle resolves to the most-recent
+	// manifest, so the handle is optional.
+	if len(manifest.Sources) == 0 && strings.TrimSpace(manifest.AggregateOutput) == "" {
 		return
+	}
+	handle := reviewManifestHandle(manifest)
+	arg := ""
+	if handle != "" {
+		arg = " " + handle
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Review complete.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "To apply all review findings:")
-	fmt.Fprintf(w, "  %s review --fix %s --all\n", reviewCommandBinary, handle)
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "To choose findings:")
-	fmt.Fprintf(w, "  %s review --fix %s\n", reviewCommandBinary, handle)
+	fmt.Fprintf(w, "Run: %s review fix%s --all      apply all findings\n", reviewCommandBinary, arg)
+	fmt.Fprintf(w, "     %s review fix%s            choose findings interactively\n", reviewCommandBinary, arg)
 }
 
 func reviewManifestHandle(manifest LocalReviewManifest) string {
@@ -617,8 +622,8 @@ func printReviewFindingsList(w io.Writer, manifests []LocalReviewManifest) {
 	commandName := reviewCommandBinary
 	for _, manifest := range manifests {
 		fmt.Fprintf(w, "%s\n", reviewManifestListLabel(manifest))
-		fmt.Fprintf(w, "  fix all: %s review --fix %s --all\n", commandName, reviewManifestHandle(manifest))
-		fmt.Fprintf(w, "  choose:  %s review --fix %s\n", commandName, reviewManifestHandle(manifest))
+		fmt.Fprintf(w, "  fix all: %s review fix %s --all\n", commandName, reviewManifestHandle(manifest))
+		fmt.Fprintf(w, "  choose:  %s review fix %s\n", commandName, reviewManifestHandle(manifest))
 	}
 }
 
@@ -664,6 +669,76 @@ func reviewManifestListLabel(manifest LocalReviewManifest) string {
 		return fmt.Sprintf("%s · local · %s · %s", handle, strings.Join(agents, ", "), preview)
 	}
 	return fmt.Sprintf("%s · local · %s", handle, strings.Join(agents, ", "))
+}
+
+// newReviewFixCmd returns the `entire review fix` cobra subcommand.
+//
+// It is the canonical entry point for applying review findings; the
+// legacy `entire review --fix` flag still works but emits a deprecation
+// hint via the parent `review` command's RunE.
+func newReviewFixCmd(deps Deps) *cobra.Command {
+	var (
+		all           bool
+		agentOverride string
+		perRunPrompt  string
+		reviewersFlag []string
+		fixerFlag     string
+	)
+	cmd := &cobra.Command{
+		Use:   "fix [session-id]",
+		Short: "Apply review findings via the configured Fixer agent",
+		Long: `Apply review findings via the configured Fixer agent.
+
+With no positional argument, the most recent review run is selected
+(or the user is prompted to pick when multiple exist).
+
+Flags:
+  --all              apply all findings/sources without selectors
+  --agent NAME       override the configured Fixer for this run
+  --prompt TEXT      per-run extra context appended to the fix prompt
+  --reviewers LIST   one-off override: agents to use as reviewers
+  --fixer NAME       one-off override: agent to use as fixer`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			external.DiscoverAndRegister(ctx)
+			target := ""
+			if len(args) == 1 {
+				target = args[0]
+			}
+			// One-off flag overrides apply by writing to settings in-memory
+			// before runReviewFix loads them via settings.Load — we capture
+			// the override here and re-resolve fix agent.
+			installed := deps.GetAgentsWithHooksInstalled(ctx)
+			override, err := resolveRolesFromFlags(reviewersFlag, fixerFlag, installed)
+			if err != nil {
+				cmd.SilenceUsage = true
+				fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
+				return wrapReviewSilentError(deps.NewSilentError, err)
+			}
+			if override != nil {
+				// --fixer wins for the fix subcommand. Prefer the
+				// explicit --fixer name; otherwise use FixerOf on the
+				// override.
+				fix := strings.TrimSpace(fixerFlag)
+				if fix != "" {
+					agentOverride = fix
+				} else {
+					tmp := &settings.EntireSettings{Review: override}
+					if f := FixerOf(tmp); f != "" {
+						agentOverride = f
+					}
+				}
+			}
+			return runReviewFix(ctx, cmd, target, all, agentOverride, perRunPrompt, deps.NewSilentError)
+		},
+	}
+	cmd.Flags().BoolVar(&all, "all", false, "apply all findings/sources without selectors")
+	cmd.Flags().StringVar(&agentOverride, "agent", "", "override the configured Fixer for this run")
+	cmd.Flags().StringVar(&perRunPrompt, "prompt", "", "per-run extra context appended to the fix prompt")
+	cmd.Flags().StringSliceVar(&reviewersFlag, "reviewers", nil, "one-off override: agents to use as reviewers (comma-separated or repeatable)")
+	cmd.Flags().StringVar(&fixerFlag, "fixer", "", "one-off override: agent to use as fixer")
+	return cmd
 }
 
 func reviewManifestPreview(manifest LocalReviewManifest) string {

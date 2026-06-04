@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
@@ -30,6 +31,42 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
+// ContextResult bundles the composed checkpoint/session context with
+// the counts of checkpoints and in-progress sessions reflected in it.
+// Counts power the transparency banner; Prompt is what flows into the
+// agent's composed review prompt.
+type ContextResult struct {
+	// Prompt is the composed context text injected into the agent prompt.
+	// Empty when no checkpoints or sessions contributed.
+	Prompt string
+	// Checkpoints is the number of unique committed checkpoints rendered in
+	// the composed prompt (capped at the renderer's internal limit; the
+	// truncation tail is not counted).
+	Checkpoints int
+	// Sessions is the number of in-progress sessions rendered in the
+	// composed prompt.
+	Sessions int
+	// CheckpointItems lists the committed checkpoints in scope (short id +
+	// one-line summary) for the human-facing scope banner. Len matches
+	// Checkpoints.
+	CheckpointItems []CheckpointScopeItem
+	// SessionItems lists the in-progress sessions in scope (agent + latest
+	// prompt) for the scope banner. Len matches Sessions.
+	SessionItems []SessionScopeItem
+}
+
+// CheckpointScopeItem is one committed checkpoint shown in the scope banner.
+type CheckpointScopeItem struct {
+	ID      string // short checkpoint id (first 8 hex chars)
+	Summary string // one-line commit subject / checkpoint summary
+}
+
+// SessionScopeItem is one in-progress session shown in the scope banner.
+type SessionScopeItem struct {
+	ID    string // short session id (first 8 chars) — stable, unlike a long prompt
+	Agent string // display name of the agent that owns the session
+}
+
 // Deps collects the runtime-injectable hooks NewCommand needs from the
 // parent cli package. Tests stub fields to drive branches that would
 // otherwise require a real TTY or enabled repo. Production wiring is
@@ -43,23 +80,17 @@ type Deps struct {
 	// NewSilentError wraps an error so the cobra root does not double-print it.
 	NewSilentError func(err error) error
 
-	// PromptForAgentFn overrides the interactive agent picker. Nil means
-	// PromptForAgent is used (the real huh form). Tests inject a stub.
-	PromptForAgentFn func(ctx context.Context, eligible []AgentChoice) (string, error)
-
-	// MultiPickerFn overrides PickAgents for the multi-agent picker. Nil
-	// means PickAgents is used (the real huh form). Tests inject a stub.
-	MultiPickerFn func(ctx context.Context, eligible []AgentChoice) (PickedAgents, error)
-
 	// HeadHasReviewCheckpoint checks whether HEAD's checkpoint metadata
 	// includes a review session. Returns (true, infoString) if HasReview is set.
 	// Injected to avoid an import cycle: review → checkpoint → codex → review.
 	HeadHasReviewCheckpoint func(ctx context.Context) (bool, string)
 
 	// ReviewCheckpointContext returns best-effort checkpoint context for the
-	// branch review scope. Injected from the cli package because checkpoint
-	// readers cannot be imported here without cycling through agent reviewers.
-	ReviewCheckpointContext func(ctx context.Context, worktreeRoot string, scopeBaseRef string) string
+	// branch review scope along with the counts of checkpoints and in-progress
+	// sessions reflected in the composed prompt. Counts power the transparency
+	// banner. Injected from the cli package because checkpoint readers cannot
+	// be imported here without cycling through agent reviewers.
+	ReviewCheckpointContext func(ctx context.Context, worktreeRoot string, scopeBaseRef string) ContextResult
 
 	// ReviewerFor maps an agent registry name to its AgentReviewer
 	// implementation. Returns nil for non-launchable agents (cursor, opencode,
@@ -84,14 +115,6 @@ type Deps struct {
 	PromptYN func(ctx context.Context, question string, def bool) (bool, error)
 }
 
-// runReviewDeps carries the subset of Deps that runReview itself reads
-// directly (vs. NewCommand's wiring). Kept unexported so tests construct a
-// Deps value at the package boundary; runReview unpacks the relevant fields.
-type runReviewDeps struct {
-	promptForAgentFn func(ctx context.Context, eligible []AgentChoice) (string, error)
-	multiPickerFn    func(ctx context.Context, eligible []AgentChoice) (PickedAgents, error)
-}
-
 // NewCommand returns the `entire review` cobra command wired with the
 // provided deps. Callers in the cli package pass a fully-populated Deps;
 // tests pass a Deps with stub fields.
@@ -102,6 +125,9 @@ func NewCommand(deps Deps) *cobra.Command {
 	var findings bool
 	var fix bool
 	var all bool
+	var perRunPrompt string
+	var reviewersFlag []string
+	var fixerFlag string
 
 	cmd := &cobra.Command{
 		Use: "review",
@@ -111,8 +137,7 @@ func NewCommand(deps Deps) *cobra.Command {
 		Hidden: true,
 		Short:  "Run configured review skills against the current branch",
 		Long: `Run configured review skills against the current branch. Review
-preferences are loaded from Entire settings and clone-local preferences. On
-first run, an interactive picker writes clone-local preferences.
+preferences are loaded from Entire settings.
 
 Labs entry: review is experimental. We are actively refining it based on user
 feedback.
@@ -121,20 +146,20 @@ The review session is recorded as part of the next checkpoint, so the
 review metadata is permanently attached to the commit it covers.
 
 Flags:
-  --edit         re-open the review config picker
-  --findings     browse local review findings
-  --fix          apply review findings in a normal agent session
-  --all          with --fix, apply all sources/findings without selectors
-  --agent NAME   select a specific configured agent when more than one is
-                 configured (default: alphabetically first)
-  --base REF     scope the review against REF instead of mainline. Useful
-                 for stacked PRs where the review base is the parent feature
-                 branch, not main. Default: first existing of origin/HEAD,
-                 origin/main, origin/master, main, master.
+  --edit             re-open the review config picker (alias for setup)
+  --findings         browse local review findings
+  --fix              DEPRECATED: use 'entire review fix' instead
+  --all              with --fix, apply all sources/findings without selectors
+  --agent NAME       select a specific configured agent (default: alphabetically first)
+  --base REF         scope the review against REF instead of mainline.
+  --prompt TEXT      per-run extra context (bypasses the inline ask)
+  --reviewers LIST   one-off override: agents to use as reviewers (comma-separated)
+  --fixer NAME       one-off override: agent to use as fixer
 
 Subcommands:
-  attach <id>    tag an existing session as a review (equivalent to
-                 'entire attach --review <id>')`,
+  setup              configure reviewers, fixer, and per-agent skills
+  fix [session-id]   apply review findings via the configured Fixer
+  attach <id>        tag an existing session as a review`,
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) > 1 {
 				return fmt.Errorf("accepts at most one review session id, received %d", len(args))
@@ -163,60 +188,78 @@ Subcommands:
 			if modes > 1 {
 				return errors.New("--edit, --findings, and --fix are mutually exclusive")
 			}
-			// The migration prompt is only relevant for flows that write or
-			// read picker config (--edit and the default review run).
-			// --findings (read-only browsing) and --fix (uses
-			// ReviewFixAgent only) don't interact with the picker, so
-			// prompting in those paths interrupts the user for no reason.
-			if !findings && !fix {
-				if err := maybePromptReviewSettingsMigration(
-					ctx,
-					cmd.OutOrStdout(),
-					cmd.ErrOrStderr(),
-					interactive.IsTerminalWriter(cmd.OutOrStdout()) && interactive.CanPromptInteractively(),
-					deps.PromptYN,
-				); err != nil {
-					return err
-				}
-			}
-			if edit {
-				_, err := RunReviewConfigPicker(ctx, cmd.OutOrStdout(), deps.GetAgentsWithHooksInstalled)
-				return err
-			}
 			if findings {
 				return runReviewFindings(ctx, cmd, deps.NewSilentError)
 			}
 			if fix {
+				fmt.Fprintln(cmd.ErrOrStderr(),
+					"Hint: `entire review --fix` is deprecated; use `entire review fix` instead.")
 				target := ""
 				if len(args) == 1 {
 					target = args[0]
 				}
-				return runReviewFix(ctx, cmd, target, all, agentOverride, deps.NewSilentError)
+				return runReviewFix(ctx, cmd, target, all, agentOverride, perRunPrompt, deps.NewSilentError)
 			}
-			innerDeps := runReviewDeps{
-				promptForAgentFn: deps.PromptForAgentFn,
-				multiPickerFn:    deps.MultiPickerFn,
+			// The migration prompt is only relevant for flows that write or
+			// read picker config.
+			if err := maybePromptReviewSettingsMigration(
+				ctx,
+				cmd.OutOrStdout(),
+				cmd.ErrOrStderr(),
+				interactive.IsTerminalWriter(cmd.OutOrStdout()) && interactive.CanPromptInteractively(),
+				deps.PromptYN,
+			); err != nil {
+				return err
 			}
-			return runReview(ctx, cmd, agentOverride, baseOverride, deps, innerDeps)
+			if edit {
+				external.DiscoverAndRegister(ctx)
+				_, err := RunSetup(ctx, cmd.OutOrStdout(),
+					deps.GetAgentsWithHooksInstalled, SetupForms{})
+				return err
+			}
+			return runReview(ctx, cmd, agentOverride, baseOverride, perRunPrompt, reviewersFlag, fixerFlag, deps)
 		},
 	}
-	cmd.Flags().BoolVar(&edit, "edit", false, "re-open the review config picker")
+	cmd.Flags().BoolVar(&edit, "edit", false, "re-open the review config picker (alias for `entire review setup`)")
 	cmd.Flags().BoolVar(&findings, "findings", false, "browse local review findings")
-	cmd.Flags().BoolVar(&fix, "fix", false, "apply review findings in a normal agent session")
+	cmd.Flags().BoolVar(&fix, "fix", false, "DEPRECATED: use `entire review fix` instead")
 	cmd.Flags().BoolVar(&all, "all", false, "with --fix, apply all sources/findings without selectors")
 	cmd.Flags().StringVar(&agentOverride, "agent", "", "select a specific configured agent (default: alphabetically first)")
 	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)")
+	cmd.Flags().StringVar(&perRunPrompt, "prompt", "", "per-run extra context appended to reviewer instructions; bypasses the inline ask")
+	cmd.Flags().StringSliceVar(&reviewersFlag, "reviewers", nil, "one-off override: agents to use as reviewers (comma-separated or repeatable; e.g. --reviewers claude-code,codex)")
+	cmd.Flags().StringVar(&fixerFlag, "fixer", "", "one-off override: agent to use as fixer (e.g. --fixer codex)")
+	// Hide the deprecated --fix flag from help but keep it functional for one
+	// release; the RunE prints a hint redirecting users to `entire review fix`.
+	if err := cmd.Flags().MarkHidden("fix"); err != nil {
+		// Should not happen for a flag we just declared.
+		logging.Debug(context.Background(), "mark --fix hidden failed", slog.String("error", err.Error()))
+	}
 	if deps.AttachCmd != nil {
 		cmd.AddCommand(deps.AttachCmd)
 	}
 	cmd.AddCommand(newReviewSetupCmd(deps))
+	cmd.AddCommand(newReviewFixCmd(deps))
 	return cmd
 }
 
-// runReview executes the main review flow.
-func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, baseOverride string, deps Deps, innerDeps runReviewDeps) error {
+// runReview executes the main review flow. perRunPrompt is the value of
+// the --prompt flag (empty when not set; the inline ask runs when empty
+// and stdin is promptable). reviewersFlag / fixerFlag carry the one-off
+// role overrides; when either is non-empty, saved config is replaced
+// for this invocation only and is NOT persisted.
+func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, baseOverride, perRunPrompt string, reviewersFlag []string, fixerFlag string, deps Deps) error {
 	out := cmd.OutOrStdout()
 	silentErr := deps.NewSilentError
+
+	// 0. Recursion guard. Prevents fan-out loops when a reviewer agent's
+	// prompt accidentally tries to re-invoke `entire review`.
+	if os.Getenv(EnvSession) != "" {
+		cmd.SilenceUsage = true
+		fmt.Fprintln(cmd.ErrOrStderr(), "Already in a review session — refusing to start a nested review.")
+		fmt.Fprintln(cmd.ErrOrStderr(), "If you reached this from a reviewer agent's prompt, this is likely a loop and you should exit the inner agent.")
+		return silentErr(errors.New("nested review session refused"))
+	}
 
 	// 1. Pre-flight: must be in a git repo.
 	if _, err := paths.WorktreeRoot(ctx); err != nil {
@@ -227,99 +270,141 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, baseOverr
 
 	// 2. Load config. A load error means the settings file exists but is
 	// malformed (Load returns a default-filled object when the file is
-	// missing). Surface the error instead of silently opening the picker,
-	// which would cause the config writer to write over the user's other
-	// settings with an empty EntireSettings{}.
+	// missing). Surface the error instead of silently overwriting.
 	s, err := settings.Load(ctx)
 	if err != nil {
 		cmd.SilenceUsage = true
 		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to load settings: %v\n", err)
 		fmt.Fprintln(cmd.ErrOrStderr(),
-			"Fix your Entire settings or clone-local review preferences and re-run `entire review`.")
+			"Fix your Entire settings and re-run `entire review`.")
 		return silentErr(err)
 	}
-	if s == nil || len(s.Review) == 0 {
-		if !ConfirmFirstRunSetup(ctx, out) {
-			return nil
+
+	installed := deps.GetAgentsWithHooksInstalled(ctx)
+
+	// 3. Flag-based one-off overrides take precedence over saved config.
+	override, overrideErr := resolveRolesFromFlags(reviewersFlag, fixerFlag, installed)
+	if overrideErr != nil {
+		cmd.SilenceUsage = true
+		fmt.Fprintln(cmd.ErrOrStderr(), overrideErr.Error())
+		return silentErr(overrideErr)
+	}
+	if override != nil {
+		// `entire review` needs at least one Reviewer (or Both). Flag-based
+		// override that only sets a Fixer is rejected here, not in
+		// resolveRolesFromFlags, because `entire review fix` legitimately
+		// resolves a fixer-only override (no reviewer needed).
+		hasReviewer := false
+		for _, cfg := range override {
+			if cfg.Role.IsReviewer() {
+				hasReviewer = true
+				break
+			}
 		}
-		picked, pickErr := RunReviewConfigPicker(ctx, out, deps.GetAgentsWithHooksInstalled)
-		if pickErr != nil {
-			return pickErr
+		if !hasReviewer {
+			cmd.SilenceUsage = true
+			msg := errors.New(
+				"--fixer alone defines a fixer with no reviewer; entire review needs at least one " +
+					"(pass --reviewers <agents> to fix this, or run `entire review fix` for fix-only operations)",
+			)
+			fmt.Fprintln(cmd.ErrOrStderr(), msg.Error())
+			return silentErr(msg)
 		}
 		if s == nil {
 			s = &settings.EntireSettings{}
 		}
-		s.Review = picked
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Setup complete — running review now.")
+		s.Review = mergeFlagOverrideWithSavedSkills(ctx, override, s.Review)
 	}
 
-	// 3. Resolve installed agents and determine the dispatch path.
-	//
-	// Three paths:
-	//   - Multi-agent: 2+ launchable eligible agents AND no --agent override →
-	//     show multi-select picker then RunMulti. Steps 3.5, 3.6, and the
-	//     single-agent skill-verify guard are skipped; each reviewer pulls
-	//     its own skills from settings at spawn time via RunConfig.
-	//   - Single-agent (default): 1 or fewer launchable eligible agents, OR
-	//     --agent override set. Falls through to the full agent-selection and
-	//     validation path below (steps 3–3.6).
-	installed := deps.GetAgentsWithHooksInstalled(ctx)
-	if agentOverride == "" {
-		launchableEligible := computeLaunchableEligible(s, installed, deps.ReviewerFor)
-		if len(launchableEligible) >= 2 {
-			return runMultiAgentPath(ctx, cmd, launchableEligible, baseOverride, s, innerDeps, deps, out)
+	// userExplicitlyOmittedFixer = `--reviewers` passed but `--fixer` empty.
+	// Drives the post-review footer (offers `--fixer <agent>` hint instead
+	// of the setup nag when no Fixer is configured).
+	userExplicitlyOmittedFixer := len(reviewersFlag) > 0 && strings.TrimSpace(fixerFlag) == ""
+
+	// 4. Replace the legacy auto-picker with the invoker-aware fallback.
+	if s == nil || len(s.Review) == 0 {
+		if interactive.CanPromptInteractively() {
+			cmd.SilenceUsage = true
+			fmt.Fprintln(cmd.ErrOrStderr(), "Not configured yet.")
+			fmt.Fprintln(cmd.ErrOrStderr())
+			fmt.Fprintln(cmd.ErrOrStderr(), "Run: entire review setup")
+			return silentErr(errors.New("review not configured"))
 		}
-	}
-
-	// Single-agent path: pick agent, verify hooks + skills, scope, run.
-
-	// 3a. Base selection on the eligible set (configured AND installed):
-	//   - 0 eligible: fall through; SelectReviewAgent below errors with the
-	//     full configured map (clearer "no installed agent" diagnostic than
-	//     a silent fail).
-	//   - 1 eligible: use it directly. This matters when the alphabetically-
-	//     first configured agent isn't installed but exactly one other is —
-	//     without this, SelectReviewAgent would default to the alphabetical
-	//     first and the verify-hooks check below would error needlessly.
-	//   - 2+ eligible: prompt with single-select (non-launchable agents reach
-	//     this branch since computeLaunchableEligible filtered them out above).
-	if agentOverride == "" {
-		eligible := ComputeEligibleConfigured(s, installed)
-		switch {
-		case len(eligible) == 1:
-			agentOverride = eligible[0].Name
-		case len(eligible) > 1:
-			fn := innerDeps.promptForAgentFn
-			if fn == nil {
-				fn = PromptForAgent
-			}
-			picked, pickErr := fn(ctx, eligible)
-			if pickErr != nil {
-				cmd.SilenceUsage = true
-				fmt.Fprintln(cmd.ErrOrStderr(), pickErr.Error())
-				return silentErr(pickErr)
-			}
-			if picked == "" {
-				// Defensive: empty picker return must not fall through to
-				// alphabetical-first default.
-				cmd.SilenceUsage = true
-				emptyErr := errors.New("agent picker returned empty agent name")
-				fmt.Fprintln(cmd.ErrOrStderr(), emptyErr.Error())
-				return silentErr(emptyErr)
-			}
-			agentOverride = picked
+		// Non-interactive: try invoker-only fallback.
+		invoker := DetectInvokingAgent()
+		if invoker == "" {
+			cmd.SilenceUsage = true
+			fmt.Fprintln(cmd.ErrOrStderr(),
+				"Cannot run review: no config, no --reviewers/--fixer flags, and no invoking agent detected (CI / piped).")
+			fmt.Fprintln(cmd.ErrOrStderr(), "Run: entire review setup (from an interactive shell)")
+			return silentErr(errors.New("review not configured and no invoker"))
 		}
+		cfg, bErr := invokerOnlyReviewConfig(ctx, invoker, installed)
+		if bErr != nil {
+			cmd.SilenceUsage = true
+			fmt.Fprintln(cmd.ErrOrStderr(), "Cannot run review:", bErr)
+			fmt.Fprintln(cmd.ErrOrStderr(), "Hint: from an interactive shell, run `entire review setup`.")
+			return silentErr(bErr)
+		}
+		if s == nil {
+			s = &settings.EntireSettings{}
+		}
+		s.Review = cfg
+		// Intentionally do NOT persist — this is a one-off fallback like
+		// --reviewers/--fixer. Persisting would create hidden state: a user
+		// who runs first from Claude Code, later from Codex, would silently
+		// get the saved Claude-Both config instead of switching to Codex-Both.
+		fmt.Fprintln(out, formatInvokerOnlyNote(invoker))
 	}
 
-	agentName, cfg, err := SelectReviewAgent(s.Review, agentOverride)
-	if err != nil {
+	// 5. Resolve reviewers from roles. Roles answer "who reviews" up front;
+	// the spawn-time multi-agent picker is gone.
+	reviewers := ReviewersOf(s)
+	if len(reviewers) == 0 {
 		cmd.SilenceUsage = true
-		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-		return silentErr(err)
+		fmt.Fprintln(cmd.ErrOrStderr(), "No agents are configured as Reviewers.")
+		fmt.Fprintln(cmd.ErrOrStderr(), "Run: entire review setup")
+		return silentErr(errors.New("no reviewers configured"))
 	}
 
-	return runSingleAgentPath(ctx, cmd, agentName, baseOverride, cfg, installed, deps, out)
+	// 6. The optional inline per-run prompt ask happens inside the dispatch
+	// paths, AFTER the scope + checkpoint/session banner is printed — so the
+	// user sees everything that's about to be reviewed (the staging summary)
+	// before deciding what extra context to add, and the banner isn't
+	// immediately obscured by the live TUI.
+
+	// 7. Dispatch:
+	//   - With --agent override: single-agent path against the named agent.
+	//   - Otherwise: all configured reviewers (1 = single, 2+ = multi).
+	if agentOverride != "" {
+		cfg, ok := s.Review[agentOverride]
+		if !ok || cfg.IsZero() {
+			err := fmt.Errorf("agent %q is not configured as a reviewer", agentOverride)
+			cmd.SilenceUsage = true
+			fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
+			return silentErr(err)
+		}
+		return runSingleAgentPath(ctx, cmd, agentOverride, baseOverride, perRunPrompt, cfg, installed, deps, out, s, userExplicitlyOmittedFixer)
+	}
+
+	if len(reviewers) == 1 {
+		name := reviewers[0]
+		cfg := s.Review[name]
+		return runSingleAgentPath(ctx, cmd, name, baseOverride, perRunPrompt, cfg, installed, deps, out, s, userExplicitlyOmittedFixer)
+	}
+
+	choices := agentChoicesFrom(reviewers, s.Review)
+	return runMultiAgentPath(ctx, cmd, choices, baseOverride, perRunPrompt, s, deps, out, userExplicitlyOmittedFixer)
+}
+
+// agentChoicesFrom converts a sorted slice of agent names into the
+// AgentChoice slice consumed by runMultiAgentPath.
+func agentChoicesFrom(names []string, m map[string]settings.ReviewConfig) []AgentChoice {
+	out := make([]AgentChoice, len(names))
+	for i, n := range names {
+		out[i] = AgentChoice{Name: n, Label: labelForAgentChoice(n, m[n])}
+	}
+	return out
 }
 
 // runSingleAgentPath completes a single-agent review: verifies hooks + skills,
@@ -328,11 +413,13 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, baseOverr
 func runSingleAgentPath(
 	ctx context.Context,
 	cmd *cobra.Command,
-	agentName, baseOverride string,
+	agentName, baseOverride, perRunPrompt string,
 	cfg settings.ReviewConfig,
 	installed []types.AgentName,
 	deps Deps,
 	out io.Writer,
+	s *settings.EntireSettings,
+	userExplicitlyOmittedFixer bool,
 ) error {
 	silentErr := deps.NewSilentError
 
@@ -395,19 +482,23 @@ func runSingleAgentPath(
 		cmd.SilenceUsage = true
 		return fmt.Errorf("resolve HEAD: %w", shaErr)
 	}
-	scopeBaseRef, scopeErr := detectScope(ctx, worktreeRoot, baseOverride, out)
+	scopeBaseRef, scopeBanner, scopeErr := detectScope(ctx, worktreeRoot, baseOverride)
 	if scopeErr != nil {
 		cmd.SilenceUsage = true
 		return scopeErr
 	}
-	checkpointContext := ""
+	var ctxResult ContextResult
 	if deps.ReviewCheckpointContext != nil {
-		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
+		ctxResult = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
 	}
+	// Staging step: present the scope + checkpoints/sessions and collect the
+	// optional per-run prompt in one styled view, before fan-out.
+	perRunPrompt = stagePerRunContext(ctx, out, scopeBanner, ctxResult, perRunPrompt)
 
 	runCfg := reviewtypes.RunConfig{
+		PerRunPrompt:      perRunPrompt,
 		ScopeBaseRef:      scopeBaseRef,
-		CheckpointContext: checkpointContext,
+		CheckpointContext: ctxResult.Prompt,
 		StartingSHA:       headSHA,
 	}
 	applyReviewConfig(&runCfg, cfg)
@@ -437,10 +528,15 @@ func runSingleAgentPath(
 	}
 
 	summary, waitErr := Run(runCtx, reviewer, runCfg, sinks)
-	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, "")
+	manifest := writePostReviewManifestAndReturn(ctx, out, worktreeRoot, headSHA, summary, "")
 	if waitErr != nil && runCtx.Err() == nil && ctx.Err() == nil {
 		// Non-cancellation error: surface to caller.
 		return fmt.Errorf("review run: %w", waitErr)
+	}
+	if manifest != nil {
+		if err := RunPostReviewFixPrompt(ctx, cmd, s, *manifest, perRunPrompt, silentErr, userExplicitlyOmittedFixer); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -453,18 +549,19 @@ func runSingleAgentPath(
 // returns ("", err) so the caller can fail-loudly before spawning agents.
 // Otherwise (auto-detection failed): returns "" and the caller proceeds in
 // degraded mode without a scope banner.
-func detectScope(ctx context.Context, worktreeRoot, baseOverride string, out io.Writer) (string, error) {
+// detectScope resolves the scope base ref and returns the human-facing scope
+// banner string (e.g. "Reviewing feat/X vs main: 3 commits, …") for the caller
+// to render — printing is left to the staging step so the banner can be folded
+// into the styled per-run prompt. Returns ("", "", nil) in degraded mode (no
+// override, auto-detection failed); a bad explicit --base aborts loudly.
+func detectScope(ctx context.Context, worktreeRoot, baseOverride string) (baseRef, banner string, err error) {
 	repo, openErr := gitrepo.OpenPath(worktreeRoot)
 	if openErr != nil {
 		logging.Debug(ctx, "review repo open failed", slog.String("error", openErr.Error()))
-		// Fail-loud when the user explicitly asked for a base. Without this
-		// branch an explicit --base flag would be silently dropped on
-		// PlainOpen failure, inconsistent with the ComputeScopeStats error
-		// path below that aborts on bad overrides.
 		if baseOverride != "" {
-			return "", fmt.Errorf("--base %q given but cannot open repository at %q: %w", baseOverride, worktreeRoot, openErr)
+			return "", "", fmt.Errorf("--base %q given but cannot open repository at %q: %w", baseOverride, worktreeRoot, openErr)
 		}
-		return "", nil
+		return "", "", nil
 	}
 	defer repo.Close()
 	stats, statsErr := ComputeScopeStats(ctx, repo, baseOverride)
@@ -473,48 +570,35 @@ func detectScope(ctx context.Context, worktreeRoot, baseOverride string, out io.
 		// A bad ref must abort before agents spawn so the user learns about
 		// the typo immediately, not after a long review run.
 		if baseOverride != "" {
-			return "", statsErr
+			return "", "", statsErr
 		}
 		logging.Debug(ctx, "review scope detection failed", slog.String("error", statsErr.Error()))
-		return "", nil
+		return "", "", nil
 	}
-	fmt.Fprintln(out, formatScopeBanner(stats))
-	return stats.BaseRef, nil
+	return stats.BaseRef, formatScopeBanner(stats), nil
 }
 
-// runMultiAgentPath handles the multi-agent review flow: shows the multi-select
-// picker, collects an optional per-run prompt, builds per-agent RunConfigs,
-// then runs all selected agents concurrently via RunMulti.
+// runMultiAgentPath handles the multi-agent review flow: builds per-agent
+// RunConfigs and runs all selected agents concurrently via RunMulti.
+//
+// Roles answer "who reviews" up front (via `entire review setup` or the
+// --reviewers flag), so this path no longer presents a spawn-time
+// multi-select picker.
 //
 // This path skips the single-agent validation steps (3.5 hooks, 3.6 skills,
-// re-run guard) for brevity — computeLaunchableEligible has already ensured
-// each eligible agent has hooks installed and a Reviewer available.
+// re-run guard) for brevity — the caller has already ensured each agent in
+// `reviewers` has been chosen via the role model.
 func runMultiAgentPath(
 	ctx context.Context,
 	cmd *cobra.Command,
-	launchableEligible []AgentChoice,
-	baseOverride string,
+	choices []AgentChoice,
+	baseOverride, perRunPrompt string,
 	s *settings.EntireSettings,
-	innerDeps runReviewDeps,
 	deps Deps,
 	out io.Writer,
+	userExplicitlyOmittedFixer bool,
 ) error {
-	// Note: skill verification is intentionally skipped here. The
-	// computeLaunchableEligible filter in the dispatch fork already
-	// guarantees every agent in launchableEligible has hooks installed
-	// AND a non-nil ReviewerFor mapping, so a per-agent verify pass would
-	// be redundant.
 	silentErr := deps.NewSilentError
-
-	// Show multi-select picker (or use injected stub in tests).
-	pickerFn := innerDeps.multiPickerFn
-	if pickerFn == nil {
-		pickerFn = PickAgents
-	}
-	picked, pickErr := pickerFn(ctx, launchableEligible)
-	if pickErr != nil {
-		return handlePickerError(cmd, silentErr, pickErr)
-	}
 
 	// Resolve worktree root and HEAD SHA for scope detection.
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
@@ -528,27 +612,33 @@ func runMultiAgentPath(
 		return fmt.Errorf("resolve HEAD: %w", shaErr)
 	}
 
-	scopeBaseRef, scopeErr := detectScope(ctx, worktreeRoot, baseOverride, out)
+	scopeBaseRef, scopeBanner, scopeErr := detectScope(ctx, worktreeRoot, baseOverride)
 	if scopeErr != nil {
 		cmd.SilenceUsage = true
 		return scopeErr
 	}
-	checkpointContext := ""
+	var ctxResult ContextResult
 	if deps.ReviewCheckpointContext != nil {
-		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
+		ctxResult = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
 	}
+	// Staging step: present the scope + checkpoints/sessions and collect the
+	// optional per-run prompt in one styled view, before fan-out.
+	perRunPrompt = stagePerRunContext(ctx, out, scopeBanner, ctxResult, perRunPrompt)
 
 	// Build per-agent reviewers with individual RunConfigs (each agent has
 	// its own skills + always-prompt from s.Review[name]).
-	reviewers := make([]reviewtypes.AgentReviewer, 0, len(picked.Names))
-	for _, name := range picked.Names {
+	reviewers := make([]reviewtypes.AgentReviewer, 0, len(choices))
+	for _, choice := range choices {
+		name := choice.Name
 		agentCfg := s.Review[name] // zero value is safe (empty skills/prompt)
 		reviewer := deps.ReviewerFor(name)
 		if reviewer == nil {
-			// Shouldn't happen given launchableEligible was filtered for
-			// ReviewerFor != nil, but be defensive.
+			// Skip non-launchable agents — roles have already decided
+			// the set, but a non-launchable reviewer just falls through
+			// to marker fallback and the multi-agent dispatch path can't
+			// represent that. Surface a clear error instead.
 			cmd.SilenceUsage = true
-			return silentErr(fmt.Errorf("agent %q is not launchable but appeared in eligible list", name))
+			return silentErr(fmt.Errorf("agent %q is configured as a reviewer but is not launchable", name))
 		}
 		// Wrap the reviewer so it sees the per-agent RunConfig at Start time.
 		// We cannot pass a different RunConfig per reviewer in RunMulti's
@@ -558,9 +648,9 @@ func runMultiAgentPath(
 		reviewers = append(reviewers, &perAgentConfiguredReviewer{
 			inner: reviewer,
 			cfg: runConfigWithReviewConfig(reviewtypes.RunConfig{
-				PerRunPrompt:      picked.PerRun,
+				PerRunPrompt:      perRunPrompt,
 				ScopeBaseRef:      scopeBaseRef,
-				CheckpointContext: checkpointContext,
+				CheckpointContext: ctxResult.Prompt,
 				StartingSHA:       headSHA,
 			}, agentCfg),
 		})
@@ -598,7 +688,7 @@ func runMultiAgentPath(
 		runContext:        runCtx,
 		synthesisProvider: deps.SynthesisProvider,
 		promptYN:          deps.PromptYN,
-		perRunPrompt:      picked.PerRun,
+		perRunPrompt:      perRunPrompt,
 		onSynthesisResult: func(result string) {
 			aggregateOutput = result
 		},
@@ -616,25 +706,16 @@ func runMultiAgentPath(
 	summary, waitErr := RunMulti(runCtx, reviewers, reviewtypes.RunConfig{
 		EnrichAgentRun: reviewAgentRunTokenEnricher(worktreeRoot, headSHA),
 	}, sinks)
-	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, aggregateOutput)
+	manifest := writePostReviewManifestAndReturn(ctx, out, worktreeRoot, headSHA, summary, aggregateOutput)
 	if waitErr != nil && runCtx.Err() == nil && ctx.Err() == nil {
 		return fmt.Errorf("review run: %w", waitErr)
 	}
-	return nil
-}
-
-// handlePickerError maps multi-picker error sentinels to the appropriate
-// command-layer response.
-//   - ErrPickerCancelled → return nil (user cancelled; no error shown)
-//   - ErrNoAgentsSelected → surface error to user
-//   - other errors → surface to user
-func handlePickerError(cmd *cobra.Command, silentErr func(error) error, pickErr error) error {
-	if errors.Is(pickErr, ErrPickerCancelled) {
-		return nil
+	if manifest != nil {
+		if err := RunPostReviewFixPrompt(ctx, cmd, s, *manifest, perRunPrompt, silentErr, userExplicitlyOmittedFixer); err != nil {
+			return err
+		}
 	}
-	cmd.SilenceUsage = true
-	fmt.Fprintln(cmd.ErrOrStderr(), pickErr.Error())
-	return silentErr(pickErr)
+	return nil
 }
 
 // multiAgentSinkInputs collects the parameters composeMultiAgentSinks needs.
@@ -701,30 +782,31 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 	return sinks
 }
 
-func writePostReviewManifest(
+// writePostReviewManifestAndReturn persists the post-review manifest to
+// disk and returns it so the caller can thread it into the post-review
+// fix prompt. Returns nil when the manifest was not written
+// (cancellation, no findings, write failure, or no matching review
+// session state).
+func writePostReviewManifestAndReturn(
 	ctx context.Context,
 	out io.Writer,
 	worktreeRoot string,
 	headSHA string,
 	summary reviewtypes.RunSummary,
 	aggregateOutput string,
-) {
+) *LocalReviewManifest {
 	if summary.Cancelled || len(summary.AgentRuns) == 0 {
-		return
+		return nil
 	}
 	manifest, states, err := localReviewManifestFromCurrentState(ctx, worktreeRoot, headSHA, summary, aggregateOutput)
 	if err != nil {
 		logging.Debug(ctx, "review manifest not written", slog.String("error", err.Error()))
 		warnManifestNotWritten(out, "could not load session state: "+err.Error())
-		return
+		return nil
 	}
 	if len(manifest.Sources) == 0 {
 		reason, sentinel := explainEmptyManifest(worktreeRoot, headSHA, summary, states)
 		if sentinel {
-			// Matcher and explainer have drifted — the matcher rejected
-			// every tagged session for a reason none of the explainer's
-			// filters cover. Surface at Warn so this gets noticed without
-			// requiring debug logging.
 			logging.Warn(ctx, "review manifest matcher/explainer drift detected",
 				slog.String("reason", reason),
 				slog.Int("tagged_state_count", len(states)),
@@ -734,14 +816,15 @@ func writePostReviewManifest(
 				slog.String("reason", reason))
 		}
 		warnManifestNotWritten(out, reason)
-		return
+		return nil
 	}
 	if err := writeLocalReviewManifest(ctx, manifest); err != nil {
 		logging.Debug(ctx, "review manifest write failed", slog.String("error", err.Error()))
 		warnManifestNotWritten(out, "write to disk failed: "+err.Error())
-		return
+		return nil
 	}
 	writeReviewCompletionFooter(out, manifest)
+	return &manifest
 }
 
 // warnManifestNotWritten prints a user-visible note explaining that the
@@ -796,6 +879,10 @@ func runConfigWithReviewConfig(base reviewtypes.RunConfig, cfg settings.ReviewCo
 }
 
 func applyReviewConfig(runCfg *reviewtypes.RunConfig, cfg settings.ReviewConfig) {
+	// Per-spawn tuning applies regardless of the skills-vs-prompt branch
+	// below; reviewers that don't support these knobs ignore them.
+	runCfg.Model = cfg.Model
+	runCfg.ReasoningEffort = cfg.ReasoningEffort
 	runCfg.Skills = cfg.Skills
 	if len(cfg.Skills) == 0 {
 		runCfg.PromptOverride = cfg.Prompt

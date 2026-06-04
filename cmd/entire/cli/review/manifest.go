@@ -70,17 +70,32 @@ func buildLocalReviewManifestFromSummary(
 	}
 	usedSessions := map[string]bool{}
 	for _, run := range summary.AgentRuns {
+		output := agentRunOutput(run)
 		st := matchReviewSessionState(worktreeRoot, headSHA, summary.StartedAt, run.Name, states, usedSessions)
-		if st == nil || st.SessionID == "" {
+		sessionID := ""
+		if st != nil {
+			sessionID = st.SessionID
+		}
+		// Include the agent when it produced review output OR matched a tagged
+		// review session. Agents whose lifecycle hooks don't fire during the
+		// run — notably codex, which fires no hooks during `codex exec` — never
+		// get a tagged review session state, but their review narrative is
+		// captured live in run.Buffer (agentRunOutput). Gating on session state
+		// alone silently dropped those agents' findings from the fix manifest,
+		// so the [s] picker showed only the hook-firing agents (e.g. claude)
+		// plus the aggregate.
+		if output == "" && sessionID == "" {
 			continue
 		}
-		usedSessions[st.SessionID] = true
+		if sessionID != "" {
+			usedSessions[sessionID] = true
+		}
 		manifest.Sources = append(manifest.Sources, ManifestSource{
-			SessionID: st.SessionID,
+			SessionID: sessionID,
 			Agent:     run.Name,
 			Label:     labelForReviewAgent(run.Name),
 			Status:    run.Status.String(),
-			Output:    agentRunOutput(run),
+			Output:    output,
 		})
 	}
 	return manifest
@@ -562,8 +577,11 @@ func localReviewManifestDir(ctx context.Context) (string, error) {
 
 func localReviewManifestFilename(manifest LocalReviewManifest) string {
 	name := manifest.CreatedAt.UTC().Format("20060102T150405")
-	if len(manifest.Sources) > 0 && manifest.Sources[0].SessionID != "" {
-		name += "-" + safeManifestFilenamePart(manifest.Sources[0].SessionID)
+	// Use the manifest handle (first source WITH a session id) rather than
+	// Sources[0] — a session-less source (e.g. codex, whose exec fires no
+	// hooks) can be first, and we still want a stable, identifiable filename.
+	if handle := reviewManifestHandle(manifest); handle != "" {
+		name += "-" + safeManifestFilenamePart(handle)
 	}
 	return name + ".json"
 }

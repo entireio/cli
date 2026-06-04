@@ -43,22 +43,6 @@ func installHooksForCmdTest(t *testing.T, agentName types.AgentName) {
 	}
 }
 
-// seedReviewConfig persists a review config map into clone-local preferences for
-// test setup, preserving any other existing preferences. It replaces the former
-// review.SaveReviewConfig, which had no production caller (the picker writes via
-// the combined config+fix-agent writer instead).
-func seedReviewConfig(ctx context.Context, cfg map[string]settings.ReviewConfig) error {
-	prefs, err := settings.LoadClonePreferences(ctx)
-	if err != nil {
-		return err
-	}
-	if prefs == nil {
-		prefs = &settings.ClonePreferences{}
-	}
-	prefs.Review = cfg
-	return settings.SaveClonePreferences(ctx, prefs)
-}
-
 // TestReviewCmd_Help verifies `entire review --help` contains the expected
 // flags and subcommands without panicking.
 func TestReviewCmd_Help(t *testing.T) {
@@ -97,38 +81,45 @@ func TestNewReviewCmd_NoHiddenFlags(t *testing.T) {
 	}
 }
 
-// TestReview_NotGitRepoReturnsSilentError checks that review outside a git repo
-// returns a SilentError and prints the message once, for any mode flag.
-func TestReview_NotGitRepoReturnsSilentError(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{"findings", []string{"review", "--findings"}},
-		{"fix", []string{"review", "--fix", "review-session"}},
+func TestReviewFindings_NotGitRepoReturnsSilentError(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	rootCmd := cli.NewRootCmd()
+	errBuf := &bytes.Buffer{}
+	rootCmd.SetErr(errBuf)
+	rootCmd.SetArgs([]string{"review", "--findings"})
+
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error outside a git repo")
 	}
+	var silentErr *cli.SilentError
+	if !errors.As(err, &silentErr) {
+		t.Fatalf("expected SilentError, got %T: %v", err, err)
+	}
+	if got := strings.Count(errBuf.String(), "Not a git repository"); got != 1 {
+		t.Fatalf("not-git message count = %d, want 1; stderr:\n%s", got, errBuf.String())
+	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Chdir(t.TempDir())
+func TestReviewFix_NotGitRepoReturnsSilentError(t *testing.T) {
+	t.Chdir(t.TempDir())
 
-			rootCmd := cli.NewRootCmd()
-			errBuf := &bytes.Buffer{}
-			rootCmd.SetErr(errBuf)
-			rootCmd.SetArgs(tt.args)
+	rootCmd := cli.NewRootCmd()
+	errBuf := &bytes.Buffer{}
+	rootCmd.SetErr(errBuf)
+	rootCmd.SetArgs([]string{"review", "--fix", "review-session"})
 
-			err := rootCmd.Execute()
-			if err == nil {
-				t.Fatal("expected error outside a git repo")
-			}
-			var silentErr *cli.SilentError
-			if !errors.As(err, &silentErr) {
-				t.Fatalf("expected SilentError, got %T: %v", err, err)
-			}
-			if got := strings.Count(errBuf.String(), "Not a git repository"); got != 1 {
-				t.Fatalf("not-git message count = %d, want 1; stderr:\n%s", got, errBuf.String())
-			}
-		})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error outside a git repo")
+	}
+	var silentErr *cli.SilentError
+	if !errors.As(err, &silentErr) {
+		t.Fatalf("expected SilentError, got %T: %v", err, err)
+	}
+	if got := strings.Count(errBuf.String(), "Not a git repository"); got != 1 {
+		t.Fatalf("not-git message count = %d, want 1; stderr:\n%s", got, errBuf.String())
 	}
 }
 
@@ -138,7 +129,7 @@ func TestRunReview_MissingHooksAborts(t *testing.T) {
 	setupCmdTestRepo(t)
 
 	// Save config but don't install hooks.
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"claude-code": {Skills: []string{testReviewSkill}},
 	}); err != nil {
 		t.Fatal(err)
@@ -182,7 +173,7 @@ func TestRunReview_NonLaunchableAgentPreservesMarker(t *testing.T) {
 
 	// Use prompt-only config: cursor has no curated built-ins, so a Skills
 	// value would trip the installed-skill guard before reaching this path.
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		nonLaunchableAgent: {Prompt: "review the diff"},
 	}); err != nil {
 		t.Fatal(err)
@@ -219,7 +210,7 @@ func TestRunReview_MissingConfiguredSkillAbortsBeforeMarker(t *testing.T) {
 	setupCmdTestRepo(t)
 	installHooksForCmdTest(t, "claude-code")
 
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"claude-code": {Skills: []string{"/bogus:skill-does-not-exist"}},
 	}); err != nil {
 		t.Fatal(err)
@@ -251,7 +242,7 @@ func TestRunReview_PromptOnlyConfigSkipsVerification(t *testing.T) {
 	setupCmdTestRepo(t)
 	installHooksForCmdTest(t, "cursor")
 
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"cursor": {Prompt: "review the diff"},
 	}); err != nil {
 		t.Fatal(err)
@@ -280,7 +271,7 @@ func TestRunReview_FlagOverrideSkipsPicker(t *testing.T) {
 	installHooksForCmdTest(t, "cursor")
 	installHooksForCmdTest(t, "opencode")
 
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"cursor":   {Prompt: "review the diff"},
 		"opencode": {Prompt: "review the diff"},
 	}); err != nil {
@@ -311,7 +302,7 @@ func TestRunReview_FlagOverrideMustBeEligibleAgent(t *testing.T) {
 	installHooksForCmdTest(t, "cursor")
 	// opencode has no hooks installed
 
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"cursor":   {Prompt: "review the diff"},
 		"opencode": {Prompt: "review the diff"},
 	}); err != nil {
@@ -343,8 +334,6 @@ func newDispatchTestDeps(
 	t *testing.T,
 	installed []types.AgentName,
 	launchableAgents []string,
-	multiPickerFn func(ctx context.Context, eligible []review.AgentChoice) (review.PickedAgents, error),
-	promptForAgentFn func(ctx context.Context, eligible []review.AgentChoice) (string, error),
 ) review.Deps {
 	t.Helper()
 	launchableSet := make(map[string]struct{}, len(launchableAgents))
@@ -355,9 +344,7 @@ func newDispatchTestDeps(
 		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
 			return installed
 		},
-		NewSilentError:   func(err error) error { return err },
-		PromptForAgentFn: promptForAgentFn,
-		MultiPickerFn:    multiPickerFn,
+		NewSilentError: func(err error) error { return err },
 		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
 			return false, "" // no review guard
 		},
@@ -414,7 +401,7 @@ func (r *captureRunConfigReviewer) Start(_ context.Context, cfg reviewtypes.RunC
 func TestRunReview_ConfigPromptAugmentsSelectedSkills(t *testing.T) {
 	setupCmdTestRepo(t)
 
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"claude-code": {
 			Skills: []string{"/review"},
 			Prompt: "Focus on auth regressions.",
@@ -463,55 +450,128 @@ func TestRunReview_ConfigPromptAugmentsSelectedSkills(t *testing.T) {
 	}
 }
 
-// TestDispatchFork_TwoLaunchableNoOverride verifies that when 2+ launchable
-// agents are configured and --agent is empty, the multi-picker is invoked
-// and RunMulti is called (not the single-agent path).
-func TestDispatchFork_TwoLaunchableNoOverride(t *testing.T) {
-	setupCmdTestRepo(t)
-
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
-		"agent-a": {Prompt: "review"},
-		"agent-b": {Prompt: "review"},
-	}); err != nil {
-		t.Fatal(err)
+// TestRunReview_IncludingContextBanner_SingleAgent verifies the
+// transparency banner: the single-agent path always prints a line
+// describing the session/checkpoint-context state directly below the scope
+// banner. The line includes ACTUAL counts (number of checkpoints + number
+// of sessions) when context is present; the empty variant is preserved for
+// no-history branches. The line is never omitted — it surfaces what
+// `entire review` does for the user vs. running a review skill manually.
+func TestRunReview_IncludingContextBanner_SingleAgent(t *testing.T) {
+	const emptyLine = "No prior session or checkpoint context for this branch yet."
+	tests := []struct {
+		name     string
+		result   review.ContextResult
+		wantLine string
+	}{
+		{
+			name: "itemised checkpoint bullet",
+			result: review.ContextResult{
+				Prompt: "ctx", Checkpoints: 2, Sessions: 1,
+				CheckpointItems: []review.CheckpointScopeItem{
+					{ID: "a1b2c3d4", Summary: "feat: add thing"},
+					{ID: "b2c3d4e5", Summary: "fix: the bug"},
+				},
+				SessionItems: []review.SessionScopeItem{{ID: "ac3d5c6e", Agent: "Claude Code"}},
+			},
+			wantLine: "  • a1b2c3d4  feat: add thing",
+		},
+		{
+			name: "checkpoint header shows count",
+			result: review.ContextResult{
+				Prompt: "ctx", Checkpoints: 2,
+				CheckpointItems: []review.CheckpointScopeItem{
+					{ID: "a1b2c3d4", Summary: "feat: add thing"},
+					{ID: "b2c3d4e5", Summary: "fix: the bug"},
+				},
+			},
+			wantLine: "Checkpoints in scope (2):",
+		},
+		{
+			name: "session header and bullet",
+			result: review.ContextResult{
+				Prompt: "ctx", Sessions: 1,
+				SessionItems: []review.SessionScopeItem{{ID: "3d4c9f88", Agent: "Codex"}},
+			},
+			wantLine: "In-progress sessions (1):",
+		},
+		{
+			name:     "empty context advertised as absent",
+			result:   review.ContextResult{},
+			wantLine: emptyLine,
+		},
 	}
-
-	multiPickerCalled := false
-	multiPickerFn := func(_ context.Context, eligible []review.AgentChoice) (review.PickedAgents, error) {
-		multiPickerCalled = true
-		names := make([]string, 0, len(eligible))
-		for _, e := range eligible {
-			names = append(names, e.Name)
-		}
-		return review.PickedAgents{Names: names, PerRun: ""}, nil
-	}
-
-	installed := []types.AgentName{"agent-a", "agent-b"}
-	deps := newDispatchTestDeps(t, installed, []string{"agent-a", "agent-b"}, multiPickerFn, nil)
-
-	buf := &bytes.Buffer{}
-	cmd := review.NewCommand(deps)
-	cmd.SetOut(buf)
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{})
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !multiPickerCalled {
-		t.Error("expected multi-picker to be invoked for 2 launchable agents with no --agent override")
+	for _, tc := range tests {
+		// Cannot t.Parallel — t.Chdir in setupCmdTestRepo.
+		t.Run(tc.name, func(t *testing.T) {
+			setupCmdTestRepo(t)
+			if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+				testAgentName: {Skills: []string{"/review"}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			reviewer := &captureRunConfigReviewer{name: testAgentName}
+			deps := review.Deps{
+				GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
+					return []types.AgentName{testAgentName}
+				},
+				NewSilentError:          func(err error) error { return err },
+				HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) { return false, "" },
+				ReviewCheckpointContext: func(_ context.Context, _ string, _ string) review.ContextResult {
+					return tc.result
+				},
+				ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
+					if agentName == testAgentName {
+						return reviewer
+					}
+					return nil
+				},
+			}
+			out := &bytes.Buffer{}
+			cmd := review.NewCommand(deps)
+			cmd.SetOut(out)
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if !strings.Contains(out.String(), tc.wantLine) {
+				t.Fatalf("expected output to contain %q; output:\n%s", tc.wantLine, out.String())
+			}
+			// The line must appear AFTER the scope banner and BEFORE any
+			// agent output. We don't have a strict agent-table marker on
+			// the non-TTY path, but we can at least require the scope
+			// banner to come first.
+			bannerIdx := strings.Index(out.String(), "Reviewing ")
+			ctxIdx := strings.Index(out.String(), tc.wantLine)
+			if bannerIdx == -1 || ctxIdx == -1 || ctxIdx < bannerIdx {
+				t.Errorf("transparency line must follow the scope banner; output:\n%s", out.String())
+			}
+			// Sanity: the RunConfig threaded to the reviewer carries the
+			// composed prompt — the banner change only affects printing,
+			// it must not change the data plumbing.
+			if reviewer.got.CheckpointContext != tc.result.Prompt {
+				t.Errorf("CheckpointContext on RunConfig = %q, want %q",
+					reviewer.got.CheckpointContext, tc.result.Prompt)
+			}
+		})
 	}
 }
 
-func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
+// TestRunReview_RolesDispatchToMultiAgent verifies that when 2+ reviewers are
+// configured (post-Chunk 2 role model), the multi-agent path is taken
+// directly — no spawn-time picker is shown.
+func TestRunReview_RolesDispatchToMultiAgent(t *testing.T) {
 	setupCmdTestRepo(t)
 
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"claude-code": {
+			Role:   settings.RoleReviewer,
 			Skills: []string{"/review"},
 			Prompt: "Claude saved prompt.",
 		},
 		testCodexAgent: {
+			Role:   settings.RoleBoth,
 			Skills: []string{"/review"},
 			Prompt: "Codex saved prompt.",
 		},
@@ -521,19 +581,12 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 
 	claudeReviewer := &captureRunConfigReviewer{name: "claude-code"}
 	codexReviewer := &captureRunConfigReviewer{name: testCodexAgent}
-	multiPickerFn := func(_ context.Context, _ []review.AgentChoice) (review.PickedAgents, error) {
-		return review.PickedAgents{
-			Names:  []string{"claude-code", testCodexAgent},
-			PerRun: "Focus this run on regressions.",
-		}, nil
-	}
 
 	deps := review.Deps{
 		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
 			return []types.AgentName{"claude-code", testCodexAgent}
 		},
 		NewSilentError: func(err error) error { return err },
-		MultiPickerFn:  multiPickerFn,
 		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
 			return false, ""
 		},
@@ -575,123 +628,20 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 		if tc.reviewer.got.AlwaysPrompt != tc.wantPrompt {
 			t.Fatalf("%s AlwaysPrompt = %q, want %q", tc.name, tc.reviewer.got.AlwaysPrompt, tc.wantPrompt)
 		}
-		if tc.reviewer.got.PerRunPrompt != "Focus this run on regressions." {
-			t.Fatalf("%s PerRunPrompt = %q", tc.name, tc.reviewer.got.PerRunPrompt)
-		}
 		if tc.reviewer.got.StartingSHA == "" {
 			t.Fatalf("%s StartingSHA is empty", tc.name)
 		}
 	}
 }
 
-// TestDispatchFork_OneLaunchableOneNonLaunchableNoOverride verifies that when
-// only 1 agent is launchable (the other is non-launchable), the single-agent
-// path is taken (no multi-picker). Uses cursor (real non-launchable agent with
-// hooks) + agent-a (fake launchable stub).
-func TestDispatchFork_OneLaunchableOneNonLaunchableNoOverride(t *testing.T) {
+// TestRunReview_RecursionGuard verifies that ENTIRE_REVIEW_SESSION in env
+// refuses a nested review (prevents fan-out loops).
+func TestRunReview_RecursionGuard(t *testing.T) {
 	setupCmdTestRepo(t)
-	installHooksForCmdTest(t, "cursor")
+	t.Setenv("ENTIRE_REVIEW_SESSION", "outer-session-id")
 
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
-		"cursor":  {Prompt: "review"},
-		"agent-a": {Prompt: "review"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	multiPickerCalled := false
-	multiPickerFn := func(_ context.Context, _ []review.AgentChoice) (review.PickedAgents, error) {
-		multiPickerCalled = true
-		return review.PickedAgents{}, errors.New("should not be called")
-	}
-	// Stub single-select picker to avoid TTY: always picks cursor.
-	singlePickerFn := func(_ context.Context, _ []review.AgentChoice) (string, error) {
-		return "cursor", nil
-	}
-
-	installed := []types.AgentName{"cursor", "agent-a"}
-	// Only agent-a is launchable. With 1 launchable agent, computeLaunchableEligible
-	// returns 1 entry, so multi-path is skipped. The single-select picker picks cursor.
-	// ReviewerFor("cursor") returns nil → marker fallback path (writes marker file).
-	deps := newDispatchTestDeps(t, installed, []string{"agent-a"}, multiPickerFn, singlePickerFn)
-
-	cmd := review.NewCommand(deps)
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{})
-
-	executeErr := cmd.Execute() // may error (agent-a not a real agent); we only care about picker routing
-	_ = executeErr              // intentionally ignored: this test only asserts picker routing
-	if multiPickerCalled {
-		t.Error("multi-picker should NOT be invoked when only 1 launchable agent is configured")
-	}
-}
-
-// TestDispatchFork_TwoLaunchableWithAgentOverride verifies that --agent flag
-// bypasses the multi-picker even when 2+ launchable agents are configured.
-// The test uses cursor (non-launchable, real agent) + agent-a (fake launchable)
-// with --agent cursor so the single-agent path runs to completion via marker
-// fallback (cursor is non-launchable in reviewerFor, so nil → marker fallback).
-func TestDispatchFork_TwoLaunchableWithAgentOverride(t *testing.T) {
-	setupCmdTestRepo(t)
-	installHooksForCmdTest(t, "cursor") // cursor needs real hooks
-
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
-		"cursor":  {Prompt: "review"},
-		"agent-a": {Prompt: "review"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	multiPickerCalled := false
-	multiPickerFn := func(_ context.Context, _ []review.AgentChoice) (review.PickedAgents, error) {
-		multiPickerCalled = true
-		return review.PickedAgents{}, errors.New("should not be called")
-	}
-
-	// cursor + agent-a both installed; agent-a is launchable but cursor is not.
-	// With 1 launchable agent (agent-a) among the 2 eligible agents, the
-	// multi-agent path would NOT fire (needs 2+ launchable). But when we
-	// additionally pass --agent cursor, the multi-picker is bypassed by the
-	// agentOverride check at the top of step 3.
-	installed := []types.AgentName{"cursor", "agent-a"}
-	deps := newDispatchTestDeps(t, installed, []string{"agent-a"}, multiPickerFn, nil)
-
-	buf := &bytes.Buffer{}
-	cmd := review.NewCommand(deps)
-	cmd.SetOut(buf)
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--agent", "cursor"})
-
-	// cursor is not launchable in our stub (reviewerFor returns nil), so it
-	// falls through to RunMarkerFallback. That's fine — we only care that
-	// multiPickerCalled is false.
-	executeErr := cmd.Execute()
-	_ = executeErr // intentionally ignored: this test only asserts picker routing
-	if multiPickerCalled {
-		t.Error("multi-picker should NOT be invoked when --agent override is set")
-	}
-}
-
-// TestDispatchFork_MultiPickerCancellationExitsCleanly verifies that when
-// the multi-picker is cancelled (ErrPickerCancelled), the command exits with
-// nil error (no user-facing error).
-func TestDispatchFork_MultiPickerCancellationExitsCleanly(t *testing.T) {
-	setupCmdTestRepo(t)
-
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
-		"agent-a": {Prompt: "review"},
-		"agent-b": {Prompt: "review"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	multiPickerFn := func(_ context.Context, _ []review.AgentChoice) (review.PickedAgents, error) {
-		return review.PickedAgents{}, review.ErrPickerCancelled
-	}
-
-	installed := []types.AgentName{"agent-a", "agent-b"}
-	deps := newDispatchTestDeps(t, installed, []string{"agent-a", "agent-b"}, multiPickerFn, nil)
+	installed := []types.AgentName{"claude-code"}
+	deps := newDispatchTestDeps(t, installed, []string{"claude-code"})
 
 	errBuf := &bytes.Buffer{}
 	cmd := review.NewCommand(deps)
@@ -699,43 +649,140 @@ func TestDispatchFork_MultiPickerCancellationExitsCleanly(t *testing.T) {
 	cmd.SetErr(errBuf)
 	cmd.SetArgs([]string{})
 
-	err := cmd.Execute()
-	if err != nil {
-		t.Errorf("ErrPickerCancelled should produce nil command error, got: %v", err)
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected refusal, got nil")
+	}
+	if !strings.Contains(errBuf.String(), "Already in a review session") {
+		t.Errorf("expected recursion-guard message, got:\n%s", errBuf.String())
 	}
 }
 
-// TestDispatchFork_MultiPickerNoSelectionSurfacesError verifies that when the
-// multi-picker returns ErrNoAgentsSelected, a clear error is shown to the user.
-func TestDispatchFork_MultiPickerNoSelectionSurfacesError(t *testing.T) {
+// TestRunReview_ReviewersFlagSingleAgent verifies that --reviewers <agent>
+// runs review with that agent only and ignores saved config.
+func TestRunReview_ReviewersFlagSingleAgent(t *testing.T) {
 	setupCmdTestRepo(t)
 
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
-		"agent-a": {Prompt: "review"},
-		"agent-b": {Prompt: "review"},
+	// Save a different agent in config — should be ignored.
+	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+		"codex": {Role: settings.RoleReviewer, Skills: []string{"/review"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	multiPickerFn := func(_ context.Context, _ []review.AgentChoice) (review.PickedAgents, error) {
-		return review.PickedAgents{}, review.ErrNoAgentsSelected
+	claudeReviewer := &captureRunConfigReviewer{name: testAgentName}
+	deps := review.Deps{
+		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
+			return []types.AgentName{testAgentName, "codex"}
+		},
+		NewSilentError:          func(err error) error { return err },
+		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) { return false, "" },
+		ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
+			if agentName == testAgentName {
+				return claudeReviewer
+			}
+			return nil
+		},
 	}
+	cmd := review.NewCommand(deps)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--reviewers", "claude-code"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !claudeReviewer.called {
+		t.Fatal("claude-code reviewer should have been started")
+	}
+}
 
-	installed := []types.AgentName{"agent-a", "agent-b"}
-	deps := newDispatchTestDeps(t, installed, []string{"agent-a", "agent-b"}, multiPickerFn, nil)
+// TestRunReview_ReviewersFlagUnknownAgentErrors verifies that --reviewers
+// with an uninstalled agent name produces a clear error.
+func TestRunReview_ReviewersFlagUnknownAgentErrors(t *testing.T) {
+	setupCmdTestRepo(t)
+
+	deps := newDispatchTestDeps(t, []types.AgentName{"claude-code"}, []string{"claude-code"})
 
 	errBuf := &bytes.Buffer{}
 	cmd := review.NewCommand(deps)
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(errBuf)
-	cmd.SetArgs([]string{})
+	cmd.SetArgs([]string{"--reviewers", "no-such-agent"})
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected error for unknown agent")
+	}
+	if !strings.Contains(errBuf.String(), "no-such-agent") {
+		t.Errorf("error should name the unknown agent, got: %q", errBuf.String())
+	}
+}
+
+// TestRunReview_FixerOnlyFlagErrorsAtReviewLayer verifies that
+// `entire review --fixer X` (without --reviewers) errors at the
+// review-command layer with a helpful message. The check lives in
+// runReview rather than resolveRolesFromFlags so that
+// `entire review fix --fixer X` (which only needs a Fixer) is not
+// rejected by the shared flag-resolution path.
+func TestRunReview_FixerOnlyFlagErrorsAtReviewLayer(t *testing.T) {
+	setupCmdTestRepo(t)
+
+	deps := newDispatchTestDeps(t,
+		[]types.AgentName{"claude-code", "codex"},
+		[]string{"claude-code", "codex"},
+	)
+
+	errBuf := &bytes.Buffer{}
+	cmd := review.NewCommand(deps)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(errBuf)
+	cmd.SetArgs([]string{"--fixer", "codex"})
 
 	err := cmd.Execute()
 	if err == nil {
-		t.Fatal("expected non-nil error when no agents are selected")
+		t.Fatal("expected error when --fixer is set without --reviewers, got nil")
 	}
-	if !strings.Contains(errBuf.String(), "no agents selected") {
-		t.Errorf("stderr should mention 'no agents selected', got: %q", errBuf.String())
+	stderr := errBuf.String()
+	if !strings.Contains(stderr, "needs at least one") {
+		t.Errorf("expected error to mention needing at least one reviewer, got: %s", stderr)
+	}
+	if !strings.Contains(stderr, "--reviewers") {
+		t.Errorf("expected error to mention --reviewers as the fix, got: %s", stderr)
+	}
+	if !strings.Contains(stderr, "entire review fix") {
+		t.Errorf("expected error to mention `entire review fix` as the alternative, got: %s", stderr)
+	}
+}
+
+// TestReviewFixCmd_FixerOnlyFlagAccepted verifies that
+// `entire review fix --fixer codex` is NOT rejected by the shared
+// flag-resolution path (the scope-bug fix). It may still fail later for
+// unrelated reasons in this test repo (no findings, no review session),
+// but the "needs at least one reviewer" check must NOT fire.
+func TestReviewFixCmd_FixerOnlyFlagAccepted(t *testing.T) {
+	setupCmdTestRepo(t)
+
+	deps := newDispatchTestDeps(t,
+		[]types.AgentName{"claude-code", "codex"},
+		[]string{"claude-code", "codex"},
+	)
+
+	errBuf := &bytes.Buffer{}
+	cmd := review.NewCommand(deps)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(errBuf)
+	cmd.SetArgs([]string{"fix", "--fixer", "codex"})
+
+	// We don't care whether the overall command succeeds — only that the
+	// failure isn't the "needs at least one reviewer" check from
+	// resolveRolesFromFlags.
+	if err := cmd.Execute(); err != nil {
+		t.Logf("entire review fix exited with error (expected — test repo has no findings): %v", err)
+	}
+	stderr := errBuf.String()
+	if strings.Contains(stderr, "needs at least one") {
+		t.Errorf("entire review fix --fixer X should not be rejected by the reviewer-required check; got: %s", stderr)
+	}
+	if strings.Contains(stderr, "Reviewer or Both") {
+		t.Errorf("entire review fix --fixer X should not be rejected by the Reviewer-or-Both check; got: %s", stderr)
 	}
 }
 
@@ -987,23 +1034,15 @@ func TestFindTUISink_NoTUIInSlice(t *testing.T) {
 func TestDispatchFork_SynthesisSinkNilProviderNoComposition(t *testing.T) {
 	setupCmdTestRepo(t)
 
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
-		"agent-a": {Prompt: "review"},
-		"agent-b": {Prompt: "review"},
+	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+		"agent-a": {Role: settings.RoleReviewer, Prompt: "review"},
+		"agent-b": {Role: settings.RoleReviewer, Prompt: "review"},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	multiPickerFn := func(_ context.Context, eligible []review.AgentChoice) (review.PickedAgents, error) {
-		names := make([]string, 0, len(eligible))
-		for _, e := range eligible {
-			names = append(names, e.Name)
-		}
-		return review.PickedAgents{Names: names, PerRun: ""}, nil
-	}
-
 	installed := []types.AgentName{"agent-a", "agent-b"}
-	deps := newDispatchTestDeps(t, installed, []string{"agent-a", "agent-b"}, multiPickerFn, nil)
+	deps := newDispatchTestDeps(t, installed, []string{"agent-a", "agent-b"})
 	deps.SynthesisProvider = nil // explicitly nil — synthesis unavailable
 
 	buf := &bytes.Buffer{}
@@ -1029,7 +1068,7 @@ func TestDispatchFork_SingleAgentNoSynthesis(t *testing.T) {
 	setupCmdTestRepo(t)
 	installHooksForCmdTest(t, "cursor")
 
-	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"cursor": {Prompt: "review"},
 	}); err != nil {
 		t.Fatal(err)
@@ -1039,7 +1078,7 @@ func TestDispatchFork_SingleAgentNoSynthesis(t *testing.T) {
 
 	// cursor is installed but not launchable (ReviewerFor returns nil).
 	installed := []types.AgentName{"cursor"}
-	deps := newDispatchTestDeps(t, installed, nil /* no launchable */, nil, nil)
+	deps := newDispatchTestDeps(t, installed, nil /* no launchable */)
 	deps.SynthesisProvider = provider
 
 	buf := &bytes.Buffer{}
@@ -1053,5 +1092,49 @@ func TestDispatchFork_SingleAgentNoSynthesis(t *testing.T) {
 	}
 	if provider.called {
 		t.Error("synthesis provider should NOT be called on single-agent path")
+	}
+}
+
+func TestRunConfigWithReviewConfig_MapsModelAndReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	// Skills branch: per-spawn knobs map through alongside Skills/AlwaysPrompt.
+	got := review.ExposedRunConfigWithReviewConfig(reviewtypes.RunConfig{}, settings.ReviewConfig{
+		Role:            settings.RoleReviewer,
+		Skills:          []string{"/review"},
+		Prompt:          "Be thorough.",
+		Model:           "gpt-5-mini",
+		ReasoningEffort: "low",
+	})
+	if got.Model != "gpt-5-mini" {
+		t.Errorf("Model = %q, want %q", got.Model, "gpt-5-mini")
+	}
+	if got.ReasoningEffort != "low" {
+		t.Errorf("ReasoningEffort = %q, want %q", got.ReasoningEffort, "low")
+	}
+	if got.AlwaysPrompt != "Be thorough." {
+		t.Errorf("AlwaysPrompt = %q, want %q", got.AlwaysPrompt, "Be thorough.")
+	}
+
+	// Prompt-only branch (no skills): knobs still map; Prompt becomes the
+	// verbatim override.
+	got = review.ExposedRunConfigWithReviewConfig(reviewtypes.RunConfig{}, settings.ReviewConfig{
+		Role:            settings.RoleReviewer,
+		Prompt:          "Just look at the diff.",
+		ReasoningEffort: "medium",
+	})
+	if got.ReasoningEffort != "medium" {
+		t.Errorf("prompt-only: ReasoningEffort = %q, want %q", got.ReasoningEffort, "medium")
+	}
+	if got.PromptOverride != "Just look at the diff." {
+		t.Errorf("prompt-only: PromptOverride = %q, want %q", got.PromptOverride, "Just look at the diff.")
+	}
+
+	// Empty knobs stay empty (no accidental defaulting).
+	got = review.ExposedRunConfigWithReviewConfig(reviewtypes.RunConfig{}, settings.ReviewConfig{
+		Skills: []string{"/review"},
+	})
+	if got.Model != "" || got.ReasoningEffort != "" {
+		t.Errorf("empty knobs leaked: Model=%q ReasoningEffort=%q", got.Model, got.ReasoningEffort)
 	}
 }

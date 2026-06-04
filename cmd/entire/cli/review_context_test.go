@@ -52,7 +52,8 @@ func TestReviewCheckpointContext_IncludesSummaryAndPromptFallback(t *testing.T) 
 	})
 	commitReviewContextChange(t, repoRoot, "prompt.go", "prompt\n", "prompt change", "Entire-Checkpoint: "+promptCheckpointID)
 
-	got := reviewCheckpointContext(context.Background(), repoRoot, "master")
+	result := reviewCheckpointContext(context.Background(), repoRoot, "master")
+	got := result.Prompt
 	for _, want := range []string{
 		"Checkpoint context from commits in scope:",
 		summaryCheckpointID,
@@ -75,6 +76,9 @@ func TestReviewCheckpointContext_IncludesSummaryAndPromptFallback(t *testing.T) 
 			t.Fatalf("review checkpoint context contains %q:\n%s", unwanted, got)
 		}
 	}
+	if result.Checkpoints != 2 {
+		t.Errorf("Checkpoints = %d, want 2", result.Checkpoints)
+	}
 }
 
 // Review committed-context reads resolve against the v1 custom ref when the
@@ -94,13 +98,13 @@ func TestReviewCheckpointContext_ReadsV1CustomRefWhenEnabled(t *testing.T) {
 	const wantDetail = "summary: custom-ref-only checkpoint; read via custom ref"
 
 	// Mirror disabled: reads hit the v1 branch, which no longer holds the checkpoint.
-	if got := reviewCheckpointContext(context.Background(), repoRoot, "master"); strings.Contains(got, wantDetail) {
+	if got := reviewCheckpointContext(context.Background(), repoRoot, "master").Prompt; strings.Contains(got, wantDetail) {
 		t.Fatalf("checkpoint detail leaked with mirror disabled:\n%s", got)
 	}
 
 	// Mirror enabled: reads hit the custom ref.
 	enableV1CustomRefMirror(t, repoRoot)
-	if got := reviewCheckpointContext(context.Background(), repoRoot, "master"); !strings.Contains(got, wantDetail) {
+	if got := reviewCheckpointContext(context.Background(), repoRoot, "master").Prompt; !strings.Contains(got, wantDetail) {
 		t.Fatalf("checkpoint detail missing with mirror enabled:\n%s", got)
 	}
 }
@@ -133,7 +137,8 @@ func TestReviewCheckpointContext_CapsCheckpointLines(t *testing.T) {
 		)
 	}
 
-	got := reviewCheckpointContext(context.Background(), repoRoot, "master")
+	result := reviewCheckpointContext(context.Background(), repoRoot, "master")
+	got := result.Prompt
 	if count := strings.Count(got, "summary: checkpoint summary"); count != reviewContextMaxCheckpoints {
 		t.Fatalf("checkpoint context summary count = %d, want %d:\n%s", count, reviewContextMaxCheckpoints, got)
 	}
@@ -142,6 +147,10 @@ func TestReviewCheckpointContext_CapsCheckpointLines(t *testing.T) {
 	}
 	if !strings.Contains(got, "1 more checkpoint omitted") {
 		t.Fatalf("checkpoint context missing truncation notice:\n%s", got)
+	}
+	if result.Checkpoints != reviewContextMaxCheckpoints {
+		t.Errorf("Checkpoints = %d, want %d (capped, not counting omitted tail)",
+			result.Checkpoints, reviewContextMaxCheckpoints)
 	}
 }
 
@@ -588,7 +597,7 @@ func TestReviewSessionContext_IncludesActiveSessionWithLatestPrompt(t *testing.T
 	writeReviewContextSessionPrompt(t, repoRoot, sessionID,
 		"Implement the auth feature.\n\n---\n\nAlso handle the edge case for refresh tokens.")
 
-	got := reviewSessionContext(context.Background(), repoRoot, headSHA)
+	got, count, _ := reviewSessionContext(context.Background(), repoRoot, headSHA)
 	for _, want := range []string{
 		"In-progress session context (uncommitted):",
 		sessionID[:8],
@@ -603,6 +612,9 @@ func TestReviewSessionContext_IncludesActiveSessionWithLatestPrompt(t *testing.T
 		if !strings.Contains(got, want) {
 			t.Errorf("expected section to contain %q, got:\n%s", want, got)
 		}
+	}
+	if count != 1 {
+		t.Errorf("session count = %d, want 1", count)
 	}
 }
 
@@ -635,9 +647,12 @@ func TestReviewSessionContext_SkipsSessionsOutsideScope(t *testing.T) {
 		writeReviewContextSessionPrompt(t, repoRoot, c.state.SessionID, "LEAKED-"+c.name)
 	}
 
-	got := reviewSessionContext(context.Background(), repoRoot, headSHA)
+	got, count, _ := reviewSessionContext(context.Background(), repoRoot, headSHA)
 	if got != "" {
 		t.Fatalf("expected empty section when no in-scope sessions match; got:\n%s", got)
+	}
+	if count != 0 {
+		t.Errorf("session count = %d, want 0", count)
 	}
 	for _, c := range cases {
 		if strings.Contains(got, "LEAKED-"+c.name) {

@@ -78,6 +78,62 @@ func TestTUIModel_AgentEvent_TokensOverwrite(t *testing.T) {
 	}
 }
 
+// TestTUIModel_DashboardTokenDisplay locks the three display branches for
+// the tokens column. Claude's live stream-json carries input tokens
+// throughout the run but only surfaces output_tokens on the final result
+// envelope, so the parser may emit Tokens{In: N, Out: 0} during the run.
+// Rendering that as "N/0" was misleading; the input-only branch renders
+// just "N", and the finalized pair renders as "<in>/<out>".
+func TestTUIModel_DashboardTokenDisplay(t *testing.T) {
+	t.Parallel()
+
+	// Values chosen so the rendered string fits inside the 8-char tokens
+	// column, otherwise the renderer's display-width truncation hides the
+	// suffix and the substring assertion measures the truncated view.
+	tests := []struct {
+		name       string
+		tokens     reviewtypes.Tokens
+		wantSubstr string
+		denySubstr string
+	}{
+		{
+			name:       "input only renders without slash",
+			tokens:     reviewtypes.Tokens{In: 54000, Out: 0},
+			wantSubstr: "54.0k",
+			denySubstr: "54.0k/",
+		},
+		{
+			name:       "finalized pair renders with slash",
+			tokens:     reviewtypes.Tokens{In: 5400, Out: 696},
+			wantSubstr: "5.4k/696",
+		},
+		{
+			name:       "output-only is exposed not silently dropped",
+			tokens:     reviewtypes.Tokens{In: 0, Out: 696},
+			wantSubstr: "0/696",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestModel([]string{"agent-a"}, func() {})
+			m.termWidth = 200
+			updated, _ := m.Update(agentEventMsg{agent: "agent-a", ev: tt.tokens})
+			m = mustModel(t, updated)
+
+			out := m.dashboardView()
+			if !strings.Contains(out, tt.wantSubstr) {
+				t.Errorf("dashboard missing %q, got:\n%s", tt.wantSubstr, out)
+			}
+			if tt.denySubstr != "" && strings.Contains(out, tt.denySubstr) {
+				t.Errorf("dashboard must not contain %q (avoid misleading In/Out split when Out unknown), got:\n%s",
+					tt.denySubstr, out)
+			}
+		})
+	}
+}
+
 func TestTUIModel_AgentEvent_FinishedSuccess(t *testing.T) {
 	t.Parallel()
 	m := newTestModel([]string{"agent-a"}, func() {})

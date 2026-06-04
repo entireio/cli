@@ -18,13 +18,14 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// SetExistingConfigForTest writes a minimal .entire/settings.json into the
-// current working directory so RunSetup's preselect-from-saved branch has
-// something to read.
+// SetExistingConfigForTest seeds clone-local review preferences (the same
+// destination RunSetup writes to) so RunSetup's preselect-from-saved branch
+// has something to read. Requires the test to have called testutil.InitRepo
+// + t.Chdir so the git common dir resolves.
 func SetExistingConfigForTest(t *testing.T, reviewMap map[string]settings.ReviewConfig) {
 	t.Helper()
-	if err := settings.Save(context.Background(), &settings.EntireSettings{Review: reviewMap}); err != nil {
-		t.Fatalf("SetExistingConfigForTest: settings.Save: %v", err)
+	if err := review.SaveReviewConfig(context.Background(), reviewMap); err != nil {
+		t.Fatalf("SetExistingConfigForTest: SaveReviewConfig: %v", err)
 	}
 }
 
@@ -85,11 +86,13 @@ func TestRunSetup_DefaultsRolesFromExistingConfig(t *testing.T) {
 	}
 	forms := review.SetupForms{
 		PickRoles: func(_ context.Context, agents []string, current map[string]settings.Role) (map[string]settings.Role, error) {
+			// claude-code is pre-seeded from saved config (Reviewer); codex has
+			// no saved entry so it defaults to Skip (reviewing is opt-in).
 			if current["claude-code"] != settings.RoleReviewer {
 				t.Errorf("pre-seed claude-code = %q, want reviewer", current["claude-code"])
 			}
-			if current["codex"] != settings.RoleReviewer {
-				t.Errorf("default codex = %q, want reviewer", current["codex"])
+			if current["codex"] != settings.RoleSkip {
+				t.Errorf("default codex = %q, want skip (opt-in)", current["codex"])
 			}
 			_ = agents
 			return map[string]settings.Role{
@@ -110,6 +113,56 @@ func TestRunSetup_DefaultsRolesFromExistingConfig(t *testing.T) {
 	}
 	if out["claude-code"].Role != settings.RoleReviewer {
 		t.Errorf("claude-code role = %q, want reviewer", out["claude-code"].Role)
+	}
+
+	// Persistence target check: review config must land in clone-local
+	// preferences (gitignored), NOT .entire/settings.json. Writing to the
+	// committable file would re-trigger maybePromptReviewSettingsMigration
+	// on the next `entire review`.
+	prefs, err := settings.LoadClonePreferences(context.Background())
+	if err != nil {
+		t.Fatalf("LoadClonePreferences: %v", err)
+	}
+	if prefs == nil || prefs.Review["codex"].Role != settings.RoleFixer {
+		t.Errorf("expected clone-local prefs to hold codex=Fixer, got: %+v", prefs)
+	}
+	// Project settings.json must NOT have a review key after setup.
+	if _, projectRaw, exists, err := settings.LoadProjectRaw(context.Background()); err != nil {
+		t.Fatalf("LoadProjectRaw: %v", err)
+	} else if exists {
+		if _, has := projectRaw["review"]; has {
+			t.Errorf("project settings.json contains review key after setup; would trigger legacy migration nudge")
+		}
+	}
+}
+
+func TestRunSetup_NoReviewersErrors(t *testing.T) {
+	// Uses t.Chdir; cannot t.Parallel.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	forms := review.SetupForms{
+		PickRoles: func(_ context.Context, _ []string, _ map[string]settings.Role) (map[string]settings.Role, error) {
+			return map[string]settings.Role{
+				"claude-code": settings.RoleFixer,
+				"codex":       settings.RoleSkip,
+			}, nil
+		},
+		// PickSkills should NOT be called.
+		PickSkills: func(_ context.Context, name string, _ settings.ReviewConfig) (settings.ReviewConfig, error) {
+			t.Errorf("PickSkills should not be called when no reviewers configured; got call for %q", name)
+			return settings.ReviewConfig{}, nil
+		},
+	}
+	_, err := review.RunSetup(context.Background(), io.Discard,
+		func(context.Context) []types.AgentName {
+			return []types.AgentName{"claude-code", "codex"}
+		}, forms)
+	if err == nil {
+		t.Fatal("expected error when no reviewers selected, got nil")
+	}
+	if !strings.Contains(err.Error(), "Reviewer or Both") {
+		t.Errorf("expected error to mention 'Reviewer or Both', got: %v", err)
 	}
 }
 
@@ -215,13 +268,18 @@ func TestPrintSetupBanner_MultipleReviewersWithDisplayLabels(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	review.PrintSetupBanner(&buf, map[string]settings.ReviewConfig{
-		"claude-code": {Role: settings.RoleReviewer},
+		"claude-code": {Role: settings.RoleReviewer, Skills: []string{"/review", "/security-review"}},
 		"gemini":      {Role: settings.RoleReviewer},
 		"codex":       {Role: settings.RoleFixer},
 	})
 	got := buf.String()
-	if !strings.Contains(got, "Reviewers: Claude Code, Gemini CLI") {
-		t.Errorf("expected display-label list, got:\n%s", got)
+	// Reviewers are annotated with their configured skill count; zero skills
+	// renders as a generic-review note rather than "(0 skills)".
+	if !strings.Contains(got, "Claude Code (2 skills)") {
+		t.Errorf("expected skill-count annotation, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Gemini CLI (no skills — generic review)") {
+		t.Errorf("expected generic-review annotation for skill-less reviewer, got:\n%s", got)
 	}
 	if !strings.Contains(got, "Fixer:     Codex") {
 		t.Errorf("expected fixer line, got:\n%s", got)

@@ -109,15 +109,16 @@ func (s SynthesisSink) RunFinished(summary reviewtypes.RunSummary) {
 	if s.OnResult != nil {
 		s.OnResult(result)
 	}
-	// The synthesis verdict is markdown — render it through the same palette
-	// dispatch / DumpSink use, so multi-agent reviews finish with a visually
-	// consistent block. Non-TTY writers receive raw markdown unchanged.
+	// The synthesis verdict is markdown — render it with the same muted palette
+	// as the per-agent DumpSink so the multi-agent review finishes calm and
+	// consistent rather than as another wall of colour. Non-TTY writers receive
+	// raw markdown unchanged.
 	//
-	// Use Fprint (not Fprintln): mdrender.Render returns glamour output that
-	// already ends with a newline, and the raw-markdown fallback path has its
-	// own terminal newline from the LLM response. Adding Fprintln would double
-	// the trailing blank line.
-	rendered, err := mdrender.RenderForWriter(s.Writer, result)
+	// Use Fprint (not Fprintln): mdrender returns glamour output that already
+	// ends with a newline, and the raw-markdown fallback path has its own
+	// terminal newline from the LLM response. Adding Fprintln would double the
+	// trailing blank line.
+	rendered, err := mdrender.RenderMutedForWriter(s.Writer, result)
 	if err != nil {
 		rendered = result
 	}

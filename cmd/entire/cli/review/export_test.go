@@ -4,8 +4,6 @@ import (
 	"context"
 	"io"
 
-	"charm.land/huh/v2"
-
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
 
@@ -13,6 +11,11 @@ import (
 // package-external tests (synthesis_prompt_test.go, synthesis_sink_test.go).
 // Only compiled during `go test`.
 var ExposedComposeSynthesisPrompt = composeSynthesisPrompt
+
+// ExposedRunConfigWithReviewConfig exposes runConfigWithReviewConfig so
+// external tests can assert the settings.ReviewConfig → RunConfig mapping
+// (skills/prompt branch plus the Model/ReasoningEffort per-spawn knobs).
+var ExposedRunConfigWithReviewConfig = runConfigWithReviewConfig
 
 // SinkComposeInputs is the test-facing alias for multiAgentSinkInputs.
 // It lets external tests drive composeMultiAgentSinks with explicit isTTY
@@ -59,10 +62,6 @@ func ExposedComposeSingleAgentSinks(in SingleAgentSinkComposeInputs) []reviewtyp
 		agentName: in.AgentName,
 		cancelRun: in.CancelRun,
 	})
-}
-
-func ExposedBuildAgentMultiSelect(options []huh.Option[string], picked *[]string) *huh.MultiSelect[string] {
-	return buildAgentMultiSelect(options, picked)
 }
 
 // ExposedFindTUISink exposes findTUISink for tests.
