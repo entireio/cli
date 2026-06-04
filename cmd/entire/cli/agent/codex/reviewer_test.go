@@ -426,7 +426,11 @@ func TestParseCodexOutput_GarbledLineEmitsRunErrorAndContinues(t *testing.T) {
 // Captured by running real codex-cli 0.130.0 — no item.* envelope ever
 // carried a usage field, so emission stays anchored to turn.completed.
 func TestParseCodexOutput_EmitsTokensAtEveryTurnCompleted(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: the thread.started envelope launches the rollout token
+	// tailer, which resolves the codex session dir. Pin it to an empty temp
+	// dir so the tailer never finds a real ~/.codex rollout-*-tid-1.jsonl and
+	// injects extra Tokens events that would break the exactly-2 assertion.
+	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", t.TempDir())
 	// Real codex --json output (lightly trimmed) simulating a multi-turn
 	// review: model call → tool exec → model call → tool exec, with a
 	// turn.completed envelope at every turn boundary carrying running

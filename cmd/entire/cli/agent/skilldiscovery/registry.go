@@ -68,8 +68,11 @@ var installHints = map[string][]InstallHint{
 	},
 	"codex": {
 		{
-			Message:     "Install codex-review-pack: codex plugins add <url>",
-			ProvidesAny: []string{"/codex:adversarial-review"},
+			Message: "Install codex-review-pack: codex plugins add <url>",
+			// Dollar form: codex DiscoverReviewSkills emits $plugin:name, so the
+			// suppression fingerprint must match that, not the slash form — else
+			// ActiveInstallHintsFor never intersects and the hint shows forever.
+			ProvidesAny: []string{"$codex:adversarial-review"},
 		},
 	},
 	"gemini": {
