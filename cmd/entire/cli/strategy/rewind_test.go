@@ -14,10 +14,14 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode" // Register agent for ResolveAgentForRewind tests
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"  // Register agent for ResolveAgentForRewind tests
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/redact"
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
@@ -203,6 +207,49 @@ func TestShadowStrategy_PreviewRewind_LogsOnly(t *testing.T) {
 	if len(preview.FilesToRestore) > 0 {
 		t.Errorf("Logs-only preview should have no files to restore, got: %v", preview.FilesToRestore)
 	}
+}
+
+func TestRestoreLogsOnly_UsesV11Transcript(t *testing.T) {
+	repo := setupV1CustomRefRepo(t, `"1.1"`)
+	repoRoot, err := os.Getwd()
+	require.NoError(t, err)
+
+	agentName := types.AgentName("restore-logs-v11-agent")
+	agentType := types.AgentType("Restore Logs V11 Agent")
+	sessionDir := filepath.Join(repoRoot, "restored-sessions")
+	agent.Register(agentName, func() agent.Agent {
+		return &restoreLogsOnlyAgent{
+			name:       agentName,
+			agentType:  agentType,
+			sessionDir: sessionDir,
+		}
+	})
+
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("abc987abc987")
+	sessionID := "restore-v11-session"
+	v11Transcript := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"restore from v11"}]}}` + "\n")
+	staleV1Transcript := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"stale v1"}]}}` + "\n")
+
+	writeCommittedRewindCheckpoint(t, repo, cpID, sessionID, agentType, v11Transcript, time.Date(2025, 1, 2, 10, 0, 0, 0, time.UTC))
+	v1Ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(paths.MetadataRefName), v1Ref.Hash())))
+
+	writeCommittedRewindCheckpoint(t, repo, cpID, sessionID, agentType, staleV1Transcript, time.Date(2025, 1, 3, 10, 0, 0, 0, time.UTC))
+
+	var stdout, stderr bytes.Buffer
+	restored, err := NewManualCommitStrategy().RestoreLogsOnly(ctx, &stdout, &stderr, RewindPoint{
+		IsLogsOnly:   true,
+		CheckpointID: cpID,
+	}, true)
+	require.NoError(t, err, "stderr: %s", stderr.String())
+	require.Len(t, restored, 1, "stdout: %s\nstderr: %s", stdout.String(), stderr.String())
+
+	restoredPath := filepath.Join(sessionDir, sessionID+".jsonl")
+	got, err := os.ReadFile(restoredPath)
+	require.NoError(t, err)
+	require.Equal(t, string(v11Transcript), string(got))
 }
 
 func TestResolveAgentForRewind(t *testing.T) {
@@ -544,6 +591,74 @@ func TestShadowStrategy_Rewind_FromRepoRoot(t *testing.T) {
 	if string(content) != "# Test\n" {
 		t.Errorf("README.md content = %q, want %q", string(content), "# Test\n")
 	}
+}
+
+func writeCommittedRewindCheckpoint(
+	t *testing.T,
+	repo *git.Repository,
+	checkpointID id.CheckpointID,
+	sessionID string,
+	agentType types.AgentType,
+	transcript []byte,
+	createdAt time.Time,
+) {
+	t.Helper()
+
+	err := cpkg.NewGitStore(repo).WriteCommitted(context.Background(), cpkg.WriteCommittedOptions{
+		CheckpointID: checkpointID,
+		SessionID:    sessionID,
+		CreatedAt:    createdAt,
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted(transcript),
+		Prompts:      []string{"restore prompt"},
+		Agent:        agentType,
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	})
+	require.NoError(t, err)
+}
+
+type restoreLogsOnlyAgent struct {
+	name       types.AgentName
+	agentType  types.AgentType
+	sessionDir string
+}
+
+var _ agent.Agent = (*restoreLogsOnlyAgent)(nil)
+
+func (a *restoreLogsOnlyAgent) Name() types.AgentName                          { return a.name }
+func (a *restoreLogsOnlyAgent) Type() types.AgentType                          { return a.agentType }
+func (a *restoreLogsOnlyAgent) Description() string                            { return "restore logs test agent" }
+func (a *restoreLogsOnlyAgent) IsPreview() bool                                { return false }
+func (a *restoreLogsOnlyAgent) DetectPresence(_ context.Context) (bool, error) { return true, nil }
+func (a *restoreLogsOnlyAgent) ProtectedDirs() []string                        { return nil }
+func (a *restoreLogsOnlyAgent) ReadTranscript(string) ([]byte, error)          { return nil, nil }
+func (a *restoreLogsOnlyAgent) ChunkTranscript(_ context.Context, content []byte, _ int) ([][]byte, error) {
+	return [][]byte{content}, nil
+}
+func (a *restoreLogsOnlyAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
+	var out []byte
+	for _, chunk := range chunks {
+		out = append(out, chunk...)
+	}
+	return out, nil
+}
+func (a *restoreLogsOnlyAgent) GetSessionID(*agent.HookInput) string { return "" }
+func (a *restoreLogsOnlyAgent) GetSessionDir(string) (string, error) { return a.sessionDir, nil }
+func (a *restoreLogsOnlyAgent) ResolveSessionFile(sessionDir, sessionID string) string {
+	return filepath.Join(sessionDir, sessionID+".jsonl")
+}
+func (a *restoreLogsOnlyAgent) ReadSession(*agent.HookInput) (*agent.AgentSession, error) {
+	return nil, nil //nolint:nilnil // Not used by this test agent.
+}
+func (a *restoreLogsOnlyAgent) WriteSession(_ context.Context, session *agent.AgentSession) error {
+	if err := os.MkdirAll(filepath.Dir(session.SessionRef), 0o750); err != nil {
+		return err
+	}
+	return os.WriteFile(session.SessionRef, session.NativeData, 0o600)
+}
+func (a *restoreLogsOnlyAgent) FormatResumeCommand(sessionID string) string {
+	return "restore-logs " + sessionID
 }
 
 // fakeExternalAgent is a minimal Agent implementation for testing dynamic registration.

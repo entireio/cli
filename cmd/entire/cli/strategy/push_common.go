@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/perf"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -30,15 +31,16 @@ import (
 func pushBranchIfNeeded(ctx context.Context, target, branchName string) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
-		return nil //nolint:nilerr // Hook must be silent on failure
+		return nil
 	}
+	defer repo.Close()
 
 	// Check if branch exists locally
 	branchRef := plumbing.NewBranchReferenceName(branchName)
 	localRef, err := repo.Reference(branchRef, true)
 	if err != nil {
 		// No branch, nothing to push
-		return nil //nolint:nilerr // Expected when no sessions exist yet
+		return nil
 	}
 
 	// Only check remote tracking refs when target is a remote name (not a URL).
@@ -73,9 +75,17 @@ func displayPushTarget(target string) string {
 	return target
 }
 
+// checkpointPushBudget is one shared deadline across the initial push,
+// fetch+rebase, and retry — per-attempt timeouts can stack to ~3x. var so tests
+// can shrink it.
+var checkpointPushBudget = 2 * time.Minute
+
 // doPushBranch pushes the given branch to the target with fetch+merge recovery.
 // The target can be a remote name or a URL.
 func doPushBranch(ctx context.Context, target, branchName string) error {
+	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
+	defer cancel()
+
 	displayTarget := displayPushTarget(target)
 
 	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", branchName, displayTarget)
@@ -97,12 +107,18 @@ func doPushBranch(ctx context.Context, target, branchName string) error {
 	}
 
 	// Push failed - likely non-fast-forward. Try to fetch and rebase.
+	// Spanned (with the network fetch as a child) so the trace distinguishes
+	// "the raw push is slow" from "we keep hitting contention and re-syncing".
 	fmt.Fprintf(os.Stderr, "[entire] Syncing %s with remote...", branchName)
 	stop = startProgressDots(os.Stderr)
 
-	if err := fetchAndRebaseSessionsCommon(ctx, target, branchName); err != nil {
+	frCtx, fetchRebaseSpan := perf.Start(ctx, "fetch_and_rebase")
+	syncErr := fetchAndRebaseSessionsCommon(frCtx, target, branchName)
+	fetchRebaseSpan.RecordError(syncErr)
+	fetchRebaseSpan.End()
+	if syncErr != nil {
 		stop("")
-		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync %s: %v\n", branchName, err)
+		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync %s: %v\n", branchName, syncErr)
 		printCheckpointRemoteHint(target)
 		return nil // Don't fail the main push
 	}
@@ -207,12 +223,19 @@ func finishPush(ctx context.Context, stop func(string), result pushResult, targe
 	}
 }
 
-// tryPushSessionsCommon attempts to push the sessions branch.
+// tryPushSessionsCommon attempts to push the sessions branch. No timeout of its
+// own — runs under doPushBranch's shared budget.
 func tryPushSessionsCommon(ctx context.Context, remoteName, branchName string) (pushResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
+	// Span the actual `git push` subprocess: on a slow remote (e.g. a custom
+	// git transport) this is typically where pre-push time is spent. Called once
+	// per push attempt, so a retry after fetch+rebase shows up as a second
+	// git_push step (git_push~1) in the trace. A rejected first push records an
+	// error flag, which signals the recovery path was taken.
+	_, pushSpan := perf.Start(ctx, "git_push")
 	result, err := remote.Push(ctx, remoteName, branchName)
+	pushSpan.RecordError(err)
+	pushSpan.End()
+
 	outputStr := result.Output
 	if err != nil {
 		return pushResult{}, classifyPushFailure(ctx, outputStr, err)
@@ -304,9 +327,7 @@ func printProtectedRefBlock(w io.Writer, ref, target string) {
 // always apply cleanly.
 // The target can be a remote name or a URL.
 func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
+	// No timeout: runs under doPushBranch's shared budget.
 	fetchTarget, err := remote.ResolveFetchTarget(ctx, target)
 	if err != nil {
 		return fmt.Errorf("resolve fetch target: %w", err)
@@ -328,21 +349,31 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 	}
 
 	// Use git CLI for fetch (go-git's fetch can be tricky with auth).
-	// Use --filter=blob:none for a partial fetch that downloads only commits
-	// and trees, skipping blobs. The merge only needs the tree structure to
-	// combine entries; blobs are already local or fetched on demand.
-	if output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+	// Do NOT --unshallow here: on a shallow repo with deep history (e.g. a
+	// shared monorepo), --unshallow downloads the whole repository because
+	// git treats shallow as a global property of the clone, not per-ref.
+	// The downstream reconcile/rebase paths walk only commits visible past
+	// .git/shallow (collectCommitChain / collectCommitsSince), so the
+	// missing pre-shallow history isn't needed to produce a correct rebase.
+	// Span the fetch separately so a slow sync can be attributed to the network
+	// fetch versus the local reconcile/rebase that follows it.
+	_, fetchSpan := perf.Start(ctx, "git_fetch")
+	fetchOutput, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
-	}); fetchErr != nil {
-		return fmt.Errorf("fetch failed: %s", output)
+	})
+	fetchSpan.RecordError(fetchErr)
+	fetchSpan.End()
+	if fetchErr != nil {
+		return fmt.Errorf("fetch failed: %s", fetchOutput)
 	}
 
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Reconcile disconnected metadata branches before rebasing.
 	// The fetch above updated the remote-tracking ref, so reconciliation
@@ -368,6 +399,7 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 
 	// If local is already at or behind remote, fast-forward
 	if localRef.Hash() == remoteRef.Hash() {
+		mirrorSyncedMetadataBranch(ctx, repo, branchName)
 		return nil
 	}
 
@@ -390,6 +422,7 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 		if usedTempRef {
 			_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
 		}
+		mirrorSyncedMetadataBranch(ctx, repo, branchName)
 		return nil
 	}
 
@@ -411,10 +444,16 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 		if usedTempRef {
 			_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
 		}
+		mirrorSyncedMetadataBranch(ctx, repo, branchName)
 		return nil
 	}
 
-	newTip, err := cherryPickOnto(ctx, repo, remoteRef.Hash(), localCommits)
+	shallow, err := loadShallowHashes(ctx, repoPath)
+	if err != nil {
+		return fmt.Errorf("failed to load shallow boundaries: %w", err)
+	}
+
+	newTip, err := cherryPickOnto(ctx, repo, remoteRef.Hash(), localCommits, shallow)
 	if err != nil {
 		return fmt.Errorf("failed to rebase local commits onto remote: %w", err)
 	}
@@ -430,7 +469,24 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 		_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
 	}
 
+	mirrorSyncedMetadataBranch(ctx, repo, branchName)
 	return nil
+}
+
+func mirrorSyncedMetadataBranch(ctx context.Context, repo *git.Repository, branchName string) {
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+	if !refs.Primary.IsBranch() {
+		logging.Debug(ctx, "committed-ref mirror skipped after sync: primary metadata ref is not a branch",
+			slog.String("primary", refs.Primary.String()))
+		return
+	}
+	if branchName != refs.Primary.Short() {
+		logging.Debug(ctx, "committed-ref mirror skipped after sync: branch name does not match primary",
+			slog.String("branch_name", branchName),
+			slog.String("primary_short", refs.Primary.Short()))
+		return
+	}
+	MirrorCommittedMetadataRefBestEffort(ctx, repo)
 }
 
 // getMergeBase returns the merge base hash of two commits, or an error if they
@@ -443,10 +499,18 @@ func getMergeBase(ctx context.Context, repoPath, hashA, hashB string) (plumbing.
 	cmd.Dir = repoPath
 	output, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return plumbing.ZeroHash, errNoMergeBase
+		}
 		return plumbing.ZeroHash, fmt.Errorf("git merge-base failed: %w", err)
 	}
 
-	return plumbing.NewHash(strings.TrimSpace(string(output))), nil
+	mergeBase := strings.TrimSpace(string(output))
+	if mergeBase == "" {
+		return plumbing.ZeroHash, errNoMergeBase
+	}
+	return plumbing.NewHash(mergeBase), nil
 }
 
 // collectCommitsSince returns non-merge commits reachable from tip but not from
@@ -509,37 +573,4 @@ func startProgressDots(w io.Writer) func(suffix string) {
 		<-stopped // Wait for goroutine to finish before writing suffix
 		fmt.Fprintln(w, suffix)
 	}
-}
-
-// createMergeCommitCommon creates a merge commit with multiple parents.
-func createMergeCommitCommon(ctx context.Context, repo *git.Repository, treeHash plumbing.Hash, parents []plumbing.Hash, message string) (plumbing.Hash, error) {
-	authorName, authorEmail := GetGitAuthorFromRepo(repo)
-	now := time.Now()
-	sig := object.Signature{
-		Name:  authorName,
-		Email: authorEmail,
-		When:  now,
-	}
-
-	commit := &object.Commit{
-		TreeHash:     treeHash,
-		ParentHashes: parents,
-		Author:       sig,
-		Committer:    sig,
-		Message:      message,
-	}
-
-	checkpoint.SignCommitBestEffort(ctx, commit)
-
-	obj := repo.Storer.NewEncodedObject()
-	if err := commit.Encode(obj); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to encode commit: %w", err)
-	}
-
-	hash, err := repo.Storer.SetEncodedObject(obj)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to store commit: %w", err)
-	}
-
-	return hash, nil
 }

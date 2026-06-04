@@ -77,6 +77,7 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	var states []*SessionState
 	for _, sessionState := range sessionStates {
@@ -247,6 +248,7 @@ func (s *ManualCommitStrategy) CountOtherActiveSessionsWithCheckpoints(ctx conte
 	if err != nil {
 		return 0, err
 	}
+	defer repo.Close()
 	head, err := repo.Head()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get HEAD: %w", err)

@@ -69,6 +69,7 @@ func ListSessions(ctx context.Context) ([]Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Get checkpoints from the entire/checkpoints/v1 branch
 	checkpoints, err := ListCheckpoints(ctx)
@@ -183,17 +184,8 @@ func GetSession(ctx context.Context, sessionID string) (*Session, error) {
 }
 
 // getDescriptionForCheckpoint reads the description for a checkpoint from committed checkpoint storage.
-// It reads from the latest session subdirectory in the new storage format.
 func getDescriptionForCheckpoint(repo *git.Repository, checkpointID id.CheckpointID) string {
 	tree, err := GetMetadataBranchTree(repo)
-	if err == nil {
-		description, readErr := readDescriptionForCheckpointFromTree(tree, checkpointID)
-		if readErr == nil {
-			return description
-		}
-	}
-
-	tree, err = GetV2MetadataBranchTree(repo)
 	if err != nil {
 		return NoDescription
 	}

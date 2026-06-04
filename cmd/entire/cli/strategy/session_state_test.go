@@ -75,132 +75,85 @@ func verifySessionState(t *testing.T, loaded, expected *SessionState) {
 }
 
 // TestLoadSessionState_WithEndedAt tests that EndedAt serializes/deserializes correctly.
-func TestLoadSessionState_WithEndedAt(t *testing.T) {
-	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+// TestLoadSessionState_OptionalTimeFields verifies that the optional *time.Time
+// fields on SessionState (EndedAt, LastInteractionTime) round-trip correctly
+// through save/load — both when set (preserved and Equal) and when nil (stays nil).
+func TestLoadSessionState_OptionalTimeFields(t *testing.T) {
+	tests := []struct {
+		name string
+		// set assigns the field on a state and returns the value assigned.
+		set func(s *SessionState, ts time.Time)
+		// get reads the field back from a loaded state.
+		get func(s *SessionState) *time.Time
+	}{
+		{
+			name: "EndedAt",
+			set:  func(s *SessionState, ts time.Time) { s.EndedAt = &ts },
+			get:  func(s *SessionState) *time.Time { return s.EndedAt },
+		},
+		{
+			name: "LastInteractionTime",
+			set:  func(s *SessionState, ts time.Time) { s.LastInteractionTime = &ts },
+			get:  func(s *SessionState) *time.Time { return s.LastInteractionTime },
+		},
 	}
 
-	t.Chdir(dir)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			_, err := git.PlainInit(dir, false)
+			if err != nil {
+				t.Fatalf("failed to init git repo: %v", err)
+			}
+			t.Chdir(dir)
 
-	// Test with EndedAt set
-	endedAt := time.Now().Add(-time.Hour) // 1 hour ago
-	state := &SessionState{
-		SessionID:  "test-session-ended",
-		BaseCommit: "abc123def456",
-		StartedAt:  time.Now().Add(-2 * time.Hour),
-		EndedAt:    &endedAt,
-		StepCount:  5,
-	}
+			// Field set: it should be preserved and Equal after load.
+			ts := time.Now().Add(-time.Hour)
+			state := &SessionState{
+				SessionID:  "test-session-set",
+				BaseCommit: "abc123def456",
+				StartedAt:  time.Now().Add(-2 * time.Hour),
+				StepCount:  5,
+			}
+			tt.set(state, ts)
 
-	err = SaveSessionState(context.Background(), state)
-	if err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
+			if err := SaveSessionState(context.Background(), state); err != nil {
+				t.Fatalf("SaveSessionState() error = %v", err)
+			}
+			loaded, err := LoadSessionState(context.Background(), "test-session-set")
+			if err != nil {
+				t.Fatalf("LoadSessionState() error = %v", err)
+			}
+			require.NotNil(t, loaded, "LoadSessionState() returned nil")
 
-	loaded, err := LoadSessionState(context.Background(), "test-session-ended")
-	if err != nil {
-		t.Fatalf("LoadSessionState() error = %v", err)
-	}
-	require.NotNil(t, loaded, "LoadSessionState() returned nil")
+			got := tt.get(loaded)
+			if got == nil {
+				t.Fatalf("%s was nil after load, expected non-nil", tt.name)
+			}
+			if !got.Equal(ts) {
+				t.Errorf("%s = %v, want %v", tt.name, *got, ts)
+			}
 
-	// Verify EndedAt was preserved
-	if loaded.EndedAt == nil {
-		t.Fatal("EndedAt was nil after load, expected non-nil")
-	}
-	if !loaded.EndedAt.Equal(endedAt) {
-		t.Errorf("EndedAt = %v, want %v", *loaded.EndedAt, endedAt)
-	}
+			// Field nil: it should remain nil after load.
+			stateNil := &SessionState{
+				SessionID:  "test-session-nil",
+				BaseCommit: "xyz789",
+				StartedAt:  time.Now(),
+				StepCount:  1,
+			}
+			if err := SaveSessionState(context.Background(), stateNil); err != nil {
+				t.Fatalf("SaveSessionState() error = %v", err)
+			}
+			loadedNil, err := LoadSessionState(context.Background(), "test-session-nil")
+			if err != nil {
+				t.Fatalf("LoadSessionState() error = %v", err)
+			}
+			require.NotNil(t, loadedNil, "LoadSessionState() returned nil")
 
-	// Test with EndedAt nil (active session)
-	stateActive := &SessionState{
-		SessionID:  "test-session-active",
-		BaseCommit: "xyz789",
-		StartedAt:  time.Now(),
-		EndedAt:    nil,
-		StepCount:  1,
-	}
-
-	err = SaveSessionState(context.Background(), stateActive)
-	if err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-
-	loadedActive, err := LoadSessionState(context.Background(), "test-session-active")
-	if err != nil {
-		t.Fatalf("LoadSessionState() error = %v", err)
-	}
-	require.NotNil(t, loadedActive, "LoadSessionState() returned nil")
-
-	// Verify EndedAt remains nil
-	if loadedActive.EndedAt != nil {
-		t.Errorf("EndedAt = %v, want nil for active session", *loadedActive.EndedAt)
-	}
-}
-
-// TestLoadSessionState_WithLastInteractionTime tests that LastInteractionTime serializes/deserializes correctly.
-func TestLoadSessionState_WithLastInteractionTime(t *testing.T) {
-	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	// Test with LastInteractionTime set
-	lastInteraction := time.Now().Add(-5 * time.Minute)
-	state := &SessionState{
-		SessionID:           "test-session-interaction",
-		BaseCommit:          "abc123def456",
-		StartedAt:           time.Now().Add(-2 * time.Hour),
-		LastInteractionTime: &lastInteraction,
-		StepCount:           3,
-	}
-
-	err = SaveSessionState(context.Background(), state)
-	if err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-
-	loaded, err := LoadSessionState(context.Background(), "test-session-interaction")
-	if err != nil {
-		t.Fatalf("LoadSessionState() error = %v", err)
-	}
-	require.NotNil(t, loaded, "LoadSessionState() returned nil")
-
-	// Verify LastInteractionTime was preserved
-	if loaded.LastInteractionTime == nil {
-		t.Fatal("LastInteractionTime was nil after load, expected non-nil")
-	}
-	if !loaded.LastInteractionTime.Equal(lastInteraction) {
-		t.Errorf("LastInteractionTime = %v, want %v", *loaded.LastInteractionTime, lastInteraction)
-	}
-
-	// Test with LastInteractionTime nil (old session without this field)
-	stateOld := &SessionState{
-		SessionID:           "test-session-no-interaction",
-		BaseCommit:          "xyz789",
-		StartedAt:           time.Now(),
-		LastInteractionTime: nil,
-		StepCount:           1,
-	}
-
-	err = SaveSessionState(context.Background(), stateOld)
-	if err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-
-	loadedOld, err := LoadSessionState(context.Background(), "test-session-no-interaction")
-	if err != nil {
-		t.Fatalf("LoadSessionState() error = %v", err)
-	}
-	require.NotNil(t, loadedOld, "LoadSessionState() returned nil")
-
-	// Verify LastInteractionTime remains nil
-	if loadedOld.LastInteractionTime != nil {
-		t.Errorf("LastInteractionTime = %v, want nil for old session", *loadedOld.LastInteractionTime)
+			if gotNil := tt.get(loadedNil); gotNil != nil {
+				t.Errorf("%s = %v, want nil", tt.name, *gotNil)
+			}
+		})
 	}
 }
 

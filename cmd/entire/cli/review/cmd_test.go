@@ -43,6 +43,22 @@ func installHooksForCmdTest(t *testing.T, agentName types.AgentName) {
 	}
 }
 
+// seedReviewConfig persists a review config map into clone-local preferences for
+// test setup, preserving any other existing preferences. It replaces the former
+// review.SaveReviewConfig, which had no production caller (the picker writes via
+// the combined config+fix-agent writer instead).
+func seedReviewConfig(ctx context.Context, cfg map[string]settings.ReviewConfig) error {
+	prefs, err := settings.LoadClonePreferences(ctx)
+	if err != nil {
+		return err
+	}
+	if prefs == nil {
+		prefs = &settings.ClonePreferences{}
+	}
+	prefs.Review = cfg
+	return settings.SaveClonePreferences(ctx, prefs)
+}
+
 // TestReviewCmd_Help verifies `entire review --help` contains the expected
 // flags and subcommands without panicking.
 func TestReviewCmd_Help(t *testing.T) {
@@ -81,45 +97,38 @@ func TestNewReviewCmd_NoHiddenFlags(t *testing.T) {
 	}
 }
 
-func TestReviewFindings_NotGitRepoReturnsSilentError(t *testing.T) {
-	t.Chdir(t.TempDir())
-
-	rootCmd := cli.NewRootCmd()
-	errBuf := &bytes.Buffer{}
-	rootCmd.SetErr(errBuf)
-	rootCmd.SetArgs([]string{"review", "--findings"})
-
-	err := rootCmd.Execute()
-	if err == nil {
-		t.Fatal("expected error outside a git repo")
+// TestReview_NotGitRepoReturnsSilentError checks that review outside a git repo
+// returns a SilentError and prints the message once, for any mode flag.
+func TestReview_NotGitRepoReturnsSilentError(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"findings", []string{"review", "--findings"}},
+		{"fix", []string{"review", "--fix", "review-session"}},
 	}
-	var silentErr *cli.SilentError
-	if !errors.As(err, &silentErr) {
-		t.Fatalf("expected SilentError, got %T: %v", err, err)
-	}
-	if got := strings.Count(errBuf.String(), "Not a git repository"); got != 1 {
-		t.Fatalf("not-git message count = %d, want 1; stderr:\n%s", got, errBuf.String())
-	}
-}
 
-func TestReviewFix_NotGitRepoReturnsSilentError(t *testing.T) {
-	t.Chdir(t.TempDir())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
 
-	rootCmd := cli.NewRootCmd()
-	errBuf := &bytes.Buffer{}
-	rootCmd.SetErr(errBuf)
-	rootCmd.SetArgs([]string{"review", "--fix", "review-session"})
+			rootCmd := cli.NewRootCmd()
+			errBuf := &bytes.Buffer{}
+			rootCmd.SetErr(errBuf)
+			rootCmd.SetArgs(tt.args)
 
-	err := rootCmd.Execute()
-	if err == nil {
-		t.Fatal("expected error outside a git repo")
-	}
-	var silentErr *cli.SilentError
-	if !errors.As(err, &silentErr) {
-		t.Fatalf("expected SilentError, got %T: %v", err, err)
-	}
-	if got := strings.Count(errBuf.String(), "Not a git repository"); got != 1 {
-		t.Fatalf("not-git message count = %d, want 1; stderr:\n%s", got, errBuf.String())
+			err := rootCmd.Execute()
+			if err == nil {
+				t.Fatal("expected error outside a git repo")
+			}
+			var silentErr *cli.SilentError
+			if !errors.As(err, &silentErr) {
+				t.Fatalf("expected SilentError, got %T: %v", err, err)
+			}
+			if got := strings.Count(errBuf.String(), "Not a git repository"); got != 1 {
+				t.Fatalf("not-git message count = %d, want 1; stderr:\n%s", got, errBuf.String())
+			}
+		})
 	}
 }
 
@@ -129,7 +138,7 @@ func TestRunReview_MissingHooksAborts(t *testing.T) {
 	setupCmdTestRepo(t)
 
 	// Save config but don't install hooks.
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"claude-code": {Skills: []string{testReviewSkill}},
 	}); err != nil {
 		t.Fatal(err)
@@ -173,7 +182,7 @@ func TestRunReview_NonLaunchableAgentPreservesMarker(t *testing.T) {
 
 	// Use prompt-only config: cursor has no curated built-ins, so a Skills
 	// value would trip the installed-skill guard before reaching this path.
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		nonLaunchableAgent: {Prompt: "review the diff"},
 	}); err != nil {
 		t.Fatal(err)
@@ -210,7 +219,7 @@ func TestRunReview_MissingConfiguredSkillAbortsBeforeMarker(t *testing.T) {
 	setupCmdTestRepo(t)
 	installHooksForCmdTest(t, "claude-code")
 
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"claude-code": {Skills: []string{"/bogus:skill-does-not-exist"}},
 	}); err != nil {
 		t.Fatal(err)
@@ -242,7 +251,7 @@ func TestRunReview_PromptOnlyConfigSkipsVerification(t *testing.T) {
 	setupCmdTestRepo(t)
 	installHooksForCmdTest(t, "cursor")
 
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"cursor": {Prompt: "review the diff"},
 	}); err != nil {
 		t.Fatal(err)
@@ -271,7 +280,7 @@ func TestRunReview_FlagOverrideSkipsPicker(t *testing.T) {
 	installHooksForCmdTest(t, "cursor")
 	installHooksForCmdTest(t, "opencode")
 
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"cursor":   {Prompt: "review the diff"},
 		"opencode": {Prompt: "review the diff"},
 	}); err != nil {
@@ -302,7 +311,7 @@ func TestRunReview_FlagOverrideMustBeEligibleAgent(t *testing.T) {
 	installHooksForCmdTest(t, "cursor")
 	// opencode has no hooks installed
 
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"cursor":   {Prompt: "review the diff"},
 		"opencode": {Prompt: "review the diff"},
 	}); err != nil {
@@ -405,7 +414,7 @@ func (r *captureRunConfigReviewer) Start(_ context.Context, cfg reviewtypes.RunC
 func TestRunReview_ConfigPromptAugmentsSelectedSkills(t *testing.T) {
 	setupCmdTestRepo(t)
 
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"claude-code": {
 			Skills: []string{"/review"},
 			Prompt: "Focus on auth regressions.",
@@ -460,7 +469,7 @@ func TestRunReview_ConfigPromptAugmentsSelectedSkills(t *testing.T) {
 func TestDispatchFork_TwoLaunchableNoOverride(t *testing.T) {
 	setupCmdTestRepo(t)
 
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"agent-a": {Prompt: "review"},
 		"agent-b": {Prompt: "review"},
 	}); err != nil {
@@ -497,7 +506,7 @@ func TestDispatchFork_TwoLaunchableNoOverride(t *testing.T) {
 func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 	setupCmdTestRepo(t)
 
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"claude-code": {
 			Skills: []string{"/review"},
 			Prompt: "Claude saved prompt.",
@@ -583,7 +592,7 @@ func TestDispatchFork_OneLaunchableOneNonLaunchableNoOverride(t *testing.T) {
 	setupCmdTestRepo(t)
 	installHooksForCmdTest(t, "cursor")
 
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"cursor":  {Prompt: "review"},
 		"agent-a": {Prompt: "review"},
 	}); err != nil {
@@ -627,7 +636,7 @@ func TestDispatchFork_TwoLaunchableWithAgentOverride(t *testing.T) {
 	setupCmdTestRepo(t)
 	installHooksForCmdTest(t, "cursor") // cursor needs real hooks
 
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"cursor":  {Prompt: "review"},
 		"agent-a": {Prompt: "review"},
 	}); err != nil {
@@ -670,7 +679,7 @@ func TestDispatchFork_TwoLaunchableWithAgentOverride(t *testing.T) {
 func TestDispatchFork_MultiPickerCancellationExitsCleanly(t *testing.T) {
 	setupCmdTestRepo(t)
 
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"agent-a": {Prompt: "review"},
 		"agent-b": {Prompt: "review"},
 	}); err != nil {
@@ -701,7 +710,7 @@ func TestDispatchFork_MultiPickerCancellationExitsCleanly(t *testing.T) {
 func TestDispatchFork_MultiPickerNoSelectionSurfacesError(t *testing.T) {
 	setupCmdTestRepo(t)
 
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"agent-a": {Prompt: "review"},
 		"agent-b": {Prompt: "review"},
 	}); err != nil {
@@ -978,7 +987,7 @@ func TestFindTUISink_NoTUIInSlice(t *testing.T) {
 func TestDispatchFork_SynthesisSinkNilProviderNoComposition(t *testing.T) {
 	setupCmdTestRepo(t)
 
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"agent-a": {Prompt: "review"},
 		"agent-b": {Prompt: "review"},
 	}); err != nil {
@@ -1020,7 +1029,7 @@ func TestDispatchFork_SingleAgentNoSynthesis(t *testing.T) {
 	setupCmdTestRepo(t)
 	installHooksForCmdTest(t, "cursor")
 
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"cursor": {Prompt: "review"},
 	}); err != nil {
 		t.Fatal(err)

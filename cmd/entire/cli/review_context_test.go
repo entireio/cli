@@ -13,6 +13,7 @@ import (
 	"time"
 
 	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -73,6 +74,34 @@ func TestReviewCheckpointContext_IncludesSummaryAndPromptFallback(t *testing.T) 
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("review checkpoint context contains %q:\n%s", unwanted, got)
 		}
+	}
+}
+
+// Review committed-context reads resolve against the v1 custom ref when the
+// mirror is enabled, and the v1 branch otherwise. No t.Parallel: t.Chdir drives
+// settings.
+func TestReviewCheckpointContext_ReadsV1CustomRefWhenEnabled(t *testing.T) {
+	repoRoot := newReviewContextRepo(t)
+	t.Chdir(repoRoot)
+
+	const cpID = "c1d2e3f4a5b6"
+	writeReviewContextCheckpointCustomRefOnly(t, repoRoot, cpID, reviewContextCheckpointOptions{
+		agentType: agent.AgentTypeClaudeCode,
+		summary:   &checkpoint.Summary{Intent: "custom-ref-only checkpoint", Outcome: "read via custom ref"},
+	})
+	commitReviewContextChange(t, repoRoot, "cp.go", "cp\n", "cp change", "Entire-Checkpoint: "+cpID)
+
+	const wantDetail = "summary: custom-ref-only checkpoint; read via custom ref"
+
+	// Mirror disabled: reads hit the v1 branch, which no longer holds the checkpoint.
+	if got := reviewCheckpointContext(context.Background(), repoRoot, "master"); strings.Contains(got, wantDetail) {
+		t.Fatalf("checkpoint detail leaked with mirror disabled:\n%s", got)
+	}
+
+	// Mirror enabled: reads hit the custom ref.
+	enableV1CustomRefMirror(t, repoRoot)
+	if got := reviewCheckpointContext(context.Background(), repoRoot, "master"); !strings.Contains(got, wantDetail) {
+		t.Fatalf("checkpoint detail missing with mirror enabled:\n%s", got)
 	}
 }
 
@@ -410,6 +439,44 @@ func writeReviewContextCheckpoint(t *testing.T, repoRoot string, checkpointID st
 	})
 	if err != nil {
 		t.Fatalf("write checkpoint: %v", err)
+	}
+}
+
+// writeReviewContextCheckpointCustomRefOnly writes a checkpoint, then points the
+// custom ref at it and drops the v1 branch so it is reachable only via the
+// custom ref.
+func writeReviewContextCheckpointCustomRefOnly(t *testing.T, repoRoot, checkpointID string, opts reviewContextCheckpointOptions) {
+	t.Helper()
+	writeReviewContextCheckpoint(t, repoRoot, checkpointID, opts)
+
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatalf("open repo: %v", err)
+	}
+	v1Branch := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	v1Ref, err := repo.Reference(v1Branch, true)
+	if err != nil {
+		t.Fatalf("resolve v1 metadata branch: %v", err)
+	}
+	customRef := plumbing.ReferenceName(paths.MetadataRefName)
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(customRef, v1Ref.Hash())); err != nil {
+		t.Fatalf("point custom ref at v1 tip: %v", err)
+	}
+	if err := repo.Storer.RemoveReference(v1Branch); err != nil {
+		t.Fatalf("remove v1 metadata branch: %v", err)
+	}
+}
+
+// enableV1CustomRefMirror enables the v1 custom-ref mirror in repo settings.
+func enableV1CustomRefMirror(t *testing.T, repoRoot string) {
+	t.Helper()
+	entireDir := filepath.Join(repoRoot, ".entire")
+	if err := os.MkdirAll(entireDir, 0o750); err != nil {
+		t.Fatalf("create .entire dir: %v", err)
+	}
+	body := `{"enabled":true,"strategy_options":{"checkpoints_version":"1.1"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(entireDir, paths.SettingsFileName), []byte(body), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
 	}
 }
 

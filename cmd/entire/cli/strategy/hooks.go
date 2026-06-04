@@ -20,6 +20,13 @@ const backupSuffix = ".pre-entire"
 const chainComment = "# Chain: run pre-existing hook"
 const missingEntireGitHookWarning = "[entire] Entire CLI is enabled but not installed or not on PATH. Skipping Entire Git hook; continuing. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
 
+// localDevHookCmdPrefix is the command prefix used for git hooks in local
+// development mode. It points at scripts/entire-dev, which compiles the CLI on
+// demand and falls back to the entire binary on PATH when the tree does not
+// build. The path is relative to the repository root, which is git's working
+// directory when it runs hooks.
+const localDevHookCmdPrefix = "./scripts/entire-dev"
+
 // gitHookNames are the git hooks managed by Entire CLI
 var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite", "pre-push"}
 
@@ -423,13 +430,13 @@ fi
 }
 
 // hookCmdPrefix returns the command prefix for hook scripts and warning messages.
-// Returns "go run ./cmd/entire/main.go" when local_dev is enabled.
+// Returns the scripts/entire-dev launcher when local_dev is enabled.
 // When absolutePath is true, resolves the full binary path via os.Executable()
 // and returns an error if resolution fails. This is needed for GUI git clients
 // (Xcode, Tower, etc.) that don't source shell profiles.
 func hookCmdPrefix(localDev, absolutePath bool) (string, error) {
 	if localDev {
-		return "go run ./cmd/entire/main.go", nil
+		return localDevHookCmdPrefix, nil
 	}
 	if absolutePath {
 		exe, err := os.Executable()

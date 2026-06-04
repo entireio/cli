@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -1371,380 +1370,6 @@ func TestHandleTurnEnd_PartialFailure(t *testing.T) {
 	}
 }
 
-func TestHandleTurnEnd_V2FullCurrent_PreservesTaskMetadata(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	// Enable checkpoints_v2 dual-write so PostCommit/HandleTurnEnd update v2 refs.
-	entireDir := filepath.Join(dir, ".entire")
-	require.NoError(t, os.MkdirAll(entireDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(testCheckpointsV2SettingsJSON), 0o644))
-
-	s := &ManualCommitStrategy{}
-	sessionID := "test-turn-end-v2-task-preserve"
-
-	metadataDir := ".entire/metadata/" + sessionID
-	metadataDirAbs := filepath.Join(dir, metadataDir)
-	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
-	transcriptPath := filepath.Join(metadataDirAbs, paths.TranscriptFileName)
-	require.NoError(t, os.WriteFile(transcriptPath, []byte(testTranscriptPromptResponse), 0o644))
-
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte("agent modified content"), 0o644))
-	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{"test.txt"},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 1",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
-	})
-	require.NoError(t, err)
-
-	subagentTranscriptPath := filepath.Join(metadataDirAbs, "subagent.jsonl")
-	require.NoError(t, os.WriteFile(subagentTranscriptPath, []byte("{\"type\":\"event\",\"message\":\"done\"}\n"), 0o644))
-	err = s.SaveTaskStep(context.Background(), TaskStepContext{
-		SessionID:              sessionID,
-		ToolUseID:              "toolu_01TASK",
-		AgentID:                "agent-01",
-		ModifiedFiles:          []string{"test.txt"},
-		TranscriptPath:         transcriptPath,
-		SubagentTranscriptPath: subagentTranscriptPath,
-		CheckpointUUID:         "uuid-task-001",
-		AuthorName:             "Test",
-		AuthorEmail:            "test@test.com",
-		SubagentType:           "general",
-		TaskDescription:        "Implement task",
-		AgentType:              agent.AgentTypeClaudeCode,
-	})
-	require.NoError(t, err)
-
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	state.Phase = session.PhaseActive
-	state.TurnCheckpointIDs = nil
-	require.NoError(t, s.saveSessionState(context.Background(), state))
-
-	cpID := "a1b2c3d4e5f6"
-	commitWithCheckpointTrailer(t, repo, dir, cpID)
-	require.NoError(t, s.PostCommit(context.Background()))
-
-	state, err = s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	require.Equal(t, []string{cpID}, state.TurnCheckpointIDs)
-
-	fullTranscript := `{"type":"human","message":{"content":"final user prompt"}}
-{"type":"assistant","message":{"content":"final assistant response"}}
-`
-	require.NoError(t, os.WriteFile(transcriptPath, []byte(fullTranscript), 0o644))
-	state.TranscriptPath = transcriptPath
-	require.NoError(t, s.saveSessionState(context.Background(), state))
-
-	require.NoError(t, s.HandleTurnEnd(context.Background(), state))
-
-	v2FullRef, err := repo.Reference(plumbing.ReferenceName(paths.V2FullCurrentRefName), true)
-	require.NoError(t, err)
-	v2FullCommit, err := repo.CommitObject(v2FullRef.Hash())
-	require.NoError(t, err)
-	v2FullTree, err := v2FullCommit.Tree()
-	require.NoError(t, err)
-
-	checkpointID := id.MustCheckpointID(cpID)
-	_, err = v2FullTree.File(checkpointID.Path() + "/0/tasks/toolu_01TASK/checkpoint.json")
-	require.NoError(t, err, "task metadata should be preserved after HandleTurnEnd finalization")
-}
-
-func TestHandleTurnEnd_V2UsesExternalTranscriptCompactor(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(testCheckpointsV2SettingsJSON), 0o644))
-
-	agentName := types.AgentName("test-external-turn-end-compactor")
-	agentType := types.AgentType("Test External Turn End Compactor")
-	fakeAgent := &fakeTranscriptCompactorAgent{
-		name:        agentName,
-		agentType:   agentType,
-		fullCompact: []byte("{\"v\":1,\"type\":\"assistant\",\"text\":\"initial\"}\n"),
-		caps:        agent.DeclaredCaps{CompactTranscript: true},
-	}
-	agent.Register(agentName, func() agent.Agent { return fakeAgent })
-
-	s := &ManualCommitStrategy{}
-	sessionID := "test-turn-end-external-compactor"
-
-	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
-
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	state.AgentType = agentType
-	state.Phase = session.PhaseActive
-	state.TranscriptPath = filepath.Join(dir, ".entire", "metadata", sessionID, paths.TranscriptFileName)
-	state.TurnCheckpointIDs = nil
-	require.NoError(t, s.saveSessionState(context.Background(), state))
-
-	cpIDStr := testTrailerCheckpointID.String()
-	commitWithCheckpointTrailer(t, repo, dir, cpIDStr)
-	require.NoError(t, s.PostCommit(context.Background()))
-
-	cpID := testTrailerCheckpointID
-	v2Store := checkpoint.NewV2GitStore(repo)
-	initialCompact, err := v2Store.ReadSessionCompactTranscript(context.Background(), cpID, 0)
-	require.NoError(t, err)
-	require.Equal(t, fakeAgent.fullCompact, initialCompact)
-
-	updatedTranscript := `{"type":"human","message":{"content":"build something"}}
-{"type":"assistant","message":{"content":"done building"}}
-{"type":"human","message":{"content":"now finalize it"}}
-{"type":"assistant","message":{"content":"all done"}}
-`
-	require.NoError(t, os.WriteFile(state.TranscriptPath, []byte(updatedTranscript), 0o644))
-	fakeAgent.fullCompact = []byte("{\"v\":1,\"type\":\"assistant\",\"text\":\"final\"}\n")
-
-	state, err = s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	require.Equal(t, []string{cpIDStr}, state.TurnCheckpointIDs)
-
-	require.NoError(t, s.HandleTurnEnd(context.Background(), state))
-
-	finalCompact, err := v2Store.ReadSessionCompactTranscript(context.Background(), cpID, 0)
-	require.NoError(t, err)
-	require.Equal(t, fakeAgent.fullCompact, finalCompact)
-}
-
-func TestHandleTurnEnd_V2ExternalTranscriptCompactor_UpdatesAllTurnCheckpoints(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(testCheckpointsV2SettingsJSON), 0o644))
-
-	agentName := types.AgentName("test-external-turn-end-multi-compactor")
-	agentType := types.AgentType("Test External Turn End Multi Compactor")
-	fakeAgent := &fakeTranscriptCompactorAgent{
-		name:        agentName,
-		agentType:   agentType,
-		fullCompact: []byte("{\"v\":1,\"type\":\"assistant\",\"text\":\"checkpoint-1\"}\n"),
-		caps:        agent.DeclaredCaps{CompactTranscript: true},
-	}
-	agent.Register(agentName, func() agent.Agent { return fakeAgent })
-
-	s := &ManualCommitStrategy{}
-	sessionID := "test-turn-end-external-nonzero-offset"
-
-	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
-
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	state.AgentType = agentType
-	state.Phase = session.PhaseActive
-	state.TranscriptPath = filepath.Join(dir, ".entire", "metadata", sessionID, paths.TranscriptFileName)
-	state.TurnCheckpointIDs = nil
-	require.NoError(t, s.saveSessionState(context.Background(), state))
-
-	cpID1 := "a1b2c3d4e5f6"
-	commitWithCheckpointTrailer(t, repo, dir, cpID1)
-	require.NoError(t, s.PostCommit(context.Background()))
-
-	fakeAgent.fullCompact = []byte("{\"v\":1,\"type\":\"assistant\",\"text\":\"checkpoint-2\"}\n")
-
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "second.txt"), []byte("second file"), 0o644))
-	metadataDir := ".entire/metadata/" + sessionID
-	metadataDirAbs := filepath.Join(dir, metadataDir)
-	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{"test.txt"},
-		NewFiles:       []string{"second.txt"},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 2",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
-	})
-	require.NoError(t, err)
-
-	state, err = s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	state.AgentType = agentType
-	state.Phase = session.PhaseActive
-	state.TranscriptPath = filepath.Join(dir, ".entire", "metadata", sessionID, paths.TranscriptFileName)
-	require.NoError(t, s.saveSessionState(context.Background(), state))
-
-	cpID2 := "b2c3d4e5f6a1"
-	commitFilesWithTrailer(t, repo, dir, cpID2, "second.txt")
-	require.NoError(t, s.PostCommit(context.Background()))
-
-	v2Store := checkpoint.NewV2GitStore(repo)
-	initialCompact1, err := v2Store.ReadSessionCompactTranscript(context.Background(), id.MustCheckpointID(cpID1), 0)
-	require.NoError(t, err)
-	require.JSONEq(t, "{\"v\":1,\"type\":\"assistant\",\"text\":\"checkpoint-1\"}\n", string(initialCompact1))
-	initialContent1, err := v2Store.ReadSessionContentByID(context.Background(), id.MustCheckpointID(cpID1), sessionID)
-	require.NoError(t, err)
-	initialStart1 := initialContent1.Metadata.CheckpointTranscriptStart
-
-	initialCompact2, err := v2Store.ReadSessionCompactTranscript(context.Background(), id.MustCheckpointID(cpID2), 0)
-	require.NoError(t, err)
-	require.JSONEq(t, "{\"v\":1,\"type\":\"assistant\",\"text\":\"checkpoint-2\"}\n", string(initialCompact2))
-	initialContent2, err := v2Store.ReadSessionContentByID(context.Background(), id.MustCheckpointID(cpID2), sessionID)
-	require.NoError(t, err)
-	initialStart2 := initialContent2.Metadata.CheckpointTranscriptStart
-	require.Greater(t, initialStart2, initialStart1, "later checkpoints should start later in transcript.jsonl")
-
-	updatedTranscript := `{"type":"human","message":{"content":"build something"}}
-{"type":"assistant","message":{"content":"done building"}}
-{"type":"human","message":{"content":"now finalize it"}}
-{"type":"assistant","message":{"content":"all done"}}
-`
-	require.NoError(t, os.WriteFile(state.TranscriptPath, []byte(updatedTranscript), 0o644))
-	fakeAgent.fullCompact = []byte("{\"v\":1,\"type\":\"assistant\",\"text\":\"final\"}\n")
-
-	state, err = s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	require.Equal(t, []string{cpID1, cpID2}, state.TurnCheckpointIDs)
-
-	require.NoError(t, s.HandleTurnEnd(context.Background(), state))
-
-	finalCompact1, err := v2Store.ReadSessionCompactTranscript(context.Background(), id.MustCheckpointID(cpID1), 0)
-	require.NoError(t, err)
-	require.Equal(t, fakeAgent.fullCompact, finalCompact1)
-	finalContent1, err := v2Store.ReadSessionContentByID(context.Background(), id.MustCheckpointID(cpID1), sessionID)
-	require.NoError(t, err)
-	require.Equal(t, initialStart1, finalContent1.Metadata.CheckpointTranscriptStart, "finalization must not rewrite checkpoint start offsets")
-
-	finalCompact2, err := v2Store.ReadSessionCompactTranscript(context.Background(), id.MustCheckpointID(cpID2), 0)
-	require.NoError(t, err)
-	require.Equal(t, fakeAgent.fullCompact, finalCompact2)
-	finalContent2, err := v2Store.ReadSessionContentByID(context.Background(), id.MustCheckpointID(cpID2), sessionID)
-	require.NoError(t, err)
-	require.Equal(t, initialStart2, finalContent2.Metadata.CheckpointTranscriptStart, "finalization must preserve per-checkpoint line references")
-}
-
-// TestHandleTurnEnd_V2InternalCompactor_PreservesCumulativeTranscript locks the
-// invariant that v2 /main stores a single CUMULATIVE compact transcript per
-// session — every mid-turn checkpoint shares the same transcript.jsonl bytes,
-// and each metadata.json indexes into it via checkpoint_transcript_start.
-//
-// Regression for the 6bc86e5832db desync (metadata says start=237 but the
-// transcript only has 17 lines): finalize used each checkpoint's stored
-// startLine to scope-compact the transcript, then wrote the scoped result on
-// top of the cumulative one. metadata.json was left untouched, so a
-// non-zero start began pointing past the end of the (now-shorter) transcript.
-func TestHandleTurnEnd_V2InternalCompactor_PreservesCumulativeTranscript(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(testCheckpointsV2SettingsJSON), 0o644))
-
-	s := &ManualCommitStrategy{}
-	sessionID := "test-turn-end-internal-cumulative"
-
-	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
-
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	state.AgentType = agent.AgentTypeClaudeCode
-	state.Phase = session.PhaseActive
-	state.TranscriptPath = filepath.Join(dir, ".entire", "metadata", sessionID, paths.TranscriptFileName)
-	state.TurnCheckpointIDs = nil
-	require.NoError(t, s.saveSessionState(context.Background(), state))
-
-	// Checkpoint 1 — first mid-turn commit, cumulative compact starts at line 0.
-	cpID1 := testTrailerCheckpointID.String()
-	commitWithCheckpointTrailer(t, repo, dir, cpID1)
-	require.NoError(t, s.PostCommit(context.Background()))
-
-	// Grow the transcript and create a second mid-turn checkpoint. Its
-	// checkpoint_transcript_start will be non-zero — that's the offset finalize
-	// previously fed back into the compactor as a scope window.
-	expandedTranscript := testTranscriptPromptResponse +
-		"{\"type\":\"human\",\"message\":{\"content\":\"another prompt\"}}\n" +
-		"{\"type\":\"assistant\",\"message\":{\"content\":\"another response\"}}\n"
-	require.NoError(t, os.WriteFile(state.TranscriptPath, []byte(expandedTranscript), 0o644))
-
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "second.txt"), []byte("second"), 0o644))
-	metadataDir := ".entire/metadata/" + sessionID
-	metadataDirAbs := filepath.Join(dir, metadataDir)
-	require.NoError(t, s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{"test.txt"},
-		NewFiles:       []string{"second.txt"},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 2",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
-	}))
-
-	state, err = s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	state.AgentType = agent.AgentTypeClaudeCode
-	state.Phase = session.PhaseActive
-	state.TranscriptPath = filepath.Join(dir, ".entire", "metadata", sessionID, paths.TranscriptFileName)
-	require.NoError(t, s.saveSessionState(context.Background(), state))
-
-	cpID2 := "b2c3d4e5f6a1"
-	commitFilesWithTrailer(t, repo, dir, cpID2, "second.txt")
-	require.NoError(t, s.PostCommit(context.Background()))
-
-	v2Store := checkpoint.NewV2GitStore(repo)
-	initialContent2, err := v2Store.ReadSessionContentByID(context.Background(), id.MustCheckpointID(cpID2), sessionID)
-	require.NoError(t, err)
-	initialStart2 := initialContent2.Metadata.CheckpointTranscriptStart
-	require.Positive(t, initialStart2,
-		"second checkpoint should have a non-zero checkpoint_transcript_start so the bug path is exercised")
-
-	// Add the rest of the turn — the content that arrives between checkpoint 2's
-	// PostCommit and Stop time, when HandleTurnEnd runs.
-	finalTranscript := expandedTranscript +
-		"{\"type\":\"human\",\"message\":{\"content\":\"final prompt\"}}\n" +
-		"{\"type\":\"assistant\",\"message\":{\"content\":\"final response\"}}\n"
-	require.NoError(t, os.WriteFile(state.TranscriptPath, []byte(finalTranscript), 0o644))
-
-	state, err = s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	require.Equal(t, []string{cpID1, cpID2}, state.TurnCheckpointIDs)
-
-	require.NoError(t, s.HandleTurnEnd(context.Background(), state))
-
-	// Both checkpoints must end up with byte-identical compact transcripts: the
-	// single cumulative stream covering the whole turn. The pre-fix code wrote a
-	// scoped slice for cp2 (bytes from source line >= initialStart2 only) which
-	// disagreed with cp1's cumulative bytes.
-	finalCompact1, err := v2Store.ReadSessionCompactTranscript(context.Background(), id.MustCheckpointID(cpID1), 0)
-	require.NoError(t, err)
-	finalCompact2, err := v2Store.ReadSessionCompactTranscript(context.Background(), id.MustCheckpointID(cpID2), 0)
-	require.NoError(t, err)
-	require.Equal(t, finalCompact1, finalCompact2,
-		"all turn checkpoints must share the same cumulative compact transcript after finalize")
-
-	// And the per-checkpoint start offset must still be a valid index into that
-	// transcript (this is the exact desync from issue 6bc86e5832db).
-	finalContent1, err := v2Store.ReadSessionContentByID(context.Background(), id.MustCheckpointID(cpID1), sessionID)
-	require.NoError(t, err)
-	finalContent2, err := v2Store.ReadSessionContentByID(context.Background(), id.MustCheckpointID(cpID2), sessionID)
-	require.NoError(t, err)
-
-	finalLines := bytes.Count(finalCompact2, []byte{'\n'})
-	require.GreaterOrEqual(t, finalLines, finalContent1.Metadata.CheckpointTranscriptStart,
-		"transcript.jsonl line count must be >= checkpoint_transcript_start for cp1")
-	require.GreaterOrEqual(t, finalLines, finalContent2.Metadata.CheckpointTranscriptStart,
-		"transcript.jsonl line count must be >= checkpoint_transcript_start for cp2 (the metadata-vs-transcript desync)")
-}
-
 // setupSessionWithCheckpoint initializes a session and creates one checkpoint
 // on the shadow branch so there is content available for condensation.
 // Also modifies test.txt to "agent modified content" and includes it in the checkpoint,
@@ -2303,117 +1928,85 @@ func TestPostCommit_IdleSession_NoTranscriptFallbackForCarryForward(t *testing.T
 		"IDLE session should NOT be condensed via transcript fallback — only ACTIVE sessions get transcript extraction for carry-forward")
 }
 
-// TestPostCommit_IdleSession_SkipsSentinelWait is a regression test verifying that
-// PostCommit for an IDLE session with AgentType=ClaudeCode and a TranscriptPath
-// completes quickly without hitting the 3s sentinel timeout in PrepareTranscript.
+// TestPostCommit_NonActiveSession_SkipsSentinelWait is a regression test verifying
+// that PostCommit for an IDLE or ENDED session with AgentType=ClaudeCode and a
+// TranscriptPath completes quickly without hitting the 3s sentinel timeout in
+// PrepareTranscript. Both IDLE and ENDED sessions should skip the sentinel wait
+// since their transcripts are already fully flushed.
 //
-// Before the fix, the transcript extraction functions called PrepareTranscript unconditionally,
-// which triggered waitForTranscriptFlush (3s timeout) even for idle/ended sessions
-// where the transcript was already fully flushed.
+// Before the fix, the transcript extraction functions called PrepareTranscript
+// unconditionally, which triggered waitForTranscriptFlush (3s timeout) even for
+// idle/ended sessions where the transcript was already fully flushed.
 //
 // After the fix, PrepareTranscript is only called when state.Phase.IsActive().
-func TestPostCommit_IdleSession_SkipsSentinelWait(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
+func TestPostCommit_NonActiveSession_SkipsSentinelWait(t *testing.T) {
+	tests := []struct {
+		name         string
+		phase        session.Phase
+		setEndedAt   bool
+		sessionID    string
+		commitTrlSHA string
+	}{
+		{"idle", session.PhaseIdle, false, "test-idle-skip-sentinel", "a1a2a3a4a5a6"},
+		{"ended", session.PhaseEnded, true, "test-ended-skip-sentinel", "e1e2e3e4e5e6"},
+	}
 
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setupGitRepo(t)
+			t.Chdir(dir)
 
-	s := &ManualCommitStrategy{}
-	sessionID := "test-idle-skip-sentinel"
+			repo, err := git.PlainOpen(dir)
+			require.NoError(t, err)
 
-	// Initialize session and save a checkpoint
-	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+			s := &ManualCommitStrategy{}
 
-	// Set phase to IDLE, set AgentType to Claude Code, and set TranscriptPath
-	// Without TranscriptPath, the PrepareTranscript code path is never reached.
-	// Without AgentType=ClaudeCode, the sentinel wait is not triggered.
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	state.Phase = session.PhaseIdle
-	state.LastInteractionTime = nil
-	state.FilesTouched = []string{"test.txt"}
-	state.AgentType = agent.AgentTypeClaudeCode
+			// Initialize session and save a checkpoint
+			setupSessionWithCheckpoint(t, s, repo, dir, tt.sessionID)
 
-	// Create a transcript file so PrepareTranscript would be triggered if not guarded
-	transcriptFile := filepath.Join(dir, ".entire", "transcript-"+sessionID+".jsonl")
-	require.NoError(t, os.MkdirAll(filepath.Dir(transcriptFile), 0o755))
-	require.NoError(t, os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644))
-	state.TranscriptPath = transcriptFile
+			// Set phase, AgentType=ClaudeCode, and TranscriptPath. Without
+			// TranscriptPath the PrepareTranscript code path is never reached;
+			// without AgentType=ClaudeCode the sentinel wait is not triggered.
+			state, err := s.loadSessionState(context.Background(), tt.sessionID)
+			require.NoError(t, err)
+			state.Phase = tt.phase
+			if tt.setEndedAt {
+				now := time.Now()
+				state.EndedAt = &now
+			} else {
+				state.LastInteractionTime = nil
+			}
+			state.FilesTouched = []string{"test.txt"}
+			state.AgentType = agent.AgentTypeClaudeCode
 
-	require.NoError(t, s.saveSessionState(context.Background(), state))
+			// Create a transcript file so PrepareTranscript would be triggered if not guarded
+			transcriptFile := filepath.Join(dir, ".entire", "transcript-"+tt.sessionID+".jsonl")
+			require.NoError(t, os.MkdirAll(filepath.Dir(transcriptFile), 0o755))
+			require.NoError(t, os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644))
+			state.TranscriptPath = transcriptFile
 
-	// Create a commit WITH the Entire-Checkpoint trailer
-	commitWithCheckpointTrailer(t, repo, dir, "a1a2a3a4a5a6")
+			require.NoError(t, s.saveSessionState(context.Background(), state))
 
-	// Time PostCommit — before the fix this would take ~3s+ due to sentinel timeout
-	start := time.Now()
-	err = s.PostCommit(context.Background())
-	elapsed := time.Since(start)
-	require.NoError(t, err)
+			// Create a commit WITH the Entire-Checkpoint trailer
+			commitWithCheckpointTrailer(t, repo, dir, tt.commitTrlSHA)
 
-	// Assert it completes well under the 3s sentinel timeout.
-	// Normal PostCommit for these tests runs in <500ms (git operations only).
-	assert.Less(t, elapsed, 2*time.Second,
-		"IDLE session PostCommit should skip sentinel wait and complete in <2s, took %v", elapsed)
+			// Time PostCommit — before the fix this would take ~3s+ due to sentinel timeout.
+			// Normal PostCommit for these tests runs in <500ms (git operations only).
+			start := time.Now()
+			err = s.PostCommit(context.Background())
+			elapsed := time.Since(start)
+			require.NoError(t, err)
 
-	// Verify condensation still happened correctly
-	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensation")
-	assert.NotNil(t, sessionsRef)
-}
+			// Assert it completes well under the 3s sentinel timeout.
+			assert.Less(t, elapsed, 2*time.Second,
+				"%s session PostCommit should skip sentinel wait and complete in <2s, took %v", tt.name, elapsed)
 
-// TestPostCommit_EndedSession_SkipsSentinelWait is the same regression test as
-// TestPostCommit_IdleSession_SkipsSentinelWait but for ENDED phase sessions.
-// Both IDLE and ENDED sessions should skip the sentinel wait since their
-// transcripts are already fully flushed.
-func TestPostCommit_EndedSession_SkipsSentinelWait(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	s := &ManualCommitStrategy{}
-	sessionID := "test-ended-skip-sentinel"
-
-	// Initialize session and save a checkpoint
-	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
-
-	// Set phase to ENDED, set AgentType to Claude Code, and set TranscriptPath
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	now := time.Now()
-	state.Phase = session.PhaseEnded
-	state.EndedAt = &now
-	state.FilesTouched = []string{"test.txt"}
-	state.AgentType = agent.AgentTypeClaudeCode
-
-	// Create a transcript file so PrepareTranscript would be triggered if not guarded
-	transcriptFile := filepath.Join(dir, ".entire", "transcript-"+sessionID+".jsonl")
-	require.NoError(t, os.MkdirAll(filepath.Dir(transcriptFile), 0o755))
-	require.NoError(t, os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644))
-	state.TranscriptPath = transcriptFile
-
-	require.NoError(t, s.saveSessionState(context.Background(), state))
-
-	// Create a commit WITH the Entire-Checkpoint trailer
-	commitWithCheckpointTrailer(t, repo, dir, "e1e2e3e4e5e6")
-
-	// Time PostCommit — before the fix this would take ~3s+ due to sentinel timeout
-	start := time.Now()
-	err = s.PostCommit(context.Background())
-	elapsed := time.Since(start)
-	require.NoError(t, err)
-
-	// Assert it completes well under the 3s sentinel timeout
-	assert.Less(t, elapsed, 2*time.Second,
-		"ENDED session PostCommit should skip sentinel wait and complete in <2s, took %v", elapsed)
-
-	// Verify condensation still happened correctly
-	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensation")
-	assert.NotNil(t, sessionsRef)
+			// Verify condensation still happened correctly
+			sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+			require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensation")
+			assert.NotNil(t, sessionsRef)
+		})
+	}
 }
 
 // TestPostCommit_EndedSession_SetsFullyCondensed verifies that an ENDED session

@@ -53,8 +53,8 @@ func TestInstallHooks_LocalDev(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go`) {
-		t.Error("local-dev extension should reference git rev-parse path")
+	if !strings.Contains(string(data), `"$(git rev-parse --show-toplevel)"/scripts/entire-dev`) {
+		t.Error("local-dev extension should delegate to the entire-dev launcher via git rev-parse")
 	}
 }
 

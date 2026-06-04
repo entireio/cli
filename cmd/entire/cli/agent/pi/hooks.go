@@ -52,7 +52,7 @@ func extensionPath(ctx context.Context) (string, error) {
 func renderExtension(localDev bool) string {
 	var cmd string
 	if localDev {
-		cmd = `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go`
+		cmd = agent.LocalDevHookScript
 	} else {
 		cmd = "entire"
 	}

@@ -21,7 +21,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
@@ -82,8 +82,19 @@ jobs:
             git log --oneline "${BASE_TAG}..HEAD" --no-merges >> "$RUNNER_TEMP/release_notes.md"
           fi
 
+      - name: Detect macOS signing availability
+        id: signing
+        env:
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+        run: |
+          if [ -n "$MACOS_SIGN_P12" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7
+        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7
         with:
           distribution: goreleaser-pro
           version: latest
@@ -102,6 +113,34 @@ jobs:
           POSTHOG_ENDPOINT: ${{ vars.POSTHOG_ENDPOINT }}
           DISCORD_WEBHOOK_ID: ${{ secrets.DISCORD_WEBHOOK_ID }}
           DISCORD_WEBHOOK_TOKEN: ${{ secrets.DISCORD_WEBHOOK_TOKEN }}
+
+      # Guard against the notarize pipe silently skipping (e.g. notarize.macos.ids
+      # not matching the build ids). GoReleaser only warns and exits 0 in that
+      # case, so the job stays green while shipping ad-hoc-signed binaries that
+      # Gatekeeper kills on launch. We can't run codesign/spctl on Linux, but a
+      # Developer ID signed Mach-O embeds the signing certificate, whose subject
+      # ("Developer ID Application: … (TEAMID)") is greppable; an ad-hoc binary
+      # embeds no certificate. Fail closed if any darwin binary is unsigned or if
+      # none are found at all.
+      - name: Verify macOS binaries are Developer ID signed
+        if: steps.signing.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          mapfile -t bins < <(jq -r '.[] | select(.type=="Binary" and .goos=="darwin") | .path' dist/artifacts.json)
+          if [ "${#bins[@]}" -eq 0 ]; then
+            echo "::error::No darwin binaries found in dist/artifacts.json — cannot verify signing. Did the build matrix change?"
+            exit 1
+          fi
+          fail=0
+          for bin in "${bins[@]}"; do
+            if grep -aq "Developer ID Application" "$bin"; then
+              echo "ok: $bin is Developer ID signed"
+            else
+              echo "::error::$bin is NOT Developer ID signed (ad-hoc only) — the notarize pipe was skipped. Check that notarize.macos.ids in .goreleaser.yaml matches the build ids."
+              fail=1
+            fi
+          done
+          exit $fail
 
   notify-slack:
     runs-on: ubuntu-latest

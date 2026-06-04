@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 )
@@ -18,6 +19,31 @@ var experimentalCommands = []experimentalCommandInfo{
 		Name:       "review",
 		Invocation: "entire review",
 		Summary:    "Run configured review skills against the current branch",
+	},
+	{
+		Name:       "investigate",
+		Invocation: "entire investigate",
+		Summary:    "Run a multi-agent investigation against a topic, issue, or seed doc",
+	},
+	{
+		Name:       "org",
+		Invocation: "entire org",
+		Summary:    "Manage Entire organizations (create, list)",
+	},
+	{
+		Name:       "project",
+		Invocation: "entire project",
+		Summary:    "Manage Entire projects (create, list)",
+	},
+	{
+		Name:       "repo",
+		Invocation: "entire repo",
+		Summary:    "Manage Entire repositories (create, list, get, delete)",
+	},
+	{
+		Name:       "grant",
+		Invocation: "entire grant",
+		Summary:    "Manage access grants and org membership (org, project, repo)",
 	},
 }
 
@@ -60,14 +86,26 @@ Available experimental commands:
 ` + renderExperimentalCommands(experimentalCommands) + `
 Try:
   entire review --help
+  entire investigate --help
+  entire org --help
+  entire project --help
+  entire repo --help
+  entire grant --help
 `
 }
 
 func renderExperimentalCommands(commands []experimentalCommandInfo) string {
+	width := 0
+	for _, info := range commands {
+		if w := utf8.RuneCountInString(info.Invocation); w > width {
+			width = w
+		}
+	}
+
 	var out strings.Builder
 	for _, info := range commands {
 		out.WriteString("  ")
-		out.WriteString(padRight(info.Invocation, 16))
+		out.WriteString(padRight(info.Invocation, width))
 		out.WriteByte(' ')
 		out.WriteString(info.Summary)
 		out.WriteByte('\n')
@@ -76,8 +114,9 @@ func renderExperimentalCommands(commands []experimentalCommandInfo) string {
 }
 
 func padRight(value string, width int) string {
-	if len(value) >= width {
+	n := utf8.RuneCountInString(value)
+	if n >= width {
 		return value
 	}
-	return value + strings.Repeat(" ", width-len(value))
+	return value + strings.Repeat(" ", width-n)
 }

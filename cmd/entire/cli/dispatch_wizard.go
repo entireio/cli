@@ -14,10 +14,10 @@ import (
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	searchpkg "github.com/entireio/cli/cmd/entire/cli/search"
-	"github.com/go-git/go-git/v6"
 	"github.com/spf13/cobra"
 )
 
@@ -29,7 +29,7 @@ var getDispatchWizardCurrentBranch = GetCurrentBranch
 var runDispatchWizardForm = func(form *huh.Form) error { return form.Run() }
 
 func defaultListDispatchWizardRepoResources(ctx context.Context) ([]api.Repository, error) {
-	client, err := NewAuthenticatedAPIClient(false)
+	client, err := NewAuthenticatedAPIClient(ctx, false)
 	if err != nil {
 		return nil, err
 	}
@@ -525,10 +525,12 @@ func discoverAuthenticatedDispatchWizardRepos(ctx context.Context) ([]string, er
 }
 
 func discoverRepoSlug(repoRoot string) string {
-	repo, err := git.PlainOpenWithOptions(repoRoot, &git.PlainOpenOptions{DetectDotGit: true})
+	repo, err := gitrepo.OpenPath(repoRoot)
 	if err != nil {
 		return ""
 	}
+	defer repo.Close()
+
 	remote, err := repo.Remote("origin")
 	if err != nil || len(remote.Config().URLs) == 0 {
 		return ""

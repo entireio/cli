@@ -12,11 +12,13 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
@@ -71,6 +73,52 @@ func TestLocalMode_EnumeratesCheckpoints(t *testing.T) {
 	}
 }
 
+func TestLocalMode_ReadsV1CustomRefWhenEnabled(t *testing.T) {
+	dir := t.TempDir()
+	stubGeneratedLocalDispatch(t)
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "a.txt", "x")
+	testutil.GitAdd(t, dir, "a.txt")
+	testutil.GitCommit(t, dir, "initial")
+	addOriginRemote(t, dir)
+
+	createdAt := time.Now().UTC()
+	seedCommittedCheckpoint(t, dir, seededCheckpoint{
+		id:           testCheckpointID,
+		branch:       "main",
+		createdAt:    createdAt,
+		filesTouched: []string{"a.txt"},
+		outcome:      testLocalFallbackText,
+	})
+	moveCheckpointsToCustomRefOnly(t, dir)
+
+	oldNow := nowUTC
+	nowUTC = func() time.Time { return createdAt.Add(2 * time.Hour) }
+	t.Cleanup(func() { nowUTC = oldNow })
+
+	t.Chdir(dir)
+	opts := Options{Mode: ModeLocal, Since: "7d", Branches: []string{"main"}}
+
+	// Mirror disabled: the checkpoint lives only on the custom ref, so the v1 read finds nothing.
+	got, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Repos) != 0 {
+		t.Fatalf("expected no checkpoints with mirror disabled, got %+v", got.Repos)
+	}
+
+	// Mirror enabled: reads resolve against the custom ref.
+	writeV1CustomRefMirrorSettings(t, dir)
+	got, err = Run(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Repos) != 1 || got.Repos[0].Sections[0].Bullets[0].Text != testLocalFallbackText {
+		t.Fatalf("expected checkpoint via custom ref, got %+v", got.Repos)
+	}
+}
+
 func TestLocalMode_ExplicitRepoUsesTargetRepoCheckpointSettings(t *testing.T) {
 	cwdDir := t.TempDir()
 	targetDir := t.TempDir()
@@ -82,7 +130,7 @@ func TestLocalMode_ExplicitRepoUsesTargetRepoCheckpointSettings(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(cwdDir, ".entire", "settings.json"),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": 2}}`),
+		[]byte(`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`),
 		0o600,
 	); err != nil {
 		t.Fatal(err)
@@ -125,6 +173,60 @@ func TestLocalMode_ExplicitRepoUsesTargetRepoCheckpointSettings(t *testing.T) {
 	}
 	if got.Repos[0].Sections[0].Bullets[0].Text != testLocalFallbackText {
 		t.Fatalf("unexpected bullet: %+v", got.Repos[0].Sections[0].Bullets[0])
+	}
+}
+
+// TestLocalMode_ExplicitRepoResolvesMirrorOptInFromTargetRepo guards against
+// resolving the committed-read topology from the process cwd instead of the
+// enumerated repo. The target repo opts into the v1.1 mirror and keeps its
+// checkpoint only on the custom ref; cwd is a separate repo with the mirror
+// off. If the opt-in were read from cwd, the checkpoint would be invisible.
+func TestLocalMode_ExplicitRepoResolvesMirrorOptInFromTargetRepo(t *testing.T) {
+	cwdDir := t.TempDir()
+	targetDir := t.TempDir()
+	stubGeneratedLocalDispatch(t)
+
+	// cwd repo: mirror explicitly disabled.
+	testutil.InitRepo(t, cwdDir)
+	testutil.WriteFile(t, cwdDir, ".entire/settings.json", `{"enabled": true}`)
+
+	testutil.InitRepo(t, targetDir)
+	testutil.WriteFile(t, targetDir, "a.txt", "x")
+	testutil.GitAdd(t, targetDir, "a.txt")
+	testutil.GitCommit(t, targetDir, "initial")
+	addOriginRemote(t, targetDir)
+
+	createdAt := time.Now().UTC()
+	seedCommittedCheckpoint(t, targetDir, seededCheckpoint{
+		id:           testCheckpointID,
+		branch:       "main",
+		createdAt:    createdAt,
+		filesTouched: []string{"a.txt"},
+		outcome:      testLocalFallbackText,
+	})
+	// Reachable only via the custom ref, and the target repo opts into the mirror.
+	moveCheckpointsToCustomRefOnly(t, targetDir)
+	writeV1CustomRefMirrorSettings(t, targetDir)
+
+	oldNow := nowUTC
+	nowUTC = func() time.Time { return createdAt.Add(2 * time.Hour) }
+	t.Cleanup(func() {
+		nowUTC = oldNow
+	})
+
+	t.Chdir(cwdDir)
+
+	got, err := Run(context.Background(), Options{
+		Mode:      ModeLocal,
+		RepoPaths: []string{targetDir},
+		Since:     "7d",
+		Branches:  []string{"main"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Repos) != 1 || got.Repos[0].Sections[0].Bullets[0].Text != testLocalFallbackText {
+		t.Fatalf("expected target repo's v1.1 custom-ref checkpoint, got %+v", got.Repos)
 	}
 }
 
@@ -853,6 +955,37 @@ func seedCommittedCheckpoint(t *testing.T, repoDir string, cp seededCheckpoint) 
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// moveCheckpointsToCustomRefOnly points the v1 custom ref at the v1 branch tip
+// and removes the v1 branch, so committed checkpoints are reachable only via the
+// custom ref.
+func moveCheckpointsToCustomRefOnly(t *testing.T, repoDir string) {
+	t.Helper()
+	repo, err := git.PlainOpenWithOptions(repoDir, &git.PlainOpenOptions{DetectDotGit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1Branch := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	v1Ref, err := repo.Reference(v1Branch, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(paths.MetadataRefName), v1Ref.Hash())); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Storer.RemoveReference(v1Branch); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeV1CustomRefMirrorSettings opts repoDir into the v1 custom-ref mirror.
+// "1.1" is the on-disk checkpoints_version encoding read by
+// settings.MirrorsToV1CustomRef.
+func writeV1CustomRefMirrorSettings(t *testing.T, repoDir string) {
+	t.Helper()
+	testutil.WriteFile(t, repoDir, ".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`)
 }
 
 func addOriginRemote(t *testing.T, repoDir string) {

@@ -62,6 +62,11 @@ func TestIsAgentSubprocessEnv(t *testing.T) {
 // GIT_TERMINAL_PROMPT only counts when explicitly set to "0". Other values
 // (or absence) shouldn't trigger the guard.
 func TestIsAgentSubprocessEnv_GitTerminalPromptOnIsNotAgent(t *testing.T) {
+	// Clear sibling agent-detection vars so the test is hermetic regardless of
+	// parent environment (e.g. running inside pi, gemini-cli, copilot-cli).
+	t.Setenv("GEMINI_CLI", "")
+	t.Setenv("COPILOT_CLI", "")
+	t.Setenv("PI_CODING_AGENT", "")
 	t.Setenv("GIT_TERMINAL_PROMPT", "1")
 	if isAgentSubprocessEnv() {
 		t.Error("isAgentSubprocessEnv() = true; want false when GIT_TERMINAL_PROMPT=1")

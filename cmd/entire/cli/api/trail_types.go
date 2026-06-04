@@ -16,8 +16,8 @@ type TrailListResponse struct {
 
 // TrailResource represents a single trail from the API.
 type TrailResource struct {
+	ID              string           `json:"id,omitempty"`
 	Number          int              `json:"number,omitempty"`
-	TrailID         string           `json:"trail_id"`
 	Branch          string           `json:"branch"`
 	Base            string           `json:"base"`
 	Title           string           `json:"title"`
@@ -42,7 +42,7 @@ type TrailResource struct {
 func (r *TrailResource) ToMetadata() *trail.Metadata {
 	m := &trail.Metadata{
 		Number:    r.Number,
-		TrailID:   trail.ID(r.TrailID),
+		TrailID:   trail.ID(r.ID),
 		Branch:    r.Branch,
 		Base:      r.Base,
 		Title:     r.Title,

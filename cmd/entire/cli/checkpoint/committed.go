@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -450,6 +451,8 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCom
 		CheckpointTranscriptStart:   opts.CheckpointTranscriptStart,
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, // Deprecated: kept for backward compat
 		TokenUsage:                  opts.TokenUsage,
+		SkillEventsVersion:          skillEventsVersion(opts.SkillEvents),
+		SkillEvents:                 opts.SkillEvents,
 		SessionMetrics:              opts.SessionMetrics,
 		InitialAttribution:          opts.InitialAttribution,
 		PromptAttributions:          opts.PromptAttributionsJSON,
@@ -458,6 +461,8 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCom
 		Kind:                        opts.Kind,
 		ReviewSkills:                opts.ReviewSkills,
 		ReviewPrompt:                opts.ReviewPrompt,
+		InvestigateRunID:            opts.InvestigateRunID,
+		InvestigateTopic:            opts.InvestigateTopic,
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(sessionMetadata, "", "  ")
@@ -488,6 +493,7 @@ func (s *GitStore) writeCheckpointSummary(opts WriteCommittedOptions, basePath s
 
 	combinedAttribution := opts.CombinedAttribution
 	hasReview := opts.HasReview
+	hasInvestigation := opts.HasInvestigation
 	rootMetadataPath := basePath + paths.MetadataFileName
 	if entry, exists := entries[rootMetadataPath]; exists {
 		existingSummary, readErr := s.readSummaryFromBlob(entry.Hash)
@@ -497,6 +503,9 @@ func (s *GitStore) writeCheckpointSummary(opts WriteCommittedOptions, basePath s
 			}
 			if !hasReview {
 				hasReview = existingSummary.HasReview
+			}
+			if !hasInvestigation {
+				hasInvestigation = existingSummary.HasInvestigation
 			}
 		}
 	}
@@ -512,6 +521,7 @@ func (s *GitStore) writeCheckpointSummary(opts WriteCommittedOptions, basePath s
 		TokenUsage:          tokenUsage,
 		CombinedAttribution: combinedAttribution,
 		HasReview:           hasReview,
+		HasInvestigation:    hasInvestigation,
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")
@@ -658,6 +668,13 @@ func checkpointCreatedAt(opts WriteCommittedOptions) time.Time {
 		return time.Now().UTC()
 	}
 	return opts.CreatedAt.UTC()
+}
+
+func skillEventsVersion(events []agent.SkillEvent) int {
+	if len(events) == 0 {
+		return 0
+	}
+	return 1
 }
 
 // readJSONFromBlob reads JSON from a blob hash and decodes it to the given type.
@@ -1324,10 +1341,11 @@ func (s *GitStore) GetSessionLog(ctx context.Context, cpID id.CheckpointID) ([]b
 // Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
 // Returns ErrNoTranscript if the checkpoint exists but has no transcript.
 func LookupSessionLog(ctx context.Context, cpID id.CheckpointID) ([]byte, string, error) {
-	repo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{DetectDotGit: true})
+	repo, err := gitrepo.OpenCurrent(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 	store := NewGitStore(repo)
 	return store.GetSessionLog(ctx, cpID)
 }
@@ -1517,6 +1535,12 @@ func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOpti
 		}
 	}
 
+	if len(opts.SkillEvents) > 0 {
+		if err := s.replaceSkillEvents(opts.SkillEvents, sessionPath, entries); err != nil {
+			return fmt.Errorf("failed to replace skill events: %w", err)
+		}
+	}
+
 	// Build checkpoint subtree and splice into root (O(depth) tree surgery)
 	newTreeHash, err := s.spliceCheckpointSubtree(ctx, rootTreeHash, opts.CheckpointID, basePath, entries)
 	if err != nil {
@@ -1540,6 +1564,36 @@ func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOpti
 		return fmt.Errorf("failed to set branch reference: %w", err)
 	}
 
+	return nil
+}
+
+func (s *GitStore) replaceSkillEvents(skillEvents []agent.SkillEvent, sessionPath string, entries map[string]object.TreeEntry) error {
+	metadataPath := sessionPath + paths.MetadataFileName
+	entry, exists := entries[metadataPath]
+	if !exists {
+		return fmt.Errorf("session metadata not found at %s", metadataPath)
+	}
+
+	metadata, err := s.readMetadataFromBlob(entry.Hash)
+	if err != nil {
+		return fmt.Errorf("read session metadata: %w", err)
+	}
+	metadata.SkillEventsVersion = skillEventsVersion(skillEvents)
+	metadata.SkillEvents = skillEvents
+
+	metadataJSON, err := jsonutil.MarshalIndentWithNewline(metadata, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal session metadata: %w", err)
+	}
+	metadataHash, err := CreateBlobFromContent(s.repo, metadataJSON)
+	if err != nil {
+		return err
+	}
+	entries[metadataPath] = object.TreeEntry{
+		Name: metadataPath,
+		Mode: filemode.Regular,
+		Hash: metadataHash,
+	}
 	return nil
 }
 
@@ -1641,10 +1695,6 @@ func (s *GitStore) replaceTranscript(ctx context.Context, transcript redact.Reda
 // plus the content-hash blob to the object store once, returning the resulting
 // hashes for reuse across multiple UpdateCommitted calls that share the same
 // transcript content.
-//
-// The returned blobs work for both v1 (full.jsonl) and v2 (raw_transcript)
-// paths since blob hashes are content-addressed (SHA-1 of chunk bytes). Only
-// the tree-entry filenames differ between v1 and v2.
 func PrecomputeTranscriptBlobs(ctx context.Context, repo *git.Repository, transcript redact.RedactedBytes, agentType types.AgentType) (*PrecomputedTranscriptBlobs, error) {
 	raw := transcript.Bytes()
 
@@ -1681,6 +1731,9 @@ func (s *GitStore) ensureSessionsBranch(ctx context.Context) error {
 	_, err := s.repo.Reference(refName, true)
 	if err == nil {
 		return nil // Branch exists
+	}
+	if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return fmt.Errorf("failed to check sessions branch: %w", err)
 	}
 
 	// Create orphan branch with empty tree
@@ -1728,13 +1781,18 @@ func (s *GitStore) getFetchingTree(ctx context.Context) (*FetchingTree, error) {
 	return NewFetchingTree(ctx, tree, s.repo.Storer, s.blobFetcher), nil
 }
 
-// getSessionsBranchTree returns the tree object for the entire/checkpoints/v1 branch.
-// Falls back to origin/entire/checkpoints/v1 if the local branch doesn't exist.
+// getSessionsBranchTree returns the tree object for the configured committed
+// ref (the v1 branch by default, or the v1.1 custom ref for v1.1 read stores).
+// For the default v1 branch it falls back to origin/entire/checkpoints/v1 when
+// the local branch is missing; the v1.1 custom ref is local-only, so no remote
+// fallback applies there.
 func (s *GitStore) getSessionsBranchTree() (*object.Tree, error) {
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	ref, err := s.repo.Reference(refName, true)
+	ref, err := s.repo.Reference(s.committedReadRef, true)
 	if err != nil {
-		// Local branch doesn't exist, try remote-tracking branch
+		if s.committedReadRef != defaultCommittedReadRef() {
+			return nil, fmt.Errorf("sessions ref %s not found: %w", s.committedReadRef, err)
+		}
+		// Local v1 branch doesn't exist, try remote-tracking branch
 		remoteRefName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
 		ref, err = s.repo.Reference(remoteRefName, true)
 		if err != nil {
@@ -1897,8 +1955,9 @@ func createRedactedBlobFromFile(repo *git.Repository, filePath, treePath string)
 // checking both the repository-local config and the global ~/.gitconfig.
 func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
 	// ConfigScoped merges local + global (local wins), matching git's own resolution.
-	// Requires a ConfigLoader plugin to be registered; cmd/entire/main.go blank-imports
-	// go-git/v6/x/plugin to register the default Auto loader.
+	// Uses the ConfigLoader plugin registered in configloader.go (a symlink-following
+	// Auto loader; importing go-git/v6/x/plugin registers go-git's default, which we
+	// override there so global config behind a symlinked ~/.config is still read).
 	if cfg, err := repo.ConfigScoped(config.GlobalScope); err == nil {
 		name = cfg.User.Name
 		email = cfg.User.Email
@@ -2139,11 +2198,12 @@ type Author struct {
 	Email string
 }
 
-// GetCheckpointAuthor retrieves the author of a checkpoint from the entire/checkpoints/v1 commit history.
+// GetCheckpointAuthor retrieves the author of a checkpoint from the configured
+// committed-read ref history.
 // Finds the commit whose subject matches "Checkpoint: <id>" and returns its author.
 // Returns empty Author if the checkpoint is not found or the sessions branch doesn't exist.
 func (s *GitStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (Author, error) {
-	return getCheckpointAuthorFromRef(ctx, s.repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName), checkpointID)
+	return getCheckpointAuthorFromRef(ctx, s.repo, s.committedReadRef, checkpointID)
 }
 
 func getCheckpointAuthorFromRef(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, checkpointID id.CheckpointID) (Author, error) {

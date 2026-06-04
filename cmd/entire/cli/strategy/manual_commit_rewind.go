@@ -34,12 +34,9 @@ func (s *ManualCommitStrategy) GetRewindPoints(ctx context.Context, limit int) (
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
-	// Get checkpoint store
-	store, err := s.getCheckpointStore()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
-	}
+	store := s.getCheckpointStore(repo)
 
 	// Get current HEAD to find matching shadow branch
 	head, err := repo.Head()
@@ -141,12 +138,13 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(ctx context.Context, limi
 	if err != nil {
 		return nil, err
 	}
+	defer repo.Close()
 
 	// Get all checkpoints from entire/checkpoints/v1 branch
 	checkpoints, err := s.listCheckpoints(ctx)
 	if err != nil {
 		// No checkpoints yet is fine
-		return nil, nil //nolint:nilerr // Expected when no checkpoints exist
+		return nil, nil
 	}
 
 	if len(checkpoints) == 0 {
@@ -282,6 +280,7 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, w, errW io.Writer, po
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Get the checkpoint commit
 	commitHash := plumbing.NewHash(point.ID)
@@ -505,6 +504,7 @@ func (s *ManualCommitStrategy) PreviewRewind(ctx context.Context, point RewindPo
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Get the checkpoint commit
 	commitHash := plumbing.NewHash(point.ID)
@@ -622,9 +622,16 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 		return nil, errors.New("missing checkpoint ID")
 	}
 
-	store, err := s.committedCheckpointStore(ctx)
+	repo, err := OpenRepository(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare checkpoint store: %w", err)
+		return nil, fmt.Errorf("failed to open git repository: %w", err)
+	}
+	defer repo.Close()
+
+	WarnIfMetadataDisconnected()
+	store := cpkg.NewCommittedReadStore(ctx, repo)
+	if s.blobFetcher != nil {
+		store.SetBlobFetcher(s.blobFetcher)
 	}
 	summary, err := cpkg.ReadCommittedCheckpoint(ctx, store, point.CheckpointID)
 	if err != nil {

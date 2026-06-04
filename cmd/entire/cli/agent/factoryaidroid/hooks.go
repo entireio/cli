@@ -36,9 +36,12 @@ const FactorySettingsFileName = "settings.json"
 // metadataDenyRule blocks Factory Droid from reading Entire session metadata
 const metadataDenyRule = "Read(./.entire/metadata/**)"
 
-// entireHookPrefixes are command prefixes that identify Entire hooks
+// entireHookPrefixes are command prefixes that identify Entire hooks. The
+// "go run" prefix is retained so hooks installed by older versions are still
+// recognized.
 var entireHookPrefixes = []string{
 	"entire ",
+	agent.LocalDevHookScript + " ",
 	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
 }
 
@@ -119,7 +122,7 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, localDev bool, f
 
 	// Define hook commands
 	var sessionStartCmd, sessionEndCmd, stopCmd, userPromptSubmitCmd, preTaskCmd, postTaskCmd, preCompactCmd string
-	localDevPrefix := `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks factoryai-droid `
+	localDevPrefix := agent.LocalDevHookScript + " hooks factoryai-droid "
 	if localDev {
 		sessionStartCmd = localDevPrefix + "session-start"
 		sessionEndCmd = localDevPrefix + "session-end"

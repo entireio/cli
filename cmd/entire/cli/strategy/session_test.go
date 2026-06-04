@@ -13,7 +13,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
-	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -120,46 +119,6 @@ func TestCheckpointStruct(t *testing.T) {
 	}
 	if taskCheckpoint.ToolUseID != "toolu_abc123" {
 		t.Errorf("expected ToolUseID to match, got %s", taskCheckpoint.ToolUseID)
-	}
-}
-
-func TestSessionCheckpointCount(t *testing.T) {
-	session := Session{
-		ID:          "test-session",
-		Description: "Test",
-		Checkpoints: []Checkpoint{
-			{CheckpointID: "a"},
-			{CheckpointID: "b"},
-			{CheckpointID: "c"},
-		},
-	}
-
-	if session.ID != "test-session" {
-		t.Errorf("expected ID to match, got %s", session.ID)
-	}
-	if session.Description != "Test" {
-		t.Errorf("expected Description to match, got %s", session.Description)
-	}
-	if len(session.Checkpoints) != 3 {
-		t.Errorf("expected 3 checkpoints, got %d", len(session.Checkpoints))
-	}
-	// Verify checkpoint IDs are accessible
-	if session.Checkpoints[0].CheckpointID != "a" {
-		t.Errorf("expected first checkpoint ID to be 'a', got %s", session.Checkpoints[0].CheckpointID)
-	}
-}
-
-func TestEmptySession(t *testing.T) {
-	session := Session{}
-
-	if session.ID != "" {
-		t.Error("expected empty session to have empty ID")
-	}
-	if session.Description != "" {
-		t.Error("expected empty session to have empty Description")
-	}
-	if session.Checkpoints != nil {
-		t.Error("expected empty session to have nil Checkpoints")
 	}
 }
 
@@ -278,44 +237,6 @@ func TestListSessionsWithDescription(t *testing.T) {
 	sess := sessions[0]
 	if sess.Description != expectedDesc {
 		t.Errorf("Session.Description = %q, want %q", sess.Description, expectedDesc)
-	}
-}
-
-func TestGetDescriptionForCheckpointFallsForwardToV2WhenV1MissesCheckpoint(t *testing.T) {
-	tmpDir := t.TempDir()
-	resolved, err := filepath.EvalSymlinks(tmpDir)
-	if err != nil {
-		t.Fatalf("filepath.EvalSymlinks() failed: %v", err)
-	}
-	tmpDir = resolved
-
-	initTestRepo(t, tmpDir)
-	t.Chdir(tmpDir)
-
-	repo, err := OpenRepository(context.Background())
-	if err != nil {
-		t.Fatalf("OpenRepository(context.Background()) failed: %v", err)
-	}
-
-	createTestMetadataBranchWithPrompt(t, repo, testSessionID, id.MustCheckpointID("111111111111"), "v1 prompt")
-
-	targetCheckpointID := id.MustCheckpointID("222222222222")
-	expectedDesc := "prompt from v2"
-	v2Store := checkpoint.NewV2GitStore(repo)
-	if err := v2Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
-		CheckpointID: targetCheckpointID,
-		SessionID:    "session-v2-description",
-		Strategy:     StrategyNameManualCommit,
-		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"test"}` + "\n")),
-		Prompts:      []string{expectedDesc},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@example.com",
-	}); err != nil {
-		t.Fatalf("WriteCommitted() error = %v", err)
-	}
-
-	if got := getDescriptionForCheckpoint(repo, targetCheckpointID); got != expectedDesc {
-		t.Errorf("getDescriptionForCheckpoint() = %q, want %q", got, expectedDesc)
 	}
 }
 

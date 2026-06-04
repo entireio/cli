@@ -96,8 +96,8 @@ func TestInstallHooks_LocalDev(t *testing.T) {
 	}
 
 	content := string(data)
-	if !strings.Contains(content, `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go`) {
-		t.Error("local dev mode: plugin file should use git rev-parse for go run path")
+	if !strings.Contains(content, `"$(git rev-parse --show-toplevel)"/scripts/entire-dev`) {
+		t.Error("local dev mode: plugin file should delegate to the entire-dev launcher via git rev-parse")
 	}
 }
 
@@ -252,8 +252,8 @@ func TestInstallHooks_RewritesWhenContentDiffers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read plugin file: %v", err)
 	}
-	if !strings.Contains(string(before), "go run") {
-		t.Fatal("expected localDev content with 'go run'")
+	if !strings.Contains(string(before), "scripts/entire-dev") {
+		t.Fatal("expected localDev content to delegate to scripts/entire-dev")
 	}
 
 	// Reinstall with localDev=false (content differs) — should rewrite
@@ -269,8 +269,8 @@ func TestInstallHooks_RewritesWhenContentDiffers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read plugin file after rewrite: %v", err)
 	}
-	if strings.Contains(string(after), "go run") {
-		t.Error("expected production content after rewrite, but still contains 'go run'")
+	if strings.Contains(string(after), "scripts/entire-dev") {
+		t.Error("expected production content after rewrite, but still references scripts/entire-dev")
 	}
 	if !strings.Contains(string(after), `const ENTIRE_CMD = 'entire'`) {
 		t.Error("expected production command constant after rewrite")

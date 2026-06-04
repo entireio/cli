@@ -290,6 +290,92 @@ func extractAgentIDFromText(text string) string {
 // CalculateTotalTokenUsage calculates token usage for a turn, including subagents.
 // It parses the main transcript bytes from startLine, extracts spawned agent IDs,
 // and calculates their token usage from transcript files in subagentsDir.
+func (c *ClaudeCodeAgent) ExtractSkillEvents(transcriptData []byte, startLine int) ([]agent.SkillEvent, error) {
+	if len(transcriptData) == 0 {
+		return nil, nil
+	}
+
+	sliced := transcript.SliceFromLine(transcriptData, startLine)
+	parsed, err := transcript.ParseFromBytes(sliced)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse transcript: %w", err)
+	}
+
+	var events []agent.SkillEvent
+	for i, line := range parsed {
+		if line.Type != envelopeTypeAssistant {
+			continue
+		}
+
+		var msg assistantMessage
+		if err := json.Unmarshal(line.Message, &msg); err != nil {
+			continue
+		}
+
+		for _, block := range msg.Content {
+			if block.Type != transcript.ContentTypeToolUse || block.Name != "Skill" {
+				continue
+			}
+			var input toolInput
+			if err := json.Unmarshal(block.Input, &input); err != nil {
+				continue
+			}
+			skillName := strings.TrimSpace(input.Skill)
+			if skillName == "" {
+				continue
+			}
+
+			native := map[string]string{"tool_name": "Skill"}
+			if block.ID != "" {
+				native["tool_use_id"] = block.ID
+			}
+			events = append(events, agent.SkillEvent{
+				ID:        claudeSkillEventID(block.ID, startLine+i),
+				EventType: agent.SkillEventTypeToolInvocation,
+				Skill: agent.SkillEventSkill{
+					Name: skillName,
+				},
+				Source: agent.SkillEventSource{
+					Agent:      string(agent.AgentNameClaudeCode),
+					Signal:     agent.SkillSignalClaudeSkillToolUse,
+					Confidence: agent.SkillConfidenceExplicit,
+				},
+				TranscriptAnchor: &agent.SkillEventTranscriptAnchor{
+					Unit:      "line",
+					Start:     startLine + i,
+					End:       startLine + i + 1,
+					EntryIDs:  nonEmptyStrings(line.UUID),
+					ToolUseID: block.ID,
+				},
+				Native: native,
+				Collapse: agent.SkillEventCollapse{
+					Target:           agent.SkillCollapseTargetToolPair,
+					Label:            "Skill: " + skillName,
+					DefaultCollapsed: true,
+				},
+			})
+		}
+	}
+	return events, nil
+}
+
+func claudeSkillEventID(toolUseID string, line int) string {
+	if toolUseID != "" {
+		return "claude-skill-" + toolUseID
+	}
+	return fmt.Sprintf("claude-skill-line-%d", line)
+}
+
+func nonEmptyStrings(values ...string) []string {
+	var out []string
+	for _, value := range values {
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
 func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startLine int, subagentsDir string) (*agent.TokenUsage, error) {
 	if len(transcriptData) == 0 {
 		return &agent.TokenUsage{}, nil
