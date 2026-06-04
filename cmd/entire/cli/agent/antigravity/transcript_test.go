@@ -117,3 +117,15 @@ func TestExtractPrompts_RespectsOffsetAndMissingFile(t *testing.T) {
 		t.Fatalf("missing file: want (nil,nil), got (%#v,%v)", got, err)
 	}
 }
+
+func TestExtractPrompts_RealFixture(t *testing.T) {
+	t.Parallel()
+	a := &AntigravityAgent{}
+	prompts, err := a.ExtractPrompts("testdata/transcript_sample.jsonl", 0)
+	if err != nil {
+		t.Fatalf("ExtractPrompts: %v", err)
+	}
+	if len(prompts) != 1 || prompts[0] != "read a.txt and tell me what it says, then exit" {
+		t.Fatalf("unexpected prompts: %#v", prompts)
+	}
+}
