@@ -3,11 +3,14 @@ package antigravity
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
 // agy's title/statusline hook pipes a state JSON to the configured command on
@@ -150,6 +153,73 @@ func AppendStatusSnapshot(payload []byte) error {
 	}
 
 	return nil
+}
+
+// SnapshotTokenBaseline returns the latest persisted snapshot for the
+// conversation, or nil if none exists yet. A nil baseline is exact only for a
+// genuinely fresh conversation; a resumed conversation whose title-tee shim
+// hasn't written a snapshot before the first TurnStart will over-count the
+// prior cumulative total on that first tracked turn.
+func (a *AntigravityAgent) SnapshotTokenBaseline(_ context.Context, sessionID string) (json.RawMessage, error) {
+	snaps, err := readStatusSnapshots(sessionID)
+	if err != nil || len(snaps) == 0 {
+		return nil, nil //nolint:nilerr // degrade to "no baseline"; never block the turn
+	}
+	raw, err := json.Marshal(snaps[len(snaps)-1])
+	if err != nil {
+		return nil, nil //nolint:nilerr // ditto
+	}
+	return raw, nil
+}
+
+// CalculateTokenUsageSince computes the delta between the baseline snapshot
+// and the latest persisted snapshot.
+//
+// Exact: InputTokens/OutputTokens (cumulative totals minus baseline totals).
+// Best-effort: cache fields and APICallCount, derived from the snapshot lines
+// appended after the baseline timestamp (the dedup writer appends ~one line
+// per API response, but lines can be missed between agent state changes).
+func (a *AntigravityAgent) CalculateTokenUsageSince(_ context.Context, sessionID string, baseline json.RawMessage) (*agent.TokenUsage, error) {
+	snaps, err := readStatusSnapshots(sessionID)
+	if err != nil || len(snaps) == 0 {
+		return nil, nil //nolint:nilerr,nilnil // no data -> no token counts, never an error
+	}
+
+	var base statusSnapshot
+	if len(baseline) > 0 {
+		_ = json.Unmarshal(baseline, &base) //nolint:errcheck // unparseable baseline -> zero baseline
+	}
+
+	latest := snaps[len(snaps)-1]
+	usage := &agent.TokenUsage{
+		InputTokens:  max(0, latest.ContextWindow.TotalInputTokens-base.ContextWindow.TotalInputTokens),
+		OutputTokens: max(0, latest.ContextWindow.TotalOutputTokens-base.ContextWindow.TotalOutputTokens),
+	}
+
+	// The strictly-after (.After, not >=) filter is load-bearing for
+	// multi-turn correctness: turn N+1's baseline IS turn N's latest snapshot,
+	// so excluding the equal-timestamp boundary line prevents re-counting it.
+	// Changing this to >= would double-count the boundary line every turn.
+	baseTS, baseTSErr := time.Parse(time.RFC3339Nano, base.Timestamp)
+	for _, s := range snaps {
+		// If baseTS is unparseable we count cache/apicalls over all lines; accepted because input/output remain exact via the totals delta.
+		if base.Timestamp != "" && baseTSErr == nil {
+			ts, parseErr := time.Parse(time.RFC3339Nano, s.Timestamp)
+			if parseErr != nil || !ts.After(baseTS) {
+				continue
+			}
+		}
+		usage.APICallCount++
+		if cu := s.ContextWindow.CurrentUsage; cu != nil {
+			usage.CacheCreationTokens += cu.CacheCreationInputTokens
+			usage.CacheReadTokens += cu.CacheReadInputTokens
+		}
+	}
+
+	if usage.InputTokens == 0 && usage.OutputTokens == 0 && usage.CacheCreationTokens == 0 && usage.CacheReadTokens == 0 {
+		return nil, nil //nolint:nilnil // nothing observed this turn
+	}
+	return usage, nil
 }
 
 // readLastContextWindow reads only the last non-empty line from a JSONL file

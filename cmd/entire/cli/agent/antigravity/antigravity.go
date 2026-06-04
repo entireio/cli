@@ -21,6 +21,8 @@ type AntigravityAgent struct {
 	CommandRunner agent.TextCommandRunner
 }
 
+var _ agent.OutOfBandTokenSource = (*AntigravityAgent)(nil)
+
 // NewAntigravityAgent creates a new AntigravityAgent instance.
 func NewAntigravityAgent() agent.Agent {
 	return &AntigravityAgent{}

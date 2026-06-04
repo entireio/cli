@@ -90,6 +90,25 @@ func AsTokenCalculator(ag Agent) (TokenCalculator, bool) {
 	return tc, true
 }
 
+// AsOutOfBandTokenSource returns the agent as OutOfBandTokenSource if supported.
+// External agents are excluded: the out-of-band store is fed by a built-in
+// shim subcommand, which external plugin binaries cannot provide. (This is the
+// intentional inverse of the other As* helpers, which let CapabilityDeclarer
+// agents opt in.)
+func AsOutOfBandTokenSource(ag Agent) (OutOfBandTokenSource, bool) {
+	if ag == nil {
+		return nil, false
+	}
+	src, ok := ag.(OutOfBandTokenSource)
+	if !ok {
+		return nil, false
+	}
+	if _, isDeclarer := ag.(CapabilityDeclarer); isDeclarer {
+		return nil, false
+	}
+	return src, true
+}
+
 // AsTextGenerator returns the agent as TextGenerator if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTextGenerator(ag Agent) (TextGenerator, bool) {

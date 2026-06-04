@@ -22,6 +22,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 
 	// Register agents so GetByAgentType works in tests.
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/copilotcli"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"
@@ -527,4 +528,101 @@ func TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation(t *testing.T)
 	require.Equal(t, string(session.KindAgentInvestigate), meta.Kind, "per-session Kind")
 	require.Equal(t, "0123456789ab", meta.InvestigateRunID, "per-session InvestigateRunID")
 	require.Equal(t, "Why is checkout flaky?", meta.InvestigateTopic, "per-session InvestigateTopic")
+}
+
+// TestCondenseSession_OutOfBandTokenFallback verifies that for an agent without
+// transcript-embedded token data (Antigravity is not a TokenCalculator), a
+// populated SessionState.TokenUsage flows through to the per-session
+// CommittedMetadata.token_usage on the metadata branch. This is the out-of-band
+// fallback: agy accumulates per-turn deltas into SessionState.TokenUsage at
+// SaveStep time, and the transcript recompute yields nil, so without the
+// fallback the UI would show no token counts.
+//
+// Tests in this file use t.Chdir for CWD-based git resolution, so this
+// cannot be a parallel test.
+func TestCondenseSession_OutOfBandTokenFallback(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-06-03-antigravity-tokens"
+
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	// Antigravity transcripts carry no token usage, so the condensation
+	// recompute yields nil — exactly the case the fallback handles.
+	transcript := `{"type":"human","message":{"content":"add tokens"}}
+{"type":"assistant","message":{"content":"Done."}}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
+
+	trackedFile := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(trackedFile, []byte("agent-modified content"), 0o644))
+
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:      sessionID,
+		AgentType:      agent.AgentTypeAntigravity,
+		ModifiedFiles:  []string{"test.txt"},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Antigravity checkpoint 1",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	}))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, agent.AgentTypeAntigravity, state.AgentType, "session must be tagged as Antigravity")
+
+	// Simulate the lifecycle accumulating an out-of-band token delta into
+	// SessionState.TokenUsage (what SaveStep does with StepContext.TokenUsage
+	// for OutOfBandTokenSource agents).
+	state.TokenUsage = &agent.TokenUsage{
+		InputTokens:         3500,
+		OutputTokens:        300,
+		CacheCreationTokens: 50,
+		CacheReadTokens:     3400,
+		APICallCount:        2,
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	checkpointID := id.MustCheckpointID("ddee00112233")
+	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped, "condensation must not skip when files are touched")
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+
+	checkpointTree, err := tree.Tree(checkpointID.Path())
+	require.NoError(t, err)
+
+	// Per-session metadata must round-trip the out-of-band token usage.
+	sessionMeta, err := checkpointTree.File(checkpointID.Path() + "/0/" + paths.MetadataFileName)
+	if err != nil {
+		subtree, subErr := checkpointTree.Tree("0")
+		require.NoError(t, subErr)
+		sessionMeta, err = subtree.File(paths.MetadataFileName)
+		require.NoError(t, err)
+	}
+	sessionBytes, err := sessionMeta.Contents()
+	require.NoError(t, err)
+	var meta checkpoint.CommittedMetadata
+	require.NoError(t, json.Unmarshal([]byte(sessionBytes), &meta))
+
+	require.NotNil(t, meta.TokenUsage, "per-session token_usage must be populated from the out-of-band fallback")
+	require.Equal(t, 3500, meta.TokenUsage.InputTokens, "InputTokens")
+	require.Equal(t, 300, meta.TokenUsage.OutputTokens, "OutputTokens")
+	require.Equal(t, 50, meta.TokenUsage.CacheCreationTokens, "CacheCreationTokens")
+	require.Equal(t, 3400, meta.TokenUsage.CacheReadTokens, "CacheReadTokens")
+	require.Equal(t, 2, meta.TokenUsage.APICallCount, "APICallCount")
 }

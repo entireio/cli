@@ -1,6 +1,7 @@
 package antigravity
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -218,5 +219,285 @@ func TestAppendStatusSnapshot_PrunesStaleFilesOnCreate(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "conv-new.jsonl")); err != nil {
 		t.Errorf("active file must exist: %v", err)
+	}
+}
+
+// writeSnapshotFixture writes the given snapshots as JSONL to the snapshot file
+// for conversationID, using the statusDirEnv override already set by the test.
+func writeSnapshotFixture(t *testing.T, conversationID string, snaps []statusSnapshot) {
+	t.Helper()
+	path, err := statusFilePath(conversationID)
+	if err != nil {
+		t.Fatalf("statusFilePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	var buf []byte
+	for _, s := range snaps {
+		line, marshalErr := json.Marshal(s)
+		if marshalErr != nil {
+			t.Fatalf("marshal snapshot: %v", marshalErr)
+		}
+		buf = append(buf, line...)
+		buf = append(buf, '\n')
+	}
+	if err := os.WriteFile(path, buf, 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+}
+
+func TestCalculateTokenUsageSince_DeltaFromBaseline(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(statusDirEnv, dir)
+
+	snaps := []statusSnapshot{
+		{
+			Timestamp:      "2026-06-03T10:00:00.000000000Z",
+			ConversationID: "c1",
+			ContextWindow: statusContextWindow{
+				TotalInputTokens:  1000,
+				TotalOutputTokens: 100,
+				CurrentUsage:      &statusCurrentUsage{CacheCreationInputTokens: 200, CacheReadInputTokens: 700},
+			},
+		},
+		{
+			Timestamp:      "2026-06-03T10:05:00.000000000Z",
+			ConversationID: "c1",
+			ContextWindow: statusContextWindow{
+				TotalInputTokens:  3000,
+				TotalOutputTokens: 250,
+				CurrentUsage:      &statusCurrentUsage{CacheCreationInputTokens: 50, CacheReadInputTokens: 1900},
+			},
+		},
+		{
+			Timestamp:      "2026-06-03T10:06:00.000000000Z",
+			ConversationID: "c1",
+			ContextWindow: statusContextWindow{
+				TotalInputTokens:  4500,
+				TotalOutputTokens: 400,
+				CurrentUsage:      &statusCurrentUsage{CacheCreationInputTokens: 0, CacheReadInputTokens: 1500},
+			},
+		},
+	}
+	writeSnapshotFixture(t, "c1", snaps)
+
+	baseline, err := json.Marshal(snaps[0])
+	if err != nil {
+		t.Fatalf("marshal baseline: %v", err)
+	}
+
+	a := &AntigravityAgent{}
+	usage, err := a.CalculateTokenUsageSince(context.Background(), "c1", baseline)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsageSince: %v", err)
+	}
+	if usage == nil {
+		t.Fatal("usage is nil")
+	}
+	if usage.InputTokens != 3500 {
+		t.Errorf("InputTokens = %d, want 3500", usage.InputTokens)
+	}
+	if usage.OutputTokens != 300 {
+		t.Errorf("OutputTokens = %d, want 300", usage.OutputTokens)
+	}
+	if usage.CacheCreationTokens != 50 {
+		t.Errorf("CacheCreationTokens = %d, want 50", usage.CacheCreationTokens)
+	}
+	if usage.CacheReadTokens != 3400 {
+		t.Errorf("CacheReadTokens = %d, want 3400", usage.CacheReadTokens)
+	}
+	if usage.APICallCount != 2 {
+		t.Errorf("APICallCount = %d, want 2", usage.APICallCount)
+	}
+}
+
+func TestCalculateTokenUsageSince_NilBaselineCountsFromZero(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(statusDirEnv, dir)
+
+	snaps := []statusSnapshot{
+		{
+			Timestamp:      "2026-06-03T10:00:00.000000000Z",
+			ConversationID: "c2",
+			ContextWindow: statusContextWindow{
+				TotalInputTokens:  1000,
+				TotalOutputTokens: 100,
+				CurrentUsage:      &statusCurrentUsage{CacheReadInputTokens: 700},
+			},
+		},
+	}
+	writeSnapshotFixture(t, "c2", snaps)
+
+	a := &AntigravityAgent{}
+	usage, err := a.CalculateTokenUsageSince(context.Background(), "c2", nil)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsageSince: %v", err)
+	}
+	if usage == nil {
+		t.Fatal("usage is nil")
+	}
+	if usage.InputTokens != 1000 {
+		t.Errorf("InputTokens = %d, want 1000", usage.InputTokens)
+	}
+	if usage.OutputTokens != 100 {
+		t.Errorf("OutputTokens = %d, want 100", usage.OutputTokens)
+	}
+}
+
+func TestCalculateTokenUsageSince_NoDataReturnsNilNil(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(statusDirEnv, dir)
+
+	a := &AntigravityAgent{}
+	usage, err := a.CalculateTokenUsageSince(context.Background(), "missing-conv", nil)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsageSince: %v", err)
+	}
+	if usage != nil {
+		t.Errorf("usage = %+v, want nil", usage)
+	}
+}
+
+func TestSnapshotTokenBaseline_ReturnsLatestSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(statusDirEnv, dir)
+
+	snaps := []statusSnapshot{
+		{
+			Timestamp:      "2026-06-03T10:00:00.000000000Z",
+			ConversationID: "c3",
+			ContextWindow:  statusContextWindow{TotalInputTokens: 1000},
+		},
+		{
+			Timestamp:      "2026-06-03T10:05:00.000000000Z",
+			ConversationID: "c3",
+			ContextWindow:  statusContextWindow{TotalInputTokens: 2000},
+		},
+	}
+	writeSnapshotFixture(t, "c3", snaps)
+
+	a := &AntigravityAgent{}
+	baseline, err := a.SnapshotTokenBaseline(context.Background(), "c3")
+	if err != nil {
+		t.Fatalf("SnapshotTokenBaseline: %v", err)
+	}
+	if len(baseline) == 0 {
+		t.Fatal("baseline is empty")
+	}
+	var snap statusSnapshot
+	if err := json.Unmarshal(baseline, &snap); err != nil {
+		t.Fatalf("unmarshal baseline: %v", err)
+	}
+	if snap.ContextWindow.TotalInputTokens != 2000 {
+		t.Errorf("baseline TotalInputTokens = %d, want 2000", snap.ContextWindow.TotalInputTokens)
+	}
+}
+
+func TestSnapshotTokenBaseline_EmptyStoreReturnsNil(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(statusDirEnv, dir)
+
+	a := &AntigravityAgent{}
+	baseline, err := a.SnapshotTokenBaseline(context.Background(), "no-such-conv")
+	if err != nil {
+		t.Fatalf("SnapshotTokenBaseline: %v", err)
+	}
+	if baseline != nil {
+		t.Errorf("baseline = %v, want nil", baseline)
+	}
+}
+
+func TestCalculateTokenUsageSince_ClampsWhenTotalsGoBackwards(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(statusDirEnv, dir)
+
+	// Simulate conversation-id reuse where cumulative totals reset lower than the baseline.
+	snaps := []statusSnapshot{
+		{
+			Timestamp:      "2026-06-03T10:05:00.000000000Z",
+			ConversationID: "c1",
+			ContextWindow:  statusContextWindow{TotalInputTokens: 500, TotalOutputTokens: 30},
+		},
+	}
+	writeSnapshotFixture(t, "c1", snaps)
+
+	// Baseline has higher totals than the latest snapshot — totals went backwards.
+	baseSnap := statusSnapshot{
+		Timestamp:     "2026-06-03T10:00:00.000000000Z",
+		ContextWindow: statusContextWindow{TotalInputTokens: 5000, TotalOutputTokens: 400},
+	}
+	baseline, err := json.Marshal(baseSnap)
+	if err != nil {
+		t.Fatalf("marshal baseline: %v", err)
+	}
+
+	a := &AntigravityAgent{}
+	usage, err := a.CalculateTokenUsageSince(context.Background(), "c1", baseline)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsageSince: %v", err)
+	}
+	// max(0, ...) clamps negative deltas to zero.
+	if usage != nil && usage.InputTokens != 0 {
+		t.Errorf("InputTokens = %d, want 0 (clamped)", usage.InputTokens)
+	}
+	if usage != nil && usage.OutputTokens != 0 {
+		t.Errorf("OutputTokens = %d, want 0 (clamped)", usage.OutputTokens)
+	}
+	// Note: cache fields (CacheCreationTokens, CacheReadTokens) are best-effort
+	// and intentionally not clamped — they are summed from current_usage per line.
+}
+
+func TestCalculateTokenUsageSince_UnparseableBaselineCountsAllLines(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(statusDirEnv, dir)
+
+	snaps := []statusSnapshot{
+		{
+			Timestamp:      "2026-06-03T10:00:00.000000000Z",
+			ConversationID: "c1",
+			ContextWindow: statusContextWindow{
+				TotalInputTokens:  1000,
+				TotalOutputTokens: 100,
+				CurrentUsage:      &statusCurrentUsage{CacheReadInputTokens: 700},
+			},
+		},
+		{
+			Timestamp:      "2026-06-03T10:05:00.000000000Z",
+			ConversationID: "c1",
+			ContextWindow: statusContextWindow{
+				TotalInputTokens:  3000,
+				TotalOutputTokens: 250,
+				CurrentUsage:      &statusCurrentUsage{CacheReadInputTokens: 900},
+			},
+		},
+	}
+	writeSnapshotFixture(t, "c1", snaps)
+
+	// Baseline with an unparseable timestamp — documents accepted degradation:
+	// input/output stay exact via the totals subtraction, but cache/apicall
+	// counts cover all lines rather than only post-baseline lines.
+	baseline := json.RawMessage(`{"ts":"not-a-timestamp","context_window":{"total_input_tokens":1000,"total_output_tokens":100}}`)
+
+	a := &AntigravityAgent{}
+	usage, err := a.CalculateTokenUsageSince(context.Background(), "c1", baseline)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsageSince: %v", err)
+	}
+	if usage == nil {
+		t.Fatal("usage is nil")
+	}
+	if usage.InputTokens != 2000 {
+		t.Errorf("InputTokens = %d, want 2000 (3000-1000)", usage.InputTokens)
+	}
+	if usage.OutputTokens != 150 {
+		t.Errorf("OutputTokens = %d, want 150 (250-100)", usage.OutputTokens)
+	}
+	// Both lines are counted because the baseline timestamp didn't parse.
+	if usage.APICallCount != 2 {
+		t.Errorf("APICallCount = %d, want 2 (all lines counted)", usage.APICallCount)
+	}
+	if usage.CacheReadTokens != 1600 {
+		t.Errorf("CacheReadTokens = %d, want 1600 (700+900)", usage.CacheReadTokens)
 	}
 }
