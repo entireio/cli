@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -102,8 +103,11 @@ func TestCodexReviewer_ArgvShape(t *testing.T) {
 
 func TestCodexReviewer_PassesSkillThroughVerbatim(t *testing.T) {
 	t.Parallel()
+	// Codex skills are dollar-prefixed ($name / $plugin:name) — the literal
+	// token a user types in the codex CLI. Use that form so the test models
+	// real codex usage, not claude's slash form.
 	cfg := reviewtypes.RunConfig{
-		Skills:            []string{"/review"},
+		Skills:            []string{"$code-reviewer"},
 		AlwaysPrompt:      "Focus on auth regressions.",
 		ScopeBaseRef:      "main",
 		CheckpointContext: "Commits in scope (newest first):\n  abc123 summary\n",
@@ -123,11 +127,11 @@ func TestCodexReviewer_PassesSkillThroughVerbatim(t *testing.T) {
 	prompt := readCodexCmdStdin(t, cmd)
 	// The configured skill must reach codex verbatim so codex's skill system
 	// loads the real SKILL.md — not a generic paraphrase.
-	if !strings.Contains(prompt, "/review") {
-		t.Fatalf("codex prompt should pass /review through verbatim:\n%s", prompt)
+	if !strings.Contains(prompt, "$code-reviewer") {
+		t.Fatalf("codex prompt should pass $code-reviewer through verbatim:\n%s", prompt)
 	}
 	if strings.Contains(prompt, "Review the current branch changes and report actionable findings.") {
-		t.Fatalf("codex prompt must not paraphrase /review:\n%s", prompt)
+		t.Fatalf("codex prompt must not paraphrase the configured skill:\n%s", prompt)
 	}
 	for _, wantText := range []string{
 		"Focus on auth regressions.",
@@ -466,6 +470,39 @@ func TestParseCodexOutput_EmitsTokensAtEveryTurnCompleted(t *testing.T) {
 	}
 	if tokens[1].In != 35820 || tokens[1].Out != 401 {
 		t.Errorf("tokens[1] = %+v, want {In:35820, Out:401}", tokens[1])
+	}
+}
+
+// Regression: the rollout token tailer runs concurrently and sends on the same
+// channel. The parser must stop+join it BEFORE emitting the terminal Finished,
+// so a late Tokens can never follow Finished (ReviewerTemplate requires Finished
+// to be the last event). A live rollout file gives the tailer real work to emit.
+func TestParseCodexOutput_FinishedIsLastEvenWithLiveTailer(t *testing.T) {
+	// Cannot t.Parallel — uses t.Setenv.
+	dir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", dir)
+	rollout := filepath.Join(dir, "rollout-2026-06-03T08-57-39-"+tailTestThreadID+".jsonl")
+	content := tokenLine(100, 5) + tokenLine(200, 10) + tokenLine(300, 15)
+	if err := os.WriteFile(rollout, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	input := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"` + tailTestThreadID + `"}`,
+		`{"type":"turn.completed","usage":{"input_tokens":300,"output_tokens":15}}`,
+		"",
+	}, "\n")
+
+	var events []reviewtypes.Event
+	for ev := range parseCodexOutput(strings.NewReader(input)) {
+		events = append(events, ev)
+	}
+	if len(events) == 0 {
+		t.Fatal("no events emitted")
+	}
+	if _, ok := events[len(events)-1].(reviewtypes.Finished); !ok {
+		t.Fatalf("last event = %T, want Finished (no Tokens may follow the terminal event); events=%+v",
+			events[len(events)-1], events)
 	}
 }
 

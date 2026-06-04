@@ -122,15 +122,22 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 	go func() {
 		defer close(out)
 		// The rollout token tailer (started on thread.started) runs concurrently
-		// and also sends on out. Stop it and wait for it to exit BEFORE close(out)
-		// so its send can never hit a closed channel. defer is LIFO, so this runs
-		// before the close(out) registered above.
+		// and also sends on out. stopTailer halts it and waits for it to exit.
+		// It MUST run before any Finished emission: ReviewerTemplate requires
+		// Finished to be the last event before the channel closes, so a late
+		// Tokens from the tailer would violate that contract (and a send after
+		// close(out) would panic). Idempotent (sync.Once) so it's safe to call
+		// explicitly before each terminal Finished AND from the defer backstop;
+		// the defer (LIFO, registered after close(out)) still guards early or
+		// unexpected returns.
 		stop := make(chan struct{})
 		var tailWG sync.WaitGroup
-		defer func() {
-			close(stop)
+		var stopOnce sync.Once
+		stopTailer := func() {
+			stopOnce.Do(func() { close(stop) })
 			tailWG.Wait()
-		}()
+		}
+		defer stopTailer()
 		out <- reviewtypes.Started{}
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, min(1024*1024, maxBuf)), maxBuf)
@@ -202,6 +209,7 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			}
 		}
 		if err := scanner.Err(); err != nil {
+			stopTailer()
 			out <- reviewtypes.RunError{Err: fmt.Errorf("read stdout: %w", err)}
 			out <- reviewtypes.Finished{Success: false}
 			return
@@ -224,6 +232,9 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 					Out: turnUsage.OutputTokens,
 				}
 			}
+			// Stop the tailer (and wait) before Finished so no late Tokens can
+			// land after the terminal event.
+			stopTailer()
 			// Success is hard-coded true here because codex's `turn.completed`
 			// envelope has no turn-level error field in 0.130.0. If a future
 			// codex version adds one (e.g., an `error` or `is_error` field on
@@ -233,6 +244,7 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			out <- reviewtypes.Finished{Success: true}
 			return
 		}
+		stopTailer()
 		out <- reviewtypes.Finished{Success: false}
 	}()
 	return out
