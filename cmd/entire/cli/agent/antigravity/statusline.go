@@ -108,7 +108,9 @@ func AppendStatusSnapshot(payload []byte) error {
 	}
 
 	// Dedup: compare compact JSON of the new context_window against the last
-	// persisted line's context_window. Read only the last line for performance.
+	// persisted line's context_window. readLastContextWindow streams the file
+	// keeping only the final line (O(1) memory); the file stays small because
+	// this very dedup suppresses unchanged snapshots.
 	newCWBytes, err := json.Marshal(p.ContextWindow)
 	if err != nil {
 		return nil

@@ -1,9 +1,11 @@
 package antigravity
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -47,12 +49,20 @@ func agyConfigDir() (string, error) {
 
 // titleTeeCommand returns the full shell command string for the title-tee shim.
 // If original is non-empty, the original command is wrapped via --wrap.
+//
+// localDev note: unlike the repo-scoped lifecycle hooks (.agents/hooks.json),
+// the title command lives in agy's GLOBAL settings.json and is invoked from
+// whatever directory agy runs in. A runtime "$(git rev-parse --show-toplevel)"
+// would resolve against the wrong repo — or fail entirely outside one — so we
+// resolve the repo root at install time and bake in the absolute main.go path.
+// If resolution fails, we fall back to the production "entire ..." form, which
+// resolves the dev binary via $PATH.
 func titleTeeCommand(localDev bool, original string) string {
-	var base string
+	base := "entire hooks antigravity title-tee"
 	if localDev {
-		base = `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks antigravity title-tee`
-	} else {
-		base = "entire hooks antigravity title-tee"
+		if mainPath := localDevMainPath(); mainPath != "" {
+			base = "go run " + shellSingleQuote(mainPath) + " hooks antigravity title-tee"
+		}
 	}
 	if original == "" {
 		return base
@@ -60,8 +70,24 @@ func titleTeeCommand(localDev bool, original string) string {
 	return base + " --wrap " + shellSingleQuote(original)
 }
 
-// shellSingleQuote wraps s in POSIX single quotes, escaping any embedded
-// single quotes using the '\” idiom.
+// localDevMainPath resolves the absolute path to cmd/entire/main.go in the
+// current repo at call time, or "" if not inside a git repo.
+func localDevMainPath() string {
+	out, err := exec.CommandContext(context.Background(), "git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return ""
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, "cmd", "entire", "main.go")
+}
+
+// shellSingleQuote wraps s in POSIX single quotes. Embedded single quotes are
+// rewritten with the standard close-escape-reopen technique (see the
+// strings.ReplaceAll below) so the result is safe inside a single-quoted shell
+// argument.
 func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

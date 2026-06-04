@@ -60,6 +60,20 @@ func (a *AntigravityAgent) InstallHooks(ctx context.Context, localDev bool, forc
 
 	candidate := buildEntireHookConfig(cmdPrefix, localDev)
 
+	// Title tee: agy's only token-usage surface (same payload as the
+	// statusline script). Run this BEFORE the idempotency early-return: the
+	// title slot lives in agy's GLOBAL settings.json, independent of this
+	// repo's .agents/hooks.json. If repo hooks already match but the global
+	// slot is missing or stale (upgrade from a pre-title-tee version, a failed
+	// first install, or `entire agent add` without --force), re-running setup
+	// must still repair it — otherwise the doctor's "re-run setup" hint is a
+	// no-op. InstallTitleTee is itself idempotent. Best-effort: a failure to
+	// claim the global slot must not fail repo-level hook setup.
+	if err := InstallTitleTee(localDev); err != nil {
+		logging.Warn(ctx, "failed to install antigravity title tee",
+			"error", err.Error())
+	}
+
 	// Idempotency check: compare candidate against existing "entire" entry by
 	// re-marshaling both to compact JSON for a stable comparison.
 	if !force {
@@ -84,14 +98,6 @@ func (a *AntigravityAgent) InstallHooks(ctx context.Context, localDev bool, forc
 
 	if err := writeHooksFile(rawFile, hooksPath); err != nil {
 		return 0, err
-	}
-
-	// Title tee: agy's only token-usage surface (same payload as the
-	// statusline script). Best-effort — a failure to claim the global title
-	// slot must not fail repo-level hook setup.
-	if err := InstallTitleTee(localDev); err != nil {
-		logging.Warn(ctx, "failed to install antigravity title tee",
-			"error", err.Error())
 	}
 
 	// 5 hooks: pre-tool-use, post-tool-use, pre-invocation, post-invocation, stop
