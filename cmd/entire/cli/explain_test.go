@@ -1618,17 +1618,6 @@ func TestFormatSessionInfo_WithSourceRef(t *testing.T) {
 	}
 }
 
-// TestManualCommitStrategyCallable verifies that the strategy's methods are callable
-func TestManualCommitStrategyCallable(t *testing.T) {
-	s := strategy.NewManualCommitStrategy()
-
-	// GetAdditionalSessions should exist and be callable
-	_, err := s.GetAdditionalSessions(context.Background())
-	if err != nil {
-		t.Logf("GetAdditionalSessions returned error: %v", err)
-	}
-}
-
 func TestFormatSessionInfo_CheckpointNumberingReversed(t *testing.T) {
 	now := time.Now()
 	session := &strategy.Session{

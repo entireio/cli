@@ -948,6 +948,82 @@ func TestFindBranchCheckpoint_SquashMergeMultipleCheckpoints(t *testing.T) {
 	}
 }
 
+// TestResumeSingleSession_RejectsPathTraversalSessionID is an end-to-end proof
+// that a malicious session ID cannot cause an arbitrary file write during resume.
+//
+// The checkpoint transcript is stored under a benign session ID; the attack is the
+// session ID that flows into path construction (in production this comes from the
+// remote checkpoint metadata via readCheckpointInfoFromStore). A "../"-laden ID
+// resolves to a path outside the agent's session directory. Before the fix,
+// resumeSingleSession would resolve the path, write the attacker-controlled
+// transcript there, and overwrite the sentinel — RCE if the target is e.g. a
+// shell init file. The fix must reject the ID and write nothing.
+func TestResumeSingleSession_RejectsPathTraversalSessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+		t.Fatalf("failed to create settings dir: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(tmpDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("dddddddddddd")
+	raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"payload"}]}}` + "\n")
+
+	v1Store := checkpoint.NewGitStore(repo)
+	if err := v1Store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "benign-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted(raw),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}); err != nil {
+		t.Fatalf("failed to write v1 checkpoint: %v", err)
+	}
+
+	sessionDir := filepath.Join(tmpDir, "sessions")
+	ag := &recordingResumeAgent{sessionDir: sessionDir}
+
+	// Sentinel lives outside the session directory; the traversal targets it.
+	// recordingResumeAgent.ResolveSessionFile appends ".jsonl".
+	victimDir := filepath.Join(tmpDir, "victim")
+	if err := os.MkdirAll(victimDir, 0o755); err != nil {
+		t.Fatalf("failed to create victim dir: %v", err)
+	}
+	sentinel := filepath.Join(victimDir, "secret.jsonl")
+	if err := os.WriteFile(sentinel, []byte("SAFE"), 0o600); err != nil {
+		t.Fatalf("failed to write sentinel: %v", err)
+	}
+
+	maliciousSessionID := "../victim/secret"
+
+	var stdout, stderr bytes.Buffer
+	err := resumeSingleSession(ctx, &stdout, &stderr, ag, maliciousSessionID, cpID, tmpDir, true)
+	if err == nil {
+		t.Fatalf("resumeSingleSession() with traversal session ID = nil error, want rejection\nstdout: %s", stdout.String())
+	}
+	if ag.writtenSession != nil {
+		t.Fatalf("resumeSingleSession() wrote a session despite malicious ID: ref=%s", ag.writtenSession.SessionRef)
+	}
+	got, readErr := os.ReadFile(sentinel)
+	if readErr != nil {
+		t.Fatalf("failed to read sentinel: %v", readErr)
+	}
+	if string(got) != "SAFE" {
+		t.Fatalf("sentinel was overwritten via path traversal: %q", string(got))
+	}
+}
+
 func TestResumeSingleSession_UsesV1Transcript(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)

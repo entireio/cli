@@ -55,18 +55,13 @@ const (
 
 ## Interface
 
-### Session Operations
+### Session Access
 
-Sessions are accessed via standalone functions in `strategy/session.go`:
-
-```go
-// ListSessions returns all sessions from entire/checkpoints/v1,
-// plus additional sessions from strategies implementing SessionSource.
-func ListSessions() ([]Session, error)
-
-// GetSession finds a session by ID (supports prefix matching).
-func GetSession(sessionID string) (*Session, error)
-```
+`strategy/session.go` keeps the `Session` and `Checkpoint` data types used by
+status/explain formatting. Active session state is read from `.git/entire-sessions/`
+through `session.StateStore`; committed checkpoint/session content is read through
+the committed checkpoint store (`checkpoint.NewCommittedReadStore(...)`) and
+command-specific strategy methods such as `GetSessionInfo`.
 
 ### Checkpoint Storage (Low-Level)
 
@@ -340,7 +335,7 @@ The checkpoint ID creates a **bidirectional link**: user commits can find their 
 
 ```
 strategy/
-├── session.go           # Session and Checkpoint types, ListSessions(), GetSession()
+├── session.go           # Session and Checkpoint types
 
 session/
 ├── state.go             # Active session state (StateStore, .git/entire-sessions/)

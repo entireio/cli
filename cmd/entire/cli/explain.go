@@ -822,7 +822,7 @@ func runPreFetch(ctx context.Context, ft *checkpoint.FetchingTree, cpID id.Check
 }
 
 func loadV1MetadataRootTree(repo *git.Repository) (*object.Tree, error) {
-	if tree, err := strategy.GetMetadataBranchTree(repo); err == nil {
+	if tree, err := strategy.GetMetadataRefTree(repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName)); err == nil {
 		return tree, nil
 	}
 	tree, err := strategy.GetRemoteMetadataBranchTree(repo)

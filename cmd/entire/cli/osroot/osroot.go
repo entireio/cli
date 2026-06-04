@@ -2,10 +2,9 @@
 // (Go 1.24+). These helpers ensure that file operations cannot escape a scoped
 // directory, preventing symlink attacks and TOCTOU races at the kernel level.
 //
-// os.Root supports: Open, OpenFile, Create, Stat, Lstat, Mkdir, Remove, OpenRoot.
-// os.Root does NOT support: MkdirAll, WriteFile, ReadFile, Rename, RemoveAll.
-// For unsupported operations, callers should use standard os functions with
-// lexical validation.
+// These wrappers predate Go 1.25, which added native ReadFile/WriteFile/MkdirAll
+// (etc.) on *os.Root; they remain as the codebase's stable, consistent helper
+// surface and delegate to the native methods where those now exist.
 //
 // Errors from these functions are returned unwrapped so that callers can use
 // os.IsNotExist() and errors.Is() directly without losing the original sentinel.
@@ -52,6 +51,16 @@ func WriteFile(root *os.Root, name string, data []byte, perm os.FileMode) (retEr
 		return err //nolint:wrapcheck // preserve original error
 	}
 	return nil
+}
+
+// MkdirAll creates the directory named by name, along with any necessary
+// parents, relative to root. The kernel enforces containment: a name that
+// escapes root (absolute, or climbing above it via "..") is rejected. Already-
+// existing directories are tolerated, like os.MkdirAll. This thin wrapper keeps
+// the package's os.Root helper surface (alongside ReadFile/WriteFile/Remove)
+// consistent at call sites.
+func MkdirAll(root *os.Root, name string, perm os.FileMode) error {
+	return root.MkdirAll(name, perm) //nolint:wrapcheck // preserve original error for errors.Is/os.IsNotExist
 }
 
 // Remove removes the named file relative to root using os.Root for

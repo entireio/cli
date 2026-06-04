@@ -341,7 +341,7 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 		freshRepo, freshErr := openRepository(ctx)
 		if freshErr == nil {
 			logRefHash(freshRepo, "checkpoint-remote")
-			metadataTree, treeErr := strategy.GetMetadataBranchTree(freshRepo)
+			metadataTree, treeErr := strategy.GetMetadataRefTree(freshRepo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 			if treeErr == nil {
 				logging.Debug(logCtx, "metadata tree obtained via checkpoint remote fetch",
 					slog.String("tree_hash", metadataTree.Hash.String()),
@@ -365,7 +365,7 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 		freshRepo, repoErr := openRepository(ctx)
 		if repoErr == nil {
 			logRefHash(freshRepo, "treeless-fetch")
-			metadataTree, treeErr := strategy.GetMetadataBranchTree(freshRepo)
+			metadataTree, treeErr := strategy.GetMetadataRefTree(freshRepo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 			if treeErr == nil {
 				logging.Debug(logCtx, "metadata tree obtained via treeless fetch",
 					slog.String("tree_hash", metadataTree.Hash.String()),
@@ -387,7 +387,7 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 	localRepo, repoErr := openRepository(ctx)
 	if repoErr == nil {
 		logRefHash(localRepo, "local")
-		metadataTree, err := strategy.GetMetadataBranchTree(localRepo)
+		metadataTree, err := strategy.GetMetadataRefTree(localRepo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 		if err == nil {
 			logging.Debug(logCtx, "metadata tree obtained from local branch",
 				slog.String("tree_hash", metadataTree.Hash.String()),
@@ -405,7 +405,7 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 		freshRepo, repoErr := openRepository(ctx)
 		if repoErr == nil {
 			logRefHash(freshRepo, "full-fetch")
-			metadataTree, treeErr := strategy.GetMetadataBranchTree(freshRepo)
+			metadataTree, treeErr := strategy.GetMetadataRefTree(freshRepo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 			if treeErr == nil {
 				logging.Debug(logCtx, "metadata tree obtained via full fetch",
 					slog.String("tree_hash", metadataTree.Hash.String()),

@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // Hook names — these match Pi's native event names exactly (snake_case),
@@ -286,6 +287,15 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 	if sessionID == "" || piSessionFile == "" {
 		return ""
 	}
+	// sessionID comes from the hook payload (or the locally cached active
+	// session) and is used to build dst below, before the lifecycle dispatcher
+	// validates it. Validate here at the choke point so an unsafe ID cannot
+	// write the transcript outside the cache directory; "" signals no capture.
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		logging.Warn(ctx, "pi: refusing to capture transcript for unsafe session ID",
+			slog.String("session_id", sessionID), slog.String("err", err.Error()))
+		return ""
+	}
 	dir := resolveSessionDir(ctx)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		logging.Warn(ctx, "pi: capture transcript mkdir failed",
@@ -300,7 +310,7 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 			slog.String("src", piSessionFile), slog.String("err", err.Error()))
 		return ""
 	}
-	//nolint:gosec // G703: dst constructed from validated session ID inside .entire/tmp
+	//nolint:gosec // G703: dst is sessionID (validated above) under .entire/tmp/pi
 	if err := os.WriteFile(dst, data, 0o600); err != nil {
 		logging.Warn(ctx, "pi: capture transcript write failed",
 			slog.String("dst", dst), slog.String("err", err.Error()))

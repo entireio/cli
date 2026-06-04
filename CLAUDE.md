@@ -419,7 +419,6 @@ The `Strategy` interface provides:
 - `SaveTaskStep()` - Save subagent task step checkpoint
 - `GetRewindPoints()` / `Rewind()` - List and restore to checkpoints
 - `GetSessionLog()` / `GetSessionInfo()` - Retrieve session data
-- `ListSessions()` / `GetSession()` - Session discovery
 
 #### How It Works
 

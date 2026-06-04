@@ -760,22 +760,19 @@ func decodeCheckpointInfo(
 	return &metadata, nil
 }
 
-// GetMetadataBranchTree returns the tree object for the entire/checkpoints/v1 branch.
-func GetMetadataBranchTree(repo *git.Repository) (*object.Tree, error) {
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	ref, err := repo.Reference(refName, true)
+// GetMetadataRefTree returns the tree object at the given committed-metadata ref.
+func GetMetadataRefTree(repo *git.Repository, ref plumbing.ReferenceName) (*object.Tree, error) {
+	resolvedRef, err := repo.Reference(ref, true)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get metadata branch reference: %w", err)
+		return nil, fmt.Errorf("read ref %s: %w", ref, err)
 	}
-
-	commit, err := repo.CommitObject(ref.Hash())
+	commit, err := repo.CommitObject(resolvedRef.Hash())
 	if err != nil {
-		return nil, fmt.Errorf("failed to get metadata branch commit: %w", err)
+		return nil, fmt.Errorf("read commit at %s: %w", ref, err)
 	}
-
 	tree, err := commit.Tree()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get metadata branch tree: %w", err)
+		return nil, fmt.Errorf("read tree at %s: %w", ref, err)
 	}
 	return tree, nil
 }
@@ -942,28 +939,32 @@ func ReadLatestSessionPromptFromCommittedTree(tree *object.Tree, cpID id.Checkpo
 
 // ReadAllSessionPromptsFromTree reads the first prompt for all sessions in a multi-session checkpoint.
 // Returns a slice of prompts parallel to sessionIDs (oldest to newest).
-// For single-session checkpoints, returns a slice with just the root prompt.
+// For single-session checkpoints, returns a slice with just the session prompt.
 func ReadAllSessionPromptsFromTree(tree *object.Tree, checkpointPath string, sessionCount int, sessionIDs []string) []string {
 	if sessionCount <= 1 || len(sessionIDs) <= 1 {
-		// Single session - just return the root prompt
-		prompt := ReadSessionPromptFromTree(tree, checkpointPath)
+		prompt := ReadSessionPromptFromTree(tree, checkpointPath+"/0")
+		if prompt == "" {
+			prompt = ReadSessionPromptFromTree(tree, checkpointPath)
+		}
 		if prompt != "" {
 			return []string{prompt}
 		}
 		return nil
 	}
 
-	// Multi-session: read prompts from archived folders (0/, 1/, etc.) and root
 	prompts := make([]string, len(sessionIDs))
 
-	// Read archived session prompts (folders 0, 1, ... N-2)
-	for i := range sessionCount - 1 {
-		archivedPath := fmt.Sprintf("%s/%d", checkpointPath, i)
-		prompts[i] = ReadSessionPromptFromTree(tree, archivedPath)
+	sessionLimit := min(sessionCount, len(prompts))
+	for i := range sessionLimit {
+		sessionPath := fmt.Sprintf("%s/%d", checkpointPath, i)
+		prompts[i] = ReadSessionPromptFromTree(tree, sessionPath)
 	}
 
-	// Read the most recent session prompt (at root level)
-	prompts[len(prompts)-1] = ReadSessionPromptFromTree(tree, checkpointPath)
+	// Older committed metadata stored the latest prompt at the checkpoint root.
+	latestIndex := sessionLimit - 1
+	if latestIndex >= 0 && prompts[latestIndex] == "" {
+		prompts[latestIndex] = ReadSessionPromptFromTree(tree, checkpointPath)
+	}
 
 	return prompts
 }
@@ -1548,73 +1549,6 @@ func collectUntrackedFiles(ctx context.Context) ([]string, error) {
 // - treeNode, insertIntoTree, buildTreeObject (internal to checkpoint package)
 //
 // See push_common.go and session_test.go for usage examples.
-
-// getSessionDescriptionFromTree reads the first line of prompt.txt from a git tree.
-// This is the tree-based equivalent of getSessionDescription (which reads from filesystem).
-//
-// If metadataDir is provided, looks for files at metadataDir/prompt.txt.
-// If metadataDir is empty, first tries the root of the tree (for when the tree is already
-// the session directory), then falls back to
-// searching for .entire/metadata/*/prompt.txt (for full worktree trees).
-func getSessionDescriptionFromTree(tree *object.Tree, metadataDir string) string {
-	// Helper to read first line from a file in tree
-	readFirstLine := func(path string) string {
-		file, err := tree.File(path)
-		if err != nil {
-			return ""
-		}
-		content, err := file.Contents()
-		if err != nil {
-			return ""
-		}
-		lines := strings.SplitN(content, "\n", 2)
-		if len(lines) > 0 && lines[0] != "" {
-			return strings.TrimSpace(lines[0])
-		}
-		return ""
-	}
-
-	// If metadataDir is provided, look there directly
-	if metadataDir != "" {
-		if desc := readFirstLine(metadataDir + "/" + paths.PromptFileName); desc != "" {
-			return desc
-		}
-		return NoDescription
-	}
-
-	// No metadataDir provided - first try looking at the root of the tree
-	// (used when the tree is already the session directory)
-	if desc := readFirstLine(paths.PromptFileName); desc != "" {
-		return desc
-	}
-
-	// Fall back to searching for .entire/metadata/*/prompt.txt
-	// (used when the tree is the full worktree)
-	var desc string
-	//nolint:errcheck // We ignore errors here as we're just searching for a description
-	_ = tree.Files().ForEach(func(f *object.File) error {
-		if desc != "" {
-			return nil // Already found description
-		}
-		name := f.Name
-		if strings.Contains(name, ".entire/metadata/") && strings.HasSuffix(name, "/"+paths.PromptFileName) {
-			content, err := f.Contents()
-			if err != nil {
-				return nil //nolint:nilerr // Skip files we can't read, continue searching
-			}
-			lines := strings.SplitN(content, "\n", 2)
-			if len(lines) > 0 && lines[0] != "" {
-				desc = strings.TrimSpace(lines[0])
-			}
-		}
-		return nil
-	})
-
-	if desc != "" {
-		return desc
-	}
-	return NoDescription
-}
 
 // GetGitAuthorFromRepo retrieves the git user.name and user.email,
 // checking both the repository-local config and the global ~/.gitconfig.

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.5] - 2026-06-04
+
+### Security
+
+- Closed a path-traversal / arbitrary-file-write vulnerability across the checkpoint, session, and agent-lifecycle paths: identifiers read from the shared `entire/checkpoints/v1` branch or from agent hook input flowed into filesystem paths without validation, so a crafted session ID could overwrite arbitrary files on `entire session resume` / `entire checkpoint rewind`. IDs are now validated at the read/dispatch boundaries, with `os.Root` containment as defense in depth ([#1365](https://github.com/entireio/cli/pull/1365))
+
+### Fixed
+
+- `git-remote-entire` now relays helper-status before checking the send-pack exit code, so per-ref rejections (branch protection, ref-name conflicts, permission denials) surface as `! [remote rejected]` with the real reason instead of a bare `send-pack exited with error: exit status 1` ([#1364](https://github.com/entireio/cli/pull/1364))
+
 ## [0.7.4] - 2026-06-04
 
 ### Added

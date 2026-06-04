@@ -1599,6 +1599,18 @@ func TestReadLatestSessionPromptFromCommittedTree(t *testing.T) {
 	})
 }
 
+func TestReadAllSessionPromptsFromTree(t *testing.T) {
+	t.Parallel()
+
+	tree := buildCommittedTree(t, map[string]string{
+		"a3/b2c4d5e6f7/0/prompt.txt": "First session prompt",
+		"a3/b2c4d5e6f7/1/prompt.txt": "Second session prompt",
+	})
+
+	got := ReadAllSessionPromptsFromTree(tree, "a3/b2c4d5e6f7", 2, []string{"session-1", "session-2"})
+	assert.Equal(t, []string{"First session prompt", "Second session prompt"}, got)
+}
+
 func TestIsEmptyRepository(t *testing.T) {
 	t.Parallel()
 	t.Run("empty repo returns true", func(t *testing.T) {
