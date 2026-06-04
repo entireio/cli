@@ -17,7 +17,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gnome-keyring
           echo 'somecredstorepass' | gnome-keyring-daemon --unlock
-      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
       - name: Core Tests
         env:
           GO_TEST_PARALLEL: "16"
@@ -38,7 +38,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gnome-keyring
           echo 'somecredstorepass' | gnome-keyring-daemon --unlock
-      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
       - name: Integration Tests
         env:
           GO_TEST_PARALLEL: "16"
@@ -55,7 +55,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gnome-keyring
           echo 'somecredstorepass' | gnome-keyring-daemon --unlock
-      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
       - name: E2E Canary
         run: mise run test:e2e:canary
 
