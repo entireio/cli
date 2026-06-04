@@ -31,7 +31,12 @@ var curatedBuiltins = map[string][]CuratedSkill{
 		{Name: "/security-review", Desc: "Scan git diff for security issues"},
 		{Name: "/simplify", Desc: "Review recent changes for code quality"},
 	},
-	"codex":  {{Name: "/review", Desc: "Review current changes and find issues"}},
+	// Codex has no binary-bundled review command usable from `codex exec`:
+	// built-in slash commands like `/review` only fire in the interactive TUI,
+	// not when piped through exec. Codex's review skills (code-reviewer,
+	// review-swarm, …) live on disk and are surfaced by DiscoverReviewSkills in
+	// $name form, so there are no curated built-ins to hardcode here.
+	"codex":  {},
 	"gemini": {},
 }
 
@@ -42,10 +47,14 @@ var curatedBuiltins = map[string][]CuratedSkill{
 // Install commands below are placeholders until marketplace URLs are pinned.
 // Tests do not assert on Message text — only on ProvidesAny semantics — so
 // prose revisions do not break the suite.
+//
+// Messages must stay backtick-free: the picker renders them through huh, which
+// treats the text as markdown and mangles backtick-wrapped code spans in the
+// terminal. Use plain text / colons to set off commands instead.
 var installHints = map[string][]InstallHint{
 	"claude-code": {
 		{
-			Message: "Install `pr-review-toolkit` via `claude plugin install entireio/pr-review-toolkit`",
+			Message: "Install pr-review-toolkit: claude plugin install entireio/pr-review-toolkit",
 			ProvidesAny: []string{
 				"/pr-review-toolkit:review-pr",
 				"/pr-review-toolkit:code-reviewer",
@@ -53,19 +62,19 @@ var installHints = map[string][]InstallHint{
 			},
 		},
 		{
-			Message:     "Install `test-auditor` via the superpowers plugin",
+			Message:     "Install test-auditor via the superpowers plugin",
 			ProvidesAny: []string{"/test-auditor"},
 		},
 	},
 	"codex": {
 		{
-			Message:     "Install `codex-review-pack` via `codex plugins add <url>`",
+			Message:     "Install codex-review-pack: codex plugins add <url>",
 			ProvidesAny: []string{"/codex:adversarial-review"},
 		},
 	},
 	"gemini": {
 		{
-			Message:     "Install `gemini-code-review` via `gemini extensions install <url>`",
+			Message:     "Install gemini-code-review: gemini extensions install <url>",
 			ProvidesAny: nil,
 		},
 	},

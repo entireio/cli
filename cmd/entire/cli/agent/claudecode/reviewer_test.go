@@ -239,6 +239,11 @@ func TestParseClaudeOutput_DecodesStreamJSON(t *testing.T) {
 		t.Error("expected AssistantText carrying fixture prose 'Cats are…'")
 	}
 
+	// The parser emits Tokens on every assistant envelope that carries
+	// non-zero usage plus a terminal Tokens on the result envelope. The
+	// fixture's two assistant envelopes both carry usage, so expect >=2
+	// here (the exact count is fixture-defined and not asserted to keep
+	// the fixture editable).
 	var tokensSeen int
 	var tokensOut int
 	for _, ev := range events {
@@ -247,11 +252,11 @@ func TestParseClaudeOutput_DecodesStreamJSON(t *testing.T) {
 			tokensOut = tk.Out
 		}
 	}
-	if tokensSeen != 1 {
-		t.Errorf("Tokens count = %d, want 1", tokensSeen)
+	if tokensSeen < 2 {
+		t.Errorf("Tokens count = %d, want >=2 (per-assistant deltas + result backstop)", tokensSeen)
 	}
 	if tokensOut == 0 {
-		t.Error("Tokens.Out = 0, want > 0")
+		t.Error("final Tokens.Out = 0, want > 0")
 	}
 }
 
@@ -382,6 +387,72 @@ func TestParseClaudeOutput_GarbledLineEmitsRunErrorAndContinues(t *testing.T) {
 	}
 	if !sawSuccess {
 		t.Error("expected Finished{Success:true} after recovering from garbled line")
+	}
+}
+
+// TestParseClaudeOutput_EmitsInputOnlyDuringRun captures the live-token
+// contract for Claude: the assistant envelopes' usage block carries a
+// per-turn-start snapshot where output_tokens is essentially zero (1–8
+// tokens of initial decision), so we surface input only on those envelopes
+// and let the terminal `result` envelope carry the true {In, Out} total.
+//
+// Fixture is derived from real `claude -p --output-format stream-json
+// --verbose` output captured against claude-haiku-4-5: six assistant
+// envelopes across three turns, each with output_tokens 1–6, then a final
+// result with output_tokens 2511. If a future Claude build starts streaming
+// real output token counts on assistant envelopes, this test fails and
+// signals that the parser can emit live {In, Out} pairs.
+func TestParseClaudeOutput_EmitsInputOnlyDuringRun(t *testing.T) {
+	t.Parallel()
+	f, err := os.Open("testdata/stream_with_deltas.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	var events []reviewtypes.Event
+	for ev := range parseClaudeOutput(f) {
+		events = append(events, ev)
+	}
+
+	var tokens []reviewtypes.Tokens
+	sawFinished := false
+	for _, e := range events {
+		switch ev := e.(type) {
+		case reviewtypes.Tokens:
+			if sawFinished {
+				t.Errorf("Tokens event arrived AFTER Finished — wrong ordering")
+			}
+			tokens = append(tokens, ev)
+		case reviewtypes.Finished:
+			sawFinished = true
+		}
+	}
+	if len(tokens) < 2 {
+		t.Fatalf("expected >=2 Tokens events (assistant snapshots + final), got %d", len(tokens))
+	}
+
+	// All Tokens BEFORE the final one are assistant-envelope snapshots:
+	// input is populated; Out must be exactly 0 to avoid showing the
+	// misleading per-turn-start initial-decision count in the TUI.
+	for i := range len(tokens) - 1 {
+		tk := tokens[i]
+		if tk.Out != 0 {
+			t.Errorf("tokens[%d].Out = %d, want 0 (assistant envelope snapshot — output not yet known)", i, tk.Out)
+		}
+		if tk.In == 0 {
+			t.Errorf("tokens[%d].In = 0, want >0 (assistant envelope carries input)", i)
+		}
+	}
+
+	// The terminal Tokens event is from `result` and carries the true
+	// aggregate output count (2511 in the fixture).
+	last := tokens[len(tokens)-1]
+	if last.Out == 0 {
+		t.Error("final Tokens.Out = 0, want non-zero (result envelope final tally)")
+	}
+	if last.In == 0 {
+		t.Error("final Tokens.In = 0, want non-zero")
 	}
 }
 

@@ -332,11 +332,22 @@ type ReviewConfig struct {
 	// Skills is non-empty it is appended after the selected skills; when
 	// Skills is empty it is the full prompt for prompt-only review configs.
 	Prompt string `json:"prompt,omitempty"`
+
+	// Model is an optional per-spawn model override passed to the agent's
+	// CLI (e.g. codex `-m <model>`). Empty falls back to the agent's own
+	// configured default. Agents that don't support a model flag ignore it.
+	Model string `json:"model,omitempty"`
+
+	// ReasoningEffort is an optional per-spawn reasoning-effort override
+	// (e.g. "low", "medium", "high", "xhigh" for codex `-c
+	// model_reasoning_effort=`). Empty falls back to the agent's default.
+	// Agents without a reasoning-effort knob ignore it.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // IsZero reports whether the config is effectively unset.
 func (c ReviewConfig) IsZero() bool {
-	return len(c.Skills) == 0 && c.Prompt == ""
+	return len(c.Skills) == 0 && c.Prompt == "" && c.Model == "" && c.ReasoningEffort == ""
 }
 
 // ReviewConfigFor returns the configured review config for the given agent.

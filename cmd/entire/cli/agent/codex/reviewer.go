@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/review"
@@ -18,7 +19,8 @@ import (
 
 // NewReviewer returns the AgentReviewer for codex.
 //
-// Argv shape: codex exec --skip-git-repo-check --json -.
+// Argv shape: codex exec --skip-git-repo-check --json [-m <model>]
+// [-c model_reasoning_effort=<level>] -.
 // Prompt is piped via stdin (the trailing "-" tells codex to read from stdin).
 // Stdout is newline-delimited JSON envelopes (one event per line); no chrome
 // filter needed — each line is parsed directly into an Event.
@@ -32,36 +34,43 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 
 // buildCodexReviewCmd builds the exec.Cmd for a codex review run.
 // Exposed at package level for test inspection of argv, stdin, and env.
+//
+// Configured skills are passed through verbatim — NOT paraphrased. Codex's
+// skill system injects a catalog of installed skills into every exec session
+// and loads the matching SKILL.md when the prompt names a skill (codex's
+// `$Skill` form, or plain-text/description match), so the agent runs codex's
+// real review workflow rather than a generic restatement of it. An older
+// version replaced `/review` with 28 words of generic instruction, which
+// obscured the skill signal and degraded review quality.
+//
+// Native `codex exec review` is intentionally NOT used: it rejects a prompt
+// when a scope flag is set and codex hooks don't fire during exec, leaving no
+// channel for Entire's scope clause, per-run prompt, and checkpoint context.
+// Plain `codex exec -` with the composed prompt on stdin runs the same skill
+// while carrying our customization.
+//
+// Per-spawn overrides from RunConfig.{Model, ReasoningEffort} translate to
+// codex CLI flags `-m <model>` and `-c model_reasoning_effort=<level>`,
+// inserted before the trailing `-` stdin marker. Empty values are skipped —
+// codex falls back to whatever the user's ~/.codex/config.toml configures.
 func buildCodexReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
-	promptCfg := cfg
-	promptCfg.Skills = expandCodexBuiltinReview(cfg.Skills)
-	args := []string{codexExecCommand, "--skip-git-repo-check", "--json", "-"}
-	prompt := review.ComposeReviewPrompt(promptCfg)
+	args := []string{codexExecCommand, "--skip-git-repo-check", "--json"}
+	if cfg.Model != "" {
+		args = append(args, "-m", cfg.Model)
+	}
+	if cfg.ReasoningEffort != "" {
+		args = append(args, "-c", "model_reasoning_effort="+cfg.ReasoningEffort)
+	}
+	args = append(args, "-")
+
+	prompt := review.ComposeReviewPrompt(cfg)
 	cmd := exec.CommandContext(ctx, "codex", args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "codex", cfg, prompt)
 	return cmd
 }
 
-// Codex's native `exec review --base <branch>` rejects an additional prompt,
-// so expand `/review` into text and run normal `codex exec -`. That preserves
-// Entire's scoped base clause, per-run instructions, and checkpoint context.
-const codexBuiltinReviewPrompt = "Review the current branch changes and report actionable findings. " +
-	"Prioritize correctness, regressions, security, and missing test coverage. Do not make code changes."
-
 const codexExecCommand = "exec"
-
-func expandCodexBuiltinReview(skills []string) []string {
-	out := make([]string, 0, len(skills))
-	for _, skill := range skills {
-		if skill == "/review" {
-			out = append(out, codexBuiltinReviewPrompt)
-			continue
-		}
-		out = append(out, skill)
-	}
-	return out
-}
 
 // parseCodexOutput converts codex's `exec --json` stdout into a stream of
 // Events. Each stdout line is one JSON envelope (top-level "type" field).
@@ -79,8 +88,16 @@ func expandCodexBuiltinReview(skills []string) []string {
 // On a scanner error or a missing turn.completed envelope, emits RunError
 // (scanner) or Finished{Success: false} (missing turn) accordingly.
 //
-// Tokens are emitted only at the terminal `turn.completed` envelope, not
-// incrementally — codex's usage fields land once at end-of-turn.
+// Live-token semantics: codex's `--json` output carries `usage` ONLY on
+// `turn.completed` envelopes. Verified against codex-cli 0.130.0 stdout
+// for both short and long prompts — no intermediate envelope
+// (item.started, item.completed, etc.) carries a usage block. Codex's
+// on-disk session log (the `event_msg{type:"token_count"}` shape the
+// transcript parser consumes) is a separate format, not surfaced
+// through `exec --json`.
+//
+// Tokens are emitted at every `turn.completed` envelope so multi-turn
+// runs show iterative updates in the TUI.
 //
 // Package-private; called directly from this package's tests so they can
 // drive raw stdout fixtures through the parser without going through the
@@ -104,10 +121,20 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 	out := make(chan reviewtypes.Event, 32)
 	go func() {
 		defer close(out)
+		// The rollout token tailer (started on thread.started) runs concurrently
+		// and also sends on out. Stop it and wait for it to exit BEFORE close(out)
+		// so its send can never hit a closed channel. defer is LIFO, so this runs
+		// before the close(out) registered above.
+		stop := make(chan struct{})
+		var tailWG sync.WaitGroup
+		defer func() {
+			close(stop)
+			tailWG.Wait()
+		}()
 		out <- reviewtypes.Started{}
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, min(1024*1024, maxBuf)), maxBuf)
-		var seenTurnComplete bool
+		var seenTurnComplete, emittedTokens, tailerStarted bool
 		var turnUsage codexUsage
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -123,8 +150,21 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			// default arm logs unknown types at Debug so drift can be
 			// triaged via ENTIRE_LOG_LEVEL=debug.
 			switch env.Type {
-			case "thread.started", "turn.started":
-				// Session/turn markers — no event emitted.
+			case "thread.started":
+				// Launch the rollout token tailer once. codex's exec --json stdout
+				// only carries usage on the terminal turn.completed, so we tail the
+				// rollout file (located by thread_id) for live per-turn token totals
+				// — the same source codex's interactive UI reads.
+				if !tailerStarted && env.ThreadID != "" {
+					tailerStarted = true
+					tailWG.Add(1)
+					go func(id string) {
+						defer tailWG.Done()
+						tailRolloutTokens(id, out, stop)
+					}(env.ThreadID)
+				}
+			case "turn.started":
+				// Turn marker — no event emitted.
 			case "item.started":
 				if env.Item.Type == "command_execution" {
 					out <- reviewtypes.ToolCall{Name: "exec", Args: env.Item.Command}
@@ -136,9 +176,26 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 				// command_execution completion is intentionally swallowed —
 				// item.started already announced it. aggregated_output is the
 				// tool's stdout, not the model's narrative.
+				//
+				// No Tokens emission here: codex --json only carries usage on
+				// `turn.completed`. An earlier version of this parser also
+				// emitted Tokens here in case a future codex build attached
+				// a usage block, but that branch was unreachable against real
+				// codex output and is gone — emit on turn.completed only.
 			case "turn.completed":
 				seenTurnComplete = true
 				turnUsage = env.Usage
+				// Emit Tokens at every turn boundary so multi-turn reviews
+				// show iterative updates in the TUI. The post-loop emission
+				// is kept as a backstop for streams that ended without a
+				// turn.completed (defensive — shouldn't happen in practice).
+				if env.Usage.InputTokens > 0 || env.Usage.OutputTokens > 0 {
+					out <- reviewtypes.Tokens{
+						In:  env.Usage.InputTokens,
+						Out: env.Usage.OutputTokens,
+					}
+					emittedTokens = true
+				}
 			default:
 				logging.Debug(context.Background(), "codex parser: unknown envelope type",
 					slog.String("type", env.Type))
@@ -150,13 +207,22 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			return
 		}
 		if seenTurnComplete {
+			// Defensive backstop: the per-turn emission inside the
+			// `case "turn.completed"` arm above is the primary path and
+			// already emitted Tokens for every turn with non-zero usage.
+			// This fires only if no per-turn emission happened (e.g., a
+			// terminal turn.completed envelope arrived without a usage
+			// block — defensive against codex output drift).
+			//
 			// codex reports cached_input_tokens as a subset of input_tokens
 			// and reasoning_output_tokens as a subset of output_tokens
 			// (matching OpenAI's chat-completions usage shape), so do NOT
 			// sum the subset fields — that would double-count.
-			out <- reviewtypes.Tokens{
-				In:  turnUsage.InputTokens,
-				Out: turnUsage.OutputTokens,
+			if !emittedTokens {
+				out <- reviewtypes.Tokens{
+					In:  turnUsage.InputTokens,
+					Out: turnUsage.OutputTokens,
+				}
 			}
 			// Success is hard-coded true here because codex's `turn.completed`
 			// envelope has no turn-level error field in 0.130.0. If a future
@@ -173,9 +239,10 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 }
 
 type codexEnvelope struct {
-	Type  string     `json:"type"`
-	Item  codexItem  `json:"item"`
-	Usage codexUsage `json:"usage"`
+	Type     string     `json:"type"`
+	ThreadID string     `json:"thread_id"` // present on thread.started; locates the rollout file
+	Item     codexItem  `json:"item"`
+	Usage    codexUsage `json:"usage"`
 }
 
 type codexItem struct {

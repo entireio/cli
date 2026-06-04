@@ -100,7 +100,7 @@ func TestCodexReviewer_ArgvShape(t *testing.T) {
 	}
 }
 
-func TestCodexReviewer_BuiltinReviewExpandsToScopedExecPrompt(t *testing.T) {
+func TestCodexReviewer_PassesSkillThroughVerbatim(t *testing.T) {
 	t.Parallel()
 	cfg := reviewtypes.RunConfig{
 		Skills:            []string{"/review"},
@@ -121,18 +121,49 @@ func TestCodexReviewer_BuiltinReviewExpandsToScopedExecPrompt(t *testing.T) {
 	}
 
 	prompt := readCodexCmdStdin(t, cmd)
-	if strings.Contains(prompt, "/review") {
-		t.Fatalf("builtin review prompt should not include raw /review:\n%s", prompt)
+	// The configured skill must reach codex verbatim so codex's skill system
+	// loads the real SKILL.md — not a generic paraphrase.
+	if !strings.Contains(prompt, "/review") {
+		t.Fatalf("codex prompt should pass /review through verbatim:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "Review the current branch changes and report actionable findings.") {
+		t.Fatalf("codex prompt must not paraphrase /review:\n%s", prompt)
 	}
 	for _, wantText := range []string{
-		"Review the current branch changes and report actionable findings.",
 		"Focus on auth regressions.",
 		"Scope: review the commits unique to this branch vs main, plus any uncommitted changes in the working tree. Ignore code outside this scope.",
 		"Commits in scope (newest first):",
 		"abc123 summary",
 	} {
 		if !strings.Contains(prompt, wantText) {
-			t.Fatalf("builtin review prompt missing %q:\n%s", wantText, prompt)
+			t.Fatalf("codex prompt missing %q:\n%s", wantText, prompt)
+		}
+	}
+}
+
+func TestCodexReviewer_ModelAndReasoningEffortFlags(t *testing.T) {
+	t.Parallel()
+	cfg := reviewtypes.RunConfig{
+		Skills:          []string{"/review"},
+		Model:           "gpt-5-mini",
+		ReasoningEffort: "low",
+	}
+	cmd := buildCodexReviewCmd(context.Background(), cfg)
+
+	// -m and -c are inserted before the trailing stdin marker; empty
+	// overrides are skipped (covered by the other argv tests).
+	want := []string{
+		wantCodexAgentName, "exec", "--skip-git-repo-check", "--json",
+		"-m", "gpt-5-mini",
+		"-c", "model_reasoning_effort=low",
+		"-",
+	}
+	if len(cmd.Args) != len(want) {
+		t.Fatalf("len(Args) = %d, want %d: %v", len(cmd.Args), len(want), cmd.Args)
+	}
+	for i, w := range want {
+		if cmd.Args[i] != w {
+			t.Errorf("Args[%d] = %q, want %q", i, cmd.Args[i], w)
 		}
 	}
 }
@@ -385,6 +416,52 @@ func TestParseCodexOutput_GarbledLineEmitsRunErrorAndContinues(t *testing.T) {
 	}
 	if !sawSuccess {
 		t.Error("expected Finished{Success:true} after recovering from garbled line")
+	}
+}
+
+// TestParseCodexOutput_EmitsTokensAtEveryTurnCompleted locks the live-token
+// contract for codex: its --json output carries `usage` on every
+// `turn.completed` envelope, and the parser emits Tokens at each turn
+// boundary so multi-turn reviews show iterative updates in the TUI.
+// Captured by running real codex-cli 0.130.0 — no item.* envelope ever
+// carried a usage field, so emission stays anchored to turn.completed.
+func TestParseCodexOutput_EmitsTokensAtEveryTurnCompleted(t *testing.T) {
+	t.Parallel()
+	// Real codex --json output (lightly trimmed) simulating a multi-turn
+	// review: model call → tool exec → model call → tool exec, with a
+	// turn.completed envelope at every turn boundary carrying running
+	// usage. The parser should emit Tokens for each turn in order.
+	input := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"tid-1"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}`,
+		`{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"ls","aggregated_output":"a\nb\nc","exit_code":0,"status":"completed"}}`,
+		`{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Found three files."}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":34317,"cached_input_tokens":19712,"output_tokens":240,"reasoning_output_tokens":114}}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"cat a","aggregated_output":"","exit_code":null,"status":"in_progress"}}`,
+		`{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"cat a","aggregated_output":"hello","exit_code":0,"status":"completed"}}`,
+		`{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Done."}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":35820,"cached_input_tokens":20114,"output_tokens":401,"reasoning_output_tokens":160}}`,
+		"",
+	}, "\n")
+
+	var tokens []reviewtypes.Tokens
+	for ev := range parseCodexOutput(strings.NewReader(input)) {
+		if tk, ok := ev.(reviewtypes.Tokens); ok {
+			tokens = append(tokens, tk)
+		}
+	}
+
+	if len(tokens) != 2 {
+		t.Fatalf("Tokens count = %d, want exactly 2 (one per turn.completed); got events: %+v",
+			len(tokens), tokens)
+	}
+	if tokens[0].In != 34317 || tokens[0].Out != 240 {
+		t.Errorf("tokens[0] = %+v, want {In:34317, Out:240}", tokens[0])
+	}
+	if tokens[1].In != 35820 || tokens[1].Out != 401 {
+		t.Errorf("tokens[1] = %+v, want {In:35820, Out:401}", tokens[1])
 	}
 }
 

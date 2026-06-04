@@ -12,9 +12,11 @@ func TestCuratedBuiltinsFor_KnownAgents(t *testing.T) {
 	if len(claude) != 3 {
 		t.Fatalf("claude-code built-ins: got %d entries, want 3", len(claude))
 	}
+	// Codex has no binary-bundled review command usable from `codex exec`;
+	// its review skills are discovered on disk in $name form instead.
 	codex := skilldiscovery.CuratedBuiltinsFor("codex")
-	if len(codex) != 1 || codex[0].Name != "/review" {
-		t.Errorf("codex built-ins: got %+v, want 1x /review", codex)
+	if len(codex) != 0 {
+		t.Errorf("codex built-ins: got %+v, want 0 (discovery-driven)", codex)
 	}
 	gemini := skilldiscovery.CuratedBuiltinsFor("gemini")
 	if len(gemini) != 0 {

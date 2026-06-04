@@ -104,6 +104,18 @@ type RunConfig struct {
 	// the commit that was reviewed.
 	StartingSHA string
 
+	// Model is an optional per-spawn model override the reviewer should
+	// pass to its underlying CLI (e.g. codex `-m <model>`). Empty means
+	// use the agent's default. Reviewers that don't support a model flag
+	// silently ignore this field.
+	Model string
+
+	// ReasoningEffort is an optional per-spawn reasoning-effort override
+	// (e.g. "low", "medium", "high", "xhigh" for codex). Empty means use
+	// the agent's default. Reviewers that don't expose reasoning effort
+	// silently ignore this field.
+	ReasoningEffort string
+
 	// EnrichSummary optionally updates the completed run summary before sinks
 	// receive RunFinished. It is used for post-process data such as token
 	// totals that are only available after agent lifecycle hooks flush state.

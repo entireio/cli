@@ -53,9 +53,17 @@ func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 // Emits Started first, Finished{Success:...} last (success follows result.is_error).
 // On a scanner error (torn stream), emits RunError then Finished{Success:false}.
 //
-// Tokens are emitted only at the terminal `result` envelope, not
-// incrementally — claude's per-assistant `usage` fields aren't cumulative
-// and summing them across messages would double-count.
+// Live-token semantics: Claude's assistant envelopes carry a usage snapshot
+// taken at the START of each turn — input_tokens/cache_* are populated but
+// output_tokens is essentially zero (a 1–8 token "initial decision" count
+// that does not update as text streams). The true per-turn output is only
+// surfaced on `result` (aggregate across all turns in the run) or on the
+// late `message_delta` event of --include-partial-messages mode.
+//
+// We emit `Tokens{In: <sum>, Out: 0}` on each assistant envelope so the TUI
+// can show context size growing across multi-turn runs, and `Tokens{In, Out}`
+// on `result` with the final aggregate. Sending the misleading early
+// "Out: 1" snapshot was removed after capturing real claude stream-json.
 //
 // Package-private; called directly from this package's tests so they can
 // drive raw stdout fixtures through the parser without going through the
@@ -110,6 +118,20 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 						out <- reviewtypes.ToolCall{Name: block.Name, Args: string(block.Input)}
 					}
 				}
+				// The usage snapshot here is captured at the start of the
+				// turn, so output_tokens is essentially zero (1–8 tokens of
+				// initial decision, not the true output count). Surface input
+				// only — TUI consumers render input-only Tokens differently
+				// from finalized {In, Out} pairs. The final tally comes from
+				// the `result` envelope below.
+				if env.Message.Usage.InputTokens > 0 ||
+					env.Message.Usage.CacheReadInputTokens > 0 ||
+					env.Message.Usage.CacheCreationInputTokens > 0 {
+					in := env.Message.Usage.InputTokens +
+						env.Message.Usage.CacheReadInputTokens +
+						env.Message.Usage.CacheCreationInputTokens
+					out <- reviewtypes.Tokens{In: in, Out: 0}
+				}
 			case "result":
 				sawResult = true
 				resultErr = env.IsError
@@ -145,6 +167,12 @@ type claudeEnvelope struct {
 
 type claudeMessage struct {
 	Content []claudeBlock `json:"content"`
+	// Usage on assistant envelopes is the per-turn-START snapshot — input
+	// counts are populated but output_tokens reflects only the model's
+	// initial decision, not the streamed text. Final aggregate usage
+	// arrives on the `result` envelope. Reuses messageUsage (declared in
+	// types.go) to stay aligned with the transcript-parser usage shape.
+	Usage messageUsage `json:"usage"`
 }
 
 type claudeBlock struct {
