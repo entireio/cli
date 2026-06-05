@@ -49,7 +49,7 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected()
-	store := s.getCommittedReadStore(ctx, repo)
+	store := s.getCheckpointStore(ctx, repo)
 
 	committed, err := store.ListCommitted(ctx)
 	if err != nil {
@@ -68,7 +68,7 @@ func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointI
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected()
-	store := s.getCheckpointStore(repo)
+	store := s.getCheckpointStore(ctx, repo)
 
 	summary, err := cpkg.ReadCommittedCheckpoint(ctx, store, checkpointID)
 	if err != nil {
@@ -184,7 +184,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		return skipped, nil
 	}
 
-	store := s.getCheckpointStore(repo)
+	store := s.getCheckpointStore(ctx, repo)
 
 	// Get author info
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
@@ -261,9 +261,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	writeCommittedSpan.End()
 	writeV1Duration := time.Since(writeV1Start)
 
-	// Mirror the committed write to the v1 custom ref when opted in
-	// (local-only, never pushed; failures are logged, not fatal).
-	MirrorCommittedMetadataRefBestEffort(ctx, repo)
+	// Mirror the committed write to refs.Mirror when configured (best-effort;
+	// failures are logged, not fatal).
+	mirrorCommittedMetadataRefBestEffort(ctx, repo, store.Refs())
 
 	logging.Debug(logCtx, "condense timings",
 		slog.String("session_id", state.SessionID),

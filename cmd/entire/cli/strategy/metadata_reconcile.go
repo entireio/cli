@@ -15,7 +15,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -26,17 +25,17 @@ import (
 // disconnectedOnce ensures the disconnection warning runs at most once per process.
 var disconnectedOnce sync.Once //nolint:gochecknoglobals // intentional per-process gate
 
-// IsMetadataDisconnected checks whether the local metadata branch
-// and the provided fetched or remote-tracking ref exist but share no common
+// IsMetadataDisconnected checks whether the local primary metadata ref and
+// the provided fetched or remote-tracking ref exist but share no common
 // ancestor.
 func IsMetadataDisconnected(ctx context.Context, repo *git.Repository, remoteRefName plumbing.ReferenceName) (bool, error) {
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	localRef, err := repo.Reference(refName, true)
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+	localRef, err := repo.Reference(refs.Primary, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("failed to check local metadata branch: %w", err)
+		return false, fmt.Errorf("failed to check local primary metadata ref: %w", err)
 	}
 
 	remoteRef, err := repo.Reference(remoteRefName, true)
@@ -44,7 +43,7 @@ func IsMetadataDisconnected(ctx context.Context, repo *git.Repository, remoteRef
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("failed to check remote metadata branch: %w", err)
+		return false, fmt.Errorf("failed to check remote metadata ref: %w", err)
 	}
 
 	if localRef.Hash() == remoteRef.Hash() {
@@ -76,7 +75,11 @@ func WarnIfMetadataDisconnected() {
 			return
 		}
 		defer repo.Close()
-		disconnected, err := IsMetadataDisconnected(ctx, repo, plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName))
+		refs := checkpoint.ResolveCommittedRefs(ctx)
+		if !refs.PrimaryFetchableFromOrigin() {
+			return // origin doesn't track Primary; nothing to disconnect from
+		}
+		disconnected, err := IsMetadataDisconnected(ctx, repo, plumbing.NewRemoteReferenceName("origin", refs.Primary.Short()))
 		if err != nil {
 			logging.Debug(ctx, "metadata disconnection check failed",
 				slog.String("error", err.Error()))
@@ -90,10 +93,10 @@ func WarnIfMetadataDisconnected() {
 	})
 }
 
-// ReconcileDisconnectedMetadataBranch detects and repairs disconnected local/remote
-// entire/checkpoints/v1 branches. Disconnected means no common ancestor, which
+// ReconcileDisconnectedMetadataRef detects and repairs disconnected local/remote
+// metadata refs. Disconnected means no common ancestor, which
 // only happens due to the empty-orphan bug. Diverged (shared ancestor) is normal
-// and handled by the push path's tree merge.
+// and handled by the push path.
 //
 // Repair strategy: cherry-pick local commits onto remote tip, preserving all data.
 // Checkpoint shards use unique paths (<id[:2]>/<id[2:]>/), so cherry-picks always
@@ -102,30 +105,34 @@ func WarnIfMetadataDisconnected() {
 // Progress messages are written to w (typically os.Stderr for hooks or
 // cmd.ErrOrStderr() for commands).
 // The remote ref can be either a remote-tracking ref or a temporary fetched ref.
-func ReconcileDisconnectedMetadataBranch(
+func ReconcileDisconnectedMetadataRef(
 	ctx context.Context,
 	repo *git.Repository,
+	localRefName plumbing.ReferenceName,
 	remoteRefName plumbing.ReferenceName,
 	w io.Writer,
 ) error {
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+	advance := func(hash plumbing.Hash) error {
+		return AdvanceLocalRef(ctx, repo, refs, localRefName, hash)
+	}
 
-	// Check local branch
-	localRef, err := repo.Reference(refName, true)
+	// Check local ref
+	localRef, err := repo.Reference(localRefName, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return nil // No local branch — nothing to reconcile
+		return nil // No local ref — nothing to reconcile
 	}
 	if err != nil {
-		return fmt.Errorf("failed to check local metadata branch: %w", err)
+		return fmt.Errorf("failed to check local metadata ref: %w", err)
 	}
 
-	// Check remote-tracking branch
+	// Check remote-tracking or fetched ref
 	remoteRef, err := repo.Reference(remoteRefName, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return nil // No remote branch — nothing to reconcile
+		return nil // No remote ref — nothing to reconcile
 	}
 	if err != nil {
-		return fmt.Errorf("failed to check remote metadata branch: %w", err)
+		return fmt.Errorf("failed to check remote metadata ref: %w", err)
 	}
 
 	localHash := localRef.Hash()
@@ -144,7 +151,7 @@ func ReconcileDisconnectedMetadataBranch(
 
 	disconnected, err := isDisconnected(ctx, repoPath, localHash.String(), remoteHash.String())
 	if err != nil {
-		return fmt.Errorf("failed to check metadata branch ancestry: %w", err)
+		return fmt.Errorf("failed to check metadata ref ancestry: %w", err)
 	}
 	if !disconnected {
 		// Shared ancestry (diverged or ancestor) — not our problem
@@ -179,11 +186,9 @@ func ReconcileDisconnectedMetadataBranch(
 
 	if len(dataCommits) == 0 {
 		// Local only had empty orphan — just point to remote
-		ref := plumbing.NewHashReference(refName, remoteHash)
-		if err := repo.Storer.SetReference(ref); err != nil {
-			return fmt.Errorf("failed to reset metadata branch to remote: %w", err)
+		if err := advance(remoteHash); err != nil {
+			return fmt.Errorf("failed to reset metadata ref to remote: %w", err)
 		}
-		MirrorCommittedMetadataRefBestEffort(ctx, repo)
 		fmt.Fprintln(w, "[entire] Done — local had no checkpoint data, reset to remote")
 		return nil
 	}
@@ -195,12 +200,9 @@ func ReconcileDisconnectedMetadataBranch(
 		return fmt.Errorf("failed to cherry-pick local commits onto remote: %w", err)
 	}
 
-	// Update local branch ref
-	ref := plumbing.NewHashReference(refName, newTip)
-	if err := repo.Storer.SetReference(ref); err != nil {
-		return fmt.Errorf("failed to update metadata branch: %w", err)
+	if err := advance(newTip); err != nil {
+		return fmt.Errorf("failed to update metadata ref: %w", err)
 	}
-	MirrorCommittedMetadataRefBestEffort(ctx, repo)
 
 	fmt.Fprintln(w, "[entire] Done — all local and remote checkpoints preserved")
 	return nil

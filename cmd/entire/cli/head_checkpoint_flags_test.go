@@ -47,7 +47,7 @@ func setupHeadFlagsRepo(t *testing.T) *git.Repository {
 func writeHeadCheckpointWithFlags(t *testing.T, repo *git.Repository, hasReview, hasInvestigation bool) id.CheckpointID {
 	t.Helper()
 	cpID := id.MustCheckpointID("aabbccdd1122")
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	require.NoError(t, store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
 		CheckpointID:     cpID,
 		SessionID:        "head-flags-session",

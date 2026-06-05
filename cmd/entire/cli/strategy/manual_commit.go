@@ -49,17 +49,10 @@ func (s *ManualCommitStrategy) withBlobFetcher(store *checkpoint.GitStore) *chec
 	return store
 }
 
-// getCheckpointStore returns the v1-branch store used by write paths.
-func (s *ManualCommitStrategy) getCheckpointStore(repo *git.Repository) *checkpoint.GitStore {
-	return s.withBlobFetcher(checkpoint.NewGitStore(repo))
-}
-
-// getCommittedReadStore returns a store for reading committed checkpoints, bound
-// to the read ref for the active checkpoints_version (the local-only v1.1 custom
-// ref when opted in, else the v1 branch). Use this for committed reads;
-// getCheckpointStore is for writes.
-func (s *ManualCommitStrategy) getCommittedReadStore(ctx context.Context, repo *git.Repository) *checkpoint.GitStore {
-	return s.withBlobFetcher(checkpoint.NewCommittedReadStore(ctx, repo))
+// getCheckpointStore returns a store bound to the resolved committed-metadata
+// topology. Writes target refs.Primary; reads target refs.Read.
+func (s *ManualCommitStrategy) getCheckpointStore(ctx context.Context, repo *git.Repository) *checkpoint.GitStore {
+	return s.withBlobFetcher(checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx)))
 }
 
 // NewManualCommitStrategy creates a new manual-commit strategy instance.

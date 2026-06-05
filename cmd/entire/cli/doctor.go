@@ -350,13 +350,17 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	defer repo.Close()
 
 	ctx := cmd.Context()
-	remoteRefName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+	w := cmd.OutOrStdout()
+	if !refs.PrimaryFetchableFromOrigin() {
+		fmt.Fprintf(w, "✓ Metadata branches: OK (primary ref %s is not pushed to origin)\n", refs.Primary)
+		return nil
+	}
+	remoteRefName := plumbing.NewRemoteReferenceName("origin", refs.Primary.Short())
 	disconnected, err := strategy.IsMetadataDisconnected(ctx, repo, remoteRefName)
 	if err != nil {
 		return fmt.Errorf("could not check metadata branch state: %w", err)
 	}
-
-	w := cmd.OutOrStdout()
 
 	if !disconnected {
 		fmt.Fprintln(w, "✓ Metadata branches: OK")
@@ -364,7 +368,7 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	}
 
 	fmt.Fprintln(w, "Metadata branches: DISCONNECTED")
-	fmt.Fprintln(w, "  Local and remote entire/checkpoints/v1 branches share no common ancestor.")
+	fmt.Fprintf(w, "  Local and remote %s branches share no common ancestor.\n", refs.Primary.Short())
 	fmt.Fprintln(w, "  Some remote checkpoints may not be visible locally.")
 	fmt.Fprintln(w, "  Fix: cherry-pick local checkpoints onto remote tip (preserves all data).")
 
@@ -378,7 +382,7 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 		}
 	}
 
-	if fixErr := strategy.ReconcileDisconnectedMetadataBranch(ctx, repo, remoteRefName, cmd.ErrOrStderr()); fixErr != nil {
+	if fixErr := strategy.ReconcileDisconnectedMetadataRef(ctx, repo, refs.Primary, remoteRefName, cmd.ErrOrStderr()); fixErr != nil {
 		return fmt.Errorf("failed to reconcile metadata branches: %w", fixErr)
 	}
 

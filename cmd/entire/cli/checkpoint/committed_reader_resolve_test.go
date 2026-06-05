@@ -40,7 +40,7 @@ func TestReadRawSessionLogForCheckpointReadsLatestV1Session(t *testing.T) {
 	repo, err := git.PlainOpen(repoDir)
 	require.NoError(t, err)
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	ctx := context.Background()
 	cpID := id.MustCheckpointID("222222222222")
 

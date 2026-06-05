@@ -123,13 +123,7 @@ func (s *GitStore) WriteCommitted(ctx context.Context, opts WriteCommittedOption
 		return err
 	}
 
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	newRef := plumbing.NewHashReference(refName, newCommitHash)
-	if err := s.repo.Storer.SetReference(newRef); err != nil {
-		return fmt.Errorf("failed to set branch reference: %w", err)
-	}
-
-	return nil
+	return s.setPrimaryRef(newCommitHash)
 }
 
 // flattenCheckpointEntries reads only the entries under a specific checkpoint path
@@ -601,13 +595,7 @@ func (s *GitStore) UpdateCheckpointSummary(ctx context.Context, checkpointID id.
 		return err
 	}
 
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	newRef := plumbing.NewHashReference(refName, newCommitHash)
-	if err := s.repo.Storer.SetReference(newRef); err != nil {
-		return fmt.Errorf("failed to set branch reference: %w", err)
-	}
-
-	return nil
+	return s.setPrimaryRef(newCommitHash)
 }
 
 // findSessionIndex returns the index of an existing session with the given ID,
@@ -1346,7 +1334,7 @@ func LookupSessionLog(ctx context.Context, cpID id.CheckpointID) ([]byte, string
 		return nil, "", fmt.Errorf("failed to open git repository: %w", err)
 	}
 	defer repo.Close()
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, ResolveCommittedRefs(ctx))
 	return store.GetSessionLog(ctx, cpID)
 }
 
@@ -1433,13 +1421,7 @@ func (s *GitStore) UpdateSummary(ctx context.Context, checkpointID id.Checkpoint
 		return err
 	}
 
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	newRef := plumbing.NewHashReference(refName, newCommitHash)
-	if err := s.repo.Storer.SetReference(newRef); err != nil {
-		return fmt.Errorf("failed to set branch reference: %w", err)
-	}
-
-	return nil
+	return s.setPrimaryRef(newCommitHash)
 }
 
 // UpdateCommitted replaces the transcript, prompts, and context for an existing
@@ -1558,13 +1540,7 @@ func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOpti
 		return err
 	}
 
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	newRef := plumbing.NewHashReference(refName, newCommitHash)
-	if err := s.repo.Storer.SetReference(newRef); err != nil {
-		return fmt.Errorf("failed to set branch reference: %w", err)
-	}
-
-	return nil
+	return s.setPrimaryRef(newCommitHash)
 }
 
 func (s *GitStore) replaceSkillEvents(skillEvents []agent.SkillEvent, sessionPath string, entries map[string]object.TreeEntry) error {
@@ -1725,10 +1701,9 @@ func PrecomputeTranscriptBlobs(ctx context.Context, repo *git.Repository, transc
 	}, nil
 }
 
-// ensureSessionsBranch ensures the entire/checkpoints/v1 branch exists.
+// ensureSessionsBranch ensures the primary metadata ref exists.
 func (s *GitStore) ensureSessionsBranch(ctx context.Context) error {
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	_, err := s.repo.Reference(refName, true)
+	_, err := s.repo.Reference(s.refs.Primary, true)
 	if err == nil {
 		return nil // Branch exists
 	}
@@ -1752,11 +1727,7 @@ func (s *GitStore) ensureSessionsBranch(ctx context.Context) error {
 		return err
 	}
 
-	newRef := plumbing.NewHashReference(refName, commitHash)
-	if err := s.repo.Storer.SetReference(newRef); err != nil {
-		return fmt.Errorf("failed to set branch reference: %w", err)
-	}
-	return nil
+	return s.setPrimaryRef(commitHash)
 }
 
 func (s *GitStore) maybeMergeVercelConfig(ctx context.Context, rootTreeHash plumbing.Hash) (plumbing.Hash, error) {
@@ -1781,19 +1752,16 @@ func (s *GitStore) getFetchingTree(ctx context.Context) (*FetchingTree, error) {
 	return NewFetchingTree(ctx, tree, s.repo.Storer, s.blobFetcher), nil
 }
 
-// getSessionsBranchTree returns the tree object for the configured committed
-// ref (the v1 branch by default, or the v1.1 custom ref for v1.1 read stores).
-// For the default v1 branch it falls back to origin/entire/checkpoints/v1 when
-// the local branch is missing; the v1.1 custom ref is local-only, so no remote
-// fallback applies there.
+// getSessionsBranchTree returns the tree object at refs.Read. Falls back to
+// origin's remote-tracking ref for Primary when ReadBootstrappableFromOrigin
+// is true.
 func (s *GitStore) getSessionsBranchTree() (*object.Tree, error) {
-	ref, err := s.repo.Reference(s.committedReadRef, true)
+	ref, err := s.repo.Reference(s.refs.Read, true)
 	if err != nil {
-		if s.committedReadRef != defaultCommittedReadRef() {
-			return nil, fmt.Errorf("sessions ref %s not found: %w", s.committedReadRef, err)
+		if !s.refs.ReadBootstrappableFromOrigin() {
+			return nil, fmt.Errorf("sessions ref %s not found: %w", s.refs.Read, err)
 		}
-		// Local v1 branch doesn't exist, try remote-tracking branch
-		remoteRefName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
+		remoteRefName := plumbing.NewRemoteReferenceName("origin", s.refs.Primary.Short())
 		ref, err = s.repo.Reference(remoteRefName, true)
 		if err != nil {
 			return nil, fmt.Errorf("sessions branch not found: %w", err)
@@ -2203,7 +2171,7 @@ type Author struct {
 // Finds the commit whose subject matches "Checkpoint: <id>" and returns its author.
 // Returns empty Author if the checkpoint is not found or the sessions branch doesn't exist.
 func (s *GitStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (Author, error) {
-	return getCheckpointAuthorFromRef(ctx, s.repo, s.committedReadRef, checkpointID)
+	return getCheckpointAuthorFromRef(ctx, s.repo, s.refs.Read, checkpointID)
 }
 
 func getCheckpointAuthorFromRef(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, checkpointID id.CheckpointID) (Author, error) {

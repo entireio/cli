@@ -187,11 +187,12 @@ func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName 
 	checkpointID := result.checkpointIDs[0]
 	var metadata *strategy.CheckpointInfo
 
-	store := checkpoint.NewCommittedReadStore(ctx, repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
 	store.SetBlobFetcher(FetchBlobsByHash)
 
-	if store.CommittedReadRef() == plumbing.NewBranchReferenceName(paths.MetadataBranchName) {
-		promoteRemoteTrackingMetadataBranch(ctx, repo)
+	refs := store.Refs()
+	if refs.ReadBootstrappableFromOrigin() {
+		promoteRemoteTrackingPrimary(ctx, repo, refs)
 	}
 
 	// Multiple checkpoints (squash merge): resolve latest by CreatedAt timestamp.
@@ -205,7 +206,7 @@ func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName 
 			)
 			fmt.Fprintf(w, "Found %d checkpoints for commit %s but metadata is not available\n",
 				len(result.checkpointIDs), result.commitHash[:7])
-			return checkRemoteMetadata(ctx, w, errW, result.checkpointIDs[0], store.CommittedReadRef())
+			return checkRemoteMetadata(ctx, w, errW, result.checkpointIDs[0], store.Refs())
 		}
 		skipped := len(result.checkpointIDs) - 1
 		fmt.Fprintf(w, "Found %d checkpoints for commit %s, resuming from the latest (%d older checkpoints skipped)\n",
@@ -227,7 +228,7 @@ func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName 
 				slog.String("checkpoint_id", checkpointID.String()),
 				slog.String("error", storeErr.Error()),
 			)
-			return checkRemoteMetadata(ctx, w, errW, checkpointID, store.CommittedReadRef())
+			return checkRemoteMetadata(ctx, w, errW, checkpointID, store.Refs())
 		}
 	}
 
@@ -301,10 +302,10 @@ func readCheckpointInfoFromStore(ctx context.Context, store checkpoint.Committed
 func readCheckpointInfoFromRef(
 	ctx context.Context,
 	repo *git.Repository,
-	committedReadRef plumbing.ReferenceName,
+	refs checkpoint.CommittedRefs,
 	checkpointID id.CheckpointID,
 ) (*strategy.CheckpointInfo, error) {
-	store := checkpoint.NewGitStoreWithRef(repo, committedReadRef)
+	store := checkpoint.NewGitStore(repo, refs)
 	store.SetBlobFetcher(FetchBlobsByHash)
 	return readCheckpointInfoFromStore(ctx, store, checkpointID)
 }
@@ -318,17 +319,19 @@ func readCheckpointInfoFromRef(
 func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error) {
 	logCtx := logging.WithComponent(ctx, "resume.getMetadataTree")
 
-	// Helper to log ref hash for a repo's metadata branch
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+
+	// Helper to log ref hash for a repo's primary metadata ref
 	logRefHash := func(repo *git.Repository, source string) {
-		ref, refErr := repo.Reference(plumbing.NewBranchReferenceName("entire/checkpoints/v1"), true)
+		ref, refErr := repo.Reference(refs.Primary, true)
 		if refErr != nil {
-			logging.Debug(logCtx, "metadata branch ref not found",
+			logging.Debug(logCtx, "primary metadata ref not found",
 				slog.String("source", source),
 				slog.String("error", refErr.Error()),
 			)
 			return
 		}
-		logging.Debug(logCtx, "metadata branch ref resolved",
+		logging.Debug(logCtx, "primary metadata ref resolved",
 			slog.String("source", source),
 			slog.String("ref_hash", ref.Hash().String()),
 		)
@@ -341,7 +344,7 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 		freshRepo, freshErr := openRepository(ctx)
 		if freshErr == nil {
 			logRefHash(freshRepo, "checkpoint-remote")
-			metadataTree, treeErr := strategy.GetMetadataRefTree(freshRepo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+			metadataTree, treeErr := strategy.GetMetadataRefTree(freshRepo, refs.Primary)
 			if treeErr == nil {
 				logging.Debug(logCtx, "metadata tree obtained via checkpoint remote fetch",
 					slog.String("tree_hash", metadataTree.Hash.String()),
@@ -365,7 +368,7 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 		freshRepo, repoErr := openRepository(ctx)
 		if repoErr == nil {
 			logRefHash(freshRepo, "treeless-fetch")
-			metadataTree, treeErr := strategy.GetMetadataRefTree(freshRepo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+			metadataTree, treeErr := strategy.GetMetadataRefTree(freshRepo, refs.Primary)
 			if treeErr == nil {
 				logging.Debug(logCtx, "metadata tree obtained via treeless fetch",
 					slog.String("tree_hash", metadataTree.Hash.String()),
@@ -387,7 +390,7 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 	localRepo, repoErr := openRepository(ctx)
 	if repoErr == nil {
 		logRefHash(localRepo, "local")
-		metadataTree, err := strategy.GetMetadataRefTree(localRepo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+		metadataTree, err := strategy.GetMetadataRefTree(localRepo, refs.Primary)
 		if err == nil {
 			logging.Debug(logCtx, "metadata tree obtained from local branch",
 				slog.String("tree_hash", metadataTree.Hash.String()),
@@ -405,7 +408,7 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 		freshRepo, repoErr := openRepository(ctx)
 		if repoErr == nil {
 			logRefHash(freshRepo, "full-fetch")
-			metadataTree, treeErr := strategy.GetMetadataRefTree(freshRepo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+			metadataTree, treeErr := strategy.GetMetadataRefTree(freshRepo, refs.Primary)
 			if treeErr == nil {
 				logging.Debug(logCtx, "metadata tree obtained via full fetch",
 					slog.String("tree_hash", metadataTree.Hash.String()),
@@ -423,13 +426,13 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 		)
 	}
 
-	// Try remote tree directly (origin/entire/checkpoints/v1)
+	// Try remote tree directly (origin's tracking ref for Primary)
 	remoteRepo, repoErr := openRepository(ctx)
 	if repoErr != nil {
 		return nil, nil, fmt.Errorf("failed to open repository: %w", repoErr)
 	}
 	logRefHash(remoteRepo, "remote-tracking")
-	remoteTree, remoteErr := strategy.GetRemoteMetadataBranchTree(remoteRepo)
+	remoteTree, remoteErr := strategy.GetRemotePrimaryTree(ctx, remoteRepo)
 	if remoteErr == nil {
 		logging.Debug(logCtx, "metadata tree obtained from remote-tracking branch")
 		return remoteTree, remoteRepo, nil
@@ -593,18 +596,19 @@ func promptResumeFromOlderCheckpoint() (bool, error) {
 	return confirmed, nil
 }
 
-// checkRemoteMetadata checks if v1 checkpoint metadata exists on the remote and
-// fetches it if available. Custom committed read refs are local-only.
+// checkRemoteMetadata checks if checkpoint metadata exists on the remote and
+// fetches it if available. Skips when reads don't target a ref origin tracks
+// (e.g. the local-only v1.1 mirror).
 func checkRemoteMetadata(
 	ctx context.Context,
 	w, errW io.Writer,
 	checkpointID id.CheckpointID,
-	committedReadRef plumbing.ReferenceName,
+	refs checkpoint.CommittedRefs,
 ) error {
 	logCtx := logging.WithComponent(ctx, "resume.checkRemoteMetadata")
 
-	if committedReadRef != plumbing.NewBranchReferenceName(paths.MetadataBranchName) {
-		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but metadata is not available in %s.\n", checkpointID, committedReadRef)
+	if !refs.ReadBootstrappableFromOrigin() {
+		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but metadata is not available in %s.\n", checkpointID, refs.Read)
 		fmt.Fprintf(errW, "This ref is local-only. Try: entire explain %s\n", checkpointID)
 		return nil
 	}
@@ -637,7 +641,7 @@ func checkRemoteMetadata(
 					)
 				} else {
 					defer freshRepo.Close()
-					metadata, err := readCheckpointInfoFromRef(ctx, freshRepo, committedReadRef, checkpointID)
+					metadata, err := readCheckpointInfoFromRef(ctx, freshRepo, refs, checkpointID)
 					if err != nil {
 						logging.Debug(logCtx, "checkpoint remote: fetch succeeded but checkpoint metadata read failed",
 							slog.String("checkpoint_id", checkpointID.String()),
@@ -656,8 +660,8 @@ func checkRemoteMetadata(
 	}
 
 	// Fall back to origin's remote-tracking branch
-	promoteRemoteTrackingMetadataBranch(ctx, repo)
-	metadata, metadataErr := readCheckpointInfoFromRef(ctx, repo, committedReadRef, checkpointID)
+	promoteRemoteTrackingPrimary(ctx, repo, refs)
+	metadata, metadataErr := readCheckpointInfoFromRef(ctx, repo, refs, checkpointID)
 	if metadataErr == nil {
 		return resumeSession(ctx, w, errW, metadata, false)
 	}
@@ -674,7 +678,7 @@ func checkRemoteMetadata(
 			)
 		} else {
 			defer freshRepo.Close()
-			metadata, err := readCheckpointInfoFromRef(ctx, freshRepo, committedReadRef, checkpointID)
+			metadata, err := readCheckpointInfoFromRef(ctx, freshRepo, refs, checkpointID)
 			if err != nil {
 				logging.Debug(logCtx, "origin metadata fetch succeeded but checkpoint metadata read failed",
 					slog.String("checkpoint_id", checkpointID.String()),
@@ -706,20 +710,23 @@ func checkRemoteMetadata(
 	return nil
 }
 
-// promoteRemoteTrackingMetadataBranch advances the local entire/checkpoints/v1
-// ref to match origin's remote-tracking ref. Without this, callers reading
-// checkpoint metadata via the local ref miss checkpoints already fetched into
-// refs/remotes/origin/...: the committed-checkpoint store only falls back to
-// origin/... when the local ref is *missing*, not when it's behind.
-func promoteRemoteTrackingMetadataBranch(ctx context.Context, repo *git.Repository) {
-	localRefName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), true)
+// promoteRemoteTrackingPrimary advances the local primary ref to match origin's
+// remote-tracking ref. Without this, callers reading checkpoint metadata via
+// the local ref miss checkpoints already fetched into refs/remotes/origin/...:
+// the committed-checkpoint store only falls back to origin/... when the local
+// ref is *missing*, not when it's behind. No-op when Primary isn't in Push
+// (no remote-tracking ref exists).
+func promoteRemoteTrackingPrimary(ctx context.Context, repo *git.Repository, refs checkpoint.CommittedRefs) {
+	if !refs.PrimaryFetchableFromOrigin() {
+		return
+	}
+	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", refs.Primary.Short()), true)
 	if err != nil {
 		return
 	}
 
-	if err := strategy.SafelyAdvanceLocalRef(ctx, repo, localRefName, remoteRef.Hash()); err != nil {
-		logging.Debug(ctx, "failed to promote remote-tracking metadata branch",
+	if err := strategy.SafelyAdvanceLocalRef(ctx, repo, refs.Primary, remoteRef.Hash()); err != nil {
+		logging.Debug(ctx, "failed to promote remote-tracking primary ref",
 			slog.String("error", err.Error()),
 		)
 	}
@@ -838,7 +845,7 @@ func resumeSingleSession(ctx context.Context, w, errW io.Writer, ag agent.Agent,
 		return fmt.Errorf("failed to open repository: %w", repoErr)
 	}
 	defer repo.Close()
-	store := checkpoint.NewCommittedReadStore(ctx, repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
 	store.SetBlobFetcher(FetchBlobsByHash)
 	logContent, _, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, store, checkpointID)
 	if err != nil {

@@ -485,7 +485,7 @@ func TestShadowStrategy_GetRewindPoints_V11ReadsPromptFromMirror(t *testing.T) {
 	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
 	const wantPrompt = "only-on-mirror"
 
-	require.NoError(t, checkpoint.NewGitStore(repo).WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
+	require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
 		CheckpointID: cpID,
 		SessionID:    "test-session-v11-rewind",
 		Strategy:     "manual-commit",
@@ -543,7 +543,7 @@ func TestShadowStrategy_GetRewindPoints_MultiSessionFallsBackToEarlierPrompt(t *
 	const earlierPrompt = "earlier-session-prompt"
 
 	// Earlier session carries the only usable prompt.
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	require.NoError(t, store.WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
 		CheckpointID: cpID,
 		SessionID:    "session-earlier",
@@ -3226,7 +3226,7 @@ func TestCondenseSession_PrefersLiveTranscript(t *testing.T) {
 	}
 
 	// Verify the condensed content includes the second prompt
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
 	if err != nil {
 		t.Fatalf("ReadLatestSessionContent() error = %v", err)
@@ -3443,7 +3443,7 @@ func TestCondenseSession_GeminiTranscript(t *testing.T) {
 	}
 
 	// Verify condensed data on entire/checkpoints/v1 branch
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
 	if err != nil {
 		t.Fatalf("ReadLatestSessionContent() error = %v", err)
@@ -3679,7 +3679,7 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 	}
 
 	// Read condensed metadata
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
 	if err != nil {
 		t.Fatalf("ReadLatestSessionContent() error = %v", err)
@@ -3794,7 +3794,7 @@ func TestCondenseSession_CopilotScopedCheckpointMetadataAndSessionBackfill(t *te
 		t.Errorf("FilesTouched = %v, want [beta.txt]", result.FilesTouched)
 	}
 
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
 	if err != nil {
 		t.Fatalf("ReadLatestSessionContent() error = %v", err)
@@ -4259,7 +4259,7 @@ func TestCondenseSession_RedactionFailure_DropsTranscriptButWritesMetadata(t *te
 	require.NoError(t, err, "redaction failure should not abort condensation")
 	require.NotNil(t, result)
 
-	store := s.getCheckpointStore(repo)
+	store := s.getCheckpointStore(context.Background(), repo)
 
 	committed, err := store.ListCommitted(context.Background())
 	require.NoError(t, err)

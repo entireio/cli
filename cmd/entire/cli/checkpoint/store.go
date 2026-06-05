@@ -1,63 +1,55 @@
 package checkpoint
 
 import (
+	"fmt"
+
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
-
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // Compile-time check that GitStore implements the Store interface.
 var _ Store = (*GitStore)(nil)
 
-// GitStore provides operations for both temporary and committed checkpoint storage.
-// It implements the Store interface by wrapping a git repository.
+// GitStore provides operations for both temporary and committed checkpoint
+// storage. Writes target refs.Primary; committed reads resolve against
+// refs.Read. The store does not advance refs.Mirror.
 type GitStore struct {
 	repo        *git.Repository
+	refs        CommittedRefs
 	blobFetcher BlobFetchFunc
-	// committedReadRef is the ref that committed-checkpoint *reads* resolve
-	// against. Defaults to the v1 branch; v1.1 read stores bind it to the
-	// local-only custom ref (paths.MetadataRefName).
-	//
-	// Writes intentionally do NOT use this ref: committed writes always target
-	// the v1 branch (the durable source of truth) and are mirrored to the v1.1
-	// custom ref separately by the strategy mirror paths. Pointing writes here
-	// would let a v1.1 read store write ahead of v1 and diverge from it.
-	committedReadRef plumbing.ReferenceName
 }
 
-// defaultCommittedReadRef is the v1 metadata branch ref reads resolve against by
-// default.
-func defaultCommittedReadRef() plumbing.ReferenceName {
-	return plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-}
-
-// NewGitStore creates a new checkpoint store backed by the given git repository.
-// Committed reads resolve against the default v1 metadata branch.
-func NewGitStore(repo *git.Repository) *GitStore {
-	return &GitStore{repo: repo, committedReadRef: defaultCommittedReadRef()}
-}
-
-// NewGitStoreWithRef creates a checkpoint store whose committed reads resolve
-// against committedReadRef (writes still target the v1 branch; see GitStore).
-func NewGitStoreWithRef(repo *git.Repository, committedReadRef plumbing.ReferenceName) *GitStore {
-	return &GitStore{repo: repo, committedReadRef: committedReadRef}
+// NewGitStore creates a checkpoint store backed by the given git repository
+// and committed-metadata topology. Pass DefaultV1Refs() for the v1-only default
+// or ResolveCommittedRefs(ctx) in code paths that honor settings.
+func NewGitStore(repo *git.Repository, refs CommittedRefs) *GitStore {
+	return &GitStore{repo: repo, refs: refs}
 }
 
 // SetBlobFetcher configures the store to automatically fetch missing blobs
-// on demand when reading from metadata trees. This is used after treeless
-// fetches where tree objects are local but blob objects are not.
+// on demand when reading from metadata trees.
 func (s *GitStore) SetBlobFetcher(f BlobFetchFunc) {
 	s.blobFetcher = f
 }
 
 // Repository returns the underlying git repository.
-// This is useful for strategies that need direct repository access.
 func (s *GitStore) Repository() *git.Repository {
 	return s.repo
 }
 
+// Refs returns the committed-metadata topology the store was constructed with.
+func (s *GitStore) Refs() CommittedRefs {
+	return s.refs
+}
+
 // CommittedReadRef returns the ref that committed-checkpoint reads resolve against.
 func (s *GitStore) CommittedReadRef() plumbing.ReferenceName {
-	return s.committedReadRef
+	return s.refs.Read
+}
+
+func (s *GitStore) setPrimaryRef(hash plumbing.Hash) error {
+	if err := s.repo.Storer.SetReference(plumbing.NewHashReference(s.refs.Primary, hash)); err != nil {
+		return fmt.Errorf("set primary metadata ref %s to %s: %w", s.refs.Primary, hash, err)
+	}
+	return nil
 }

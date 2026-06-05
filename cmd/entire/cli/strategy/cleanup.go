@@ -169,7 +169,7 @@ func ListOrphanedSessionStates(ctx context.Context) ([]CleanupItem, error) {
 	}
 
 	// Get all committed checkpoints from the configured read ref to find which sessions have checkpoints
-	cpStore := checkpoint.NewCommittedReadStore(ctx, repo)
+	cpStore := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
 
 	sessionsWithCheckpoints := make(map[string]bool)
 	checkpoints, listErr := cpStore.ListCommitted(ctx)
@@ -258,11 +258,10 @@ func DeleteOrphanedCheckpoints(ctx context.Context, checkpointIDs []string) (del
 	}
 	defer repo.Close()
 
-	// Get sessions branch
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	ref, err := repo.Reference(refName, true)
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+	ref, err := repo.Reference(refs.Primary, true)
 	if err != nil {
-		return nil, nil, fmt.Errorf("sessions branch not found: %w", err)
+		return nil, nil, fmt.Errorf("primary metadata ref %s not found: %w", refs.Primary, err)
 	}
 
 	parentCommit, err := repo.CommitObject(ref.Hash())
@@ -334,12 +333,10 @@ func DeleteOrphanedCheckpoints(ctx context.Context, checkpointIDs []string) (del
 		return nil, nil, fmt.Errorf("failed to store commit: %w", err)
 	}
 
-	// Update branch reference
-	newRef := plumbing.NewHashReference(refName, commitHash)
-	if err := repo.Storer.SetReference(newRef); err != nil {
+	// Update branch reference and best-effort mirror
+	if err := AdvanceCommittedPrimary(ctx, repo, refs, commitHash); err != nil {
 		return nil, nil, fmt.Errorf("failed to update branch: %w", err)
 	}
-	MirrorCommittedMetadataRefBestEffort(ctx, repo)
 
 	// All checkpoints deleted successfully
 	return checkpointIDs, []string{}, nil

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -66,16 +66,17 @@ func (s *ManualCommitStrategy) GetSessionInfo(ctx context.Context) (*SessionInfo
 }
 
 // GetMetadataRef returns a reference to the metadata for the given checkpoint.
-// For manual-commit strategy, returns the sharded path on entire/checkpoints/v1 branch.
-func (s *ManualCommitStrategy) GetMetadataRef(_ context.Context, checkpoint Checkpoint) string {
-	if checkpoint.CheckpointID.IsEmpty() {
+// For manual-commit strategy, returns the sharded path on refs.Primary.
+func (s *ManualCommitStrategy) GetMetadataRef(ctx context.Context, cp Checkpoint) string {
+	if cp.CheckpointID.IsEmpty() {
 		return ""
 	}
-	return paths.MetadataBranchName + ":" + checkpoint.CheckpointID.Path()
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+	return refs.Primary.Short() + ":" + cp.CheckpointID.Path()
 }
 
 // GetSessionMetadataRef returns a reference to the most recent metadata commit for a session.
-// For manual-commit strategy, metadata lives on the entire/checkpoints/v1 branch.
+// For manual-commit strategy, metadata lives on refs.Primary.
 func (s *ManualCommitStrategy) GetSessionMetadataRef(ctx context.Context, _ string) string {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -83,16 +84,15 @@ func (s *ManualCommitStrategy) GetSessionMetadataRef(ctx context.Context, _ stri
 	}
 	defer repo.Close()
 
-	// Get the sessions branch
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	ref, err := repo.Reference(refName, true)
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+	ref, err := repo.Reference(refs.Primary, true)
 	if err != nil {
 		return ""
 	}
 
-	// The tip of entire/checkpoints/v1 contains all condensed sessions
-	// Return a reference to it (sessionID is not used as all sessions are on the same branch)
-	return trailers.FormatSourceRef(paths.MetadataBranchName, ref.Hash().String())
+	// The tip of Primary contains all condensed sessions; return a reference to
+	// it (sessionID is not used because all sessions live on the same ref).
+	return trailers.FormatSourceRef(refs.Primary.Short(), ref.Hash().String())
 }
 
 // GetCheckpointLog returns the session transcript for a specific checkpoint.

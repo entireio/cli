@@ -490,7 +490,7 @@ func TestListOrphanedSessionStates_V11ReadsViaTopology(t *testing.T) {
 
 	const sessionID = "test-session-v11-orphan"
 	cpID := id.MustCheckpointID("b2c3d4e5f6a1")
-	require.NoError(t, checkpoint.NewGitStore(repo).WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
+	require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
 		CheckpointID: cpID,
 		SessionID:    sessionID,
 		Strategy:     "manual-commit",
@@ -553,7 +553,7 @@ func TestListOrphanedSessionStates_MultiSessionArchivedNotOrphaned(t *testing.T)
 	// Two sequential writes with the same checkpoint ID produce a multi-session
 	// checkpoint: the second write archives the first session under <sharded>/0
 	// and lists both IDs in SessionIDs.
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	for _, sid := range []string{archivedSessionID, latestSessionID} {
 		require.NoError(t, store.WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
 			CheckpointID: cpID,

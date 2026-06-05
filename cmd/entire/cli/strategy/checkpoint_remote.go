@@ -52,7 +52,7 @@ func (ps *pushSettings) hasCheckpointURL() bool {
 //   - Skips if the push remote owner differs from the checkpoint repo owner (fork detection)
 //   - If a checkpoint branch doesn't exist locally, attempts to fetch it from the URL
 //
-// The push itself handles failures gracefully (doPushBranch warns and continues),
+// The push itself handles failures gracefully (doPushRef warns and continues),
 // so no reachability check is needed here.
 func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSettings {
 	s, err := settings.Load(ctx)
@@ -128,7 +128,7 @@ func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
 		return nil
 	}
 	defer repo.Close()
-	MirrorCommittedMetadataRefBestEffort(ctx, repo)
+	mirrorCommittedMetadataRefBestEffort(ctx, repo, refs)
 	return nil
 }
 

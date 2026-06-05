@@ -98,7 +98,7 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 		return ""
 	}
 	defer repo.Close()
-	store := checkpoint.NewCommittedReadStore(ctx, repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
 
 	var lines []string
 	seen := map[checkpointid.CheckpointID]bool{}

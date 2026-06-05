@@ -198,7 +198,7 @@ func assertRemoteHasCheckpointCommit(t *testing.T, bareDir, checkpointID string)
 // checkpoint branch to an HTTPS remote when ENTIRE_CHECKPOINT_TOKEN is set.
 // This exercises:
 //   - remote.newCommand HTTPS protocol detection and token injection
-//   - tryPushSessionsCommon over HTTPS with Authorization header
+//   - tryPushRefCommon over HTTPS with Authorization header
 //   - go-git backend.requireReceivePackAuth validates the header
 func TestHTTPS_PushCheckpointBranchToRemote(t *testing.T) {
 	t.Parallel()
@@ -252,8 +252,8 @@ func TestHTTPS_PushCheckpointBranchToRemote(t *testing.T) {
 //
 // Code paths exercised:
 //   - resolvePushSettings -> PushURL -> deriveCheckpointURLFromInfo (push routing)
-//   - fetchAndRebaseSessionsCommon with checkpoint URL target (fetch routing)
-//   - tryPushSessionsCommon retry after rebase (push retry)
+//   - fetchAndRebaseRefCommon with checkpoint URL target (fetch routing)
+//   - tryPushRefCommon retry after rebase (push retry)
 func TestHTTPS_CheckpointRemoteRoutesToSeparateRepo(t *testing.T) {
 	t.Parallel()
 

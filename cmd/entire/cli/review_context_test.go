@@ -425,7 +425,7 @@ func writeReviewContextCheckpoint(t *testing.T, repoRoot string, checkpointID st
 		t.Fatalf("open repo: %v", err)
 	}
 	cpID := checkpointid.MustCheckpointID(checkpointID)
-	err = checkpoint.NewGitStore(repo).WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	err = checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
 		CheckpointID:     cpID,
 		SessionID:        checkpointID,
 		Strategy:         "manual-commit",

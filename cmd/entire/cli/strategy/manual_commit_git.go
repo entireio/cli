@@ -52,7 +52,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		}
 		migrateSpan.End()
 
-		store := s.getCheckpointStore(repo)
+		store := s.getCheckpointStore(ctx, repo)
 
 		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
@@ -182,7 +182,7 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 			return fmt.Errorf("failed to check/migrate shadow branch: %w", err)
 		}
 
-		store := s.getCheckpointStore(repo)
+		store := s.getCheckpointStore(ctx, repo)
 
 		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)

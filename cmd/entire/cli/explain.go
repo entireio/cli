@@ -638,7 +638,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		// layer, so rawTranscript is always false when generate is true; the
 		// direct-to-w write path inside explainTemporaryCheckpoint is not
 		// reachable here and won't leak partial output on error.
-		output, found, tempErr := explainTemporaryCheckpoint(ctx, w, errW, lookup.repo, checkpoint.NewGitStore(lookup.repo), checkpointIDPrefix, verbose, full, rawTranscript)
+		output, found, tempErr := explainTemporaryCheckpoint(ctx, w, errW, lookup.repo, checkpoint.NewGitStore(lookup.repo, checkpoint.ResolveCommittedRefs(ctx)), checkpointIDPrefix, verbose, full, rawTranscript)
 		if tempErr != nil {
 			return tempErr
 		}
@@ -678,13 +678,13 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	// Handle summary generation — uses raw transcript.
 	if generate {
 		stopLoad(false) // generation prints its own progress to w/errW
-		writeStore := checkpoint.NewGitStore(lookup.repo)
+		writeStore := checkpoint.NewGitStore(lookup.repo, checkpoint.ResolveCommittedRefs(ctx))
 		if err := generateCheckpointSummary(ctx, w, errW, writeStore, fullCheckpointID, summary, content, force, summaryTimeoutSeconds); err != nil {
 			return err
 		}
 		// Reload to get the updated summary.
 		stopLoad = startSpinner(errW, fmt.Sprintf("Reloading checkpoint %s", fullCheckpointID))
-		lookup.store = checkpoint.NewCommittedReadStore(ctx, lookup.repo)
+		lookup.store = checkpoint.NewGitStore(lookup.repo, checkpoint.ResolveCommittedRefs(ctx))
 		lookup.store.SetBlobFetcher(FetchBlobsByHash)
 		content, err = checkpoint.ReadLatestSessionContent(ctx, lookup.store, fullCheckpointID, summary)
 		if err != nil {
@@ -762,11 +762,15 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 // inside this function so the caller's spinner provides continuous
 // feedback.
 func prefetchCheckpointBlobs(ctx context.Context, repo *git.Repository, cpID id.CheckpointID) {
-	v1FT := buildCheckpointFetchingTree(ctx, repo, cpID, "v1", loadV1MetadataRootTree)
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+	loadPrimaryRoot := func(repo *git.Repository) (*object.Tree, error) {
+		return loadPrimaryMetadataRootTree(ctx, repo, refs)
+	}
+	primaryFT := buildCheckpointFetchingTree(ctx, repo, cpID, "primary", loadPrimaryRoot)
 
 	missingCount := 0
-	if v1FT != nil {
-		missingCount += len(v1FT.CollectMissingBlobs())
+	if primaryFT != nil {
+		missingCount += len(primaryFT.CollectMissingBlobs())
 	}
 	if missingCount == 0 {
 		return
@@ -776,7 +780,7 @@ func prefetchCheckpointBlobs(ctx context.Context, repo *git.Repository, cpID id.
 		slog.Int("blob_count", missingCount),
 	)
 
-	runPreFetch(ctx, v1FT, cpID, "v1")
+	runPreFetch(ctx, primaryFT, cpID, "primary")
 }
 
 // buildCheckpointFetchingTree navigates to the checkpoint subtree using
@@ -821,13 +825,18 @@ func runPreFetch(ctx context.Context, ft *checkpoint.FetchingTree, cpID id.Check
 	}
 }
 
-func loadV1MetadataRootTree(repo *git.Repository) (*object.Tree, error) {
-	if tree, err := strategy.GetMetadataRefTree(repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName)); err == nil {
+// loadPrimaryMetadataRootTree reads the tree at refs.Primary, falling back to
+// origin's remote-tracking ref when Primary is pushed.
+func loadPrimaryMetadataRootTree(ctx context.Context, repo *git.Repository, refs checkpoint.CommittedRefs) (*object.Tree, error) {
+	if tree, err := strategy.GetMetadataRefTree(repo, refs.Primary); err == nil {
 		return tree, nil
 	}
-	tree, err := strategy.GetRemoteMetadataBranchTree(repo)
+	if !refs.PrimaryFetchableFromOrigin() {
+		return nil, fmt.Errorf("read primary metadata tree %s: ref not found locally", refs.Primary)
+	}
+	tree, err := strategy.GetRemotePrimaryTree(ctx, repo)
 	if err != nil {
-		return nil, fmt.Errorf("read v1 metadata tree (local + remote-tracking): %w", err)
+		return nil, fmt.Errorf("read primary metadata tree (local + remote-tracking): %w", err)
 	}
 	return tree, nil
 }
@@ -848,7 +857,7 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 	// `git fetch` fails against partial-clone repos with "did not send all
 	// necessary objects"). Falls back to a full metadata-branch fetch if
 	// fetch-pack also can't reach the blobs.
-	store := checkpoint.NewCommittedReadStore(ctx, repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
 	store.SetBlobFetcher(FetchBlobsByHash)
 
 	lookup := &explainCheckpointLookup{
@@ -923,10 +932,9 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store *ch
 		return fmt.Errorf("failed to save summary: %w", err)
 	}
 
-	if refs := checkpoint.ResolveCommittedRefs(ctx); refs.HasMirror() {
-		if err := strategy.MirrorCommittedMetadataRef(ctx, store.Repository(), refs); err != nil {
-			return fmt.Errorf("summary was written to %s, but failed to mirror to %s: %w", refs.Primary, refs.Mirror, err)
-		}
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+	if err := strategy.MirrorCommittedMetadataRef(ctx, store.Repository(), refs); err != nil {
+		return fmt.Errorf("summary was written to %s, but failed to mirror to %s: %w", refs.Primary, refs.Mirror, err)
 	}
 
 	styles := newStatusStyles(w)
@@ -2002,7 +2010,7 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	// Warn (once per process) if metadata branches are disconnected
 	strategy.WarnIfMetadataDisconnected()
 
-	store := checkpoint.NewCommittedReadStore(ctx, repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
 
 	// Get all committed checkpoints for lookup.
 	committedInfos, err := store.ListCommitted(ctx)
@@ -2106,7 +2114,7 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	}
 
 	// Get temporary checkpoints from ALL shadow branches whose base commit is reachable from HEAD.
-	tempPoints := getReachableTemporaryCheckpoints(ctx, repo, checkpoint.NewGitStore(repo), head.Hash(), isOnDefault, limit)
+	tempPoints := getReachableTemporaryCheckpoints(ctx, repo, store, head.Hash(), isOnDefault, limit)
 	points = append(points, tempPoints...)
 
 	// Sort by date, most recent first

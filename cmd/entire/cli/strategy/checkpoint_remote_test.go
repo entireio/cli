@@ -262,7 +262,7 @@ func TestFetchBranchIfMissing_RecoversFromEmptyLocalOrphan(t *testing.T) {
 
 	// Simulate the failed first bootstrap: the fetch is a no-op against an
 	// unreachable remote, then EnsureSetup falls through to
-	// EnsureMetadataBranch, which mints the empty orphan.
+	// EnsurePrimaryRef, which mints the empty orphan.
 	fetched, err := fetchMetadataBranchIfMissing(ctx, "/nonexistent/repo.git")
 	require.NoError(t, err)
 	require.False(t, fetched)
@@ -270,7 +270,7 @@ func TestFetchBranchIfMissing_RecoversFromEmptyLocalOrphan(t *testing.T) {
 	repo, err := OpenRepository(ctx)
 	require.NoError(t, err)
 	defer repo.Close()
-	require.NoError(t, EnsureMetadataBranch(ctx, repo))
+	require.NoError(t, EnsurePrimaryRef(ctx, repo))
 	require.True(t, testutil.BranchExists(t, localDir, "entire/checkpoints/v1"))
 
 	// Retry with the remote reachable (e.g. a second `entire enable` after

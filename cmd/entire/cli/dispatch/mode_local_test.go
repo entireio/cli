@@ -422,7 +422,7 @@ func TestLocalMode_ImplicitCurrentBranchUsesHEADReachability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	parsedID, err := checkpointid.NewCheckpointID(cpID)
 	if err != nil {
 		t.Fatal(err)
@@ -489,7 +489,7 @@ func TestLocalMode_ExplicitBranchesRemainExact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	parsedID, err := checkpointid.NewCheckpointID(cpID)
 	if err != nil {
 		t.Fatal(err)
@@ -930,7 +930,7 @@ func seedCommittedCheckpoint(t *testing.T, repoDir string, cp seededCheckpoint) 
 		t.Fatal(err)
 	}
 
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	cpID, err := checkpointid.NewCheckpointID(cp.id)
 	if err != nil {
 		t.Fatal(err)

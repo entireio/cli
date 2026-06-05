@@ -78,7 +78,7 @@ func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
 	}
 
 	// Create GitStore and call copyMetadataDir
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	entries := make(map[string]object.TreeEntry)
 
 	err = store.copyMetadataDir(metadataDir, "checkpoint/", entries)
@@ -133,7 +133,7 @@ func TestWriteCommitted_AgentField(t *testing.T) {
 	}
 
 	// Create checkpoint store
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 
 	// Write a committed checkpoint with Agent field
 	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
@@ -343,7 +343,7 @@ func TestWriteTemporary_Deduplication(t *testing.T) {
 	}
 
 	// Create checkpoint store
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 
 	// First checkpoint should be created
 	baseCommit := initialCommit.String()
@@ -469,7 +469,7 @@ func TestEnsureSessionsBranch_WritesVercelConfigWhenEnabled(t *testing.T) {
 		t.Fatalf("write settings.json: %v", err)
 	}
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	if err := store.ensureSessionsBranch(context.Background()); err != nil {
 		t.Fatalf("ensureSessionsBranch() error = %v", err)
 	}
@@ -544,7 +544,7 @@ func TestWriteCommitted_MergesVercelConfigOnMetadataBranch(t *testing.T) {
 		t.Fatalf("BuildTreeFromEntries() error = %v", err)
 	}
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	commitHash, err := store.createCommit(context.Background(), treeHash, plumbing.ZeroHash, "Initialize metadata branch", "Test", "test@test.com")
 	if err != nil {
 		t.Fatalf("createCommit() error = %v", err)
@@ -686,7 +686,7 @@ func TestWriteCommitted_BranchField(t *testing.T) {
 
 		// Write a committed checkpoint with branch information
 		checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
-		store := NewGitStore(repo)
+		store := NewGitStore(repo, DefaultV1Refs())
 		err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
 			CheckpointID: checkpointID,
 			SessionID:    "test-session-123",
@@ -726,7 +726,7 @@ func TestWriteCommitted_BranchField(t *testing.T) {
 
 		// Write a committed checkpoint (branch should be empty in detached HEAD)
 		checkpointID := id.MustCheckpointID("b2c3d4e5f6a7")
-		store := NewGitStore(repo)
+		store := NewGitStore(repo, DefaultV1Refs())
 		err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
 			CheckpointID: checkpointID,
 			SessionID:    "test-session-456",
@@ -748,7 +748,7 @@ func TestWriteCommitted_BranchField(t *testing.T) {
 // field in an existing checkpoint's metadata.
 func TestUpdateSummary(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("f1e2d3c4b5a6")
 
 	// First, create a checkpoint without a summary
@@ -820,7 +820,7 @@ func TestUpdateSummary(t *testing.T) {
 // when the checkpoint doesn't exist.
 func TestUpdateSummary_NotFound(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 
 	// Ensure sessions branch exists
 	err := store.ensureSessionsBranch(context.Background())
@@ -870,7 +870,7 @@ func TestListCommitted_FallsBackToRemote(t *testing.T) {
 	}
 
 	// Create entire/checkpoints/v1 branch on the remote with a checkpoint
-	remoteStore := NewGitStore(remoteRepo)
+	remoteStore := NewGitStore(remoteRepo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("abcdef123456")
 	err = remoteStore.WriteCommitted(context.Background(), WriteCommittedOptions{
 		CheckpointID: cpID,
@@ -917,7 +917,7 @@ func TestListCommitted_FallsBackToRemote(t *testing.T) {
 	}
 
 	// ListCommitted should find the checkpoint by falling back to remote
-	localStore := NewGitStore(localRepo)
+	localStore := NewGitStore(localRepo, DefaultV1Refs())
 	checkpoints, err := localStore.ListCommitted(context.Background())
 	if err != nil {
 		t.Fatalf("ListCommitted() error = %v", err)
@@ -934,7 +934,7 @@ func TestListCommitted_FallsBackToRemote(t *testing.T) {
 // author of the commit that created the checkpoint on the entire/checkpoints/v1 branch.
 func TestGetCheckpointAuthor(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
 
 	// Create a checkpoint with specific author info
@@ -972,7 +972,7 @@ func TestGetCheckpointAuthor(t *testing.T) {
 // empty author when the checkpoint doesn't exist.
 func TestGetCheckpointAuthor_NotFound(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 
 	// Query for a non-existent checkpoint (must be valid hex)
 	checkpointID := id.MustCheckpointID("ffffffffffff")
@@ -998,7 +998,7 @@ func TestGetCheckpointAuthor_NoSessionsBranch(t *testing.T) {
 		t.Fatalf("failed to init git repo: %v", err)
 	}
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("aabbccddeeff")
 
 	author, err := store.GetCheckpointAuthor(context.Background(), checkpointID)
@@ -1021,7 +1021,7 @@ func TestGetCheckpointAuthor_NoSessionsBranch(t *testing.T) {
 // sessions to the same checkpoint ID creates separate numbered subdirectories.
 func TestWriteCommitted_MultipleSessionsSameCheckpoint(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("a1a2a3a4a5a6")
 
 	// Write first session
@@ -1102,7 +1102,7 @@ func TestWriteCommitted_MultipleSessionsSameCheckpoint(t *testing.T) {
 // multiple sessions written to the same checkpoint.
 func TestWriteCommitted_Aggregation(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("b1b2b3b4b5b6")
 
 	// Write first session with specific stats
@@ -1193,7 +1193,7 @@ func TestWriteCommitted_Aggregation(t *testing.T) {
 // a CheckpointSummary with the correct structure including Sessions array.
 func TestReadCommitted_ReturnsCheckpointSummary(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("c1c2c3c4c5c6")
 
 	// Write two sessions
@@ -1253,7 +1253,7 @@ func TestReadCommitted_ReturnsCheckpointSummary(t *testing.T) {
 // specific sessions by their 0-based index within a checkpoint.
 func TestReadSessionContent_ByIndex(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("d1d2d3d4d5d6")
 
 	// Write two sessions with distinct content
@@ -1315,7 +1315,7 @@ func TestReadSessionContent_ByIndex(t *testing.T) {
 func writeSingleSession(t *testing.T, cpIDStr, sessionID, transcript string) (*GitStore, id.CheckpointID) {
 	t.Helper()
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID(cpIDStr)
 
 	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
@@ -1335,7 +1335,7 @@ func writeSingleSession(t *testing.T, cpIDStr, sessionID, transcript string) (*G
 
 func TestWriteCommitted_CodexSanitizesPortableTranscript(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("c0de1234beef")
 
 	transcript := `{"timestamp":"2026-03-25T11:31:11.754Z","type":"response_item","payload":{"type":"reasoning","summary":[{"text":"brief"}],"encrypted_content":"REDACTED"}}
@@ -1388,7 +1388,7 @@ func TestReadSessionContent_InvalidIndex(t *testing.T) {
 // the content of the most recently added session (highest index).
 func TestReadLatestSessionContent(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("f1f2f3f4f5f6")
 
 	// Write three sessions
@@ -1426,7 +1426,7 @@ func TestReadLatestSessionContent(t *testing.T) {
 // a session by its session ID rather than by index.
 func TestReadSessionContentByID(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("010203040506")
 
 	// Write two sessions with distinct IDs
@@ -1479,7 +1479,7 @@ func TestReadSessionContentByID_NotFound(t *testing.T) {
 // information for checkpoints with multiple sessions.
 func TestListCommitted_MultiSessionInfo(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("212223242526")
 
 	// Write two sessions to the same checkpoint
@@ -1542,7 +1542,7 @@ func TestListCommitted_MultiSessionInfo(t *testing.T) {
 // written without prompts and still be read correctly.
 func TestWriteCommitted_SessionWithNoPrompts(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("313233343536")
 
 	// Write session without prompts
@@ -1587,7 +1587,7 @@ func TestWriteCommitted_SessionWithNoPrompts(t *testing.T) {
 // Regression test for ENT-243 where Summary was omitted from the struct literal.
 func TestWriteCommitted_SessionWithSummary(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("aabbccddeeff")
 
 	summary := &Summary{
@@ -1629,7 +1629,7 @@ func TestWriteCommitted_SessionWithSummary(t *testing.T) {
 // to ensure the 0-based indexing works correctly throughout.
 func TestWriteCommitted_ThreeSessions(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("515253545556")
 
 	// Write three sessions
@@ -1700,7 +1700,7 @@ func TestWriteCommitted_ThreeSessions(t *testing.T) {
 // nil (not an error) when the checkpoint doesn't exist.
 func TestReadCommitted_NonexistentCheckpoint(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 
 	// Ensure sessions branch exists
 	err := store.ensureSessionsBranch(context.Background())
@@ -1723,7 +1723,7 @@ func TestReadCommitted_NonexistentCheckpoint(t *testing.T) {
 // returns ErrCheckpointNotFound when the checkpoint doesn't exist.
 func TestReadSessionContent_NonexistentCheckpoint(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 
 	// Ensure sessions branch exists
 	err := store.ensureSessionsBranch(context.Background())
@@ -1793,7 +1793,7 @@ func TestWriteTemporary_FirstCheckpoint_CapturesModifiedTrackedFiles(t *testing.
 	// Create checkpoint store and write first checkpoint
 	// Note: ModifiedFiles is empty because agent hasn't touched anything yet
 	// The first checkpoint should still capture README.md because it's modified in working dir
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	baseCommit := initialCommit.String()
 
 	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
@@ -1922,7 +1922,7 @@ func TestWriteTemporary_PathNormalizationAndSkipping(t *testing.T) {
 				t.Fatalf("failed to write transcript: %v", err)
 			}
 
-			store := NewGitStore(repo)
+			store := NewGitStore(repo, DefaultV1Refs())
 			result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
 				SessionID:      "test-session",
 				BaseCommit:     initialCommit.String(),
@@ -2021,7 +2021,7 @@ func TestWriteTemporary_FirstCheckpoint_CapturesUntrackedFiles(t *testing.T) {
 	}
 
 	// Create checkpoint store and write first checkpoint
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	baseCommit := initialCommit.String()
 
 	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
@@ -2130,7 +2130,7 @@ func TestWriteTemporary_FirstCheckpoint_ExcludesGitIgnoredFiles(t *testing.T) {
 	}
 
 	// Create checkpoint store and write first checkpoint
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	baseCommit := initialCommit.String()
 
 	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
@@ -2230,7 +2230,7 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesGitIgnoredModifiedFiles(t *
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	baseCommit := initialCommit.String()
 
 	// Write first checkpoint to establish the shadow branch
@@ -2351,7 +2351,7 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesGitIgnoredNewFiles(t *testi
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	baseCommit := initialCommit.String()
 
 	// First checkpoint
@@ -2462,7 +2462,7 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesNestedGitIgnoredFiles(t *te
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	baseCommit := initialCommit.String()
 
 	// First checkpoint
@@ -2585,7 +2585,7 @@ func TestWriteTemporary_FirstCheckpoint_UserAndAgentChanges(t *testing.T) {
 	}
 
 	// Create checkpoint - agent reports main.go as modified (from transcript)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	baseCommit := initialCommit.String()
 
 	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
@@ -2699,7 +2699,7 @@ func TestWriteTemporary_FirstCheckpoint_CapturesUserDeletedFiles(t *testing.T) {
 	}
 
 	// Create checkpoint store and write first checkpoint
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	baseCommit := initialCommit.String()
 
 	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
@@ -2797,7 +2797,7 @@ func TestWriteTemporary_FirstCheckpoint_CapturesRenamedFiles(t *testing.T) {
 	}
 
 	// Create checkpoint store and write first checkpoint
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	baseCommit := initialCommit.String()
 
 	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
@@ -2893,7 +2893,7 @@ func TestWriteTemporary_FirstCheckpoint_FilenamesWithSpaces(t *testing.T) {
 	}
 
 	// Create checkpoint store and write first checkpoint
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	baseCommit := initialCommit.String()
 
 	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
@@ -2940,7 +2940,7 @@ func TestWriteTemporary_FirstCheckpoint_FilenamesWithSpaces(t *testing.T) {
 func TestWriteCommitted_DuplicateSessionIDUpdatesInPlace(t *testing.T) {
 	t.Parallel()
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("deda01234567")
 
 	// Write session "X" with initial data
@@ -3075,7 +3075,7 @@ func TestWriteCommitted_DuplicateSessionIDUpdatesInPlace(t *testing.T) {
 func TestWriteCommitted_DuplicateSessionIDSingleSession(t *testing.T) {
 	t.Parallel()
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("dedb07654321")
 
 	// Write session "X" with initial data
@@ -3151,7 +3151,7 @@ func TestWriteCommitted_DuplicateSessionIDSingleSession(t *testing.T) {
 func TestWriteCommitted_DuplicateSessionIDReusesIndex(t *testing.T) {
 	t.Parallel()
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("dedc0abcdef1")
 
 	// Write session A at index 0
@@ -3235,7 +3235,7 @@ func TestWriteCommitted_DuplicateSessionIDReusesIndex(t *testing.T) {
 func TestWriteCommitted_DuplicateSessionIDClearsStaleFiles(t *testing.T) {
 	t.Parallel()
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("dedd0abcdef2")
 
 	// Write session A with prompts and context
@@ -3313,7 +3313,7 @@ const highEntropySecret = "sk-ant-api03-xK9mZ2vL8nQ5rT1wY4bC7dF0gH3jE6pA"
 
 func TestWriteCommitted_PreservesRedactedTranscript(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("aabbccddeef1")
 
 	// Callers redact before passing to WriteCommitted; the store persists as-is.
@@ -3351,7 +3351,7 @@ func TestWriteCommitted_PreservesRedactedTranscript(t *testing.T) {
 
 func TestWriteCommitted_RedactsPromptSecrets(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("aabbccddeef2")
 
 	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
@@ -3406,7 +3406,7 @@ func TestCopyMetadataDir_RedactsSecrets(t *testing.T) {
 		t.Fatalf("failed to write txt file: %v", err)
 	}
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	entries := make(map[string]object.TreeEntry)
 
 	if err := store.copyMetadataDir(metadataDir, "cp/", entries); err != nil {
@@ -3477,7 +3477,7 @@ func TestWriteCommitted_CLIVersionField(t *testing.T) {
 		t.Fatalf("failed to commit: %v", err)
 	}
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 
 	checkpointID := id.MustCheckpointID("b1c2d3e4f5a6")
 	sessionID := "test-session-version"
@@ -3590,7 +3590,7 @@ func TestWriteCommitted_ModelFieldAlwaysPresent(t *testing.T) {
 		t.Fatalf("failed to commit: %v", err)
 	}
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 
 	checkpointID := id.MustCheckpointID("c1d2e3f4a5b6")
 	err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
@@ -3808,7 +3808,7 @@ func TestRedactCodeLearnings_NilAndEmpty(t *testing.T) {
 func TestWriteCommitted_RedactsSummarySecrets(t *testing.T) {
 	t.Parallel()
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("aabbccddeef7")
 
 	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
@@ -3850,7 +3850,7 @@ func TestWriteCommitted_RedactsSummarySecrets(t *testing.T) {
 func TestUpdateSummary_RedactsSecrets(t *testing.T) {
 	t.Parallel()
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("aabbccddeef8")
 
 	// First write a checkpoint without a summary
@@ -3895,7 +3895,7 @@ func TestUpdateSummary_RedactsSecrets(t *testing.T) {
 func TestWriteCommitted_SubagentTranscript_JSONLFallback(t *testing.T) {
 	t.Parallel()
 	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("aabbccddeef9")
 
 	// Create a temp file with invalid JSONL containing a secret
@@ -3996,7 +3996,7 @@ func TestWriteTemporaryTask_SubagentTranscript_RedactsSecrets(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	baseCommit := initialCommit.String()
 
 	_, err = store.WriteTemporaryTask(context.Background(), WriteTemporaryTaskOptions{
@@ -4250,7 +4250,7 @@ func TestWriteTemporaryTask_ExcludesGitIgnoredFiles(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	baseCommit := initialCommit.String()
 
 	// Write task checkpoint where subagent reports .env as modified
@@ -4554,7 +4554,7 @@ func TestWriteCommitted_PropagatesHasInvestigation(t *testing.T) {
 	t.Parallel()
 
 	repo := initRepoForCheckpointTest(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("aabbccddeeff")
 
 	// First session: investigate session, sets HasInvestigation=true.
@@ -4607,7 +4607,7 @@ func TestCommittedMetadata_InvestigateFieldsRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	repo := initRepoForCheckpointTest(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("11223344aabb")
 
 	if err := store.WriteCommitted(context.Background(), WriteCommittedOptions{

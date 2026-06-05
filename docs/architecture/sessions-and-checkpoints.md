@@ -59,8 +59,9 @@ const (
 
 `strategy/session.go` keeps the `Session` and `Checkpoint` data types used by
 status/explain formatting. Active session state is read from `.git/entire-sessions/`
-through `session.StateStore`; committed checkpoint/session content is read through
-the committed checkpoint store (`checkpoint.NewCommittedReadStore(...)`) and
+through `session.StateStore`; committed checkpoint/session content is read
+through a `checkpoint.GitStore` built with resolved committed refs (for example,
+`checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))`) and
 command-specific strategy methods such as `GetSessionInfo`.
 
 ### Checkpoint Storage (Low-Level)
@@ -149,7 +150,7 @@ func (s *ManualCommitStrategy) CondenseSession(
 | Session State | `.git/entire-sessions/<id>.json` | Active session tracking |
 | Temporary | `entire/<commit[:7]>-<worktreeHash[:6]>` branch | Full state (code + metadata) |
 | Committed | `entire/checkpoints/v1` branch (sharded) | Metadata + commit reference |
-| Committed read mirror | `refs/entire/checkpoints/v1.1` ref | Local-only mirror used by v1.1 reads |
+| Committed read mirror | `refs/entire/checkpoints/v1.1` ref | Mirror used by v1.1 reads; pushed alongside v1 when opted in |
 
 ### Session State
 
@@ -210,13 +211,19 @@ target this branch, and push/fetch operations synchronize this branch with
 remotes. When `strategy_options.checkpoints_version` is `"1.1"`, committed reads
 resolve against `refs/entire/checkpoints/v1.1` instead.
 
-The v1.1 ref is a local-only mirror. It lives outside `refs/heads/`, is never
-pushed, and does not appear in normal branch listings. Entire-managed v1 write
-and fetch paths advance the mirror best-effort after they advance
-`entire/checkpoints/v1`; mirror failures are logged but never fail the primary
-operation. The resume bootstrap that promotes local v1 from origin's
-remote-tracking ref is the deliberate exception — it does not mirror and is
-skipped entirely in v1.1 mode.
+The v1.1 ref lives outside `refs/heads/` and does not appear in normal branch
+listings. It is pushed to the configured remote alongside `entire/checkpoints/v1`
+— the resolver adds it to the push set and `PrePush` pushes every ref there.
+Because it is not a branch it gets no `refs/remotes/origin/...` tracking ref,
+and reads still resolve against the local ref rather than bootstrapping it from
+origin (reads target v1.1 while the primary write/fetch ref stays
+`entire/checkpoints/v1`). Entire-managed v1 write and fetch paths advance the
+mirror best-effort after they advance `entire/checkpoints/v1`; mirror failures
+are logged but never fail the primary operation. `PrePush` re-points the mirror
+at the v1 tip before pushing so the published ref reflects the current primary.
+The resume bootstrap that promotes local v1 from origin's remote-tracking ref
+is the deliberate exception — it does not mirror and is skipped entirely in
+v1.1 mode.
 
 Read paths do not create, repair, or advance the mirror before use; they read
 the configured committed-read ref as-is. The repair tool is `entire doctor`:
