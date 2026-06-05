@@ -109,49 +109,59 @@ func TestIsURL(t *testing.T) {
 	}
 }
 
-// Not parallel: uses t.Chdir()
-func TestFetchBranchIfMissing_CreatesLocalFromRemote(t *testing.T) {
+// createMetadataBranchWithData creates an entire/checkpoints/v1 orphan branch
+// in repoDir containing fileName, then switches back to the original branch.
+func createMetadataBranchWithData(t *testing.T, repoDir, fileName, content string) {
+	t.Helper()
 	ctx := context.Background()
-
-	// Set up a "remote" repo with a branch
-	remoteDir := t.TempDir()
-	testutil.InitRepo(t, remoteDir)
-	testutil.WriteFile(t, remoteDir, "f.txt", "init")
-	testutil.GitAdd(t, remoteDir, "f.txt")
-	testutil.GitCommit(t, remoteDir, "init")
 
 	// Get the default branch name before switching
 	branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
-	branchCmd.Dir = remoteDir
+	branchCmd.Dir = repoDir
 	branchCmd.Env = testutil.GitIsolatedEnv()
 	branchOut, err := branchCmd.Output()
 	require.NoError(t, err)
 	defaultBranch := strings.TrimSpace(string(branchOut))
 
-	// Create an orphan branch in the remote repo (simulating entire/checkpoints/v1)
-	cmd := exec.CommandContext(ctx, "git", "checkout", "--orphan", "entire/checkpoints/v1")
-	cmd.Dir = remoteDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+	runGit := func(args ...string) {
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = repoDir
+		cmd.Env = testutil.GitIsolatedEnv()
+		require.NoError(t, cmd.Run())
+	}
 
-	cmd = exec.CommandContext(ctx, "git", "rm", "-rf", ".")
-	cmd.Dir = remoteDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+	runGit("checkout", "--orphan", "entire/checkpoints/v1")
+	runGit("rm", "-rf", ".")
 
-	testutil.WriteFile(t, remoteDir, "metadata.json", `{"test": true}`)
-	testutil.GitAdd(t, remoteDir, "metadata.json")
+	testutil.WriteFile(t, repoDir, fileName, content)
+	testutil.GitAdd(t, repoDir, fileName)
 
-	cmd = exec.CommandContext(ctx, "git", "-c", "commit.gpgsign=false", "commit", "-m", "checkpoint data")
-	cmd.Dir = remoteDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+	runGit("-c", "commit.gpgsign=false", "commit", "-m", "checkpoint data")
+	runGit("checkout", defaultBranch)
+}
 
-	// Go back to the default branch
-	cmd = exec.CommandContext(ctx, "git", "checkout", defaultBranch)
-	cmd.Dir = remoteDir
+// revParseRef resolves ref in repoDir to a commit hash.
+func revParseRef(t *testing.T, repoDir, ref string) string {
+	t.Helper()
+	cmd := exec.CommandContext(context.Background(), "git", "rev-parse", ref)
+	cmd.Dir = repoDir
 	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	return strings.TrimSpace(string(out))
+}
+
+// Not parallel: uses t.Chdir()
+func TestFetchBranchIfMissing_CreatesLocalFromRemote(t *testing.T) {
+	ctx := context.Background()
+
+	// Set up a "remote" repo with a metadata branch containing data
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	createMetadataBranchWithData(t, remoteDir, "metadata.json", `{"test": true}`)
 
 	// Set up local repo
 	localDir := t.TempDir()
@@ -178,45 +188,13 @@ func TestFetchBranchIfMissing_CreatesLocalFromRemote(t *testing.T) {
 func TestFetchBranchIfMissing_NoOpWhenBranchExistsLocally(t *testing.T) {
 	ctx := context.Background()
 
-	// Set up local repo with the branch already existing
+	// Set up local repo with the branch already existing (with real data)
 	localDir := t.TempDir()
 	testutil.InitRepo(t, localDir)
 	testutil.WriteFile(t, localDir, "f.txt", "init")
 	testutil.GitAdd(t, localDir, "f.txt")
 	testutil.GitCommit(t, localDir, "init")
-
-	// Get the default branch name before switching
-	branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
-	branchCmd.Dir = localDir
-	branchCmd.Env = testutil.GitIsolatedEnv()
-	branchOut, err := branchCmd.Output()
-	require.NoError(t, err)
-	defaultBranch := strings.TrimSpace(string(branchOut))
-
-	// Create the branch locally
-	cmd := exec.CommandContext(ctx, "git", "checkout", "--orphan", "entire/checkpoints/v1")
-	cmd.Dir = localDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
-
-	cmd = exec.CommandContext(ctx, "git", "rm", "-rf", ".")
-	cmd.Dir = localDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
-
-	testutil.WriteFile(t, localDir, "data.json", `{"local": true}`)
-	testutil.GitAdd(t, localDir, "data.json")
-
-	cmd = exec.CommandContext(ctx, "git", "-c", "commit.gpgsign=false", "commit", "-m", "local checkpoint")
-	cmd.Dir = localDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
-
-	// Switch back to the default branch
-	cmd = exec.CommandContext(ctx, "git", "checkout", defaultBranch)
-	cmd.Dir = localDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+	createMetadataBranchWithData(t, localDir, "data.json", `{"local": true}`)
 
 	t.Chdir(localDir)
 
@@ -253,6 +231,57 @@ func TestFetchBranchIfMissing_NoOpWhenBranchNotOnRemote(t *testing.T) {
 
 	// Branch should still not exist locally
 	assert.False(t, testutil.BranchExists(t, localDir, "entire/checkpoints/v1"))
+}
+
+// Not parallel: uses t.Chdir()
+//
+// A first `entire enable` whose checkpoint-remote fetch fails (no token,
+// network down, remote branch not pushed yet) falls back to minting an empty
+// local orphan. That orphan must not permanently close the bootstrap window:
+// a later attempt with the remote reachable must still fetch the real branch
+// and point the local ref at it.
+func TestFetchBranchIfMissing_RecoversFromEmptyLocalOrphan(t *testing.T) {
+	ctx := context.Background()
+
+	// Set up a "remote" repo with a metadata branch containing data
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	createMetadataBranchWithData(t, remoteDir, "metadata.json", `{"test": true}`)
+
+	// Set up local repo
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+
+	t.Chdir(localDir)
+
+	// Simulate the failed first bootstrap: the fetch is a no-op against an
+	// unreachable remote, then EnsureSetup falls through to
+	// EnsureMetadataBranch, which mints the empty orphan.
+	fetched, err := fetchMetadataBranchIfMissing(ctx, "/nonexistent/repo.git")
+	require.NoError(t, err)
+	require.False(t, fetched)
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+	require.NoError(t, EnsureMetadataBranch(ctx, repo))
+	require.True(t, testutil.BranchExists(t, localDir, "entire/checkpoints/v1"))
+
+	// Retry with the remote reachable (e.g. a second `entire enable` after
+	// fixing auth, or after a teammate's first checkpoint push).
+	fetched, err = fetchMetadataBranchIfMissing(ctx, remoteDir)
+	require.NoError(t, err)
+	assert.True(t, fetched, "empty local orphan must not block the checkpoint-remote bootstrap")
+
+	remoteTip := revParseRef(t, remoteDir, "refs/heads/entire/checkpoints/v1")
+	localTip := revParseRef(t, localDir, "refs/heads/entire/checkpoints/v1")
+	assert.Equal(t, remoteTip, localTip, "local metadata branch should match the checkpoint remote tip")
 }
 
 // Not parallel: uses t.Chdir()

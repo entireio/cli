@@ -84,10 +84,11 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 
 	ps.checkpointURL = checkpointURL
 
-	// If the v1 checkpoint branch doesn't exist locally, try to fetch it from the URL.
-	// This is a one-time operation — once the branch exists locally, subsequent pushes
-	// skip the fetch entirely. Only fetch the metadata branch; trails are always pushed
-	// to the user's push remote, not the checkpoint remote.
+	// If the v1 checkpoint branch doesn't exist locally (or is only the empty
+	// bootstrap orphan), try to fetch it from the URL. Once the branch has
+	// checkpoint data, subsequent pushes skip the fetch entirely. Only fetch
+	// the metadata branch; trails are always pushed to the user's push
+	// remote, not the checkpoint remote.
 	if _, err := fetchMetadataBranchIfMissing(ctx, checkpointURL); err != nil {
 		logging.Warn(ctx, "checkpoint-remote: failed to fetch metadata branch",
 			slog.String("error", err.Error()),
@@ -165,7 +166,8 @@ func fetchURLIntoTmpRef(ctx context.Context, remoteURL, srcRef, tmpRef, label st
 }
 
 // bootstrapMetadataFromCheckpointRemote populates the local metadata branch
-// from the configured checkpoint_remote when it doesn't exist locally yet.
+// from the configured checkpoint_remote when it doesn't exist locally yet,
+// or exists only as the empty orphan minted by a previous failed bootstrap.
 //
 // On a fresh clone of a repo whose checkpoints live in a separate repo,
 // neither the local branch nor origin's remote-tracking ref exists — without
@@ -197,11 +199,20 @@ func bootstrapMetadataFromCheckpointRemote(ctx context.Context) {
 	}
 }
 
-// fetchMetadataBranchIfMissing fetches the primary metadata ref from a URL only if it doesn't exist locally.
-// This avoids network calls on every push — once the branch exists locally, this is a no-op.
-// Returns true when the branch was actually fetched and created locally.
-// Fetch failures are silently swallowed (returns nil error): the push will handle creating
-// the branch on the remote. Only fatal errors (opening repo, creating local branch) are returned.
+// fetchMetadataBranchIfMissing fetches the primary metadata ref from a URL
+// only if it doesn't exist locally with real data. This avoids network calls
+// on every push — once the branch has checkpoint data, this is a no-op.
+//
+// An empty bootstrap orphan does not count as existing: it means a previous
+// bootstrap couldn't reach the checkpoint remote (no token, network down,
+// branch not pushed yet) and EnsureSetup fell back to orphan creation —
+// fetching again is the recovery path, and SafelyAdvanceLocalRef discards
+// the no-op orphan commit during the promote.
+//
+// Returns true when the branch was actually fetched. Fetch failures are
+// logged but swallowed (returns nil error): the remote branch legitimately
+// doesn't exist before the first push from any device, and push will create
+// it. Only failures to open the repository are returned.
 func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) (bool, error) {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -209,15 +220,24 @@ func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) (bool, 
 	}
 	defer repo.Close()
 
-	// Check if branch already exists locally - if so, nothing to do
+	// Skip the network call when the branch already has checkpoint data.
 	refs := checkpoint.ResolveCommittedRefs(ctx)
-	if _, err := repo.Reference(refs.Primary, true); err == nil {
-		return false, nil // Branch exists locally, skip fetch
+	if ref, refErr := repo.Reference(refs.Primary, true); refErr == nil {
+		empty, emptyErr := isEmptyMetadataBranch(repo, ref)
+		if emptyErr != nil || !empty {
+			return false, nil // Branch has data (or is unreadable) — skip fetch
+		}
+		// Empty bootstrap orphan — fall through and try the fetch again.
 	}
 
-	// Branch doesn't exist locally - try to fetch it from the URL.
-	// Fetch failures are not fatal: push will create it on the remote when it succeeds.
+	// Branch is missing (or an empty orphan) — try to fetch it from the URL.
+	// Not fatal on failure, but log it: a silent swallow here made auth and
+	// network problems invisible while EnsureSetup fell back to minting an
+	// empty orphan.
 	if err := FetchMetadataBranch(ctx, remoteURL); err != nil {
+		logging.Warn(ctx, "checkpoint-remote: metadata branch fetch failed, continuing without it",
+			slog.String("error", err.Error()),
+		)
 		return false, nil
 	}
 

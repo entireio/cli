@@ -516,3 +516,68 @@ func TestHTTPS_EnableBootstrapsMetadataFromCheckpointRemote(t *testing.T) {
 		t.Errorf("local metadata branch should contain checkpoint A summary at %s", summaryA)
 	}
 }
+
+// TestHTTPS_ReEnableRecoversFromEmptyMetadataOrphan covers the recovery path
+// after a bootstrap that found nothing on the checkpoint remote: device B
+// enables before any checkpoint exists (the bootstrap fetch legitimately
+// finds no branch, so EnsureSetup mints the empty orphan), device A then
+// pushes checkpoint data, and a second `entire enable` on device B must
+// replace the empty orphan with the fetched branch — not skip the fetch
+// because a local branch already exists.
+func TestHTTPS_ReEnableRecoversFromEmptyMetadataOrphan(t *testing.T) {
+	t.Parallel()
+
+	srv := startGitHTTPSServer(t, "testorg/main-repo", "testorg/checkpoints")
+	env := NewFeatureBranchEnv(t)
+
+	mainBare := srv.BareDirs["testorg/main-repo"]
+	checkpointBare := srv.BareDirs["testorg/checkpoints"]
+	httpsURL := srv.URL + "/testorg/main-repo.git"
+	seedBareRepo(t, env, mainBare, httpsURL)
+
+	checkpointRemoteSettings := map[string]any{
+		"strategy_options": map[string]any{
+			"checkpoint_remote": map[string]any{
+				"provider": "github",
+				"repo":     "testorg/checkpoints",
+			},
+		},
+	}
+
+	// Device B: enable while the checkpoint remote has no metadata branch yet.
+	// The bootstrap fetch finds nothing and the empty orphan is minted — the
+	// expected fallback for a brand-new checkpoint remote.
+	cloneB := cloneFromBareWithHTTPS(t, env, mainBare, httpsURL)
+	cloneB.ExtraEnv = srv.sslEnv()
+	cloneB.PatchSettings(checkpointRemoteSettings)
+	cloneB.RunCLI("enable", "--agent", "claude-code", "--telemetry=false")
+	if !cloneB.BranchExists(paths.MetadataBranchName) {
+		t.Fatal("precondition: enable should mint a local metadata branch")
+	}
+
+	// Device A: create a checkpoint and push it to the checkpoint remote.
+	cloneA := cloneFromBareWithHTTPS(t, env, mainBare, httpsURL)
+	cloneA.ExtraEnv = srv.tokenEnv("clone-a-token")
+	cloneA.GitCheckoutNewBranch("feature/clone-a")
+	cloneA.PatchSettings(checkpointRemoteSettings)
+	checkpointA := createCheckpointedCommit(t, cloneA, "Work in clone A", "a.go", "package a", "Work from A")
+	cloneA.RunPrePush("origin")
+	if !cloneA.BranchExistsOnRemote(checkpointBare, paths.MetadataBranchName) {
+		t.Fatal("precondition: checkpoint branch should be on checkpoint remote after push")
+	}
+
+	// Device B: re-running enable must recover — the empty orphan must not
+	// permanently block the checkpoint-remote bootstrap.
+	cloneB.RunCLI("enable", "--agent", "claude-code", "--telemetry=false")
+
+	remoteTip := revParse(t, checkpointBare, "refs/heads/"+paths.MetadataBranchName)
+	localTip := revParse(t, cloneB.RepoDir, "refs/heads/"+paths.MetadataBranchName)
+	if localTip != remoteTip {
+		t.Errorf("local metadata branch tip = %s, want checkpoint remote tip %s (empty orphan blocked re-bootstrap)", localTip, remoteTip)
+	}
+
+	summaryA := CheckpointSummaryPath(checkpointA)
+	if _, found := cloneB.ReadFileFromBranch(paths.MetadataBranchName, summaryA); !found {
+		t.Errorf("local metadata branch should contain checkpoint A summary at %s", summaryA)
+	}
+}
