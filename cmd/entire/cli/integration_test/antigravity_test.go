@@ -9,10 +9,16 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -117,6 +123,143 @@ func TestAntigravity_FullEventFlow(t *testing.T) {
 	}
 	assert.True(t, slices.Contains(got, "foo.txt"),
 		"PreToolUse(write_to_file foo.txt) should have populated files_touched; got %v", got)
+}
+
+// TestAntigravity_PromptInCheckpointMetadata proves the condensation-time
+// late-flush prompt fallback end-to-end for Antigravity (agy).
+//
+// Background: agy writes its JSONL transcript AFTER the Stop hook fires, so the
+// TurnEnd prompt backfill (lifecycle.go) reads an EMPTY transcript and prompt.txt
+// stays empty. The committed "prompt" field would therefore be empty. The
+// condensation-time fallback (resolvePromptsFromLateFlushedTranscript) re-extracts
+// the prompt from the live transcript at `git commit` time — by then agy has
+// finished its asynchronous write, so the transcript is populated.
+//
+// The test reproduces that exact timing:
+//  1. TurnStart (PreInvocation, invocationNum 0) — transcript file is EMPTY.
+//  2. PreToolUse write_to_file touches foo.txt; the file is written to the worktree.
+//  3. Stop (fullyIdle true) — SaveStep creates the shadow checkpoint while the
+//     transcript is STILL EMPTY (proving the backfill cannot recover the prompt).
+//  4. The transcript is populated with a USER_INPUT/<USER_REQUEST> step BEFORE the
+//     git commit (simulating agy finishing its late write).
+//  5. git commit → PostCommit condensation → the committed session metadata's
+//     prompt is recovered from the now-populated transcript.
+func TestAntigravity_PromptInCheckpointMetadata(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	env.InitEntire()
+
+	const requestText = "add a foo.txt file with the word bar in it"
+
+	conversationID := "antigravity-it-prompt-conv-id"
+	transcriptPath := filepath.Join(env.RepoDir, ".gemini", "antigravity-cli",
+		"brain", conversationID, ".system_generated", "logs", "transcript.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(transcriptPath), 0o750))
+
+	// CRUX: transcript is EMPTY at TurnStart and TurnEnd. agy writes it after Stop.
+	require.NoError(t, os.WriteFile(transcriptPath, []byte{}, 0o600),
+		"transcript must start empty to simulate agy's late flush")
+
+	common := map[string]any{
+		"conversationId":        conversationID,
+		"workspacePaths":        []string{env.RepoDir},
+		"transcriptPath":        transcriptPath,
+		"artifactDirectoryPath": filepath.Join(env.RepoDir, ".gemini", "antigravity-cli", "artifacts"),
+	}
+
+	// TurnStart: first model invocation of the conversation (invocationNum=0).
+	preInv := mergeMaps(common, map[string]any{
+		"invocationNum":   0,
+		"initialNumSteps": 1,
+	})
+	require.NoError(t, runAntigravityHook(t, env.RepoDir, "pre-invocation", preInv),
+		"pre-invocation hook should succeed and lazy-init session state")
+
+	statePath := filepath.Join(env.RepoDir, ".git", "entire-sessions", conversationID+".json")
+	require.FileExists(t, statePath, "session state file should exist after pre-invocation")
+
+	// PreToolUse write_to_file: records foo.txt in state.FilesTouched.
+	preTU := mergeMaps(common, map[string]any{
+		"toolCall": map[string]any{
+			"name": "write_to_file",
+			"args": map[string]any{
+				"TargetFile": "foo.txt",
+				"Overwrite":  false,
+			},
+		},
+		"stepIdx": 1,
+	})
+	require.NoError(t, runAntigravityHook(t, env.RepoDir, "pre-tool-use", preTU),
+		"pre-tool-use hook should record the new file in state.FilesTouched")
+
+	// The agent actually writes the file to the worktree so there is a diff to
+	// checkpoint and later commit.
+	env.WriteFile("foo.txt", "bar\n")
+
+	// Stop (fullyIdle=true): TurnEnd → SaveStep creates the shadow checkpoint.
+	// The transcript is STILL EMPTY here, so the TurnEnd prompt backfill recovers
+	// nothing and prompt.txt is empty. This is what makes the test exercise the
+	// condensation-time fallback rather than the backfill path.
+	stopIdle := mergeMaps(common, map[string]any{
+		"executionNum":      1,
+		"terminationReason": "model_stop",
+		"error":             "",
+		"fullyIdle":         true,
+	})
+	require.NoError(t, runAntigravityHook(t, env.RepoDir, "stop", stopIdle),
+		"stop hook with fullyIdle=true should emit SessionEnd and SaveStep the checkpoint")
+
+	// LATE FLUSH: agy finishes writing the transcript AFTER Stop, BEFORE the commit.
+	// Now the live transcript carries the USER_INPUT step with the <USER_REQUEST>.
+	step := map[string]any{
+		"step_index": 0,
+		"source":     "USER_EXPLICIT",
+		"type":       "USER_INPUT",
+		"status":     "DONE",
+		"content":    "<USER_REQUEST>\n" + requestText + "\n</USER_REQUEST>",
+	}
+	stepJSON, err := json.Marshal(step)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(transcriptPath, append(stepJSON, '\n'), 0o600),
+		"populate the transcript before commit to simulate agy's completed late write")
+
+	// Commit → PostCommit condensation. The fallback re-extracts the prompt from
+	// the now-populated live transcript.
+	env.GitCommitWithShadowHooks("Add foo.txt", "foo.txt")
+
+	// Resolve the checkpoint ID from the user commit's Entire-Checkpoint trailer.
+	headHash := env.GetHeadHash()
+	repo, err := git.PlainOpen(env.RepoDir)
+	require.NoError(t, err)
+	commitObj, err := repo.CommitObject(plumbing.NewHash(headHash))
+	require.NoError(t, err)
+	checkpointID, found := trailers.ParseCheckpoint(commitObj.Message)
+	require.True(t, found, "user commit should carry an Entire-Checkpoint trailer")
+
+	// Sanity-check that the checkpoint's session metadata.json was written (the
+	// checkpoint exists and is sharded under the checkpoint ID).
+	metadataPath := SessionMetadataPath(checkpointID.String())
+	metadataContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, metadataPath)
+	require.True(t, found, "session metadata.json should exist at %s", metadataPath)
+	var metadata checkpoint.CommittedMetadata
+	require.NoError(t, json.Unmarshal([]byte(metadataContent), &metadata),
+		"session metadata.json should parse")
+	require.Equal(t, conversationID, metadata.SessionID,
+		"checkpoint should be linked to the antigravity conversation/session")
+
+	// PRIMARY ASSERTION: the committed session-level "prompt" (prompt.txt on
+	// entire/checkpoints/v1) was recovered by the condensation-time late-flush
+	// fallback. The transcript was empty at TurnEnd (so the backfill recovered
+	// nothing) and only populated before commit, so a non-empty prompt here can
+	// ONLY have come from resolvePromptsFromLateFlushedTranscript at condensation.
+	promptPath := SessionFilePath(checkpointID.String(), paths.PromptFileName)
+	promptContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, promptPath)
+	require.True(t, found, "prompt.txt should exist at %s", promptPath)
+	require.NotEmpty(t, strings.TrimSpace(promptContent),
+		"committed prompt.txt must be non-empty — the condensation-time late-flush "+
+			"fallback should have recovered it from the populated transcript")
+	assert.Equal(t, requestText, strings.TrimSpace(promptContent),
+		"committed prompt should equal the <USER_REQUEST> text from the late-flushed transcript")
 }
 
 func runAntigravityHook(t *testing.T, repoDir, hookName string, input map[string]any) error {
