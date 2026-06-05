@@ -28,9 +28,10 @@ var _ agent.PromptExtractor = (*AntigravityAgent)(nil)
 //     "content":     string (optional — user request / model text),
 //     "tool_calls":  [ { "name": string, "args": object } ] (optional)
 //   }
-// v1 ships only the JSONL chunk/reassemble passthrough; field-aware decoding
-// (token counting, file-change replay, prompt extraction) is deferred to a
-// follow-up plan. See testdata/transcript_sample.jsonl for a captured fixture.
+// ReadTranscript/Chunk/Reassemble remain JSONL passthrough. Prompt extraction
+// is implemented below (token counting is handled out-of-band elsewhere);
+// field-aware modified-file analysis (TranscriptAnalyzer) is being added in a
+// sibling change. See testdata/transcript_sample.jsonl for a captured fixture.
 
 // agyStep is one line of agy's step-based JSONL transcript.
 type agyStep struct {
@@ -54,6 +55,8 @@ func extractUserRequest(content string) string {
 	if m := userRequestRe.FindStringSubmatch(content); m != nil {
 		return strings.TrimSpace(m[1])
 	}
+	// No wrapper: assume the content is itself the prompt. A hypothetical
+	// metadata-only USER_INPUT step would surface verbatim — acceptable for v1.
 	return strings.TrimSpace(content)
 }
 
