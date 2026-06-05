@@ -31,10 +31,10 @@ var (
 //     "content":     string (optional — user request / model text),
 //     "tool_calls":  [ { "name": string, "args": object } ] (optional)
 //   }
-// ReadTranscript/Chunk/Reassemble remain JSONL passthrough. Prompt extraction
-// is implemented below (token counting is handled out-of-band elsewhere);
-// field-aware modified-file analysis (TranscriptAnalyzer) is being added in a
-// sibling change. See testdata/transcript_sample.jsonl for a captured fixture.
+// Prompt extraction and field-aware modified-file/position analysis
+// (TranscriptAnalyzer) are implemented below. ReadTranscript/Chunk/Reassemble
+// remain JSONL passthrough, and token counting is handled out-of-band
+// elsewhere. See testdata/transcript_sample.jsonl for a captured fixture.
 
 // agyStep is one line of agy's step-based JSONL transcript.
 type agyStep struct {
@@ -139,6 +139,9 @@ func (a *AntigravityAgent) GetTranscriptPosition(path string) (int, error) {
 // The blank-skip -> lineNum++ -> (lineNum <= startOffset) ordering matches
 // ExtractPrompts so positions stay consistent across analyzer methods.
 func (a *AntigravityAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) (files []string, currentPosition int, err error) {
+	if path == "" {
+		return nil, 0, nil
+	}
 	data, readErr := os.ReadFile(path) //nolint:gosec // path supplied by agent hook stdin
 	if readErr != nil {
 		if os.IsNotExist(readErr) {

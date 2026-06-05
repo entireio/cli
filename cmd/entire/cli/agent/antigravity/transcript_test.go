@@ -188,6 +188,8 @@ func TestExtractModifiedFiles_FromToolCalls(t *testing.T) {
 		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","tool_calls":[{"name":"write_to_file","args":{"TargetFile":"\"/repo/a.txt\"","Overwrite":"true"}}]}`,
 		`{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","tool_calls":[{"name":"replace_file_content","args":{"TargetFile":"\"/repo/b.txt\""}}]}`,
 		`{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","tool_calls":[{"name":"list_dir","args":{"DirectoryPath":"\"/repo\""}}]}`,
+		// Re-mutate /repo/a.txt on a later step: must be deduplicated, not double-counted.
+		`{"step_index":4,"source":"MODEL","type":"PLANNER_RESPONSE","tool_calls":[{"name":"write_to_file","args":{"TargetFile":"\"/repo/a.txt\"","Overwrite":"true"}}]}`,
 	}
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -197,12 +199,12 @@ func TestExtractModifiedFiles_FromToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pos != 4 {
-		t.Errorf("want pos 4, got %d", pos)
+	if pos != 5 {
+		t.Errorf("want pos 5, got %d", pos)
 	}
 	want := map[string]bool{"/repo/a.txt": true, "/repo/b.txt": true}
 	if len(files) != 2 {
-		t.Fatalf("want 2 modified files, got %#v", files)
+		t.Fatalf("want 2 modified files (deduped), got %#v", files)
 	}
 	for _, f := range files {
 		if !want[f] {
