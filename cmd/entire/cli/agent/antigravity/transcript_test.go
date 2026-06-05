@@ -129,3 +129,36 @@ func TestExtractPrompts_RealFixture(t *testing.T) {
 		t.Fatalf("unexpected prompts: %#v", prompts)
 	}
 }
+
+func TestExtractPrompts_SkipsLinesAtOrBelowOffset(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	lines := []string{
+		`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_REQUEST>first</USER_REQUEST>"}`,
+		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"ok"}`,
+		`{"step_index":2,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_REQUEST>second</USER_REQUEST>"}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &AntigravityAgent{}
+
+	// offset 0 → both prompts
+	all, err := a.ExtractPrompts(path, 0)
+	if err != nil {
+		t.Fatalf("ExtractPrompts(0): %v", err)
+	}
+	if len(all) != 2 || all[0] != "first" || all[1] != "second" {
+		t.Fatalf("offset 0: want [first second], got %#v", all)
+	}
+
+	// offset 1 → first non-blank line consumed, so only the second USER_INPUT remains
+	rest, err := a.ExtractPrompts(path, 1)
+	if err != nil {
+		t.Fatalf("ExtractPrompts(1): %v", err)
+	}
+	if len(rest) != 1 || rest[0] != "second" {
+		t.Fatalf("offset 1: want [second], got %#v", rest)
+	}
+}
