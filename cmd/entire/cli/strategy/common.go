@@ -67,6 +67,14 @@ func EnsureSetup(ctx context.Context) error {
 		return err
 	}
 
+	// When checkpoints live in a separate checkpoint_remote repo, a fresh
+	// clone has neither the local metadata branch nor an origin
+	// remote-tracking ref. Fetch from the checkpoint remote before opening
+	// the repo handle below, so EnsureMetadataBranch doesn't mint an
+	// unrelated empty orphan (issue #1374) and the handle sees the fetched
+	// packfiles.
+	bootstrapMetadataFromCheckpointRemote(ctx)
+
 	// Ensure the entire/checkpoints/v1 orphan branch exists for permanent session storage
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -453,6 +461,11 @@ func resolveAgentType(ctxAgentType types.AgentType, state *SessionState) types.A
 // If the remote-tracking branch (origin/entire/checkpoints/v1) exists and the local
 // branch is missing or empty, creates/updates the local branch from it.
 // Otherwise creates an empty orphan.
+//
+// Note: this function only consults local refs. When a checkpoint_remote is
+// configured, EnsureSetup fetches the metadata branch from it first (see
+// bootstrapMetadataFromCheckpointRemote) so this function doesn't mint an
+// unrelated empty orphan on a fresh clone.
 func EnsureMetadataBranch(ctx context.Context, repo *git.Repository) error {
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 

@@ -446,3 +446,73 @@ func TestHTTPS_PushFailsWithoutToken(t *testing.T) {
 	}
 	assertRemoteHasCheckpointCommit(t, bareDir, checkpointID)
 }
+
+// TestHTTPS_EnableBootstrapsMetadataFromCheckpointRemote reproduces
+// https://github.com/entireio/cli/issues/1374: when a second device clones a
+// repo whose checkpoint data lives on a configured checkpoint_remote (a
+// separate repo from origin), `entire enable` must populate the local
+// entire/checkpoints/v1 branch from that remote instead of minting an
+// unrelated empty orphan. The orphan made `entire checkpoint list` return
+// nothing and caused non-fast-forward rejections on later fetches.
+func TestHTTPS_EnableBootstrapsMetadataFromCheckpointRemote(t *testing.T) {
+	t.Parallel()
+
+	srv := startGitHTTPSServer(t, "testorg/main-repo", "testorg/checkpoints")
+	env := NewFeatureBranchEnv(t)
+
+	mainBare := srv.BareDirs["testorg/main-repo"]
+	checkpointBare := srv.BareDirs["testorg/checkpoints"]
+	httpsURL := srv.URL + "/testorg/main-repo.git"
+	seedBareRepo(t, env, mainBare, httpsURL)
+
+	checkpointRemoteSettings := map[string]any{
+		"strategy_options": map[string]any{
+			"checkpoint_remote": map[string]any{
+				"provider": "github",
+				"repo":     "testorg/checkpoints",
+			},
+		},
+	}
+
+	// Device A: create a checkpoint and push — metadata routes to the
+	// checkpoint remote, never to origin.
+	cloneA := cloneFromBareWithHTTPS(t, env, mainBare, httpsURL)
+	cloneA.ExtraEnv = srv.tokenEnv("clone-a-token")
+	cloneA.GitCheckoutNewBranch("feature/clone-a")
+	cloneA.PatchSettings(checkpointRemoteSettings)
+	checkpointA := createCheckpointedCommit(t, cloneA, "Work in clone A", "a.go", "package a", "Work from A")
+	cloneA.RunPrePush("origin")
+
+	if !cloneA.BranchExistsOnRemote(checkpointBare, paths.MetadataBranchName) {
+		t.Fatal("precondition: checkpoint branch should be on checkpoint remote after push")
+	}
+	if cloneA.BranchExistsOnRemote(mainBare, paths.MetadataBranchName) {
+		t.Fatal("precondition: checkpoint branch should NOT be on origin")
+	}
+
+	// Device B: fresh clone of origin (which has no metadata branch) with the
+	// same checkpoint_remote configured. No token — fetch (upload-pack) is
+	// unauthenticated; only push requires one.
+	cloneB := cloneFromBareWithHTTPS(t, env, mainBare, httpsURL)
+	cloneB.ExtraEnv = srv.sslEnv()
+	cloneB.PatchSettings(checkpointRemoteSettings)
+
+	cloneB.RunCLI("enable", "--agent", "claude-code", "--telemetry=false")
+
+	// The local metadata branch must match the checkpoint remote tip — not be
+	// a fresh empty orphan with unrelated history.
+	if !cloneB.BranchExists(paths.MetadataBranchName) {
+		t.Fatal("local metadata branch should exist after enable")
+	}
+	remoteTip := revParse(t, checkpointBare, "refs/heads/"+paths.MetadataBranchName)
+	localTip := revParse(t, cloneB.RepoDir, "refs/heads/"+paths.MetadataBranchName)
+	if localTip != remoteTip {
+		t.Errorf("local metadata branch tip = %s, want checkpoint remote tip %s (empty-orphan bug: enable did not fetch from checkpoint_remote)", localTip, remoteTip)
+	}
+
+	// The fetched branch must contain device A's checkpoint metadata.
+	summaryA := CheckpointSummaryPath(checkpointA)
+	if _, found := cloneB.ReadFileFromBranch(paths.MetadataBranchName, summaryA); !found {
+		t.Errorf("local metadata branch should contain checkpoint A summary at %s", summaryA)
+	}
+}

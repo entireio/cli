@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -86,7 +88,7 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 	// This is a one-time operation — once the branch exists locally, subsequent pushes
 	// skip the fetch entirely. Only fetch the metadata branch; trails are always pushed
 	// to the user's push remote, not the checkpoint remote.
-	if err := fetchMetadataBranchIfMissing(ctx, checkpointURL); err != nil {
+	if _, err := fetchMetadataBranchIfMissing(ctx, checkpointURL); err != nil {
 		logging.Warn(ctx, "checkpoint-remote: failed to fetch metadata branch",
 			slog.String("error", err.Error()),
 		)
@@ -162,29 +164,63 @@ func fetchURLIntoTmpRef(ctx context.Context, remoteURL, srcRef, tmpRef, label st
 	return fmt.Errorf("fetch %s from %s failed: %w", label, redactedURL, fetchErr)
 }
 
+// bootstrapMetadataFromCheckpointRemote populates the local metadata branch
+// from the configured checkpoint_remote when it doesn't exist locally yet.
+//
+// On a fresh clone of a repo whose checkpoints live in a separate repo,
+// neither the local branch nor origin's remote-tracking ref exists — without
+// this fetch, EnsureMetadataBranch would mint an unrelated empty orphan that
+// hides existing checkpoints and rejects later fetches as non-fast-forward
+// (issue #1374). Best-effort: on failure the caller falls back to orphan
+// creation (the remote branch legitimately doesn't exist before the first
+// push from any device).
+func bootstrapMetadataFromCheckpointRemote(ctx context.Context) {
+	if !remote.Configured(ctx) {
+		return
+	}
+	checkpointURL, err := remote.FetchURL(ctx)
+	if err != nil {
+		logging.Warn(ctx, "checkpoint-remote: could not resolve fetch URL for metadata branch bootstrap",
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	fetched, err := fetchMetadataBranchIfMissing(ctx, checkpointURL)
+	if err != nil {
+		logging.Warn(ctx, "checkpoint-remote: metadata branch bootstrap failed",
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	if fetched {
+		fmt.Fprintf(os.Stderr, "✓ Created local branch '%s' from checkpoint remote\n", paths.MetadataBranchName)
+	}
+}
+
 // fetchMetadataBranchIfMissing fetches the primary metadata ref from a URL only if it doesn't exist locally.
 // This avoids network calls on every push — once the branch exists locally, this is a no-op.
-// Fetch failures are silently swallowed (returns nil): the push will handle creating the
-// branch on the remote. Only fatal errors (opening repo, creating local branch) are returned.
-func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) error {
+// Returns true when the branch was actually fetched and created locally.
+// Fetch failures are silently swallowed (returns nil error): the push will handle creating
+// the branch on the remote. Only fatal errors (opening repo, creating local branch) are returned.
+func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) (bool, error) {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
+		return false, fmt.Errorf("failed to open repository: %w", err)
 	}
 	defer repo.Close()
 
 	// Check if branch already exists locally - if so, nothing to do
 	refs := checkpoint.ResolveCommittedRefs(ctx)
 	if _, err := repo.Reference(refs.Primary, true); err == nil {
-		return nil // Branch exists locally, skip fetch
+		return false, nil // Branch exists locally, skip fetch
 	}
 
 	// Branch doesn't exist locally - try to fetch it from the URL.
 	// Fetch failures are not fatal: push will create it on the remote when it succeeds.
 	if err := FetchMetadataBranch(ctx, remoteURL); err != nil {
-		return nil
+		return false, nil
 	}
 
 	logging.Info(ctx, "checkpoint-remote: fetched metadata branch from URL")
-	return nil
+	return true, nil
 }
