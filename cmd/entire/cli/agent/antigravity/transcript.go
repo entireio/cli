@@ -13,8 +13,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
-// Compile-time interface assertion.
-var _ agent.PromptExtractor = (*AntigravityAgent)(nil)
+// Compile-time interface assertions.
+var (
+	_ agent.PromptExtractor    = (*AntigravityAgent)(nil)
+	_ agent.TranscriptAnalyzer = (*AntigravityAgent)(nil)
+)
 
 // Antigravity 2.0 (agy) writes JSONL transcripts at
 //   ~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/transcript.jsonl
@@ -93,6 +96,82 @@ func (a *AntigravityAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]
 		}
 	}
 	return prompts, nil
+}
+
+// GetTranscriptPosition implements agent.TranscriptAnalyzer. It returns the
+// number of non-blank JSONL lines in the transcript, which the framework uses
+// as a stable offset to bound subsequent extraction to a single checkpoint
+// range. A missing file yields (0, nil) so a not-yet-flushed transcript (agy
+// writes asynchronously) doesn't fail the hook.
+func (a *AntigravityAgent) GetTranscriptPosition(path string) (int, error) {
+	if path == "" {
+		return 0, nil
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // path supplied by agent hook stdin
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("antigravity: transcript position: %w", err)
+	}
+	count := 0
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) > 0 {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// ExtractModifiedFilesFromOffset implements agent.TranscriptAnalyzer. It scans
+// agy step lines after startOffset for mutating tool calls and returns the
+// target file paths they touch, deduplicated, alongside the new line position.
+//
+// Path convention: returned paths are ABSOLUTE and symlink-resolved — the same
+// shape lifecycle.go's parsePreToolUse records into FilesTouched. The framework
+// relativizes downstream via FilterAndNormalizePaths -> paths.ToRelativePath
+// against the worktree root, so we must NOT pre-relativize here. We mirror
+// parsePreToolUse exactly: decode the double-encoded TargetFile arg, then
+// resolveAgySymlinks so the path matches what attribution diffs against (e.g.
+// macOS /tmp -> /private/tmp). Both helpers live in lifecycle.go (same package)
+// and are reused, not duplicated.
+//
+// The blank-skip -> lineNum++ -> (lineNum <= startOffset) ordering matches
+// ExtractPrompts so positions stay consistent across analyzer methods.
+func (a *AntigravityAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) (files []string, currentPosition int, err error) {
+	data, readErr := os.ReadFile(path) //nolint:gosec // path supplied by agent hook stdin
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return nil, 0, nil
+		}
+		return nil, 0, fmt.Errorf("antigravity: extract modified files: %w", readErr)
+	}
+	seen := map[string]bool{}
+	lineNum := 0
+	for _, raw := range bytes.Split(data, []byte("\n")) {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue // skip blank lines BEFORE counting (matches ExtractPrompts)
+		}
+		lineNum++
+		if lineNum <= startOffset {
+			continue
+		}
+		var step agyStep
+		if json.Unmarshal(raw, &step) != nil {
+			continue
+		}
+		for _, tc := range step.ToolCalls {
+			switch tc.Name {
+			case "write_to_file", "replace_file_content", "multi_replace_file_content":
+				target := resolveAgySymlinks(decodeAgyString(tc.Args["TargetFile"]))
+				if target != "" && !seen[target] {
+					seen[target] = true
+					files = append(files, target)
+				}
+			}
+		}
+	}
+	return files, lineNum, nil
 }
 
 func (a *AntigravityAgent) ReadTranscript(sessionRef string) ([]byte, error) {
