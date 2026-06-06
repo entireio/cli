@@ -20,7 +20,7 @@ Getting Started:
   To get started with Entire CLI, run 'entire enable' to enable
   session tracking in your repository, then 'entire agent add <name>'
   to install hooks for a specific agent. For more information, visit:
-  https://docs.entire.io/introduction
+  https://docs.entire.io/overview
 
 `
 

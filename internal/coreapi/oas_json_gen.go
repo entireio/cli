@@ -1888,6 +1888,10 @@ func (s *CreatedMirror) encodeFields(e *jx.Encoder) {
 		e.Bool(s.Created)
 	}
 	{
+		e.FieldStart("empty")
+		e.Bool(s.Empty)
+	}
+	{
 		e.FieldStart("mirrorId")
 		e.Str(s.MirrorId)
 	}
@@ -1901,12 +1905,13 @@ func (s *CreatedMirror) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfCreatedMirror = [5]string{
+var jsonFieldsNameOfCreatedMirror = [6]string{
 	0: "$schema",
 	1: "created",
-	2: "mirrorId",
-	3: "mirrorUrl",
-	4: "publicUrl",
+	2: "empty",
+	3: "mirrorId",
+	4: "mirrorUrl",
+	5: "publicUrl",
 }
 
 // Decode decodes CreatedMirror from json.
@@ -1940,8 +1945,20 @@ func (s *CreatedMirror) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"created\"")
 			}
-		case "mirrorId":
+		case "empty":
 			requiredBitSet[0] |= 1 << 2
+			if err := func() error {
+				v, err := d.Bool()
+				s.Empty = bool(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"empty\"")
+			}
+		case "mirrorId":
+			requiredBitSet[0] |= 1 << 3
 			if err := func() error {
 				v, err := d.Str()
 				s.MirrorId = string(v)
@@ -1953,7 +1970,7 @@ func (s *CreatedMirror) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"mirrorId\"")
 			}
 		case "mirrorUrl":
-			requiredBitSet[0] |= 1 << 3
+			requiredBitSet[0] |= 1 << 4
 			if err := func() error {
 				v, err := d.Str()
 				s.MirrorUrl = string(v)
@@ -1965,7 +1982,7 @@ func (s *CreatedMirror) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"mirrorUrl\"")
 			}
 		case "publicUrl":
-			requiredBitSet[0] |= 1 << 4
+			requiredBitSet[0] |= 1 << 5
 			if err := func() error {
 				v, err := d.Str()
 				s.PublicUrl = string(v)
@@ -1986,7 +2003,7 @@ func (s *CreatedMirror) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00011110,
+		0b00111110,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.

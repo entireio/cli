@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -145,31 +147,80 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 					return err
 				}
 				out := cmd.OutOrStdout()
-				if created.Created {
-					fmt.Fprintf(out, "Registered mirror %s\n", created.MirrorId)
-				} else {
-					fmt.Fprintf(out, "Mirror already exists (%s)\n", created.MirrorId)
-				}
-				fmt.Fprintf(out, "  %s\n", created.MirrorUrl)
-				if noWait {
-					fmt.Fprintf(out, "Initial clone may still be in progress; `git clone %s` will work once it completes.\n", created.MirrorUrl)
-					return nil
-				}
-				if err := waitForMirrorClone(ctx, out, clusterHost, owner, repo, waitTimeout); err != nil {
-					if handled, serr := explainSuspendedMirror(cmd.ErrOrStderr(), created.MirrorId, created.Created, err); handled {
-						cmd.SilenceUsage = true
-						return serr
-					}
-					return err
-				}
-				fmt.Fprintf(out, "\nClone it:\n  git clone %s\n", created.MirrorUrl)
-				return nil
+				repoSlug := "/gh/" + owner + "/" + repo
+				return finishMirrorCreate(out, cmd.ErrOrStderr(), created, noWait,
+					func() error {
+						if _, terr := auth.RepoScopedToken(ctx, "https://"+clusterHost, repoSlug, "pull"); terr != nil {
+							return fmt.Errorf("probe mirror for suspension: %w", terr)
+						}
+						return nil
+					},
+					func() error {
+						return waitForMirrorClone(ctx, out, clusterHost, owner, repo, waitTimeout)
+					},
+				)
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "return once the placement is registered, without waiting for the initial clone")
 	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Minute, "how long to wait for the initial clone to finish")
 	return cmd
+}
+
+// finishMirrorCreate prints the post-create status for `repo mirror create`
+// and, unless noWait, makes sure the mirror is usable before returning.
+//
+// Empty upstream and suspended placement interact. An empty upstream has no
+// clone to wait for, so the HEAD-poll loop is skipped — it could only spin to
+// the timeout, since an empty repo never advertises a HEAD. But an *existing*
+// placement can be suspended even when its upstream is empty, and the
+// repo-scoped token exchange is the only signal that surfaces that; a *fresh*
+// create can't be suspended (suspension follows upstream access loss), so it
+// needs neither the probe nor the wait. Non-empty mirrors take the normal
+// clone-wait path.
+//
+// probeSuspended mints a repo-scoped pull token and returns its error for
+// explainSuspendedMirror to classify; waitClone runs the HEAD-poll loop. Both
+// are injected so the branching is unit-testable without the auth and
+// control-plane stack the production caller wires up.
+func finishMirrorCreate(out, errW io.Writer, created *coreapi.CreatedMirror, noWait bool, probeSuspended, waitClone func() error) error {
+	if created.Created {
+		fmt.Fprintf(out, "Registered mirror %s\n", created.MirrorId)
+	} else {
+		fmt.Fprintf(out, "Mirror already exists (%s)\n", created.MirrorId)
+	}
+	fmt.Fprintf(out, "  %s\n", created.MirrorUrl)
+
+	if created.Empty {
+		// An existing placement can sit behind a suspension even with an empty
+		// upstream, so probe the token exchange to surface it. A fresh create
+		// can't be suspended, so skip the probe there.
+		if !created.Created {
+			if err := probeSuspended(); err != nil {
+				if handled, serr := explainSuspendedMirror(errW, created.MirrorId, created.Created, err); handled {
+					return serr
+				}
+				// A non-suspension probe error isn't fatal: the placement exists
+				// and the upstream is genuinely empty, so report that rather than
+				// failing the create on a transient token hiccup.
+			}
+		}
+		fmt.Fprintln(out, "Upstream has no commits yet — nothing to clone. The mirror will pick up refs once the upstream is pushed to.")
+		return nil
+	}
+
+	if noWait {
+		fmt.Fprintf(out, "Initial clone may still be in progress; `git clone %s` will work once it completes.\n", created.MirrorUrl)
+		return nil
+	}
+	if err := waitClone(); err != nil {
+		if handled, serr := explainSuspendedMirror(errW, created.MirrorId, created.Created, err); handled {
+			return serr
+		}
+		return err
+	}
+	fmt.Fprintf(out, "\nClone it:\n  git clone %s\n", created.MirrorUrl)
+	return nil
 }
 
 func newRepoMirrorListCmd() *cobra.Command {

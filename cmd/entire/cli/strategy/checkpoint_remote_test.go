@@ -660,7 +660,14 @@ func TestFetchMetadataBranch_UpdatesExistingLocalBranch(t *testing.T) {
 	testutil.WriteFile(t, localDir, "f.txt", "init")
 	testutil.GitAdd(t, localDir, "f.txt")
 	testutil.GitCommit(t, localDir, "init")
+	require.NoError(t, os.MkdirAll(filepath.Join(localDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(localDir, ".entire", paths.SettingsFileName),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
+		0o644,
+	))
 	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
 
 	require.NoError(t, FetchMetadataBranch(ctx, remoteDir))
 
@@ -701,6 +708,8 @@ func TestFetchMetadataBranch_UpdatesExistingLocalBranch(t *testing.T) {
 	hash2 := strings.TrimSpace(string(hash2Out))
 
 	assert.NotEqual(t, hash1, hash2, "FetchMetadataBranch should update existing local branch to new remote tip")
+	assert.Equal(t, hash2, checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataRefName),
+		"FetchMetadataBranch should mirror fetched v1 metadata to the v1.1 custom ref")
 }
 
 // TestFetchMetadataBranch_DoesNotRewindLocalAhead verifies that calling

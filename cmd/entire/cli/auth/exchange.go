@@ -54,6 +54,14 @@ func EnableInsecureHTTP() {
 	insecureHTTPOverride.Store(true)
 }
 
+// insecureHTTPEnabled reports whether EnableInsecureHTTP was called. The
+// per-context control-plane provider (which bypasses the singleton manager)
+// reads this so --insecure-http-auth still relaxes the HTTPS guard for a
+// non-loopback http:// core, mirroring the singleton's AllowInsecureHTTP.
+func insecureHTTPEnabled() bool {
+	return insecureHTTPOverride.Load()
+}
+
 // SetManagerForTest installs mgr as the manager returned by
 // defaultManager() and returns a cleanup function. Test-only.
 func SetManagerForTest(t interface{ Helper() }, mgr *tokenmanager.Manager) func() {

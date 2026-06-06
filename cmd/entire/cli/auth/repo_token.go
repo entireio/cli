@@ -75,7 +75,7 @@ func SetRepoExchangeTransportForTest(rt http.RoundTripper) func() {
 func RepoScopedToken(ctx context.Context, clusterBaseURL, repoSlug, action string) (string, error) {
 	provider := CurrentProvider()
 	if strings.TrimSpace(provider.STSPath) == "" {
-		return "", errors.New("repo-scoped token exchange requires a v2 auth host (set ENTIRE_AUTH_BASE_URL to a core that exposes /oauth/token)")
+		return "", errors.New("repo-scoped token exchange requires a v2 auth host (set ENTIRE_AUTH_BASE_URL to a login server that exposes /oauth/token)")
 	}
 
 	loginJWT, err := LookupCurrentToken()

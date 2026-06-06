@@ -73,12 +73,11 @@ func RenderForWriter(w io.Writer, markdown string) (string, error) {
 	return Render(markdown, terminalWidth(w), termenv.HasDarkBackground())
 }
 
-// shouldRender returns true if w is a terminal writer and NO_COLOR is unset.
+// shouldRender returns true when styled output is appropriate for w
+// (terminal writer, NO_COLOR unset, no legacy console) — see
+// interactive.ShouldStyle.
 func shouldRender(w io.Writer) bool {
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	return interactive.IsTerminalWriter(w)
+	return interactive.ShouldStyle(w)
 }
 
 // terminalWidth returns the writer's terminal width capped at 80.

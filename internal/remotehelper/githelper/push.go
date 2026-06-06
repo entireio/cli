@@ -151,6 +151,20 @@ func handlePush(ctx context.Context, t Transport, firstLine string, opts *Option
 		return fmt.Errorf("reading helper-status: %w", err)
 	}
 
+	// Relay helper-status before checking exit codes. send-pack exits
+	// non-zero on per-ref rejections (D/F conflict, protected branch,
+	// hook decline); the buffered `error refs/X <reason>` lines are
+	// what git's transport-helper.c reads to print `! [remote rejected]
+	// refs/X (<reason>)`. Returning early on Wait/feed errors swallowed
+	// them, leaving users with only `send-pack exited with error: exit
+	// status 1`.
+	if _, err := stdout.Write(helperStatus); err != nil {
+		return fmt.Errorf("writing helper-status: %w", err)
+	}
+	if _, err := fmt.Fprintln(stdout); err != nil {
+		return fmt.Errorf("writing push terminator: %w", err)
+	}
+
 	if err := <-feedErr; err != nil {
 		if waitErr := sp.Wait(); waitErr != nil {
 			return errors.Join(err, fmt.Errorf("send-pack exited after feeder error: %w", waitErr))
@@ -159,13 +173,6 @@ func handlePush(ctx context.Context, t Transport, firstLine string, opts *Option
 	}
 	if err := sp.Wait(); err != nil {
 		return fmt.Errorf("send-pack exited with error: %w", err)
-	}
-
-	if _, err := stdout.Write(helperStatus); err != nil {
-		return fmt.Errorf("writing helper-status: %w", err)
-	}
-	if _, err := fmt.Fprintln(stdout); err != nil {
-		return fmt.Errorf("writing push terminator: %w", err)
 	}
 	return nil
 }

@@ -41,6 +41,12 @@ type Config struct {
 	SkipTLS      bool
 	SetAuth      SetAuthFunc
 	OnNodeFailed func(failedNode string)
+	// UserAgent is stamped on every outbound HTTP request so the
+	// server can attribute git smart-HTTP traffic to the remote
+	// helper. Empty disables the wrapper, in which case the request
+	// carries Go's default ("Go-http-client/1.1") — useful for tests
+	// that don't care about identity. Production callers set it.
+	UserAgent string
 }
 
 // Proxy is the HTTP transport the helper protocol uses to talk to the
@@ -103,9 +109,17 @@ func New(cfg Config) *Proxy {
 		p.repoPath = cfg.Nodes.RepoPath
 	}
 
-	transport := httpclient.NewTransport(cfg.SkipTLS)
+	// User-Agent must be set before httpdebug logs the request, so the
+	// wrapper sits outside httpdebug. The order is:
+	//   user-agent → httpdebug → http.Transport
+	// so the debug log captures the same headers the wire sees.
+	var rt http.RoundTripper = httpclient.NewTransport(cfg.SkipTLS)
+	rt = &httpdebug.RoundTripper{Next: rt}
+	if cfg.UserAgent != "" {
+		rt = &httpclient.UserAgentTransport{Next: rt, UA: cfg.UserAgent}
+	}
 	p.client = &http.Client{
-		Transport:     &httpdebug.RoundTripper{Next: transport},
+		Transport:     rt,
 		CheckRedirect: p.checkRedirect,
 	}
 	return p

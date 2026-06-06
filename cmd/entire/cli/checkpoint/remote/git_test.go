@@ -145,7 +145,7 @@ func TestResolvePushCommandTarget(t *testing.T) {
 		{
 			// Without checkpoint_remote configured the push should use the
 			// remote name so git updates refs/remotes/origin/<branch> and
-			// subsequent hasUnpushedSessionsCommon checks can short-circuit.
+			// subsequent hasUnpushedBranchRef checks can short-circuit.
 			name:         "no checkpoint remote keeps remote name",
 			originURL:    "git@github.com:acme/app.git",
 			settingsJSON: `{"enabled":true}`,

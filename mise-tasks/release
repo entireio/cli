@@ -21,7 +21,8 @@ if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
 fi
 
 # Ensure working tree is clean
-if [ -n "$(git status --porcelain)" ]; then
+status="$(git status --porcelain)"
+if [ -n "$status" ]; then
   echo "Error: working tree is not clean, commit or stash changes first"
   exit 1
 fi

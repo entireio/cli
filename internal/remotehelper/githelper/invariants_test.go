@@ -17,10 +17,14 @@ package githelper
 // and every byte that reached stdout.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -259,5 +263,72 @@ func TestInvariant_PartialRefBatchAllOrNothing(t *testing.T) {
 	}
 	if !strings.Contains(body, refB) {
 		t.Errorf("POST body missing %q", refB)
+	}
+}
+
+// TestInvariant_HelperStatusSurfacedOnSendPackError: when `git send-pack`
+// exits non-zero on a per-ref rejection (e.g. branch protection, D/F
+// conflict, server hook decline), its buffered `error <ref> <reason>`
+// helper-status lines are what `transport-helper.c` reads to render
+// `! [remote rejected] <ref> (<reason>)`. handlePush must therefore
+// relay helper-status to stdout BEFORE returning the send-pack exit
+// error — relaying only on the success path strips the rejection
+// reason and leaves the user with bare "send-pack exited with error".
+//
+// A shell stub on PATH plays the role of `git send-pack`: it emits the
+// minimal wire shape handlePush expects (empty wrapped request, then
+// trailing flush + helper-status), and exits 1.
+func TestInvariant_HelperStatusSurfacedOnSendPackError(t *testing.T) {
+	// No t.Parallel(): t.Setenv("PATH", ...) mutates process-global state.
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script PATH stub is POSIX-only")
+	}
+
+	ref := testRefMain
+	helperStatusLine := "error " + ref + " remote rejected: branch protection violation\n"
+
+	// Stub git: emits the outer flush that terminates an empty
+	// send-pack request, drains stdin (refspecs + advertisement +
+	// receive-pack response), then emits the trailing flush +
+	// helper-status line, then exits 1. The exit code mirrors
+	// send-pack's behaviour on per-ref rejection.
+	stubDir := t.TempDir()
+	stubPath := filepath.Join(stubDir, "git")
+	stub := "#!/bin/sh\n" +
+		"printf '0000'\n" +
+		"cat > /dev/null\n" +
+		"printf '0000" + helperStatusLine + "'\n" +
+		"exit 1\n"
+	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
+		t.Fatalf("writing stub git: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	oldSHA := strings.Repeat("a", 40)
+
+	ft := &fakeTransport{
+		infoRefsResp: func() (io.ReadCloser, error) {
+			return stringRC(serviceAnnouncement(serviceReceivePack,
+				oldSHA+" "+ref+"\x00 report-status\n")), nil
+		},
+		serviceRPCResp: func(string, []byte) (io.ReadCloser, error) {
+			return stringRC(""), nil
+		},
+	}
+
+	// handlePush takes the first "push" line plus a bufio.Reader for
+	// the rest of the batch; readPushBatch terminates on the blank
+	// line.
+	firstLine := "push " + oldSHA + ":" + ref
+	stdin := bufio.NewReader(strings.NewReader("\n"))
+
+	var stdout bytes.Buffer
+	err := handlePush(context.Background(), ft, firstLine, &Options{}, stdin, &stdout)
+	if err == nil {
+		t.Fatal("expected error from send-pack exit 1")
+	}
+	if !strings.Contains(stdout.String(), helperStatusLine) {
+		t.Errorf("stdout missing helper-status line; got %q, want substring %q",
+			stdout.String(), helperStatusLine)
 	}
 }

@@ -14,11 +14,21 @@ import (
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // resolveTranscriptPath determines the correct file path for an agent's session transcript.
 // Computes the path dynamically from the current repo location for cross-machine portability.
 func resolveTranscriptPath(ctx context.Context, sessionID string, agent agentpkg.Agent) (string, error) {
+	// Session IDs reaching this restore path can originate from checkpoint
+	// metadata on the shared entire/checkpoints/v1 branch, which is attacker-
+	// influenceable. Reject path separators/absolute paths before they reach
+	// agent.ResolveSessionFile (some agents return absolute IDs verbatim),
+	// preventing transcript writes outside the agent session directory.
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		return "", fmt.Errorf("invalid session ID for transcript path: %w", err)
+	}
+
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get worktree root: %w", err)

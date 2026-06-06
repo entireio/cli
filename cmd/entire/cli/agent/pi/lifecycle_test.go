@@ -211,6 +211,41 @@ func TestCaptureTranscript_MissingInputs(t *testing.T) {
 	}
 }
 
+// TestCaptureTranscript_RejectsTraversalSessionID verifies that captureTranscript
+// refuses an unsafe session ID. captureTranscript runs inside ParseHookEvent,
+// before the lifecycle dispatcher validates the ID, so it must guard the
+// transcript write itself — otherwise a "../"-laden ID escapes the cache dir.
+func TestCaptureTranscript_RejectsTraversalSessionID(t *testing.T) {
+	// Cannot use t.Parallel — t.Chdir.
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	src := filepath.Join(dir, "src.jsonl")
+	if err := os.WriteFile(src, []byte("payload\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A sentinel outside the cache dir that the traversal would target.
+	victim := filepath.Join(dir, "victim.json")
+	if err := os.WriteFile(victim, []byte("SAFE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, bad := range []string{"../victim", "/etc/passwd", "..", "a/b"} {
+		if got := captureTranscript(context.Background(), bad, src); got != "" {
+			t.Errorf("captureTranscript(%q) = %q, want \"\" (unsafe ID must be refused)", bad, got)
+		}
+	}
+
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "SAFE" {
+		t.Errorf("sentinel was overwritten via traversal: %q", string(got))
+	}
+}
+
 func TestGetSupportedHooks(t *testing.T) {
 	t.Parallel()
 	got := (&PiAgent{}).GetSupportedHooks()

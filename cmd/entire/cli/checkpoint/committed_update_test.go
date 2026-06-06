@@ -46,7 +46,7 @@ func setupRepoForUpdate(t *testing.T) (*git.Repository, *GitStore, id.Checkpoint
 		t.Fatalf("failed to commit: %v", err)
 	}
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
 
 	err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
@@ -486,7 +486,7 @@ func TestUpdateCommitted_UsesCorrectAuthor(t *testing.T) {
 			}
 
 			// Write initial checkpoint
-			store := NewGitStore(repo)
+			store := NewGitStore(repo, DefaultV1Refs())
 			cpID := id.MustCheckpointID("a1b2c3d4e5f6")
 			err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
 				CheckpointID: cpID,

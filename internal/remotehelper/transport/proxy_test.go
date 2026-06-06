@@ -114,6 +114,69 @@ func TestNewProxy(t *testing.T) {
 
 const serviceParam = "git-upload-pack"
 
+func TestProxy_SetsUserAgentHeader(t *testing.T) {
+	t.Parallel()
+
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("User-Agent")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	p := New(Config{
+		Nodes: replicas.NodeConfig{
+			InitialNodes: []string{server.URL},
+			EntryURL:     server.URL,
+			ClusterHost:  mustHost(t, server.URL),
+			RepoPath:     "owner/repo",
+		},
+		Path:      "/et/owner/repo",
+		UserAgent: "git-remote-entire/9.9.9",
+	})
+
+	resp, err := p.InfoRefs(t.Context(), serviceParam)
+	if err != nil {
+		t.Fatalf("InfoRefs: %v", err)
+	}
+	_ = resp.Close()
+
+	if want := "git-remote-entire/9.9.9"; got != want {
+		t.Errorf("User-Agent = %q, want %q", got, want)
+	}
+}
+
+func TestProxy_OmitsUserAgentWrapperWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("User-Agent")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	p := New(Config{
+		Nodes: replicas.NodeConfig{
+			InitialNodes: []string{server.URL},
+			EntryURL:     server.URL,
+			ClusterHost:  mustHost(t, server.URL),
+			RepoPath:     "owner/repo",
+		},
+		Path: "/et/owner/repo",
+	})
+
+	resp, err := p.InfoRefs(t.Context(), serviceParam)
+	if err != nil {
+		t.Fatalf("InfoRefs: %v", err)
+	}
+	_ = resp.Close()
+
+	if !strings.HasPrefix(got, "Go-http-client/") {
+		t.Errorf("User-Agent = %q, want Go's default when wrapper omitted", got)
+	}
+}
+
 func TestInfoRefs(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

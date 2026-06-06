@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v6"
@@ -710,6 +711,48 @@ func TestResolveCheckpointFetchTarget_FallsBackOnError(t *testing.T) {
 	// Falls back to the origin remote name when URL resolution fails.
 	target := resolveCheckpointFetchTarget(context.Background())
 	assert.Equal(t, "origin", target)
+}
+
+// Not parallel: uses t.Chdir().
+func TestFetchMetadataBranch_MirrorsV11Ref(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	defaultBranch := gitDefaultBranch(t, remoteDir)
+
+	gitRun(t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	gitRun(t, remoteDir, "rm", "-rf", ".")
+	testutil.WriteFile(t, remoteDir, "metadata.json", `{"version": 1}`)
+	testutil.GitAdd(t, remoteDir, "metadata.json")
+	gitRun(t, remoteDir, "-c", "commit.gpgsign=false", "commit", "-m", "checkpoint metadata")
+	gitRun(t, remoteDir, "checkout", defaultBranch)
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	gitRun(t, localDir, "remote", "add", "origin", remoteDir)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(localDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(localDir, ".entire", paths.SettingsFileName),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
+		0o644,
+	))
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	require.NoError(t, FetchMetadataBranch(ctx))
+
+	v1Hash := gitOutput(t, localDir, "rev-parse", paths.MetadataBranchName)
+	mirrorHash := gitOutput(t, localDir, "rev-parse", paths.MetadataRefName)
+	assert.Equal(t, v1Hash, mirrorHash)
 }
 
 // setupRepoWithBlobOnMetadataBranch creates a repo with a blob committed on

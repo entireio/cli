@@ -269,57 +269,6 @@ func TestRemoveCurrentContext(t *testing.T) {
 	}
 }
 
-func TestRemoveAllContexts(t *testing.T) {
-	cfgDir := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
-	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
-	t.Cleanup(restore)
-
-	exp := time.Now().Add(time.Hour).Unix()
-	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://a.example.com","handle":"alice","exp":%d}`, exp)), "entr_a", true); err != nil {
-		t.Fatalf("record a: %v", err)
-	}
-	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://b.example.com","handle":"bob","exp":%d}`, exp)), "entr_b", true); err != nil {
-		t.Fatalf("record b: %v", err)
-	}
-	n, err := RemoveAllContexts()
-	if err != nil {
-		t.Fatalf("RemoveAllContexts: %v", err)
-	}
-	if n != 2 {
-		t.Fatalf("removed %d, want 2", n)
-	}
-	f, err := contexts.Load(cfgDir)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if len(f.Contexts) != 0 || f.CurrentContext != "" {
-		t.Fatalf("expected fully cleared, got contexts=%d current=%q", len(f.Contexts), f.CurrentContext)
-	}
-	// Every refresh slot must be gone too, for both removed contexts.
-	for _, tc := range []struct{ iss, handle string }{
-		{"https://a.example.com", "alice"},
-		{"https://b.example.com", "bob"},
-	} {
-		svc := tokenstore.CoreKeyringService(tc.iss)
-		if v, err := tokenstore.Get(svc, tc.handle); !errors.Is(err, tokenstore.ErrNotFound) {
-			t.Fatalf("access slot for %s survived: value=%q err=%v", tc.handle, v, err)
-		}
-		if v, err := tokenstore.Get(tokenstore.RefreshService(svc), tc.handle); !errors.Is(err, tokenstore.ErrNotFound) {
-			t.Fatalf("refresh slot for %s survived: value=%q err=%v", tc.handle, v, err)
-		}
-	}
-
-	// Idempotent.
-	n2, err := RemoveAllContexts()
-	if err != nil {
-		t.Fatalf("second RemoveAllContexts: %v", err)
-	}
-	if n2 != 0 {
-		t.Fatalf("second call removed %d, want 0", n2)
-	}
-}
-
 func TestRemoveCurrentContext_DoesNotSwitchToAnother(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
@@ -352,6 +301,51 @@ func TestRemoveCurrentContext_DoesNotSwitchToAnother(t *testing.T) {
 	}
 	if len(f.Contexts) != 1 {
 		t.Fatalf("want the other context to survive; got %d contexts", len(f.Contexts))
+	}
+}
+
+func TestRemoveContext(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	exp := time.Now().Add(time.Hour).Unix()
+	first, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://a.example.com","handle":"alice","exp":%d}`, exp)), "entr_a", true)
+	if err != nil {
+		t.Fatalf("record a: %v", err)
+	}
+	active, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://b.example.com","handle":"alice","exp":%d}`, exp)), "entr_b", true)
+	if err != nil {
+		t.Fatalf("record b: %v", err)
+	}
+
+	// Remove the non-current context by name: it must disappear (both slots)
+	// while the active context and current_context pointer are untouched.
+	if err := RemoveContext(first); err != nil {
+		t.Fatalf("RemoveContext: %v", err)
+	}
+	f, err := contexts.Load(cfgDir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if f.Find(first) != nil {
+		t.Fatalf("context %q should have been removed", first)
+	}
+	if f.CurrentContext != active {
+		t.Fatalf("current_context = %q, want the untouched active context %q", f.CurrentContext, active)
+	}
+	svcA := tokenstore.CoreKeyringService("https://a.example.com")
+	if v, err := tokenstore.Get(svcA, "alice"); !errors.Is(err, tokenstore.ErrNotFound) {
+		t.Fatalf("access slot survived RemoveContext: value=%q err=%v", v, err)
+	}
+	if v, err := tokenstore.Get(tokenstore.RefreshService(svcA), "alice"); !errors.Is(err, tokenstore.ErrNotFound) {
+		t.Fatalf("refresh slot survived RemoveContext: value=%q err=%v", v, err)
+	}
+
+	// Idempotent: removing a name that no longer exists is a no-op.
+	if err := RemoveContext(first); err != nil {
+		t.Fatalf("second RemoveContext: %v", err)
 	}
 }
 

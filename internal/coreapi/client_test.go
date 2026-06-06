@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ogen-go/ogen/ogenerrors"
+
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
 
 func TestAPIError(t *testing.T) {
@@ -69,6 +72,63 @@ func TestAPIError(t *testing.T) {
 				t.Errorf("APIError() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestProviderSource_BearerAuth covers the three branches of the
+// token-provider SecuritySource New() builds: a token passes through, a
+// not-logged-in error gets the login hint, and any other error surfaces
+// under the control-plane-token wrapper rather than the login hint.
+func TestProviderSource_BearerAuth(t *testing.T) {
+	t.Parallel()
+
+	t.Run("token passes through", func(t *testing.T) {
+		t.Parallel()
+		src := &providerSource{provide: func(context.Context) (string, error) { return "tok-123", nil }}
+		got, err := src.BearerAuth(context.Background(), "")
+		if err != nil {
+			t.Fatalf("BearerAuth: %v", err)
+		}
+		if got.Token != "tok-123" {
+			t.Fatalf("Token = %q, want tok-123", got.Token)
+		}
+	})
+
+	t.Run("not-logged-in maps to login hint", func(t *testing.T) {
+		t.Parallel()
+		src := &providerSource{provide: func(context.Context) (string, error) {
+			return "", fmt.Errorf("wrapped: %w", auth.ErrNotLoggedIn)
+		}}
+		_, err := src.BearerAuth(context.Background(), "")
+		if err == nil || !strings.Contains(err.Error(), "entire login") {
+			t.Fatalf("error = %v, want a login hint", err)
+		}
+		if !errors.Is(err, auth.ErrNotLoggedIn) {
+			t.Fatalf("error must wrap ErrNotLoggedIn, got %v", err)
+		}
+	})
+
+	t.Run("other errors surface verbatim", func(t *testing.T) {
+		t.Parallel()
+		// The active-context provider returns an already-tailored message; it
+		// must reach the user unprefixed (no generic "resolve control-plane
+		// token" wrapper burying it) and without the login hint.
+		sentinel := errors.New(`no usable login for "ctx" (https://core.example); run ENTIRE_AUTH_BASE_URL=https://core.example entire login`)
+		src := &providerSource{provide: func(context.Context) (string, error) { return "", sentinel }}
+		_, err := src.BearerAuth(context.Background(), "")
+		if err == nil || err.Error() != sentinel.Error() {
+			t.Fatalf("error = %v, want the provider message surfaced verbatim", err)
+		}
+	})
+}
+
+// providerSource must skip SessionAuth so no Cookie header is added — same
+// contract as bearerOnlySource below, asserted here at the unit level.
+func TestProviderSource_SkipsSessionAuth(t *testing.T) {
+	t.Parallel()
+	src := &providerSource{provide: func(context.Context) (string, error) { return "", nil }}
+	if _, err := src.SessionAuth(context.Background(), ""); !errors.Is(err, ogenerrors.ErrSkipClientSecurity) {
+		t.Fatalf("SessionAuth err = %v, want ErrSkipClientSecurity", err)
 	}
 }
 

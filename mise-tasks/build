@@ -2,3 +2,4 @@
 #MISE description="Build the CLI"
 
 go build ./cmd/entire
+go build ./cmd/git-remote-entire

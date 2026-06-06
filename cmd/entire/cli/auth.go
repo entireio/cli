@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,22 +13,20 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/coreapi"
+	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/spf13/cobra"
 )
 
-// authTokenLister lists API tokens for the authenticated user. The
-// implementation resolves its own data-API bearer via
-// auth.TokenForResource (RFC 8693 exchange in split-host setups, same-
-// host shortcut otherwise); callers don't pass a bearer through, which
-// removes the temptation to forward the wrong-audience keyring token.
-type authTokenLister func(ctx context.Context) ([]api.Token, error)
+// coreAuthSessionsPath is entire-core's login-session endpoint family
+// (list / revoke / current) on the auth host. Sessions are OAuth
+// refresh-token families; the CLI authenticates against them with its core
+// JWT. Session management must target the auth host (entire-core), never the
+// data host.
+const coreAuthSessionsPath = "/api/auth/tokens"
 
-// authTokenRevoker revokes a single API token by id. Same bearer-
-// resolution contract as authTokenLister.
-type authTokenRevoker func(ctx context.Context, id string) error
-
-// User-visible placeholder strings. Promoted to constants so tests and
-// production share a single source of truth.
+// User-visible placeholder strings. lastUsedJustNow is consumed by
+// formatRelativeDuration in status.go.
 const (
 	placeholderDash = "-"
 	lastUsedNever   = "never"
@@ -38,11 +35,11 @@ const (
 
 // requireSecureBaseURL enforces TLS unless insecureHTTPAuth is set. Every
 // command that sends a bearer token over the network (login, logout,
-// auth status/list/revoke) must call this so credentials don't leak over
-// plaintext HTTP without explicit opt-in.
+// auth status) must call this so credentials don't leak over plaintext HTTP
+// without explicit opt-in.
 //
 // Both the auth and data API origins are checked: the bearer travels to the
-// auth host for login + auth-token management, and to the data host for
+// auth host for login + session management, and to the data host for
 // search/activity/dispatch/etc. When both origins resolve to the same host
 // (e.g. an explicitly collapsed single-host deployment) the redundant second
 // parse is skipped.
@@ -69,42 +66,33 @@ func requireSecureBaseURL(insecureHTTPAuth bool) error {
 	return nil
 }
 
-// newAPITokensClient builds an api.Client for the auth-token management
-// endpoints (list / revoke / current). API tokens live on the data API
-// regardless of split-host config — the auth host (entire-core in v2)
-// mints OAuth tokens but doesn't host application API token management
-// endpoints — so this targets api.BaseURL().
-//
-// The supplied token must already be scoped for api.BaseURL(). Callers
-// must obtain it via resolveDataAPIToken (or auth.TokenForResource
-// directly) rather than handing through the raw keyring entry — the
-// keyring stores the auth-host-issued core token, which the data API
-// rejects in split-host setups.
-func newAPITokensClient(token string) *api.Client {
-	return api.NewClientWithBaseURL(token, api.BaseURL()).
-		WithAuthTokensPath(auth.CurrentProvider().AuthTokensPath)
+// newAuthSessionsClient builds an api.Client for entire-core's login-session
+// endpoints (coreAuthSessionsPath) on coreURL, authenticated with the
+// session-scoped login JWT. coreURL is the active context's CoreURL (or the
+// configured auth host when no context is active) — session management always
+// targets a login server, never the data host.
+func newAuthSessionsClient(coreURL, token string) *api.Client {
+	return api.NewClientWithBaseURL(token, coreURL).WithAuthSessionsPath(coreAuthSessionsPath)
 }
 
-// resolveDataAPIToken returns a bearer scoped for the data API. In
-// split-host setups this triggers an RFC 8693 exchange against the
-// auth host's STS endpoint; in single-host setups the tokenmanager
-// hits the same-host shortcut and returns the core token unchanged.
-// Centralised so the audience-mismatch bug that motivated this fix
-// can't be reintroduced piecemeal at individual call sites.
-func resolveDataAPIToken(ctx context.Context) (string, error) {
-	token, err := auth.TokenForResource(ctx, api.OriginOnly(api.BaseURL()))
+// resolveAuthHostToken returns a bearer scoped for the auth host (entire-core).
+// For the auth host's own origin the tokenmanager hits the same-host shortcut
+// and returns the stored login JWT unchanged — keeping the entire:session
+// scope that core's session endpoints (and /me) require, with no STS exchange.
+func resolveAuthHostToken(ctx context.Context) (string, error) {
+	token, err := auth.TokenForResource(ctx, api.OriginOnly(api.AuthBaseURL()))
 	if err != nil {
-		return "", fmt.Errorf("resolve API token: %w", err)
+		return "", fmt.Errorf("resolve auth-host token: %w", err)
 	}
 	return token, nil
 }
 
 // isKeychainTokenRejected reports whether err indicates the stored
-// keyring token can't authenticate against the data API. Three failure
-// modes collapse into this single "the user must re-login" branch:
+// keyring token can't authenticate against entire-core. Failure modes that
+// collapse into the single "the user must re-login" branch:
 //
-//   - data API returned 401 (single-host, or after a successful STS
-//     exchange whose result the data API then rejected),
+//   - core API returned 401 (surfaces as *coreapi.ErrorModelStatusCode),
+//     or a data API 401 (api.HTTPError),
 //   - tokenmanager's preflight rejected an expired core token JWT
 //     (surfacing as auth.ErrNotLoggedIn even though the keyring entry
 //     is still present),
@@ -122,7 +110,20 @@ func isKeychainTokenRejected(err error) bool {
 	if api.IsHTTPErrorStatus(err, http.StatusUnauthorized) {
 		return true
 	}
+	// The /me liveness probe goes through the core API client, whose 401
+	// surfaces as *coreapi.ErrorModelStatusCode rather than api.HTTPError.
+	var coreErr *coreapi.ErrorModelStatusCode
+	if errors.As(err, &coreErr) && coreErr.StatusCode == http.StatusUnauthorized {
+		return true
+	}
 	if errors.Is(err, auth.ErrNotLoggedIn) {
+		return true
+	}
+	// A 401 whose body isn't JSON (e.g. a gateway returning text/plain) fails
+	// the ogen typed decode, so it never becomes an ErrorModelStatusCode — it
+	// arrives as a decode error whose message carries "(code 401)". Match that
+	// so the user still gets the re-login hint, not a raw decode dump.
+	if strings.Contains(err.Error(), "code 401") {
 		return true
 	}
 	return strings.Contains(err.Error(), "token exchange: status 4")
@@ -140,8 +141,8 @@ func addInsecureHTTPAuthFlag(cmd *cobra.Command, target *bool) {
 func newAuthCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auth",
-		Short: "Manage authentication and API tokens",
-		Long:  "Authentication subcommands. Includes login, logout, status, listing tokens, and revoking tokens.",
+		Short: "Manage authentication",
+		Long:  "Authentication subcommands. Includes login, logout, status, and login-context management (contexts, use).",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
@@ -150,8 +151,6 @@ func newAuthCmd() *cobra.Command {
 	cmd.AddCommand(newLoginCmd())
 	cmd.AddCommand(newLogoutCmd())
 	cmd.AddCommand(newAuthStatusCmd())
-	cmd.AddCommand(newAuthListCmd())
-	cmd.AddCommand(newAuthRevokeCmd())
 	cmd.AddCommand(newAuthContextsCmd())
 	cmd.AddCommand(newAuthUseCmd())
 	return cmd
@@ -168,136 +167,209 @@ func newAuthStatusCmd() *cobra.Command {
 			if err := requireSecureBaseURL(insecureHTTPAuth); err != nil {
 				return err
 			}
-			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(),
-				auth.NewContextStore(), defaultListTokens, api.AuthBaseURL())
+			target, err := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, api.AuthBaseURL())
+			if err != nil {
+				return err
+			}
+			// We send the session token to target.coreURL; enforce TLS on it
+			// too (it may differ from AuthBaseURL when a context is active).
+			if !insecureHTTPAuth {
+				if err := api.RequireSecureURL(target.coreURL); err != nil {
+					return fmt.Errorf("context login server URL check: %w", err)
+				}
+			}
+			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(), defaultFetchProfile, defaultListAuthSessions, target)
 		},
 	}
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	return cmd
 }
 
-func defaultListTokens(ctx context.Context) ([]api.Token, error) {
-	token, err := resolveDataAPIToken(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return newAPITokensClient(token).ListTokens(ctx) //nolint:wrapcheck // ListTokens already wraps with action context
+// authProfile is the subset of the core API's GET /me that `entire auth
+// status` renders.
+type authProfile struct {
+	Handle         string
+	DisplayName    string
+	Email          string
+	Provider       string
+	ProviderUserID string
 }
 
-func runAuthStatus(ctx context.Context, w io.Writer, store tokenStore, list authTokenLister, baseURL string) error {
-	token, err := store.GetToken(baseURL)
+// profileFetcher fetches a user's profile via GET /me on coreURL, authenticated
+// with token. Injected so status stays unit-testable without a live core.
+type profileFetcher func(ctx context.Context, coreURL, token string) (*authProfile, error)
+
+// authSessionLister lists the active login sessions on coreURL (the user's
+// refresh-token families). Injected for testability; production wires
+// defaultListAuthSessions.
+type authSessionLister func(ctx context.Context, coreURL, token string) ([]api.AuthSession, error)
+
+// contextsProvider returns the stored login contexts and the active context
+// name. Injected for testability; production wires auth.Contexts.
+type contextsProvider func() ([]*contexts.Context, string, error)
+
+// statusTarget is the resolved core to act against: the active context's
+// CoreURL + its session token, or (no active context) the configured
+// AuthBaseURL + legacy keyring entry. Shared by `auth status` (profile +
+// session list) and `logout` (revocation) so both hit the same login server.
+type statusTarget struct {
+	coreURL       string
+	token         string
+	activeContext string // "" when falling back to the legacy entry
+	totalContexts int
+}
+
+// resolveStatusTarget picks the core + token for `entire auth status`. The
+// active contexts.json context wins (so `auth use` retargets status onto that
+// login server); otherwise it falls back to the legacy keyring entry keyed by
+// the configured auth host.
+//
+// A genuine contexts.json read/parse error is surfaced, not swallowed — a
+// missing file reads as "no contexts" (no error), so an error here means the
+// file is corrupt or unreadable, which the user must see. This keeps status
+// symmetric with the control-plane commands (auth.ResolveControlPlaneTarget),
+// which fail the same way rather than silently degrading to a stale identity.
+func resolveStatusTarget(store tokenStore, listContexts contextsProvider, fallbackBaseURL string) (statusTarget, error) {
+	all, current, err := listContexts()
 	if err != nil {
-		return fmt.Errorf("read keychain: %w", err)
+		return statusTarget{}, fmt.Errorf("load contexts: %w", err)
 	}
-	if token == "" {
-		fmt.Fprintf(w, "Not logged in to %s\n", baseURL)
+	total := len(all)
+	for _, c := range all {
+		if c.Name != current || c.CoreURL == "" {
+			continue
+		}
+		if tok, terr := auth.LoginTokenForContext(c); terr == nil && tok != "" {
+			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total}, nil
+		}
+	}
+	tok, gerr := store.GetToken(fallbackBaseURL)
+	if gerr != nil {
+		tok = "" // best-effort: a keyring read failure just reads as "no token"
+	}
+	return statusTarget{coreURL: fallbackBaseURL, token: tok, totalContexts: total}, nil
+}
+
+// defaultFetchProfile fetches a user's profile from coreURL's GET /me with the
+// given bearer. It doubles as the liveness check for `entire auth status`: a
+// 401 (or an expired login) means the token is no longer usable, which
+// isKeychainTokenRejected maps to a re-login hint.
+func defaultFetchProfile(ctx context.Context, coreURL, token string) (*authProfile, error) {
+	client, err := coreapi.NewWithBearer(coreURL, token)
+	if err != nil {
+		return nil, fmt.Errorf("connect to %s: %w", coreURL, err)
+	}
+	me, err := client.GetMe(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("fetch profile: %w", err)
+	}
+	p := &authProfile{
+		Provider:       me.Auth.Provider,
+		ProviderUserID: me.Auth.ProviderUserId,
+	}
+	p.Handle, _ = me.Global.Handle.Get()
+	if reg, ok := me.Regional.Get(); ok {
+		p.DisplayName, _ = reg.DisplayName.Get()
+		p.Email, _ = reg.Email.Get()
+	}
+	return p, nil
+}
+
+// defaultListAuthSessions lists the user's active login sessions on coreURL.
+func defaultListAuthSessions(ctx context.Context, coreURL, token string) ([]api.AuthSession, error) {
+	return newAuthSessionsClient(coreURL, token).ListAuthSessions(ctx) //nolint:wrapcheck // ListAuthSessions already wraps with action context
+}
+
+// runAuthStatus reports auth state against the target core: GET /me validates
+// the token and supplies the profile header, the active login context is shown
+// locally, and the active sessions (refresh-token families) on that core are
+// listed so the effect of `logout` / `logout --everywhere` is visible.
+func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher, listSessions authSessionLister, t statusTarget) error {
+	if t.token == "" {
+		fmt.Fprintf(w, "Not logged in to %s\n", t.coreURL)
 		fmt.Fprintln(w, "Run 'entire login' to authenticate.")
 		return nil
 	}
 
-	tokens, err := list(ctx)
+	profile, err := fetchProfile(ctx, t.coreURL, t.token)
 	if err != nil {
 		if isKeychainTokenRejected(err) {
-			fmt.Fprintf(w, "Token in keychain for %s is no longer valid.\n", baseURL)
+			fmt.Fprintf(w, "Login for %s is no longer valid.\n", t.coreURL)
 			fmt.Fprintln(w, "Run 'entire login' to re-authenticate.")
 			return nil
 		}
 		return fmt.Errorf("validate token: %w", err)
 	}
 
-	fmt.Fprintf(w, "Logged in to %s\n", baseURL)
-	fmt.Fprintln(w, "  Token: stored in OS keychain")
-	fmt.Fprintf(w, "  Active tokens on this account: %d\n", len(tokens))
+	fmt.Fprintf(w, "Logged in to %s\n", t.coreURL)
+	writeProfileLines(w, profile)
+	if t.activeContext != "" {
+		fmt.Fprintf(w, "  %-9s %s\n", "Context:", t.activeContext)
+	}
+	fmt.Fprintf(w, "  %-9s %s\n", "Token:", "stored in OS keychain")
+
+	// Active sessions on this core. The token is already known good, so a
+	// listing failure is non-fatal — note it and carry on.
+	sessions, serr := listSessions(ctx, t.coreURL, t.token)
+	switch {
+	case serr != nil:
+		fmt.Fprintf(w, "\n(could not list active sessions: %v)\n", serr)
+	case len(sessions) > 0:
+		sortAuthSessionsByRecency(sessions)
+		fmt.Fprintf(w, "\nActive sessions (%d):\n", len(sessions))
+		renderAuthSessionsTable(w, newAuthTableStyles(w), sessions)
+		fmt.Fprintln(w, "\nRun 'entire logout' to end this session, or 'entire logout --everywhere' to end all of them.")
+	}
+
+	if t.totalContexts > 1 {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "%d login contexts saved; run 'entire auth contexts' to list or 'entire auth use <name>' to switch.\n", t.totalContexts)
+	}
 	return nil
 }
 
-// --- list -------------------------------------------------------------------
-
-func newAuthListCmd() *cobra.Command {
-	var jsonOut bool
-	var insecureHTTPAuth bool
-	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List active API tokens for the authenticated user",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := requireSecureBaseURL(insecureHTTPAuth); err != nil {
-				return err
-			}
-			return runAuthList(cmd.Context(), cmd.OutOrStdout(),
-				auth.NewContextStore(), defaultListTokens, api.AuthBaseURL(), jsonOut)
-		},
+// writeProfileLines renders the user identity from GET /me as aligned
+// label/value lines, omitting any field the server didn't populate.
+func writeProfileLines(w io.Writer, p *authProfile) {
+	var parts []string
+	if p.DisplayName != "" {
+		parts = append(parts, p.DisplayName)
 	}
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "Print tokens as JSON")
-	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
-	return cmd
+	if p.Handle != "" {
+		parts = append(parts, "@"+p.Handle)
+	}
+	if p.Email != "" {
+		parts = append(parts, "<"+p.Email+">")
+	}
+	if len(parts) > 0 {
+		fmt.Fprintf(w, "  %-9s %s\n", "User:", strings.Join(parts, " "))
+	}
+	if p.Provider != "" {
+		identity := p.Provider
+		if p.ProviderUserID != "" {
+			identity += "/" + p.ProviderUserID
+		}
+		fmt.Fprintf(w, "  %-9s %s\n", "Identity:", identity)
+	}
 }
 
-func runAuthList(ctx context.Context, w io.Writer, store tokenStore, list authTokenLister, baseURL string, jsonOut bool) error {
-	token, err := store.GetToken(baseURL)
-	if err != nil {
-		return fmt.Errorf("read keychain: %w", err)
-	}
-	if token == "" {
-		return fmt.Errorf("not logged in to %s; run 'entire login' first", baseURL)
-	}
+// --- auth tables -------------------------------------------------------------
 
-	tokens, err := list(ctx)
-	if err != nil {
-		return err
-	}
-
-	if jsonOut {
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(tokens); err != nil {
-			return fmt.Errorf("encode JSON: %w", err)
-		}
-		return nil
-	}
-
-	if len(tokens) == 0 {
-		fmt.Fprintln(w, "No active tokens.")
-		return nil
-	}
-
-	// Deterministic order: most recently used first, then most recently
-	// created, then by id as a final tie-breaker so the output is fully
-	// specified regardless of the server's response order.
-	sort.Slice(tokens, func(i, j int) bool {
-		li := lastUsedSortKey(tokens[i])
-		lj := lastUsedSortKey(tokens[j])
-		if li != lj {
-			return li > lj
-		}
-		if tokens[i].CreatedAt != tokens[j].CreatedAt {
-			return tokens[i].CreatedAt > tokens[j].CreatedAt
-		}
-		return tokens[i].ID < tokens[j].ID
-	})
-
-	sty := newAuthListStyles(w)
-	renderAuthListTable(w, sty, tokens, time.Now())
-	return nil
-}
-
-// authListStyles holds the lipgloss styles for `entire auth list`. Mirrors the
-// approach in activity_render.go: keep style construction tied to color
-// detection, and render plain text when color is disabled.
-type authListStyles struct {
+// authTableStyles holds the lipgloss styles for the `entire auth contexts`
+// table. Mirrors the approach in activity_render.go: keep style construction
+// tied to color detection, and render plain text when color is disabled.
+type authTableStyles struct {
 	colorEnabled bool
 
-	header  lipgloss.Style // bold + dim, used for column headers
-	id      lipgloss.Style // yellow accent
-	name    lipgloss.Style // bold
-	value   lipgloss.Style // default fg for scope/dates (no color)
-	dim     lipgloss.Style // "never", "-"
-	warning lipgloss.Style // expires-soon
-	expired lipgloss.Style // already expired
+	header lipgloss.Style // bold + dim, used for column headers
+	id     lipgloss.Style // yellow accent (active-context marker)
+	name   lipgloss.Style // bold (active context name)
+	value  lipgloss.Style // default fg
 }
 
-func newAuthListStyles(w io.Writer) authListStyles {
+func newAuthTableStyles(w io.Writer) authTableStyles {
 	useColor := shouldUseColor(w)
-	s := authListStyles{colorEnabled: useColor}
+	s := authTableStyles{colorEnabled: useColor}
 	if !useColor {
 		return s
 	}
@@ -305,43 +377,21 @@ func newAuthListStyles(w io.Writer) authListStyles {
 	s.id = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
 	s.name = lipgloss.NewStyle().Bold(true)
 	s.value = lipgloss.NewStyle() // default fg
-	s.dim = lipgloss.NewStyle().Faint(true)
-	s.warning = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
-	s.expired = lipgloss.NewStyle().Foreground(lipgloss.Color("1")) // red
 	return s
 }
 
-func (s authListStyles) render(style lipgloss.Style, text string) string {
+func (s authTableStyles) render(style lipgloss.Style, text string) string {
 	if !s.colorEnabled {
 		return text
 	}
 	return style.Render(text)
 }
 
-// renderAuthListTable prints a styled, column-aligned table of tokens. Column
-// padding is computed via lipgloss.Width — it strips ANSI escapes, so a styled
-// cell's visible width matches its plain text. tabwriter can't be used here
-// once cells contain ANSI codes.
-func renderAuthListTable(w io.Writer, sty authListStyles, tokens []api.Token, now time.Time) {
-	headerCells := []string{"ID", "NAME", "SCOPE", "CREATED", "LAST USED", "EXPIRES"}
-	header := make([]string, len(headerCells))
-	for i, h := range headerCells {
-		header[i] = sty.render(sty.header, h)
-	}
-
-	rows := make([][]string, 0, len(tokens))
-	for _, t := range tokens {
-		rows = append(rows, []string{
-			sty.render(sty.id, t.ID),
-			styleName(sty, t.Name),
-			sty.render(sty.value, fallback(t.Scope, placeholderDash)),
-			sty.render(sty.value, formatAuthDate(t.CreatedAt)),
-			styleLastUsed(sty, t.LastUsedAt, now),
-			styleExpires(sty, t.ExpiresAt, now),
-		})
-	}
-
-	widths := make([]int, len(headerCells))
+// renderAlignedTable writes header followed by rows in left-aligned columns,
+// sizing each column to its widest (possibly pre-styled) cell. Column widths
+// use lipgloss.Width so ANSI escapes don't inflate the padding.
+func renderAlignedTable(w io.Writer, header []string, rows [][]string) {
+	widths := make([]int, len(header))
 	for i, h := range header {
 		widths[i] = lipgloss.Width(h)
 	}
@@ -369,41 +419,60 @@ func writeRow(w io.Writer, cells []string, widths []int) {
 	fmt.Fprintln(w)
 }
 
-func styleName(sty authListStyles, name string) string {
-	if name == "" {
-		return sty.render(sty.dim, placeholderDash)
+func fallback(s, alt string) string {
+	if strings.TrimSpace(s) == "" {
+		return alt
 	}
-	return sty.render(sty.name, name)
+	return s
 }
 
-func styleLastUsed(sty authListStyles, lastUsed *string, now time.Time) string {
-	if lastUsed == nil {
-		return sty.render(sty.dim, lastUsedNever)
+// renderAuthSessionsTable prints the active login sessions as an aligned table.
+// No id column: there's no per-session CLI action (revoke-by-id is gone), so
+// NAME/CREATED/LAST USED/EXPIRES is what's useful.
+func renderAuthSessionsTable(w io.Writer, sty authTableStyles, sessions []api.AuthSession) {
+	header := []string{
+		sty.render(sty.header, "NAME"),
+		sty.render(sty.header, "CREATED"),
+		sty.render(sty.header, "LAST USED"),
+		sty.render(sty.header, "EXPIRES"),
 	}
-	return sty.render(sty.value, formatAuthLastUsed(lastUsed, now))
+	rows := make([][]string, 0, len(sessions))
+	for _, s := range sessions {
+		rows = append(rows, []string{
+			sty.render(sty.name, fallback(s.Name, placeholderDash)),
+			sty.render(sty.value, formatAuthDate(s.CreatedAt)),
+			sty.render(sty.value, formatLastUsed(s.LastUsedAt)),
+			sty.render(sty.value, formatAuthDate(s.ExpiresAt)),
+		})
+	}
+	renderAlignedTable(w, header, rows)
 }
 
-func styleExpires(sty authListStyles, expiresAt string, now time.Time) string {
-	formatted := formatAuthDate(expiresAt)
-	switch classifyExpiresAt(expiresAt, now) {
-	case expiresExpired:
-		return sty.render(sty.expired, formatted)
-	case expiresSoon:
-		return sty.render(sty.warning, formatted)
-	case expiresNormal:
-		return sty.render(sty.value, formatted)
-	}
-	return sty.render(sty.value, formatted)
+// sortAuthSessionsByRecency orders sessions most-recently-used first, then most
+// recently created, then by id — a fully specified order independent of the
+// server's response ordering.
+func sortAuthSessionsByRecency(sessions []api.AuthSession) {
+	sort.Slice(sessions, func(i, j int) bool {
+		li, lj := lastUsedSortKey(sessions[i]), lastUsedSortKey(sessions[j])
+		if li != lj {
+			return li > lj
+		}
+		if sessions[i].CreatedAt != sessions[j].CreatedAt {
+			return sessions[i].CreatedAt > sessions[j].CreatedAt
+		}
+		return sessions[i].ID < sessions[j].ID
+	})
 }
 
-func lastUsedSortKey(t api.Token) string {
-	if t.LastUsedAt == nil {
+func lastUsedSortKey(s api.AuthSession) string {
+	if s.LastUsedAt == nil {
 		return ""
 	}
-	return *t.LastUsedAt
+	return *s.LastUsedAt
 }
 
-// formatAuthDate renders an RFC3339 timestamp as YYYY-MM-DD in local time.
+// formatAuthDate renders an RFC3339 timestamp as YYYY-MM-DD in local time,
+// falling back to a dash (empty) or the raw value (unparseable).
 func formatAuthDate(s string) string {
 	if s == "" {
 		return placeholderDash
@@ -414,150 +483,9 @@ func formatAuthDate(s string) string {
 	return s
 }
 
-// formatAuthLastUsed renders a relative "last used" timestamp, with "yesterday"
-// and absolute-date branches that the shared formatRelativeDuration helper
-// doesn't cover.
-func formatAuthLastUsed(s *string, now time.Time) string {
+func formatLastUsed(s *string) string {
 	if s == nil || *s == "" {
 		return lastUsedNever
 	}
-	ts, err := time.Parse(time.RFC3339, *s)
-	if err != nil {
-		return *s
-	}
-	delta := now.Sub(ts)
-	switch {
-	case delta < 0, delta >= 30*24*time.Hour:
-		return ts.Local().Format("2006-01-02")
-	case delta >= 24*time.Hour && delta < 48*time.Hour:
-		return "yesterday"
-	default:
-		return formatRelativeDuration(delta)
-	}
-}
-
-type expiresState int
-
-const (
-	expiresNormal expiresState = iota
-	expiresSoon
-	expiresExpired
-)
-
-// classifyExpiresAt classifies an RFC3339 expires-at relative to now. Used to
-// color the EXPIRES column so tokens worth rotating stand out.
-func classifyExpiresAt(s string, now time.Time) expiresState {
-	if s == "" {
-		return expiresNormal
-	}
-	ts, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		return expiresNormal
-	}
-	delta := ts.Sub(now)
-	switch {
-	case delta <= 0:
-		return expiresExpired
-	case delta < 7*24*time.Hour:
-		return expiresSoon
-	default:
-		return expiresNormal
-	}
-}
-
-func fallback(s, alt string) string {
-	if strings.TrimSpace(s) == "" {
-		return alt
-	}
-	return s
-}
-
-// --- revoke -----------------------------------------------------------------
-
-func newAuthRevokeCmd() *cobra.Command {
-	var revokeCurrent bool
-	var insecureHTTPAuth bool
-	cmd := &cobra.Command{
-		Use:   "revoke [id]",
-		Short: "Revoke an API token by id",
-		Long:  "Revoke a specific API token. Use --current to revoke the token used by this CLI (equivalent to 'entire logout').",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			id := ""
-			if len(args) == 1 {
-				id = args[0]
-			}
-			if id == "" && !revokeCurrent {
-				return cmd.Help()
-			}
-			if id != "" && revokeCurrent {
-				return errors.New("cannot use both <id> and --current")
-			}
-			if err := requireSecureBaseURL(insecureHTTPAuth); err != nil {
-				return err
-			}
-			return runAuthRevoke(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
-				auth.NewContextStore(), defaultListTokens, defaultRevokeTokenByID, defaultRevokeCurrentToken,
-				auth.RemoveCurrentContext, api.AuthBaseURL(), id, revokeCurrent)
-		},
-	}
-	cmd.Flags().BoolVar(&revokeCurrent, "current", false, "Revoke the token used by this CLI and remove the local copy")
-	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
-	return cmd
-}
-
-func defaultRevokeTokenByID(ctx context.Context, id string) error {
-	token, err := resolveDataAPIToken(ctx)
-	if err != nil {
-		return err
-	}
-	return newAPITokensClient(token).RevokeToken(ctx, id) //nolint:wrapcheck // RevokeToken already wraps with action context
-}
-
-func runAuthRevoke(
-	ctx context.Context,
-	outW, errW io.Writer,
-	store tokenStore,
-	list authTokenLister,
-	revokeByID authTokenRevoker,
-	revokeCurrent revokeCurrentFunc,
-	clearContext clearContextFunc,
-	baseURL, id string,
-	current bool,
-) error {
-	token, err := store.GetToken(baseURL)
-	if err != nil {
-		return fmt.Errorf("read keychain: %w", err)
-	}
-	if token == "" {
-		return fmt.Errorf("not logged in to %s; run 'entire login' first", baseURL)
-	}
-
-	if current {
-		// Revoking our own token is just logout — reuse that path so behavior
-		// stays identical (best-effort revoke + local delete + context clear).
-		return runLogout(ctx, outW, errW, store, revokeCurrent, clearContext, baseURL)
-	}
-
-	if err := revokeByID(ctx, id); err != nil {
-		return err
-	}
-
-	// The list endpoint requires bearer auth, so a 401 here means the id we
-	// just revoked was the same one this CLI is using — the local copy is now
-	// stale and would otherwise produce confusing 401s on every command, so
-	// remove both the legacy keyring entry and the active context.
-	if _, listErr := list(ctx); listErr != nil && api.IsHTTPErrorStatus(listErr, http.StatusUnauthorized) {
-		if delErr := store.DeleteToken(baseURL); delErr != nil {
-			return fmt.Errorf("revoked token %s but failed to remove local copy: %w", id, delErr)
-		}
-		if ctxErr := clearContext(); ctxErr != nil {
-			fmt.Fprintf(errW, "Warning: revoked token %s but failed to clear current context: %v\n", id, ctxErr)
-		}
-		fmt.Fprintf(outW, "Revoked token %s (this was your local token; removed from keychain).\n", id)
-		return nil
-	}
-
-	fmt.Fprintf(outW, "Revoked token %s.\n", id)
-	return nil
+	return formatAuthDate(*s)
 }

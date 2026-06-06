@@ -171,7 +171,7 @@ func NewBenchRepo(b *testing.B, opts RepoOpts) *BenchRepo {
 	br := &BenchRepo{
 		Dir:      dir,
 		Repo:     repo,
-		Store:    checkpoint.NewGitStore(repo),
+		Store:    checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()),
 		HeadHash: headHash.String(),
 		Strategy: opts.Strategy,
 	}

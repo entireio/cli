@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v6"
@@ -428,7 +428,11 @@ type fetchMetadataOpts struct {
 }
 
 func fetchMetadataFromOrigin(ctx context.Context, fopts fetchMetadataOpts) error {
-	branchName := paths.MetadataBranchName
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+	if !refs.Primary.IsBranch() {
+		return fmt.Errorf("primary metadata ref %s is not a branch", refs.Primary)
+	}
+	branchName := refs.Primary.Short()
 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -465,8 +469,13 @@ func fetchMetadataFromOrigin(ctx context.Context, fopts fetchMetadataOpts) error
 	if err != nil {
 		return fmt.Errorf("branch '%s' not found on origin: %w", branchName, err)
 	}
-	if err := strategy.SafelyAdvanceLocalRef(ctx, repo, plumbing.NewBranchReferenceName(branchName), remoteRef.Hash()); err != nil {
+	if err := strategy.SafelyAdvanceLocalRef(ctx, repo, refs.Primary, remoteRef.Hash()); err != nil {
 		return fmt.Errorf("failed to advance local %s branch: %w", branchName, err)
+	}
+	if err := strategy.MirrorCommittedMetadataRef(ctx, repo, refs); err != nil && !errors.Is(err, strategy.ErrPrimaryMetadataMissing) {
+		logging.Warn(ctx, "committed-ref mirror failed after origin fetch",
+			slog.String("ref", refs.Mirror.String()),
+			slog.String("error", err.Error()))
 	}
 	return nil
 }

@@ -65,10 +65,7 @@ func (s statusStyles) render(style lipgloss.Style, text string) string {
 
 // shouldUseColor returns true if the writer supports color output.
 func shouldUseColor(w io.Writer) bool {
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	return interactive.IsTerminalWriter(w)
+	return interactive.ShouldStyle(w)
 }
 
 // getTerminalWidth returns the terminal width, capped at 80 with a fallback of 60.

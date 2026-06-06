@@ -777,7 +777,7 @@ func TestPostCommit_FilesTouched_ResetsAfterCondensation(t *testing.T) {
 	require.NoError(t, err, "entire/checkpoints/v1 should exist after first condensation")
 
 	// Verify first condensation contains A.txt and B.txt
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	cpID1 := id.MustCheckpointID(checkpointID1)
 	summary1, err := store.ReadCommitted(context.Background(), cpID1)
 	require.NoError(t, err)
@@ -1359,7 +1359,7 @@ func TestHandleTurnEnd_PartialFailure(t *testing.T) {
 		"TurnCheckpointIDs should be cleared after HandleTurnEnd, even with errors")
 
 	// Verify the 2 valid checkpoints were finalized with the full transcript
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	for _, cpIDStr := range []string{"a1b2c3d4e5f6", "b2c3d4e5f6a1"} {
 		cpID := id.MustCheckpointID(cpIDStr)
 		content, readErr := store.ReadSessionContent(context.Background(), cpID, 0)

@@ -25,6 +25,19 @@ func TestMain(m *testing.M) {
 	_ = os.MkdirAll(runDir, 0o755)
 	testutil.SetRunDir(runDir)
 
+	// Route every spawned entire binary (and the git hooks that invoke it) at
+	// file-backed token stores so e2e never touches the developer's real OS
+	// keychain. These env vars are inherited by child processes:
+	//   - internal/entireclient/tokenstore honors ENTIRE_TOKEN_STORE/_PATH
+	//     unconditionally (always compiled).
+	//   - the auth package's legacy keyring store honors
+	//     ENTIRE_TEST_AUTH_STORE_FILE only in -tags=authfilestore builds, which
+	//     the build:e2e task produces.
+	// In-process keyring.MockInit() cannot help here: the binary is a subprocess.
+	os.Setenv("ENTIRE_TOKEN_STORE", "file")
+	os.Setenv("ENTIRE_TOKEN_STORE_PATH", filepath.Join(runDir, "e2e-tokenstore.json"))
+	os.Setenv("ENTIRE_TEST_AUTH_STORE_FILE", filepath.Join(runDir, "e2e-auth-tokens.json"))
+
 	// Resolve the entire binary (set by mise run build via E2E_ENTIRE_BIN).
 	entireBin := entire.BinPath()
 	if err := ensureHookEntireBinary(entireBin); err != nil {

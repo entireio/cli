@@ -235,8 +235,9 @@ func (s *GitStore) ListTemporary(ctx context.Context) ([]TemporaryInfo, error) {
 			return nil
 		}
 
-		// Skip the sessions branch
-		if branchName == paths.MetadataBranchName {
+		// Skip the primary metadata ref when it's a branch (shares the
+		// entire/ prefix but isn't a shadow branch).
+		if s.refs.Primary.IsBranch() && branchName == s.refs.Primary.Short() {
 			return nil
 		}
 

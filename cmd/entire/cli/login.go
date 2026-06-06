@@ -78,7 +78,8 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 		// so opening the URL is usually all the user needs to do. The device
 		// code is printed above regardless, so it's still available to confirm
 		// against the page (RFC 8628 §3.3.1) or to enter on the bare-URI fallback.
-		fmt.Fprintf(outW, "Press Enter to open %s in your browser to approve this login...", approvalURL)
+		fmt.Fprintf(outW, "Login URL:   %s\n\n", approvalURL)
+		fmt.Fprintf(outW, "Press Enter to open in browser...")
 
 		// Read from /dev/tty so we get a real keypress and don't consume piped stdin.
 		if err := waitForEnter(ctx); err != nil {
@@ -91,10 +92,10 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 			fmt.Fprintf(outW, "Open this URL in your browser to approve this login: %s\n", approvalURL)
 		}
 	} else {
-		fmt.Fprintf(outW, "Approval URL: %s\n", approvalURL)
+		fmt.Fprintf(outW, "Login URL:   %s\n\n", approvalURL)
 	}
 
-	fmt.Fprintln(outW, "Waiting for approval...")
+	fmt.Fprint(outW, "Waiting for approval... ")
 
 	token, refreshToken, err := waitForApproval(ctx, client, start.DeviceCode, start.ExpiresIn, time.Duration(start.Interval)*time.Second, defaultSlowDownBackoff)
 	if err != nil {
@@ -123,7 +124,7 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 		fmt.Fprintf(errW, "Warning: logged in, but could not record a shareable context (clone via entire:// may need a re-login): %v\n", err)
 	}
 
-	fmt.Fprintln(outW, "Login complete.")
+	fmt.Fprintln(outW, "✓ Login complete.")
 	return nil
 }
 

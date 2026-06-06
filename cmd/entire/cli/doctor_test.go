@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -399,6 +400,184 @@ func TestRunSessionsFix_ForceDiscardOutput_Indented(t *testing.T) {
 	}
 }
 
+// setupMirrorCheckRepo is setupHeadFlagsRepo plus the v1.1 settings opt-in.
+func setupMirrorCheckRepo(t *testing.T) *git.Repository {
+	t.Helper()
+	repo := setupHeadFlagsRepo(t)
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(cwd, paths.EntireDir), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(cwd, paths.EntireDir, paths.SettingsFileName),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
+		0o644,
+	))
+	return repo
+}
+
+// setMetadataV1Branch points the v1 metadata branch at HEAD and returns the hash.
+func setMetadataV1Branch(t *testing.T, repo *git.Repository) plumbing.Hash {
+	t.Helper()
+	head, err := repo.Head()
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(
+		plumbing.NewHashReference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), head.Hash())))
+	return head.Hash()
+}
+
+// setMetadataMirrorRef points the v1.1 mirror ref at the given hash.
+func setMetadataMirrorRef(t *testing.T, repo *git.Repository, hash plumbing.Hash) {
+	t.Helper()
+	require.NoError(t, repo.Storer.SetReference(
+		plumbing.NewHashReference(plumbing.ReferenceName(paths.MetadataRefName), hash)))
+}
+
+// metadataMirrorHash resolves the v1.1 mirror ref, reporting existence.
+func metadataMirrorHash(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
+	t.Helper()
+	ref, err := repo.Reference(plumbing.ReferenceName(paths.MetadataRefName), true)
+	if err != nil {
+		return plumbing.ZeroHash, false
+	}
+	return ref.Hash(), true
+}
+
+// secondCommitInCwd creates a second commit in the test repo and returns its hash.
+func secondCommitInCwd(t *testing.T, repo *git.Repository) plumbing.Hash {
+	t.Helper()
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	testutil.WriteFile(t, cwd, "f2.txt", "more")
+	testutil.GitAdd(t, cwd, "f2.txt")
+	testutil.GitCommit(t, cwd, "second")
+	head, err := repo.Head()
+	require.NoError(t, err)
+	return head.Hash()
+}
+
+// Not parallel: uses t.Chdir(). Setup returns the expected final mirror state.
+func TestCheckCommittedMetadataMirror(t *testing.T) {
+	tests := []struct {
+		name    string
+		v1Only  bool // skip the v1.1 settings opt-in
+		force   bool
+		setup   func(t *testing.T, repo *git.Repository) (plumbing.Hash, bool)
+		wantOut []string // empty = expect no output at all
+	}{
+		{
+			name:   "silent when not configured",
+			v1Only: true,
+			setup: func(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
+				setMetadataV1Branch(t, repo)
+				return plumbing.ZeroHash, false
+			},
+		},
+		{
+			name: "ok",
+			setup: func(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
+				v1 := setMetadataV1Branch(t, repo)
+				setMetadataMirrorRef(t, repo, v1)
+				return v1, true
+			},
+			wantOut: []string{"✓ Checkpoint read mirror: OK"},
+		},
+		{
+			name: "ok when no metadata yet",
+			setup: func(_ *testing.T, _ *git.Repository) (plumbing.Hash, bool) {
+				return plumbing.ZeroHash, false
+			},
+			wantOut: []string{"✓ Checkpoint read mirror: OK (no committed metadata yet)"},
+		},
+		{
+			// Warn-only anomaly: even --force must not move or delete the mirror.
+			name:  "warns when mirror outlives v1",
+			force: true,
+			setup: func(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
+				head, err := repo.Head()
+				require.NoError(t, err)
+				setMetadataMirrorRef(t, repo, head.Hash())
+				return head.Hash(), true
+			},
+			wantOut: []string{
+				"Checkpoint read mirror: V1 BRANCH MISSING",
+				"git fetch origin entire/checkpoints/v1:entire/checkpoints/v1",
+			},
+		},
+		{
+			name:  "force seeds missing mirror",
+			force: true,
+			setup: func(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
+				return setMetadataV1Branch(t, repo), true
+			},
+			wantOut: []string{"Checkpoint read mirror: MISSING", "✓ Fixed"},
+		},
+		{
+			name:  "force advances stale mirror",
+			force: true,
+			setup: func(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
+				setMetadataMirrorRef(t, repo, setMetadataV1Branch(t, repo))
+				secondCommitInCwd(t, repo)
+				return setMetadataV1Branch(t, repo), true
+			},
+			wantOut: []string{"Checkpoint read mirror: STALE", "✓ Fixed"},
+		},
+		{
+			name:  "force resets diverged mirror",
+			force: true,
+			setup: func(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
+				v1 := setMetadataV1Branch(t, repo)
+				setMetadataMirrorRef(t, repo, secondCommitInCwd(t, repo))
+				return v1, true
+			},
+			wantOut: []string{"Checkpoint read mirror: DIVERGED", "discard", "✓ Fixed"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var repo *git.Repository
+			if tt.v1Only {
+				repo = setupHeadFlagsRepo(t)
+			} else {
+				repo = setupMirrorCheckRepo(t)
+			}
+			wantMirror, wantExists := tt.setup(t, repo)
+
+			cmd, stdout := newTestCmd(t)
+			require.NoError(t, checkCommittedMetadataMirror(cmd, tt.force))
+
+			if len(tt.wantOut) == 0 {
+				assert.Empty(t, stdout.String())
+			}
+			for _, want := range tt.wantOut {
+				assert.Contains(t, stdout.String(), want)
+			}
+
+			gotMirror, gotExists := metadataMirrorHash(t, repo)
+			require.Equal(t, wantExists, gotExists)
+			if wantExists {
+				assert.Equal(t, wantMirror, gotMirror)
+			}
+		})
+	}
+}
+
+// Proves the mirror check is wired into the main doctor flow.
+func TestRunSessionsFix_IncludesMirrorCheck(t *testing.T) {
+	repo := setupMirrorCheckRepo(t)
+	v1Hash := setMetadataV1Branch(t, repo)
+
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, runSessionsFix(cmd, true))
+
+	out := stdout.String()
+	assert.Contains(t, out, "Checkpoint read mirror: MISSING")
+	assert.Contains(t, out, "✓ Fixed")
+
+	got, ok := metadataMirrorHash(t, repo)
+	require.True(t, ok)
+	assert.Equal(t, v1Hash, got)
+}
+
 // TestCheckCodexHookTrust_SilentWhenCodexNotInstalled — `entire doctor`
 // shouldn't print anything Codex-related when this repo doesn't have
 // .codex/hooks.json. Other agents (Claude, Cursor) keep their existing
@@ -548,4 +727,18 @@ trusted_hash = "sha256:ccc"
 	require.Contains(t, out, "- post_tool_use")
 	require.Contains(t, out, "entire enable")
 	require.NotContains(t, out, "Codex hook trust: REVIEW NEEDED")
+}
+
+// TestConfirmDoctorFix_CancelledContext verifies that a cancelled command
+// context makes the confirm prompt return (false, nil) rather than surfacing a
+// wrapped error — doctor fixes are skipped cleanly on interrupt.
+func TestConfirmDoctorFix_CancelledContext(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before prompting
+
+	var out bytes.Buffer
+	proceed, err := confirmDoctorFix(ctx, &out, "Apply fix?")
+	require.NoError(t, err)
+	assert.False(t, proceed)
 }

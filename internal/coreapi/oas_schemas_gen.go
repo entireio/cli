@@ -769,7 +769,9 @@ type CreatedMirror struct {
 	// A URL to the JSON Schema for this object.
 	Schema OptURI `json:"$schema"`
 	// True on fresh creation; false when an existing mirror was returned.
-	Created   bool   `json:"created"`
+	Created bool `json:"created"`
+	// True when the upstream has no refs to clone.
+	Empty     bool   `json:"empty"`
 	MirrorId  string `json:"mirrorId"`
 	MirrorUrl string `json:"mirrorUrl"`
 	PublicUrl string `json:"publicUrl"`
@@ -783,6 +785,11 @@ func (s *CreatedMirror) GetSchema() OptURI {
 // GetCreated returns the value of Created.
 func (s *CreatedMirror) GetCreated() bool {
 	return s.Created
+}
+
+// GetEmpty returns the value of Empty.
+func (s *CreatedMirror) GetEmpty() bool {
+	return s.Empty
 }
 
 // GetMirrorId returns the value of MirrorId.
@@ -808,6 +815,11 @@ func (s *CreatedMirror) SetSchema(val OptURI) {
 // SetCreated sets the value of Created.
 func (s *CreatedMirror) SetCreated(val bool) {
 	s.Created = val
+}
+
+// SetEmpty sets the value of Empty.
+func (s *CreatedMirror) SetEmpty(val bool) {
+	s.Empty = val
 }
 
 // SetMirrorId sets the value of MirrorId.

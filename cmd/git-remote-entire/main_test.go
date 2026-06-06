@@ -15,6 +15,42 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
 
+func TestInfoFlagText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		flag     string
+		want     bool
+		contains []string
+	}{
+		{"version", "--version", true, []string{"git-remote-entire 1.2.3", "Go version:", "OS/Arch:"}},
+		{"help", "--help", true, []string{"git-remote-entire 1.2.3", "entire://", "https://github.com/entireio/cli"}},
+		{"unknown flag", "--nope", false, nil},
+		{"empty", "", false, nil},
+		{"url-like arg", "entire://host/p/r", false, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			text, ok := infoFlagText(tc.flag, "1.2.3")
+			if ok != tc.want {
+				t.Fatalf("infoFlagText(%q) ok = %v, want %v", tc.flag, ok, tc.want)
+			}
+			if !ok {
+				if text != "" {
+					t.Fatalf("expected empty text when not handled, got %q", text)
+				}
+				return
+			}
+			for _, sub := range tc.contains {
+				if !strings.Contains(text, sub) {
+					t.Errorf("infoFlagText(%q) = %q, missing %q", tc.flag, text, sub)
+				}
+			}
+		})
+	}
+}
+
 func TestParseProtocolVersion(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -196,7 +232,7 @@ func TestResolveEnvTokenCreds_UntrustedAudAborts(t *testing.T) {
 	if creds != nil {
 		t.Fatal("expected nil creds when aud is untrusted")
 	}
-	if !strings.Contains(err.Error(), "not a trusted core") {
+	if !strings.Contains(err.Error(), "not a trusted login server") {
 		t.Fatalf("expected trust-gate error, got: %v", err)
 	}
 }

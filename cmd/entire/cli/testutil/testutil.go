@@ -209,19 +209,32 @@ func BranchExists(t *testing.T, repoDir, branchName string) bool {
 	return found
 }
 
-// gitEmptyConfigPath returns the path to an empty file suitable for use as
-// GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM. We use an empty file instead of
+// gitEmptyConfigPath returns the path to a config file suitable for use as
+// GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM. We use a real file instead of
 // os.DevNull because git on Windows cannot open NUL as a config file.
+//
+// The file is not strictly empty: it pins background maintenance off so that
+// no detached `git gc`/`git maintenance` process lingers after a test holding
+// an open handle on the temp repo's .git/objects. Such a lingering process
+// races t.TempDir()'s deferred RemoveAll and fails the test with
+// "directory not empty" (see COR-394). Suppressing it centrally keeps every
+// git-shelling test that uses GitIsolatedEnv/IsolateGitConfigEnv safe.
 var gitEmptyConfig string
 var gitEmptyConfigOnce sync.Once
 
 func gitEmptyConfigPath() string {
 	gitEmptyConfigOnce.Do(func() {
-		f, err := os.CreateTemp("", "git-empty-config-*")
+		f, err := os.CreateTemp("", "git-isolation-config-*")
 		if err != nil {
-			panic("create empty git config: " + err.Error())
+			panic("create git isolation config: " + err.Error())
 		}
-		_ = f.Close()
+		_, err = f.WriteString("[gc]\n\tauto = 0\n\tautoDetach = false\n[maintenance]\n\tauto = false\n[fetch]\n\twriteCommitGraph = false\n")
+		if err != nil {
+			panic("write git isolation config: " + err.Error())
+		}
+		if err := f.Close(); err != nil {
+			panic("close git isolation config: " + err.Error())
+		}
 		gitEmptyConfig = f.Name()
 	})
 	return gitEmptyConfig

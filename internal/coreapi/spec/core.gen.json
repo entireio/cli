@@ -371,6 +371,10 @@
             "description": "true on fresh creation; false when an existing mirror was returned.",
             "type": "boolean"
           },
+          "empty": {
+            "description": "true when the upstream has no refs to clone.",
+            "type": "boolean"
+          },
           "mirrorId": {
             "type": "string"
           },
@@ -385,7 +389,8 @@
           "mirrorId",
           "mirrorUrl",
           "publicUrl",
-          "created"
+          "created",
+          "empty"
         ],
         "type": "object"
       },

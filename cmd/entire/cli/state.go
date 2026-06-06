@@ -638,6 +638,13 @@ func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found boo
 // It counts existing checkpoint files in the task metadata checkpoints directory.
 // Returns 1 if no checkpoints exist yet.
 func GetNextCheckpointSequence(sessionID, taskToolUseID string) int {
+	// sessionID/taskToolUseID arrive from agent hook input and are used as path
+	// components below. Reject unsafe values so a crafted "../.." cannot redirect
+	// the os.ReadDir to an arbitrary directory; an invalid ID just starts at 1.
+	if validation.ValidateSessionID(sessionID) != nil || validation.ValidateToolUseID(taskToolUseID) != nil {
+		return 1
+	}
+
 	// Use the session ID directly as the metadata directory name
 	sessionMetadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
 	taskMetadataDir := strategy.TaskMetadataDir(sessionMetadataDir, taskToolUseID)

@@ -255,8 +255,8 @@ func waitForLoginPrompt(t *testing.T, stdout *bufio.Reader) (string, string) {
 		switch {
 		case strings.HasPrefix(line, "Device code: "):
 			deviceCode = strings.TrimPrefix(line, "Device code: ")
-		case strings.HasPrefix(line, "Approval URL: "):
-			approvalURL = strings.TrimPrefix(line, "Approval URL: ")
+		case strings.HasPrefix(line, "Login URL:"):
+			approvalURL = strings.TrimSpace(strings.TrimPrefix(line, "Login URL:"))
 		}
 
 		if approvalURL != "" && deviceCode != "" {
