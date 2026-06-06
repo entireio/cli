@@ -20,11 +20,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
-	"github.com/entireio/cli/cmd/entire/cli/transcript/compact"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/perf"
@@ -32,7 +31,6 @@ import (
 
 	"charm.land/huh/v2"
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/spf13/cobra"
 )
@@ -56,6 +54,16 @@ type attachOptions struct {
 	// transcript's first user prompt. Used by `entire review attach` when a
 	// pending-review marker has the exact prompt the user was asked to run.
 	ReviewPromptOverride string
+	// entireSettings, when non-nil, supplies already-resolved settings.
+	entireSettings *settings.EntireSettings
+}
+
+// committedRefs resolves the topology, honoring an injected EntireSettings.
+func (opts attachOptions) committedRefs(ctx context.Context) cpkg.CommittedRefs {
+	if opts.entireSettings != nil {
+		return cpkg.ResolveCommittedRefsFromSettings(opts.entireSettings)
+	}
+	return cpkg.ResolveCommittedRefs(ctx)
 }
 
 func newAttachCmd() *cobra.Command {
@@ -149,7 +157,7 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 	// Flush the 8KB buffered log writer on exit. Without this, any
 	// Warn/Info calls during attach (including the overwrite tripwire)
 	// get silently dropped when the process exits, matching the pattern
-	// already used by resume/clean/reset/rewind/migrate/explain.
+	// already used by resume/clean/reset/rewind/explain.
 	defer logging.Close()
 
 	logCtx := logging.WithComponent(ctx, "attach")
@@ -159,6 +167,11 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if closeErr := repo.Close(); closeErr != nil {
+			logging.Warn(logCtx, "failed to close repository", slog.String("error", closeErr.Error()))
+		}
+	}()
 
 	existingState, err := validateAttachPreconditions(ctx, repo, sessionID)
 	if err != nil {
@@ -226,13 +239,21 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 	// If HEAD references an existing checkpoint, make sure we have it locally
 	// before writing — otherwise we'd create a fresh session 0 under the same
 	// ID and overwrite the original on push.
-	repo, err = ensureCheckpointAvailable(ctx, logCtx, repo, checkpointID, isExistingCheckpoint)
+	refs := opts.committedRefs(ctx)
+	refreshedRepo, err := ensureCheckpointAvailable(ctx, logCtx, repo, refs, checkpointID, isExistingCheckpoint)
+	if refreshedRepo != nil && refreshedRepo != repo {
+		oldRepo := repo
+		repo = refreshedRepo
+		if closeErr := oldRepo.Close(); closeErr != nil {
+			logging.Warn(logCtx, "failed to close stale repository handle after checkpoint refresh",
+				slog.String("error", closeErr.Error()))
+		}
+	}
 	if err != nil {
 		return err
 	}
 
-	// Write directly to entire/checkpoints/v1.
-	store := cpkg.NewGitStore(repo)
+	store := cpkg.NewGitStore(repo, refs)
 
 	// Defense-in-depth guard: the earlier existingState.LastCheckpointID
 	// check only fires when the session's state file records its
@@ -244,7 +265,11 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 	// review-attach on such a session silently overwrites the existing
 	// session's metadata in the checkpoint.
 	if opts.Review && isExistingCheckpoint {
-		if existing, readErr := store.ReadSessionContentByID(ctx, checkpointID, sessionID); readErr == nil && existing != nil {
+		exists, readErr := checkpointHasSessionMetadata(ctx, repo, refs, checkpointID, sessionID)
+		if readErr != nil {
+			return fmt.Errorf("failed to check checkpoint %s for session %s: %w", checkpointID.String(), sessionID, readErr)
+		}
+		if exists {
 			return fmt.Errorf(
 				"session %s is already recorded in checkpoint %s; rewriting an existing checkpoint as a review is not supported yet",
 				sessionID, checkpointID.String(),
@@ -290,15 +315,12 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 		writeOpts.HasReview = true
 	}
 
-	if compacted := compactTranscriptForStartLine(logCtx, redactedTranscript.Bytes(), cpkg.CommittedMetadata{
-		CheckpointID: checkpointID,
-		Agent:        ag.Type(),
-	}, 0); compacted != nil {
-		writeOpts.CompactTranscript = compacted
-	}
-
 	if err := store.WriteCommitted(ctx, writeOpts); err != nil {
 		return fmt.Errorf("failed to write checkpoint: %w", err)
+	}
+
+	if err := strategy.MirrorCommittedMetadataRef(ctx, repo, refs); err != nil {
+		return fmt.Errorf("checkpoint was written to %s, but failed to mirror to %s: %w", refs.Primary, refs.Mirror, err)
 	}
 
 	// Create or update session state.
@@ -320,6 +342,30 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 	}
 
 	return nil
+}
+
+// checkpointHasSessionMetadata reports whether sessionID has existing metadata
+// at Primary. Reads target Primary directly, not refs.Read, because this guard
+// must reflect what the next write would target.
+func checkpointHasSessionMetadata(ctx context.Context, repo *git.Repository, refs cpkg.CommittedRefs, checkpointID id.CheckpointID, sessionID string) (bool, error) {
+	store := cpkg.NewGitStore(repo, refs.PrimaryAsRead())
+	summary, err := store.ReadCommitted(ctx, checkpointID)
+	if err != nil {
+		return false, fmt.Errorf("read checkpoint summary: %w", err)
+	}
+	if summary == nil {
+		return false, nil
+	}
+	for i := range summary.Sessions {
+		metadata, err := store.ReadSessionMetadata(ctx, checkpointID, i)
+		if err != nil {
+			return false, fmt.Errorf("read session %d metadata: %w", i, err)
+		}
+		if metadata != nil && metadata.SessionID == sessionID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // getHeadCommit returns the HEAD commit object.
@@ -349,12 +395,12 @@ func getHeadCommit(repo *git.Repository) (*object.Commit, error) {
 // metadata fetch fallback chain used by `entire resume` (which advances the
 // local ref on success) and re-check. Returns a possibly-freshly-opened repo
 // handle so go-git sees any newly fetched packfiles.
-func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository, checkpointID id.CheckpointID, isExistingCheckpoint bool) (*git.Repository, error) {
+func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository, refs cpkg.CommittedRefs, checkpointID id.CheckpointID, isExistingCheckpoint bool) (*git.Repository, error) {
 	if !isExistingCheckpoint {
 		return repo, nil
 	}
 
-	present, readErr := checkpointPresentLocally(ctx, repo, checkpointID)
+	present, readErr := checkpointPresentLocally(ctx, repo, refs, checkpointID)
 	if readErr != nil {
 		return repo, fmt.Errorf("failed to read checkpoint %s: %w", checkpointID, readErr)
 	}
@@ -363,14 +409,14 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 	}
 
 	// Missing locally — try to refresh, then re-check. Use the same fetch
-	// chain `entire resume` uses for the v1 metadata branch.
+	// chain `entire resume` uses for the primary metadata ref.
 	freshRepo, fetchErr := refreshCheckpointRefs(ctx)
 	if fetchErr != nil {
 		logging.Warn(logCtx, "failed to refresh metadata branch before attach; proceeding with local state",
 			slog.String("error", fetchErr.Error()))
 	} else {
 		repo = freshRepo
-		present, readErr = checkpointPresentLocally(ctx, repo, checkpointID)
+		present, readErr = checkpointPresentLocally(ctx, repo, refs, checkpointID)
 		if readErr != nil {
 			return repo, fmt.Errorf("failed to read checkpoint %s after refresh: %w", checkpointID, readErr)
 		}
@@ -394,18 +440,15 @@ func refreshCheckpointRefs(ctx context.Context) (*git.Repository, error) {
 	return repo, err
 }
 
-// checkpointPresentLocally reports whether the checkpoint already exists on
-// the local v1 ref we would write to. Remote-tracking alone is not enough;
-// see ensureCheckpointAvailable.
-func checkpointPresentLocally(ctx context.Context, repo *git.Repository, checkpointID id.CheckpointID) (bool, error) {
-	localRef := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	if _, err := repo.Reference(localRef, true); err != nil {
-		// Local branch ref doesn't exist — treat as "not present locally".
-		// We deliberately do not fall back to remote-tracking: see
-		// ensureCheckpointAvailable's docstring.
+// checkpointPresentLocally reports whether the checkpoint already exists at
+// Primary locally. Reads target Primary directly, not refs.Read, because this
+// asks what the next write would find, not what readers see. A missing local
+// ref is reported as absent; the caller is responsible for any remote refresh.
+func checkpointPresentLocally(ctx context.Context, repo *git.Repository, refs cpkg.CommittedRefs, checkpointID id.CheckpointID) (bool, error) {
+	if _, err := repo.Reference(refs.Primary, true); err != nil {
 		return false, nil //nolint:nilerr // Missing ref is the "absent" signal, not an error.
 	}
-	summary, err := cpkg.NewGitStore(repo).ReadCommitted(ctx, checkpointID)
+	summary, err := cpkg.NewGitStore(repo, refs.PrimaryAsRead()).ReadCommitted(ctx, checkpointID)
 	if err != nil {
 		return false, err //nolint:wrapcheck // Caller wraps with checkpoint ID context
 	}
@@ -674,39 +717,4 @@ func promptAmendCommit(ctx context.Context, w io.Writer, headCommit *object.Comm
 
 	fmt.Fprintf(w, "Amended commit %s with Entire-Checkpoint: %s\n", shortHash, checkpointIDStr)
 	return nil
-}
-
-func compactTranscriptForStartLine(ctx context.Context, transcript []byte, m cpkg.CommittedMetadata, startLine int) []byte {
-	if len(transcript) == 0 {
-		return nil
-	}
-	if m.Agent == "" {
-		logging.Warn(ctx, "compact transcript skipped: no agent type in checkpoint metadata",
-			slog.String("checkpoint_id", string(m.CheckpointID)),
-		)
-		return nil
-	}
-
-	compacted, err := compact.Compact(redact.AlreadyRedacted(transcript), compact.MetadataFields{
-		Agent:      string(m.Agent),
-		CLIVersion: versioninfo.Version,
-		StartLine:  startLine,
-	})
-	if err != nil {
-		logging.Warn(ctx, "compact transcript generation failed",
-			slog.String("checkpoint_id", string(m.CheckpointID)),
-			slog.String("agent", string(m.Agent)),
-			slog.String("error", err.Error()),
-		)
-		return nil
-	}
-	if len(compacted) == 0 {
-		logging.Warn(ctx, "transcript.jsonl generation produced no output",
-			slog.String("checkpoint_id", string(m.CheckpointID)),
-			slog.String("agent", string(m.Agent)),
-			slog.Int("input_bytes", len(transcript)),
-		)
-		return nil
-	}
-	return compacted
 }

@@ -12,9 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -30,13 +28,6 @@ const (
 	EntireSettingsLocalFile = ".entire/settings.local.json"
 	// ClonePreferencesFile is the path inside the git common dir for clone-local preferences.
 	ClonePreferencesFile = "entire/preferences.json"
-	// defaultGenerationRetentionDays is the default retention window for archived
-	// checkpoints v2 raw-transcript generations when no override is configured.
-	defaultGenerationRetentionDays = 14
-)
-
-var (
-	checkpointsVersionWarningOnce sync.Once
 )
 
 type worktreeRootContextKey struct{}
@@ -100,6 +91,10 @@ type EntireSettings struct {
 	// ReviewFixAgent is the default agent used when applying aggregate or
 	// multi-agent review findings with `entire review --fix`.
 	ReviewFixAgent string `json:"review_fix_agent,omitempty"`
+
+	// Investigate holds configuration for `entire investigate`. Empty means
+	// `entire investigate` triggers the first-run picker.
+	Investigate *InvestigateConfig `json:"investigate,omitempty"`
 
 	// CommitLinking controls how commits are linked to agent sessions.
 	// "always" = auto-link without prompting, "prompt" = ask on each commit.
@@ -278,6 +273,45 @@ func (s *EntireSettings) ReviewConfigFor(agentName string) ReviewConfig {
 		return ReviewConfig{}
 	}
 	return s.Review[agentName]
+}
+
+// InvestigateConfig holds the configuration for `entire investigate`.
+// Unlike ReviewConfig, investigate runs the same shared prompt across
+// all configured agents, so the schema is a flat agent list with global
+// loop knobs rather than per-agent skill lists.
+type InvestigateConfig struct {
+	// Agents is the ordered list of agent names to round-robin during the loop.
+	Agents []string `json:"agents,omitempty"`
+
+	// MaxTurns is the per-agent turn budget. Defaults to 2 when zero
+	// (see investigate.defaultMaxTurns).
+	MaxTurns int `json:"max_turns,omitempty"`
+
+	// Quorum is the count of `approve` stances needed to terminate the loop.
+	// Zero means "all agents must approve" (matches marvin's default).
+	Quorum int `json:"quorum,omitempty"`
+
+	// AlwaysPrompt is appended to every turn's composed prompt, parallel
+	// to ReviewConfig.Prompt.
+	AlwaysPrompt string `json:"always_prompt,omitempty"`
+}
+
+// IsZero reports whether the config is effectively unset.
+func (c *InvestigateConfig) IsZero() bool {
+	if c == nil {
+		return true
+	}
+	return len(c.Agents) == 0 && c.MaxTurns == 0 && c.Quorum == 0 && c.AlwaysPrompt == ""
+}
+
+// InvestigateConfig returns the configured investigate config. Returns nil
+// when no configuration is present; callers should check IsZero (or guard
+// for nil) to decide whether configuration is present.
+func (s *EntireSettings) InvestigateConfig() *InvestigateConfig {
+	if s == nil {
+		return nil
+	}
+	return s.Investigate
 }
 
 // Load loads the Entire settings from .entire/settings.json, then applies
@@ -643,6 +677,26 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		}
 	}
 
+	if err := mergeInvestigate(settings, raw); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// mergeInvestigate replaces the investigate config from the override (whole-object
+// replacement, parallel to how summary_generation is handled but simpler — the
+// investigate schema is small and lacks per-field merge semantics).
+func mergeInvestigate(settings *EntireSettings, raw map[string]json.RawMessage) error {
+	investigateRaw, ok := raw["investigate"]
+	if !ok {
+		return nil
+	}
+	var cfg InvestigateConfig
+	if err := unmarshalField("investigate", investigateRaw, &cfg); err != nil {
+		return err
+	}
+	settings.Investigate = &cfg
 	return nil
 }
 
@@ -936,48 +990,14 @@ func IsSetUpAndEnabled(ctx context.Context) bool {
 	return s.Enabled
 }
 
-// IsCheckpointsV2Enabled checks if checkpoints v2 is enabled in settings.
-// Returns false by default if settings cannot be loaded or the key is missing.
-func IsCheckpointsV2Enabled(ctx context.Context) bool {
-	settings, err := Load(ctx)
+// MirrorsToV1CustomRef reports whether the v1 custom-ref mirror is opted in.
+// Returns false if settings cannot be loaded.
+func MirrorsToV1CustomRef(ctx context.Context) bool {
+	s, err := Load(ctx)
 	if err != nil {
 		return false
 	}
-	return settings.IsCheckpointsV2Enabled()
-}
-
-// CheckpointsVersion returns the configured checkpoints format version, or 1
-// if settings cannot be loaded or the value is unset/invalid.
-func CheckpointsVersion(ctx context.Context) int {
-	s, err := Load(ctx)
-	if err != nil {
-		return 1
-	}
-	version := s.CheckpointsVersion()
-	if s.StrategyOptions != nil {
-		if configured, ok := s.StrategyOptions["checkpoints_version"]; ok {
-			if _, supported := parseCheckpointsVersion(configured); !supported {
-				checkpointsVersionWarningOnce.Do(func() {
-					fmt.Fprintf(os.Stderr,
-						"[entire] unsupported strategy_options.checkpoints_version %v detected in settings. Falling back to the default version (1).\n",
-						configured,
-					)
-				})
-			}
-		}
-	}
-	return version
-}
-
-// WarnIfCheckpointsV2Disallowed emits the user-facing fallback warning when a
-// settings file still requests checkpoints v2. Call this from push-time flows
-// so users learn why v1 metadata is being pushed instead.
-func WarnIfCheckpointsV2Disallowed(ctx context.Context) {
-	s, err := Load(ctx)
-	if err != nil {
-		return
-	}
-	s.WarnIfCheckpointsV2Disallowed()
+	return s.MirrorsToV1CustomRef()
 }
 
 // IsFilteredFetchesEnabled checks if filtered fetches should be used.
@@ -1061,120 +1081,22 @@ func (s *EntireSettings) GetCheckpointRemote() *CheckpointRemoteConfig {
 	return &CheckpointRemoteConfig{Provider: provider, Repo: repo}
 }
 
-// IsCheckpointsV2Enabled checks if checkpoints v2 is enabled for read paths.
-// Existing v2 checkpoint metadata remains readable while new writes use v1.
-func (s *EntireSettings) IsCheckpointsV2Enabled() bool {
+// MirrorsToV1CustomRef reports whether checkpoints_version opts into mirroring
+// committed metadata to the v1 custom ref (refs/entire/checkpoints/v1.1). v1
+// remains the source of truth; the v1 custom ref is a local-only mirror.
+// Returns false when unset or set to any other value.
+func (s *EntireSettings) MirrorsToV1CustomRef() bool {
 	if s.StrategyOptions == nil {
 		return false
 	}
-	if val, ok := s.StrategyOptions["checkpoints_version"]; ok {
-		version, supported := parseCheckpointsVersion(val)
-		if supported && version == 2 {
-			return true
-		}
-	}
-	val, ok := s.StrategyOptions["checkpoints_v2"].(bool)
-	return ok && val
+	return isV1CustomRefValue(s.StrategyOptions["checkpoints_version"])
 }
 
-// CheckpointsVersion returns the configured checkpoints format version from
-// strategy_options.checkpoints_version. Returns 1 when unset, invalid, or
-// unsupported. Version 2 is no longer an exclusive storage mode; reads use
-// IsCheckpointsV2Enabled to enable dual v2/v1 lookup when legacy settings are
-// present.
-func (s *EntireSettings) CheckpointsVersion() int {
-	if s.StrategyOptions == nil {
-		return 1
-	}
-	val, ok := s.StrategyOptions["checkpoints_version"]
-	if !ok {
-		return 1
-	}
-	version, ok := parseCheckpointsVersion(val)
-	if ok && version == 1 {
-		return 1
-	}
-	return 1
-}
-
-// WarnIfCheckpointsV2Disallowed emits the v2 fallback warning when any legacy
-// settings key requests v2 writes or pushes.
-func (s *EntireSettings) WarnIfCheckpointsV2Disallowed() {
-	if val, ok := s.disallowedCheckpointsV2Value(); ok {
-		warnCheckpointsV2Disallowed(val)
-	}
-}
-
-func (s *EntireSettings) disallowedCheckpointsV2Value() (any, bool) {
-	if s.StrategyOptions == nil {
-		return nil, false
-	}
-	if val, ok := s.StrategyOptions["checkpoints_version"]; ok {
-		version, supported := parseCheckpointsVersion(val)
-		if supported && version == 2 {
-			return val, true
-		}
-	}
-	for _, key := range []string{"checkpoints_v2", "push_v2_refs", "push_v2"} {
-		if val, ok := s.StrategyOptions[key].(bool); ok && val {
-			return 2, true
-		}
-	}
-	return nil, false
-}
-
-func warnCheckpointsV2Disallowed(val any) {
-	fmt.Fprintf(os.Stderr,
-		"[entire] strategy_options.checkpoints_version %v is no longer supported. Falling back to version 1\n",
-		val,
-	)
-}
-
-func parseCheckpointsVersion(val any) (int, bool) {
-	v, ok := val.(int)
-	if ok && (v == 1 || v == 2) {
-		return v, true
-	}
-	floatV, ok := val.(float64)
-	if ok && (floatV == 1 || floatV == 2) {
-		return int(floatV), true
-	}
-	stringV, ok := val.(string)
-	if ok {
-		parsed, err := strconv.Atoi(stringV)
-		if err == nil && (parsed == 1 || parsed == 2) {
-			return parsed, true
-		}
-	}
-	return 1, false
-}
-
-// GetFullTranscriptGenerationRetentionDays returns the retention window for
-// archived checkpoints v2 /full/* generations. Invalid, missing, or
-// non-positive values fall back to the documented default.
-func (s *EntireSettings) GetFullTranscriptGenerationRetentionDays() int {
-	if s.StrategyOptions == nil {
-		return defaultGenerationRetentionDays
-	}
-
-	val, ok := s.StrategyOptions["full_transcript_generation_retention_days"]
-	if !ok {
-		return defaultGenerationRetentionDays
-	}
-
-	switch days := val.(type) {
-	case int:
-		if days > 0 {
-			return days
-		}
-	case float64:
-		intDays := int(days)
-		if intDays > 0 && days == float64(intDays) {
-			return intDays
-		}
-	}
-
-	return defaultGenerationRetentionDays
+// isV1CustomRefValue reports whether a checkpoints_version value selects the v1
+// custom ref. Only the JSON string "1.1" opts in; numeric values remain plain v1.
+func isV1CustomRefValue(val any) bool {
+	s, ok := val.(string)
+	return ok && s == "1.1"
 }
 
 // IsFilteredFetchesEnabled checks if fetches should use --filter=blob:none.

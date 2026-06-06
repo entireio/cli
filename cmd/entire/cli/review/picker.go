@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"sort"
 	"strings"
 
@@ -23,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/uiform"
 )
 
 // AgentChoice is one row in the spawn-time picker. Name is the agent
@@ -33,15 +33,11 @@ type AgentChoice struct {
 	Label string
 }
 
-// newAccessibleForm creates a huh form with accessibility mode enabled when
-// the ACCESSIBLE env var is set. Mirrors cli.NewAccessibleForm without
-// requiring an import of the cli package (which would be circular).
+// newAccessibleForm creates a huh form with Entire's standard theme,
+// switching to accessibility mode when ACCESSIBLE is set. Thin wrapper
+// around uiform.New preserved so existing call sites don't change.
 func newAccessibleForm(groups ...*huh.Group) *huh.Form {
-	form := huh.NewForm(groups...).WithTheme(huh.ThemeFunc(huh.ThemeDracula))
-	if os.Getenv("ACCESSIBLE") != "" {
-		form = form.WithAccessible(true)
-	}
-	return form
+	return uiform.New(groups...)
 }
 
 // ConfirmFirstRunSetup prints a banner framing the picker as first-run
@@ -257,26 +253,6 @@ func MergePickerResults(existing map[string]settings.ReviewConfig, offered map[s
 		merged[name] = cfg
 	}
 	return merged
-}
-
-// SaveReviewConfig persists the review map into clone-local preferences while
-// preserving other review preferences. A load error means the preferences file
-// exists but is malformed — we must NOT silently overwrite it with an empty
-// struct, or every unrelated review preference would be wiped. Return the
-// error so the caller can surface it instead.
-func SaveReviewConfig(ctx context.Context, review map[string]settings.ReviewConfig) error {
-	prefs, err := settings.LoadClonePreferences(ctx)
-	if err != nil {
-		return fmt.Errorf("load review preferences before save: %w", err)
-	}
-	if prefs == nil {
-		prefs = &settings.ClonePreferences{}
-	}
-	prefs.Review = review
-	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
-		return fmt.Errorf("save review preferences: %w", err)
-	}
-	return nil
 }
 
 func SaveReviewFixAgent(ctx context.Context, agentName string) error {

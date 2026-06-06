@@ -11,10 +11,10 @@ package review
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitexec"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/storer"
@@ -250,26 +250,8 @@ func countUncommitted(ctx context.Context, repoRoot string) (int, error) {
 	return len(strings.Split(trimmed, "\n")), nil
 }
 
-// runGit runs `git <args>` in repoDir and returns stdout as a string.
-// stderr is captured separately and surfaced in the error wrap on non-zero
-// exit. Stdout and stderr are NOT combined — git emits warnings on stderr
-// even on successful commands (shallow-clone notices, safe.directory
-// advisories, etc.) and merging them would corrupt parsed output (e.g.,
-// strconv.Atoi on the result of `rev-list --count` would fail).
+// runGit runs `git <args>` in repoDir and returns stdout as a string. Thin
+// wrapper around gitexec.Run preserved so existing call sites don't change.
 func runGit(ctx context.Context, repoRoot string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = repoRoot
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		// Surface stderr so callers see why git rejected the command,
-		// not just "exit status 128".
-		stderrTxt := strings.TrimSpace(stderr.String())
-		if stderrTxt != "" {
-			return "", fmt.Errorf("git %s: %w (stderr: %s)", args[0], err, stderrTxt)
-		}
-		return "", fmt.Errorf("git %s: %w", args[0], err)
-	}
-	return string(out), nil
+	return gitexec.Run(ctx, repoRoot, args...) //nolint:wrapcheck // gitexec already wraps
 }

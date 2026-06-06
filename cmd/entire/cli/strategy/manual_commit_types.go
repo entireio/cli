@@ -64,5 +64,6 @@ type ExtractedSessionData struct {
 	FullTranscriptLines int      // Total line count in full transcript
 	Prompts             []string // User prompts from the current checkpoint portion
 	FilesTouched        []string
-	TokenUsage          *agent.TokenUsage // Token usage calculated from transcript (since CheckpointTranscriptStart)
+	TokenUsage          *agent.TokenUsage  // Token usage calculated from transcript (since CheckpointTranscriptStart)
+	SkillEvents         []agent.SkillEvent // Skill events detected from transcript data
 }

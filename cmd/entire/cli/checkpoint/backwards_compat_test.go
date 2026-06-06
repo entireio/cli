@@ -48,7 +48,7 @@ func TestReadCommitted_MissingTokenUsage(t *testing.T) {
 		t.Fatalf("failed to commit: %v", err)
 	}
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	checkpointID := id.MustCheckpointID("def456abc123")
 
 	// Write checkpoint WITHOUT token usage (simulates old checkpoints)

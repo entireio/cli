@@ -22,14 +22,6 @@ type runConfig struct {
 	PromptTimeout  time.Duration
 }
 
-func WithModel(model string) Option {
-	return func(c *runConfig) { c.Model = model }
-}
-
-func WithPermissionMode(mode string) Option {
-	return func(c *runConfig) { c.PermissionMode = mode }
-}
-
 func WithPromptTimeout(d time.Duration) Option {
 	return func(c *runConfig) { c.PromptTimeout = d }
 }

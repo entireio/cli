@@ -42,10 +42,14 @@ var (
 
 // listCheckpoints returns all checkpoints from committed checkpoint storage.
 func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
-	store, err := s.committedCheckpointStore(ctx)
+	repo, err := OpenRepository(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
+		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
+
+	WarnIfMetadataDisconnected()
+	store := s.getCheckpointStore(ctx, repo)
 
 	committed, err := store.ListCommitted(ctx)
 	if err != nil {
@@ -57,10 +61,14 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 
 // getCheckpointLog returns the transcript for a specific checkpoint ID.
 func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointID id.CheckpointID) ([]byte, error) {
-	store, err := s.committedCheckpointStore(ctx)
+	repo, err := OpenRepository(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
+		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
+
+	WarnIfMetadataDisconnected()
+	store := s.getCheckpointStore(ctx, repo)
 
 	summary, err := cpkg.ReadCommittedCheckpoint(ctx, store, checkpointID)
 	if err != nil {
@@ -140,6 +148,16 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		state.TokenUsage = backfillUsage
 	}
 
+	// Backfill the model from the transcript for agents that don't report it via
+	// hooks (e.g., Pi records message.model but its hook events carry no model
+	// field). Only fills when the model is otherwise unknown — hook-reported
+	// models take precedence.
+	if state.ModelName == "" {
+		if model := sessionStateBackfillModel(ctx, ag, sessionData.Transcript); model != "" {
+			state.ModelName = model
+		}
+	}
+
 	// Skip gate: if there is no transcript AND no files touched, there is nothing
 	// meaningful to condense. Return early to avoid writing metadata-only stubs.
 	//
@@ -166,11 +184,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		return skipped, nil
 	}
 
-	// Get checkpoint store
-	store, err := s.getCheckpointStore()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
-	}
+	store := s.getCheckpointStore(ctx, repo)
 
 	// Get author info
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
@@ -203,7 +217,8 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		summary = generateSummary(ctx, redactedTranscript, sessionData.FilesTouched, state)
 	}
 
-	// Build write options (shared by v1 and v2)
+	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(sessionData.SkillEvents, state.TurnID))
+
 	writeOpts := cpkg.WriteCommittedOptions{
 		CheckpointID:                checkpointID,
 		SessionID:                   state.SessionID,
@@ -222,6 +237,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
 		TokenUsage:                  sessionData.TokenUsage,
+		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),
 		InitialAttribution:          attribution,
 		PromptAttributionsJSON:      marshalPromptAttributionsIncludingPending(state),
@@ -230,6 +246,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		ReviewSkills:                state.ReviewSkills,
 		ReviewPrompt:                state.ReviewPrompt,
 		HasReview:                   state.Kind.IsReview(),
+		HasInvestigation:            state.Kind.IsInvestigate(),
+		InvestigateRunID:            state.InvestigateRunID,
+		InvestigateTopic:            state.InvestigateTopic,
 	}
 
 	writeV1Start := time.Now()
@@ -241,6 +260,10 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	writeCommittedSpan.End()
 	writeV1Duration := time.Since(writeV1Start)
+
+	// Mirror the committed write to refs.Mirror when configured (best-effort;
+	// failures are logged, not fatal).
+	mirrorCommittedMetadataRefBestEffort(ctx, repo, store.Refs())
 
 	logging.Debug(logCtx, "condense timings",
 		slog.String("session_id", state.SessionID),
@@ -588,6 +611,24 @@ func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentTy
 	return nil
 }
 
+// sessionStateBackfillModel extracts the LLM model from the transcript for
+// agents that don't report it through hooks (e.g., Pi). Returns "" when the
+// agent doesn't support model extraction, the transcript is empty, or no model
+// can be determined. Errors are debug-logged because callers treat "" as "no
+// model available".
+func sessionStateBackfillModel(ctx context.Context, ag agent.Agent, transcript []byte) string {
+	me, ok := agent.AsModelExtractor(ag)
+	if !ok {
+		return ""
+	}
+	model, err := me.ExtractModel(transcript)
+	if err != nil {
+		logging.Debug(ctx, "model backfill from transcript failed", slog.String("error", err.Error()))
+		return ""
+	}
+	return model
+}
+
 // attributionOpts provides pre-resolved git objects to avoid redundant reads.
 type attributionOpts struct {
 	headTree              *object.Tree        // HEAD commit tree (already resolved by PostCommit)
@@ -831,9 +872,13 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 	// Use tracked files from session state (not all files in tree)
 	data.FilesTouched = filesTouched
 
-	// Calculate token usage from the extracted transcript portion
+	// Calculate token usage from the checkpoint-scoped transcript portion.
+	// Skill events annotate the stored raw transcript, which is full-session, so
+	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
+	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
 		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "") //TODO: why do we not use here subagents dir?
+		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
 	return data, nil
@@ -869,9 +914,13 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	// Resolve files touched: prefers hook-populated state, falls back to transcript extraction
 	data.FilesTouched = s.resolveFilesTouched(ctx, state)
 
-	// Calculate token usage from the extracted transcript portion
+	// Calculate token usage from the checkpoint-scoped transcript portion.
+	// Skill events annotate the stored raw transcript, which is full-session, so
+	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
+	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
 		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "") //TODO: why do we not use here subagents dir?
+		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
 	return data, nil
@@ -1100,6 +1149,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	checkpointID, err := id.Generate()
 	if err != nil {
@@ -1198,6 +1248,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		)
 		return nil // fail-open
 	}
+	defer repo.Close()
 
 	checkpointID, err := id.Generate()
 	if err != nil {

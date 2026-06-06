@@ -3,8 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,82 +13,25 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// createV2Ref creates a v2 custom ref with an empty tree commit.
-// Works for refs/entire/checkpoints/v2/main, refs/entire/checkpoints/v2/full/current, etc.
-func createV2Ref(t *testing.T, repo *git.Repository, refName string) {
-	t.Helper()
-
-	treeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, make(map[string]object.TreeEntry))
-	require.NoError(t, err)
-
-	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "init v2 ref", "test", "test@test.com")
-	require.NoError(t, err)
-
-	ref := plumbing.NewHashReference(plumbing.ReferenceName(refName), commitHash)
-	require.NoError(t, repo.Storer.SetReference(ref))
-}
-
-// createBlob stores a string as a git blob and returns its hash.
-func createBlob(t *testing.T, repo *git.Repository, content string) plumbing.Hash {
-	t.Helper()
-	obj := repo.Storer.NewEncodedObject()
-	obj.SetType(plumbing.BlobObject)
-	w, err := obj.Writer()
-	require.NoError(t, err)
-	_, err = w.Write([]byte(content))
-	require.NoError(t, err)
-	require.NoError(t, w.Close())
-	hash, err := repo.Storer.SetEncodedObject(obj)
-	require.NoError(t, err)
-	return hash
-}
-
-// createV2RefWithCheckpoints creates a v2 custom ref with N checkpoint shard directories.
-// Each shard has a minimal metadata.json file.
-func createV2RefWithCheckpoints(t *testing.T, repo *git.Repository, refName string, count int) {
-	t.Helper()
-
-	entries := make(map[string]object.TreeEntry)
-	for i := range count {
-		cpID := fmt.Sprintf("%02x%010x", i%256, i)
-		path := cpID[:2] + "/" + cpID[2:] + "/" + paths.MetadataFileName
-		blobHash := createBlob(t, repo, fmt.Sprintf(`{"checkpoint_id":"%s"}`, cpID))
-		entries[path] = object.TreeEntry{
-			Name: paths.MetadataFileName,
-			Mode: filemode.Regular,
-			Hash: blobHash,
-		}
-	}
-
-	treeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, entries)
-	require.NoError(t, err)
-
-	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "v2 ref with checkpoints", "test", "test@test.com")
-	require.NoError(t, err)
-
-	ref := plumbing.NewHashReference(plumbing.ReferenceName(refName), commitHash)
-	require.NoError(t, repo.Storer.SetReference(ref))
-}
-
-// newTestCmd creates a minimal cobra.Command with captured stdout/stderr for testing.
-func newTestCmd(t *testing.T) (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
+// newTestCmd creates a minimal cobra.Command with captured stdout for testing.
+func newTestCmd(t *testing.T) (*cobra.Command, *bytes.Buffer) {
 	t.Helper()
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	return cmd, &stdout, &stderr
+	return cmd, &stdout
 }
 
 // testBaseCommit is a fake commit hash used across classifySession tests.
@@ -365,361 +306,6 @@ func TestClassifySession_WorktreeIDInShadowBranch(t *testing.T) {
 	assert.Equal(t, expectedBranch, result.ShadowBranch)
 }
 
-func TestCheckV2RefExistence_BothExist(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	createV2Ref(t, repo, paths.V2MainRefName)
-	createV2Ref(t, repo, paths.V2FullCurrentRefName)
-
-	cmd, stdout, stderr := newTestCmd(t)
-
-	err = checkV2RefExistence(cmd, repo)
-	require.NoError(t, err)
-	assert.Contains(t, stdout.String(), "v2 refs: OK")
-	assert.Empty(t, stderr.String())
-}
-
-func TestCheckV2RefExistence_NeitherExist(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2RefExistence(cmd, repo)
-	require.NoError(t, err)
-	assert.Contains(t, stdout.String(), "no checkpoints written yet")
-}
-
-func TestCheckV2RefExistence_OnlyMainExists(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	createV2Ref(t, repo, paths.V2MainRefName)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2RefExistence(cmd, repo)
-	require.Error(t, err)
-	assert.Contains(t, stdout.String(), "INCONSISTENT")
-	assert.Contains(t, stdout.String(), "/full/current is missing")
-}
-
-func TestCheckV2RefExistence_OnlyFullCurrentExists(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	createV2Ref(t, repo, paths.V2FullCurrentRefName)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2RefExistence(cmd, repo)
-	require.Error(t, err)
-	assert.Contains(t, stdout.String(), "INCONSISTENT")
-	assert.Contains(t, stdout.String(), "/main is missing")
-}
-
-func TestCheckV2CheckpointCounts_Consistent(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	createV2RefWithCheckpoints(t, repo, paths.V2MainRefName, 10)
-	createV2RefWithCheckpoints(t, repo, paths.V2FullCurrentRefName, 5)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2CheckpointCounts(cmd, repo)
-	require.NoError(t, err)
-	assert.Contains(t, stdout.String(), "v2 checkpoint counts: OK")
-	assert.Contains(t, stdout.String(), "main: 10")
-	assert.Contains(t, stdout.String(), "full/current: 5")
-}
-
-func TestCheckV2CheckpointCounts_FullExceedsMain(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	createV2RefWithCheckpoints(t, repo, paths.V2MainRefName, 3)
-	createV2RefWithCheckpoints(t, repo, paths.V2FullCurrentRefName, 5)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2CheckpointCounts(cmd, repo)
-	require.Error(t, err)
-	assert.Contains(t, stdout.String(), "INCONSISTENT")
-}
-
-func TestCheckV2CheckpointCounts_SkipsWhenRefsMissing(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2CheckpointCounts(cmd, repo)
-	require.NoError(t, err)
-	assert.Empty(t, stdout.String())
-}
-
-func TestCheckV2CheckpointCounts_ReturnsErrorForCorruptRef(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	// /full/current exists and is valid.
-	createV2RefWithCheckpoints(t, repo, paths.V2FullCurrentRefName, 1)
-
-	// /main exists but points to a missing commit object.
-	missingHash := plumbing.NewHash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	err = repo.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(paths.V2MainRefName), missingHash))
-	require.NoError(t, err)
-
-	cmd, _, _ := newTestCmd(t)
-
-	err = checkV2CheckpointCounts(cmd, repo)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to read /main")
-}
-
-// createArchivedGeneration creates an archived generation ref with the given generation.json
-// and checkpoint count. generationNum is the sequence number (e.g., 1 -> "0000000000001").
-func createArchivedGeneration(t *testing.T, repo *git.Repository, generationNum int, gen *checkpoint.GenerationMetadata, checkpointCount int) {
-	t.Helper()
-
-	entries := make(map[string]object.TreeEntry)
-
-	for i := range checkpointCount {
-		cpID := fmt.Sprintf("%02x%010x", i%256, i)
-		path := cpID[:2] + "/" + cpID[2:] + "/0/" + paths.TranscriptFileName
-		blobHash := createBlob(t, repo, `{"transcript":"data"}`)
-		entries[path] = object.TreeEntry{
-			Name: paths.TranscriptFileName,
-			Mode: filemode.Regular,
-			Hash: blobHash,
-		}
-	}
-
-	if gen != nil {
-		genJSON, err := json.Marshal(gen)
-		require.NoError(t, err)
-		blobHash := createBlob(t, repo, string(genJSON))
-		entries[paths.GenerationFileName] = object.TreeEntry{
-			Name: paths.GenerationFileName,
-			Mode: filemode.Regular,
-			Hash: blobHash,
-		}
-	}
-
-	treeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, entries)
-	require.NoError(t, err)
-
-	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "archived generation", "test", "test@test.com")
-	require.NoError(t, err)
-
-	refName := fmt.Sprintf("%s%013d", paths.V2FullRefPrefix, generationNum)
-	ref := plumbing.NewHashReference(plumbing.ReferenceName(refName), commitHash)
-	require.NoError(t, repo.Storer.SetReference(ref))
-}
-
-func TestCheckV2GenerationHealth_NoArchives(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2GenerationHealth(cmd, repo)
-	require.NoError(t, err)
-	assert.Contains(t, stdout.String(), "no archived generations")
-}
-
-func TestCheckV2GenerationHealth_HealthyGeneration(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	now := time.Now().UTC()
-	gen := &checkpoint.GenerationMetadata{
-		OldestCheckpointAt: now.Add(-24 * time.Hour),
-		NewestCheckpointAt: now,
-	}
-	createArchivedGeneration(t, repo, 1, gen, 5)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2GenerationHealth(cmd, repo)
-	require.NoError(t, err)
-	assert.Contains(t, stdout.String(), "v2 generations: OK (1 archived)")
-}
-
-func TestCheckV2GenerationHealth_MissingGenerationJSON(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	createArchivedGeneration(t, repo, 1, nil, 5)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2GenerationHealth(cmd, repo)
-	require.Error(t, err)
-	assert.Contains(t, stdout.String(), "WARNING")
-	assert.Contains(t, stdout.String(), "missing generation.json")
-}
-
-func TestCheckV2GenerationHealth_InvalidTimestamps(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	now := time.Now().UTC()
-	gen := &checkpoint.GenerationMetadata{
-		OldestCheckpointAt: now,
-		NewestCheckpointAt: now.Add(-24 * time.Hour),
-	}
-	createArchivedGeneration(t, repo, 1, gen, 5)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2GenerationHealth(cmd, repo)
-	require.Error(t, err)
-	assert.Contains(t, stdout.String(), "WARNING")
-	assert.Contains(t, stdout.String(), "invalid timestamps")
-}
-
-func TestCheckV2GenerationHealth_PartialTimestamp_MissingNewest(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	gen := &checkpoint.GenerationMetadata{
-		OldestCheckpointAt: time.Now().UTC(),
-		// NewestCheckpointAt is zero — partial/corrupt
-	}
-	createArchivedGeneration(t, repo, 1, gen, 5)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2GenerationHealth(cmd, repo)
-	require.Error(t, err)
-	assert.Contains(t, stdout.String(), "WARNING")
-	assert.Contains(t, stdout.String(), "incomplete generation.json")
-}
-
-func TestCheckV2GenerationHealth_PartialTimestamp_MissingOldest(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	gen := &checkpoint.GenerationMetadata{
-		// OldestCheckpointAt is zero — partial/corrupt
-		NewestCheckpointAt: time.Now().UTC(),
-	}
-	createArchivedGeneration(t, repo, 1, gen, 5)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2GenerationHealth(cmd, repo)
-	require.Error(t, err)
-	assert.Contains(t, stdout.String(), "WARNING")
-	assert.Contains(t, stdout.String(), "incomplete generation.json")
-}
-
-func TestCheckV2GenerationHealth_EmptyGeneration(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	now := time.Now().UTC()
-	gen := &checkpoint.GenerationMetadata{
-		OldestCheckpointAt: now.Add(-24 * time.Hour),
-		NewestCheckpointAt: now,
-	}
-	createArchivedGeneration(t, repo, 1, gen, 0)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2GenerationHealth(cmd, repo)
-	require.Error(t, err)
-	assert.Contains(t, stdout.String(), "WARNING")
-	assert.Contains(t, stdout.String(), "empty")
-}
-
-func TestCheckV2GenerationHealth_SequenceGap(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	now := time.Now().UTC()
-	gen1 := &checkpoint.GenerationMetadata{
-		OldestCheckpointAt: now.Add(-48 * time.Hour),
-		NewestCheckpointAt: now.Add(-24 * time.Hour),
-	}
-	createArchivedGeneration(t, repo, 1, gen1, 3)
-
-	gen3 := &checkpoint.GenerationMetadata{
-		OldestCheckpointAt: now.Add(-12 * time.Hour),
-		NewestCheckpointAt: now,
-	}
-	createArchivedGeneration(t, repo, 3, gen3, 3)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2GenerationHealth(cmd, repo)
-	require.Error(t, err)
-	assert.Contains(t, stdout.String(), "INFO")
-	assert.Contains(t, stdout.String(), "0000000000002 missing")
-}
-
-func TestCheckV2GenerationHealth_SequenceGapRange(t *testing.T) {
-	t.Parallel()
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	now := time.Now().UTC()
-	gen1 := &checkpoint.GenerationMetadata{
-		OldestCheckpointAt: now.Add(-72 * time.Hour),
-		NewestCheckpointAt: now.Add(-48 * time.Hour),
-	}
-	createArchivedGeneration(t, repo, 1, gen1, 3)
-
-	gen5 := &checkpoint.GenerationMetadata{
-		OldestCheckpointAt: now.Add(-24 * time.Hour),
-		NewestCheckpointAt: now,
-	}
-	createArchivedGeneration(t, repo, 5, gen5, 3)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = checkV2GenerationHealth(cmd, repo)
-	require.Error(t, err)
-	assert.Contains(t, stdout.String(), "0000000000002–0000000000004 missing")
-}
-
 // TestRunSessionsFix_MetadataCheckFailure_PropagatesError verifies that when
 // checkDisconnectedMetadata fails, runSessionsFix returns a SilentError so the
 // custom stderr message is not printed twice by main.go.
@@ -814,57 +400,182 @@ func TestRunSessionsFix_ForceDiscardOutput_Indented(t *testing.T) {
 	}
 }
 
-func TestRunSessionsFix_V2ChecksSkippedWhenDisabled(t *testing.T) {
-	// Cannot use t.Parallel() because t.Chdir modifies process-global state.
-	dir := setupGitRepoForPhaseTest(t)
-	t.Chdir(dir)
-
-	// Create v2 refs but do NOT enable checkpoints_v2 in settings.
-	// Intentionally only create /main (not /full/current) to trigger INCONSISTENT
-	// if the check were to run.
-	repo, err := git.PlainOpen(dir)
+// setupMirrorCheckRepo is setupHeadFlagsRepo plus the v1.1 settings opt-in.
+func setupMirrorCheckRepo(t *testing.T) *git.Repository {
+	t.Helper()
+	repo := setupHeadFlagsRepo(t)
+	cwd, err := os.Getwd()
 	require.NoError(t, err)
-	createV2Ref(t, repo, paths.V2MainRefName)
-
-	cmd, stdout, _ := newTestCmd(t)
-
-	err = runSessionsFix(cmd, true)
-	require.NoError(t, err)
-
-	output := stdout.String()
-	// v2 checks should not appear in output
-	assert.NotContains(t, output, "v2 refs")
-	assert.NotContains(t, output, "v2 checkpoint counts")
-	assert.NotContains(t, output, "v2 generations")
-	assert.NotContains(t, output, "v2 /main ref")
+	require.NoError(t, os.MkdirAll(filepath.Join(cwd, paths.EntireDir), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(cwd, paths.EntireDir, paths.SettingsFileName),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
+		0o644,
+	))
+	return repo
 }
 
-func TestRunSessionsFix_V2ChecksRunWhenEnabled(t *testing.T) {
-	// Cannot use t.Parallel() because t.Chdir modifies process-global state.
-	dir := setupGitRepoForPhaseTest(t)
-	t.Chdir(dir)
-
-	// Create settings.json with checkpoints_v2 enabled
-	entireDir := filepath.Join(dir, ".entire")
-	require.NoError(t, os.MkdirAll(entireDir, 0o755))
-	settingsJSON := `{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`
-	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(settingsJSON), 0o644))
-
-	// Create both v2 refs so ref existence check passes
-	repo, err := git.PlainOpen(dir)
+// setMetadataV1Branch points the v1 metadata branch at HEAD and returns the hash.
+func setMetadataV1Branch(t *testing.T, repo *git.Repository) plumbing.Hash {
+	t.Helper()
+	head, err := repo.Head()
 	require.NoError(t, err)
-	createV2Ref(t, repo, paths.V2MainRefName)
-	createV2Ref(t, repo, paths.V2FullCurrentRefName)
+	require.NoError(t, repo.Storer.SetReference(
+		plumbing.NewHashReference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), head.Hash())))
+	return head.Hash()
+}
 
-	cmd, stdout, _ := newTestCmd(t)
+// setMetadataMirrorRef points the v1.1 mirror ref at the given hash.
+func setMetadataMirrorRef(t *testing.T, repo *git.Repository, hash plumbing.Hash) {
+	t.Helper()
+	require.NoError(t, repo.Storer.SetReference(
+		plumbing.NewHashReference(plumbing.ReferenceName(paths.MetadataRefName), hash)))
+}
 
-	err = runSessionsFix(cmd, true)
+// metadataMirrorHash resolves the v1.1 mirror ref, reporting existence.
+func metadataMirrorHash(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
+	t.Helper()
+	ref, err := repo.Reference(plumbing.ReferenceName(paths.MetadataRefName), true)
+	if err != nil {
+		return plumbing.ZeroHash, false
+	}
+	return ref.Hash(), true
+}
+
+// secondCommitInCwd creates a second commit in the test repo and returns its hash.
+func secondCommitInCwd(t *testing.T, repo *git.Repository) plumbing.Hash {
+	t.Helper()
+	cwd, err := os.Getwd()
 	require.NoError(t, err)
+	testutil.WriteFile(t, cwd, "f2.txt", "more")
+	testutil.GitAdd(t, cwd, "f2.txt")
+	testutil.GitCommit(t, cwd, "second")
+	head, err := repo.Head()
+	require.NoError(t, err)
+	return head.Hash()
+}
 
-	output := stdout.String()
-	// v2 checks should appear in output
-	assert.Contains(t, output, "v2 /main ref: OK (no remote to compare)")
-	assert.Contains(t, output, "v2 refs: OK")
+// Not parallel: uses t.Chdir(). Setup returns the expected final mirror state.
+func TestCheckCommittedMetadataMirror(t *testing.T) {
+	tests := []struct {
+		name    string
+		v1Only  bool // skip the v1.1 settings opt-in
+		force   bool
+		setup   func(t *testing.T, repo *git.Repository) (plumbing.Hash, bool)
+		wantOut []string // empty = expect no output at all
+	}{
+		{
+			name:   "silent when not configured",
+			v1Only: true,
+			setup: func(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
+				setMetadataV1Branch(t, repo)
+				return plumbing.ZeroHash, false
+			},
+		},
+		{
+			name: "ok",
+			setup: func(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
+				v1 := setMetadataV1Branch(t, repo)
+				setMetadataMirrorRef(t, repo, v1)
+				return v1, true
+			},
+			wantOut: []string{"✓ Checkpoint read mirror: OK"},
+		},
+		{
+			name: "ok when no metadata yet",
+			setup: func(_ *testing.T, _ *git.Repository) (plumbing.Hash, bool) {
+				return plumbing.ZeroHash, false
+			},
+			wantOut: []string{"✓ Checkpoint read mirror: OK (no committed metadata yet)"},
+		},
+		{
+			// Warn-only anomaly: even --force must not move or delete the mirror.
+			name:  "warns when mirror outlives v1",
+			force: true,
+			setup: func(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
+				head, err := repo.Head()
+				require.NoError(t, err)
+				setMetadataMirrorRef(t, repo, head.Hash())
+				return head.Hash(), true
+			},
+			wantOut: []string{
+				"Checkpoint read mirror: V1 BRANCH MISSING",
+				"git fetch origin entire/checkpoints/v1:entire/checkpoints/v1",
+			},
+		},
+		{
+			name:  "force seeds missing mirror",
+			force: true,
+			setup: func(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
+				return setMetadataV1Branch(t, repo), true
+			},
+			wantOut: []string{"Checkpoint read mirror: MISSING", "✓ Fixed"},
+		},
+		{
+			name:  "force advances stale mirror",
+			force: true,
+			setup: func(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
+				setMetadataMirrorRef(t, repo, setMetadataV1Branch(t, repo))
+				secondCommitInCwd(t, repo)
+				return setMetadataV1Branch(t, repo), true
+			},
+			wantOut: []string{"Checkpoint read mirror: STALE", "✓ Fixed"},
+		},
+		{
+			name:  "force resets diverged mirror",
+			force: true,
+			setup: func(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
+				v1 := setMetadataV1Branch(t, repo)
+				setMetadataMirrorRef(t, repo, secondCommitInCwd(t, repo))
+				return v1, true
+			},
+			wantOut: []string{"Checkpoint read mirror: DIVERGED", "discard", "✓ Fixed"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var repo *git.Repository
+			if tt.v1Only {
+				repo = setupHeadFlagsRepo(t)
+			} else {
+				repo = setupMirrorCheckRepo(t)
+			}
+			wantMirror, wantExists := tt.setup(t, repo)
+
+			cmd, stdout := newTestCmd(t)
+			require.NoError(t, checkCommittedMetadataMirror(cmd, tt.force))
+
+			if len(tt.wantOut) == 0 {
+				assert.Empty(t, stdout.String())
+			}
+			for _, want := range tt.wantOut {
+				assert.Contains(t, stdout.String(), want)
+			}
+
+			gotMirror, gotExists := metadataMirrorHash(t, repo)
+			require.Equal(t, wantExists, gotExists)
+			if wantExists {
+				assert.Equal(t, wantMirror, gotMirror)
+			}
+		})
+	}
+}
+
+// Proves the mirror check is wired into the main doctor flow.
+func TestRunSessionsFix_IncludesMirrorCheck(t *testing.T) {
+	repo := setupMirrorCheckRepo(t)
+	v1Hash := setMetadataV1Branch(t, repo)
+
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, runSessionsFix(cmd, true))
+
+	out := stdout.String()
+	assert.Contains(t, out, "Checkpoint read mirror: MISSING")
+	assert.Contains(t, out, "✓ Fixed")
+
+	got, ok := metadataMirrorHash(t, repo)
+	require.True(t, ok)
+	assert.Equal(t, v1Hash, got)
 }
 
 // TestCheckCodexHookTrust_SilentWhenCodexNotInstalled — `entire doctor`
@@ -875,7 +586,7 @@ func TestCheckCodexHookTrust_SilentWhenCodexNotInstalled(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 
-	cmd, stdout, _ := newTestCmd(t)
+	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
 	require.NotContains(t, stdout.String(), "Codex hook trust")
 }
@@ -932,7 +643,7 @@ trusted_hash = "sha256:ddd"
 	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(configTOML), 0o600))
 	t.Setenv("CODEX_HOME", codexHome)
 
-	cmd, stdout, _ := newTestCmd(t)
+	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
 	require.Contains(t, stdout.String(), "✓ Codex hook trust: OK")
 }
@@ -964,7 +675,7 @@ trusted_hash = "sha256:ccc"
 	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(configTOML), 0o600))
 	t.Setenv("CODEX_HOME", codexHome)
 
-	cmd, stdout, _ := newTestCmd(t)
+	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
 
 	out := stdout.String()
@@ -1008,7 +719,7 @@ trusted_hash = "sha256:ccc"
 	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(configTOML), 0o600))
 	t.Setenv("CODEX_HOME", codexHome)
 
-	cmd, stdout, _ := newTestCmd(t)
+	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
 
 	out := stdout.String()
@@ -1016,4 +727,18 @@ trusted_hash = "sha256:ccc"
 	require.Contains(t, out, "- post_tool_use")
 	require.Contains(t, out, "entire enable")
 	require.NotContains(t, out, "Codex hook trust: REVIEW NEEDED")
+}
+
+// TestConfirmDoctorFix_CancelledContext verifies that a cancelled command
+// context makes the confirm prompt return (false, nil) rather than surfacing a
+// wrapped error — doctor fixes are skipped cleanly on interrupt.
+func TestConfirmDoctorFix_CancelledContext(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before prompting
+
+	var out bytes.Buffer
+	proceed, err := confirmDoctorFix(ctx, &out, "Apply fix?")
+	require.NoError(t, err)
+	assert.False(t, proceed)
 }

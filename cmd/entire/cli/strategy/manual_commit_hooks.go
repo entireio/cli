@@ -205,18 +205,19 @@ func (s *ManualCommitStrategy) PostRewrite(ctx context.Context, rewriteType stri
 
 	worktreePath, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return nil //nolint:nilerr // Hook must be resilient
+		return nil
 	}
 
 	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
 	if err != nil || len(sessions) == 0 {
-		return nil //nolint:nilerr // Hook must be resilient
+		return nil
 	}
 
 	repo, err := OpenRepository(ctx)
 	if err != nil {
-		return nil //nolint:nilerr // Hook must be resilient
+		return nil
 	}
+	defer repo.Close()
 
 	for _, sess := range sessions {
 		sessionID := sess.SessionID
@@ -388,6 +389,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		openRepoSpan.End()
 		return nil
 	}
+	defer repo.Close()
 	openRepoSpan.End()
 
 	_, findSessionsSpan := perf.Start(ctx, "find_sessions_for_worktree")
@@ -559,7 +561,7 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 	// Read current commit message
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
 	if err != nil {
-		return nil //nolint:nilerr // Hook must be silent on failure
+		return nil
 	}
 
 	message := string(content)
@@ -576,12 +578,12 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 	// No trailer in message — check if any session has LastCheckpointID to restore
 	worktreePath, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return nil //nolint:nilerr // Hook must be silent on failure
+		return nil
 	}
 
 	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
 	if err != nil || len(sessions) == 0 {
-		return nil //nolint:nilerr // No sessions - nothing to restore
+		return nil
 	}
 
 	// For amend, HEAD^ is the commit being amended, and HEAD is where we are now.
@@ -590,11 +592,12 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 	// unrelated checkpoint IDs.
 	repo, repoErr := OpenRepository(ctx)
 	if repoErr != nil {
-		return nil //nolint:nilerr // Hook must be silent on failure
+		return nil
 	}
+	defer repo.Close()
 	head, headErr := repo.Head()
 	if headErr != nil {
-		return nil //nolint:nilerr // Hook must be silent on failure
+		return nil
 	}
 	currentHead := head.Hash().String()
 
@@ -613,7 +616,7 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 		// Restore the trailer
 		message = addCheckpointTrailer(message, cpID)
 		if writeErr := os.WriteFile(commitMsgFile, []byte(message), 0o600); writeErr != nil { //nolint:gosec // path from git hook arg
-			return nil //nolint:nilerr // Hook must be silent on failure
+			return nil
 		}
 
 		logging.Info(logCtx, "prepare-commit-msg: restored trailer on amend",
@@ -872,7 +875,7 @@ func (h *postCommitActionHandler) HandleWarnStaleSession(_ *session.State) error
 // During rebase/cherry-pick/revert operations, phase transitions are skipped entirely.
 //
 
-func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:unparam // error return is part of the hook contract; callers check it
+func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
 	_, openRepoSpan := perf.Start(ctx, "open_repository_and_head")
@@ -882,6 +885,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:
 		openRepoSpan.End()
 		return nil
 	}
+	defer repo.Close()
 
 	// Get HEAD commit to check for trailer
 	head, err := repo.Head()
@@ -927,7 +931,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:
 			slog.String("strategy", "manual-commit"),
 			slog.String("checkpoint_id", checkpointID.String()),
 		)
-		return nil //nolint:nilerr // Intentional: hooks must be silent on failure
+		return nil
 	}
 
 	// Build transition context
@@ -1058,7 +1062,7 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	repoDir string,
 ) error {
 	logCtx := logging.WithComponent(ctx, "attribution")
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
 
 	summary, err := store.ReadCommitted(ctx, checkpointID)
 	if err != nil {
@@ -1151,6 +1155,10 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	if err := store.UpdateCheckpointSummary(ctx, checkpointID, combined); err != nil {
 		return fmt.Errorf("persisting combined attribution: %w", err)
 	}
+
+	// Combined attribution is a committed write in the post-commit hook, so the
+	// mirror must track it too when configured (best-effort).
+	mirrorCommittedMetadataRefBestEffort(ctx, repo, store.Refs())
 
 	return nil
 }
@@ -2275,6 +2283,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Resolve which agent actually owns this session. The hook firing isn't
 	// authoritative when multiple agents' hooks fire for the same session ID
@@ -2770,11 +2779,15 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		state.TurnCheckpointIDs = nil
 		return 1 // Count as error - all checkpoints will be skipped
 	}
+	defer repo.Close()
 
 	prompts := readPromptsFromShadowBranch(ctx, repo, state)
 	if len(prompts) == 0 {
 		prompts = readPromptsFromFilesystem(ctx, state.SessionID)
 	}
+
+	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; ExtractSkillEvents handles nil
+	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(agent.ExtractSkillEvents(ctx, ag, fullTranscript, 0), state.TurnID))
 
 	// Redact secrets before writing. Checkpoint store methods require
 	// pre-redacted in-memory transcript content from callers. The live
@@ -2799,7 +2812,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		prompts[i] = redact.String(p)
 	}
 
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
 
 	precomputed := precomputeTranscriptBlobsForFinalize(logCtx, repo, redactedTranscript, state)
 
@@ -2821,6 +2834,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			Transcript:       redactedTranscript,
 			Prompts:          prompts,
 			Agent:            state.AgentType,
+			SkillEvents:      skillEvents,
 			PrecomputedBlobs: precomputed,
 		}
 
@@ -2839,6 +2853,11 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			slog.String("session_id", state.SessionID),
 		)
 	}
+
+	// Mirror the finalized primary metadata to refs.Mirror when configured
+	// (best-effort; failures are logged, not fatal). Once after the loop is
+	// enough — it tracks Primary's final commit.
+	mirrorCommittedMetadataRefBestEffort(ctx, repo, store.Refs())
 
 	// Clear turn checkpoint IDs. Do NOT update CheckpointTranscriptStart here — it was
 	// already set correctly by PostCommit: condenseAndUpdateState sets it to the total
@@ -2909,7 +2928,7 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 ) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	start := time.Now()
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
 
 	// Don't include metadata directory in carry-forward. The carry-forward branch
 	// only needs to preserve file content for comparison - not the transcript.
@@ -2955,7 +2974,6 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 	// but this would complicate checkpoint retrieval and require careful tracking of dependencies.
 	state.StepCount = 1
 	state.CheckpointTranscriptStart = 0
-	state.CompactTranscriptStart = 0
 	state.CheckpointTranscriptSize = 0
 	state.LastCheckpointID = ""
 	// NOTE: TurnCheckpointIDs is intentionally NOT cleared here. Those checkpoint

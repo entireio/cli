@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"runtime"
 
+	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/prompts"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
@@ -20,7 +21,7 @@ Getting Started:
   To get started with Entire CLI, run 'entire enable' to enable
   session tracking in your repository, then 'entire agent add <name>'
   to install hooks for a specific agent. For more information, visit:
-  https://docs.entire.io/introduction
+  https://docs.entire.io/overview
 
 `
 
@@ -93,6 +94,11 @@ func NewRootCmd() *cobra.Command {
 
 	// Top-level lifecycle and standalone commands.
 	cmd.AddCommand(cliReview.NewCommand(buildReviewDeps(newReviewAttachCmd()))) // hidden during maturation; runs configured review skills
+	cmd.AddCommand(investigate.NewCommand(buildInvestigateDeps()))              // hidden during maturation; runs a multi-agent investigation
+	cmd.AddCommand(newOrgCmd())                                                 // hidden during maturation; control-plane org management
+	cmd.AddCommand(newProjectCmd())                                             // hidden during maturation; control-plane project management
+	cmd.AddCommand(newRepoCmd())                                                // hidden during maturation; control-plane repo lifecycle
+	cmd.AddCommand(newGrantCmd())                                               // hidden during maturation; control-plane access grants
 	cmd.AddCommand(newCleanCmd())
 	cmd.AddCommand(newSetupCmd()) // 'configure' — non-agent settings; agent CRUD lives under 'agent'
 	cmd.AddCommand(newEnableCmd())
@@ -121,7 +127,6 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newTrailCmd())
 	cmd.AddCommand(newSendAnalyticsCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
-	cmd.AddCommand(newMigrateCmd())
 
 	cmd.SetVersionTemplate(versionString())
 
@@ -132,8 +137,8 @@ func NewRootCmd() *cobra.Command {
 }
 
 func versionString() string {
-	return fmt.Sprintf("Entire CLI %s (%s)\nGo version: %s\nOS/Arch: %s/%s\n",
-		versioninfo.Version, versioninfo.Commit, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	return fmt.Sprintf("Entire CLI %s\nGo version: %s\nOS/Arch: %s/%s\n",
+		versioninfo.Version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
 func newVersionCmd() *cobra.Command {

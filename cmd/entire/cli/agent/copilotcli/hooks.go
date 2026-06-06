@@ -20,9 +20,12 @@ const HooksFileName = "entire.json"
 // hooksDir is the directory within the repo where Copilot CLI looks for hook configs.
 const hooksDir = ".github/hooks"
 
-// entireHookPrefixes are command prefixes that identify Entire hooks in the bash field.
+// entireHookPrefixes are command prefixes that identify Entire hooks in the
+// bash field. The "go run" prefix is retained so hooks installed by older
+// versions are still recognized.
 var entireHookPrefixes = []string{
 	"entire ",
+	agent.LocalDevHookScript + " ",
 	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
 }
 
@@ -101,7 +104,7 @@ func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, localDev bool, force
 	// Define command prefix
 	var cmdPrefix string
 	if localDev {
-		cmdPrefix = `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks copilot-cli `
+		cmdPrefix = agent.LocalDevHookScript + " hooks copilot-cli "
 	} else {
 		cmdPrefix = "entire hooks copilot-cli "
 	}

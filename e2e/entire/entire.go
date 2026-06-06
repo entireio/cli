@@ -141,18 +141,6 @@ func Explain(t *testing.T, dir, checkpointID string) string {
 	return run(t, dir, "checkpoint", "explain", "--checkpoint", checkpointID)
 }
 
-// ExplainGenerate runs `entire explain --checkpoint <id> --generate`.
-// Returns (output, error) — doesn't fail test since callers may test failure cases.
-func ExplainGenerate(dir, checkpointID string) (string, error) {
-	return runOutput(dir, "checkpoint", "explain", "--checkpoint", checkpointID, "--generate")
-}
-
-// ExplainCommit runs `entire explain --commit <ref>`.
-// Returns (output, error) — for testing failure cases.
-func ExplainCommit(dir, ref string) (string, error) {
-	return runOutput(dir, "checkpoint", "explain", "--commit", ref)
-}
-
 // AttachWithEnv runs `entire attach <session-id> --agent <agent> --force`
 // with extra env vars.
 func AttachWithEnv(dir string, extraEnv []string, sessionID, agent string) (string, error) {

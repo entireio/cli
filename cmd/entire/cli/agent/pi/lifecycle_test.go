@@ -45,6 +45,32 @@ func TestParseHookEvent_BeforeAgentStart(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_BeforeAgentStart_WithSkillEvent(t *testing.T) {
+	t.Parallel()
+	a := &PiAgent{}
+	stdin := strings.NewReader(`{"type":"before_agent_start","session_file":"/tmp/2026-05-09T12-00-00-000Z_abc-123.jsonl","prompt":"expanded skill","skill_events":[{"skill_name":"trigger-analysis","invocation":"/skill:trigger-analysis","timestamp":"2026-05-25T12:34:56Z"}]}`)
+	ev, err := a.ParseHookEvent(context.Background(), HookNameBeforeAgentStart, stdin)
+	if err != nil {
+		t.Fatalf("ParseHookEvent: %v", err)
+	}
+	if len(ev.SkillEvents) != 1 {
+		t.Fatalf("SkillEvents len = %d, want 1", len(ev.SkillEvents))
+	}
+	skillEvent := ev.SkillEvents[0]
+	if skillEvent.EventType != agent.SkillEventTypePromptInvocation {
+		t.Errorf("EventType = %q", skillEvent.EventType)
+	}
+	if skillEvent.Skill.Name != "trigger-analysis" {
+		t.Errorf("Skill.Name = %q", skillEvent.Skill.Name)
+	}
+	if skillEvent.Source.Signal != agent.SkillSignalPiInputSlashCommand {
+		t.Errorf("Source.Signal = %q", skillEvent.Source.Signal)
+	}
+	if skillEvent.Collapse.Target != agent.SkillCollapseTargetUserMessage || !skillEvent.Collapse.DefaultCollapsed {
+		t.Errorf("Collapse = %+v", skillEvent.Collapse)
+	}
+}
+
 func TestParseHookEvent_SessionShutdown_NoLifecycleEvent(t *testing.T) {
 	t.Parallel()
 	a := &PiAgent{}
@@ -182,6 +208,41 @@ func TestCaptureTranscript_MissingInputs(t *testing.T) {
 	}
 	if got := captureTranscript(context.Background(), "abc", ""); got != "" {
 		t.Errorf("empty session file should return empty, got %q", got)
+	}
+}
+
+// TestCaptureTranscript_RejectsTraversalSessionID verifies that captureTranscript
+// refuses an unsafe session ID. captureTranscript runs inside ParseHookEvent,
+// before the lifecycle dispatcher validates the ID, so it must guard the
+// transcript write itself — otherwise a "../"-laden ID escapes the cache dir.
+func TestCaptureTranscript_RejectsTraversalSessionID(t *testing.T) {
+	// Cannot use t.Parallel — t.Chdir.
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	src := filepath.Join(dir, "src.jsonl")
+	if err := os.WriteFile(src, []byte("payload\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A sentinel outside the cache dir that the traversal would target.
+	victim := filepath.Join(dir, "victim.json")
+	if err := os.WriteFile(victim, []byte("SAFE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, bad := range []string{"../victim", "/etc/passwd", "..", "a/b"} {
+		if got := captureTranscript(context.Background(), bad, src); got != "" {
+			t.Errorf("captureTranscript(%q) = %q, want \"\" (unsafe ID must be refused)", bad, got)
+		}
+	}
+
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "SAFE" {
+		t.Errorf("sentinel was overwritten via traversal: %q", string(got))
 	}
 }
 

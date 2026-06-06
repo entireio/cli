@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // Hook names — these match Pi's native event names exactly (snake_case),
@@ -55,11 +56,61 @@ func (a *PiAgent) GetSupportedHooks() []agent.HookType {
 // piHookPayload is the JSON the embedded TypeScript extension pipes to
 // `entire hooks pi <event>` on stdin.
 type piHookPayload struct {
-	Type        string `json:"type"`
-	Cwd         string `json:"cwd,omitempty"`
-	SessionFile string `json:"session_file,omitempty"`
-	SessionID   string `json:"session_id,omitempty"`
-	Prompt      string `json:"prompt,omitempty"`
+	Type        string              `json:"type"`
+	Cwd         string              `json:"cwd,omitempty"`
+	SessionFile string              `json:"session_file,omitempty"`
+	SessionID   string              `json:"session_id,omitempty"`
+	Prompt      string              `json:"prompt,omitempty"`
+	SkillEvents []piSkillEventInput `json:"skill_events,omitempty"`
+}
+
+type piSkillEventInput struct {
+	SkillName  string `json:"skill_name"`
+	Invocation string `json:"invocation"`
+	Timestamp  string `json:"timestamp,omitempty"`
+}
+
+func piSkillEvents(in []piSkillEventInput) []agent.SkillEvent {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]agent.SkillEvent, 0, len(in))
+	for i, ev := range in {
+		skillName := strings.TrimSpace(ev.SkillName)
+		if skillName == "" {
+			continue
+		}
+		invocation := strings.TrimSpace(ev.Invocation)
+		if invocation == "" {
+			invocation = "/skill:" + skillName
+		}
+		id := ""
+		if ev.Timestamp != "" {
+			id = fmt.Sprintf("pi-skill-%s-%s-%d", skillName, ev.Timestamp, i)
+		}
+		out = append(out, agent.SkillEvent{
+			ID:        id,
+			EventType: agent.SkillEventTypePromptInvocation,
+			Skill: agent.SkillEventSkill{
+				Name: skillName,
+			},
+			Source: agent.SkillEventSource{
+				Agent:      string(agent.AgentNamePi),
+				Signal:     agent.SkillSignalPiInputSlashCommand,
+				Confidence: agent.SkillConfidenceExplicit,
+			},
+			Timestamp: ev.Timestamp,
+			Native: map[string]string{
+				"command": invocation,
+			},
+			Collapse: agent.SkillEventCollapse{
+				Target:           agent.SkillCollapseTargetUserMessage,
+				Label:            invocation,
+				DefaultCollapsed: true,
+			},
+		})
+	}
+	return out
 }
 
 // ParseHookEvent translates a Pi hook invocation into a normalised lifecycle
@@ -106,11 +157,12 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 		// is populated before any mid-turn commits. Without this, the
 		// post-commit hook cannot condense when no shadow branch exists yet.
 		return &agent.Event{
-			Type:       agent.TurnStart,
-			SessionID:  sessionID,
-			SessionRef: payload.SessionFile,
-			Prompt:     payload.Prompt,
-			Timestamp:  now,
+			Type:        agent.TurnStart,
+			SessionID:   sessionID,
+			SessionRef:  payload.SessionFile,
+			Prompt:      payload.Prompt,
+			Timestamp:   now,
+			SkillEvents: piSkillEvents(payload.SkillEvents),
 		}, nil
 
 	case HookNameAgentEnd:
@@ -235,6 +287,15 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 	if sessionID == "" || piSessionFile == "" {
 		return ""
 	}
+	// sessionID comes from the hook payload (or the locally cached active
+	// session) and is used to build dst below, before the lifecycle dispatcher
+	// validates it. Validate here at the choke point so an unsafe ID cannot
+	// write the transcript outside the cache directory; "" signals no capture.
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		logging.Warn(ctx, "pi: refusing to capture transcript for unsafe session ID",
+			slog.String("session_id", sessionID), slog.String("err", err.Error()))
+		return ""
+	}
 	dir := resolveSessionDir(ctx)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		logging.Warn(ctx, "pi: capture transcript mkdir failed",
@@ -249,7 +310,7 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 			slog.String("src", piSessionFile), slog.String("err", err.Error()))
 		return ""
 	}
-	//nolint:gosec // G703: dst constructed from validated session ID inside .entire/tmp
+	//nolint:gosec // G703: dst is sessionID (validated above) under .entire/tmp/pi
 	if err := os.WriteFile(dst, data, 0o600); err != nil {
 		logging.Warn(ctx, "pi: capture transcript write failed",
 			slog.String("dst", dst), slog.String("err", err.Error()))

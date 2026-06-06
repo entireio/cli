@@ -21,6 +21,7 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -43,34 +44,6 @@ func TestShadowStrategy_ValidateRepository(t *testing.T) {
 	if err != nil {
 		t.Errorf("ValidateRepository() error = %v, want nil", err)
 	}
-}
-
-func TestManualCommitStrategy_ListCheckpointsUsesLocalV2WhenSettingsDisabled(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	cpID := id.MustCheckpointID("dd11ee22ff33")
-	v2Store := checkpoint.NewV2GitStore(repo)
-	require.NoError(t, v2Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
-		CheckpointID: cpID,
-		SessionID:    "session-v2-local",
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"from v2"}]}}` + "\n")),
-		Prompts:      []string{"Use local v2 data"},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@example.com",
-	}))
-
-	s := NewManualCommitStrategy()
-	checkpoints, err := s.listCheckpoints(context.Background())
-	require.NoError(t, err)
-	require.Len(t, checkpoints, 1)
-	require.Equal(t, cpID, checkpoints[0].CheckpointID)
-	require.Equal(t, "session-v2-local", checkpoints[0].SessionID)
 }
 
 func TestShadowStrategy_ValidateRepository_NotGitRepo(t *testing.T) {
@@ -493,37 +466,114 @@ func TestShadowStrategy_GetRewindPoints_NoShadowBranch(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_ListSessions_Empty(t *testing.T) {
+// In v1.1 mode the picker must read prompt text from the topology mirror,
+// not v1.
+func TestShadowStrategy_GetRewindPoints_V11ReadsPromptFromMirror(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	baseRef, err := repo.Head()
+	require.NoError(t, err)
+	baseHash := baseRef.Hash()
+
+	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
+	const wantPrompt = "only-on-mirror"
+
+	require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "test-session-v11-rewind",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
+		Prompts:      []string{wantPrompt},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}))
+	v1Ref := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	committedRef, err := repo.Reference(v1Ref, true)
+	require.NoError(t, err)
+
+	// Mirror carries the checkpoint; v1 points at the initial commit (no metadata).
+	mirrorRef := plumbing.ReferenceName(paths.MetadataRefName)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(mirrorRef, committedRef.Hash())))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(v1Ref, baseHash)))
+
+	// HEAD trailer drives the picker's log walk.
+	testutil.WriteFile(t, dir, "g.txt", "feat")
+	testutil.GitAdd(t, dir, "g.txt")
+	testutil.GitCommit(t, dir, "feat\n\nEntire-Checkpoint: "+cpID.String())
 
 	t.Chdir(dir)
+	settingsDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(settingsDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(settingsDir, paths.SettingsFileName),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
+		0o644,
+	))
 
-	sessions, err := ListSessions(context.Background())
-	if err != nil {
-		t.Errorf("ListSessions(context.Background()) error = %v", err)
-	}
-	if len(sessions) != 0 {
-		t.Errorf("ListSessions(context.Background()) returned %d sessions, want 0", len(sessions))
-	}
+	strat := NewManualCommitStrategy()
+	points, err := strat.GetRewindPoints(t.Context(), 10)
+	require.NoError(t, err)
+	require.Len(t, points, 1)
+	assert.Equal(t, wantPrompt, points[0].SessionPrompt, "prompt must come from the mirror, not v1")
 }
 
-func TestShadowStrategy_GetSession_NotFound(t *testing.T) {
+// When the most-recent session of a multi-session condensed checkpoint has no
+// prompt, the picker must fall back to the latest non-empty session prompt
+// rather than displaying nothing.
+func TestShadowStrategy_GetRewindPoints_MultiSessionFallsBackToEarlierPrompt(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
 
 	t.Chdir(dir)
 
-	_, err = GetSession(context.Background(), "nonexistent")
-	if !errors.Is(err, ErrNoSession) {
-		t.Errorf("GetSession() error = %v, want ErrNoSession", err)
-	}
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	cpID := id.MustCheckpointID("d4e5f6a1b2c3")
+	const earlierPrompt = "earlier-session-prompt"
+
+	// Earlier session carries the only usable prompt.
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	require.NoError(t, store.WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-earlier",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
+		Prompts:      []string{earlierPrompt},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}))
+	// Latest session has no prompt at all.
+	require.NoError(t, store.WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-latest",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
+		Prompts:      nil,
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}))
+
+	testutil.WriteFile(t, dir, "g.txt", "feat")
+	testutil.GitAdd(t, dir, "g.txt")
+	testutil.GitCommit(t, dir, "feat\n\nEntire-Checkpoint: "+cpID.String())
+
+	strat := NewManualCommitStrategy()
+	points, err := strat.GetRewindPoints(t.Context(), 10)
+	require.NoError(t, err)
+	require.Len(t, points, 1)
+	assert.Equal(t, earlierPrompt, points[0].SessionPrompt,
+		"picker must fall back to the latest non-empty session prompt when the most-recent session is empty")
 }
 
 func TestShadowStrategy_GetSessionInfo_NoShadowBranch(t *testing.T) {
@@ -3176,7 +3226,7 @@ func TestCondenseSession_PrefersLiveTranscript(t *testing.T) {
 	}
 
 	// Verify the condensed content includes the second prompt
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
 	if err != nil {
 		t.Fatalf("ReadLatestSessionContent() error = %v", err)
@@ -3393,7 +3443,7 @@ func TestCondenseSession_GeminiTranscript(t *testing.T) {
 	}
 
 	// Verify condensed data on entire/checkpoints/v1 branch
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
 	if err != nil {
 		t.Fatalf("ReadLatestSessionContent() error = %v", err)
@@ -3629,7 +3679,7 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 	}
 
 	// Read condensed metadata
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
 	if err != nil {
 		t.Fatalf("ReadLatestSessionContent() error = %v", err)
@@ -3744,7 +3794,7 @@ func TestCondenseSession_CopilotScopedCheckpointMetadataAndSessionBackfill(t *te
 		t.Errorf("FilesTouched = %v, want [beta.txt]", result.FilesTouched)
 	}
 
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
 	if err != nil {
 		t.Fatalf("ReadLatestSessionContent() error = %v", err)
@@ -4209,8 +4259,7 @@ func TestCondenseSession_RedactionFailure_DropsTranscriptButWritesMetadata(t *te
 	require.NoError(t, err, "redaction failure should not abort condensation")
 	require.NotNil(t, result)
 
-	store, err := s.getCheckpointStore()
-	require.NoError(t, err)
+	store := s.getCheckpointStore(context.Background(), repo)
 
 	committed, err := store.ListCommitted(context.Background())
 	require.NoError(t, err)
@@ -4258,81 +4307,77 @@ func TestCommittedFilesExcludingMetadata(t *testing.T) {
 	require.NotContains(t, resultSet, ".cursor/hooks.json", ".cursor/ should be excluded (cursor ProtectedDirs)")
 	require.NotContains(t, resultSet, "opencode.json", "opencode.json should be excluded (opencode ProtectedFiles)")
 	require.Len(t, result, 2)
-}
 
-func TestMarshalPromptAttributionsIncludingPending_IncludesPending(t *testing.T) {
-	t.Parallel()
-
-	state := &SessionState{
-		PromptAttributions: []PromptAttribution{
-			{CheckpointNumber: 1, UserLinesAdded: 3},
-		},
-		PendingPromptAttribution: &PromptAttribution{
-			CheckpointNumber: 2, UserLinesAdded: 5,
-		},
-	}
-
-	raw := marshalPromptAttributionsIncludingPending(state)
-	require.NotNil(t, raw)
-
-	var result []PromptAttribution
-	require.NoError(t, json.Unmarshal(raw, &result))
-	require.Len(t, result, 2, "should include both committed and pending attributions")
-	require.Equal(t, 1, result[0].CheckpointNumber)
-	require.Equal(t, 3, result[0].UserLinesAdded)
-	require.Equal(t, 2, result[1].CheckpointNumber)
-	require.Equal(t, 5, result[1].UserLinesAdded)
-}
-
-func TestMarshalPromptAttributionsIncludingPending_NoPending(t *testing.T) {
-	t.Parallel()
-
-	state := &SessionState{
-		PromptAttributions: []PromptAttribution{
-			{CheckpointNumber: 1, UserLinesAdded: 3},
-		},
-	}
-
-	raw := marshalPromptAttributionsIncludingPending(state)
-	require.NotNil(t, raw)
-
-	var result []PromptAttribution
-	require.NoError(t, json.Unmarshal(raw, &result))
-	require.Len(t, result, 1)
-}
-
-func TestMarshalPromptAttributionsIncludingPending_Empty(t *testing.T) {
-	t.Parallel()
-
-	state := &SessionState{}
-	raw := marshalPromptAttributionsIncludingPending(state)
-	require.Nil(t, raw, "empty state should return nil")
-}
-
-func TestMarshalPromptAttributionsIncludingPending_OnlyPending(t *testing.T) {
-	t.Parallel()
-
-	state := &SessionState{
-		PendingPromptAttribution: &PromptAttribution{
-			CheckpointNumber: 1, UserLinesAdded: 7,
-		},
-	}
-
-	raw := marshalPromptAttributionsIncludingPending(state)
-	require.NotNil(t, raw, "pending-only should still produce output")
-
-	var result []PromptAttribution
-	require.NoError(t, json.Unmarshal(raw, &result))
-	require.Len(t, result, 1)
-	require.Equal(t, 7, result[0].UserLinesAdded)
-}
-
-func TestCommittedFilesExcludingMetadata_AllMetadata(t *testing.T) {
-	t.Parallel()
-
-	result := committedFilesExcludingMetadata(map[string]struct{}{
+	// All-metadata input excludes everything, yielding an empty result.
+	allMetadata := committedFilesExcludingMetadata(map[string]struct{}{
 		".entire/settings.json": {},
 		".entire/.gitignore":    {},
 	})
-	require.Empty(t, result, "all metadata files should be excluded")
+	require.Empty(t, allMetadata, "all metadata files should be excluded")
+}
+
+func TestMarshalPromptAttributionsIncludingPending(t *testing.T) {
+	t.Parallel()
+
+	committed := []PromptAttribution{{CheckpointNumber: 1, UserLinesAdded: 3}}
+	pending := &PromptAttribution{CheckpointNumber: 2, UserLinesAdded: 5}
+
+	tests := []struct {
+		name      string
+		state     *SessionState
+		wantNil   bool
+		wantCount int
+		// verify is an optional extra check on the unmarshalled attributions.
+		verify func(t *testing.T, result []PromptAttribution)
+	}{
+		{
+			name:      "includes both committed and pending",
+			state:     &SessionState{PromptAttributions: committed, PendingPromptAttribution: pending},
+			wantCount: 2,
+			verify: func(t *testing.T, result []PromptAttribution) {
+				require.Equal(t, 1, result[0].CheckpointNumber)
+				require.Equal(t, 3, result[0].UserLinesAdded)
+				require.Equal(t, 2, result[1].CheckpointNumber)
+				require.Equal(t, 5, result[1].UserLinesAdded)
+			},
+		},
+		{
+			name:      "committed only, no pending",
+			state:     &SessionState{PromptAttributions: committed},
+			wantCount: 1,
+		},
+		{
+			name:    "empty state returns nil",
+			state:   &SessionState{},
+			wantNil: true,
+		},
+		{
+			name:      "pending only still produces output",
+			state:     &SessionState{PendingPromptAttribution: &PromptAttribution{CheckpointNumber: 1, UserLinesAdded: 7}},
+			wantCount: 1,
+			verify: func(t *testing.T, result []PromptAttribution) {
+				require.Equal(t, 7, result[0].UserLinesAdded)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			raw := marshalPromptAttributionsIncludingPending(tt.state)
+			if tt.wantNil {
+				require.Nil(t, raw)
+				return
+			}
+			require.NotNil(t, raw)
+
+			var result []PromptAttribution
+			require.NoError(t, json.Unmarshal(raw, &result))
+			require.Len(t, result, tt.wantCount)
+			if tt.verify != nil {
+				tt.verify(t, result)
+			}
+		})
+	}
 }

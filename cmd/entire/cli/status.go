@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -21,7 +22,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
-	"github.com/go-git/go-git/v6"
 	"github.com/spf13/cobra"
 )
 
@@ -187,6 +187,17 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		b.WriteString("\n")
 		b.WriteString(sty.render(sty.dim, "  Review · "))
 		b.WriteString("reviewed (")
+		b.WriteString(meta)
+		b.WriteString(")")
+	}
+
+	// Show investigation status for HEAD's checkpoint, if any. Review and
+	// investigation can both be true on the same checkpoint, so we render
+	// both lines independently rather than gating one on the other.
+	if investigated, meta := headHasInvestigateCheckpoint(ctx); investigated {
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.dim, "  Investigation · "))
+		b.WriteString("investigated (")
 		b.WriteString(meta)
 		b.WriteString(")")
 	}
@@ -470,10 +481,11 @@ func currentHeadLinkage(ctx context.Context) (string, headLinkage, error) {
 		return "", headLinkage{}, fmt.Errorf("resolve worktree root: %w", err)
 	}
 
-	repo, err := git.PlainOpen(repoRoot)
+	repo, err := gitrepo.OpenPath(repoRoot)
 	if err != nil {
 		return "", headLinkage{}, fmt.Errorf("open repo: %w", err)
 	}
+	defer repo.Close()
 
 	headRef, err := repo.Head()
 	if err != nil {

@@ -203,6 +203,10 @@ func runLoginProcess(t *testing.T, apiBaseURL string) *loginProcess {
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_API_BASE_URL="+apiBaseURL,
+		// AuthBaseURL no longer inherits from BaseURL; pin both at the test
+		// server so the device flow stays in-process instead of reaching
+		// out to the production us.auth.entire.io default.
+		"ENTIRE_AUTH_BASE_URL="+apiBaseURL,
 		"ENTIRE_TEST_AUTH_STORE_FILE="+filepath.Join(env.RepoDir, ".entire-test-auth-store.json"),
 	)
 
@@ -251,8 +255,8 @@ func waitForLoginPrompt(t *testing.T, stdout *bufio.Reader) (string, string) {
 		switch {
 		case strings.HasPrefix(line, "Device code: "):
 			deviceCode = strings.TrimPrefix(line, "Device code: ")
-		case strings.HasPrefix(line, "Approval URL: "):
-			approvalURL = strings.TrimPrefix(line, "Approval URL: ")
+		case strings.HasPrefix(line, "Login URL:"):
+			approvalURL = strings.TrimSpace(strings.TrimPrefix(line, "Login URL:"))
 		}
 
 		if approvalURL != "" && deviceCode != "" {

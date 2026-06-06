@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
@@ -33,6 +34,44 @@ func getSessionStateDir(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return filepath.Join(commonDir, session.SessionStateDirName), nil
+}
+
+// openSessionStateRoot creates the session state directory if needed and returns
+// an os.Root scoped to it. Hint/marker files are named from the (already
+// validated) session ID; routing their writes through os.Root makes escaping
+// the directory impossible at the kernel level even if validation were bypassed.
+// Callers must Close the returned root.
+func openSessionStateRoot(ctx context.Context) (*os.Root, error) {
+	stateDir, err := getSessionStateDir(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session state directory: %w", err)
+	}
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		return nil, fmt.Errorf("failed to create session state directory: %w", err)
+	}
+	root, err := os.OpenRoot(stateDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open session state directory: %w", err)
+	}
+	return root, nil
+}
+
+// openSessionStateRootForRead returns an os.Root scoped to the session state
+// directory without creating it. Returns (nil, nil) when the directory does not
+// exist, so read paths can treat a missing directory as "no hint".
+func openSessionStateRootForRead(ctx context.Context) (*os.Root, error) {
+	stateDir, err := getSessionStateDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(stateDir)
+	if os.IsNotExist(err) {
+		return nil, nil //nolint:nilnil // missing dir = no hint; callers handle nil root
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to open session state directory: %w", err)
+	}
+	return root, nil
 }
 
 // sessionStateFile returns the path to a session state file.
@@ -207,16 +246,13 @@ func StoreModelHint(ctx context.Context, sessionID, model string) error {
 		return nil
 	}
 
-	stateDir, err := getSessionStateDir(ctx)
+	root, err := openSessionStateRoot(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get session state directory: %w", err)
+		return err
 	}
-	if err := os.MkdirAll(stateDir, 0o750); err != nil {
-		return fmt.Errorf("failed to create session state directory: %w", err)
-	}
+	defer root.Close()
 
-	hintFile := filepath.Join(stateDir, sessionID+".model")
-	if err := os.WriteFile(hintFile, []byte(model), 0o600); err != nil {
+	if err := osroot.WriteFile(root, sessionID+".model", []byte(model), 0o600); err != nil {
 		return fmt.Errorf("failed to write model hint file: %w", err)
 	}
 	return nil
@@ -229,20 +265,23 @@ func LoadModelHint(ctx context.Context, sessionID string) string {
 		return ""
 	}
 
-	stateDir, err := getSessionStateDir(ctx)
+	root, err := openSessionStateRootForRead(ctx)
 	if err != nil {
 		logging.Warn(logging.WithComponent(ctx, "session"), "failed to resolve state dir for model hint",
 			slog.String("session_id", sessionID),
 			slog.Any("error", err))
 		return ""
 	}
+	if root == nil {
+		return ""
+	}
+	defer root.Close()
 
-	hintPath := filepath.Join(stateDir, sessionID+".model")
-	data, err := os.ReadFile(hintPath) //nolint:gosec // sessionID is validated above
+	data, err := osroot.ReadFile(root, sessionID+".model")
 	if err != nil {
 		if !os.IsNotExist(err) {
 			logging.Warn(logging.WithComponent(ctx, "session"), "failed to read model hint file",
-				slog.String("path", hintPath),
+				slog.String("session_id", sessionID),
 				slog.Any("error", err))
 		}
 		return ""
@@ -279,16 +318,13 @@ func StoreAgentTypeHint(ctx context.Context, sessionID string, agentType types.A
 		return false, nil
 	}
 
-	stateDir, sErr := getSessionStateDir(ctx)
-	if sErr != nil {
-		return false, fmt.Errorf("failed to get session state directory: %w", sErr)
+	root, rErr := openSessionStateRoot(ctx)
+	if rErr != nil {
+		return false, rErr
 	}
-	if mErr := os.MkdirAll(stateDir, 0o750); mErr != nil {
-		return false, fmt.Errorf("failed to create session state directory: %w", mErr)
-	}
+	defer root.Close()
 
-	hintFile := filepath.Join(stateDir, sessionID+".agent")
-	f, oErr := os.OpenFile(hintFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // hintFile path is built from validated sessionID
+	f, oErr := root.OpenFile(sessionID+".agent", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if oErr != nil {
 		if errors.Is(oErr, os.ErrExist) {
 			// First-writer-wins: another caller already claimed this session.
@@ -320,16 +356,13 @@ func ClaimSessionStartBanner(ctx context.Context, sessionID string) (claimed boo
 		return false, fmt.Errorf("invalid session ID: %w", vErr)
 	}
 
-	stateDir, sErr := getSessionStateDir(ctx)
-	if sErr != nil {
-		return false, fmt.Errorf("failed to get session state directory: %w", sErr)
+	root, rErr := openSessionStateRoot(ctx)
+	if rErr != nil {
+		return false, rErr
 	}
-	if mErr := os.MkdirAll(stateDir, 0o750); mErr != nil {
-		return false, fmt.Errorf("failed to create session state directory: %w", mErr)
-	}
+	defer root.Close()
 
-	markerFile := filepath.Join(stateDir, sessionID+".banner")
-	f, oErr := os.OpenFile(markerFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // markerFile path is built from validated sessionID
+	f, oErr := root.OpenFile(sessionID+".banner", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if oErr != nil {
 		if errors.Is(oErr, os.ErrExist) {
 			return false, nil
@@ -348,20 +381,23 @@ func LoadAgentTypeHint(ctx context.Context, sessionID string) types.AgentType {
 		return ""
 	}
 
-	stateDir, err := getSessionStateDir(ctx)
+	root, err := openSessionStateRootForRead(ctx)
 	if err != nil {
 		logging.Warn(logging.WithComponent(ctx, "session"), "failed to resolve state dir for agent hint",
 			slog.String("session_id", sessionID),
 			slog.Any("error", err))
 		return ""
 	}
+	if root == nil {
+		return ""
+	}
+	defer root.Close()
 
-	hintPath := filepath.Join(stateDir, sessionID+".agent")
-	data, err := os.ReadFile(hintPath) //nolint:gosec // sessionID is validated above
+	data, err := osroot.ReadFile(root, sessionID+".agent")
 	if err != nil {
 		if !os.IsNotExist(err) {
 			logging.Warn(logging.WithComponent(ctx, "session"), "failed to read agent hint file",
-				slog.String("path", hintPath),
+				slog.String("session_id", sessionID),
 				slog.Any("error", err))
 		}
 		return ""
@@ -604,10 +640,28 @@ func ClearSessionState(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("failed to get session state directory: %w", err)
 	}
 
-	// Remove all files for this session (state .json, .model hint, any future hint files).
-	matches, _ := filepath.Glob(filepath.Join(stateDir, sessionID+".*")) //nolint:errcheck // pattern is always valid
-	for _, f := range matches {
-		_ = os.Remove(f)
+	// Remove all files for this session (state .json, .model hint, any future
+	// hint files). Match by literal prefix rather than filepath.Glob: the
+	// session ID is user-controlled, and a glob pattern would let metacharacters
+	// match and delete other sessions' files. os.Root ensures traversal-resistant
+	// removal.
+	prefix := sessionID + "."
+	entries, _ := os.ReadDir(stateDir) //nolint:errcheck // best-effort cleanup; missing dir => nothing to clear
+	var matches []string
+	for _, e := range entries {
+		if name := e.Name(); strings.HasPrefix(name, prefix) {
+			matches = append(matches, name)
+		}
+	}
+	if len(matches) > 0 {
+		root, rootErr := os.OpenRoot(stateDir)
+		if rootErr != nil {
+			return fmt.Errorf("failed to open session state directory for cleanup: %w", rootErr)
+		}
+		defer root.Close()
+		for _, name := range matches {
+			_ = osroot.Remove(root, name) //nolint:errcheck // best-effort cleanup
+		}
 	}
 
 	// Intentionally do NOT remove the per-session lock file under

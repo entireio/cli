@@ -67,6 +67,4 @@ docs/superpowers
 tmp/
 .tmp/
 .superpowers/
-
-# Entire CLI data
-# Note: .entire/ subdirectories like prompts/ may be tracked
+/git-remote-entire

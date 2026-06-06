@@ -21,10 +21,35 @@ const (
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
+
+	// authSessionsPath is the base path for entire-core's login-session
+	// endpoints (list / revoke / current). Set via WithAuthSessionsPath when the
+	// client targets the auth host; empty otherwise, and the session methods
+	// error out if called against an empty path.
+	authSessionsPath string
 }
 
-// NewClient creates a new authenticated API client with an explicit bearer token.
+// WithAuthSessionsPath sets the base path used by ListAuthSessions,
+// RevokeCurrentAuthSession, and RevokeAuthSession. Returns the receiver for chaining
+// at construction:
+//
+//	c := api.NewClientWithBaseURL(token, base).WithAuthSessionsPath(p)
+func (c *Client) WithAuthSessionsPath(path string) *Client {
+	c.authSessionsPath = path
+	return c
+}
+
+// NewClient creates a new authenticated API client with an explicit bearer
+// token, targeting the data API base URL (BaseURL()).
 func NewClient(token string) *Client {
+	return NewClientWithBaseURL(token, BaseURL())
+}
+
+// NewClientWithBaseURL creates a new authenticated API client targeting an
+// explicit base URL. Use this for endpoints that live on the auth host (e.g.
+// auth-token management) when ENTIRE_AUTH_BASE_URL splits the auth origin
+// from the data API origin.
+func NewClientWithBaseURL(token, baseURL string) *Client {
 	return &Client{
 		httpClient: &http.Client{
 			Transport: &bearerTransport{
@@ -32,11 +57,18 @@ func NewClient(token string) *Client {
 				base:  http.DefaultTransport,
 			},
 		},
-		baseURL: BaseURL(),
+		baseURL: baseURL,
 	}
 }
 
 // bearerTransport is an http.RoundTripper that injects the Authorization header.
+//
+// When token is empty, the Authorization header is omitted (rather than sent
+// as a malformed "Authorization: Bearer "). This supports endpoints like
+// recap that deliberately want the unauthenticated request to reach the
+// server so it can return a typed 401 — callers that want a local fast-fail
+// for missing auth should check ErrNotLoggedIn at construction time, not
+// rely on the transport.
 type bearerTransport struct {
 	token string
 	base  http.RoundTripper
@@ -45,7 +77,9 @@ type bearerTransport struct {
 func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Clone the request to avoid mutating the caller's request.
 	r := req.Clone(req.Context())
-	r.Header.Set("Authorization", "Bearer "+t.token)
+	if t.token != "" {
+		r.Header.Set("Authorization", "Bearer "+t.token)
+	}
 	r.Header.Set("User-Agent", userAgent)
 	if r.Header.Get("Accept") == "" {
 		r.Header.Set("Accept", "application/json")

@@ -52,6 +52,55 @@ func TestReadFile_TraversalBlocked(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestMkdirAll(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	require.NoError(t, osroot.MkdirAll(root, "a/b/c", 0o755))
+
+	info, err := os.Stat(filepath.Join(dir, "a", "b", "c"))
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+}
+
+func TestMkdirAll_Idempotent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	require.NoError(t, osroot.MkdirAll(root, "x/y", 0o755))
+	// Creating an existing tree must not error.
+	require.NoError(t, osroot.MkdirAll(root, "x/y", 0o755))
+}
+
+func TestMkdirAll_TraversalBlocked(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	outsideDir := t.TempDir()
+
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	for _, name := range []string{"../escape", "../../escape/deep", "a/../../escape"} {
+		err := osroot.MkdirAll(root, name, 0o755)
+		require.Error(t, err, "MkdirAll(%q) must be rejected", name)
+	}
+
+	// Nothing must have been created outside the root.
+	entries, err := os.ReadDir(outsideDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "no directories should be created outside the root")
+}
+
 func TestWriteFile(t *testing.T) {
 	t.Parallel()
 

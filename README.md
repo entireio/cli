@@ -210,9 +210,13 @@ If you're working on the CLI device auth flow against a local `entire.io` checko
 cd ../entire.io-1
 mise run dev
 
-# In this repo, point the CLI at the local API
+# In this repo, point the CLI at the local API. Both env vars are
+# required: ENTIRE_AUTH_BASE_URL no longer inherits from
+# ENTIRE_API_BASE_URL — without it, the login flow reaches for the
+# production us.auth.entire.io.
 cd ../cli
 export ENTIRE_API_BASE_URL=http://localhost:8787
+export ENTIRE_AUTH_BASE_URL=http://localhost:8787
 
 # Run the smoke test
 ./scripts/local-device-auth-smoke.sh

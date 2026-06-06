@@ -1,0 +1,55 @@
+#!/bin/sh
+# Entire CLI local-development hook launcher.
+#
+# In local-dev mode, Entire hooks invoke the CLI straight from source via
+# "go run", which recompiles on demand. When the tree does not compile (for
+# example while an agent is resolving a merge conflict) "go run" fails and the
+# hook would silently do nothing. This launcher first checks that the tree
+# builds; if it does it runs the freshly compiled CLI, otherwise it falls back
+# to an "entire" binary on PATH. If neither is available it exits 0 so it never
+# blocks the surrounding git or agent operation.
+#
+# Usage: scripts/entire-dev <entire args...>
+#
+# All local-dev hooks delegate here so the build-probe-and-fallback logic lives
+# in one place rather than being duplicated across generated hook commands.
+
+set -eu
+
+# Informational messages go to stderr so they never pollute hook stdout (some
+# hooks emit JSON there).
+log() {
+	printf '[entire-dev] %s\n' "$1" >&2
+}
+
+# Resolve the repository root from this script's own location so it works
+# regardless of the caller's working directory. Parameter expansion avoids
+# depending on external tools like dirname, which may not be on PATH when this
+# runs from a minimal hook environment.
+case "$0" in
+	*/*) script_dir=${0%/*} ;;
+	*) script_dir=. ;;
+esac
+root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+# Build/run the whole cmd/entire package, not just main.go: package main is
+# split across multiple files (e.g. the git-remote-entire dispatch in
+# remotehelper.go), and naming a single file would leave the others out and
+# fail to compile.
+pkg="$root/cmd/entire"
+
+# Run freshly compiled code when the tree builds. The build probe populates the
+# build cache, so the subsequent "go run" does not recompile from scratch.
+if command -v go >/dev/null 2>&1 && go build -o /dev/null "$pkg" >/dev/null 2>&1; then
+	exec go run "$pkg" "$@"
+fi
+
+# The tree does not build (or Go is unavailable): fall back to the installed
+# binary so hooks keep working while the source is broken.
+if command -v entire >/dev/null 2>&1; then
+	log "project isn't compiling; falling back to the entire binary on PATH"
+	exec entire "$@"
+fi
+
+# Nothing to run: do not block the surrounding operation.
+log "project isn't compiling and no entire binary on PATH; skipping hook"
+exit 0

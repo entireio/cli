@@ -1,6 +1,6 @@
 [tools]
 # Please also keep the version aligned in the go.mod file
-go = { version = '1.26.3', postinstall = "go install github.com/go-delve/delve/cmd/dlv@latest && go install gotest.tools/gotestsum@latest" }
+go = { version = '1.26.4', postinstall = "go install github.com/go-delve/delve/cmd/dlv@latest && go install gotest.tools/gotestsum@latest" }
 golangci-lint = '2.11.3'
 shellcheck = 'latest'
 tmux = 'latest'
@@ -18,6 +18,13 @@ run = "gotestsum --format pkgname --format-icons text --format-hide-empty-pkg --
 [tasks."test:integration"]
 description = "Run integration tests"
 run = "gotestsum --format testname --format-icons text --hide-summary skipped -- -tags=integration,authfilestore ./cmd/entire/cli/integration_test/... ./cmd/entire/cli/auth/..."
+
+[tasks."build:e2e"]
+description = "Build the CLI for e2e tests with the file-backed auth store (-tags=authfilestore), so the spawned binary, the git-remote-entire helper, and git hooks never touch the developer's OS keychain"
+run = """
+go build -tags=authfilestore ./cmd/entire
+go build -tags=authfilestore ./cmd/git-remote-entire
+"""
 
 [tasks."test:ci"]
 description = "Run all tests (unit + integration + E2E canary) with race detection"

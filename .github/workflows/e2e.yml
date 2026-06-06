@@ -57,7 +57,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Setup mise
         uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
@@ -104,6 +104,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           E2E_CODEX_MODEL: ${{ matrix.agent == 'codex' && 'gpt-5.4-mini' || '' }}
+          E2E_GEMINI_MODEL: ${{ matrix.agent == 'gemini-cli' && 'gemini-3.1-flash-lite' || '' }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
           COPILOT_GITHUB_TOKEN: ${{ github.token }}
