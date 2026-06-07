@@ -13,7 +13,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -83,6 +86,33 @@ func TestDeriveCheckpointURL(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestURLTargetsCheckpointRepo(t *testing.T) {
+	t.Parallel()
+
+	config := &settings.CheckpointRemoteConfig{Provider: "github", Repo: "org/checkpoints"}
+
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"HTTPS checkpoint repo", "https://github.com/org/checkpoints.git", true},
+		{"SSH checkpoint repo", "git@github.com:org/checkpoints.git", true},
+		{"enterprise host, same repo path", "https://github.example.com/org/checkpoints.git", true},
+		{"case-insensitive owner/repo", "https://github.com/Org/Checkpoints.git", true},
+		{"origin fallback (different repo)", "https://github.com/org/main-repo.git", false},
+		{"different owner", "https://github.com/other/checkpoints.git", false},
+		{"unparseable url", "not a url", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, urlTargetsCheckpointRepo(tt.url, config))
 		})
 	}
 }
@@ -923,6 +953,326 @@ func TestFetchMetadataBranch_DisconnectedPreservesLocalCheckpoint(t *testing.T) 
 	files := checkpointRemoteMetadataFiles(ctx, t, localDir)
 	assert.Contains(t, files, "cc/cccccccccc/metadata.json", "rewritten remote checkpoint should be present after fetch")
 	assert.Contains(t, files, "bb/bbbbbbbbbb/metadata.json", "local-only checkpoint should be replayed when there is no common ancestor")
+}
+
+// TestBootstrapMetadataFromURL_FetchesWhenLocalMissing verifies the issue #1374
+// fix: when no local metadata branch exists, the branch is fetched from the
+// checkpoint remote and points exactly at the remote tip — no empty orphan, no
+// replayed commit on top.
+//
+// Not parallel: uses t.Chdir().
+func TestBootstrapMetadataFromURL_FetchesWhenLocalMissing(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	remoteDefault := checkpointRemoteCurrentBranch(ctx, t, remoteDir)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, remoteDir, "abcabcabcabc", "data")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", remoteDefault)
+	remoteTip := checkpointRemoteRevParse(ctx, t, remoteDir, paths.MetadataBranchName)
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	t.Chdir(localDir)
+
+	repo, err := git.PlainOpen(localDir)
+	require.NoError(t, err)
+
+	require.False(t, testutil.BranchExists(t, localDir, paths.MetadataBranchName),
+		"test setup: local metadata branch should not exist yet")
+
+	ok, err := bootstrapMetadataFromURL(ctx, repo, remoteDir)
+	require.NoError(t, err)
+	assert.True(t, ok, "bootstrap should report success when the remote has real metadata")
+	assert.True(t, testutil.BranchExists(t, localDir, paths.MetadataBranchName))
+	assert.Equal(t, remoteTip, checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName),
+		"local branch should point exactly at the remote tip, not at a fresh orphan")
+}
+
+// TestBootstrapMetadataFromURL_EmptyRemoteReturnsFalse verifies that fetching a
+// remote whose metadata branch is itself an empty orphan does not count as a
+// successful bootstrap, so the caller falls back to its normal orphan creation.
+//
+// Not parallel: uses t.Chdir().
+func TestBootstrapMetadataFromURL_EmptyRemoteReturnsFalse(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	createEmptyOrphanMetadataBranch(ctx, t, remoteDir)
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	t.Chdir(localDir)
+
+	repo, err := git.PlainOpen(localDir)
+	require.NoError(t, err)
+
+	ok, err := bootstrapMetadataFromURL(ctx, repo, remoteDir)
+	require.NoError(t, err)
+	assert.False(t, ok, "an empty remote metadata branch should not be treated as a successful bootstrap")
+}
+
+// TestHealEmptyOrphanFromURL_ReplacesEmptyOrphanWithRemoteData verifies that an
+// existing empty-orphan metadata branch (the issue #1374 bug state) is replaced
+// wholesale with the real branch from the checkpoint remote — the local ref ends
+// up at the exact remote tip with no replayed empty commit on top.
+//
+// Not parallel: uses t.Chdir().
+func TestHealEmptyOrphanFromURL_ReplacesEmptyOrphanWithRemoteData(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	remoteDefault := checkpointRemoteCurrentBranch(ctx, t, remoteDir)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, remoteDir, "abcabcabcabc", "data")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", remoteDefault)
+	remoteTip := checkpointRemoteRevParse(ctx, t, remoteDir, paths.MetadataBranchName)
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	createEmptyOrphanMetadataBranch(ctx, t, localDir)
+	t.Chdir(localDir)
+
+	repo, err := git.PlainOpen(localDir)
+	require.NoError(t, err)
+
+	orphanHash := checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName)
+	require.NotEqual(t, remoteTip, orphanHash, "test setup: orphan must differ from remote tip")
+
+	ok, err := healEmptyOrphanFromURL(ctx, repo, remoteDir)
+	require.NoError(t, err)
+	assert.True(t, ok, "heal should report success when it replaces an empty orphan with real data")
+
+	healed := checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName)
+	assert.Equal(t, remoteTip, healed,
+		"empty orphan should be replaced by the exact remote tip, not a replay with an extra empty commit")
+	assert.Contains(t, checkpointRemoteMetadataFiles(ctx, t, localDir), "ab/cabcabcabc/metadata.json",
+		"healed branch should contain the remote checkpoint data")
+	assert.False(t, testutil.BranchExists(t, localDir, "refs/entire-fetch-tmp/"+paths.MetadataBranchName),
+		"temp fetch ref should be cleaned up")
+}
+
+// TestBootstrapMetadataFromCheckpointRemote_NoConfigReturnsFalse verifies the
+// resolver wrapper is a no-op (and creates no branch) when no checkpoint_remote is
+// configured, so the caller falls through to normal orphan creation.
+//
+// Not parallel: uses t.Chdir().
+func TestBootstrapMetadataFromCheckpointRemote_NoConfigReturnsFalse(t *testing.T) {
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, paths.SettingsFileName),
+		[]byte(`{"enabled": true}`),
+		0o644,
+	))
+	t.Chdir(localDir)
+
+	repo, err := git.PlainOpen(localDir)
+	require.NoError(t, err)
+
+	ok, err := BootstrapMetadataFromCheckpointRemote(t.Context(), repo)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.False(t, testutil.BranchExists(t, localDir, paths.MetadataBranchName),
+		"bootstrap must not create a branch when no checkpoint_remote is configured")
+}
+
+// TestHealEmptyOrphanMetadataFromCheckpointRemote_NonEmptyLocalReturnsFalse
+// verifies that a local metadata branch with real data is never healed/replaced,
+// regardless of any configured checkpoint_remote (the guard returns before any
+// network access).
+//
+// Not parallel: uses t.Chdir().
+func TestHealEmptyOrphanMetadataFromCheckpointRemote_NonEmptyLocalReturnsFalse(t *testing.T) {
+	ctx := context.Background()
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	localDefault := checkpointRemoteCurrentBranch(ctx, t, localDir)
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, localDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, localDir, "abcabcabcabc", "real")
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", localDefault)
+	t.Chdir(localDir)
+
+	repo, err := git.PlainOpen(localDir)
+	require.NoError(t, err)
+	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+
+	ok, err := HealEmptyOrphanMetadataFromCheckpointRemote(ctx, repo, localRef)
+	require.NoError(t, err)
+	assert.False(t, ok, "a non-empty local metadata branch must not be replaced")
+}
+
+// TestHealEmptyOrphanMetadataFromCheckpointRemote_HealsVercelOnlyOrphan verifies
+// that a local metadata branch carrying only vercel.json — the orphan-init state in
+// a vercel-enabled repo (issue #1374) — is still recognized as un-initialized and
+// healed from the checkpoint remote. A literal empty-tree check would have skipped
+// it because the tree is not empty.
+//
+// Not parallel: overrides the URL resolver seam and uses t.Chdir().
+func TestHealEmptyOrphanMetadataFromCheckpointRemote_HealsVercelOnlyOrphan(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	remoteDefault := checkpointRemoteCurrentBranch(ctx, t, remoteDir)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, remoteDir, "abcabcabcabc", "data")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", remoteDefault)
+	remoteTip := checkpointRemoteRevParse(ctx, t, remoteDir, paths.MetadataBranchName)
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	localDefault := checkpointRemoteCurrentBranch(ctx, t, localDir)
+	// Orphan that carries only vercel.json — the vercel-enabled bug state.
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, localDir, "rm", "-rf", ".")
+	testutil.WriteFile(t, localDir, vercelconfig.FileName, `{"git":{"deploymentEnabled":{"entire/**":false}}}`)
+	runCheckpointRemoteGit(ctx, t, localDir, "add", vercelconfig.FileName)
+	runCheckpointRemoteGit(ctx, t, localDir, "commit", "-m", "Initialize metadata branch")
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", localDefault)
+	t.Chdir(localDir)
+
+	origResolve := resolveCheckpointRemoteURLFn
+	t.Cleanup(func() { resolveCheckpointRemoteURLFn = origResolve })
+	resolveCheckpointRemoteURLFn = func(context.Context) (string, bool) { return remoteDir, true }
+
+	repo, err := git.PlainOpen(localDir)
+	require.NoError(t, err)
+	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+
+	ok, err := HealEmptyOrphanMetadataFromCheckpointRemote(ctx, repo, localRef)
+	require.NoError(t, err)
+	assert.True(t, ok, "a vercel.json-only orphan should be treated as un-initialized and healed")
+	assert.Equal(t, remoteTip, checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName),
+		"local branch should adopt the checkpoint remote tip")
+}
+
+// TestEnsurePrimaryRef_CheckpointRemoteTakesPrecedenceOverOrigin verifies that
+// when a checkpoint_remote is configured, EnsurePrimaryRef adopts its branch even
+// when a (stale) origin/entire/checkpoints/v1 tracking ref is present. Origin is no
+// longer the authoritative checkpoint store, so it must not be seeded from (issue
+// #1374).
+//
+// Not parallel: overrides the URL resolver seam and uses t.Chdir().
+func TestEnsurePrimaryRef_CheckpointRemoteTakesPrecedenceOverOrigin(t *testing.T) {
+	ctx := context.Background()
+
+	// Checkpoint remote holds the authoritative checkpoint.
+	checkpointRemoteDir := t.TempDir()
+	testutil.InitRepo(t, checkpointRemoteDir)
+	testutil.WriteFile(t, checkpointRemoteDir, "f.txt", "init")
+	testutil.GitAdd(t, checkpointRemoteDir, "f.txt")
+	testutil.GitCommit(t, checkpointRemoteDir, "init")
+	cpDefault := checkpointRemoteCurrentBranch(ctx, t, checkpointRemoteDir)
+	runCheckpointRemoteGit(ctx, t, checkpointRemoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, checkpointRemoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, checkpointRemoteDir, "aaaaaaaaaaaa", "authoritative")
+	runCheckpointRemoteGit(ctx, t, checkpointRemoteDir, "checkout", cpDefault)
+	cpTip := checkpointRemoteRevParse(ctx, t, checkpointRemoteDir, paths.MetadataBranchName)
+
+	// Origin holds a different, stale checkpoint branch.
+	originDir := t.TempDir()
+	testutil.InitRepo(t, originDir)
+	testutil.WriteFile(t, originDir, "f.txt", "init")
+	testutil.GitAdd(t, originDir, "f.txt")
+	testutil.GitCommit(t, originDir, "init")
+	originDefault := checkpointRemoteCurrentBranch(ctx, t, originDir)
+	runCheckpointRemoteGit(ctx, t, originDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, originDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, originDir, "bbbbbbbbbbbb", "stale")
+	runCheckpointRemoteGit(ctx, t, originDir, "checkout", originDefault)
+
+	// Local clone of origin: origin tracking ref present, no local metadata branch.
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	runCheckpointRemoteGit(ctx, t, localDir, "remote", "add", "origin", originDir)
+	runCheckpointRemoteGit(ctx, t, localDir, "fetch", "origin")
+	require.NoError(t, os.MkdirAll(filepath.Join(localDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(localDir, ".entire", paths.SettingsFileName),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
+		0o644,
+	))
+	t.Chdir(localDir)
+
+	// Point the resolver at the local checkpoint remote instead of the github URL.
+	origResolve := resolveCheckpointRemoteURLFn
+	t.Cleanup(func() { resolveCheckpointRemoteURLFn = origResolve })
+	resolveCheckpointRemoteURLFn = func(context.Context) (string, bool) { return checkpointRemoteDir, true }
+
+	repo, err := git.PlainOpen(localDir)
+	require.NoError(t, err)
+
+	// Sanity: the stale origin tracking ref exists and differs from the remote.
+	originRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	require.NotEqual(t, cpTip, originRef.Hash().String(), "test setup: origin must differ from checkpoint remote")
+
+	require.NoError(t, EnsurePrimaryRef(ctx, repo))
+
+	got := checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName)
+	assert.Equal(t, cpTip, got, "local branch should adopt the checkpoint remote, not the stale origin ref")
+	files := checkpointRemoteMetadataFiles(ctx, t, localDir)
+	assert.Contains(t, files, "aa/aaaaaaaaaa/metadata.json", "authoritative checkpoint-remote data should be present")
+	assert.NotContains(t, files, "bb/bbbbbbbbbb/metadata.json", "stale origin data must not be adopted")
+}
+
+// createEmptyOrphanMetadataBranch creates an empty-tree orphan entire/checkpoints/v1
+// branch in dir, reproducing the issue #1374 bug state, and leaves the default
+// branch checked out.
+func createEmptyOrphanMetadataBranch(ctx context.Context, t *testing.T, dir string) {
+	t.Helper()
+	defaultBranch := checkpointRemoteCurrentBranch(ctx, t, dir)
+	runCheckpointRemoteGit(ctx, t, dir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, dir, "rm", "-rf", ".")
+	runCheckpointRemoteGit(ctx, t, dir, "commit", "--allow-empty", "-m", "Initialize metadata branch")
+	runCheckpointRemoteGit(ctx, t, dir, "checkout", defaultBranch)
 }
 
 func runCheckpointRemoteGit(ctx context.Context, t *testing.T, dir string, args ...string) {
