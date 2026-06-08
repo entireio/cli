@@ -1993,44 +1993,49 @@ func CreateCommit(ctx context.Context, repo *git.Repository, treeHash, parentHas
 	return hash, nil
 }
 
-// SignCommitBestEffort signs the commit using an on-demand object signer.
-// If signing is disabled, no signer can be created, or signing fails, the commit
-// is left unsigned and the error is logged.
-func SignCommitBestEffort(ctx context.Context, commit *object.Commit) {
+// SignCommit signs the commit using an on-demand object signer. It returns
+// ErrSigningDisabled when signing is disabled in settings or no signer is
+// available. Any signer error is returned wrapped so callers can use
+// errors.Is/As. On success the commit's Signature field is populated.
+func SignCommit(ctx context.Context, commit *object.Commit) error {
 	if !settings.IsSignCheckpointCommitsEnabled(ctx) {
-		return
+		return ErrSigningDisabled
 	}
 
 	signer, ok := objectSignerLoader(ctx)
-	if !ok {
-		return
-	}
-
-	if signer == nil {
-		return
+	if !ok || signer == nil {
+		return ErrSigningDisabled
 	}
 
 	encoded := &plumbing.MemoryObject{}
-	var err error
-	if err = commit.EncodeWithoutSignature(encoded); err != nil {
-		logging.Warn(ctx, "failed to encode commit for signing", slog.String("error", err.Error()))
-		return
+	if err := commit.EncodeWithoutSignature(encoded); err != nil {
+		return fmt.Errorf("encode commit for signing: %w", err)
 	}
 
 	r, err := encoded.Reader()
 	if err != nil {
-		logging.Warn(ctx, "failed to read encoded commit", slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("read encoded commit: %w", err)
 	}
 	defer r.Close()
 
 	sig, err := signer.Sign(r)
 	if err != nil {
-		logging.Warn(ctx, "failed to sign commit", slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("sign commit: %w", err)
 	}
 
 	commit.Signature = string(sig)
+	return nil
+}
+
+// SignCommitBestEffort signs the commit using an on-demand object signer.
+// If signing is disabled, no signer can be created, or signing fails, the commit
+// is left unsigned and the error is logged.
+func SignCommitBestEffort(ctx context.Context, commit *object.Commit) {
+	if err := SignCommit(ctx, commit); err != nil {
+		if !errors.Is(err, ErrSigningDisabled) {
+			logging.Warn(ctx, "failed to sign commit", slog.String("error", err.Error()))
+		}
+	}
 }
 
 // readTranscriptFromTree reads a transcript from a git tree, handling both chunked and non-chunked formats.
