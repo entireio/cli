@@ -956,8 +956,8 @@ func (manifestTokenTestAgent) ReassembleTranscript(chunks [][]byte) ([]byte, err
 }
 func (manifestTokenTestAgent) GetSessionID(*agent.HookInput) string { return "" }
 func (manifestTokenTestAgent) GetSessionDir(string) (string, error) { return "", nil }
-func (manifestTokenTestAgent) ResolveSessionFile(_, _ string) string {
-	return ""
+func (manifestTokenTestAgent) ResolveSessionFile(_, _ string) (string, error) {
+	return "", nil
 }
 func (manifestTokenTestAgent) ReadSession(*agent.HookInput) (*agent.AgentSession, error) {
 	return &agent.AgentSession{}, nil

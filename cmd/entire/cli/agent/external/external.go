@@ -171,17 +171,17 @@ func (e *Agent) GetSessionDir(repoPath string) (string, error) {
 	return resp.SessionDir, nil
 }
 
-func (e *Agent) ResolveSessionFile(sessionDir, agentSessionID string) string {
+func (e *Agent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
 	stdout, err := e.run(context.Background(), nil, "resolve-session-file",
 		"--session-dir", sessionDir, "--session-id", agentSessionID)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("resolve-session-file: %w", err)
 	}
 	var resp SessionFileResponse
 	if err := json.Unmarshal(stdout, &resp); err != nil {
-		return ""
+		return "", fmt.Errorf("resolve-session-file: invalid JSON: %w", err)
 	}
-	return resp.SessionFile
+	return resp.SessionFile, nil
 }
 
 func (e *Agent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error) {

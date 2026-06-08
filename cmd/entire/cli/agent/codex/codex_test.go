@@ -93,7 +93,8 @@ func TestCodexAgent_ResolveSessionFile_SessionTreeLayout(t *testing.T) {
 	expected := filepath.Join(dayDir, "rollout-2026-04-08T10-43-48-"+sessionID+".jsonl")
 	require.NoError(t, os.WriteFile(expected, []byte(sampleRollout), 0o600))
 
-	result := ag.ResolveSessionFile(sessionDir, sessionID)
+	result, err := ag.ResolveSessionFile(sessionDir, sessionID)
+	require.NoError(t, err)
 	require.Equal(t, expected, result)
 }
 
@@ -120,7 +121,8 @@ func TestCodexAgent_ResolveSessionFile_FindsNestedRollout(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(want), 0o755))
 	require.NoError(t, os.WriteFile(want, []byte(sampleRollout), 0o600))
 
-	got := ag.ResolveSessionFile(dir, "019d24c3")
+	got, err := ag.ResolveSessionFile(dir, "019d24c3")
+	require.NoError(t, err)
 	require.Equal(t, want, got)
 }
 

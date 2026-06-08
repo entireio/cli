@@ -84,8 +84,8 @@ func (v *Agent) GetSessionDir(_ string) (string, error) {
 	return filepath.Join(homeDir, ".vogon", "sessions"), nil
 }
 
-func (v *Agent) ResolveSessionFile(sessionDir, agentSessionID string) string {
-	return filepath.Join(sessionDir, agentSessionID+".jsonl")
+func (v *Agent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
+	return filepath.Join(sessionDir, agentSessionID+".jsonl"), nil
 }
 
 func (v *Agent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error) {

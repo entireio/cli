@@ -42,5 +42,9 @@ func RestoredSessionTranscriptPath(t *testing.T, repoDir string, meta SessionMet
 		t.Fatalf("get session dir for agent %q: %v", meta.Agent, err)
 	}
 
-	return ag.ResolveSessionFile(sessionDir, meta.SessionID), true
+	sessionFile, err := ag.ResolveSessionFile(sessionDir, meta.SessionID)
+	if err != nil {
+		t.Fatalf("resolve session file for agent %q: %v", meta.Agent, err)
+	}
+	return sessionFile, true
 }

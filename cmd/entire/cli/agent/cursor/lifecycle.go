@@ -76,7 +76,12 @@ func (c *CursorAgent) resolveTranscriptRef(ctx context.Context, conversationID, 
 		return ""
 	}
 
-	return c.ResolveSessionFile(sessionDir, conversationID)
+	ref, err := c.ResolveSessionFile(sessionDir, conversationID)
+	if err != nil {
+		logging.Warn(ctx, "cursor: failed to resolve session file", "err", err)
+		return ""
+	}
+	return ref
 }
 
 func (c *CursorAgent) parseSessionStart(stdin io.Reader) (*agent.Event, error) {

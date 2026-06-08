@@ -727,7 +727,11 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 			fmt.Fprintf(errW, "  Warning: failed to get session dir for session %d: %v\n", i, dirErr)
 			continue
 		}
-		sessionFile := sessionAgent.ResolveSessionFile(sessionAgentDir, sessionID)
+		sessionFile, resolveErr := sessionAgent.ResolveSessionFile(sessionAgentDir, sessionID)
+		if resolveErr != nil {
+			fmt.Fprintf(errW, "  Warning: failed to resolve session file for session %d (%s): %v, skipping\n", i, sessionID, resolveErr)
+			continue
+		}
 		if resolver, ok := sessionAgent.(agent.RestoredSessionPathResolver); ok {
 			resolvedFile, resolveErr := resolver.ResolveRestoredSessionFile(sessionAgentDir, sessionID, content.Transcript)
 			if resolveErr != nil {
@@ -878,7 +882,10 @@ func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, r
 		if dirErr != nil {
 			continue
 		}
-		localPath := sessionAgent.ResolveSessionFile(sessionAgentDir, sessionID)
+		localPath, resolveErr := sessionAgent.ResolveSessionFile(sessionAgentDir, sessionID)
+		if resolveErr != nil {
+			continue
+		}
 
 		localTime := paths.GetLastTimestampFromFile(localPath)
 		checkpointTime := paths.GetLastTimestampFromBytes(content.Transcript)

@@ -68,10 +68,10 @@ func (s *stubTextAgent) ReadTranscript(string) ([]byte, error)        { return n
 func (s *stubTextAgent) ChunkTranscript(context.Context, []byte, int) ([][]byte, error) {
 	return nil, nil
 }
-func (s *stubTextAgent) ReassembleTranscript([][]byte) ([]byte, error) { return nil, nil }
-func (s *stubTextAgent) GetSessionID(*agent.HookInput) string          { return "" }
-func (s *stubTextAgent) GetSessionDir(string) (string, error)          { return "", nil }
-func (s *stubTextAgent) ResolveSessionFile(string, string) string      { return "" }
+func (s *stubTextAgent) ReassembleTranscript([][]byte) ([]byte, error)     { return nil, nil }
+func (s *stubTextAgent) GetSessionID(*agent.HookInput) string              { return "" }
+func (s *stubTextAgent) GetSessionDir(string) (string, error)              { return "", nil }
+func (s *stubTextAgent) ResolveSessionFile(string, string) (string, error) { return "", nil }
 func (s *stubTextAgent) ReadSession(*agent.HookInput) (*agent.AgentSession, error) {
 	return nil, nil //nolint:nilnil // test stub
 }

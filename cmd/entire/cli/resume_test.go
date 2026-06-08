@@ -54,8 +54,8 @@ func (a *recordingResumeAgent) ReassembleTranscript(chunks [][]byte) ([]byte, er
 }
 func (a *recordingResumeAgent) GetSessionID(*agent.HookInput) string { return "" }
 func (a *recordingResumeAgent) GetSessionDir(string) (string, error) { return a.sessionDir, nil }
-func (a *recordingResumeAgent) ResolveSessionFile(sessionDir, sessionID string) string {
-	return filepath.Join(sessionDir, sessionID+".jsonl")
+func (a *recordingResumeAgent) ResolveSessionFile(sessionDir, sessionID string) (string, error) {
+	return filepath.Join(sessionDir, sessionID+".jsonl"), nil
 }
 func (a *recordingResumeAgent) ReadSession(*agent.HookInput) (*agent.AgentSession, error) {
 	return nil, nil //nolint:nilnil // Not used by this test agent.

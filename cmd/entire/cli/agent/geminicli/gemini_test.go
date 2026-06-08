@@ -103,7 +103,10 @@ func TestResolveSessionFile(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		result := ag.ResolveSessionFile(tmpDir, "0544a0f5-46a6-41b3-a89c-e7804df731b8")
+		result, err := ag.ResolveSessionFile(tmpDir, "0544a0f5-46a6-41b3-a89c-e7804df731b8")
+		if err != nil {
+			t.Fatalf("ResolveSessionFile() error = %v", err)
+		}
 		if result != geminiFile {
 			t.Errorf("ResolveSessionFile() = %q, want %q", result, geminiFile)
 		}
@@ -114,7 +117,10 @@ func TestResolveSessionFile(t *testing.T) {
 		tmpDir := t.TempDir()
 		ag := &GeminiCLIAgent{}
 
-		result := ag.ResolveSessionFile(tmpDir, "0544a0f5-46a6-41b3-a89c-e7804df731b8")
+		result, err := ag.ResolveSessionFile(tmpDir, "0544a0f5-46a6-41b3-a89c-e7804df731b8")
+		if err != nil {
+			t.Fatalf("ResolveSessionFile() error = %v", err)
+		}
 		filename := filepath.Base(result)
 		if !strings.HasPrefix(filename, "session-") {
 			t.Errorf("fallback filename %q should start with 'session-'", filename)
@@ -133,7 +139,10 @@ func TestResolveSessionFile(t *testing.T) {
 		ag := &GeminiCLIAgent{}
 
 		// Short ID (less than 8 chars) should use entire ID in filename
-		result := ag.ResolveSessionFile(tmpDir, "abc123")
+		result, err := ag.ResolveSessionFile(tmpDir, "abc123")
+		if err != nil {
+			t.Fatalf("ResolveSessionFile() error = %v", err)
+		}
 		filename := filepath.Base(result)
 		if !strings.HasPrefix(filename, "session-") {
 			t.Errorf("fallback filename %q should start with 'session-'", filename)

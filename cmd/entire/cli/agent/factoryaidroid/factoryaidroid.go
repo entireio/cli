@@ -119,8 +119,8 @@ func (f *FactoryAIDroidAgent) GetSessionBaseDir() (string, error) {
 }
 
 // ResolveSessionFile returns the path to a Factory AI Droid session file.
-func (f *FactoryAIDroidAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
-	return filepath.Join(sessionDir, agentSessionID+".jsonl")
+func (f *FactoryAIDroidAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
+	return filepath.Join(sessionDir, agentSessionID+".jsonl"), nil
 }
 
 // ReadSession reads a session from Factory AI Droid's storage (JSONL transcript file).

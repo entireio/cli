@@ -344,10 +344,10 @@ func (f *fakeBuiltInAgent) ReadTranscript(string) ([]byte, error)        { retur
 func (f *fakeBuiltInAgent) ChunkTranscript(context.Context, []byte, int) ([][]byte, error) {
 	return nil, nil
 }
-func (f *fakeBuiltInAgent) ReassembleTranscript([][]byte) ([]byte, error) { return nil, nil }
-func (f *fakeBuiltInAgent) GetSessionID(*agent.HookInput) string          { return "" }
-func (f *fakeBuiltInAgent) GetSessionDir(string) (string, error)          { return "", nil }
-func (f *fakeBuiltInAgent) ResolveSessionFile(string, string) string      { return "" }
+func (f *fakeBuiltInAgent) ReassembleTranscript([][]byte) ([]byte, error)     { return nil, nil }
+func (f *fakeBuiltInAgent) GetSessionID(*agent.HookInput) string              { return "" }
+func (f *fakeBuiltInAgent) GetSessionDir(string) (string, error)              { return "", nil }
+func (f *fakeBuiltInAgent) ResolveSessionFile(string, string) (string, error) { return "", nil }
 func (f *fakeBuiltInAgent) ReadSession(*agent.HookInput) (*agent.AgentSession, error) {
 	return nil, nil //nolint:nilnil // test fake — no session is a valid state
 }

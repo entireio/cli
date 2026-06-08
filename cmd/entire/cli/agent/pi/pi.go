@@ -165,21 +165,26 @@ func (a *PiAgent) GetSessionBaseDir() (string, error) {
 // so glob for the matching ID; on multiple matches the lexicographically
 // latest (most recent timestamp) wins.
 //
-// Absolute paths pass through unchanged so hook payloads carrying live
-// pi paths work without re-resolution. When no match exists, fall back
-// to a deterministic non-existent path so downstream stat checks fail
-// cleanly rather than panicking on an empty path.
-func (a *PiAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
+// An absolute agentSessionID is rejected with an error rather than
+// returned verbatim: that would let an attacker-influenceable session ID
+// (e.g. from checkpoint metadata) resolve to an arbitrary path and, via
+// the resume/rewind write path, overwrite files outside the session
+// directory. Live Pi hooks record the transcript path as SessionRef and
+// read it directly via ReadSession, so they never round-trip an absolute
+// path through this function. When no match exists, fall back to a
+// deterministic non-existent path so downstream stat checks fail cleanly
+// rather than panicking on an empty path.
+func (a *PiAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
 	if filepath.IsAbs(agentSessionID) {
-		return agentSessionID
+		return "", fmt.Errorf("session ID must be relative, got absolute path: %q", agentSessionID)
 	}
 	if path := findPiSessionByID(sessionDir, agentSessionID); path != "" {
-		return path
+		return path, nil
 	}
 	if sessionDir == "" {
-		return agentSessionID
+		return agentSessionID, nil
 	}
-	return filepath.Join(sessionDir, agentSessionID+".jsonl")
+	return filepath.Join(sessionDir, agentSessionID+".jsonl"), nil
 }
 
 // resolvePiHome returns Pi's home directory: $PI_CODING_AGENT_DIR or

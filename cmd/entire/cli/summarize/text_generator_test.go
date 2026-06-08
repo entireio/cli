@@ -26,10 +26,10 @@ func (m *mockTextGenerator) ReadTranscript(string) ([]byte, error)        { retu
 func (m *mockTextGenerator) ChunkTranscript(context.Context, []byte, int) ([][]byte, error) {
 	return nil, nil
 }
-func (m *mockTextGenerator) ReassembleTranscript([][]byte) ([]byte, error) { return nil, nil }
-func (m *mockTextGenerator) GetSessionID(*agent.HookInput) string          { return "" }
-func (m *mockTextGenerator) GetSessionDir(string) (string, error)          { return "", nil }
-func (m *mockTextGenerator) ResolveSessionFile(string, string) string      { return "" }
+func (m *mockTextGenerator) ReassembleTranscript([][]byte) ([]byte, error)     { return nil, nil }
+func (m *mockTextGenerator) GetSessionID(*agent.HookInput) string              { return "" }
+func (m *mockTextGenerator) GetSessionDir(string) (string, error)              { return "", nil }
+func (m *mockTextGenerator) ResolveSessionFile(string, string) (string, error) { return "", nil }
 func (m *mockTextGenerator) ReadSession(*agent.HookInput) (*agent.AgentSession, error) {
 	return nil, nil //nolint:nilnil // test stub
 }

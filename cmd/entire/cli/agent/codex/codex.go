@@ -87,20 +87,27 @@ func (c *CodexAgent) GetSessionDir(_ string) (string, error) {
 }
 
 // ResolveSessionFile returns the path to a Codex session transcript file.
-// Codex provides the transcript path directly in hook payloads as an absolute path.
-// When only a session ID is available, attach/rewind must recover it from the
+// Codex provides the transcript path directly in hook payloads as an absolute
+// path, but that path is recorded as SessionRef and read directly — it never
+// round-trips through this function. When only a session ID is available,
+// attach/rewind must recover it from the
 // sessions/YYYY/MM/DD/rollout-...-<session-id>.jsonl layout.
-func (c *CodexAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
+//
+// An absolute agentSessionID is rejected with an error rather than returned
+// verbatim: that would let an attacker-influenceable session ID (e.g. from
+// checkpoint metadata) resolve to an arbitrary path and, via the
+// resume/rewind write path, overwrite files outside the session directory.
+func (c *CodexAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
 	if filepath.IsAbs(agentSessionID) {
-		return agentSessionID
+		return "", fmt.Errorf("session ID must be relative, got absolute path: %q", agentSessionID)
 	}
 	if path := findRolloutBySessionID(sessionDir, agentSessionID); path != "" {
-		return path
+		return path, nil
 	}
 	if sessionDir != "" {
-		return filepath.Join(sessionDir, agentSessionID+".jsonl")
+		return filepath.Join(sessionDir, agentSessionID+".jsonl"), nil
 	}
-	return agentSessionID
+	return agentSessionID, nil
 }
 
 // ResolveRestoredSessionFile returns the canonical Codex rollout path for a

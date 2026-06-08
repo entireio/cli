@@ -40,7 +40,10 @@ func TestClaudeCodeAgent_LaunchCmd(t *testing.T) {
 func TestResolveSessionFile(t *testing.T) {
 	t.Parallel()
 	ag := &ClaudeCodeAgent{}
-	result := ag.ResolveSessionFile("/home/user/.claude/projects/foo", "abc-123-def")
+	result, err := ag.ResolveSessionFile("/home/user/.claude/projects/foo", "abc-123-def")
+	if err != nil {
+		t.Fatalf("ResolveSessionFile() error = %v", err)
+	}
 	expected := "/home/user/.claude/projects/foo/abc-123-def.jsonl"
 	if result != expected {
 		t.Errorf("ResolveSessionFile() = %q, want %q", result, expected)

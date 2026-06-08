@@ -37,8 +37,8 @@ func (m *mockAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 	return result, nil
 }
 func (m *mockAgent) GetSessionDir(_ string) (string, error) { return "", nil }
-func (m *mockAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
-	return sessionDir + "/" + agentSessionID + ".jsonl"
+func (m *mockAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
+	return sessionDir + "/" + agentSessionID + ".jsonl", nil
 }
 
 //nolint:nilnil // Mock implementation

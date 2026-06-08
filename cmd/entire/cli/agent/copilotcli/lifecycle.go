@@ -160,5 +160,10 @@ func (c *CopilotCLIAgent) resolveTranscriptRef(ctx context.Context, sessionID st
 		logging.Warn(ctx, "copilot-cli: failed to resolve transcript path", "sessionID", sessionID, "err", err)
 		return ""
 	}
-	return c.ResolveSessionFile(sessionDir, sessionID)
+	ref, err := c.ResolveSessionFile(sessionDir, sessionID)
+	if err != nil {
+		logging.Warn(ctx, "copilot-cli: failed to resolve session file", "sessionID", sessionID, "err", err)
+		return ""
+	}
+	return ref
 }

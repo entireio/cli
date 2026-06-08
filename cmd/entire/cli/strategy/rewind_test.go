@@ -645,8 +645,8 @@ func (a *restoreLogsOnlyAgent) ReassembleTranscript(chunks [][]byte) ([]byte, er
 }
 func (a *restoreLogsOnlyAgent) GetSessionID(*agent.HookInput) string { return "" }
 func (a *restoreLogsOnlyAgent) GetSessionDir(string) (string, error) { return a.sessionDir, nil }
-func (a *restoreLogsOnlyAgent) ResolveSessionFile(sessionDir, sessionID string) string {
-	return filepath.Join(sessionDir, sessionID+".jsonl")
+func (a *restoreLogsOnlyAgent) ResolveSessionFile(sessionDir, sessionID string) (string, error) {
+	return filepath.Join(sessionDir, sessionID+".jsonl"), nil
 }
 func (a *restoreLogsOnlyAgent) ReadSession(*agent.HookInput) (*agent.AgentSession, error) {
 	return nil, nil //nolint:nilnil // Not used by this test agent.
@@ -681,7 +681,7 @@ func (f *fakeExternalAgent) ChunkTranscript(_ context.Context, _ []byte, _ int) 
 func (f *fakeExternalAgent) ReassembleTranscript(_ [][]byte) ([]byte, error) { return nil, nil }
 func (f *fakeExternalAgent) GetSessionID(_ *agent.HookInput) string          { return "" }
 func (f *fakeExternalAgent) GetSessionDir(_ string) (string, error)          { return "", nil }
-func (f *fakeExternalAgent) ResolveSessionFile(_, _ string) string           { return "" }
+func (f *fakeExternalAgent) ResolveSessionFile(_, _ string) (string, error)  { return "", nil }
 func (f *fakeExternalAgent) ReadSession(_ *agent.HookInput) (*agent.AgentSession, error) {
 	return nil, nil //nolint:nilnil // test stub
 }

@@ -65,17 +65,23 @@ type Agent interface {
 	// GetSessionDir returns where agent stores session data for this repo.
 	GetSessionDir(repoPath string) (string, error)
 
-	// ResolveSessionFile returns the path to the session transcript file.
+	// ResolveSessionFile returns the path to the session transcript file, or an
+	// error when agentSessionID cannot be resolved to a path safely.
 	//
-	// SECURITY CONTRACT: agentSessionID is used to build a filesystem path and
-	// some implementations use it as a directory component or (Codex/Pi) return
-	// it verbatim when absolute. Callers that source agentSessionID from
-	// untrusted data (e.g. checkpoint metadata on the shared
-	// entire/checkpoints/v1 branch, hook input) MUST validate it with
-	// validation.ValidateSessionID first. The resume/rewind restore paths do
-	// this at their choke points (transcript.resolveTranscriptPath and
-	// strategy.RestoreLogsOnly); do not call this with unvalidated input.
-	ResolveSessionFile(sessionDir, agentSessionID string) string
+	// SECURITY CONTRACT: agentSessionID is used to build a filesystem path, and
+	// most implementations use it as a path component (filepath.Join, which
+	// contains a leading-slash element but not "../" traversal). Codex and Pi
+	// reject an absolute agentSessionID with an error rather than returning it
+	// verbatim — closing the arbitrary-write footgun at the function itself
+	// (defense in depth) instead of relying on caller discipline.
+	//
+	// Callers that source agentSessionID from untrusted data (e.g. checkpoint
+	// metadata on the shared entire/checkpoints/v1 branch, hook input) MUST
+	// still validate it with validation.ValidateSessionID first, because the
+	// per-function guard only covers absolute paths, not "../" traversal. The
+	// resume/rewind restore paths do this at their choke points
+	// (transcript.resolveTranscriptPath and strategy.RestoreLogsOnly).
+	ResolveSessionFile(sessionDir, agentSessionID string) (string, error)
 
 	// ReadSession reads session data from agent's storage.
 	ReadSession(input *HookInput) (*AgentSession, error)

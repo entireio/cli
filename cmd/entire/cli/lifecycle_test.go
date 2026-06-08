@@ -63,8 +63,8 @@ func (m *mockLifecycleAgent) GetSessionDir(_ string) (string, error) {
 	return "", nil
 }
 
-func (m *mockLifecycleAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
-	return filepath.Join(sessionDir, agentSessionID+".jsonl")
+func (m *mockLifecycleAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
+	return filepath.Join(sessionDir, agentSessionID+".jsonl"), nil
 }
 
 //nolint:nilnil // Mock implementation

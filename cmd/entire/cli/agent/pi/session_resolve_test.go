@@ -87,12 +87,18 @@ func TestPiAgent_ImplementsSessionBaseDirProvider(t *testing.T) {
 	}
 }
 
-func TestResolveSessionFile_AbsolutePathPassthrough(t *testing.T) {
+// An absolute agentSessionID must be rejected with an error rather than
+// returned verbatim — see the security contract on the Agent interface. This is
+// the Pi counterpart to codex.TestResolveSessionFile_RejectsAbsolute.
+func TestResolveSessionFile_RejectsAbsolute(t *testing.T) {
 	t.Parallel()
 	abs := "/tmp/2026-01-01T00-00-00-000Z_abc123.jsonl"
-	got := (&PiAgent{}).ResolveSessionFile("/ignored", abs)
-	if got != abs {
-		t.Errorf("absolute path: got %q, want %q", got, abs)
+	got, err := (&PiAgent{}).ResolveSessionFile("/ignored", abs)
+	if err == nil {
+		t.Errorf("absolute path: got (%q, nil), want error", got)
+	}
+	if got != "" {
+		t.Errorf("absolute path: returned path %q alongside error, want empty", got)
 	}
 }
 
@@ -115,7 +121,10 @@ func TestResolveSessionFile_GlobsBySessionID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := (&PiAgent{}).ResolveSessionFile(dir, id)
+	got, err := (&PiAgent{}).ResolveSessionFile(dir, id)
+	if err != nil {
+		t.Fatalf("ResolveSessionFile() error = %v", err)
+	}
 	if got != newer {
 		t.Errorf("ResolveSessionFile picked %q, want most recent %q", got, newer)
 	}
@@ -126,7 +135,10 @@ func TestResolveSessionFile_NoMatchFallback(t *testing.T) {
 	dir := t.TempDir()
 	id := "missing-id"
 
-	got := (&PiAgent{}).ResolveSessionFile(dir, id)
+	got, err := (&PiAgent{}).ResolveSessionFile(dir, id)
+	if err != nil {
+		t.Fatalf("ResolveSessionFile() error = %v", err)
+	}
 	want := filepath.Join(dir, id+".jsonl")
 	if got != want {
 		t.Errorf("ResolveSessionFile fallback = %q, want %q", got, want)
@@ -139,7 +151,10 @@ func TestResolveSessionFile_NoMatchFallback(t *testing.T) {
 
 func TestResolveSessionFile_NoMatch_NoSessionDir(t *testing.T) {
 	t.Parallel()
-	got := (&PiAgent{}).ResolveSessionFile("", "sess-xyz")
+	got, err := (&PiAgent{}).ResolveSessionFile("", "sess-xyz")
+	if err != nil {
+		t.Fatalf("ResolveSessionFile() error = %v", err)
+	}
 	if got != "sess-xyz" {
 		t.Errorf("ResolveSessionFile with empty dir = %q, want %q", got, "sess-xyz")
 	}

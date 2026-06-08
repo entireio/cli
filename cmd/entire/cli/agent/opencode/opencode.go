@@ -180,8 +180,8 @@ func (a *OpenCodeAgent) GetSessionDir(repoPath string) (string, error) {
 	return filepath.Join(os.TempDir(), "entire-opencode", projectDir), nil
 }
 
-func (a *OpenCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
-	return filepath.Join(sessionDir, agentSessionID+".json")
+func (a *OpenCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
+	return filepath.Join(sessionDir, agentSessionID+".json"), nil
 }
 
 func (a *OpenCodeAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error) {

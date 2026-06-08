@@ -66,7 +66,7 @@ func (w *wrappedAgent) GetSessionID(input *agent.HookInput) string { return w.ea
 func (w *wrappedAgent) GetSessionDir(repoPath string) (string, error) {
 	return w.ea.GetSessionDir(repoPath)
 }
-func (w *wrappedAgent) ResolveSessionFile(dir, id string) string {
+func (w *wrappedAgent) ResolveSessionFile(dir, id string) (string, error) {
 	return w.ea.ResolveSessionFile(dir, id)
 }
 func (w *wrappedAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error) {

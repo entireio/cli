@@ -75,8 +75,8 @@ func (c *CopilotCLIAgent) GetSessionDir(_ string) (string, error) {
 
 // ResolveSessionFile returns the path to a Copilot CLI session transcript file.
 // Copilot CLI stores transcripts at <sessionDir>/<sessionId>/events.jsonl.
-func (c *CopilotCLIAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
-	return filepath.Join(sessionDir, agentSessionID, "events.jsonl")
+func (c *CopilotCLIAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
+	return filepath.Join(sessionDir, agentSessionID, "events.jsonl"), nil
 }
 
 // ProtectedDirs returns directories that Copilot CLI uses for config/state.

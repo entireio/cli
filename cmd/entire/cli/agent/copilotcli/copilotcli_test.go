@@ -102,7 +102,10 @@ func TestCopilotCLIAgent_GetSessionID(t *testing.T) {
 func TestCopilotCLIAgent_ResolveSessionFile(t *testing.T) {
 	t.Parallel()
 	ag := &CopilotCLIAgent{}
-	result := ag.ResolveSessionFile("/home/user/.copilot/session-state", "b0ff98c0-8e01-4b73-bf92-9649b139931b")
+	result, err := ag.ResolveSessionFile("/home/user/.copilot/session-state", "b0ff98c0-8e01-4b73-bf92-9649b139931b")
+	if err != nil {
+		t.Fatalf("ResolveSessionFile() error = %v", err)
+	}
 	expected := "/home/user/.copilot/session-state/b0ff98c0-8e01-4b73-bf92-9649b139931b/events.jsonl"
 	if result != expected {
 		t.Errorf("ResolveSessionFile() = %q, want %q", result, expected)

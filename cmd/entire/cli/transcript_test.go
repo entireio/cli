@@ -14,9 +14,12 @@ import (
 // Session IDs reaching the resume/rewind restore paths originate from checkpoint
 // metadata stored on the shared entire/checkpoints/v1 branch, which an attacker
 // with push access can craft. Without validation, an absolute or "../"-laden
-// session ID escapes the agent session directory (and for agents like Pi/Codex
-// that return absolute paths verbatim, lands anywhere), letting attacker-controlled
+// session ID escapes the agent session directory, letting attacker-controlled
 // transcript bytes overwrite arbitrary files such as ~/.bashrc.
+//
+// This call-site validation is the primary guard. Pi and Codex additionally
+// reject absolute IDs inside ResolveSessionFile itself (defense in depth) — see
+// their TestResolveSessionFile_RejectsAbsolute contract tests.
 func TestResolveTranscriptPath_RejectsTraversalSessionID(t *testing.T) {
 	tmpDir := t.TempDir()
 	setupResumeTestRepo(t, tmpDir, false)

@@ -53,7 +53,10 @@ func resolveTranscriptPath(state *SessionState) (string, error) {
 	base := filepath.Base(state.TranscriptPath)
 	agentSessionID := strings.TrimSuffix(base, filepath.Ext(base))
 
-	resolved := ag.ResolveSessionFile(sessionDir, agentSessionID)
+	resolved, resolveErr := ag.ResolveSessionFile(sessionDir, agentSessionID)
+	if resolveErr != nil {
+		return "", fmt.Errorf("transcript not found at %s: %w", state.TranscriptPath, os.ErrNotExist)
+	}
 	if resolved == state.TranscriptPath {
 		// Agent resolved to the same path — file genuinely doesn't exist.
 		return "", fmt.Errorf("transcript not found at %s: %w", state.TranscriptPath, os.ErrNotExist)

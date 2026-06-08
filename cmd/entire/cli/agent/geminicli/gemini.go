@@ -88,7 +88,7 @@ func (g *GeminiCLIAgent) ProtectedDirs() []string { return []string{".gemini"} }
 // Gemini names files as session-<date>-<shortid>.json where shortid is the first 8 chars
 // of the session UUID. This searches for an existing file matching the pattern, falling
 // back to constructing a filename matching Gemini's convention if no match is found.
-func (g *GeminiCLIAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
+func (g *GeminiCLIAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
 	// Try to find existing file matching Gemini's naming convention:
 	// session-*-<first8chars>.json
 	shortID := agentSessionID
@@ -100,12 +100,12 @@ func (g *GeminiCLIAgent) ResolveSessionFile(sessionDir, agentSessionID string) s
 	matches, err := filepath.Glob(pattern)
 	if err == nil && len(matches) > 0 {
 		// Return the most recent match (last alphabetically, since date is in the name)
-		return matches[len(matches)-1]
+		return matches[len(matches)-1], nil
 	}
 
 	// Fallback: construct filename matching Gemini's convention: session-<timestamp>-<id[:8]>.json
 	timestamp := time.Now().UTC().Format("2006-01-02T15-04")
-	return filepath.Join(sessionDir, "session-"+timestamp+"-"+shortID+".json")
+	return filepath.Join(sessionDir, "session-"+timestamp+"-"+shortID+".json"), nil
 }
 
 // GetSessionDir returns the directory where Gemini stores session transcripts.

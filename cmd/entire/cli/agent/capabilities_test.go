@@ -26,7 +26,7 @@ func (m *mockBaseAgent) ChunkTranscript(context.Context, []byte, int) ([][]byte,
 func (m *mockBaseAgent) ReassembleTranscript([][]byte) ([]byte, error)     { return nil, nil }
 func (m *mockBaseAgent) GetSessionID(*HookInput) string                    { return "" }
 func (m *mockBaseAgent) GetSessionDir(string) (string, error)              { return "", nil }
-func (m *mockBaseAgent) ResolveSessionFile(string, string) string          { return "" }
+func (m *mockBaseAgent) ResolveSessionFile(string, string) (string, error) { return "", nil }
 func (m *mockBaseAgent) ReadSession(*HookInput) (*AgentSession, error)     { return nil, nil } //nolint:nilnil // test mock
 func (m *mockBaseAgent) WriteSession(context.Context, *AgentSession) error { return nil }
 func (m *mockBaseAgent) FormatResumeCommand(string) string                 { return "" }

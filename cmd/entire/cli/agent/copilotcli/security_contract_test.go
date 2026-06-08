@@ -24,8 +24,13 @@ func TestResolveSessionFile_DirComponent_GuardedByValidator(t *testing.T) {
 	ag := &CopilotCLIAgent{}
 	sessionDir := "/home/user/.copilot/session-state"
 
-	// A ".." id used as a directory component escapes sessionDir.
-	escaped := ag.ResolveSessionFile(sessionDir, "..")
+	// A ".." id used as a directory component escapes sessionDir. Copilot does
+	// not reject it itself (unlike Codex/Pi's absolute-path guard) — it relies
+	// on the shared validator, which is the point of this contract test.
+	escaped, resolveErr := ag.ResolveSessionFile(sessionDir, "..")
+	if resolveErr != nil {
+		t.Fatalf("ResolveSessionFile(%q, \"..\") error = %v", sessionDir, resolveErr)
+	}
 	rel, err := filepath.Rel(sessionDir, escaped)
 	if err != nil {
 		t.Fatalf("filepath.Rel(%q, %q) error: %v", sessionDir, escaped, err)

@@ -107,7 +107,10 @@ func TestCursorAgent_ResolveSessionFile_FlatLayout(t *testing.T) {
 	if err := os.WriteFile(flatFile, []byte("{}"), 0o644); err != nil {
 		t.Fatalf("failed to write flat file: %v", err)
 	}
-	result := ag.ResolveSessionFile(tmpDir, "abc123")
+	result, err := ag.ResolveSessionFile(tmpDir, "abc123")
+	if err != nil {
+		t.Fatalf("ResolveSessionFile() error = %v", err)
+	}
 	if result != flatFile {
 		t.Errorf("ResolveSessionFile() flat = %q, want %q", result, flatFile)
 	}
@@ -119,7 +122,10 @@ func TestCursorAgent_ResolveSessionFile_NeitherExists(t *testing.T) {
 	// When neither nested nor flat file exists, returns flat path as best guess
 	// (transcript may not exist yet at TurnStart time)
 	tmpDir := t.TempDir()
-	result := ag.ResolveSessionFile(tmpDir, "abc123")
+	result, err := ag.ResolveSessionFile(tmpDir, "abc123")
+	if err != nil {
+		t.Fatalf("ResolveSessionFile() error = %v", err)
+	}
 	expected := filepath.Join(tmpDir, "abc123.jsonl")
 	if result != expected {
 		t.Errorf("ResolveSessionFile() neither = %q, want %q", result, expected)
@@ -140,7 +146,10 @@ func TestCursorAgent_ResolveSessionFile_NestedLayout(t *testing.T) {
 		t.Fatalf("failed to write nested file: %v", err)
 	}
 
-	result := ag.ResolveSessionFile(tmpDir, "abc123")
+	result, err := ag.ResolveSessionFile(tmpDir, "abc123")
+	if err != nil {
+		t.Fatalf("ResolveSessionFile() error = %v", err)
+	}
 	if result != nestedFile {
 		t.Errorf("ResolveSessionFile() nested = %q, want %q", result, nestedFile)
 	}
@@ -157,7 +166,10 @@ func TestCursorAgent_ResolveSessionFile_NestedDirOnly(t *testing.T) {
 		t.Fatalf("failed to create nested dir: %v", err)
 	}
 
-	result := ag.ResolveSessionFile(tmpDir, "abc123")
+	result, err := ag.ResolveSessionFile(tmpDir, "abc123")
+	if err != nil {
+		t.Fatalf("ResolveSessionFile() error = %v", err)
+	}
 	expected := filepath.Join(nestedDir, "abc123.jsonl")
 	if result != expected {
 		t.Errorf("ResolveSessionFile() nested dir only = %q, want %q", result, expected)
@@ -186,7 +198,10 @@ func TestCursorAgent_ResolveSessionFile_PrefersNested(t *testing.T) {
 		t.Fatalf("failed to write nested file: %v", err)
 	}
 
-	result := ag.ResolveSessionFile(tmpDir, "abc123")
+	result, err := ag.ResolveSessionFile(tmpDir, "abc123")
+	if err != nil {
+		t.Fatalf("ResolveSessionFile() error = %v", err)
+	}
 	if result != nestedFile {
 		t.Errorf("ResolveSessionFile() should prefer nested = %q, got %q", nestedFile, result)
 	}

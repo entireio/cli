@@ -38,7 +38,11 @@ func resolveTranscriptPath(ctx context.Context, sessionID string, agent agentpkg
 	if err != nil {
 		return "", fmt.Errorf("failed to get agent session directory: %w", err)
 	}
-	return agent.ResolveSessionFile(sessionDir, sessionID), nil
+	resolved, err := agent.ResolveSessionFile(sessionDir, sessionID)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve transcript path: %w", err)
+	}
+	return resolved, nil
 }
 
 // searchTranscriptInProjectDirs searches for a session transcript across an agent's
@@ -82,7 +86,12 @@ func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string,
 		if depth > maxExtraDepth {
 			return filepath.SkipDir
 		}
-		candidate := ag.ResolveSessionFile(path, sessionID)
+		candidate, resolveErr := ag.ResolveSessionFile(path, sessionID)
+		if resolveErr != nil {
+			// sessionID can't be resolved to a path (e.g. absolute) — it won't
+			// resolve in any sibling dir either, so stop the walk.
+			return filepath.SkipAll
+		}
 		if _, statErr := os.Stat(candidate); statErr == nil {
 			found = candidate
 			return filepath.SkipAll

@@ -84,8 +84,8 @@ func (c *ClaudeCodeAgent) GetSessionID(input *agent.HookInput) string {
 
 // ResolveSessionFile returns the path to a Claude session file.
 // Claude names files directly as <id>.jsonl.
-func (c *ClaudeCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
-	return filepath.Join(sessionDir, agentSessionID+".jsonl")
+func (c *ClaudeCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
+	return filepath.Join(sessionDir, agentSessionID+".jsonl"), nil
 }
 
 // ProtectedDirs returns directories that Claude uses for config/state.

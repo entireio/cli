@@ -43,7 +43,7 @@ func (s *stubTextGenerator) GetSessionID(*agent.HookInput) string { return "" }
 
 func (s *stubTextGenerator) GetSessionDir(string) (string, error) { return "", nil }
 
-func (s *stubTextGenerator) ResolveSessionFile(string, string) string { return "" }
+func (s *stubTextGenerator) ResolveSessionFile(string, string) (string, error) { return "", nil }
 
 func (s *stubTextGenerator) ReadSession(*agent.HookInput) (*agent.AgentSession, error) {
 	return &agent.AgentSession{}, nil
