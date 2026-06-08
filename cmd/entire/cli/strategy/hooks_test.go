@@ -1424,6 +1424,160 @@ func TestInstallGitHook_MixedHooks(t *testing.T) {
 	}
 }
 
+func TestInstallGitHook_LefthookSafetyNetKeepsPrePushWrapper(t *testing.T) {
+	tmpDir, hooksDir := initHooksTestRepo(t)
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "lefthook.yml"), []byte("pre-push:\n  commands: {}\n"), 0o644); err != nil {
+		t.Fatalf("failed to create lefthook.yml: %v", err)
+	}
+
+	_, err := InstallGitHook(context.Background(), true, false, false)
+	if err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+
+	prePushData, err := os.ReadFile(filepath.Join(hooksDir, "pre-push"))
+	if err != nil {
+		t.Fatalf("pre-push hook should exist: %v", err)
+	}
+	prePush := string(prePushData)
+	if !strings.Contains(prePush, entireHookMarker) {
+		t.Fatalf("pre-push should keep the normal Entire wrapper, got:\n%s", prePush)
+	}
+	if !strings.Contains(prePush, `entire hooks git pre-push "$1" || true`) {
+		t.Fatalf("pre-push should keep the normal Entire command, got:\n%s", prePush)
+	}
+
+	config := readLefthookConfigForTest(t, filepath.Join(tmpDir, "lefthook-local.yml"))
+	if !lefthookConfigHasEntireCommand(config) {
+		t.Fatalf("lefthook-local.yml should include %s, got %#v", lefthookEntireCommandName, config)
+	}
+
+	excludeData, err := os.ReadFile(filepath.Join(tmpDir, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatalf("git info/exclude should exist: %v", err)
+	}
+	if !strings.Contains(string(excludeData), "lefthook-local.yml") {
+		t.Fatalf("git info/exclude should include lefthook-local.yml, got:\n%s", excludeData)
+	}
+}
+
+func TestInstallGitHook_LefthookSafetyNetPreservesExistingLocalCommands(t *testing.T) {
+	tmpDir, _ := initHooksTestRepo(t)
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "lefthook.yml"), []byte("pre-push:\n  commands: {}\n"), 0o644); err != nil {
+		t.Fatalf("failed to create lefthook.yml: %v", err)
+	}
+	existing := []byte(`pre-push:
+  commands:
+    existing-check:
+      run: echo existing
+pre-commit:
+  commands:
+    lint:
+      run: echo lint
+`)
+	if err := os.WriteFile(filepath.Join(tmpDir, "lefthook-local.yml"), existing, 0o644); err != nil {
+		t.Fatalf("failed to create lefthook-local.yml: %v", err)
+	}
+
+	_, err := InstallGitHook(context.Background(), true, false, false)
+	if err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+
+	config := readLefthookConfigForTest(t, filepath.Join(tmpDir, "lefthook-local.yml"))
+	if !lefthookConfigHasEntireCommand(config) {
+		t.Fatalf("lefthook-local.yml should include %s, got %#v", lefthookEntireCommandName, config)
+	}
+	prePush := mapValueForTest(t, config, "pre-push")
+	prePushCommands := mapValueForTest(t, prePush, "commands")
+	if _, ok := prePushCommands["existing-check"]; !ok {
+		t.Fatalf("existing pre-push command should be preserved, got %#v", prePushCommands)
+	}
+	preCommit := mapValueForTest(t, config, "pre-commit")
+	preCommitCommands := mapValueForTest(t, preCommit, "commands")
+	if _, ok := preCommitCommands["lint"]; !ok {
+		t.Fatalf("existing pre-commit command should be preserved, got %#v", preCommitCommands)
+	}
+}
+
+func TestLefthookSafetyNetCommandSkipsWhenEntireWrapperPresent(t *testing.T) {
+	tmpDir, hooksDir := initHooksTestRepo(t)
+	binDir := t.TempDir()
+	markerFile := filepath.Join(tmpDir, "entire-called")
+
+	if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte("#!/bin/sh\n# Entire CLI hooks\n"), 0o755); err != nil {
+		t.Fatalf("failed to write pre-push hook: %v", err)
+	}
+	writeFakeEntire(t, binDir, markerFile)
+
+	command := strings.ReplaceAll(lefthookSafetyNetCommand("entire"), "{1}", "origin")
+	runSafetyNetCommand(t, tmpDir, binDir, command)
+
+	if _, err := os.Stat(markerFile); !os.IsNotExist(err) {
+		t.Fatalf("safety-net command should not call entire when wrapper is present")
+	}
+}
+
+func TestLefthookSafetyNetCommandRunsWhenEntireWrapperMissing(t *testing.T) {
+	tmpDir, hooksDir := initHooksTestRepo(t)
+	binDir := t.TempDir()
+	markerFile := filepath.Join(tmpDir, "entire-called")
+
+	if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte("#!/bin/sh\n# Lefthook\n"), 0o755); err != nil {
+		t.Fatalf("failed to write pre-push hook: %v", err)
+	}
+	writeFakeEntire(t, binDir, markerFile)
+
+	command := strings.ReplaceAll(lefthookSafetyNetCommand("entire"), "{1}", "origin")
+	runSafetyNetCommand(t, tmpDir, binDir, command)
+
+	data, err := os.ReadFile(markerFile)
+	if err != nil {
+		t.Fatalf("safety-net command should call entire when wrapper is missing: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "hooks git pre-push origin" {
+		t.Fatalf("fake entire args = %q, want hooks git pre-push origin", got)
+	}
+}
+
+func TestRemoveGitHook_RemovesOnlyLefthookSafetyNetCommand(t *testing.T) {
+	tmpDir, _ := initHooksTestRepo(t)
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "lefthook.yml"), []byte("pre-push:\n  commands: {}\n"), 0o644); err != nil {
+		t.Fatalf("failed to create lefthook.yml: %v", err)
+	}
+	localPath := filepath.Join(tmpDir, "lefthook-local.yml")
+	existing := []byte(`pre-push:
+  commands:
+    existing-check:
+      run: echo existing
+`)
+	if err := os.WriteFile(localPath, existing, 0o644); err != nil {
+		t.Fatalf("failed to create lefthook-local.yml: %v", err)
+	}
+
+	_, err := InstallGitHook(context.Background(), true, false, false)
+	if err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+	_, err = RemoveGitHook(context.Background())
+	if err != nil {
+		t.Fatalf("RemoveGitHook() error = %v", err)
+	}
+
+	config := readLefthookConfigForTest(t, localPath)
+	if lefthookConfigHasEntireCommand(config) {
+		t.Fatalf("RemoveGitHook should remove %s, got %#v", lefthookEntireCommandName, config)
+	}
+	prePush := mapValueForTest(t, config, "pre-push")
+	prePushCommands := mapValueForTest(t, prePush, "commands")
+	if _, ok := prePushCommands["existing-check"]; !ok {
+		t.Fatalf("existing Lefthook command should be preserved, got %#v", prePushCommands)
+	}
+}
+
 func TestRemoveGitHook_RestoresBackup(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
@@ -1460,6 +1614,57 @@ func TestRemoveGitHook_RestoresBackup(t *testing.T) {
 	backupPath := hookPath + backupSuffix
 	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
 		t.Error("backup should be removed after restore")
+	}
+}
+
+func readLefthookConfigForTest(t *testing.T, path string) map[string]any {
+	t.Helper()
+	config, err := readLefthookLocalConfig(path)
+	if err != nil {
+		t.Fatalf("failed to read Lefthook config %s: %v", path, err)
+	}
+	return config
+}
+
+func lefthookConfigHasEntireCommand(config map[string]any) bool {
+	prePush, ok := config["pre-push"].(map[string]any)
+	if !ok {
+		return false
+	}
+	commands, ok := prePush["commands"].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, ok = commands[lefthookEntireCommandName]
+	return ok
+}
+
+func mapValueForTest(t *testing.T, parent map[string]any, key string) map[string]any {
+	t.Helper()
+	child, ok := parent[key].(map[string]any)
+	if !ok {
+		t.Fatalf("expected %q to be a map, got %#v", key, parent[key])
+	}
+	return child
+}
+
+func writeFakeEntire(t *testing.T, binDir, markerFile string) {
+	t.Helper()
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + shellQuote(markerFile) + "\n"
+	if err := os.WriteFile(filepath.Join(binDir, "entire"), []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write fake entire: %v", err)
+	}
+}
+
+func runSafetyNetCommand(t *testing.T, repoDir, binDir, command string) {
+	t.Helper()
+	shPath := requireShell(t)
+	cmd := exec.CommandContext(context.Background(), shPath, "-c", command)
+	cmd.Dir = repoDir
+	cmd.Env = envWithPath(binDir + string(os.PathListSeparator) + os.Getenv("PATH"))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("safety-net command failed: %v\n%s\ncommand:\n%s", err, output, command)
 	}
 }
 
