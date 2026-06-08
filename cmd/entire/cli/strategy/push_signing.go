@@ -159,15 +159,6 @@ func signLocalCommitsForPush(ctx context.Context, target string, ref plumbing.Re
 	}
 
 	remoteHash := lookupRemoteTipForSigning(ctx, repo, target, ref)
-	// When there is no remote tip (first push), fall back to HEAD so that only
-	// commits on the checkpoint branch itself are signed. Without this guard the
-	// traversal walks back through the user's working-branch history and
-	// cherry-picks a synthetic signed copy of every ancestor.
-	if remoteHash == plumbing.ZeroHash {
-		if head, headErr := repo.Head(); headErr == nil {
-			remoteHash = head.Hash()
-		}
-	}
 
 	repoPath, err := getRepoPath(repo)
 	if err != nil {

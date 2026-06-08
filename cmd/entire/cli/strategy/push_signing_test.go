@@ -223,24 +223,30 @@ func TestSignAndPersistCommits_RetrySucceedsOnSecondAttempt(t *testing.T) {
 	walkAndAssertAllSigned(t, repo, tip, base)
 }
 
-// setupChainOfUnsignedCommits commits a base file, then creates n unsigned
-// checkpoint commits on top using checkpoint.CreateCommit and points the
-// local entire/checkpoints/v1 ref at the chain tip. Returns the repo and
-// the base (pre-chain) hash that callers should pass as the cherry-pick
-// base.
+// setupChainOfUnsignedCommits commits a base file to give the repo a valid
+// HEAD, then creates n unsigned checkpoint commits as an orphan-rooted chain
+// (matching production: entire/checkpoints/v1 is initialized as an orphan via
+// strategy/common.go orphan-init). Points the local entire/checkpoints/v1 ref
+// at the chain tip. Returns the repo and ZeroHash as the base, because the
+// checkpoint chain does NOT descend from HEAD.
 func setupChainOfUnsignedCommits(t *testing.T, dir string, n int) (*git.Repository, plumbing.Hash) {
 	t.Helper()
+
+	// Production rationale: entire/checkpoints/v1 is initialized as an orphan
+	// (see strategy/common.go orphan-init and checkpoint/temporary.go
+	// getOrCreateShadowBranch). The test must mirror that so first-push code
+	// paths exercise the real chain shape.
+	//
+	// We still need an initial user commit so the repo has a valid HEAD for
+	// OpenRepository, but the checkpoint chain does NOT descend from it.
 	testutil.WriteFile(t, dir, "base.txt", "base")
 	testutil.GitAdd(t, dir, "base.txt")
 	testutil.GitCommit(t, dir, "base")
 
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
-	head, err := repo.Head()
-	require.NoError(t, err)
-	base := head.Hash()
 
-	parent := base
+	parent := plumbing.ZeroHash
 	for i := range n {
 		treeHash := makeUniqueTree(t, repo, i)
 		hash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, parent, fmt.Sprintf("entire-checkpoint: step %d", i+1), "u", "u@e")
@@ -252,7 +258,9 @@ func setupChainOfUnsignedCommits(t *testing.T, dir string, n int) (*git.Reposito
 	refs := checkpoint.DefaultV1Refs()
 	require.NoError(t, AdvanceLocalRef(context.Background(), repo, refs, refs.Primary, tip))
 
-	return repo, base
+	// base is ZeroHash because the chain is orphan-rooted — there is no
+	// anchor commit to exclude when walking.
+	return repo, plumbing.ZeroHash
 }
 
 func listLocalCommits(t *testing.T, repo *git.Repository, base plumbing.Hash) []*object.Commit {
@@ -344,8 +352,7 @@ func TestPrePush_SignsCommitsAboveRemoteTipAndAdvancesLocal(t *testing.T) { //no
 	refs := checkpoint.DefaultV1Refs()
 	tip, err := repo.Reference(refs.Primary, true)
 	require.NoError(t, err)
-	// Only the checkpoint commits above base should be signed; base itself is a
-	// regular working-branch commit and is not part of the checkpoint chain.
+	// All checkpoint commits in the orphan-rooted chain must be signed.
 	walkAndAssertAllSigned(t, repo, tip.Hash(), base)
 
 	bare, err := git.PlainOpen(bareRemote)
@@ -353,6 +360,20 @@ func TestPrePush_SignsCommitsAboveRemoteTipAndAdvancesLocal(t *testing.T) { //no
 	remoteTip, err := bare.Reference(refs.Primary, true)
 	require.NoError(t, err)
 	assert.Equal(t, tip.Hash(), remoteTip.Hash(), "remote should mirror local signed tip")
+
+	// Walk to root and confirm the chain is orphan-rooted (matches production).
+	rootHash := tip.Hash()
+	for {
+		c, err := repo.CommitObject(rootHash)
+		require.NoError(t, err)
+		if len(c.ParentHashes) == 0 {
+			break
+		}
+		rootHash = c.ParentHashes[0]
+	}
+	root, err := repo.CommitObject(rootHash)
+	require.NoError(t, err)
+	assert.Empty(t, root.ParentHashes, "signed chain root must be orphan-rooted")
 }
 
 func TestPrePush_IdempotentReRunDoesNothing(t *testing.T) { //nolint:paralleltest // t.Chdir + signCommitForPush global
@@ -400,7 +421,7 @@ func TestPrePush_SigningDisabled_PushesUnsigned(t *testing.T) { //nolint:paralle
 	tip, err := repo.Reference(refs.Primary, true)
 	require.NoError(t, err)
 
-	// Count only the checkpoint commits above base; base is a regular commit.
+	// All checkpoint commits in the orphan-rooted chain should be unsigned.
 	signed, unsigned := countSignedAndUnsigned(t, repo, tip.Hash(), base)
 	assert.Equal(t, 0, signed)
 	assert.Equal(t, 2, unsigned)
@@ -437,7 +458,7 @@ func TestPrePush_SigningFailureSkipNonTTY_KeepsChainConnected(t *testing.T) { //
 	refs := checkpoint.DefaultV1Refs()
 	tip, err := repo.Reference(refs.Primary, true)
 	require.NoError(t, err)
-	// Count only checkpoint commits above base; base is a regular working commit.
+	// Count across all checkpoint commits in the orphan-rooted chain.
 	signed, unsigned := countSignedAndUnsigned(t, repo, tip.Hash(), base)
 	assert.Equal(t, 2, signed)
 	assert.Equal(t, 1, unsigned)
