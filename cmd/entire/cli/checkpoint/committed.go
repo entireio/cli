@@ -1959,7 +1959,7 @@ func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
 
 // CreateCommit creates a git commit object with the given tree, parent, message, and author.
 // If parentHash is ZeroHash, the commit is created without a parent (orphan commit).
-func CreateCommit(ctx context.Context, repo *git.Repository, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) {
+func CreateCommit(_ context.Context, repo *git.Repository, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) {
 	now := time.Now()
 	sig := object.Signature{
 		Name:  authorName,
@@ -1977,8 +1977,6 @@ func CreateCommit(ctx context.Context, repo *git.Repository, treeHash, parentHas
 	if parentHash != plumbing.ZeroHash {
 		commit.ParentHashes = []plumbing.Hash{parentHash}
 	}
-
-	SignCommitBestEffort(ctx, commit)
 
 	obj := repo.Storer.NewEncodedObject()
 	if err := commit.Encode(obj); err != nil {

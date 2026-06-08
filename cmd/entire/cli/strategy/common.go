@@ -539,14 +539,6 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 	}
 	// Note: No ParentHashes - this is an orphan commit
 
-	// Sign the orphan commit when signing is enabled, matching the path used
-	// for every other metadata commit (see metadata_reconcile.go and
-	// push_common.go). Without this, repos that enforce a "verified
-	// signatures" ruleset on entire/* refs reject the very first push of
-	// the metadata ref with GH013, even though every later commit on it
-	// is correctly signed.
-	checkpoint.SignCommitBestEffort(ctx, commit)
-
 	commitObj := repo.Storer.NewEncodedObject()
 	if err := commit.Encode(commitObj); err != nil {
 		return fmt.Errorf("failed to encode orphan commit: %w", err)
