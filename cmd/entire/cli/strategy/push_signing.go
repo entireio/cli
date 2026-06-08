@@ -43,18 +43,59 @@ var promptOnSigningFailure = defaultPromptOnSigningFailure
 // failure it consults promptOnSigningFailure and either retries, includes
 // the commit unsigned, or aborts (returning errSigningAborted).
 //
+// Tree construction uses a diff-based approach: each commit's delta (relative
+// to its own parent) is applied to the current chain tip's tree. This is
+// equivalent to what cherryPickOnto does, but with strict signing added.
+// Using per-commit deltas rather than the original TreeHash ensures that
+// cross-clone cherry-picks accumulate trees correctly — each replica's commits
+// only carry their own checkpoint files, so a simple tree-replace would
+// overwrite the other clone's data.
+//
 // Returns the hash of the new chain tip on success. Returns base unchanged
 // when signing is disabled in settings (caller is expected to push the
 // chain as-is in that case).
-func signAndPersistCommits(ctx context.Context, repo *git.Repository, base plumbing.Hash, commits []*object.Commit, stderr io.Writer) (plumbing.Hash, error) {
+func signAndPersistCommits(ctx context.Context, repo *git.Repository, repoPath string, base plumbing.Hash, commits []*object.Commit, stderr io.Writer) (plumbing.Hash, error) {
 	if checkpoint.ShouldSkipPushSigning(ctx) {
 		return base, nil
+	}
+
+	shallow, err := loadShallowHashes(ctx, repoPath)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("load shallow hashes: %w", err)
 	}
 
 	total := len(commits)
 	currentTip := base
 	for i, original := range commits {
-		built, err := buildCherryPickCommit(ctx, repo, original.TreeHash, currentTip, original)
+		changes, err := treeChangesForCherryPick(ctx, repo, original, shallow)
+		if err != nil {
+			return plumbing.ZeroHash, fmt.Errorf("tree changes for %s: %w", original.Hash.String()[:7], err)
+		}
+
+		var treeHash plumbing.Hash
+		switch {
+		case len(changes) == 0:
+			// No changes relative to parent (e.g. empty-tree orphan init). Use
+			// the original tree directly; ApplyTreeChanges with no changes would
+			// return the base tree, which is wrong for root commits.
+			treeHash = original.TreeHash
+		case currentTip == plumbing.ZeroHash:
+			treeHash, err = checkpoint.ApplyTreeChanges(ctx, repo, plumbing.ZeroHash, changes)
+			if err != nil {
+				return plumbing.ZeroHash, fmt.Errorf("apply tree changes for %s: %w", original.Hash.String()[:7], err)
+			}
+		default:
+			tipCommit, tipErr := repo.CommitObject(currentTip)
+			if tipErr != nil {
+				return plumbing.ZeroHash, fmt.Errorf("get tip commit %s: %w", currentTip.String()[:7], tipErr)
+			}
+			treeHash, err = checkpoint.ApplyTreeChanges(ctx, repo, tipCommit.TreeHash, changes)
+			if err != nil {
+				return plumbing.ZeroHash, fmt.Errorf("apply tree changes for %s: %w", original.Hash.String()[:7], err)
+			}
+		}
+
+		built, err := buildCherryPickCommit(ctx, repo, treeHash, currentTip, original)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("build cherry-pick: %w", err)
 		}
@@ -173,7 +214,35 @@ func signLocalCommitsForPush(ctx context.Context, target string, ref plumbing.Re
 		return nil
 	}
 
-	newTip, err := signAndPersistCommits(ctx, repo, remoteHash, commits, stderr)
+	// In cross-clone scenarios the remote already has its own orphan-init
+	// commit. Each clone also has its own local orphan-init commit (different
+	// hash). When we cherry-pick B's local chain onto the remote tip we must
+	// skip B's orphan-init, otherwise the remote accumulates duplicate
+	// empty-tree commits. Only apply this filter when the remote already has
+	// commits (remoteHash != ZeroHash); on first-ever push the local orphan
+	// is the intended root and must be included.
+	//
+	// This mirrors the filter that metadata_reconcile.go applies in its
+	// disconnected path.
+	signingCommits := commits
+	if remoteHash != plumbing.ZeroHash {
+		dataCommits := commits[:0]
+		for _, c := range commits {
+			tree, treeErr := c.Tree()
+			if treeErr != nil {
+				return fmt.Errorf("read tree for commit %s: %w", c.Hash.String()[:7], treeErr)
+			}
+			if len(tree.Entries) > 0 {
+				dataCommits = append(dataCommits, c)
+			}
+		}
+		if len(dataCommits) == 0 {
+			return nil
+		}
+		signingCommits = dataCommits
+	}
+
+	newTip, err := signAndPersistCommits(ctx, repo, repoPath, remoteHash, signingCommits, stderr)
 	if err != nil {
 		return err
 	}

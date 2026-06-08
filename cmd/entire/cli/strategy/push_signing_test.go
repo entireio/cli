@@ -123,7 +123,7 @@ func TestSignAndPersistCommits_AllSucceed(t *testing.T) {
 
 	var stderr bytes.Buffer
 	commits := listLocalCommits(t, repo, base)
-	tip, err := signAndPersistCommits(context.Background(), repo, base, commits, &stderr)
+	tip, err := signAndPersistCommits(context.Background(), repo, dir, base, commits, &stderr)
 	require.NoError(t, err)
 
 	assert.NotEqual(t, plumbing.ZeroHash, tip)
@@ -160,7 +160,7 @@ func TestSignAndPersistCommits_SkipKeepsChainConnectedWithUnsignedMiddle(t *test
 
 	var stderr bytes.Buffer
 	commits := listLocalCommits(t, repo, base)
-	tip, err := signAndPersistCommits(context.Background(), repo, base, commits, &stderr)
+	tip, err := signAndPersistCommits(context.Background(), repo, dir, base, commits, &stderr)
 	require.NoError(t, err)
 
 	signedCount, unsignedCount := countSignedAndUnsigned(t, repo, tip, base)
@@ -187,7 +187,7 @@ func TestSignAndPersistCommits_AbortReturnsErrorWithoutAdvancing(t *testing.T) {
 
 	var stderr bytes.Buffer
 	commits := listLocalCommits(t, repo, base)
-	_, err := signAndPersistCommits(context.Background(), repo, base, commits, &stderr)
+	_, err := signAndPersistCommits(context.Background(), repo, dir, base, commits, &stderr)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errSigningAborted)
 }
@@ -217,7 +217,7 @@ func TestSignAndPersistCommits_RetrySucceedsOnSecondAttempt(t *testing.T) {
 
 	var stderr bytes.Buffer
 	commits := listLocalCommits(t, repo, base)
-	tip, err := signAndPersistCommits(context.Background(), repo, base, commits, &stderr)
+	tip, err := signAndPersistCommits(context.Background(), repo, dir, base, commits, &stderr)
 	require.NoError(t, err)
 	assert.Equal(t, 2, attempt)
 	walkAndAssertAllSigned(t, repo, tip, base)
