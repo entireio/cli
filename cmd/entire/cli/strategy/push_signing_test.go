@@ -76,33 +76,27 @@ func TestPersistCherryPickCommit_StoresAndReturnsHash(t *testing.T) {
 	assert.Equal(t, headCommit.TreeHash, stored.TreeHash)
 }
 
-// Tests for signingProgressMessage formatting.
-func TestSigningProgressMessage_FormatsSubjectAndCount(t *testing.T) {
+// Tests for truncatedSubject formatting.
+func TestTruncatedSubject_ShortPassthrough(t *testing.T) {
 	t.Parallel()
 
-	got := signingProgressMessage(3, 12, "entire-checkpoint: step 4 post-tool")
-	assert.Equal(t, "Signing commit 3/12: entire-checkpoint: step 4 post-tool", got)
+	assert.Equal(t, "entire-checkpoint: step 4 post-tool", truncatedSubject("entire-checkpoint: step 4 post-tool"))
 }
 
-func TestSigningProgressMessage_TruncatesLongSubject(t *testing.T) {
+func TestTruncatedSubject_TruncatesLong(t *testing.T) {
 	t.Parallel()
 
 	long := strings.Repeat("a", 200)
-	got := signingProgressMessage(1, 1, long)
-	// Subject is truncated to 80 visible chars (79 'a's + "…"). "…" is 3 bytes.
-	// Prefix is "Signing commit 1/1: " (20 chars). So byte length = 20 + 79 + 3 = 102.
+	got := truncatedSubject(long)
+	// 80 visible characters: 79 'a's + "…".
 	assert.True(t, strings.HasSuffix(got, "…"))
-	assert.True(t, strings.HasPrefix(got, "Signing commit 1/1: "))
-	// Subject portion (after prefix) should be 79 'a's + "…"
-	subjectPortion := strings.TrimPrefix(got, "Signing commit 1/1: ")
-	assert.Equal(t, 79, strings.Count(subjectPortion, "a"))
+	assert.Equal(t, 79, strings.Count(got, "a"))
 }
 
-func TestSigningProgressMessage_StripsBodyOfMessage(t *testing.T) {
+func TestTruncatedSubject_StripsBody(t *testing.T) {
 	t.Parallel()
 
-	got := signingProgressMessage(1, 1, "subject line\n\nlong body line 1\nlong body line 2\n")
-	assert.Equal(t, "Signing commit 1/1: subject line", got)
+	assert.Equal(t, "subject line", truncatedSubject("subject line\n\nlong body line 1\nlong body line 2\n"))
 }
 
 const testFakeSig = "fake-sig"
@@ -128,9 +122,10 @@ func TestSignAndPersistCommits_AllSucceed(t *testing.T) {
 
 	assert.NotEqual(t, plumbing.ZeroHash, tip)
 	out := stderr.String()
-	assert.Contains(t, out, "Signing commit 1/3:")
-	assert.Contains(t, out, "Signing commit 2/3:")
-	assert.Contains(t, out, "Signing commit 3/3:")
+	assert.Contains(t, out, "[entire] Signing commits:")
+	assert.Contains(t, out, "        1/3:")
+	assert.Contains(t, out, "        2/3:")
+	assert.Contains(t, out, "        3/3:")
 
 	walkAndAssertAllSigned(t, repo, tip, base)
 }
@@ -554,40 +549,56 @@ func extendChainOfUnsignedCommits(t *testing.T, dir string, n int) {
 	require.NoError(t, AdvanceLocalRef(context.Background(), repo, refs, refs.Primary, parent))
 }
 
-func TestSigningProgress_NonTTYPrintsEveryLine(t *testing.T) {
+func TestSigningProgress_NonTTYPrintsHeaderAndEveryLine(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	p := newSigningProgress(&buf, 3)
-	p.Push("a")
-	p.Push("b")
-	p.Push("c")
-	p.Push("d")
-	p.Push("e")
+	p := newSigningProgress(&buf, 5)
+	p.Update(1, "first")
+	p.Update(2, "second")
+	p.Update(3, "third")
 
-	assert.Equal(t, "a\nb\nc\nd\ne\n", buf.String())
+	out := buf.String()
+	assert.Equal(t, 1, strings.Count(out, "[entire] Signing commits:"), "header printed exactly once")
+	assert.Contains(t, out, "        1/5: first")
+	assert.Contains(t, out, "        2/5: second")
+	assert.Contains(t, out, "        3/5: third")
 }
 
-func TestSigningProgress_TTYRollsLastN(t *testing.T) {
+func TestSigningProgress_TTYRewritesStatusInPlace(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
 	// Bypass the TTY detection by direct construction.
-	p := &signingProgress{out: &buf, capacity: 3, isTTY: true}
+	p := &signingProgress{out: &buf, total: 3, isTTY: true}
 
-	p.Push("a")
-	p.Push("b")
-	p.Push("c")
-	p.Push("d")
-	p.Push("e")
+	p.Update(1, "alpha")
+	p.Update(2, "beta")
+	p.Update(3, "gamma")
 
 	out := buf.String()
-	// ANSI cursor-up should appear after the first draw.
-	assert.Contains(t, out, "\033[")
-	// Final buffer state should include the most recent three lines, c d e.
-	assert.Contains(t, out, "c")
-	assert.Contains(t, out, "d")
-	assert.Contains(t, out, "e")
+	assert.Equal(t, 1, strings.Count(out, "[entire] Signing commits:"), "header printed exactly once")
+	// First update has no cursor-up; subsequent ones do.
+	assert.Equal(t, 2, strings.Count(out, "\033[1A"), "cursor-up emitted once per re-render")
+	assert.Equal(t, 3, strings.Count(out, "\033[2K"), "clear-line emitted on every status write")
+	assert.Contains(t, out, "        3/3: gamma")
+}
+
+func TestSigningProgress_DetachResumesBelowPrompt(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	p := &signingProgress{out: &buf, total: 2, isTTY: true}
+
+	p.Update(1, "first")
+	p.Detach()
+	p.Update(2, "second")
+
+	out := buf.String()
+	// After Detach, the second Update should NOT emit cursor-up (Detach resets
+	// statusDrawn to false), so the line lands fresh below whatever the prompt
+	// printed in between.
+	assert.Equal(t, 0, strings.Count(out, "\033[1A"))
 }
 
 // writeDisabledSigningSettings writes a settings file disabling signing into dir/.entire/settings.json.

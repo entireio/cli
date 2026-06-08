@@ -27,53 +27,57 @@ const (
 	signingActionAbort
 )
 
-// signingProgress renders a rolling N-line progress display on a TTY,
-// in-place, using ANSI cursor-up + clear-line escapes. On a non-TTY the
-// renderer falls back to printing each line as it arrives.
+// signingProgress renders a two-line push-signing display:
+//
+//	[entire] Signing commits:
+//	        3/10: <subject>
+//
+// The header prints once on the first Update; the status line below it is
+// rewritten in place on each subsequent Update. On a non-TTY the status line
+// is appended fresh for each commit instead of being overwritten, so CI logs
+// retain a record of every signed commit.
 type signingProgress struct {
-	out      io.Writer
-	capacity int
-	isTTY    bool
-	lines    []string
-	drawn    int
+	out         io.Writer
+	isTTY       bool
+	total       int
+	headerDrawn bool
+	statusDrawn bool
 }
 
-func newSigningProgress(out io.Writer, capacity int) *signingProgress {
+func newSigningProgress(out io.Writer, total int) *signingProgress {
 	return &signingProgress{
-		out:      out,
-		capacity: capacity,
-		isTTY:    interactive.IsTerminalWriter(out),
+		out:   out,
+		isTTY: interactive.IsTerminalWriter(out),
+		total: total,
 	}
 }
 
-// Push appends line to the visible buffer. On a TTY, the previous N lines
-// (if any) are erased and the buffer redrawn in place; on a non-TTY, line
-// is appended to out without any cursor manipulation.
-func (p *signingProgress) Push(line string) {
-	p.lines = append(p.lines, line)
-	if len(p.lines) > p.capacity {
-		p.lines = p.lines[len(p.lines)-p.capacity:]
+// Update writes the progress line for commit i (1-indexed) with the given
+// subject. The first call also prints the static "[entire] Signing commits:"
+// header.
+func (p *signingProgress) Update(i int, subject string) {
+	if !p.headerDrawn {
+		fmt.Fprintln(p.out, "[entire] Signing commits:")
+		p.headerDrawn = true
 	}
+	line := fmt.Sprintf("        %d/%d: %s", i, p.total, truncatedSubject(subject))
 	if !p.isTTY {
 		fmt.Fprintln(p.out, line)
 		return
 	}
-	if p.drawn > 0 {
-		// Move cursor up `drawn` lines so we can rewrite them in place.
-		fmt.Fprintf(p.out, "\033[%dA", p.drawn)
+	if p.statusDrawn {
+		// Move cursor up one line so we can rewrite the status line in place.
+		fmt.Fprint(p.out, "\033[1A")
 	}
-	for _, l := range p.lines {
-		// Clear the entire line then print the buffered content.
-		fmt.Fprintf(p.out, "\033[2K%s\n", l)
-	}
-	p.drawn = len(p.lines)
+	fmt.Fprintf(p.out, "\033[2K%s\n", line)
+	p.statusDrawn = true
 }
 
-// Detach forgets that we've drawn anything, so the next Push prints below
-// whatever currently sits on screen (e.g. after a prompt that wrote lines
-// outside our control). The currently-visible buffered lines stay in place.
+// Detach forgets that we've drawn a status line so the next Update prints
+// below whatever currently sits on screen (used before showing a prompt that
+// writes output we shouldn't overwrite). The header tracking is preserved.
 func (p *signingProgress) Detach() {
-	p.drawn = 0
+	p.statusDrawn = false
 }
 
 var errSigningAborted = errors.New("checkpoint signing aborted by user")
@@ -113,10 +117,9 @@ func signAndPersistCommits(ctx context.Context, repo *git.Repository, repoPath s
 		return plumbing.ZeroHash, fmt.Errorf("load shallow hashes: %w", err)
 	}
 
-	const progressBufferLines = 3
-	progress := newSigningProgress(stderr, progressBufferLines)
-
 	total := len(commits)
+	progress := newSigningProgress(stderr, total)
+
 	currentTip := base
 	for i, original := range commits {
 		changes, err := treeChangesForCherryPick(ctx, repo, original, shallow)
@@ -153,12 +156,12 @@ func signAndPersistCommits(ctx context.Context, repo *git.Repository, repoPath s
 		}
 
 		subject := commitSubject(original.Message)
-		progress.Push(signingProgressMessage(i+1, total, subject))
+		progress.Update(i+1, subject)
 
 		signErr := signCommitForPush(ctx, built)
 		for signErr != nil && !errors.Is(signErr, checkpoint.ErrSigningDisabled) {
 			// Detach so the prompt's output lines are not overwritten by the
-			// next Push.
+			// next Update.
 			progress.Detach()
 			action := promptOnSigningFailure(ctx, subject, signErr, stderr)
 			switch action {
@@ -186,13 +189,15 @@ func signAndPersistCommits(ctx context.Context, repo *git.Repository, repoPath s
 	return currentTip, nil
 }
 
-func signingProgressMessage(i, total int, subject string) string {
+// truncatedSubject returns the first line of subject, rune-truncated to 80
+// visible characters with an ellipsis suffix when shortened.
+func truncatedSubject(subject string) string {
 	subject = strings.SplitN(subject, "\n", 2)[0]
 	const maxLen = 80
 	if len([]rune(subject)) > maxLen {
 		subject = string([]rune(subject)[:maxLen-1]) + "…"
 	}
-	return fmt.Sprintf("Signing commit %d/%d: %s", i, total, subject)
+	return subject
 }
 
 func commitSubject(message string) string {
@@ -248,7 +253,7 @@ func signLocalCommitsForPush(ctx context.Context, target string, ref plumbing.Re
 		return nil
 	}
 
-	remoteHash, cleanup := resolveRemoteTipForSigning(ctx, repo, target, ref)
+	remoteHash, cleanup := resolveRemoteTipForSigning(ctx, repo, target, ref, stderr)
 	defer cleanup()
 
 	repoPath, err := getRepoPath(repo)
@@ -311,7 +316,7 @@ func signLocalCommitsForPush(ctx context.Context, target string, ref plumbing.Re
 // yet, network failure, non-branch ref). Best-effort: failures only mean the
 // caller will treat the local chain as entirely new, which is the same
 // pre-fix behaviour for URL targets.
-func resolveRemoteTipForSigning(ctx context.Context, repo *git.Repository, target string, ref plumbing.ReferenceName) (plumbing.Hash, func()) {
+func resolveRemoteTipForSigning(ctx context.Context, repo *git.Repository, target string, ref plumbing.ReferenceName, stderr io.Writer) (plumbing.Hash, func()) {
 	cleanup := func() {}
 	if !ref.IsBranch() {
 		return plumbing.ZeroHash, cleanup
@@ -339,6 +344,8 @@ func resolveRemoteTipForSigning(ctx context.Context, repo *git.Repository, targe
 		refSpec = fmt.Sprintf("+%s:refs/remotes/%s/%s", ref.String(), target, ref.Short())
 		fetchedRefName = plumbing.NewRemoteReferenceName(target, ref.Short())
 	}
+
+	fmt.Fprintln(stderr, "[entire] Fetching latest from remote...")
 
 	if _, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
 		Remote:   fetchTarget,
