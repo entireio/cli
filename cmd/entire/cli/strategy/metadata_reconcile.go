@@ -417,9 +417,16 @@ func buildCherryPickCommit(_ context.Context, repo *git.Repository, treeHash, pa
 	committerName, committerEmail := GetGitAuthorFromRepo(repo)
 	now := time.Now()
 
+	// When parent is ZeroHash the new chain has no base commit to attach to;
+	// encode it as a root commit (empty ParentHashes) so git CLI can traverse it.
+	var parentHashes []plumbing.Hash
+	if parent != plumbing.ZeroHash {
+		parentHashes = []plumbing.Hash{parent}
+	}
+
 	return &object.Commit{
 		TreeHash:     treeHash,
-		ParentHashes: []plumbing.Hash{parent},
+		ParentHashes: parentHashes,
 		Author:       original.Author,
 		Committer: object.Signature{
 			Name:  committerName,

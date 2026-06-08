@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"log/slog"
+	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -40,6 +41,10 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 	pushCtx, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoint_refs")
 	defer pushCheckpointsSpan.End()
 	for _, ref := range refs.Push {
+		if err := signLocalCommitsForPush(pushCtx, ps.pushTarget(), ref, os.Stderr); err != nil {
+			pushCheckpointsSpan.RecordError(err)
+			return err
+		}
 		if err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref); err != nil {
 			pushCheckpointsSpan.RecordError(err)
 			return err

@@ -508,7 +508,13 @@ func collectCommitsSince(ctx context.Context, repo *git.Repository, repoPath str
 	// cherryPickOnto computes each commit's delta against its first parent, so
 	// replaying merge commits would incorrectly re-apply changes that arrived via
 	// non-first-parent history. Limit the replay set to non-merge commits.
-	cmd := exec.CommandContext(ctx, "git", "rev-list", "--reverse", "--topo-order", "--no-merges", exclude.String()+".."+tip.String())
+	var revRange string
+	if exclude == plumbing.ZeroHash {
+		revRange = tip.String()
+	} else {
+		revRange = exclude.String() + ".." + tip.String()
+	}
+	cmd := exec.CommandContext(ctx, "git", "rev-list", "--reverse", "--topo-order", "--no-merges", revRange)
 	cmd.Dir = repoPath
 	output, err := cmd.Output()
 	if err != nil {

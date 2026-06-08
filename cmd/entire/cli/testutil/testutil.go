@@ -294,3 +294,26 @@ func IsolateGitConfigEnv(t *testing.T) {
 func isGitConfigEnv(e string) bool {
 	return strings.HasPrefix(e, "GIT_CONFIG_")
 }
+
+// InitBareRepo runs git init --bare in dir, suitable as a push target.
+func InitBareRepo(t *testing.T, dir string) {
+	t.Helper()
+	cmd := exec.Command("git", "init", "--bare", dir) //nolint:noctx // test helper, no context needed
+	cmd.Env = GitIsolatedEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git init --bare failed: %v\n%s", err, out)
+	}
+}
+
+// AddRemote runs git remote add <name> <url> inside dir.
+func AddRemote(t *testing.T, dir, name, url string) {
+	t.Helper()
+	cmd := exec.Command("git", "remote", "add", name, url) //nolint:noctx // test helper, no context needed
+	cmd.Dir = dir
+	cmd.Env = GitIsolatedEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git remote add failed: %v\n%s", err, out)
+	}
+}

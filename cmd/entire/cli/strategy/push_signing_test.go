@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -316,4 +318,170 @@ func makeUniqueTree(t *testing.T, repo *git.Repository, salt int) plumbing.Hash 
 	hash, err := repo.Storer.SetEncodedObject(obj)
 	require.NoError(t, err)
 	return hash
+}
+
+func TestPrePush_SignsCommitsAboveRemoteTipAndAdvancesLocal(t *testing.T) { //nolint:paralleltest // t.Chdir + signCommitForPush global
+	dir := t.TempDir()
+	bareRemote := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.InitBareRepo(t, bareRemote)
+	testutil.AddRemote(t, dir, "origin", bareRemote)
+	_, base := setupChainOfUnsignedCommits(t, dir, 4)
+
+	prev := signCommitForPush
+	signCommitForPush = func(_ context.Context, c *object.Commit) error {
+		c.Signature = testFakeSig
+		return nil
+	}
+	t.Cleanup(func() { signCommitForPush = prev })
+
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.PrePush(context.Background(), "origin"))
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	refs := checkpoint.DefaultV1Refs()
+	tip, err := repo.Reference(refs.Primary, true)
+	require.NoError(t, err)
+	// Only the checkpoint commits above base should be signed; base itself is a
+	// regular working-branch commit and is not part of the checkpoint chain.
+	walkAndAssertAllSigned(t, repo, tip.Hash(), base)
+
+	bare, err := git.PlainOpen(bareRemote)
+	require.NoError(t, err)
+	remoteTip, err := bare.Reference(refs.Primary, true)
+	require.NoError(t, err)
+	assert.Equal(t, tip.Hash(), remoteTip.Hash(), "remote should mirror local signed tip")
+}
+
+func TestPrePush_IdempotentReRunDoesNothing(t *testing.T) { //nolint:paralleltest // t.Chdir + signCommitForPush global
+	dir := t.TempDir()
+	bareRemote := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.InitBareRepo(t, bareRemote)
+	testutil.AddRemote(t, dir, "origin", bareRemote)
+	_, _ = setupChainOfUnsignedCommits(t, dir, 2)
+
+	signCalls := 0
+	prev := signCommitForPush
+	signCommitForPush = func(_ context.Context, c *object.Commit) error {
+		signCalls++
+		c.Signature = testFakeSig
+		return nil
+	}
+	t.Cleanup(func() { signCommitForPush = prev })
+
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.PrePush(context.Background(), "origin"))
+	require.NoError(t, s.PrePush(context.Background(), "origin"))
+
+	assert.Equal(t, 2, signCalls, "second push should sign nothing")
+}
+
+func TestPrePush_SigningDisabled_PushesUnsigned(t *testing.T) { //nolint:paralleltest // t.Chdir + setupSigningEnv global
+	dir := t.TempDir()
+	bareRemote := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.InitBareRepo(t, bareRemote)
+	testutil.AddRemote(t, dir, "origin", bareRemote)
+	_, base := setupChainOfUnsignedCommits(t, dir, 2)
+
+	// Write a settings file that disables signing, then chdir.
+	writeDisabledSigningSettings(t, dir)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.PrePush(context.Background(), "origin"))
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	refs := checkpoint.DefaultV1Refs()
+	tip, err := repo.Reference(refs.Primary, true)
+	require.NoError(t, err)
+
+	// Count only the checkpoint commits above base; base is a regular commit.
+	signed, unsigned := countSignedAndUnsigned(t, repo, tip.Hash(), base)
+	assert.Equal(t, 0, signed)
+	assert.Equal(t, 2, unsigned)
+}
+
+func TestPrePush_SigningFailureSkipNonTTY_KeepsChainConnected(t *testing.T) { //nolint:paralleltest // t.Chdir + signCommitForPush global
+	dir := t.TempDir()
+	bareRemote := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.InitBareRepo(t, bareRemote)
+	testutil.AddRemote(t, dir, "origin", bareRemote)
+	_, base := setupChainOfUnsignedCommits(t, dir, 3)
+
+	prev := signCommitForPush
+	calls := 0
+	signCommitForPush = func(_ context.Context, c *object.Commit) error {
+		calls++
+		if calls == 2 {
+			return errors.New("agent busy")
+		}
+		c.Signature = testFakeSig
+		return nil
+	}
+	t.Cleanup(func() { signCommitForPush = prev })
+
+	// Default prompt under `go test` is non-interactive, so it skips silently.
+
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.PrePush(context.Background(), "origin"))
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	refs := checkpoint.DefaultV1Refs()
+	tip, err := repo.Reference(refs.Primary, true)
+	require.NoError(t, err)
+	// Count only checkpoint commits above base; base is a regular working commit.
+	signed, unsigned := countSignedAndUnsigned(t, repo, tip.Hash(), base)
+	assert.Equal(t, 2, signed)
+	assert.Equal(t, 1, unsigned)
+}
+
+func TestPrePush_SigningAbort_LeavesLocalUnchanged(t *testing.T) { //nolint:paralleltest // t.Chdir + signCommitForPush global
+	dir := t.TempDir()
+	bareRemote := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.InitBareRepo(t, bareRemote)
+	testutil.AddRemote(t, dir, "origin", bareRemote)
+	_, _ = setupChainOfUnsignedCommits(t, dir, 2)
+
+	prevSign := signCommitForPush
+	signCommitForPush = func(_ context.Context, _ *object.Commit) error {
+		return errors.New("agent down")
+	}
+	t.Cleanup(func() { signCommitForPush = prevSign })
+
+	prevPrompt := promptOnSigningFailure
+	promptOnSigningFailure = func(_ context.Context, _ string, _ error, _ io.Writer) signingAction {
+		return signingActionAbort
+	}
+	t.Cleanup(func() { promptOnSigningFailure = prevPrompt })
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	refs := checkpoint.DefaultV1Refs()
+	tipBefore, err := repo.Reference(refs.Primary, true)
+	require.NoError(t, err)
+
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	require.Error(t, s.PrePush(context.Background(), "origin"))
+
+	tipAfter, err := repo.Reference(refs.Primary, true)
+	require.NoError(t, err)
+	assert.Equal(t, tipBefore.Hash(), tipAfter.Hash(), "local ref must not advance on abort")
+}
+
+// writeDisabledSigningSettings writes a settings file disabling signing into dir/.entire/settings.json.
+func writeDisabledSigningSettings(t *testing.T, dir string) {
+	t.Helper()
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(`{"sign_checkpoint_commits": false}`), 0o644))
 }
