@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -85,6 +86,9 @@ func (c *ClaudeCodeAgent) GetSessionID(input *agent.HookInput) string {
 // ResolveSessionFile returns the path to a Claude session file.
 // Claude names files directly as <id>.jsonl.
 func (c *ClaudeCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
+	if err := validation.RejectAbsoluteSessionID(agentSessionID); err != nil {
+		return "", err
+	}
 	return filepath.Join(sessionDir, agentSessionID+".jsonl"), nil
 }
 

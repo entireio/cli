@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // nonAlphanumericRegex matches any non-alphanumeric character for path sanitization.
@@ -120,6 +121,9 @@ func (f *FactoryAIDroidAgent) GetSessionBaseDir() (string, error) {
 
 // ResolveSessionFile returns the path to a Factory AI Droid session file.
 func (f *FactoryAIDroidAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
+	if err := validation.RejectAbsoluteSessionID(agentSessionID); err != nil {
+		return "", err
+	}
 	return filepath.Join(sessionDir, agentSessionID+".jsonl"), nil
 }
 

@@ -50,6 +50,26 @@ func ValidateSessionID(id string) error {
 	return nil
 }
 
+// RejectAbsoluteSessionID returns an error if id is an absolute path (including
+// Windows drive-relative forms). Agent ResolveSessionFile implementations call
+// this as a defense-in-depth guard: an absolute agentSessionID is
+// attacker-influenceable (it can originate from checkpoint metadata on the
+// shared entire/checkpoints/v1 branch) and, if joined or returned verbatim,
+// could resolve to a path outside the session directory — letting the
+// resume/rewind write path overwrite arbitrary files.
+//
+// This is intentionally narrower than ValidateSessionID: it only rejects
+// absolute paths, not "../" traversal or separators. Restore-path callers must
+// still call ValidateSessionID for the full guard; this closes the absolute
+// footgun at the function itself so it cannot regress out from under a future
+// caller that forgets.
+func RejectAbsoluteSessionID(id string) error {
+	if filepath.IsAbs(id) || filepath.VolumeName(id) != "" {
+		return fmt.Errorf("session ID must be relative, got absolute path: %q", id)
+	}
+	return nil
+}
+
 // ValidateToolUseID validates that a tool use ID contains only safe characters for paths.
 // Tool use IDs can be UUIDs or prefixed identifiers like "toolu_xxx".
 func ValidateToolUseID(id string) error {

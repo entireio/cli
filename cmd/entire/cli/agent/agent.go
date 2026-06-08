@@ -68,12 +68,11 @@ type Agent interface {
 	// ResolveSessionFile returns the path to the session transcript file, or an
 	// error when agentSessionID cannot be resolved to a path safely.
 	//
-	// SECURITY CONTRACT: agentSessionID is used to build a filesystem path, and
-	// most implementations use it as a path component (filepath.Join, which
-	// contains a leading-slash element but not "../" traversal). Codex and Pi
-	// reject an absolute agentSessionID with an error rather than returning it
-	// verbatim — closing the arbitrary-write footgun at the function itself
-	// (defense in depth) instead of relying on caller discipline.
+	// SECURITY CONTRACT: agentSessionID is used to build a filesystem path.
+	// Every implementation MUST reject an absolute agentSessionID with an error
+	// (via validation.RejectAbsoluteSessionID) rather than joining or returning
+	// it — closing the arbitrary-write footgun at the function itself (defense
+	// in depth) instead of relying on caller discipline.
 	//
 	// Callers that source agentSessionID from untrusted data (e.g. checkpoint
 	// metadata on the shared entire/checkpoints/v1 branch, hook input) MUST

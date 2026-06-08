@@ -884,3 +884,21 @@ func TestStripExeExt(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveSessionFile_RejectsAbsolute verifies the external agent rejects an
+// absolute agentSessionID before delegating to the helper binary, so an
+// untrusted helper can't reflect an absolute path back as a verbatim transcript
+// path. The guard runs before any subprocess invocation, so a zero-value Agent
+// (no binary) is sufficient to exercise it.
+func TestResolveSessionFile_RejectsAbsolute(t *testing.T) {
+	t.Parallel()
+
+	ag := &Agent{binaryPath: "/nonexistent/entire-agent-test"}
+	got, err := ag.ResolveSessionFile("/home/u/.agent/sessions", "/etc/evil.jsonl")
+	if err == nil {
+		t.Fatalf("ResolveSessionFile(absolute) = %q, nil; want error", got)
+	}
+	if got != "" {
+		t.Fatalf("ResolveSessionFile(absolute) returned path %q alongside error; want empty", got)
+	}
+}

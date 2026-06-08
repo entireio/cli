@@ -90,6 +90,12 @@ linters:
       # errors verbatim.
       ignore-package-globs:
         - github.com/entireio/cli/internal/coreapi
+      # validation.RejectAbsoluteSessionID returns a complete, self-contained
+      # rejection message ("session ID must be relative, got absolute path: ...")
+      # that agent ResolveSessionFile implementations return verbatim as the
+      # security-guard error. Wrapping it would only add a redundant prefix.
+      extra-ignore-sigs:
+        - .RejectAbsoluteSessionID(
     forbidigo:
       analyze-types: true
       forbid:

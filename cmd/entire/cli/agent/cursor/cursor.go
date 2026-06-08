@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // Compile-time interface assertion.
@@ -80,6 +81,9 @@ func (c *CursorAgent) GetSessionID(input *agent.HookInput) string {
 // We prefer nested if the file OR directory exists (the directory may be created
 // before the file is flushed), otherwise fall back to flat.
 func (c *CursorAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
+	if err := validation.RejectAbsoluteSessionID(agentSessionID); err != nil {
+		return "", err
+	}
 	nestedDir := filepath.Join(sessionDir, agentSessionID)
 	nested := filepath.Join(nestedDir, agentSessionID+".jsonl")
 	if _, err := os.Stat(nested); err == nil {

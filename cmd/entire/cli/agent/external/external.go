@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
@@ -172,6 +173,12 @@ func (e *Agent) GetSessionDir(repoPath string) (string, error) {
 }
 
 func (e *Agent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
+	// Guard before delegating to the external binary so an absolute
+	// (attacker-influenceable) session ID can't be reflected back as a verbatim
+	// path by an untrusted helper.
+	if err := validation.RejectAbsoluteSessionID(agentSessionID); err != nil {
+		return "", err
+	}
 	stdout, err := e.run(context.Background(), nil, "resolve-session-file",
 		"--session-dir", sessionDir, "--session-id", agentSessionID)
 	if err != nil {

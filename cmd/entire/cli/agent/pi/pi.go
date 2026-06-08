@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // piHomeEnvVar overrides the default Pi home directory (~/.pi/agent).
@@ -175,8 +176,8 @@ func (a *PiAgent) GetSessionBaseDir() (string, error) {
 // deterministic non-existent path so downstream stat checks fail cleanly
 // rather than panicking on an empty path.
 func (a *PiAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
-	if filepath.IsAbs(agentSessionID) {
-		return "", fmt.Errorf("session ID must be relative, got absolute path: %q", agentSessionID)
+	if err := validation.RejectAbsoluteSessionID(agentSessionID); err != nil {
+		return "", err
 	}
 	if path := findPiSessionByID(sessionDir, agentSessionID); path != "" {
 		return path, nil

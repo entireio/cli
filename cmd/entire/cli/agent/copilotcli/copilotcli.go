@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -76,6 +77,9 @@ func (c *CopilotCLIAgent) GetSessionDir(_ string) (string, error) {
 // ResolveSessionFile returns the path to a Copilot CLI session transcript file.
 // Copilot CLI stores transcripts at <sessionDir>/<sessionId>/events.jsonl.
 func (c *CopilotCLIAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
+	if err := validation.RejectAbsoluteSessionID(agentSessionID); err != nil {
+		return "", err
+	}
 	return filepath.Join(sessionDir, agentSessionID, "events.jsonl"), nil
 }
 

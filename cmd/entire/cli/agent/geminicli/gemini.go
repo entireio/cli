@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -89,6 +90,9 @@ func (g *GeminiCLIAgent) ProtectedDirs() []string { return []string{".gemini"} }
 // of the session UUID. This searches for an existing file matching the pattern, falling
 // back to constructing a filename matching Gemini's convention if no match is found.
 func (g *GeminiCLIAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
+	if err := validation.RejectAbsoluteSessionID(agentSessionID); err != nil {
+		return "", err
+	}
 	// Try to find existing file matching Gemini's naming convention:
 	// session-*-<first8chars>.json
 	shortID := agentSessionID

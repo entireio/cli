@@ -98,8 +98,8 @@ func (c *CodexAgent) GetSessionDir(_ string) (string, error) {
 // checkpoint metadata) resolve to an arbitrary path and, via the
 // resume/rewind write path, overwrite files outside the session directory.
 func (c *CodexAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
-	if filepath.IsAbs(agentSessionID) {
-		return "", fmt.Errorf("session ID must be relative, got absolute path: %q", agentSessionID)
+	if err := validation.RejectAbsoluteSessionID(agentSessionID); err != nil {
+		return "", err
 	}
 	if path := findRolloutBySessionID(sessionDir, agentSessionID); path != "" {
 		return path, nil

@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -181,6 +182,9 @@ func (a *OpenCodeAgent) GetSessionDir(repoPath string) (string, error) {
 }
 
 func (a *OpenCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) (string, error) {
+	if err := validation.RejectAbsoluteSessionID(agentSessionID); err != nil {
+		return "", err
+	}
 	return filepath.Join(sessionDir, agentSessionID+".json"), nil
 }
 
