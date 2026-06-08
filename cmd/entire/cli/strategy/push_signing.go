@@ -27,6 +27,55 @@ const (
 	signingActionAbort
 )
 
+// signingProgress renders a rolling N-line progress display on a TTY,
+// in-place, using ANSI cursor-up + clear-line escapes. On a non-TTY the
+// renderer falls back to printing each line as it arrives.
+type signingProgress struct {
+	out      io.Writer
+	capacity int
+	isTTY    bool
+	lines    []string
+	drawn    int
+}
+
+func newSigningProgress(out io.Writer, capacity int) *signingProgress {
+	return &signingProgress{
+		out:      out,
+		capacity: capacity,
+		isTTY:    interactive.IsTerminalWriter(out),
+	}
+}
+
+// Push appends line to the visible buffer. On a TTY, the previous N lines
+// (if any) are erased and the buffer redrawn in place; on a non-TTY, line
+// is appended to out without any cursor manipulation.
+func (p *signingProgress) Push(line string) {
+	p.lines = append(p.lines, line)
+	if len(p.lines) > p.capacity {
+		p.lines = p.lines[len(p.lines)-p.capacity:]
+	}
+	if !p.isTTY {
+		fmt.Fprintln(p.out, line)
+		return
+	}
+	if p.drawn > 0 {
+		// Move cursor up `drawn` lines so we can rewrite them in place.
+		fmt.Fprintf(p.out, "\033[%dA", p.drawn)
+	}
+	for _, l := range p.lines {
+		// Clear the entire line then print the buffered content.
+		fmt.Fprintf(p.out, "\033[2K%s\n", l)
+	}
+	p.drawn = len(p.lines)
+}
+
+// Detach forgets that we've drawn anything, so the next Push prints below
+// whatever currently sits on screen (e.g. after a prompt that wrote lines
+// outside our control). The currently-visible buffered lines stay in place.
+func (p *signingProgress) Detach() {
+	p.drawn = 0
+}
+
 var errSigningAborted = errors.New("checkpoint signing aborted by user")
 
 // signCommitForPush is the strict signer used at push time. Overridden in
@@ -63,6 +112,9 @@ func signAndPersistCommits(ctx context.Context, repo *git.Repository, repoPath s
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("load shallow hashes: %w", err)
 	}
+
+	const progressBufferLines = 3
+	progress := newSigningProgress(stderr, progressBufferLines)
 
 	total := len(commits)
 	currentTip := base
@@ -101,10 +153,13 @@ func signAndPersistCommits(ctx context.Context, repo *git.Repository, repoPath s
 		}
 
 		subject := commitSubject(original.Message)
-		fmt.Fprintln(stderr, signingProgressMessage(i+1, total, subject))
+		progress.Push(signingProgressMessage(i+1, total, subject))
 
 		signErr := signCommitForPush(ctx, built)
 		for signErr != nil && !errors.Is(signErr, checkpoint.ErrSigningDisabled) {
+			// Detach so the prompt's output lines are not overwritten by the
+			// next Push.
+			progress.Detach()
 			action := promptOnSigningFailure(ctx, subject, signErr, stderr)
 			switch action {
 			case signingActionRetry:

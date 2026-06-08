@@ -554,6 +554,42 @@ func extendChainOfUnsignedCommits(t *testing.T, dir string, n int) {
 	require.NoError(t, AdvanceLocalRef(context.Background(), repo, refs, refs.Primary, parent))
 }
 
+func TestSigningProgress_NonTTYPrintsEveryLine(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	p := newSigningProgress(&buf, 3)
+	p.Push("a")
+	p.Push("b")
+	p.Push("c")
+	p.Push("d")
+	p.Push("e")
+
+	assert.Equal(t, "a\nb\nc\nd\ne\n", buf.String())
+}
+
+func TestSigningProgress_TTYRollsLastN(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	// Bypass the TTY detection by direct construction.
+	p := &signingProgress{out: &buf, capacity: 3, isTTY: true}
+
+	p.Push("a")
+	p.Push("b")
+	p.Push("c")
+	p.Push("d")
+	p.Push("e")
+
+	out := buf.String()
+	// ANSI cursor-up should appear after the first draw.
+	assert.Contains(t, out, "\033[")
+	// Final buffer state should include the most recent three lines, c d e.
+	assert.Contains(t, out, "c")
+	assert.Contains(t, out, "d")
+	assert.Contains(t, out, "e")
+}
+
 // writeDisabledSigningSettings writes a settings file disabling signing into dir/.entire/settings.json.
 func writeDisabledSigningSettings(t *testing.T, dir string) {
 	t.Helper()
