@@ -76,6 +76,9 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 			return fmt.Errorf("invalid subagent ID in %s event: %w", event.Type, err)
 		}
 	}
+	if err := validation.ValidateSessionRef(event.SessionRef); err != nil {
+		return fmt.Errorf("invalid session ref in %s event: %w", event.Type, err)
+	}
 
 	// Filter forwarded hooks: when Cursor IDE forwards events to both
 	// .cursor/hooks.json and .claude/settings.json, only the agent that owns

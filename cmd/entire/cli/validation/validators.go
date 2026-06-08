@@ -93,6 +93,29 @@ func ValidateAgentID(id string) error {
 	return nil
 }
 
+// ValidateSessionRef validates that a session-transcript path is free of bytes
+// that are never legitimate in a filesystem path. SessionRef is a path
+// (potentially absolute), so we deliberately do not reject separators or
+// path-traversal-shaped components — agents store transcripts in agent-specific
+// directories and an absolute path is the common case. The check exists to
+// catch obvious injection (NUL bytes, control characters) early, before the
+// value reaches os.ReadFile / filepath.Dir / strategy persistence.
+// Empty is allowed because handlers gate on emptiness independently.
+func ValidateSessionRef(ref string) error {
+	if ref == "" {
+		return nil
+	}
+	if strings.ContainsRune(ref, 0) {
+		return fmt.Errorf("invalid session ref: contains null byte")
+	}
+	for _, r := range ref {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("invalid session ref: contains control character %U", r)
+		}
+	}
+	return nil
+}
+
 // ValidateAgentSessionID validates that an agent session ID contains only safe characters for paths.
 // Agent session IDs can be UUIDs (Claude Code), test identifiers, or other formats depending on the agent.
 // This prevents path traversal attacks when the ID is used in file path construction.

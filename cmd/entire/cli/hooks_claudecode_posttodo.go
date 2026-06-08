@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // handleClaudeCodePostTodo handles the PostToolUse[TodoWrite] hook for subagent checkpoints.
@@ -31,6 +32,23 @@ func handleClaudeCodePostTodoFromReader(ctx context.Context, reader io.Reader) e
 	input, err := parseSubagentCheckpointHookInput(reader)
 	if err != nil {
 		return fmt.Errorf("failed to parse PostToolUse[TodoWrite] input: %w", err)
+	}
+
+	// PostTodo bypasses DispatchLifecycleEvent (see hook_registry.go), so the
+	// central guard in lifecycle.go never runs here. Mirror it: SessionID and
+	// ToolUseID get used to build filesystem paths downstream (session-state
+	// lookups, pre-task file naming, TaskStepContext), and TranscriptPath is
+	// consumed as an os.ReadFile/filepath.Dir target.
+	if input.SessionID != "" {
+		if err := validation.ValidateSessionID(input.SessionID); err != nil {
+			return fmt.Errorf("invalid session ID in PostTodo input: %w", err)
+		}
+	}
+	if err := validation.ValidateToolUseID(input.ToolUseID); err != nil {
+		return fmt.Errorf("invalid tool use ID in PostTodo input: %w", err)
+	}
+	if err := validation.ValidateSessionRef(input.TranscriptPath); err != nil {
+		return fmt.Errorf("invalid transcript path in PostTodo input: %w", err)
 	}
 
 	// Get agent for logging context

@@ -386,6 +386,14 @@ func TestDispatchLifecycleEvent_RejectsTraversalSessionID(t *testing.T) {
 	}); err == nil || !strings.Contains(err.Error(), "invalid subagent ID") {
 		t.Errorf("traversal subagent ID: error = %v, want \"invalid subagent ID\"", err)
 	}
+
+	// SessionRef is consumed by handlers via os.ReadFile / filepath.Dir; a null
+	// byte in the path is never legitimate and must be rejected at the choke point.
+	if err := DispatchLifecycleEvent(context.Background(), ag, &agent.Event{
+		Type: agent.TurnEnd, SessionID: "ok-session", SessionRef: "/tmp/transcript\x00.jsonl",
+	}); err == nil || !strings.Contains(err.Error(), "invalid session ref") {
+		t.Errorf("null-byte session ref: error = %v, want \"invalid session ref\"", err)
+	}
 }
 
 // --- handleLifecycleSessionStart tests ---

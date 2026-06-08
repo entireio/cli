@@ -258,6 +258,55 @@ func TestValidateAgentID(t *testing.T) {
 	}
 }
 
+func TestValidateSessionRef(t *testing.T) {
+	tests := []struct {
+		name       string
+		sessionRef string
+		wantErr    bool
+		errMsg     string
+	}{
+		{name: "empty is allowed", sessionRef: "", wantErr: false},
+		{name: "absolute unix path", sessionRef: "/home/u/.claude/projects/foo/abc.jsonl", wantErr: false},
+		{name: "absolute windows path", sessionRef: `C:\Users\u\.claude\projects\foo\abc.jsonl`, wantErr: false},
+		{name: "relative path", sessionRef: ".entire/tmp/pi/abc.json", wantErr: false},
+		{
+			name:       "null byte rejected",
+			sessionRef: "/home/u/abc\x00.jsonl",
+			wantErr:    true,
+			errMsg:     "contains null byte",
+		},
+		{
+			name:       "control char rejected",
+			sessionRef: "/home/u/abc\x01.jsonl",
+			wantErr:    true,
+			errMsg:     "contains control character",
+		},
+		{
+			name:       "newline rejected",
+			sessionRef: "/home/u/abc\n.jsonl",
+			wantErr:    true,
+			errMsg:     "contains control character",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateSessionRef(tt.sessionRef)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("ValidateSessionRef(%q) expected error containing %q, got nil", tt.sessionRef, tt.errMsg)
+					return
+				}
+				if !strings.Contains(err.Error(), tt.errMsg) {
+					t.Errorf("ValidateSessionRef(%q) error = %q, want error containing %q", tt.sessionRef, err.Error(), tt.errMsg)
+				}
+			} else if err != nil {
+				t.Errorf("ValidateSessionRef(%q) unexpected error: %v", tt.sessionRef, err)
+			}
+		})
+	}
+}
+
 func TestValidateAgentSessionID(t *testing.T) {
 	tests := []struct {
 		name    string

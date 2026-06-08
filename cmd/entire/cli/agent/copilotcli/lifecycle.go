@@ -7,6 +7,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // Ensure CopilotCLIAgent implements HookSupport at compile time.
@@ -152,7 +153,15 @@ func (c *CopilotCLIAgent) readHookEnvelope(stdin io.Reader) (*hookEnvelope, erro
 // resolveTranscriptRef computes the transcript path from the session ID.
 // Copilot CLI stores transcripts at ~/.copilot/session-state/<sessionId>/events.jsonl.
 // The userPromptSubmitted hook does not include a transcriptPath field, so we compute it.
+//
+// sessionID flows into ResolveSessionFile, which uses it as a directory
+// component. The dispatcher's central guard runs AFTER ParseHookEvent, so the
+// session ID must be validated here per ResolveSessionFile's interface contract.
 func (c *CopilotCLIAgent) resolveTranscriptRef(ctx context.Context, sessionID string) string {
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		logging.Warn(ctx, "copilot-cli: refusing to resolve transcript for unsafe session ID", "sessionID", sessionID, "err", err)
+		return ""
+	}
 	// GetSessionDir ignores the repoPath parameter for Copilot CLI since session
 	// state is always in ~/.copilot/session-state/ (not repo-specific).
 	sessionDir, err := c.GetSessionDir("")

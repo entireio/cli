@@ -14,6 +14,21 @@ import (
 // testSessionID is the UUID used in captured Copilot CLI hook payloads.
 const testSessionID = "b0ff98c0-8e01-4b73-bf92-9649b139931b"
 
+// TestResolveTranscriptRef_RejectsUnsafeSessionID verifies the copilot-cli
+// hook path validates session IDs before passing them to ResolveSessionFile.
+// ResolveSessionFile uses the ID as a directory component and the central
+// dispatcher guard runs only AFTER ParseHookEvent, so this is the choke point
+// for copilot-cli.
+func TestResolveTranscriptRef_RejectsUnsafeSessionID(t *testing.T) {
+	t.Parallel()
+
+	ag := &CopilotCLIAgent{}
+	got := ag.resolveTranscriptRef(context.Background(), "../../etc/evil")
+	if got != "" {
+		t.Errorf("expected empty transcript path for unsafe ID, got %q", got)
+	}
+}
+
 func TestParseHookEvent_UserPromptSubmitted(t *testing.T) {
 	t.Parallel()
 

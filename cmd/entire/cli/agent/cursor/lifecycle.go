@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // intFromJSON safely converts a json.Number to int64, returning 0 for
@@ -59,9 +60,20 @@ func (c *CursorAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 
 // resolveTranscriptRef returns the transcript path from the hook input, or computes
 // it dynamically when the hook doesn't provide one (Cursor CLI pattern).
+//
+// conversationID flows into ResolveSessionFile, which uses it as a directory
+// component. ResolveSessionFile's interface contract (agent.go) requires
+// callers that source the ID from untrusted input to pre-validate; the
+// dispatcher's central guard runs AFTER ParseHookEvent, so this is the choke
+// point for the cursor hook path.
 func (c *CursorAgent) resolveTranscriptRef(ctx context.Context, conversationID, rawPath string) string {
 	if rawPath != "" {
 		return rawPath
+	}
+
+	if err := validation.ValidateSessionID(conversationID); err != nil {
+		logging.Warn(ctx, "cursor: refusing to resolve transcript for unsafe conversation ID", "err", err)
+		return ""
 	}
 
 	repoRoot, err := paths.WorktreeRoot(ctx)

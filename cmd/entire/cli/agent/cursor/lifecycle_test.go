@@ -17,6 +17,22 @@ import (
 
 const testModel = "gpt-4o"
 
+// TestResolveTranscriptRef_RejectsUnsafeConversationID verifies the cursor
+// hook path validates conversation IDs before passing them to ResolveSessionFile.
+// ResolveSessionFile uses the ID as a directory component and the central
+// dispatcher guard runs only AFTER ParseHookEvent, so this is the choke point
+// for cursor.
+func TestResolveTranscriptRef_RejectsUnsafeConversationID(t *testing.T) {
+	t.Parallel()
+
+	ag := &CursorAgent{}
+	// rawPath empty → falls through to the validation+resolution branch.
+	got := ag.resolveTranscriptRef(context.Background(), "../../etc/evil", "")
+	if got != "" {
+		t.Errorf("expected empty transcript path for unsafe ID, got %q", got)
+	}
+}
+
 func TestParseHookEvent_SessionStart(t *testing.T) {
 	t.Parallel()
 
