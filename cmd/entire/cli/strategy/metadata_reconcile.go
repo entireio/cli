@@ -408,13 +408,16 @@ func changeToTreeChange(change *object.Change) (checkpoint.TreeChange, error) {
 	}
 }
 
-// createCherryPickCommit creates a new commit on top of parent, preserving the
-// original commit's message and author.
-func createCherryPickCommit(ctx context.Context, repo *git.Repository, treeHash, parent plumbing.Hash, original *object.Commit) (plumbing.Hash, error) {
+// buildCherryPickCommit constructs a cherry-picked commit object on top of
+// parent with treeHash. The returned commit is unsigned and not persisted —
+// callers can attach a signature before calling persistCherryPickCommit.
+//
+//nolint:unparam // error return reserved for future signing errors (Task 4 push-signing loop)
+func buildCherryPickCommit(_ context.Context, repo *git.Repository, treeHash, parent plumbing.Hash, original *object.Commit) (*object.Commit, error) {
 	committerName, committerEmail := GetGitAuthorFromRepo(repo)
 	now := time.Now()
 
-	commit := &object.Commit{
+	return &object.Commit{
 		TreeHash:     treeHash,
 		ParentHashes: []plumbing.Hash{parent},
 		Author:       original.Author,
@@ -424,10 +427,11 @@ func createCherryPickCommit(ctx context.Context, repo *git.Repository, treeHash,
 			When:  now,
 		},
 		Message: original.Message,
-	}
+	}, nil
+}
 
-	checkpoint.SignCommitBestEffort(ctx, commit)
-
+// persistCherryPickCommit encodes commit and stores it in the repo.
+func persistCherryPickCommit(repo *git.Repository, commit *object.Commit) (plumbing.Hash, error) {
 	obj := repo.Storer.NewEncodedObject()
 	if err := commit.Encode(obj); err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to encode commit: %w", err)
@@ -439,6 +443,17 @@ func createCherryPickCommit(ctx context.Context, repo *git.Repository, treeHash,
 	}
 
 	return hash, nil
+}
+
+// createCherryPickCommit builds, best-effort signs, and persists a cherry-
+// picked commit. Used by the metadata-reconcile divergence path.
+func createCherryPickCommit(ctx context.Context, repo *git.Repository, treeHash, parent plumbing.Hash, original *object.Commit) (plumbing.Hash, error) {
+	commit, err := buildCherryPickCommit(ctx, repo, treeHash, parent, original)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	checkpoint.SignCommitBestEffort(ctx, commit)
+	return persistCherryPickCommit(repo, commit)
 }
 
 // getRepoPath returns the filesystem path for the repository's worktree.
