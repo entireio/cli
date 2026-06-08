@@ -52,6 +52,105 @@ const (
 // underlying flag name or discovery mechanics.
 const externalAgentsAutoEnabledNotice = "Note: external agents are now enabled for the rest of Entire too — not just summaries."
 
+// Checkpoint sync destination values used by the interactive picker.
+const (
+	checkpointSyncThisRemote = "this-remote"
+	checkpointSyncSeparate   = "separate"
+	checkpointSyncLocal      = "local"
+)
+
+const checkpointSyncFooter = "Transcripts may contain sensitive data. Review before sharing."
+
+// promptCheckpointSync shows an interactive picker for checkpoint sync
+// destination. Modifies opts based on the user's selection.
+// In non-interactive or --yes mode, prints an informational notice instead.
+func promptCheckpointSync(w io.Writer, opts *EnableOptions) error {
+	// Skip if the user already specified a checkpoint destination via flags.
+	if opts.CheckpointRemote != "" || opts.SkipPushSessions {
+		return nil
+	}
+
+	if opts.Yes || !interactive.CanPromptInteractively() {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Checkpoints will sync to this repo's remote.")
+		fmt.Fprintf(w, "To use a private checkpoint repo: entire configure --checkpoint-remote github:org/private-repo\n\n")
+		fmt.Fprintln(w, checkpointSyncFooter)
+		return nil
+	}
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  "+checkpointSyncFooter)
+	fmt.Fprintln(w)
+
+	choice := checkpointSyncThisRemote
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Where should checkpoints sync?").
+				Options(
+					huh.NewOption("This repo's remote", checkpointSyncThisRemote),
+					huh.NewOption("A separate private checkpoint repo", checkpointSyncSeparate),
+					huh.NewOption("Keep checkpoints local only", checkpointSyncLocal),
+				).
+				Value(&choice),
+		),
+	)
+
+	if err := form.Run(); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			return NewSilentError(errors.New("checkpoint sync selection cancelled"))
+		}
+		return fmt.Errorf("checkpoint sync prompt: %w", err)
+	}
+
+	if choice == checkpointSyncSeparate {
+		var repo string
+		inputForm := NewAccessibleForm(
+			huh.NewGroup(
+				huh.NewInput().
+					Title("Checkpoint repo (format: github:owner/repo)").
+					Placeholder("github:org/private-checkpoints").
+					Value(&repo),
+			),
+		)
+		if err := inputForm.Run(); err != nil {
+			if errors.Is(err, huh.ErrUserAborted) {
+				return NewSilentError(errors.New("checkpoint repo input cancelled"))
+			}
+			return fmt.Errorf("checkpoint repo prompt: %w", err)
+		}
+		repo = strings.TrimSpace(repo)
+		if repo == "" {
+			return NewSilentError(errors.New("no checkpoint repo provided"))
+		}
+		choice = repo // pass the raw input to applyCheckpointSyncChoice for validation
+	}
+
+	return applyCheckpointSyncChoice(choice, opts)
+}
+
+// applyCheckpointSyncChoice applies the checkpoint sync picker result to opts.
+// choice is one of the checkpointSync* constants, or a raw "provider:owner/repo"
+// string when the user selected "separate" and entered a repo.
+func applyCheckpointSyncChoice(choice string, opts *EnableOptions) error {
+	switch choice {
+	case checkpointSyncThisRemote:
+		opts.CheckpointRemote = ""
+		opts.SkipPushSessions = false
+	case checkpointSyncLocal:
+		opts.CheckpointRemote = ""
+		opts.SkipPushSessions = true
+	default:
+		// Treat as a checkpoint remote value (e.g. "github:org/repo").
+		if _, _, err := parseCheckpointRemoteFlag(choice); err != nil {
+			return fmt.Errorf("invalid checkpoint repo: %w", err)
+		}
+		opts.CheckpointRemote = choice
+		opts.SkipPushSessions = false
+	}
+	return nil
+}
+
 // EnableOptions holds the flags for `entire enable`.
 type EnableOptions struct {
 	LocalDev            bool
@@ -957,6 +1056,11 @@ To completely remove Entire integrations from this repository, use --uninstall:
 // runEnableInteractive runs the interactive enable flow.
 // agents must be provided by the caller (via detectOrSelectAgent).
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
+	// Ask where checkpoints should sync (interactive picker or printed notice).
+	if err := promptCheckpointSync(w, &opts); err != nil {
+		return err
+	}
+
 	// Uninstall hooks for agents that were previously active but are no longer selected
 	if err := uninstallDeselectedAgentHooks(ctx, w, agents); err != nil {
 		return fmt.Errorf("failed to clean up deselected agents: %w", err)
