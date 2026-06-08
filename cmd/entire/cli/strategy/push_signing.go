@@ -169,10 +169,10 @@ func defaultPromptOnSigningFailure(_ context.Context, subject string, signErr er
 	}
 }
 
-// signLocalCommitsForPush fetches the remote-tracking tip for ref, finds
-// the local-only commits above it, signs and cherry-picks them onto that
-// tip, and advances the local ref to the new signed tip. The caller is then
-// expected to do a fast-forward push.
+// signLocalCommitsForPush fetches the remote tip for ref, finds the
+// local-only commits above it, signs and cherry-picks them onto that tip, and
+// advances the local ref to the new signed tip. The caller is then expected to
+// do a fast-forward push.
 //
 // When checkpoint signing is disabled in settings, this is a no-op so the
 // caller's plain push goes through unchanged.
@@ -187,19 +187,14 @@ func signLocalCommitsForPush(ctx context.Context, target string, ref plumbing.Re
 	}
 	defer repo.Close()
 
-	if fetchErr := fetchRefBestEffort(ctx, target, ref); fetchErr != nil {
-		logging.Debug(ctx, "fetch for sign-at-push failed; treating all local commits as new",
-			slog.String("ref", ref.String()),
-			slog.String("error", fetchErr.Error()))
-	}
-
 	localRef, err := repo.Reference(ref, true)
 	if err != nil {
 		// No local ref yet — nothing to sign or push.
 		return nil
 	}
 
-	remoteHash := lookupRemoteTipForSigning(ctx, repo, target, ref)
+	remoteHash, cleanup := resolveRemoteTipForSigning(ctx, repo, target, ref)
+	defer cleanup()
 
 	repoPath, err := getRepoPath(repo)
 	if err != nil {
@@ -251,46 +246,65 @@ func signLocalCommitsForPush(ctx context.Context, target string, ref plumbing.Re
 	return AdvanceLocalRef(ctx, repo, refsBundle, ref, newTip)
 }
 
-// lookupRemoteTipForSigning returns the hash of the remote-tracking ref for
-// target/ref, or ZeroHash when no tracking ref exists (first push).
-func lookupRemoteTipForSigning(ctx context.Context, repo *git.Repository, target string, ref plumbing.ReferenceName) plumbing.Hash {
+// resolveRemoteTipForSigning fetches ref from target into the appropriate
+// local-side ref and returns the fetched tip hash. URL targets get a
+// transient temp ref (refs/entire-sign-tmp/<rest>) that the returned cleanup
+// removes; named-remote targets reuse the standard remote-tracking ref and
+// the cleanup is a no-op.
+//
+// Returns ZeroHash + nil cleanup if anything fails (e.g. remote has no ref
+// yet, network failure, non-branch ref). Best-effort: failures only mean the
+// caller will treat the local chain as entirely new, which is the same
+// pre-fix behaviour for URL targets.
+func resolveRemoteTipForSigning(ctx context.Context, repo *git.Repository, target string, ref plumbing.ReferenceName) (plumbing.Hash, func()) {
+	cleanup := func() {}
 	if !ref.IsBranch() {
-		return plumbing.ZeroHash
-	}
-	rname := plumbing.NewRemoteReferenceName(target, ref.Short())
-	r, err := repo.Reference(rname, true)
-	if err != nil {
-		logging.Debug(ctx, "no remote-tracking ref; treating all local commits as new",
-			slog.String("ref", rname.String()),
-			slog.String("error", err.Error()))
-		return plumbing.ZeroHash
-	}
-	return r.Hash()
-}
-
-// fetchRefBestEffort fetches ref from target into the standard remote-tracking
-// ref (refs/remotes/<target>/<branch>) without doing any local rebase. It is
-// called before signing so that lookupRemoteTipForSigning finds a fresh tip.
-// Failures are silently ignored by the caller — this is a best-effort update.
-func fetchRefBestEffort(ctx context.Context, target string, ref plumbing.ReferenceName) error {
-	if !ref.IsBranch() || remote.IsURL(target) {
-		// Non-branch refs and URL targets don't have a standard remote-tracking
-		// ref, so there is nothing useful to fetch here.
-		return nil
+		return plumbing.ZeroHash, cleanup
 	}
 
 	fetchTarget, err := remote.ResolveFetchTarget(ctx, target)
 	if err != nil {
-		return fmt.Errorf("resolve fetch target: %w", err)
+		logging.Debug(ctx, "resolve fetch target failed; treating local chain as new",
+			slog.String("target", target),
+			slog.String("error", err.Error()))
+		return plumbing.ZeroHash, cleanup
 	}
 
-	refSpec := fmt.Sprintf("+%s:refs/remotes/%s/%s", ref.String(), target, ref.Short())
+	var fetchedRefName plumbing.ReferenceName
+	var refSpec string
+	usedTempRef := remote.IsURL(fetchTarget)
+	if usedTempRef {
+		tmp := plumbing.ReferenceName("refs/entire-sign-tmp/" + strings.TrimPrefix(ref.String(), "refs/"))
+		refSpec = fmt.Sprintf("+%s:%s", ref.String(), tmp.String())
+		fetchedRefName = tmp
+		cleanup = func() {
+			_ = repo.Storer.RemoveReference(tmp) //nolint:errcheck // best-effort cleanup
+		}
+	} else {
+		refSpec = fmt.Sprintf("+%s:refs/remotes/%s/%s", ref.String(), target, ref.Short())
+		fetchedRefName = plumbing.NewRemoteReferenceName(target, ref.Short())
+	}
+
 	if _, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
 	}); fetchErr != nil {
-		return fmt.Errorf("fetch ref %s from %s: %w", ref, target, fetchErr)
+		logging.Debug(ctx, "pre-sign fetch failed; treating local chain as new",
+			slog.String("ref", ref.String()),
+			slog.String("target", target),
+			slog.String("error", fetchErr.Error()))
+		cleanup()
+		return plumbing.ZeroHash, func() {}
 	}
-	return nil
+
+	r, err := repo.Reference(fetchedRefName, true)
+	if err != nil {
+		logging.Debug(ctx, "fetched ref not present after pre-sign fetch",
+			slog.String("ref", fetchedRefName.String()),
+			slog.String("error", err.Error()))
+		cleanup()
+		return plumbing.ZeroHash, func() {}
+	}
+	return r.Hash(), cleanup
 }

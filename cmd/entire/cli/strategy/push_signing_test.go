@@ -499,6 +499,61 @@ func TestPrePush_SigningAbort_LeavesLocalUnchanged(t *testing.T) { //nolint:para
 	assert.Equal(t, tipBefore.Hash(), tipAfter.Hash(), "local ref must not advance on abort")
 }
 
+func TestPrePush_SignsOnceWhenRemoteIsURL(t *testing.T) { //nolint:paralleltest // t.Chdir + signCommitForPush global
+	dir := t.TempDir()
+	bareRemote := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.InitBareRepo(t, bareRemote)
+	// Add the remote as a file:// URL so remote.IsURL returns true.
+	testutil.AddRemote(t, dir, "origin", "file://"+bareRemote)
+	_, _ = setupChainOfUnsignedCommits(t, dir, 3)
+
+	signCalls := 0
+	prev := signCommitForPush
+	signCommitForPush = func(_ context.Context, c *object.Commit) error {
+		signCalls++
+		c.Signature = testFakeSig
+		return nil
+	}
+	t.Cleanup(func() { signCommitForPush = prev })
+
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.PrePush(context.Background(), "origin"))
+
+	// First push: empty remote, all 3 commits signed once.
+	assert.Equal(t, 3, signCalls, "first push should sign each commit exactly once")
+
+	// Add 2 more local commits and push again.
+	extendChainOfUnsignedCommits(t, dir, 2)
+
+	signCalls = 0
+	require.NoError(t, s.PrePush(context.Background(), "origin"))
+	assert.Equal(t, 2, signCalls, "second push should sign only the 2 new commits, NOT re-sign the 3 already-pushed commits")
+}
+
+// extendChainOfUnsignedCommits appends n more unsigned checkpoint commits onto
+// the existing entire/checkpoints/v1 chain. Used to simulate additional work
+// after an initial push.
+func extendChainOfUnsignedCommits(t *testing.T, dir string, n int) {
+	t.Helper()
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	refs := checkpoint.DefaultV1Refs()
+	tip, err := repo.Reference(refs.Primary, true)
+	require.NoError(t, err)
+	parent := tip.Hash()
+	for i := range n {
+		// Salt by a large offset so each tree is unique and doesn't collide
+		// with the trees created by setupChainOfUnsignedCommits.
+		treeHash := makeUniqueTree(t, repo, 1000+i)
+		hash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, parent, fmt.Sprintf("entire-checkpoint: appended %d", i+1), "u", "u@e")
+		require.NoError(t, err)
+		parent = hash
+	}
+	require.NoError(t, AdvanceLocalRef(context.Background(), repo, refs, refs.Primary, parent))
+}
+
 // writeDisabledSigningSettings writes a settings file disabling signing into dir/.entire/settings.json.
 func writeDisabledSigningSettings(t *testing.T, dir string) {
 	t.Helper()
