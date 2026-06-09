@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 
 	"charm.land/huh/v2"
@@ -979,16 +980,13 @@ func PromptOverwriteNewerLogs(errW io.Writer, sessions []SessionRestoreInfo) (bo
 	fmt.Fprintf(errW, "\nOverwriting will lose the newer local entries.\n\n")
 
 	var confirmed bool
-	form := huh.NewForm(
+	form := uiform.New(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title("Overwrite local session logs with checkpoint versions?").
 				Value(&confirmed),
 		),
 	)
-	if isAccessibleMode() {
-		form = form.WithAccessible(true)
-	}
 
 	if err := form.Run(); err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
