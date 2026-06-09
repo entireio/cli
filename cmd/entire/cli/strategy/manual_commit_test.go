@@ -23,6 +23,8 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 )
 
 const testTrailerCheckpointID id.CheckpointID = "a1b2c3d4e5f6"
@@ -3321,6 +3323,65 @@ func TestCondenseSession_TranscriptRelocatedMidSession(t *testing.T) {
 	if state.TranscriptPath != nestedPath {
 		t.Errorf("state.TranscriptPath = %q, want %q (should be updated after re-resolution)", state.TranscriptPath, nestedPath)
 	}
+}
+
+func TestCondenseSession_ClaudeSubagentTokenUsage(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "README.md", "initial\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "initial")
+	t.Chdir(dir)
+
+	sessionID := "2026-06-09-claude-subagent-token"
+	transcriptDir := filepath.Join(dir, ".claude", "transcripts")
+	transcriptPath := filepath.Join(transcriptDir, "main.jsonl")
+	subagentsDir := filepath.Join(transcriptDir, sessionID, "subagents")
+	require.NoError(t, os.MkdirAll(subagentsDir, 0o755))
+
+	mainTranscript := strings.Join([]string{
+		`{"type":"assistant","uuid":"a-main","message":{"id":"msg_main","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_task1","name":"Task","input":{"description":"write helper","prompt":"write helper"}}],"usage":{"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":10}}}`,
+		`{"type":"user","uuid":"u-main","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_task1","content":"agentId: sub1"}]}}`,
+	}, "\n") + "\n"
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(mainTranscript), 0o644))
+
+	subagentTranscript := `{"type":"assistant","uuid":"a-sub","message":{"id":"msg_sub","type":"message","role":"assistant","content":[{"type":"text","text":"wrote helper"}],"usage":{"input_tokens":200,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":20}}}` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(subagentsDir, "agent-sub1.jsonl"), []byte(subagentTranscript), 0o644))
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+	initialHash := head.Hash().String()
+
+	state := &SessionState{
+		SessionID:                 sessionID,
+		BaseCommit:                initialHash,
+		AttributionBaseCommit:     initialHash,
+		WorktreePath:              dir,
+		TranscriptPath:            transcriptPath,
+		FilesTouched:              []string{"helper.go"},
+		AgentType:                 agent.AgentTypeClaudeCode,
+		ModelName:                 "claude-sonnet-repro",
+		CheckpointTranscriptStart: 0,
+	}
+
+	s := &ManualCommitStrategy{}
+	checkpointID := id.MustCheckpointID("dd11cc22bb33")
+	_, err = s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
+	require.NoError(t, err)
+
+	require.NotNil(t, content.Metadata.TokenUsage, "TokenUsage should be persisted")
+	assert.Equal(t, 100, content.Metadata.TokenUsage.InputTokens)
+	assert.Equal(t, 10, content.Metadata.TokenUsage.OutputTokens)
+	require.NotNil(t, content.Metadata.TokenUsage.SubagentTokens, "SubagentTokens should survive condensation")
+	assert.Equal(t, 200, content.Metadata.TokenUsage.SubagentTokens.InputTokens)
+	assert.Equal(t, 20, content.Metadata.TokenUsage.SubagentTokens.OutputTokens)
+	assert.Equal(t, 1, content.Metadata.TokenUsage.SubagentTokens.APICallCount)
 }
 
 // TestCondenseSession_GeminiTranscript verifies that CondenseSession works correctly

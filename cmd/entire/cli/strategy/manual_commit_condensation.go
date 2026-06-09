@@ -462,6 +462,13 @@ func (s *ManualCommitStrategy) extractOrCreateSessionData(ctx context.Context, r
 	}
 }
 
+func subagentsDirForTranscript(transcriptPath, sessionID string) string {
+	if transcriptPath == "" || sessionID == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(transcriptPath), sessionID, "subagents")
+}
+
 // generateSummary produces an LLM-generated summary of the session transcript.
 // The transcript must be pre-redacted to avoid sending secrets to the LLM.
 // Returns nil if the scoped transcript is empty or generation fails.
@@ -898,7 +905,8 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
 	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "") //TODO: why do we not use here subagents dir?
+		subagentsDir := subagentsDirForTranscript(liveTranscriptPath, sessionID)
+		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, subagentsDir)
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
@@ -940,7 +948,8 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
 	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "") //TODO: why do we not use here subagents dir?
+		subagentsDir := subagentsDirForTranscript(transcriptPath, state.SessionID)
+		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, subagentsDir)
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
