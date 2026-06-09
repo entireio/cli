@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -206,7 +207,10 @@ func TestProcessEntries_SkipsCorrectAndCollectsMissing(t *testing.T) {
 	}
 
 	var progress bytes.Buffer
-	updates, result := processEntries(context.Background(), entries, existing, 4, &progress)
+	updates, result, err := processEntries(context.Background(), entries, existing, 4, &progress)
+	if err != nil {
+		t.Fatalf("processEntries: %v", err)
+	}
 
 	if result.Total != 3 || result.Skipped != 1 || result.Created != 2 {
 		t.Fatalf("result = %+v, want total=3 skipped=1 created=2", result)
@@ -226,6 +230,58 @@ func TestProcessEntries_SkipsCorrectAndCollectsMissing(t *testing.T) {
 	}
 	if progress.Len() == 0 {
 		t.Fatalf("expected progress output, got none")
+	}
+}
+
+func TestProcessEntries_ContextCancelled(t *testing.T) {
+	t.Parallel()
+
+	entries := []checkpointEntry{
+		{ID: id.MustCheckpointID("aa0000000001"), Tree: plumbing.NewHash("1111111111111111111111111111111111111111")},
+		{ID: id.MustCheckpointID("bb0000000002"), Tree: plumbing.NewHash("2222222222222222222222222222222222222222")},
+		{ID: id.MustCheckpointID("cc0000000003"), Tree: plumbing.NewHash("3333333333333333333333333333333333333333")},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := processEntries(ctx, entries, map[string]plumbing.Hash{}, 4, &bytes.Buffer{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestApplyRefUpdates_MultipleBatches(t *testing.T) {
+	t.Parallel()
+
+	dir := seedV1Checkpoints(t, "ab3c4d5e6f70", "cd1122334455")
+	repo, err := gitrepo.OpenPath(dir)
+	if err != nil {
+		t.Fatalf("OpenPath: %v", err)
+	}
+	entries, err := buildCheckpointList(context.Background(), repo)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("buildCheckpointList: %v len=%d", err, len(entries))
+	}
+
+	updates := make([]refUpdate, 0, len(entries))
+	for _, e := range entries {
+		updates = append(updates, refUpdate{Ref: treeRefName(e.ID).String(), Hash: e.Tree})
+	}
+
+	// batchSize=1 forces one batch per update (two batches here).
+	if err := applyRefUpdates(context.Background(), dir, updates, 1); err != nil {
+		t.Fatalf("applyRefUpdates: %v", err)
+	}
+
+	for _, e := range entries {
+		ref, err := repo.Reference(treeRefName(e.ID), false)
+		if err != nil {
+			t.Fatalf("ref for %s missing: %v", e.ID, err)
+		}
+		if ref.Hash() != e.Tree {
+			t.Fatalf("ref %s -> %s, want %s", e.ID, ref.Hash(), e.Tree)
+		}
 	}
 }
 

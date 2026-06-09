@@ -160,7 +160,7 @@ type migrateRefsResult struct {
 // desired ref against the pre-snapshotted existing refs: it skips when present
 // and already correct, otherwise emits a refUpdate. Progress (processed/total)
 // is written to the progress writer, throttled. Writes are NOT performed here.
-func processEntries(ctx context.Context, entries []checkpointEntry, existing map[string]plumbing.Hash, workers int, progress io.Writer) ([]refUpdate, migrateRefsResult) {
+func processEntries(ctx context.Context, entries []checkpointEntry, existing map[string]plumbing.Hash, workers int, progress io.Writer) ([]refUpdate, migrateRefsResult, error) {
 	total := len(entries)
 	if workers < 1 {
 		workers = 1
@@ -190,10 +190,11 @@ func processEntries(ctx context.Context, entries []checkpointEntry, existing map
 	go func() {
 		defer close(in)
 		for _, e := range entries {
-			if ctx.Err() != nil {
+			select {
+			case in <- e:
+			case <-ctx.Done():
 				return
 			}
-			in <- e
 		}
 	}()
 
@@ -212,7 +213,7 @@ func processEntries(ctx context.Context, entries []checkpointEntry, existing map
 		Created: len(updates),
 		Skipped: total - len(updates),
 		Total:   total,
-	}
+	}, ctx.Err() //nolint:wrapcheck // ctx.Err() is wrapped by the caller (runMigrateTreeRefs)
 }
 
 // reportProgress prints "n/total". On a terminal it rewrites a single line with
@@ -309,7 +310,10 @@ func runMigrateTreeRefs(ctx context.Context, opts migrateRefsOptions) (migrateRe
 	if err != nil {
 		return migrateRefsResult{}, err
 	}
-	updates, result := processEntries(ctx, entries, existing, opts.workers, opts.progress)
+	updates, result, err := processEntries(ctx, entries, existing, opts.workers, opts.progress)
+	if err != nil {
+		return migrateRefsResult{}, fmt.Errorf("process checkpoints: %w", err)
+	}
 
 	if opts.dryRun {
 		fmt.Fprintf(opts.out, "[dry-run] would create %d, skip %d (total %d)\n", result.Created, result.Skipped, result.Total)
