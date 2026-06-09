@@ -206,8 +206,14 @@ func commitSubject(message string) string {
 
 // defaultPromptOnSigningFailure asks the user what to do when stderr is a
 // TTY; defaults to skip silently in non-interactive contexts.
+//
+// Two gates must hold before we prompt: CanPromptInteractively (a controlling
+// terminal exists, so reading stdin won't hang) AND IsTerminalWriter(stderr)
+// (the question itself will be visible to the user). When pre-push runs as a
+// git hook with stderr piped or redirected, /dev/tty may still exist but the
+// user can't see what we'd ask them — so we skip instead of risking a hang.
 func defaultPromptOnSigningFailure(_ context.Context, subject string, signErr error, stderr io.Writer) signingAction {
-	if !interactive.CanPromptInteractively() {
+	if !interactive.CanPromptInteractively() || !interactive.IsTerminalWriter(stderr) {
 		return signingActionSkip
 	}
 	fmt.Fprintf(stderr, "Failed to sign commit: %s\nError: %v\nRetry, skip, or abort? [r/s/a]: ", subject, signErr)

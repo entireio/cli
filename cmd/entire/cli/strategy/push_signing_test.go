@@ -601,6 +601,22 @@ func TestSigningProgress_DetachResumesBelowPrompt(t *testing.T) {
 	assert.Equal(t, 0, strings.Count(out, "\033[1A"))
 }
 
+// TestDefaultPromptOnSigningFailure_SkipsWhenStderrNotTTY guards against the
+// failure mode where a controlling /dev/tty exists (so
+// CanPromptInteractively returns true) but stderr has been redirected by the
+// caller (e.g. a git pre-push hook with output captured). Prompting in that
+// case writes a question the user can never see and then blocks reading
+// stdin. The defaultPromptOnSigningFailure must skip silently instead.
+func TestDefaultPromptOnSigningFailure_SkipsWhenStderrNotTTY(t *testing.T) { //nolint:paralleltest // t.Setenv mutates process env
+	t.Setenv("ENTIRE_TEST_TTY", "1") // force CanPromptInteractively true
+
+	var stderr bytes.Buffer // bytes.Buffer is not a terminal
+	got := defaultPromptOnSigningFailure(context.Background(), "subject", errors.New("boom"), &stderr)
+
+	assert.Equal(t, signingActionSkip, got, "must skip when stderr is not a terminal")
+	assert.Empty(t, stderr.String(), "must not write the prompt to a non-TTY writer")
+}
+
 // writeDisabledSigningSettings writes a settings file disabling signing into dir/.entire/settings.json.
 func writeDisabledSigningSettings(t *testing.T, dir string) {
 	t.Helper()
