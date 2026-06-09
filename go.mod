@@ -21,6 +21,7 @@ require (
 	github.com/go-git/x/plugin/objectsigner/program v0.0.0-20260506121155-e7fc238fcab6
 	github.com/gofrs/flock v0.13.0
 	github.com/google/uuid v1.6.0
+	github.com/kljensen/snowball v0.10.0
 	github.com/mattn/go-isatty v0.0.22
 	github.com/muesli/termenv v0.16.0
 	github.com/ogen-go/ogen v1.20.3
@@ -36,6 +37,7 @@ require (
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.45.0
 	golang.org/x/term v0.43.0
+	golang.org/x/text v0.37.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

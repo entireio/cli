@@ -1077,7 +1077,7 @@ func formatCheckpointSummaryError(err error, deadline time.Duration) (string, []
 	var claudeErr *claudecode.ClaudeError
 	switch {
 	case errors.As(err, &claudeErr):
-		switch claudeErr.Kind { //nolint:exhaustive // ClaudeErrorUnknown handled by default
+		switch claudeErr.Kind {
 		case claudecode.ClaudeErrorAuth:
 			label := "Claude authentication failed"
 			rows := []explainRow{
