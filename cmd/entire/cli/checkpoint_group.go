@@ -39,6 +39,7 @@ Examples:
 	cmd.AddCommand(newExplainCmd())
 	cmd.AddCommand(newRewindCmd())
 	cmd.AddCommand(newCheckpointSearchCmd())
+	cmd.AddCommand(newCheckpointMigrateRefsCmd())
 
 	return cmd
 }

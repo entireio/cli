@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,9 +20,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/spf13/cobra"
 )
 
 // treeRefName returns the ref that points at a checkpoint's metadata subtree:
@@ -352,4 +355,59 @@ func loadOrBuildList(ctx context.Context, repo *git.Repository, opts migrateRefs
 	}
 	fmt.Fprintf(opts.out, "Found %d checkpoints on entire/checkpoints/v1\n", len(entries))
 	return entries, nil
+}
+
+// newCheckpointMigrateRefsCmd builds the hidden `entire checkpoint migrate-refs`
+// command that backfills a tree ref per checkpoint.
+func newCheckpointMigrateRefsCmd() *cobra.Command {
+	var (
+		workers   int
+		cacheFile string
+		refresh   bool
+		dryRun    bool
+	)
+
+	cmd := &cobra.Command{
+		Use:    "migrate-refs",
+		Short:  "Backfill a tree ref per checkpoint (refs/entire/checkpoints/<ab>/<rest>/tree)",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		Long: `Create one git ref per checkpoint pointing at that checkpoint's metadata
+subtree on the entire/checkpoints/v1 branch.
+
+The full checkpoint list is read from entire/checkpoints/v1 and cached to a file,
+then processed in parallel with progress. Re-runs reuse the cache file and skip
+refs that already point at the correct tree. Refs are created locally only.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			repoRoot, err := paths.WorktreeRoot(ctx)
+			if err != nil {
+				cmd.SilenceUsage = true
+				return errors.New("not a git repository")
+			}
+			if cacheFile == "" {
+				commonDir, err := strategy.GetGitCommonDir(ctx)
+				if err != nil {
+					return fmt.Errorf("resolve git common dir: %w", err)
+				}
+				cacheFile = filepath.Join(commonDir, "entire-migrate-refs", "checkpoints.tsv")
+			}
+			_, err = runMigrateTreeRefs(ctx, migrateRefsOptions{
+				repoRoot:  repoRoot,
+				cacheFile: cacheFile,
+				workers:   workers,
+				refresh:   refresh,
+				dryRun:    dryRun,
+				out:       cmd.OutOrStdout(),
+				progress:  cmd.ErrOrStderr(),
+			})
+			return err
+		},
+	}
+
+	cmd.Flags().IntVar(&workers, "workers", 0, "Number of parallel workers (0 = number of CPUs)")
+	cmd.Flags().StringVar(&cacheFile, "cache-file", "", "Path to the checkpoint list cache file (default: <git-common-dir>/entire-migrate-refs/checkpoints.tsv)")
+	cmd.Flags().BoolVar(&refresh, "refresh", false, "Ignore an existing cache file and re-walk entire/checkpoints/v1")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Compute and report; do not write any refs")
+	return cmd
 }

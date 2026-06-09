@@ -446,3 +446,36 @@ func TestRunMigrateTreeRefs_ResumeReusesCache(t *testing.T) {
 		t.Fatalf("cached entry ref not created: %v", err)
 	}
 }
+
+func TestNewCheckpointMigrateRefsCmd_Hidden(t *testing.T) {
+	t.Parallel()
+
+	cmd := newCheckpointMigrateRefsCmd()
+	if cmd.Use != "migrate-refs" {
+		t.Fatalf("Use = %q, want migrate-refs", cmd.Use)
+	}
+	if !cmd.Hidden {
+		t.Fatalf("command must be hidden")
+	}
+	for _, name := range []string{"workers", "cache-file", "refresh", "dry-run"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Fatalf("missing --%s flag", name)
+		}
+	}
+}
+
+func TestCheckpointGroup_RegistersMigrateRefs(t *testing.T) {
+	t.Parallel()
+
+	group := newCheckpointGroupCmd()
+	var found bool
+	for _, c := range group.Commands() {
+		if c.Name() == "migrate-refs" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("checkpoint group does not register migrate-refs")
+	}
+}
