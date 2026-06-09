@@ -15,7 +15,7 @@ import (
 //   - EnvTestTTY=1 → CanPromptInteractively returns true.
 //   - EnvTestTTY set to any other value → returns false.
 //   - EnvTestTTY unset → real detection via testing.Testing(), agent
-//     sentinels, CI, then /dev/tty probe.
+//     sentinels, CI, then a platform-specific prompt terminal probe.
 const EnvTestTTY = "ENTIRE_TEST_TTY"
 
 // CanPromptInteractively reports whether interactive confirmation prompts
@@ -30,7 +30,7 @@ const EnvTestTTY = "ENTIRE_TEST_TTY"
 //     Subprocess tests must spawn via execx.NonInteractive (or set EnvTestTTY).
 //  3. Agent sentinels — vendor-set by agent subprocesses.
 //  4. CI=<non-empty-non-false> — de-facto CI convention.
-//  5. /dev/tty probe.
+//  5. Platform-specific prompt terminal probe.
 func CanPromptInteractively() bool {
 	if v := os.Getenv(EnvTestTTY); v != "" {
 		return v == "1"
@@ -50,7 +50,7 @@ func CanPromptInteractively() bool {
 		return false
 	}
 
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	tty, err := OpenPromptTTY()
 	if err != nil {
 		return false
 	}
@@ -60,8 +60,8 @@ func CanPromptInteractively() bool {
 
 // UnderTest reports whether the process is running in a test context — either
 // inside `go test` (testing.Testing()) or with EnvTestTTY explicitly set. Use
-// to skip operations that read from the real terminal (e.g. opening /dev/tty)
-// even when CanPromptInteractively() returns true.
+// to skip operations that read from the real terminal even when
+// CanPromptInteractively() returns true.
 func UnderTest() bool {
 	return testing.Testing() || os.Getenv(EnvTestTTY) != ""
 }

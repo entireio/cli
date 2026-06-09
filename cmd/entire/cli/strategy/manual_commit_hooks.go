@@ -47,7 +47,7 @@ const (
 	ttyResultLinkAlways                  // Link and remember: add trailer + save "always" preference
 )
 
-// askConfirmTTY prompts the user via /dev/tty whether to link a commit to session context.
+// askConfirmTTY prompts the user via the prompt terminal whether to link a commit to session context.
 // This requires a controlling terminal — callers must check
 // interactive.CanPromptInteractively() first and handle the no-TTY case
 // (agent subprocesses, CI) themselves.
@@ -65,10 +65,10 @@ func askConfirmTTY(header string, details []string, prompt string, defaultYes bo
 		return defaultResult
 	}
 
-	// Open /dev/tty for both reading and writing.
-	// This is the controlling terminal, which works even when stdin/stderr are redirected
-	// (e.g., human runs git commit -m where stdin is not a pipe).
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	// Open the prompt terminal for both reading and writing. This works even
+	// when stdin/stderr are redirected (e.g., human runs git commit -m where
+	// stdin is not a pipe).
+	tty, err := interactive.OpenPromptTTY()
 	if err != nil {
 		return defaultResult
 	}

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"os"
 	"os/exec"
 	"runtime"
 	"time"
@@ -81,7 +80,7 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 		fmt.Fprintf(outW, "Login URL:   %s\n\n", approvalURL)
 		fmt.Fprintf(outW, "Press Enter to open in browser...")
 
-		// Read from /dev/tty so we get a real keypress and don't consume piped stdin.
+		// Read from the prompt terminal so we get a real keypress and don't consume piped stdin.
 		if err := waitForEnter(ctx); err != nil {
 			return fmt.Errorf("wait for input: %w", err)
 		}
@@ -250,13 +249,13 @@ func waitForApproval(ctx context.Context, poller deviceAuthClient, deviceCode st
 	}
 }
 
-// waitForEnter reads a line from /dev/tty, blocking until the user presses Enter.
-// If /dev/tty cannot be opened (e.g. on Windows), it returns immediately.
+// waitForEnter reads a line from the prompt terminal, blocking until the user presses Enter.
+// If the prompt terminal cannot be opened, it returns immediately.
 // Returns ctx.Err() if the context is cancelled before the user presses Enter.
 func waitForEnter(ctx context.Context) error {
-	tty, err := os.Open("/dev/tty")
+	tty, err := interactive.OpenPromptTTY()
 	if err != nil {
-		return nil //nolint:nilerr // tty unavailable (e.g. Windows) — skip prompt silently
+		return nil //nolint:nilerr // tty unavailable — skip prompt silently
 	}
 
 	done := make(chan error, 1)
