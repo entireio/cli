@@ -127,13 +127,24 @@ func signAndPersistCommits(ctx context.Context, repo *git.Repository, repoPath s
 			return plumbing.ZeroHash, fmt.Errorf("tree changes for %s: %w", original.Hash.String()[:7], err)
 		}
 
+		// A "true root" is a commit treeChangesForCherryPick treats as having no
+		// parent: it has no ParentHashes or sits on the shallow boundary. For
+		// those, len(changes) == 0 means the original tree is empty (the
+		// orphan-init case) and the cherry-picked clone must keep that empty
+		// tree as the chain anchor.
+		//
+		// For non-root no-op commits (original.Tree == parent.Tree), the diff
+		// is also empty, but reusing original.TreeHash would clobber the
+		// accumulated state on the remote tip — in cross-clone pushes, the
+		// remote tip can carry files the local parent never had. Skip those
+		// commits entirely, matching the same skip cherryPickOnto applies.
+		isRoot := len(original.ParentHashes) == 0 || shallow[original.Hash]
 		var treeHash plumbing.Hash
 		switch {
-		case len(changes) == 0:
-			// No changes relative to parent (e.g. empty-tree orphan init). Use
-			// the original tree directly; ApplyTreeChanges with no changes would
-			// return the base tree, which is wrong for root commits.
+		case len(changes) == 0 && isRoot:
 			treeHash = original.TreeHash
+		case len(changes) == 0:
+			continue
 		case currentTip == plumbing.ZeroHash:
 			treeHash, err = checkpoint.ApplyTreeChanges(ctx, repo, plumbing.ZeroHash, changes)
 			if err != nil {
