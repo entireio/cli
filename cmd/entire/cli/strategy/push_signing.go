@@ -309,7 +309,15 @@ func signLocalCommitsForPush(ctx context.Context, target string, ref plumbing.Re
 			}
 		}
 		if len(dataCommits) == 0 {
-			return nil
+			// Local-only chain is just orphan-init commits with no checkpoint
+			// data. Pushing it as-is would be rejected as non-fast-forward
+			// against the populated remote. Reset the local ref to the
+			// remote tip so the subsequent push is a no-op and the local
+			// metadata branch matches what the remote already has — this
+			// mirrors the same reset in metadata_reconcile.go's
+			// disconnected path.
+			refsBundle := checkpoint.ResolveCommittedRefs(ctx)
+			return AdvanceLocalRef(ctx, repo, refsBundle, ref, remoteHash)
 		}
 		signingCommits = dataCommits
 	}

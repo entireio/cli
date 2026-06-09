@@ -494,6 +494,73 @@ func TestPrePush_SigningAbort_LeavesLocalUnchanged(t *testing.T) { //nolint:para
 	assert.Equal(t, tipBefore.Hash(), tipAfter.Hash(), "local ref must not advance on abort")
 }
 
+// TestPrePush_OrphanOnlyLocalResetsToRemoteTip exercises the bug where, on a
+// clone that has only its own orphan-init commit locally and a populated
+// remote, the pre-sign filter dropped every commit, returned without touching
+// the ref, and the subsequent push went out as the local orphan chain —
+// which the remote rejected as non-fast-forward, masking the real fix until
+// reconciliation kicked in.
+//
+// The pre-sign path must mirror the disconnected-reconcile path's reset:
+// when the data-commit set is empty, advance the local ref to the remote
+// tip so the push that follows is a clean fast-forward (no-op).
+func TestPrePush_OrphanOnlyLocalResetsToRemoteTip(t *testing.T) { //nolint:paralleltest // t.Chdir + signCommitForPush global
+	dir := t.TempDir()
+	bareRemote := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.InitBareRepo(t, bareRemote)
+	testutil.AddRemote(t, dir, "origin", bareRemote)
+
+	// Populate the remote with a real chain via a regular push.
+	_, _ = setupChainOfUnsignedCommits(t, dir, 2)
+
+	prev := signCommitForPush
+	signCommitForPush = func(_ context.Context, c *object.Commit) error {
+		c.Signature = testFakeSig
+		return nil
+	}
+	t.Cleanup(func() { signCommitForPush = prev })
+
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.PrePush(context.Background(), "origin"))
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	refs := checkpoint.DefaultV1Refs()
+
+	bare, err := git.PlainOpen(bareRemote)
+	require.NoError(t, err)
+	remoteRef, err := bare.Reference(refs.Primary, true)
+	require.NoError(t, err)
+	remoteTipHash := remoteRef.Hash()
+
+	// Build a fresh orphan-only local chain — an empty-tree commit with no
+	// parent — and reset local v1 to it. This is the shape of a freshly
+	// initialised entire/checkpoints/v1 on a clone that has not yet fetched.
+	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
+	emptyTreeObj := repo.Storer.NewEncodedObject()
+	require.NoError(t, emptyTree.Encode(emptyTreeObj))
+	emptyTreeHash, err := repo.Storer.SetEncodedObject(emptyTreeObj)
+	require.NoError(t, err)
+	orphanHash, err := checkpoint.CreateCommit(context.Background(), repo, emptyTreeHash, plumbing.ZeroHash, "Initialize metadata ref", "u", "u@e")
+	require.NoError(t, err)
+	require.NoError(t, AdvanceLocalRef(context.Background(), repo, refs, refs.Primary, orphanHash))
+
+	localBefore, err := repo.Reference(refs.Primary, true)
+	require.NoError(t, err)
+	require.Equal(t, orphanHash, localBefore.Hash())
+	require.NotEqual(t, remoteTipHash, localBefore.Hash())
+
+	// The push should observe an empty data-commit set and reset local to
+	// the remote tip; pushRefIfNeeded then has nothing to do.
+	require.NoError(t, s.PrePush(context.Background(), "origin"))
+
+	localAfter, err := repo.Reference(refs.Primary, true)
+	require.NoError(t, err)
+	assert.Equal(t, remoteTipHash, localAfter.Hash(), "local ref should be reset to remote tip when local-only chain is just orphan-init")
+}
+
 func TestPrePush_SignsOnceWhenRemoteIsURL(t *testing.T) { //nolint:paralleltest // t.Chdir + signCommitForPush global
 	dir := t.TempDir()
 	bareRemote := t.TempDir()
