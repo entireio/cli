@@ -593,6 +593,94 @@ func TestShadowStrategy_Rewind_FromRepoRoot(t *testing.T) {
 	}
 }
 
+func TestShadowStrategy_Rewind_RemovesTrackedFilesDeletedByCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	author := &object.Signature{
+		Name:  "Test",
+		Email: "test@example.com",
+		When:  time.Now(),
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("keep\n"), 0o644); err != nil {
+		t.Fatalf("failed to write keep.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "delete-me.txt"), []byte("delete\n"), 0o644); err != nil {
+		t.Fatalf("failed to write delete-me.txt: %v", err)
+	}
+	if _, err := worktree.Add("keep.txt"); err != nil {
+		t.Fatalf("failed to add keep.txt: %v", err)
+	}
+	if _, err := worktree.Add("delete-me.txt"); err != nil {
+		t.Fatalf("failed to add delete-me.txt: %v", err)
+	}
+	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{Author: author})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	if err := os.Remove(filepath.Join(dir, "delete-me.txt")); err != nil {
+		t.Fatalf("failed to delete tracked file: %v", err)
+	}
+	if _, err := worktree.Remove("delete-me.txt"); err != nil {
+		t.Fatalf("failed to stage delete-me.txt removal: %v", err)
+	}
+	checkpointHash, err := worktree.Commit("Checkpoint deletes tracked file", &git.CommitOptions{Author: author})
+	if err != nil {
+		t.Fatalf("failed to create checkpoint: %v", err)
+	}
+
+	if err := worktree.Reset(&git.ResetOptions{
+		Commit: initialCommit,
+		Mode:   git.HardReset,
+	}); err != nil {
+		t.Fatalf("failed to reset to initial: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "delete-me.txt")); err != nil {
+		t.Fatalf("expected delete-me.txt to exist before rewind: %v", err)
+	}
+
+	s := NewManualCommitStrategy()
+	point := RewindPoint{
+		ID:      checkpointHash.String(),
+		Message: "Checkpoint deletes tracked file",
+		Date:    time.Now(),
+	}
+
+	preview, err := s.PreviewRewind(context.Background(), point)
+	if err != nil {
+		t.Fatalf("PreviewRewind() error = %v", err)
+	}
+	require.Contains(t, preview.FilesToDelete, "delete-me.txt")
+
+	if err := s.Rewind(context.Background(), io.Discard, io.Discard, point); err != nil {
+		t.Fatalf("Rewind() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "delete-me.txt")); !os.IsNotExist(err) {
+		t.Fatalf("delete-me.txt should be removed by rewind, got err: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "keep.txt"))
+	if err != nil {
+		t.Fatalf("expected keep.txt to remain: %v", err)
+	}
+	if string(content) != "keep\n" {
+		t.Fatalf("keep.txt content = %q, want %q", string(content), "keep\n")
+	}
+}
+
 func writeCommittedRewindCheckpoint(
 	t *testing.T,
 	repo *git.Repository,

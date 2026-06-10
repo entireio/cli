@@ -354,15 +354,10 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, w, errW io.Writer, po
 	}
 
 	// Build set of files tracked in HEAD
-	trackedFiles := make(map[string]bool)
-	//nolint:errcheck // Error is not critical for rewind
-	_ = headTree.Files().ForEach(func(f *object.File) error {
-		if err := ctx.Err(); err != nil {
-			return err //nolint:wrapcheck // Propagating context cancellation
-		}
-		trackedFiles[f.Name] = true
-		return nil
-	})
+	trackedFiles, err := trackedFilesInTree(ctx, headTree)
+	if err != nil {
+		return fmt.Errorf("failed to list HEAD files: %w", err)
+	}
 
 	// Get repository root to walk from there
 	repoRoot, err := paths.WorktreeRoot(ctx)
@@ -379,35 +374,16 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, w, errW io.Writer, po
 	}
 	defer repoRootHandle.Close()
 
-	// Find and delete untracked files that aren't in the checkpoint.
-	// Uses git ls-files to only consider non-ignored files, avoiding walks through
-	// large ignored directories like node_modules/.
+	if err := deleteTrackedFilesMissingFromCheckpoint(w, repoRootHandle, trackedFiles, checkpointFiles); err != nil {
+		return err
+	}
+
 	untrackedNow, err := collectUntrackedFiles(ctx)
 	if err != nil {
 		// Non-fatal - continue with restoration
 		fmt.Fprintf(errW, "Warning: error listing untracked files: %v\n", err)
 	}
-	for _, relPath := range untrackedNow {
-		// If file is in checkpoint, it will be restored
-		if checkpointFiles[relPath] {
-			continue
-		}
-
-		// If file is tracked in HEAD, don't delete (user's committed work)
-		if trackedFiles[relPath] {
-			continue
-		}
-
-		// If file existed at session start, preserve it (untracked user files)
-		if preservedUntrackedFiles[relPath] {
-			continue
-		}
-
-		// File is untracked and not in checkpoint - delete it via os.Root
-		if removeErr := osroot.Remove(repoRootHandle, relPath); removeErr == nil {
-			fmt.Fprintf(w, "  Deleted: %s\n", relPath)
-		}
-	}
+	deleteUntrackedFilesMissingFromCheckpoint(w, repoRootHandle, untrackedNow, trackedFiles, checkpointFiles, preservedUntrackedFiles)
 
 	// Restore files from checkpoint
 	err = tree.Files().ForEach(func(f *object.File) error {
@@ -459,6 +435,73 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, w, errW io.Writer, po
 	fmt.Fprintln(w)
 
 	return nil
+}
+
+func deleteTrackedFilesMissingFromCheckpoint(
+	w io.Writer,
+	repoRootHandle *os.Root,
+	trackedFiles, checkpointFiles map[string]bool,
+) error {
+	// Checkpoint trees encode deletions by omitting paths. Rewind must remove
+	// tracked HEAD files absent from the checkpoint before restoring present files.
+	for relPath := range trackedFiles {
+		if checkpointFiles[relPath] || isProtectedPath(relPath) {
+			continue
+		}
+		if removeErr := osroot.Remove(repoRootHandle, relPath); removeErr == nil {
+			fmt.Fprintf(w, "  Deleted: %s\n", relPath)
+		} else if !errors.Is(removeErr, os.ErrNotExist) {
+			return fmt.Errorf("failed to delete tracked file %s: %w", relPath, removeErr)
+		}
+	}
+	return nil
+}
+
+func deleteUntrackedFilesMissingFromCheckpoint(
+	w io.Writer,
+	repoRootHandle *os.Root,
+	untrackedNow []string,
+	trackedFiles, checkpointFiles, preservedUntrackedFiles map[string]bool,
+) {
+	// Uses git ls-files output, so this only considers non-ignored files and avoids
+	// walks through large ignored directories like node_modules/.
+	for _, relPath := range untrackedNow {
+		// If file is in checkpoint, it will be restored
+		if checkpointFiles[relPath] {
+			continue
+		}
+
+		// If file is tracked in HEAD, it was already handled by the tracked-file
+		// reconciliation above.
+		if trackedFiles[relPath] {
+			continue
+		}
+
+		// If file existed at session start, preserve it (untracked user files)
+		if preservedUntrackedFiles[relPath] {
+			continue
+		}
+
+		// File is untracked and not in checkpoint - delete it via os.Root
+		if removeErr := osroot.Remove(repoRootHandle, relPath); removeErr == nil {
+			fmt.Fprintf(w, "  Deleted: %s\n", relPath)
+		}
+	}
+}
+
+func trackedFilesInTree(ctx context.Context, tree *object.Tree) (map[string]bool, error) {
+	trackedFiles := make(map[string]bool)
+	err := tree.Files().ForEach(func(f *object.File) error {
+		if err := ctx.Err(); err != nil {
+			return err //nolint:wrapcheck // Propagating context cancellation
+		}
+		trackedFiles[f.Name] = true
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to iterate tree files: %w", err)
+	}
+	return trackedFiles, nil
 }
 
 // resetShadowBranchToCheckpoint resets the shadow branch HEAD to the given checkpoint.
@@ -573,19 +616,21 @@ func (s *ManualCommitStrategy) PreviewRewind(ctx context.Context, point RewindPo
 	}
 
 	// Build set of files tracked in HEAD
-	trackedFiles := make(map[string]bool)
-	//nolint:errcheck // Error is not critical for preview
-	_ = headTree.Files().ForEach(func(f *object.File) error {
-		if err := ctx.Err(); err != nil {
-			return err //nolint:wrapcheck // Propagating context cancellation
-		}
-		trackedFiles[f.Name] = true
-		return nil
-	})
+	trackedFiles, err := trackedFilesInTree(ctx, headTree)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list HEAD files: %w", err)
+	}
 
-	// Find untracked files that would be deleted.
+	// Find tracked and untracked files that would be deleted.
 	// Uses git ls-files to only consider non-ignored files.
 	var filesToDelete []string
+	for relPath := range trackedFiles {
+		if checkpointFiles[relPath] || isProtectedPath(relPath) {
+			continue
+		}
+		filesToDelete = append(filesToDelete, relPath)
+	}
+
 	untrackedNow, untrackedErr := collectUntrackedFiles(ctx)
 	if untrackedErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not list untracked files for preview: %v\n", untrackedErr)
