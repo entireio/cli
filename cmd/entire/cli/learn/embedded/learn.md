@@ -1,87 +1,89 @@
 ## Set up & connect
 
-Turn on Entire and log in so your agent work gets tracked. Install hooks for an agent to start capturing checkpoints alongside your commits.
+Turns on Entire in this repository and wires it to your agents. Run `entire enable` once per repo, then `entire agent add` to install hooks for each agent you use.
 
-- `entire enable` — Enable Entire in current repository
-- `entire agent add` — Install hooks for an agent
-- `entire auth login` — Log in to Entire
+- `entire enable` — Enable Entire with session tracking for your AI agent workflows
+- `entire agent add` — Install hooks for an agent in this repository
+- `entire agent list` — List installed and available agents
+- `entire agent remove` — Uninstall hooks for an agent from this repository
 
-## Observe your work
+## Observe current state
 
-Check what you're working on right now — your activity summary, the active session, and a recap of recent checkpoint milestones.
+Tells you what's active right now — which session owns the current worktree, what all tracked sessions look like, and your cross-repo activity overview. Useful when you return to a repo after a break and need to orient quickly.
 
-- `entire activity` — Show your activity overview
-- `entire session current` — Show the active session for the current worktree
-- `entire recap` — Summarize recent checkpoint activity
+- `entire status` — Show whether Entire is currently enabled or disabled
+- `entire session current` — Show the most recently active session for the current worktree
+- `entire session list` — List all sessions, including ended ones
+- `entire session info` — Display detailed state for a session
+- `entire activity` — Show your activity overview, repository breakdown, and recent commits from entire.io
 
-## Find & explore checkpoints
+## Switch or resume
 
-Search or list checkpoints by keyword or semantic match. Explain the intent behind any session or commit by pulling up the original prompt, agent response, and files touched.
+Switch branches and pick up an agent session exactly where it left off, or attach a session that ran outside the normal hook lifecycle. Useful when juggling multiple branches or pulling in a session that started before hooks were installed.
 
-- `entire checkpoint search` — Search checkpoints using semantic and keyword matching
+- `entire session resume` — Switch to a local branch and resume the agent session from its last commit
+- `entire session attach` — Attach an existing agent session that wasn't captured by hooks
+- `entire session stop` — Mark one or more active sessions as ended
+
+## Find prior work
+
+Search past checkpoints, commits, and sessions by topic, keyword, or natural language using hybrid semantic and keyword matching — useful when you can't remember which session fixed a bug or led to a refactor.
+
+- `entire checkpoint search "<query>"` — Search checkpoints, commits, and sessions using semantic and keyword matching
 - `entire checkpoint list` — List checkpoints on the current branch
-- `entire checkpoint explain` — Explain a session, commit, or checkpoint
 
-## Switch & resume work
+## Understand a change
 
-Jump between branches without losing context by resuming a session from its last commit. Attach work that wasn't auto-captured, or rewind interactively to an earlier checkpoint and resume from there.
+Shows you the original prompt, agent response, and files touched behind any checkpoint or commit, so you can tell what intent shaped the diff — yours or a teammate's.
 
-- `entire session resume` — Switch to a branch and resume its session
-- `entire session attach` — Attach an existing agent session
-- `entire checkpoint rewind` — Browse checkpoints and rewind your session
+- `entire checkpoint explain` — Explain a session, commit, or checkpoint in human-readable context
 
-## Manage & troubleshoot
+## Summarize & share
 
-Detect and fix stuck sessions, broken metadata branches, or hook misconfiguration with the doctor. Clean up session data and check whether Entire is enabled.
+Generate a human-readable summary of recent agent work for standup, handoff, or your own weekly review.
 
-- `entire doctor` — Diagnose and fix session issues
-- `entire clean` — Clean up Entire session data
-- `entire status` — Show Entire status
-
-## Summarize & dispatch
-
-Generate a dispatch that summarizes your recent agent work — useful for standup, handoff, or your own weekly review.
-
+- `entire recap` — Summarize recent checkpoint activity
 - `entire dispatch` — Generate a dispatch summarizing recent agent work
+
+## Troubleshoot
+
+Detects and offers fixes for stuck sessions, broken metadata branches, or hook misconfiguration. Run `entire doctor` first whenever something feels off before digging deeper.
+
+- `entire doctor` — Scan for session issues and offer to fix them
 
 ## Labs
 
-Entire Labs is where experimental workflows live — try new features before they graduate to the main CLI. Run `entire labs` to see what's available.
+`entire labs` is where commands live before they're ready for the main surface — you get early access to new workflows, with the understanding that invocations and behavior may shift. Try them freely; feedback shapes what graduates.
 
 - `entire review` — Run configured review skills against the current branch
 - `entire learn` — Learn the Entire CLI
+- `entire investigate` — Run a multi-agent investigation against a topic, issue, or seed doc
+- `entire org` — Manage Entire organizations (create, list)
+- `entire project` — Manage Entire projects (create, list)
+- `entire repo` — Manage Entire repositories (create, list, get, delete)
+- `entire grant` — Manage access grants and org membership (org, project, repo)
 
 ## External agents
 
 Entire ships with built-in support for several agents (run `entire agent list` to see them). For anything else, drop an `entire-agent-<name>` binary on your PATH and it shows up alongside the built-ins, ready for `entire agent add`.
 
-https://github.com/entireio/external-agents
+  https://github.com/entireio/external-agents
 
 ## Skills
 
 Entire publishes a curated library of agent skills — slash commands and integrations that drop into Claude Code, Codex, Cursor, OpenCode, and other supported agents.
 
-https://github.com/entireio/skills
+  https://github.com/entireio/skills
 
 ## Other commands
 
-- `entire agent list` — List installed and available agents
-- `entire agent remove` — Uninstall hooks for an agent
-- `entire auth logout` — Log out of Entire
-- `entire auth list` — List active API tokens for the authenticated user
-- `entire auth revoke` — Revoke an API token by id
-- `entire auth status` — Show authentication status
+- `entire auth` — Manage authentication (login, logout, status, and login-context management)
+- `entire clean` — Clean up Entire session data
 - `entire configure` — Update Entire settings in the current repository
 - `entire disable` — Disable Entire in current repository
-- `entire doctor bundle` — Produce a diagnostic bundle (zip) for bug reports — secrets are redacted by default
-- `entire doctor logs` — Show recent operational logs
-- `entire doctor trace` — Show hook performance traces
-- `entire plugin install` — Link or copy a plugin executable into the managed directory
-- `entire plugin list` — List plugins installed in the managed directory
-- `entire plugin remove` — Remove a plugin from the managed directory
-- `entire session info` — Show detailed session information
-- `entire session list` — List all sessions
-- `entire session stop` — Stop one or more active sessions
+- `entire login` — Log in to Entire
+- `entire logout` — Log out of Entire
+- `entire plugin` — Manage Entire plugins (install, list, remove)
 - `entire version` — Show build information
 
 https://docs.entire.io/cli
