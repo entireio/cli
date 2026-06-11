@@ -148,12 +148,17 @@ jobs:
 
       - name: Bootstrap agent
         env:
-          COPILOT_GITHUB_TOKEN: ${{ github.token }}
-        run: go run ./e2e/bootstrap ${{ inputs.agent }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          if [ -z "${COPILOT_GITHUB_TOKEN:-}" ]; then
+            echo "::error::COPILOT_GITHUB_TOKEN repository secret is required for Copilot CLI E2E tests"
+            exit 1
+          fi
+          go run ./e2e/bootstrap ${{ inputs.agent }}
 
       - name: E2E Checkpoints V2
         env:
-          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
           E2E_ENTIRE_BIN: /usr/local/bin/entire
           E2E_CHECKPOINTS_MODE: ${{ inputs.checkpoints_mode }}
