@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -343,6 +344,47 @@ func TestDispatchLifecycleEvent_UnknownEventType(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown lifecycle event type") {
 		t.Errorf("expected error message about unknown event type, got: %v", err)
+	}
+}
+
+// TestDispatchLifecycleEvent_RejectsTraversalSessionID verifies the dispatcher
+// rejects a path-unsafe session ID for every event type, before routing to a
+// handler. This guards handlers that build filesystem paths from the ID without
+// their own check (notably handleLifecycleTurnEnd's .entire/metadata/<id>/
+// MkdirAll + WriteFile). The guard runs before any repo/FS access, so no repo
+// setup is needed.
+func TestDispatchLifecycleEvent_RejectsTraversalSessionID(t *testing.T) {
+	t.Parallel()
+
+	ag := newMockAgent()
+	for _, evType := range []agent.EventType{
+		agent.TurnEnd, agent.ModelUpdate, agent.Compaction, agent.SubagentEnd, agent.SessionEnd,
+	} {
+		err := DispatchLifecycleEvent(context.Background(), ag, &agent.Event{
+			Type:       evType,
+			SessionID:  "../../etc/evil",
+			SessionRef: "/dev/null",
+			Model:      "x",
+		})
+		if err == nil {
+			t.Fatalf("%v event with traversal session ID: got nil error, want rejection", evType)
+		}
+		if !strings.Contains(err.Error(), "invalid session ID") {
+			t.Errorf("%v event: error = %q, want \"invalid session ID\"", evType, err)
+		}
+	}
+
+	// ToolUseID and SubagentID also build filesystem paths (task metadata dir,
+	// subagent transcript path) and must be rejected too.
+	if err := DispatchLifecycleEvent(context.Background(), ag, &agent.Event{
+		Type: agent.SubagentEnd, SessionID: "ok-session", ToolUseID: "../../evil", SessionRef: "/dev/null",
+	}); err == nil || !strings.Contains(err.Error(), "invalid tool use ID") {
+		t.Errorf("traversal tool use ID: error = %v, want \"invalid tool use ID\"", err)
+	}
+	if err := DispatchLifecycleEvent(context.Background(), ag, &agent.Event{
+		Type: agent.SubagentEnd, SessionID: "ok-session", SubagentID: "../../evil", SessionRef: "/dev/null",
+	}); err == nil || !strings.Contains(err.Error(), "invalid subagent ID") {
+		t.Errorf("traversal subagent ID: error = %v, want \"invalid subagent ID\"", err)
 	}
 }
 
@@ -1098,6 +1140,85 @@ func TestHandleLifecycleTurnStart_WritesPromptContent(t *testing.T) {
 	}
 }
 
+func TestHandleLifecycleTurnStart_RecordsGenericSkillSlashEvent(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	ag := newMockAgent()
+	sessionID := "test-generic-skill-slash"
+	event := &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Prompt:    "/skill:trigger-analysis inspect the implementation",
+		Timestamp: time.Date(2026, 5, 25, 12, 34, 56, 0, time.UTC),
+	}
+
+	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, event))
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Len(t, state.SkillEvents, 1)
+
+	skillEvent := state.SkillEvents[0]
+	require.Equal(t, agent.SkillEventTypePromptInvocation, skillEvent.EventType)
+	require.Equal(t, "trigger-analysis", skillEvent.Skill.Name)
+	require.Equal(t, string(ag.Name()), skillEvent.Source.Agent)
+	require.Equal(t, agent.SkillSignalPromptSlashCommand, skillEvent.Source.Signal)
+	require.Equal(t, agent.SkillConfidenceExplicit, skillEvent.Source.Confidence)
+	require.Equal(t, state.TurnID, skillEvent.TurnID)
+	require.Equal(t, "2026-05-25T12:34:56Z", skillEvent.Timestamp)
+	require.Equal(t, "/skill:trigger-analysis", skillEvent.Native["command"])
+	require.Equal(t, agent.SkillCollapseTargetUserMessage, skillEvent.Collapse.Target)
+	require.True(t, skillEvent.Collapse.DefaultCollapsed)
+}
+
+func TestHandleLifecycleTurnStart_DoesNotDuplicateGenericSkillSlashEventFromForwardedHook(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	sessionID := "test-generic-skill-forwarded"
+	ownerAgent := newMockAgent()
+	forwardedAgent := &mockLifecycleAgent{
+		name:           "forwarded-agent",
+		agentType:      "Forwarded Agent",
+		transcriptData: []byte(`{"type":"user","message":"test"}`),
+	}
+	prompt := "/skill:trigger-analysis inspect the implementation"
+
+	require.NoError(t, handleLifecycleTurnStart(context.Background(), ownerAgent, &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Prompt:    prompt,
+		Timestamp: time.Date(2026, 5, 25, 12, 34, 56, 0, time.UTC),
+	}))
+	require.NoError(t, handleLifecycleTurnStart(context.Background(), forwardedAgent, &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Prompt:    prompt,
+		Timestamp: time.Date(2026, 5, 25, 12, 34, 57, 0, time.UTC),
+	}))
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, ownerAgent.Type(), state.AgentType)
+	require.Len(t, state.SkillEvents, 1)
+	require.Equal(t, string(ownerAgent.Name()), state.SkillEvents[0].Source.Agent)
+}
+
 func TestHandleLifecycleTurnEnd_BackfillsPromptFromTranscript(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir()
 	tmpDir := t.TempDir()
@@ -1597,5 +1718,391 @@ func TestAdoptReviewEnv_AlreadyTaggedNotOverwritten(t *testing.T) {
 	}
 	if state.ReviewPrompt != "old prompt" {
 		t.Errorf("ReviewPrompt: got %q, want %q (must not be overwritten on second turn)", state.ReviewPrompt, "old prompt")
+	}
+}
+
+// testInvestigateRunID is the placeholder run ID used by the
+// adoptInvestigateEnv tests below. Production run IDs are 12 hex chars; the
+// adopter does not enforce the format itself, so a fixed test value is fine.
+const testInvestigateRunID = "abcdef012345"
+
+// setInvestigateEnv populates all ENTIRE_INVESTIGATE_* env vars for a test
+// using t.Setenv (so they are restored at test end). agentName must match
+// the hook's agent for adoption to succeed.
+func setInvestigateEnv(t *testing.T, agentName, startingSHA, topic string) {
+	t.Helper()
+	t.Setenv(investigate.EnvSession, "1")
+	t.Setenv(investigate.EnvAgent, agentName)
+	t.Setenv(investigate.EnvStartingSHA, startingSHA)
+	t.Setenv(investigate.EnvRunID, testInvestigateRunID)
+	t.Setenv(investigate.EnvTopic, topic)
+}
+
+// TestAdoptInvestigateEnv_Success verifies that adoptInvestigateEnv tags the
+// session state with Kind=agent_investigate and populates the investigate
+// fields when all ENTIRE_INVESTIGATE_* env vars are valid.
+func TestAdoptInvestigateEnv_Success(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	ag := newMockAgent()
+	headSHA := testutil.GetHeadHash(t, tmp)
+	setInvestigateEnv(t, string(ag.Name()), headSHA, "Why is checkout flaky?")
+
+	sessionID := "test-investigate-env-success"
+	state := &session.State{
+		SessionID:  sessionID,
+		BaseCommit: headSHA,
+	}
+	adoptInvestigateEnv(context.Background(), state, string(ag.Name()))
+
+	if state.Kind != session.KindAgentInvestigate {
+		t.Errorf("Kind: got %q, want agent_investigate", state.Kind)
+	}
+	if state.InvestigateRunID != testInvestigateRunID {
+		t.Errorf("InvestigateRunID: got %q", state.InvestigateRunID)
+	}
+	if state.InvestigateTopic != "Why is checkout flaky?" {
+		t.Errorf("InvestigateTopic: got %q", state.InvestigateTopic)
+	}
+}
+
+// TestAdoptInvestigateEnv_AgentMismatch verifies that adoption is skipped
+// (and state is left untouched) when the env's agent does not match the
+// expected hook agent.
+func TestAdoptInvestigateEnv_AgentMismatch(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	headSHA := testutil.GetHeadHash(t, tmp)
+	// Env says claude-code; the hook is "codex" — mismatch must skip adoption.
+	setInvestigateEnv(t, "claude-code", headSHA, "topic")
+
+	state := &session.State{
+		SessionID:  "test-investigate-env-agent-mismatch",
+		BaseCommit: headSHA,
+	}
+	adoptInvestigateEnv(context.Background(), state, "codex")
+
+	if state.Kind != "" {
+		t.Errorf("Kind: got %q, want empty for agent mismatch", state.Kind)
+	}
+	if state.InvestigateRunID != "" {
+		t.Errorf("InvestigateRunID: got %q, want empty", state.InvestigateRunID)
+	}
+}
+
+// TestAdoptInvestigateEnv_StaleStartingSHA verifies that adoption is skipped
+// when the env's starting SHA does not match the session's base commit
+// (stale env from an earlier HEAD).
+func TestAdoptInvestigateEnv_StaleStartingSHA(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	ag := newMockAgent()
+	// "deadbeef" vs state.BaseCommit "cafebabe" — different SHAs.
+	setInvestigateEnv(t, string(ag.Name()), "deadbeef", "topic")
+
+	state := &session.State{
+		SessionID:  "test-investigate-env-stale-sha",
+		BaseCommit: "cafebabe",
+	}
+	adoptInvestigateEnv(context.Background(), state, string(ag.Name()))
+
+	if state.Kind != "" {
+		t.Errorf("Kind: got %q, want empty for stale starting SHA", state.Kind)
+	}
+}
+
+// TestAdoptInvestigateEnv_AlreadyTaggedNotOverwritten verifies that when a
+// session is already tagged (e.g. as a review session by an outer adoption),
+// adoptInvestigateEnv short-circuits and does not modify state.
+func TestAdoptInvestigateEnv_AlreadyTaggedNotOverwritten(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	ag := newMockAgent()
+	headSHA := testutil.GetHeadHash(t, tmp)
+	setInvestigateEnv(t, string(ag.Name()), headSHA, "topic")
+
+	// Pre-tag the state as a review session.
+	state := &session.State{
+		SessionID:    "test-investigate-env-already-tagged",
+		BaseCommit:   headSHA,
+		Kind:         session.KindAgentReview,
+		ReviewPrompt: "review prompt",
+		ReviewSkills: []string{"/skill"},
+	}
+	adoptInvestigateEnv(context.Background(), state, string(ag.Name()))
+
+	if state.Kind != session.KindAgentReview {
+		t.Errorf("Kind: got %q, want agent_review (must not be overwritten)", state.Kind)
+	}
+	if state.InvestigateRunID != "" {
+		t.Errorf("InvestigateRunID: got %q, want empty (must not be set)", state.InvestigateRunID)
+	}
+	if state.InvestigateTopic != "" {
+		t.Errorf("InvestigateTopic: got %q, want empty (must not be set)", state.InvestigateTopic)
+	}
+}
+
+// TestAdoptInvestigateEnv_SessionEnvNotOne verifies that adoption is skipped
+// when ENTIRE_INVESTIGATE_SESSION is set to anything other than "1".
+func TestAdoptInvestigateEnv_SessionEnvNotOne(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	ag := newMockAgent()
+	headSHA := testutil.GetHeadHash(t, tmp)
+	t.Setenv(investigate.EnvSession, "0")
+	t.Setenv(investigate.EnvAgent, string(ag.Name()))
+	t.Setenv(investigate.EnvStartingSHA, headSHA)
+	t.Setenv(investigate.EnvRunID, testInvestigateRunID)
+	t.Setenv(investigate.EnvTopic, "topic")
+
+	state := &session.State{
+		SessionID:  "test-investigate-env-session-not-one",
+		BaseCommit: headSHA,
+	}
+	adoptInvestigateEnv(context.Background(), state, string(ag.Name()))
+
+	if state.Kind != "" {
+		t.Errorf("Kind: got %q, want empty when SESSION!=\"1\"", state.Kind)
+	}
+}
+
+// TestAdoptInvestigateEnv_RejectsBadRunID verifies that an env var
+// handshake with a malformed (non-12-hex) or empty RunID does not tag the
+// session. This protects downstream condensation from joining on junk run
+// IDs leaked via stale shell env or hand-set vars.
+// TestAdoptInvestigateEnv_TagsSessionViaHandleLifecycleTurnStart is the
+// investigate twin of TestAdoptReviewEnv_TagsSession: it drives
+// handleLifecycleTurnStart end-to-end and asserts the persisted session
+// state carries Kind=agent_investigate plus the run id/topic decoded from
+// the env vars. Distinct from the more focused TestAdoptInvestigateEnv_*
+// cases above, which call adoptInvestigateEnv directly.
+func TestAdoptInvestigateEnv_TagsSessionViaHandleLifecycleTurnStart(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	ag := newMockAgent()
+	headSHA := testutil.GetHeadHash(t, tmp)
+	setInvestigateEnv(t, string(ag.Name()), headSHA, "Why is checkout flaky?")
+
+	sessionID := "test-investigate-env-via-handle-001"
+	event := &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Prompt:    "Investigate this.",
+		Timestamp: time.Now(),
+	}
+	if err := handleLifecycleTurnStart(context.Background(), ag, event); err != nil {
+		t.Fatalf("handleLifecycleTurnStart: %v", err)
+	}
+
+	state, loadErr := strategy.LoadSessionState(context.Background(), sessionID)
+	if loadErr != nil {
+		t.Fatalf("load state: %v", loadErr)
+	}
+	if state == nil {
+		t.Fatal("state is nil after turn start")
+	}
+	if state.Kind != session.KindAgentInvestigate {
+		t.Errorf("Kind: got %q, want agent_investigate", state.Kind)
+	}
+	if state.InvestigateRunID != testInvestigateRunID {
+		t.Errorf("InvestigateRunID: got %q, want %q", state.InvestigateRunID, testInvestigateRunID)
+	}
+	if state.InvestigateTopic != "Why is checkout flaky?" {
+		t.Errorf("InvestigateTopic: got %q", state.InvestigateTopic)
+	}
+}
+
+func TestAdoptInvestigateEnv_RejectsBadRunID(t *testing.T) {
+	cases := []struct {
+		name  string
+		runID string
+	}{
+		{"empty", ""},
+		{"too short", "abcdef0"},
+		{"too long", "abcdef0123456789"},
+		{"uppercase", "ABCDEF012345"},
+		{"non-hex", "notatallhex!"},
+		{"path-traversal attempt", "../../../etc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Cannot use t.Parallel(): t.Chdir + t.Setenv.
+			tmp := t.TempDir()
+			testutil.InitRepo(t, tmp)
+			testutil.WriteFile(t, tmp, "f.txt", "x")
+			testutil.GitAdd(t, tmp, "f.txt")
+			testutil.GitCommit(t, tmp, "init")
+			t.Chdir(tmp)
+			paths.ClearWorktreeRootCache()
+
+			ag := newMockAgent()
+			headSHA := testutil.GetHeadHash(t, tmp)
+			t.Setenv(investigate.EnvSession, "1")
+			t.Setenv(investigate.EnvAgent, string(ag.Name()))
+			t.Setenv(investigate.EnvStartingSHA, headSHA)
+			t.Setenv(investigate.EnvRunID, tc.runID)
+			t.Setenv(investigate.EnvTopic, "topic")
+
+			state := &session.State{
+				SessionID:  "test-investigate-env-bad-run-id-" + tc.name,
+				BaseCommit: headSHA,
+			}
+			adoptInvestigateEnv(context.Background(), state, string(ag.Name()))
+
+			if state.Kind != "" {
+				t.Errorf("Kind: got %q, want empty for bad run ID %q", state.Kind, tc.runID)
+			}
+			if state.InvestigateRunID != "" {
+				t.Errorf("InvestigateRunID: got %q, want empty (must not be set)", state.InvestigateRunID)
+			}
+		})
+	}
+}
+
+// promptWindow mirrors strategy.checkpointStepCount (unexported there): the
+// displayed step count = SessionTurnCount - PromptWindowBase, floored at 1.
+func promptWindow(s *strategy.SessionState) int {
+	if w := s.SessionTurnCount - s.PromptWindowBase; w >= 1 {
+		return w
+	}
+	return 1
+}
+
+// writeCheckpoint simulates what CondenseSession does to the window state: read
+// the count, then set the deferred-reset flag (without zeroing the window).
+func writeCheckpoint(s *strategy.SessionState) int {
+	n := promptWindow(s)
+	s.PromptWindowResetPending = true
+	return n
+}
+
+// TestPromptWindowDeferredReset exercises the two product-required examples:
+// (1) p1,p2,p3 -> A=3 then p4,p5 -> C=2, and (2) two checkpoints with no prompt
+// in between report the same count (deferred reset).
+func TestPromptWindowDeferredReset(t *testing.T) {
+	turn := func(s *strategy.SessionState) {
+		persistEventMetadataToState(&agent.Event{Type: agent.TurnEnd}, s)
+	}
+
+	s := &strategy.SessionState{}
+
+	// p1,p2,p3 -> checkpoint A => 3
+	turn(s)
+	turn(s)
+	turn(s)
+	if got := writeCheckpoint(s); got != 3 {
+		t.Fatalf("checkpoint A = %d, want 3", got)
+	}
+
+	// Back-to-back: checkpoint B with no prompt in between => same as A (3), not 0.
+	if got := writeCheckpoint(s); got != 3 {
+		t.Fatalf("back-to-back checkpoint B = %d, want 3", got)
+	}
+
+	// The next prompt re-anchors the window to start fresh.
+	turn(s) // p4: first prompt of the new window
+	if s.PromptWindowResetPending {
+		t.Fatalf("ResetPending should be cleared after the first post-checkpoint turn")
+	}
+	if s.PromptWindowBase != 3 {
+		t.Fatalf("PromptWindowBase = %d, want 3 (re-anchored to pre-turn count)", s.PromptWindowBase)
+	}
+	turn(s) // p5
+	if got := writeCheckpoint(s); got != 2 {
+		t.Fatalf("checkpoint C = %d, want 2", got)
+	}
+}
+
+// TestPromptWindowExecModeCumulativeTurnCount verifies the window derives
+// correctly when turns arrive as a cumulative hook-reported TurnCount (exec-mode
+// agents that never fire UserPromptSubmit/TurnStart), rather than as self-counted
+// TurnEnd increments.
+func TestPromptWindowExecModeCumulativeTurnCount(t *testing.T) {
+	exec := func(s *strategy.SessionState, cumulative int) {
+		persistEventMetadataToState(&agent.Event{Type: agent.TurnEnd, TurnCount: cumulative}, s)
+	}
+
+	s := &strategy.SessionState{}
+
+	exec(s, 1)
+	exec(s, 2)
+	exec(s, 3)
+	if got := writeCheckpoint(s); got != 3 {
+		t.Fatalf("exec checkpoint A = %d, want 3", got)
+	}
+
+	exec(s, 4) // re-anchors base to 3
+	exec(s, 5)
+	if got := writeCheckpoint(s); got != 2 {
+		t.Fatalf("exec checkpoint B = %d, want 2", got)
+	}
+}
+
+// TestPromptWindowStaleHookDoesNotResetEarly guards against a repeated/stale hook
+// (same cumulative TurnCount, so the count doesn't actually advance) clearing the
+// deferred reset early. If it did, a later back-to-back checkpoint would report 1
+// instead of matching the prior checkpoint's count.
+func TestPromptWindowStaleHookDoesNotResetEarly(t *testing.T) {
+	exec := func(s *strategy.SessionState, cumulative int) {
+		persistEventMetadataToState(&agent.Event{Type: agent.TurnEnd, TurnCount: cumulative}, s)
+	}
+
+	s := &strategy.SessionState{}
+	exec(s, 1)
+	exec(s, 2)
+	exec(s, 3)
+	if got := writeCheckpoint(s); got != 3 {
+		t.Fatalf("checkpoint A = %d, want 3", got)
+	}
+
+	// Stale hook: same cumulative count, no real advance — must not re-anchor.
+	exec(s, 3)
+	if !s.PromptWindowResetPending {
+		t.Fatalf("stale hook should not clear ResetPending")
+	}
+	if got := writeCheckpoint(s); got != 3 {
+		t.Fatalf("back-to-back checkpoint B after stale hook = %d, want 3", got)
 	}
 }

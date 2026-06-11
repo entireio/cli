@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
+	"golang.org/x/term"
 
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
@@ -24,10 +25,12 @@ import (
 // orchestrator's dispatch goroutine.
 //
 // Cancellation: cancel is the same context.CancelFunc that controls the
-// orchestrator's run context. KeyCtrlC in the dashboard calls this function
-// (gated by a sync.Once in the model). Out-of-TUI SIGINT routes through the
-// cobra root's context, which cancels the same function — no parallel
-// signal.Notify goroutine is needed here.
+// orchestrator's run context. The first KeyCtrlC in the dashboard fires this
+// function (guarded by a sync.Once in the model) and switches the dashboard
+// to a "Cancelling agents..." indicator while agents drain; a second KeyCtrlC
+// force-quits without waiting. Out-of-TUI SIGINT routes through the cobra
+// root's context, which cancels the same function — no parallel signal.Notify
+// goroutine is needed here.
 type TUISink struct {
 	program *tea.Program
 
@@ -45,21 +48,49 @@ var _ reviewtypes.Sink = (*TUISink)(nil)
 // the ordered list of agent names that will run; the dashboard pre-renders one
 // row per agent so the user sees the full run shape from the first frame.
 // output is the writer the Bubble Tea program renders into (typically
-// cmd.OutOrStdout()).
+// cmd.OutOrStdout()). input is the reader Bubble Tea reads keypresses from
+// (typically os.Stdin in production); tests must pass a non-TTY reader (e.g.
+// bytes.NewReader(nil)) so Bubble Tea does not put the inherited terminal
+// into raw mode and corrupt sibling test output.
 //
 // tea.WithoutSignalHandler keeps SIGINT routing on the cobra root's existing
 // handler (which cancels the run context), so the TUI's KeyCtrlC path and the
 // OS signal path share a single cancel function with no race.
-func NewTUISink(agents []string, cancel context.CancelFunc, output io.Writer) *TUISink {
+func NewTUISink(agents []string, cancel context.CancelFunc, output io.Writer, input io.Reader) *TUISink {
 	model := newReviewTUIModel(agents, cancel)
+	if measureTerminal := terminalMeasurer(output); measureTerminal != nil {
+		if width, height, ok := measureTerminal(); ok {
+			model.termWidth = width
+			model.termHeight = height
+		}
+	}
 	prog := tea.NewProgram(
 		model,
 		tea.WithOutput(output),
+		tea.WithInput(input),
 		tea.WithoutSignalHandler(), // SIGINT handled by cobra root; KeyCtrlC calls cancel directly
 	)
 	return &TUISink{
 		program: prog,
 		done:    make(chan struct{}),
+	}
+}
+
+type fdWriter interface {
+	Fd() uintptr
+}
+
+func terminalMeasurer(output io.Writer) func() (int, int, bool) {
+	f, ok := output.(fdWriter)
+	if !ok {
+		return nil
+	}
+	return func() (int, int, bool) {
+		width, height, err := term.GetSize(int(f.Fd())) //nolint:gosec // fd values fit in int on supported platforms
+		if err != nil || width <= 0 || height <= 0 {
+			return 0, 0, false
+		}
+		return width, height, true
 	}
 }
 
@@ -116,11 +147,15 @@ func (s *TUISink) AgentEvent(agent string, ev reviewtypes.Event) {
 
 // RunFinished (Sink interface): mark the run complete and send the final
 // summary message. The TUI shows the dashboard one more frame with the
-// terminal statuses and waits for the user to press any key to dismiss.
+// terminal statuses, then waits for the user to dismiss it. After a run
+// completes, dismissal requires an explicit exit key (q/Esc/Enter/Ctrl+C);
+// Ctrl+O still drills into agent buffers for post-mortem inspection. Other
+// keys are no-ops so users can navigate the completed run without
+// accidentally dismissing.
 //
-// IMPORTANT: RunFinished blocks until the user dismisses (presses any key)
-// so that post-run sinks (e.g. DumpSink) render their narrative AFTER the
-// TUI has exited and the terminal is back in normal mode.
+// IMPORTANT: RunFinished blocks until the user dismisses so that post-run
+// sinks (e.g. DumpSink) render their narrative AFTER the TUI has exited
+// and the terminal is back in normal mode.
 func (s *TUISink) RunFinished(summary reviewtypes.RunSummary) {
 	s.mu.Lock()
 	if s.finished {
@@ -131,8 +166,8 @@ func (s *TUISink) RunFinished(summary reviewtypes.RunSummary) {
 	s.mu.Unlock()
 
 	s.program.Send(runFinishedMsg{summary: summary})
-	// Block until the Bubble Tea program exits (user presses any key after
-	// seeing the final dashboard, or Ctrl+C was already received and the
-	// program already quit).
+	// Block until the Bubble Tea program exits — user pressed an explicit
+	// exit key (q/Esc/Enter/Ctrl+C) after seeing the final dashboard, or
+	// Ctrl+C was received during the run and the program already quit.
 	s.Wait()
 }

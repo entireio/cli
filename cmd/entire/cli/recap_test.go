@@ -314,6 +314,25 @@ func TestRecapLoadErrorMessage_NetworkError(t *testing.T) {
 	}
 }
 
+func TestRecapLoadErrorMessage_DNSNotFound(t *testing.T) {
+	t.Parallel()
+
+	nxdomain := &net.DNSError{Name: "no-token-here.example.com", Err: "no such host", IsNotFound: true}
+	got := recapLoadErrorMessage(fmt.Errorf("me/recap get: %w", nxdomain))
+	if strings.Contains(got, "Check your internet connection") {
+		t.Fatalf("NXDOMAIN should not blame internet connection:\n%s", got)
+	}
+	for _, want := range []string{
+		"Could not resolve API host",
+		"no-token-here.example.com",
+		"ENTIRE_API_BASE_URL",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("message missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestRecapLoadErrorMessage_ContextCancellation(t *testing.T) {
 	t.Parallel()
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -51,6 +52,46 @@ func TestBearerTransport_InjectsAuthHeader(t *testing.T) {
 	}
 	if gotAccept != "application/json" {
 		t.Errorf("Accept = %q, want %q", gotAccept, "application/json")
+	}
+}
+
+func TestBearerTransport_EmptyTokenOmitsAuthHeader(t *testing.T) {
+	t.Parallel()
+
+	// recap's logged-out path constructs a client with token="" and expects
+	// the request to reach the server (which then returns a typed 401 that
+	// recap handles specially). The transport must omit the Authorization
+	// header rather than fail locally or send a malformed "Bearer ".
+	var gotAuth string
+	var gotUA string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotUA = r.Header.Get("User-Agent")
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	transport := &bearerTransport{token: "", base: http.DefaultTransport}
+	client := &http.Client{Transport: transport}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, server.URL+"/test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("unexpected transport error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if gotAuth != "" {
+		t.Errorf("Authorization = %q, want empty", gotAuth)
+	}
+	if gotUA != "entire-cli" {
+		t.Errorf("User-Agent = %q, want entire-cli", gotUA)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (server should have decided, not the transport)", resp.StatusCode)
 	}
 }
 
@@ -246,6 +287,31 @@ func TestCheckResponse_ErrorWithJSON(t *testing.T) {
 	}
 }
 
+func TestCheckResponse_ErrorWithObjectEnvelope(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":{"code":"not_found","message":"session not found","field":null,"retryable":false}}`)) //nolint:errcheck // test handler
+	}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL) //nolint:noctx // test helper
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	err = CheckResponse(resp)
+	if err == nil {
+		t.Fatal("CheckResponse(404) = nil, want error")
+	}
+	if got := err.Error(); got != "API error: session not found (status 404)" {
+		t.Errorf("error = %q", got)
+	}
+}
+
 func TestCheckResponse_ErrorWithPlainText(t *testing.T) {
 	t.Parallel()
 
@@ -298,5 +364,58 @@ func TestDecodeJSONResponse(t *testing.T) {
 	}
 	if result.Status != "ok" {
 		t.Errorf("Status = %q, want %q", result.Status, "ok")
+	}
+}
+
+// TestDecodeJSONResponse_LargeBodyOverOldCap exercises a JSON body whose size
+// exceeds the previous 1 MiB read cap. `entire activity` requests up to a
+// month of commits, which routinely produces 1.5+ MiB responses; under the
+// old cap, io.LimitReader truncated the body mid-JSON and json.Unmarshal
+// surfaced "unexpected end of JSON input", masking the real cause.
+func TestDecodeJSONResponse_LargeBodyOverOldCap(t *testing.T) {
+	t.Parallel()
+
+	const itemCount = 4000 // ~2 MiB at ~500 bytes per item
+	type item struct {
+		ID      string `json:"id"`
+		Message string `json:"message"`
+	}
+	payload := struct {
+		Items []item `json:"items"`
+	}{Items: make([]item, itemCount)}
+	for i := range payload.Items {
+		payload.Items[i] = item{
+			ID:      "0123456789abcdef0123456789abcdef0123456789abcdef",
+			Message: strings.Repeat("x", 400),
+		}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) <= 1<<20 {
+		t.Fatalf("test payload %d bytes is not over the old 1 MiB cap", len(encoded))
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(encoded) //nolint:errcheck // test handler
+	}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL) //nolint:noctx // test helper
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var got struct {
+		Items []item `json:"items"`
+	}
+	if err := DecodeJSON(resp, &got); err != nil {
+		t.Fatalf("DecodeJSON(%d-byte body) = %v, want nil", len(encoded), err)
+	}
+	if len(got.Items) != itemCount {
+		t.Errorf("decoded %d items, want %d", len(got.Items), itemCount)
 	}
 }

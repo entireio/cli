@@ -50,6 +50,13 @@ const (
 	// distinct Kind values AND added to Kind.IsReview so the checkpoint's
 	// HasReview umbrella flag keeps covering them.
 	KindAgentReview Kind = "agent_review"
+
+	// KindAgentInvestigate tags a session created by `entire investigate`
+	// (agent-driven investigation). A session is review OR investigate, not
+	// both — Kind is single-valued. Future investigate kinds should be added
+	// to Kind.IsInvestigate so the checkpoint's HasInvestigation umbrella
+	// flag keeps covering them.
+	KindAgentInvestigate Kind = "agent_investigate"
 )
 
 // IsReview reports whether this Kind counts as "a review happened" for the
@@ -61,6 +68,15 @@ func (k Kind) IsReview() bool {
 	// singleCaseSwitch flags a one-case switch — so we keep it as a list of
 	// equality checks. Add new review-kind values to the disjunction below.
 	return k == KindAgentReview
+}
+
+// IsInvestigate reports whether this Kind counts as "an investigation
+// happened" for the purpose of CheckpointSummary.HasInvestigation. Extend
+// this when adding new investigate-kind Kind values so the umbrella flag
+// stays accurate without string-literal coupling across packages.
+func (k Kind) IsInvestigate() bool {
+	// See IsReview for why this is an equality check rather than a switch.
+	return k == KindAgentInvestigate
 }
 
 // State represents the state of an active session.
@@ -116,6 +132,18 @@ type State struct {
 	// prompt (attach path). Always populated when Kind is a review kind.
 	ReviewPrompt string `json:"review_prompt,omitempty"`
 
+	// InvestigateRunID is the 12-hex-char ID of the parent investigation
+	// run when Kind is an investigate kind. Multiple sessions across rounds
+	// share this ID so the loop driver can correlate them. Empty for
+	// non-investigate sessions.
+	InvestigateRunID string `json:"investigate_run_id,omitempty"`
+
+	// InvestigateTopic is the human-readable topic the investigation was
+	// asked to investigate. Snapshot at session start so checkpoint
+	// metadata records what the agent was investigating. Only meaningful
+	// when Kind is an investigate kind.
+	InvestigateTopic string `json:"investigate_topic,omitempty"`
+
 	// TurnID is a unique identifier for the current agent turn.
 	// Lifecycle:
 	//   - Generated fresh in InitializeSession at each turn start
@@ -152,11 +180,6 @@ type State struct {
 	// Used for fast "has new content?" checks in PostCommit: compare the git blob size
 	// against this value without reading the full transcript content.
 	CheckpointTranscriptSize int64 `json:"checkpoint_transcript_size,omitempty"`
-
-	// CompactTranscriptStart is the transcript.jsonl line offset where the current
-	// checkpoint cycle began. It parallels CheckpointTranscriptStart (full.jsonl)
-	// and is updated after each condensation.
-	CompactTranscriptStart int `json:"compact_transcript_start,omitempty"`
 
 	// Deprecated: CondensedTranscriptLines is replaced by CheckpointTranscriptStart.
 	// Kept for backward compatibility with existing state files.
@@ -212,11 +235,30 @@ type State struct {
 	// Token usage tracking (accumulated across all checkpoints in this session)
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
 
+	// SkillEvents records explicit native skill signals observed during this session.
+	// Stored as sidecar metadata so consumers can collapse skill-related transcript events
+	// without mutating the raw agent transcript.
+	SkillEvents []agent.SkillEvent `json:"skill_events,omitempty"`
+
 	// Hook-provided session metrics (for agents like Cursor that report via hooks)
 	SessionDurationMs int64 `json:"session_duration_ms,omitempty"`
 	SessionTurnCount  int   `json:"session_turn_count,omitempty"`
 	ContextTokens     int   `json:"context_tokens,omitempty"`
 	ContextWindowSize int   `json:"context_window_size,omitempty"`
+
+	// PromptWindowBase is the SessionTurnCount value at the start of the current
+	// checkpoint window. The number of prompts attributed to the next checkpoint is
+	// SessionTurnCount - PromptWindowBase (floored at 1 when written). It is only
+	// advanced (deferred reset) the next time a turn is counted after a checkpoint
+	// was written, so two checkpoints with no prompt between them report the same
+	// count. Zero-value safe on old state files: base 0 ⇒ window = SessionTurnCount,
+	// i.e. "all prompts so far" (correct first-checkpoint semantics).
+	PromptWindowBase int `json:"prompt_window_base,omitempty"`
+
+	// PromptWindowResetPending indicates a checkpoint was just written and the
+	// window base must be re-anchored to the current SessionTurnCount the next time
+	// a turn is counted. Deferred so back-to-back checkpoints share a count.
+	PromptWindowResetPending bool `json:"prompt_window_reset_pending,omitempty"`
 
 	// Deprecated: TranscriptLinesAtStart is replaced by CheckpointTranscriptStart.
 	// Kept for backward compatibility with existing state files.
@@ -450,12 +492,20 @@ func (s *StateStore) Save(ctx context.Context, state *State) error {
 		return fmt.Errorf("failed to create session state directory: %w", err)
 	}
 
+	// Scope the final rename to an os.Root so the session-ID-derived destination
+	// cannot escape the state directory even if validation were ever bypassed
+	// (defense in depth; the ID is already validated above).
+	root, err := os.OpenRoot(s.stateDir)
+	if err != nil {
+		return fmt.Errorf("failed to open session state directory: %w", err)
+	}
+	defer root.Close()
+
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal session state: %w", err)
 	}
 
-	stateFile := s.stateFilePath(state.SessionID)
 	fileName := state.SessionID + ".json"
 
 	// Use a unique temp file per save. Concurrent hook processes can write the
@@ -480,8 +530,8 @@ func (s *StateStore) Save(ctx context.Context, state *State) error {
 		return fmt.Errorf("failed to close session state file: %w", err)
 	}
 
-	// Atomic rename into the validated final path.
-	if err := os.Rename(tmpFileName, stateFile); err != nil {
+	// Atomic rename into the validated final path, via os.Root.
+	if err := root.Rename(filepath.Base(tmpFileName), fileName); err != nil {
 		return fmt.Errorf("failed to rename session state file: %w", err)
 	}
 	removeTmp = false
@@ -497,21 +547,43 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
 
-	// Remove all files for this session (state .json, .model hint, any future hint files).
-	// filepath.Glob finds matches; os.Root ensures traversal-resistant removal.
-	matches, _ := filepath.Glob(filepath.Join(s.stateDir, sessionID+".*")) //nolint:errcheck // pattern is always valid
+	// Remove all files for this session (state .json, .model hint, any future
+	// hint files). Match by literal prefix rather than filepath.Glob: the
+	// session ID is user-controlled, and a glob pattern would let metacharacters
+	// match and delete other sessions' files. os.Root ensures traversal-resistant
+	// removal.
+	matches := matchSessionFiles(s.stateDir, sessionID)
 	if len(matches) > 0 {
 		root, rootErr := os.OpenRoot(s.stateDir)
 		if rootErr != nil {
 			return fmt.Errorf("failed to open session state directory for cleanup: %w", rootErr)
 		}
 		defer root.Close()
-		for _, f := range matches {
-			_ = osroot.Remove(root, filepath.Base(f)) //nolint:errcheck // best-effort cleanup
+		for _, name := range matches {
+			_ = osroot.Remove(root, name) //nolint:errcheck // best-effort cleanup
 		}
 	}
 
 	return nil
+}
+
+// matchSessionFiles returns the names (not paths) of files in dir that belong to
+// the given session ID — i.e. "<sessionID>.<ext>". It uses literal prefix
+// matching, never glob patterns, so a session ID containing glob metacharacters
+// cannot match unrelated files.
+func matchSessionFiles(dir, sessionID string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil // missing/unreadable dir => nothing to clear
+	}
+	prefix := sessionID + "."
+	var matched []string
+	for _, e := range entries {
+		if name := e.Name(); strings.HasPrefix(name, prefix) {
+			matched = append(matched, name)
+		}
+	}
+	return matched
 }
 
 // RemoveAll removes the entire session state directory.
@@ -554,11 +626,6 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 		states = append(states, state)
 	}
 	return states, nil
-}
-
-// stateFilePath returns the path to a session state file.
-func (s *StateStore) stateFilePath(sessionID string) string {
-	return filepath.Join(s.stateDir, sessionID+".json")
 }
 
 // gitCommonDirCache caches the git common dir to avoid repeated subprocess calls.

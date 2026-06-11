@@ -2,8 +2,6 @@ package review_test
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -224,7 +222,7 @@ func TestBuildReviewPickerFields_StructureWithDiscovery(t *testing.T) {
 func TestBuildReviewPickerFields_EmptyBuiltinsRendersNote(t *testing.T) {
 	t.Parallel()
 	fields := review.BuildReviewPickerFields(
-		"gemini-cli",
+		"gemini",
 		nil,
 		nil,
 		[]skilldiscovery.InstallHint{{Message: "install gemini-code-review"}},
@@ -289,63 +287,6 @@ func TestBuildReviewPickerFields_SingleBuiltinDefaultsSelectedAndRenders(t *test
 	}
 }
 
-// TestSaveReviewConfig_PersistsSettings verifies SaveReviewConfig writes and
-// the settings can be read back.
-func TestSaveReviewConfig_PersistsSettings(t *testing.T) {
-	tmp := t.TempDir()
-	testutil.InitRepo(t, tmp)
-	t.Chdir(tmp)
-
-	err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
-		testAgentName: {Skills: []string{testReviewSkill, "/test-auditor"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	s, err := settings.Load(context.Background())
-	if err != nil {
-		t.Fatalf("load settings: %v", err)
-	}
-	cfg := s.Review[testAgentName]
-	if len(cfg.Skills) != 2 {
-		t.Errorf("expected 2 skills saved, got %v", cfg.Skills)
-	}
-	if cfg.Skills[0] != testReviewSkill {
-		t.Errorf("first skill = %q", cfg.Skills[0])
-	}
-}
-
-func TestSaveReviewConfig_PreservesReviewFixAgent(t *testing.T) {
-	tmp := t.TempDir()
-	testutil.InitRepo(t, tmp)
-	t.Chdir(tmp)
-
-	entireDir := filepath.Join(tmp, ".entire")
-	if err := os.MkdirAll(entireDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	before := []byte(`{"enabled":true,"review_fix_agent":"` + testCodexAgent + `"}`)
-	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), before, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
-		testAgentName: {Skills: []string{testReviewSkill}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	s, err := settings.Load(context.Background())
-	if err != nil {
-		t.Fatalf("load settings: %v", err)
-	}
-	if s.ReviewFixAgent != testCodexAgent {
-		t.Fatalf("ReviewFixAgent = %q, want %s", s.ReviewFixAgent, testCodexAgent)
-	}
-}
-
 func TestSaveReviewFixAgent_PersistsSettings(t *testing.T) {
 	tmp := t.TempDir()
 	testutil.InitRepo(t, tmp)
@@ -355,47 +296,11 @@ func TestSaveReviewFixAgent_PersistsSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := settings.Load(context.Background())
+	prefs, err := settings.LoadClonePreferences(context.Background())
 	if err != nil {
-		t.Fatalf("load settings: %v", err)
+		t.Fatalf("load preferences: %v", err)
 	}
-	if s.ReviewFixAgent != testCodexAgent {
-		t.Fatalf("ReviewFixAgent = %q, want %s", s.ReviewFixAgent, testCodexAgent)
-	}
-}
-
-// TestSaveReviewConfig_ReturnsErrorOnMalformedSettings ensures SaveReviewConfig
-// does not overwrite existing settings when settings.json is malformed.
-func TestSaveReviewConfig_ReturnsErrorOnMalformedSettings(t *testing.T) {
-	tmp := t.TempDir()
-	testutil.InitRepo(t, tmp)
-	t.Chdir(tmp)
-
-	entireDir := filepath.Join(tmp, ".entire")
-	if err := os.MkdirAll(entireDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	malformed := []byte(`{"enabled": true, "strategy": "manual-commit", "review": {`)
-	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), malformed, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(filepath.Join(entireDir, "settings.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
-		testAgentName: {Skills: []string{testReviewSkill}},
-	})
-	if err == nil {
-		t.Fatal("expected SaveReviewConfig to error on malformed settings")
-	}
-
-	after, err := os.ReadFile(filepath.Join(entireDir, "settings.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(before) != string(after) {
-		t.Errorf("settings.json was overwritten on load error:\nbefore=%q\nafter=%q", before, after)
+	if prefs.ReviewFixAgent != testCodexAgent {
+		t.Fatalf("ReviewFixAgent = %q, want %s", prefs.ReviewFixAgent, testCodexAgent)
 	}
 }

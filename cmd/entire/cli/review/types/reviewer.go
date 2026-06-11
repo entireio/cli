@@ -1,7 +1,7 @@
 // Package types defines the per-agent abstraction interfaces for `entire review`.
 //
 // AgentReviewer is the contract every supported agent (claude-code, codex,
-// gemini-cli, future additions) implements in its own package. The orchestrator
+// gemini, future additions) implements in its own package. The orchestrator
 // in cmd/entire/cli/review/run.go consumes this interface, never importing
 // concrete agent packages — that's how new agents land as additive files
 // without touching shared code.
@@ -9,9 +9,9 @@
 // Events flow as a stream: implementations spawn the agent process, parse
 // stdout into a sequence of typed Events (Started, AssistantText, ToolCall,
 // Tokens, Finished, RunError), and surface them via Process.Events. Per-agent
-// quirks (codex's chrome stripping, gemini's stdin requirement, claude's argv
-// shape) are entirely encapsulated inside each agent's adapter — shared code
-// only sees the cleaned event stream.
+// quirks (codex's JSONL envelope shape, gemini's stdin requirement, claude's
+// argv shape) are entirely encapsulated inside each agent's adapter — shared
+// code only sees the cleaned event stream.
 //
 // Living in a subpackage (not the review root package) avoids import cycles:
 // per-agent reviewers and the orchestrator both depend on these types
@@ -23,7 +23,7 @@ import "context"
 // AgentReviewer drives a single agent's review run.
 type AgentReviewer interface {
 	// Name returns the agent's registry key (e.g., "claude-code", "codex",
-	// "gemini-cli"). Stable identifier; do not change after release without
+	// "gemini"). Stable identifier; do not change after release without
 	// updating settings migration.
 	Name() string
 
@@ -86,9 +86,10 @@ type RunConfig struct {
 	// PerRunPrompt is optional textarea input from a single invocation.
 	PerRunPrompt string
 
-	// ScopeBaseRef is the git ref the review is scoped against (typically the
-	// closest ancestor branch). Used to compose the scope clause and as the
-	// base for `git diff` operations the agent may perform.
+	// ScopeBaseRef is the git ref the review is scoped against (mainline by
+	// default — origin/HEAD → origin/main → origin/master → main → master —
+	// or whatever `--base` overrides it to). Used to compose the scope clause
+	// and as the base for `git diff` operations the agent may perform.
 	ScopeBaseRef string
 
 	// CheckpointContext is best-effort context derived from checkpoints in the
@@ -102,6 +103,35 @@ type RunConfig struct {
 	// hook via ENTIRE_REVIEW_STARTING_SHA so checkpoint metadata records
 	// the commit that was reviewed.
 	StartingSHA string
+
+	// EnrichSummary optionally updates the completed run summary before sinks
+	// receive RunFinished. It is used for post-process data such as token
+	// totals that are only available after agent lifecycle hooks flush state.
+	//
+	// Timing: called on the orchestrator goroutine after every per-agent
+	// goroutine has exited, immediately before Sink.RunFinished is fanned
+	// out. The full RunSummary is consumed; any field the callback
+	// returns reaches the sinks.
+	//
+	// Contract: nil is valid (no enrichment). The callback must not block on
+	// a sink (deadlock), must not panic (no orchestrator-side recovery), and
+	// should honor ctx for cancellation when doing I/O.
+	EnrichSummary func(context.Context, RunSummary) RunSummary
+
+	// EnrichAgentRun optionally updates a single agent run after that agent
+	// exits, before the overall multi-agent run has necessarily completed.
+	//
+	// Timing: called on the per-agent forwarding goroutine in RunMulti,
+	// after proc.Wait() returns and after any synthetic RunError is queued.
+	// Only the returned Tokens field is consumed (emitted as a synthetic
+	// Tokens event so sinks see live token totals before sibling agents
+	// finish); other field changes are discarded. Returning Tokens{In:0,
+	// Out:0} suppresses emission entirely.
+	//
+	// Contract: nil is valid (no enrichment). The callback must be
+	// goroutine-safe across N agents and must not block on a sink. A panic
+	// is recovered; no synthetic Tokens event is emitted on panic.
+	EnrichAgentRun func(context.Context, AgentRun) AgentRun
 }
 
 // Event is the sealed sum type emitted by Process.Events. The unexported

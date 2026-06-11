@@ -10,7 +10,7 @@ export E2E_AGENT="${usage_agent:-}"
 
 # Build from source with version info unless a pre-built binary is provided.
 if [ -z "${E2E_ENTIRE_BIN:-}" ]; then
-  mise run build
+  mise run build:e2e
   if [ -f "$PWD/entire.exe" ]; then
     export E2E_ENTIRE_BIN="$PWD/entire.exe"
   else

@@ -36,7 +36,7 @@ func TestWriteCommitted_EmptyTranscript_NoPhantomPaths(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("d4e5f6a1b2c3")
 
 	// Write a checkpoint with NO transcript
@@ -82,7 +82,7 @@ func TestWriteCommitted_WithTranscript_PathsPopulated(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("e5f6a1b2c3d4")
 
 	// Write a checkpoint WITH a transcript

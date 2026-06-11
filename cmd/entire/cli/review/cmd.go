@@ -2,7 +2,7 @@
 //
 // cmd.go provides NewCommand(), the cobra entry point for `entire review`.
 // It routes through the new AgentReviewer / Sink / Run architecture for
-// launchable agents (claude-code, codex, gemini-cli) and falls back to
+// launchable agents (claude-code, codex, gemini) and falls back to
 // RunMarkerFallback for non-launchable agents (cursor, opencode,
 // factoryai-droid, copilot-cli).
 package review
@@ -13,15 +13,16 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"strings"
+	"os"
 
 	"charm.land/huh/v2"
-	git "github.com/go-git/go-git/v6"
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitexec"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -97,6 +98,7 @@ type runReviewDeps struct {
 func NewCommand(deps Deps) *cobra.Command {
 	var edit bool
 	var agentOverride string
+	var baseOverride string
 	var findings bool
 	var fix bool
 	var all bool
@@ -108,8 +110,9 @@ func NewCommand(deps Deps) *cobra.Command {
 		// review --help` and the command works normally.
 		Hidden: true,
 		Short:  "Run configured review skills against the current branch",
-		Long: `Run the review skills configured in .entire/settings.json against
-the current branch. On first run, an interactive picker writes the config.
+		Long: `Run configured review skills against the current branch. Review
+preferences are loaded from Entire settings and clone-local preferences. On
+first run, an interactive picker writes clone-local preferences.
 
 Labs entry: review is experimental. We are actively refining it based on user
 feedback.
@@ -124,6 +127,10 @@ Flags:
   --all          with --fix, apply all sources/findings without selectors
   --agent NAME   select a specific configured agent when more than one is
                  configured (default: alphabetically first)
+  --base REF     scope the review against REF instead of mainline. Useful
+                 for stacked PRs where the review base is the parent feature
+                 branch, not main. Default: first existing of origin/HEAD,
+                 origin/main, origin/master, main, master.
 
 Subcommands:
   attach <id>    tag an existing session as a review (equivalent to
@@ -156,6 +163,22 @@ Subcommands:
 			if modes > 1 {
 				return errors.New("--edit, --findings, and --fix are mutually exclusive")
 			}
+			// The migration prompt is only relevant for flows that write or
+			// read picker config (--edit and the default review run).
+			// --findings (read-only browsing) and --fix (uses
+			// ReviewFixAgent only) don't interact with the picker, so
+			// prompting in those paths interrupts the user for no reason.
+			if !findings && !fix {
+				if err := maybePromptReviewSettingsMigration(
+					ctx,
+					cmd.OutOrStdout(),
+					cmd.ErrOrStderr(),
+					interactive.IsTerminalWriter(cmd.OutOrStdout()) && interactive.CanPromptInteractively(),
+					deps.PromptYN,
+				); err != nil {
+					return err
+				}
+			}
 			if edit {
 				_, err := RunReviewConfigPicker(ctx, cmd.OutOrStdout(), deps.GetAgentsWithHooksInstalled)
 				return err
@@ -174,7 +197,7 @@ Subcommands:
 				promptForAgentFn: deps.PromptForAgentFn,
 				multiPickerFn:    deps.MultiPickerFn,
 			}
-			return runReview(ctx, cmd, agentOverride, deps, innerDeps)
+			return runReview(ctx, cmd, agentOverride, baseOverride, deps, innerDeps)
 		},
 	}
 	cmd.Flags().BoolVar(&edit, "edit", false, "re-open the review config picker")
@@ -182,6 +205,7 @@ Subcommands:
 	cmd.Flags().BoolVar(&fix, "fix", false, "apply review findings in a normal agent session")
 	cmd.Flags().BoolVar(&all, "all", false, "with --fix, apply all sources/findings without selectors")
 	cmd.Flags().StringVar(&agentOverride, "agent", "", "select a specific configured agent (default: alphabetically first)")
+	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)")
 	if deps.AttachCmd != nil {
 		cmd.AddCommand(deps.AttachCmd)
 	}
@@ -189,7 +213,7 @@ Subcommands:
 }
 
 // runReview executes the main review flow.
-func runReview(ctx context.Context, cmd *cobra.Command, agentOverride string, deps Deps, innerDeps runReviewDeps) error {
+func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, baseOverride string, deps Deps, innerDeps runReviewDeps) error {
 	out := cmd.OutOrStdout()
 	silentErr := deps.NewSilentError
 
@@ -203,13 +227,14 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride string, de
 	// 2. Load config. A load error means the settings file exists but is
 	// malformed (Load returns a default-filled object when the file is
 	// missing). Surface the error instead of silently opening the picker,
-	// which would cause SaveReviewConfig to write over the user's other
+	// which would cause the config writer to write over the user's other
 	// settings with an empty EntireSettings{}.
 	s, err := settings.Load(ctx)
 	if err != nil {
 		cmd.SilenceUsage = true
 		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to load settings: %v\n", err)
-		fmt.Fprintln(cmd.ErrOrStderr(), "Fix `.entire/settings.json` and re-run `entire review`.")
+		fmt.Fprintln(cmd.ErrOrStderr(),
+			"Fix your Entire settings or clone-local review preferences and re-run `entire review`.")
 		return silentErr(err)
 	}
 	if s == nil || len(s.Review) == 0 {
@@ -242,7 +267,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride string, de
 	if agentOverride == "" {
 		launchableEligible := computeLaunchableEligible(s, installed, deps.ReviewerFor)
 		if len(launchableEligible) >= 2 {
-			return runMultiAgentPath(ctx, cmd, launchableEligible, s, innerDeps, deps, out)
+			return runMultiAgentPath(ctx, cmd, launchableEligible, baseOverride, s, innerDeps, deps, out)
 		}
 	}
 
@@ -293,7 +318,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride string, de
 		return silentErr(err)
 	}
 
-	return runSingleAgentPath(ctx, cmd, agentName, cfg, installed, deps, out)
+	return runSingleAgentPath(ctx, cmd, agentName, baseOverride, cfg, installed, deps, out)
 }
 
 // runSingleAgentPath completes a single-agent review: verifies hooks + skills,
@@ -302,7 +327,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride string, de
 func runSingleAgentPath(
 	ctx context.Context,
 	cmd *cobra.Command,
-	agentName string,
+	agentName, baseOverride string,
 	cfg settings.ReviewConfig,
 	installed []types.AgentName,
 	deps Deps,
@@ -359,15 +384,21 @@ func runSingleAgentPath(
 	// 5. Resolve HEAD SHA and worktree root.
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
+		cmd.SilenceUsage = true
 		return fmt.Errorf("resolve worktree root: %w", err)
 	}
 
 	// 6. Resolve HEAD SHA and detect scope.
 	headSHA, shaErr := currentHeadSHA(ctx, worktreeRoot)
 	if shaErr != nil {
+		cmd.SilenceUsage = true
 		return fmt.Errorf("resolve HEAD: %w", shaErr)
 	}
-	scopeBaseRef := detectScope(ctx, worktreeRoot, out)
+	scopeBaseRef, scopeErr := detectScope(ctx, worktreeRoot, baseOverride, out)
+	if scopeErr != nil {
+		cmd.SilenceUsage = true
+		return scopeErr
+	}
 	checkpointContext := ""
 	if deps.ReviewCheckpointContext != nil {
 		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
@@ -390,6 +421,7 @@ func runSingleAgentPath(
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
+	runCfg.EnrichSummary = reviewSummaryTokenEnricher(worktreeRoot, headSHA)
 	canPrompt := interactive.CanPromptInteractively()
 	sinks := composeSingleAgentSinks(singleAgentSinkInputs{
 		out:       out,
@@ -412,21 +444,41 @@ func runSingleAgentPath(
 	return nil
 }
 
-// detectScope computes the scope base ref for the current repo and prints a
-// scope banner to out on success. Best-effort: on any failure, returns an
-// empty string and prints no banner so the run proceeds in degraded mode.
-func detectScope(ctx context.Context, worktreeRoot string, out io.Writer) (scopeBaseRef string) {
-	if repo, openErr := git.PlainOpen(worktreeRoot); openErr == nil {
-		if stats, statsErr := ComputeScopeStats(ctx, repo); statsErr == nil {
-			fmt.Fprintln(out, formatScopeBanner(stats))
-			return stats.BaseRef
-		} else { //nolint:revive // else-after-return is clearer here for the error-path log
-			logging.Debug(ctx, "review scope detection failed", slog.String("error", statsErr.Error()))
-		}
-	} else {
+// detectScope computes the scope base ref for the current repo and prints
+// a scope banner to out on success. baseOverride, when non-empty, comes from
+// the `--base <ref>` flag and bypasses mainline auto-detection.
+//
+// Failure handling: when baseOverride is set and the ref is invalid,
+// returns ("", err) so the caller can fail-loudly before spawning agents.
+// Otherwise (auto-detection failed): returns "" and the caller proceeds in
+// degraded mode without a scope banner.
+func detectScope(ctx context.Context, worktreeRoot, baseOverride string, out io.Writer) (string, error) {
+	repo, openErr := gitrepo.OpenPath(worktreeRoot)
+	if openErr != nil {
 		logging.Debug(ctx, "review repo open failed", slog.String("error", openErr.Error()))
+		// Fail-loud when the user explicitly asked for a base. Without this
+		// branch an explicit --base flag would be silently dropped on
+		// PlainOpen failure, inconsistent with the ComputeScopeStats error
+		// path below that aborts on bad overrides.
+		if baseOverride != "" {
+			return "", fmt.Errorf("--base %q given but cannot open repository at %q: %w", baseOverride, worktreeRoot, openErr)
+		}
+		return "", nil
 	}
-	return ""
+	defer repo.Close()
+	stats, statsErr := ComputeScopeStats(ctx, repo, baseOverride)
+	if statsErr != nil {
+		// With an override, the user explicitly asked for a specific base.
+		// A bad ref must abort before agents spawn so the user learns about
+		// the typo immediately, not after a long review run.
+		if baseOverride != "" {
+			return "", statsErr
+		}
+		logging.Debug(ctx, "review scope detection failed", slog.String("error", statsErr.Error()))
+		return "", nil
+	}
+	fmt.Fprintln(out, formatScopeBanner(stats))
+	return stats.BaseRef, nil
 }
 
 // runMultiAgentPath handles the multi-agent review flow: shows the multi-select
@@ -440,6 +492,7 @@ func runMultiAgentPath(
 	ctx context.Context,
 	cmd *cobra.Command,
 	launchableEligible []AgentChoice,
+	baseOverride string,
 	s *settings.EntireSettings,
 	innerDeps runReviewDeps,
 	deps Deps,
@@ -465,14 +518,20 @@ func runMultiAgentPath(
 	// Resolve worktree root and HEAD SHA for scope detection.
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
+		cmd.SilenceUsage = true
 		return fmt.Errorf("resolve worktree root: %w", err)
 	}
 	headSHA, shaErr := currentHeadSHA(ctx, worktreeRoot)
 	if shaErr != nil {
+		cmd.SilenceUsage = true
 		return fmt.Errorf("resolve HEAD: %w", shaErr)
 	}
 
-	scopeBaseRef := detectScope(ctx, worktreeRoot, out)
+	scopeBaseRef, scopeErr := detectScope(ctx, worktreeRoot, baseOverride, out)
+	if scopeErr != nil {
+		cmd.SilenceUsage = true
+		return scopeErr
+	}
 	checkpointContext := ""
 	if deps.ReviewCheckpointContext != nil {
 		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
@@ -548,7 +607,14 @@ func runMultiAgentPath(
 		defer tuiSink.Wait()
 	}
 
-	summary, waitErr := RunMulti(runCtx, reviewers, reviewtypes.RunConfig{}, sinks)
+	// Multi-agent only wires EnrichAgentRun. The per-agent enricher emits a
+	// synthetic Tokens event as each agent finishes, which the dispatch loop
+	// overwrites onto st.tokens (run_multi.go:168). That value flows into
+	// agentRuns[i].Tokens in the final summary, so a summary-level pass would
+	// redo the same store.List + token hydration once per run.
+	summary, waitErr := RunMulti(runCtx, reviewers, reviewtypes.RunConfig{
+		EnrichAgentRun: reviewAgentRunTokenEnricher(worktreeRoot, headSHA),
+	}, sinks)
 	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, aggregateOutput)
 	if waitErr != nil && runCtx.Err() == nil && ctx.Err() == nil {
 		return fmt.Errorf("review run: %w", waitErr)
@@ -617,7 +683,7 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 		return []reviewtypes.Sink{DumpSink{W: in.out}}
 	}
 	sinks := []reviewtypes.Sink{
-		NewTUISink(in.agentNames, in.cancelRun, in.out),
+		NewTUISink(in.agentNames, in.cancelRun, in.out, os.Stdin),
 		DumpSink{W: in.out},
 	}
 	if in.synthesisProvider != nil && in.canPrompt {
@@ -645,15 +711,28 @@ func writePostReviewManifest(
 	if summary.Cancelled || len(summary.AgentRuns) == 0 {
 		return
 	}
-	manifest, err := localReviewManifestFromCurrentState(ctx, worktreeRoot, headSHA, summary, aggregateOutput)
+	manifest, states, err := localReviewManifestFromCurrentState(ctx, worktreeRoot, headSHA, summary, aggregateOutput)
 	if err != nil {
 		logging.Debug(ctx, "review manifest not written", slog.String("error", err.Error()))
 		warnManifestNotWritten(out, "could not load session state: "+err.Error())
 		return
 	}
 	if len(manifest.Sources) == 0 {
-		logging.Debug(ctx, "review manifest not written: no matching review sessions")
-		warnManifestNotWritten(out, "review session was not tagged as a review (env-var handshake did not reach the hook)")
+		reason, sentinel := explainEmptyManifest(worktreeRoot, headSHA, summary, states)
+		if sentinel {
+			// Matcher and explainer have drifted — the matcher rejected
+			// every tagged session for a reason none of the explainer's
+			// filters cover. Surface at Warn so this gets noticed without
+			// requiring debug logging.
+			logging.Warn(ctx, "review manifest matcher/explainer drift detected",
+				slog.String("reason", reason),
+				slog.Int("tagged_state_count", len(states)),
+				slog.Int("agent_run_count", len(summary.AgentRuns)))
+		} else {
+			logging.Debug(ctx, "review manifest not written: no matching review sessions",
+				slog.String("reason", reason))
+		}
+		warnManifestNotWritten(out, reason)
 		return
 	}
 	if err := writeLocalReviewManifest(ctx, manifest); err != nil {
@@ -677,13 +756,35 @@ func warnManifestNotWritten(out io.Writer, reason string) {
 	fmt.Fprintln(out, "  Re-run with `ENTIRE_LOG_LEVEL=debug` for diagnostic detail.")
 }
 
+func reviewSummaryTokenEnricher(worktreeRoot, headSHA string) func(context.Context, reviewtypes.RunSummary) reviewtypes.RunSummary {
+	return func(ctx context.Context, summary reviewtypes.RunSummary) reviewtypes.RunSummary {
+		enriched, err := hydrateReviewSummaryTokensFromCurrentState(ctx, worktreeRoot, headSHA, summary, agent.GetByAgentType)
+		if err != nil {
+			logging.Debug(ctx, "review token hydration skipped", slog.String("error", err.Error()))
+			return summary
+		}
+		return enriched
+	}
+}
+
+func reviewAgentRunTokenEnricher(worktreeRoot, headSHA string) func(context.Context, reviewtypes.AgentRun) reviewtypes.AgentRun {
+	return func(ctx context.Context, run reviewtypes.AgentRun) reviewtypes.AgentRun {
+		enriched, err := hydrateReviewAgentRunTokensFromCurrentState(ctx, worktreeRoot, headSHA, run, agent.GetByAgentType)
+		if err != nil {
+			logging.Debug(ctx, "review agent token hydration skipped", slog.String("error", err.Error()))
+			return run
+		}
+		return enriched
+	}
+}
+
 func composeSingleAgentSinks(in singleAgentSinkInputs) []reviewtypes.Sink {
 	if !in.isTTY || !in.canPrompt {
 		fmt.Fprintf(in.out, "Running review with %s...\n", in.agentName)
 		return []reviewtypes.Sink{DumpSink{W: in.out}}
 	}
 	return []reviewtypes.Sink{
-		NewTUISink([]string{in.agentName}, in.cancelRun, in.out),
+		NewTUISink([]string{in.agentName}, in.cancelRun, in.out, os.Stdin),
 		DumpSink{W: in.out},
 	}
 }
@@ -732,9 +833,5 @@ var _ reviewtypes.AgentReviewer = (*perAgentConfiguredReviewer)(nil)
 
 // currentHeadSHA returns the current HEAD commit hash as a 40-char hex string.
 func currentHeadSHA(ctx context.Context, repoRoot string) (string, error) {
-	out, err := runGit(ctx, repoRoot, "rev-parse", "HEAD")
-	if err != nil {
-		return "", fmt.Errorf("git rev-parse HEAD: %w", err)
-	}
-	return strings.TrimSpace(out), nil
+	return gitexec.HeadSHA(ctx, repoRoot) //nolint:wrapcheck // gitexec already wraps
 }

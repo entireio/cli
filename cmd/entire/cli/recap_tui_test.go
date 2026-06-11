@@ -122,6 +122,111 @@ func TestRecapTUIModel_TogglesRange(t *testing.T) {
 	}
 }
 
+func TestRecapTUIModel_UsesDirectRangeKeys(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		key  rune
+		want recap.RangeKey
+	}{
+		{'d', recap.RangeDay},
+		{'w', recap.RangeWeek},
+		{'m', recap.RangeMonth},
+		{'r', recap.Range90d},
+	}
+	for _, tt := range cases {
+		key, want := tt.key, tt.want
+		t.Run(string(key), func(t *testing.T) {
+			t.Parallel()
+
+			start := testRecapTUIModel()
+			start.rangeKey = recap.RangeMonth
+			m, cmd := updateRecapTUIModel(t, start, recapRuneKey(key))
+			if m.rangeKey != want {
+				t.Fatalf("range = %q, want %q", m.rangeKey, want)
+			}
+			if want == recap.RangeMonth {
+				if cmd != nil {
+					t.Fatal("pressing the current range key should not refetch")
+				}
+				return
+			}
+			if !m.loading {
+				t.Fatal("range key should mark model loading")
+			}
+			if cmd == nil {
+				t.Fatal("range key should refetch recap data")
+			}
+		})
+	}
+}
+
+func TestRecapTUIModel_LoadErrorShowsUppercaseRetryKey(t *testing.T) {
+	t.Parallel()
+
+	m := testRecapTUIModel()
+	m.loadErr = errors.New("boom")
+
+	view := m.View()
+	if !strings.Contains(view.Content, "Press R to retry or q to quit.") {
+		t.Fatalf("load error view = %q, want uppercase retry key", view.Content)
+	}
+	if strings.Contains(view.Content, "Press r to retry") {
+		t.Fatalf("load error view still references lowercase retry key: %q", view.Content)
+	}
+}
+
+func TestRecapTUIModel_UppercaseRRefreshes(t *testing.T) {
+	t.Parallel()
+
+	start := testRecapTUIModel()
+	start.rangeKey = recap.RangeWeek
+	m, cmd := updateRecapTUIModel(t, start, recapRuneKey('R'))
+	if m.rangeKey != recap.RangeWeek {
+		t.Fatalf("refresh should keep range = %q, want week", m.rangeKey)
+	}
+	if !m.loading {
+		t.Fatal("refresh should mark model loading")
+	}
+	if cmd == nil {
+		t.Fatal("refresh should refetch recap data")
+	}
+}
+
+func TestRecapTUIModel_SameRangeKeyRetriesAfterError(t *testing.T) {
+	t.Parallel()
+
+	// When a load error is on screen, pressing the current range key should
+	// retry the fetch rather than be silently swallowed — otherwise the user
+	// is stranded staring at an error with no obvious recovery path.
+	start := testRecapTUIModel()
+	start.rangeKey = recap.RangeMonth
+	start.loadErr = errors.New("boom")
+	// Seed a prior response so we can assert that same-range retry preserves
+	// it (instead of nil-ing it like the new-range path does). The user is
+	// asking for the same data, so anything already on screen stays visible
+	// under the loading state — no blank flicker mid-retry.
+	priorResp := &recap.MeRecapResponse{Summary: recap.Summary{Me: recap.SummaryTotals{Sessions: 7}}}
+	start.resp = priorResp
+
+	m, cmd := updateRecapTUIModel(t, start, recapRuneKey('m'))
+	if m.rangeKey != recap.RangeMonth {
+		t.Fatalf("retry should not change range, got %q", m.rangeKey)
+	}
+	if m.loadErr != nil {
+		t.Fatalf("retry should clear loadErr, got %v", m.loadErr)
+	}
+	if !m.loading {
+		t.Fatal("retry should mark model loading")
+	}
+	if cmd == nil {
+		t.Fatal("retry should refetch recap data")
+	}
+	if m.resp != priorResp {
+		t.Fatalf("same-range retry must preserve m.resp so previously displayed data stays visible during retry; got %+v want %+v", m.resp, priorResp)
+	}
+}
+
 func TestRecapTUIModel_TogglesView(t *testing.T) {
 	t.Parallel()
 
@@ -218,7 +323,7 @@ func TestRecapTUIModel_FooterFitsWidth(t *testing.T) {
 	if got := lipgloss.Width(footer); got > m.width {
 		t.Fatalf("wide footer width = %d, want <= %d: %q", got, m.width, footer)
 	}
-	for _, want := range []string{"t range", "v view", "a agent", "r refresh", "↑/↓ scroll", "q quit"} {
+	for _, want := range []string{"d day", "w week", "m month", "r 90d", "v view", "a agent", "R reload", "q quit"} {
 		if !strings.Contains(footer, want) {
 			t.Fatalf("wide footer missing %q: %q", want, footer)
 		}

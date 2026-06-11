@@ -78,6 +78,9 @@ func (m *mockFullAgent) PrepareTranscript(context.Context, string) error { retur
 // TokenCalculator
 func (m *mockFullAgent) CalculateTokenUsage([]byte, int) (*TokenUsage, error) { return nil, nil } //nolint:nilnil // test mock
 
+// ModelExtractor
+func (m *mockFullAgent) ExtractModel([]byte) (string, error) { return "mock-model", nil }
+
 // TextGenerator
 func (m *mockFullAgent) GenerateText(context.Context, string, string) (string, error) {
 	return "", nil
@@ -234,6 +237,36 @@ func TestAsTokenCalculator(t *testing.T) {
 		t.Parallel()
 		ag := &mockFullAgent{caps: DeclaredCaps{TokenCalculator: false}}
 		_, ok := AsTokenCalculator(ag)
+		if ok {
+			t.Error("expected false")
+		}
+	})
+}
+
+func TestAsModelExtractor(t *testing.T) {
+	t.Parallel()
+
+	// AsModelExtractor is an ungated, built-in-only helper (no DeclaredCaps
+	// field): implementing the interface is sufficient.
+	t.Run("not implemented", func(t *testing.T) {
+		t.Parallel()
+		_, ok := AsModelExtractor(&mockBaseAgent{})
+		if ok {
+			t.Error("expected false")
+		}
+	})
+
+	t.Run("implemented", func(t *testing.T) {
+		t.Parallel()
+		me, ok := AsModelExtractor(&mockFullAgent{})
+		if !ok || me == nil {
+			t.Error("expected true")
+		}
+	})
+
+	t.Run("nil agent", func(t *testing.T) {
+		t.Parallel()
+		_, ok := AsModelExtractor(nil)
 		if ok {
 			t.Error("expected false")
 		}

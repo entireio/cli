@@ -13,9 +13,17 @@ import (
 )
 
 // MeRecapResponse mirrors GET /api/v1/me/recap.
+//
+// Repo/Repos contract: at most one of these scopes the recap.
+//   - When Repo is non-nil and non-empty, the recap is scoped to that single
+//     repo and Repos is ignored.
+//   - Otherwise Repos lists the repos contributing to a multi-repo recap,
+//     ordered by the server's "most active first" ranking (rendering code
+//     relies on that order when truncating to "+N more").
 type MeRecapResponse struct {
 	Timeframe    string                `json:"timeframe"`
 	Repo         *string               `json:"repo"`
+	Repos        []string              `json:"repos"`
 	Since        string                `json:"since"`
 	Until        string                `json:"until"`
 	Agents       map[string]AgentEntry `json:"agents"`
@@ -27,11 +35,12 @@ type MeRecapResponse struct {
 
 // Summary contains top-level counts intended for CLI rendering.
 type Summary struct {
-	Me         SummaryTotals  `json:"me"`
-	Team       *SummaryTotals `json:"team"`
-	RepoCount  int            `json:"repoCount"`
-	ActiveDays int            `json:"activeDays"`
-	Analysis   AnalysisStatus `json:"analysis"`
+	Me          SummaryTotals     `json:"me"`
+	Team        *SummaryTotals    `json:"team"`
+	RepoCount   int               `json:"repoCount"`
+	ActiveDays  int               `json:"activeDays"`
+	Analysis    AnalysisStatus    `json:"analysis"`
+	Transcripts TranscriptSummary `json:"transcripts"`
 }
 
 type SummaryTotals struct {
@@ -44,6 +53,17 @@ type AnalysisStatus struct {
 	Complete int `json:"complete"`
 	Pending  int `json:"pending"`
 	Failed   int `json:"failed"`
+}
+
+type TranscriptSummary struct {
+	Me   TranscriptStatus  `json:"me"`
+	Team *TranscriptStatus `json:"team"`
+}
+
+type TranscriptStatus struct {
+	Failed  int `json:"failed"`
+	Pending int `json:"pending"`
+	Empty   int `json:"empty"`
 }
 
 type DailyCount struct {

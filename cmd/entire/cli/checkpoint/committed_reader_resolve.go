@@ -2,106 +2,69 @@ package checkpoint
 
 import (
 	"context"
-	"errors"
-	"log/slog"
+	"fmt"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // CommittedReader provides read access to committed checkpoint data.
-// Both GitStore (v1) and V2GitStore (v2) implement this interface.
 type CommittedReader interface {
 	ReadCommitted(ctx context.Context, checkpointID id.CheckpointID) (*CheckpointSummary, error)
 	ReadSessionContent(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*SessionContent, error)
 }
 
-// ResolveCommittedReaderForCheckpoint resolves which committed checkpoint reader
-// should be used for a specific checkpoint ID.
-//
-// Fallback behavior:
-//   - Try v2 first when preferCheckpointsV2 is true
-//   - Fall back to v1 for any v2 failure except context cancellation
-//   - During the v2 migration period, a valid v1 copy should never be blocked
-//     by a corrupt or unreadable v2 copy
-func ResolveCommittedReaderForCheckpoint(
-	ctx context.Context,
-	checkpointID id.CheckpointID,
-	v1Store *GitStore,
-	v2Store *V2GitStore,
-	preferCheckpointsV2 bool,
-) (CommittedReader, *CheckpointSummary, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, nil, err //nolint:wrapcheck // Propagating context cancellation
-	}
-
-	if preferCheckpointsV2 && v2Store != nil {
-		summary, err := v2Store.ReadCommitted(ctx, checkpointID)
-		if err == nil && summary != nil {
-			return v2Store, summary, nil
-		}
-		if err != nil && ctx.Err() != nil {
-			return nil, nil, ctx.Err() //nolint:wrapcheck // Propagating context cancellation
-		}
-		if err != nil && !errors.Is(err, ErrCheckpointNotFound) && !errors.Is(err, ErrNoTranscript) {
-			logging.Debug(ctx, "v2 ReadCommitted failed, falling back to v1",
-				slog.String("checkpoint_id", checkpointID.String()),
-				slog.String("error", err.Error()),
-			)
-		}
-	}
-
-	if v1Store == nil {
-		return nil, nil, ErrCheckpointNotFound
-	}
-
-	summary, err := v1Store.ReadCommitted(ctx, checkpointID)
-	if err != nil {
-		return nil, nil, err
-	}
-	if summary == nil {
-		return nil, nil, ErrCheckpointNotFound
-	}
-
-	return v1Store, summary, nil
+// CommittedListReader provides read and list access to committed checkpoint data.
+type CommittedListReader interface {
+	CommittedReader
+	ListCommitted(ctx context.Context) ([]CommittedInfo, error)
+	ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*CommittedMetadata, error)
+	ReadSessionPrompts(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (string, error)
 }
 
-// ResolveRawSessionLogForCheckpoint resolves the raw transcript log bytes for a
-// checkpoint with v2-first, v1-fallback behavior.
-//
-// Fallback behavior:
-//   - Try v2 first when preferCheckpointsV2 is true
-//   - Fall back to v1 for any v2 failure except context cancellation
-func ResolveRawSessionLogForCheckpoint(
-	ctx context.Context,
-	checkpointID id.CheckpointID,
-	v1Store *GitStore,
-	v2Store *V2GitStore,
-	preferCheckpointsV2 bool,
-) ([]byte, string, error) {
+// ReadCommittedCheckpoint reads a committed checkpoint summary and normalizes
+// a nil store response into ErrCheckpointNotFound.
+func ReadCommittedCheckpoint(ctx context.Context, reader CommittedReader, checkpointID id.CheckpointID) (*CheckpointSummary, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err //nolint:wrapcheck // Propagating context cancellation
+	}
+
+	summary, err := reader.ReadCommitted(ctx, checkpointID)
+	if err != nil {
+		return nil, fmt.Errorf("read committed checkpoint: %w", err)
+	}
+	if summary == nil {
+		return nil, ErrCheckpointNotFound
+	}
+	return summary, nil
+}
+
+// ReadLatestSessionContent reads the latest session from an already-resolved
+// committed reader and summary.
+func ReadLatestSessionContent(ctx context.Context, reader CommittedReader, checkpointID id.CheckpointID, summary *CheckpointSummary) (*SessionContent, error) {
+	if summary == nil || len(summary.Sessions) == 0 {
+		return nil, ErrCheckpointNotFound
+	}
+	latestIndex := len(summary.Sessions) - 1
+	content, err := reader.ReadSessionContent(ctx, checkpointID, latestIndex)
+	if err != nil {
+		return nil, fmt.Errorf("read session %d content: %w", latestIndex, err)
+	}
+	return content, nil
+}
+
+func ReadRawSessionLogForCheckpoint(ctx context.Context, reader CommittedReader, checkpointID id.CheckpointID) ([]byte, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	if preferCheckpointsV2 && v2Store != nil {
-		content, sessionID, err := v2Store.GetSessionLog(ctx, checkpointID)
-		if err == nil && len(content) > 0 {
-			return content, sessionID, nil
-		}
-		if err != nil && ctx.Err() != nil {
-			return nil, "", ctx.Err() //nolint:wrapcheck // Propagating context cancellation
-		}
-		if err != nil && !errors.Is(err, ErrCheckpointNotFound) && !errors.Is(err, ErrNoTranscript) {
-			logging.Debug(ctx, "v2 GetSessionLog failed, falling back to v1",
-				slog.String("checkpoint_id", checkpointID.String()),
-				slog.String("error", err.Error()),
-			)
-		}
+	summary, err := ReadCommittedCheckpoint(ctx, reader, checkpointID)
+	if err != nil {
+		return nil, "", err
 	}
 
-	if v1Store == nil {
-		return nil, "", ErrCheckpointNotFound
+	content, err := ReadLatestSessionContent(ctx, reader, checkpointID, summary)
+	if err != nil {
+		return nil, "", err
 	}
-
-	return v1Store.GetSessionLog(ctx, checkpointID)
+	return content.Transcript, content.Metadata.SessionID, nil
 }

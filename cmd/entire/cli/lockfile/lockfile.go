@@ -3,11 +3,13 @@
 package lockfile
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ErrLocked is returned by Acquire when another process holds the lock.
@@ -39,6 +41,45 @@ func Acquire(path string) (*Lock, error) {
 		return nil, fmt.Errorf("write PID to lock file %s: %w", path, err)
 	}
 	return &Lock{f: f}, nil
+}
+
+// WithTimeout acquires path, runs fn while holding the lock, and releases it.
+// If another process holds the lock, it retries until ctx is canceled or timeout
+// elapses. The returned lock error wraps ErrLocked on timeout.
+func WithTimeout(ctx context.Context, path string, timeout time.Duration, fn func() error) (err error) {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lk *Lock
+	for {
+		lk, err = Acquire(path)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, ErrLocked) {
+			return err
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("acquire lock %s: %w", path, ctx.Err())
+		case <-deadline.C:
+			if holder := ReadHolderPID(path); holder > 0 {
+				return fmt.Errorf("lock %s held by PID %d: %w", path, holder, ErrLocked)
+			}
+			return fmt.Errorf("lock %s held: %w", path, ErrLocked)
+		case <-ticker.C:
+		}
+	}
+	defer func() {
+		if releaseErr := lk.Release(); err == nil && releaseErr != nil {
+			err = releaseErr
+		}
+	}()
+
+	return fn()
 }
 
 // Release releases the OS lock and closes the file. Idempotent.

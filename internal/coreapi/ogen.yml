@@ -1,0 +1,15 @@
+# ogen generation config for the Entire Core API client.
+#
+# The CLI is a pure client of the control plane: it never serves the API,
+# so the server half (handlers, router, request decoders, response
+# encoders, unimplemented stubs) is disabled. OpenTelemetry wiring is also
+# off — the CLI has its own telemetry path and doesn't trace these calls.
+#
+# Regenerate with `go generate ./internal/coreapi/...`.
+generator:
+  features:
+    disable:
+      - "paths/server"
+      - "webhooks/server"
+      - "ogen/unimplemented"
+      - "ogen/otel"

@@ -40,7 +40,7 @@ func TestIsOutdated(t *testing.T) {
 		// Pre-release versions (semver uses hyphen)
 		{"1.0.0-rc1", "1.0.0", true, "prerelease in current"},
 		{"1.0.0", "1.0.1-rc1", true, "prerelease in latest is still newer"},
-		{"1.0.0-dev-xxx", "1.0.1", false, "dev build skips version check"},
+		{"0.6.3-nightly.202605250745.b5855692.0.20260527023747-77e1fedc5741", "0.6.4", false, "pseudo-version (local dev build) skips check"},
 
 		// Nightly-vs-nightly comparisons (same channel)
 		{"0.5.3-nightly.202604051159.abc1234", "0.5.3-nightly.202604061200.def5678", true, "older nightly is outdated by newer nightly"},
@@ -77,6 +77,36 @@ func TestIsNightly(t *testing.T) {
 			t.Parallel()
 			if got := isNightly(tt.version); got != tt.want {
 				t.Errorf("isNightly(%q) = %v, want %v", tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsDevBuild(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		version string
+		want    bool
+	}{
+		{"dev", true},
+		{"", true},
+		{"garbage", true}, // unparseable -> treat as local build, don't nag
+		// Released builds: clean semver, should be checked for updates.
+		{"0.6.3", false},
+		{"v0.6.3", false},
+		{"1.0.0-rc1", false},
+		{"0.6.3-nightly.202605250745.b5855692", false},
+		{"v0.6.3-nightly.202605250745.b5855692", false},
+		// Local builds: Go pseudo-versions and dirty trees.
+		{"0.6.3-nightly.202605250745.b5855692.0.20260527023747-77e1fedc5741", true},
+		{"0.6.3-nightly.202605250745.b5855692.0.20260527023747-77e1fedc5741+dirty", true},
+		{"0.6.4-0.20260527023747-77e1fedc5741", true}, // pseudo-version off a stable tag
+	}
+	for _, tt := range tests {
+		t.Run(tt.version, func(t *testing.T) {
+			t.Parallel()
+			if got := isDevBuild(tt.version); got != tt.want {
+				t.Errorf("isDevBuild(%q) = %v, want %v", tt.version, got, tt.want)
 			}
 		})
 	}
@@ -392,13 +422,13 @@ func TestUpdateCommand(t *testing.T) {
 	}
 }
 
-// setupCheckAndNotifyTest sets HOME to a temp dir and overrides githubAPIURL.
-// Returns a cobra.Command with captured stdout and a cleanup function.
+// setupCheckAndNotifyTest points the global config dir at a per-test temp
+// dir and overrides githubAPIURL. Returns a cobra.Command with captured
+// stdout and a cleanup function.
 func setupCheckAndNotifyTest(t *testing.T, serverURL string) (*cobra.Command, *bytes.Buffer) {
 	t.Helper()
 
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 
 	origURL := githubAPIURL
 	githubAPIURL = serverURL
@@ -456,15 +486,26 @@ func TestCheckAndNotify_SkipsEmptyVersion(t *testing.T) {
 	}
 }
 
+func TestCheckAndNotify_SkipsPseudoVersion(t *testing.T) {
+	server := newVersionServer(t, "v9.9.9")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+
+	// A local working-tree build reports a Go pseudo-version; it must not be
+	// nagged to update even though it isn't the bare "dev" sentinel.
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(),
+		"0.6.3-nightly.202605250745.b5855692.0.20260527023747-77e1fedc5741")
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for pseudo-version build, got %q", buf.String())
+	}
+}
+
 func TestCheckAndNotify_SkipsWhenCacheIsFresh(t *testing.T) {
 	server := newVersionServer(t, "v9.9.9")
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
 
 	// Pre-seed the cache with a recent check time
-	configDir, err := globalConfigDirPath()
-	if err != nil {
-		t.Fatalf("globalConfigDirPath() error = %v", err)
-	}
+	configDir := globalConfigDirPath()
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}

@@ -25,7 +25,7 @@ func TestWriteStandardCheckpointEntries_RefusesUnexpectedSessionZeroOverwrite(t 
 	if err != nil {
 		t.Fatalf("PlainInit() error = %v", err)
 	}
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 
 	if err := logging.Init(context.Background(), ""); err != nil {
 		t.Fatalf("logging.Init() error = %v", err)

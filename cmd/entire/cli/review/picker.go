@@ -2,7 +2,7 @@
 //
 // picker.go implements the interactive review skills picker and agent selection
 // helpers. pickConfig presents a huh multi-select per installed agent and saves
-// the selection to .entire/settings.json.
+// the selection to clone-local review preferences.
 package review
 
 import (
@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"sort"
 	"strings"
 
@@ -23,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/uiform"
 )
 
 // AgentChoice is one row in the spawn-time picker. Name is the agent
@@ -33,15 +33,11 @@ type AgentChoice struct {
 	Label string
 }
 
-// newAccessibleForm creates a huh form with accessibility mode enabled when
-// the ACCESSIBLE env var is set. Mirrors cli.NewAccessibleForm without
-// requiring an import of the cli package (which would be circular).
+// newAccessibleForm creates a huh form with Entire's standard theme,
+// switching to accessibility mode when ACCESSIBLE is set. Thin wrapper
+// around uiform.New preserved so existing call sites don't change.
 func newAccessibleForm(groups ...*huh.Group) *huh.Form {
-	form := huh.NewForm(groups...).WithTheme(huh.ThemeFunc(huh.ThemeDracula))
-	if os.Getenv("ACCESSIBLE") != "" {
-		form = form.WithAccessible(true)
-	}
-	return form
+	return uiform.New(groups...)
 }
 
 // ConfirmFirstRunSetup prints a banner framing the picker as first-run
@@ -57,7 +53,7 @@ func ConfirmFirstRunSetup(ctx context.Context, out io.Writer) bool {
 	fmt.Fprintln(out, "No review config found — let's set one up first.")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "You'll pick skills for each installed agent. They're saved to")
-	fmt.Fprintln(out, ".entire/settings.json; edit later with `entire review --edit`.")
+	fmt.Fprintln(out, "local review preferences; edit later with `entire review --edit`.")
 	fmt.Fprintln(out, "After setup, the review will run with your selection.")
 	fmt.Fprintln(out)
 
@@ -81,7 +77,7 @@ func ConfirmFirstRunSetup(ctx context.Context, out io.Writer) bool {
 
 // RunReviewConfigPicker presents a huh multi-select for each installed agent
 // that has curated review skills, and saves the selection to
-// .entire/settings.json. Previously-saved skills are pre-checked via
+// clone-local review preferences. Previously-saved skills are pre-checked via
 // huh.Option.Selected(true), mirroring how `entire enable` preserves prior
 // selections in its own agent picker.
 //
@@ -97,7 +93,7 @@ func RunReviewConfigPicker(ctx context.Context, out io.Writer, getInstalled func
 	}
 
 	// Narrow to agents that have a curated skills list; others need manual
-	// editing of settings.json under review.<agent-name>.
+	// editing of clone-local preferences under review.<agent-name>.
 	type configurableAgent struct {
 		name types.AgentName
 		ag   agent.Agent
@@ -114,9 +110,19 @@ func RunReviewConfigPicker(ctx context.Context, out io.Writer, getInstalled func
 		configurable = append(configurable, configurableAgent{name: name, ag: ag})
 	}
 	if len(configurable) == 0 {
-		return nil, errors.New(
-			"no installed agents have curated review skills; " +
-				"edit .entire/settings.json directly under review.<agent-name>",
+		prefsPath, pathErr := settings.ClonePreferencesPath(ctx)
+		if pathErr != nil {
+			return nil, errors.New(
+				"no installed agents have curated review skills; " +
+					"install an eligible agent and run `entire review --edit`, " +
+					"or edit clone-local review preferences under review.<agent-name>",
+			)
+		}
+		return nil, fmt.Errorf(
+			"no installed agents have curated review skills; "+
+				"install an eligible agent and run `entire review --edit`, "+
+				"or edit clone-local review preferences (%s) under review.<agent-name>",
+			prefsPath,
 		)
 	}
 
@@ -224,7 +230,7 @@ func RunReviewConfigPicker(ctx context.Context, out io.Writer, getInstalled func
 	if err := saveReviewConfigAndFixAgent(ctx, merged, fixAgent); err != nil {
 		return nil, err
 	}
-	fmt.Fprintln(out, "Saved review config to .entire/settings.json. Edit directly or run `entire review --edit`.")
+	fmt.Fprintln(out, "Saved review config to local review preferences. Edit later with `entire review --edit`.")
 	return merged, nil
 }
 
@@ -249,53 +255,33 @@ func MergePickerResults(existing map[string]settings.ReviewConfig, offered map[s
 	return merged
 }
 
-// SaveReviewConfig persists the review map into .entire/settings.json while
-// preserving all other settings. A Load error means the file exists but is
-// malformed — we must NOT silently overwrite it with an empty struct, or
-// every unrelated setting the user had configured would be wiped. Return the
-// error so the caller can surface it instead.
-func SaveReviewConfig(ctx context.Context, review map[string]settings.ReviewConfig) error {
-	s, err := settings.Load(ctx)
-	if err != nil {
-		return fmt.Errorf("load settings before save: %w", err)
-	}
-	if s == nil {
-		s = &settings.EntireSettings{}
-	}
-	s.Review = review
-	if err := settings.Save(ctx, s); err != nil {
-		return fmt.Errorf("save settings: %w", err)
-	}
-	return nil
-}
-
 func SaveReviewFixAgent(ctx context.Context, agentName string) error {
-	s, err := settings.Load(ctx)
+	prefs, err := settings.LoadClonePreferences(ctx)
 	if err != nil {
-		return fmt.Errorf("load settings before save: %w", err)
+		return fmt.Errorf("load review preferences before save: %w", err)
 	}
-	if s == nil {
-		s = &settings.EntireSettings{}
+	if prefs == nil {
+		prefs = &settings.ClonePreferences{}
 	}
-	s.ReviewFixAgent = agentName
-	if err := settings.Save(ctx, s); err != nil {
-		return fmt.Errorf("save settings: %w", err)
+	prefs.ReviewFixAgent = agentName
+	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+		return fmt.Errorf("save review preferences: %w", err)
 	}
 	return nil
 }
 
 func saveReviewConfigAndFixAgent(ctx context.Context, review map[string]settings.ReviewConfig, fixAgent string) error {
-	s, err := settings.Load(ctx)
+	prefs, err := settings.LoadClonePreferences(ctx)
 	if err != nil {
-		return fmt.Errorf("load settings before save: %w", err)
+		return fmt.Errorf("load review preferences before save: %w", err)
 	}
-	if s == nil {
-		s = &settings.EntireSettings{}
+	if prefs == nil {
+		prefs = &settings.ClonePreferences{}
 	}
-	s.Review = review
-	s.ReviewFixAgent = fixAgent
-	if err := settings.Save(ctx, s); err != nil {
-		return fmt.Errorf("save settings: %w", err)
+	prefs.Review = review
+	prefs.ReviewFixAgent = fixAgent
+	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+		return fmt.Errorf("save review preferences: %w", err)
 	}
 	return nil
 }

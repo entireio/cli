@@ -3,22 +3,25 @@ package codex
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
 
 // NewReviewer returns the AgentReviewer for codex.
 //
-// Argv shape: codex exec --skip-git-repo-check -.
+// Argv shape: codex exec --skip-git-repo-check --json -.
 // Prompt is piped via stdin (the trailing "-" tells codex to read from stdin).
-// Stdout includes chrome (banners, hook notices, exec blocks, CSI sequences)
-// that output_filter.go strips before emitting AssistantText events.
+// Stdout is newline-delimited JSON envelopes (one event per line); no chrome
+// filter needed — each line is parsed directly into an Event.
 func NewReviewer() *reviewtypes.ReviewerTemplate {
 	return &reviewtypes.ReviewerTemplate{
 		AgentName: "codex",
@@ -32,7 +35,7 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 func buildCodexReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	promptCfg := cfg
 	promptCfg.Skills = expandCodexBuiltinReview(cfg.Skills)
-	args := []string{codexExecCommand, "--skip-git-repo-check", "-"}
+	args := []string{codexExecCommand, "--skip-git-repo-check", "--json", "-"}
 	prompt := review.ComposeReviewPrompt(promptCfg)
 	cmd := exec.CommandContext(ctx, "codex", args...)
 	cmd.Stdin = strings.NewReader(prompt)
@@ -60,24 +63,85 @@ func expandCodexBuiltinReview(skills []string) []string {
 	return out
 }
 
-// parseCodexOutput wraps the reader with the chrome filter and converts
-// remaining lines into a stream of Events.
-// On clean EOF emits Finished{Success: true}. On a scanner error (including
-// errors propagated from Strip via pipe CloseWithError) emits RunError then
-// Finished{Success: false}.
+// parseCodexOutput converts codex's `exec --json` stdout into a stream of
+// Events. Each stdout line is one JSON envelope (top-level "type" field).
 //
-// Exposed for golden-file contract testing.
+// Envelope types this parser handles:
+//   - thread.started        session id; swallowed
+//   - turn.started          marker; swallowed
+//   - item.started          tool invocation begins → emits ToolCall when
+//     item.type == "command_execution"
+//   - item.completed        tool invocation ends OR an agent_message;
+//     agent_message → AssistantText
+//     command_execution → swallowed (start already announced)
+//   - turn.completed        terminal usage block → Tokens, then Finished
+//
+// On a scanner error or a missing turn.completed envelope, emits RunError
+// (scanner) or Finished{Success: false} (missing turn) accordingly.
+//
+// Tokens are emitted only at the terminal `turn.completed` envelope, not
+// incrementally — codex's usage fields land once at end-of-turn.
+//
+// Package-private; called directly from this package's tests so they can
+// drive raw stdout fixtures through the parser without going through the
+// ReviewerTemplate.Start spawn path.
 func parseCodexOutput(r io.Reader) <-chan reviewtypes.Event {
+	return parseCodexOutputBuf(r, codexReviewMaxScannerBuf)
+}
+
+// codexReviewMaxScannerBuf is the production bufio.Scanner cap for the codex
+// review parser. Codex packs the entire stdout of `command_execution` tools
+// into the aggregated_output field on item.completed envelopes inline, so a
+// chatty grep/cat/find over a large repo can put many MB into one envelope.
+// 16MB was too tight; 64MB is generous without imposing real memory cost
+// (one buffer per active review run).
+const codexReviewMaxScannerBuf = 64 * 1024 * 1024
+
+// parseCodexOutputBuf is the parameterized variant of parseCodexOutput, used
+// by tests to shrink the scanner cap so the "token too long" branch can be
+// exercised without writing 64MB of fixture data.
+func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 	out := make(chan reviewtypes.Event, 32)
 	go func() {
 		defer close(out)
 		out <- reviewtypes.Started{}
 		scanner := bufio.NewScanner(r)
-		scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-		state := codexEventNormal
+		scanner.Buffer(make([]byte, min(1024*1024, maxBuf)), maxBuf)
+		var seenTurnComplete bool
+		var turnUsage codexUsage
 		for scanner.Scan() {
-			for _, ev := range collectCodexEventsLine(scanner.Text(), &state) {
-				out <- ev
+			line := scanner.Bytes()
+			if len(line) == 0 {
+				continue
+			}
+			var env codexEnvelope
+			if err := json.Unmarshal(line, &env); err != nil {
+				out <- reviewtypes.RunError{Err: fmt.Errorf("codex --json: %w", err)}
+				continue
+			}
+			// Add cases here when codex's envelope or item types grow; the
+			// default arm logs unknown types at Debug so drift can be
+			// triaged via ENTIRE_LOG_LEVEL=debug.
+			switch env.Type {
+			case "thread.started", "turn.started":
+				// Session/turn markers — no event emitted.
+			case "item.started":
+				if env.Item.Type == "command_execution" {
+					out <- reviewtypes.ToolCall{Name: "exec", Args: env.Item.Command}
+				}
+			case "item.completed":
+				if env.Item.Type == "agent_message" && env.Item.Text != "" {
+					out <- reviewtypes.AssistantText{Text: env.Item.Text}
+				}
+				// command_execution completion is intentionally swallowed —
+				// item.started already announced it. aggregated_output is the
+				// tool's stdout, not the model's narrative.
+			case "turn.completed":
+				seenTurnComplete = true
+				turnUsage = env.Usage
+			default:
+				logging.Debug(context.Background(), "codex parser: unknown envelope type",
+					slog.String("type", env.Type))
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -85,122 +149,44 @@ func parseCodexOutput(r io.Reader) <-chan reviewtypes.Event {
 			out <- reviewtypes.Finished{Success: false}
 			return
 		}
-		out <- reviewtypes.Finished{Success: true}
+		if seenTurnComplete {
+			// codex reports cached_input_tokens as a subset of input_tokens
+			// and reasoning_output_tokens as a subset of output_tokens
+			// (matching OpenAI's chat-completions usage shape), so do NOT
+			// sum the subset fields — that would double-count.
+			out <- reviewtypes.Tokens{
+				In:  turnUsage.InputTokens,
+				Out: turnUsage.OutputTokens,
+			}
+			// Success is hard-coded true here because codex's `turn.completed`
+			// envelope has no turn-level error field in 0.130.0. If a future
+			// codex version adds one (e.g., an `error` or `is_error` field on
+			// the envelope), capture it into a local during the switch case and
+			// thread it through here as `!turnErr` — mirroring claude's
+			// `!resultErr` pattern.
+			out <- reviewtypes.Finished{Success: true}
+			return
+		}
+		out <- reviewtypes.Finished{Success: false}
 	}()
 	return out
 }
 
-type codexEventState int
-
-const (
-	codexEventNormal codexEventState = iota
-	codexEventUserBlock
-	codexEventAssistantBlock
-	codexEventExecAwaitCommand
-	codexEventExecBlock
-	codexEventAfterTokens
-)
-
-func collectCodexEventsLine(raw string, state *codexEventState) []reviewtypes.Event {
-	cleaned := csiRegex.ReplaceAllString(raw, "")
-	trimmed := strings.TrimSpace(cleaned)
-	trimmedRight := strings.TrimRight(cleaned, " \t")
-
-	if *state == codexEventAfterTokens {
-		return nil
-	}
-	if isTokensUsedMarker(trimmed) {
-		*state = codexEventAfterTokens
-		return nil
-	}
-
-	switch *state {
-	case codexEventUserBlock:
-		if isCodexRoleMarker(trimmed) {
-			*state = codexEventAssistantBlock
-		}
-		return nil
-	case codexEventAssistantBlock:
-		return collectCodexAssistantLine(raw, trimmed, trimmedRight, state)
-	case codexEventExecAwaitCommand:
-		return collectCodexExecCommandLine(trimmed, trimmedRight, state)
-	case codexEventExecBlock:
-		switch {
-		case trimmed == "":
-			*state = codexEventNormal
-		case isCodexRoleMarker(trimmed):
-			*state = codexEventAssistantBlock
-		case isUserRoleMarker(trimmed):
-			*state = codexEventUserBlock
-		}
-		return nil
-	case codexEventNormal:
-		// Continue below.
-	case codexEventAfterTokens:
-		return nil
-	}
-
-	if isUserRoleMarker(trimmed) {
-		*state = codexEventUserBlock
-		return nil
-	}
-	if isCodexRoleMarker(trimmed) {
-		*state = codexEventAssistantBlock
-		return nil
-	}
-	if isCodexMetadataLine(trimmed) {
-		return nil
-	}
-	if trimmedRight == codexExecCommand {
-		*state = codexEventExecAwaitCommand
-		return nil
-	}
-	if execBlockRegex.MatchString(trimmedRight) {
-		*state = codexEventExecBlock
-		return []reviewtypes.Event{reviewtypes.ToolCall{Name: codexExecCommand, Args: trimmedRight}}
-	}
-	if line, ok := FilterLine(raw); ok {
-		return []reviewtypes.Event{reviewtypes.AssistantText{Text: line}}
-	}
-	return nil
+type codexEnvelope struct {
+	Type  string     `json:"type"`
+	Item  codexItem  `json:"item"`
+	Usage codexUsage `json:"usage"`
 }
 
-func collectCodexAssistantLine(raw, trimmed, trimmedRight string, state *codexEventState) []reviewtypes.Event {
-	switch {
-	case isCodexRoleMarker(trimmed):
-		return nil
-	case isUserRoleMarker(trimmed):
-		*state = codexEventUserBlock
-		return nil
-	case trimmedRight == codexExecCommand:
-		*state = codexEventExecAwaitCommand
-		return nil
-	case execBlockRegex.MatchString(trimmedRight):
-		*state = codexEventExecBlock
-		return []reviewtypes.Event{reviewtypes.ToolCall{Name: codexExecCommand, Args: trimmedRight}}
-	case isCodexMetadataLine(trimmed):
-		return nil
-	default:
-		if line, ok := FilterLine(raw); ok {
-			return []reviewtypes.Event{reviewtypes.AssistantText{Text: line}}
-		}
-		return nil
-	}
+type codexItem struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+	Text    string `json:"text"`
 }
 
-func collectCodexExecCommandLine(trimmed, trimmedRight string, state *codexEventState) []reviewtypes.Event {
-	switch {
-	case trimmed == "":
-		*state = codexEventNormal
-		return nil
-	case isCodexRoleMarker(trimmed):
-		*state = codexEventAssistantBlock
-		return nil
-	case isUserRoleMarker(trimmed):
-		*state = codexEventUserBlock
-		return nil
-	default:
-		*state = codexEventExecBlock
-		return []reviewtypes.Event{reviewtypes.ToolCall{Name: codexExecCommand, Args: trimmedRight}}
-	}
+type codexUsage struct {
+	InputTokens           int `json:"input_tokens"`
+	CachedInputTokens     int `json:"cached_input_tokens"`
+	OutputTokens          int `json:"output_tokens"`
+	ReasoningOutputTokens int `json:"reasoning_output_tokens"`
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 )
@@ -23,6 +24,31 @@ var experimentalCommands = []experimentalCommandInfo{
 		Name:       "learn",
 		Invocation: "entire learn",
 		Summary:    "Learn the Entire CLI",
+	},
+	{
+		Name:       "investigate",
+		Invocation: "entire investigate",
+		Summary:    "Run a multi-agent investigation against a topic, issue, or seed doc",
+	},
+	{
+		Name:       "org",
+		Invocation: "entire org",
+		Summary:    "Manage Entire organizations (create, list)",
+	},
+	{
+		Name:       "project",
+		Invocation: "entire project",
+		Summary:    "Manage Entire projects (create, list)",
+	},
+	{
+		Name:       "repo",
+		Invocation: "entire repo",
+		Summary:    "Manage Entire repositories (create, list, get, delete)",
+	},
+	{
+		Name:       "grant",
+		Invocation: "entire grant",
+		Summary:    "Manage access grants and org membership (org, project, repo)",
 	},
 }
 
@@ -65,6 +91,11 @@ Available experimental commands:
 Try:
   entire learn --help
   entire review --help
+  entire investigate --help
+  entire org --help
+  entire project --help
+  entire repo --help
+  entire grant --help
 `
 }
 
@@ -83,12 +114,13 @@ func labsTopicHint(topic string) string {
 }
 
 func renderExperimentalCommands(commands []experimentalCommandInfo) string {
-	width := 16
+	width := 0
 	for _, info := range commands {
-		if l := len(info.Invocation); l > width {
-			width = l
+		if w := utf8.RuneCountInString(info.Invocation); w > width {
+			width = w
 		}
 	}
+
 	var out strings.Builder
 	for _, info := range commands {
 		out.WriteString("  ")
@@ -101,8 +133,9 @@ func renderExperimentalCommands(commands []experimentalCommandInfo) string {
 }
 
 func padRight(value string, width int) string {
-	if len(value) >= width {
+	n := utf8.RuneCountInString(value)
+	if n >= width {
 		return value
 	}
-	return value + strings.Repeat(" ", width-len(value))
+	return value + strings.Repeat(" ", width-n)
 }

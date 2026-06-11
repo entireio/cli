@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -17,11 +17,10 @@ import (
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 
 	"charm.land/huh/v2"
 	"github.com/go-git/go-git/v6"
@@ -30,13 +29,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// committedReader provides read access to committed checkpoint data.
-// Both checkpoint.GitStore (v1) and checkpoint.V2GitStore implement this interface.
-type committedReader interface {
-	ReadCommitted(ctx context.Context, checkpointID id.CheckpointID) (*cpkg.CheckpointSummary, error)
-	ReadSessionContent(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*cpkg.SessionContent, error)
-}
-
 // GetRewindPoints returns available rewind points.
 // Uses checkpoint.GitStore.ListTemporaryCheckpoints for reading from shadow branches.
 func (s *ManualCommitStrategy) GetRewindPoints(ctx context.Context, limit int) ([]RewindPoint, error) {
@@ -44,12 +36,9 @@ func (s *ManualCommitStrategy) GetRewindPoints(ctx context.Context, limit int) (
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
-	// Get checkpoint store
-	store, err := s.getCheckpointStore()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
-	}
+	store := s.getCheckpointStore(ctx, repo)
 
 	// Get current HEAD to find matching shadow branch
 	head, err := repo.Head()
@@ -138,11 +127,11 @@ func (s *ManualCommitStrategy) GetRewindPoints(ctx context.Context, limit int) (
 }
 
 // GetLogsOnlyRewindPoints finds commits in the current branch's history that have
-// condensed session logs on the entire/checkpoints/v1 branch. These are commits that
+// condensed session logs in committed checkpoint storage. These are commits that
 // were created with session data but the shadow branch has been condensed.
 //
 // The function works by:
-// 1. Getting all checkpoints from the entire/checkpoints/v1 branch
+// 1. Getting all checkpoints from committed checkpoint storage
 // 2. Building a map of checkpoint ID -> checkpoint info
 // 3. Scanning the current branch history for commits with Entire-Checkpoint trailers
 // 4. Matching by checkpoint ID (stable across amend/rebase)
@@ -151,12 +140,13 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(ctx context.Context, limi
 	if err != nil {
 		return nil, err
 	}
+	defer repo.Close()
 
-	// Get all checkpoints from entire/checkpoints/v1 branch
+	// Get all checkpoints from committed checkpoint storage
 	checkpoints, err := s.listCheckpoints(ctx)
 	if err != nil {
 		// No checkpoints yet is fine
-		return nil, nil //nolint:nilerr // Expected when no checkpoints exist
+		return nil, nil
 	}
 
 	if len(checkpoints) == 0 {
@@ -172,8 +162,9 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(ctx context.Context, limi
 		}
 	}
 
-	// Get metadata branch tree for reading session prompts (best-effort, ignore errors)
-	metadataTree, _ := GetMetadataBranchTree(repo) //nolint:errcheck // Best-effort for session prompts
+	// Get committed metadata read tree for session prompts (best-effort, ignore errors)
+	readRef := cpkg.ResolveCommittedRefs(ctx).Read
+	metadataTree, _ := GetMetadataRefTree(repo, readRef) //nolint:errcheck // Best-effort for session prompts
 
 	head, err := repo.Head()
 	if err != nil {
@@ -221,16 +212,23 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(ctx context.Context, limi
 		var sessionPrompt string
 		var sessionPrompts []string
 		if metadataTree != nil {
-			checkpointPath := paths.CheckpointPath(cpInfo.CheckpointID) //nolint:staticcheck // deprecated but migration deferred
+			checkpointPath := cpInfo.CheckpointID.Path()
 			// For multi-session checkpoints, read all prompts
 			if cpInfo.SessionCount > 1 && len(cpInfo.SessionIDs) > 1 {
 				sessionPrompts = ReadAllSessionPromptsFromTree(metadataTree, checkpointPath, cpInfo.SessionCount, cpInfo.SessionIDs)
-				// Use the last (most recent) prompt as the main session prompt
-				if len(sessionPrompts) > 0 {
-					sessionPrompt = sessionPrompts[len(sessionPrompts)-1]
+				// Prefer the latest non-empty prompt: the most-recent session may
+				// have been recorded without a prompt, but an earlier one usually has one.
+				for i := len(sessionPrompts) - 1; i >= 0; i-- {
+					if sessionPrompts[i] != "" {
+						sessionPrompt = sessionPrompts[i]
+						break
+					}
 				}
 			} else {
-				sessionPrompt = ReadSessionPromptFromTree(metadataTree, checkpointPath)
+				sessionPrompt = ReadLatestSessionPromptFromCommittedTree(metadataTree, cpInfo.CheckpointID, cpInfo.SessionCount)
+				if sessionPrompt == "" {
+					sessionPrompt = ReadSessionPromptFromTree(metadataTree, checkpointPath)
+				}
 				if sessionPrompt != "" {
 					sessionPrompts = []string{sessionPrompt}
 				}
@@ -292,6 +290,7 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, w, errW io.Writer, po
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Get the checkpoint commit
 	commitHash := plumbing.NewHash(point.ID)
@@ -425,12 +424,12 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, w, errW io.Writer, po
 			return fmt.Errorf("failed to read file %s: %w", f.Name, err)
 		}
 
-		// Ensure directory exists (MkdirAll not available on os.Root)
-		absPath := filepath.Join(repoRoot, f.Name)
-		dir := filepath.Dir(absPath)
+		// Ensure parent directories exist via os.Root so a crafted tree entry
+		// name (e.g. containing "..") from an untrusted checkpoint cannot create
+		// directories outside the repo. f.Name uses forward slashes (git tree).
+		dir := path.Dir(f.Name)
 		if dir != "." {
-			//nolint:gosec // G301: Need 0o755 for user directories during rewind
-			if err := os.MkdirAll(dir, 0o755); err != nil {
+			if err := osroot.MkdirAll(repoRootHandle, dir, 0o755); err != nil {
 				return fmt.Errorf("failed to create directory %s: %w", dir, err)
 			}
 		}
@@ -515,6 +514,7 @@ func (s *ManualCommitStrategy) PreviewRewind(ctx context.Context, point RewindPo
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Get the checkpoint commit
 	commitHash := plumbing.NewHash(point.ID)
@@ -632,43 +632,20 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 		return nil, errors.New("missing checkpoint ID")
 	}
 
-	// Resolve which store has this checkpoint. Try v2 first when enabled.
-	// The chosen reader is used for all subsequent reads (summary + session content)
-	// to avoid mixed v1/v2 reads. No per-session fallback to v1: during dual-write,
-	// both stores receive the same data, so if v2 has the summary it also has the
-	// transcripts on /full/* refs.
-	var reader committedReader
-	var summary *cpkg.CheckpointSummary
-
-	if settings.IsCheckpointsV2Enabled(ctx) {
-		v2Store, v2Err := s.getV2CheckpointStore(ctx)
-		if v2Err == nil {
-			v2Summary, readErr := v2Store.ReadCommitted(ctx, point.CheckpointID)
-			if readErr != nil {
-				logging.Debug(ctx, "v2 ReadCommitted failed, falling back to v1",
-					slog.String("checkpoint_id", string(point.CheckpointID)),
-					slog.String("error", readErr.Error()),
-				)
-			} else if v2Summary != nil {
-				reader = v2Store
-				summary = v2Summary
-			}
-		}
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
-	if summary == nil {
-		v1Store, err := s.getCheckpointStore()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
-		}
-		summary, err = v1Store.ReadCommitted(ctx, point.CheckpointID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read checkpoint: %w", err)
-		}
-		reader = v1Store
+	WarnIfMetadataDisconnected()
+	store := cpkg.NewGitStore(repo, cpkg.ResolveCommittedRefs(ctx))
+	if s.blobFetcher != nil {
+		store.SetBlobFetcher(s.blobFetcher)
 	}
-	if summary == nil {
-		return nil, fmt.Errorf("checkpoint not found: %s", point.CheckpointID)
+	summary, err := cpkg.ReadCommittedCheckpoint(ctx, store, point.CheckpointID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
 
 	// Get worktree root for agent session directory lookup
@@ -679,7 +656,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 
 	// Check for newer local logs if not forcing
 	if !force {
-		sessions := s.classifySessionsForRestore(ctx, repoRoot, reader, point.CheckpointID, summary)
+		sessions := s.classifySessionsForRestore(ctx, repoRoot, store, point.CheckpointID, summary)
 		hasConflicts := false
 		for _, sess := range sessions {
 			if sess.Status == StatusLocalNewer {
@@ -708,7 +685,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 	// Restore all sessions (oldest to newest, using 0-based indexing)
 	var restored []RestoredSession
 	for i := range totalSessions {
-		content, readErr := reader.ReadSessionContent(ctx, point.CheckpointID, i)
+		content, readErr := store.ReadSessionContent(ctx, point.CheckpointID, i)
 		if readErr != nil {
 			if !errors.Is(readErr, cpkg.ErrNoTranscript) {
 				fmt.Fprintf(errW, "  Warning: failed to read session %d: %v\n", i, readErr)
@@ -722,6 +699,14 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 		sessionID := content.Metadata.SessionID
 		if sessionID == "" {
 			fmt.Fprintf(errW, "  Warning: session %d has no session ID, skipping\n", i)
+			continue
+		}
+		// Checkpoint metadata comes from the shared entire/checkpoints/v1 branch
+		// and is attacker-influenceable. Reject path separators/absolute IDs before
+		// they reach ResolveSessionFile + WriteSession, which would otherwise let a
+		// crafted session ID overwrite files outside the agent session directory.
+		if err := validation.ValidateSessionID(sessionID); err != nil {
+			fmt.Fprintf(errW, "  Warning: session %d has unsafe session ID %q, skipping: %v\n", i, sessionID, err)
 			continue
 		}
 
@@ -862,7 +847,7 @@ type SessionRestoreInfo struct {
 // about each session, including whether local logs have newer timestamps.
 // repoRoot is used to compute per-session agent directories.
 // Sessions without agent metadata are skipped (cannot determine target directory).
-func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, repoRoot string, store committedReader, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary) []SessionRestoreInfo {
+func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, repoRoot string, store cpkg.CommittedReader, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary) []SessionRestoreInfo {
 	var sessions []SessionRestoreInfo
 
 	totalSessions := len(summary.Sessions)
@@ -875,6 +860,11 @@ func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, r
 
 		sessionID := content.Metadata.SessionID
 		if sessionID == "" || content.Metadata.Agent == "" {
+			continue
+		}
+		// Skip unsafe session IDs (see RestoreLogsOnly): this path stats the resolved
+		// transcript file, so a crafted ID could otherwise probe arbitrary locations.
+		if validation.ValidateSessionID(sessionID) != nil {
 			continue
 		}
 

@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -38,6 +40,7 @@ const (
 	flagSkipPushSessions     = "skip-push-sessions"
 	flagSummarizeModel       = "summarize-model"
 	flagSummarizeAgent       = "summarize-provider"
+	flagSummarizeTimeout     = "summarize-timeout-seconds"
 	flagTelemetry            = "telemetry"
 	flagAbsoluteGitHookPath  = "absolute-git-hook-path"
 	flagForce                = "force"
@@ -101,6 +104,10 @@ func hasSummaryProviderFlags(cmd *cobra.Command) bool {
 	return cmd.Flags().Changed(flagSummarizeAgent) || cmd.Flags().Changed(flagSummarizeModel)
 }
 
+func hasSummaryTimeoutFlag(cmd *cobra.Command) bool {
+	return cmd.Flags().Changed(flagSummarizeTimeout)
+}
+
 // hasGlobalSettingsFlags reports whether any flag affects telemetry or
 // the entire-managed git hook (force / absolute path / local-dev).
 func hasGlobalSettingsFlags(cmd *cobra.Command) bool {
@@ -113,7 +120,7 @@ func hasGlobalSettingsFlags(cmd *cobra.Command) bool {
 // hasConfigureSettingsFlags reports whether configure was invoked with any
 // flag that mutates settings or hooks. Bare invocation prints help instead.
 func hasConfigureSettingsFlags(cmd *cobra.Command) bool {
-	return hasStrategyFlags(cmd) || hasSummaryProviderFlags(cmd) || hasGlobalSettingsFlags(cmd)
+	return hasStrategyFlags(cmd) || hasSummaryProviderFlags(cmd) || hasSummaryTimeoutFlag(cmd) || hasGlobalSettingsFlags(cmd)
 }
 
 // enableUsesSetupFlow reports whether `entire enable` should delegate to the
@@ -215,6 +222,41 @@ func updateSummaryGenerationSettings(ctx context.Context, w io.Writer, provider,
 	}
 
 	s.SummaryGeneration.SetProvider(provider, model)
+
+	if targetFile == settings.EntireSettingsLocalFile {
+		if err := SaveEntireSettingsLocal(ctx, s); err != nil {
+			return fmt.Errorf("failed to save settings: %w", err)
+		}
+	} else {
+		if err := SaveEntireSettings(ctx, s); err != nil {
+			return fmt.Errorf("failed to save settings: %w", err)
+		}
+	}
+
+	fmt.Fprintf(w, "✓ Settings updated (%s)\n", configDisplay)
+	return nil
+}
+
+// updateSummaryTimeoutSetting persists the --summarize-timeout-seconds flag
+// to settings. Pass 0 to clear (treated as "unset" by the generate path);
+// negative values are rejected.
+func updateSummaryTimeoutSetting(ctx context.Context, w io.Writer, timeoutSeconds int, opts EnableOptions) error {
+	if timeoutSeconds < 0 {
+		return errors.New("--summarize-timeout-seconds must be non-negative")
+	}
+
+	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
+	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	if err != nil {
+		targetFileAbs = targetFile
+	}
+
+	s, err := settings.LoadFromFile(targetFileAbs)
+	if err != nil {
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
+
+	s.SummaryTimeoutSeconds = timeoutSeconds
 
 	if targetFile == settings.EntireSettingsLocalFile {
 		if err := SaveEntireSettingsLocal(ctx, s); err != nil {
@@ -627,6 +669,7 @@ func newSetupCmd() *cobra.Command {
 	var opts EnableOptions
 	var summarizeProvider string
 	var summarizeModel string
+	var summarizeTimeoutSeconds int
 
 	cmd := &cobra.Command{
 		Use:   "configure",
@@ -642,7 +685,8 @@ Examples:
   entire configure --absolute-git-hook-path       # Reinstall git hook with absolute path
   entire configure --force                        # Reinstall git hook
   entire configure --checkpoint-remote github:org/checkpoints
-  entire configure --summarize-provider claude-code`,
+  entire configure --summarize-provider claude-code
+  entire configure --summarize-timeout-seconds 300   # 5m deadline for explain --generate`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 
@@ -676,6 +720,11 @@ Examples:
 					return err
 				}
 			}
+			if hasSummaryTimeoutFlag(cmd) {
+				if err := updateSummaryTimeoutSetting(ctx, cmd.OutOrStdout(), summarizeTimeoutSeconds, opts); err != nil {
+					return err
+				}
+			}
 			if hasGlobalSettingsFlags(cmd) {
 				if err := updateGlobalSettings(ctx, cmd, cmd.OutOrStdout(), opts); err != nil {
 					return err
@@ -694,6 +743,7 @@ Examples:
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
 	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
+	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears (falls back to 5m default).")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 
@@ -705,6 +755,7 @@ func newEnableCmd() *cobra.Command {
 	var ignoreUntracked bool
 	var agentName string
 	var bootstrapOpts GitHubBootstrapOptions
+	var insecureHTTPAuth bool
 
 	cmd := &cobra.Command{
 		Use:   "enable",
@@ -718,6 +769,17 @@ If the current directory is not a git repository, Entire can initialize one
 for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 		RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
 			ctx := cmd.Context()
+			// Best-effort: after a successful enable, tell the backend which repo
+			// was enabled so the web onboarding reflects it (and we can warn when
+			// the GitHub App can't reach it). Registered first so it runs LAST
+			// (defers are LIFO) — after any bootstrap finalize that creates the
+			// GitHub repo and pushes, by which point an origin remote exists.
+			defer func() {
+				if runErr != nil {
+					return
+				}
+				reportRepoEnabled(ctx, insecureHTTPAuth)
+			}()
 			// Check if we're in a git repository first. If not, offer to
 			// bootstrap one (git init + optional GitHub repo). If the user
 			// declines, fall back to the legacy prerequisite error.
@@ -844,6 +906,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit; then enable all agents and accept telemetry)")
+	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
 	// Bootstrap flags for non-git-repo folders.
 	cmd.Flags().BoolVar(&bootstrapOpts.InitRepo, "init-repo", false, "If not a git repo, initialize one non-interactively")
@@ -869,6 +932,58 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	})
 
 	return cmd
+}
+
+// reportRepoEnabled records the `entire enable` against the backend so the web
+// onboarding can reflect it. It is strictly best-effort and fully silent:
+// enabling works offline, and every outcome (no origin remote, not logged in,
+// network error, App-can't-reach-repo) is swallowed — the web onboarding
+// surfaces the "install the GitHub App" nudge, so the CLI stays quiet.
+func reportRepoEnabled(ctx context.Context, insecureHTTPAuth bool) {
+	// This runs synchronously on the enable success path, so bound it: a backend
+	// that accepts the connection but never responds must not hang the command
+	// after it has already printed success.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	rawURL, err := gitremote.GetRemoteURL(ctx, "origin")
+	if err != nil || strings.TrimSpace(rawURL) == "" {
+		// Local-only repo with no origin yet — nothing to report.
+		return
+	}
+
+	cleanURL, err := cleanRemoteURLForReport(rawURL)
+	if err != nil {
+		logging.Debug(ctx, "skipping enable report: unparseable origin remote", "error", err)
+		return
+	}
+
+	client, err := NewAuthenticatedAPIClient(ctx, insecureHTTPAuth)
+	if err != nil {
+		// Not logged in / token unavailable — enable already succeeded locally.
+		logging.Debug(ctx, "skipping enable report", "error", err)
+		return
+	}
+
+	if _, err := client.ReportEnable(ctx, cleanURL); err != nil {
+		logging.Debug(ctx, "enable report failed", "error", err)
+	}
+}
+
+// cleanRemoteURLForReport turns a raw git remote URL into a clean,
+// credential-free HTTPS URL safe to send to the backend. The raw remote can
+// carry embedded credentials (https://token@host/...) or query params, so we
+// never forward it verbatim: parse it and rebuild from host/owner/repo alone.
+// Returns an error if the URL can't be parsed (the caller skips reporting).
+func cleanRemoteURLForReport(rawURL string) (string, error) {
+	info, err := gitremote.ParseURL(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("parse remote URL: %w", err)
+	}
+	// Use CanonicalHost, not Host: an entire://cluster/gh/owner/repo origin (an
+	// already-mirrored repo) carries the Entire cluster as Host, so reporting
+	// Host verbatim would point the backend at the cluster instead of github.com.
+	return fmt.Sprintf("https://%s/%s/%s.git", info.CanonicalHost(), info.Owner, info.Repo), nil
 }
 
 func newDisableCmd() *cobra.Command {
@@ -1031,10 +1146,13 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	fmt.Fprintln(w, "\nReady.")
 
 	// Note about empty repos at the end, after setup is complete
-	if repo, err := strategy.OpenRepository(ctx); err == nil && strategy.IsEmptyRepository(repo) {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Note: Session checkpoints require at least one commit. To get started,")
-		fmt.Fprintln(w, "commit the configuration files (e.g. .entire/, .claude/).")
+	if repo, err := strategy.OpenRepository(ctx); err == nil {
+		defer repo.Close()
+		if strategy.IsEmptyRepository(repo) {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "Note: Session checkpoints require at least one commit. To get started,")
+			fmt.Fprintln(w, "commit the configuration files (e.g. .entire/, .claude/).")
+		}
 	}
 
 	return nil
@@ -1511,10 +1629,13 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 
 	fmt.Fprintln(w, "\nReady.")
 
-	if repo, err := strategy.OpenRepository(ctx); err == nil && strategy.IsEmptyRepository(repo) {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Note: Session checkpoints require at least one commit. To get started,")
-		fmt.Fprintln(w, "commit the configuration files (e.g. .entire/, .claude/).")
+	if repo, err := strategy.OpenRepository(ctx); err == nil {
+		defer repo.Close()
+		if strategy.IsEmptyRepository(repo) {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "Note: Session checkpoints require at least one commit. To get started,")
+			fmt.Fprintln(w, "commit the configuration files (e.g. .entire/, .claude/).")
+		}
 	}
 
 	return nil

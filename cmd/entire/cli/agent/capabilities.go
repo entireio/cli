@@ -15,6 +15,11 @@ type CapabilityDeclarer interface {
 // DeclaredCaps enumerates the optional interfaces an agent claims to support.
 // JSON tags match the external agent protocol schema so external.InfoResponse
 // can deserialize directly into this type.
+//
+// Not every optional interface appears here: built-in-only capabilities that
+// have no external-protocol equivalent (SessionBaseDirProvider, ModelExtractor)
+// are intentionally excluded — their As* helpers resolve by type assertion
+// alone, with no DeclaredCaps gate.
 type DeclaredCaps struct {
 	Hooks                  bool `json:"hooks"`
 	TranscriptAnalyzer     bool `json:"transcript_analyzer"`
@@ -171,6 +176,21 @@ func AsSessionBaseDirProvider(ag Agent) (SessionBaseDirProvider, bool) {
 	return sbp, true
 }
 
+// AsModelExtractor returns the agent as ModelExtractor if it implements the
+// interface. No capability declaration is needed: transcript-based model
+// extraction is a built-in-only fallback for agents whose hooks omit the model
+// (e.g., Pi). External agents report the model through their own hook protocol.
+func AsModelExtractor(ag Agent) (ModelExtractor, bool) {
+	if ag == nil {
+		return nil, false
+	}
+	me, ok := ag.(ModelExtractor)
+	if !ok {
+		return nil, false
+	}
+	return me, true
+}
+
 // AsSubagentAwareExtractor returns the agent as SubagentAwareExtractor if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsSubagentAwareExtractor(ag Agent) (SubagentAwareExtractor, bool) {
@@ -185,4 +205,15 @@ func AsSubagentAwareExtractor(ag Agent) (SubagentAwareExtractor, bool) {
 		return sae, cd.DeclaredCapabilities().SubagentAwareExtractor
 	}
 	return sae, true
+}
+
+// AsSkillEventExtractor returns the agent as SkillEventExtractor if it implements
+// the interface. Skill-event extraction is currently built-in only; external
+// agents do not expose this optional interface through declared capabilities.
+func AsSkillEventExtractor(ag Agent) (SkillEventExtractor, bool) {
+	if ag == nil {
+		return nil, false
+	}
+	see, ok := ag.(SkillEventExtractor)
+	return see, ok
 }

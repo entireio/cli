@@ -15,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -122,10 +123,19 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	if err != nil {
 		return err
 	}
-	client, err := NewAuthenticatedAPIClient(f.insecureHTTP)
+	client, err := newRecapClient(ctx, f.insecureHTTP)
 	if err != nil {
-		fmt.Fprintln(errW, "Sign in with `entire login` to use `entire recap`.")
-		return NewSilentError(err)
+		if errors.Is(err, api.ErrInsecureHTTP) {
+			fmt.Fprintf(errW, "ENTIRE_API_BASE_URL is set to an insecure http:// URL (%s). Use https:// for production, or pass --insecure-http-auth for local dev.\n", api.BaseURL())
+			return NewSilentError(err)
+		}
+		// Token resolution can fail for many reasons unrelated to the
+		// keyring — STS exchange rejected, network error, audience
+		// misconfiguration. Surface the underlying error verbatim
+		// rather than misattributing it to a missing or locked
+		// keyring entry; main.go's default printer is honest about
+		// what went wrong.
+		return err
 	}
 	rangeKey := f.rangeKey()
 	repoSlug := currentRepoSlug(ctx)
@@ -152,6 +162,41 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	}))
 	fmt.Fprintln(w)
 	return nil
+}
+
+// newRecapClient does not gate on a missing token; FetchMeRecap surfaces
+// 401s via recapLoadErrorMessage so flag effects (--week, --agent, ...)
+// and the real auth error are not collapsed into one "sign in" hint.
+//
+// Goes through auth.ResolveDataAPIToken (the same context-aware path as
+// activity/search/dispatch) so the data host's /.well-known/entire-api.json
+// picks the matching login context and exchanges for the advertised audience,
+// falling back to static resolution when discovery is unavailable.
+// ErrNotLoggedIn is collapsed back into an empty token so the caller's "render
+// with no bearer, let the server respond 401" path still fires. Every other
+// resolution failure (no eligible/ambiguous context, STS exchange rejected,
+// network error, keyring locked) surfaces verbatim to the caller — previously
+// these were all relabelled as keyring read failures via keyringReadError,
+// which sent users on wild goose chases when the keyring was fine and the real
+// problem was downstream.
+func newRecapClient(ctx context.Context, insecureHTTP bool) (*api.Client, error) {
+	if insecureHTTP {
+		auth.EnableInsecureHTTP()
+	}
+	token, err := auth.ResolveDataAPIToken(ctx, api.BaseURL())
+	if errors.Is(err, auth.ErrNotLoggedIn) {
+		token = ""
+		err = nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if token != "" && !insecureHTTP {
+		if err := api.RequireSecureURL(api.BaseURL()); err != nil {
+			return nil, fmt.Errorf("base URL check: %w", err)
+		}
+	}
+	return api.NewClient(token), nil
 }
 
 func handleRecapFetchError(w io.Writer, err error) error {

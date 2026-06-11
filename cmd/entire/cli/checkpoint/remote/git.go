@@ -1,9 +1,12 @@
 package remote
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,11 +29,22 @@ var sshTokenWarningOnce sync.Once //nolint:gochecknoglobals // intentional per-p
 
 // FetchOptions configures a git fetch operation.
 type FetchOptions struct {
-	Remote    string   // remote name or URL (required)
-	RefSpecs  []string // one or more refspecs / object hashes
-	Shallow   bool     // adds --depth=1
-	NoTags    bool     // adds --no-tags
-	NoFilter  bool     // when true, skips --filter=blob:none even if filtered fetches are enabled
+	Remote   string   // remote name or URL (required)
+	RefSpecs []string // one or more refspecs / object hashes
+	NoTags   bool     // adds --no-tags
+	NoFilter bool     // when true, skips --filter=blob:none even if filtered fetches are enabled
+	// Shallow adds --depth=1 to fetch only the tip commit and its tree. Use
+	// for tip-only probes (e.g. resolving the latest checkpoint metadata)
+	// where ancestry isn't needed. Creates .git/shallow state — callers that
+	// later require full history should opt into Unshallow on a follow-up
+	// fetch.
+	Shallow bool
+	// Unshallow adds --unshallow when the repository is currently shallow,
+	// triggering git to download the rest of the history for the fetched ref.
+	// Set this on metadata-repair / reconcile paths that need complete
+	// checkpoint ancestry. Do not set on generic branch fetches — it would
+	// silently convert a deliberately-shallow user clone into a full one.
+	Unshallow bool
 	Dir       string   // working directory (empty = CWD)
 	ExtraArgs []string // additional flags before remote (e.g., "--no-write-fetch-head")
 }
@@ -43,14 +57,17 @@ type FetchOptions struct {
 // resolve the name to a URL (to avoid persisting promisor settings) should call
 // ResolveFetchTarget first and pass the resolved target as opts.Remote.
 func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
-	args := []string{"fetch"}
+	args := []string{"fetch", "--no-auto-gc"}
 	if opts.NoTags {
 		args = append(args, "--no-tags")
 	}
-	if opts.Shallow {
-		args = append(args, "--depth=1")
-	}
 	args = append(args, opts.ExtraArgs...)
+	switch {
+	case opts.Shallow:
+		args = append(args, "--depth=1")
+	case opts.Unshallow && isShallowRepository(ctx, opts.Dir):
+		args = append(args, "--unshallow")
+	}
 	if !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx) {
 		args = append(args, "--filter=blob:none")
 	}
@@ -95,6 +112,124 @@ func FetchBlobs(ctx context.Context, remote string, hashes []string) error {
 		return fmt.Errorf("git fetch-pack from %s: %w", redactedURL, err)
 	}
 	return nil
+}
+
+// CatFilesOptions configures a git cat-file --batch read.
+type CatFilesOptions struct {
+	Specs     []string // one or more object names or revspecs
+	Dir       string   // working directory (empty = CWD)
+	ExtraArgs []string // additional flags before --batch
+}
+
+// CatFileResult is the result of reading one cat-file batch spec.
+type CatFileResult struct {
+	Content []byte
+	Missing bool
+	Err     error
+}
+
+// CatFiles reads specs through git cat-file --batch.
+func CatFiles(ctx context.Context, opts CatFilesOptions) map[string]CatFileResult {
+	specs := uniqueStrings(opts.Specs)
+	results := make(map[string]CatFileResult, len(specs))
+	if len(specs) == 0 {
+		return results
+	}
+
+	args := []string{"cat-file"}
+	args = append(args, opts.ExtraArgs...)
+	args = append(args, "--batch")
+	cmd := newCommand(ctx, args...)
+	if opts.Dir != "" {
+		cmd.Dir = opts.Dir
+	}
+	cmd.Stdin = strings.NewReader(strings.Join(specs, "\n") + "\n")
+	disableTerminalPrompt(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	output, err := cmd.Output()
+	if err != nil {
+		wrapped := catFilesError(err, stderr.String())
+		for _, spec := range specs {
+			results[spec] = CatFileResult{Err: wrapped}
+		}
+		return results
+	}
+
+	reader := bufio.NewReader(bytes.NewReader(output))
+	for i, spec := range specs {
+		result, parseErr := parseBlobBatchEntry(reader)
+		if parseErr != nil {
+			for _, s := range specs[i:] {
+				results[s] = CatFileResult{Err: parseErr}
+			}
+			break
+		}
+		results[spec] = result
+	}
+	return results
+}
+
+func parseBlobBatchEntry(reader *bufio.Reader) (CatFileResult, error) {
+	header, err := reader.ReadString('\n')
+	if err != nil {
+		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: %w", err)
+	}
+	header = strings.TrimSuffix(header, "\n")
+
+	fields := strings.Fields(header)
+	if len(fields) == 2 && fields[1] == "missing" {
+		return CatFileResult{Missing: true}, nil
+	}
+	if len(fields) != 3 {
+		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: unexpected header %q", header)
+	}
+
+	size, err := strconv.ParseInt(fields[2], 10, 64)
+	if err != nil {
+		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: invalid size %q: %w", fields[2], err)
+	}
+	content := make([]byte, size)
+	if _, err := io.ReadFull(reader, content); err != nil {
+		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: %w", err)
+	}
+	separator, err := reader.ReadByte()
+	if err != nil {
+		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: %w", err)
+	}
+	if separator != '\n' {
+		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: unexpected separator %q", separator)
+	}
+
+	if fields[1] != "blob" {
+		return CatFileResult{Err: fmt.Errorf("object %s is %s, want blob", fields[0], fields[1])}, nil
+	}
+	return CatFileResult{Content: content}, nil
+}
+
+func catFilesError(err error, stderr string) error {
+	msg := strings.TrimSpace(stderr)
+	if msg == "" {
+		return fmt.Errorf("git cat-file --batch: %w", err)
+	}
+	return fmt.Errorf("git cat-file --batch: %s: %w", msg, err)
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	unique := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		unique = append(unique, value)
+	}
+	return unique
 }
 
 // PushResult holds raw porcelain output from git push.
@@ -144,12 +279,6 @@ func PushWithOptions(ctx context.Context, opts PushOptions) (PushResult, error) 
 	return PushResult{Output: string(output)}, nil
 }
 
-// LsRemote runs git ls-remote with token injection.
-// GIT_TERMINAL_PROMPT=0 is always set. Returns stdout only.
-func LsRemote(ctx context.Context, remote string, patterns ...string) ([]byte, error) {
-	return lsRemote(ctx, "", remote, patterns...)
-}
-
 // LsRemoteInDir is like LsRemote but runs in a specific directory.
 func LsRemoteInDir(ctx context.Context, dir, remote string, patterns ...string) ([]byte, error) {
 	return lsRemote(ctx, dir, remote, patterns...)
@@ -188,6 +317,20 @@ func ResolveFetchTarget(ctx context.Context, target string) (string, error) {
 	return url, nil
 }
 
+// isShallowRepository returns true when the git repository at dir is shallow.
+// An empty dir inherits the parent process's working directory, matching the
+// semantics callers use when invoking Fetch with empty FetchOptions.Dir.
+func isShallowRepository(ctx context.Context, dir string) bool {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-shallow-repository")
+	cmd.Dir = dir
+	disableTerminalPrompt(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "true"
+}
+
 // newCommand creates an exec.Cmd for a git operation that may need
 // checkpoint token authentication. If ENTIRE_CHECKPOINT_TOKEN is set:
 //   - if the target in args is (or resolves to) an SSH remote, the target is
@@ -209,6 +352,7 @@ func newCommand(ctx context.Context, args ...string) *exec.Cmd {
 	mkCmd := func(finalArgs []string) *exec.Cmd {
 		c := exec.CommandContext(ctx, "git", finalArgs...)
 		c.Stdin = nil // Disconnect stdin to prevent hanging in hook context
+		terminateOnCancel(c)
 		return c
 	}
 

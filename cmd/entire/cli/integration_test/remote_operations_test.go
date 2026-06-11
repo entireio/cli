@@ -68,6 +68,47 @@ func TestPrePush_PushesCheckpointBranchToOrigin(t *testing.T) {
 	}
 }
 
+// TestPrePush_PushesV1CustomRefWhenOptedIn verifies that with
+// checkpoints_version "1.1", PrePush pushes the v1.1 ref to the remote at the v1 tip.
+func TestPrePush_PushesV1CustomRefWhenOptedIn(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	// Opt in before session activity so condensation mirrors v1.1.
+	env.PatchSettings(map[string]any{
+		"strategy_options": map[string]any{"checkpoints_version": "1.1"},
+	})
+
+	bareDir := env.SetupBareRemote()
+
+	session := env.NewSession()
+	transcriptPath := session.CreateTranscript("Add auth module", []FileChange{
+		{Path: "auth.go", Content: "package auth"},
+	})
+	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(session.ID, "Add auth module", transcriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	env.WriteFile("auth.go", "package auth")
+	env.GitAdd("auth.go")
+	if err := env.SimulateStop(session.ID, transcriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+	env.GitCommitWithShadowHooks("Add auth module", "auth.go")
+
+	env.RunPrePush("origin")
+
+	if !env.BranchExistsOnRemote(bareDir, paths.MetadataBranchName) {
+		t.Fatalf("%s should exist on bare remote after PrePush", paths.MetadataBranchName)
+	}
+
+	// v1.1 must exist on the remote at the v1 tip (revParse fails if absent).
+	remoteV1 := revParse(t, bareDir, "refs/heads/"+paths.MetadataBranchName)
+	remoteCustom := revParse(t, bareDir, paths.MetadataRefName)
+	if remoteV1 != remoteCustom {
+		t.Errorf("remote %s = %s, want %s (remote v1 tip)", paths.MetadataRefName, remoteCustom, remoteV1)
+	}
+}
+
 // TestPrePush_NoOpWhenNoCheckpoints verifies that PrePush is a no-op
 // when no sessions or checkpoints exist.
 func TestPrePush_NoOpWhenNoCheckpoints(t *testing.T) {
@@ -172,7 +213,7 @@ func TestPrePush_PushDisabledSkipsCheckpoints(t *testing.T) {
 // can be selectively pushed to a separate remote.
 //
 // This is a data routing verification test. It validates that when the production
-// code's pushBranchIfNeeded is called with different targets for checkpoints,
+// code's pushRefIfNeeded is called with different targets for checkpoints,
 // the branches land on the correct remotes with correct data.
 //
 // Why not test through PrePush directly: resolvePushSettings derives the checkpoint
@@ -181,8 +222,8 @@ func TestPrePush_PushDisabledSkipsCheckpoints(t *testing.T) {
 // origin. The URL derivation logic is unit-tested in checkpoint_remote_test.go
 // (TestDeriveCheckpointURL, TestResolvePushSettings_WithCheckpointRemote_*).
 //
-// The pushBranchIfNeeded function (which PrePush calls with the resolved target)
-// is exercised in push_common_test.go:TestPushBranchIfNeeded_LocalBareRepo_PushesSuccessfully,
+// The pushRefIfNeeded function (which PrePush calls with the resolved target)
+// is exercised in push_common_test.go:TestPushRefIfNeeded_LocalBareRepo_PushesSuccessfully,
 // verifying it works with local bare repo paths.
 func TestPrePush_CheckpointRemoteRoutesToSeparateRemote(t *testing.T) {
 	t.Parallel()
@@ -529,10 +570,10 @@ func TestConcurrentPush_SecondPusherRebasesAndRetries(t *testing.T) {
 // origin. Trails are always pushed to origin regardless of checkpoint_remote config.
 //
 // This test exercises the PrePush -> resolvePushSettings -> fallback code path.
-// The actual doPushBranch graceful degradation (push to unreachable URL returns nil,
+// The actual doPushRef graceful degradation (push to unreachable URL returns nil,
 // not an error) is tested in push_common_test.go:
-//   - TestDoPushBranch_UnreachableTarget_ReturnsNil
-//   - TestPushBranchIfNeeded_UnreachableTarget_ReturnsNil
+//   - TestDoPushRef_UnreachableTarget_ReturnsNil
+//   - TestPushRefIfNeeded_UnreachableTarget_ReturnsNil
 func TestGracefulDegradation_UnreachableCheckpointRemotePushContinues(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)

@@ -72,6 +72,50 @@ func TestValidateSessionID(t *testing.T) {
 			wantErr:   true,
 			errMsg:    "contains path separators",
 		},
+		// Bare path segments (separator-free but still traverse as a path component)
+		{
+			name:      "single dot",
+			sessionID: ".",
+			wantErr:   true,
+			errMsg:    "reserved path segment",
+		},
+		{
+			name:      "double dot",
+			sessionID: "..",
+			wantErr:   true,
+			errMsg:    "reserved path segment",
+		},
+		{
+			name:      "dot in the middle is allowed",
+			sessionID: "a..b",
+			wantErr:   false,
+		},
+		// Windows drive-relative path (separator-free, not reported absolute)
+		{
+			name:      "windows drive-relative path",
+			sessionID: "C:foo",
+			wantErr:   true,
+			errMsg:    "volume separator",
+		},
+		// Glob metacharacters (would match unrelated files when used in a pattern)
+		{
+			name:      "glob star",
+			sessionID: "*",
+			wantErr:   true,
+			errMsg:    "glob metacharacters",
+		},
+		{
+			name:      "glob question mark",
+			sessionID: "sess?on",
+			wantErr:   true,
+			errMsg:    "glob metacharacters",
+		},
+		{
+			name:      "glob bracket",
+			sessionID: "a[bc]d",
+			wantErr:   true,
+			errMsg:    "glob metacharacters",
+		},
 	}
 
 	for _, tt := range tests {

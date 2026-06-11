@@ -1,7 +1,6 @@
 package strategy
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,12 +21,11 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 const testTrailerCheckpointID id.CheckpointID = "a1b2c3d4e5f6"
-
-const testCheckpointsV2SettingsJSON = `{"enabled": true, "strategy": "manual-commit", "strategy_options": {"checkpoints_v2": true}}`
 
 // testTranscriptPromptResponse is a minimal transcript used across strategy tests.
 const testTranscriptPromptResponse = "{\"type\":\"human\",\"message\":{\"content\":\"test prompt\"}}\n{\"type\":\"assistant\",\"message\":{\"content\":\"test response\"}}\n"
@@ -468,37 +466,114 @@ func TestShadowStrategy_GetRewindPoints_NoShadowBranch(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_ListSessions_Empty(t *testing.T) {
+// In v1.1 mode the picker must read prompt text from the topology mirror,
+// not v1.
+func TestShadowStrategy_GetRewindPoints_V11ReadsPromptFromMirror(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	baseRef, err := repo.Head()
+	require.NoError(t, err)
+	baseHash := baseRef.Hash()
+
+	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
+	const wantPrompt = "only-on-mirror"
+
+	require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "test-session-v11-rewind",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
+		Prompts:      []string{wantPrompt},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}))
+	v1Ref := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	committedRef, err := repo.Reference(v1Ref, true)
+	require.NoError(t, err)
+
+	// Mirror carries the checkpoint; v1 points at the initial commit (no metadata).
+	mirrorRef := plumbing.ReferenceName(paths.MetadataRefName)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(mirrorRef, committedRef.Hash())))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(v1Ref, baseHash)))
+
+	// HEAD trailer drives the picker's log walk.
+	testutil.WriteFile(t, dir, "g.txt", "feat")
+	testutil.GitAdd(t, dir, "g.txt")
+	testutil.GitCommit(t, dir, "feat\n\nEntire-Checkpoint: "+cpID.String())
 
 	t.Chdir(dir)
+	settingsDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(settingsDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(settingsDir, paths.SettingsFileName),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
+		0o644,
+	))
 
-	sessions, err := ListSessions(context.Background())
-	if err != nil {
-		t.Errorf("ListSessions(context.Background()) error = %v", err)
-	}
-	if len(sessions) != 0 {
-		t.Errorf("ListSessions(context.Background()) returned %d sessions, want 0", len(sessions))
-	}
+	strat := NewManualCommitStrategy()
+	points, err := strat.GetRewindPoints(t.Context(), 10)
+	require.NoError(t, err)
+	require.Len(t, points, 1)
+	assert.Equal(t, wantPrompt, points[0].SessionPrompt, "prompt must come from the mirror, not v1")
 }
 
-func TestShadowStrategy_GetSession_NotFound(t *testing.T) {
+// When the most-recent session of a multi-session condensed checkpoint has no
+// prompt, the picker must fall back to the latest non-empty session prompt
+// rather than displaying nothing.
+func TestShadowStrategy_GetRewindPoints_MultiSessionFallsBackToEarlierPrompt(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
 
 	t.Chdir(dir)
 
-	_, err = GetSession(context.Background(), "nonexistent")
-	if !errors.Is(err, ErrNoSession) {
-		t.Errorf("GetSession() error = %v, want ErrNoSession", err)
-	}
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	cpID := id.MustCheckpointID("d4e5f6a1b2c3")
+	const earlierPrompt = "earlier-session-prompt"
+
+	// Earlier session carries the only usable prompt.
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	require.NoError(t, store.WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-earlier",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
+		Prompts:      []string{earlierPrompt},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}))
+	// Latest session has no prompt at all.
+	require.NoError(t, store.WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-latest",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
+		Prompts:      nil,
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}))
+
+	testutil.WriteFile(t, dir, "g.txt", "feat")
+	testutil.GitAdd(t, dir, "g.txt")
+	testutil.GitCommit(t, dir, "feat\n\nEntire-Checkpoint: "+cpID.String())
+
+	strat := NewManualCommitStrategy()
+	points, err := strat.GetRewindPoints(t.Context(), 10)
+	require.NoError(t, err)
+	require.Len(t, points, 1)
+	assert.Equal(t, earlierPrompt, points[0].SessionPrompt,
+		"picker must fall back to the latest non-empty session prompt when the most-recent session is empty")
 }
 
 func TestShadowStrategy_GetSessionInfo_NoShadowBranch(t *testing.T) {
@@ -3151,7 +3226,7 @@ func TestCondenseSession_PrefersLiveTranscript(t *testing.T) {
 	}
 
 	// Verify the condensed content includes the second prompt
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
 	if err != nil {
 		t.Fatalf("ReadLatestSessionContent() error = %v", err)
@@ -3368,7 +3443,7 @@ func TestCondenseSession_GeminiTranscript(t *testing.T) {
 	}
 
 	// Verify condensed data on entire/checkpoints/v1 branch
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
 	if err != nil {
 		t.Fatalf("ReadLatestSessionContent() error = %v", err)
@@ -3561,6 +3636,9 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 	// what would happen after condensing checkpoint 1
 	state.CheckpointTranscriptStart = 2 // Start from message index 2 (the second user prompt)
 	state.StepCount = 1                 // Set to 1 (will be incremented to 2 by SaveStep)
+	// CheckpointsCount is now the prompt window (SessionTurnCount - PromptWindowBase),
+	// not StepCount. Simulate two counted turns so the assertion below still expects 2.
+	state.SessionTurnCount = 2
 	if err := s.saveSessionState(context.Background(), state); err != nil {
 		t.Fatalf("failed to update session state: %v", err)
 	}
@@ -3604,7 +3682,7 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 	}
 
 	// Read condensed metadata
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
 	if err != nil {
 		t.Fatalf("ReadLatestSessionContent() error = %v", err)
@@ -3719,7 +3797,7 @@ func TestCondenseSession_CopilotScopedCheckpointMetadataAndSessionBackfill(t *te
 		t.Errorf("FilesTouched = %v, want [beta.txt]", result.FilesTouched)
 	}
 
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
 	if err != nil {
 		t.Fatalf("ReadLatestSessionContent() error = %v", err)
@@ -4128,459 +4206,6 @@ func TestResolveFilesTouched_PrefersStateFallsBackToTranscript(t *testing.T) {
 	})
 }
 
-// TestCondenseSession_V2DualWrite verifies that when checkpoints_v2 is enabled,
-// CondenseSession writes to both v1 (entire/checkpoints/v1) and v2 refs
-// (refs/entire/checkpoints/v2/main and refs/entire/checkpoints/v2/full/current).
-func TestCondenseSession_V2DualWrite(t *testing.T) {
-	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
-	require.NoError(t, err)
-
-	worktree, err := repo.Worktree()
-	require.NoError(t, err)
-
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o644))
-	_, err = worktree.Add("main.go")
-	require.NoError(t, err)
-	commitHash, err := worktree.Commit("Initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
-	})
-	require.NoError(t, err)
-
-	t.Chdir(dir)
-
-	// Enable checkpoints_v2 via settings
-	entireDir := filepath.Join(dir, ".entire")
-	require.NoError(t, os.MkdirAll(entireDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(testCheckpointsV2SettingsJSON), 0o644))
-
-	s := &ManualCommitStrategy{}
-	sessionID := "2025-01-15-test-v2-dual-write"
-
-	// Create metadata directory with transcript
-	metadataDir := ".entire/metadata/" + sessionID
-	metadataDirAbs := filepath.Join(dir, metadataDir)
-	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
-
-	secret := "q9Xv2Lm8Rt1Yp4Kd7Wz0Hs6Nc3Bf5Jg"
-	transcript := `{"type":"human","message":{"content":"hello secret: ` + secret + `"}}
-{"type":"assistant","message":{"content":"hi there"}}
-`
-	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
-
-	// SaveStep to create shadow branch
-	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{"main.go"},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 1",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
-	})
-	require.NoError(t, err)
-
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	state.TranscriptPath = filepath.Join(metadataDirAbs, paths.TranscriptFileName)
-	state.BaseCommit = commitHash.String()[:7]
-	state.AgentType = agent.AgentTypeClaudeCode
-
-	checkpointID := id.MustCheckpointID("dd11ee22ff33")
-	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-
-	// v1 branch should exist (as before)
-	v1Ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err, "v1 metadata branch should exist")
-	require.NotEqual(t, plumbing.ZeroHash, v1Ref.Hash())
-
-	// v2 /main ref should exist
-	v2MainRef, err := repo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true)
-	require.NoError(t, err, "v2 /main ref should exist")
-	require.NotEqual(t, plumbing.ZeroHash, v2MainRef.Hash())
-
-	// v2 /full/current ref should exist (transcript was non-empty)
-	v2FullRef, err := repo.Reference(plumbing.ReferenceName(paths.V2FullCurrentRefName), true)
-	require.NoError(t, err, "v2 /full/current ref should exist")
-	require.NotEqual(t, plumbing.ZeroHash, v2FullRef.Hash())
-
-	// Verify /main has metadata and redacted compact transcript
-	v2MainCommit, err := repo.CommitObject(v2MainRef.Hash())
-	require.NoError(t, err)
-	v2MainTree, err := v2MainCommit.Tree()
-	require.NoError(t, err)
-
-	cpPath := checkpointID.Path()
-	mainCpTree, err := v2MainTree.Tree(cpPath)
-	require.NoError(t, err)
-
-	// Root metadata.json should exist
-	_, err = mainCpTree.File(paths.MetadataFileName)
-	require.NoError(t, err, "root metadata.json should exist on /main")
-
-	mainSessionTree, err := mainCpTree.Tree("0")
-	require.NoError(t, err)
-	compactFile, err := mainSessionTree.File(paths.CompactTranscriptFileName)
-	require.NoError(t, err, "transcript.jsonl should exist on /main")
-	compactContent, err := compactFile.Contents()
-	require.NoError(t, err)
-	require.NotContains(t, compactContent, secret, "compact transcript on /main must be redacted")
-
-	// Verify /full/current has transcript
-	v2FullCommit, err := repo.CommitObject(v2FullRef.Hash())
-	require.NoError(t, err)
-	v2FullTree, err := v2FullCommit.Tree()
-	require.NoError(t, err)
-
-	fullCpTree, err := v2FullTree.Tree(cpPath)
-	require.NoError(t, err)
-	fullSessionTree, err := fullCpTree.Tree("0")
-	require.NoError(t, err)
-	_, err = fullSessionTree.File(paths.V2RawTranscriptFileName)
-	require.NoError(t, err, "raw_transcript should exist on /full/current")
-}
-
-func TestCondenseSession_V2DualWrite_CopiesTaskMetadataToFullCurrent(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "main.go", "package main")
-	testutil.GitAdd(t, dir, "main.go")
-	testutil.GitCommit(t, dir, "Initial commit")
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-	commitHash := testutil.GetHeadHash(t, dir)
-
-	t.Chdir(dir)
-
-	entireDir := filepath.Join(dir, ".entire")
-	require.NoError(t, os.MkdirAll(entireDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(testCheckpointsV2SettingsJSON), 0o644))
-
-	s := &ManualCommitStrategy{}
-	sessionID := "2025-01-15-test-v2-task-dual-write"
-
-	metadataDir := ".entire/metadata/" + sessionID
-	metadataDirAbs := filepath.Join(dir, metadataDir)
-	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
-
-	transcript := `{"type":"human","message":{"content":"hello"}}
-{"type":"assistant","message":{"content":"hi there"}}
-`
-	transcriptPath := filepath.Join(metadataDirAbs, paths.TranscriptFileName)
-	require.NoError(t, os.WriteFile(transcriptPath, []byte(transcript), 0o644))
-
-	// Create shadow branch/session checkpoint data.
-	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{"main.go"},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 1",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
-	})
-	require.NoError(t, err)
-
-	subagentTranscriptPath := filepath.Join(metadataDirAbs, "subagent.jsonl")
-	require.NoError(t, os.WriteFile(subagentTranscriptPath, []byte("{\"type\":\"event\",\"message\":\"done\"}\n"), 0o644))
-
-	err = s.SaveTaskStep(context.Background(), TaskStepContext{
-		SessionID:              sessionID,
-		ToolUseID:              "toolu_01TASK",
-		AgentID:                "agent-01",
-		ModifiedFiles:          []string{"main.go"},
-		TranscriptPath:         transcriptPath,
-		SubagentTranscriptPath: subagentTranscriptPath,
-		CheckpointUUID:         "uuid-task-001",
-		AuthorName:             "Test",
-		AuthorEmail:            "test@test.com",
-		SubagentType:           "general",
-		TaskDescription:        "Implement task",
-		AgentType:              agent.AgentTypeClaudeCode,
-	})
-	require.NoError(t, err)
-
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	state.TranscriptPath = transcriptPath
-	state.BaseCommit = commitHash[:7]
-	state.AgentType = agent.AgentTypeClaudeCode
-
-	checkpointID := id.MustCheckpointID("ab11cd22ef33")
-	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-
-	v2FullRef, err := repo.Reference(plumbing.ReferenceName(paths.V2FullCurrentRefName), true)
-	require.NoError(t, err, "v2 /full/current ref should exist")
-
-	v2FullCommit, err := repo.CommitObject(v2FullRef.Hash())
-	require.NoError(t, err)
-	v2FullTree, err := v2FullCommit.Tree()
-	require.NoError(t, err)
-
-	taskCheckpointPath := checkpointID.Path() + "/0/tasks/toolu_01TASK/checkpoint.json"
-	_, err = v2FullTree.File(taskCheckpointPath)
-	require.NoError(t, err, "task checkpoint metadata should be copied to v2 /full/current")
-}
-
-// TestCondenseSession_V2CompactTranscriptStart verifies v2 /main writes
-// checkpoint_transcript_start from compact transcript offset, not full.jsonl offset.
-func TestCondenseSession_V2CompactTranscriptStart(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "main.go", "package main")
-	testutil.GitAdd(t, dir, "main.go")
-	testutil.GitCommit(t, dir, "Initial commit")
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-	commitHash := testutil.GetHeadHash(t, dir)
-
-	t.Chdir(dir)
-
-	// Enable checkpoints_v2 via settings
-	entireDir := filepath.Join(dir, ".entire")
-	require.NoError(t, os.MkdirAll(entireDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(testCheckpointsV2SettingsJSON), 0o644))
-
-	s := &ManualCommitStrategy{}
-	sessionID := "2025-01-15-test-v2-compact-start"
-
-	// Create metadata directory with transcript
-	metadataDir := ".entire/metadata/" + sessionID
-	metadataDirAbs := filepath.Join(dir, metadataDir)
-	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
-
-	transcript := `{"type":"human","message":{"content":"hello"}}
-{"type":"assistant","message":{"content":"hi there"}}
-`
-	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
-
-	// SaveStep to create shadow branch
-	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{"main.go"},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 1",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
-	})
-	require.NoError(t, err)
-
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	state.TranscriptPath = filepath.Join(metadataDirAbs, paths.TranscriptFileName)
-	state.BaseCommit = commitHash[:7]
-	state.AgentType = agent.AgentTypeClaudeCode
-
-	// First condensation starts at compact offset 0.
-	checkpointID := id.MustCheckpointID("cc11dd22ee33")
-	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-
-	// v2 /main should have checkpoint_transcript_start = 0 for first checkpoint.
-	v2MainRef, err := repo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true)
-	require.NoError(t, err)
-	v2MainCommit, err := repo.CommitObject(v2MainRef.Hash())
-	require.NoError(t, err)
-	v2MainTree, err := v2MainCommit.Tree()
-	require.NoError(t, err)
-
-	cpPath := checkpointID.Path()
-	sessionTree, err := v2MainTree.Tree(cpPath + "/0")
-	require.NoError(t, err)
-	metadataFile, err := sessionTree.File(paths.MetadataFileName)
-	require.NoError(t, err)
-	metadataContent, err := metadataFile.Contents()
-	require.NoError(t, err)
-
-	var v2Metadata checkpoint.CommittedMetadata
-	require.NoError(t, json.Unmarshal([]byte(metadataContent), &v2Metadata))
-	require.Equal(t, 0, v2Metadata.CheckpointTranscriptStart,
-		"first checkpoint v2 metadata should have checkpoint_transcript_start=0")
-
-	// Read v1 metadata for comparison.
-	v1Ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err)
-	v1Commit, err := repo.CommitObject(v1Ref.Hash())
-	require.NoError(t, err)
-	v1Tree, err := v1Commit.Tree()
-	require.NoError(t, err)
-	v1SessionTree, err := v1Tree.Tree(cpPath + "/0")
-	require.NoError(t, err)
-	v1MetadataFile, err := v1SessionTree.File(paths.MetadataFileName)
-	require.NoError(t, err)
-	v1MetadataContent, err := v1MetadataFile.Contents()
-	require.NoError(t, err)
-
-	var v1Metadata checkpoint.CommittedMetadata
-	require.NoError(t, json.Unmarshal([]byte(v1MetadataContent), &v1Metadata))
-	require.Equal(t, 0, v1Metadata.CheckpointTranscriptStart,
-		"first checkpoint v1 metadata should also have checkpoint_transcript_start=0")
-
-	// Verify compact transcript lines were counted in the result
-	require.Positive(t, result.CompactTranscriptLines,
-		"CondenseResult should report compact transcript lines")
-
-	// Read compact transcript.jsonl from v2 /main for the first checkpoint.
-	compactFile1, err := sessionTree.File(paths.CompactTranscriptFileName)
-	require.NoError(t, err, "transcript.jsonl should exist on v2 /main")
-	compactContent1, err := compactFile1.Contents()
-	require.NoError(t, err)
-	firstCompactLines := bytes.Count([]byte(compactContent1), []byte{'\n'})
-	require.Positive(t, firstCompactLines, "first checkpoint compact transcript should have lines")
-
-	// --- Second condensation: add more transcript content ---
-	transcript2 := transcript + `{"type":"human","message":{"content":"next question"}}
-{"type":"assistant","message":{"content":"next answer"}}
-`
-	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript2), 0o644))
-
-	// Update state after first condensation (mimic what CondenseSessionByID does)
-	state.StepCount = 0
-	state.CheckpointTranscriptStart = result.TotalTranscriptLines
-	state.CompactTranscriptStart += result.CompactTranscriptLines
-
-	// SaveStep for second checkpoint
-	testutil.WriteFile(t, dir, "main.go", "package main\n// v2")
-	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{"main.go"},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 2",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
-	})
-	require.NoError(t, err)
-
-	state2, err := s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	state2.TranscriptPath = filepath.Join(metadataDirAbs, paths.TranscriptFileName)
-	state2.BaseCommit = commitHash[:7]
-	state2.AgentType = agent.AgentTypeClaudeCode
-	state2.CheckpointTranscriptStart = state.CheckpointTranscriptStart
-	state2.CompactTranscriptStart = state.CompactTranscriptStart
-
-	checkpointID2 := id.MustCheckpointID("dd22ee33ff44")
-	result2, err := s.CondenseSession(context.Background(), repo, checkpointID2, state2, nil)
-	require.NoError(t, err)
-	require.NotNil(t, result2)
-
-	// v2 /main metadata for second checkpoint should have compact start = firstCompactLines.
-	v2MainRef2, err := repo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true)
-	require.NoError(t, err)
-	v2MainCommit2, err := repo.CommitObject(v2MainRef2.Hash())
-	require.NoError(t, err)
-	v2MainTree2, err := v2MainCommit2.Tree()
-	require.NoError(t, err)
-
-	cpPath2 := checkpointID2.Path()
-	sessionTree2, err := v2MainTree2.Tree(cpPath2 + "/0")
-	require.NoError(t, err)
-	metadataFile2, err := sessionTree2.File(paths.MetadataFileName)
-	require.NoError(t, err)
-	metadataContent2, err := metadataFile2.Contents()
-	require.NoError(t, err)
-
-	var v2Metadata2 checkpoint.CommittedMetadata
-	require.NoError(t, json.Unmarshal([]byte(metadataContent2), &v2Metadata2))
-	require.Equal(t, firstCompactLines, v2Metadata2.CheckpointTranscriptStart,
-		"second checkpoint v2 metadata should have checkpoint_transcript_start = first checkpoint's compact line count")
-
-	// The compact transcript.jsonl for checkpoint 2 should be CUMULATIVE:
-	// it should contain both checkpoint 1's and checkpoint 2's compact lines.
-	compactFile2, err := sessionTree2.File(paths.CompactTranscriptFileName)
-	require.NoError(t, err, "transcript.jsonl should exist for second checkpoint")
-	compactContent2, err := compactFile2.Contents()
-	require.NoError(t, err)
-	secondCompactTotalLines := bytes.Count([]byte(compactContent2), []byte{'\n'})
-	require.Greater(t, secondCompactTotalLines, firstCompactLines,
-		"second checkpoint compact transcript should include all prior content plus new content")
-
-	// The first checkpoint's content should be a prefix of the second checkpoint's content.
-	require.True(t, strings.HasPrefix(compactContent2, compactContent1),
-		"second checkpoint compact transcript should start with first checkpoint's content")
-}
-
-// TestCondenseSession_V2Disabled_NoV2Refs verifies that when checkpoints_v2 is
-// not enabled, CondenseSession only writes to v1 and does not create v2 refs.
-func TestCondenseSession_V2Disabled_NoV2Refs(t *testing.T) {
-	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
-	require.NoError(t, err)
-
-	worktree, err := repo.Worktree()
-	require.NoError(t, err)
-
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o644))
-	_, err = worktree.Add("main.go")
-	require.NoError(t, err)
-	commitHash, err := worktree.Commit("Initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
-	})
-	require.NoError(t, err)
-
-	t.Chdir(dir)
-
-	// No checkpoints_v2 setting — default is disabled
-	entireDir := filepath.Join(dir, ".entire")
-	require.NoError(t, os.MkdirAll(entireDir, 0o755))
-	settingsJSON := `{"enabled": true, "strategy": "manual-commit"}`
-	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(settingsJSON), 0o644))
-
-	s := &ManualCommitStrategy{}
-	sessionID := "2025-01-15-test-v2-disabled"
-
-	metadataDir := ".entire/metadata/" + sessionID
-	metadataDirAbs := filepath.Join(dir, metadataDir)
-	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
-
-	transcript := `{"type":"human","message":{"content":"hello"}}
-{"type":"assistant","message":{"content":"hi"}}
-`
-	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
-
-	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{"main.go"},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 1",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
-	})
-	require.NoError(t, err)
-
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	state.TranscriptPath = filepath.Join(metadataDirAbs, paths.TranscriptFileName)
-	state.BaseCommit = commitHash.String()[:7]
-
-	checkpointID := id.MustCheckpointID("ee22ff33aa44")
-	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.Equal(t, 0, result.CompactTranscriptLines, "v2-disabled condensation should not report compact transcript line deltas")
-
-	// v1 should exist
-	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err, "v1 metadata branch should exist")
-
-	// v2 refs should NOT exist
-	_, err = repo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true)
-	require.Error(t, err, "v2 /main ref should not exist when v2 is disabled")
-
-	_, err = repo.Reference(plumbing.ReferenceName(paths.V2FullCurrentRefName), true)
-	require.Error(t, err, "v2 /full/current ref should not exist when v2 is disabled")
-}
-
 func TestCondenseSession_RedactionFailure_DropsTranscriptButWritesMetadata(t *testing.T) {
 	originalRedact := redactSessionJSONLBytes
 	redactSessionJSONLBytes = func([]byte) (redact.RedactedBytes, error) {
@@ -4637,8 +4262,7 @@ func TestCondenseSession_RedactionFailure_DropsTranscriptButWritesMetadata(t *te
 	require.NoError(t, err, "redaction failure should not abort condensation")
 	require.NotNil(t, result)
 
-	store, err := s.getCheckpointStore()
-	require.NoError(t, err)
+	store := s.getCheckpointStore(context.Background(), repo)
 
 	committed, err := store.ListCommitted(context.Background())
 	require.NoError(t, err)
@@ -4686,81 +4310,77 @@ func TestCommittedFilesExcludingMetadata(t *testing.T) {
 	require.NotContains(t, resultSet, ".cursor/hooks.json", ".cursor/ should be excluded (cursor ProtectedDirs)")
 	require.NotContains(t, resultSet, "opencode.json", "opencode.json should be excluded (opencode ProtectedFiles)")
 	require.Len(t, result, 2)
-}
 
-func TestMarshalPromptAttributionsIncludingPending_IncludesPending(t *testing.T) {
-	t.Parallel()
-
-	state := &SessionState{
-		PromptAttributions: []PromptAttribution{
-			{CheckpointNumber: 1, UserLinesAdded: 3},
-		},
-		PendingPromptAttribution: &PromptAttribution{
-			CheckpointNumber: 2, UserLinesAdded: 5,
-		},
-	}
-
-	raw := marshalPromptAttributionsIncludingPending(state)
-	require.NotNil(t, raw)
-
-	var result []PromptAttribution
-	require.NoError(t, json.Unmarshal(raw, &result))
-	require.Len(t, result, 2, "should include both committed and pending attributions")
-	require.Equal(t, 1, result[0].CheckpointNumber)
-	require.Equal(t, 3, result[0].UserLinesAdded)
-	require.Equal(t, 2, result[1].CheckpointNumber)
-	require.Equal(t, 5, result[1].UserLinesAdded)
-}
-
-func TestMarshalPromptAttributionsIncludingPending_NoPending(t *testing.T) {
-	t.Parallel()
-
-	state := &SessionState{
-		PromptAttributions: []PromptAttribution{
-			{CheckpointNumber: 1, UserLinesAdded: 3},
-		},
-	}
-
-	raw := marshalPromptAttributionsIncludingPending(state)
-	require.NotNil(t, raw)
-
-	var result []PromptAttribution
-	require.NoError(t, json.Unmarshal(raw, &result))
-	require.Len(t, result, 1)
-}
-
-func TestMarshalPromptAttributionsIncludingPending_Empty(t *testing.T) {
-	t.Parallel()
-
-	state := &SessionState{}
-	raw := marshalPromptAttributionsIncludingPending(state)
-	require.Nil(t, raw, "empty state should return nil")
-}
-
-func TestMarshalPromptAttributionsIncludingPending_OnlyPending(t *testing.T) {
-	t.Parallel()
-
-	state := &SessionState{
-		PendingPromptAttribution: &PromptAttribution{
-			CheckpointNumber: 1, UserLinesAdded: 7,
-		},
-	}
-
-	raw := marshalPromptAttributionsIncludingPending(state)
-	require.NotNil(t, raw, "pending-only should still produce output")
-
-	var result []PromptAttribution
-	require.NoError(t, json.Unmarshal(raw, &result))
-	require.Len(t, result, 1)
-	require.Equal(t, 7, result[0].UserLinesAdded)
-}
-
-func TestCommittedFilesExcludingMetadata_AllMetadata(t *testing.T) {
-	t.Parallel()
-
-	result := committedFilesExcludingMetadata(map[string]struct{}{
+	// All-metadata input excludes everything, yielding an empty result.
+	allMetadata := committedFilesExcludingMetadata(map[string]struct{}{
 		".entire/settings.json": {},
 		".entire/.gitignore":    {},
 	})
-	require.Empty(t, result, "all metadata files should be excluded")
+	require.Empty(t, allMetadata, "all metadata files should be excluded")
+}
+
+func TestMarshalPromptAttributionsIncludingPending(t *testing.T) {
+	t.Parallel()
+
+	committed := []PromptAttribution{{CheckpointNumber: 1, UserLinesAdded: 3}}
+	pending := &PromptAttribution{CheckpointNumber: 2, UserLinesAdded: 5}
+
+	tests := []struct {
+		name      string
+		state     *SessionState
+		wantNil   bool
+		wantCount int
+		// verify is an optional extra check on the unmarshalled attributions.
+		verify func(t *testing.T, result []PromptAttribution)
+	}{
+		{
+			name:      "includes both committed and pending",
+			state:     &SessionState{PromptAttributions: committed, PendingPromptAttribution: pending},
+			wantCount: 2,
+			verify: func(t *testing.T, result []PromptAttribution) {
+				require.Equal(t, 1, result[0].CheckpointNumber)
+				require.Equal(t, 3, result[0].UserLinesAdded)
+				require.Equal(t, 2, result[1].CheckpointNumber)
+				require.Equal(t, 5, result[1].UserLinesAdded)
+			},
+		},
+		{
+			name:      "committed only, no pending",
+			state:     &SessionState{PromptAttributions: committed},
+			wantCount: 1,
+		},
+		{
+			name:    "empty state returns nil",
+			state:   &SessionState{},
+			wantNil: true,
+		},
+		{
+			name:      "pending only still produces output",
+			state:     &SessionState{PendingPromptAttribution: &PromptAttribution{CheckpointNumber: 1, UserLinesAdded: 7}},
+			wantCount: 1,
+			verify: func(t *testing.T, result []PromptAttribution) {
+				require.Equal(t, 7, result[0].UserLinesAdded)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			raw := marshalPromptAttributionsIncludingPending(tt.state)
+			if tt.wantNil {
+				require.Nil(t, raw)
+				return
+			}
+			require.NotNil(t, raw)
+
+			var result []PromptAttribution
+			require.NoError(t, json.Unmarshal(raw, &result))
+			require.Len(t, result, tt.wantCount)
+			if tt.verify != nil {
+				tt.verify(t, result)
+			}
+		})
+	}
 }

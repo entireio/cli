@@ -55,7 +55,7 @@ func TestComposeReviewPrompt_AllSectionsWithScope(t *testing.T) {
 		ScopeBaseRef: "main",
 	}
 	got := ComposeReviewPrompt(cfg)
-	want := "/x\n\nbe thorough\n\nfocus on auth\n\nScope: review only the commits unique to this branch vs main."
+	want := "/x\n\nbe thorough\n\nfocus on auth\n\nScope: review the commits unique to this branch vs main, plus any uncommitted changes in the working tree. Ignore code outside this scope."
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -71,12 +71,33 @@ func TestComposeReviewPrompt_IncludesCheckpointContext(t *testing.T) {
 	got := ComposeReviewPrompt(cfg)
 	for _, want := range []string{
 		"/x",
-		"Scope: review only the commits unique to this branch vs main.",
+		"Scope: review the commits unique to this branch vs main, plus any uncommitted changes in the working tree. Ignore code outside this scope.",
 		"Commits in scope (newest first):",
 		"abc123 checkpoint data",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestComposeReviewPrompt_ScopeIncludesUncommittedChanges(t *testing.T) {
+	t.Parallel()
+	cfg := reviewtypes.RunConfig{
+		Skills:       []string{"/x"},
+		ScopeBaseRef: "origin/main",
+	}
+	got := ComposeReviewPrompt(cfg)
+	// The scope clause must explicitly include uncommitted changes — without
+	// this, agents (correctly) ignored working-tree edits that hadn't been
+	// committed yet, surprising users iterating on a feature branch who
+	// expected their in-progress work to be reviewed.
+	for _, want := range []string{
+		"origin/main",
+		"uncommitted",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("scope clause must mention %q so agents include uncommitted changes; got:\n%s", want, got)
 		}
 	}
 }

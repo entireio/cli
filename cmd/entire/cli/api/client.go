@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	maxResponseBytes = 1 << 20
+	maxResponseBytes = 16 << 20
 	userAgent        = "entire-cli"
 )
 
@@ -21,10 +21,35 @@ const (
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
+
+	// authSessionsPath is the base path for entire-core's login-session
+	// endpoints (list / revoke / current). Set via WithAuthSessionsPath when the
+	// client targets the auth host; empty otherwise, and the session methods
+	// error out if called against an empty path.
+	authSessionsPath string
 }
 
-// NewClient creates a new authenticated API client with an explicit bearer token.
+// WithAuthSessionsPath sets the base path used by ListAuthSessions,
+// RevokeCurrentAuthSession, and RevokeAuthSession. Returns the receiver for chaining
+// at construction:
+//
+//	c := api.NewClientWithBaseURL(token, base).WithAuthSessionsPath(p)
+func (c *Client) WithAuthSessionsPath(path string) *Client {
+	c.authSessionsPath = path
+	return c
+}
+
+// NewClient creates a new authenticated API client with an explicit bearer
+// token, targeting the data API base URL (BaseURL()).
 func NewClient(token string) *Client {
+	return NewClientWithBaseURL(token, BaseURL())
+}
+
+// NewClientWithBaseURL creates a new authenticated API client targeting an
+// explicit base URL. Use this for endpoints that live on the auth host (e.g.
+// auth-token management) when ENTIRE_AUTH_BASE_URL splits the auth origin
+// from the data API origin.
+func NewClientWithBaseURL(token, baseURL string) *Client {
 	return &Client{
 		httpClient: &http.Client{
 			Transport: &bearerTransport{
@@ -32,11 +57,18 @@ func NewClient(token string) *Client {
 				base:  http.DefaultTransport,
 			},
 		},
-		baseURL: BaseURL(),
+		baseURL: baseURL,
 	}
 }
 
 // bearerTransport is an http.RoundTripper that injects the Authorization header.
+//
+// When token is empty, the Authorization header is omitted (rather than sent
+// as a malformed "Authorization: Bearer "). This supports endpoints like
+// recap that deliberately want the unauthenticated request to reach the
+// server so it can return a typed 401 — callers that want a local fast-fail
+// for missing auth should check ErrNotLoggedIn at construction time, not
+// rely on the transport.
 type bearerTransport struct {
 	token string
 	base  http.RoundTripper
@@ -45,7 +77,9 @@ type bearerTransport struct {
 func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Clone the request to avoid mutating the caller's request.
 	r := req.Clone(req.Context())
-	r.Header.Set("Authorization", "Bearer "+t.token)
+	if t.token != "" {
+		r.Header.Set("Authorization", "Bearer "+t.token)
+	}
 	r.Header.Set("User-Agent", userAgent)
 	if r.Header.Get("Accept") == "" {
 		r.Header.Set("Accept", "application/json")
@@ -59,7 +93,16 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // Get sends an authenticated GET request to the given API-relative path.
 func (c *Client) Get(ctx context.Context, path string) (*http.Response, error) {
-	return c.do(ctx, http.MethodGet, path, nil)
+	return c.do(ctx, http.MethodGet, path, nil, nil)
+}
+
+// GetStream sends an authenticated GET request with optional extra request
+// headers (e.g. Accept: text/event-stream, Last-Event-ID) and returns the
+// response with the body still open. Callers are responsible for reading and
+// closing resp.Body. Intended for streaming endpoints such as Server-Sent
+// Events; for normal JSON requests use Get.
+func (c *Client) GetStream(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
+	return c.do(ctx, http.MethodGet, path, nil, headers)
 }
 
 // Post sends an authenticated POST request with a JSON body to the given API-relative path.
@@ -72,7 +115,7 @@ func (c *Client) Post(ctx context.Context, path string, body any) (*http.Respons
 		}
 		reader = bytes.NewReader(data)
 	}
-	return c.do(ctx, http.MethodPost, path, reader)
+	return c.do(ctx, http.MethodPost, path, reader, nil)
 }
 
 // Put sends an authenticated PUT request with a JSON body to the given API-relative path.
@@ -85,7 +128,7 @@ func (c *Client) Put(ctx context.Context, path string, body any) (*http.Response
 		}
 		reader = bytes.NewReader(data)
 	}
-	return c.do(ctx, http.MethodPut, path, reader)
+	return c.do(ctx, http.MethodPut, path, reader, nil)
 }
 
 // Patch sends an authenticated PATCH request with a JSON body to the given API-relative path.
@@ -98,15 +141,15 @@ func (c *Client) Patch(ctx context.Context, path string, body any) (*http.Respon
 		}
 		reader = bytes.NewReader(data)
 	}
-	return c.do(ctx, http.MethodPatch, path, reader)
+	return c.do(ctx, http.MethodPatch, path, reader, nil)
 }
 
 // Delete sends an authenticated DELETE request to the given API-relative path.
 func (c *Client) Delete(ctx context.Context, path string) (*http.Response, error) {
-	return c.do(ctx, http.MethodDelete, path, nil)
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
-func (c *Client) do(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+func (c *Client) do(ctx context.Context, method, path string, body io.Reader, headers http.Header) (*http.Response, error) {
 	endpoint, err := ResolveURLFromBase(c.baseURL, path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve URL %s: %w", path, err)
@@ -115,6 +158,12 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader) (*
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	for k, vs := range headers {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
 	}
 
 	if body != nil {
@@ -144,9 +193,27 @@ func DecodeJSON(resp *http.Response, dest any) error {
 	return nil
 }
 
-// ErrorResponse represents a standard API error response.
+// ErrorResponse represents a standard API error response. Older endpoints
+// return {"error":"message"}; newer endpoints return
+// {"error":{"code":"...","message":"...",...}}.
 type ErrorResponse struct {
-	Error string `json:"error"`
+	Error any `json:"error"`
+}
+
+// Message extracts the human-readable error message from either envelope shape.
+func (e ErrorResponse) Message() string {
+	switch v := e.Error.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]any:
+		if message, ok := v["message"].(string); ok && strings.TrimSpace(message) != "" {
+			return strings.TrimSpace(message)
+		}
+		if code, ok := v["code"].(string); ok && strings.TrimSpace(code) != "" {
+			return strings.TrimSpace(code)
+		}
+	}
+	return ""
 }
 
 // HTTPError is returned by CheckResponse for non-2xx responses. Callers can use
@@ -185,9 +252,11 @@ func CheckResponse(resp *http.Response) error {
 	}
 
 	var parsed ErrorResponse
-	if err := json.Unmarshal(body, &parsed); err == nil && strings.TrimSpace(parsed.Error) != "" {
-		apiError.Message = parsed.Error
-		return apiError
+	if err := json.Unmarshal(body, &parsed); err == nil {
+		if message := parsed.Message(); message != "" {
+			apiError.Message = message
+			return apiError
+		}
 	}
 
 	if text := strings.TrimSpace(string(body)); text != "" {

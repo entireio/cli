@@ -2278,6 +2278,111 @@ func TestConfigureCmd_CheckpointRemote_LocalOnlyRepo(t *testing.T) {
 	}
 }
 
+// Tests for configure --summarize-timeout-seconds (issue #1198)
+
+func TestConfigureCmd_SummarizeTimeoutSeconds_WritesProjectSettings(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--summarize-timeout-seconds", "300"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --summarize-timeout-seconds failed: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Settings updated") {
+		t.Errorf("expected 'Settings updated' output, got: %s", stdout.String())
+	}
+
+	s, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load settings: %v", err)
+	}
+	if s.SummaryTimeoutSeconds != 300 {
+		t.Errorf("SummaryTimeoutSeconds = %d, want 300", s.SummaryTimeoutSeconds)
+	}
+}
+
+func TestConfigureCmd_SummarizeTimeoutSeconds_WritesLocalSettings(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--local", "--summarize-timeout-seconds", "600"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --local --summarize-timeout-seconds failed: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "settings.local.json") {
+		t.Errorf("expected output to reference settings.local.json, got: %s", stdout.String())
+	}
+
+	localS, err := settings.LoadFromFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to load local settings: %v", err)
+	}
+	if localS.SummaryTimeoutSeconds != 600 {
+		t.Errorf("local SummaryTimeoutSeconds = %d, want 600", localS.SummaryTimeoutSeconds)
+	}
+
+	// Project settings must not have been mutated.
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load project settings: %v", err)
+	}
+	if projectS.SummaryTimeoutSeconds != 0 {
+		t.Errorf("project SummaryTimeoutSeconds = %d, want 0 (unchanged)", projectS.SummaryTimeoutSeconds)
+	}
+}
+
+func TestConfigureCmd_SummarizeTimeoutSeconds_ClearsValue(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true,"summary_timeout_seconds":300}`)
+
+	cmd := newSetupCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--summarize-timeout-seconds", "0"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --summarize-timeout-seconds 0 failed: %v", err)
+	}
+
+	s, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load settings: %v", err)
+	}
+	if s.SummaryTimeoutSeconds != 0 {
+		t.Errorf("SummaryTimeoutSeconds = %d, want 0 (cleared)", s.SummaryTimeoutSeconds)
+	}
+}
+
+func TestConfigureCmd_SummarizeTimeoutSeconds_RejectsNegative(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--summarize-timeout-seconds", "-5"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for negative --summarize-timeout-seconds")
+	}
+	if !strings.Contains(err.Error(), "non-negative") {
+		t.Errorf("expected 'non-negative' in error, got: %v", err)
+	}
+}
+
 func TestConfigureCmd_CheckpointRemote_InvalidFormat(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
@@ -2681,7 +2786,7 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 
 	t.Run("yes with telemetry=false", func(t *testing.T) {
 		s := &EntireSettings{}
-		opts := EnableOptions{Yes: true, Telemetry: false}
+		opts := EnableOptions{Telemetry: false}
 		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
 			f := false
 			s.Telemetry = &f
@@ -2697,7 +2802,7 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 	t.Run("yes with ENTIRE_TELEMETRY_OPTOUT", func(t *testing.T) {
 		t.Setenv("ENTIRE_TELEMETRY_OPTOUT", "1")
 		s := &EntireSettings{}
-		opts := EnableOptions{Yes: true, Telemetry: true}
+		opts := EnableOptions{Telemetry: true}
 		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
 			f := false
 			s.Telemetry = &f
@@ -2712,7 +2817,7 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 
 	t.Run("yes defaults to telemetry enabled", func(t *testing.T) {
 		s := &EntireSettings{}
-		opts := EnableOptions{Yes: true, Telemetry: true}
+		opts := EnableOptions{Telemetry: true}
 		if !opts.Telemetry {
 			f := false
 			s.Telemetry = &f
@@ -2728,7 +2833,7 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 	t.Run("yes preserves existing telemetry setting", func(t *testing.T) {
 		existing := false
 		s := &EntireSettings{Telemetry: &existing}
-		opts := EnableOptions{Yes: true, Telemetry: true}
+		opts := EnableOptions{Telemetry: true}
 		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
 			f := false
 			s.Telemetry = &f
@@ -2982,5 +3087,88 @@ func TestConfigureCmd_FreshRepo_PointsAtEnable(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "entire enable") {
 		t.Errorf("expected hint pointing at 'entire enable', got stderr: %s", stderr.String())
+	}
+}
+
+func TestCleanRemoteURLForReport(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		rawURL  string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:   "https without credentials is normalized",
+			rawURL: "https://github.com/entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "https token credentials are stripped",
+			rawURL: "https://ghp_secrettoken@github.com/entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "https user:password credentials are stripped",
+			rawURL: "https://x-access-token:ghp_secret@github.com/entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "query parameters are dropped",
+			rawURL: "https://github.com/entireio/cli.git?token=secret",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "scp-style ssh remote is normalized to https and the user is dropped",
+			rawURL: "git@github.com:entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "missing .git suffix is added",
+			rawURL: "https://github.com/entireio/cli",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "entire:// mirror origin maps the forge back to its real host",
+			rawURL: "entire://aws-us-east-2.entire.io/gh/entireio/cli",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "unknown forge host is preserved (self-hosted enterprise)",
+			rawURL: "git@ghe.corp.example.com:entireio/cli.git",
+			want:   "https://ghe.corp.example.com/entireio/cli.git",
+		},
+		{
+			name:    "unparseable single-segment path errors",
+			rawURL:  "https://github.com/onlyowner.git",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := cleanRemoteURLForReport(tt.rawURL)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got %q", tt.rawURL, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tt.rawURL, err)
+			}
+			if got != tt.want {
+				t.Errorf("cleanRemoteURLForReport(%q) = %q, want %q", tt.rawURL, got, tt.want)
+			}
+			// The cleaned URL must never carry the original credentials.
+			for _, secret := range []string{"ghp_secrettoken", "ghp_secret", "x-access-token", "token=secret"} {
+				if strings.Contains(got, secret) {
+					t.Errorf("cleaned URL %q leaked credential %q", got, secret)
+				}
+			}
+		})
 	}
 }

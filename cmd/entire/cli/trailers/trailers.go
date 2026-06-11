@@ -52,24 +52,12 @@ const (
 
 // Pre-compiled regexes for trailer parsing.
 var (
-	strategyTrailerRegex     = regexp.MustCompile(StrategyTrailerKey + `:\s*(.+)`)
 	metadataTrailerRegex     = regexp.MustCompile(MetadataTrailerKey + `:\s*(.+)`)
 	taskMetadataTrailerRegex = regexp.MustCompile(MetadataTaskTrailerKey + `:\s*(.+)`)
 	baseCommitTrailerRegex   = regexp.MustCompile(BaseCommitTrailerKey + `:\s*([a-f0-9]{40})`)
-	condensationTrailerRegex = regexp.MustCompile(CondensationTrailerKey + `:\s*(.+)`)
 	sessionTrailerRegex      = regexp.MustCompile(SessionTrailerKey + `:\s*(.+)`)
 	checkpointTrailerRegex   = regexp.MustCompile(CheckpointTrailerKey + `:\s*(` + checkpointID.Pattern + `)(?:\s|$)`)
 )
-
-// ParseStrategy extracts strategy from commit message.
-// Returns the strategy name and true if found, empty string and false otherwise.
-func ParseStrategy(commitMessage string) (string, bool) {
-	matches := strategyTrailerRegex.FindStringSubmatch(commitMessage)
-	if len(matches) > 1 {
-		return strings.TrimSpace(matches[1]), true
-	}
-	return "", false
-}
 
 // ParseMetadata extracts metadata dir from commit message.
 // Returns the metadata directory and true if found, empty string and false otherwise.
@@ -97,16 +85,6 @@ func ParseBaseCommit(commitMessage string) (string, bool) {
 	matches := baseCommitTrailerRegex.FindStringSubmatch(commitMessage)
 	if len(matches) > 1 {
 		return matches[1], true
-	}
-	return "", false
-}
-
-// ParseCondensation extracts the condensation ID from a commit message.
-// Returns the condensation ID and true if found, empty string and false otherwise.
-func ParseCondensation(commitMessage string) (string, bool) {
-	matches := condensationTrailerRegex.FindStringSubmatch(commitMessage)
-	if len(matches) > 1 {
-		return strings.TrimSpace(matches[1]), true
 	}
 	return "", false
 }
@@ -187,19 +165,9 @@ func ParseAllSessions(commitMessage string) []string {
 	return sessionIDs
 }
 
-// FormatStrategy creates a commit message with just the strategy trailer.
-func FormatStrategy(message, strategy string) string {
-	return fmt.Sprintf("%s\n\n%s: %s\n", message, StrategyTrailerKey, strategy)
-}
-
 // FormatTaskMetadata creates a commit message with task metadata trailer.
 func FormatTaskMetadata(message, taskMetadataDir string) string {
 	return fmt.Sprintf("%s\n\n%s: %s\n", message, MetadataTaskTrailerKey, taskMetadataDir)
-}
-
-// FormatTaskMetadataWithStrategy creates a commit message with task metadata and strategy trailers.
-func FormatTaskMetadataWithStrategy(message, taskMetadataDir, strategy string) string {
-	return fmt.Sprintf("%s\n\n%s: %s\n%s: %s\n", message, MetadataTaskTrailerKey, taskMetadataDir, StrategyTrailerKey, strategy)
 }
 
 // FormatSourceRef creates a formatted source ref string for the trailer.
@@ -215,11 +183,6 @@ func FormatSourceRef(branch, commitHash string) string {
 // FormatMetadata creates a commit message with metadata trailer.
 func FormatMetadata(message, metadataDir string) string {
 	return fmt.Sprintf("%s\n\n%s: %s\n", message, MetadataTrailerKey, metadataDir)
-}
-
-// FormatMetadataWithStrategy creates a commit message with metadata and strategy trailers.
-func FormatMetadataWithStrategy(message, metadataDir, strategy string) string {
-	return fmt.Sprintf("%s\n\n%s: %s\n%s: %s\n", message, MetadataTrailerKey, metadataDir, StrategyTrailerKey, strategy)
 }
 
 // FormatShadowCommit creates a commit message for manual-commit strategy checkpoints.

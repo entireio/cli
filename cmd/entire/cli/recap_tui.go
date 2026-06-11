@@ -137,20 +137,23 @@ func (m recapTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		switch msg.String() {
+		case "d":
+			return m.setRange(recap.RangeDay)
+		case "w":
+			return m.setRange(recap.RangeWeek)
+		case "m":
+			return m.setRange(recap.RangeMonth)
+		case "r":
+			return m.setRange(recap.Range90d)
 		case "t":
-			m.rangeKey = nextRecapRange(m.rangeKey)
-			m.requestID++
-			m.loading = true
-			m.loadErr = nil
-			m.resp = nil
-			return m.withViewport(), m.fetch(m.requestID)
+			return m.setRange(nextRecapRange(m.rangeKey))
 		case "v":
 			m.view = nextRecapView(m.view)
 			return m.withViewport(), nil
 		case "a":
 			m.agent = m.nextAgent()
 			return m.withViewport(), nil
-		case "r":
+		case "R":
 			m.requestID++
 			m.loading = true
 			m.loadErr = nil
@@ -174,10 +177,41 @@ func (m recapTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m recapTUIModel) setRange(next recap.RangeKey) (recapTUIModel, tea.Cmd) {
+	if next == "" {
+		return m, nil
+	}
+	// Pressing the current range key while a load error is on screen acts as
+	// retry — otherwise the keystroke would be silently dropped and the user
+	// would be left staring at the error with no obvious way out.
+	//
+	// Same-range retry intentionally preserves m.resp (no nil-out) and skips
+	// withViewport: the user is asking for the same data, so if a previous
+	// successful response is on screen we keep showing it under the loading
+	// state instead of blanking the viewport. This matches the 'R' reload
+	// path. The new-range branch below clears m.resp because the displayed
+	// data no longer matches the requested range.
+	if next == m.rangeKey {
+		if m.loadErr == nil {
+			return m, nil
+		}
+		m.requestID++
+		m.loading = true
+		m.loadErr = nil
+		return m, m.fetch(m.requestID)
+	}
+	m.rangeKey = next
+	m.requestID++
+	m.loading = true
+	m.loadErr = nil
+	m.resp = nil
+	return m.withViewport(), m.fetch(m.requestID)
+}
+
 func (m recapTUIModel) View() tea.View {
 	v := tea.View{AltScreen: true}
 	if m.loadErr != nil {
-		v.SetContent(fmt.Sprintf("\n  Failed to load recap: %s\n\n  Press r to retry or q to quit.\n", recapLoadErrorMessage(m.loadErr)))
+		v.SetContent(fmt.Sprintf("\n  Failed to load recap: %s\n\n  Press R to retry or q to quit.\n", recapLoadErrorMessage(m.loadErr)))
 		return v
 	}
 	if m.loading && m.resp == nil {
@@ -223,21 +257,23 @@ func (m recapTUIModel) withViewport() recapTUIModel {
 func (m recapTUIModel) renderFooter() string {
 	choices := []string{
 		recapFooterLine(m.color, []recapHelpItem{
-			{"t", "range"},
+			{"d", "day"},
+			{"w", "week"},
+			{"m", "month"},
+			{"r", "90d"},
 			{"v", "view"},
 			{"a", "agent"},
-			{"r", "refresh"},
-			{"↑/↓", "scroll"},
+			{"R", "reload"},
 			{"q", "quit"},
 		}),
 		recapFooterLine(m.color, []recapHelpItem{
-			{"t", "range"},
+			{"d/w/m/r", "range"},
 			{"v", "view"},
 			{"a", "agent"},
 			{"q", "quit"},
 		}),
 		recapFooterLine(m.color, []recapHelpItem{
-			{"t", "range"},
+			{"d/w/m/r", "range"},
 			{"v", "view"},
 			{"q", "quit"},
 		}),

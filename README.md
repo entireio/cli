@@ -15,7 +15,7 @@ With Entire, you can:
 - **Understand why code changed, not just what** — Transcripts, prompts, files touched, token usage, tool calls, and more are captured alongside every commit.
 - **Rewind and resume from any checkpoint** — Go back to any previous agent session and pick up exactly where you or a coworker left off.
 - **Full context preserved and searchable** — A versioned record of every AI interaction tied to your git history, with nothing lost.
-- **Zero context switching** — Git-native, two-step setup, works with Claude Code, Codex, Gemini, and more.
+- **Zero context switching** — Git-native, two-step setup, works with Claude Code, Codex, Gemini, Pi, and more.
 
 ## Table of Contents
 
@@ -117,7 +117,9 @@ Just use one of your AI agents as before. Entire runs in the background, trackin
 entire status  # Check current session status anytime
 ```
 
-### 3. Rewind to a Previous Checkpoint
+### 3. Rewind to a Previous Checkpoint (deprecated)
+
+> **Deprecated:** `entire checkpoint rewind` will be removed in a future release.
 
 If you want to undo some changes and go back to an earlier checkpoint:
 
@@ -210,9 +212,13 @@ If you're working on the CLI device auth flow against a local `entire.io` checko
 cd ../entire.io-1
 mise run dev
 
-# In this repo, point the CLI at the local API
+# In this repo, point the CLI at the local API. Both env vars are
+# required: ENTIRE_AUTH_BASE_URL no longer inherits from
+# ENTIRE_API_BASE_URL — without it, the login flow reaches for the
+# production us.auth.entire.io.
 cd ../cli
 export ENTIRE_API_BASE_URL=http://localhost:8787
+export ENTIRE_AUTH_BASE_URL=http://localhost:8787
 
 # Run the smoke test
 ./scripts/local-device-auth-smoke.sh
@@ -238,9 +244,9 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire disable` | Remove Entire hooks from repository                                                               |
 | `entire doctor`  | Fix or clean up stuck sessions                                                                    |
 | `entire enable`  | Enable Entire in your repository                                                                  |
-| `entire checkpoint`        | List, explain, rewind, and search checkpoints                                           |
+| `entire checkpoint`        | List, explain, and search checkpoints                                                   |
 | `entire checkpoint explain` | Explain a session, commit, or checkpoint                                               |
-| `entire checkpoint rewind` | Rewind to a previous checkpoint                                                         |
+| `entire checkpoint rewind` | Rewind to a previous checkpoint (deprecated, will be removed in a future release)       |
 | `entire login`   | Authenticate the CLI with Entire device auth                                                      |
 | `entire session` | View and manage agent sessions tracked by Entire                                                  |
 | `entire session resume`    | Switch to a branch, restore latest checkpointed session metadata, and show command(s) |
@@ -359,6 +365,7 @@ Each agent stores its hook configuration in its own directory. When you run `ent
 | Factory AI Droid | `.factory/settings.json`      | JSON hooks config |
 | Gemini CLI       | `.gemini/settings.json`       | JSON hooks config |
 | OpenCode         | `.opencode/plugins/entire.ts` | TypeScript plugin |
+| Pi               | `.pi/extensions/entire/index.ts` | TypeScript extension |
 
 You can enable multiple agents at the same time — each agent's hooks are independent. Entire detects which agents are active by checking for installed hooks, not by a setting in `settings.json`.
 
@@ -435,6 +442,7 @@ Local settings override project settings field-by-field. When you run `entire st
 - When enabling Entire for Codex, the command will also create or update `.codex/config.toml` with `codex_hooks = true` to enable Codex hooks. If you configure Codex manually, make sure this flag is set in your `.codex/config.toml`. Or select Codex from the interactive agent picker when running `entire enable`.
 - Entire supports Cursor IDE and Cursor Agent CLI tool, but `entire rewind` is not available at this time. Other commands (`doctor`, `status` etc.) work the same as all other agents.
 - Entire supports Copilot CLI, but not Copilot in VS Code, in other IDEs, or on github.com.
+- Entire supports Pi coding agent (Preview). Pi uses a TypeScript extension instead of a JSON hook config. Subagent capture is not currently available.
 
 ## Security & Privacy
 

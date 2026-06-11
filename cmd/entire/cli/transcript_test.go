@@ -1,10 +1,72 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// TestResolveTranscriptPath_RejectsTraversalSessionID verifies that session IDs
+// containing path-traversal primitives are rejected before being used to build a
+// filesystem write path.
+//
+// Session IDs reaching the resume/rewind restore paths originate from checkpoint
+// metadata stored on the shared entire/checkpoints/v1 branch, which an attacker
+// with push access can craft. Without validation, an absolute or "../"-laden
+// session ID escapes the agent session directory (and for agents like Pi/Codex
+// that return absolute paths verbatim, lands anywhere), letting attacker-controlled
+// transcript bytes overwrite arbitrary files such as ~/.bashrc.
+func TestResolveTranscriptPath_RejectsTraversalSessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	setupResumeTestRepo(t, tmpDir, false)
+	t.Chdir(tmpDir)
+
+	ag := &recordingResumeAgent{sessionDir: filepath.Join(tmpDir, "sessions")}
+	ctx := context.Background()
+
+	cases := []struct {
+		name      string
+		sessionID string
+	}{
+		{"absolute unix path", "/tmp/entire-pwned"},
+		{"absolute path to dotfile", filepath.Join(tmpDir, "victim", ".bashrc")},
+		{"parent traversal", "../../../../../../tmp/entire-pwned"},
+		{"backslash traversal", `..\..\..\evil`},
+		{"embedded separator", "sessions/../../evil"},
+		{"empty", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveTranscriptPath(ctx, tc.sessionID, ag)
+			if err == nil {
+				t.Fatalf("resolveTranscriptPath(%q) = %q, want error (traversal must be rejected)", tc.sessionID, got)
+			}
+		})
+	}
+}
+
+// TestResolveTranscriptPath_AllowsLegitSessionID is the regression guard ensuring
+// the traversal check does not reject ordinary (UUID-style) session IDs.
+func TestResolveTranscriptPath_AllowsLegitSessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	setupResumeTestRepo(t, tmpDir, false)
+	t.Chdir(tmpDir)
+
+	sessionDir := filepath.Join(tmpDir, "sessions")
+	ag := &recordingResumeAgent{sessionDir: sessionDir}
+	ctx := context.Background()
+
+	sessionID := "11111111-2222-3333-4444-555555555555"
+	got, err := resolveTranscriptPath(ctx, sessionID, ag)
+	if err != nil {
+		t.Fatalf("resolveTranscriptPath(%q) unexpected error: %v", sessionID, err)
+	}
+	want := filepath.Join(sessionDir, sessionID+".jsonl")
+	if got != want {
+		t.Fatalf("resolveTranscriptPath(%q) = %q, want %q", sessionID, got, want)
+	}
+}
 
 func createTempTranscript(t *testing.T, content string) string {
 	t.Helper()

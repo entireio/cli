@@ -8,6 +8,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -15,11 +16,23 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
+)
+
+// Default terminal dimensions used before the first tea.WindowSizeMsg
+// arrives. Shared by the constructor and the dashboardWidth /
+// detailViewportWidth fallbacks so both views render at the same width when
+// termWidth is uninitialized — a 1-cell viewport falls back here would
+// collapse to a single column, which is not what we want.
+const (
+	defaultTermWidth  = 80
+	defaultTermHeight = 24
 )
 
 // agentRow holds per-agent live state during the TUI run.
@@ -50,11 +63,14 @@ type tickMsg time.Time
 
 // reviewTUIModel is the Bubble Tea model for the review dashboard.
 type reviewTUIModel struct {
-	rows         []agentRow
-	rowIdx       map[string]int // agent name → row index (O(1) lookup)
-	detailMode   bool
-	detailIdx    int // which agent is shown in drill-in
-	detailScroll int
+	rows       []agentRow
+	rowIdx     map[string]int // agent name → row index (O(1) lookup)
+	detailMode bool
+	detailIdx  int // which agent is shown in drill-in
+	// detail is the pager backing the drill-in body. Width/Height are kept
+	// in sync with termWidth/termHeight (minus header+footer). Scroll
+	// position is internal state; AtBottom drives auto-tail.
+	detail viewport.Model
 
 	cancel     context.CancelFunc
 	cancelOnce *sync.Once
@@ -65,6 +81,13 @@ type reviewTUIModel struct {
 
 	finished bool
 	summary  reviewtypes.RunSummary
+
+	// cancelling tracks whether a Ctrl+C-initiated cancellation is in flight.
+	// Set true on the first Ctrl+C (in tandem with cancelOnce firing the shared
+	// CancelFunc); the dashboard switches to a "cancelling" indicator and the
+	// footer offers a force-quit hint. A second Ctrl+C while cancelling=true
+	// force-quits without waiting for agents to drain.
+	cancelling bool
 }
 
 // newReviewTUIModel builds an initial model pre-populated with one row per
@@ -84,14 +107,21 @@ func newReviewTUIModel(agents []string, cancel context.CancelFunc) reviewTUIMode
 		}
 		rowIdx[name] = i
 	}
+	// Seed viewport with defaults that match termWidth/termHeight so an
+	// immediate Ctrl+O before any WindowSizeMsg still renders.
+	vp := viewport.New(
+		viewport.WithWidth(defaultTermWidth),
+		viewport.WithHeight(defaultTermHeight-2),
+	)
 	return reviewTUIModel{
 		rows:       rows,
 		rowIdx:     rowIdx,
+		detail:     vp,
 		cancel:     cancel,
 		cancelOnce: &sync.Once{},
 		spinner:    sp,
-		termWidth:  80,
-		termHeight: 24,
+		termWidth:  defaultTermWidth,
+		termHeight: defaultTermHeight,
 	}
 }
 
@@ -137,6 +167,12 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.rows[i].status == reviewtypes.AgentStatusUnknown {
 				m.rows[i].status = run.Status
 			}
+			if run.Tokens.In > 0 || run.Tokens.Out > 0 {
+				m.rows[i].tokens = run.Tokens
+			}
+			if m.rows[i].err == nil && run.Err != nil {
+				m.rows[i].err = run.Err
+			}
 			if m.rows[i].runEnd.IsZero() && !m.rows[i].runStart.IsZero() {
 				m.rows[i].runEnd = now
 			}
@@ -144,25 +180,91 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		if m.finished {
+			return m, nil
+		}
 		var spinCmd tea.Cmd
 		m.spinner, spinCmd = m.spinner.Update(msg)
 		return m, tea.Batch(spinCmd, tickCmd())
 
 	case spinner.TickMsg:
+		if m.finished {
+			return m, nil
+		}
 		var spinCmd tea.Cmd
 		m.spinner, spinCmd = m.spinner.Update(msg)
 		return m, spinCmd
 
 	case tea.WindowSizeMsg:
+		wasAtBottom := m.detail.AtBottom()
 		m.termWidth = msg.Width
 		m.termHeight = msg.Height
-		m = m.clampScroll()
+		m.detail.SetWidth(m.detailViewportWidth())
+		m.detail.SetHeight(m.detailViewportHeight())
+		m = m.refreshDetailContentWithAutoTail(wasAtBottom)
 		return m, nil
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseWheelMsg, tea.MouseClickMsg, tea.MouseReleaseMsg, tea.MouseMotionMsg:
+		// Mouse events: only meaningful inside the drill-in viewport, which
+		// handles tea.MouseWheelMsg natively.
+		// Without this delegation the events arrive at the Program (because
+		// View.MouseMode = MouseModeCellMotion is set during detail mode)
+		// but fall through Update unhandled — the user sees no scroll
+		// response to the wheel.
+		if m.detailMode {
+			var cmd tea.Cmd
+			m.detail, cmd = m.detail.Update(msg)
+			return m, cmd
+		}
+		return m, nil
 	}
 	return m, nil
+}
+
+// detailViewportWidth returns the viewport's width, mirroring termWidth.
+func (m reviewTUIModel) detailViewportWidth() int {
+	width, _ := m.currentTerminalSize()
+	return width
+}
+
+// detailViewportHeight returns the viewport's body height, reserving one line
+// for the header and one for the footer.
+func (m reviewTUIModel) detailViewportHeight() int {
+	_, termHeight := m.currentTerminalSize()
+	h := termHeight - 2
+	if h < 1 {
+		return 1
+	}
+	return h
+}
+
+// refreshDetailContent re-renders the focused agent's events into the
+// viewport. It preserves auto-tail: if the viewport was sitting at the bottom
+// (or has no scrollable content), it jumps to the new bottom after the content
+// is replaced; otherwise the user's scroll position is left untouched.
+//
+// reviewTUIModel uses value receivers throughout (matching the Bubble Tea
+// idiom of returning an updated tea.Model from Update); the viewport is
+// mutated in place on the returned copy and the caller assigns the result
+// back.
+func (m reviewTUIModel) refreshDetailContent() reviewTUIModel {
+	return m.refreshDetailContentWithAutoTail(m.detail.AtBottom())
+}
+
+func (m reviewTUIModel) refreshDetailContentWithAutoTail(wasAtBottom bool) reviewTUIModel {
+	if len(m.rows) == 0 || m.detailIdx < 0 || m.detailIdx >= len(m.rows) {
+		m.detail.SetContentLines(nil)
+		return m
+	}
+	lines := buildEventLines(m.rows[m.detailIdx].buffer, m.detailViewportWidth())
+	m.detail.SetContentLines(lines)
+	if wasAtBottom {
+		m.detail.GotoBottom()
+	}
+	return m
 }
 
 // handleAgentEvent processes an agentEventMsg, updating the relevant row.
@@ -214,15 +316,11 @@ func (m reviewTUIModel) handleAgentEvent(msg agentEventMsg) (tea.Model, tea.Cmd)
 		// No visible state update for tool calls in the dashboard.
 	}
 
-	// Auto-follow ONLY when the user is already at the bottom. This lets a
-	// user scroll up to inspect older events without each new event yanking
-	// them back to the tail. The pre-append max-scroll was for buffer
-	// length-1; if detailScroll was at-or-past that, the user was tailing.
+	// Re-render the focused agent's viewport content when a new event lands
+	// for it. refreshDetailContent's AtBottom check preserves user scroll if
+	// they've scrolled up; auto-tails otherwise.
 	if m.detailMode && m.detailIdx == idx {
-		preAppendMax := len(row.buffer) - 2 // -1 for the just-appended event, -1 for max-index
-		if preAppendMax < 0 || m.detailScroll >= preAppendMax {
-			m.detailScroll = m.maxDetailScroll()
-		}
+		m = m.refreshDetailContent()
 	}
 
 	return m, nil
@@ -230,19 +328,61 @@ func (m reviewTUIModel) handleAgentEvent(msg agentEventMsg) (tea.Model, tea.Cmd)
 
 // handleKey processes keyboard input.
 func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// Any key after finished dismisses.
+	// Post-finish: explicit exit keys dismiss the TUI from either the
+	// dashboard or detail mode. Esc retains its "back to dashboard" meaning
+	// while drilled in so the user can return to the finished dashboard
+	// before quitting. Other keys (including Ctrl+O and scroll keys) fall
+	// through to normal handling so post-mortem inspection still works.
 	if m.finished {
-		return m, tea.Quit
+		switch {
+		case msg.Mod == 0 && msg.Code == 'q':
+			return m, tea.Quit
+		case msg.Mod == 0 && msg.Code == tea.KeyEnter:
+			return m, tea.Quit
+		case msg.Mod == tea.ModCtrl && msg.Code == 'c':
+			return m, tea.Quit
+		case msg.Mod == 0 && (msg.Code == tea.KeyEscape):
+			if !m.detailMode {
+				return m, tea.Quit
+			}
+			// Detail mode: fall through to main switch where Esc returns to dashboard.
+		}
 	}
 
 	switch {
 	case msg.Code == 'c' && msg.Mod == tea.ModCtrl:
+		if m.cancelling {
+			// Second Ctrl+C while a cancellation is already in flight
+			// force-quits without waiting for agents to drain. Checked
+			// before m.detailMode so the force-quit escape hatch works
+			// from drill-in too — the dashboard footer hint promises this
+			// path and a user drilled into a hanging agent's buffer is
+			// exactly when they need force-quit most. cancelOnce guards
+			// CancelFunc against the duplicate-firing case.
+			return m, tea.Quit
+		}
+		if m.allAgentsTerminal() {
+			// Race window: every agent emitted a terminal event but
+			// runFinishedMsg hasn't arrived yet. There's nothing left to
+			// cancel — quit immediately instead of flashing the
+			// "Cancelling agents..." footer until the runFinishedMsg lands.
+			// Checked before m.detailMode so the user reading a finished
+			// agent's buffer doesn't have to press Esc first to dismiss.
+			return m, tea.Quit
+		}
 		if m.detailMode {
-			// In drill-in: Ctrl+C is intentionally ignored; Esc first.
+			// Idle drill-in with at least one agent still running: Ctrl+C
+			// is intentionally ignored so the user reading content can't
+			// accidentally fire a cancel. Esc first to return to the
+			// dashboard.
 			return m, nil
 		}
+		m.cancelling = true
 		m.cancelOnce.Do(m.cancel)
-		return m, tea.Quit
+		// Do NOT quit on the first Ctrl+C: leave the TUI up so the user sees
+		// the cancelling indicator while agents drain. Natural finish
+		// (runFinishedMsg) or a second Ctrl+C dismisses the TUI.
+		return m, nil
 
 	case msg.Code == 'o' && msg.Mod == tea.ModCtrl:
 		if m.detailMode {
@@ -253,10 +393,16 @@ func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if len(m.rows) > 0 && (m.detailIdx < 0 || m.detailIdx >= len(m.rows)) {
 			m.detailIdx = 0
 		}
-		m.detailScroll = m.maxDetailScroll()
+		// Resize viewport in case termWidth/termHeight have changed since
+		// last detail-mode entry, then load the focused agent's events and
+		// tail to the bottom.
+		m.detail.SetWidth(m.detailViewportWidth())
+		m.detail.SetHeight(m.detailViewportHeight())
+		m = m.refreshDetailContent()
+		m.detail.GotoBottom()
 		return m, nil
 
-	case msg.Code == tea.KeyEscape || msg.Code == tea.KeyEsc:
+	case msg.Code == tea.KeyEscape:
 		if m.detailMode {
 			m.detailMode = false
 			return m, nil
@@ -266,68 +412,70 @@ func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case msg.Code == tea.KeyLeft:
 		if m.detailMode && len(m.rows) > 0 {
 			m.detailIdx = (m.detailIdx - 1 + len(m.rows)) % len(m.rows)
-			m.detailScroll = m.maxDetailScroll()
+			m = m.refreshDetailContent()
+			m.detail.GotoBottom()
 		}
 		return m, nil
 
 	case msg.Code == tea.KeyRight:
 		if m.detailMode && len(m.rows) > 0 {
 			m.detailIdx = (m.detailIdx + 1) % len(m.rows)
-			m.detailScroll = m.maxDetailScroll()
-		}
-		return m, nil
-
-	case msg.Code == tea.KeyUp:
-		if m.detailMode && m.detailScroll > 0 {
-			m.detailScroll--
-		}
-		return m, nil
-
-	case msg.Code == tea.KeyDown:
-		if m.detailMode {
-			if maxScroll := m.maxDetailScroll(); m.detailScroll < maxScroll {
-				m.detailScroll++
-			}
+			m = m.refreshDetailContent()
+			m.detail.GotoBottom()
 		}
 		return m, nil
 	}
 
+	// Delegate any unhandled key to the viewport so PgUp/PgDn/Home/End/↑/↓
+	// reach its internal keymap. Only meaningful in detail mode — on the
+	// dashboard the viewport is inert.
+	if m.detailMode {
+		var cmd tea.Cmd
+		m.detail, cmd = m.detail.Update(msg)
+		return m, cmd
+	}
 	return m, nil
 }
 
-// maxDetailScroll returns the largest valid detailScroll value for the current
-// agent's buffer (0 when the buffer is empty or no rows exist).
-func (m reviewTUIModel) maxDetailScroll() int {
+// allAgentsTerminal reports whether every agent row has reached a terminal
+// status. Used to short-circuit Ctrl+C cancellation in the race window between
+// the last agent emitting Finished/RunError and runFinishedMsg arriving — at
+// that point CancelFunc has nothing to do and the "Cancelling agents..."
+// footer would only flash briefly before runFinishedMsg dismisses it anyway.
+func (m reviewTUIModel) allAgentsTerminal() bool {
 	if len(m.rows) == 0 {
-		return 0
+		return false
 	}
-	n := len(m.rows[m.detailIdx].buffer)
-	if n == 0 {
-		return 0
+	for _, r := range m.rows {
+		if r.status == reviewtypes.AgentStatusUnknown {
+			return false
+		}
 	}
-	return n - 1
-}
-
-// clampScroll returns a copy of m with detailScroll clamped to valid bounds.
-// Used after resize or index change.
-func (m reviewTUIModel) clampScroll() reviewTUIModel {
-	maxScroll := m.maxDetailScroll()
-	if m.detailScroll > maxScroll {
-		m.detailScroll = maxScroll
-	}
-	return m
+	return true
 }
 
 // View renders the current state.
+//
+// In detail mode we enable [tea.MouseModeCellMotion] so the embedded
+// [viewport.Model] receives mouse-wheel events natively — the viewport handles
+// them as scroll, but only if the Bubble Tea program is configured to deliver
+// mouse messages. Bubble Tea v2 expresses that config as a per-view field
+// rather than a Program option, so it lives here next to AltScreen.
+// Dashboard mode leaves the default [tea.MouseModeNone] in place so normal
+// terminal mouse selection still works on the summary table.
 func (m reviewTUIModel) View() tea.View {
 	var content string
+	termWidth, termHeight := m.currentTerminalSize()
 	if m.detailMode && len(m.rows) > 0 {
-		content = detailView(m.rows[m.detailIdx], m.detailScroll, m.termWidth, m.termHeight)
+		content = detailFrame(m.rows[m.detailIdx], m.detail.View(), termWidth, termHeight)
 	} else {
 		content = m.dashboardView()
 	}
 	v := tea.NewView(content)
-	v.AltScreen = m.detailMode
+	v.AltScreen = true
+	if m.detailMode {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	return v
 }
 
@@ -342,10 +490,13 @@ func (m reviewTUIModel) dashboardView() string {
 	}
 	b.WriteString("\n")
 
-	if m.finished {
+	switch {
+	case m.finished:
 		m.writeDashboardLine(&b, m.countsLine())
-		m.writeDashboardLine(&b, "Press any key to exit.")
-	} else {
+		m.writeDashboardLine(&b, "Ctrl+O: drill in · q/Esc/Enter: exit")
+	case m.cancelling:
+		m.writeDashboardLine(&b, "Cancelling agents... · Ctrl+C again: force quit")
+	default:
 		m.writeDashboardLine(&b, "Ctrl+O: drill in · Ctrl+C: cancel")
 	}
 	return b.String()
@@ -357,10 +508,20 @@ func (m reviewTUIModel) writeDashboardLine(b *strings.Builder, line string) {
 }
 
 func (m reviewTUIModel) dashboardWidth() int {
-	if m.termWidth <= 0 {
-		return 80
+	width, _ := m.currentTerminalSize()
+	return width
+}
+
+func (m reviewTUIModel) currentTerminalSize() (int, int) {
+	width := m.termWidth
+	height := m.termHeight
+	if width <= 0 {
+		width = defaultTermWidth
 	}
-	return m.termWidth
+	if height <= 0 {
+		height = defaultTermHeight
+	}
+	return width, height
 }
 
 // headerLine returns the column header row.
@@ -381,9 +542,15 @@ func (m reviewTUIModel) renderRow(row agentRow) string {
 	case reviewtypes.AgentStatusCancelled:
 		statusStr = "— cancel"
 	case reviewtypes.AgentStatusUnknown:
-		if row.runStart.IsZero() {
+		switch {
+		case m.cancelling:
+			// In-flight cancellation: distinct from the terminal Cancelled
+			// state ("— cancel") so the user can see that the cancel signal
+			// has been sent but the agent is still draining.
+			statusStr = "cancelling"
+		case row.runStart.IsZero():
 			statusStr = "queued"
-		} else {
+		default:
 			statusStr = m.spinner.View() + " running"
 		}
 	}
@@ -402,7 +569,35 @@ func (m reviewTUIModel) renderRow(row agentRow) string {
 		tokStr = fmt.Sprintf("%s/%s", formatCompact(row.tokens.In), formatCompact(row.tokens.Out))
 	}
 
-	return m.renderTableLine(name, statusStr, durStr, tokStr, row.preview)
+	preview := row.preview
+	if row.status == reviewtypes.AgentStatusFailed && row.err != nil {
+		preview = stringutil.CollapseWhitespace(sanitizeDisplayText(formatErrorPreview(row.err)))
+	}
+
+	return m.renderTableLine(name, statusStr, durStr, tokStr, preview)
+}
+
+func formatErrorPreview(err error) string {
+	if err == nil {
+		return ""
+	}
+	var pe *reviewtypes.ProcessError
+	if errors.As(err, &pe) {
+		// Strip ANSI before the empty check — agents like codex/claude-code
+		// emit colored stderr banners whose first line can be escape codes
+		// only. TrimSpace doesn't drop those, so without stripping we'd pick
+		// the chrome and hide the real message on subsequent lines.
+		for _, line := range strings.Split(pe.Stderr, "\n") {
+			trimmed := strings.TrimSpace(stripANSI(line))
+			if trimmed != "" {
+				return trimmed
+			}
+		}
+		if pe.Err != nil {
+			return pe.Err.Error()
+		}
+	}
+	return err.Error()
 }
 
 func (m reviewTUIModel) renderTableLine(agent, status, duration, tokens, preview string) string {
@@ -448,15 +643,10 @@ func (m reviewTUIModel) countsLine() string {
 		len(m.summary.AgentRuns), succ, fail, canc)
 }
 
-// formatDuration formats a duration compactly for the table column.
+// formatDuration delegates to tuiutil.FormatDuration so the review and
+// investigate TUIs share one implementation.
 func formatDuration(d time.Duration) string {
-	if d < time.Second {
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	}
-	if d < time.Minute {
-		return fmt.Sprintf("%.1fs", d.Seconds())
-	}
-	return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
+	return tuiutil.FormatDuration(d)
 }
 
 // formatCompact formats a token count as e.g. "1.2k" or "450".

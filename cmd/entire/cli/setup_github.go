@@ -488,7 +488,7 @@ func resolveRepoName(ctx context.Context, w, errW io.Writer, runner bootstrapRun
 					Description(fmt.Sprintf("Press enter to use %q", name)).
 					Value(&input),
 			),
-		)
+		).WithOutput(w)
 		if err := form.Run(); err != nil {
 			if errors.Is(err, huh.ErrUserAborted) {
 				return "", errBootstrapInterrupted

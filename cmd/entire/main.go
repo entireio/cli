@@ -11,10 +11,14 @@ import (
 	"syscall"
 
 	"github.com/entireio/cli/cmd/entire/cli"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
 
 func main() {
+	// Resolve version/commit from build info before anything reads them.
+	versioninfo.Load()
+
 	// Create context that cancels on interrupt
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -49,7 +53,7 @@ func main() {
 	}
 	restorePATH()
 
-	err := rootCmd.ExecuteContext(ctx)
+	executed, err := rootCmd.ExecuteContextC(ctx)
 	if err != nil {
 		var silent *cli.SilentError
 
@@ -58,6 +62,14 @@ func main() {
 			// Command already printed the error
 		case strings.Contains(err.Error(), "unknown command") || strings.Contains(err.Error(), "unknown flag"):
 			showSuggestion(rootCmd, err)
+		case isPositionalArgError(err):
+			// Arg-count errors come from cobra's own validators (e.g.
+			// cobra.ExactArgs) and surface as "accepts N arg(s), received M".
+			// Show the failing subcommand's usage so the user sees what it
+			// actually expects — rootCmd's usage isn't useful for a
+			// subcommand-level arg mismatch. ExecuteContextC returns the
+			// deepest matched command, which is the one that failed.
+			showSuggestion(executed, err)
 		default:
 			fmt.Fprintln(rootCmd.OutOrStderr(), err)
 		}
@@ -66,6 +78,16 @@ func main() {
 		os.Exit(1)
 	}
 	cancel() // Cleanup on successful exit
+}
+
+// isPositionalArgError reports whether err looks like a cobra positional-
+// arg validator failure. cobra's stock validators (ExactArgs, NoArgs,
+// MinimumNArgs, MaximumNArgs, RangeArgs) all surface error strings
+// containing "arg(s)", and that substring doesn't appear in cobra's other
+// error paths or in the cli's own errors — so it's a stable, cheap
+// discriminator without reaching into cobra internals.
+func isPositionalArgError(err error) bool {
+	return strings.Contains(err.Error(), "arg(s)")
 }
 
 func showSuggestion(cmd *cobra.Command, err error) {

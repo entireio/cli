@@ -11,6 +11,13 @@ import (
 
 const testOwner = "entirehq"
 const testRepo = "entire.io"
+const testCPID = "cp1"
+
+// writeTestJSON writes raw JSON to a response writer, ignoring write errors (test helper).
+func writeTestJSON(w http.ResponseWriter, jsonStr string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(jsonStr)) //nolint:errcheck // test helper
+}
 
 // -- ParseGitHubRemote tests --
 
@@ -133,8 +140,9 @@ func TestSearch_URLConstruction(t *testing.T) {
 	if capturedReq.URL.Query().Get("repo") != "myowner/myrepo" {
 		t.Errorf("repo = %s, want 'myowner/myrepo'", capturedReq.URL.Query().Get("repo"))
 	}
-	if capturedReq.URL.Query().Get("types") != "checkpoints" {
-		t.Errorf("types = %s, want 'checkpoints'", capturedReq.URL.Query().Get("types"))
+	// types param should NOT be set — the CLI now requests all types
+	if capturedReq.URL.Query().Has("types") {
+		t.Errorf("types param should not be set, got %q", capturedReq.URL.Query().Get("types"))
 	}
 	if capturedReq.URL.Query().Get("limit") != "10" {
 		t.Errorf("limit = %s, want '10'", capturedReq.URL.Query().Get("limit"))
@@ -301,28 +309,7 @@ func TestSearch_SuccessWithResults(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		resp := Response{
-			Results: []Result{
-				{
-					Type: "checkpoint",
-					Data: CheckpointResult{
-						ID:        "abc123def456",
-						Branch:    "main",
-						Prompt:    "add auth middleware",
-						Author:    "alice",
-						CreatedAt: "2026-01-13T12:00:00Z",
-					},
-					Meta: Meta{
-						Score:     0.042,
-						MatchType: "both",
-					},
-				},
-			},
-			Total: 1,
-			Page:  1,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
+		writeTestJSON(w, `{"results":[{"type":"checkpoint","data":{"id":"abc123def456","branch":"main","prompt":"add auth middleware","author":"alice","createdAt":"2026-01-13T12:00:00Z","org":"","repo":"","filesTouched":[]},"searchMeta":{"score":0.042,"matchType":"both"}}],"total":1,"page":1}`)
 	}))
 	defer srv.Close()
 
@@ -339,11 +326,168 @@ func TestSearch_SuccessWithResults(t *testing.T) {
 	if len(resp.Results) != 1 {
 		t.Fatalf("got %d results, want 1", len(resp.Results))
 	}
-	if resp.Results[0].Data.ID != "abc123def456" {
-		t.Errorf("checkpoint id = %s, want abc123def456", resp.Results[0].Data.ID)
+	r := resp.Results[0]
+	if r.Type != TypeCheckpoint {
+		t.Errorf("type = %s, want checkpoint", r.Type)
 	}
-	if resp.Results[0].Meta.MatchType != "both" {
-		t.Errorf("matchType = %s, want both", resp.Results[0].Meta.MatchType)
+	if r.Checkpoint == nil {
+		t.Fatal("checkpoint data is nil")
+	}
+	if r.Checkpoint.ID != "abc123def456" {
+		t.Errorf("checkpoint id = %s, want abc123def456", r.Checkpoint.ID)
+	}
+	if r.Meta.MatchType != "both" {
+		t.Errorf("matchType = %s, want both", r.Meta.MatchType)
+	}
+}
+
+func TestSearch_SuccessWithMultipleTypes(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, `{"results":[{"type":"checkpoint","data":{"id":"cp1","prompt":"fix bug","branch":"main","org":"o","repo":"r","author":"alice","createdAt":"2026-01-13T12:00:00Z","filesTouched":[]},"searchMeta":{"matchType":"keyword","score":0.5}},{"type":"commit","data":{"id":"cm1","commitSha":"abc1234567890","commitMessage":"fix: auth bug","commitSubject":"fix: auth bug","branch":"main","org":"o","repo":"r","author":"bob","createdAt":"2026-01-14T12:00:00Z","additions":10,"deletions":5,"filesChanged":3},"searchMeta":{"matchType":"semantic","score":0.3}},{"type":"session","data":{"sessionId":"ss1","displayName":"Debug auth","org":"o","repo":"r","createdAt":"2026-01-15T12:00:00Z","stepCount":5},"searchMeta":{"matchType":"both","score":0.4}}],"total":3,"page":1,"counts":{"repos":0,"checkpoints":1,"commits":1,"prs":0,"sessions":1}}`)
+	}))
+	defer srv.Close()
+
+	resp, err := Search(context.Background(), Config{
+		ServiceURL:  srv.URL,
+		GitHubToken: "tok",
+		Owner:       "o",
+		Repo:        "r",
+		Query:       "auth",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 3 {
+		t.Fatalf("got %d results, want 3", len(resp.Results))
+	}
+
+	// Checkpoint
+	if resp.Results[0].Checkpoint == nil {
+		t.Fatal("result[0] checkpoint is nil")
+	}
+	if resp.Results[0].Checkpoint.ID != testCPID {
+		t.Errorf("checkpoint ID = %q", resp.Results[0].Checkpoint.ID)
+	}
+
+	// Commit
+	if resp.Results[1].Commit == nil {
+		t.Fatal("result[1] commit is nil")
+	}
+	if resp.Results[1].Commit.CommitSHA != "abc1234567890" {
+		t.Errorf("commit SHA = %q", resp.Results[1].Commit.CommitSHA)
+	}
+	if resp.Results[1].Commit.Additions != 10 {
+		t.Errorf("commit additions = %d", resp.Results[1].Commit.Additions)
+	}
+
+	// Session
+	if resp.Results[2].Session == nil {
+		t.Fatal("result[2] session is nil")
+	}
+	if resp.Results[2].Session.SessionID != "ss1" {
+		t.Errorf("session ID = %q", resp.Results[2].Session.SessionID)
+	}
+	if resp.Results[2].Session.StepCount != 5 {
+		t.Errorf("session steps = %d", resp.Results[2].Session.StepCount)
+	}
+
+	// Counts
+	if resp.Counts == nil {
+		t.Fatal("counts is nil")
+	}
+	if resp.Counts.Checkpoints != 1 || resp.Counts.Commits != 1 || resp.Counts.Sessions != 1 {
+		t.Errorf("counts = %+v", resp.Counts)
+	}
+}
+
+func TestSearch_ResultAccessors(t *testing.T) {
+	t.Parallel()
+
+	cp := Result{
+		Type:       TypeCheckpoint,
+		Checkpoint: &CheckpointResult{ID: testCPID, Org: "o", Repo: "r", Branch: "main", Author: "alice", CreatedAt: "2026-01-01T00:00:00Z", Prompt: "fix bug"},
+	}
+	if cp.ResultOrg() != "o" {
+		t.Errorf("ResultOrg = %q", cp.ResultOrg())
+	}
+	if cp.ResultTitle() != "fix bug" {
+		t.Errorf("ResultTitle = %q", cp.ResultTitle())
+	}
+	if cp.ResultID() != testCPID {
+		t.Errorf("ResultID = %q", cp.ResultID())
+	}
+
+	cm := Result{
+		Type:   TypeCommit,
+		Commit: &CommitResult{CommitSHA: "abc123", CommitSubject: "fix: bug", Org: "o", Repo: "r", Branch: "dev", Author: "bob"},
+	}
+	if cm.ResultTitle() != "fix: bug" {
+		t.Errorf("commit ResultTitle = %q", cm.ResultTitle())
+	}
+	if cm.ResultID() != "abc123" {
+		t.Errorf("commit ResultID = %q", cm.ResultID())
+	}
+
+	ss := Result{
+		Type:    TypeSession,
+		Session: &SessionResult{SessionID: "ss1", DisplayName: "Debug session", Org: "o", Repo: "r"},
+	}
+	if ss.ResultTitle() != "Debug session" {
+		t.Errorf("session ResultTitle = %q", ss.ResultTitle())
+	}
+	if ss.ResultID() != "ss1" {
+		t.Errorf("session ResultID = %q", ss.ResultID())
+	}
+}
+
+func TestSearch_ResultJSONRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := Result{
+		Type: TypeCheckpoint,
+		Checkpoint: &CheckpointResult{
+			ID:        testCPID,
+			Prompt:    "fix bug",
+			Branch:    "main",
+			Org:       "o",
+			Repo:      "r",
+			Author:    "alice",
+			CreatedAt: "2026-01-01T00:00:00Z",
+		},
+		Meta: Meta{MatchType: "keyword", Score: 0.5},
+	}
+
+	data, err := json.Marshal(&original)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify wire format has "type", "data", "searchMeta" keys
+	if !strings.Contains(string(data), `"type":"checkpoint"`) {
+		t.Errorf("JSON missing type: %s", data)
+	}
+	if !strings.Contains(string(data), `"data":{`) {
+		t.Errorf("JSON missing data: %s", data)
+	}
+	if !strings.Contains(string(data), `"searchMeta":{`) {
+		t.Errorf("JSON missing searchMeta: %s", data)
+	}
+
+	// Round-trip
+	var decoded Result
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Type != TypeCheckpoint {
+		t.Errorf("decoded type = %q", decoded.Type)
+	}
+	if decoded.Checkpoint == nil || decoded.Checkpoint.ID != testCPID {
+		t.Errorf("decoded checkpoint = %+v", decoded.Checkpoint)
+	}
+	if decoded.Meta.Score != 0.5 {
+		t.Errorf("decoded score = %f", decoded.Meta.Score)
 	}
 }
 
@@ -463,6 +607,67 @@ func TestSearch_AllReposFilterOmitsRepoParam(t *testing.T) {
 
 	if got := capturedReq.URL.Query()["repo"]; len(got) != 0 {
 		t.Errorf("repo params = %v, want omitted for all-repos search", got)
+	}
+}
+
+func TestSearch_AllReposFlagOmitsRepoParam(t *testing.T) {
+	t.Parallel()
+
+	var capturedReq *http.Request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedReq = r
+		resp := Response{Results: []Result{}, Total: 0, Page: 1}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
+	}))
+	defer srv.Close()
+
+	_, err := Search(context.Background(), Config{
+		ServiceURL:  srv.URL,
+		GitHubToken: "tok",
+		Owner:       "default-owner",
+		Repo:        "default-repo",
+		Query:       "q",
+		AllRepos:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := capturedReq.URL.Query()["repo"]; len(got) != 0 {
+		t.Errorf("repo params = %v, want omitted for AllRepos=true", got)
+	}
+}
+
+func TestSearch_ExplicitRepoWinsOverAllRepos(t *testing.T) {
+	t.Parallel()
+
+	var capturedReq *http.Request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedReq = r
+		resp := Response{Results: []Result{}, Total: 0, Page: 1}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
+	}))
+	defer srv.Close()
+
+	// --all-repos alongside an explicit owner/name filter must scope to the
+	// explicit repo (the more specific filter wins), not search all repos.
+	_, err := Search(context.Background(), Config{
+		ServiceURL:  srv.URL,
+		GitHubToken: "tok",
+		Owner:       "default-owner",
+		Repo:        "default-repo",
+		Query:       "q",
+		AllRepos:    true,
+		Repos:       []string{"owner/explicit"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := capturedReq.URL.Query()["repo"]; len(got) != 1 || got[0] != "owner/explicit" {
+		t.Errorf("repo params = %v, want [owner/explicit]", got)
 	}
 }
 
@@ -589,6 +794,9 @@ func TestConfig_HasFilters(t *testing.T) {
 	}
 	if !(Config{Repos: []string{"entirehq/entire.io"}}).HasFilters() {
 		t.Error("config with Repos should have filters")
+	}
+	if !(Config{AllRepos: true}).HasFilters() {
+		t.Error("config with AllRepos should have filters")
 	}
 	if !(Config{Author: "alice", Date: testDateWeek}).HasFilters() {
 		t.Error("config with both should have filters")

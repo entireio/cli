@@ -126,6 +126,7 @@ func TestReviewCommand_PassesReviewEnvToSpawnedAgentHook(t *testing.T) {
 	fakeAgent := `#!/bin/sh
 set -eu
 printf '%s\n' '{"session_id":"` + sessionID + `","transcript_path":"","prompt":"review command prompt"}' | "$ENTIRE_TEST_BINARY" hooks claude-code user-prompt-submit
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":0,"output_tokens":0}}'
 `
 	if err := os.WriteFile(fakeClaude, []byte(fakeAgent), 0o755); err != nil {
 		t.Fatalf("write fake claude: %v", err)

@@ -78,9 +78,12 @@ func TestRunMulti_OneSucceedsOneFails(t *testing.T) {
 	if len(summary.AgentRuns) != 2 {
 		t.Fatalf("expected 2 AgentRuns, got %d", len(summary.AgentRuns))
 	}
-	// Both agents delivered events to the sink.
-	if len(rec.agentEvents) != 4 {
-		t.Errorf("expected 4 AgentEvent calls (2 per agent), got %d", len(rec.agentEvents))
+	// Both agents delivered events to the sink. ok-agent emits 2 events
+	// (Started, Finished); fail-agent emits 2 events (Started, Finished)
+	// plus a synthetic RunError emitted after Wait returns the non-nil
+	// process error.
+	if len(rec.agentEvents) != 5 {
+		t.Errorf("expected 5 AgentEvent calls (ok: 2, fail: 2 + RunError), got %d", len(rec.agentEvents))
 	}
 	// Verify per-agent statuses.
 	statusFor := func(name string) reviewtypes.AgentStatus {
@@ -377,4 +380,221 @@ func TestRunMulti_TokenTracking(t *testing.T) {
 	if run.Tokens.Out != 15 {
 		t.Errorf("Tokens.Out: got %d, want 15", run.Tokens.Out)
 	}
+}
+
+func TestRunMulti_EnrichesSummaryBeforeRunFinished(t *testing.T) {
+	t.Parallel()
+	ra := &stubReviewer{
+		name:   "agent-a",
+		events: []reviewtypes.Event{reviewtypes.Started{}, reviewtypes.Finished{Success: true}},
+	}
+	rec := &stubSinkRecorder{}
+	cfg := reviewtypes.RunConfig{
+		EnrichSummary: func(_ context.Context, summary reviewtypes.RunSummary) reviewtypes.RunSummary {
+			summary.AgentRuns[0].Tokens = reviewtypes.Tokens{In: 42, Out: 7}
+			return summary
+		},
+	}
+
+	summary, err := RunMulti(context.Background(), []reviewtypes.AgentReviewer{ra}, cfg, []reviewtypes.Sink{rec})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := summary.AgentRuns[0].Tokens; got.In != 42 || got.Out != 7 {
+		t.Fatalf("summary tokens = {%d %d}, want {42 7}", got.In, got.Out)
+	}
+	if len(rec.finishedCalls) != 1 {
+		t.Fatalf("finished calls = %d, want 1", len(rec.finishedCalls))
+	}
+	if got := rec.finishedCalls[0].AgentRuns[0].Tokens; got.In != 42 || got.Out != 7 {
+		t.Fatalf("sink summary tokens = {%d %d}, want {42 7}", got.In, got.Out)
+	}
+}
+
+func TestRunMulti_EmitsSyntheticRunErrorWhenAgentWaitErrIsNonNil(t *testing.T) {
+	t.Parallel()
+	failingWait := errors.New("exit status 1: stderr: invalid_api_key")
+	failer := &stubReviewer{
+		name: "claude-code",
+		events: []reviewtypes.Event{
+			reviewtypes.Started{},
+			reviewtypes.Finished{Success: true},
+		},
+		waitErr: failingWait,
+	}
+	succeeder := &stubReviewer{
+		name: "codex",
+		events: []reviewtypes.Event{
+			reviewtypes.Started{},
+			reviewtypes.AssistantText{Text: "looks good"},
+			reviewtypes.Finished{Success: true},
+		},
+	}
+	rec := &stubSinkRecorder{}
+
+	_, err := RunMulti(context.Background(), []reviewtypes.AgentReviewer{failer, succeeder}, reviewtypes.RunConfig{}, []reviewtypes.Sink{rec})
+	if err == nil {
+		t.Fatal("expected non-nil firstErr from failing agent")
+	}
+
+	var found bool
+	for _, evt := range rec.agentEvents {
+		if evt.agent != "claude-code" {
+			continue
+		}
+		if re, ok := evt.ev.(reviewtypes.RunError); ok && re.Err != nil && re.Err.Error() == failingWait.Error() {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected synthetic RunError for failing agent in live sink stream, got events: %+v", rec.agentEvents)
+	}
+}
+
+func TestRunMulti_DoesNotEmitSyntheticRunErrorOnCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reviewer := &stubReviewer{
+		name: "claude-code",
+		events: []reviewtypes.Event{
+			reviewtypes.Started{},
+			reviewtypes.Finished{Success: true},
+		},
+		waitErr: context.Canceled,
+	}
+	rec := &stubSinkRecorder{}
+
+	summary, err := RunMulti(ctx, []reviewtypes.AgentReviewer{reviewer}, reviewtypes.RunConfig{}, []reviewtypes.Sink{rec})
+	if err != nil {
+		t.Fatalf("cancelled RunMulti should not return firstErr, got %v", err)
+	}
+	if got := summary.AgentRuns[0].Status; got != reviewtypes.AgentStatusCancelled {
+		t.Fatalf("summary status = %v, want Cancelled", got)
+	}
+	for _, evt := range rec.agentEvents {
+		if _, ok := evt.ev.(reviewtypes.RunError); ok {
+			t.Errorf("cancelled run should not produce synthetic RunError, got: %+v", evt.ev)
+		}
+	}
+}
+
+func TestRunMulti_EmitsEnrichedTokensWhenAgentFinishes(t *testing.T) {
+	t.Parallel()
+	eventsA := make(chan reviewtypes.Event, 2)
+	eventsA <- reviewtypes.Started{}
+	eventsA <- reviewtypes.Finished{Success: true}
+	close(eventsA)
+	eventsB := make(chan reviewtypes.Event, 1)
+	eventsB <- reviewtypes.Started{}
+
+	ra := &funcReviewer{name: "agent-a", process: &chanProcess{events: eventsA}}
+	rb := &funcReviewer{name: "agent-b", process: &chanProcess{events: eventsB}}
+	sink := &liveTokenSink{
+		tokens:   make(chan reviewtypes.Tokens, 1),
+		finished: make(chan struct{}, 1),
+	}
+	cfg := reviewtypes.RunConfig{
+		EnrichAgentRun: func(_ context.Context, run reviewtypes.AgentRun) reviewtypes.AgentRun {
+			if run.Name == "agent-a" {
+				run.Tokens = reviewtypes.Tokens{In: 42, Out: 7}
+			}
+			return run
+		},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := RunMulti(context.Background(), []reviewtypes.AgentReviewer{ra, rb}, cfg, []reviewtypes.Sink{sink})
+		done <- err
+	}()
+
+	select {
+	case got := <-sink.tokens:
+		if got.In != 42 || got.Out != 7 {
+			t.Fatalf("tokens = {%d %d}, want {42 7}", got.In, got.Out)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for agent-a token event before agent-b finished")
+	}
+	select {
+	case <-sink.finished:
+		t.Fatal("RunFinished fired before agent-b finished")
+	default:
+	}
+
+	close(eventsB)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunMulti: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for RunMulti")
+	}
+}
+
+// TestRunMulti_PreservesParserTokensWhenEnrichmentReturnsZero locks in the
+// dispatch-loop overwrite contract: when the parser emits Tokens during the
+// run and EnrichAgentRun later returns zero (e.g. no matching session state
+// found), the parser's tokens must be preserved in the final summary because
+// emitEnrichedAgentTokens short-circuits before sending the synthetic event.
+// Without that early-return, a zero overwrite would clobber the parser value.
+func TestRunMulti_PreservesParserTokensWhenEnrichmentReturnsZero(t *testing.T) {
+	t.Parallel()
+	events := []reviewtypes.Event{
+		reviewtypes.Started{},
+		reviewtypes.Tokens{In: 1000, Out: 500},
+		reviewtypes.Finished{Success: true},
+	}
+	reviewer := &stubReviewer{name: "agent-a", events: events}
+	cfg := reviewtypes.RunConfig{
+		EnrichAgentRun: func(_ context.Context, run reviewtypes.AgentRun) reviewtypes.AgentRun {
+			// Enricher couldn't find session state; returns zero tokens.
+			// The orchestrator must NOT propagate this back into the summary.
+			run.Tokens = reviewtypes.Tokens{}
+			return run
+		},
+	}
+
+	summary, err := RunMulti(context.Background(), []reviewtypes.AgentReviewer{reviewer}, cfg, nil)
+	if err != nil {
+		t.Fatalf("RunMulti: %v", err)
+	}
+	if len(summary.AgentRuns) != 1 {
+		t.Fatalf("expected 1 AgentRun, got %d", len(summary.AgentRuns))
+	}
+	got := summary.AgentRuns[0].Tokens
+	if got.In != 1000 || got.Out != 500 {
+		t.Fatalf("parser-emitted Tokens lost: got {%d %d}, want {1000 500}", got.In, got.Out)
+	}
+}
+
+type chanProcess struct {
+	events  chan reviewtypes.Event
+	waitErr error
+}
+
+func (p *chanProcess) Events() <-chan reviewtypes.Event { return p.events }
+func (p *chanProcess) Wait() error                      { return p.waitErr }
+
+type liveTokenSink struct {
+	tokens   chan reviewtypes.Tokens
+	finished chan struct{}
+}
+
+func (s *liveTokenSink) AgentEvent(agent string, ev reviewtypes.Event) {
+	if agent != "agent-a" {
+		return
+	}
+	tokens, ok := ev.(reviewtypes.Tokens)
+	if !ok {
+		return
+	}
+	s.tokens <- tokens
+}
+
+func (s *liveTokenSink) RunFinished(reviewtypes.RunSummary) {
+	s.finished <- struct{}{}
 }

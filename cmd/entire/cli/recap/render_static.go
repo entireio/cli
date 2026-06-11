@@ -1,13 +1,18 @@
 package recap
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 const (
@@ -18,11 +23,12 @@ const (
 )
 
 type RenderOptions struct {
-	Range RangeKey
-	View  ViewMode
-	Agent string
-	Width int
-	Color bool
+	Range    RangeKey
+	View     ViewMode
+	Agent    string
+	Width    int
+	Color    bool
+	Location *time.Location
 }
 
 // RenderStaticRecap renders the server-backed static recap view.
@@ -125,7 +131,11 @@ func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles 
 		}
 	}
 	top := topSignals(resp, opts, styles)
-	lines := []string{opts.Range.Title(), ""}
+	lines := []string{opts.Range.Title()}
+	if window := renderWindow(resp, opts, styles); window != "" {
+		lines = append(lines, window)
+	}
+	lines = append(lines, "")
 	if opts.View != ViewTeam {
 		lines = append(lines, fmt.Sprintf("%s   %-12s  %-15s  %s",
 			styles.accent.Render("you"),
@@ -140,18 +150,209 @@ func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles 
 				plural(team.Sessions, "session"), plural(team.Checkpoints, "checkpoint"), formatTokens(team.Tokens)+" tok"))
 		}
 	}
+	if noteLines := transcriptAvailabilityNote(resp.Summary.Transcripts, opts.View, summaryContentWidth(width)); len(noteLines) > 0 {
+		lines = append(lines, "")
+		for _, noteLine := range noteLines {
+			lines = append(lines, styles.muted.Render(noteLine))
+		}
+	}
 	if len(top) > 0 {
 		lines = append(lines, "", styles.muted.Render("top")+"  "+strings.Join(top, styles.muted.Render(" · ")))
 	}
 	context := []string{plural(len(filteredAgents(resp, opts)), "agent")}
-	if resp.Summary.RepoCount > 0 {
-		context = append(context, plural(resp.Summary.RepoCount, "repo"))
+	if repoScope := repoScopeText(resp); repoScope != "" {
+		context = append(context, repoScope)
 	}
 	if !agentFiltered {
 		context = append(context, plural(resp.Summary.ActiveDays, "active day"))
 	}
-	lines = append(lines, "", styles.muted.Render(strings.Join(context, " · ")))
+	// Wrap on whitespace at the box's content width so long repo names don't
+	// tear the border at narrow widths. wrapPlainLine breaks on whitespace
+	// only — a single ultra-long repo name (> contentWidth) overflows its
+	// line and renderBox truncates it, the same fallback the transcript note
+	// relies on.
+	lines = append(lines, "")
+	for _, line := range wrapPlainLine(strings.Join(context, " · "), summaryContentWidth(width)) {
+		lines = append(lines, styles.muted.Render(line))
+	}
 	return renderBox("", lines, width, styles)
+}
+
+// transcriptAvailabilityNote builds the "X unavailable transcripts" hint shown
+// inside the summary box. The note is word-wrapped to the available content
+// width so it never tears the box at narrow widths or with large counts.
+// width is the renderable text width inside the box (already accounting for
+// the box borders and the leading two-space indent — see summaryContentWidth).
+func transcriptAvailabilityNote(summary TranscriptSummary, view ViewMode, width int) []string {
+	status := visibleTranscriptStatus(summary, view)
+	total := status.Failed + status.Pending + status.Empty
+	if total == 0 {
+		return nil
+	}
+	label := "unavailable transcripts"
+	if total == 1 {
+		label = "unavailable transcript"
+	}
+	parts := make([]string, 0, 3)
+	if status.Failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", status.Failed))
+	}
+	if status.Pending > 0 {
+		parts = append(parts, fmt.Sprintf("%d pending", status.Pending))
+	}
+	if status.Empty > 0 {
+		parts = append(parts, fmt.Sprintf("%d empty", status.Empty))
+	}
+	headline := fmt.Sprintf("%d %s", total, label)
+	detail := strings.Join(parts, ", ") + "; session totals may be lower"
+
+	out := wrapPlainLine(headline, width)
+	out = append(out, wrapPlainLine(detail, width)...)
+	return out
+}
+
+// visibleTranscriptStatus returns the transcript-availability counts that
+// apply to the current view. ViewBoth sums Me + Team so the displayed count
+// matches the sessions visible in that view; future ViewMode additions hit
+// the default arm and emit a debug log instead of silently zeroing.
+func visibleTranscriptStatus(summary TranscriptSummary, view ViewMode) TranscriptStatus {
+	switch view {
+	case ViewYou:
+		return summary.Me
+	case ViewTeam:
+		if summary.Team == nil {
+			return TranscriptStatus{}
+		}
+		return *summary.Team
+	case ViewBoth:
+		status := summary.Me
+		if summary.Team != nil {
+			status.Failed += summary.Team.Failed
+			status.Pending += summary.Team.Pending
+			status.Empty += summary.Team.Empty
+		}
+		return status
+	default:
+		logging.Debug(context.Background(), "recap: unknown view mode for transcript status", slog.String("view", string(view)))
+		return TranscriptStatus{}
+	}
+}
+
+// summaryContentWidth returns the renderable text width inside the summary
+// box, accounting for the two border columns and the leading two-space indent
+// that renderBox applies to every content line.
+func summaryContentWidth(width int) int {
+	inner := width - 2 - 2
+	if inner < 1 {
+		return 1
+	}
+	return inner
+}
+
+// wrapPlainLine word-wraps a plain (no ANSI) string at width on whitespace
+// boundaries. Returns at least one line, even if width is too small to fit a
+// single token — that token is emitted as its own (overflowing) line, which
+// renderBox will then truncate, rather than silently dropped.
+func wrapPlainLine(s string, width int) []string {
+	if width <= 0 {
+		return []string{s}
+	}
+	if displayLen(s) <= width {
+		return []string{s}
+	}
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return []string{s}
+	}
+	var out []string
+	current := words[0]
+	for _, word := range words[1:] {
+		if displayLen(current)+1+displayLen(word) <= width {
+			current += " " + word
+			continue
+		}
+		out = append(out, current)
+		current = word
+	}
+	if current != "" {
+		out = append(out, current)
+	}
+	return out
+}
+
+// renderWindow formats the recap window using the API's since/until. Parse
+// failures fall back to an empty window line (graceful degradation) but the
+// underlying error is logged via slog so the failure is diagnosable when
+// debug logging is enabled.
+func renderWindow(resp *MeRecapResponse, opts RenderOptions, styles staticStyles) string {
+	if resp.Since == "" || resp.Until == "" {
+		return ""
+	}
+	since, err := time.Parse(time.RFC3339, resp.Since)
+	if err != nil {
+		logging.Debug(context.Background(), "recap: failed to parse since", slog.String("value", resp.Since), slog.String("error", err.Error()))
+		return ""
+	}
+	until, err := time.Parse(time.RFC3339, resp.Until)
+	if err != nil {
+		logging.Debug(context.Background(), "recap: failed to parse until", slog.String("value", resp.Until), slog.String("error", err.Error()))
+		return ""
+	}
+	loc := opts.Location
+	if loc == nil {
+		loc = time.Local
+	}
+	return styles.muted.Render("window " + formatWindowTime(since.In(loc)) + " - " + formatWindowTime(until.In(loc)))
+}
+
+func formatWindowTime(t time.Time) string {
+	return t.Format("Jan 2, 2006 15:04 MST")
+}
+
+func repoScopeText(resp *MeRecapResponse) string {
+	repos := recapRepoNames(resp)
+	switch {
+	case len(repos) == 1:
+		return "repo " + repos[0]
+	case len(repos) > 1:
+		limit := min(len(repos), 3)
+		text := "repos " + strings.Join(repos[:limit], ", ")
+		if extra := len(repos) - limit; extra > 0 {
+			text += fmt.Sprintf(" +%d more", extra)
+		}
+		return text
+	case resp.Summary.RepoCount > 0:
+		return plural(resp.Summary.RepoCount, "repo")
+	default:
+		return ""
+	}
+}
+
+// recapRepoNames returns the deduplicated, trimmed repo names from the
+// response. Order is preserved from the API so that repos the server ranked
+// as most active appear first in the summary; if we sorted alphabetically
+// here, the +N more overflow would hide the user's primary repo.
+func recapRepoNames(resp *MeRecapResponse) []string {
+	if resp.Repo != nil && strings.TrimSpace(*resp.Repo) != "" {
+		return []string{strings.TrimSpace(*resp.Repo)}
+	}
+	if len(resp.Repos) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	repos := make([]string, 0, len(resp.Repos))
+	for _, repo := range resp.Repos {
+		repo = strings.TrimSpace(repo)
+		if repo == "" {
+			continue
+		}
+		if _, ok := seen[repo]; ok {
+			continue
+		}
+		seen[repo] = struct{}{}
+		repos = append(repos, repo)
+	}
+	return repos
 }
 
 func hasAgentFilter(opts RenderOptions) bool {

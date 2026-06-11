@@ -18,7 +18,7 @@ import (
 // tree hashes to the old FlattenTree+BuildTreeFromEntries approach.
 func TestBuildTreeWithChanges_EquivalenceWithFlattenRebuild(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
 	repo, dir := setupTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 
 	// Get the base tree hash from HEAD
 	head, err := repo.Head()
@@ -76,7 +76,7 @@ func TestAddTaskMetadataToTree_EquivalenceWithFlattenRebuild(t *testing.T) {
 	t.Parallel()
 
 	repo, _ := setupTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 
 	head, err := repo.Head()
 	if err != nil {
@@ -119,7 +119,7 @@ func TestAddTaskMetadataToTree_IncrementalPath(t *testing.T) {
 	t.Parallel()
 
 	repo, _ := setupTestRepo(t)
-	store := NewGitStore(repo)
+	store := NewGitStore(repo, DefaultV1Refs())
 
 	head, err := repo.Head()
 	if err != nil {

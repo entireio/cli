@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -17,24 +18,29 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newSearchCmd() *cobra.Command {
+func newSearchCmd() *cobra.Command { //nolint:maintidx // command wiring is inherently complex
 	var (
-		jsonOutput bool
-		limitFlag  int
-		pageFlag   int
-		authorFlag string
-		dateFlag   string
-		branchFlag string
-		repoFlag   string
+		jsonOutput       bool
+		limitFlag        int
+		pageFlag         int
+		authorFlag       string
+		dateFlag         string
+		branchFlag       string
+		repoFlag         string
+		allReposFlag     bool
+		insecureHTTPAuth bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "search [query]",
-		Short: "Search checkpoints using semantic and keyword matching",
-		Long: `Search checkpoints using hybrid search (semantic + keyword),
+		Short: "Search checkpoints, commits, and sessions using semantic and keyword matching",
+		Long: `Search checkpoints, commits, and sessions using hybrid search (semantic + keyword),
 powered by the Entire search service.
 
 Requires authentication via 'entire login' (GitHub device flow).
+
+By default, results are scoped to the current repository. Use --all-repos to
+search across all accessible repos.
 
 Run without arguments to open an interactive search. Results are
 displayed in an interactive table. Use --json for machine-readable output.
@@ -67,21 +73,22 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				return fmt.Errorf("validating repo filter: %w", err)
 			}
 
+			// Check for repo:* in inline filters
+			allRepos := allReposFlag
+			if len(repos) == 1 && repos[0] == search.AllReposFilter {
+				allRepos = true
+			}
+
 			w := cmd.OutOrStdout()
 			isTerminal := interactive.IsTerminalWriter(w)
-			hasFilters := authorFlag != "" || dateFlag != "" || branchFlag != "" || len(repos) > 0
+			// Mirror search.Config.HasFilters (incl. --all-repos) so an empty
+			// query with only filters isn't rejected here. This guard runs
+			// before git/auth, so it can't call searchCfg.HasFilters() directly.
+			hasFilters := authorFlag != "" || dateFlag != "" || branchFlag != "" || len(repos) > 0 || allRepos
 
 			// Fast-fail: no query + non-interactive mode = error (before auth/git checks)
 			if query == "" && !hasFilters && (jsonOutput || !isTerminal || IsAccessibleMode()) {
 				return errors.New("query required when using --json, accessible mode, or piped output. Usage: entire search <query>")
-			}
-
-			ghToken, err := auth.LookupCurrentToken()
-			if err != nil {
-				return fmt.Errorf("reading credentials: %w", err)
-			}
-			if ghToken == "" {
-				return errors.New("not authenticated. Run 'entire login' to authenticate")
 			}
 
 			// Get the repo's GitHub remote URL
@@ -91,6 +98,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Run this command from within a git repository.")
 				return NewSilentError(err)
 			}
+			defer repo.Close()
 
 			remote, err := repo.Remote("origin")
 			if err != nil {
@@ -108,7 +116,16 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			serviceURL := os.Getenv("ENTIRE_SEARCH_URL")
 			if serviceURL == "" {
-				serviceURL = search.DefaultServiceURL
+				// Search lives on the data API host. Fall back to
+				// api.BaseURL() so ENTIRE_API_BASE_URL applies; the search
+				// package's DefaultServiceURL is only consulted by callers
+				// that bypass this entry point.
+				serviceURL = api.BaseURL()
+			}
+
+			ghToken, err := resolveSearchToken(ctx, serviceURL, insecureHTTPAuth)
+			if err != nil {
+				return err
 			}
 
 			searchCfg := search.Config{
@@ -117,6 +134,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				Owner:       owner,
 				Repo:        repoName,
 				Repos:       repos,
+				AllRepos:    allRepos,
 				Query:       query,
 				Limit:       limitFlag,
 				Page:        pageFlag,
@@ -132,7 +150,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			// No query provided + interactive = open TUI with search bar focused
 			if query == "" && !searchCfg.HasFilters() {
-				searchCfg.Limit = search.MaxLimit
+				searchCfg.Limit = search.DefaultLimit
 				styles := newStatusStyles(w)
 				model := newSearchModel(nil, "", 0, searchCfg, styles)
 				model.mode = modeSearch
@@ -144,12 +162,12 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				return nil
 			}
 
-			// Fetch max results so client-side pagination works.
-			// The search API caps results at the limit, so we fetch
-			// the maximum and paginate client-side for all output modes.
+			// Fetch a full page (DefaultLimit, matching the web UI) up front and
+			// paginate client-side for all output modes; the requested --limit
+			// only controls the client-side page size.
 			requestedLimit := searchCfg.Limit
 			requestedPage := searchCfg.Page
-			searchCfg.Limit = search.MaxLimit
+			searchCfg.Limit = search.DefaultLimit
 			searchCfg.Page = 0 // let API default to page 1
 
 			resp, err := search.Search(ctx, searchCfg)
@@ -191,6 +209,8 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	cmd.Flags().StringVar(&dateFlag, "date", "", "Filter by time period (week or month)")
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Filter by branch name")
 	cmd.Flags().StringVar(&repoFlag, "repo", "", "Filter by repository (owner/name or *)")
+	cmd.Flags().BoolVar(&allReposFlag, "all-repos", false, "Search all accessible repos instead of just the current one")
+	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
 	cmd.RegisterFlagCompletionFunc("date", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) { //nolint:errcheck,gosec // only fails if the flag isn't defined; defined directly above
 		return []string{"week", "month"}, cobra.ShellCompDirectiveNoFileComp
@@ -200,6 +220,27 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	return cmd
 }
 
+// resolveSearchToken returns a bearer scoped to the search service host.
+// In split-host deployments this triggers an RFC 8693 exchange so the bearer
+// carries the data-API audience rather than the auth-host one; single-host
+// setups hit the same-host shortcut and return the core token unchanged.
+// insecureHTTPAuth opts into non-loopback http:// resources at the
+// tokenmanager layer, matching the per-command --insecure-http-auth pattern
+// used by NewAuthenticatedAPIClient and newRecapClient.
+func resolveSearchToken(ctx context.Context, serviceURL string, insecureHTTPAuth bool) (string, error) {
+	if insecureHTTPAuth {
+		auth.EnableInsecureHTTP()
+	}
+	token, err := auth.ResolveDataAPIToken(ctx, serviceURL)
+	if errors.Is(err, auth.ErrNotLoggedIn) {
+		return "", errors.New("not authenticated. Run 'entire login' to authenticate")
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading credentials: %w", err)
+	}
+	return token, nil
+}
+
 // completeRepoFlag returns shell-completion suggestions for the search
 // command's --repo flag. "*" is always offered so the wildcard works
 // regardless of auth state. Errors are swallowed (rather than surfaced via
@@ -207,7 +248,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 // must never pollute the user's prompt with error output.
 func completeRepoFlag(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 	suggestions := []string{"*"}
-	client, err := NewAuthenticatedAPIClient(false)
+	client, err := NewAuthenticatedAPIClient(cmd.Context(), false)
 	if err != nil {
 		return suggestions, cobra.ShellCompDirectiveNoFileComp
 	}
@@ -254,17 +295,19 @@ func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error 
 	}
 
 	out := struct {
-		Results    []search.Result `json:"results"`
-		Total      int             `json:"total"`
-		Page       int             `json:"page"`
-		TotalPages int             `json:"total_pages"`
-		Limit      int             `json:"limit"`
+		Results    []search.Result    `json:"results"`
+		Total      int                `json:"total"`
+		Page       int                `json:"page"`
+		TotalPages int                `json:"total_pages"`
+		Limit      int                `json:"limit"`
+		Counts     *search.TypeCounts `json:"counts,omitempty"`
 	}{
 		Results:    pageResults,
 		Total:      total,
 		Page:       page,
 		TotalPages: totalPages,
 		Limit:      limit,
+		Counts:     resp.Counts,
 	}
 	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
 	if err != nil {
