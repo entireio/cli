@@ -44,12 +44,10 @@ With Entire, you can:
 
 ```bash
 # Install stable via Homebrew
-brew tap entireio/tap
-brew install --cask entire
+brew install --cask entireio/tap/entire
 
 # Or install nightly via Homebrew
-brew tap entireio/tap
-brew install --cask entire@nightly
+brew install --cask entireio/tap/entire@nightly
 
 # Or install stable via install.sh
 curl -fsSL https://entire.io/install.sh | bash
