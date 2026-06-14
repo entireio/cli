@@ -134,19 +134,60 @@ func countWarnableStaleEndedSessions(repo *git.Repository, sessions []*SessionSt
 }
 
 // findSessionsForWorktree finds all sessions for the given worktree path.
+//
+// When invoked from a linked worktree and no session is registered against
+// that worktree, the lookup falls back to sessions registered against the
+// main worktree. Agent-managed worktrees — like Claude Code's
+// .claude/worktrees/<branch> feature — spawn a sub-process that inherits a
+// session whose UserPromptSubmit fired in the main worktree; the hook handler
+// must still be able to find that session when prepare-commit-msg /
+// post-commit / etc. run from inside the linked worktree at commit time.
+//
+// The fallback is one-directional and only kicks in when the linked worktree
+// has no session of its own. This preserves three properties:
+//
+//  1. Linked-worktree sessions are never crowded out by main: if you ran
+//     `git worktree add ../wt && cd ../wt && agent`, your commits in `wt`
+//     link to the wt session, not also to some unrelated main session.
+//  2. Sibling linked worktrees never bleed into each other: a commit in
+//     worktree A never picks up a session registered against worktree B.
+//  3. Main-worktree lookups are unchanged: commits on main never adopt a
+//     session registered against a linked worktree.
 func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, worktreePath string) ([]*SessionState, error) {
 	allStates, err := s.listAllSessionStates(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var matching []*SessionState
+	var localMatches []*SessionState
 	for _, state := range allStates {
 		if state.WorktreePath == worktreePath {
-			matching = append(matching, state)
+			localMatches = append(localMatches, state)
 		}
 	}
-	return matching, nil
+	if len(localMatches) > 0 {
+		return localMatches, nil
+	}
+
+	// No local match. Fall back to main-worktree sessions only when we're
+	// actually in a different (linked) worktree. Failure to resolve the main
+	// path degrades gracefully to strict-equal — the caller is no worse off
+	// than before this fallback existed.
+	mainPath := ""
+	if p, mainErr := paths.MainWorktreeRoot(ctx); mainErr == nil {
+		mainPath = p
+	}
+	if mainPath == "" || mainPath == worktreePath {
+		return nil, nil
+	}
+
+	var mainMatches []*SessionState
+	for _, state := range allStates {
+		if state.WorktreePath == mainPath {
+			mainMatches = append(mainMatches, state)
+		}
+	}
+	return mainMatches, nil
 }
 
 type rewritePair struct {

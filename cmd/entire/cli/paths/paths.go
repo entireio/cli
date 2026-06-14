@@ -2,6 +2,7 @@ package paths
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -65,6 +66,10 @@ var (
 	worktreeRootMu       sync.RWMutex
 	worktreeRootCache    string
 	worktreeRootCacheDir string
+
+	mainWorktreeRootMu       sync.RWMutex
+	mainWorktreeRootCache    string
+	mainWorktreeRootCacheDir string
 )
 
 // WorktreeRoot returns the git worktree root directory.
@@ -112,14 +117,87 @@ func ClearWorktreeRootCache() {
 	worktreeRootCache = ""
 	worktreeRootCacheDir = ""
 	worktreeRootMu.Unlock()
+
+	mainWorktreeRootMu.Lock()
+	mainWorktreeRootCache = ""
+	mainWorktreeRootCacheDir = ""
+	mainWorktreeRootMu.Unlock()
+}
+
+// MainWorktreeRoot returns the directory containing the main (non-linked)
+// worktree's .git directory. When invoked from a linked worktree (including
+// agent-managed worktrees such as Claude Code's .claude/worktrees/<branch>),
+// this returns the main repo root, not the linked worktree root.
+//
+// Resolution uses 'git rev-parse --path-format=absolute --git-common-dir'
+// (whose parent directory is the main worktree). This is the canonical anchor
+// for .entire/ state: settings, metadata, logs all live in the main repo and
+// must be looked up there regardless of which linked worktree the caller is in.
+//
+// The result is cached per working directory. Returns an error if not inside
+// a git repository.
+func MainWorktreeRoot(ctx context.Context) (string, error) {
+	cwd, err := os.Getwd() //nolint:forbidigo // mirrors WorktreeRoot's pattern
+	if err != nil {
+		cwd = ""
+	}
+
+	mainWorktreeRootMu.RLock()
+	if mainWorktreeRootCache != "" && mainWorktreeRootCacheDir == cwd {
+		cached := mainWorktreeRootCache
+		mainWorktreeRootMu.RUnlock()
+		return cached, nil
+	}
+	mainWorktreeRootMu.RUnlock()
+
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--path-format=absolute", "--git-common-dir")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get git common dir: %w", err)
+	}
+
+	commonDir := strings.TrimSpace(string(output))
+	if commonDir == "" {
+		return "", errors.New("git rev-parse --git-common-dir returned empty output")
+	}
+
+	// The main worktree root is the parent directory of the common .git dir.
+	// (Bare repos have no worktree; entire requires a worktree, so we don't
+	// special-case that here — the caller will fail later if there's no tree.)
+	root := filepath.Dir(filepath.Clean(commonDir))
+
+	mainWorktreeRootMu.Lock()
+	mainWorktreeRootCache = root
+	mainWorktreeRootCacheDir = cwd
+	mainWorktreeRootMu.Unlock()
+
+	return root, nil
 }
 
 // AbsPath returns the absolute path for a relative path within the repository.
 // If the path is already absolute, it is returned as-is.
-// Uses WorktreeRoot() to resolve paths relative to the worktree root.
+//
+// Paths under .entire/ (settings, metadata, logs, tmp) are anchored at the
+// main worktree root so that linked worktrees — including agent-managed
+// worktrees like Claude Code's .claude/worktrees/<branch> — share a single
+// canonical configuration and state directory with the main repo. Without
+// this, hooks firing from inside a linked worktree fail to find settings,
+// see Entire as "not set up", and silently skip work (no trailer added to
+// the commit, no condensation, no push of entire/checkpoints/v1).
+//
+// All other relative paths resolve against the current worktree root via
+// WorktreeRoot().
 func AbsPath(ctx context.Context, relPath string) (string, error) {
 	if filepath.IsAbs(relPath) {
 		return relPath, nil
+	}
+
+	if IsSubpath(EntireDir, relPath) {
+		root, err := MainWorktreeRoot(ctx)
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(root, relPath), nil
 	}
 
 	root, err := WorktreeRoot(ctx)

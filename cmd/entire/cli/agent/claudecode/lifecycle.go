@@ -7,11 +7,13 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // Compile-time interface assertions for new interfaces.
@@ -105,7 +107,7 @@ func (c *ClaudeCodeAgent) parseSessionStart(stdin io.Reader) (*agent.Event, erro
 	return &agent.Event{
 		Type:       agent.SessionStart,
 		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
+		SessionRef: c.resolveTranscriptPath(raw.TranscriptPath, raw.SessionID),
 		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
@@ -119,7 +121,7 @@ func (c *ClaudeCodeAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) 
 	return &agent.Event{
 		Type:       agent.TurnStart,
 		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
+		SessionRef: c.resolveTranscriptPath(raw.TranscriptPath, raw.SessionID),
 		Prompt:     raw.Prompt,
 		Timestamp:  time.Now(),
 	}, nil
@@ -133,7 +135,7 @@ func (c *ClaudeCodeAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
 	return &agent.Event{
 		Type:       agent.TurnEnd,
 		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
+		SessionRef: c.resolveTranscriptPath(raw.TranscriptPath, raw.SessionID),
 		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
@@ -147,7 +149,7 @@ func (c *ClaudeCodeAgent) parseSessionEnd(stdin io.Reader) (*agent.Event, error)
 	return &agent.Event{
 		Type:       agent.SessionEnd,
 		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
+		SessionRef: c.resolveTranscriptPath(raw.TranscriptPath, raw.SessionID),
 		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
@@ -161,7 +163,7 @@ func (c *ClaudeCodeAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, err
 	return &agent.Event{
 		Type:       agent.SubagentStart,
 		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
+		SessionRef: c.resolveTranscriptPath(raw.TranscriptPath, raw.SessionID),
 		ToolUseID:  raw.ToolUseID,
 		ToolInput:  raw.ToolInput,
 		Timestamp:  time.Now(),
@@ -176,7 +178,7 @@ func (c *ClaudeCodeAgent) parseSubagentEnd(stdin io.Reader) (*agent.Event, error
 	event := &agent.Event{
 		Type:       agent.SubagentEnd,
 		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
+		SessionRef: c.resolveTranscriptPath(raw.TranscriptPath, raw.SessionID),
 		ToolUseID:  raw.ToolUseID,
 		ToolInput:  raw.ToolInput,
 		Timestamp:  time.Now(),
@@ -185,6 +187,77 @@ func (c *ClaudeCodeAgent) parseSubagentEnd(stdin io.Reader) (*agent.Event, error
 		event.SubagentID = raw.ToolResponse.AgentID
 	}
 	return event, nil
+}
+
+// claudeWorktreeMarker appears in an encoded project-dir segment when Claude
+// Code is invoked from inside its worktree feature: SanitizePathForClaude maps
+// every non-alphanumeric character to '-', so a CWD ending in
+// "/.claude/worktrees/<branch>" produces a segment containing
+// "--claude-worktrees-<branch-encoded>".
+const claudeWorktreeMarker = "--claude-worktrees-"
+
+// resolveTranscriptPath recovers from a Claude Code bug where transcript_path
+// encodes the worktree CWD ("...--claude-worktrees-<branch>") but the file is
+// actually written under the parent-repo project dir. Returns sessionRef
+// unchanged on the fast path; only the IsNotExist branch consults the
+// filesystem a second time. Tight gates (sessionID validation, base-prefix
+// check, marker presence, candidate must exist) keep the fallback from
+// crossing into an unrelated project that happens to share a session ID.
+func (c *ClaudeCodeAgent) resolveTranscriptPath(sessionRef, sessionID string) string {
+	if sessionRef == "" || sessionID == "" {
+		return sessionRef
+	}
+	if _, err := os.Stat(sessionRef); err == nil {
+		return sessionRef
+	} else if !os.IsNotExist(err) {
+		return sessionRef
+	}
+	if err := validation.ValidateAgentSessionID(sessionID); err != nil {
+		return sessionRef
+	}
+	base, err := c.GetSessionBaseDir()
+	if err != nil {
+		return sessionRef
+	}
+	candidate := worktreeParentCandidate(filepath.Clean(base), filepath.Clean(sessionRef), sessionID)
+	if candidate == "" {
+		return sessionRef
+	}
+	if _, err := os.Stat(candidate); err != nil {
+		return sessionRef
+	}
+	logging.Info(logging.WithComponent(context.Background(), "agent.claudecode"),
+		"resolved transcript via worktree fallback",
+		slog.String("reported", sessionRef),
+		slog.String("found", candidate),
+		slog.String("session_id", sessionID),
+	)
+	return candidate
+}
+
+// worktreeParentCandidate returns the parent-repo equivalent of reported when
+// the project segment carries the Claude Code worktree marker. Returns "" if
+// the input doesn't qualify. Callers must validate sessionID before calling.
+func worktreeParentCandidate(base, reported, sessionID string) string {
+	sep := string(os.PathSeparator)
+	prefix := base + sep
+	if !strings.HasPrefix(reported, prefix) {
+		return ""
+	}
+	projectSeg, _, ok := strings.Cut(reported[len(prefix):], sep)
+	if !ok || projectSeg == "" {
+		return ""
+	}
+	// LastIndex (not Index): the synthetic marker is always the trailing
+	// occurrence — Claude appends "/.claude/worktrees/<branch>" to the cwd
+	// and SanitizePathForClaude preserves order. Cutting at the first match
+	// would mis-strip repos already checked out under a path literally
+	// containing "--claude-worktrees-".
+	idx := strings.LastIndex(projectSeg, claudeWorktreeMarker)
+	if idx <= 0 {
+		return ""
+	}
+	return filepath.Join(base, projectSeg[:idx], sessionID+".jsonl")
 }
 
 // --- Transcript flush sentinel ---

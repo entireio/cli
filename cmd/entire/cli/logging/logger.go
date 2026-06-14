@@ -110,11 +110,19 @@ func Init(ctx context.Context, sessionID string) error {
 		fmt.Fprintf(os.Stderr, "[entire] Warning: invalid log level %q, defaulting to INFO\n", levelStr)
 	}
 
-	// Determine log file path
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	// Determine log file path. Anchor at the main worktree root so that hooks
+	// firing from inside a linked worktree (e.g. Claude Code's agent-managed
+	// .claude/worktrees/<branch>) write to the canonical .entire/logs/entire.log
+	// rather than creating an orphan logs directory inside the linked worktree.
+	repoRoot, err := paths.MainWorktreeRoot(ctx)
 	if err != nil {
-		// Fall back to current directory
-		repoRoot = "."
+		// Fall back to the current worktree, then cwd, so logging still works
+		// in environments where --git-common-dir resolution fails.
+		if alt, altErr := paths.WorktreeRoot(ctx); altErr == nil {
+			repoRoot = alt
+		} else {
+			repoRoot = "."
+		}
 	}
 
 	logsPath := filepath.Join(repoRoot, LogsDir)
