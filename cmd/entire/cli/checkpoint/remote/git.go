@@ -65,7 +65,7 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	switch {
 	case opts.Shallow:
 		args = append(args, "--depth=1")
-	case opts.Unshallow && isShallowRepository(ctx, opts.Dir):
+	case opts.Unshallow && IsShallowRepository(ctx, opts.Dir):
 		args = append(args, "--unshallow")
 	}
 	if !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx) {
@@ -317,10 +317,10 @@ func ResolveFetchTarget(ctx context.Context, target string) (string, error) {
 	return url, nil
 }
 
-// isShallowRepository returns true when the git repository at dir is shallow.
+// IsShallowRepository returns true when the git repository at dir is shallow.
 // An empty dir inherits the parent process's working directory, matching the
 // semantics callers use when invoking Fetch with empty FetchOptions.Dir.
-func isShallowRepository(ctx context.Context, dir string) bool {
+func IsShallowRepository(ctx context.Context, dir string) bool {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-shallow-repository")
 	cmd.Dir = dir
 	disableTerminalPrompt(cmd)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -341,7 +344,9 @@ func discardSession(ctx context.Context, ss stuckSession, _ *git.Repository, err
 }
 
 // checkDisconnectedMetadata detects and optionally repairs disconnected
-// local/remote metadata branches (the "empty-orphan bug").
+// local/remote metadata branches (the "empty-orphan bug"). On a shallow
+// checkpoint clone it first deepens the metadata branch so the check isn't
+// fooled by a merge-base miss at the shallow boundary.
 func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	repo, err := openRepository(cmd.Context())
 	if err != nil {
@@ -356,6 +361,20 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 		fmt.Fprintf(w, "✓ Metadata branches: OK (primary ref %s is not pushed to origin)\n", refs.Primary)
 		return nil
 	}
+	// On a shallow checkpoint clone, `git merge-base` can falsely report "no
+	// common ancestor" because the real ancestor lives below the shallow
+	// boundary (see strategy.metadataDisconnected). Deepen the metadata branch
+	// first so detection — and any subsequent reconcile — operate on real
+	// ancestry. Best-effort: if the deepen fails (offline), the check below
+	// still runs and conservatively treats a shallow repo as connected.
+	if remote.IsShallowRepository(ctx, "") {
+		fmt.Fprintln(w, "  Deepening metadata branch (shallow clone) before check...")
+		if deepenErr := DeepenMetadataBranch(ctx); deepenErr != nil {
+			logging.Warn(ctx, "could not deepen metadata branch before disconnection check",
+				slog.String("error", deepenErr.Error()))
+		}
+	}
+
 	remoteRefName := plumbing.NewRemoteReferenceName("origin", refs.Primary.Short())
 	disconnected, err := strategy.IsMetadataDisconnected(ctx, repo, remoteRefName)
 	if err != nil {

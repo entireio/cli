@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 
 	"github.com/go-git/go-git/v6"
@@ -55,7 +56,7 @@ func IsMetadataDisconnected(ctx context.Context, repo *git.Repository, remoteRef
 		return false, err
 	}
 
-	return isDisconnected(ctx, repoPath, localRef.Hash().String(), remoteRef.Hash().String())
+	return metadataDisconnected(ctx, repoPath, localRef.Hash().String(), remoteRef.Hash().String())
 }
 
 // WarnIfMetadataDisconnected checks (once per process) whether the metadata
@@ -94,9 +95,11 @@ func WarnIfMetadataDisconnected() {
 }
 
 // ReconcileDisconnectedMetadataRef detects and repairs disconnected local/remote
-// metadata refs. Disconnected means no common ancestor, which
-// only happens due to the empty-orphan bug. Diverged (shared ancestor) is normal
-// and handled by the push path.
+// metadata refs. Disconnected means no common ancestor — genuinely caused by the
+// empty-orphan bug. Diverged (shared ancestor) is normal and handled by the push
+// path. The disconnection check is shallow-aware (see metadataDisconnected): on a
+// shallow clone a merge-base miss is suppressed rather than trusted, so this
+// no-ops instead of attempting a doomed full-history cherry-pick.
 //
 // Repair strategy: cherry-pick local commits onto remote tip, preserving all data.
 // Checkpoint shards use unique paths (<id[:2]>/<id[2:]>/), so cherry-picks always
@@ -149,7 +152,7 @@ func ReconcileDisconnectedMetadataRef(
 		return err
 	}
 
-	disconnected, err := isDisconnected(ctx, repoPath, localHash.String(), remoteHash.String())
+	disconnected, err := metadataDisconnected(ctx, repoPath, localHash.String(), remoteHash.String())
 	if err != nil {
 		return fmt.Errorf("failed to check metadata ref ancestry: %w", err)
 	}
@@ -206,6 +209,41 @@ func ReconcileDisconnectedMetadataRef(
 
 	fmt.Fprintln(w, "[entire] Done — all local and remote checkpoints preserved")
 	return nil
+}
+
+// metadataDisconnected reports whether the local and remote metadata commits
+// share no common ancestor, accounting for shallow clones.
+//
+// A bare `git merge-base` miss is NOT sufficient evidence of disconnection on a
+// shallow repository: the real common ancestor can live below the shallow
+// boundary, where git has no objects, so merge-base reports a false "no common
+// ancestor". Checkpoint metadata branches are routinely shallow — resume/explain
+// fetch the tip with --depth=1 and nothing deepens them again (see
+// FetchMetadataTreeOnly) — so trusting that miss marks an ordinary
+// diverged-but-behind branch as disconnected and triggers a doomed
+// full-history reconcile (collectCommitChain blows MaxCommitTraversalDepth on a
+// deep team branch).
+//
+// We therefore only treat a merge-base miss as a genuine disconnection when the
+// repository is not shallow. On a shallow repo the verdict is suppressed (the
+// refs are reported connected) and 'entire doctor' is the path that deepens the
+// branch first and then re-checks authoritatively.
+func metadataDisconnected(ctx context.Context, repoPath, localHash, remoteHash string) (bool, error) {
+	disconnected, err := isDisconnected(ctx, repoPath, localHash, remoteHash)
+	if err != nil {
+		return false, err
+	}
+	if !disconnected {
+		return false, nil
+	}
+	if remote.IsShallowRepository(ctx, repoPath) {
+		logging.Debug(ctx, "merge-base reports no common ancestor but repository is shallow; "+
+			"treating metadata refs as connected (run 'entire doctor' to deepen and re-check)",
+			slog.String("local", localHash),
+			slog.String("remote", remoteHash))
+		return false, nil
+	}
+	return true, nil
 }
 
 // isDisconnected checks if two commits have no common ancestor using git merge-base.

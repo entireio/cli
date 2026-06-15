@@ -421,6 +421,47 @@ func FetchMetadataTreeOnly(ctx context.Context) error {
 	return fetchMetadataFromOrigin(ctx, fetchMetadataOpts{Shallow: true})
 }
 
+// DeepenMetadataBranch converts a shallow checkpoint clone to complete history
+// for the metadata branch by fetching it from origin with --unshallow. It only
+// updates the origin remote-tracking ref and the local object store; it does
+// NOT advance the local primary ref, so callers can compare local vs remote
+// afterwards on a no-longer-shallow repo.
+//
+// 'entire doctor' calls this before the disconnection check so `git merge-base`
+// can see the real common ancestor instead of falsely reporting a disconnection
+// at the shallow boundary (see metadataDisconnected). On a non-shallow repo the
+// --unshallow flag is suppressed by remote.Fetch and this is a plain fetch.
+func DeepenMetadataBranch(ctx context.Context) error {
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+	if !refs.Primary.IsBranch() {
+		return fmt.Errorf("primary metadata ref %s is not a branch", refs.Primary)
+	}
+	branchName := refs.Primary.Short()
+
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	fetchTarget, err := remote.ResolveFetchTarget(ctx, "origin")
+	if err != nil {
+		return fmt.Errorf("failed to resolve fetch target: %w", err)
+	}
+
+	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
+	output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+		Remote:    fetchTarget,
+		RefSpecs:  []string{refSpec},
+		NoTags:    true,
+		Unshallow: true,
+	})
+	if fetchErr != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return errors.New("fetch timed out after 2 minutes")
+		}
+		return formatFilteredFetchError("failed to deepen "+branchName, fetchTarget, output, fetchErr)
+	}
+	return nil
+}
+
 type fetchMetadataOpts struct {
 	NoFilter  bool
 	Shallow   bool

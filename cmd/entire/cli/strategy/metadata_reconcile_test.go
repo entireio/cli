@@ -830,6 +830,116 @@ func TestLoadShallowHashes(t *testing.T) {
 	})
 }
 
+// TestMetadataDisconnected_ShallowSuppressesFalsePositive verifies that a
+// merge-base miss on a SHALLOW repo is not reported as a disconnection. The
+// common ancestor may live below the shallow boundary, where git has no
+// objects, so `git merge-base` falsely reports "no common ancestor".
+// Suppressing this prevents a doomed full-history reconcile on an ordinary
+// diverged-but-behind metadata branch (the shallow-clone incident: local fell
+// behind while out of office, the clone stayed shallow, and merge-base could
+// not see the still-existing shared ancestor).
+func TestMetadataDisconnected_ShallowSuppressesFalsePositive(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := exec.CommandContext(context.Background(), "git", args...)
+		cmd.Dir = dir
+		cmd.Env = testutil.GitIsolatedEnv()
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	runGit("init", "-b", "main")
+
+	// Shared ancestor B.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "f.txt"), []byte("base"), 0o644))
+	runGit("add", ".")
+	runGit("commit", "-m", "base")
+	base := runGit("rev-parse", "HEAD")
+
+	// Remote tip C on top of B.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "f.txt"), []byte("remote"), 0o644))
+	runGit("add", ".")
+	runGit("commit", "-m", "remote")
+	remoteTip := runGit("rev-parse", "HEAD")
+
+	// Local tip D, also on top of B (diverged-but-connected).
+	runGit("checkout", "-b", "local", base)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "g.txt"), []byte("local"), 0o644))
+	runGit("add", ".")
+	runGit("commit", "-m", "local")
+	localTip := runGit("rev-parse", "HEAD")
+
+	ctx := context.Background()
+
+	// Sanity: with full history they share ancestor B → connected.
+	disconnected, err := metadataDisconnected(ctx, dir, localTip, remoteTip)
+	require.NoError(t, err)
+	require.False(t, disconnected, "full-history repo shares ancestor B")
+
+	// Make the repo shallow at both tips, cutting B out of view. The shared
+	// ancestor is now hidden and bare merge-base reports no common ancestor.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "shallow"),
+		[]byte(localTip+"\n"+remoteTip+"\n"), 0o644))
+
+	// Precondition: the bare merge-base check now misses.
+	rawDisconnected, err := isDisconnected(ctx, dir, localTip, remoteTip)
+	require.NoError(t, err)
+	require.True(t, rawDisconnected,
+		"precondition: shallow boundary should hide the common ancestor from merge-base")
+
+	// The shallow-aware check must suppress the false positive.
+	disconnected, err = metadataDisconnected(ctx, dir, localTip, remoteTip)
+	require.NoError(t, err)
+	assert.False(t, disconnected,
+		"shallow repo: a merge-base miss must not be treated as a disconnection")
+}
+
+// TestMetadataDisconnected_GenuineDisconnectionOnFullRepo verifies that on a
+// non-shallow repo a real merge-base miss (two unrelated roots) is still
+// reported as disconnected — the suppression only applies to shallow clones.
+func TestMetadataDisconnected_GenuineDisconnectionOnFullRepo(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := exec.CommandContext(context.Background(), "git", args...)
+		cmd.Dir = dir
+		cmd.Env = testutil.GitIsolatedEnv()
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	runGit("init", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "f.txt"), []byte("a"), 0o644))
+	runGit("add", ".")
+	runGit("commit", "-m", "a")
+	tipA := runGit("rev-parse", "HEAD")
+
+	// Unrelated orphan root — no shared ancestry with tipA.
+	runGit("checkout", "--orphan", "orphan")
+	runGit("rm", "-rf", ".")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "h.txt"), []byte("b"), 0o644))
+	runGit("add", ".")
+	runGit("commit", "-m", "b")
+	tipB := runGit("rev-parse", "HEAD")
+
+	ctx := context.Background()
+	disconnected, err := metadataDisconnected(ctx, dir, tipA, tipB)
+	require.NoError(t, err)
+	assert.True(t, disconnected,
+		"non-shallow repo with unrelated roots must be reported as disconnected")
+}
+
 // TestReconcileDisconnected_AllEmptyOrphans verifies that when all local commits
 // are empty-tree orphan commits (the exact bug artifact), reconciliation resets
 // the local branch to the remote tip without cherry-picking.

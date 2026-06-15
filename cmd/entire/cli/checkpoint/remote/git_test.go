@@ -265,7 +265,7 @@ func TestFetch_Unshallow(t *testing.T) {
 		ctx := context.Background()
 
 		bareDir, cloneDir := setupShallowClone(ctx, t)
-		require.True(t, isShallowRepository(ctx, cloneDir), "test setup should produce a shallow repo")
+		require.True(t, IsShallowRepository(ctx, cloneDir), "test setup should produce a shallow repo")
 
 		out, err := Fetch(ctx, FetchOptions{
 			Remote:    "file://" + bareDir,
@@ -276,7 +276,7 @@ func TestFetch_Unshallow(t *testing.T) {
 		})
 		require.NoError(t, err, "fetch output: %s", out)
 
-		assert.False(t, isShallowRepository(ctx, cloneDir),
+		assert.False(t, IsShallowRepository(ctx, cloneDir),
 			"Unshallow=true should remove shallow state when the repo is shallow")
 	})
 
@@ -285,7 +285,7 @@ func TestFetch_Unshallow(t *testing.T) {
 		ctx := context.Background()
 
 		bareDir, cloneDir := setupShallowClone(ctx, t)
-		require.True(t, isShallowRepository(ctx, cloneDir))
+		require.True(t, IsShallowRepository(ctx, cloneDir))
 
 		out, err := Fetch(ctx, FetchOptions{
 			Remote:   "file://" + bareDir,
@@ -295,7 +295,7 @@ func TestFetch_Unshallow(t *testing.T) {
 		})
 		require.NoError(t, err, "fetch output: %s", out)
 
-		assert.True(t, isShallowRepository(ctx, cloneDir),
+		assert.True(t, IsShallowRepository(ctx, cloneDir),
 			"a fetch without Unshallow must not silently convert a shallow repo to a full one")
 	})
 }
@@ -309,7 +309,7 @@ func TestFetch_Shallow(t *testing.T) {
 	// .git/shallow appears.
 	cloneDir := t.TempDir()
 	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+bareDir, cloneDir)
-	require.False(t, isShallowRepository(ctx, cloneDir), "fresh clone should not be shallow")
+	require.False(t, IsShallowRepository(ctx, cloneDir), "fresh clone should not be shallow")
 
 	out, err := Fetch(ctx, FetchOptions{
 		Remote:   "file://" + bareDir,
@@ -320,7 +320,7 @@ func TestFetch_Shallow(t *testing.T) {
 	})
 	require.NoError(t, err, "fetch output: %s", out)
 
-	assert.True(t, isShallowRepository(ctx, cloneDir),
+	assert.True(t, IsShallowRepository(ctx, cloneDir),
 		"Shallow=true should request --depth=1 and leave the repo shallow")
 }
 
