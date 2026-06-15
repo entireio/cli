@@ -421,16 +421,18 @@ func FetchMetadataTreeOnly(ctx context.Context) error {
 	return fetchMetadataFromOrigin(ctx, fetchMetadataOpts{Shallow: true})
 }
 
-// DeepenMetadataBranch converts a shallow checkpoint clone to complete history
-// for the metadata branch by fetching it from origin with --unshallow. It only
-// updates the origin remote-tracking ref and the local object store; it does
-// NOT advance the local primary ref, so callers can compare local vs remote
-// afterwards on a no-longer-shallow repo.
+// DeepenMetadataBranch extends the metadata branch's shallow history by
+// strategy.MaxCommitTraversalDepth commits using a ref-scoped --deepen. It
+// only updates the origin remote-tracking ref and the local object store; it
+// does NOT advance the local primary ref, so callers can compare local vs
+// remote afterwards.
 //
 // 'entire doctor' calls this before the disconnection check so `git merge-base`
 // can see the real common ancestor instead of falsely reporting a disconnection
-// at the shallow boundary (see metadataDisconnected). On a non-shallow repo the
-// --unshallow flag is suppressed by remote.Fetch and this is a plain fetch.
+// at the shallow boundary (see metadataDisconnected). --deepen is used rather
+// than --unshallow because --unshallow is repository-global: it would also
+// deepen an unrelated shallow source-tree clone. --deepen keeps the repository
+// shallow and touches only the metadata ref's boundary.
 func DeepenMetadataBranch(ctx context.Context) error {
 	refs := checkpoint.ResolveCommittedRefs(ctx)
 	if !refs.Primary.IsBranch() {
@@ -448,10 +450,10 @@ func DeepenMetadataBranch(ctx context.Context) error {
 
 	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
 	output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:    fetchTarget,
-		RefSpecs:  []string{refSpec},
-		NoTags:    true,
-		Unshallow: true,
+		Remote:   fetchTarget,
+		RefSpecs: []string{refSpec},
+		NoTags:   true,
+		Deepen:   strategy.MaxCommitTraversalDepth,
 	})
 	if fetchErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {

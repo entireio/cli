@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -265,7 +266,7 @@ func TestFetch_Unshallow(t *testing.T) {
 		ctx := context.Background()
 
 		bareDir, cloneDir := setupShallowClone(ctx, t)
-		require.True(t, IsShallowRepository(ctx, cloneDir), "test setup should produce a shallow repo")
+		require.True(t, isShallowRepository(ctx, cloneDir), "test setup should produce a shallow repo")
 
 		out, err := Fetch(ctx, FetchOptions{
 			Remote:    "file://" + bareDir,
@@ -276,7 +277,7 @@ func TestFetch_Unshallow(t *testing.T) {
 		})
 		require.NoError(t, err, "fetch output: %s", out)
 
-		assert.False(t, IsShallowRepository(ctx, cloneDir),
+		assert.False(t, isShallowRepository(ctx, cloneDir),
 			"Unshallow=true should remove shallow state when the repo is shallow")
 	})
 
@@ -285,7 +286,7 @@ func TestFetch_Unshallow(t *testing.T) {
 		ctx := context.Background()
 
 		bareDir, cloneDir := setupShallowClone(ctx, t)
-		require.True(t, IsShallowRepository(ctx, cloneDir))
+		require.True(t, isShallowRepository(ctx, cloneDir))
 
 		out, err := Fetch(ctx, FetchOptions{
 			Remote:   "file://" + bareDir,
@@ -295,9 +296,47 @@ func TestFetch_Unshallow(t *testing.T) {
 		})
 		require.NoError(t, err, "fetch output: %s", out)
 
-		assert.True(t, IsShallowRepository(ctx, cloneDir),
+		assert.True(t, isShallowRepository(ctx, cloneDir),
 			"a fetch without Unshallow must not silently convert a shallow repo to a full one")
 	})
+}
+
+func TestFetch_Deepen(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "bare.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	cloneDir := filepath.Join(tmpDir, "clone")
+
+	testutil.InitRepo(t, seedDir)
+	for _, c := range []string{"c1", "c2", "c3"} {
+		testutil.WriteFile(t, seedDir, "f.txt", c)
+		testutil.GitAdd(t, seedDir, "f.txt")
+		testutil.GitCommit(t, seedDir, c)
+	}
+	runIsolatedGit(ctx, t, "", "init", "--bare", bareDir)
+	runIsolatedGit(ctx, t, seedDir, "remote", "add", "origin", bareDir)
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, "", "clone", "--depth=1", "--branch", "main", "file://"+bareDir, cloneDir)
+	require.True(t, isShallowRepository(ctx, cloneDir))
+	require.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/main"),
+		"a --depth=1 clone of a 3-commit history sees exactly one commit")
+
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   "file://" + bareDir,
+		RefSpecs: []string{"+refs/heads/main:refs/remotes/origin/main"},
+		NoTags:   true,
+		Deepen:   1,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	assert.True(t, isShallowRepository(ctx, cloneDir),
+		"Deepen must extend history ref-scoped without unshallowing the whole repo")
+	assert.Equal(t, 2, revListCount(ctx, t, cloneDir, "refs/remotes/origin/main"),
+		"Deepen=1 should add one commit of history to the fetched ref")
 }
 
 func TestFetch_Shallow(t *testing.T) {
@@ -309,7 +348,7 @@ func TestFetch_Shallow(t *testing.T) {
 	// .git/shallow appears.
 	cloneDir := t.TempDir()
 	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+bareDir, cloneDir)
-	require.False(t, IsShallowRepository(ctx, cloneDir), "fresh clone should not be shallow")
+	require.False(t, isShallowRepository(ctx, cloneDir), "fresh clone should not be shallow")
 
 	out, err := Fetch(ctx, FetchOptions{
 		Remote:   "file://" + bareDir,
@@ -320,7 +359,7 @@ func TestFetch_Shallow(t *testing.T) {
 	})
 	require.NoError(t, err, "fetch output: %s", out)
 
-	assert.True(t, IsShallowRepository(ctx, cloneDir),
+	assert.True(t, isShallowRepository(ctx, cloneDir),
 		"Shallow=true should request --depth=1 and leave the repo shallow")
 }
 
@@ -351,6 +390,18 @@ func setupShallowClone(ctx context.Context, t *testing.T) (bareDir, cloneDir str
 	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
 
 	return bareDir, cloneDir
+}
+
+func revListCount(ctx context.Context, t *testing.T, dir, ref string) int {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", "rev-list", "--count", ref)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	require.NoError(t, err)
+	return n
 }
 
 func runIsolatedGit(ctx context.Context, t *testing.T, dir string, args ...string) {

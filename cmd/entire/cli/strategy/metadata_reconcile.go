@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 
 	"github.com/go-git/go-git/v6"
@@ -56,7 +55,7 @@ func IsMetadataDisconnected(ctx context.Context, repo *git.Repository, remoteRef
 		return false, err
 	}
 
-	return metadataDisconnected(ctx, repoPath, localRef.Hash().String(), remoteRef.Hash().String())
+	return metadataDisconnected(ctx, repo, repoPath, localRef.Hash().String(), remoteRef.Hash().String())
 }
 
 // WarnIfMetadataDisconnected checks (once per process) whether the metadata
@@ -152,7 +151,7 @@ func ReconcileDisconnectedMetadataRef(
 		return err
 	}
 
-	disconnected, err := metadataDisconnected(ctx, repoPath, localHash.String(), remoteHash.String())
+	disconnected, err := metadataDisconnected(ctx, repo, repoPath, localHash.String(), remoteHash.String())
 	if err != nil {
 		return fmt.Errorf("failed to check metadata ref ancestry: %w", err)
 	}
@@ -214,21 +213,24 @@ func ReconcileDisconnectedMetadataRef(
 // metadataDisconnected reports whether the local and remote metadata commits
 // share no common ancestor, accounting for shallow clones.
 //
-// A bare `git merge-base` miss is NOT sufficient evidence of disconnection on a
-// shallow repository: the real common ancestor can live below the shallow
-// boundary, where git has no objects, so merge-base reports a false "no common
-// ancestor". Checkpoint metadata branches are routinely shallow — resume/explain
-// fetch the tip with --depth=1 and nothing deepens them again (see
-// FetchMetadataTreeOnly) — so trusting that miss marks an ordinary
-// diverged-but-behind branch as disconnected and triggers a doomed
-// full-history reconcile (collectCommitChain blows MaxCommitTraversalDepth on a
-// deep team branch).
+// A bare `git merge-base` miss is NOT sufficient evidence of disconnection when
+// the metadata history is shallow: the real common ancestor can live below the
+// shallow boundary, where git has no objects, so merge-base reports a false "no
+// common ancestor". Checkpoint metadata branches are routinely shallow —
+// resume/explain fetch the tip with --depth=1 and nothing deepens them again
+// (see FetchMetadataTreeOnly) — so trusting that miss marks an ordinary
+// diverged-but-behind branch as disconnected and triggers a doomed full-history
+// reconcile (collectCommitChain blows MaxCommitTraversalDepth on a deep team
+// branch).
 //
 // We therefore only treat a merge-base miss as a genuine disconnection when the
-// repository is not shallow. On a shallow repo the verdict is suppressed (the
-// refs are reported connected) and 'entire doctor' is the path that deepens the
-// branch first and then re-checks authoritatively.
-func metadataDisconnected(ctx context.Context, repoPath, localHash, remoteHash string) (bool, error) {
+// metadata history does not reach a shallow boundary. The check is keyed on the
+// metadata commits specifically (not merely "is the repo shallow"), so a
+// genuine disconnection on a repo that is shallow only for an unrelated
+// source-tree branch is still reported. When the metadata history is
+// shallow-bounded the verdict is suppressed (refs reported connected) and
+// 'entire doctor' is the path that deepens the branch and re-checks.
+func metadataDisconnected(ctx context.Context, repo *git.Repository, repoPath, localHash, remoteHash string) (bool, error) {
 	disconnected, err := isDisconnected(ctx, repoPath, localHash, remoteHash)
 	if err != nil {
 		return false, err
@@ -236,14 +238,48 @@ func metadataDisconnected(ctx context.Context, repoPath, localHash, remoteHash s
 	if !disconnected {
 		return false, nil
 	}
-	if remote.IsShallowRepository(ctx, repoPath) {
-		logging.Debug(ctx, "merge-base reports no common ancestor but repository is shallow; "+
-			"treating metadata refs as connected (run 'entire doctor' to deepen and re-check)",
+	bounded, err := hasReachableShallowBoundary(ctx, repo, repoPath, localHash, remoteHash)
+	if err != nil {
+		return false, err
+	}
+	if bounded {
+		logging.Debug(ctx, "merge-base reports no common ancestor but metadata history reaches a "+
+			"shallow boundary; treating refs as connected (run 'entire doctor' to deepen and re-check)",
 			slog.String("local", localHash),
 			slog.String("remote", remoteHash))
 		return false, nil
 	}
 	return true, nil
+}
+
+// MetadataHistoryShallowBounded reports whether the local primary metadata ref
+// or its origin remote-tracking ref has a shallow boundary in its ancestry —
+// i.e. whether deepening the metadata branch could change a merge-base result.
+//
+// 'entire doctor' uses this to decide whether to deepen before the disconnection
+// check, so it never issues a (potentially large) deepen for a shallow boundary
+// that belongs to an unrelated branch such as a shallow source-tree clone.
+func MetadataHistoryShallowBounded(ctx context.Context, repo *git.Repository) (bool, error) {
+	repoPath, err := getRepoPath(repo)
+	if err != nil {
+		return false, err
+	}
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+
+	var hashes []string
+	addRef := func(name plumbing.ReferenceName) {
+		if ref, refErr := repo.Reference(name, true); refErr == nil {
+			hashes = append(hashes, ref.Hash().String())
+		}
+	}
+	addRef(refs.Primary)
+	if refs.PrimaryFetchableFromOrigin() {
+		addRef(plumbing.NewRemoteReferenceName("origin", refs.Primary.Short()))
+	}
+	if len(hashes) == 0 {
+		return false, nil
+	}
+	return hasReachableShallowBoundary(ctx, repo, repoPath, hashes...)
 }
 
 // isDisconnected checks if two commits have no common ancestor using git merge-base.

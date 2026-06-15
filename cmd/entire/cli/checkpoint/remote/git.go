@@ -44,7 +44,15 @@ type FetchOptions struct {
 	// Set this on metadata-repair / reconcile paths that need complete
 	// checkpoint ancestry. Do not set on generic branch fetches — it would
 	// silently convert a deliberately-shallow user clone into a full one.
+	// Note: --unshallow is repository-global (it removes .git/shallow), so it
+	// also deepens unrelated shallow branches. Prefer Deepen for ref-scoped
+	// extension.
 	Unshallow bool
+	// Deepen adds --deepen=N, extending the fetched ref's shallow history by N
+	// commits. Unlike Unshallow this is ref-scoped: the repository stays shallow
+	// and other shallow boundaries (e.g. a shallow source-tree clone) are left
+	// untouched. Ignored when zero, or when Shallow/Unshallow are set.
+	Deepen    int
 	Dir       string   // working directory (empty = CWD)
 	ExtraArgs []string // additional flags before remote (e.g., "--no-write-fetch-head")
 }
@@ -65,8 +73,10 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	switch {
 	case opts.Shallow:
 		args = append(args, "--depth=1")
-	case opts.Unshallow && IsShallowRepository(ctx, opts.Dir):
+	case opts.Unshallow && isShallowRepository(ctx, opts.Dir):
 		args = append(args, "--unshallow")
+	case opts.Deepen > 0:
+		args = append(args, fmt.Sprintf("--deepen=%d", opts.Deepen))
 	}
 	if !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx) {
 		args = append(args, "--filter=blob:none")
@@ -317,10 +327,10 @@ func ResolveFetchTarget(ctx context.Context, target string) (string, error) {
 	return url, nil
 }
 
-// IsShallowRepository returns true when the git repository at dir is shallow.
+// isShallowRepository returns true when the git repository at dir is shallow.
 // An empty dir inherits the parent process's working directory, matching the
 // semantics callers use when invoking Fetch with empty FetchOptions.Dir.
-func IsShallowRepository(ctx context.Context, dir string) bool {
+func isShallowRepository(ctx context.Context, dir string) bool {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-shallow-repository")
 	cmd.Dir = dir
 	disableTerminalPrompt(cmd)

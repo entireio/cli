@@ -13,7 +13,6 @@ import (
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -361,14 +360,19 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 		fmt.Fprintf(w, "✓ Metadata branches: OK (primary ref %s is not pushed to origin)\n", refs.Primary)
 		return nil
 	}
-	// On a shallow checkpoint clone, `git merge-base` can falsely report "no
-	// common ancestor" because the real ancestor lives below the shallow
-	// boundary (see strategy.metadataDisconnected). Deepen the metadata branch
-	// first so detection — and any subsequent reconcile — operate on real
-	// ancestry. Best-effort: if the deepen fails (offline), the check below
-	// still runs and conservatively treats a shallow repo as connected.
-	if remote.IsShallowRepository(ctx, "") {
-		fmt.Fprintln(w, "  Deepening metadata branch (shallow clone) before check...")
+	// When the metadata history is shallow-bounded, `git merge-base` can falsely
+	// report "no common ancestor" because the real ancestor lives below the
+	// shallow boundary (see strategy.metadataDisconnected). Deepen the metadata
+	// branch first so detection — and any subsequent reconcile — operate on real
+	// ancestry. Gated on the metadata refs specifically so an unrelated shallow
+	// boundary (e.g. a shallow source-tree clone) doesn't trigger a deepen.
+	// Best-effort: if the deepen fails (offline), the check below still runs and
+	// conservatively treats shallow-bounded metadata as connected.
+	if bounded, boundedErr := strategy.MetadataHistoryShallowBounded(ctx, repo); boundedErr != nil {
+		logging.Debug(ctx, "could not determine metadata shallow state",
+			slog.String("error", boundedErr.Error()))
+	} else if bounded {
+		fmt.Fprintln(w, "  Deepening metadata branch (shallow history) before check...")
 		if deepenErr := DeepenMetadataBranch(ctx); deepenErr != nil {
 			logging.Warn(ctx, "could not deepen metadata branch before disconnection check",
 				slog.String("error", deepenErr.Error()))

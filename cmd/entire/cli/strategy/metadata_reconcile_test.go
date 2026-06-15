@@ -29,6 +29,25 @@ func metadataLocalRef() plumbing.ReferenceName {
 	return plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 }
 
+// gitRunnerInDir returns a helper that runs git in dir with isolated config and
+// fails the test on error, returning trimmed stdout+stderr. Pair it with
+// testutil.InitRepo (which sets repo-local user identity and disables signing)
+// so commits succeed under GitIsolatedEnv, which clears global/system config.
+func gitRunnerInDir(t *testing.T, dir string) func(args ...string) string {
+	t.Helper()
+	return func(args ...string) string {
+		t.Helper()
+		cmd := exec.CommandContext(context.Background(), "git", args...)
+		cmd.Dir = dir
+		cmd.Env = testutil.GitIsolatedEnv()
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+}
+
 func TestReconcileDisconnected_NoRemote(t *testing.T) {
 	t.Parallel()
 
@@ -842,19 +861,8 @@ func TestMetadataDisconnected_ShallowSuppressesFalsePositive(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	runGit := func(args ...string) string {
-		t.Helper()
-		cmd := exec.CommandContext(context.Background(), "git", args...)
-		cmd.Dir = dir
-		cmd.Env = testutil.GitIsolatedEnv()
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args, err, out)
-		}
-		return strings.TrimSpace(string(out))
-	}
-
-	runGit("init", "-b", "main")
+	testutil.InitRepo(t, dir)
+	runGit := gitRunnerInDir(t, dir)
 
 	// Shared ancestor B.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "f.txt"), []byte("base"), 0o644))
@@ -878,7 +886,9 @@ func TestMetadataDisconnected_ShallowSuppressesFalsePositive(t *testing.T) {
 	ctx := context.Background()
 
 	// Sanity: with full history they share ancestor B → connected.
-	disconnected, err := metadataDisconnected(ctx, dir, localTip, remoteTip)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	disconnected, err := metadataDisconnected(ctx, repo, dir, localTip, remoteTip)
 	require.NoError(t, err)
 	require.False(t, disconnected, "full-history repo shares ancestor B")
 
@@ -893,11 +903,14 @@ func TestMetadataDisconnected_ShallowSuppressesFalsePositive(t *testing.T) {
 	require.True(t, rawDisconnected,
 		"precondition: shallow boundary should hide the common ancestor from merge-base")
 
-	// The shallow-aware check must suppress the false positive.
-	disconnected, err = metadataDisconnected(ctx, dir, localTip, remoteTip)
+	// The shallow-aware check must suppress the false positive. Re-open so the
+	// storer picks up the freshly written shallow file.
+	shallowRepo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	disconnected, err = metadataDisconnected(ctx, shallowRepo, dir, localTip, remoteTip)
 	require.NoError(t, err)
 	assert.False(t, disconnected,
-		"shallow repo: a merge-base miss must not be treated as a disconnection")
+		"shallow metadata history: a merge-base miss must not be treated as a disconnection")
 }
 
 // TestMetadataDisconnected_GenuineDisconnectionOnFullRepo verifies that on a
@@ -907,19 +920,9 @@ func TestMetadataDisconnected_GenuineDisconnectionOnFullRepo(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	runGit := func(args ...string) string {
-		t.Helper()
-		cmd := exec.CommandContext(context.Background(), "git", args...)
-		cmd.Dir = dir
-		cmd.Env = testutil.GitIsolatedEnv()
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args, err, out)
-		}
-		return strings.TrimSpace(string(out))
-	}
+	testutil.InitRepo(t, dir)
+	runGit := gitRunnerInDir(t, dir)
 
-	runGit("init", "-b", "main")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "f.txt"), []byte("a"), 0o644))
 	runGit("add", ".")
 	runGit("commit", "-m", "a")
@@ -934,7 +937,9 @@ func TestMetadataDisconnected_GenuineDisconnectionOnFullRepo(t *testing.T) {
 	tipB := runGit("rev-parse", "HEAD")
 
 	ctx := context.Background()
-	disconnected, err := metadataDisconnected(ctx, dir, tipA, tipB)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	disconnected, err := metadataDisconnected(ctx, repo, dir, tipA, tipB)
 	require.NoError(t, err)
 	assert.True(t, disconnected,
 		"non-shallow repo with unrelated roots must be reported as disconnected")
