@@ -83,8 +83,8 @@ Entire currently ships two release channels:
 
 How to use each channel:
 
-- Homebrew stable: `brew install --cask entire`
-- Homebrew nightly: `brew install --cask entire@nightly`
+- Homebrew stable: `brew install --cask entireio/tap/entire`
+- Homebrew nightly: `brew install --cask entireio/tap/entire@nightly`
 - `install.sh` stable: `curl -fsSL https://entire.io/install.sh | bash`
 - `install.sh` nightly: `curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly`
 - Scoop: currently supports `stable` only via `scoop install entire/cli`
