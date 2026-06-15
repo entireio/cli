@@ -80,7 +80,7 @@ func SetManagerForTest(t interface{ Helper() }, mgr *tokenmanager.Manager) func(
 // defaultManager returns the package-level Manager built from this
 // CLI's identity (current provider, AuthBaseURL, NewStore service
 // name). Constructed lazily on first use so any env-var setup
-// (ENTIRE_AUTH_BASE_URL, ENTIRE_AUTH_PROVIDER_VERSION) lands before
+// (ENTIRE_AUTH_PROVIDER_VERSION, ENTIRE_API_BASE_URL) lands before
 // construction. sync.Once means later env-var changes within the same
 // process are ignored; tests bypass the singleton via SetManagerForTest.
 func defaultManager() (*tokenmanager.Manager, error) {

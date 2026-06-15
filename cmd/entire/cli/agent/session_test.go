@@ -7,6 +7,8 @@ import (
 )
 
 func TestAgentSessionStructure(t *testing.T) {
+	t.Parallel()
+
 	session := AgentSession{
 		SessionID:     "test-session-123",
 		AgentName:     "claude-code",
@@ -28,6 +30,8 @@ func TestAgentSessionStructure(t *testing.T) {
 }
 
 func TestSessionEntryStructure(t *testing.T) {
+	t.Parallel()
+
 	entry := SessionEntry{
 		UUID:          "entry-uuid-123",
 		Type:          EntryTool,
@@ -48,6 +52,8 @@ func TestSessionEntryStructure(t *testing.T) {
 }
 
 func TestGetLastUserPrompt(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		entries  []SessionEntry
@@ -94,6 +100,8 @@ func TestGetLastUserPrompt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			session := &AgentSession{Entries: tt.entries}
 			result := session.GetLastUserPrompt()
 			if result != tt.expected {
@@ -104,6 +112,8 @@ func TestGetLastUserPrompt(t *testing.T) {
 }
 
 func TestGetLastAssistantResponse(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		entries  []SessionEntry
@@ -150,6 +160,8 @@ func TestGetLastAssistantResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			session := &AgentSession{Entries: tt.entries}
 			result := session.GetLastAssistantResponse()
 			if result != tt.expected {
@@ -160,7 +172,11 @@ func TestGetLastAssistantResponse(t *testing.T) {
 }
 
 func TestTruncateAtUUID(t *testing.T) {
+	t.Parallel()
+
 	t.Run("empty uuid returns original", func(t *testing.T) {
+		t.Parallel()
+
 		session := &AgentSession{
 			SessionID: "test",
 			Entries: []SessionEntry{
@@ -175,6 +191,8 @@ func TestTruncateAtUUID(t *testing.T) {
 	})
 
 	t.Run("truncates at uuid", func(t *testing.T) {
+		t.Parallel()
+
 		session := &AgentSession{
 			SessionID: "test",
 			AgentName: "claude-code",
@@ -196,6 +214,8 @@ func TestTruncateAtUUID(t *testing.T) {
 	})
 
 	t.Run("uuid not found includes all entries", func(t *testing.T) {
+		t.Parallel()
+
 		session := &AgentSession{
 			SessionID: "test",
 			Entries: []SessionEntry{
@@ -212,6 +232,8 @@ func TestTruncateAtUUID(t *testing.T) {
 }
 
 func TestFindToolResultUUID(t *testing.T) {
+	t.Parallel()
+
 	session := &AgentSession{
 		Entries: []SessionEntry{
 			{UUID: "user-1", Type: EntryUser},
@@ -222,6 +244,8 @@ func TestFindToolResultUUID(t *testing.T) {
 	}
 
 	t.Run("finds existing tool uuid", func(t *testing.T) {
+		t.Parallel()
+
 		uuid, found := session.FindToolResultUUID("tool-1")
 		if !found {
 			t.Error("expected to find tool-1")
@@ -232,6 +256,8 @@ func TestFindToolResultUUID(t *testing.T) {
 	})
 
 	t.Run("returns empty for non-tool entry", func(t *testing.T) {
+		t.Parallel()
+
 		_, found := session.FindToolResultUUID("user-1")
 		if found {
 			t.Error("expected not to find user-1 as tool")
@@ -239,6 +265,8 @@ func TestFindToolResultUUID(t *testing.T) {
 	})
 
 	t.Run("returns empty for nonexistent uuid", func(t *testing.T) {
+		t.Parallel()
+
 		_, found := session.FindToolResultUUID("nonexistent")
 		if found {
 			t.Error("expected not to find nonexistent uuid")

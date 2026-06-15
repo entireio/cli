@@ -73,8 +73,10 @@ func newLogoutCmd() *cobra.Command {
 			}
 
 			// Revoke against the active context's core (matching what
-			// `auth status` lists), not a static AuthBaseURL.
-			target, err := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, api.AuthBaseURL())
+			// `auth status` lists), not a static AuthBaseURL. The refreshing
+			// resolver means an expired-but-refreshable session still yields a
+			// bearer that can authenticate the revoke call.
+			target, err := resolveStatusTarget(cmd.Context(), auth.NewContextStore(), auth.Contexts, auth.RefreshedLoginToken, api.AuthBaseURL())
 			if err != nil {
 				return err
 			}

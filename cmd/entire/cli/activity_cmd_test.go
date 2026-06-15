@@ -36,6 +36,10 @@ func TestRunActivity_SilencesContextCanceled(t *testing.T) {
 		return nil, context.Canceled
 	})
 	t.Cleanup(auth.SetManagerForTest(t, mgr))
+	// Force discovery-unavailable so ResolveDataAPIToken takes the static
+	// fallback through the singleton test manager above, rather than making a
+	// real network fetch to the configured data host.
+	t.Cleanup(auth.SetResolveContextForAPIForTest(t, auth.DiscoveryUnavailableForTest))
 
 	var out, errOut bytes.Buffer
 	err := runActivity(t.Context(), &out, &errOut)
@@ -67,6 +71,10 @@ func TestRunActivity_PrintsLoginHintOnNotLoggedIn(t *testing.T) {
 		return nil, errors.New("unreachable")
 	})
 	t.Cleanup(auth.SetManagerForTest(t, mgr))
+	// Force discovery-unavailable so ResolveDataAPIToken takes the static
+	// fallback through the singleton test manager above, rather than making a
+	// real network fetch to the configured data host.
+	t.Cleanup(auth.SetResolveContextForAPIForTest(t, auth.DiscoveryUnavailableForTest))
 
 	var out, errOut bytes.Buffer
 	err := runActivity(t.Context(), &out, &errOut)

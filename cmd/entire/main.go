@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/entireio/cli/cmd/entire/cli"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
@@ -52,6 +53,15 @@ func main() {
 		os.Exit(code)
 	}
 	restorePATH()
+
+	// Retired env vars fail every built-in command up front; a removed knob
+	// must never be silently ignored. Plugins (above) are exempt — what they
+	// read is their business.
+	if err := api.RejectRemovedAuthEnv(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		cancel()
+		os.Exit(1)
+	}
 
 	executed, err := rootCmd.ExecuteContextC(ctx)
 	if err != nil {

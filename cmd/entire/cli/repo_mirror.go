@@ -150,7 +150,7 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 				repoSlug := "/gh/" + owner + "/" + repo
 				return finishMirrorCreate(out, cmd.ErrOrStderr(), created, noWait,
 					func() error {
-						if _, terr := auth.RepoScopedToken(ctx, "https://"+clusterHost, repoSlug, "pull"); terr != nil {
+						if _, terr := auth.RepoScopedToken(ctx, clusterHost, repoSlug, "pull"); terr != nil {
 							return fmt.Errorf("probe mirror for suspension: %w", terr)
 						}
 						return nil

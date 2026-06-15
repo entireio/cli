@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // defaultContextTokenTTL is the encoded keychain expiry used when a login
@@ -96,7 +97,7 @@ func RecordLoginContext(rawToken, refreshToken string, activate bool) (string, e
 	}
 
 	var name string
-	cfgDir := contexts.DefaultConfigDir()
+	cfgDir := userdirs.Config()
 	if modErr := contexts.Modify(cfgDir, func(f *contexts.File) (bool, error) {
 		name = pickContextName(f, coreURL, handle)
 		f.Upsert(&contexts.Context{
@@ -177,7 +178,7 @@ func MigrateLegacyLoginContext() (migrated bool, err error) {
 	if handle == "" {
 		handle = claims.Subject
 	}
-	f, err := contexts.Load(contexts.DefaultConfigDir())
+	f, err := contexts.Load(userdirs.Config())
 	if err != nil {
 		return false, fmt.Errorf("load contexts: %w", err)
 	}

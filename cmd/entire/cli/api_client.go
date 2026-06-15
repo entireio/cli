@@ -38,10 +38,12 @@ func NewAuthenticatedAPIClient(ctx context.Context, insecureHTTP bool) (*api.Cli
 		}
 	}
 
-	// tokenmanager validates Resource as a strict origin URL; strip any path
-	// the operator may have included in ENTIRE_API_BASE_URL before handing
-	// it across the package boundary.
-	token, err := auth.TokenForResource(ctx, api.OriginOnly(dataURL))
+	// ResolveDataAPIToken discovers which login context the data host trusts
+	// (via its /.well-known/entire-api.json) and exchanges that context's
+	// token for the advertised audience, falling back to static resolution
+	// when the host doesn't advertise discovery. It normalises dataURL to an
+	// origin internally.
+	token, err := auth.ResolveDataAPIToken(ctx, dataURL)
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {
 			// Wrap the original err (not the sentinel) so any context

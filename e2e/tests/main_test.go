@@ -38,6 +38,14 @@ func TestMain(m *testing.M) {
 	os.Setenv("ENTIRE_TOKEN_STORE_PATH", filepath.Join(runDir, "e2e-tokenstore.json"))
 	os.Setenv("ENTIRE_TEST_AUTH_STORE_FILE", filepath.Join(runDir, "e2e-auth-tokens.json"))
 
+	// Same for the CLI's config and cache directories: contexts.json,
+	// version_check.json, and the discovery caches must never resolve to the
+	// developer's real ~/.config/entire or ~/.cache/entire from a spawned
+	// binary (testing.Testing() is false there, so the internal/testdirs
+	// fallback cannot protect it).
+	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(runDir, "entire-config"))
+	os.Setenv("XDG_CACHE_HOME", filepath.Join(runDir, "entire-cache"))
+
 	// Resolve the entire binary (set by mise run build via E2E_ENTIRE_BIN).
 	entireBin := entire.BinPath()
 	if err := ensureHookEntireBinary(entireBin); err != nil {

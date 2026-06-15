@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -508,4 +509,24 @@ func mustReq(t *testing.T, rawURL string) *http.Request {
 	u, err := url.Parse(rawURL)
 	require.NoError(t, err)
 	return &http.Request{URL: u}
+}
+
+// TestWaitForMirrorClone_TimeoutBoundsAuthorization pins that --wait-timeout
+// covers the authorization phase, not just the probe loop: building the
+// token source spans cluster discovery and a possible login refresh, so a
+// hung auth path must be cut off by the user's wait budget.
+//
+// Not parallel: swaps the package-level newRepoTokenSource seam.
+func TestWaitForMirrorClone_TimeoutBoundsAuthorization(t *testing.T) {
+	prev := newRepoTokenSource
+	newRepoTokenSource = func(ctx context.Context, _ string) (repoTokenSource, error) {
+		<-ctx.Done() // hang until the wait deadline fires
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { newRepoTokenSource = prev })
+
+	start := time.Now()
+	err := waitForMirrorClone(context.Background(), io.Discard, "cluster.example", "o", "r", 50*time.Millisecond)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(start), 10*time.Second, "authorization must be bounded by the wait timeout")
 }

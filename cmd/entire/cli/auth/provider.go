@@ -24,6 +24,7 @@ const ProviderVersionEnvVar = "ENTIRE_AUTH_PROVIDER_VERSION"
 type Provider struct {
 	ClientID       string
 	DeviceCodePath string
+	AuthorizePath  string
 	TokenPath      string
 	STSPath        string
 }
@@ -32,6 +33,7 @@ var providers = map[string]Provider{
 	"v1": { //nolint:gosec // OAuth client_id and endpoint paths, not credentials
 		ClientID:       "entire-cli",
 		DeviceCodePath: "/oauth/device/code",
+		AuthorizePath:  "/oauth/authorize",
 		TokenPath:      "/oauth/token",
 	},
 	"v2": { //nolint:gosec // OAuth client_id and endpoint paths, not credentials
@@ -42,8 +44,11 @@ var providers = map[string]Provider{
 		// exchange at the shared /oauth/token endpoint.
 		ClientID:       "entire-cli",
 		DeviceCodePath: "/device_authorization",
-		TokenPath:      "/oauth/token",
-		STSPath:        "/oauth/token",
+		// OIDC-standard authorization_endpoint. Verified against
+		// us.auth.entire.io's /.well-known/openid-configuration.
+		AuthorizePath: "/authorize",
+		TokenPath:     "/oauth/token",
+		STSPath:       "/oauth/token",
 	},
 }
 

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/spf13/cobra"
 )
@@ -25,15 +27,15 @@ func TestResolveStatusTarget_PrefersActiveContext(t *testing.T) {
 	t.Cleanup(restore)
 
 	exp := time.Now().Add(time.Hour).Unix()
-	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://eu.auth.entire.io","handle":"alice","exp":%d}`, exp)), "", true); err != nil {
+	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"`+testCoreURL+`","handle":"alice","exp":%d}`, exp)), "", true); err != nil {
 		t.Fatalf("record context: %v", err)
 	}
 
-	got, err := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, "https://fallback.example.com")
+	got, err := resolveStatusTarget(t.Context(), auth.NewContextStore(), auth.Contexts, auth.RefreshedLoginToken, "https://fallback.example.com")
 	if err != nil {
 		t.Fatalf("resolveStatusTarget: %v", err)
 	}
-	if got.coreURL != "https://eu.auth.entire.io" {
+	if got.coreURL != testCoreURL {
 		t.Errorf("coreURL = %q, want the active context's CoreURL", got.coreURL)
 	}
 	if got.token == "" {
@@ -41,6 +43,67 @@ func TestResolveStatusTarget_PrefersActiveContext(t *testing.T) {
 	}
 	if got.activeContext == "" {
 		t.Error("activeContext = empty, want the active context name")
+	}
+}
+
+// TestResolveStatusTarget_PrefersRefreshedToken pins the fix: status uses the
+// refreshed login JWT for the active context, so an expired-but-refreshable
+// session reports "logged in" rather than the false "re-login" the raw read
+// produced. The resolver returns a token distinct from what's stored; we assert
+// status carries the refreshed one.
+func TestResolveStatusTarget_PrefersRefreshedToken(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	// Stored token is expired; a raw read would 401 at /me → "re-login".
+	expired := time.Now().Add(-time.Hour).Unix()
+	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"`+testCoreURL+`","handle":"alice","exp":%d}`, expired)), "entr_refresh", true); err != nil {
+		t.Fatalf("record context: %v", err)
+	}
+
+	refreshed := func(_ context.Context, _ *contexts.Context) (string, error) { return "refreshed-jwt", nil }
+	got, err := resolveStatusTarget(t.Context(), auth.NewContextStore(), auth.Contexts, refreshed, "https://fallback.example.com")
+	if err != nil {
+		t.Fatalf("resolveStatusTarget: %v", err)
+	}
+	if got.token != "refreshed-jwt" {
+		t.Errorf("token = %q, want the refreshed token (not the stale stored one)", got.token)
+	}
+	if got.coreURL != testCoreURL {
+		t.Errorf("coreURL = %q, want the active context's CoreURL", got.coreURL)
+	}
+}
+
+// TestResolveStatusTarget_FallsBackToStoredWhenRefreshFails pins the safety net:
+// when refresh fails (revoked family, network, opaque token) status drops to the
+// stored token and lets the /me probe arbitrate — rather than skipping to the
+// legacy entry or losing the active context.
+func TestResolveStatusTarget_FallsBackToStoredWhenRefreshFails(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	exp := time.Now().Add(time.Hour).Unix()
+	stored := makeContextJWT(t, fmt.Sprintf(`{"iss":"`+testCoreURL+`","handle":"alice","exp":%d}`, exp))
+	if _, err := auth.RecordLoginContext(stored, "", true); err != nil {
+		t.Fatalf("record context: %v", err)
+	}
+
+	failRefresh := func(_ context.Context, _ *contexts.Context) (string, error) {
+		return "", auth.ErrNotLoggedIn
+	}
+	got, err := resolveStatusTarget(t.Context(), auth.NewContextStore(), auth.Contexts, failRefresh, "https://fallback.example.com")
+	if err != nil {
+		t.Fatalf("resolveStatusTarget: %v", err)
+	}
+	if got.token != stored {
+		t.Errorf("token = %q, want the stored token as fallback", got.token)
+	}
+	if got.coreURL != testCoreURL || got.activeContext == "" {
+		t.Errorf("want the active context preserved on fallback, got coreURL=%q activeContext=%q", got.coreURL, got.activeContext)
 	}
 }
 
@@ -56,7 +119,7 @@ func TestResolveStatusTarget_CorruptContextsErrors(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cfgDir, "contexts.json"), []byte("{ not valid json"), 0o600); err != nil {
 		t.Fatalf("write corrupt contexts.json: %v", err)
 	}
-	if _, err := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, "https://fallback.example.com"); err == nil {
+	if _, err := resolveStatusTarget(t.Context(), auth.NewContextStore(), auth.Contexts, auth.RefreshedLoginToken, "https://fallback.example.com"); err == nil {
 		t.Fatal("want an error when contexts.json is corrupt, got nil")
 	}
 }

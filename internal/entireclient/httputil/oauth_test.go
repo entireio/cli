@@ -50,3 +50,32 @@ func TestPostOAuthToken_LiftsAndPercentEncodesClientCreds(t *testing.T) {
 	assert.Empty(t, gotForm.Get("client_id"), "client_id must be dropped from the body once lifted into Basic")
 	assert.Empty(t, gotForm.Get("client_secret"), "client_secret must be dropped from the body")
 }
+
+// TestPostOAuthToken_ErrorCode pins that a non-200 response surfaces as
+// *OAuthError with the RFC 6749 `error` code parsed from the body (empty for
+// non-JSON bodies), so callers can branch on e.g. invalid_target.
+func TestPostOAuthToken_ErrorCode(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, body, wantCode string
+	}{
+		{"json error code", `{"error":"invalid_target","error_description":"no mirror"}`, "invalid_target"},
+		{"non-json body", `gateway exploded`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(tc.body)) //nolint:errcheck // test stub
+			}))
+			defer srv.Close()
+
+			_, _, err := PostOAuthToken(context.Background(), srv.Client(), srv.URL, url.Values{})
+			var oe *OAuthError
+			require.ErrorAs(t, err, &oe)
+			assert.Equal(t, http.StatusBadRequest, oe.Status)
+			assert.Equal(t, tc.wantCode, oe.Code)
+			assert.Equal(t, tc.body, oe.Body)
+		})
+	}
+}

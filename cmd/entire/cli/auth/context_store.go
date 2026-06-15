@@ -6,6 +6,7 @@ import (
 	"github.com/entireio/auth-go/tokens"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // CurrentContextToken returns the login JWT for the active context in
@@ -14,7 +15,7 @@ import (
 // credential resolution; callers fall back to the legacy keyring entry so
 // pre-contexts logins keep working until migrated.
 func CurrentContextToken() (string, bool) {
-	f, err := contexts.Load(contexts.DefaultConfigDir())
+	f, err := contexts.Load(userdirs.Config())
 	if err != nil {
 		return "", false
 	}
@@ -37,7 +38,7 @@ func RemoveCurrentContext() error {
 	// is exactly the one we capture the keychain slot from (separate Load +
 	// Modify would race a concurrent `auth use`).
 	var svc, handle string
-	if err := contexts.Modify(contexts.DefaultConfigDir(), func(f *contexts.File) (bool, error) {
+	if err := contexts.Modify(userdirs.Config(), func(f *contexts.File) (bool, error) {
 		current := f.Find(f.CurrentContext)
 		if current == nil {
 			return false, nil
@@ -60,7 +61,7 @@ func RemoveCurrentContext() error {
 // the active one, so removing the current context this way also logs it out.
 func RemoveContext(name string) error {
 	var svc, handle string
-	if err := contexts.Modify(contexts.DefaultConfigDir(), func(f *contexts.File) (bool, error) {
+	if err := contexts.Modify(userdirs.Config(), func(f *contexts.File) (bool, error) {
 		c := f.Find(name)
 		if c == nil {
 			return false, nil
@@ -92,7 +93,7 @@ func deleteContextKeychain(svc, handle string) {
 // SetCurrentContext makes name the active context. Returns an error when
 // no context with that name exists (a stale current pointer is a foot-gun).
 func SetCurrentContext(name string) error {
-	if err := contexts.Modify(contexts.DefaultConfigDir(), func(f *contexts.File) (bool, error) {
+	if err := contexts.Modify(userdirs.Config(), func(f *contexts.File) (bool, error) {
 		if f.Find(name) == nil {
 			return false, fmt.Errorf("no login context named %q (run `entire auth contexts` to list)", name)
 		}
@@ -110,7 +111,7 @@ func SetCurrentContext(name string) error {
 // Contexts returns all stored login contexts and the current context name,
 // for listing/switching. Order matches on-disk order.
 func Contexts() ([]*contexts.Context, string, error) {
-	f, err := contexts.Load(contexts.DefaultConfigDir())
+	f, err := contexts.Load(userdirs.Config())
 	if err != nil {
 		return nil, "", fmt.Errorf("load contexts: %w", err)
 	}

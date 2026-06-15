@@ -9,6 +9,8 @@ import (
 )
 
 func TestChunkJSONL_SmallContent(t *testing.T) {
+	t.Parallel()
+
 	// Small transcript should not be chunked
 	content := []byte(`{"type":"human","message":"hello"}
 {"type":"assistant","message":"hi"}`)
@@ -26,6 +28,8 @@ func TestChunkJSONL_SmallContent(t *testing.T) {
 }
 
 func TestChunkJSONL_LargeContent(t *testing.T) {
+	t.Parallel()
+
 	// Create a transcript larger than MaxChunkSize
 	var lines []string
 	lineContent := `{"type":"human","message":"` + strings.Repeat("x", 1000) + `"}`
@@ -60,6 +64,8 @@ func TestChunkJSONL_LargeContent(t *testing.T) {
 }
 
 func TestChunkTranscript_SmallContent_NoAgent(t *testing.T) {
+	t.Parallel()
+
 	// Without a registered agent, ChunkTranscript falls back to JSONL
 	content := []byte(`{"type":"human","message":"hello"}`)
 
@@ -73,6 +79,8 @@ func TestChunkTranscript_SmallContent_NoAgent(t *testing.T) {
 }
 
 func TestChunkFileName(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		baseName string
 		index    int
@@ -94,6 +102,8 @@ func TestChunkFileName(t *testing.T) {
 }
 
 func TestParseChunkIndex(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		filename string
 		baseName string
@@ -117,6 +127,8 @@ func TestParseChunkIndex(t *testing.T) {
 }
 
 func TestSortChunkFiles(t *testing.T) {
+	t.Parallel()
+
 	files := []string{"full.jsonl.003", "full.jsonl.001", "full.jsonl", "full.jsonl.002"}
 	expected := []string{"full.jsonl", "full.jsonl.001", "full.jsonl.002", "full.jsonl.003"}
 
@@ -133,6 +145,8 @@ func TestSortChunkFiles(t *testing.T) {
 }
 
 func TestReassembleJSONL_SingleChunk(t *testing.T) {
+	t.Parallel()
+
 	content := []byte(`{"type":"human","message":"hello"}`)
 	chunks := [][]byte{content}
 
@@ -143,6 +157,8 @@ func TestReassembleJSONL_SingleChunk(t *testing.T) {
 }
 
 func TestReassembleTranscript_EmptyChunks(t *testing.T) {
+	t.Parallel()
+
 	result, err := ReassembleTranscript([][]byte{}, "")
 	if err != nil {
 		t.Fatalf("ReassembleTranscript error: %v", err)
@@ -153,6 +169,8 @@ func TestReassembleTranscript_EmptyChunks(t *testing.T) {
 }
 
 func TestReassembleJSONL_MultipleChunks(t *testing.T) {
+	t.Parallel()
+
 	chunk1 := []byte(`{"line":1}`)
 	chunk2 := []byte(`{"line":2}`)
 	chunks := [][]byte{chunk1, chunk2}
@@ -166,6 +184,8 @@ func TestReassembleJSONL_MultipleChunks(t *testing.T) {
 }
 
 func TestChunkJSONL_OversizedLine(t *testing.T) {
+	t.Parallel()
+
 	// A single line that exceeds maxSize should return an error
 	maxSize := 100
 	oversizedLine := `{"type":"human","message":"` + strings.Repeat("x", maxSize) + `"}`
@@ -181,6 +201,8 @@ func TestChunkJSONL_OversizedLine(t *testing.T) {
 }
 
 func TestChunkJSONL_OversizedLineInMiddle(t *testing.T) {
+	t.Parallel()
+
 	// An oversized line in the middle of content should return an error
 	maxSize := 100
 	normalLine := `{"type":"human","message":"short"}`
@@ -197,6 +219,8 @@ func TestChunkJSONL_OversizedLineInMiddle(t *testing.T) {
 }
 
 func TestDetectAgentTypeFromContent(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		content  []byte
@@ -226,6 +250,8 @@ func TestDetectAgentTypeFromContent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := DetectAgentTypeFromContent(tt.content)
 			if result != tt.expected {
 				t.Errorf("DetectAgentTypeFromContent() = %q, want %q", result, tt.expected)

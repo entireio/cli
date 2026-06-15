@@ -8,11 +8,17 @@ import (
 const (
 	clusterCoresFileName = "cluster_cores.json"
 
-	// ClusterCoresTTL bounds how long a cached cluster→core_urls mapping is
-	// treated as fresh. Which control plane(s) front a data-plane cluster is
-	// near-static infra — once a cluster is homed to a core it stays — so a
-	// long TTL is fine. On expiry we re-fetch /.well-known and only fall back
-	// to the stale entry if that fetch fails.
+	// apiDiscoveryFileName caches a data-API host's trusted issuer URLs, the
+	// same shape a git cluster's cores take. Kept in a separate file from
+	// cluster_cores.json so a cluster host and an API host that happen to share
+	// a name can't collide on one cache key.
+	apiDiscoveryFileName = "api_discovery.json"
+
+	// ClusterCoresTTL bounds how long a cached host→trusted-issuer-URLs mapping
+	// is treated as fresh, for both clusters and data APIs. Which login
+	// server(s) front a resource is near-static infra — once homed it stays —
+	// so a long TTL is fine. On expiry we re-fetch /.well-known and only fall
+	// back to the stale entry if that fetch fails.
 	ClusterCoresTTL = 24 * time.Hour
 )
 
@@ -56,6 +62,25 @@ func readClusterCoresNoLock(path string) (ClusterCoresCache, error) {
 
 func writeClusterCoresNoLock(path string, cache ClusterCoresCache) error {
 	return writeCacheFile(path, cache)
+}
+
+// LoadAPICores / ModifyAPICores are the data-API siblings of
+// LoadClusterCores / ModifyClusterCores: same ClusterCoresCache type and TTL,
+// different cache file (api_discovery.json). A data API's advertised
+// trusted_issuers ARE core URLs (the login servers whose JWTs it accepts), so
+// the cluster cores cache fits verbatim — the audience the CLI exchanges for is
+// the data host origin itself, derived at call time, never cached.
+
+// LoadAPICores reads the api-host→trusted-issuer-URLs cache. Unlocked read; use
+// ModifyAPICores for a read-modify-write sequence.
+func LoadAPICores(cacheDir string) (ClusterCoresCache, error) {
+	return readClusterCoresNoLock(filepath.Join(cacheDir, apiDiscoveryFileName))
+}
+
+// ModifyAPICores atomically applies fn to the api-host→trusted-issuer-URLs
+// cache under a single exclusive flock.
+func ModifyAPICores(cacheDir string, fn func(ClusterCoresCache) error) error {
+	return modifyCacheFile(cacheDir, apiDiscoveryFileName, readClusterCoresNoLock, writeClusterCoresNoLock, fn)
 }
 
 // Get returns a cluster's cached core URLs, whether the entry is still fresh,

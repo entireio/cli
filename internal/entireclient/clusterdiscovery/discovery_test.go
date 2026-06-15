@@ -126,11 +126,12 @@ func TestDiscover(t *testing.T) {
 func TestRenderLoginHint(t *testing.T) {
 	hint := RenderLoginHint("rc.partial.to", []string{"https://a.example", "https://b.example"})
 
-	// Each URL is on its own indented line — the "bog-simple stdout
-	// list" requirement.
 	assert.Contains(t, hint, "no auth context for cluster rc.partial.to")
-	assert.Contains(t, hint, "\n  https://a.example\n", "missing indented URL line: %q", hint)
-	assert.Contains(t, hint, "\n  https://b.example\n", "missing indented URL line: %q", hint)
 	assert.Contains(t, hint, "entire login")
-	assert.Contains(t, hint, "ENTIRE_AUTH_BASE_URL")
+	// The advertised login servers are intentionally squashed from the hint
+	// until the multi-login UX is ready (see renderLoginHint): the coreURLs
+	// argument is accepted but not yet surfaced, so neither the URLs nor the
+	// `entire auth use` switch hint appear.
+	assert.NotContains(t, hint, "https://a.example", "login servers should be squashed for now: %q", hint)
+	assert.NotContains(t, hint, "entire auth use", "auth-use hint should be squashed for now: %q", hint)
 }

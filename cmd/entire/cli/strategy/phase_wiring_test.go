@@ -180,15 +180,8 @@ func setupGitRepo(t *testing.T) string {
 
 	dir := t.TempDir()
 
-	repo, err := git.PlainInit(dir, false)
-	require.NoError(t, err)
-
-	// Configure git for commits
-	cfg, err := repo.Config()
-	require.NoError(t, err)
-	cfg.User.Name = "Test User"
-	cfg.User.Email = "test@test.com"
-	err = repo.SetConfig(cfg)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
 	// Create initial commit (required for HEAD to exist)

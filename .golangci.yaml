@@ -123,6 +123,7 @@ linters:
         - github.com/entireio/cli/cmd/entire/cli/review.SynthesisProvider
         - github.com/entireio/cli/cmd/entire/cli/checkpoint.CommittedReader
         - github.com/entireio/cli/cmd/entire/cli/strategy.Strategy
+        - github.com/entireio/cli/internal/entireclient/tokenstore.store
         - github.com/go-git/go-git/v6/x/plugin.Signer
         - github.com/go-git/go-git/v6/plumbing/storer.ReferenceIter
         - github.com/go-git/go-git/v6/plumbing.EncodedObject

@@ -35,10 +35,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
-	"github.com/entireio/cli/internal/entireclient/contexts"
-	"github.com/entireio/cli/internal/entireclient/discovery"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
 	"github.com/entireio/cli/internal/entireclient/repocreds"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/entireio/cli/internal/remotehelper"
 	"github.com/entireio/cli/internal/remotehelper/debuglog"
 	"github.com/entireio/cli/internal/remotehelper/githelper"
@@ -232,7 +231,7 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, clusterBaseURL string
 		if envToken == "" {
 			return nil, fmt.Errorf("%s is set but blank", auth.EnvTokenVar)
 		}
-		return resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, clusterBaseURL, discovery.DefaultCacheDir(), httpClient)
+		return resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, clusterBaseURL, userdirs.Cache(), httpClient)
 	}
 
 	// Bridge any pre-contexts.json login so the resolver can find it.
@@ -245,8 +244,8 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, clusterBaseURL string
 	// /.well-known fetch on miss/expiry), then the account is selected from
 	// local contexts — active context if eligible, else the sole eligible
 	// one, else an explicit-choice error.
-	cfgDir := contexts.DefaultConfigDir()
-	clusterCtx, err := clusterdiscovery.ResolveContextForCluster(ctx, cfgDir, discovery.DefaultCacheDir(), parsedURL.Host, httpClient, debuglog.Printf)
+	cfgDir := userdirs.Config()
+	clusterCtx, err := clusterdiscovery.ResolveContextForCluster(ctx, cfgDir, userdirs.Cache(), parsedURL.Host, httpClient, debuglog.Printf)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // ResolveContextForCluster already returns a user-facing error; preserved verbatim for the "fatal: <msg>" surface
 	}
@@ -266,7 +265,7 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, clusterBaseURL string
 
 // resolveEnvTokenCreds builds the repo-cred cache for the ENTIRE_TOKEN path.
 // Split out of resolveCreds with explicit clusterHost/cacheDir params (no
-// os.Getenv / DefaultCacheDir globals) so the trust gate below is unit-testable
+// os.Getenv / userdirs.Cache globals) so the trust gate below is unit-testable
 // against a fake well-known server.
 //
 // SECURITY: coreURL is derived from the env token's *unverified* aud claim, and

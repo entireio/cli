@@ -22,7 +22,8 @@ type AddOrgMemberInputBody struct {
 	Provider       string `json:"provider"`
 	ProviderUserId string `json:"providerUserId"`
 	// Role at the org; defaults to member.
-	Role OptAddOrgMemberInputBodyRole `json:"role"`
+	Role            OptAddOrgMemberInputBodyRole `json:"role"`
+	AdditionalProps AddOrgMemberInputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -45,6 +46,11 @@ func (s *AddOrgMemberInputBody) GetRole() OptAddOrgMemberInputBodyRole {
 	return s.Role
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *AddOrgMemberInputBody) GetAdditionalProps() AddOrgMemberInputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *AddOrgMemberInputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -63,6 +69,22 @@ func (s *AddOrgMemberInputBody) SetProviderUserId(val string) {
 // SetRole sets the value of Role.
 func (s *AddOrgMemberInputBody) SetRole(val OptAddOrgMemberInputBodyRole) {
 	s.Role = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *AddOrgMemberInputBody) SetAdditionalProps(val AddOrgMemberInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type AddOrgMemberInputBodyAdditional map[string]jx.Raw
+
+func (s *AddOrgMemberInputBodyAdditional) init() AddOrgMemberInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // Role at the org; defaults to member.
@@ -120,9 +142,10 @@ type AuditEvent struct {
 	EventType string `json:"eventType"`
 	ID        string `json:"id"`
 	// Source IP recorded when the event was logged.
-	IpAddress  OptString             `json:"ipAddress"`
-	Metadata   OptAuditEventMetadata `json:"metadata"`
-	OccurredAt time.Time             `json:"occurredAt"`
+	IpAddress       OptString             `json:"ipAddress"`
+	Metadata        OptAuditEventMetadata `json:"metadata"`
+	OccurredAt      time.Time             `json:"occurredAt"`
+	AdditionalProps AuditEventAdditional
 }
 
 // GetActorId returns the value of ActorId.
@@ -155,6 +178,11 @@ func (s *AuditEvent) GetOccurredAt() time.Time {
 	return s.OccurredAt
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *AuditEvent) GetAdditionalProps() AuditEventAdditional {
+	return s.AdditionalProps
+}
+
 // SetActorId sets the value of ActorId.
 func (s *AuditEvent) SetActorId(val string) {
 	s.ActorId = val
@@ -185,6 +213,22 @@ func (s *AuditEvent) SetOccurredAt(val time.Time) {
 	s.OccurredAt = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *AuditEvent) SetAdditionalProps(val AuditEventAdditional) {
+	s.AdditionalProps = val
+}
+
+type AuditEventAdditional map[string]jx.Raw
+
+func (s *AuditEventAdditional) init() AuditEventAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 type AuditEventMetadata map[string]jx.Raw
 
 func (s *AuditEventMetadata) init() AuditEventMetadata {
@@ -199,8 +243,9 @@ func (s *AuditEventMetadata) init() AuditEventMetadata {
 // Ref: #/components/schemas/BatchLookupInputBody
 type BatchLookupInputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema OptURI      `json:"$schema"`
-	Refs   []LookupRef `json:"refs"`
+	Schema          OptURI      `json:"$schema"`
+	Refs            []LookupRef `json:"refs"`
+	AdditionalProps BatchLookupInputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -213,6 +258,11 @@ func (s *BatchLookupInputBody) GetRefs() []LookupRef {
 	return s.Refs
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *BatchLookupInputBody) GetAdditionalProps() BatchLookupInputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *BatchLookupInputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -223,11 +273,28 @@ func (s *BatchLookupInputBody) SetRefs(val []LookupRef) {
 	s.Refs = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *BatchLookupInputBody) SetAdditionalProps(val BatchLookupInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type BatchLookupInputBodyAdditional map[string]jx.Raw
+
+func (s *BatchLookupInputBodyAdditional) init() BatchLookupInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/BatchLookupOutputBody
 type BatchLookupOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema OptURI            `json:"$schema"`
-	Refs   []LookupRefResult `json:"refs"`
+	Schema          OptURI            `json:"$schema"`
+	Refs            []LookupRefResult `json:"refs"`
+	AdditionalProps BatchLookupOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -240,6 +307,11 @@ func (s *BatchLookupOutputBody) GetRefs() []LookupRefResult {
 	return s.Refs
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *BatchLookupOutputBody) GetAdditionalProps() BatchLookupOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *BatchLookupOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -248,6 +320,22 @@ func (s *BatchLookupOutputBody) SetSchema(val OptURI) {
 // SetRefs sets the value of Refs.
 func (s *BatchLookupOutputBody) SetRefs(val []LookupRefResult) {
 	s.Refs = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *BatchLookupOutputBody) SetAdditionalProps(val BatchLookupOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type BatchLookupOutputBodyAdditional map[string]jx.Raw
+
+func (s *BatchLookupOutputBodyAdditional) init() BatchLookupOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 type BearerAuth struct {
@@ -284,6 +372,7 @@ type Binding struct {
 	CreatedAt       time.Time `json:"createdAt"`
 	ID              string    `json:"id"`
 	ProviderId      string    `json:"providerId"`
+	AdditionalProps BindingAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -316,6 +405,11 @@ func (s *Binding) GetProviderId() string {
 	return s.ProviderId
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *Binding) GetAdditionalProps() BindingAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *Binding) SetSchema(val OptURI) {
 	s.Schema = val
@@ -346,6 +440,22 @@ func (s *Binding) SetProviderId(val string) {
 	s.ProviderId = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *Binding) SetAdditionalProps(val BindingAdditional) {
+	s.AdditionalProps = val
+}
+
+type BindingAdditional map[string]jx.Raw
+
+func (s *BindingAdditional) init() BindingAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/CreateBindingInputBody
 type CreateBindingInputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -353,6 +463,7 @@ type CreateBindingInputBody struct {
 	// Exact-match key/value map; empty filter matches any token.
 	AttributeFilter jx.Raw `json:"attributeFilter"`
 	ProviderId      string `json:"providerId"`
+	AdditionalProps CreateBindingInputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -370,6 +481,11 @@ func (s *CreateBindingInputBody) GetProviderId() string {
 	return s.ProviderId
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CreateBindingInputBody) GetAdditionalProps() CreateBindingInputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *CreateBindingInputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -385,15 +501,32 @@ func (s *CreateBindingInputBody) SetProviderId(val string) {
 	s.ProviderId = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CreateBindingInputBody) SetAdditionalProps(val CreateBindingInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type CreateBindingInputBodyAdditional map[string]jx.Raw
+
+func (s *CreateBindingInputBodyAdditional) init() CreateBindingInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/CreateMirrorInputBody
 type CreateMirrorInputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema OptURI `json:"$schema"`
 	// DNS host of the destination cluster.
-	ClusterHost string                        `json:"clusterHost"`
-	Owner       string                        `json:"owner"`
-	Provider    CreateMirrorInputBodyProvider `json:"provider"`
-	Repo        string                        `json:"repo"`
+	ClusterHost     string                        `json:"clusterHost"`
+	Owner           string                        `json:"owner"`
+	Provider        CreateMirrorInputBodyProvider `json:"provider"`
+	Repo            string                        `json:"repo"`
+	AdditionalProps CreateMirrorInputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -421,6 +554,11 @@ func (s *CreateMirrorInputBody) GetRepo() string {
 	return s.Repo
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CreateMirrorInputBody) GetAdditionalProps() CreateMirrorInputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *CreateMirrorInputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -444,6 +582,22 @@ func (s *CreateMirrorInputBody) SetProvider(val CreateMirrorInputBodyProvider) {
 // SetRepo sets the value of Repo.
 func (s *CreateMirrorInputBody) SetRepo(val string) {
 	s.Repo = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CreateMirrorInputBody) SetAdditionalProps(val CreateMirrorInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type CreateMirrorInputBodyAdditional map[string]jx.Raw
+
+func (s *CreateMirrorInputBodyAdditional) init() CreateMirrorInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 type CreateMirrorInputBodyProvider string
@@ -487,7 +641,8 @@ type CreateOrgInputBody struct {
 	// Display name.
 	Name string `json:"name"`
 	// Jurisdiction slug; defaults to the server's home jurisdiction.
-	Region OptString `json:"region"`
+	Region          OptString `json:"region"`
+	AdditionalProps CreateOrgInputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -505,6 +660,11 @@ func (s *CreateOrgInputBody) GetRegion() OptString {
 	return s.Region
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CreateOrgInputBody) GetAdditionalProps() CreateOrgInputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *CreateOrgInputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -520,14 +680,31 @@ func (s *CreateOrgInputBody) SetRegion(val OptString) {
 	s.Region = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CreateOrgInputBody) SetAdditionalProps(val CreateOrgInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type CreateOrgInputBodyAdditional map[string]jx.Raw
+
+func (s *CreateOrgInputBodyAdditional) init() CreateOrgInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/CreateProjectInputBody
 type CreateProjectInputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema    OptURI                          `json:"$schema"`
-	Name      string                          `json:"name"`
-	OwnerId   string                          `json:"ownerId"`
-	OwnerType CreateProjectInputBodyOwnerType `json:"ownerType"`
-	Region    OptString                       `json:"region"`
+	Schema          OptURI                          `json:"$schema"`
+	Name            string                          `json:"name"`
+	OwnerId         string                          `json:"ownerId"`
+	OwnerType       CreateProjectInputBodyOwnerType `json:"ownerType"`
+	Region          OptString                       `json:"region"`
+	AdditionalProps CreateProjectInputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -555,6 +732,11 @@ func (s *CreateProjectInputBody) GetRegion() OptString {
 	return s.Region
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CreateProjectInputBody) GetAdditionalProps() CreateProjectInputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *CreateProjectInputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -578,6 +760,22 @@ func (s *CreateProjectInputBody) SetOwnerType(val CreateProjectInputBodyOwnerTyp
 // SetRegion sets the value of Region.
 func (s *CreateProjectInputBody) SetRegion(val OptString) {
 	s.Region = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CreateProjectInputBody) SetAdditionalProps(val CreateProjectInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type CreateProjectInputBodyAdditional map[string]jx.Raw
+
+func (s *CreateProjectInputBodyAdditional) init() CreateProjectInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 type CreateProjectInputBodyOwnerType string
@@ -630,8 +828,9 @@ type CreateRepoInputBody struct {
 	ClusterHost OptString `json:"clusterHost"`
 	Name        string    `json:"name"`
 	// Hash format; defaults to sha1.
-	ObjectFormat OptCreateRepoInputBodyObjectFormat `json:"objectFormat"`
-	ProjectId    string                             `json:"projectId"`
+	ObjectFormat    OptCreateRepoInputBodyObjectFormat `json:"objectFormat"`
+	ProjectId       string                             `json:"projectId"`
+	AdditionalProps CreateRepoInputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -659,6 +858,11 @@ func (s *CreateRepoInputBody) GetProjectId() string {
 	return s.ProjectId
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CreateRepoInputBody) GetAdditionalProps() CreateRepoInputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *CreateRepoInputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -682,6 +886,22 @@ func (s *CreateRepoInputBody) SetObjectFormat(val OptCreateRepoInputBodyObjectFo
 // SetProjectId sets the value of ProjectId.
 func (s *CreateRepoInputBody) SetProjectId(val string) {
 	s.ProjectId = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CreateRepoInputBody) SetAdditionalProps(val CreateRepoInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type CreateRepoInputBodyAdditional map[string]jx.Raw
+
+func (s *CreateRepoInputBodyAdditional) init() CreateRepoInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // Hash format; defaults to sha1.
@@ -729,9 +949,10 @@ func (s *CreateRepoInputBodyObjectFormat) UnmarshalText(data []byte) error {
 // Ref: #/components/schemas/CreateServiceAccountInputBody
 type CreateServiceAccountInputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema OptURI `json:"$schema"`
-	Name   string `json:"name"`
-	OrgId  string `json:"orgId"`
+	Schema          OptURI `json:"$schema"`
+	Name            string `json:"name"`
+	OrgId           string `json:"orgId"`
+	AdditionalProps CreateServiceAccountInputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -749,6 +970,11 @@ func (s *CreateServiceAccountInputBody) GetOrgId() string {
 	return s.OrgId
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CreateServiceAccountInputBody) GetAdditionalProps() CreateServiceAccountInputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *CreateServiceAccountInputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -764,6 +990,22 @@ func (s *CreateServiceAccountInputBody) SetOrgId(val string) {
 	s.OrgId = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CreateServiceAccountInputBody) SetAdditionalProps(val CreateServiceAccountInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type CreateServiceAccountInputBodyAdditional map[string]jx.Raw
+
+func (s *CreateServiceAccountInputBodyAdditional) init() CreateServiceAccountInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/CreatedMirror
 type CreatedMirror struct {
 	// A URL to the JSON Schema for this object.
@@ -771,10 +1013,11 @@ type CreatedMirror struct {
 	// True on fresh creation; false when an existing mirror was returned.
 	Created bool `json:"created"`
 	// True when the upstream has no refs to clone.
-	Empty     bool   `json:"empty"`
-	MirrorId  string `json:"mirrorId"`
-	MirrorUrl string `json:"mirrorUrl"`
-	PublicUrl string `json:"publicUrl"`
+	Empty           bool   `json:"empty"`
+	MirrorId        string `json:"mirrorId"`
+	MirrorUrl       string `json:"mirrorUrl"`
+	PublicUrl       string `json:"publicUrl"`
+	AdditionalProps CreatedMirrorAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -807,6 +1050,11 @@ func (s *CreatedMirror) GetPublicUrl() string {
 	return s.PublicUrl
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CreatedMirror) GetAdditionalProps() CreatedMirrorAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *CreatedMirror) SetSchema(val OptURI) {
 	s.Schema = val
@@ -835,6 +1083,22 @@ func (s *CreatedMirror) SetMirrorUrl(val string) {
 // SetPublicUrl sets the value of PublicUrl.
 func (s *CreatedMirror) SetPublicUrl(val string) {
 	s.PublicUrl = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CreatedMirror) SetAdditionalProps(val CreatedMirrorAdditional) {
+	s.AdditionalProps = val
+}
+
+type CreatedMirrorAdditional map[string]jx.Raw
+
+func (s *CreatedMirrorAdditional) init() CreatedMirrorAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // DeleteBindingNoContent is response for DeleteBinding operation.
@@ -890,7 +1154,8 @@ type ErrorDetail struct {
 	// Error message text.
 	Message OptString `json:"message"`
 	// The value at the given location.
-	Value jx.Raw `json:"value"`
+	Value           jx.Raw `json:"value"`
+	AdditionalProps ErrorDetailAdditional
 }
 
 // GetLocation returns the value of Location.
@@ -908,6 +1173,11 @@ func (s *ErrorDetail) GetValue() jx.Raw {
 	return s.Value
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ErrorDetail) GetAdditionalProps() ErrorDetailAdditional {
+	return s.AdditionalProps
+}
+
 // SetLocation sets the value of Location.
 func (s *ErrorDetail) SetLocation(val OptString) {
 	s.Location = val
@@ -921,6 +1191,22 @@ func (s *ErrorDetail) SetMessage(val OptString) {
 // SetValue sets the value of Value.
 func (s *ErrorDetail) SetValue(val jx.Raw) {
 	s.Value = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ErrorDetail) SetAdditionalProps(val ErrorDetailAdditional) {
+	s.AdditionalProps = val
+}
+
+type ErrorDetailAdditional map[string]jx.Raw
+
+func (s *ErrorDetailAdditional) init() ErrorDetailAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // Ref: #/components/schemas/ErrorModel
@@ -939,7 +1225,8 @@ type ErrorModel struct {
 	// occurrences of the error.
 	Title OptString `json:"title"`
 	// A URI reference to human-readable documentation for the error.
-	Type OptURI `json:"type"`
+	Type            OptURI `json:"type"`
+	AdditionalProps ErrorModelAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -977,6 +1264,11 @@ func (s *ErrorModel) GetType() OptURI {
 	return s.Type
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ErrorModel) GetAdditionalProps() ErrorModelAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ErrorModel) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1010,6 +1302,22 @@ func (s *ErrorModel) SetTitle(val OptString) {
 // SetType sets the value of Type.
 func (s *ErrorModel) SetType(val OptURI) {
 	s.Type = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ErrorModel) SetAdditionalProps(val ErrorModelAdditional) {
+	s.AdditionalProps = val
+}
+
+type ErrorModelAdditional map[string]jx.Raw
+
+func (s *ErrorModelAdditional) init() ErrorModelAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // ErrorModelStatusCode wraps ErrorModel with StatusCode.
@@ -1048,6 +1356,7 @@ type GetMeOutputBody struct {
 	Mode                OptGetMeOutputBodyMode   `json:"mode"`
 	Regional            OptMeRegional            `json:"regional"`
 	RegionalUnavailable OptMeRegionalUnavailable `json:"regionalUnavailable"`
+	AdditionalProps     GetMeOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1085,6 +1394,11 @@ func (s *GetMeOutputBody) GetRegionalUnavailable() OptMeRegionalUnavailable {
 	return s.RegionalUnavailable
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GetMeOutputBody) GetAdditionalProps() GetMeOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *GetMeOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1118,6 +1432,22 @@ func (s *GetMeOutputBody) SetRegional(val OptMeRegional) {
 // SetRegionalUnavailable sets the value of RegionalUnavailable.
 func (s *GetMeOutputBody) SetRegionalUnavailable(val OptMeRegionalUnavailable) {
 	s.RegionalUnavailable = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GetMeOutputBody) SetAdditionalProps(val GetMeOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GetMeOutputBodyAdditional map[string]jx.Raw
+
+func (s *GetMeOutputBodyAdditional) init() GetMeOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 type GetMeOutputBodyMode string
@@ -1171,11 +1501,12 @@ func (s *GetMeOutputBodyMode) UnmarshalText(data []byte) error {
 // Ref: #/components/schemas/GetPermissionsOutputBody
 type GetPermissionsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema       OptURI                             `json:"$schema"`
-	Explain      OptGetPermissionsOutputBodyExplain `json:"explain"`
-	Permissions  []string                           `json:"permissions"`
-	ResourceId   string                             `json:"resourceId"`
-	ResourceType string                             `json:"resourceType"`
+	Schema          OptURI                             `json:"$schema"`
+	Explain         OptGetPermissionsOutputBodyExplain `json:"explain"`
+	Permissions     []string                           `json:"permissions"`
+	ResourceId      string                             `json:"resourceId"`
+	ResourceType    string                             `json:"resourceType"`
+	AdditionalProps GetPermissionsOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1203,6 +1534,11 @@ func (s *GetPermissionsOutputBody) GetResourceType() string {
 	return s.ResourceType
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GetPermissionsOutputBody) GetAdditionalProps() GetPermissionsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *GetPermissionsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1228,6 +1564,22 @@ func (s *GetPermissionsOutputBody) SetResourceType(val string) {
 	s.ResourceType = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GetPermissionsOutputBody) SetAdditionalProps(val GetPermissionsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GetPermissionsOutputBodyAdditional map[string]jx.Raw
+
+func (s *GetPermissionsOutputBodyAdditional) init() GetPermissionsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 type GetPermissionsOutputBodyExplain map[string]jx.Raw
 
 func (s *GetPermissionsOutputBodyExplain) init() GetPermissionsOutputBodyExplain {
@@ -1242,11 +1594,12 @@ func (s *GetPermissionsOutputBodyExplain) init() GetPermissionsOutputBodyExplain
 // Ref: #/components/schemas/GrantProjectAccessInputBody
 type GrantProjectAccessInputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema         OptURI                                    `json:"$schema"`
-	GranteeType    OptGrantProjectAccessInputBodyGranteeType `json:"granteeType"`
-	Provider       string                                    `json:"provider"`
-	ProviderUserId string                                    `json:"providerUserId"`
-	Role           string                                    `json:"role"`
+	Schema          OptURI                                    `json:"$schema"`
+	GranteeType     OptGrantProjectAccessInputBodyGranteeType `json:"granteeType"`
+	Provider        string                                    `json:"provider"`
+	ProviderUserId  string                                    `json:"providerUserId"`
+	Role            string                                    `json:"role"`
+	AdditionalProps GrantProjectAccessInputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1274,6 +1627,11 @@ func (s *GrantProjectAccessInputBody) GetRole() string {
 	return s.Role
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GrantProjectAccessInputBody) GetAdditionalProps() GrantProjectAccessInputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *GrantProjectAccessInputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1297,6 +1655,22 @@ func (s *GrantProjectAccessInputBody) SetProviderUserId(val string) {
 // SetRole sets the value of Role.
 func (s *GrantProjectAccessInputBody) SetRole(val string) {
 	s.Role = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GrantProjectAccessInputBody) SetAdditionalProps(val GrantProjectAccessInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GrantProjectAccessInputBodyAdditional map[string]jx.Raw
+
+func (s *GrantProjectAccessInputBodyAdditional) init() GrantProjectAccessInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 type GrantProjectAccessInputBodyGranteeType string
@@ -1350,8 +1724,9 @@ func (s *GrantProjectAccessInputBodyGranteeType) UnmarshalText(data []byte) erro
 // Ref: #/components/schemas/GrantProjectAccessOutputBody
 type GrantProjectAccessOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema OptURI `json:"$schema"`
-	Status string `json:"status"`
+	Schema          OptURI `json:"$schema"`
+	Status          string `json:"status"`
+	AdditionalProps GrantProjectAccessOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1364,6 +1739,11 @@ func (s *GrantProjectAccessOutputBody) GetStatus() string {
 	return s.Status
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GrantProjectAccessOutputBody) GetAdditionalProps() GrantProjectAccessOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *GrantProjectAccessOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1374,14 +1754,31 @@ func (s *GrantProjectAccessOutputBody) SetStatus(val string) {
 	s.Status = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GrantProjectAccessOutputBody) SetAdditionalProps(val GrantProjectAccessOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GrantProjectAccessOutputBodyAdditional map[string]jx.Raw
+
+func (s *GrantProjectAccessOutputBodyAdditional) init() GrantProjectAccessOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/GrantRepoAccessInputBody
 type GrantRepoAccessInputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema         OptURI                                 `json:"$schema"`
-	GranteeType    OptGrantRepoAccessInputBodyGranteeType `json:"granteeType"`
-	Provider       string                                 `json:"provider"`
-	ProviderUserId string                                 `json:"providerUserId"`
-	Role           string                                 `json:"role"`
+	Schema          OptURI                                 `json:"$schema"`
+	GranteeType     OptGrantRepoAccessInputBodyGranteeType `json:"granteeType"`
+	Provider        string                                 `json:"provider"`
+	ProviderUserId  string                                 `json:"providerUserId"`
+	Role            string                                 `json:"role"`
+	AdditionalProps GrantRepoAccessInputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1409,6 +1806,11 @@ func (s *GrantRepoAccessInputBody) GetRole() string {
 	return s.Role
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GrantRepoAccessInputBody) GetAdditionalProps() GrantRepoAccessInputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *GrantRepoAccessInputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1432,6 +1834,22 @@ func (s *GrantRepoAccessInputBody) SetProviderUserId(val string) {
 // SetRole sets the value of Role.
 func (s *GrantRepoAccessInputBody) SetRole(val string) {
 	s.Role = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GrantRepoAccessInputBody) SetAdditionalProps(val GrantRepoAccessInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GrantRepoAccessInputBodyAdditional map[string]jx.Raw
+
+func (s *GrantRepoAccessInputBodyAdditional) init() GrantRepoAccessInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 type GrantRepoAccessInputBodyGranteeType string
@@ -1485,8 +1903,9 @@ func (s *GrantRepoAccessInputBodyGranteeType) UnmarshalText(data []byte) error {
 // Ref: #/components/schemas/GrantRepoAccessOutputBody
 type GrantRepoAccessOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema OptURI `json:"$schema"`
-	Status string `json:"status"`
+	Schema          OptURI `json:"$schema"`
+	Status          string `json:"status"`
+	AdditionalProps GrantRepoAccessOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1499,6 +1918,11 @@ func (s *GrantRepoAccessOutputBody) GetStatus() string {
 	return s.Status
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GrantRepoAccessOutputBody) GetAdditionalProps() GrantRepoAccessOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *GrantRepoAccessOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1509,13 +1933,30 @@ func (s *GrantRepoAccessOutputBody) SetStatus(val string) {
 	s.Status = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GrantRepoAccessOutputBody) SetAdditionalProps(val GrantRepoAccessOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GrantRepoAccessOutputBodyAdditional map[string]jx.Raw
+
+func (s *GrantRepoAccessOutputBodyAdditional) init() GrantRepoAccessOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/GrantServiceAccountAccessInputBody
 type GrantServiceAccountAccessInputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema       OptURI                                         `json:"$schema"`
-	ResourceId   string                                         `json:"resourceId"`
-	ResourceType GrantServiceAccountAccessInputBodyResourceType `json:"resourceType"`
-	Role         string                                         `json:"role"`
+	Schema          OptURI                                         `json:"$schema"`
+	ResourceId      string                                         `json:"resourceId"`
+	ResourceType    GrantServiceAccountAccessInputBodyResourceType `json:"resourceType"`
+	Role            string                                         `json:"role"`
+	AdditionalProps GrantServiceAccountAccessInputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1538,6 +1979,11 @@ func (s *GrantServiceAccountAccessInputBody) GetRole() string {
 	return s.Role
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GrantServiceAccountAccessInputBody) GetAdditionalProps() GrantServiceAccountAccessInputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *GrantServiceAccountAccessInputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1556,6 +2002,22 @@ func (s *GrantServiceAccountAccessInputBody) SetResourceType(val GrantServiceAcc
 // SetRole sets the value of Role.
 func (s *GrantServiceAccountAccessInputBody) SetRole(val string) {
 	s.Role = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GrantServiceAccountAccessInputBody) SetAdditionalProps(val GrantServiceAccountAccessInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GrantServiceAccountAccessInputBodyAdditional map[string]jx.Raw
+
+func (s *GrantServiceAccountAccessInputBodyAdditional) init() GrantServiceAccountAccessInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 type GrantServiceAccountAccessInputBodyResourceType string
@@ -1602,8 +2064,9 @@ func (s *GrantServiceAccountAccessInputBodyResourceType) UnmarshalText(data []by
 // Ref: #/components/schemas/GrantServiceAccountAccessOutputBody
 type GrantServiceAccountAccessOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema OptURI `json:"$schema"`
-	Status string `json:"status"`
+	Schema          OptURI `json:"$schema"`
+	Status          string `json:"status"`
+	AdditionalProps GrantServiceAccountAccessOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1616,6 +2079,11 @@ func (s *GrantServiceAccountAccessOutputBody) GetStatus() string {
 	return s.Status
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GrantServiceAccountAccessOutputBody) GetAdditionalProps() GrantServiceAccountAccessOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *GrantServiceAccountAccessOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1626,11 +2094,28 @@ func (s *GrantServiceAccountAccessOutputBody) SetStatus(val string) {
 	s.Status = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GrantServiceAccountAccessOutputBody) SetAdditionalProps(val GrantServiceAccountAccessOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GrantServiceAccountAccessOutputBodyAdditional map[string]jx.Raw
+
+func (s *GrantServiceAccountAccessOutputBodyAdditional) init() GrantServiceAccountAccessOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListAuditEventsOutputBody
 type ListAuditEventsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema OptURI       `json:"$schema"`
-	Events []AuditEvent `json:"events"`
+	Schema          OptURI       `json:"$schema"`
+	Events          []AuditEvent `json:"events"`
+	AdditionalProps ListAuditEventsOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1643,6 +2128,11 @@ func (s *ListAuditEventsOutputBody) GetEvents() []AuditEvent {
 	return s.Events
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListAuditEventsOutputBody) GetAdditionalProps() ListAuditEventsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ListAuditEventsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1653,11 +2143,28 @@ func (s *ListAuditEventsOutputBody) SetEvents(val []AuditEvent) {
 	s.Events = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListAuditEventsOutputBody) SetAdditionalProps(val ListAuditEventsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListAuditEventsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListAuditEventsOutputBodyAdditional) init() ListAuditEventsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListBindingsOutputBody
 type ListBindingsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema   OptURI    `json:"$schema"`
-	Bindings []Binding `json:"bindings"`
+	Schema          OptURI    `json:"$schema"`
+	Bindings        []Binding `json:"bindings"`
+	AdditionalProps ListBindingsOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1670,6 +2177,11 @@ func (s *ListBindingsOutputBody) GetBindings() []Binding {
 	return s.Bindings
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListBindingsOutputBody) GetAdditionalProps() ListBindingsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ListBindingsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1680,11 +2192,28 @@ func (s *ListBindingsOutputBody) SetBindings(val []Binding) {
 	s.Bindings = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListBindingsOutputBody) SetAdditionalProps(val ListBindingsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListBindingsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListBindingsOutputBodyAdditional) init() ListBindingsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListMirrorsOutputBody
 type ListMirrorsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema  OptURI   `json:"$schema"`
-	Mirrors []Mirror `json:"mirrors"`
+	Schema          OptURI   `json:"$schema"`
+	Mirrors         []Mirror `json:"mirrors"`
+	AdditionalProps ListMirrorsOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1697,6 +2226,11 @@ func (s *ListMirrorsOutputBody) GetMirrors() []Mirror {
 	return s.Mirrors
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListMirrorsOutputBody) GetAdditionalProps() ListMirrorsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ListMirrorsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1707,11 +2241,28 @@ func (s *ListMirrorsOutputBody) SetMirrors(val []Mirror) {
 	s.Mirrors = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListMirrorsOutputBody) SetAdditionalProps(val ListMirrorsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListMirrorsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListMirrorsOutputBodyAdditional) init() ListMirrorsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListOIDCProvidersOutputBody
 type ListOIDCProvidersOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema    OptURI         `json:"$schema"`
-	Providers []OIDCProvider `json:"providers"`
+	Schema          OptURI         `json:"$schema"`
+	Providers       []OIDCProvider `json:"providers"`
+	AdditionalProps ListOIDCProvidersOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1724,6 +2275,11 @@ func (s *ListOIDCProvidersOutputBody) GetProviders() []OIDCProvider {
 	return s.Providers
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListOIDCProvidersOutputBody) GetAdditionalProps() ListOIDCProvidersOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ListOIDCProvidersOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1734,11 +2290,28 @@ func (s *ListOIDCProvidersOutputBody) SetProviders(val []OIDCProvider) {
 	s.Providers = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListOIDCProvidersOutputBody) SetAdditionalProps(val ListOIDCProvidersOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListOIDCProvidersOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListOIDCProvidersOutputBodyAdditional) init() ListOIDCProvidersOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListOrgMembersOutputBody
 type ListOrgMembersOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema  OptURI       `json:"$schema"`
-	Members []Membership `json:"members"`
+	Schema          OptURI       `json:"$schema"`
+	Members         []Membership `json:"members"`
+	AdditionalProps ListOrgMembersOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1751,6 +2324,11 @@ func (s *ListOrgMembersOutputBody) GetMembers() []Membership {
 	return s.Members
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListOrgMembersOutputBody) GetAdditionalProps() ListOrgMembersOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ListOrgMembersOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1761,11 +2339,28 @@ func (s *ListOrgMembersOutputBody) SetMembers(val []Membership) {
 	s.Members = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListOrgMembersOutputBody) SetAdditionalProps(val ListOrgMembersOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListOrgMembersOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListOrgMembersOutputBodyAdditional) init() ListOrgMembersOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListOrgProjectsOutputBody
 type ListOrgProjectsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema   OptURI    `json:"$schema"`
-	Projects []Project `json:"projects"`
+	Schema          OptURI    `json:"$schema"`
+	Projects        []Project `json:"projects"`
+	AdditionalProps ListOrgProjectsOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1778,6 +2373,11 @@ func (s *ListOrgProjectsOutputBody) GetProjects() []Project {
 	return s.Projects
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListOrgProjectsOutputBody) GetAdditionalProps() ListOrgProjectsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ListOrgProjectsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1788,11 +2388,28 @@ func (s *ListOrgProjectsOutputBody) SetProjects(val []Project) {
 	s.Projects = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListOrgProjectsOutputBody) SetAdditionalProps(val ListOrgProjectsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListOrgProjectsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListOrgProjectsOutputBodyAdditional) init() ListOrgProjectsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListOrgsOutputBody
 type ListOrgsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema OptURI `json:"$schema"`
-	Orgs   []Org  `json:"orgs"`
+	Schema          OptURI `json:"$schema"`
+	Orgs            []Org  `json:"orgs"`
+	AdditionalProps ListOrgsOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1805,6 +2422,11 @@ func (s *ListOrgsOutputBody) GetOrgs() []Org {
 	return s.Orgs
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListOrgsOutputBody) GetAdditionalProps() ListOrgsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ListOrgsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1815,11 +2437,28 @@ func (s *ListOrgsOutputBody) SetOrgs(val []Org) {
 	s.Orgs = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListOrgsOutputBody) SetAdditionalProps(val ListOrgsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListOrgsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListOrgsOutputBodyAdditional) init() ListOrgsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListProjectMembersOutputBody
 type ListProjectMembersOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema  OptURI         `json:"$schema"`
-	Members []ProjectGrant `json:"members"`
+	Schema          OptURI         `json:"$schema"`
+	Members         []ProjectGrant `json:"members"`
+	AdditionalProps ListProjectMembersOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1832,6 +2471,11 @@ func (s *ListProjectMembersOutputBody) GetMembers() []ProjectGrant {
 	return s.Members
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListProjectMembersOutputBody) GetAdditionalProps() ListProjectMembersOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ListProjectMembersOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1842,11 +2486,28 @@ func (s *ListProjectMembersOutputBody) SetMembers(val []ProjectGrant) {
 	s.Members = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListProjectMembersOutputBody) SetAdditionalProps(val ListProjectMembersOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListProjectMembersOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListProjectMembersOutputBodyAdditional) init() ListProjectMembersOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListProjectReposOutputBody
 type ListProjectReposOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema OptURI `json:"$schema"`
-	Repos  []Repo `json:"repos"`
+	Schema          OptURI `json:"$schema"`
+	Repos           []Repo `json:"repos"`
+	AdditionalProps ListProjectReposOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1859,6 +2520,11 @@ func (s *ListProjectReposOutputBody) GetRepos() []Repo {
 	return s.Repos
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListProjectReposOutputBody) GetAdditionalProps() ListProjectReposOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ListProjectReposOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1869,12 +2535,29 @@ func (s *ListProjectReposOutputBody) SetRepos(val []Repo) {
 	s.Repos = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListProjectReposOutputBody) SetAdditionalProps(val ListProjectReposOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListProjectReposOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListProjectReposOutputBodyAdditional) init() ListProjectReposOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListProjectsOutputBody
 type ListProjectsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema   OptURI     `json:"$schema"`
-	Project  OptProject `json:"project"`
-	Projects []Project  `json:"projects"`
+	Schema          OptURI     `json:"$schema"`
+	Project         OptProject `json:"project"`
+	Projects        []Project  `json:"projects"`
+	AdditionalProps ListProjectsOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1892,6 +2575,11 @@ func (s *ListProjectsOutputBody) GetProjects() []Project {
 	return s.Projects
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListProjectsOutputBody) GetAdditionalProps() ListProjectsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ListProjectsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1907,11 +2595,28 @@ func (s *ListProjectsOutputBody) SetProjects(val []Project) {
 	s.Projects = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListProjectsOutputBody) SetAdditionalProps(val ListProjectsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListProjectsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListProjectsOutputBodyAdditional) init() ListProjectsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListServiceAccountGrantsOutputBody
 type ListServiceAccountGrantsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema OptURI                `json:"$schema"`
-	Grants []ServiceAccountGrant `json:"grants"`
+	Schema          OptURI                `json:"$schema"`
+	Grants          []ServiceAccountGrant `json:"grants"`
+	AdditionalProps ListServiceAccountGrantsOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1924,6 +2629,11 @@ func (s *ListServiceAccountGrantsOutputBody) GetGrants() []ServiceAccountGrant {
 	return s.Grants
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListServiceAccountGrantsOutputBody) GetAdditionalProps() ListServiceAccountGrantsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ListServiceAccountGrantsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1934,11 +2644,28 @@ func (s *ListServiceAccountGrantsOutputBody) SetGrants(val []ServiceAccountGrant
 	s.Grants = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListServiceAccountGrantsOutputBody) SetAdditionalProps(val ListServiceAccountGrantsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListServiceAccountGrantsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListServiceAccountGrantsOutputBodyAdditional) init() ListServiceAccountGrantsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListServiceAccountsOutputBody
 type ListServiceAccountsOutputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema          OptURI                     `json:"$schema"`
 	ServiceAccounts []ServiceAccountWithGrants `json:"serviceAccounts"`
+	AdditionalProps ListServiceAccountsOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -1951,6 +2678,11 @@ func (s *ListServiceAccountsOutputBody) GetServiceAccounts() []ServiceAccountWit
 	return s.ServiceAccounts
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListServiceAccountsOutputBody) GetAdditionalProps() ListServiceAccountsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ListServiceAccountsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -1961,11 +2693,28 @@ func (s *ListServiceAccountsOutputBody) SetServiceAccounts(val []ServiceAccountW
 	s.ServiceAccounts = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListServiceAccountsOutputBody) SetAdditionalProps(val ListServiceAccountsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListServiceAccountsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListServiceAccountsOutputBodyAdditional) init() ListServiceAccountsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/LookupRef
 type LookupRef struct {
 	ID string `json:"id"`
 	// Resource type slug; "org", "project", "repo" are enriched, unknown types pass through.
-	Type string `json:"type"`
+	Type            string `json:"type"`
+	AdditionalProps LookupRefAdditional
 }
 
 // GetID returns the value of ID.
@@ -1978,6 +2727,11 @@ func (s *LookupRef) GetType() string {
 	return s.Type
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *LookupRef) GetAdditionalProps() LookupRefAdditional {
+	return s.AdditionalProps
+}
+
 // SetID sets the value of ID.
 func (s *LookupRef) SetID(val string) {
 	s.ID = val
@@ -1988,15 +2742,32 @@ func (s *LookupRef) SetType(val string) {
 	s.Type = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *LookupRef) SetAdditionalProps(val LookupRefAdditional) {
+	s.AdditionalProps = val
+}
+
+type LookupRefAdditional map[string]jx.Raw
+
+func (s *LookupRefAdditional) init() LookupRefAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/LookupRefResult
 type LookupRefResult struct {
-	ID        string                      `json:"id"`
-	Name      OptString                   `json:"name"`
-	OwnerId   OptString                   `json:"ownerId"`
-	OwnerType OptLookupRefResultOwnerType `json:"ownerType"`
-	ProjectId OptString                   `json:"projectId"`
-	Type      string                      `json:"type"`
-	URL       OptString                   `json:"url"`
+	ID              string                      `json:"id"`
+	Name            OptString                   `json:"name"`
+	OwnerId         OptString                   `json:"ownerId"`
+	OwnerType       OptLookupRefResultOwnerType `json:"ownerType"`
+	ProjectId       OptString                   `json:"projectId"`
+	Type            string                      `json:"type"`
+	URL             OptString                   `json:"url"`
+	AdditionalProps LookupRefResultAdditional
 }
 
 // GetID returns the value of ID.
@@ -2034,6 +2805,11 @@ func (s *LookupRefResult) GetURL() OptString {
 	return s.URL
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *LookupRefResult) GetAdditionalProps() LookupRefResultAdditional {
+	return s.AdditionalProps
+}
+
 // SetID sets the value of ID.
 func (s *LookupRefResult) SetID(val string) {
 	s.ID = val
@@ -2067,6 +2843,22 @@ func (s *LookupRefResult) SetType(val string) {
 // SetURL sets the value of URL.
 func (s *LookupRefResult) SetURL(val OptString) {
 	s.URL = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *LookupRefResult) SetAdditionalProps(val LookupRefResultAdditional) {
+	s.AdditionalProps = val
+}
+
+type LookupRefResultAdditional map[string]jx.Raw
+
+func (s *LookupRefResultAdditional) init() LookupRefResultAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 type LookupRefResultOwnerType string
@@ -2113,11 +2905,12 @@ func (s *LookupRefResultOwnerType) UnmarshalText(data []byte) error {
 // Ref: #/components/schemas/LookupResourcesOutputBody
 type LookupResourcesOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema       OptURI           `json:"$schema"`
-	Permission   OptString        `json:"permission"`
-	ResourceIds  []string         `json:"resourceIds"`
-	ResourceType string           `json:"resourceType"`
-	Resources    []ResourceAccess `json:"resources"`
+	Schema          OptURI           `json:"$schema"`
+	Permission      OptString        `json:"permission"`
+	ResourceIds     []string         `json:"resourceIds"`
+	ResourceType    string           `json:"resourceType"`
+	Resources       []ResourceAccess `json:"resources"`
+	AdditionalProps LookupResourcesOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -2145,6 +2938,11 @@ func (s *LookupResourcesOutputBody) GetResources() []ResourceAccess {
 	return s.Resources
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *LookupResourcesOutputBody) GetAdditionalProps() LookupResourcesOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *LookupResourcesOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
@@ -2170,10 +2968,27 @@ func (s *LookupResourcesOutputBody) SetResources(val []ResourceAccess) {
 	s.Resources = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *LookupResourcesOutputBody) SetAdditionalProps(val LookupResourcesOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type LookupResourcesOutputBodyAdditional map[string]jx.Raw
+
+func (s *LookupResourcesOutputBodyAdditional) init() LookupResourcesOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/MeAuth
 type MeAuth struct {
-	Provider       string `json:"provider"`
-	ProviderUserId string `json:"providerUserId"`
+	Provider        string `json:"provider"`
+	ProviderUserId  string `json:"providerUserId"`
+	AdditionalProps MeAuthAdditional
 }
 
 // GetProvider returns the value of Provider.
@@ -2186,6 +3001,11 @@ func (s *MeAuth) GetProviderUserId() string {
 	return s.ProviderUserId
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *MeAuth) GetAdditionalProps() MeAuthAdditional {
+	return s.AdditionalProps
+}
+
 // SetProvider sets the value of Provider.
 func (s *MeAuth) SetProvider(val string) {
 	s.Provider = val
@@ -2196,6 +3016,22 @@ func (s *MeAuth) SetProviderUserId(val string) {
 	s.ProviderUserId = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *MeAuth) SetAdditionalProps(val MeAuthAdditional) {
+	s.AdditionalProps = val
+}
+
+type MeAuthAdditional map[string]jx.Raw
+
+func (s *MeAuthAdditional) init() MeAuthAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/MeGlobal
 type MeGlobal struct {
 	AccountId        string             `json:"accountId"`
@@ -2203,6 +3039,7 @@ type MeGlobal struct {
 	Handle           OptString          `json:"handle"`
 	Handles          []MeIdentityHandle `json:"handles"`
 	HomeJurisdiction OptString          `json:"homeJurisdiction"`
+	AdditionalProps  MeGlobalAdditional
 }
 
 // GetAccountId returns the value of AccountId.
@@ -2230,6 +3067,11 @@ func (s *MeGlobal) GetHomeJurisdiction() OptString {
 	return s.HomeJurisdiction
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *MeGlobal) GetAdditionalProps() MeGlobalAdditional {
+	return s.AdditionalProps
+}
+
 // SetAccountId sets the value of AccountId.
 func (s *MeGlobal) SetAccountId(val string) {
 	s.AccountId = val
@@ -2255,11 +3097,28 @@ func (s *MeGlobal) SetHomeJurisdiction(val OptString) {
 	s.HomeJurisdiction = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *MeGlobal) SetAdditionalProps(val MeGlobalAdditional) {
+	s.AdditionalProps = val
+}
+
+type MeGlobalAdditional map[string]jx.Raw
+
+func (s *MeGlobalAdditional) init() MeGlobalAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/MeIdentityHandle
 type MeIdentityHandle struct {
-	Handle         string `json:"handle"`
-	Provider       string `json:"provider"`
-	ProviderUserId string `json:"providerUserId"`
+	Handle          string `json:"handle"`
+	Provider        string `json:"provider"`
+	ProviderUserId  string `json:"providerUserId"`
+	AdditionalProps MeIdentityHandleAdditional
 }
 
 // GetHandle returns the value of Handle.
@@ -2277,6 +3136,11 @@ func (s *MeIdentityHandle) GetProviderUserId() string {
 	return s.ProviderUserId
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *MeIdentityHandle) GetAdditionalProps() MeIdentityHandleAdditional {
+	return s.AdditionalProps
+}
+
 // SetHandle sets the value of Handle.
 func (s *MeIdentityHandle) SetHandle(val string) {
 	s.Handle = val
@@ -2292,13 +3156,30 @@ func (s *MeIdentityHandle) SetProviderUserId(val string) {
 	s.ProviderUserId = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *MeIdentityHandle) SetAdditionalProps(val MeIdentityHandleAdditional) {
+	s.AdditionalProps = val
+}
+
+type MeIdentityHandleAdditional map[string]jx.Raw
+
+func (s *MeIdentityHandleAdditional) init() MeIdentityHandleAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/MeRegional
 type MeRegional struct {
-	Bio         OptString `json:"bio"`
-	Company     OptString `json:"company"`
-	DisplayName OptString `json:"displayName"`
-	Email       OptString `json:"email"`
-	Location    OptString `json:"location"`
+	Bio             OptString `json:"bio"`
+	Company         OptString `json:"company"`
+	DisplayName     OptString `json:"displayName"`
+	Email           OptString `json:"email"`
+	Location        OptString `json:"location"`
+	AdditionalProps MeRegionalAdditional
 }
 
 // GetBio returns the value of Bio.
@@ -2326,6 +3207,11 @@ func (s *MeRegional) GetLocation() OptString {
 	return s.Location
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *MeRegional) GetAdditionalProps() MeRegionalAdditional {
+	return s.AdditionalProps
+}
+
 // SetBio sets the value of Bio.
 func (s *MeRegional) SetBio(val OptString) {
 	s.Bio = val
@@ -2351,6 +3237,22 @@ func (s *MeRegional) SetLocation(val OptString) {
 	s.Location = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *MeRegional) SetAdditionalProps(val MeRegionalAdditional) {
+	s.AdditionalProps = val
+}
+
+type MeRegionalAdditional map[string]jx.Raw
+
+func (s *MeRegionalAdditional) init() MeRegionalAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/MeRegionalUnavailable
 type MeRegionalUnavailable struct {
 	// Always 'foreign_jurisdiction'. Discriminator for client-side state machines.
@@ -2360,7 +3262,8 @@ type MeRegionalUnavailable struct {
 	// The account's home jurisdiction (e.g. 'us', 'eu').
 	Jurisdiction string `json:"jurisdiction"`
 	// Human-readable copy ready to surface in a UI.
-	Message string `json:"message"`
+	Message         string `json:"message"`
+	AdditionalProps MeRegionalUnavailableAdditional
 }
 
 // GetError returns the value of Error.
@@ -2383,6 +3286,11 @@ func (s *MeRegionalUnavailable) GetMessage() string {
 	return s.Message
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *MeRegionalUnavailable) GetAdditionalProps() MeRegionalUnavailableAdditional {
+	return s.AdditionalProps
+}
+
 // SetError sets the value of Error.
 func (s *MeRegionalUnavailable) SetError(val MeRegionalUnavailableError) {
 	s.Error = val
@@ -2401,6 +3309,22 @@ func (s *MeRegionalUnavailable) SetJurisdiction(val string) {
 // SetMessage sets the value of Message.
 func (s *MeRegionalUnavailable) SetMessage(val string) {
 	s.Message = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *MeRegionalUnavailable) SetAdditionalProps(val MeRegionalUnavailableAdditional) {
+	s.AdditionalProps = val
+}
+
+type MeRegionalUnavailableAdditional map[string]jx.Raw
+
+func (s *MeRegionalUnavailableAdditional) init() MeRegionalUnavailableAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // Always 'foreign_jurisdiction'. Discriminator for client-side state machines.
@@ -2449,6 +3373,7 @@ type Membership struct {
 	Role                  string    `json:"role"`
 	Status                string    `json:"status"`
 	WorkosOrgMembershipId OptString `json:"workosOrgMembershipId"`
+	AdditionalProps       MembershipAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -2491,6 +3416,11 @@ func (s *Membership) GetWorkosOrgMembershipId() OptString {
 	return s.WorkosOrgMembershipId
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *Membership) GetAdditionalProps() MembershipAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *Membership) SetSchema(val OptURI) {
 	s.Schema = val
@@ -2531,22 +3461,39 @@ func (s *Membership) SetWorkosOrgMembershipId(val OptString) {
 	s.WorkosOrgMembershipId = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *Membership) SetAdditionalProps(val MembershipAdditional) {
+	s.AdditionalProps = val
+}
+
+type MembershipAdditional map[string]jx.Raw
+
+func (s *MembershipAdditional) init() MembershipAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/Mirror
 type Mirror struct {
 	// A URL to the JSON Schema for this object.
 	Schema OptURI `json:"$schema"`
 	// Public host of the cluster serving this mirror.
-	ClusterHost    string      `json:"clusterHost"`
-	CreatedAt      time.Time   `json:"createdAt"`
-	InstallationId OptInt64    `json:"installationId"`
-	IsArchived     OptBool     `json:"isArchived"`
-	IsPrivate      OptBool     `json:"isPrivate"`
-	Jurisdiction   OptString   `json:"jurisdiction"`
-	MirrorId       string      `json:"mirrorId"`
-	Owner          string      `json:"owner"`
-	Provider       string      `json:"provider"`
-	Repo           string      `json:"repo"`
-	SuspendedAt    OptDateTime `json:"suspendedAt"`
+	ClusterHost     string      `json:"clusterHost"`
+	CreatedAt       time.Time   `json:"createdAt"`
+	InstallationId  OptInt64    `json:"installationId"`
+	IsArchived      OptBool     `json:"isArchived"`
+	IsPrivate       OptBool     `json:"isPrivate"`
+	Jurisdiction    OptString   `json:"jurisdiction"`
+	MirrorId        string      `json:"mirrorId"`
+	Owner           string      `json:"owner"`
+	Provider        string      `json:"provider"`
+	Repo            string      `json:"repo"`
+	SuspendedAt     OptDateTime `json:"suspendedAt"`
+	AdditionalProps MirrorAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -2609,6 +3556,11 @@ func (s *Mirror) GetSuspendedAt() OptDateTime {
 	return s.SuspendedAt
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *Mirror) GetAdditionalProps() MirrorAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *Mirror) SetSchema(val OptURI) {
 	s.Schema = val
@@ -2669,12 +3621,29 @@ func (s *Mirror) SetSuspendedAt(val OptDateTime) {
 	s.SuspendedAt = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *Mirror) SetAdditionalProps(val MirrorAdditional) {
+	s.AdditionalProps = val
+}
+
+type MirrorAdditional map[string]jx.Raw
+
+func (s *MirrorAdditional) init() MirrorAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/OIDCProvider
 type OIDCProvider struct {
-	Description OptString `json:"description"`
-	DisplayName OptString `json:"displayName"`
-	ID          string    `json:"id"`
-	Issuer      string    `json:"issuer"`
+	Description     OptString `json:"description"`
+	DisplayName     OptString `json:"displayName"`
+	ID              string    `json:"id"`
+	Issuer          string    `json:"issuer"`
+	AdditionalProps OIDCProviderAdditional
 }
 
 // GetDescription returns the value of Description.
@@ -2697,6 +3666,11 @@ func (s *OIDCProvider) GetIssuer() string {
 	return s.Issuer
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *OIDCProvider) GetAdditionalProps() OIDCProviderAdditional {
+	return s.AdditionalProps
+}
+
 // SetDescription sets the value of Description.
 func (s *OIDCProvider) SetDescription(val OptString) {
 	s.Description = val
@@ -2715,6 +3689,22 @@ func (s *OIDCProvider) SetID(val string) {
 // SetIssuer sets the value of Issuer.
 func (s *OIDCProvider) SetIssuer(val string) {
 	s.Issuer = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *OIDCProvider) SetAdditionalProps(val OIDCProviderAdditional) {
+	s.AdditionalProps = val
+}
+
+type OIDCProviderAdditional map[string]jx.Raw
+
+func (s *OIDCProviderAdditional) init() OIDCProviderAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // NewOptAddOrgMemberInputBodyRole returns new OptAddOrgMemberInputBodyRole with value set to v.
@@ -3554,6 +4544,7 @@ type Org struct {
 	Name                 string    `json:"name"`
 	Region               string    `json:"region"`
 	WorkosOrganizationId OptString `json:"workosOrganizationId"`
+	AdditionalProps      OrgAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -3586,6 +4577,11 @@ func (s *Org) GetWorkosOrganizationId() OptString {
 	return s.WorkosOrganizationId
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *Org) GetAdditionalProps() OrgAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *Org) SetSchema(val OptURI) {
 	s.Schema = val
@@ -3616,16 +4612,33 @@ func (s *Org) SetWorkosOrganizationId(val OptString) {
 	s.WorkosOrganizationId = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *Org) SetAdditionalProps(val OrgAdditional) {
+	s.AdditionalProps = val
+}
+
+type OrgAdditional map[string]jx.Raw
+
+func (s *OrgAdditional) init() OrgAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/Project
 type Project struct {
 	// A URL to the JSON Schema for this object.
-	Schema    OptURI           `json:"$schema"`
-	CreatedAt time.Time        `json:"createdAt"`
-	ID        string           `json:"id"`
-	Name      string           `json:"name"`
-	OwnerId   string           `json:"ownerId"`
-	OwnerType ProjectOwnerType `json:"ownerType"`
-	Region    string           `json:"region"`
+	Schema          OptURI           `json:"$schema"`
+	CreatedAt       time.Time        `json:"createdAt"`
+	ID              string           `json:"id"`
+	Name            string           `json:"name"`
+	OwnerId         string           `json:"ownerId"`
+	OwnerType       ProjectOwnerType `json:"ownerType"`
+	Region          string           `json:"region"`
+	AdditionalProps ProjectAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -3663,6 +4676,11 @@ func (s *Project) GetRegion() string {
 	return s.Region
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *Project) GetAdditionalProps() ProjectAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *Project) SetSchema(val OptURI) {
 	s.Schema = val
@@ -3698,11 +4716,28 @@ func (s *Project) SetRegion(val string) {
 	s.Region = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *Project) SetAdditionalProps(val ProjectAdditional) {
+	s.AdditionalProps = val
+}
+
+type ProjectAdditional map[string]jx.Raw
+
+func (s *ProjectAdditional) init() ProjectAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ProjectGrant
 type ProjectGrant struct {
-	GranteeId   string `json:"granteeId"`
-	GranteeType string `json:"granteeType"`
-	Role        string `json:"role"`
+	GranteeId       string `json:"granteeId"`
+	GranteeType     string `json:"granteeType"`
+	Role            string `json:"role"`
+	AdditionalProps ProjectGrantAdditional
 }
 
 // GetGranteeId returns the value of GranteeId.
@@ -3720,6 +4755,11 @@ func (s *ProjectGrant) GetRole() string {
 	return s.Role
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ProjectGrant) GetAdditionalProps() ProjectGrantAdditional {
+	return s.AdditionalProps
+}
+
 // SetGranteeId sets the value of GranteeId.
 func (s *ProjectGrant) SetGranteeId(val string) {
 	s.GranteeId = val
@@ -3733,6 +4773,22 @@ func (s *ProjectGrant) SetGranteeType(val string) {
 // SetRole sets the value of Role.
 func (s *ProjectGrant) SetRole(val string) {
 	s.Role = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ProjectGrant) SetAdditionalProps(val ProjectGrantAdditional) {
+	s.AdditionalProps = val
+}
+
+type ProjectGrantAdditional map[string]jx.Raw
+
+func (s *ProjectGrantAdditional) init() ProjectGrantAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 type ProjectOwnerType string
@@ -3793,6 +4849,7 @@ type Repo struct {
 	ProvisionAttempts OptInt64            `json:"provisionAttempts"`
 	ProvisionReason   OptString           `json:"provisionReason"`
 	State             OptRepoState        `json:"state"`
+	AdditionalProps   RepoAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -3850,6 +4907,11 @@ func (s *Repo) GetState() OptRepoState {
 	return s.State
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *Repo) GetAdditionalProps() RepoAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *Repo) SetSchema(val OptURI) {
 	s.Schema = val
@@ -3903,6 +4965,22 @@ func (s *Repo) SetProvisionReason(val OptString) {
 // SetState sets the value of State.
 func (s *Repo) SetState(val OptRepoState) {
 	s.State = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *Repo) SetAdditionalProps(val RepoAdditional) {
+	s.AdditionalProps = val
+}
+
+type RepoAdditional map[string]jx.Raw
+
+func (s *RepoAdditional) init() RepoAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 type RepoObjectFormat string
@@ -3997,11 +5075,12 @@ func (s *RepoState) UnmarshalText(data []byte) error {
 // Ref: #/components/schemas/ResolvedIdentity
 type ResolvedIdentity struct {
 	// A URL to the JSON Schema for this object.
-	Schema         OptURI `json:"$schema"`
-	AccountId      string `json:"accountId"`
-	Handle         string `json:"handle"`
-	Provider       string `json:"provider"`
-	ProviderUserId string `json:"providerUserId"`
+	Schema          OptURI `json:"$schema"`
+	AccountId       string `json:"accountId"`
+	Handle          string `json:"handle"`
+	Provider        string `json:"provider"`
+	ProviderUserId  string `json:"providerUserId"`
+	AdditionalProps ResolvedIdentityAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -4029,6 +5108,11 @@ func (s *ResolvedIdentity) GetProviderUserId() string {
 	return s.ProviderUserId
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ResolvedIdentity) GetAdditionalProps() ResolvedIdentityAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ResolvedIdentity) SetSchema(val OptURI) {
 	s.Schema = val
@@ -4054,10 +5138,27 @@ func (s *ResolvedIdentity) SetProviderUserId(val string) {
 	s.ProviderUserId = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ResolvedIdentity) SetAdditionalProps(val ResolvedIdentityAdditional) {
+	s.AdditionalProps = val
+}
+
+type ResolvedIdentityAdditional map[string]jx.Raw
+
+func (s *ResolvedIdentityAdditional) init() ResolvedIdentityAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ResourceAccess
 type ResourceAccess struct {
-	Permissions []string `json:"permissions"`
-	ResourceId  string   `json:"resourceId"`
+	Permissions     []string `json:"permissions"`
+	ResourceId      string   `json:"resourceId"`
+	AdditionalProps ResourceAccessAdditional
 }
 
 // GetPermissions returns the value of Permissions.
@@ -4070,6 +5171,11 @@ func (s *ResourceAccess) GetResourceId() string {
 	return s.ResourceId
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ResourceAccess) GetAdditionalProps() ResourceAccessAdditional {
+	return s.AdditionalProps
+}
+
 // SetPermissions sets the value of Permissions.
 func (s *ResourceAccess) SetPermissions(val []string) {
 	s.Permissions = val
@@ -4078,6 +5184,22 @@ func (s *ResourceAccess) SetPermissions(val []string) {
 // SetResourceId sets the value of ResourceId.
 func (s *ResourceAccess) SetResourceId(val string) {
 	s.ResourceId = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ResourceAccess) SetAdditionalProps(val ResourceAccessAdditional) {
+	s.AdditionalProps = val
+}
+
+type ResourceAccessAdditional map[string]jx.Raw
+
+func (s *ResourceAccessAdditional) init() ResourceAccessAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // RevokeProjectAccessByProviderNoContent is response for RevokeProjectAccessByProvider operation.
@@ -4133,13 +5255,14 @@ func (s *RevokeServiceAccountAccessResourceType) UnmarshalText(data []byte) erro
 // Ref: #/components/schemas/ServiceAccount
 type ServiceAccount struct {
 	// A URL to the JSON Schema for this object.
-	Schema        OptURI    `json:"$schema"`
-	AccountId     string    `json:"accountId"`
-	CreatedAt     time.Time `json:"createdAt"`
-	Name          string    `json:"name"`
-	OrgId         string    `json:"orgId"`
-	Status        string    `json:"status"`
-	SystemManaged bool      `json:"systemManaged"`
+	Schema          OptURI    `json:"$schema"`
+	AccountId       string    `json:"accountId"`
+	CreatedAt       time.Time `json:"createdAt"`
+	Name            string    `json:"name"`
+	OrgId           string    `json:"orgId"`
+	Status          string    `json:"status"`
+	SystemManaged   bool      `json:"systemManaged"`
+	AdditionalProps ServiceAccountAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -4177,6 +5300,11 @@ func (s *ServiceAccount) GetSystemManaged() bool {
 	return s.SystemManaged
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ServiceAccount) GetAdditionalProps() ServiceAccountAdditional {
+	return s.AdditionalProps
+}
+
 // SetSchema sets the value of Schema.
 func (s *ServiceAccount) SetSchema(val OptURI) {
 	s.Schema = val
@@ -4212,12 +5340,29 @@ func (s *ServiceAccount) SetSystemManaged(val bool) {
 	s.SystemManaged = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ServiceAccount) SetAdditionalProps(val ServiceAccountAdditional) {
+	s.AdditionalProps = val
+}
+
+type ServiceAccountAdditional map[string]jx.Raw
+
+func (s *ServiceAccountAdditional) init() ServiceAccountAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ServiceAccountGrant
 type ServiceAccountGrant struct {
-	ResourceId   string    `json:"resourceId"`
-	ResourceName OptString `json:"resourceName"`
-	ResourceType string    `json:"resourceType"`
-	Role         string    `json:"role"`
+	ResourceId      string    `json:"resourceId"`
+	ResourceName    OptString `json:"resourceName"`
+	ResourceType    string    `json:"resourceType"`
+	Role            string    `json:"role"`
+	AdditionalProps ServiceAccountGrantAdditional
 }
 
 // GetResourceId returns the value of ResourceId.
@@ -4240,6 +5385,11 @@ func (s *ServiceAccountGrant) GetRole() string {
 	return s.Role
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ServiceAccountGrant) GetAdditionalProps() ServiceAccountGrantAdditional {
+	return s.AdditionalProps
+}
+
 // SetResourceId sets the value of ResourceId.
 func (s *ServiceAccountGrant) SetResourceId(val string) {
 	s.ResourceId = val
@@ -4260,15 +5410,32 @@ func (s *ServiceAccountGrant) SetRole(val string) {
 	s.Role = val
 }
 
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ServiceAccountGrant) SetAdditionalProps(val ServiceAccountGrantAdditional) {
+	s.AdditionalProps = val
+}
+
+type ServiceAccountGrantAdditional map[string]jx.Raw
+
+func (s *ServiceAccountGrantAdditional) init() ServiceAccountGrantAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ServiceAccountWithGrants
 type ServiceAccountWithGrants struct {
-	AccountId     string    `json:"accountId"`
-	CreatedAt     time.Time `json:"createdAt"`
-	Grants        []string  `json:"grants"`
-	Name          string    `json:"name"`
-	OrgId         string    `json:"orgId"`
-	Status        string    `json:"status"`
-	SystemManaged bool      `json:"systemManaged"`
+	AccountId       string    `json:"accountId"`
+	CreatedAt       time.Time `json:"createdAt"`
+	Grants          []string  `json:"grants"`
+	Name            string    `json:"name"`
+	OrgId           string    `json:"orgId"`
+	Status          string    `json:"status"`
+	SystemManaged   bool      `json:"systemManaged"`
+	AdditionalProps ServiceAccountWithGrantsAdditional
 }
 
 // GetAccountId returns the value of AccountId.
@@ -4306,6 +5473,11 @@ func (s *ServiceAccountWithGrants) GetSystemManaged() bool {
 	return s.SystemManaged
 }
 
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ServiceAccountWithGrants) GetAdditionalProps() ServiceAccountWithGrantsAdditional {
+	return s.AdditionalProps
+}
+
 // SetAccountId sets the value of AccountId.
 func (s *ServiceAccountWithGrants) SetAccountId(val string) {
 	s.AccountId = val
@@ -4339,6 +5511,22 @@ func (s *ServiceAccountWithGrants) SetStatus(val string) {
 // SetSystemManaged sets the value of SystemManaged.
 func (s *ServiceAccountWithGrants) SetSystemManaged(val bool) {
 	s.SystemManaged = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ServiceAccountWithGrants) SetAdditionalProps(val ServiceAccountWithGrantsAdditional) {
+	s.AdditionalProps = val
+}
+
+type ServiceAccountWithGrantsAdditional map[string]jx.Raw
+
+func (s *ServiceAccountWithGrantsAdditional) init() ServiceAccountWithGrantsAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 type SessionAuth struct {

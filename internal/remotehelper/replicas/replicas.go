@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/internal/entireclient/discovery"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/entireio/cli/internal/remotehelper/debuglog"
 )
 
@@ -74,7 +75,7 @@ func ExtractRepoPath(urlPath string) string {
 // LoadFresh returns the cached replica set for (host, repoPath) if one
 // exists and is fresh, otherwise nil.
 func LoadFresh(host, repoPath string) []string {
-	cache, err := discovery.LoadCache(discovery.DefaultCacheDir())
+	cache, err := discovery.LoadCache(userdirs.Cache())
 	if err != nil || cache == nil {
 		return nil
 	}
@@ -93,7 +94,7 @@ func Persist(host, repoPath string, nodes []string) {
 	if host == "" || repoPath == "" || len(nodes) == 0 {
 		return
 	}
-	if err := discovery.ModifyCache(discovery.DefaultCacheDir(), func(cache discovery.ClusterCache) error {
+	if err := discovery.ModifyCache(userdirs.Cache(), func(cache discovery.ClusterCache) error {
 		cache.SetRepoNodes(host, repoPath, nodes, discovery.DefaultTTL)
 		return nil
 	}); err != nil {
@@ -108,7 +109,7 @@ func Invalidate(host, repoPath string) {
 	if host == "" || repoPath == "" {
 		return
 	}
-	if err := discovery.ModifyCache(discovery.DefaultCacheDir(), func(cache discovery.ClusterCache) error {
+	if err := discovery.ModifyCache(userdirs.Cache(), func(cache discovery.ClusterCache) error {
 		cache.InvalidateRepo(host, repoPath)
 		return nil
 	}); err != nil {

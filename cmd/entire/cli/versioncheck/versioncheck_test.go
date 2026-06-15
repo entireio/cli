@@ -422,13 +422,13 @@ func TestUpdateCommand(t *testing.T) {
 	}
 }
 
-// setupCheckAndNotifyTest sets HOME to a temp dir and overrides githubAPIURL.
-// Returns a cobra.Command with captured stdout and a cleanup function.
+// setupCheckAndNotifyTest points the global config dir at a per-test temp
+// dir and overrides githubAPIURL. Returns a cobra.Command with captured
+// stdout and a cleanup function.
 func setupCheckAndNotifyTest(t *testing.T, serverURL string) (*cobra.Command, *bytes.Buffer) {
 	t.Helper()
 
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 
 	origURL := githubAPIURL
 	githubAPIURL = serverURL
@@ -505,10 +505,7 @@ func TestCheckAndNotify_SkipsWhenCacheIsFresh(t *testing.T) {
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
 
 	// Pre-seed the cache with a recent check time
-	configDir, err := globalConfigDirPath()
-	if err != nil {
-		t.Fatalf("globalConfigDirPath() error = %v", err)
-	}
+	configDir := globalConfigDirPath()
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}

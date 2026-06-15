@@ -78,15 +78,78 @@ type TrailReviewComment struct {
 	OutgoingLinks             []TrailReviewOutgoingLink    `json:"outgoing_links,omitempty"`
 }
 
-// TrailReviewCommentCreateRequest creates an agent-native review finding on a trail.
-type TrailReviewCommentCreateRequest struct {
-	Title            *string                                   `json:"title,omitempty"`
-	Body             string                                    `json:"body"`
-	Severity         *string                                   `json:"severity,omitempty"`
-	Confidence       *float64                                  `json:"confidence,omitempty"`
-	ClientID         *string                                   `json:"client_id,omitempty"`
-	Location         TrailReviewLocationCreateRequest          `json:"location"`
-	SuggestedChanges []TrailReviewSuggestedChangeCreateRequest `json:"suggested_changes,omitempty"`
+// TrailReviewStartRequest starts a review session for a trail via
+// POST /api/v1/trails/{trail_id}/reviews. All fields are optional; the server
+// resolves the code version (base/head) when they are omitted.
+type TrailReviewStartRequest struct {
+	HeadSHA *string `json:"head_sha,omitempty"`
+	BaseSHA *string `json:"base_sha,omitempty"`
+	BaseRef *string `json:"base_ref,omitempty"`
+	HeadRef *string `json:"head_ref,omitempty"`
+}
+
+// TrailReviewStartResponse is returned by POST /api/v1/trails/{trail_id}/reviews.
+type TrailReviewStartResponse struct {
+	ReviewID       string            `json:"review_id"`
+	TrailID        string            `json:"trail_id"`
+	RepositoryID   string            `json:"repository_id"`
+	CodeVersionID  string            `json:"code_version_id"`
+	BaseSHA        *string           `json:"base_sha"`
+	HeadSHA        *string           `json:"head_sha"`
+	EventStreamURL string            `json:"event_stream_url"`
+	DiffURL        string            `json:"diff_url"`
+	FilesURL       string            `json:"files_url"`
+	Limits         TrailReviewLimits `json:"limits"`
+}
+
+// TrailReviewLimits carries the server-enforced batch limits for a review.
+type TrailReviewLimits struct {
+	MaxCommentsPerBatch int `json:"max_comments_per_batch"`
+}
+
+// TrailReviewCommentBatchRequest posts a batch of findings to a review via
+// POST /api/v1/trails/{trail_id}/reviews/{id}/comments. The API requires at
+// least one comment and rejects batches larger than the review's
+// max_comments_per_batch limit.
+type TrailReviewCommentBatchRequest struct {
+	Comments []TrailReviewCommentInput `json:"comments"`
+}
+
+// TrailReviewCommentInput is a single finding within a batch create request.
+// client_id (an idempotency key) and location are required by the API.
+type TrailReviewCommentInput struct {
+	ClientID        string                                   `json:"client_id"`
+	Body            *string                                  `json:"body,omitempty"`
+	Severity        *string                                  `json:"severity,omitempty"`
+	Confidence      *float64                                 `json:"confidence,omitempty"`
+	Status          *string                                  `json:"status,omitempty"`
+	StatusReason    *string                                  `json:"status_reason,omitempty"`
+	Location        TrailReviewLocationCreateRequest         `json:"location"`
+	SuggestedChange *TrailReviewSuggestedChangeCreateRequest `json:"suggested_change,omitempty"`
+}
+
+// TrailReviewCommentBatchResponse is returned by the batch comment endpoint.
+type TrailReviewCommentBatchResponse struct {
+	Results []TrailReviewCommentBatchResult `json:"results"`
+}
+
+// TrailReviewCommentBatchResult reports the per-finding outcome of a batch.
+// Status is one of "created", "existing", or "error"; Comment is populated for
+// the first two, Error for the last.
+type TrailReviewCommentBatchResult struct {
+	ClientID        string                        `json:"client_id"`
+	Status          string                        `json:"status"`
+	Comment         *TrailReviewComment           `json:"comment,omitempty"`
+	SuggestedChange *TrailReviewSuggestedChange   `json:"suggested_change,omitempty"`
+	Error           *TrailReviewCommentBatchError `json:"error,omitempty"`
+}
+
+// TrailReviewCommentBatchError describes why a single finding in a batch failed.
+type TrailReviewCommentBatchError struct {
+	Code      string  `json:"code"`
+	Message   string  `json:"message"`
+	Field     *string `json:"field"`
+	Retryable bool    `json:"retryable"`
 }
 
 // TrailReviewLocationCreateRequest identifies where a new finding applies.

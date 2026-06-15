@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	gogit "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
@@ -184,9 +185,10 @@ func setupTestRepo(t *testing.T) (*gogit.Repository, string) {
 		dir = resolved
 	}
 
-	repo, err := gogit.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := gogit.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("git init: %v", err)
+		t.Fatalf("git open: %v", err)
 	}
 
 	wt, err := repo.Worktree()

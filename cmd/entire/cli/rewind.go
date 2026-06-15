@@ -50,8 +50,9 @@ func newRewindCmd() *cobra.Command {
 	var resetFlag bool
 
 	cmd := &cobra.Command{
-		Use:   "rewind",
-		Short: "Browse checkpoints and rewind your session",
+		Use:        "rewind",
+		Short:      "Browse checkpoints and rewind your session",
+		Deprecated: "and will be removed in a future release",
 		Long: `Interactive command for rewinding and managing agent sessions.
 
 This command will show you an interactive list of recent checkpoints.  You'll be

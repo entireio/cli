@@ -73,13 +73,14 @@ func (id ID) ShardParts() (shard, suffix string) {
 // Status represents the lifecycle status of a trail.
 type Status string
 
+// The status set mirrors the server's repo_trails check constraint
+// ('draft', 'open', 'merged', 'closed'). The former in_progress and
+// in_review statuses were folded into open server-side.
 const (
-	StatusDraft      Status = "draft"
-	StatusOpen       Status = "open"
-	StatusInProgress Status = "in_progress"
-	StatusInReview   Status = "in_review"
-	StatusMerged     Status = "merged"
-	StatusClosed     Status = "closed"
+	StatusDraft  Status = "draft"
+	StatusOpen   Status = "open"
+	StatusMerged Status = "merged"
+	StatusClosed Status = "closed"
 )
 
 // ValidStatuses returns all valid trail statuses in lifecycle order.
@@ -87,8 +88,6 @@ func ValidStatuses() []Status {
 	return []Status{
 		StatusDraft,
 		StatusOpen,
-		StatusInProgress,
-		StatusInReview,
 		StatusMerged,
 		StatusClosed,
 	}

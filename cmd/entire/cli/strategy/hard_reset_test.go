@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
@@ -21,9 +22,10 @@ func TestHardResetWithProtection_PreservesProtectedDirs(t *testing.T) {
 	repoDir := t.TempDir()
 
 	// Initialize a git repo
-	repo, err := git.PlainInit(repoDir, false)
+	testutil.InitRepo(t, repoDir)
+	repo, err := git.PlainOpen(repoDir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()

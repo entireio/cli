@@ -45,6 +45,16 @@ var experimentalCommands = []experimentalCommandInfo{
 		Invocation: "entire grant",
 		Summary:    "Manage access grants and org membership (org, project, repo)",
 	},
+	{
+		Name:       "blame",
+		Invocation: "entire blame",
+		Summary:    "Show which lines came from Entire checkpoints",
+	},
+	{
+		Name:       "why",
+		Invocation: "entire why",
+		Summary:    "Show why a line exists (commit, checkpoint, prompt, session)",
+	},
 }
 
 func newLabsCmd() *cobra.Command {
@@ -91,6 +101,8 @@ Try:
   entire project --help
   entire repo --help
   entire grant --help
+  entire blame --help
+  entire why --help
 `
 }
 

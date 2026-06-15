@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/auth-go/sts"
 	"github.com/entireio/auth-go/tokenmanager"
@@ -123,6 +124,19 @@ func TestRunAuthStatus_RendersSessionsTable(t *testing.T) {
 	}
 	if !strings.Contains(got, "entire logout --everywhere") {
 		t.Fatalf("output = %q, want logout hint tying the table to logout", got)
+	}
+}
+
+func TestFormatAuthDate_DoesNotShiftUTCDateToLocalTimezone(t *testing.T) {
+	oldLocal := time.Local
+	time.Local = time.FixedZone("PST", -8*60*60)
+	t.Cleanup(func() {
+		time.Local = oldLocal
+	})
+
+	got := formatAuthDate("2026-01-01T00:00:00Z")
+	if got != "2026-01-01" {
+		t.Fatalf("formatAuthDate() = %q, want %q", got, "2026-01-01")
 	}
 }
 
@@ -271,115 +285,16 @@ func TestAuthCmd_RegistersExpectedSubcommands(t *testing.T) {
 	}
 }
 
-// --- resolveDataAPIToken ----------------------------------------------------
-//
-// These tests exercise the production path: they install a real
-// tokenmanager.Manager via auth.SetManagerForTest and stub only the
-// STS wire call via SetExchangeForTest. That covers the audience-
-// matching logic the function-injection tests above can't reach
-// (revokeCurrentAuthSession / revokeAllAuthSessions call
-// resolveAuthHostToken directly, but unit tests for the surrounding flows
-// inject fakes that bypass it).
-
 // authResolveTestIssuer is intentionally distinct from api.AuthBaseURL() so
 // the manager's same-host shortcut is skipped and the STS-exchange path runs.
 const authResolveTestIssuer = "https://auth.resolve-test.example.com"
 
-func TestResolveAuthHostToken_ScopesExchangeToAuthHostOrigin(t *testing.T) {
-	// No t.Parallel: SetManagerForTest mutates package-level state in the
-	// auth package. Concurrent tests in this package don't reach the real
-	// auth.TokenForResource path (they inject lister/revoker fakes), so
-	// serial execution here is purely defensive.
-
-	store := newAuthMemStore()
-	saveCoreToken(t, store, authResolveTestIssuer, "opaque-core-token")
-
-	var capturedResource string
-	mgr := newResolveTestManager(t, store, func(_ context.Context, req sts.ExchangeRequest) (*tokens.TokenSet, error) {
-		capturedResource = req.Resource
-		return &tokens.TokenSet{AccessToken: "exchanged-auth-host-tok"}, nil
-	})
-	t.Cleanup(auth.SetManagerForTest(t, mgr))
-
-	got, err := resolveAuthHostToken(t.Context())
-	if err != nil {
-		t.Fatalf("resolveAuthHostToken: %v", err)
-	}
-
-	if got != "exchanged-auth-host-tok" {
-		t.Errorf("token = %q, want %q", got, "exchanged-auth-host-tok")
-	}
-	// The whole point of the helper: when an exchange happens, the resource
-	// handed to STS must be the auth host's origin (where the session
-	// endpoints live), not the raw env-var value.
-	if want := api.OriginOnly(api.AuthBaseURL()); capturedResource != want {
-		t.Errorf("STS exchange Resource = %q, want %q (api.OriginOnly(api.AuthBaseURL()))",
-			capturedResource, want)
-	}
-}
-
-func TestResolveAuthHostToken_WrapsManagerError(t *testing.T) {
-	store := newAuthMemStore()
-	saveCoreToken(t, store, authResolveTestIssuer, "opaque-core-token")
-
-	mgr := newResolveTestManager(t, store, func(context.Context, sts.ExchangeRequest) (*tokens.TokenSet, error) {
-		return nil, errors.New("simulated transport failure")
-	})
-	t.Cleanup(auth.SetManagerForTest(t, mgr))
-
-	_, err := resolveAuthHostToken(t.Context())
-	if err == nil {
-		t.Fatal("expected error when exchange fails")
-	}
-	if !strings.Contains(err.Error(), "resolve auth-host token") {
-		t.Errorf("error = %v, want 'resolve auth-host token' wrap prefix", err)
-	}
-	if !strings.Contains(err.Error(), "simulated transport failure") {
-		t.Errorf("error = %v, want underlying message preserved", err)
-	}
-}
-
-// --- isKeychainTokenRejected -----------------------------------------------
-
-func TestIsKeychainTokenRejected_AllShapes(t *testing.T) {
-	t.Parallel()
-
-	cases := map[string]struct {
-		err  error
-		want bool
-	}{
-		"data API 401":           {&api.HTTPError{StatusCode: http.StatusUnauthorized}, true},
-		"data API 500":           {&api.HTTPError{StatusCode: http.StatusInternalServerError}, false},
-		"ErrNotLoggedIn":         {auth.ErrNotLoggedIn, true},
-		"wrapped ErrNotLoggedIn": {errors.New("resolve API token: " + auth.ErrNotLoggedIn.Error()), false /* string-only, no chain — not detected */},
-		"sts 401":                {errors.New("token exchange: status 401: invalid_client"), true},
-		"sts 400 invalid_grant":  {errors.New("token exchange: status 400: invalid_grant: token expired"), true},
-		"sts 500":                {errors.New("token exchange: status 500: server_error"), false},
-		"network error":          {errors.New("dial tcp: i/o timeout"), false},
-		// ogen decode failure on a non-JSON 401 body (the /me cross-core case).
-		"non-JSON 401 decode": {errors.New("decode response: default (code 401): unexpected Content-Type: text/plain"), true},
-		"non-JSON 500 decode": {errors.New("decode response: default (code 500): unexpected Content-Type: text/plain"), false},
-	}
-
-	// Confirm wrapped chains do propagate (the "wrapped ErrNotLoggedIn"
-	// case above uses string substitution which intentionally doesn't
-	// preserve the sentinel; this case uses fmt.Errorf %w which does).
-	cases["fmt.Errorf %w ErrNotLoggedIn"] = struct {
-		err  error
-		want bool
-	}{errors.Join(errors.New("resolve API token"), auth.ErrNotLoggedIn), true}
-
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			if got := isKeychainTokenRejected(tc.err); got != tc.want {
-				t.Errorf("isKeychainTokenRejected(%v) = %v, want %v", tc.err, got, tc.want)
-			}
-		})
-	}
-}
-
-// --- helpers for resolveAuthHostToken tests ---------------------------------
+// --- shared token-manager test helpers --------------------------------------
+//
+// Used by the data-API resolution tests (activity_cmd_test.go and friends) to
+// install a real tokenmanager.Manager via auth.SetManagerForTest while stubbing
+// only the STS wire call, so the static fallback path runs end-to-end without a
+// live core.
 
 // authMemStore is an in-memory tokenstore.Store for tests that need a
 // real tokenmanager.Manager. Mirrors the private memStore in auth-go's
@@ -429,6 +344,46 @@ func newResolveTestManager(t *testing.T, store tokenstore.Store, exchange func(c
 	}
 	tokenmanager.SetExchangeForTest(t, mgr, exchange)
 	return mgr
+}
+
+// --- isKeychainTokenRejected -----------------------------------------------
+
+func TestIsKeychainTokenRejected_AllShapes(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		err  error
+		want bool
+	}{
+		"data API 401":           {&api.HTTPError{StatusCode: http.StatusUnauthorized}, true},
+		"data API 500":           {&api.HTTPError{StatusCode: http.StatusInternalServerError}, false},
+		"ErrNotLoggedIn":         {auth.ErrNotLoggedIn, true},
+		"wrapped ErrNotLoggedIn": {errors.New("resolve API token: " + auth.ErrNotLoggedIn.Error()), false /* string-only, no chain — not detected */},
+		"sts 401":                {errors.New("token exchange: status 401: invalid_client"), true},
+		"sts 400 invalid_grant":  {errors.New("token exchange: status 400: invalid_grant: token expired"), true},
+		"sts 500":                {errors.New("token exchange: status 500: server_error"), false},
+		"network error":          {errors.New("dial tcp: i/o timeout"), false},
+		// ogen decode failure on a non-JSON 401 body (the /me cross-core case).
+		"non-JSON 401 decode": {errors.New("decode response: default (code 401): unexpected Content-Type: text/plain"), true},
+		"non-JSON 500 decode": {errors.New("decode response: default (code 500): unexpected Content-Type: text/plain"), false},
+	}
+
+	// Confirm wrapped chains do propagate (the "wrapped ErrNotLoggedIn"
+	// case above uses string substitution which intentionally doesn't
+	// preserve the sentinel; this case uses fmt.Errorf %w which does).
+	cases["fmt.Errorf %w ErrNotLoggedIn"] = struct {
+		err  error
+		want bool
+	}{errors.Join(errors.New("resolve API token"), auth.ErrNotLoggedIn), true}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := isKeychainTokenRejected(tc.err); got != tc.want {
+				t.Errorf("isKeychainTokenRejected(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestAuthCmd_TopLevelLoginAndLogoutStillRegistered(t *testing.T) {

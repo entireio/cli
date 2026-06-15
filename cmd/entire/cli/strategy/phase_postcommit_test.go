@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v6"
@@ -951,14 +952,9 @@ func TestFilesChangedInCommit_InitialCommit(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
-
-	cfg, err := repo.Config()
-	require.NoError(t, err)
-	cfg.User.Name = "Test"
-	cfg.User.Email = "test@test.com"
-	require.NoError(t, repo.SetConfig(cfg))
 
 	wt, err := repo.Worktree()
 	require.NoError(t, err)

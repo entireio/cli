@@ -117,7 +117,9 @@ Just use one of your AI agents as before. Entire runs in the background, trackin
 entire status  # Check current session status anytime
 ```
 
-### 3. Rewind to a Previous Checkpoint
+### 3. Rewind to a Previous Checkpoint (deprecated)
+
+> **Deprecated:** `entire checkpoint rewind` will be removed in a future release.
 
 If you want to undo some changes and go back to an earlier checkpoint:
 
@@ -210,13 +212,12 @@ If you're working on the CLI device auth flow against a local `entire.io` checko
 cd ../entire.io-1
 mise run dev
 
-# In this repo, point the CLI at the local API. Both env vars are
-# required: ENTIRE_AUTH_BASE_URL no longer inherits from
-# ENTIRE_API_BASE_URL — without it, the login flow reaches for the
-# production us.auth.entire.io.
+# In this repo, point data-API commands at the local API.
+# (ENTIRE_AUTH_BASE_URL is retired — commands refuse to run while it's
+# exported. The login server is chosen at login time via --server, and
+# every other command follows the login context.)
 cd ../cli
 export ENTIRE_API_BASE_URL=http://localhost:8787
-export ENTIRE_AUTH_BASE_URL=http://localhost:8787
 
 # Run the smoke test
 ./scripts/local-device-auth-smoke.sh
@@ -226,7 +227,7 @@ Useful commands while developing:
 
 ```bash
 # Run the login flow against a local server (prompts to press Enter before opening the browser)
-go run ./cmd/entire login --insecure-http-auth
+go run ./cmd/entire login --server http://localhost:8787 --insecure-http-auth
 
 # Run the focused integration coverage for login
 go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
@@ -242,9 +243,9 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire disable` | Remove Entire hooks from repository                                                               |
 | `entire doctor`  | Fix or clean up stuck sessions                                                                    |
 | `entire enable`  | Enable Entire in your repository                                                                  |
-| `entire checkpoint`        | List, explain, rewind, and search checkpoints                                           |
+| `entire checkpoint`        | List, explain, and search checkpoints                                                   |
 | `entire checkpoint explain` | Explain a session, commit, or checkpoint                                               |
-| `entire checkpoint rewind` | Rewind to a previous checkpoint                                                         |
+| `entire checkpoint rewind` | Rewind to a previous checkpoint (deprecated, will be removed in a future release)       |
 | `entire login`   | Authenticate the CLI with Entire device auth                                                      |
 | `entire session` | View and manage agent sessions tracked by Entire                                                  |
 | `entire session resume`    | Switch to a branch, restore latest checkpointed session metadata, and show command(s) |
@@ -252,6 +253,13 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire status`  | Show current session info                                                                         |
 | `entire doctor trace` | Show hook performance traces                                                                 |
 | `entire version` | Show Entire CLI version                                                                           |
+
+`entire blame` and `entire why` are experimental Labs commands. Run `entire
+labs` to discover them. `entire blame <file>` shows which current file lines
+came from an Entire checkpoint, and `entire why <file>:<line>` jumps from a
+specific line back to the prompt, session, and checkpoint that created it. Use
+`entire blame <file> --long` for the full agent, model, author, and session
+table.
 
 ### `entire enable` Flags
 

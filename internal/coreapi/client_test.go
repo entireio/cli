@@ -113,7 +113,7 @@ func TestProviderSource_BearerAuth(t *testing.T) {
 		// The active-context provider returns an already-tailored message; it
 		// must reach the user unprefixed (no generic "resolve control-plane
 		// token" wrapper burying it) and without the login hint.
-		sentinel := errors.New(`no usable login for "ctx" (https://core.example); run ENTIRE_AUTH_BASE_URL=https://core.example entire login`)
+		sentinel := errors.New(`no usable login for "ctx" (https://core.example); run entire login --server https://core.example`)
 		src := &providerSource{provide: func(context.Context) (string, error) { return "", sentinel }}
 		_, err := src.BearerAuth(context.Background(), "")
 		if err == nil || err.Error() != sentinel.Error() {

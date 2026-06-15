@@ -119,9 +119,11 @@ func TestResolve_NoEligibleContextReturnsLoginHint(t *testing.T) {
 	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no auth context for cluster aws-eu-central-1.entire.io")
-	assert.Contains(t, err.Error(), "https://eu.auth.entire.io")
 	assert.Contains(t, err.Error(), "entire login")
-	assert.Contains(t, err.Error(), "ENTIRE_AUTH_BASE_URL")
+	// Advertised login servers + the `entire auth use` hint are intentionally
+	// squashed for now (see renderLoginHint).
+	assert.NotContains(t, err.Error(), "https://eu.auth.entire.io")
+	assert.NotContains(t, err.Error(), "entire auth use")
 }
 
 // TestResolve_CoresCachedAcrossCalls: the first call hits /.well-known and

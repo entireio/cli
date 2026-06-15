@@ -48,9 +48,10 @@ func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Initialize a git repository
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create metadata directory structure
@@ -108,9 +109,10 @@ func TestWriteCommitted_AgentField(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Initialize a git repository with an initial commit
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create worktree and make initial commit
@@ -299,9 +301,10 @@ func TestWriteTemporary_Deduplication(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Initialize a git repository with an initial commit
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create worktree and make initial commit
@@ -423,9 +426,10 @@ func setupBranchTestRepo(t *testing.T) (*git.Repository, plumbing.Hash) {
 	t.Helper()
 	tempDir := t.TempDir()
 
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -846,9 +850,10 @@ func TestUpdateSummary_NotFound(t *testing.T) {
 func TestListCommitted_FallsBackToRemote(t *testing.T) {
 	// Create "remote" repo (non-bare, so we can make commits)
 	remoteDir := t.TempDir()
-	remoteRepo, err := git.PlainInit(remoteDir, false)
+	testutil.InitRepo(t, remoteDir)
+	remoteRepo, err := git.PlainOpen(remoteDir)
 	if err != nil {
-		t.Fatalf("failed to init remote repo: %v", err)
+		t.Fatalf("failed to open remote repo: %v", err)
 	}
 
 	// Create an initial commit on main branch (required for cloning)
@@ -993,9 +998,10 @@ func TestGetCheckpointAuthor_NotFound(t *testing.T) {
 func TestGetCheckpointAuthor_NoSessionsBranch(t *testing.T) {
 	// Create a fresh repo without sessions branch
 	tempDir := t.TempDir()
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	store := NewGitStore(repo, DefaultV1Refs())
@@ -1746,9 +1752,10 @@ func TestWriteTemporary_FirstCheckpoint_CapturesModifiedTrackedFiles(t *testing.
 	tempDir := t.TempDir()
 
 	// Initialize a git repository with an initial commit containing README.md
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -1883,9 +1890,10 @@ func TestWriteTemporary_PathNormalizationAndSkipping(t *testing.T) {
 				t.Fatalf("failed to resolve symlinks: %v", err)
 			}
 
-			repo, err := git.PlainInit(tempDir, false)
+			testutil.InitRepo(t, tempDir)
+			repo, err := git.PlainOpen(tempDir)
 			if err != nil {
-				t.Fatalf("failed to init git repo: %v", err)
+				t.Fatalf("failed to open git repo: %v", err)
 			}
 
 			worktree, err := repo.Worktree()
@@ -1976,9 +1984,10 @@ func TestWriteTemporary_FirstCheckpoint_CapturesUntrackedFiles(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Initialize a git repository with an initial commit
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -2073,9 +2082,10 @@ func TestWriteTemporary_FirstCheckpoint_ExcludesGitIgnoredFiles(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Initialize a git repository with an initial commit
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -2528,9 +2538,10 @@ func TestWriteTemporary_FirstCheckpoint_UserAndAgentChanges(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Initialize a git repository with an initial commit
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -2647,9 +2658,10 @@ func TestWriteTemporary_FirstCheckpoint_CapturesUserDeletedFiles(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Initialize a git repository with an initial commit
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -2749,9 +2761,10 @@ func TestWriteTemporary_FirstCheckpoint_CapturesRenamedFiles(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Initialize a git repository with an initial commit
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -2847,9 +2860,10 @@ func TestWriteTemporary_FirstCheckpoint_FilenamesWithSpaces(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Initialize a git repository with an initial commit
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -3384,9 +3398,10 @@ func TestWriteCommitted_RedactsPromptSecrets(t *testing.T) {
 func TestCopyMetadataDir_RedactsSecrets(t *testing.T) {
 	tempDir := t.TempDir()
 
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	metadataDir := filepath.Join(tempDir, "metadata")
@@ -3454,9 +3469,10 @@ func TestWriteCommitted_CLIVersionField(t *testing.T) {
 
 	tempDir := t.TempDir()
 
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -3567,9 +3583,10 @@ func TestWriteCommitted_ModelFieldAlwaysPresent(t *testing.T) {
 
 	tempDir := t.TempDir()
 
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -3965,9 +3982,10 @@ func TestWriteTemporaryTask_SubagentTranscript_RedactsSecrets(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Initialize a git repository with an initial commit
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -4056,9 +4074,10 @@ func TestAddDirectoryToEntries_PathTraversal(t *testing.T) {
 	t.Parallel()
 	tempDir := t.TempDir()
 
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create a directory structure where the relative path could escape
@@ -4091,9 +4110,10 @@ func TestAddDirectoryToEntries_SkipsSymlinks(t *testing.T) {
 	t.Parallel()
 	tempDir := t.TempDir()
 
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create metadata directory
@@ -4145,9 +4165,10 @@ func TestAddDirectoryToEntries_SkipsSymlinkedDirectories(t *testing.T) {
 	t.Parallel()
 	tempDir := t.TempDir()
 
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create metadata directory with a regular file
@@ -4203,9 +4224,10 @@ func TestAddDirectoryToEntries_SkipsSymlinkedDirectories(t *testing.T) {
 func TestWriteTemporaryTask_ExcludesGitIgnoredFiles(t *testing.T) {
 	tempDir := t.TempDir()
 
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -4522,9 +4544,10 @@ func readSessionMetadataAtIndex(t *testing.T, repo *git.Repository, checkpointID
 func initRepoForCheckpointTest(t *testing.T) *git.Repository {
 	t.Helper()
 	tempDir := t.TempDir()
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("init git repo: %v", err)
+		t.Fatalf("open git repo: %v", err)
 	}
 	worktree, err := repo.Worktree()
 	if err != nil {

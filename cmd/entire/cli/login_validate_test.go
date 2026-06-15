@@ -108,3 +108,41 @@ func TestValidateReceivedToken_AllowsFutureExp(t *testing.T) {
 		t.Fatalf("validateReceivedToken(future exp) = %v, want nil", err)
 	}
 }
+
+func TestParseLoginServer(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, in, want string // want=="" means error expected
+	}{
+		{"default form", "https://us.auth.entire.io", "https://us.auth.entire.io"},
+		{"trailing slash normalised", "https://eu.auth.entire.io/", "https://eu.auth.entire.io"},
+		{"case and default port normalised", "HTTPS://US.AUTH.ENTIRE.IO:443", "https://us.auth.entire.io"},
+		{"loopback http kept", "http://127.0.0.1:8787", "http://127.0.0.1:8787"},
+		{"empty", "", ""},
+		{"whitespace only", "   ", ""},
+		{"no scheme", "us.auth.entire.io", ""},
+		{"bad scheme", "ftp://x.example", ""},
+		{"userinfo rejected", "https://tok@evil.example", ""},
+		{"path rejected", "https://x.example/oauth", ""},
+		{"query rejected", "https://x.example?a=1", ""},
+		{"fragment rejected", "https://x.example#frag", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseLoginServer(tc.in)
+			if tc.want == "" {
+				if err == nil {
+					t.Fatalf("parseLoginServer(%q) = %q, want error", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseLoginServer(%q): %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("parseLoginServer(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

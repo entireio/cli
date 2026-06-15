@@ -72,9 +72,10 @@ func TestIsShadowBranch(t *testing.T) {
 func TestListShadowBranches(t *testing.T) {
 	// Setup: create a temp git repo with various branches
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -146,9 +147,10 @@ func TestListShadowBranches(t *testing.T) {
 func TestListShadowBranches_Empty(t *testing.T) {
 	// Setup: create a temp git repo with no shadow branches
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -188,9 +190,10 @@ func TestListShadowBranches_Empty(t *testing.T) {
 func TestDeleteShadowBranches(t *testing.T) {
 	// Setup: create a temp git repo with shadow branches
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -252,9 +255,10 @@ func TestDeleteShadowBranches(t *testing.T) {
 func TestDeleteShadowBranches_NonExistent(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -295,10 +299,7 @@ func TestDeleteShadowBranches_NonExistent(t *testing.T) {
 func TestDeleteShadowBranches_Empty(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -326,9 +327,10 @@ func TestDeleteShadowBranches_Empty(t *testing.T) {
 func TestListOrphanedSessionStates_RecentSessionNotOrphaned(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -390,9 +392,10 @@ func TestListOrphanedSessionStates_RecentSessionNotOrphaned(t *testing.T) {
 func TestListOrphanedSessionStates_ShadowBranchMatching(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)

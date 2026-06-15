@@ -7,8 +7,13 @@ import (
 )
 
 // TrailListResponse is the response from GET /api/v1/trails/:org/:repo.
+// The endpoint paginates: Trails holds one page (server max 200 rows) and
+// Total is the full match count for the requested filters.
 type TrailListResponse struct {
 	Trails        []TrailResource `json:"trails"`
+	Total         int             `json:"total"`
+	Limit         int             `json:"limit"`
+	Offset        int             `json:"offset"`
 	RepoFullName  string          `json:"repo_full_name"`
 	DefaultBranch string          `json:"default_branch"`
 	UpdatedAt     time.Time       `json:"updated_at"`

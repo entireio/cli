@@ -6,7 +6,8 @@
 // which is useful in CI environments that lack a keyring daemon.
 //
 // When using the file backend the tokens are stored in
-// $ENTIRE_TOKEN_STORE_PATH (default: ~/.config/entire/tokens.json).
+// $ENTIRE_TOKEN_STORE_PATH (default: tokens.json in the per-user config
+// directory — see internal/entireclient/userdirs).
 //
 // Service-name conventions:
 //   - "entire:<cluster-host>"        — entiredb cluster login tokens
@@ -16,12 +17,15 @@
 package tokenstore
 
 import (
-	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/zalando/go-keyring"
+
+	"github.com/entireio/cli/internal/entireclient/userdirs"
+	"github.com/entireio/cli/internal/testdirs"
 )
 
 // ErrNotFound is returned when a credential is not present in the store.
@@ -86,7 +90,7 @@ type store interface {
 	Delete(service, user string) error
 }
 
-func currentBackend() store { //nolint:ireturn // pluggable keyring backend; the interface return is the seam for the file-backed test store
+func currentBackend() store {
 	backendMu.Lock()
 	defer backendMu.Unlock()
 	if !resolved {
@@ -96,17 +100,21 @@ func currentBackend() store { //nolint:ireturn // pluggable keyring backend; the
 	return backend
 }
 
-func resolveBackendLocked() store { //nolint:ireturn // see currentBackend: the interface return is the test-store seam
+func resolveBackendLocked() store {
 	if os.Getenv("ENTIRE_TOKEN_STORE") == "file" {
 		path := os.Getenv("ENTIRE_TOKEN_STORE_PATH")
 		if path == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				panic(fmt.Sprintf("tokenstore: cannot determine home directory: %v", err))
-			}
-			path = home + "/.config/entire/tokens.json"
+			path = filepath.Join(userdirs.Config(), "tokens.json")
 		}
 		return &fileStore{path: path}
+	}
+	// Under `go test`, never fall through to the real OS keyring: a test
+	// that forgets tokenstore.UseFileBackendForTesting would otherwise write
+	// real keychain entries. The fallback file is per-process; tests that
+	// need isolation from each other still swap in a per-test file via
+	// UseFileBackendForTesting.
+	if dir, ok := testdirs.Dir("tokenstore"); ok {
+		return &fileStore{path: filepath.Join(dir, "tokens.json")}
 	}
 	return keyringStore{}
 }

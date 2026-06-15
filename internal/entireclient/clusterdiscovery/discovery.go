@@ -53,6 +53,60 @@ var (
 	ErrNoCoreURLs = errors.New("cluster advertises no trusted core URLs")
 )
 
+// statusError carries the HTTP status from a well-known fetch that
+// returned a non-200, so each caller (cluster vs api) can map specific
+// codes to its own sentinel (503 → not-configured, 404 → not-advertised)
+// without the shared fetcher knowing either contract.
+type statusError struct {
+	Code int
+	URL  string
+}
+
+func (e *statusError) Error() string { return fmt.Sprintf("HTTP %d from %s", e.Code, e.URL) }
+
+// fetchWellKnownJSON GETs https://host+path and decodes a 200 body into
+// out. Transport failures are wrapped under ErrUnreachable; a non-200
+// returns a *statusError so the caller can branch on Code; a malformed
+// 200 body returns a wrapped decode error. The scheme is hard-coded to
+// https: the response is a trust root (which login servers to honour),
+// so it must be TLS-authenticated — a plaintext fetch would let a
+// network attacker advertise an attacker-controlled issuer.
+func fetchWellKnownJSON(ctx context.Context, host, path string, c *http.Client, out any, debugf DebugFunc) error {
+	url := "https://" + host + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("build discovery request: %w", err)
+	}
+	// Refuse redirects. This is a trust-root fetch — the response decides which
+	// login servers we honour — so a 3xx to another origin (or a plaintext
+	// downgrade) from a hostile/misconfigured host must not be followed.
+	// Shallow-copy the caller's client so we don't mutate its redirect policy
+	// (it's reused for other operations); the copy shares Transport/TLS config.
+	if c == nil {
+		c = http.DefaultClient
+	}
+	noRedirect := *c
+	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return errors.New("discovery does not follow redirects (trust root)")
+	}
+	resp, err := noRedirect.Do(req)
+	if err != nil {
+		debugf("discovery: %v", err)
+		return fmt.Errorf("%w: %w", ErrUnreachable, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		debugf("discovery: HTTP %d from %s", resp.StatusCode, url)
+		return &statusError{Code: resp.StatusCode, URL: url}
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		debugf("discovery: decode: %v", err)
+		return fmt.Errorf("decode %s: %w", url, err)
+	}
+	return nil
+}
+
 // Discover fetches and parses the cluster's
 // /.well-known/entire-cluster.json. On success returns the parsed body
 // with a non-empty CoreURLs list. On failure returns one of the
@@ -66,49 +120,39 @@ func Discover(ctx context.Context, clusterHost string, c *http.Client, debugf De
 	if debugf == nil {
 		debugf = func(string, ...any) {}
 	}
-	url := "https://" + clusterHost + Path
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build discovery request: %w", err)
-	}
-	resp, err := c.Do(req)
-	if err != nil {
-		debugf("cluster discovery: %v", err)
-		return nil, fmt.Errorf("%w: %w", ErrUnreachable, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusServiceUnavailable {
-		return nil, ErrNoIssuers
-	}
-	if resp.StatusCode != http.StatusOK {
-		debugf("cluster discovery: HTTP %d from %s", resp.StatusCode, url)
-		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
-	}
 	var body Response
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		debugf("cluster discovery: decode: %v", err)
-		return nil, fmt.Errorf("decode %s: %w", url, err)
+	err := fetchWellKnownJSON(ctx, clusterHost, Path, c, &body, debugf)
+	var se *statusError
+	switch {
+	case errors.As(err, &se) && se.Code == http.StatusServiceUnavailable:
+		return nil, ErrNoIssuers
+	case err != nil:
+		return nil, err
 	}
 	if len(body.CoreURLs) == 0 {
-		debugf("cluster discovery: no core_urls in response from %s", url)
+		debugf("cluster discovery: no core_urls in response from https://%s%s", clusterHost, Path)
 		return nil, ErrNoCoreURLs
 	}
 	return &body, nil
 }
 
-// RenderLoginHint formats a fatal-ready message describing which
-// entire-core URLs an operator can log into to gain credentials for
-// clusterHost. The output is stable (one indented URL per line) so
-// callers can pattern-match in tests.
+// RenderLoginHint formats a fatal-ready "no auth context for cluster X"
+// message telling the operator to run `entire login`. coreURLs (the cluster's
+// advertised login servers) is accepted but intentionally not yet surfaced —
+// see renderLoginHint.
 func RenderLoginHint(clusterHost string, coreURLs []string) string {
+	return renderLoginHint("cluster "+clusterHost, coreURLs)
+}
+
+// renderLoginHint is the subject-agnostic form behind RenderLoginHint:
+// subject is a noun phrase like "cluster nyc.entire.io" or "API host
+// partial.to" so the same hint serves both the git-cluster and data-API
+// resolvers.
+//
+// We'll display coreURLs (2nd param) to the user as a hint at a later stage.
+func renderLoginHint(subject string, _ []string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "no auth context for cluster %s. This cluster accepts logins from:\n", clusterHost)
-	for _, u := range coreURLs {
-		fmt.Fprintf(&b, "  %s\n", u)
-	}
-	fmt.Fprint(&b, "\nAuthenticate against one of those login servers and re-run your command:\n"+
-		"  ENTIRE_AUTH_BASE_URL=<url> entire login\n"+
-		"or, if you already have a login there, switch to it with `entire auth use <context>`.")
+	fmt.Fprintf(&b, "no auth context for %s.\n", subject)
+	fmt.Fprint(&b, "Log in with `entire login`, then re-run your command.")
 	return b.String()
 }

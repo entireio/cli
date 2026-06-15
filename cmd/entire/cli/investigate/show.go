@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/investigate/flowchart"
 	"github.com/entireio/cli/cmd/entire/cli/mdrender"
 )
 
@@ -145,14 +147,42 @@ func printShowFindings(w io.Writer, m LocalManifest) {
 		fmt.Fprintf(w, "No findings content available for run %s.\n", m.RunID)
 		return
 	}
-	rendered, err := mdrender.RenderForWriter(w, body)
-	if err != nil {
-		// Glamour failure: fall back to raw markdown so the user still
-		// sees the content.
-		rendered = body
+	writeRenderedFindings(w, body)
+}
+
+// writeRenderedFindings renders findings markdown to w, ensuring a trailing
+// newline. Shared by `investigate show` and the post-run footer so both get
+// identical treatment.
+//
+// For piped/NO_COLOR output the raw markdown is written unchanged so it stays
+// grep-friendly and renders natively on GitHub/docs. For a styled terminal,
+// ```mermaid blocks that are renderable flowcharts are converted to indented
+// text outlines and printed verbatim — NOT through mdrender, because glamour
+// word-wraps content and would corrupt the diagram's indentation. The
+// markdown around each diagram is still rendered through mdrender.
+func writeRenderedFindings(w io.Writer, body string) {
+	if !interactive.ShouldStyle(w) {
+		fmt.Fprint(w, body)
+		if !strings.HasSuffix(body, "\n") {
+			fmt.Fprintln(w)
+		}
+		return
 	}
-	fmt.Fprint(w, rendered)
-	if !strings.HasSuffix(rendered, "\n") {
-		fmt.Fprintln(w)
+
+	for _, seg := range flowchart.SplitRenderable(body) {
+		if seg.Diagram != "" {
+			// Print the diagram outside glamour, padded with blank lines so
+			// it sits apart from the surrounding rendered markdown.
+			fmt.Fprintf(w, "\n%s\n\n", seg.Diagram)
+			continue
+		}
+		rendered, err := mdrender.RenderForWriter(w, seg.Markdown)
+		if err != nil {
+			// Glamour failure: fall back to raw markdown so the user still
+			// sees the content.
+			rendered = seg.Markdown
+		}
+		fmt.Fprint(w, rendered)
 	}
+	fmt.Fprintln(w)
 }

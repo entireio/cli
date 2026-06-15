@@ -102,6 +102,8 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newEnableCmd())
 	cmd.AddCommand(newDisableCmd())
 	cmd.AddCommand(newStatusCmd())
+	cmd.AddCommand(newBlameCmd())
+	cmd.AddCommand(newWhyCmd())
 	cmd.AddCommand(newLoginCmd())
 	cmd.AddCommand(newLogoutCmd())
 	cmd.AddCommand(newVersionCmd())
@@ -110,15 +112,16 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newRecapCmd())
 
 	// Hidden top-level shortcuts. Functional but print a deprecation hint.
-	cmd.AddCommand(hideAsAlias(newRewindCmd(), "entire checkpoint rewind"))
 	cmd.AddCommand(hideAsAlias(newResumeCmd(), "entire session resume"))
 	cmd.AddCommand(hideAsAlias(newAttachCmd(), "entire session attach"))
 	cmd.AddCommand(hideAsAlias(newExplainCmd(), "entire checkpoint explain"))
 	cmd.AddCommand(hideAsAlias(newTraceCmd(), "entire doctor trace"))
 	cmd.AddCommand(newSearchCmd()) // 'entire search' = 'checkpoint search' (hidden, no hint)
 
-	// Deprecated top-level alias (functional; reset.go marks it Deprecated).
+	// Deprecated top-level commands (functional; the constructors mark them
+	// Deprecated, which also excludes them from help and completion).
 	cmd.AddCommand(newResetCmd())
+	cmd.AddCommand(newRewindCmd())
 
 	// Hidden infrastructure.
 	cmd.AddCommand(newHooksCmd())

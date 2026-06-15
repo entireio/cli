@@ -2,7 +2,7 @@
   "components": {
     "schemas": {
       "AddOrgMemberInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -39,7 +39,7 @@
         "type": "object"
       },
       "AuditEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "actorId": {
             "type": "string"
@@ -72,7 +72,7 @@
         "type": "object"
       },
       "BatchLookupInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -98,7 +98,7 @@
         "type": "object"
       },
       "BatchLookupOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -122,7 +122,7 @@
         "type": "object"
       },
       "Binding": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -158,7 +158,7 @@
         "type": "object"
       },
       "CreateBindingInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -183,7 +183,7 @@
         "type": "object"
       },
       "CreateMirrorInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -223,7 +223,7 @@
         "type": "object"
       },
       "CreateOrgInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -251,7 +251,7 @@
         "type": "object"
       },
       "CreateProjectInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -290,7 +290,7 @@
         "type": "object"
       },
       "CreateRepoInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -329,7 +329,7 @@
         "type": "object"
       },
       "CreateServiceAccountInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -356,7 +356,7 @@
         "type": "object"
       },
       "CreatedMirror": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -395,7 +395,7 @@
         "type": "object"
       },
       "ErrorDetail": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "location": {
             "description": "Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'",
@@ -412,7 +412,7 @@
         "type": "object"
       },
       "ErrorModel": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -473,7 +473,7 @@
         "type": "object"
       },
       "GetMeOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -515,7 +515,7 @@
         "type": "object"
       },
       "GetPermissionsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -550,7 +550,7 @@
         "type": "object"
       },
       "GrantProjectAccessInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -591,7 +591,7 @@
         "type": "object"
       },
       "GrantProjectAccessOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -612,7 +612,7 @@
         "type": "object"
       },
       "GrantRepoAccessInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -653,7 +653,7 @@
         "type": "object"
       },
       "GrantRepoAccessOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -674,7 +674,7 @@
         "type": "object"
       },
       "GrantServiceAccountAccessInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -709,7 +709,7 @@
         "type": "object"
       },
       "GrantServiceAccountAccessOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -730,7 +730,7 @@
         "type": "object"
       },
       "ListAuditEventsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -754,7 +754,7 @@
         "type": "object"
       },
       "ListBindingsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -778,7 +778,7 @@
         "type": "object"
       },
       "ListMirrorsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -802,7 +802,7 @@
         "type": "object"
       },
       "ListOIDCProvidersOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -826,7 +826,7 @@
         "type": "object"
       },
       "ListOrgMembersOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -850,7 +850,7 @@
         "type": "object"
       },
       "ListOrgProjectsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -874,7 +874,7 @@
         "type": "object"
       },
       "ListOrgsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -898,7 +898,7 @@
         "type": "object"
       },
       "ListProjectMembersOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -922,7 +922,7 @@
         "type": "object"
       },
       "ListProjectReposOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -946,7 +946,7 @@
         "type": "object"
       },
       "ListProjectsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -970,7 +970,7 @@
         "type": "object"
       },
       "ListServiceAccountGrantsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -994,7 +994,7 @@
         "type": "object"
       },
       "ListServiceAccountsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1018,7 +1018,7 @@
         "type": "object"
       },
       "LookupRef": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "id": {
             "minLength": 1,
@@ -1037,7 +1037,7 @@
         "type": "object"
       },
       "LookupRefResult": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "id": {
             "type": "string"
@@ -1072,7 +1072,7 @@
         "type": "object"
       },
       "LookupResourcesOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1108,7 +1108,7 @@
         "type": "object"
       },
       "MeAuth": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "provider": {
             "type": "string"
@@ -1124,7 +1124,7 @@
         "type": "object"
       },
       "MeGlobal": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "accountId": {
             "type": "string"
@@ -1152,7 +1152,7 @@
         "type": "object"
       },
       "MeIdentityHandle": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "handle": {
             "type": "string"
@@ -1172,7 +1172,7 @@
         "type": "object"
       },
       "MeRegional": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "bio": {
             "type": "string"
@@ -1193,7 +1193,7 @@
         "type": "object"
       },
       "MeRegionalUnavailable": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "error": {
             "description": "Always 'foreign_jurisdiction'. Discriminator for client-side state machines.",
@@ -1224,7 +1224,7 @@
         "type": "object"
       },
       "Membership": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1269,7 +1269,7 @@
         "type": "object"
       },
       "Mirror": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1329,7 +1329,7 @@
         "type": "object"
       },
       "OIDCProvider": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "description": {
             "type": "string"
@@ -1351,7 +1351,7 @@
         "type": "object"
       },
       "Org": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1388,7 +1388,7 @@
         "type": "object"
       },
       "Project": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1434,7 +1434,7 @@
         "type": "object"
       },
       "ProjectGrant": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "granteeId": {
             "type": "string"
@@ -1454,7 +1454,7 @@
         "type": "object"
       },
       "Repo": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1514,7 +1514,7 @@
         "type": "object"
       },
       "ResolvedIdentity": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1547,7 +1547,7 @@
         "type": "object"
       },
       "ResourceAccess": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "permissions": {
             "items": {
@@ -1566,7 +1566,7 @@
         "type": "object"
       },
       "ServiceAccount": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1608,7 +1608,7 @@
         "type": "object"
       },
       "ServiceAccountGrant": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "resourceId": {
             "type": "string"
@@ -1631,7 +1631,7 @@
         "type": "object"
       },
       "ServiceAccountWithGrants": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "accountId": {
             "type": "string"

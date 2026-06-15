@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -702,7 +703,8 @@ func TestCollectCommitChain_DepthLimit(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
 	// Create an empty tree for all commits.
@@ -747,7 +749,8 @@ func TestCollectCommitChain_StopsAtShallowBoundary(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
 	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
@@ -802,8 +805,7 @@ func TestLoadShallowHashes(t *testing.T) {
 	t.Run("non-shallow repo returns empty set", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		_, err := git.PlainInit(dir, false)
-		require.NoError(t, err)
+		testutil.InitRepo(t, dir)
 
 		set, err := loadShallowHashes(context.Background(), dir)
 		require.NoError(t, err)
@@ -813,8 +815,7 @@ func TestLoadShallowHashes(t *testing.T) {
 	t.Run("reads .git/shallow hash list", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		_, err := git.PlainInit(dir, false)
-		require.NoError(t, err)
+		testutil.InitRepo(t, dir)
 
 		shallowFile := filepath.Join(dir, ".git", "shallow")
 		require.NoError(t, os.WriteFile(shallowFile,

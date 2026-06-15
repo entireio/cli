@@ -168,20 +168,22 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 // 401s via recapLoadErrorMessage so flag effects (--week, --agent, ...)
 // and the real auth error are not collapsed into one "sign in" hint.
 //
-// Goes through auth.TokenForResource so split-host deployments get a
-// resource-scoped bearer via RFC 8693 exchange. ErrNotLoggedIn is
-// collapsed back into an empty token so the caller's "render with no
-// bearer, let the server respond 401" path still fires. Every other
-// resolution failure (STS exchange rejected, network error, audience
-// misconfiguration, keyring locked) surfaces verbatim to the caller —
-// previously these were all relabelled as keyring read failures via
-// keyringReadError, which sent users on wild goose chases when the
-// keyring was fine and the real problem was downstream.
+// Goes through auth.ResolveDataAPIToken (the same context-aware path as
+// activity/search/dispatch) so the data host's /.well-known/entire-api.json
+// picks the matching login context and exchanges for the advertised audience,
+// falling back to static resolution when discovery is unavailable.
+// ErrNotLoggedIn is collapsed back into an empty token so the caller's "render
+// with no bearer, let the server respond 401" path still fires. Every other
+// resolution failure (no eligible/ambiguous context, STS exchange rejected,
+// network error, keyring locked) surfaces verbatim to the caller — previously
+// these were all relabelled as keyring read failures via keyringReadError,
+// which sent users on wild goose chases when the keyring was fine and the real
+// problem was downstream.
 func newRecapClient(ctx context.Context, insecureHTTP bool) (*api.Client, error) {
 	if insecureHTTP {
 		auth.EnableInsecureHTTP()
 	}
-	token, err := auth.TokenForResource(ctx, api.OriginOnly(api.BaseURL()))
+	token, err := auth.ResolveDataAPIToken(ctx, api.BaseURL())
 	if errors.Is(err, auth.ErrNotLoggedIn) {
 		token = ""
 		err = nil

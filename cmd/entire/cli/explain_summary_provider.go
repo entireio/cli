@@ -86,7 +86,7 @@ func discoverSummaryProviderIfMissing(ctx context.Context, name types.AgentName)
 	if _, err := getSummaryAgent(name); err == nil {
 		return
 	}
-	discoverSummaryProviders(ctx)
+	discoverSummaryProvidersAlways(ctx)
 }
 
 // autoSelectSummaryProvider builds a provider for an auto-selected candidate

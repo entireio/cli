@@ -33,6 +33,18 @@ const (
 	schemeHTTPS = "https"
 )
 
+// RejectRemovedAuthEnv returns an error when ENTIRE_AUTH_BASE_URL is set
+// at all (even empty). The variable is retired in favour of
+// `entire login --server`; failing loudly beats silently ignoring an
+// override the operator believes is in effect. The remaining internal
+// AuthBaseURL() reads only ever see the default once this gate has run.
+func RejectRemovedAuthEnv() error {
+	if _, ok := os.LookupEnv(AuthBaseURLEnvVar); ok {
+		return fmt.Errorf("%s is no longer supported; unset it, and use `entire login --server <url>` to log in to a non-default login server", AuthBaseURLEnvVar)
+	}
+	return nil
+}
+
 // BaseURL returns the effective Entire API base URL.
 // ENTIRE_API_BASE_URL takes precedence over the production default.
 func BaseURL() string {

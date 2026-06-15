@@ -5,11 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
-	"strings"
+	"time"
 
-	"github.com/entireio/auth-go/sts"
-	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
+	"github.com/entireio/cli/internal/entireclient/httputil"
+	"github.com/entireio/cli/internal/entireclient/repocreds"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // ErrRepoTargetUnknown reports that the cluster's STS refused the exchange
@@ -22,10 +23,18 @@ import (
 // actionable message instead of the raw OAuth error.
 var ErrRepoTargetUnknown = errors.New("cluster has no servable mirror at this audience")
 
-// repoExchangeTransportForTest, when non-nil, is used as the sts.Client
-// transport by RepoScopedToken instead of the default. Test-only seam so
-// the wire form (audience / scope / client_id) can be asserted without a
-// live core. Production leaves it nil.
+// repoExchangeTimeout bounds each HTTP call on the mint path: the
+// /.well-known cluster discovery at construction (disk-cached after the
+// first call) and each /oauth/token exchange.
+const repoExchangeTimeout = 30 * time.Second
+
+// resolveContextForCluster is the discovery seam, swapped in tests so they
+// don't reach the network. Mirrors clusterdiscovery.ResolveContextForCluster.
+var resolveContextForCluster resolveContextFunc = clusterdiscovery.ResolveContextForCluster
+
+// repoExchangeTransportForTest, when non-nil, is the HTTP transport used by
+// RepoScopedToken's exchange (and login refresh), so the wire form can be
+// asserted without a live core. Production leaves it nil.
 var repoExchangeTransportForTest http.RoundTripper
 
 // SetRepoExchangeTransportForTest installs rt as the transport used by
@@ -36,94 +45,86 @@ func SetRepoExchangeTransportForTest(rt http.RoundTripper) func() {
 	return func() { repoExchangeTransportForTest = prev }
 }
 
-// RepoScopedToken exchanges the logged-in user's token for a short-lived,
-// repo-scoped access token usable against a data-plane cluster's git
-// endpoints (clone / fetch / info-refs).
+// RepoTokenSource mints short-lived, repo-scoped access tokens usable
+// against one data-plane cluster's git endpoints (clone / fetch /
+// info-refs). The data plane's git gate rejects the raw login bearer: it
+// only accepts a token whose RFC 8693 audience is
+// https://<clusterHost><repoSlug> and whose scope is "repo:<action>".
 //
-// The data plane's git gate rejects the raw login bearer (HTTP 403): it
-// only accepts a token whose RFC 8693 audience is <clusterBaseURL><repoSlug>
-// and whose scope is "repo:<action>". This is the same exchange
-// git-remote-entire performs internally for the entire:// transport — the
-// CLI does it in-process when it needs to read the data plane directly
-// (e.g. probing a mirror's clone readiness).
-//
-//   - clusterBaseURL is the data-plane cluster origin (scheme+host, e.g.
-//     https://aws-us-east-2.entire.io); a trailing slash is trimmed.
-//   - repoSlug is the full surface-prefixed path (e.g. /gh/octocat/hello
-//     or /et/<project>/<repo>), joined to the cluster URL verbatim to form
-//     the audience.
-//   - action is "pull" for reads or "push" for writes.
-//
-// The exchange targets the same core endpoint and client identity the CLI
-// logged in against (AuthBaseURL + the provider's STS path, client_id
-// entire-cli), so a successful login implies a usable exchange. Errors
-// surface verbatim from the STS endpoint (e.g. invalid_target when no
-// mirror matches the slug+cluster).
-//
-// The subject token is the stored login access token read directly,
-// rather than routed through the refresh-aware tokenmanager. That's
-// deliberate for two reasons: (1) `entire login` (device flow) stores only
-// a bare access token — no refresh token — so there is nothing the manager
-// could refresh that this path can't equally use; an expired login token
-// fails both ways. (2) The manager's exchange also emits an RFC 8693
-// `resource` parameter alongside `audience`, whereas the data-plane gate
-// keys solely on `audience`; going direct keeps the wire form byte-for-byte
-// what git-remote-entire (and the standalone entiredb CLI) already send.
-// Each call performs a fresh exchange and does not cache — callers that
-// poll (e.g. the mirror clone wait) re-invoke on token expiry. If the CLI
-// gains refresh tokens, route this through the tokenmanager instead.
-func RepoScopedToken(ctx context.Context, clusterBaseURL, repoSlug, action string) (string, error) {
-	provider := CurrentProvider()
-	if strings.TrimSpace(provider.STSPath) == "" {
-		return "", errors.New("repo-scoped token exchange requires a v2 auth host (set ENTIRE_AUTH_BASE_URL to a login server that exposes /oauth/token)")
+// The login context is resolved once, at construction, the way
+// git-remote-entire resolves it: the cluster's
+// /.well-known/entire-cluster.json names the core(s) it trusts, and the
+// matching local context (active if eligible, else the sole eligible one,
+// else an explicit-choice error) supplies the subject token — exchanged at
+// that context's core, never at the active context's. Token calls then only
+// exchange (through repocreds, the same code path and wire form
+// git-remote-entire uses), re-minting an expired login JWT from the stored
+// refresh token as needed — so a poller's re-mints don't depend on
+// discovery staying reachable.
+type RepoTokenSource struct {
+	creds *repocreds.Cache
+}
+
+// NewRepoTokenSource resolves clusterHost's trusted core and login context
+// and returns a source minting tokens for that cluster.
+func NewRepoTokenSource(ctx context.Context, clusterHost string) (*RepoTokenSource, error) {
+	if clusterHost == "" {
+		return nil, errors.New("repo-scoped token exchange requires a target cluster host")
 	}
 
-	loginJWT, err := LookupCurrentToken()
+	// Bridge any pre-contexts.json login so the resolver can match it.
+	// Best-effort: a migration failure must not block resolution.
+	_, _ = MigrateLegacyLoginContext() //nolint:errcheck // best-effort bridge; resolution proceeds regardless
+
+	httpClient := &http.Client{Timeout: repoExchangeTimeout, Transport: repoExchangeTransportForTest}
+	clusterCtx, err := resolveContextForCluster(ctx, userdirs.Config(), userdirs.Cache(), clusterHost, httpClient, nil)
 	if err != nil {
-		return "", fmt.Errorf("read login token: %w", err)
-	}
-	if loginJWT == "" {
-		return "", ErrNotLoggedIn
+		return nil, err
 	}
 
-	clusterBaseURL = strings.TrimRight(clusterBaseURL, "/")
-	if clusterBaseURL == "" {
-		return "", errors.New("repo-scoped token exchange requires a target cluster URL")
-	}
-	issuer := api.AuthBaseURL()
-
-	client := &sts.Client{
-		Transport:         repoExchangeTransportForTest,
-		BaseURL:           issuer,
-		Path:              provider.STSPath,
-		UserAgent:         provider.ClientID,
-		AllowInsecureHTTP: isLoopbackHTTP(issuer) || insecureHTTPOverride.Load(),
-	}
-	set, err := client.Exchange(ctx, sts.ExchangeRequest{
-		SubjectToken:     loginJWT,
-		SubjectTokenType: sts.SubjectTokenTypeAccessToken,
-		// sts.Client (unlike the tokenmanager) applies no default, so set
-		// requested_token_type explicitly to the access-token URI.
-		RequestedTokenType: sts.SubjectTokenTypeAccessToken,
-		// Audience-only (no Resource): the data plane's git gate keys its
-		// repo check on the audience host+slug. Sending a separate resource
-		// param risks the server validating a different value than it grants.
-		Audience: clusterBaseURL + repoSlug,
-		Scope:    "repo:" + action,
-		// Public-client identification per RFC 6749 §2.3.1, carried via
-		// Extra because the sts package is provider-agnostic.
-		Extra: url.Values{"client_id": {provider.ClientID}},
-	})
+	allowInsecure := insecureHTTPEnabled() || isLoopbackHTTP(clusterCtx.CoreURL)
+	loginProvider, err := NewRefreshingLoginProvider(clusterCtx, repoExchangeTransportForTest, allowInsecure)
 	if err != nil {
-		// A typed invalid_target means the cluster has no servable mirror at
-		// this audience (commonly a suspended placement). Surface the
-		// sentinel for callers that branch on it, preserving the verbatim STS
-		// text (second %w) for those that don't.
-		var xe *sts.ExchangeError
-		if errors.As(err, &xe) && xe.Code == "invalid_target" {
+		return nil, err
+	}
+
+	return &RepoTokenSource{creds: repocreds.New(clusterCtx.CoreURL, "https://"+clusterHost, loginProvider, httpClient)}, nil
+}
+
+// Token returns a repo-scoped token for repoSlug (the surface-prefixed repo
+// path, e.g. /gh/octocat/hello, joined verbatim to the cluster URL to form
+// the audience) and action ("pull" or "push"). Tokens are cached per
+// (repoSlug, action) until near expiry.
+func (s *RepoTokenSource) Token(ctx context.Context, repoSlug, action string) (string, error) {
+	token, err := s.creds.Token(ctx, repoSlug, action)
+	if err != nil {
+		// invalid_target means the cluster has no servable mirror at this
+		// audience (commonly a suspended placement). Surface the sentinel for
+		// callers that branch on it, preserving the verbatim OAuth body
+		// (second %w) for those that don't.
+		var oe *httputil.OAuthError
+		if errors.As(err, &oe) && oe.Code == "invalid_target" {
 			return "", fmt.Errorf("repo-scoped token exchange: %w: %w", ErrRepoTargetUnknown, err)
 		}
 		return "", fmt.Errorf("repo-scoped token exchange: %w", err)
 	}
-	return set.AccessToken, nil
+	return token, nil
+}
+
+// Invalidate drops the cached (repoSlug, action) token so the next Token
+// call re-exchanges — for when the data plane rejected it (401) ahead of
+// its recorded expiry.
+func (s *RepoTokenSource) Invalidate(repoSlug, action string) {
+	s.creds.Invalidate(repoSlug, action)
+}
+
+// RepoScopedToken is the one-shot form of RepoTokenSource: resolve, mint
+// once, discard. Callers that re-mint (e.g. a polling wait) should hold a
+// RepoTokenSource instead, so re-mints skip cluster discovery.
+func RepoScopedToken(ctx context.Context, clusterHost, repoSlug, action string) (string, error) {
+	src, err := NewRepoTokenSource(ctx, clusterHost)
+	if err != nil {
+		return "", err
+	}
+	return src.Token(ctx, repoSlug, action)
 }

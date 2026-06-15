@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
 
@@ -31,9 +32,13 @@ const (
 	trailReviewStatusOpen      = "open"
 	trailReviewStatusResolved  = "resolved"
 	trailReviewStatusDismissed = "dismissed"
-	trailReviewSeverityHigh    = "high"
-	trailReviewSeverityMedium  = "medium"
-	trailReviewSeverityLow     = "low"
+	// Per-finding batch-create outcome returned by the reviews/{id}/comments
+	// endpoint that the CLI must surface as a failure. "created" and "existing"
+	// are both success outcomes and need no dedicated handling.
+	trailReviewBatchResultError = "error"
+	trailReviewSeverityHigh     = "high"
+	trailReviewSeverityMedium   = "medium"
+	trailReviewSeverityLow      = "low"
 )
 
 var errTrailReviewDefaultTargetNotFound = errors.New("default trail finding target not found")
@@ -133,7 +138,6 @@ func newTrailFindingListCmd(targetOpts *trailReviewTargetOptions) *cobra.Command
 }
 
 type trailReviewCommentAddOptions struct {
-	Title       string
 	Body        string
 	Severity    string
 	Confidence  float64
@@ -162,7 +166,6 @@ func newTrailFindingAddCmd(targetOpts *trailReviewTargetOptions) *cobra.Command 
 			return runTrailReviewCommentAdd(cmd, selector, opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.Title, "title", "", "Finding title")
 	cmd.Flags().StringVarP(&opts.Body, "body", "m", "", "Finding body")
 	cmd.Flags().StringVar(&opts.Severity, "severity", "", "Finding severity: high,medium,low")
 	cmd.Flags().Float64Var(&opts.Confidence, "confidence", -1, "Finding confidence from 0.0 to 1.0")
@@ -266,7 +269,7 @@ func runTrailReviewDashboard(cmd *cobra.Command, selector string, opts trailRevi
 		if strings.TrimSpace(selector) == "" && errors.Is(err, errTrailReviewDefaultTargetNotFound) {
 			fmt.Fprintln(cmd.OutOrStdout(), "No trail found for the current branch; showing trails in this repo.")
 			fmt.Fprintln(cmd.OutOrStdout())
-			return runTrailListAll(cmd.Context(), cmd.OutOrStdout(), trailListOptions{Status: trailListStatusAny, Limit: defaultTrailListLimit, InsecureHTTP: trailInsecureHTTP(cmd)})
+			return runTrailListAll(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailListOptions{Status: trailListStatusAny, Limit: defaultTrailListLimit, InsecureHTTP: trailInsecureHTTP(cmd)})
 		}
 		return err
 	}
@@ -311,11 +314,11 @@ func runTrailReviewCommentAdd(cmd *cobra.Command, selector string, opts trailRev
 	if err != nil {
 		return err
 	}
-	request, err := buildTrailReviewCommentCreateRequest(opts)
+	input, err := buildTrailReviewCommentInput(opts)
 	if err != nil {
 		return err
 	}
-	created, err := createTrailReviewComment(cmd.Context(), client, target.Trail.ID, request)
+	created, err := createTrailReviewFinding(cmd.Context(), client, target.Trail.ID, input)
 	if err != nil {
 		return err
 	}
@@ -420,15 +423,18 @@ func runTrailReviewWatchWithClient(cmd *cobra.Command, client *api.Client, targe
 }
 
 func authenticatedTrailReviewTarget(cmd *cobra.Command, selector string) (*api.Client, trailReviewTarget, error) {
-	client, err := NewAuthenticatedAPIClient(cmd.Context(), trailInsecureHTTP(cmd))
-	if err != nil {
-		return nil, trailReviewTarget{}, fmt.Errorf("authentication required: %w", err)
-	}
-	target, err := resolveTrailReviewTarget(cmd.Context(), client, selector)
+	var target trailReviewTarget
+	var resolvedClient *api.Client
+	err := runAuthenticatedDataAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), func(ctx context.Context, client *api.Client) error {
+		var err error
+		resolvedClient = client
+		target, err = resolveTrailReviewTarget(ctx, client, selector)
+		return err
+	})
 	if err != nil {
 		return nil, trailReviewTarget{}, err
 	}
-	return client, target, nil
+	return resolvedClient, target, nil
 }
 
 func resolveTrailReviewTarget(ctx context.Context, client *api.Client, selector string) (trailReviewTarget, error) {
@@ -560,7 +566,7 @@ func trailReviewCommentsPath(trailID string, opts trailReviewListOptions) string
 	if opts.Offset > 0 {
 		q.Set("offset", strconv.Itoa(opts.Offset))
 	}
-	path := trailReviewCreateCommentPath(trailID)
+	path := trailReviewListCommentsPath(trailID)
 	if encoded := q.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
@@ -591,51 +597,62 @@ func loadTrailReviewCommentPatchFile(opts trailReviewCommentAddOptions, stdin io
 	return opts, nil
 }
 
-func buildTrailReviewCommentCreateRequest(opts trailReviewCommentAddOptions) (api.TrailReviewCommentCreateRequest, error) {
+func buildTrailReviewCommentInput(opts trailReviewCommentAddOptions) (api.TrailReviewCommentInput, error) {
 	body := strings.TrimSpace(opts.Body)
 	if body == "" {
-		return api.TrailReviewCommentCreateRequest{}, errors.New("finding body is required (pass --body)")
+		return api.TrailReviewCommentInput{}, errors.New("finding body is required (pass --body)")
 	}
 	severity := strings.ToLower(strings.TrimSpace(opts.Severity))
 	if severity != "" {
 		switch severity {
 		case trailReviewSeverityHigh, trailReviewSeverityMedium, trailReviewSeverityLow:
 		default:
-			return api.TrailReviewCommentCreateRequest{}, fmt.Errorf("invalid severity %q: valid values are high, medium, low", opts.Severity)
+			return api.TrailReviewCommentInput{}, fmt.Errorf("invalid severity %q: valid values are high, medium, low", opts.Severity)
 		}
 	}
 	confidence, hasConfidence, err := buildTrailReviewCommentConfidence(opts.Confidence)
 	if err != nil {
-		return api.TrailReviewCommentCreateRequest{}, err
+		return api.TrailReviewCommentInput{}, err
 	}
 	loc, err := buildTrailReviewCommentLocation(opts)
 	if err != nil {
-		return api.TrailReviewCommentCreateRequest{}, err
+		return api.TrailReviewCommentInput{}, err
 	}
-	request := api.TrailReviewCommentCreateRequest{
-		Title:    optionalStringPtr(strings.TrimSpace(opts.Title)),
-		Body:     body,
+	// client_id is the API's idempotency key and is now required. Honour an
+	// explicit --client-id when given, otherwise generate a unique one so a
+	// retried add doesn't create duplicate findings within the same key.
+	clientID := strings.TrimSpace(opts.ClientID)
+	if clientID == "" {
+		clientID = generateTrailReviewClientID()
+	}
+	input := api.TrailReviewCommentInput{
+		ClientID: clientID,
+		Body:     stringPtr(body),
 		Severity: optionalStringPtr(severity),
-		ClientID: optionalStringPtr(strings.TrimSpace(opts.ClientID)),
 		Location: loc,
 	}
 	if hasConfidence {
-		request.Confidence = &confidence
+		input.Confidence = &confidence
 	}
 	if patch := strings.TrimSpace(opts.Patch); patch != "" {
-		change := api.TrailReviewSuggestedChangeCreateRequest{
+		input.SuggestedChange = &api.TrailReviewSuggestedChangeCreateRequest{
 			ChangeType:  "unified_diff",
 			Patch:       stringPtr(patch),
 			Instruction: optionalStringPtr(strings.TrimSpace(opts.Instruction)),
 		}
-		request.SuggestedChanges = append(request.SuggestedChanges, change)
 	} else if instruction := strings.TrimSpace(opts.Instruction); instruction != "" {
-		request.SuggestedChanges = append(request.SuggestedChanges, api.TrailReviewSuggestedChangeCreateRequest{
+		input.SuggestedChange = &api.TrailReviewSuggestedChangeCreateRequest{
 			ChangeType:  "manual_instruction",
 			Instruction: stringPtr(instruction),
-		})
+		}
 	}
-	return request, nil
+	return input, nil
+}
+
+// generateTrailReviewClientID builds a unique idempotency key for a CLI-created
+// finding when the caller did not supply --client-id.
+func generateTrailReviewClientID() string {
+	return "entire-cli:" + uuid.NewString()
 }
 
 func buildTrailReviewCommentConfidence(confidence float64) (float64, bool, error) {
@@ -689,8 +706,17 @@ func buildTrailReviewCommentLocation(opts trailReviewCommentAddOptions) (api.Tra
 	return loc, nil
 }
 
-func createTrailReviewComment(ctx context.Context, client *api.Client, trailID string, request api.TrailReviewCommentCreateRequest) (api.TrailReviewComment, error) {
-	resp, err := client.Post(ctx, trailReviewCreateCommentPath(trailID), request)
+// createTrailReviewFinding posts a single finding through the current API flow:
+// start a review session, then submit a one-item comment batch under it. It
+// returns the created (or already-existing) finding.
+func createTrailReviewFinding(ctx context.Context, client *api.Client, trailID string, input api.TrailReviewCommentInput) (api.TrailReviewComment, error) {
+	review, err := startTrailReview(ctx, client, trailID)
+	if err != nil {
+		return api.TrailReviewComment{}, err
+	}
+	resp, err := client.Post(ctx, trailReviewBatchCommentsPath(trailID, review.ReviewID), api.TrailReviewCommentBatchRequest{
+		Comments: []api.TrailReviewCommentInput{input},
+	})
 	if err != nil {
 		return api.TrailReviewComment{}, fmt.Errorf("create finding: %w", err)
 	}
@@ -698,14 +724,59 @@ func createTrailReviewComment(ctx context.Context, client *api.Client, trailID s
 	if err := checkTrailResponse(resp); err != nil {
 		return api.TrailReviewComment{}, err
 	}
-	var created api.TrailReviewComment
-	if err := api.DecodeJSON(resp, &created); err != nil {
-		return api.TrailReviewComment{}, fmt.Errorf("decode created finding: %w", err)
+	var batch api.TrailReviewCommentBatchResponse
+	if err := api.DecodeJSON(resp, &batch); err != nil {
+		return api.TrailReviewComment{}, fmt.Errorf("decode finding batch response: %w", err)
 	}
-	return created, nil
+	if len(batch.Results) == 0 {
+		return api.TrailReviewComment{}, errors.New("create finding: server returned no results")
+	}
+	result := batch.Results[0]
+	if result.Status == trailReviewBatchResultError {
+		if result.Error != nil {
+			return api.TrailReviewComment{}, fmt.Errorf("create finding: %s: %s", result.Error.Code, result.Error.Message)
+		}
+		return api.TrailReviewComment{}, errors.New("create finding: server reported an error")
+	}
+	if result.Comment == nil {
+		return api.TrailReviewComment{}, errors.New("create finding: server did not return the finding")
+	}
+	return *result.Comment, nil
 }
 
-func trailReviewCreateCommentPath(trailID string) string {
+// startTrailReview opens a review session for a trail. The body is left empty
+// so the server resolves the code version (base/head) from the trail itself.
+// The API rejects a lone head_sha — base_sha and head_sha must be supplied
+// together or not at all — and computing a correct base SHA client-side is out
+// of scope for a single-finding add, so neither is sent.
+func startTrailReview(ctx context.Context, client *api.Client, trailID string) (api.TrailReviewStartResponse, error) {
+	resp, err := client.Post(ctx, trailReviewStartPath(trailID), api.TrailReviewStartRequest{})
+	if err != nil {
+		return api.TrailReviewStartResponse{}, fmt.Errorf("start review: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return api.TrailReviewStartResponse{}, err
+	}
+	var out api.TrailReviewStartResponse
+	if err := api.DecodeJSON(resp, &out); err != nil {
+		return api.TrailReviewStartResponse{}, fmt.Errorf("decode review: %w", err)
+	}
+	if out.ReviewID == "" {
+		return api.TrailReviewStartResponse{}, errors.New("start review: server returned an empty review id")
+	}
+	return out, nil
+}
+
+func trailReviewStartPath(trailID string) string {
+	return "/api/v1/trails/" + url.PathEscape(trailID) + "/reviews"
+}
+
+func trailReviewBatchCommentsPath(trailID, reviewID string) string {
+	return "/api/v1/trails/" + url.PathEscape(trailID) + "/reviews/" + url.PathEscape(reviewID) + "/comments"
+}
+
+func trailReviewListCommentsPath(trailID string) string {
 	return "/api/v1/trails/" + url.PathEscape(trailID) + "/reviews/comments"
 }
 

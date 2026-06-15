@@ -23,7 +23,7 @@ const apiBasePath = "/api/v1"
 // commands target a login server directly — unlike `git clone` or the data
 // API, there's no resource host to match a context against — so the active
 // contexts.json login is used as-is, and `entire auth use <ctx>` retargets the
-// control plane onto that login server. ENTIRE_AUTH_BASE_URL / the default is
+// control plane onto that login server. The default auth origin is
 // only the fallback when no context is active, not an override. The Core API
 // is served at <host>/api/v1. The bearer is resolved lazily per request; for
 // an active context it re-mints silently from the stored refresh token, and
