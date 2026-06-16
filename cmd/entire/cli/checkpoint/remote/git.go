@@ -75,7 +75,10 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 		args = append(args, "--depth=1")
 	case opts.Unshallow && isShallowRepository(ctx, opts.Dir):
 		args = append(args, "--unshallow")
-	case opts.Deepen > 0:
+	case opts.Deepen > 0 && !opts.Unshallow:
+		// Honour the documented precedence: Deepen is ignored whenever
+		// Unshallow is set, even when --unshallow is a no-op because the repo
+		// isn't currently shallow.
 		args = append(args, fmt.Sprintf("--deepen=%d", opts.Deepen))
 	}
 	if !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx) {
