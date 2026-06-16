@@ -351,7 +351,9 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
-	defer repo.Close()
+	// Closure (not `defer repo.Close()`) so the latest repo is closed even after
+	// the post-deepen swap below reassigns the variable.
+	defer func() { _ = repo.Close() }()
 
 	ctx := cmd.Context()
 	refs := checkpoint.ResolveCommittedRefs(ctx)
@@ -376,6 +378,16 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 		if deepenErr := DeepenMetadataBranch(ctx); deepenErr != nil {
 			logging.Warn(ctx, "could not deepen metadata branch before disconnection check",
 				slog.String("error", deepenErr.Error()))
+		} else if fresh, reopenErr := openRepository(ctx); reopenErr != nil {
+			logging.Warn(ctx, "could not reopen repository after deepening metadata branch",
+				slog.String("error", reopenErr.Error()))
+		} else {
+			// Swap to a freshly opened repo so the connectivity check and any
+			// reconcile see the objects fetched by the deepen, rather than a
+			// storer that was opened before the fetch. Matches the post-git-op
+			// reopen pattern used elsewhere (e.g. resume.go's freshRepo).
+			_ = repo.Close()
+			repo = fresh
 		}
 	}
 
