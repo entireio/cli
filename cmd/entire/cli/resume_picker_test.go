@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -72,7 +73,8 @@ func TestResumeOptionLabel(t *testing.T) {
 		StartedAt:  time.Now().Add(-2 * time.Hour),
 	}
 
-	selectable := resumeOptionLabel(resumableSession{state: s, branch: "experiment"})
+	cpID := id.MustCheckpointID("abc123abc123")
+	selectable := resumeOptionLabel(resumableSession{state: s, branch: "experiment", checkpointID: cpID})
 	if !strings.HasPrefix(selectable, "experiment · ") {
 		t.Errorf("selectable label should start with branch, got %q", selectable)
 	}
@@ -84,9 +86,14 @@ func TestResumeOptionLabel(t *testing.T) {
 		t.Errorf("prompt whitespace should be collapsed, got %q", selectable)
 	}
 
-	unresolvable := resumeOptionLabel(resumableSession{state: s, branch: ""})
-	if !strings.Contains(unresolvable, "can't resume") {
-		t.Errorf("unresolvable label should say it can't resume, got %q", unresolvable)
+	noBranch := resumeOptionLabel(resumableSession{state: s, branch: "", checkpointID: cpID})
+	if !strings.Contains(noBranch, "can't resume") || !strings.Contains(noBranch, "no branch") {
+		t.Errorf("no-branch label should say it can't resume (no branch), got %q", noBranch)
+	}
+
+	noCheckpoint := resumeOptionLabel(resumableSession{state: s, branch: "experiment"})
+	if !strings.Contains(noCheckpoint, "can't resume") || !strings.Contains(noCheckpoint, "no committed checkpoint") {
+		t.Errorf("no-checkpoint label should say it can't resume (no committed checkpoint), got %q", noCheckpoint)
 	}
 }
 
@@ -110,7 +117,7 @@ func TestBuildResumeOptions(t *testing.T) {
 
 	now := time.Now()
 	items := []resumableSession{
-		{state: &strategy.SessionState{SessionID: "a", StartedAt: now}, branch: "feat-a"},
+		{state: &strategy.SessionState{SessionID: "a", StartedAt: now}, branch: "feat-a", checkpointID: id.MustCheckpointID("abc123abc123")},
 		{state: &strategy.SessionState{SessionID: "b", StartedAt: now}, branch: ""},
 	}
 
@@ -134,12 +141,112 @@ func TestBuildResumeOptions(t *testing.T) {
 func TestBuildResumeOptions_NoneSelectable(t *testing.T) {
 	t.Parallel()
 
+	// Neither a branch-less entry nor a branch-with-no-checkpoint entry is
+	// selectable — both lack something required to resume.
 	items := []resumableSession{
 		{state: &strategy.SessionState{SessionID: "a", StartedAt: time.Now()}, branch: ""},
+		{state: &strategy.SessionState{SessionID: "b", StartedAt: time.Now()}, branch: "has-branch-no-cp"},
 	}
 	_, hasSelectable := buildResumeOptions(items)
 	if hasSelectable {
-		t.Error("expected no selectable options when every branch is empty")
+		t.Error("expected no selectable options when entries lack a branch or a checkpoint")
+	}
+}
+
+// TestResumableSession_RequiresCheckpoint covers the reviewer's case: a session
+// with a stored branch but no committed checkpoint (e.g. an idle session that
+// never committed) must not be selectable, while one with both is.
+func TestResumableSession_RequiresCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	withCheckpoint := resumableSession{branch: "b", checkpointID: id.MustCheckpointID("abc123abc123")}
+	if !withCheckpoint.isResumable() {
+		t.Error("branch + checkpoint should be resumable")
+	}
+
+	branchOnly := resumableSession{branch: "b"} // empty checkpoint ID
+	if branchOnly.isResumable() {
+		t.Error("a branch with no committed checkpoint must not be resumable")
+	}
+	if branchOnly.unresumableReason() != "no committed checkpoint" {
+		t.Errorf("unexpected reason: %q", branchOnly.unresumableReason())
+	}
+}
+
+// TestResolveResumableBranches_TwoSessionsSameBranch covers the reviewer's case:
+// two sessions sharing one branch must each carry their own checkpoint ID, so
+// selecting one resumes that session rather than the branch's latest.
+func TestResolveResumableBranches_TwoSessionsSameBranch(t *testing.T) {
+	t.Parallel()
+
+	const sharedBranch = "two-sessions-shared"
+
+	tmpDir := t.TempDir()
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	testutil.CreateBranch(t, tmpDir, sharedBranch)
+
+	cpA := id.MustCheckpointID("aa11bb22cc33")
+	cpB := id.MustCheckpointID("dd44ee55ff66")
+	states := []*strategy.SessionState{
+		{SessionID: "sess-a", Branch: sharedBranch, LastCheckpointID: cpA},
+		{SessionID: "sess-b", Branch: sharedBranch, LastCheckpointID: cpB},
+	}
+
+	items := resolveResumableBranches(repo, states)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+	for _, it := range items {
+		if it.branch != sharedBranch {
+			t.Errorf("session %s: branch = %q, want %q", it.state.SessionID, it.branch, sharedBranch)
+		}
+		if !it.isResumable() {
+			t.Errorf("session %s should be resumable", it.state.SessionID)
+		}
+	}
+	// Crucially, each item carries its OWN checkpoint, not a shared/latest one.
+	if items[0].checkpointID != cpA || items[1].checkpointID != cpB {
+		t.Errorf("checkpoints not carried per session: got %s, %s; want %s, %s",
+			items[0].checkpointID, items[1].checkpointID, cpA, cpB)
+	}
+}
+
+// TestResumeByCheckpointID_ResumesRequestedSession verifies the action resumes
+// the exact selected session's checkpoint, not the latest on the branch — two
+// committed checkpoints exist, and resuming one restores only that session.
+func TestResumeByCheckpointID_ResumesRequestedSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	claudeDir := filepath.Join(tmpDir, "claude-projects")
+	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", claudeDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+
+	cpA := id.MustCheckpointID("aa11bb22cc33")
+	cpB := id.MustCheckpointID("dd44ee55ff66")
+	writeCommittedResumeCheckpoint(t, repo, cpA, "session-a", time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
+	writeCommittedResumeCheckpoint(t, repo, cpB, "session-b", time.Date(2025, 1, 2, 10, 0, 0, 0, time.UTC)) // newer
+
+	// Resume the OLDER session-a, even though session-b is newer.
+	var out strings.Builder
+	if err := resumeByCheckpointID(context.Background(), &out, &out, cpA, false); err != nil {
+		t.Fatalf("resumeByCheckpointID(cpA) error: %v\noutput: %s", err, out.String())
+	}
+
+	combined := out.String()
+	if !strings.Contains(combined, "session-a") {
+		t.Errorf("expected resume command for session-a, got:\n%s", combined)
+	}
+	if strings.Contains(combined, "session-b") {
+		t.Errorf("must NOT resume session-b when session-a was requested, got:\n%s", combined)
+	}
+	// session-a's transcript is restored; session-b's is left untouched.
+	if _, err := os.Stat(filepath.Join(claudeDir, "session-a.jsonl")); err != nil {
+		t.Errorf("session-a transcript should have been restored: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(claudeDir, "session-b.jsonl")); !os.IsNotExist(err) {
+		t.Errorf("session-b transcript should NOT have been restored (err=%v)", err)
 	}
 }
 

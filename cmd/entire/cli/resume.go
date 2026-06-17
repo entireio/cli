@@ -89,38 +89,50 @@ func runResume(ctx context.Context, cmd *cobra.Command, branchName string, force
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
+	proceed, err := switchToBranchForResume(ctx, w, errW, branchName, force)
+	if err != nil || !proceed {
+		return err
+	}
+
+	return resumeFromCurrentBranch(ctx, w, errW, branchName, force)
+}
+
+// switchToBranchForResume ensures the working tree is on branchName, checking it
+// out (or fetching it from origin) as needed. It returns proceed=false with a nil
+// error when the user declined to fetch a remote-only branch, so callers should
+// stop without treating that as a failure.
+func switchToBranchForResume(ctx context.Context, w, errW io.Writer, branchName string, force bool) (bool, error) {
 	// Check if we're already on this branch
 	currentBranch, err := GetCurrentBranch(ctx)
 	if err == nil && currentBranch == branchName {
-		// Already on the branch, skip checkout
-		return resumeFromCurrentBranch(ctx, w, errW, branchName, force)
+		return true, nil
 	}
 
 	// Check if branch exists locally
 	exists, err := BranchExistsLocally(ctx, branchName)
 	if err != nil {
-		return fmt.Errorf("failed to check branch: %w", err)
+		return false, fmt.Errorf("failed to check branch: %w", err)
 	}
 
 	if !exists {
 		// Branch doesn't exist locally, check if it exists on remote
 		remoteExists, err := BranchExistsOnRemote(ctx, branchName)
 		if err != nil {
-			return fmt.Errorf("failed to check remote branch: %w", err)
+			return false, fmt.Errorf("failed to check remote branch: %w", err)
 		}
 
 		if !remoteExists {
-			return fmt.Errorf("branch '%s' not found locally or on origin", branchName)
+			return false, fmt.Errorf("branch '%s' not found locally or on origin", branchName)
 		}
 
 		// Ask user if they want to fetch from remote (--force skips the prompt)
 		if !force {
 			shouldFetch, err := promptFetchFromRemote(branchName)
 			if err != nil {
-				return err
+				return false, err
 			}
 			if !shouldFetch {
-				return nil
+				return false, nil
 			}
 		}
 
@@ -128,28 +140,85 @@ func runResume(ctx context.Context, cmd *cobra.Command, branchName string, force
 		fmt.Fprintf(w, "Fetching branch '%s' from origin...\n", branchName)
 		if err := FetchAndCheckoutRemoteBranch(ctx, branchName); err != nil {
 			fmt.Fprintf(errW, "Error: failed to checkout branch: %v\n", err)
-			return NewSilentError(errors.New("failed to checkout branch"))
+			return false, NewSilentError(errors.New("failed to checkout branch"))
 		}
 		fmt.Fprintf(w, "✓ Switched to branch %s\n", branchName)
-	} else {
-		// Branch exists locally, check for uncommitted changes before checkout
-		hasChanges, err := HasUncommittedChanges(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to check for uncommitted changes: %w", err)
-		}
-		if hasChanges {
-			return errors.New("you have uncommitted changes. Please commit or stash them first")
-		}
-
-		// Checkout the branch
-		if err := CheckoutBranch(ctx, branchName); err != nil {
-			fmt.Fprintf(errW, "Error: failed to checkout branch: %v\n", err)
-			return NewSilentError(errors.New("failed to checkout branch"))
-		}
-		fmt.Fprintf(w, "✓ Switched to branch %s\n", branchName)
+		return true, nil
 	}
 
-	return resumeFromCurrentBranch(ctx, w, errW, branchName, force)
+	// Branch exists locally, check for uncommitted changes before checkout
+	hasChanges, err := HasUncommittedChanges(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to check for uncommitted changes: %w", err)
+	}
+	if hasChanges {
+		return false, errors.New("you have uncommitted changes. Please commit or stash them first")
+	}
+
+	// Checkout the branch
+	if err := CheckoutBranch(ctx, branchName); err != nil {
+		fmt.Fprintf(errW, "Error: failed to checkout branch: %v\n", err)
+		return false, NewSilentError(errors.New("failed to checkout branch"))
+	}
+	fmt.Fprintf(w, "✓ Switched to branch %s\n", branchName)
+	return true, nil
+}
+
+// resumeSessionOnBranch switches to branchName and resumes the specific session
+// identified by checkpointID, instead of re-deriving the latest checkpoint on the
+// branch. The interactive picker uses this so that selecting one of several
+// sessions on the same branch resumes exactly that session.
+func resumeSessionOnBranch(ctx context.Context, cmd *cobra.Command, branchName string, checkpointID id.CheckpointID, force bool) error {
+	if _, err := paths.WorktreeRoot(ctx); err == nil {
+		logging.SetLogLevelGetter(GetLogLevel)
+		if err := logging.Init(ctx, ""); err == nil {
+			defer logging.Close()
+		}
+	}
+
+	w := cmd.OutOrStdout()
+	errW := cmd.ErrOrStderr()
+
+	proceed, err := switchToBranchForResume(ctx, w, errW, branchName, force)
+	if err != nil || !proceed {
+		return err
+	}
+
+	return resumeByCheckpointID(ctx, w, errW, checkpointID, force)
+}
+
+// resumeByCheckpointID restores the session(s) recorded in a specific committed
+// checkpoint and prints the resume command(s). Unlike resumeFromCurrentBranch it
+// does not search branch history — the caller already knows which checkpoint to
+// resume, so two sessions on the same branch resume independently.
+func resumeByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID id.CheckpointID, force bool) error {
+	if checkpointID.IsEmpty() {
+		return errors.New("no checkpoint to resume")
+	}
+
+	repo, err := openRepository(ctx)
+	if err != nil {
+		return fmt.Errorf("not a git repository: %w", err)
+	}
+	defer repo.Close()
+
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
+	store.SetBlobFetcher(FetchBlobsByHash)
+	refs := store.Refs()
+	if refs.ReadBootstrappableFromOrigin() {
+		promoteRemoteTrackingPrimary(ctx, repo, refs)
+	}
+
+	metadata, err := readCheckpointInfoFromStore(ctx, store, checkpointID)
+	if err != nil {
+		logging.Debug(ctx, "resume by checkpoint: metadata read failed, checking remote",
+			slog.String("checkpoint_id", checkpointID.String()),
+			slog.String("error", err.Error()),
+		)
+		return checkRemoteMetadata(ctx, w, errW, checkpointID, store.Refs())
+	}
+
+	return resumeSession(ctx, w, errW, metadata, force)
 }
 
 func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName string, force bool) error {

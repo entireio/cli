@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -26,13 +27,29 @@ import (
 // resumePickerCancel is the sentinel option value for the picker's Cancel entry.
 const resumePickerCancel = "cancel"
 
-// resumableSession pairs a stopped session with the branch we resolved for it.
-// branch is empty when no local branch could be mapped to the session (e.g. it
-// was stopped before any checkpoint was committed) — such entries are shown but
-// cannot be selected for resume.
+// resumableSession pairs a session with the branch and committed checkpoint we
+// resolved for it. A session is only resumable when BOTH are known: the branch
+// is where its code lives, and checkpointID identifies the exact session to
+// restore (so two sessions on the same branch resume independently). Entries
+// missing either are shown but cannot be selected.
 type resumableSession struct {
-	state  *strategy.SessionState
-	branch string
+	state        *strategy.SessionState
+	branch       string
+	checkpointID id.CheckpointID
+}
+
+// isResumable reports whether this entry can actually be resumed: we need a
+// branch to switch to and a committed checkpoint identifying the session.
+func (r resumableSession) isResumable() bool {
+	return r.branch != "" && !r.checkpointID.IsEmpty()
+}
+
+// unresumableReason explains why a non-resumable entry can't be picked.
+func (r resumableSession) unresumableReason() string {
+	if r.branch == "" {
+		return "no branch"
+	}
+	return "no committed checkpoint"
 }
 
 // runResumePicker lists stopped sessions across all worktrees and lets the user
@@ -63,8 +80,8 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 
 	options, hasSelectable := buildResumeOptions(items)
 	if !hasSelectable {
-		fmt.Fprintln(w, "Found stopped session(s) but none could be mapped to a branch to resume.")
-		fmt.Fprintln(w, "They had no committed checkpoints to locate. Pass a branch directly to resume.")
+		fmt.Fprintln(w, "Found session(s) but none can be resumed (no branch or no committed checkpoint).")
+		fmt.Fprintln(w, "Pass a branch directly to resume, e.g. 'entire session resume <branch>'.")
 		return nil
 	}
 
@@ -97,8 +114,8 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 	}
 	chosen := items[idx]
 
-	if chosen.branch == "" {
-		fmt.Fprintf(w, "Session %s has no branch to resume — it has no committed checkpoints.\n", chosen.state.SessionID)
+	if !chosen.isResumable() {
+		fmt.Fprintf(w, "Session %s can't be resumed: %s.\n", chosen.state.SessionID, chosen.unresumableReason())
 		return nil
 	}
 
@@ -112,7 +129,9 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 		return nil
 	}
 
-	return runResume(ctx, cmd, chosen.branch, force)
+	// Resume the specific selected session by its checkpoint, not whatever is
+	// latest on the branch — otherwise two sessions on one branch would collide.
+	return resumeSessionOnBranch(ctx, cmd, chosen.branch, chosen.checkpointID, force)
 }
 
 // filterResumableSessions returns sessions you can pick up later — anything not
@@ -159,14 +178,17 @@ func resolveResumableBranches(repo *git.Repository, stopped []*strategy.SessionS
 	// that carry a stored branch (the common case going forward) skip it entirely.
 	var index map[string]string
 	for _, s := range stopped {
+		// checkpointID identifies the exact session to restore; it's required for
+		// the entry to be resumable (a session that never committed has none).
+		cpID := s.LastCheckpointID
 		if s.Branch != "" && branchExistsLocally(repo, s.Branch) {
-			items = append(items, resumableSession{state: s, branch: s.Branch})
+			items = append(items, resumableSession{state: s, branch: s.Branch, checkpointID: cpID})
 			continue
 		}
 		if index == nil {
 			index = buildCheckpointBranchIndex(repo)
 		}
-		items = append(items, resumableSession{state: s, branch: resolveSessionBranch(repo, s, index)})
+		items = append(items, resumableSession{state: s, branch: resolveSessionBranch(repo, s, index), checkpointID: cpID})
 	}
 	return items
 }
@@ -276,7 +298,7 @@ func buildResumeOptions(items []resumableSession) ([]huh.Option[string], bool) {
 	hasSelectable := false
 	for i, item := range items {
 		options = append(options, huh.NewOption(resumeOptionLabel(item), strconv.Itoa(i)))
-		if item.branch != "" {
+		if item.isResumable() {
 			hasSelectable = true
 		}
 	}
@@ -302,8 +324,8 @@ func resumeOptionLabel(item resumableSession) string {
 
 	when := timeAgo(sessionLastActiveTime(s))
 
-	if item.branch == "" {
-		return fmt.Sprintf("(no branch) · \"%s\" · %s · last active %s — can't resume", prompt, agentLabel, when)
+	if !item.isResumable() {
+		return fmt.Sprintf("(%s) · \"%s\" · %s · last active %s — can't resume", item.unresumableReason(), prompt, agentLabel, when)
 	}
 	return fmt.Sprintf("%s · \"%s\" · %s · last active %s", item.branch, prompt, agentLabel, when)
 }
