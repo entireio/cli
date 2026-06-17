@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks codex post-tool-use",
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex post-tool-use'",
             "timeout": 30
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks codex session-start",
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then printf \"%s\\n\" \"{\\\"systemMessage\\\":\\\"Entire CLI is enabled but not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\\\"}\"; exit 0; fi; exec entire hooks codex session-start'",
             "timeout": 30
           }
         ]
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks codex stop",
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex stop'",
             "timeout": 30
           }
         ]
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks codex user-prompt-submit",
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex user-prompt-submit'",
             "timeout": 30
           }
         ]

@@ -8,5 +8,21 @@
     },
     "filtered_fetches": true
   },
+  "review": {
+    "claude-code": {
+      "skills": [
+        "/review",
+        "/pr-review-toolkit:review-pr"
+      ]
+    },
+    "codex": {
+      "skills": [
+        "$code-reviewer"
+      ]
+    },
+    "gemini": {},
+    "opencode": {}
+  },
+  "review_fix_agent": "claude-code",
   "strategy": "manual-commit"
 }
