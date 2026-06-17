@@ -8,7 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
@@ -203,6 +208,144 @@ func TestAttach_AlreadyTracked_NoCheckpoint(t *testing.T) {
 	}
 }
 
+func TestAttach_RefusesTrackedSessionFromDifferentWorktree(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	sessionWorktree := filepath.Join(t.TempDir(), "session-worktree")
+	runGitCommand(t, env.RepoDir, "worktree", "add", sessionWorktree, "-b", "attach-session-worktree", "HEAD")
+
+	// Advance the current worktree so a mistaken attach would amend the wrong
+	// branch/commit, matching the real failure mode this guard protects.
+	env.WriteFile("wrong-head.txt", "this commit must not get a checkpoint")
+	env.GitAdd("wrong-head.txt")
+	env.GitCommit("wrong commit should stay untouched")
+	wrongHeadBefore := env.GetHeadHash()
+
+	if err := os.WriteFile(filepath.Join(sessionWorktree, "session-head.txt"), []byte("session work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, sessionWorktree, "add", "session-head.txt")
+	runGitCommand(t, sessionWorktree, "commit", "-m", "session work")
+	sessionHead := strings.TrimSpace(runGitCommand(t, sessionWorktree, "rev-parse", "HEAD"))
+	sessionWorktreeID, err := paths.GetWorktreeID(sessionWorktree)
+	if err != nil {
+		t.Fatalf("GetWorktreeID(%s): %v", sessionWorktree, err)
+	}
+
+	sessionID := "attach-cross-worktree-session"
+	if err := env.WriteSessionState(sessionID, &strategy.SessionState{
+		SessionID:    sessionID,
+		BaseCommit:   sessionHead,
+		WorktreePath: sessionWorktree,
+		WorktreeID:   sessionWorktreeID,
+		StartedAt:    time.Now(),
+		AgentType:    agent.AgentTypeClaudeCode,
+	}); err != nil {
+		t.Fatalf("failed to write session state: %v", err)
+	}
+
+	tb := NewTranscriptBuilder()
+	tb.AddUserMessage("make the session worktree change")
+	tb.AddAssistantMessage("Done.")
+	if err := tb.WriteToFile(filepath.Join(env.ClaudeProjectDir, sessionID+".jsonl")); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	output, err := env.RunCLIWithError("session", "attach", sessionID, "-a", "claude-code", "-f")
+	if err == nil {
+		t.Fatalf("expected attach to refuse session from another worktree; output:\n%s", output)
+	}
+	if !strings.Contains(output, "different worktree") {
+		t.Fatalf("expected worktree mismatch error, got:\n%s", output)
+	}
+
+	wrongHeadAfter := env.GetHeadHash()
+	if wrongHeadAfter != wrongHeadBefore {
+		t.Fatalf("wrong HEAD changed from %s to %s", wrongHeadBefore, wrongHeadAfter)
+	}
+
+	wrongHeadMsg := env.GetCommitMessage(wrongHeadAfter)
+	if checkpoints := trailers.ParseAllCheckpoints(wrongHeadMsg); len(checkpoints) != 0 {
+		t.Fatalf("wrong HEAD should not receive checkpoint trailers; got %v\nCommit message:\n%s", checkpoints, wrongHeadMsg)
+	}
+
+	state, err := env.GetSessionState(sessionID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	if state == nil {
+		t.Fatal("expected session state to remain after refusal")
+	}
+	if !state.LastCheckpointID.IsEmpty() {
+		t.Fatalf("wrong-worktree attach should not write LastCheckpointID, got %s", state.LastCheckpointID.String())
+	}
+}
+
+func TestAttach_AllowsTrackedSessionAfterWorktreeMove(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	originalWorktree := filepath.Join(t.TempDir(), "session-worktree")
+	runGitCommand(t, env.RepoDir, "worktree", "add", originalWorktree, "-b", "attach-session-moved-worktree", "HEAD")
+
+	if err := os.WriteFile(filepath.Join(originalWorktree, "session-head.txt"), []byte("session work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, originalWorktree, "add", "session-head.txt")
+	runGitCommand(t, originalWorktree, "commit", "-m", "session work")
+	sessionHeadBefore := strings.TrimSpace(runGitCommand(t, originalWorktree, "rev-parse", "HEAD"))
+	sessionWorktreeID, err := paths.GetWorktreeID(originalWorktree)
+	if err != nil {
+		t.Fatalf("GetWorktreeID(%s): %v", originalWorktree, err)
+	}
+
+	sessionID := "attach-moved-worktree-session"
+	if err := env.WriteSessionState(sessionID, &strategy.SessionState{
+		SessionID:    sessionID,
+		BaseCommit:   sessionHeadBefore,
+		WorktreePath: originalWorktree,
+		WorktreeID:   sessionWorktreeID,
+		StartedAt:    time.Now(),
+		AgentType:    agent.AgentTypeClaudeCode,
+	}); err != nil {
+		t.Fatalf("failed to write session state: %v", err)
+	}
+
+	tb := NewTranscriptBuilder()
+	tb.AddUserMessage("make the moved worktree change")
+	tb.AddAssistantMessage("Done.")
+	if err := tb.WriteToFile(filepath.Join(env.ClaudeProjectDir, sessionID+".jsonl")); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	movedWorktree := filepath.Join(t.TempDir(), "moved-session-worktree")
+	runGitCommand(t, env.RepoDir, "worktree", "move", originalWorktree, movedWorktree)
+	writeEntireSettingsForWorktree(t, env.RepoDir, movedWorktree)
+
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "session", "attach", sessionID, "-a", "claude-code", "-f")
+	cmd.Dir = movedWorktree
+	cmd.Env = env.cliEnv()
+	outputBytes, err := cmd.CombinedOutput()
+	output := string(outputBytes)
+	if err != nil {
+		t.Fatalf("attach should allow moved worktree with matching WorktreeID: %v\nOutput:\n%s", err, output)
+	}
+	if !strings.Contains(output, "Attached session") {
+		t.Fatalf("expected attach success output, got:\n%s", output)
+	}
+
+	sessionHeadAfter := strings.TrimSpace(runGitCommand(t, movedWorktree, "rev-parse", "HEAD"))
+	if sessionHeadAfter == sessionHeadBefore {
+		t.Fatal("expected moved worktree HEAD to be amended with checkpoint trailer")
+	}
+
+	msg := strings.TrimSpace(runGitCommand(t, movedWorktree, "log", "-1", "--format=%B"))
+	if checkpoints := trailers.ParseAllCheckpoints(msg); len(checkpoints) != 1 {
+		t.Fatalf("expected moved worktree HEAD to receive one checkpoint trailer, got %v\nCommit message:\n%s", checkpoints, msg)
+	}
+}
+
 // TestAttach_AlreadyTracked_HasCheckpoint tests that re-attaching a session that already
 // has a checkpoint just offers to link it (no duplicate checkpoint created).
 func TestAttach_AlreadyTracked_HasCheckpoint(t *testing.T) {
@@ -361,5 +504,37 @@ func TestAttach_InvalidSessionID(t *testing.T) {
 	_, err := env.RunCLIWithError("session", "attach", "../path-traversal", "-a", "claude-code")
 	if err == nil {
 		t.Error("expected error for invalid session ID")
+	}
+}
+
+func runGitCommand(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.CommandContext(t.Context(), "git", args...)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s in %s failed: %v\n%s", strings.Join(args, " "), dir, err, output)
+	}
+	return string(output)
+}
+
+func writeEntireSettingsForWorktree(t *testing.T, sourceWorktree, targetWorktree string) {
+	t.Helper()
+
+	source := filepath.Join(sourceWorktree, ".entire", "settings.json")
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read source settings %s: %v", source, err)
+	}
+
+	targetDir := filepath.Join(targetWorktree, ".entire")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatalf("create target settings dir %s: %v", targetDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "settings.json"), data, 0o644); err != nil {
+		t.Fatalf("write target settings: %v", err)
 	}
 }

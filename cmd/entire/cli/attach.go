@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -39,6 +40,10 @@ import (
 // agent_review in the checkpoint metadata.
 type attachOptions struct {
 	Force bool
+	// AllowCrossWorktree permits attaching a session whose stored worktree path
+	// differs from the current checkout. Force deliberately does not imply this:
+	// skipping the amend prompt should not also bypass session identity checks.
+	AllowCrossWorktree bool
 	// Review, when true, tags the attached session as a review. Skills are
 	// resolved inside runAttach after the real agent is known (via session
 	// state or transcript auto-detection), not at the cobra layer — the
@@ -72,10 +77,11 @@ func openAttachStore(ctx context.Context, repo *git.Repository, refs cpkg.Commit
 
 func newAttachCmd() *cobra.Command {
 	var (
-		force      bool
-		agentFlag  string
-		reviewFlag bool
-		skillsFlag []string
+		force              bool
+		allowCrossWorktree bool
+		agentFlag          string
+		reviewFlag         bool
+		skillsFlag         []string
 	)
 	cmd := &cobra.Command{
 		Use:   "attach <session-id>",
@@ -109,6 +115,7 @@ external_agents in settings. Run 'entire agent list' to see the full list.`,
 			agentName := types.AgentName(agentFlag)
 			opts := attachOptions{
 				Force:                force,
+				AllowCrossWorktree:   allowCrossWorktree,
 				Review:               reviewFlag,
 				ReviewSkillsOverride: skillsFlag,
 			}
@@ -116,6 +123,7 @@ external_agents in settings. Run 'entire agent list' to see the full list.`,
 		},
 	}
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation and amend the last commit with the checkpoint trailer")
+	cmd.Flags().BoolVar(&allowCrossWorktree, "allow-cross-worktree", false, "Attach even if the session was recorded in a different worktree")
 	cmd.Flags().StringVarP(&agentFlag, "agent", "a", string(agent.DefaultAgentName), "Agent that created the session (see 'entire agent list' for registered agents, including external)")
 	cmd.Flags().BoolVar(&reviewFlag, "review", false, "Tag the attached session as an agent review")
 	cmd.Flags().StringSliceVar(&skillsFlag, "skills", nil, "Optional: declare which review skills were run in this session. Only used with --review")
@@ -198,6 +206,9 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 
 	existingState, err := validateAttachPreconditions(ctx, repo, sessionID)
 	if err != nil {
+		return err
+	}
+	if err := validateAttachWorktree(ctx, existingState, opts); err != nil {
 		return err
 	}
 
@@ -360,6 +371,58 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 	}
 
 	return nil
+}
+
+func validateAttachWorktree(ctx context.Context, existingState *session.State, opts attachOptions) error {
+	if existingState == nil || opts.AllowCrossWorktree {
+		return nil
+	}
+
+	currentWorktree, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to resolve current worktree for session %s: %w", existingState.SessionID, err)
+	}
+
+	if existingState.WorktreeID != "" {
+		currentWorktreeID, idErr := paths.GetWorktreeID(currentWorktree)
+		if idErr != nil {
+			return fmt.Errorf("failed to resolve current worktree ID for session %s: %w", existingState.SessionID, idErr)
+		}
+		if existingState.WorktreeID == currentWorktreeID {
+			return nil
+		}
+		return attachWorktreeMismatchError(existingState, currentWorktree, currentWorktreeID)
+	}
+
+	if existingState.WorktreePath == "" {
+		return nil
+	}
+
+	if normalizeWorktreePath(existingState.WorktreePath) == normalizeWorktreePath(currentWorktree) {
+		return nil
+	}
+
+	return attachWorktreeMismatchError(existingState, currentWorktree, "")
+}
+
+func attachWorktreeMismatchError(existingState *session.State, currentWorktree string, currentWorktreeID string) error {
+	if existingState.WorktreeID != "" || currentWorktreeID != "" {
+		return fmt.Errorf(
+			"session %s was recorded in a different worktree; session worktree: %s; current worktree: %s; session worktree ID: %s; current worktree ID: %s. Run attach from the session worktree or pass --allow-cross-worktree to override",
+			existingState.SessionID,
+			existingState.WorktreePath,
+			currentWorktree,
+			existingState.WorktreeID,
+			currentWorktreeID,
+		)
+	}
+
+	return fmt.Errorf(
+		"session %s was recorded in a different worktree; session worktree: %s; current worktree: %s. Run attach from the session worktree or pass --allow-cross-worktree to override",
+		existingState.SessionID,
+		existingState.WorktreePath,
+		currentWorktree,
+	)
 }
 
 // checkpointHasSessionMetadata reports whether sessionID has existing metadata

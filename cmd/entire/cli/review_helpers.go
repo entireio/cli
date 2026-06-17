@@ -35,9 +35,10 @@ import (
 // because it calls runAttachSurfaceReviewErrors which is in the cli package.
 func newReviewAttachCmd() *cobra.Command {
 	var (
-		force      bool
-		agentFlag  string
-		skillsFlag []string
+		force              bool
+		allowCrossWorktree bool
+		agentFlag          string
+		skillsFlag         []string
 	)
 	cmd := &cobra.Command{
 		Use:   "attach <session-id>",
@@ -73,6 +74,7 @@ discoverability alongside the other review subcommands.`,
 			}
 			opts := attachOptions{
 				Force:                force,
+				AllowCrossWorktree:   allowCrossWorktree,
 				Review:               true,
 				ReviewSkillsOverride: skillsFlag,
 			}
@@ -92,6 +94,7 @@ discoverability alongside the other review subcommands.`,
 		},
 	}
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation and amend the last commit with the checkpoint trailer")
+	cmd.Flags().BoolVar(&allowCrossWorktree, "allow-cross-worktree", false, "Attach even if the session was recorded in a different worktree")
 	cmd.Flags().StringVarP(&agentFlag, "agent", "a", string(agent.DefaultAgentName), "Agent that created the session")
 	cmd.Flags().StringSliceVar(&skillsFlag, "skills", nil, "Optional: declare which review skills were run in this session")
 	return cmd

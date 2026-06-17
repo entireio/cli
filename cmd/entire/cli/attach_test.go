@@ -275,6 +275,126 @@ func TestAttach_SessionAlreadyTracked_NoCheckpoint(t *testing.T) {
 	}
 }
 
+func TestAttach_RefusesExistingSessionFromDifferentWorktree(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	repoRoot := mustGetwd(t)
+	sessionID := "test-attach-wrong-worktree"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"work from another checkout"},"uuid":"uuid-1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]},"uuid":"uuid-2"}
+`)
+
+	wrongWorktree := filepath.Join(filepath.Dir(repoRoot), "other-worktree")
+	if err := os.MkdirAll(wrongWorktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(context.Background(), &session.State{
+		SessionID:    sessionID,
+		AgentType:    agent.AgentTypeClaudeCode,
+		StartedAt:    time.Now(),
+		WorktreePath: wrongWorktree,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err = runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
+	if err == nil {
+		t.Fatal("expected attach to refuse a session recorded for another worktree")
+	}
+	if !strings.Contains(err.Error(), "different worktree") {
+		t.Fatalf("error should explain the worktree mismatch, got: %v", err)
+	}
+
+	reloadedState, err := store.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloadedState == nil {
+		t.Fatal("expected session state to remain")
+	}
+	if !reloadedState.LastCheckpointID.IsEmpty() {
+		t.Errorf("attach should not write a checkpoint for the wrong-worktree session, got %s", reloadedState.LastCheckpointID)
+	}
+
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headCommit, err := getHeadCommit(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpoints := trailers.ParseAllCheckpoints(headCommit.Message); len(checkpoints) != 0 {
+		t.Fatalf("attach should not amend HEAD on refusal; found checkpoints %v", checkpoints)
+	}
+}
+
+func TestAttach_AllowCrossWorktreeOverridesGuard(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	repoRoot := mustGetwd(t)
+	sessionID := "test-attach-cross-worktree-override"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"repair from here"},"uuid":"uuid-1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]},"uuid":"uuid-2"}
+`)
+
+	otherWorktree := filepath.Join(filepath.Dir(repoRoot), "other-worktree")
+	if err := os.MkdirAll(otherWorktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(context.Background(), &session.State{
+		SessionID:    sessionID,
+		AgentType:    agent.AgentTypeClaudeCode,
+		StartedAt:    time.Now(),
+		WorktreePath: otherWorktree,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err = runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
+		Force:              true,
+		AllowCrossWorktree: true,
+	})
+	if err != nil {
+		t.Fatalf("expected explicit cross-worktree override to attach, got error: %v", err)
+	}
+
+	reloadedState, err := store.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloadedState == nil {
+		t.Fatal("expected session state to remain")
+	}
+	if reloadedState.LastCheckpointID.IsEmpty() {
+		t.Fatal("expected LastCheckpointID to be set after override attach")
+	}
+
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headCommit, err := getHeadCommit(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpoints := trailers.ParseAllCheckpoints(headCommit.Message); len(checkpoints) != 1 {
+		t.Fatalf("expected override attach to amend HEAD with one checkpoint, got %v", checkpoints)
+	}
+}
+
 func TestAttach_OutputContainsCheckpointID(t *testing.T) {
 	setupAttachTestRepo(t)
 
