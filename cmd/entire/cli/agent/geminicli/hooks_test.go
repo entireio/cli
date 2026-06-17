@@ -102,8 +102,9 @@ func TestInstallHooks_LocalDev(t *testing.T) {
 
 	settings := readGeminiSettings(t, tempDir)
 
-	// Verify local dev commands use git rev-parse for runtime repo root resolution
-	prefix := `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks gemini `
+	// Verify local dev commands delegate to the entire-dev launcher, resolving
+	// the repo root at runtime via git.
+	prefix := `"$(git rev-parse --show-toplevel)"/scripts/entire-dev hooks gemini `
 	verifyHookCommand(t, settings.Hooks.SessionStart, "", prefix+"session-start")
 	verifyHookCommand(t, settings.Hooks.SessionEnd, "exit", prefix+"session-end")
 	verifyHookCommand(t, settings.Hooks.SessionEnd, "logout", prefix+"session-end")
@@ -299,7 +300,7 @@ func TestUninstallHooks_PreservesUnknownHookTypes(t *testing.T) {
   "hooks": {
     "SessionStart": [
       {
-        "hooks": [{"name": "entire-session-start", "type": "command", "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then echo \"Powered by Entire: Tracking is enabled, but the Entire CLI is not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\" >&2; exit 0; fi; exec entire hooks gemini session-start'"}]
+        "hooks": [{"name": "entire-session-start", "type": "command", "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then echo \"Entire CLI is enabled but not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\" >&2; exit 0; fi; exec entire hooks gemini session-start'"}]
       }
     ],
     "FutureHook": [
@@ -425,7 +426,7 @@ func TestUninstallHooks_PreservesUserHooks(t *testing.T) {
         "hooks": [{"name": "my-hook", "type": "command", "command": "echo hello"}]
       },
       {
-        "hooks": [{"name": "entire-session-start", "type": "command", "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then echo \"Powered by Entire: Tracking is enabled, but the Entire CLI is not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\" >&2; exit 0; fi; exec entire hooks gemini session-start'"}]
+        "hooks": [{"name": "entire-session-start", "type": "command", "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then echo \"Entire CLI is enabled but not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\" >&2; exit 0; fi; exec entire hooks gemini session-start'"}]
       }
     ]
   }
@@ -641,7 +642,7 @@ func TestInstallHooks_ForceWithLegacyFields(t *testing.T) {
     "enabled": true,
     "SessionStart": [
       {
-        "hooks": [{"name": "entire-session-start", "type": "command", "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then echo \"Powered by Entire: Tracking is enabled, but the Entire CLI is not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\" >&2; exit 0; fi; exec entire hooks gemini session-start'"}]
+        "hooks": [{"name": "entire-session-start", "type": "command", "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then echo \"Entire CLI is enabled but not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\" >&2; exit 0; fi; exec entire hooks gemini session-start'"}]
       }
     ]
   }
@@ -675,7 +676,7 @@ func TestUninstallHooks_RemovesLegacyEnabledField(t *testing.T) {
     "enabled": true,
     "SessionStart": [
       {
-        "hooks": [{"name": "entire-session-start", "type": "command", "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then echo \"Powered by Entire: Tracking is enabled, but the Entire CLI is not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\" >&2; exit 0; fi; exec entire hooks gemini session-start'"}]
+        "hooks": [{"name": "entire-session-start", "type": "command", "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then echo \"Entire CLI is enabled but not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\" >&2; exit 0; fi; exec entire hooks gemini session-start'"}]
       }
     ]
   }

@@ -5,52 +5,58 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/perf"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// pushBranchIfNeeded pushes a branch to the given target if it has unpushed changes.
+// pushRefIfNeeded pushes a ref to the given target if it has unpushed changes.
 // The target can be a remote name (e.g., "origin") or a URL for direct push.
-// When pushing to a URL, the "has unpushed" optimization is skipped since there are
-// no remote tracking refs — git itself handles the no-op case.
+// For branch refs, the "has unpushed" optimization consults the remote-tracking
+// ref. Non-branch refs and URL targets skip the optimization and let git
+// handle the no-op case.
 // Does not check any settings — callers are responsible for gating.
-func pushBranchIfNeeded(ctx context.Context, target, branchName string) error {
+func pushRefIfNeeded(ctx context.Context, target string, ref plumbing.ReferenceName) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
-		return nil //nolint:nilerr // Hook must be silent on failure
+		logging.Debug(ctx, "push skipped: open repository failed",
+			slog.String("ref", ref.String()),
+			slog.String("error", err.Error()))
+		return nil
 	}
+	defer repo.Close()
 
-	// Check if branch exists locally
-	branchRef := plumbing.NewBranchReferenceName(branchName)
-	localRef, err := repo.Reference(branchRef, true)
+	localRef, err := repo.Reference(ref, true)
 	if err != nil {
-		// No branch, nothing to push
-		return nil //nolint:nilerr // Expected when no sessions exist yet
-	}
-
-	// Only check remote tracking refs when target is a remote name (not a URL).
-	// URLs don't have tracking refs, so we always attempt the push and let git handle it.
-	if !isURL(target) && !hasUnpushedSessionsCommon(repo, target, localRef.Hash(), branchName) {
+		// Ref doesn't exist locally — nothing to push.
 		return nil
 	}
 
-	return doPushBranch(ctx, target, branchName)
+	if ref.IsBranch() && !remote.IsURL(target) && !hasUnpushedBranchRef(repo, target, localRef.Hash(), ref.Short()) {
+		return nil
+	}
+
+	return doPushRef(ctx, target, ref)
 }
 
-// hasUnpushedSessionsCommon checks if the local branch differs from the remote.
+// hasUnpushedBranchRef checks if the local branch differs from the remote.
 // Returns true if there's any difference that needs syncing (local ahead, remote ahead, or diverged).
-func hasUnpushedSessionsCommon(repo *git.Repository, remote string, localHash plumbing.Hash, branchName string) bool {
-	// Check for remote tracking ref: refs/remotes/<remote>/<branch>
-	remoteRefName := plumbing.NewRemoteReferenceName(remote, branchName)
+func hasUnpushedBranchRef(repo *git.Repository, remoteName string, localHash plumbing.Hash, branchName string) bool {
+	// Check for remote tracking ref: refs/remotes/<remoteName>/<branch>
+	remoteRefName := plumbing.NewRemoteReferenceName(remoteName, branchName)
 	remoteRef, err := repo.Reference(remoteRefName, true)
 	if err != nil {
 		// Remote branch doesn't exist yet - we have content to push
@@ -62,43 +68,70 @@ func hasUnpushedSessionsCommon(repo *git.Repository, remote string, localHash pl
 	return localHash != remoteRef.Hash()
 }
 
-// doPushBranch pushes the given branch to the target with fetch+merge recovery.
-// The target can be a remote name or a URL.
-func doPushBranch(ctx context.Context, target, branchName string) error {
-	displayTarget := target
-	if isURL(target) {
-		displayTarget = "checkpoint remote"
+func displayPushTarget(target string) string {
+	if remote.IsURL(target) {
+		return "checkpoint remote"
 	}
+	return target
+}
 
-	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", branchName, displayTarget)
+// checkpointPushBudget is one shared deadline across the initial push,
+// fetch+rebase, and retry — per-attempt timeouts can stack to ~3x. var so tests
+// can shrink it.
+var checkpointPushBudget = 2 * time.Minute
+
+// doPushRef pushes the given ref to the target with fetch+rebase recovery.
+// The target can be a remote name or a URL.
+func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) error {
+	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
+	defer cancel()
+
+	displayTarget := displayPushTarget(target)
+	refLabel := refDisplayName(ref)
+
+	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", refLabel, displayTarget)
 	stop := startProgressDots(os.Stderr)
 
 	// Try pushing first
-	if result, err := tryPushSessionsCommon(ctx, target, branchName); err == nil {
+	result, err := tryPushRefCommon(ctx, target, ref)
+	if err == nil {
 		finishPush(ctx, stop, result, target)
 		return nil
 	}
 	stop("")
 
+	// Protected refs cannot be fixed by syncing and retrying.
+	var protectedErr *protectedRefError
+	if errors.As(err, &protectedErr) {
+		printProtectedRefBlock(os.Stderr, refLabel, target)
+		return nil
+	}
+
 	// Push failed - likely non-fast-forward. Try to fetch and rebase.
-	fmt.Fprintf(os.Stderr, "[entire] Syncing %s with remote...", branchName)
+	// Spanned (with the network fetch as a child) so the trace distinguishes
+	// "the raw push is slow" from "we keep hitting contention and re-syncing".
+	fmt.Fprintf(os.Stderr, "[entire] Syncing %s with remote...", refLabel)
 	stop = startProgressDots(os.Stderr)
 
-	if err := fetchAndRebaseSessionsCommon(ctx, target, branchName); err != nil {
+	frCtx, fetchRebaseSpan := perf.Start(ctx, "fetch_and_rebase")
+	syncErr := fetchAndRebaseRefCommon(frCtx, target, ref)
+	fetchRebaseSpan.RecordError(syncErr)
+	fetchRebaseSpan.End()
+	if syncErr != nil {
 		stop("")
-		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync %s: %v\n", branchName, err)
+		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync %s: %v\n", refLabel, syncErr)
 		printCheckpointRemoteHint(target)
 		return nil // Don't fail the main push
 	}
 	stop(" done")
 
 	// Try pushing again after rebase
-	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", branchName, displayTarget)
+	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", refLabel, displayTarget)
 	stop = startProgressDots(os.Stderr)
 
-	if result, err := tryPushSessionsCommon(ctx, target, branchName); err != nil {
+	if result, err := tryPushRefCommon(ctx, target, ref); err != nil {
 		stop("")
-		fmt.Fprintf(os.Stderr, "[entire] Warning: failed to push %s after sync: %v\n", branchName, err)
+		fmt.Fprintf(os.Stderr, "[entire] Warning: failed to push %s after sync: %v\n", refLabel, err)
 		printCheckpointRemoteHint(target)
 	} else {
 		finishPush(ctx, stop, result, target)
@@ -107,10 +140,19 @@ func doPushBranch(ctx context.Context, target, branchName string) error {
 	return nil
 }
 
+// refDisplayName returns a user-readable name for ref. Branch refs use the
+// short name (e.g. "entire/checkpoints/v1"); other refs use the full name.
+func refDisplayName(ref plumbing.ReferenceName) string {
+	if ref.IsBranch() {
+		return ref.Short()
+	}
+	return ref.String()
+}
+
 // printCheckpointRemoteHint prints a hint when a push to a checkpoint URL fails.
 // Only prints when the target is a URL (not the user's default remote).
 func printCheckpointRemoteHint(target string) {
-	if !isURL(target) {
+	if !remote.IsURL(target) {
 		return
 	}
 	fmt.Fprintln(os.Stderr, "[entire] A checkpoint remote is configured in Entire settings (.entire/settings.json or .entire/settings.local.json) but could not be reached.")
@@ -128,7 +170,7 @@ var settingsHintOnce sync.Once
 // Uses sync.Once to avoid duplicates when multiple branches/refs are pushed in a
 // single pre-push invocation.
 func printSettingsCommitHint(ctx context.Context, target string) {
-	if !isURL(target) {
+	if !remote.IsURL(target) {
 		return
 	}
 	settingsHintOnce.Do(func() {
@@ -191,84 +233,177 @@ func finishPush(ctx context.Context, stop func(string), result pushResult, targe
 	}
 }
 
-// tryPushSessionsCommon attempts to push the sessions branch.
-func tryPushSessionsCommon(ctx context.Context, remote, branchName string) (pushResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
+// tryPushRefCommon attempts to push a ref. No timeout of its own —
+// runs under doPushRef's shared budget. Branch refs use a bare branch-name
+// refSpec so existing remote-tracking works; non-branch refs use a force
+// refspec ("+refs/...:refs/...") with no tracking shadow.
+func tryPushRefCommon(ctx context.Context, remoteName string, ref plumbing.ReferenceName) (pushResult, error) {
+	refSpec := ref.Short()
+	if !ref.IsBranch() {
+		refSpec = "+" + ref.String() + ":" + ref.String()
+	}
 
-	// Use --no-verify to prevent recursive hook calls.
-	// Use --porcelain for machine-readable, locale-independent output.
-	cmd := CheckpointGitCommand(ctx, remote, "push", "--no-verify", "--porcelain", remote, branchName)
+	// Span the actual `git push` subprocess: on a slow remote (e.g. a custom
+	// git transport) this is typically where pre-push time is spent. Called once
+	// per push attempt, so a retry after fetch+rebase shows up as a second
+	// git_push step (git_push~1) in the trace. A rejected first push records an
+	// error flag, which signals the recovery path was taken.
+	_, pushSpan := perf.Start(ctx, "git_push")
+	result, err := remote.Push(ctx, remoteName, refSpec)
+	pushSpan.RecordError(err)
+	pushSpan.End()
 
-	output, err := cmd.CombinedOutput()
-	outputStr := string(output)
+	outputStr := result.Output
 	if err != nil {
-		// Check if it's a non-fast-forward error (we can try to recover)
-		if strings.Contains(outputStr, "non-fast-forward") ||
-			strings.Contains(outputStr, "rejected") {
-			return pushResult{}, errors.New("non-fast-forward")
-		}
-		return pushResult{}, fmt.Errorf("push failed: %s", outputStr)
+		return pushResult{}, classifyPushFailure(ctx, outputStr, err)
 	}
 
 	return parsePushResult(outputStr), nil
 }
 
-// fetchAndRebaseSessionsCommon fetches remote sessions and rebases local commits
-// on top of the remote tip. Since checkpoint shards use unique paths, rebases
-// always apply cleanly.
-// The target can be a remote name or a URL.
-func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
+// protectedRefError means the remote is blocking writes to the ref itself.
+type protectedRefError struct {
+	output string
+}
 
-	fetchTarget, err := ResolveFetchTarget(ctx, target)
+func (e *protectedRefError) Error() string {
+	return "remote rejected push to protected ref"
+}
+
+// isProtectedRefRejection detects GitHub ruleset and branch-protection failures.
+func isProtectedRefRejection(output string) bool {
+	return strings.Contains(output, "GH013") ||
+		strings.Contains(output, "Cannot update this protected ref") ||
+		strings.Contains(output, "protected branch hook declined")
+}
+
+var errNonFastForward = errors.New("non-fast-forward")
+
+func isNonFastForwardRejection(output string) bool {
+	if strings.Contains(output, "non-fast-forward") {
+		return true
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "[rejected]") && strings.Contains(line, "(fetch first)") {
+			return true
+		}
+	}
+	return strings.Contains(output, "Updates were rejected because the tip of your current branch is behind") ||
+		strings.Contains(output, "Updates were rejected because the remote contains work that you do not have locally")
+}
+
+// classifyPushOutput maps failing push stderr to a typed error.
+func classifyPushOutput(output string) error {
+	if isProtectedRefRejection(output) {
+		return &protectedRefError{output: output}
+	}
+	if isNonFastForwardRejection(output) {
+		return errNonFastForward
+	}
+	if strings.TrimSpace(output) == "" {
+		return errors.New("push failed")
+	}
+	return fmt.Errorf("push failed: %s", output)
+}
+
+func classifyPushFailure(ctx context.Context, output string, pushErr error) error {
+	if strings.TrimSpace(output) != "" {
+		if pushErr != nil {
+			logging.Debug(ctx, "git push failed",
+				slog.String("error", pushErr.Error()),
+				slog.String("output", output),
+			)
+		}
+		return classifyPushOutput(output)
+	}
+	if pushErr != nil {
+		logging.Debug(ctx, "git push failed without output",
+			slog.String("error", pushErr.Error()),
+		)
+		return fmt.Errorf("push failed: %w", pushErr)
+	}
+	return errors.New("push failed")
+}
+
+// printProtectedRefBlock explains that checkpoint syncing was blocked remotely.
+func printProtectedRefBlock(w io.Writer, ref, target string) {
+	const banner = "[entire] ============================================================"
+	displayTarget := displayPushTarget(target)
+	fmt.Fprintln(w, banner)
+	fmt.Fprintf(w, "[entire] BLOCKED: remote rejected push to %s\n", ref)
+	fmt.Fprintln(w, "[entire] Reason:  GitHub branch protection or repository ruleset (e.g. GH013)")
+	fmt.Fprintf(w, "[entire] Target:  %s\n", displayTarget)
+	fmt.Fprintln(w, "[entire] Impact:  checkpoints are saved locally but NOT synced to this remote.")
+	fmt.Fprintln(w, "[entire] Action:  allow pushes to `entire/*` in your ruleset, or set")
+	fmt.Fprintln(w, "[entire]          `checkpoint_remote` in .entire/settings.json to a separate repo.")
+	fmt.Fprintln(w, banner)
+}
+
+// fetchAndRebaseRefCommon fetches a remote ref and rebases local commits on top
+// of the remote tip. Since checkpoint shards use unique paths, rebases always
+// apply cleanly.
+// The target can be a remote name or a URL.
+func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.ReferenceName) error {
+	// No timeout: runs under doPushRef's shared budget.
+	fetchTarget, err := remote.ResolveFetchTarget(ctx, target)
 	if err != nil {
 		return fmt.Errorf("resolve fetch target: %w", err)
 	}
 
-	// Determine fetch refspec. When the resolved fetch target is a URL, use a
-	// temp ref; when it's still a remote name, use the standard remote-tracking
-	// ref.
+	// Determine fetch refspec. When the resolved fetch target is a URL or the
+	// ref isn't a branch, fetch into a temp ref (no remote-tracking shadow);
+	// otherwise use the standard refs/remotes/<remote>/<branch> destination.
 	var fetchedRefName plumbing.ReferenceName
 	var refSpec string
-	usedTempRef := isURL(fetchTarget)
+	usedTempRef := remote.IsURL(fetchTarget) || !ref.IsBranch()
 	if usedTempRef {
-		tmpRef := "refs/entire-fetch-tmp/" + branchName
-		refSpec = fmt.Sprintf("+refs/heads/%s:%s", branchName, tmpRef)
+		tmpRef := "refs/entire-fetch-tmp/" + strings.TrimPrefix(ref.String(), "refs/")
+		refSpec = fmt.Sprintf("+%s:%s", ref.String(), tmpRef)
 		fetchedRefName = plumbing.ReferenceName(tmpRef)
 	} else {
-		refSpec = fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", branchName, target, branchName)
-		fetchedRefName = plumbing.NewRemoteReferenceName(target, branchName)
+		refSpec = fmt.Sprintf("+%s:refs/remotes/%s/%s", ref.String(), target, ref.Short())
+		fetchedRefName = plumbing.NewRemoteReferenceName(target, ref.Short())
 	}
 
 	// Use git CLI for fetch (go-git's fetch can be tricky with auth).
-	// Use --filter=blob:none for a partial fetch that downloads only commits
-	// and trees, skipping blobs. The merge only needs the tree structure to
-	// combine entries; blobs are already local or fetched on demand.
-	fetchArgs := AppendFetchFilterArgs(ctx, []string{"fetch", "--no-tags", fetchTarget, refSpec})
-	fetchCmd := CheckpointGitCommand(ctx, fetchTarget, fetchArgs...)
-	if output, err := fetchCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("fetch failed: %s", output)
+	// Do NOT --unshallow here: on a shallow repo with deep history (e.g. a
+	// shared monorepo), --unshallow downloads the whole repository because
+	// git treats shallow as a global property of the clone, not per-ref.
+	// The downstream reconcile/rebase paths walk only commits visible past
+	// .git/shallow (collectCommitChain / collectCommitsSince), so the
+	// missing pre-shallow history isn't needed to produce a correct rebase.
+	// Span the fetch separately so a slow sync can be attributed to the network
+	// fetch versus the local reconcile/rebase that follows it.
+	_, fetchSpan := perf.Start(ctx, "git_fetch")
+	fetchOutput, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+		Remote:   fetchTarget,
+		RefSpecs: []string{refSpec},
+		NoTags:   true,
+	})
+	fetchSpan.RecordError(fetchErr)
+	fetchSpan.End()
+	if fetchErr != nil {
+		return fmt.Errorf("fetch failed: %s", fetchOutput)
 	}
 
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Reconcile disconnected metadata branches before rebasing.
 	// The fetch above updated the remote-tracking ref, so reconciliation
 	// can compare fresh local vs remote. If disconnected (empty-orphan bug),
 	// this cherry-picks local commits onto remote tip, updating the local ref.
 	// If reconciliation fails, abort — proceeding to rebase on disconnected
-	// branches would silently combine unrelated histories.
-	if reconcileErr := ReconcileDisconnectedMetadataBranch(ctx, repo, fetchedRefName, os.Stderr); reconcileErr != nil {
+	// refs would silently combine unrelated histories.
+	if reconcileErr := ReconcileDisconnectedMetadataRef(ctx, repo, ref, fetchedRefName, os.Stderr); reconcileErr != nil {
 		return fmt.Errorf("metadata reconciliation failed: %w", reconcileErr)
 	}
 
-	// Get local branch (re-read after potential reconciliation update)
-	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
+	// Get local ref (re-read after potential reconciliation update)
+	localRef, err := repo.Reference(ref, true)
 	if err != nil {
 		return fmt.Errorf("failed to get local ref: %w", err)
 	}
@@ -279,9 +414,20 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 		return fmt.Errorf("failed to get remote ref: %w", err)
 	}
 
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+	advance := func(hash plumbing.Hash) error {
+		if err := AdvanceLocalRef(ctx, repo, refs, ref, hash); err != nil {
+			return err
+		}
+		if usedTempRef {
+			_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
+		}
+		return nil
+	}
+
 	// If local is already at or behind remote, fast-forward
 	if localRef.Hash() == remoteRef.Hash() {
-		return nil
+		return advance(remoteRef.Hash())
 	}
 
 	// Find merge base
@@ -296,12 +442,8 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 
 	// If local is ancestor of remote (merge base == local), fast-forward to remote
 	if mergeBase == localRef.Hash() {
-		ref := plumbing.NewHashReference(plumbing.NewBranchReferenceName(branchName), remoteRef.Hash())
-		if err := repo.Storer.SetReference(ref); err != nil {
-			return fmt.Errorf("failed to fast-forward branch ref: %w", err)
-		}
-		if usedTempRef {
-			_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
+		if err := advance(remoteRef.Hash()); err != nil {
+			return fmt.Errorf("failed to fast-forward ref: %w", err)
 		}
 		return nil
 	}
@@ -317,33 +459,20 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 
 	if len(localCommits) == 0 {
 		// No local-only commits — just point to remote
-		ref := plumbing.NewHashReference(plumbing.NewBranchReferenceName(branchName), remoteRef.Hash())
-		if err := repo.Storer.SetReference(ref); err != nil {
-			return fmt.Errorf("failed to update branch ref: %w", err)
-		}
-		if usedTempRef {
-			_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
-		}
-		return nil
+		return advance(remoteRef.Hash())
 	}
 
-	newTip, err := cherryPickOnto(ctx, repo, remoteRef.Hash(), localCommits)
+	shallow, err := loadShallowHashes(ctx, repoPath)
+	if err != nil {
+		return fmt.Errorf("failed to load shallow boundaries: %w", err)
+	}
+
+	newTip, err := cherryPickOnto(ctx, repo, remoteRef.Hash(), localCommits, shallow)
 	if err != nil {
 		return fmt.Errorf("failed to rebase local commits onto remote: %w", err)
 	}
 
-	// Update branch ref
-	newRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(branchName), newTip)
-	if err := repo.Storer.SetReference(newRef); err != nil {
-		return fmt.Errorf("failed to update branch ref: %w", err)
-	}
-
-	// Clean up temp ref if we used one (best-effort, not critical if it fails)
-	if usedTempRef {
-		_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
-	}
-
-	return nil
+	return advance(newTip)
 }
 
 // getMergeBase returns the merge base hash of two commits, or an error if they
@@ -356,10 +485,18 @@ func getMergeBase(ctx context.Context, repoPath, hashA, hashB string) (plumbing.
 	cmd.Dir = repoPath
 	output, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return plumbing.ZeroHash, errNoMergeBase
+		}
 		return plumbing.ZeroHash, fmt.Errorf("git merge-base failed: %w", err)
 	}
 
-	return plumbing.NewHash(strings.TrimSpace(string(output))), nil
+	mergeBase := strings.TrimSpace(string(output))
+	if mergeBase == "" {
+		return plumbing.ZeroHash, errNoMergeBase
+	}
+	return plumbing.NewHash(mergeBase), nil
 }
 
 // collectCommitsSince returns non-merge commits reachable from tip but not from
@@ -422,40 +559,4 @@ func startProgressDots(w io.Writer) func(suffix string) {
 		<-stopped // Wait for goroutine to finish before writing suffix
 		fmt.Fprintln(w, suffix)
 	}
-}
-
-// isURL returns true if the target looks like a URL rather than a git remote name.
-func isURL(target string) bool {
-	return strings.Contains(target, "://") || strings.Contains(target, "@")
-}
-
-// createMergeCommitCommon creates a merge commit with multiple parents.
-func createMergeCommitCommon(repo *git.Repository, treeHash plumbing.Hash, parents []plumbing.Hash, message string) (plumbing.Hash, error) {
-	authorName, authorEmail := GetGitAuthorFromRepo(repo)
-	now := time.Now()
-	sig := object.Signature{
-		Name:  authorName,
-		Email: authorEmail,
-		When:  now,
-	}
-
-	commit := &object.Commit{
-		TreeHash:     treeHash,
-		ParentHashes: parents,
-		Author:       sig,
-		Committer:    sig,
-		Message:      message,
-	}
-
-	obj := repo.Storer.NewEncodedObject()
-	if err := commit.Encode(obj); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to encode commit: %w", err)
-	}
-
-	hash, err := repo.Storer.SetEncodedObject(obj)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to store commit: %w", err)
-	}
-
-	return hash, nil
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -34,9 +35,10 @@ func setupCleanTestRepo(t *testing.T) (*git.Repository, plumbing.Hash) {
 	t.Helper()
 
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -108,6 +110,37 @@ func createSessionStateFile(t *testing.T, repoRoot string, sessionID string, com
 	return sessionFile
 }
 
+func writeCleanSettingsFile(t *testing.T, repoRoot, content string) {
+	t.Helper()
+
+	entireDir := filepath.Join(repoRoot, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+
+	settingsFile := filepath.Join(entireDir, "settings.json")
+	if err := os.WriteFile(settingsFile, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write settings file: %v", err)
+	}
+}
+
+func TestCleanLongDescription_DefaultIsGeneric(t *testing.T) {
+	repo, _ := setupCleanTestRepo(t)
+
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	repoRoot := wt.Filesystem().Root()
+
+	writeCleanSettingsFile(t, repoRoot, `{"enabled": true, "strategy_options": {}}`)
+
+	description := cleanLongDescription()
+	if strings.Contains(description, "entire/checkpoints/v1") {
+		t.Fatalf("did not expect stale v1 preservation text, got: %s", description)
+	}
+}
+
 // --- Default mode tests (current HEAD cleanup) ---
 
 func TestCleanCmd_DefaultMode_NothingToClean(t *testing.T) {
@@ -132,7 +165,7 @@ func TestCleanCmd_DefaultMode_WithForce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
-	worktreePath := wt.Filesystem.Root()
+	worktreePath := wt.Filesystem().Root()
 	worktreeID, err := paths.GetWorktreeID(worktreePath)
 	if err != nil {
 		t.Fatalf("failed to get worktree ID: %v", err)
@@ -178,7 +211,7 @@ func TestCleanCmd_DefaultMode_DryRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
-	worktreePath := wt.Filesystem.Root()
+	worktreePath := wt.Filesystem().Root()
 	worktreeID, err := paths.GetWorktreeID(worktreePath)
 	if err != nil {
 		t.Fatalf("failed to get worktree ID: %v", err)
@@ -253,7 +286,7 @@ func TestCleanCmd_DefaultMode_SessionsWithoutShadowBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
-	worktreePath := wt.Filesystem.Root()
+	worktreePath := wt.Filesystem().Root()
 
 	// Create session state files WITHOUT a shadow branch
 	sessionFile := createSessionStateFile(t, worktreePath, "2026-02-02-orphaned", commitHash)
@@ -282,7 +315,7 @@ func TestCleanCmd_DefaultMode_MultipleSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
-	worktreePath := wt.Filesystem.Root()
+	worktreePath := wt.Filesystem().Root()
 	worktreeID, err := paths.GetWorktreeID(worktreePath)
 	if err != nil {
 		t.Fatalf("failed to get worktree ID: %v", err)
@@ -546,6 +579,35 @@ func TestCleanCmd_All_NotGitRepository(t *testing.T) {
 	}
 }
 
+func TestCleanCmd_All_InvalidSettingsIgnoredWithoutV2Scan(t *testing.T) {
+	repo, _ := setupCleanTestRepo(t)
+
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	repoRoot := wt.Filesystem().Root()
+
+	writeCleanSettingsFile(t, repoRoot, `{"enabled": true,`)
+
+	cmd := newCleanCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--all", "--dry-run"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("clean --all --dry-run error = %v", err)
+	}
+
+	if stderr.String() != "" {
+		t.Fatalf("expected no settings warning, got stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No items to clean up.") {
+		t.Fatalf("expected command to continue cleanup flow, got stdout=%q", stdout.String())
+	}
+}
+
 func TestCleanCmd_All_Subdirectory(t *testing.T) {
 	repo, commitHash := setupCleanTestRepo(t)
 
@@ -558,9 +620,9 @@ func TestCleanCmd_All_Subdirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
-	repoRoot := wt.Filesystem.Root()
+	repoRoot := wt.Filesystem().Root()
 	subDir := filepath.Join(repoRoot, "subdir")
-	if err := wt.Filesystem.MkdirAll("subdir", 0o755); err != nil {
+	if err := wt.Filesystem().MkdirAll("subdir", 0o755); err != nil {
 		t.Fatalf("failed to create subdir: %v", err)
 	}
 
@@ -593,7 +655,7 @@ func TestCleanCmd_All_FindsSessionWithShadowBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
-	worktreePath := wt.Filesystem.Root()
+	worktreePath := wt.Filesystem().Root()
 	worktreeID, err := paths.GetWorktreeID(worktreePath)
 	if err != nil {
 		t.Fatalf("failed to get worktree ID: %v", err)

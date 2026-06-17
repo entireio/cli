@@ -3,12 +3,14 @@
 package integration
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
@@ -30,7 +32,7 @@ func TestAttach_NewSession_NoHooks(t *testing.T) {
 	}
 
 	// Run attach
-	output := env.RunCLI("attach", sessionID, "-a", "claude-code", "-f")
+	output := env.RunCLI("session", "attach", sessionID, "-a", "claude-code", "-f")
 
 	// Verify output
 	if !strings.Contains(output, "Attached session") {
@@ -75,7 +77,7 @@ func TestAttach_ResearchSession_NoFileChanges(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	output := env.RunCLI("attach", sessionID, "-a", "claude-code", "-f")
+	output := env.RunCLI("session", "attach", sessionID, "-a", "claude-code", "-f")
 
 	if !strings.Contains(output, "Attached session") {
 		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
@@ -130,7 +132,7 @@ func TestAttach_ExistingCheckpoint_AddSession(t *testing.T) {
 	}
 
 	// Attach the second session
-	output := env.RunCLI("attach", session2ID, "-a", "claude-code")
+	output := env.RunCLI("session", "attach", session2ID, "-a", "claude-code")
 
 	if !strings.Contains(output, "Attached session") {
 		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
@@ -187,7 +189,7 @@ func TestAttach_AlreadyTracked_NoCheckpoint(t *testing.T) {
 	env.GitCommit("add research notes")
 
 	// Now attach — session state exists but has no checkpoint.
-	output := env.RunCLI("attach", session1.ID, "-a", "claude-code", "-f")
+	output := env.RunCLI("session", "attach", session1.ID, "-a", "claude-code", "-f")
 
 	if !strings.Contains(output, "Attached session") {
 		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
@@ -243,7 +245,7 @@ func TestAttach_AlreadyTracked_HasCheckpoint(t *testing.T) {
 	}
 
 	// Re-attach the same session
-	output := env.RunCLI("attach", session1.ID, "-a", "claude-code")
+	output := env.RunCLI("session", "attach", session1.ID, "-a", "claude-code")
 
 	if !strings.Contains(output, "already has checkpoint") {
 		t.Errorf("expected 'already has checkpoint' in output, got:\n%s", output)
@@ -358,8 +360,51 @@ func TestAttach_InvalidSessionID(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 
-	_, err := env.RunCLIWithError("attach", "../path-traversal", "-a", "claude-code")
+	_, err := env.RunCLIWithError("session", "attach", "../path-traversal", "-a", "claude-code")
 	if err == nil {
 		t.Error("expected error for invalid session ID")
 	}
+}
+
+// TestAttach_MirrorsToV1CustomRefWhenOptedIn verifies that running attach
+// through the real entire binary with checkpoints_version "1.1" leaves
+// refs/entire/checkpoints/v1.1 at the same hash as entire/checkpoints/v1.
+func TestAttach_MirrorsToV1CustomRefWhenOptedIn(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	env.PatchSettings(map[string]any{
+		"strategy_options": map[string]any{"checkpoints_version": "1.1"},
+	})
+
+	sessionID := "attach-v1-1-mirror"
+	tb := NewTranscriptBuilder()
+	tb.AddUserMessage("hello")
+	tb.AddAssistantMessage("hi")
+	transcriptPath := filepath.Join(env.ClaudeProjectDir, sessionID+".jsonl")
+	if err := tb.WriteToFile(transcriptPath); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	env.RunCLI("session", "attach", sessionID, "-a", "claude-code", "-f")
+
+	v1 := revParse(t, env.RepoDir, "entire/checkpoints/v1")
+	custom := revParse(t, env.RepoDir, "refs/entire/checkpoints/v1.1")
+	if v1 != custom {
+		t.Errorf("refs/entire/checkpoints/v1.1 = %s, want %s (entire/checkpoints/v1)", custom, v1)
+	}
+}
+
+func revParse(t *testing.T, dir, ref string) string {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", "rev-parse", "--verify", ref)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse %s in %s failed: %v\n%s", ref, dir, err, stderr.String())
+	}
+	return strings.TrimSpace(string(out))
 }

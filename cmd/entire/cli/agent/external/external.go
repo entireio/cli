@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
 // defaultRunTimeout is the maximum time an external binary call may take when
@@ -92,6 +93,10 @@ func (e *Agent) ProtectedDirs() []string {
 	return e.info.ProtectedDirs
 }
 
+func (e *Agent) ProtectedFiles() []string {
+	return e.info.ProtectedFiles
+}
+
 // --- Agent interface: Transcript Storage ---
 
 func (e *Agent) ReadTranscript(sessionRef string) ([]byte, error) {
@@ -116,6 +121,24 @@ func (e *Agent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 		return nil, fmt.Errorf("reassemble-transcript: marshal: %w", err)
 	}
 	return e.run(context.Background(), input, "reassemble-transcript")
+}
+
+func (e *Agent) CompactTranscript(ctx context.Context, sessionRef string) (*agent.CompactedTranscript, error) {
+	stdout, err := e.run(ctx, nil, "compact-transcript", "--session-ref", sessionRef)
+	if err != nil {
+		return nil, fmt.Errorf("compact-transcript: %w", err)
+	}
+
+	var resp CompactTranscriptResponse
+	if err := json.Unmarshal(stdout, &resp); err != nil {
+		return nil, fmt.Errorf("compact-transcript: invalid JSON: %w", err)
+	}
+
+	compacted, err := resp.toCompactedTranscript()
+	if err != nil {
+		return nil, err
+	}
+	return compacted, nil
 }
 
 // --- Agent interface: Legacy methods ---
@@ -412,9 +435,9 @@ func (e *Agent) run(ctx context.Context, stdin []byte, args ...string) ([]byte, 
 	// so cmd.Run() doesn't block waiting for pipe reads.
 	cmd.WaitDelay = 3 * time.Second
 
-	// Set environment: repo root + protocol version
 	cmd.Env = append(cmd.Environ(),
 		"ENTIRE_PROTOCOL_VERSION="+strconv.Itoa(ProtocolVersion),
+		"ENTIRE_CLI_VERSION="+versioninfo.Version,
 	)
 	if repoRoot, err := paths.WorktreeRoot(ctx); err == nil {
 		cmd.Env = append(cmd.Env, "ENTIRE_REPO_ROOT="+repoRoot)

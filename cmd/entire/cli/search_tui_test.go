@@ -6,7 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 )
 
@@ -23,7 +24,7 @@ func testResults() []search.Result {
 	return []search.Result{
 		{
 			Type: "checkpoint",
-			Data: search.CheckpointResult{
+			Checkpoint: &search.CheckpointResult{
 				ID:             "a3b2c4d5e6f7",
 				Prompt:         "add auth middleware to protect API routes",
 				CommitSHA:      &sha1,
@@ -44,7 +45,7 @@ func testResults() []search.Result {
 		},
 		{
 			Type: "checkpoint",
-			Data: search.CheckpointResult{
+			Checkpoint: &search.CheckpointResult{
 				ID:            "d5e6f789ab01",
 				Prompt:        "fix auth token refresh",
 				CommitSHA:     &sha2,
@@ -64,6 +65,43 @@ func testResults() []search.Result {
 	}
 }
 
+func testMultiTypeResults() []search.Result {
+	results := testResults()
+	results = append(results,
+		search.Result{
+			Type: "commit",
+			Commit: &search.CommitResult{
+				ID:            "cm1",
+				CommitSHA:     "abc1234567890",
+				CommitMessage: "fix: auth token validation",
+				CommitSubject: "fix: auth token validation",
+				Branch:        "main",
+				Org:           "entirehq",
+				Repo:          "entire.io",
+				Author:        "carol",
+				CreatedAt:     "2026-03-22T09:00:00Z",
+				Additions:     15,
+				Deletions:     3,
+				FilesChanged:  2,
+			},
+			Meta: search.Meta{MatchType: "keyword", Score: 0.4},
+		},
+		search.Result{
+			Type: "session",
+			Session: &search.SessionResult{
+				SessionID:   "ss1",
+				DisplayName: "Debug auth flow",
+				Org:         "entirehq",
+				Repo:        "entire.io",
+				CreatedAt:   "2026-03-23T11:00:00Z",
+				StepCount:   8,
+			},
+			Meta: search.Meta{MatchType: "semantic", Score: 0.3},
+		},
+	)
+	return results
+}
+
 func testModel() searchModel {
 	ss := statusStyles{colorEnabled: false, width: 100}
 	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r", Limit: 20}
@@ -71,10 +109,18 @@ func testModel() searchModel {
 	return initTestViewport(m)
 }
 
+func testMultiTypeModel() searchModel {
+	ss := statusStyles{colorEnabled: false, width: 120}
+	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r", Limit: 20}
+	results := testMultiTypeResults()
+	m := newSearchModel(results, "auth", len(results), cfg, ss)
+	return initTestViewport(m)
+}
+
 // initTestViewport sets a simulated terminal height and initializes the browse viewport for tests that call View().
 func initTestViewport(m searchModel) searchModel {
 	m.height = 60
-	m.browseVP.Height = 59
+	m.browseVP.SetHeight(59)
 	m = m.refreshBrowseContent()
 	return m
 }
@@ -98,24 +144,111 @@ func TestSearchModel_Navigation(t *testing.T) {
 		t.Fatalf("initial cursor = %d, want 0", m.cursor)
 	}
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 	if m.cursor != 1 {
 		t.Errorf("after down: cursor = %d, want 1", m.cursor)
 	}
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 	if m.cursor != 1 {
 		t.Errorf("after down at bottom: cursor = %d, want 1", m.cursor)
 	}
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if m.cursor != 0 {
 		t.Errorf("after up: cursor = %d, want 0", m.cursor)
 	}
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if m.cursor != 0 {
 		t.Errorf("after up at top: cursor = %d, want 0", m.cursor)
+	}
+}
+
+func TestSearchModel_VimNavigationAliases(t *testing.T) {
+	t.Parallel()
+	m := testModel()
+
+	m = updateModel(t, m, tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if m.cursor != 1 {
+		t.Errorf("after j: cursor = %d, want 1", m.cursor)
+	}
+
+	m = updateModel(t, m, tea.KeyPressMsg{Code: 'k', Text: "k"})
+	if m.cursor != 0 {
+		t.Errorf("after k: cursor = %d, want 0", m.cursor)
+	}
+}
+
+func TestSearchModel_TopBottomNavigation(t *testing.T) {
+	t.Parallel()
+
+	results := make([]search.Result, 30)
+	for i := range results {
+		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
+	}
+
+	tests := []struct {
+		name        string
+		key         tea.KeyPressMsg
+		startPage   int
+		startCursor int
+		wantPage    int
+		wantCursor  int
+	}{
+		{
+			name:        "home",
+			key:         tea.KeyPressMsg{Code: tea.KeyHome},
+			startPage:   1,
+			startCursor: 4,
+			wantPage:    0,
+			wantCursor:  0,
+		},
+		{
+			name:        "g",
+			key:         tea.KeyPressMsg{Code: 'g', Text: "g"},
+			startPage:   1,
+			startCursor: 4,
+			wantPage:    0,
+			wantCursor:  0,
+		},
+		{
+			name:        "end",
+			key:         tea.KeyPressMsg{Code: tea.KeyEnd},
+			startPage:   0,
+			startCursor: 0,
+			wantPage:    2,
+			wantCursor:  9,
+		},
+		{
+			name:        "G",
+			key:         tea.KeyPressMsg{Code: 'G', Text: "G"},
+			startPage:   0,
+			startCursor: 0,
+			wantPage:    2,
+			wantCursor:  9,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ss := statusStyles{colorEnabled: false, width: 100}
+			cfg := search.Config{}
+			m := initTestViewport(newSearchModel(results, "q", len(results), cfg, ss))
+			m.page = tt.startPage
+			m.cursor = tt.startCursor
+			m = m.refreshBrowseContent()
+
+			m = updateModel(t, m, tt.key)
+			if m.page != tt.wantPage {
+				t.Errorf("page = %d, want %d", m.page, tt.wantPage)
+			}
+			if m.cursor != tt.wantCursor {
+				t.Errorf("cursor = %d, want %d", m.cursor, tt.wantCursor)
+			}
+		})
 	}
 }
 
@@ -123,9 +256,11 @@ func TestSearchModel_Quit(t *testing.T) {
 	t.Parallel()
 	m := testModel()
 
-	quitKeys := []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune{'q'}},
-		{Type: tea.KeyCtrlC},
+	quitKeys := []tea.KeyPressMsg{
+		{Code: 'q', Text: "q"},
+		{Code: 'c', Mod: tea.ModCtrl},
+		{Code: tea.KeyEscape},
+		{Code: 'h', Text: "h"},
 	}
 
 	for _, key := range quitKeys {
@@ -149,12 +284,12 @@ func TestSearchModel_SearchMode(t *testing.T) {
 		t.Fatalf("initial mode = %d, want modeBrowse", m.mode)
 	}
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	if m.mode != modeSearch {
 		t.Errorf("after /: mode = %d, want modeSearch", m.mode)
 	}
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
 	if m.mode != modeBrowse {
 		t.Errorf("after esc: mode = %d, want modeBrowse", m.mode)
 	}
@@ -165,12 +300,12 @@ func TestSearchModel_SearchModeEnter(t *testing.T) {
 	m := testModel()
 
 	// Enter search mode
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	// Type a query
 	m.input.SetValue(newQuery)
 
 	// Press enter — should set loading and return to browse mode
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -191,11 +326,11 @@ func TestSearchModel_SearchModeEnterEmpty(t *testing.T) {
 	m := testModel()
 
 	// Enter search mode with empty query
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	m.input.SetValue("   ")
 
 	// Press enter — should be a no-op (stay in search mode)
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.mode != modeSearch {
 		t.Errorf("after enter with empty query: mode = %d, want modeSearch", m.mode)
 	}
@@ -204,10 +339,92 @@ func TestSearchModel_SearchModeEnterEmpty(t *testing.T) {
 	}
 }
 
+// TestSearchModel_BrowseNeverExceedsHeight guards the master-detail layout:
+// the browse view (header + scrolling list + pinned detail card + footer) must
+// never render more rows than the terminal height, or the detail card gets
+// clipped at the bottom (the bug this layout fixes).
+func TestSearchModel_BrowseNeverExceedsHeight(t *testing.T) {
+	t.Parallel()
+
+	results := make([]search.Result, 10)
+	for i := range results {
+		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{
+			ID:           fmt.Sprintf("id-%02d", i),
+			Prompt:       "a deliberately long prompt that wraps across the detail card width several times over",
+			Branch:       "feature/a-fairly-long-branch-name",
+			Org:          "entireio",
+			Repo:         "cli",
+			Author:       "toothbrush",
+			CreatedAt:    "2026-06-03T10:00:00Z",
+			FilesTouched: []string{"cmd/entire/cli/auth.go", "cmd/entire/cli/some/deeply/nested/long/path/file.go"},
+		}}
+	}
+
+	for _, color := range []bool{false, true} {
+		for _, w := range []int{40, 80, 120} {
+			for _, h := range []int{12, 20, 24, 40, 60} {
+				ss := statusStyles{colorEnabled: color, width: w}
+				m := initTestViewport(newSearchModel(results, "auth", 47, search.Config{}, ss))
+				m.width, m.height = w, h
+				m.cursor = 7 // force the list to scroll
+				m = m.refreshBrowseContent()
+
+				if got := lipgloss.Height(m.viewBrowse()); got > h {
+					t.Errorf("color=%v w=%d h=%d: rendered %d rows, exceeds height", color, w, h, got)
+				}
+			}
+		}
+	}
+}
+
+// TestSearchModel_ListScrollHint verifies the reserved gap row shows a "more
+// results" affordance when the list is cut off, and stays blank when it fits.
+func TestSearchModel_ListScrollHint(t *testing.T) {
+	t.Parallel()
+
+	mk := func(n int) []search.Result {
+		r := make([]search.Result, n)
+		for i := range r {
+			r[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{
+				ID: fmt.Sprintf("id-%02d", i), Prompt: "p", Branch: "main", Org: "o", Repo: "r",
+				Author: "a", CreatedAt: "2026-06-03T10:00:00Z",
+			}}
+		}
+		return r
+	}
+
+	// Short terminal + 25 results (multiple pages) → the page's rows can't all fit.
+	overflow := newSearchModel(mk(25), "auth", 25, search.Config{}, statusStyles{width: 80})
+	overflow.height, overflow.width = 28, 80
+	overflow = overflow.refreshBrowseContent()
+
+	overflow.cursor = 0
+	if v := overflow.viewBrowse(); !strings.Contains(v, "↓ more results") {
+		t.Error("expected a down-scroll hint at the top of an overflowing list")
+	}
+	// The page / results count renders on the same status row beneath the list.
+	if v := overflow.viewBrowse(); !strings.Contains(v, "page 1/3") || !strings.Contains(v, "25 results") {
+		t.Errorf("expected page/results count in the list status row: %q", v)
+	}
+	overflow.cursor = 9
+	overflow = overflow.refreshBrowseContent()
+	if v := overflow.viewBrowse(); !strings.Contains(v, "↑ more results") {
+		t.Error("expected an up-scroll hint at the bottom of an overflowing list")
+	}
+
+	// Tall terminal + few results → everything fits, no hint.
+	fits := newSearchModel(mk(3), "auth", 3, search.Config{}, statusStyles{width: 80})
+	fits.height, fits.width = 50, 80
+	fits = fits.refreshBrowseContent()
+	if v := fits.viewBrowse(); strings.Contains(v, "more results") {
+		t.Error("did not expect a scroll hint when the whole list fits")
+	}
+}
+
 func TestSearchModel_View(t *testing.T) {
 	t.Parallel()
 	m := testModel()
-	view := m.View()
+	view := m.View().Content
 
 	// Section headers
 	if !strings.Contains(view, "SEARCH") {
@@ -222,14 +439,12 @@ func TestSearchModel_View(t *testing.T) {
 		t.Error("view missing query in search bar")
 	}
 
-	// Column headers
-	for _, col := range []string{"Age", "ID", "Branch", "Repo", "Prompt", "Author"} {
-		if !strings.Contains(view, col) {
-			t.Errorf("view missing column header %q", col)
-		}
+	// List meta line shows the result's type word
+	if !strings.Contains(view, "checkpoint") {
+		t.Error("view missing checkpoint type word on meta line")
 	}
 
-	// Table data
+	// Selected result's full ID is shown in the detail card
 	if !strings.Contains(view, "a3b2c4d5e6f") {
 		t.Error("view missing first result ID")
 	}
@@ -258,12 +473,226 @@ func TestSearchModel_View(t *testing.T) {
 		t.Error("detail missing files or truncation hint")
 	}
 
-	// Footer
-	if !strings.Contains(view, "navigate") {
-		t.Error("view missing footer help")
-	}
 	if !strings.Contains(view, "2 results") {
 		t.Error("view missing results count in footer")
+	}
+}
+
+func TestSearchModel_ViewMultiTypes(t *testing.T) {
+	t.Parallel()
+	m := testMultiTypeModel()
+	// Switch to the All tab so every result type renders in the list.
+	m.filterType = typeFilterAll
+	m = m.refreshBrowseContent()
+	view := m.View().Content
+
+	// List meta lines show each result's type word
+	if !strings.Contains(view, "checkpoint") {
+		t.Error("view missing checkpoint type word")
+	}
+	if !strings.Contains(view, "commit") {
+		t.Error("view missing commit type word")
+	}
+	if !strings.Contains(view, "session") {
+		t.Error("view missing session type word")
+	}
+
+	// Type tabs
+	if !strings.Contains(view, "Checkpoints") {
+		t.Error("view missing Checkpoints tab")
+	}
+	if !strings.Contains(view, "Sessions") {
+		t.Error("view missing Sessions tab")
+	}
+	if !strings.Contains(view, "Commits") {
+		t.Error("view missing Commits tab")
+	}
+}
+
+func TestSearchModel_TypeFilterKeys(t *testing.T) {
+	t.Parallel()
+	m := testMultiTypeModel()
+
+	// Press 1 → filter to checkpoints
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '1', Text: "1"})
+	if m.filterType != typeFilterCheckpoints {
+		t.Errorf("after 1: filterType = %q, want %q", m.filterType, typeFilterCheckpoints)
+	}
+	if len(m.filteredResults()) != 2 {
+		t.Errorf("checkpoint filter: got %d results, want 2", len(m.filteredResults()))
+	}
+
+	// Press 2 → filter to sessions
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '2', Text: "2"})
+	if m.filterType != typeFilterSessions {
+		t.Errorf("after 2: filterType = %q, want %q", m.filterType, typeFilterSessions)
+	}
+	if len(m.filteredResults()) != 1 {
+		t.Errorf("session filter: got %d results, want 1", len(m.filteredResults()))
+	}
+
+	// Press 3 → filter to commits
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '3', Text: "3"})
+	if m.filterType != typeFilterCommits {
+		t.Errorf("after 3: filterType = %q, want %q", m.filterType, typeFilterCommits)
+	}
+	if len(m.filteredResults()) != 1 {
+		t.Errorf("commit filter: got %d results, want 1", len(m.filteredResults()))
+	}
+
+	// Press 0 → no-op (the All tab was removed); filter stays on commits
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '0', Text: "0"})
+	if m.filterType != typeFilterCommits {
+		t.Errorf("after 0: filterType = %q, want %q (no-op)", m.filterType, typeFilterCommits)
+	}
+}
+
+func TestSearchModel_TypeFilterResetsCursorAndPage(t *testing.T) {
+	t.Parallel()
+	m := testMultiTypeModel()
+	m.cursor = 2
+	m.page = 1
+
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '1', Text: "1"})
+	if m.cursor != 0 {
+		t.Errorf("cursor should reset to 0 on type change, got %d", m.cursor)
+	}
+	if m.page != 0 {
+		t.Errorf("page should reset to 0 on type change, got %d", m.page)
+	}
+}
+
+func TestSearchModel_CommitDetail(t *testing.T) {
+	t.Parallel()
+	m := testMultiTypeModel()
+
+	// Filter to commits and check detail
+	m.filterType = typeFilterCommits
+	m.cursor = 0
+	m = m.refreshBrowseContent()
+
+	r := m.selectedResult()
+	if r == nil {
+		t.Fatal("no selected result")
+	}
+	if r.Type != "commit" {
+		t.Fatalf("selected result type = %q, want commit", r.Type)
+	}
+
+	content := m.renderDetailContent(*r, 80, true)
+	if !strings.Contains(content, "Commit Detail") {
+		t.Error("missing Commit Detail title")
+	}
+	if !strings.Contains(content, "abc1234") {
+		t.Error("missing truncated SHA")
+	}
+	if !strings.Contains(content, "fix: auth token validation") {
+		t.Error("missing commit subject")
+	}
+	if !strings.Contains(content, "+15") {
+		t.Error("missing additions")
+	}
+	if !strings.Contains(content, "-3") {
+		t.Error("missing deletions")
+	}
+}
+
+func TestSearchModel_SessionDetail(t *testing.T) {
+	t.Parallel()
+	m := testMultiTypeModel()
+
+	// Filter to sessions and check detail
+	m.filterType = typeFilterSessions
+	m.cursor = 0
+	m = m.refreshBrowseContent()
+
+	r := m.selectedResult()
+	if r == nil {
+		t.Fatal("no selected result")
+	}
+	if r.Type != "session" {
+		t.Fatalf("selected result type = %q, want session", r.Type)
+	}
+
+	content := m.renderDetailContent(*r, 80, true)
+	if !strings.Contains(content, "Session Detail") {
+		t.Error("missing Session Detail title")
+	}
+	if !strings.Contains(content, "ss1") {
+		t.Error("missing session ID")
+	}
+	if !strings.Contains(content, "Debug auth flow") {
+		t.Error("missing display name")
+	}
+	if !strings.Contains(content, "8") {
+		t.Error("missing step count")
+	}
+}
+
+func TestSearchModel_BrowseFooterHelp(t *testing.T) {
+	t.Parallel()
+	m := testModel()
+
+	footer := m.viewHelp()
+	wantParts := []string{
+		"/ search",
+		"↑/↓, j/k scroll",
+		"home/end, g/G top/bottom",
+		"1-3 type",
+		"q quit",
+	}
+	lastIndex := -1
+	for _, want := range wantParts {
+		idx := strings.Index(footer, want)
+		if idx == -1 {
+			t.Fatalf("footer missing %q: %q", want, footer)
+		}
+		if idx < lastIndex {
+			t.Fatalf("footer control %q rendered out of order: %q", want, footer)
+		}
+		lastIndex = idx
+	}
+
+	for _, unwanted := range []string{"detail", "open", "back", "navigate"} {
+		if strings.Contains(footer, unwanted) {
+			t.Fatalf("footer should not mention %q: %q", unwanted, footer)
+		}
+	}
+	if strings.Contains(footer, "n/p page") {
+		t.Fatalf("single-page footer should not mention paging: %q", footer)
+	}
+}
+
+func TestSearchModel_BrowseFooterHelpIncludesPagingForMultiplePages(t *testing.T) {
+	t.Parallel()
+
+	results := make([]search.Result, 30)
+	for i := range results {
+		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
+	}
+
+	ss := statusStyles{colorEnabled: false, width: 120}
+	m := newSearchModel(results, "q", len(results), search.Config{}, ss)
+
+	footer := m.viewHelp()
+	wantParts := []string{
+		"/ search",
+		"↑/↓, j/k scroll",
+		"home/end, g/G top/bottom",
+		"n/p page",
+		"1-3 type",
+		"q quit",
+	}
+	lastIndex := -1
+	for _, want := range wantParts {
+		idx := strings.Index(footer, want)
+		if idx == -1 {
+			t.Fatalf("footer missing %q: %q", want, footer)
+		}
+		if idx < lastIndex {
+			t.Fatalf("footer control %q rendered out of order: %q", want, footer)
+		}
+		lastIndex = idx
 	}
 }
 
@@ -274,7 +703,7 @@ func TestSearchModel_ViewSearchModeIncludesRepoHint(t *testing.T) {
 	m.mode = modeSearch
 	m.input.Focus()
 
-	view := m.View()
+	view := m.View().Content
 	if !strings.Contains(view, "repo:<owner/name|*>") {
 		t.Error("view missing repo filter hint")
 	}
@@ -288,7 +717,7 @@ func TestSearchModel_ViewNoResults(t *testing.T) {
 	ss := statusStyles{colorEnabled: false, width: 80}
 	cfg := search.Config{}
 	m := initTestViewport(newSearchModel(nil, "nothing", 0, cfg, ss))
-	view := m.View()
+	view := m.View().Content
 
 	if !strings.Contains(view, "No results found") {
 		t.Error("view should show no results message")
@@ -312,7 +741,7 @@ func TestSearchModel_ViewZeroWidth(t *testing.T) {
 	m := newSearchModel(testResults(), "auth", 2, cfg, ss)
 	m.width = 0
 
-	if view := m.View(); view != "" {
+	if view := m.View().Content; view != "" {
 		t.Errorf("view with zero width should be empty, got %q", view)
 	}
 }
@@ -445,7 +874,7 @@ func TestRenderDetailContent_AuthorEmptyUsername(t *testing.T) {
 
 	// Empty string username should fall back to display name
 	empty := ""
-	r.Data.AuthorUsername = &empty
+	r.Checkpoint.AuthorUsername = &empty
 	content = m.renderDetailContent(r, 80, false)
 	if !strings.Contains(content, "bob") {
 		t.Error("author should show display name when username is empty string")
@@ -456,7 +885,7 @@ func TestRenderDetailContent_PromptWrapping(t *testing.T) {
 	t.Parallel()
 	m := testModel()
 	r := testResults()[0]
-	r.Data.Prompt = "line one\nline two\nline three"
+	r.Checkpoint.Prompt = "line one\nline two\nline three"
 
 	content := m.renderDetailContent(r, 80, false)
 	// CollapseWhitespace should merge the newlines into spaces
@@ -472,24 +901,28 @@ func TestRenderSearchStatic(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	styles := statusStyles{colorEnabled: false, width: 100}
-	renderSearchStatic(&buf, testResults(), "auth", 2, styles)
+	styles := statusStyles{colorEnabled: false, width: 120}
+	results := testMultiTypeResults()
+	renderSearchStatic(&buf, results, "auth", len(results), styles)
 	output := buf.String()
 
-	if !strings.Contains(output, `Found 2 checkpoints matching "auth"`) {
-		t.Error("static output missing header")
+	if !strings.Contains(output, `Found 4 results matching "auth"`) {
+		t.Errorf("static output missing header, got:\n%s", output)
+	}
+	if !strings.Contains(output, "TYPE") {
+		t.Error("static output missing TYPE header")
 	}
 	if !strings.Contains(output, "REPO") {
-		t.Error("static output missing repo header")
+		t.Error("static output missing REPO header")
 	}
-	if !strings.Contains(output, "entire") {
-		t.Error("static output missing repo value")
+	if !strings.Contains(output, "CP") {
+		t.Error("static output missing CP badge")
 	}
-	if !strings.Contains(output, "a3b2c4d5e6") {
-		t.Error("static output missing first result ID")
+	if !strings.Contains(output, "CM") {
+		t.Error("static output missing CM badge")
 	}
-	if !strings.Contains(output, "d5e6f789ab") {
-		t.Error("static output missing second result ID")
+	if !strings.Contains(output, "SS") {
+		t.Error("static output missing SS badge")
 	}
 }
 
@@ -528,22 +961,30 @@ func TestSearchModel_TotalPages(t *testing.T) {
 	}
 
 	// 26 loaded results, total=26 → 2 pages
-	many := newSearchModel(make([]search.Result, 26), "q", 26, cfg, ss)
-	if got := many.totalPages(); got != 2 {
-		t.Errorf("totalPages() with total=26 = %d, want 2", got)
+	results := make([]search.Result, 26)
+	for i := range results {
+		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
+	}
+	many := newSearchModel(results, "q", 26, cfg, ss)
+	if got := many.totalPages(); got != 3 {
+		t.Errorf("totalPages() with total=26 = %d, want 3", got)
 	}
 }
 
-func TestSearchModel_TotalPagesUsesAPITotal(t *testing.T) {
+func TestSearchModel_TotalPagesUsesFilteredCount(t *testing.T) {
 	t.Parallel()
 
-	// Only 20 results loaded but API reports total=100
-	ss := statusStyles{colorEnabled: false, width: 100}
-	cfg := search.Config{}
-	m := newSearchModel(make([]search.Result, 20), "q", 100, cfg, ss)
+	m := testMultiTypeModel()
 
-	if got := m.totalPages(); got != 4 {
-		t.Errorf("totalPages() with 20 loaded but total=100 = %d, want 4", got)
+	// Unfiltered: 4 results → 1 page
+	if got := m.totalPages(); got != 1 {
+		t.Errorf("unfiltered totalPages = %d, want 1", got)
+	}
+
+	// Filter to checkpoints: 2 results → 1 page
+	m.filterType = typeFilterCheckpoints
+	if got := m.totalPages(); got != 1 {
+		t.Errorf("checkpoint-filtered totalPages = %d, want 1", got)
 	}
 }
 
@@ -552,7 +993,11 @@ func TestSearchModel_AppendResults(t *testing.T) {
 
 	ss := statusStyles{colorEnabled: false, width: 100}
 	cfg := search.Config{}
-	m := newSearchModel(make([]search.Result, 25), "q", 50, cfg, ss)
+	results := make([]search.Result, 25)
+	for i := range results {
+		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
+	}
+	m := newSearchModel(results, "q", 50, cfg, ss)
 
 	if m.apiPage != 1 {
 		t.Fatalf("initial apiPage = %d, want 1", m.apiPage)
@@ -560,6 +1005,9 @@ func TestSearchModel_AppendResults(t *testing.T) {
 
 	// Simulate receiving more results
 	newResults := make([]search.Result, 25)
+	for i := range newResults {
+		newResults[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("new-%02d", i)}}
+	}
 	m = updateModel(t, m, searchMoreResultsMsg{results: newResults})
 
 	if len(m.results) != 50 {
@@ -576,13 +1024,18 @@ func TestSearchModel_AppendResults(t *testing.T) {
 func TestSearchModel_FetchMoreOnNavigate(t *testing.T) {
 	t.Parallel()
 
-	// 25 loaded results, total=50 → 2 display pages but only 1 page loaded
+	// 10 loaded results, total=50 → multiple display pages but only 1 page loaded
 	ss := statusStyles{colorEnabled: false, width: 100}
-	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r", Limit: 25}
-	m := newSearchModel(make([]search.Result, 25), "q", 50, cfg, ss)
+	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r", Limit: 10}
+	results := make([]search.Result, 10)
+	for i := range results {
+		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
+	}
+	m := newSearchModel(results, "q", 50, cfg, ss)
+	m.filterType = typeFilterAll // fetch-more from the API applies in the All view
 
 	// Navigate to page 2 — should trigger fetch
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -607,12 +1060,12 @@ func TestSearchModel_NoFetchWhenResultsLoaded(t *testing.T) {
 	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r", Limit: 25}
 	results := make([]search.Result, 50)
 	for i := range results {
-		results[i] = search.Result{Data: search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
+		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
 	}
 	m := newSearchModel(results, "q", 50, cfg, ss)
 
 	// Navigate to page 2 — should NOT trigger fetch (data already loaded)
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -656,8 +1109,8 @@ func TestSearchModel_SelectedResult(t *testing.T) {
 		t.Fatal("selectedResult() = nil, want first result")
 		return
 	}
-	if r.Data.ID != "a3b2c4d5e6f7" {
-		t.Errorf("selectedResult().Data.ID = %q, want %q", r.Data.ID, "a3b2c4d5e6f7")
+	if r.Checkpoint == nil || r.Checkpoint.ID != "a3b2c4d5e6f7" {
+		t.Errorf("selectedResult().Checkpoint.ID = %q, want %q", r.ResultID(), "a3b2c4d5e6f7")
 	}
 
 	// Move cursor to second result
@@ -667,8 +1120,8 @@ func TestSearchModel_SelectedResult(t *testing.T) {
 		t.Fatal("selectedResult() at cursor 1 = nil")
 		return
 	}
-	if r.Data.ID != "d5e6f789ab01" {
-		t.Errorf("selectedResult().Data.ID = %q, want %q", r.Data.ID, "d5e6f789ab01")
+	if r.Checkpoint == nil || r.Checkpoint.ID != "d5e6f789ab01" {
+		t.Errorf("selectedResult().Checkpoint.ID = %q, want %q", r.ResultID(), "d5e6f789ab01")
 	}
 
 	// Out-of-range cursor returns nil
@@ -681,21 +1134,21 @@ func TestSearchModel_SelectedResult(t *testing.T) {
 func TestSearchModel_PageNavigation(t *testing.T) {
 	t.Parallel()
 
-	// Create model with 30 results (2 pages)
+	// Create model with 20 results (2 pages at 10/page)
 	ss := statusStyles{colorEnabled: false, width: 100}
 	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r"}
-	results := make([]search.Result, 30)
+	results := make([]search.Result, 20)
 	for i := range results {
-		results[i] = search.Result{Data: search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
+		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
 	}
-	m := newSearchModel(results, "q", 30, cfg, ss)
+	m := newSearchModel(results, "q", 20, cfg, ss)
 
 	if m.page != 0 {
 		t.Fatalf("initial page = %d, want 0", m.page)
 	}
 
 	// Navigate to next page
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
 	if m.page != 1 {
 		t.Errorf("after 'n': page = %d, want 1", m.page)
 	}
@@ -704,19 +1157,19 @@ func TestSearchModel_PageNavigation(t *testing.T) {
 	}
 
 	// Can't go past last page
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
 	if m.page != 1 {
 		t.Errorf("after 'n' on last page: page = %d, want 1", m.page)
 	}
 
 	// Navigate back
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: 'p', Text: "p"})
 	if m.page != 0 {
 		t.Errorf("after 'p': page = %d, want 0", m.page)
 	}
 
 	// Can't go before first page
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: 'p', Text: "p"})
 	if m.page != 0 {
 		t.Errorf("after 'p' on first page: page = %d, want 0", m.page)
 	}
@@ -734,13 +1187,13 @@ func TestSearchModel_NewSearchClearsFilters(t *testing.T) {
 	m := newSearchModel(testResults(), "auth", 2, cfg, ss)
 
 	// Enter search mode
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 
 	// Type a query without filters
 	m.input.SetValue(newQuery)
 
 	// Press enter — should trigger search with cleared filters
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -774,7 +1227,11 @@ func TestSearchModel_FetchMoreError(t *testing.T) {
 
 	ss := statusStyles{colorEnabled: false, width: 100}
 	cfg := search.Config{}
-	m := newSearchModel(make([]search.Result, 25), "q", 50, cfg, ss)
+	results := make([]search.Result, 25)
+	for i := range results {
+		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
+	}
+	m := newSearchModel(results, "q", 50, cfg, ss)
 	m.fetchingMore = true
 
 	m = updateModel(t, m, searchMoreResultsMsg{err: errTestSearch})
@@ -795,17 +1252,22 @@ func TestSearchModel_FetchMoreEmpty_CapsTotal(t *testing.T) {
 
 	ss := statusStyles{colorEnabled: false, width: 100}
 	cfg := search.Config{}
-	m := newSearchModel(make([]search.Result, 25), "q", 100, cfg, ss)
+	results := make([]search.Result, 10)
+	for i := range results {
+		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
+	}
+	m := newSearchModel(results, "q", 100, cfg, ss)
+	m.filterType = typeFilterAll // exercise all-types pagination against m.total
 
-	if m.totalPages() != 4 {
-		t.Fatalf("initial totalPages = %d, want 4", m.totalPages())
+	if m.totalPages() != 10 {
+		t.Fatalf("initial totalPages = %d, want 10", m.totalPages())
 	}
 
 	// Simulate API returning empty results (exhausted)
 	m = updateModel(t, m, searchMoreResultsMsg{results: nil})
 
-	if m.total != 25 {
-		t.Errorf("total should be capped to loaded results (25), got %d", m.total)
+	if m.total != 10 {
+		t.Errorf("total should be capped to loaded results (10), got %d", m.total)
 	}
 	if m.totalPages() != 1 {
 		t.Errorf("totalPages should be 1 after cap, got %d", m.totalPages())
@@ -815,15 +1277,19 @@ func TestSearchModel_FetchMoreEmpty_CapsTotal(t *testing.T) {
 func TestSearchModel_ViewFetchingMore(t *testing.T) {
 	t.Parallel()
 
-	// Model with 25 loaded results but on page 2 (no data) while fetching
+	// Model with 10 loaded results but on page 2 (no data) while fetching
 	ss := statusStyles{colorEnabled: false, width: 100}
 	cfg := search.Config{}
-	m := initTestViewport(newSearchModel(make([]search.Result, 25), "q", 50, cfg, ss))
+	results := make([]search.Result, 10)
+	for i := range results {
+		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
+	}
+	m := initTestViewport(newSearchModel(results, "q", 50, cfg, ss))
 	m.page = 1
 	m.fetchingMore = true
 	m = m.refreshBrowseContent()
 
-	view := m.View()
+	view := m.View().Content
 	if !strings.Contains(view, "Loading more results...") {
 		t.Error("view should show loading message when fetchingMore and page has no data")
 	}
@@ -837,10 +1303,10 @@ func TestSearchModel_NewSearchPersistsFilters(t *testing.T) {
 	m := newSearchModel(testResults(), "old", 2, cfg, ss)
 
 	// Enter search mode and type query with filters
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	m.input.SetValue(newQuery + " author:bob date:month")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -869,10 +1335,10 @@ func TestSearchModel_NewSearchPersistsRepoFilters(t *testing.T) {
 	}
 	m := newSearchModel(testResults(), "old", 2, cfg, ss)
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	m.input.SetValue(newQuery + " repo:entirehq/entire.io")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -899,10 +1365,10 @@ func TestSearchModel_NewSearchClearsExplicitRepoFilters(t *testing.T) {
 	}
 	m := newSearchModel(testResults(), "auth", 2, cfg, ss)
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	m.input.SetValue(newQuery)
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -928,10 +1394,10 @@ func TestSearchModel_NewSearchAllReposFilter(t *testing.T) {
 	}
 	m := newSearchModel(testResults(), "old", 2, cfg, ss)
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	m.input.SetValue(newQuery + " repo:*")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -954,10 +1420,10 @@ func TestSearchModel_NewSearchRejectsMultipleExplicitRepos(t *testing.T) {
 	}
 	m := newSearchModel(testResults(), "old", 2, cfg, ss)
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	m.input.SetValue(newQuery + " repo:entirehq/entire.io,entireio/cli")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -996,7 +1462,10 @@ func TestSearchModel_ApiPageInitialization(t *testing.T) {
 func TestComputeColumns(t *testing.T) {
 	t.Parallel()
 
-	cols := computeColumns(100)
+	cols := computeColumns(120)
+	if cols.typeCol != 5 {
+		t.Errorf("type width = %d, want 5", cols.typeCol)
+	}
 	if cols.age != 10 {
 		t.Errorf("age width = %d, want 10", cols.age)
 	}
@@ -1016,5 +1485,38 @@ func TestComputeColumns(t *testing.T) {
 	}
 	if cols.repo < 10 {
 		t.Errorf("repo width on narrow terminal = %d, want >= 10", cols.repo)
+	}
+}
+
+func TestSearchModel_ComputeTypeCounts(t *testing.T) {
+	t.Parallel()
+
+	m := testMultiTypeModel()
+	cp, cm, ss := m.computeTypeCounts()
+	if cp != 2 {
+		t.Errorf("checkpoints = %d, want 2", cp)
+	}
+	if cm != 1 {
+		t.Errorf("commits = %d, want 1", cm)
+	}
+	if ss != 1 {
+		t.Errorf("sessions = %d, want 1", ss)
+	}
+}
+
+func TestSearchModel_ComputeTypeCounts_UsesAPICounts(t *testing.T) {
+	t.Parallel()
+
+	m := testMultiTypeModel()
+	m.counts = &search.TypeCounts{Checkpoints: 10, Commits: 5, Sessions: 3}
+	cp, cm, ss := m.computeTypeCounts()
+	if cp != 10 {
+		t.Errorf("checkpoints = %d, want 10", cp)
+	}
+	if cm != 5 {
+		t.Errorf("commits = %d, want 5", cm)
+	}
+	if ss != 3 {
+		t.Errorf("sessions = %d, want 3", ss)
 	}
 }

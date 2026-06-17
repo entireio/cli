@@ -15,9 +15,32 @@ const (
 	// DefaultBaseURL is the production Entire API origin.
 	DefaultBaseURL = "https://entire.io"
 
+	// DefaultAuthBaseURL is the production Entire login server — the
+	// default for `entire login --server`.
+	DefaultAuthBaseURL = "https://us.auth.entire.io"
+
 	// BaseURLEnvVar overrides the Entire API origin for local development.
 	BaseURLEnvVar = "ENTIRE_API_BASE_URL"
+
+	// AuthBaseURLEnvVar is the retired auth-origin override. Nothing reads
+	// its value — RejectRemovedAuthEnv fails every command when it is set,
+	// pointing at `entire login --server`.
+	AuthBaseURLEnvVar = "ENTIRE_AUTH_BASE_URL"
+
+	schemeHTTP  = "http"
+	schemeHTTPS = "https"
 )
+
+// RejectRemovedAuthEnv returns an error when ENTIRE_AUTH_BASE_URL is set
+// at all (even empty). The variable is retired in favour of
+// `entire login --server`; failing loudly beats silently ignoring an
+// override the operator believes is in effect.
+func RejectRemovedAuthEnv() error {
+	if _, ok := os.LookupEnv(AuthBaseURLEnvVar); ok {
+		return fmt.Errorf("%s is no longer supported; unset it, and use `entire login --server <url>` to log in to a non-default login server", AuthBaseURLEnvVar)
+	}
+	return nil
+}
 
 // BaseURL returns the effective Entire API base URL.
 // ENTIRE_API_BASE_URL takes precedence over the production default.
@@ -42,7 +65,7 @@ func ResolveURLFromBase(baseURL, path string) (string, error) {
 		return "", fmt.Errorf("parse base URL: %w", err)
 	}
 
-	if base.Scheme != "http" && base.Scheme != "https" {
+	if base.Scheme != schemeHTTP && base.Scheme != schemeHTTPS {
 		return "", fmt.Errorf("unsupported base URL scheme %q (must be http or https)", base.Scheme)
 	}
 
@@ -62,7 +85,7 @@ func RequireSecureURL(baseURL string) error {
 		return fmt.Errorf("parse base URL: %w", err)
 	}
 
-	if u.Scheme == "http" {
+	if u.Scheme == schemeHTTP {
 		return ErrInsecureHTTP
 	}
 
@@ -71,4 +94,50 @@ func RequireSecureURL(baseURL string) error {
 
 func normalizeBaseURL(raw string) string {
 	return strings.TrimRight(strings.TrimSpace(raw), "/")
+}
+
+// NormalizeOriginURL canonicalises an origin URL the same way auth-go's
+// tokenmanager does internally: lowercase scheme/host, default port stripped
+// (80 for http, 443 for https), path/query/fragment dropped, trailing slash
+// collapsed. On parse failure, raw is returned unchanged so non-URL audience
+// values still compare byte-for-byte.
+//
+// Mirrors auth-go's internal/oauthhttp.NormalizeOriginURL so the value the
+// CLI hands to the manager as Issuer survives the manager's own normalisation
+// pass byte-for-byte; a cosmetically-different origin (uppercase host,
+// explicit :443, trailing slash) would otherwise be keyed under a different
+// keyring slot than the manager later reads.
+func NormalizeOriginURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return trimmed
+	}
+	scheme := strings.ToLower(u.Scheme)
+	hostname := strings.ToLower(u.Hostname())
+	port := u.Port()
+	dropPort := port == "" ||
+		(scheme == schemeHTTP && port == "80") ||
+		(scheme == schemeHTTPS && port == "443")
+
+	out := url.URL{Scheme: scheme}
+	switch {
+	case dropPort && strings.Contains(hostname, ":"):
+		out.Host = "[" + hostname + "]"
+	case dropPort:
+		out.Host = hostname
+	case strings.Contains(hostname, ":"):
+		out.Host = "[" + hostname + "]:" + port
+	default:
+		out.Host = hostname + ":" + port
+	}
+	return out.String()
+}
+
+// OriginOnly is a backwards-compatible alias for NormalizeOriginURL.
+// Callers reading raw URLs (e.g. ENTIRE_SEARCH_URL) and feeding them into
+// tokenmanager.TokenRequest.Resource use this to strip path/query/fragment
+// before the lib's stricter origin-only validator runs.
+func OriginOnly(raw string) string {
+	return NormalizeOriginURL(raw)
 }

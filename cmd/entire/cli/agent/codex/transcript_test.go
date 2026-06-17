@@ -11,14 +11,14 @@ import (
 const sampleRollout = `{"timestamp":"2026-03-25T11:31:11.752Z","type":"session_meta","payload":{"id":"019d24c3","timestamp":"2026-03-25T11:31:10.922Z","cwd":"/tmp/repo","originator":"codex_exec","cli_version":"0.116.0","source":"exec"}}
 {"timestamp":"2026-03-25T11:31:11.754Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
 {"timestamp":"2026-03-25T11:31:11.754Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Create a file called hello.txt"}]}}
-{"timestamp":"2026-03-25T11:31:12.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5000,"cached_input_tokens":4000,"output_tokens":100,"reasoning_output_tokens":20,"total_tokens":5120}}}}
+{"timestamp":"2026-03-25T11:31:12.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5000,"cached_input_tokens":4000,"output_tokens":100,"reasoning_output_tokens":20,"total_tokens":5100}}}}
 {"timestamp":"2026-03-25T11:31:13.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Creating the file now."}]}}
 {"timestamp":"2026-03-25T11:31:14.000Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** Add File: hello.txt\n+Hello World\n*** End Patch\n"}}
 {"timestamp":"2026-03-25T11:31:14.500Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_1","output":{"type":"text","text":"Success. Updated: A hello.txt"}}}
-{"timestamp":"2026-03-25T11:31:15.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10000,"cached_input_tokens":8000,"output_tokens":200,"reasoning_output_tokens":50,"total_tokens":10250}}}}
+{"timestamp":"2026-03-25T11:31:15.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10000,"cached_input_tokens":8000,"output_tokens":200,"reasoning_output_tokens":50,"total_tokens":10200}}}}
 {"timestamp":"2026-03-25T11:31:16.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Now create docs/readme.md too"}]}}
 {"timestamp":"2026-03-25T11:31:17.000Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_2","name":"apply_patch","input":"*** Begin Patch\n*** Add File: docs/readme.md\n+# Readme\n*** Update File: hello.txt\n-Hello World\n+Hello World!\n*** End Patch\n"}}
-{"timestamp":"2026-03-25T11:31:18.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15000,"cached_input_tokens":12000,"output_tokens":300,"reasoning_output_tokens":80,"total_tokens":15380}}}}
+{"timestamp":"2026-03-25T11:31:18.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15000,"cached_input_tokens":12000,"output_tokens":300,"reasoning_output_tokens":80,"total_tokens":15300}}}}
 {"timestamp":"2026-03-25T11:31:19.000Z","type":"event_msg","payload":{"type":"task_complete"}}
 `
 
@@ -102,26 +102,28 @@ func TestCalculateTokenUsage(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, usage)
 
-	require.Equal(t, 15000, usage.InputTokens)
+	require.Equal(t, 3000, usage.InputTokens)
 	require.Equal(t, 12000, usage.CacheReadTokens)
-	require.Equal(t, 380, usage.OutputTokens) // 300 + 80 reasoning
+	require.Equal(t, 300, usage.OutputTokens)
 	require.Equal(t, 3, usage.APICallCount)
+	require.Equal(t, 15300, usage.InputTokens+usage.CacheReadTokens+usage.OutputTokens)
 }
 
 func TestCalculateTokenUsage_WithOffset(t *testing.T) {
 	t.Parallel()
 	ag := &CodexAgent{}
 
-	// Skip past first token_count (line 4) — baseline is {5000, 4000, 120}
-	// Last after offset is {15000, 12000, 380} → delta = {10000, 8000, 260}
+	// Skip past first token_count (line 4) — baseline is {5000, 4000, 100}
+	// Last after offset is {15000, 12000, 300} → delta = {10000, 8000, 200}
 	usage, err := ag.CalculateTokenUsage([]byte(sampleRollout), 4)
 	require.NoError(t, err)
 	require.NotNil(t, usage)
 
-	require.Equal(t, 10000, usage.InputTokens)    // 15000 - 5000
+	require.Equal(t, 2000, usage.InputTokens)     // (15000 - 5000) - (12000 - 4000)
 	require.Equal(t, 8000, usage.CacheReadTokens) // 12000 - 4000
-	require.Equal(t, 260, usage.OutputTokens)     // (300+80) - (100+20)
+	require.Equal(t, 200, usage.OutputTokens)     // 300 - 100
 	require.Equal(t, 2, usage.APICallCount)
+	require.Equal(t, 10200, usage.InputTokens+usage.CacheReadTokens+usage.OutputTokens)
 }
 
 func TestCalculateTokenUsage_NoData(t *testing.T) {
@@ -212,6 +214,97 @@ func TestExtractFilesFromApplyPatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestClassifyApplyPatchPaths(t *testing.T) {
+	t.Parallel()
+
+	added, modified, deleted := classifyApplyPatchPaths(
+		"*** Begin Patch\n*** Add File: a.txt\n+hi\n*** Update File: b.txt\n@@\n-old\n+new\n*** Delete File: c.txt\n*** End Patch\n",
+	)
+	require.Equal(t, []string{"a.txt"}, added)
+	require.Equal(t, []string{"b.txt"}, modified)
+	require.Equal(t, []string{"c.txt"}, deleted)
+}
+
+func TestClassifyApplyPatchPaths_AddWinsOverUpdate(t *testing.T) {
+	t.Parallel()
+	// If a path appears with both Add and Update verbs (envelopes shouldn't do
+	// this, but we're defensive), the more specific intent — Add — wins so
+	// callers route the file into NewFiles rather than ModifiedFiles.
+	added, modified, deleted := classifyApplyPatchPaths(
+		"*** Add File: a.txt\n*** Update File: a.txt\n",
+	)
+	require.Equal(t, []string{"a.txt"}, added)
+	require.Empty(t, modified)
+	require.Empty(t, deleted)
+}
+
+func TestClassifyApplyPatchPaths_Empty(t *testing.T) {
+	t.Parallel()
+	added, modified, deleted := classifyApplyPatchPaths("*** Begin Patch\n*** End Patch\n")
+	require.Empty(t, added)
+	require.Empty(t, modified)
+	require.Empty(t, deleted)
+}
+
+func TestClassifyApplyPatchPaths_MoveTo(t *testing.T) {
+	t.Parallel()
+	// Codex apply_patch encodes renames as "*** Update File: <old>\n*** Move
+	// to: <new>". Both paths must be tracked: the source is being deleted
+	// (renamed away), the destination is being created.
+	added, modified, deleted := classifyApplyPatchPaths(
+		"*** Begin Patch\n" +
+			"*** Update File: src/old.rs\n" +
+			"*** Move to: src/new.rs\n" +
+			"@@\n-old\n+new\n" +
+			"*** End Patch\n",
+	)
+	require.Equal(t, []string{"src/new.rs"}, added)
+	require.Empty(t, modified)
+	require.Equal(t, []string{"src/old.rs"}, deleted)
+}
+
+func TestClassifyApplyPatchPaths_MoveToWithSiblingHunks(t *testing.T) {
+	t.Parallel()
+	// A patch can mix Move-to renames with regular Add/Delete entries — the
+	// Move handler must scope to the most recent Update File, not collapse
+	// unrelated entries.
+	added, modified, deleted := classifyApplyPatchPaths(
+		"*** Begin Patch\n" +
+			"*** Delete File: gone.txt\n" +
+			"*** Update File: a.rs\n" +
+			"*** Move to: b.rs\n" +
+			"@@\n-x\n+y\n" +
+			"*** Add File: brand-new.go\n" +
+			"+package main\n" +
+			"*** End Patch\n",
+	)
+	require.Equal(t, []string{"b.rs", "brand-new.go"}, added)
+	require.Empty(t, modified)
+	require.Equal(t, []string{"a.rs", "gone.txt"}, deleted)
+}
+
+// TestClassifyApplyPatchPaths_MoveDoesNotOverwriteStickyAdd pins the
+// sticky-verb invariant against the Move-to handler. A path already
+// classified as Add must survive a later Update+Move-to that names it
+// as the source. Codex itself doesn't emit envelopes shaped like this,
+// but the invariant is documented and we don't want a quiet downgrade
+// if the grammar ever loosens.
+func TestClassifyApplyPatchPaths_MoveDoesNotOverwriteStickyAdd(t *testing.T) {
+	t.Parallel()
+	added, modified, deleted := classifyApplyPatchPaths(
+		"*** Begin Patch\n" +
+			"*** Add File: foo.txt\n" +
+			"+content\n" +
+			"*** Update File: foo.txt\n" +
+			"*** Move to: bar.txt\n" +
+			"@@\n-x\n+y\n" +
+			"*** End Patch\n",
+	)
+	require.Equal(t, []string{"bar.txt", "foo.txt"}, added)
+	require.Empty(t, modified)
+	require.Empty(t, deleted)
 }
 
 func TestSplitJSONL(t *testing.T) {

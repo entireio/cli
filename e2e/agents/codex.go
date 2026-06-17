@@ -62,10 +62,22 @@ func (c *Codex) IsTransientError(out Output, err error) bool {
 
 // codexHome creates an isolated CODEX_HOME for a test run.
 // Auth still works via OPENAI_API_KEY env var or symlinked auth.json.
+//
+// The directory lives under the user's home (not the system temp dir) because
+// recent Codex versions refuse to install PATH helper binaries when CODEX_HOME
+// sits under /tmp, which breaks subsequent tool calls.
 func codexHome() (string, func(), error) {
-	dir, err := os.MkdirTemp("", "codex-home-*")
+	cache, err := os.UserCacheDir()
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("resolve user cache dir: %w", err)
+	}
+	base := filepath.Join(cache, "entire-e2e")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return "", nil, fmt.Errorf("create codex home base %q: %w", base, err)
+	}
+	dir, err := os.MkdirTemp(base, "codex-home-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("create temporary codex home under %q: %w", base, err)
 	}
 	return dir, func() { _ = os.RemoveAll(dir) }, nil
 }
@@ -227,7 +239,20 @@ func seedCodexHome(home, projectDir string) error {
 	if model == "" {
 		model = "gpt-5.4"
 	}
-	config := fmt.Sprintf("model = %q\n\n[features]\ncodex_hooks = true\n\n[projects.%q]\ntrust_level = \"trusted\"\n", model, projectDir)
+	config := fmt.Sprintf("model = %q\n\n[features]\nhooks = true\n\n[projects.%q]\ntrust_level = \"trusted\"\n", model, projectDir)
+
+	// Codex 0.129+ refuses to run unmanaged hooks until each one has a
+	// trusted_hash entry in the user's config. Compute the hashes the same
+	// way Codex does and pre-trust them — without this, every hook in
+	// .codex/hooks.json sits as Untrusted and our hooks never fire under e2e.
+	trustState, err := codexHookTrustState(projectDir)
+	if err != nil {
+		return fmt.Errorf("compute hook trust state: %w", err)
+	}
+	if trustState != "" {
+		config += "\n" + trustState
+	}
+
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o600); err != nil {
 		return err
 	}

@@ -179,6 +179,28 @@ func TestExtractModifiedFilesFromOffset(t *testing.T) {
 	}
 }
 
+func TestExtractPrompts(t *testing.T) {
+	t.Parallel()
+
+	ag := &OpenCodeAgent{}
+	path := writeTestTranscript(t, testExportJSON)
+
+	prompts, err := ag.ExtractPrompts(path, 0)
+	require.NoError(t, err)
+	require.Equal(t, []string{"Fix the bug in main.go", "Also fix util.go"}, prompts)
+}
+
+func TestExtractPrompts_FromOffset(t *testing.T) {
+	t.Parallel()
+
+	ag := &OpenCodeAgent{}
+	path := writeTestTranscript(t, testExportJSON)
+
+	prompts, err := ag.ExtractPrompts(path, 2)
+	require.NoError(t, err)
+	require.Equal(t, []string{"Also fix util.go"}, prompts)
+}
+
 func TestExtractFilePaths(t *testing.T) {
 	t.Parallel()
 

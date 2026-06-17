@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,33 +14,47 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/spf13/cobra"
 )
 
+type headLinkage struct {
+	commitHash    string
+	checkpointIDs []string
+}
+
 func newStatusCmd() *cobra.Command {
 	var detailed bool
+	var jsonFlag bool
 
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show Entire status",
 		Long:  "Show whether Entire is currently enabled or disabled",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runStatus(cmd.Context(), cmd.OutOrStdout(), detailed)
+			return runStatus(cmd.Context(), cmd.OutOrStdout(), detailed, jsonFlag)
 		},
 	}
 
 	cmd.Flags().BoolVar(&detailed, "detailed", false, "Show detailed status for each settings file")
+	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
+	cmd.MarkFlagsMutuallyExclusive("detailed", "json")
 
 	return cmd
 }
 
-func runStatus(ctx context.Context, w io.Writer, detailed bool) error {
+func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) error {
+	if jsonOutput {
+		return runStatusJSON(ctx, w)
+	}
+
 	// Check if we're in a git repository
 	if _, repoErr := paths.WorktreeRoot(ctx); repoErr != nil {
 		fmt.Fprintln(w, "✕ not a git repository")
@@ -167,6 +182,26 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		}
 	}
 
+	// Show review status for HEAD's checkpoint, if any.
+	if reviewed, meta := headHasReviewCheckpoint(ctx); reviewed {
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.dim, "  Review · "))
+		b.WriteString("reviewed (")
+		b.WriteString(meta)
+		b.WriteString(")")
+	}
+
+	// Show investigation status for HEAD's checkpoint, if any. Review and
+	// investigation can both be true on the same checkpoint, so we render
+	// both lines independently rather than gating one on the other.
+	if investigated, meta := headHasInvestigateCheckpoint(ctx); investigated {
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.dim, "  Investigation · "))
+		b.WriteString("investigated (")
+		b.WriteString(meta)
+		b.WriteString(")")
+	}
+
 	return b.String()
 }
 
@@ -193,19 +228,22 @@ func formatSettingsStatus(prefix string, s *EntireSettings, sty statusStyles) st
 
 // timeAgo formats a time as a human-readable relative duration.
 func timeAgo(t time.Time) string {
-	d := time.Since(t)
+	return formatRelativeDuration(time.Since(t))
+}
+
+// formatRelativeDuration renders a positive duration as "just now" / "Xm ago"
+// / "Xh ago" / "Xd ago". Shared between `entire status` and `entire auth list`
+// so the bucket thresholds and labels stay consistent.
+func formatRelativeDuration(d time.Duration) string {
 	switch {
 	case d < time.Minute:
-		return "just now"
+		return lastUsedJustNow
 	case d < time.Hour:
-		m := int(d.Minutes())
-		return fmt.Sprintf("%dm ago", m)
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
 	case d < 24*time.Hour:
-		h := int(d.Hours())
-		return fmt.Sprintf("%dh ago", h)
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
 	default:
-		days := int(d.Hours() / 24)
-		return fmt.Sprintf("%dd ago", days)
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }
 
@@ -242,6 +280,12 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 	}
 	if len(active) == 0 {
 		return
+	}
+
+	repoRoot, head, headErr := currentHeadLinkage(ctx)
+	divergenceWarnings := make(map[string]string)
+	if headErr == nil && repoRoot != "" && head.commitHash != "" {
+		divergenceWarnings = computeSessionDivergenceWarnings(repoRoot, active, head)
 	}
 
 	// Group by worktree path
@@ -342,6 +386,9 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 			} else {
 				fmt.Fprintln(w, sty.render(sty.dim, statsLine))
 			}
+			if warning := divergenceWarnings[st.SessionID]; warning != "" {
+				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
+			}
 			fmt.Fprintln(w)
 		}
 	}
@@ -426,4 +473,207 @@ func resolveWorktreeBranchGit(ctx context.Context, worktreePath string) string {
 		return strings.TrimPrefix(ref, "refs/heads/")
 	}
 	return detachedHEADDisplay
+}
+
+func currentHeadLinkage(ctx context.Context) (string, headLinkage, error) {
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "", headLinkage{}, fmt.Errorf("resolve worktree root: %w", err)
+	}
+
+	repo, err := gitrepo.OpenPath(repoRoot)
+	if err != nil {
+		return "", headLinkage{}, fmt.Errorf("open repo: %w", err)
+	}
+	defer repo.Close()
+
+	headRef, err := repo.Head()
+	if err != nil {
+		return "", headLinkage{}, fmt.Errorf("resolve HEAD: %w", err)
+	}
+
+	commit, err := repo.CommitObject(headRef.Hash())
+	if err != nil {
+		return "", headLinkage{}, fmt.Errorf("load HEAD commit: %w", err)
+	}
+
+	head := headLinkage{commitHash: headRef.Hash().String()}
+	if checkpointIDs := trailers.ParseAllCheckpoints(commit.Message); len(checkpointIDs) > 0 {
+		head.checkpointIDs = make([]string, 0, len(checkpointIDs))
+		for _, checkpointID := range checkpointIDs {
+			head.checkpointIDs = append(head.checkpointIDs, checkpointID.String())
+		}
+	}
+
+	return repoRoot, head, nil
+}
+
+func computeSessionDivergenceWarnings(
+	repoRoot string,
+	active []*session.State,
+	head headLinkage,
+) map[string]string {
+	warnings := make(map[string]string)
+	normalizedRepoRoot := normalizeWorktreePath(repoRoot)
+
+	for _, st := range active {
+		if normalizeWorktreePath(st.WorktreePath) != normalizedRepoRoot {
+			continue
+		}
+
+		if st.BaseCommit == "" {
+			// Session linkage is incomplete (migration refuses to run and save-step
+			// must reinitialize). Surface this explicitly rather than skipping silently,
+			// so operators don't see a false-clean status for a session that cannot
+			// be attributed until the next prompt reinitializes it.
+			warnings[st.SessionID] = "session linkage incomplete; awaiting reinitialization"
+			continue
+		}
+
+		if st.BaseCommit == head.commitHash {
+			if st.AttributionBaseCommit != "" && st.AttributionBaseCommit != st.BaseCommit {
+				warnings[st.SessionID] = "attribution base diverged after history movement; figures may be off until next checkpoint"
+			}
+			continue
+		}
+
+		// BaseCommit != HEAD — hooks haven't reconciled/migrated yet
+		if len(head.checkpointIDs) > 0 {
+			warnings[st.SessionID] = "tracking diverged from current HEAD; HEAD links to checkpoint(s) " + strings.Join(head.checkpointIDs, ", ")
+			continue
+		}
+
+		warnings[st.SessionID] = "tracking diverged from current HEAD after git history movement"
+	}
+
+	return warnings
+}
+
+func normalizeWorktreePath(path string) string {
+	if path == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(path)
+}
+
+// statusJSON is the JSON output for `entire status --json`.
+type statusJSON struct {
+	Enabled        bool               `json:"enabled"`
+	Agents         []string           `json:"agents"`
+	ActiveSessions []sessionBriefJSON `json:"active_sessions"`
+	Error          string             `json:"error,omitempty"`
+}
+
+type sessionBriefJSON struct {
+	Agent  string `json:"agent"`
+	Model  string `json:"model,omitempty"`
+	Status string `json:"status"`
+}
+
+func runStatusJSON(ctx context.Context, w io.Writer) error {
+	writeJSON := func(v statusJSON) error {
+		return json.NewEncoder(w).Encode(v)
+	}
+
+	if _, err := paths.WorktreeRoot(ctx); err != nil {
+		return writeJSON(statusJSON{Error: "not a git repository"})
+	}
+
+	settingsPath, err := paths.AbsPath(ctx, EntireSettingsFile)
+	if err != nil {
+		settingsPath = EntireSettingsFile
+	}
+	localSettingsPath, err := paths.AbsPath(ctx, EntireSettingsLocalFile)
+	if err != nil {
+		localSettingsPath = EntireSettingsLocalFile
+	}
+
+	_, projectErr := os.Stat(settingsPath)
+	if projectErr != nil && !errors.Is(projectErr, fs.ErrNotExist) {
+		return writeJSON(statusJSON{Error: fmt.Sprintf("cannot access project settings file: %v", projectErr)})
+	}
+	_, localErr := os.Stat(localSettingsPath)
+	if localErr != nil && !errors.Is(localErr, fs.ErrNotExist) {
+		return writeJSON(statusJSON{Error: fmt.Sprintf("cannot access local settings file: %v", localErr)})
+	}
+
+	if projectErr != nil && localErr != nil {
+		return writeJSON(statusJSON{Error: "not set up"})
+	}
+
+	s, err := LoadEntireSettings(ctx)
+	if err != nil {
+		return writeJSON(statusJSON{Error: fmt.Sprintf("failed to load settings: %v", err)})
+	}
+
+	result := statusJSON{
+		Enabled:        s.Enabled,
+		Agents:         []string{},
+		ActiveSessions: []sessionBriefJSON{},
+	}
+
+	if s.Enabled {
+		if names := InstalledAgentDisplayNames(ctx); len(names) > 0 {
+			result.Agents = names
+		}
+
+		if store, err := session.NewStateStore(ctx); err == nil {
+			if states, err := store.List(ctx); err == nil {
+				// Deduplicate by agent: one entry per agent, "active" wins over "idle".
+				type agentEntry struct {
+					brief    sessionBriefJSON
+					isActive bool
+				}
+				byAgent := make(map[string]*agentEntry)
+				for _, st := range states {
+					if st.EndedAt != nil {
+						continue
+					}
+					agent := string(st.AgentType)
+					if agent == "" {
+						agent = unknownPlaceholder
+					}
+					active := st.Phase == session.PhaseActive
+					if existing, ok := byAgent[agent]; ok {
+						if active && !existing.isActive {
+							existing.brief.Model = st.ModelName
+							existing.brief.Status = sessionStatusLabel(st)
+							existing.isActive = true
+						}
+					} else {
+						byAgent[agent] = &agentEntry{
+							brief: sessionBriefJSON{
+								Agent:  agent,
+								Model:  st.ModelName,
+								Status: sessionStatusLabel(st),
+							},
+							isActive: active,
+						}
+					}
+				}
+				for _, e := range byAgent {
+					result.ActiveSessions = append(result.ActiveSessions, e.brief)
+				}
+				sort.Slice(result.ActiveSessions, func(i, j int) bool {
+					return result.ActiveSessions[i].Agent < result.ActiveSessions[j].Agent
+				})
+			}
+		}
+	}
+
+	return writeJSON(result)
+}
+
+// sessionStatusLabel derives a display status from a session state.
+func sessionStatusLabel(s *session.State) string {
+	if s.EndedAt != nil {
+		return "ended"
+	}
+	if s.Phase != "" {
+		return string(s.Phase)
+	}
+	return string(session.PhaseIdle)
 }

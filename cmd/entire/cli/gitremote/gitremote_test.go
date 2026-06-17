@@ -1,0 +1,264 @@
+package gitremote
+
+import (
+	"context"
+	"os/exec"
+	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestParseURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		url      string
+		wantInfo *Info
+		wantErr  bool
+	}{
+		{
+			name:     "SSH SCP format",
+			url:      "git@github.com:org/repo.git",
+			wantInfo: &Info{Protocol: ProtocolSSH, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
+			name:     "SSH SCP without .git",
+			url:      "git@github.com:org/repo",
+			wantInfo: &Info{Protocol: ProtocolSSH, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
+			name:     "HTTPS format",
+			url:      "https://github.com/org/repo.git",
+			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
+			name:     "HTTPS without .git",
+			url:      "https://github.com/org/repo",
+			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
+			name:     "SSH protocol format",
+			url:      "ssh://git@github.com/org/repo.git",
+			wantInfo: &Info{Protocol: ProtocolSSH, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
+			name:     "HTTPS with non-standard port",
+			url:      "https://git.example.com:8443/org/repo.git",
+			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "git.example.com", Port: "8443", Owner: "org", Repo: "repo"},
+		},
+		{
+			name:     "SSH protocol with non-standard port",
+			url:      "ssh://git@git.example.com:2222/org/repo.git",
+			wantInfo: &Info{Protocol: ProtocolSSH, Host: "git.example.com", Port: "2222", Owner: "org", Repo: "repo"},
+		},
+		{
+			name:     "HTTPS standard port not appended",
+			url:      "https://github.com/org/repo.git",
+			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
+			name:     "entire:// gh prefix preserved as forge",
+			url:      "entire://entirehost/gh/entireio/cli",
+			wantInfo: &Info{Protocol: ProtocolEntire, Host: "entirehost", Forge: "gh", Owner: "entireio", Repo: "cli"},
+		},
+		{
+			name:     "entire:// non-gh prefix preserved as forge",
+			url:      "entire://abc/jk/myproject/repo",
+			wantInfo: &Info{Protocol: ProtocolEntire, Host: "abc", Forge: "jk", Owner: "myproject", Repo: "repo"},
+		},
+		{
+			name:     "entire:// regional host with gh forge",
+			url:      "entire://aws-us-east-2.entire.io/gh/entirehq/entiredb",
+			wantInfo: &Info{Protocol: ProtocolEntire, Host: "aws-us-east-2.entire.io", Forge: "gh", Owner: "entirehq", Repo: "entiredb"},
+		},
+		{
+			name:     "entire:// with .git suffix",
+			url:      "entire://entirehost/gh/entireio/cli.git",
+			wantInfo: &Info{Protocol: ProtocolEntire, Host: "entirehost", Forge: "gh", Owner: "entireio", Repo: "cli"},
+		},
+		{
+			name:     "unmapped host has empty forge",
+			url:      "git@gitlab.com:org/repo.git",
+			wantInfo: &Info{Protocol: ProtocolSSH, Host: "gitlab.com", Owner: "org", Repo: "repo"},
+		},
+		{
+			name:    "empty string",
+			url:     "",
+			wantErr: true,
+		},
+		{
+			name:    "no path",
+			url:     "https://github.com",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			info, err := ParseURL(tt.url)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantInfo.Protocol, info.Protocol)
+			assert.Equal(t, tt.wantInfo.Host, info.Host)
+			assert.Equal(t, tt.wantInfo.Forge, info.Forge)
+			assert.Equal(t, tt.wantInfo.Owner, info.Owner)
+			assert.Equal(t, tt.wantInfo.Repo, info.Repo)
+		})
+	}
+}
+
+func TestExtractOwnerFromRemoteURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"SSH", "git@github.com:org/repo.git", "org"},
+		{"HTTPS", "https://github.com/org/repo.git", "org"},
+		{"invalid", "not-a-url", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, ExtractOwnerFromRemoteURL(tt.url))
+		})
+	}
+}
+
+func TestInfo_CanonicalHost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"direct https github", "https://github.com/org/repo.git", "github.com"},
+		{"direct ssh github", "git@github.com:org/repo.git", "github.com"},
+		{"entire mirror maps forge to host", "entire://aws-us-east-2.entire.io/gh/org/repo", "github.com"},
+		{"unknown forge falls back to host", "git@ghe.corp.example.com:org/repo.git", "ghe.corp.example.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			info, err := ParseURL(tt.url)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, info.CanonicalHost())
+		})
+	}
+}
+
+func TestRedactURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "HTTPS no creds",
+			url:  "https://github.com/org/repo.git",
+			want: "https://github.com/org/repo.git",
+		},
+		{
+			name: "HTTPS with token",
+			url:  "https://x-token:ghp_abc123@github.com/org/repo.git",
+			want: "https://github.com/org/repo.git",
+		},
+		{
+			name: "HTTPS with query token",
+			url:  "https://github.com/org/repo.git?token=secret",
+			want: "https://github.com/org/repo.git",
+		},
+		{
+			name: "SSH SCP-style returned as-is",
+			url:  "git@github.com:org/repo.git",
+			want: "git@github.com:org/repo.git",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, RedactURL(tt.url))
+		})
+	}
+}
+
+// Not parallel: uses t.Chdir()
+func TestResolveRemoteRepo(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		originURL string
+		wantForge string
+		wantOwner string
+		wantRepo  string
+	}{
+		{
+			name:      "SSH SCP format",
+			originURL: "git@github.com:acme/my-app.git",
+			wantForge: "gh",
+			wantOwner: "acme",
+			wantRepo:  "my-app",
+		},
+		{
+			name:      "HTTPS format",
+			originURL: "https://github.com/acme/my-app.git",
+			wantForge: "gh",
+			wantOwner: "acme",
+			wantRepo:  "my-app",
+		},
+		{
+			name:      "entire:// with gh forge in path",
+			originURL: "entire://aws-us-east-2.entire.io/gh/acme/my-app",
+			wantForge: "gh",
+			wantOwner: "acme",
+			wantRepo:  "my-app",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			testutil.InitRepo(t, repoDir)
+
+			cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", tt.originURL)
+			cmd.Dir = repoDir
+			cmd.Env = testutil.GitIsolatedEnv()
+			require.NoError(t, cmd.Run())
+
+			t.Chdir(repoDir)
+
+			forge, owner, repo, err := ResolveRemoteRepo(ctx, "origin")
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantForge, forge)
+			assert.Equal(t, tt.wantOwner, owner)
+			assert.Equal(t, tt.wantRepo, repo)
+		})
+	}
+}
+
+// Not parallel: uses t.Chdir()
+func TestResolveRemoteRepo_MissingRemote(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	t.Chdir(repoDir)
+
+	_, _, _, err := ResolveRemoteRepo(context.Background(), "origin")
+	assert.Error(t, err)
+}

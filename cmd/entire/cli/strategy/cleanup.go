@@ -80,6 +80,7 @@ func ListShadowBranches(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	refs, err := repo.References()
 	if err != nil {
@@ -141,7 +142,7 @@ func DeleteShadowBranches(ctx context.Context, branches []string) (deleted []str
 
 // ListOrphanedSessionStates returns session state files that are orphaned.
 // A session state is orphaned if:
-//   - No checkpoints on entire/checkpoints/v1 reference this session ID
+//   - No checkpoints on the configured committed read ref reference this session ID
 //   - No shadow branch exists for the session's base commit
 //
 // This is strategy-agnostic as session states are shared by all strategies.
@@ -150,6 +151,7 @@ func ListOrphanedSessionStates(ctx context.Context) ([]CleanupItem, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Get all session states
 	store, err := session.NewStateStore(ctx)
@@ -166,14 +168,20 @@ func ListOrphanedSessionStates(ctx context.Context) ([]CleanupItem, error) {
 		return []CleanupItem{}, nil
 	}
 
-	// Get all checkpoints to find which sessions have checkpoints
-	cpStore := checkpoint.NewGitStore(repo)
+	// Get all committed checkpoints from the configured read ref to find which sessions have checkpoints
+	cpStore := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
 
 	sessionsWithCheckpoints := make(map[string]bool)
 	checkpoints, listErr := cpStore.ListCommitted(ctx)
 	if listErr == nil {
 		for _, cp := range checkpoints {
+			// cp.SessionID is the most-recent session in a multi-session checkpoint;
+			// cp.SessionIDs lists every session that contributed. Track all of them so
+			// archived sessions of condensed checkpoints aren't flagged as orphaned.
 			sessionsWithCheckpoints[cp.SessionID] = true
+			for _, sid := range cp.SessionIDs {
+				sessionsWithCheckpoints[sid] = true
+			}
 		}
 	}
 
@@ -194,7 +202,7 @@ func ListOrphanedSessionStates(ctx context.Context) ([]CleanupItem, error) {
 			continue
 		}
 
-		// Check if session has checkpoints on entire/checkpoints/v1
+		// Check if session has checkpoints in committed checkpoint storage
 		hasCheckpoints := sessionsWithCheckpoints[state.SessionID]
 
 		// Check if shadow branch exists for this session's base commit and worktree
@@ -248,12 +256,12 @@ func DeleteOrphanedCheckpoints(ctx context.Context, checkpointIDs []string) (del
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
-	// Get sessions branch
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	ref, err := repo.Reference(refName, true)
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+	ref, err := repo.Reference(refs.Primary, true)
 	if err != nil {
-		return nil, nil, fmt.Errorf("sessions branch not found: %w", err)
+		return nil, nil, fmt.Errorf("primary metadata ref %s not found: %w", refs.Primary, err)
 	}
 
 	parentCommit, err := repo.CommitObject(ref.Hash())
@@ -325,9 +333,8 @@ func DeleteOrphanedCheckpoints(ctx context.Context, checkpointIDs []string) (del
 		return nil, nil, fmt.Errorf("failed to store commit: %w", err)
 	}
 
-	// Update branch reference
-	newRef := plumbing.NewHashReference(refName, commitHash)
-	if err := repo.Storer.SetReference(newRef); err != nil {
+	// Update branch reference and best-effort mirror
+	if err := AdvanceCommittedPrimary(ctx, repo, refs, commitHash); err != nil {
 		return nil, nil, fmt.Errorf("failed to update branch: %w", err)
 	}
 
@@ -339,7 +346,7 @@ func DeleteOrphanedCheckpoints(ctx context.Context, checkpointIDs []string) (del
 // This includes all shadow branches and all session states regardless of
 // whether they have checkpoints or active shadow branches.
 func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
-	var items []CleanupItem
+	var cleanupItems []CleanupItem
 
 	// All shadow branches (using ListShadowBranches directly, not
 	// ListOrphanedItems, so this won't break if orphan filtering is added)
@@ -348,7 +355,7 @@ func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 		return nil, fmt.Errorf("listing shadow branches: %w", err)
 	}
 	for _, branch := range branches {
-		items = append(items, CleanupItem{
+		cleanupItems = append(cleanupItems, CleanupItem{
 			Type:   CleanupTypeShadowBranch,
 			ID:     branch,
 			Reason: "clean all",
@@ -367,14 +374,14 @@ func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 	}
 
 	for _, state := range states {
-		items = append(items, CleanupItem{
+		cleanupItems = append(cleanupItems, CleanupItem{
 			Type:   CleanupTypeSessionState,
 			ID:     state.SessionID,
 			Reason: "clean all",
 		})
 	}
 
-	return items, nil
+	return cleanupItems, nil
 }
 
 // DeleteAllCleanupItems deletes all specified cleanup items.

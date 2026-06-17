@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
@@ -31,6 +32,37 @@ func TestParseTranscript(t *testing.T) {
 
 	if lines[1].Type != transcript.TypeAssistant || lines[1].UUID != "a1" {
 		t.Errorf("Second line = %+v, want type=assistant, uuid=a1", lines[1])
+	}
+}
+
+func TestExtractSkillEvents_SkillToolUse(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"toolu_123","name":"Skill","input":{"skill":"trigger-analysis"}}]}}
+`)
+
+	events, err := (&ClaudeCodeAgent{}).ExtractSkillEvents(data, 0)
+	if err != nil {
+		t.Fatalf("ExtractSkillEvents() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("ExtractSkillEvents() got %d events, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.EventType != agent.SkillEventTypeToolInvocation {
+		t.Errorf("EventType = %q", ev.EventType)
+	}
+	if ev.Skill.Name != "trigger-analysis" {
+		t.Errorf("Skill.Name = %q", ev.Skill.Name)
+	}
+	if ev.Source.Signal != agent.SkillSignalClaudeSkillToolUse || ev.Source.Confidence != agent.SkillConfidenceExplicit {
+		t.Errorf("Source = %+v", ev.Source)
+	}
+	if ev.TranscriptAnchor == nil || ev.TranscriptAnchor.ToolUseID != "toolu_123" {
+		t.Errorf("TranscriptAnchor = %+v", ev.TranscriptAnchor)
+	}
+	if ev.Collapse.Target != agent.SkillCollapseTargetToolPair || !ev.Collapse.DefaultCollapsed {
+		t.Errorf("Collapse = %+v", ev.Collapse)
 	}
 }
 
@@ -197,6 +229,8 @@ func TestFindCheckpointUUID(t *testing.T) {
 // Token calculation tests - Claude Code specific token format
 
 func TestCalculateTokenUsage_BasicMessages(t *testing.T) {
+	t.Parallel()
+
 	transcript := []TranscriptLine{
 		{
 			Type: "assistant",
@@ -246,6 +280,8 @@ func TestCalculateTokenUsage_BasicMessages(t *testing.T) {
 }
 
 func TestCalculateTokenUsage_StreamingDeduplication(t *testing.T) {
+	t.Parallel()
+
 	// Simulate streaming: multiple rows with same message ID, increasing output_tokens
 	transcript := []TranscriptLine{
 		{
@@ -305,6 +341,8 @@ func TestCalculateTokenUsage_StreamingDeduplication(t *testing.T) {
 }
 
 func TestCalculateTokenUsage_IgnoresUserMessages(t *testing.T) {
+	t.Parallel()
+
 	transcript := []TranscriptLine{
 		{
 			Type:    "user",
@@ -334,6 +372,8 @@ func TestCalculateTokenUsage_IgnoresUserMessages(t *testing.T) {
 }
 
 func TestCalculateTokenUsage_EmptyTranscript(t *testing.T) {
+	t.Parallel()
+
 	usage := CalculateTokenUsage(nil)
 
 	if usage.APICallCount != 0 {
@@ -345,6 +385,8 @@ func TestCalculateTokenUsage_EmptyTranscript(t *testing.T) {
 }
 
 func TestExtractSpawnedAgentIDs_FromToolResult(t *testing.T) {
+	t.Parallel()
+
 	transcript := []TranscriptLine{
 		{
 			Type: "user",
@@ -377,6 +419,8 @@ func TestExtractSpawnedAgentIDs_FromToolResult(t *testing.T) {
 }
 
 func TestExtractSpawnedAgentIDs_MultipleAgents(t *testing.T) {
+	t.Parallel()
+
 	transcript := []TranscriptLine{
 		{
 			Type: "user",
@@ -424,6 +468,8 @@ func TestExtractSpawnedAgentIDs_MultipleAgents(t *testing.T) {
 }
 
 func TestExtractSpawnedAgentIDs_NoAgentID(t *testing.T) {
+	t.Parallel()
+
 	transcript := []TranscriptLine{
 		{
 			Type: "user",
@@ -450,6 +496,8 @@ func TestExtractSpawnedAgentIDs_NoAgentID(t *testing.T) {
 }
 
 func TestExtractAgentIDFromText(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		text     string
@@ -484,6 +532,8 @@ func TestExtractAgentIDFromText(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			got := extractAgentIDFromText(tt.text)
 			if got != tt.expected {
 				t.Errorf("extractAgentIDFromText(%q) = %q, want %q", tt.text, got, tt.expected)

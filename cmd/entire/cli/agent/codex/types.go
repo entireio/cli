@@ -1,5 +1,7 @@
 package codex
 
+import "encoding/json"
+
 // HooksFile represents the .codex/hooks.json structure.
 type HooksFile struct {
 	Hooks HookEvents `json:"hooks"`
@@ -11,6 +13,7 @@ type HookEvents struct {
 	UserPromptSubmit []MatcherGroup `json:"UserPromptSubmit,omitempty"`
 	Stop             []MatcherGroup `json:"Stop,omitempty"`
 	PreToolUse       []MatcherGroup `json:"PreToolUse,omitempty"`
+	PostToolUse      []MatcherGroup `json:"PostToolUse,omitempty"`
 }
 
 // MatcherGroup groups hooks under an optional matcher pattern.
@@ -47,6 +50,25 @@ type userPromptSubmitRaw struct {
 	Model          string  `json:"model"`
 	PermissionMode string  `json:"permission_mode"`
 	Prompt         string  `json:"prompt"`
+}
+
+// postToolUseRaw is the JSON structure from PostToolUse hooks.
+// Schema source: codex-rs/hooks/src/schema.rs PostToolUseCommandInput.
+// We only consume the fields we need; unknown fields are ignored.
+type postToolUseRaw struct {
+	SessionID      string          `json:"session_id"`
+	TranscriptPath *string         `json:"transcript_path"`
+	CWD            string          `json:"cwd"`
+	Model          string          `json:"model"`
+	ToolName       string          `json:"tool_name"`
+	ToolUseID      string          `json:"tool_use_id"`
+	ToolInput      json.RawMessage `json:"tool_input"`
+}
+
+// applyPatchToolInput is the tool_input shape for apply_patch.
+// Codex serializes the patch envelope as a single string under "command".
+type applyPatchToolInput struct {
+	Command string `json:"command"`
 }
 
 // stopRaw is the JSON structure from Stop hooks.

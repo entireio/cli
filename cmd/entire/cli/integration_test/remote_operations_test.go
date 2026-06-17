@@ -68,6 +68,47 @@ func TestPrePush_PushesCheckpointBranchToOrigin(t *testing.T) {
 	}
 }
 
+// TestPrePush_PushesV1CustomRefWhenOptedIn verifies that with
+// checkpoints_version "1.1", PrePush pushes the v1.1 ref to the remote at the v1 tip.
+func TestPrePush_PushesV1CustomRefWhenOptedIn(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	// Opt in before session activity so condensation mirrors v1.1.
+	env.PatchSettings(map[string]any{
+		"strategy_options": map[string]any{"checkpoints_version": "1.1"},
+	})
+
+	bareDir := env.SetupBareRemote()
+
+	session := env.NewSession()
+	transcriptPath := session.CreateTranscript("Add auth module", []FileChange{
+		{Path: "auth.go", Content: "package auth"},
+	})
+	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(session.ID, "Add auth module", transcriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	env.WriteFile("auth.go", "package auth")
+	env.GitAdd("auth.go")
+	if err := env.SimulateStop(session.ID, transcriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+	env.GitCommitWithShadowHooks("Add auth module", "auth.go")
+
+	env.RunPrePush("origin")
+
+	if !env.BranchExistsOnRemote(bareDir, paths.MetadataBranchName) {
+		t.Fatalf("%s should exist on bare remote after PrePush", paths.MetadataBranchName)
+	}
+
+	// v1.1 must exist on the remote at the v1 tip (revParse fails if absent).
+	remoteV1 := revParse(t, bareDir, "refs/heads/"+paths.MetadataBranchName)
+	remoteCustom := revParse(t, bareDir, paths.MetadataRefName)
+	if remoteV1 != remoteCustom {
+		t.Errorf("remote %s = %s, want %s (remote v1 tip)", paths.MetadataRefName, remoteCustom, remoteV1)
+	}
+}
+
 // TestPrePush_NoOpWhenNoCheckpoints verifies that PrePush is a no-op
 // when no sessions or checkpoints exist.
 func TestPrePush_NoOpWhenNoCheckpoints(t *testing.T) {
@@ -172,17 +213,17 @@ func TestPrePush_PushDisabledSkipsCheckpoints(t *testing.T) {
 // can be selectively pushed to a separate remote.
 //
 // This is a data routing verification test. It validates that when the production
-// code's pushBranchIfNeeded is called with different targets for checkpoints,
+// code's pushRefIfNeeded is called with different targets for checkpoints,
 // the branches land on the correct remotes with correct data.
 //
 // Why not test through PrePush directly: resolvePushSettings derives the checkpoint
 // URL from origin's protocol (SSH/HTTPS). Since integration tests use local file
-// paths as remotes, parseGitRemoteURL fails and resolvePushSettings falls back to
+// paths as remotes, remote.ParseURL fails and resolvePushSettings falls back to
 // origin. The URL derivation logic is unit-tested in checkpoint_remote_test.go
 // (TestDeriveCheckpointURL, TestResolvePushSettings_WithCheckpointRemote_*).
 //
-// The pushBranchIfNeeded function (which PrePush calls with the resolved target)
-// is exercised in push_common_test.go:TestPushBranchIfNeeded_LocalBareRepo_PushesSuccessfully,
+// The pushRefIfNeeded function (which PrePush calls with the resolved target)
+// is exercised in push_common_test.go:TestPushRefIfNeeded_LocalBareRepo_PushesSuccessfully,
 // verifying it works with local bare repo paths.
 func TestPrePush_CheckpointRemoteRoutesToSeparateRemote(t *testing.T) {
 	t.Parallel()
@@ -235,7 +276,7 @@ func TestPrePush_CheckpointURLDerivationFailureFallsBackToOrigin(t *testing.T) {
 
 	// Configure checkpoint_remote with a different owner than origin.
 	// Since our bare remote is a local path (not a URL), resolvePushSettings cannot
-	// parse it via parseGitRemoteURL and falls back to origin. The unit test
+	// parse it via remote.ParseURL and falls back to origin. The unit test
 	// TestResolvePushSettings_ForkDetection in checkpoint_remote_test.go validates
 	// the exact fork detection logic with real URL parsing.
 	env.PatchSettings(map[string]any{
@@ -267,7 +308,7 @@ func TestPrePush_CheckpointURLDerivationFailureFallsBackToOrigin(t *testing.T) {
 	env.GitCommitWithShadowHooks("Add middleware", "middleware.go")
 
 	// Run PrePush -- with a local path remote, checkpoint URL derivation will fail
-	// (parseGitRemoteURL can't parse local paths), so checkpoints fall back to origin.
+	// (remote.ParseURL can't parse local paths), so checkpoints fall back to origin.
 	env.RunPrePush("origin")
 
 	// Checkpoints should be on origin (fallback behavior)
@@ -529,10 +570,10 @@ func TestConcurrentPush_SecondPusherRebasesAndRetries(t *testing.T) {
 // origin. Trails are always pushed to origin regardless of checkpoint_remote config.
 //
 // This test exercises the PrePush -> resolvePushSettings -> fallback code path.
-// The actual doPushBranch graceful degradation (push to unreachable URL returns nil,
+// The actual doPushRef graceful degradation (push to unreachable URL returns nil,
 // not an error) is tested in push_common_test.go:
-//   - TestDoPushBranch_UnreachableTarget_ReturnsNil
-//   - TestPushBranchIfNeeded_UnreachableTarget_ReturnsNil
+//   - TestDoPushRef_UnreachableTarget_ReturnsNil
+//   - TestPushRefIfNeeded_UnreachableTarget_ReturnsNil
 func TestGracefulDegradation_UnreachableCheckpointRemotePushContinues(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
@@ -625,6 +666,102 @@ func TestGracefulDegradation_UnreachableCheckpointRemoteOnCloneIsSilent(t *testi
 	// unreachable checkpoint_remote config.
 	if !cloneEnv.BranchExists(paths.MetadataBranchName) {
 		t.Error("entire/checkpoints/v1 should exist locally after session + commit in clone")
+	}
+}
+
+// =============================================================================
+// P1 -- Resume with Partial Clone
+// =============================================================================
+
+// TestResume_FetchesPrimaryBranchFullyWithFilteredFetches verifies that
+// `entire resume` fetches the primary repository branch (the user's feature
+// branch) WITHOUT --filter=blob:none, even when filtered_fetches is enabled.
+//
+// Filtered fetches use --filter=blob:none for checkpoint push/fetch sync
+// (metadata-only, trees suffice). But when resume fetches a branch that only
+// exists on the remote, it needs full blob content (source files) — not a
+// partial clone.
+//
+// The test creates a feature branch with a committed source file, pushes it
+// to a bare remote, then clones to a fresh repo that does NOT have the
+// feature branch locally. With filtered_fetches enabled, `entire resume`
+// must still fetch the branch fully so the checked-out file has real content.
+func TestResume_FetchesPrimaryBranchFullyWithFilteredFetches(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	bareDir := env.SetupBareRemote()
+
+	// Create a session with a source file and commit it on the feature branch.
+	_ = createCheckpointedCommit(t, env, "Build auth module", "auth.go", "package auth", "Build auth module")
+
+	// Push the feature branch + checkpoint branch to the remote.
+	env.GitPush("origin", "HEAD")
+	env.RunPrePush("origin")
+
+	// Clone the repo, then switch away from the feature branch and delete it
+	// locally so it only exists on the remote. This forces resume to fetch it.
+	cloneEnv := env.CloneFrom(bareDir)
+
+	ctx := t.Context()
+
+	// Detach HEAD so we can delete the feature branch.
+	cmd := exec.CommandContext(ctx, "git", "checkout", "--detach")
+	cmd.Dir = cloneEnv.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("detach HEAD: %v\n%s", err, output)
+	}
+
+	cmd = exec.CommandContext(ctx, "git", "branch", "-D", "feature/test-branch")
+	cmd.Dir = cloneEnv.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("delete feature branch: %v\n%s", err, output)
+	}
+
+	cloneEnv.setGitConfigBaseline()
+
+	// Enable filtered fetches in the clone.
+	cloneEnv.PatchSettings(map[string]any{
+		"strategy_options": map[string]any{
+			"filtered_fetches": true,
+		},
+	})
+
+	// The feature branch should NOT exist locally.
+	if cloneEnv.BranchExists("feature/test-branch") {
+		t.Fatal("feature branch should not exist locally before resume")
+	}
+
+	// Run resume — this fetches the feature branch from origin and checks it out.
+	// With filtered_fetches enabled, the fetch must still be unfiltered so the
+	// source file blob (auth.go) is available after checkout.
+	output, err := cloneEnv.RunCLIWithError("session", "resume", "--force", "feature/test-branch")
+	t.Logf("resume output: %s", output)
+
+	if err != nil {
+		t.Fatalf("resume failed: %v\nOutput: %s", err, output)
+	}
+
+	// Verify the source file is fully available — a filtered fetch would leave
+	// it as a missing blob, making the working tree incomplete.
+	content := cloneEnv.ReadFile("auth.go")
+	if content != "package auth" {
+		t.Errorf("auth.go should contain 'package auth' after resume, got: %q", content)
+	}
+
+	// Verify the metadata branch transcript blob is locally available.
+	// A filtered fetch (--filter=blob:none) would leave only tree objects,
+	// making git cat-file fail for the blob. This confirms the metadata
+	// fetch was also unfiltered.
+	checkpointID := cloneEnv.GetLatestCheckpointID()
+	if checkpointID == "" {
+		t.Fatal("should have a checkpoint ID after resume")
+	}
+	transcriptPath := SessionFilePath(checkpointID, paths.TranscriptFileName)
+	if !cloneEnv.FileExistsInBranch(paths.MetadataBranchName, transcriptPath) {
+		t.Error("transcript blob should be locally available on metadata branch (not partial-cloned)")
 	}
 }
 

@@ -5,12 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -210,15 +210,23 @@ func ApplyTreeChanges(
 		return rootTreeHash, nil
 	}
 
-	// Read the current root tree
 	var currentEntries []object.TreeEntry
 	if rootTreeHash != plumbing.ZeroHash {
 		tree, err := repo.TreeObject(rootTreeHash)
 		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to read tree: %w", err)
+			cliEntries, cliErr := readTreeEntriesViaCLI(ctx, rootTreeHash)
+			if cliErr != nil {
+				return plumbing.ZeroHash, fmt.Errorf("failed to read tree: %w", errors.Join(err, cliErr))
+			}
+			logging.Warn(ctx, "ApplyTreeChanges: go-git tree read failed, used git ls-tree fallback",
+				slog.String("tree", rootTreeHash.String()[:12]),
+				slog.String("gogit_error", err.Error()),
+			)
+			currentEntries = cliEntries
+		} else {
+			currentEntries = make([]object.TreeEntry, len(tree.Entries))
+			copy(currentEntries, tree.Entries)
 		}
-		currentEntries = make([]object.TreeEntry, len(tree.Entries))
-		copy(currentEntries, tree.Entries)
 	}
 
 	// Group changes by first path segment
@@ -296,12 +304,57 @@ func ApplyTreeChanges(
 	return storeTree(repo, result)
 }
 
+// readTreeEntriesViaCLI parses `git ls-tree <hash>` into go-git TreeEntry
+// values. Fallback for go-git tree reads that fail in partial-clone repos
+// where the storer's packfile index has gone stale — analogous to the
+// blob-side workaround in FetchingTree.blobOnDisk.
+func readTreeEntriesViaCLI(ctx context.Context, hash plumbing.Hash) ([]object.TreeEntry, error) {
+	short := hash.String()[:12]
+	cmd := exec.CommandContext(ctx, "git", "ls-tree", hash.String())
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git ls-tree %s: %w", short, err)
+	}
+	trimmed := strings.TrimRight(string(output), "\n")
+	if trimmed == "" {
+		return nil, nil
+	}
+	lines := strings.Split(trimmed, "\n")
+	entries := make([]object.TreeEntry, 0, len(lines))
+	for _, line := range lines {
+		// Format: "<mode> <type> <hash>\t<name>"
+		tab := strings.IndexByte(line, '\t')
+		if tab < 0 {
+			return nil, fmt.Errorf("git ls-tree %s: malformed line %q", short, line)
+		}
+		name := line[tab+1:]
+		fields := strings.Fields(line[:tab])
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("git ls-tree %s: malformed entry %q", short, line)
+		}
+		mode, modeErr := filemode.New(fields[0])
+		if modeErr != nil {
+			return nil, fmt.Errorf("git ls-tree %s: invalid mode %q: %w", short, fields[0], modeErr)
+		}
+		entries = append(entries, object.TreeEntry{
+			Name: name,
+			Mode: mode,
+			Hash: plumbing.NewHash(fields[2]),
+		})
+	}
+	return entries, nil
+}
+
 // WalkCheckpointShards iterates over the two-level shard structure (<id[:2]>/<id[2:]>/)
-// in a checkpoint tree, calling fn for each checkpoint found. Skips non-directory entries
-// at both levels (e.g., generation.json at the root). The callback receives the parsed
+// in a checkpoint tree, calling fn for each checkpoint found. It skips non-directory
+// and non-shard entries at both levels, such as legacy generation.json files or
+// other metadata kept outside shard directories. The callback receives the parsed
 // checkpoint ID and the tree hash of the checkpoint subtree.
-func WalkCheckpointShards(repo *git.Repository, tree *object.Tree, fn func(cpID id.CheckpointID, cpTreeHash plumbing.Hash) error) error {
+func WalkCheckpointShards(ctx context.Context, repo *git.Repository, tree *object.Tree, fn func(cpID id.CheckpointID, cpTreeHash plumbing.Hash) error) error {
 	for _, bucketEntry := range tree.Entries {
+		if err := ctx.Err(); err != nil {
+			return err //nolint:wrapcheck // propagate context cancellation unwrapped
+		}
 		if bucketEntry.Mode != filemode.Dir {
 			continue
 		}
@@ -314,6 +367,9 @@ func WalkCheckpointShards(repo *git.Repository, tree *object.Tree, fn func(cpID 
 			continue
 		}
 
+		if err := ctx.Err(); err != nil {
+			return err //nolint:wrapcheck // propagate context cancellation unwrapped
+		}
 		for _, cpEntry := range bucketTree.Entries {
 			if cpEntry.Mode != filemode.Dir {
 				continue
@@ -385,13 +441,12 @@ func splitFirstSegment(path string) (first, rest string) {
 	return parts[0], parts[1]
 }
 
-// getSessionsBranchRef returns the sessions branch parent commit hash and root tree hash
-// without flattening the tree.
+// getSessionsBranchRef returns the primary metadata ref's commit hash and root tree
+// hash without flattening the tree.
 func (s *GitStore) getSessionsBranchRef() (plumbing.Hash, plumbing.Hash, error) {
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	ref, err := s.repo.Reference(refName, true)
+	ref, err := s.repo.Reference(s.refs.Primary, true)
 	if err != nil {
-		return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("failed to get sessions branch reference: %w", err)
+		return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("failed to get primary metadata ref %s: %w", s.refs.Primary, err)
 	}
 
 	parentCommit, err := s.repo.CommitObject(ref.Hash())

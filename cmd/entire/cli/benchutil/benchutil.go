@@ -109,6 +109,7 @@ func NewBenchRepo(b *testing.B, opts RepoOpts) *BenchRepo {
 	if err != nil {
 		b.Fatalf("git init: %v", err)
 	}
+	b.Cleanup(func() { _ = repo.Close() })
 
 	// Create .gitignore and .entire settings
 	writeFile(b, dir, ".gitignore", ".entire/\n")
@@ -170,7 +171,7 @@ func NewBenchRepo(b *testing.B, opts RepoOpts) *BenchRepo {
 	br := &BenchRepo{
 		Dir:      dir,
 		Repo:     repo,
-		Store:    checkpoint.NewGitStore(repo),
+		Store:    checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()),
 		HeadHash: headHash.String(),
 		Strategy: opts.Strategy,
 	}
@@ -188,33 +189,6 @@ func NewBenchRepo(b *testing.B, opts RepoOpts) *BenchRepo {
 func (br *BenchRepo) WriteFile(b *testing.B, relPath, content string) {
 	b.Helper()
 	writeFile(b, br.Dir, relPath, content)
-}
-
-// AddAndCommit stages the given files and creates a commit.
-// Returns the new HEAD hash.
-func (br *BenchRepo) AddAndCommit(b *testing.B, message string, files ...string) string {
-	b.Helper()
-	wt, err := br.Repo.Worktree()
-	if err != nil {
-		b.Fatalf("worktree: %v", err)
-	}
-	for _, f := range files {
-		if _, err := wt.Add(f); err != nil {
-			b.Fatalf("add %s: %v", f, err)
-		}
-	}
-	hash, err := wt.Commit(message, &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Bench User",
-			Email: "bench@example.com",
-			When:  time.Now(),
-		},
-	})
-	if err != nil {
-		b.Fatalf("commit: %v", err)
-	}
-	br.HeadHash = hash.String()
-	return hash.String()
 }
 
 // SessionOpts configures how CreateSessionState creates a session state file.

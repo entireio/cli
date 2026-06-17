@@ -78,7 +78,7 @@ func benchStatus(sessionCount int, detailed, useGitCommonDirCache bool) func(*te
 				session.ClearGitCommonDirCache()
 			}
 
-			if err := runStatus(context.Background(), io.Discard, detailed); err != nil {
+			if err := runStatus(context.Background(), io.Discard, detailed, false); err != nil {
 				b.Fatalf("runStatus: %v", err)
 			}
 		}

@@ -18,13 +18,14 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
@@ -49,8 +50,9 @@ func newRewindCmd() *cobra.Command {
 	var resetFlag bool
 
 	cmd := &cobra.Command{
-		Use:   "rewind",
-		Short: "Browse checkpoints and rewind your session",
+		Use:        "rewind",
+		Short:      "Browse checkpoints and rewind your session",
+		Deprecated: "and will be removed in a future release",
 		Long: `Interactive command for rewinding and managing agent sessions.
 
 This command will show you an interactive list of recent checkpoints.  You'll be
@@ -686,8 +688,14 @@ func restoreSessionTranscript(ctx context.Context, w io.Writer, transcriptFile, 
 // This is used for strategies that store transcripts in git branches rather than local files.
 // Returns the session ID that was actually used (may differ from input if checkpoint provides one).
 func restoreSessionTranscriptFromStrategy(ctx context.Context, cpID id.CheckpointID, sessionID string, agent agentpkg.Agent) (string, error) {
-	// Get transcript content from checkpoint storage
-	content, returnedSessionID, err := checkpoint.LookupSessionLog(ctx, cpID)
+	repo, err := openRepository(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to open git repository: %w", err)
+	}
+	defer repo.Close()
+
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
+	content, returnedSessionID, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, store, cpID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get session log: %w", err)
 	}
@@ -721,10 +729,11 @@ func restoreSessionTranscriptFromStrategy(ctx context.Context, cpID id.Checkpoin
 // This is used for uncommitted checkpoints where the transcript is stored in the shadow branch tree.
 func restoreSessionTranscriptFromShadow(ctx context.Context, commitHash, metadataDir, sessionID string, agent agentpkg.Agent) (string, error) {
 	// Open repository
-	repo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{DetectDotGit: true})
+	repo, err := gitrepo.OpenCurrent(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Parse commit hash
 	hash := plumbing.NewHash(commitHash)
@@ -733,7 +742,7 @@ func restoreSessionTranscriptFromShadow(ctx context.Context, commitHash, metadat
 	}
 
 	// Get transcript from shadow branch commit tree
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
 	content, err := store.GetTranscriptFromCommit(ctx, hash, metadataDir, agent.Type())
 	if err != nil {
 		return "", fmt.Errorf("failed to get transcript from shadow branch: %w", err)
@@ -1061,6 +1070,7 @@ func getCurrentHeadHash(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
@@ -1080,6 +1090,7 @@ func checkResetSafety(ctx context.Context, targetCommitHash string, uncommittedC
 	if err != nil {
 		return nil, err
 	}
+	defer repo.Close()
 
 	// Check for uncommitted changes
 	if uncommittedChangesWarning != "" {
@@ -1208,10 +1219,10 @@ func printMultiSessionResumeCommands(w, errW io.Writer, sessions []strategy.Rest
 	}
 
 	if len(sessions) > 1 {
-		fmt.Fprintf(w, "\n✓ Restored %d sessions. To continue, run:\n", len(sessions))
+		fmt.Fprintf(w, "\n✓ Restored %d sessions. To continue:\n", len(sessions))
 	} else {
 		fmt.Fprintf(w, "✓ Restored session %s.\n", sessions[0].SessionID)
-		fmt.Fprintf(w, "\nTo continue this session, run:\n")
+		fmt.Fprintf(w, "\nTo continue this session:\n")
 	}
 
 	isMulti := len(sessions) > 1

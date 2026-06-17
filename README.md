@@ -15,7 +15,7 @@ With Entire, you can:
 - **Understand why code changed, not just what** — Transcripts, prompts, files touched, token usage, tool calls, and more are captured alongside every commit.
 - **Rewind and resume from any checkpoint** — Go back to any previous agent session and pick up exactly where you or a coworker left off.
 - **Full context preserved and searchable** — A versioned record of every AI interaction tied to your git history, with nothing lost.
-- **Zero context switching** — Git-native, two-step setup, works with Claude Code, Codex, Gemini, and more.
+- **Zero context switching** — Git-native, two-step setup, works with Claude Code, Codex, Gemini, Pi, and more.
 
 ## Table of Contents
 
@@ -74,7 +74,7 @@ cd your-project && entire enable
 entire status
 ```
 
-After the initial setup, use `entire configure` to add/remove agents or update setup-related options, and use `entire enable` / `entire disable` to toggle Entire on or off.
+After the initial setup, use `entire agent` to add or remove agents, `entire configure` to update non-agent settings, and `entire enable` / `entire disable` to toggle Entire on or off.
 
 ## Release Channels
 
@@ -104,7 +104,8 @@ On a repo that has not been enabled yet, `entire enable` runs the initial enable
 After setup:
 
 - Use `entire enable` to turn Entire back on if the repo is currently disabled.
-- Use `entire configure` to change which agents are installed or to update setup-related settings.
+- Use `entire agent` to add or remove agents.
+- Use `entire configure` to update non-agent settings (telemetry, hooks, checkpoint remote, summary provider).
 
 The hooks capture session data as you work. Checkpoints are created when you or the agent make a git commit. Your code commits stay clean, Entire never creates commits on your active branch. All session metadata is stored on a separate `entire/checkpoints/v1` branch.
 
@@ -116,12 +117,14 @@ Just use one of your AI agents as before. Entire runs in the background, trackin
 entire status  # Check current session status anytime
 ```
 
-### 3. Rewind to a Previous Checkpoint
+### 3. Rewind to a Previous Checkpoint (deprecated)
+
+> **Deprecated:** `entire checkpoint rewind` will be removed in a future release.
 
 If you want to undo some changes and go back to an earlier checkpoint:
 
 ```
-entire rewind
+entire checkpoint rewind
 ```
 
 This shows all available checkpoints in the current session. Select one to restore your code to that exact state.
@@ -131,7 +134,7 @@ This shows all available checkpoints in the current session. Select one to resto
 To restore the latest checkpointed session metadata for a branch:
 
 ```
-entire resume <branch>
+entire session resume <branch>
 ```
 
 Entire checks out the branch, restores the latest checkpointed session metadata (one or more sessions), and prints command(s) to continue.
@@ -209,9 +212,12 @@ If you're working on the CLI device auth flow against a local `entire.io` checko
 cd ../entire.io-1
 mise run dev
 
-# In this repo, point the CLI at the local API
+# In this repo, point the CLI at the local API. The login flow targets
+# the local server via --server (the default is the production
+# us.auth.entire.io).
 cd ../cli
 export ENTIRE_API_BASE_URL=http://localhost:8787
+entire login --server https://localhost:8180
 
 # Run the smoke test
 ./scripts/local-device-auth-smoke.sh
@@ -221,7 +227,7 @@ Useful commands while developing:
 
 ```bash
 # Run the login flow against a local server (prompts to press Enter before opening the browser)
-go run ./cmd/entire login --insecure-http-auth
+go run ./cmd/entire login --server https://localhost:8180
 
 # Run the focused integration coverage for login
 go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
@@ -232,17 +238,28 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | Command          | Description                                                                                       |
 | ---------------- | ------------------------------------------------------------------------------------------------- |
 | `entire clean`   | Clean up session data and orphaned Entire data (use `--all` for repo-wide cleanup)                |
-| `entire configure` | Configure agents and setup options for the current repository                                  |
+| `entire agent`   | Add, remove, or list agent integrations for the current repository                                |
+| `entire configure` | Update non-agent settings (telemetry, git hook, strategy options, summary provider)            |
 | `entire disable` | Remove Entire hooks from repository                                                               |
 | `entire doctor`  | Fix or clean up stuck sessions                                                                    |
 | `entire enable`  | Enable Entire in your repository                                                                  |
-| `entire explain` | Explain a session or commit                                                                       |
+| `entire checkpoint`        | List, explain, and search checkpoints                                                   |
+| `entire checkpoint explain` | Explain a session, commit, or checkpoint                                               |
+| `entire checkpoint rewind` | Rewind to a previous checkpoint (deprecated, will be removed in a future release)       |
 | `entire login`   | Authenticate the CLI with Entire device auth                                                      |
-| `entire resume`  | Switch to a branch, restore latest checkpointed session metadata, and show command(s) to continue |
-| `entire rewind`  | Rewind to a previous checkpoint                                                                   |
+| `entire session` | View and manage agent sessions tracked by Entire                                                  |
+| `entire session resume`    | Switch to a branch, restore latest checkpointed session metadata, and show command(s) |
+| `entire session attach`    | Attach to a previously detached session                                                |
 | `entire status`  | Show current session info                                                                         |
-| `entire sessions stop` | Mark one or more active sessions as ended                                                   |
+| `entire doctor trace` | Show hook performance traces                                                                 |
 | `entire version` | Show Entire CLI version                                                                           |
+
+`entire blame` and `entire why` are experimental Labs commands. Run `entire
+labs` to discover them. `entire blame <file>` shows which current file lines
+came from an Entire checkpoint, and `entire why <file>:<line>` jumps from a
+specific line back to the prompt, session, and checkpoint that created it. Use
+`entire blame <file> --long` for the full agent, model, author, and session
+table.
 
 ### `entire enable` Flags
 
@@ -272,33 +289,37 @@ entire enable --force
 entire enable --local
 ```
 
-`entire enable` is primarily for turning Entire on. On an unconfigured repo it will also bootstrap setup, but once the repo is already configured, `entire configure` is the clearer command for managing agents and setup options.
+`entire enable` is primarily for turning Entire on. On an unconfigured repo it will also bootstrap setup. Use `entire agent` for adding or removing agents, and `entire configure` for non-agent settings.
 
 ### `entire configure`
 
-Use `entire configure` after the repo is already set up and you want to change the configuration without framing the action as an enable/disable toggle.
+Use `entire configure` to update non-agent settings on a repo that's already set up. Agent installation lives under `entire agent`.
 
 Typical uses:
 
-- Add another agent
-- Remove an agent
-- Reinstall hooks for selected agents
-- Update settings such as `--checkpoint-remote` or `--skip-push-sessions`
+- Toggle telemetry
+- Reinstall the Entire git hook (`--force`, `--absolute-git-hook-path`)
+- Update strategy options such as `--checkpoint-remote` or `--skip-push-sessions`
+- Pick a summary provider for `entire explain --generate`
 
 **Examples:**
 
 ```bash
-# Add or remove agents interactively
+# Show help and the hint pointing to 'entire agent'
 entire configure
 
-# Install or refresh hooks for one agent non-interactively
-entire configure --agent claude-code --force
+# Opt out of telemetry
+entire configure --telemetry=false
 
-# Update setup settings on an existing repo
+# Reinstall the Entire git hook with an absolute binary path
+entire configure --absolute-git-hook-path
+
+# Update strategy options on an existing repo
 entire configure --checkpoint-remote github:myorg/checkpoints-private
 
-# Remove one agent's hooks
-entire configure --remove claude-code
+# Add or remove an agent
+entire agent add claude-code
+entire agent remove claude-code
 ```
 
 ## Configuration
@@ -350,6 +371,7 @@ Each agent stores its hook configuration in its own directory. When you run `ent
 | Factory AI Droid | `.factory/settings.json`      | JSON hooks config |
 | Gemini CLI       | `.gemini/settings.json`       | JSON hooks config |
 | OpenCode         | `.opencode/plugins/entire.ts` | TypeScript plugin |
+| Pi               | `.pi/extensions/entire/index.ts` | TypeScript extension |
 
 You can enable multiple agents at the same time — each agent's hooks are independent. Entire detects which agents are active by checking for installed hooks, not by a setting in `settings.json`.
 
@@ -381,6 +403,21 @@ Entire derives the git URL automatically using the same protocol (SSH or HTTPS) 
 - Skip pushing if a fork is detected (push remote owner differs from checkpoint repo owner)
 - If the remote is unreachable, warn and continue without blocking your main push
 
+#### `ENTIRE_CHECKPOINT_TOKEN`
+
+`ENTIRE_CHECKPOINT_TOKEN` allows you to provide a dedicated token for checkpoint repository operations, without modifying the credentials used for your primary repository.
+
+When this environment variable is set, Entire behaves as follows:
+
+- Injects the token into HTTPS Git operations used for checkpoint fetch and push
+- If `checkpoint_remote` is configured:
+  - Prefers an HTTPS URL for the checkpoint remote when a token is present, even if the repository’s `origin` uses SSH
+- If `checkpoint_remote` is not configured:
+  - Falls back to using the default `origin` remote
+- If `checkpoint_remote` configuration cannot be loaded:
+  - Falls back to `origin`
+  - If `origin` is a valid SSH or HTTPS Git remote, Entire converts it to an HTTPS URL to enable token-based authentication
+
 ### Auto-Summarization
 
 When enabled, Entire automatically generates AI summaries for checkpoints at commit time. Summaries capture intent, outcome, learnings, friction points, and open items from the session.
@@ -411,6 +448,7 @@ Local settings override project settings field-by-field. When you run `entire st
 - When enabling Entire for Codex, the command will also create or update `.codex/config.toml` with `codex_hooks = true` to enable Codex hooks. If you configure Codex manually, make sure this flag is set in your `.codex/config.toml`. Or select Codex from the interactive agent picker when running `entire enable`.
 - Entire supports Cursor IDE and Cursor Agent CLI tool, but `entire rewind` is not available at this time. Other commands (`doctor`, `status` etc.) work the same as all other agents.
 - Entire supports Copilot CLI, but not Copilot in VS Code, in other IDEs, or on github.com.
+- Entire supports Pi coding agent (Preview). Pi uses a TypeScript extension instead of a JSON hook config. Subagent capture is not currently available.
 
 ## Security & Privacy
 

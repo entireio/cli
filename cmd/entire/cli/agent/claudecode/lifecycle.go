@@ -19,8 +19,10 @@ var (
 	_ agent.TranscriptAnalyzer     = (*ClaudeCodeAgent)(nil)
 	_ agent.TranscriptPreparer     = (*ClaudeCodeAgent)(nil)
 	_ agent.TokenCalculator        = (*ClaudeCodeAgent)(nil)
+	_ agent.SkillEventExtractor    = (*ClaudeCodeAgent)(nil)
 	_ agent.SubagentAwareExtractor = (*ClaudeCodeAgent)(nil)
 	_ agent.HookResponseWriter     = (*ClaudeCodeAgent)(nil)
+	_ agent.ContextInjector        = (*ClaudeCodeAgent)(nil)
 )
 
 // WriteHookResponse outputs a JSON hook response to stdout.
@@ -33,6 +35,20 @@ func (c *ClaudeCodeAgent) WriteHookResponse(message string) error {
 		return fmt.Errorf("failed to encode hook response: %w", err)
 	}
 	return nil
+}
+
+// InjectionEvent reports that Claude Code injects model context at TurnStart
+// (the UserPromptSubmit hook), which supports hookSpecificOutput.additionalContext.
+func (c *ClaudeCodeAgent) InjectionEvent() agent.EventType { return agent.TurnStart }
+
+// RenderContextInjection renders the UserPromptSubmit additionalContext payload
+// Claude Code injects into the model context.
+func (c *ClaudeCodeAgent) RenderContextInjection(inj agent.ContextInjection) ([]byte, error) {
+	out, err := agent.RenderAdditionalContextHookOutput("UserPromptSubmit", inj.Text)
+	if err != nil {
+		return nil, fmt.Errorf("render claude-code context injection: %w", err)
+	}
+	return out, nil
 }
 
 // HookNames returns the hook verbs Claude Code supports.

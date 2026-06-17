@@ -109,6 +109,52 @@ func TrackCommandDetached(cmd *cobra.Command, agent string, isEntireEnabled bool
 	}
 }
 
+// BuildPluginEventPayload deliberately omits plugin args/flags — only the
+// allowlisted plugin name is recorded. Returns nil on failure.
+func BuildPluginEventPayload(pluginName string, isEntireEnabled bool, version string) *EventPayload {
+	if pluginName == "" {
+		return nil
+	}
+
+	machineID, err := machineid.ProtectedID("entire-cli")
+	if err != nil {
+		return nil
+	}
+
+	properties := map[string]any{
+		"command":         "entire " + pluginName,
+		"plugin":          pluginName,
+		"isEntireEnabled": isEntireEnabled,
+		"cli_version":     version,
+		"os":              runtime.GOOS,
+		"arch":            runtime.GOARCH,
+	}
+
+	return &EventPayload{
+		Event:      "cli_plugin_executed",
+		DistinctID: machineID,
+		Properties: properties,
+		Timestamp:  time.Now(),
+	}
+}
+
+// TrackPluginDetached records a plugin invocation. Call sites must gate
+// on the plugin allowlist — this function does no name filtering itself.
+func TrackPluginDetached(pluginName string, isEntireEnabled bool, version string) {
+	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+		return
+	}
+
+	payload := BuildPluginEventPayload(pluginName, isEntireEnabled, version)
+	if payload == nil {
+		return
+	}
+
+	if payloadJSON, err := json.Marshal(payload); err == nil {
+		spawnDetachedAnalytics(string(payloadJSON))
+	}
+}
+
 // SendEvent processes an event payload in the detached subprocess.
 // This is called by the hidden __send_analytics command.
 func SendEvent(payloadJSON string) {

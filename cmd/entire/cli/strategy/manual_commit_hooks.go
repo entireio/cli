@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitops"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -36,55 +38,6 @@ import (
 	"github.com/go-git/go-git/v6/utils/binary"
 )
 
-// hasTTY checks if /dev/tty is available for interactive prompts.
-// Returns false when running as an agent subprocess (no controlling terminal).
-//
-// In test environments, ENTIRE_TEST_TTY overrides the real check:
-//   - ENTIRE_TEST_TTY=1 → simulate human (TTY available)
-//   - ENTIRE_TEST_TTY=0 → simulate agent (no TTY)
-func hasTTY() bool {
-	if v := os.Getenv("ENTIRE_TEST_TTY"); v != "" {
-		return v == "1"
-	}
-
-	// Gemini CLI sets GEMINI_CLI=1 when running shell commands.
-	// Gemini subprocesses may have access to the user's TTY, but they can't
-	// actually respond to interactive prompts. Treat them as non-TTY.
-	// See: https://geminicli.com/docs/tools/shell/
-	if os.Getenv("GEMINI_CLI") != "" {
-		return false
-	}
-
-	// Copilot CLI sets COPILOT_CLI=1 when running hook subprocesses (v0.0.421+).
-	// Like Gemini, the subprocess may inherit the user's TTY but can't respond
-	// to interactive prompts.
-	if os.Getenv("COPILOT_CLI") != "" {
-		return false
-	}
-
-	// Pi Coding Agent sets PI_CODING_AGENT=true when running shell commands.
-	// Like other agents, the subprocess may inherit the TTY but can't respond
-	// to interactive prompts.
-	if os.Getenv("PI_CODING_AGENT") != "" {
-		return false
-	}
-
-	// GIT_TERMINAL_PROMPT=0 disables git's own terminal prompts.
-	// Factory AI Droid (and other non-interactive environments like CI) set this.
-	// Since we run as a git hook, respect it — if the environment doesn't want
-	// git prompting, our hook shouldn't prompt either.
-	if os.Getenv("GIT_TERMINAL_PROMPT") == "0" {
-		return false
-	}
-
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		return false
-	}
-	_ = tty.Close()
-	return true
-}
-
 // ttyResult represents the outcome of a TTY confirmation prompt.
 type ttyResult int
 
@@ -95,8 +48,9 @@ const (
 )
 
 // askConfirmTTY prompts the user via /dev/tty whether to link a commit to session context.
-// This requires a controlling terminal — callers must check hasTTY() first and handle
-// the no-TTY case (agent subprocesses, CI) themselves.
+// This requires a controlling terminal — callers must check
+// interactive.CanPromptInteractively() first and handle the no-TTY case
+// (agent subprocesses, CI) themselves.
 //
 // header is displayed as the first line (e.g., "Entire: Active Claude Code session").
 // detail lines are displayed indented below the header.
@@ -106,10 +60,8 @@ func askConfirmTTY(header string, details []string, prompt string, defaultYes bo
 		defaultResult = ttyResultLink
 	}
 
-	// In test mode, don't try to interact with the real TTY — just use the default.
-	// ENTIRE_TEST_TTY=1 simulates "a human is present" for the hasTTY() check
-	// but we can't actually read from the TTY in tests.
-	if os.Getenv("ENTIRE_TEST_TTY") != "" {
+	// In test mode, don't try to interact with the real TTY — use the default.
+	if interactive.UnderTest() {
 		return defaultResult
 	}
 
@@ -252,43 +204,43 @@ func (s *ManualCommitStrategy) PostRewrite(ctx context.Context, rewriteType stri
 
 	worktreePath, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return nil //nolint:nilerr // Hook must be resilient
+		return nil
 	}
 
 	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
 	if err != nil || len(sessions) == 0 {
-		return nil //nolint:nilerr // Hook must be resilient
+		return nil
 	}
 
 	repo, err := OpenRepository(ctx)
 	if err != nil {
-		return nil //nolint:nilerr // Hook must be resilient
+		return nil
 	}
+	defer repo.Close()
 
-	for _, state := range sessions {
-		changed, err := s.remapSessionForRewrite(ctx, repo, state, rewrites)
-		if err != nil {
+	for _, sess := range sessions {
+		sessionID := sess.SessionID
+		mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+			changed, err := s.remapSessionForRewrite(ctx, repo, state, rewrites)
+			if err != nil {
+				return err
+			}
+			if !changed {
+				return ErrMutationSkip
+			}
+			logging.Info(logCtx, "post-rewrite: remapped session linkage",
+				slog.String("session_id", state.SessionID),
+				slog.String("rewrite_type", rewriteType),
+				slog.String("base_commit", truncateHash(state.BaseCommit)),
+			)
+			return nil
+		})
+		if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
 			logging.Warn(logCtx, "post-rewrite: failed to remap session linkage",
-				slog.String("session_id", state.SessionID),
-				slog.String("error", err.Error()),
+				slog.String("session_id", sessionID),
+				slog.String("error", mutErr.Error()),
 			)
-			continue
 		}
-		if !changed {
-			continue
-		}
-		if err := s.saveSessionState(ctx, state); err != nil {
-			logging.Warn(logCtx, "post-rewrite: failed to save remapped session state",
-				slog.String("session_id", state.SessionID),
-				slog.String("error", err.Error()),
-			)
-			continue
-		}
-		logging.Info(logCtx, "post-rewrite: remapped session linkage",
-			slog.String("session_id", state.SessionID),
-			slog.String("rewrite_type", rewriteType),
-			slog.String("base_commit", truncateHash(state.BaseCommit)),
-		)
 	}
 
 	return nil
@@ -436,6 +388,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		openRepoSpan.End()
 		return nil
 	}
+	defer repo.Close()
 	openRepoSpan.End()
 
 	_, findSessionsSpan := perf.Start(ctx, "find_sessions_for_worktree")
@@ -461,6 +414,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		return nil
 	}
 	findSessionsSpan.End()
+
+	s.warnIfAttributionDiverged(ctx, sessions)
 
 	// Fast path: skip content detection for mid-turn agent commits.
 	if s.tryAgentCommitFastPath(ctx, commitMsgFile, sessions, source) {
@@ -543,7 +498,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	case "message":
 		// Using -m or -F: behavior depends on TTY availability and commit_linking setting
 		switch {
-		case !hasTTY():
+		case !interactive.CanPromptInteractively():
 			// No TTY (agent subprocess, CI) — auto-link without prompting
 			message = addCheckpointTrailer(message, checkpointID)
 		case commitLinking == settings.CommitLinkingAlways:
@@ -605,7 +560,7 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 	// Read current commit message
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
 	if err != nil {
-		return nil //nolint:nilerr // Hook must be silent on failure
+		return nil
 	}
 
 	message := string(content)
@@ -622,12 +577,12 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 	// No trailer in message — check if any session has LastCheckpointID to restore
 	worktreePath, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return nil //nolint:nilerr // Hook must be silent on failure
+		return nil
 	}
 
 	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
 	if err != nil || len(sessions) == 0 {
-		return nil //nolint:nilerr // No sessions - nothing to restore
+		return nil
 	}
 
 	// For amend, HEAD^ is the commit being amended, and HEAD is where we are now.
@@ -636,11 +591,12 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 	// unrelated checkpoint IDs.
 	repo, repoErr := OpenRepository(ctx)
 	if repoErr != nil {
-		return nil //nolint:nilerr // Hook must be silent on failure
+		return nil
 	}
+	defer repo.Close()
 	head, headErr := repo.Head()
 	if headErr != nil {
-		return nil //nolint:nilerr // Hook must be silent on failure
+		return nil
 	}
 	currentHead := head.Hash().String()
 
@@ -659,7 +615,7 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 		// Restore the trailer
 		message = addCheckpointTrailer(message, cpID)
 		if writeErr := os.WriteFile(commitMsgFile, []byte(message), 0o600); writeErr != nil { //nolint:gosec // path from git hook arg
-			return nil //nolint:nilerr // Hook must be silent on failure
+			return nil
 		}
 
 		logging.Info(logCtx, "prepare-commit-msg: restored trailer on amend",
@@ -720,6 +676,9 @@ type postCommitActionHandler struct {
 	allAgentFiles map[string]struct{} // Union of all sessions' FilesTouched for cross-session attribution
 
 	// Output: set by handler methods, read by caller after TransitionAndLog.
+	// condensed is true only when CondenseSession wrote data to the metadata branch.
+	// Both failures and skips (no transcript/files) leave condensed=false, which
+	// correctly preserves shadow branches and defers FullyCondensed marking.
 	condensed bool
 }
 
@@ -915,7 +874,7 @@ func (h *postCommitActionHandler) HandleWarnStaleSession(_ *session.State) error
 // During rebase/cherry-pick/revert operations, phase transitions are skipped entirely.
 //
 
-func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:unparam // error return is part of the hook contract; callers check it
+func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
 	_, openRepoSpan := perf.Start(ctx, "open_repository_and_head")
@@ -925,6 +884,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:
 		openRepoSpan.End()
 		return nil
 	}
+	defer repo.Close()
 
 	// Get HEAD commit to check for trailer
 	head, err := repo.Head()
@@ -970,7 +930,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:
 			slog.String("strategy", "manual-commit"),
 			slog.String("checkpoint_id", checkpointID.String()),
 		)
-		return nil //nolint:nilerr // Intentional: hooks must be silent on failure
+		return nil
 	}
 
 	// Build transition context
@@ -1031,17 +991,24 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:
 	}
 
 	loopCtx, processSessionsLoop := perf.StartLoop(ctx, "process_sessions")
-	for _, state := range sessions {
-		// Skip fully-condensed ended sessions — no work remains.
-		// These sessions only persist for LastCheckpointID (amend trailer reuse).
-		if state.FullyCondensed && state.Phase == session.PhaseEnded {
+	for _, sess := range sessions {
+		if sess.FullyCondensed && sess.Phase == session.PhaseEnded {
 			continue
 		}
+		sessionID := sess.SessionID
 		iterCtx, iterSpan := processSessionsLoop.Iteration(loopCtx)
-		s.postCommitProcessSession(iterCtx, repo, state, &transitionCtx, checkpointID,
-			head, commit, newHead, worktreePath, headTree, parentTree,
-			committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
-			sessionsWithCommittedFiles)
+		mutErr := MutateSessionState(iterCtx, sessionID, func(state *SessionState) error {
+			s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
+				head, commit, newHead, worktreePath, headTree, parentTree,
+				committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
+				sessionsWithCommittedFiles)
+			return nil
+		})
+		if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
+			logging.Warn(logCtx, "post-commit: session mutation failed",
+				slog.String("session_id", sessionID),
+				slog.String("error", mutErr.Error()))
+		}
 		iterSpan.End()
 	}
 	processSessionsLoop.End()
@@ -1094,7 +1061,7 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	repoDir string,
 ) error {
 	logCtx := logging.WithComponent(ctx, "attribution")
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
 
 	summary, err := store.ReadCommitted(ctx, checkpointID)
 	if err != nil {
@@ -1105,15 +1072,18 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	}
 
 	// Collect union of files_touched from sessions that had real checkpoints (SaveStep ran).
-	// Sessions with checkpoints_count == 0 (e.g., commit-only sessions) use a fallback that
+	// Sessions with no SaveStep steps (e.g., commit-only sessions) use a fallback that
 	// includes ALL committed files, which would incorrectly classify human-created files as agent work.
+	// Gate on SaveStepCount (the honest "SaveStep ran" signal), not CheckpointsCount —
+	// CheckpointsCount is now a prompt count floored at 1, so it's no longer 0 for these sessions.
+	// Old metadata lacks SaveStepCount → 0 → conservatively skipped, matching prior behavior.
 	agentFiles := make(map[string]struct{})
 	for i := range len(summary.Sessions) {
 		metadata, readErr := store.ReadSessionMetadata(ctx, checkpointID, i)
 		if readErr != nil || metadata == nil {
 			continue
 		}
-		if metadata.CheckpointsCount == 0 {
+		if metadata.SaveStepCount == 0 {
 			continue // Skip sessions that used the filesTouched fallback
 		}
 		for _, f := range metadata.FilesTouched {
@@ -1188,13 +1158,21 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 		return fmt.Errorf("persisting combined attribution: %w", err)
 	}
 
+	// Combined attribution is a committed write in the post-commit hook, so the
+	// mirror must track it too when configured (best-effort).
+	mirrorCommittedMetadataRefBestEffort(ctx, repo, store.Refs())
+
 	return nil
 }
 
-// postCommitProcessSession handles a single session within the PostCommit loop.
+// postCommitProcessSessionLocked handles a single session within the PostCommit loop.
 // Pre-resolved git objects (headTree, parentTree) are shared across all sessions;
 // per-session shadow ref/tree are resolved once here and threaded through sub-calls.
-func (s *ManualCommitStrategy) postCommitProcessSession(
+//
+// MUST be called from inside MutateSessionState. Mutations to state are persisted
+// by the caller's outer save — calling this function standalone silently loses
+// every field change (StepCount, FilesTouched, CheckpointTranscriptStart, …).
+func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	ctx context.Context,
 	repo *git.Repository,
 	state *SessionState,
@@ -1360,14 +1338,7 @@ func (s *ManualCommitStrategy) postCommitProcessSession(
 		state.FullyCondensed = true
 	}
 
-	// Save the updated state
-	_, saveSessionStateSpan := perf.Start(ctx, "save_session_state")
-	if err := s.saveSessionState(ctx, state); err != nil {
-		logging.Warn(logCtx, "failed to update session state",
-			slog.String("session_id", state.SessionID),
-			slog.String("error", err.Error()))
-	}
-	saveSessionStateSpan.End()
+	// State is saved by the outer MutateSessionState in PostCommit.
 
 	// Only preserve shadow branch for active sessions that were NOT condensed.
 	// Condensed sessions already have their data on entire/checkpoints/v1.
@@ -1399,16 +1370,23 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 		return false
 	}
 
+	if result.Skipped {
+		logging.Debug(logCtx, "condensation skipped, session state unchanged",
+			slog.String("session_id", state.SessionID),
+			slog.String("checkpoint_id", checkpointID.String()),
+		)
+		return false
+	}
+
 	// Track this shadow branch for cleanup
 	shadowBranchesToDelete[shadowBranchName] = struct{}{}
 
 	// Update session state for the new base commit
 	newHead := head.Hash().String()
 	state.BaseCommit = newHead
-	state.AttributionBaseCommit = newHead
+	state.RealignAttributionBase(newHead)
 	state.StepCount = 0
 	state.CheckpointTranscriptStart = result.TotalTranscriptLines
-	state.CompactTranscriptStart += result.CompactTranscriptLines
 	state.CheckpointTranscriptSize = int64(len(result.Transcript))
 
 	// Clear attribution tracking — condensation already used these values
@@ -1420,8 +1398,11 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	// decides whether to clear it based on carry-forward: if remaining files exist,
 	// the prompt must persist so the next condensation can read it.
 
-	// Save checkpoint ID so subsequent commits can reuse it (e.g., amend restores trailer)
+	// Save checkpoint ID so subsequent commits can reuse it (e.g., amend restores trailer).
+	// LastCheckpointCommitHash records the exact commit SHA so the reconcile path can
+	// distinguish a true reset (same SHA) from cherry-pick/rebase (same trailer, new SHA).
 	state.LastCheckpointID = checkpointID
+	state.LastCheckpointCommitHash = newHead
 
 	logging.Info(logCtx, "session condensed",
 		slog.String("strategy", "manual-commit"),
@@ -1454,7 +1435,7 @@ func (s *ManualCommitStrategy) updateBaseCommitIfChanged(ctx context.Context, st
 		// Keep AttributionBaseCommit in sync to prevent stale base drift.
 		// Without this, a subsequent condensation would diff from the old base,
 		// inflating human_added with lines from unrelated prior commits.
-		state.AttributionBaseCommit = newHead
+		state.RealignAttributionBase(newHead)
 		logging.Debug(logCtx, "post-commit: updated BaseCommit and AttributionBaseCommit",
 			slog.String("session_id", state.SessionID),
 			slog.String("new_head", truncateHash(newHead)),
@@ -1482,28 +1463,32 @@ func (s *ManualCommitStrategy) postCommitUpdateBaseCommitOnly(ctx context.Contex
 	}
 
 	newHead := head.Hash().String()
-	for _, state := range sessions {
-		// Only update active sessions. Idle/ended sessions are kept around for
-		// LastCheckpointID reuse and should not be advanced to HEAD.
-		if !state.Phase.IsActive() {
+	for _, sess := range sessions {
+		if !sess.Phase.IsActive() || sess.BaseCommit == newHead {
 			continue
 		}
-		if state.BaseCommit != newHead {
+		sessionID := sess.SessionID
+		oldBase := sess.BaseCommit
+		mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+			if !state.Phase.IsActive() || state.BaseCommit == newHead {
+				return ErrMutationSkip
+			}
 			logging.Debug(logCtx, "post-commit (no trailer): updating BaseCommit and AttributionBaseCommit",
 				slog.String("session_id", state.SessionID),
-				slog.String("old_base", truncateHash(state.BaseCommit)),
+				slog.String("old_base", truncateHash(oldBase)),
 				slog.String("new_head", truncateHash(newHead)),
 			)
 			state.BaseCommit = newHead
 			// Keep AttributionBaseCommit in sync to prevent stale base drift.
 			// Without this, a subsequent condensation would diff from the old base,
 			// inflating human_added with lines from unrelated prior commits.
-			state.AttributionBaseCommit = newHead
-			if err := s.saveSessionState(ctx, state); err != nil {
-				logging.Warn(logCtx, "failed to update session state",
-					slog.String("session_id", state.SessionID),
-					slog.String("error", err.Error()))
-			}
+			state.RealignAttributionBase(newHead)
+			return nil
+		})
+		if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
+			logging.Warn(logCtx, "failed to update session state",
+				slog.String("session_id", sessionID),
+				slog.String("error", mutErr.Error()))
 		}
 	}
 }
@@ -1991,6 +1976,49 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 	return modifiedFiles
 }
 
+// warnIfAttributionDiverged prints at most one stderr warning per call and
+// marks every divergent session as notified so subsequent invocations stay
+// silent until the next successful condensation (or reconcile) realigns
+// attribution and clears the flag via State.RealignAttributionBase.
+//
+// Divergence arises when the migrate path advances BaseCommit to a new HEAD
+// but intentionally leaves AttributionBaseCommit pinned (e.g., after a pull
+// or git reset to an unrelated commit). Writing to stderrWriter surfaces the
+// message in the user's terminal during prepare-commit-msg, not the agent's
+// transcript — stderr from the hook is TTY-bound to the invoking process.
+func (s *ManualCommitStrategy) warnIfAttributionDiverged(ctx context.Context, sessions []*SessionState) {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	printed := false
+	for _, sess := range sessions {
+		if sess.AttributionBaseCommit == "" ||
+			sess.AttributionBaseCommit == sess.BaseCommit ||
+			sess.DivergenceNoticeShown {
+			continue
+		}
+		if !printed {
+			fmt.Fprintln(stderrWriter, "entire: session attribution diverged after recent history movement; figures may be off until next checkpoint")
+			printed = true
+		}
+		sessionID := sess.SessionID
+		mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+			if state.DivergenceNoticeShown {
+				return ErrMutationSkip
+			}
+			state.DivergenceNoticeShown = true
+			return nil
+		})
+		if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
+			logging.Warn(logCtx, "failed to save divergence notice flag",
+				slog.String("session_id", sessionID),
+				slog.String("error", mutErr.Error()))
+			continue
+		}
+		// Reflect the persisted change on the caller's slice so a same-call
+		// second pass observes the flag without reloading.
+		sess.DivergenceNoticeShown = true
+	}
+}
+
 // tryAgentCommitFastPath skips content detection for mid-turn agent commits.
 // Returns true if the fast path was taken (trailer added or attempt made),
 // false if the caller should continue with normal content detection.
@@ -2002,7 +2030,7 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 //     have /dev/tty but can't respond to prompts, and content detection fails
 //     since the shadow branch doesn't exist yet).
 func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commitMsgFile string, sessions []*SessionState, source string) bool {
-	noTTY := !hasTTY()
+	noTTY := !interactive.CanPromptInteractively()
 	skipContentDetection := noTTY
 	if !skipContentDetection {
 		if stngs, err := settings.Load(ctx); err == nil {
@@ -2013,20 +2041,44 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		return false
 	}
 	logCtx := logging.WithComponent(ctx, "checkpoint")
+	activeSessions := 0
+	emptyActiveSessions := 0
 	for _, state := range sessions {
-		if state.Phase.IsActive() {
-			_ = s.addTrailerForAgentCommit(logCtx, commitMsgFile, state, source) //nolint:errcheck // always returns nil; kept for signature stability
-			return true
+		if !state.Phase.IsActive() {
+			continue
 		}
+		activeSessions++
+		// Skip sessions that have no condensable content: no transcript path,
+		// no tracked files, and no shadow branch data (StepCount == 0). These
+		// would produce a Skipped result in CondenseSession, leaving the
+		// Entire-Checkpoint trailer pointing to nothing on the metadata branch.
+		// NOTE: conservative approximation of the skip gate in CondenseSession
+		// (which checks extracted data, not raw state). Keep aligned.
+		if state.TranscriptPath == "" && len(state.FilesTouched) == 0 && state.StepCount == 0 {
+			emptyActiveSessions++
+			logging.Debug(logCtx, "prepare-commit-msg: fast path skipping empty session",
+				slog.String("session_id", state.SessionID),
+				slog.String("agent_type", string(state.AgentType)),
+			)
+			continue
+		}
+		_ = s.addTrailerForAgentCommit(logCtx, commitMsgFile, state, source) //nolint:errcheck // always returns nil; kept for signature stability
+		return true
 	}
 	// Log why fast path didn't fire — collect session phases for diagnostics.
 	phases := make([]string, 0, len(sessions))
 	for _, state := range sessions {
 		phases = append(phases, string(state.Phase))
 	}
-	logging.Debug(logCtx, "prepare-commit-msg: fast path found no ACTIVE sessions",
+	message := "prepare-commit-msg: fast path found no ACTIVE sessions"
+	if activeSessions > 0 && emptyActiveSessions == activeSessions {
+		message = "prepare-commit-msg: fast path skipped all ACTIVE sessions as empty"
+	}
+	logging.Debug(logCtx, message,
 		slog.Bool("no_tty", noTTY),
 		slog.Int("sessions", len(sessions)),
+		slog.Int("active_sessions", activeSessions),
+		slog.Int("empty_active_sessions", emptyActiveSessions),
 		slog.Any("session_phases", phases),
 	)
 	return false
@@ -2119,6 +2171,58 @@ func addCheckpointTrailerWithComment(message string, checkpointID id.CheckpointI
 	return userContent + "\n\n" + trailer + "\n" + comment + "\n\n" + gitComments
 }
 
+// resolveSessionAgentType picks the most reliable identifier for which agent
+// owns a session, given the agent whose hook is firing right now (callerAgentType),
+// an optional transcript path, and the SessionStart hint stored under the
+// session ID.
+//
+// Priority (strongest signal wins):
+//  1. Transcript path — when transcriptPath is inside a registered agent's
+//     GetSessionDir(repoRoot), the file's location is direct evidence.
+//  2. SessionStart hint — first agent to fire SessionStart for this session.
+//     Useful when transcriptPath is empty (e.g., Claude Code's first TurnStart
+//     in a forwarded-hook scenario).
+//  3. callerAgentType — the agent whose hook called us. Used when no stronger
+//     signal exists.
+func resolveSessionAgentType(ctx context.Context, sessionID string, callerAgentType types.AgentType, transcriptPath string) types.AgentType {
+	if repoRoot, err := paths.WorktreeRoot(ctx); err == nil && transcriptPath != "" {
+		if owner, ok := agent.AgentForTranscriptPath(transcriptPath, repoRoot); ok {
+			return owner.Type()
+		}
+	}
+	if hint := LoadAgentTypeHint(ctx, sessionID); hint != "" && hint != agent.AgentTypeUnknown {
+		return hint
+	}
+	return callerAgentType
+}
+
+// correctSessionAgentType returns the agent type that owns transcriptPath when
+// it disagrees with currentType. Returns (currentType, false) if there's no
+// disagreement or no transcript signal — callers should treat that as a no-op.
+//
+// Used to repair sessions whose AgentType was set incorrectly on an earlier
+// turn (e.g., a wrapper agent's hook fired first before the real agent's
+// transcript path was available). Only the transcript path is considered;
+// the SessionStart hint is intentionally ignored here because it can also be
+// the wrong-first-writer that we're trying to correct.
+func correctSessionAgentType(ctx context.Context, currentType types.AgentType, transcriptPath string) (types.AgentType, bool) {
+	if transcriptPath == "" {
+		return currentType, false
+	}
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return currentType, false
+	}
+	owner, ok := agent.AgentForTranscriptPath(transcriptPath, repoRoot)
+	if !ok {
+		return currentType, false
+	}
+	if owner.Type() == currentType {
+		return currentType, false
+	}
+	return owner.Type(), true
+}
+
 // InitializeSession creates session state for a new session or updates an existing one.
 // This implements the optional SessionInitializer interface.
 // Called during UserPromptSubmit to allow git hooks to detect active sessions.
@@ -2134,99 +2238,110 @@ func addCheckpointTrailerWithComment(message string, checkpointID id.CheckpointI
 // userPrompt is the user's prompt text (stored truncated as LastPrompt for display).
 // model is the LLM model identifier (e.g., "claude-sonnet-4-20250514"); empty if unknown.
 func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath string, userPrompt string, model string) error {
+	// Concurrent calls for the same session_id are accepted; convergence on
+	// AgentType is via correctSessionAgentType on the next turn.
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
-	// Check if session already exists
-	state, err := s.loadSessionState(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to check session state: %w", err)
-	}
+	// Resolve which agent actually owns this session. The hook firing isn't
+	// authoritative when multiple agents' hooks fire for the same session ID
+	// (e.g., Cursor IDE forwarding to both .cursor/hooks.json and
+	// .claude/settings.json). Stronger signals: transcript path (file lives in
+	// a specific agent's session dir) and the SessionStart hint (first agent
+	// to claim the session ID).
+	resolvedAgentType := resolveSessionAgentType(ctx, sessionID, agentType, transcriptPath)
 
-	if state != nil && state.BaseCommit != "" {
-		// Session is fully initialized — apply phase transition for TurnStart.
+	// Try the existing-session path first. If MutateSessionState reports
+	// the state is missing (or the loaded state has an empty BaseCommit, a
+	// partial-state remnant from a concurrent warning), fall through to
+	// the initialize-new-session branch.
+	turnStartErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if state.BaseCommit == "" {
+			return errPartialState
+		}
 		if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
 				slog.String("session_id", sessionID),
 				slog.String("error", transErr.Error()))
 		}
 
-		// Generate a new TurnID for each turn (correlates carry-forward checkpoints)
 		turnID, err := id.Generate()
 		if err != nil {
 			return fmt.Errorf("failed to generate turn ID: %w", err)
 		}
 		state.TurnID = turnID.String()
 
-		// Set AgentType from hook context if not yet set
-		if state.AgentType == "" && agentType != "" {
-			state.AgentType = agentType
+		// Update AgentType when it isn't set yet, or when the transcript path
+		// proves we're a different agent than the one stored.
+		if state.AgentType == "" && resolvedAgentType != "" {
+			state.AgentType = resolvedAgentType
+		} else if corrected, changed := correctSessionAgentType(ctx, state.AgentType, transcriptPath); changed {
+			logging.Info(logging.WithComponent(ctx, "hooks"), "corrected session agent type from transcript path",
+				slog.String("session_id", sessionID),
+				slog.String("from", string(state.AgentType)),
+				slog.String("to", string(corrected)),
+				slog.String("transcript_path", transcriptPath))
+			state.AgentType = corrected
 		}
-
-		// Update ModelName if provided (model can change between turns)
 		if model != "" {
 			state.ModelName = model
 		}
-
-		// Update LastPrompt on every turn so condensation always has the current prompt
 		if userPrompt != "" {
 			state.LastPrompt = truncatePromptForStorage(userPrompt)
 		}
-
-		// Update transcript path if provided (may change on session resume)
 		if transcriptPath != "" && state.TranscriptPath != transcriptPath {
 			state.TranscriptPath = transcriptPath
 		}
 
-		// Clear checkpoint IDs on every new prompt.
-		// LastCheckpointID is set during PostCommit, cleared at new prompt.
-		// TurnCheckpointIDs tracks mid-turn checkpoints for stop-time finalization.
-		state.LastCheckpointID = ""
-		state.TurnCheckpointIDs = nil
-
-		// Calculate attribution at prompt start (BEFORE agent makes any changes)
-		// This captures user edits since the last checkpoint (or base commit for first prompt).
-		// IMPORTANT: Always calculate attribution, even for the first checkpoint, to capture
-		// user edits made before the first prompt. The inner CalculatePromptAttribution handles
-		// nil lastCheckpointTree by falling back to baseTree.
+		// ORDERING: attribution runs BEFORE migrate to use the pre-migration
+		// BaseCommit as the base tree (preserving correct agent-line counts
+		// when HEAD moved between turns via pull/rebase). Migrate runs BEFORE
+		// the LastCheckpointID clear so the reconcile guard can read it.
 		promptAttr := s.calculatePromptAttributionAtStart(ctx, repo, state)
 		state.PendingPromptAttribution = &promptAttr
 
-		// Check if HEAD has moved (user pulled/rebased or committed)
-		// migrateShadowBranchIfNeeded handles renaming the shadow branch and updating state.BaseCommit
-		if _, err := s.migrateShadowBranchIfNeeded(ctx, repo, state); err != nil {
+		_, reconciled, err := s.migrateShadowBranchIfNeeded(ctx, repo, state)
+		if err != nil {
 			return fmt.Errorf("failed to check/migrate shadow branch: %w", err)
 		}
-
-		if err := s.saveSessionState(ctx, state); err != nil {
-			return fmt.Errorf("failed to update session state: %w", err)
+		if reconciled {
+			recomputed := s.calculatePromptAttributionAtStart(ctx, repo, state)
+			state.PendingPromptAttribution = &recomputed
 		}
+
+		state.LastCheckpointID = ""
+		state.TurnCheckpointIDs = nil
+		return nil
+	})
+	if turnStartErr == nil {
 		return nil
 	}
-	// If state exists but BaseCommit is empty, it's a partial state from concurrent warning
-	// Continue below to properly initialize it
+	if !errors.Is(turnStartErr, ErrStateNotFound) && !errors.Is(turnStartErr, errPartialState) {
+		return fmt.Errorf("failed to update session state: %w", turnStartErr)
+	}
 
-	// Initialize new session
-	state, err = s.initializeSession(ctx, repo, sessionID, agentType, transcriptPath, userPrompt, model)
-	if err != nil {
+	// Initialize new session (or repair a partial state). The MutateSessionState
+	// call below reloads the freshly-persisted state under lock and runs the
+	// turn-start mutations on top of it.
+	if err := s.initializeSession(ctx, repo, sessionID, resolvedAgentType, transcriptPath, userPrompt, model); err != nil {
 		return fmt.Errorf("failed to initialize session: %w", err)
 	}
 
-	// Apply phase transition: new session starts as ACTIVE.
-	if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
-		logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
-			slog.String("session_id", sessionID),
-			slog.String("error", transErr.Error()))
-	}
-
-	// Calculate attribution for pre-prompt edits
-	// This captures any user edits made before the first prompt
-	promptAttr := s.calculatePromptAttributionAtStart(ctx, repo, state)
-	state.PendingPromptAttribution = &promptAttr
-	if err = s.saveSessionState(ctx, state); err != nil {
-		return fmt.Errorf("failed to save attribution: %w", err)
+	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+			logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
+				slog.String("session_id", sessionID),
+				slog.String("error", transErr.Error()))
+		}
+		promptAttr := s.calculatePromptAttributionAtStart(ctx, repo, state)
+		state.PendingPromptAttribution = &promptAttr
+		return nil
+	})
+	if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
+		return fmt.Errorf("failed to save attribution: %w", mutErr)
 	}
 
 	logging.Info(logging.WithComponent(ctx, "hooks"), "initialized shadow session",
@@ -2309,7 +2424,7 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 		return result
 	}
 
-	worktreeRoot := worktree.Filesystem.Root()
+	worktreeRoot := worktree.Filesystem().Root()
 
 	// Build map of changed files with their worktree content
 	// IMPORTANT: We read from worktree (not staging area) to match what WriteTemporary
@@ -2472,6 +2587,12 @@ func readPromptsFromShadowBranch(_ context.Context, repo *git.Repository, state 
 	return splitPromptContent(content)
 }
 
+// errPartialState signals InitializeSession's mutation callback that the
+// loaded state has an empty BaseCommit (left over from a concurrent warning
+// that wrote partial state). The caller falls through to initializeSession
+// to repair it.
+var errPartialState = errors.New("partial session state")
+
 // HandleTurnEnd dispatches strategy-specific actions emitted when an agent turn ends.
 // The primary job is to finalize all checkpoints from this turn with the full transcript.
 //
@@ -2528,6 +2649,29 @@ func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *Session
 	}
 
 	return nil
+}
+
+// precomputeTranscriptBlobsForFinalize chunks + zlib-compresses the redacted
+// transcript once for reuse across every checkpoint in the turn. Returns nil
+// (without error) when the transcript is empty — downstream stores skip
+// transcript updates in that case, so precompute would only write a wasted
+// empty-chunk blob to the object store. On failure, logs a warning and
+// returns nil so the loop falls back to per-checkpoint chunking.
+func precomputeTranscriptBlobsForFinalize(ctx context.Context, repo *git.Repository, transcript redact.RedactedBytes, state *SessionState) *checkpoint.PrecomputedTranscriptBlobs {
+	if transcript.Len() == 0 {
+		return nil
+	}
+	_, span := perf.Start(ctx, "precompute_transcript_blobs")
+	defer span.End()
+	precomputed, err := checkpoint.PrecomputeTranscriptBlobs(ctx, repo, transcript, state.AgentType)
+	if err != nil {
+		logging.Warn(ctx, "finalize: precompute transcript blobs failed, falling back to per-checkpoint work",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()),
+		)
+		return nil
+	}
+	return precomputed
 }
 
 // finalizeAllTurnCheckpoints replaces the provisional transcript in each checkpoint
@@ -2596,11 +2740,15 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		state.TurnCheckpointIDs = nil
 		return 1 // Count as error - all checkpoints will be skipped
 	}
+	defer repo.Close()
 
 	prompts := readPromptsFromShadowBranch(ctx, repo, state)
 	if len(prompts) == 0 {
 		prompts = readPromptsFromFilesystem(ctx, state.SessionID)
 	}
+
+	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; ExtractSkillEvents handles nil
+	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(agent.ExtractSkillEvents(ctx, ag, fullTranscript, 0), state.TurnID))
 
 	// Redact secrets before writing. Checkpoint store methods require
 	// pre-redacted in-memory transcript content from callers. The live
@@ -2625,13 +2773,9 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		prompts[i] = redact.String(p)
 	}
 
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
 
-	// Evaluate v2 flag once before the loop to avoid re-reading settings per checkpoint
-	var v2Store *checkpoint.V2GitStore
-	if settings.IsCheckpointsV2Enabled(logCtx) {
-		v2Store = checkpoint.NewV2GitStore(repo, ResolveCheckpointURL(logCtx, "origin"))
-	}
+	precomputed := precomputeTranscriptBlobsForFinalize(logCtx, repo, redactedTranscript, state)
 
 	// Update each checkpoint with the full transcript
 	for _, cpIDStr := range state.TurnCheckpointIDs {
@@ -2646,31 +2790,13 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		}
 
 		updateOpts := checkpoint.UpdateCommittedOptions{
-			CheckpointID: cpID,
-			SessionID:    state.SessionID,
-			Transcript:   redactedTranscript,
-			Prompts:      prompts,
-			Agent:        state.AgentType,
-		}
-
-		// Generate compact transcript for v2 /main
-		if v2Store != nil && redactedTranscript.Len() > 0 {
-			finalAg, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; compactTranscriptForV2 handles nil
-			startLine := 0
-			if content, readErr := store.ReadSessionContentByID(ctx, cpID, state.SessionID); readErr == nil && content != nil {
-				startLine = content.Metadata.GetTranscriptStart()
-			} else {
-				errMsg := "unknown"
-				if readErr != nil {
-					errMsg = readErr.Error()
-				}
-				logging.Debug(logCtx, "finalize: failed to read checkpoint metadata, using full transcript for compact output",
-					slog.String("checkpoint_id", cpIDStr),
-					slog.String("session_id", state.SessionID),
-					slog.String("error", errMsg),
-				)
-			}
-			updateOpts.CompactTranscript = compactTranscriptForV2(logCtx, finalAg, redactedTranscript, startLine)
+			CheckpointID:     cpID,
+			SessionID:        state.SessionID,
+			Transcript:       redactedTranscript,
+			Prompts:          prompts,
+			Agent:            state.AgentType,
+			SkillEvents:      skillEvents,
+			PrecomputedBlobs: precomputed,
 		}
 
 		updateErr := store.UpdateCommitted(ctx, updateOpts)
@@ -2683,21 +2809,16 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			continue
 		}
 
-		// Dual-write: update v2 refs when enabled
-		if v2Store != nil {
-			if v2Err := v2Store.UpdateCommitted(logCtx, updateOpts); v2Err != nil {
-				logging.Warn(logCtx, "v2 dual-write update failed",
-					slog.String("checkpoint_id", cpIDStr),
-					slog.String("error", v2Err.Error()),
-				)
-			}
-		}
-
 		logging.Info(logCtx, "finalize: checkpoint updated with full transcript",
 			slog.String("checkpoint_id", cpIDStr),
 			slog.String("session_id", state.SessionID),
 		)
 	}
+
+	// Mirror the finalized primary metadata to refs.Mirror when configured
+	// (best-effort; failures are logged, not fatal). Once after the loop is
+	// enough — it tracks Primary's final commit.
+	mirrorCommittedMetadataRefBestEffort(ctx, repo, store.Refs())
 
 	// Clear turn checkpoint IDs. Do NOT update CheckpointTranscriptStart here — it was
 	// already set correctly by PostCommit: condenseAndUpdateState sets it to the total
@@ -2768,7 +2889,7 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 ) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	start := time.Now()
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
 
 	// Don't include metadata directory in carry-forward. The carry-forward branch
 	// only needs to preserve file content for comparison - not the transcript.
@@ -2814,7 +2935,6 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 	// but this would complicate checkpoint retrieval and require careful tracking of dependencies.
 	state.StepCount = 1
 	state.CheckpointTranscriptStart = 0
-	state.CompactTranscriptStart = 0
 	state.CheckpointTranscriptSize = 0
 	state.LastCheckpointID = ""
 	// NOTE: TurnCheckpointIDs is intentionally NOT cleared here. Those checkpoint

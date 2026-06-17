@@ -542,3 +542,30 @@ func TestWaitForTranscriptFlush_NonexistentFile_ReturnsImmediately(t *testing.T)
 		t.Errorf("expected immediate return for nonexistent file, but took %v", elapsed)
 	}
 }
+
+func TestClaudeCodeAgent_ContextInjector(t *testing.T) {
+	t.Parallel()
+	c := &ClaudeCodeAgent{}
+	if got := c.InjectionEvent(); got != agent.TurnStart {
+		t.Errorf("InjectionEvent = %v, want TurnStart", got)
+	}
+	out, err := c.RenderContextInjection(agent.ContextInjection{Text: "use entire trail"})
+	if err != nil {
+		t.Fatalf("RenderContextInjection: %v", err)
+	}
+	var parsed struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v (%q)", err, string(out))
+	}
+	if parsed.HookSpecificOutput.HookEventName != "UserPromptSubmit" {
+		t.Errorf("hookEventName = %q, want UserPromptSubmit", parsed.HookSpecificOutput.HookEventName)
+	}
+	if parsed.HookSpecificOutput.AdditionalContext != "use entire trail" {
+		t.Errorf("additionalContext = %q", parsed.HookSpecificOutput.AdditionalContext)
+	}
+}

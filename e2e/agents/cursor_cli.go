@@ -132,11 +132,19 @@ func (a *CursorCLI) RunPrompt(ctx context.Context, dir string, prompt string, op
 			fmt.Errorf("sending prompt: %w", err)
 	}
 
-	// Wait for the "Add a follow-up" completion marker that appears after the
-	// agent finishes processing. We cannot reuse PromptPattern() here because
-	// it matches ready-state UI markers that can already be visible while the
-	// model is still thinking, causing WaitFor to settle prematurely.
-	content, waitErr := s.WaitFor(`Add a follow-up`, timeout)
+	// One absolute deadline covers both the "Add a follow-up" wait and the
+	// subsequent busy-hint wait, so the whole RunPrompt call honors the
+	// caller-provided timeout (rather than ~2× it across two stages).
+	deadline := time.Now().Add(timeout)
+
+	// Wait for the "Add a follow-up" input placeholder. This alone isn't
+	// sufficient — Cursor renders the placeholder while the agent is still
+	// editing, alongside a busy-state hint "ctrl+c to stop" on the same line
+	// (and the "Editing N tokens" spinner above). If we return now, the
+	// caller's defer s.Close() kills tmux mid-turn, the cursor process exits
+	// before its `stop` hook fires, SaveStep never runs, and the resulting
+	// checkpoint has empty FilesTouched.
+	content, waitErr := s.WaitFor(`Add a follow-up`, time.Until(deadline))
 	if waitErr != nil {
 		// Check for deadline exceeded to allow transient error detection.
 		if ctx.Err() == context.DeadlineExceeded {
@@ -145,7 +153,32 @@ func (a *CursorCLI) RunPrompt(ctx context.Context, dir string, prompt string, op
 		return Output{Command: displayCmd, Stdout: content, ExitCode: -1}, waitErr
 	}
 
-	return Output{Command: displayCmd, Stdout: content, ExitCode: 0}, nil
+	// Then wait for the busy hint to disappear, confirming the agent has
+	// finished its turn so the `stop` hook can fire before tmux is torn down.
+	for {
+		if !strings.Contains(content, "ctrl+c to stop") {
+			return Output{Command: displayCmd, Stdout: content, ExitCode: 0}, nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			err := fmt.Errorf("cursor agent did not finish turn (ctrl+c to stop still visible) within %s", timeout)
+			if ctx.Err() == context.DeadlineExceeded {
+				err = fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
+			}
+			return Output{Command: displayCmd, Stdout: content, ExitCode: -1}, err
+		}
+		sleep := 200 * time.Millisecond
+		if remaining < sleep {
+			sleep = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return Output{Command: displayCmd, Stdout: content, ExitCode: -1},
+				fmt.Errorf("waiting for cursor agent to finish turn: %w", ctx.Err())
+		case <-time.After(sleep):
+		}
+		content = s.Capture()
+	}
 }
 
 func (a *CursorCLI) StartSession(ctx context.Context, dir string) (Session, error) {

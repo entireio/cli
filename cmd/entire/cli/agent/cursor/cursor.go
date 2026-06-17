@@ -29,7 +29,9 @@ func init() {
 // CursorAgent implements the Agent interface for Cursor.
 //
 //nolint:revive // CursorAgent is clearer than Agent in this context
-type CursorAgent struct{}
+type CursorAgent struct {
+	CommandRunner agent.TextCommandRunner
+}
 
 // NewCursorAgent creates a new Cursor agent instance.
 func NewCursorAgent() agent.Agent {
@@ -228,7 +230,7 @@ func (c *CursorAgent) WriteSession(_ context.Context, session *agent.AgentSessio
 // FormatResumeCommand returns an instruction to resume a Cursor session.
 // Cursor is a GUI IDE, so there's no CLI command to resume a session directly.
 func (c *CursorAgent) FormatResumeCommand(_ string) string {
-	return "Open this project in Cursor to continue the session."
+	return "Open this project in Cursor."
 }
 
 // sanitizePathForCursor converts a path to Cursor's project directory format.

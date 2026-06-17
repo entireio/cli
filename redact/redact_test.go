@@ -2,6 +2,7 @@ package redact
 
 import (
 	"bytes"
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -9,6 +10,42 @@ import (
 
 // highEntropySecret is a string with Shannon entropy > 4.5 that will trigger redaction.
 const highEntropySecret = "sk-ant-api03-xK9mZ2vL8nQ5rT1wY4bC7dF0gH3jE6pA"
+
+var fakeOpenSSHPrivateKey = makeFakeOpenSSHPrivateKey(`b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACB7ZlJ8tkWCKdRJRGF1BngP3bkNbz8bMF6Yl5xLJp9m1QAAAJj2M3UO9jN1
+DgAAAAtzc2gtZWQyNTUxOQAAACB7ZlJ8tkWCKdRJRGF1BngP3bkNbz8bMF6Yl5xLJp9m1QA
+AAEAGZmFrZS1rZXktZm9yLXJlZGFjdGlvbi10ZXN0LW9ubHkBAgMEBQY=`)
+
+func makeFakeOpenSSHPrivateKey(payload string) string {
+	return strings.Join([]string{
+		openSSHPrivateKeyMarker("BEGIN"),
+		payload,
+		openSSHPrivateKeyMarker("END"),
+	}, "\n")
+}
+
+func openSSHPrivateKeyMarker(kind string) string {
+	return "-----" + kind + " " + "OPEN" + "SSH" + " " + "PRIVATE" + " KEY-----"
+}
+
+type stringRedactionCase struct {
+	name  string
+	input string
+	want  string
+}
+
+func assertStringRedactionCases(t *testing.T, tests []stringRedactionCase) {
+	t.Helper()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := String(tt.input)
+			if got != tt.want {
+				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestBytes_NoSecrets(t *testing.T) {
 	input := []byte("hello world, this is normal text")
@@ -165,7 +202,7 @@ func TestCollectJSONLReplacements_Succeeds(t *testing.T) {
 	}
 	repls := collectJSONLReplacements(obj)
 	// expect one replacement for high-entropy secret
-	want := [][2]string{{"token=" + highEntropySecret, "REDACTED"}}
+	want := []jsonReplacement{{key: "content", original: "token=" + highEntropySecret, redacted: "REDACTED"}}
 	if !slices.Equal(repls, want) {
 		t.Errorf("got %q, want %q", repls, want)
 	}
@@ -233,14 +270,31 @@ func TestShouldSkipJSONLField_RedactionBehavior(t *testing.T) {
 	if len(repls) != 1 {
 		t.Fatalf("expected 1 replacement, got %d", len(repls))
 	}
-	if repls[0][0] != highEntropySecret {
-		t.Errorf("expected replacement for secret in content field, got %q", repls[0][0])
+	if repls[0].original != highEntropySecret {
+		t.Errorf("expected replacement for secret in content field, got %q", repls[0].original)
+	}
+}
+
+func TestJSONLContent_SkippedFieldValueCollision(t *testing.T) {
+	t.Parallel()
+	input := `{"session_id":"` + highEntropySecret + `","content":"` + highEntropySecret + `"}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(result, `"session_id":"`+highEntropySecret+`"`) {
+		t.Fatalf("expected skipped session_id to be preserved, got: %s", result)
+	}
+	if !strings.Contains(result, `"content":"REDACTED"`) {
+		t.Fatalf("expected content field to be redacted, got: %s", result)
 	}
 }
 
 func TestString_PatternDetection(t *testing.T) {
 	// These secrets have entropy below 4.5 so entropy-only detection misses them.
-	// Gitleaks pattern matching should catch them.
+	// Betterleaks pattern matching should catch them.
 	tests := []struct {
 		name  string
 		input string
@@ -277,6 +331,532 @@ func TestString_PatternDetection(t *testing.T) {
 				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestString_CredentialedURIs(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "postgres URI",
+			input: "DATABASE_URL=postgres://app:pwd123@db.example.com:5432/app",
+			want:  "DATABASE_URL=REDACTED",
+		},
+		{
+			name:  "postgresql URI with query",
+			input: `dsn="postgresql://svc:moderatepw@localhost/app?sslmode=require"`,
+			want:  `dsn="REDACTED"`,
+		},
+		{
+			name:  "mongodb srv URI",
+			input: "mongo=mongodb+srv://user:pass123@cluster0.example.mongodb.net/app?retryWrites=true",
+			want:  "mongo=REDACTED",
+		},
+		{
+			name:  "mysql URI",
+			input: "mysql://root:p@localhost:3306/app",
+			want:  "REDACTED",
+		},
+		{
+			name:  "redis URI with empty username",
+			input: "cache redis://:hunter2@localhost:6379/0",
+			want:  "cache REDACTED",
+		},
+		{
+			name:  "generic credentialed URL",
+			input: "proxy=https://user:pass@example.com/path",
+			want:  "proxy=REDACTED",
+		},
+		{
+			name:  "URL without password is preserved",
+			input: "repo=ssh://git@github.com/entireio/cli",
+			want:  "repo=ssh://git@github.com/entireio/cli",
+		},
+		{
+			name:  "colon and at-sign in path are preserved",
+			input: "url=https://example.com/a:b@c",
+			want:  "url=https://example.com/a:b@c",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := String(tt.input)
+			if got != tt.want {
+				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestString_DatabaseConnectionStringRedaction(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "postgres keyword DSN",
+			input: `dsn="host=db.example.com port=5432 user=svc password=secret dbname=app sslmode=require"`,
+			want:  `dsn="REDACTED"`,
+		},
+		{
+			name:  "postgres keyword DSN different order",
+			input: "password=secret sslmode=require user=svc host=db.example.com dbname=app",
+			want:  "REDACTED",
+		},
+		{
+			name:  "sql server connection string",
+			input: "conn=Server=tcp:db.example.com,1433;Database=app;User Id=svc;Password=secret;Encrypt=true",
+			want:  "conn=REDACTED",
+		},
+		{
+			name:  "odbc connection string",
+			input: "conn=Driver={ODBC Driver 18 for SQL Server};Server=db;UID=svc;PWD=secret;Database=app",
+			want:  "conn=REDACTED",
+		},
+		{
+			name:  "jdbc query password",
+			input: "jdbc:postgresql://db.example.com:5432/app?user=svc&password=secret&ssl=true",
+			want:  "REDACTED",
+		},
+		{
+			name:  "postgres URL query password without userinfo",
+			input: "DATABASE_URL=postgresql://db.example.com:5432/app?user=svc&password=secret&sslmode=require",
+			want:  "DATABASE_URL=REDACTED",
+		},
+		{
+			name:  "postgres URL query password is case-insensitive",
+			input: "DATABASE_URL=postgresql://db.example.com:5432/app?user=svc&Password=secret&sslmode=require",
+			want:  "DATABASE_URL=REDACTED",
+		},
+		{
+			name:  "mongodb URL query password without userinfo",
+			input: "MONGO_URL=mongodb://cluster0.example.mongodb.net/app?authSource=admin&username=svc&password=secret",
+			want:  "MONGO_URL=REDACTED",
+		},
+		{
+			name:  "mongodb srv URL query password without userinfo",
+			input: "MONGO_URL=mongodb+srv://cluster0.example.mongodb.net/app?authSource=admin&username=svc&password=secret",
+			want:  "MONGO_URL=REDACTED",
+		},
+		{
+			name:  "placeholder password in database URL query is preserved",
+			input: "DATABASE_URL=postgresql://db.example.com/app?user=svc&password=${DB_PASSWORD}",
+			want:  "DATABASE_URL=postgresql://db.example.com/app?user=svc&password=${DB_PASSWORD}",
+		},
+		{
+			name:  "jdbc semicolon password",
+			input: "jdbc:sqlserver://db.example.com:1433;databaseName=app;user=svc;password=secret;encrypt=true",
+			want:  "REDACTED",
+		},
+		{
+			name:  "ado.net quoted password with embedded semicolons",
+			input: `conn=Server=db.example.com;User ID=svc;Password="se;cret;here";Encrypt=true`,
+			want:  "conn=REDACTED",
+		},
+		{
+			name:  "ado.net single-quoted password with embedded semicolons",
+			input: `conn=Server=db.example.com;User ID=svc;Password='se;cret;here';Encrypt=true`,
+			want:  "conn=REDACTED",
+		},
+	})
+}
+
+func TestDatabaseConnectionStringRuleScope(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		candidate string
+		hasSecret func(string) bool
+		want      bool
+	}{
+		{
+			name:      "database URL query password is in scope",
+			candidate: "postgresql://db.example.com:5432/app?user=svc&password=secret&sslmode=require",
+			hasSecret: hasDatabaseURLSecret,
+			want:      true,
+		},
+		{
+			name:      "database URL userinfo password is handled by credentialed URI detection",
+			candidate: "postgresql://svc:secret@db.example.com:5432/app",
+			hasSecret: hasDatabaseURLSecret,
+			want:      false,
+		},
+		{
+			name:      "JDBC query password is in scope",
+			candidate: "jdbc:postgresql://db.example.com:5432/app?user=svc&password=secret",
+			hasSecret: hasJDBCPassword,
+			want:      true,
+		},
+		{
+			name:      "JDBC userinfo password is handled by credentialed URI detection",
+			candidate: "jdbc:postgresql://svc:secret@db.example.com:5432/app",
+			hasSecret: hasJDBCPassword,
+			want:      false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.hasSecret(tt.candidate)
+			if got != tt.want {
+				t.Errorf("hasSecret(%q) = %v, want %v", tt.candidate, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestString_BoundedCredentialValueRedaction(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "db password env var",
+			input: "DB_PASSWORD=secret123",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "postgres password env var",
+			input: "PGPASSWORD='secret123'",
+			want:  "PGPASSWORD='REDACTED'",
+		},
+		{
+			name:  "redis password env var",
+			input: `REDIS_PASSWORD="secret123"`,
+			want:  `REDIS_PASSWORD="REDACTED"`,
+		},
+		{
+			name:  "lowercase database password",
+			input: "database_password=secret123",
+			want:  "database_password=REDACTED",
+		},
+		{
+			name:  "prefixed db password env var",
+			input: "APP_DB_PASSWORD=secret123",
+			want:  "APP_DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "prefixed mysql password env var",
+			input: "PROD_MYSQL_PWD=secret123",
+			want:  "PROD_MYSQL_PWD=REDACTED",
+		},
+		{
+			name:  "mysql root password env var",
+			input: "MYSQL_ROOT_PASSWORD=secret123",
+			want:  "MYSQL_ROOT_PASSWORD=REDACTED",
+		},
+		{
+			name:  "mariadb root password env var",
+			input: "MARIADB_ROOT_PASSWORD=secret123",
+			want:  "MARIADB_ROOT_PASSWORD=REDACTED",
+		},
+		{
+			name:  "mongo initdb root password env var",
+			input: "MONGO_INITDB_ROOT_PASSWORD=secret123",
+			want:  "MONGO_INITDB_ROOT_PASSWORD=REDACTED",
+		},
+		{
+			name:  "mssql sa password env var",
+			input: "MSSQL_SA_PASSWORD=secret123",
+			want:  "MSSQL_SA_PASSWORD=REDACTED",
+		},
+		{
+			name:  "double underscore separator",
+			input: "DB__PASSWORD=secret123",
+			want:  "DB__PASSWORD=REDACTED",
+		},
+	})
+}
+
+func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "placeholder env var is preserved",
+			input: "DB_PASSWORD=${DB_PASSWORD}",
+			want:  "DB_PASSWORD=${DB_PASSWORD}",
+		},
+		{
+			name:  "already redacted value is preserved",
+			input: "DB_PASSWORD=REDACTED",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "prose about password is preserved",
+			input: "the password field should be rotated regularly",
+			want:  "the password field should be rotated regularly",
+		},
+		{
+			name:  "generic key is preserved",
+			input: "key=not-a-secret-setting",
+			want:  "key=not-a-secret-setting",
+		},
+		{
+			name:  "shell pwd is preserved",
+			input: "PWD=/workspace/project",
+			want:  "PWD=/workspace/project",
+		},
+		{
+			name:  "standalone password assignment is preserved",
+			input: "password=not-a-secret-setting",
+			want:  "password=not-a-secret-setting",
+		},
+		{
+			name:  "password reset query parameter is preserved",
+			input: "https://example.com/?password_reset=true",
+			want:  "https://example.com/?password_reset=true",
+		},
+		{
+			name:  "generic https password query is preserved",
+			input: "https://example.com/callback?user=svc&password=not-a-db-credential&debug=true",
+			want:  "https://example.com/callback?user=svc&password=not-a-db-credential&debug=true",
+		},
+		{
+			name:  "db password hash field is preserved",
+			input: "DB_PASSWORD_HASH=abcdef",
+			want:  "DB_PASSWORD_HASH=abcdef",
+		},
+		{
+			name:  "non-credential mysql field is preserved",
+			input: "MYSQL_USER_ID=alice",
+			want:  "MYSQL_USER_ID=alice",
+		},
+		{
+			name:  "angle bracket placeholder is preserved",
+			input: "DB_PASSWORD=<password>",
+			want:  "DB_PASSWORD=<password>",
+		},
+		{
+			name:  "your_password placeholder is preserved",
+			input: "DB_PASSWORD=your_password",
+			want:  "DB_PASSWORD=your_password",
+		},
+		{
+			name:  "your-db-password placeholder is preserved",
+			input: "DB_PASSWORD=<your-db-password>",
+			want:  "DB_PASSWORD=<your-db-password>",
+		},
+		{
+			name:  "asterisk mask placeholder is preserved",
+			input: "DB_PASSWORD=*****",
+			want:  "DB_PASSWORD=*****",
+		},
+		{
+			name:  "dot mask placeholder is preserved",
+			input: "DB_PASSWORD=......",
+			want:  "DB_PASSWORD=......",
+		},
+		{
+			name:  "secret_here placeholder is preserved",
+			input: "DB_PASSWORD=secret_here",
+			want:  "DB_PASSWORD=secret_here",
+		},
+		{
+			name:  "placeholder literal is preserved",
+			input: "DB_PASSWORD=placeholder",
+			want:  "DB_PASSWORD=placeholder",
+		},
+	})
+}
+
+// Pins that single-char "masks" and arbitrary <…> wrappers do NOT count as
+// placeholders, so credentials that happen to be short or bracket-wrapped
+// still get redacted. The opposite cases (`***`, `<password>`, etc.) are
+// covered above in TestString_BoundedCredentialValueOverRedactionGuards.
+func TestString_ShortAndOpaquePlaceholdersFallThrough(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "single x is not a mask",
+			input: "DB_PASSWORD=x",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "single dash is not a mask",
+			input: "DB_PASSWORD=-",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "single asterisk is not a mask",
+			input: "DB_PASSWORD=*",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "two-char repeat is not a mask",
+			input: "DB_PASSWORD=xx",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "bracketed value with digits is not a placeholder",
+			input: "DB_PASSWORD=<hunter2>",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "bracketed mixed-case value is not a placeholder",
+			input: "DB_PASSWORD=<RealPassword>",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+	})
+}
+
+func TestString_OpenSSHPrivateKeyBlock(t *testing.T) {
+	input := "key:\n" + fakeOpenSSHPrivateKey + "\nend"
+	want := "key:\nREDACTED\nend"
+
+	got := String(input)
+	if got != want {
+		t.Errorf("String(private key block) = %q, want %q", got, want)
+	}
+	if strings.Contains(got, openSSHPrivateKeyMarker("BEGIN")) || strings.Contains(got, openSSHPrivateKeyMarker("END")) {
+		t.Errorf("private key block markers should be fully redacted, got %q", got)
+	}
+}
+
+func TestJSONLContent_CredentialedURI(t *testing.T) {
+	input := `{"type":"text","content":"DATABASE_URL=postgres://app:pwd123@db.example.com:5432/app"}`
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if strings.Contains(result, "postgres://app:pwd123@db.example.com:5432/app") {
+		t.Error("credentialed database URI was not redacted")
+	}
+	if !strings.Contains(result, "DATABASE_URL=REDACTED") {
+		t.Errorf("expected credentialed URI replacement, got %q", result)
+	}
+}
+
+func TestJSONLContent_OpenSSHPrivateKeyBlock(t *testing.T) {
+	content, err := json.Marshal("key:\n" + fakeOpenSSHPrivateKey + "\nend")
+	if err != nil {
+		t.Fatalf("marshal content: %v", err)
+	}
+	input := `{"type":"text","content":` + string(content) + `}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(result, openSSHPrivateKeyMarker("BEGIN")) || strings.Contains(result, openSSHPrivateKeyMarker("END")) {
+		t.Errorf("private key block markers should be fully redacted, got %q", result)
+	}
+	if !strings.Contains(result, `key:\nREDACTED\nend`) {
+		t.Errorf("expected whole private key block replacement, got %q", result)
+	}
+}
+
+func TestJSONLContent_DatabaseCredentialRedaction(t *testing.T) {
+	t.Parallel()
+	input := `{"type":"assistant","message":"dsn host=db.example.com user=svc password=secret dbname=app and env DB_PASSWORD=secret123","session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0","file_path":"/tmp/TestE2E_ExistingFiles/controller.go"}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, leaked := range []string{"password=secret", "DB_PASSWORD=secret123"} {
+		if strings.Contains(result, leaked) {
+			t.Fatalf("expected %q to be redacted, got: %s", leaked, result)
+		}
+	}
+	for _, preserved := range []string{"ses_37273a1fdffegpYbwUTqEkPsQ0", "/tmp/TestE2E_ExistingFiles/controller.go"} {
+		if !strings.Contains(result, preserved) {
+			t.Fatalf("expected structural value %q to be preserved, got: %s", preserved, result)
+		}
+	}
+}
+
+func TestJSONLContent_StructuredCredentialFieldsRedacted(t *testing.T) {
+	t.Parallel()
+	input := `{"type":"assistant","env":{"DB_PASSWORD":"correct-horse-db","REDIS_PASSWORD":"${REDIS_PASSWORD}","note":"correct-horse-db"},"db":{"password":"correct-horse-db","host":"db.example.com","user":"svc"},"session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0"}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, leaked := range []string{`"DB_PASSWORD":"correct-horse-db"`, `"password":"correct-horse-db"`} {
+		if strings.Contains(result, leaked) {
+			t.Fatalf("expected structured credential field %q to be redacted, got: %s", leaked, result)
+		}
+	}
+	for _, preserved := range []string{
+		`"DB_PASSWORD":"REDACTED"`,
+		`"REDIS_PASSWORD":"${REDIS_PASSWORD}"`,
+		`"password":"REDACTED"`,
+		`"host":"db.example.com"`,
+		`"user":"svc"`,
+		`"note":"correct-horse-db"`,
+		"ses_37273a1fdffegpYbwUTqEkPsQ0",
+	} {
+		if !strings.Contains(result, preserved) {
+			t.Fatalf("expected %q to be preserved, got: %s", preserved, result)
+		}
+	}
+}
+
+func TestJSONLContent_NormalizedCredentialKeysRedacted(t *testing.T) {
+	t.Parallel()
+	input := `{"type":"assistant","env":{"DB Password":"correct-horse-db","note":"correct-horse-db"},"session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0"}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, preserved := range []string{
+		`"DB Password":"REDACTED"`,
+		`"note":"correct-horse-db"`,
+		"ses_37273a1fdffegpYbwUTqEkPsQ0",
+	} {
+		if !strings.Contains(result, preserved) {
+			t.Fatalf("expected %q to be preserved, got: %s", preserved, result)
+		}
+	}
+	if strings.Contains(result, `"DB Password":"correct-horse-db"`) {
+		t.Fatalf("expected normalized credential key to be redacted, got: %s", result)
+	}
+}
+
+func TestJSONLContent_DottedCredentialKeysRedacted(t *testing.T) {
+	t.Parallel()
+	input := `{"config":{"db.password":"correct-horse-db","mysql.root.password":"correct-horse-mysql","note":"correct-horse-db"}}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, redacted := range []string{
+		`"db.password":"REDACTED"`,
+		`"mysql.root.password":"REDACTED"`,
+	} {
+		if !strings.Contains(result, redacted) {
+			t.Fatalf("expected %q in output, got: %s", redacted, result)
+		}
+	}
+	if !strings.Contains(result, `"note":"correct-horse-db"`) {
+		t.Fatalf("expected unrelated note field to be preserved, got: %s", result)
+	}
+}
+
+func TestJSONLContent_RootPasswordJSONKeysRedacted(t *testing.T) {
+	t.Parallel()
+	input := `{"env":{"MYSQL_ROOT_PASSWORD":"correct-horse-mysql","MONGO_INITDB_ROOT_PASSWORD":"correct-horse-mongo","MSSQL_SA_PASSWORD":"correct-horse-mssql"}}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, redacted := range []string{
+		`"MYSQL_ROOT_PASSWORD":"REDACTED"`,
+		`"MONGO_INITDB_ROOT_PASSWORD":"REDACTED"`,
+		`"MSSQL_SA_PASSWORD":"REDACTED"`,
+	} {
+		if !strings.Contains(result, redacted) {
+			t.Fatalf("expected %q in output, got: %s", redacted, result)
+		}
+	}
+	for _, leaked := range []string{"correct-horse-mysql", "correct-horse-mongo", "correct-horse-mssql"} {
+		if strings.Contains(result, leaked) {
+			t.Fatalf("expected %q to be redacted, got: %s", leaked, result)
+		}
 	}
 }
 
@@ -336,7 +916,7 @@ func TestShouldSkipJSONLObject_RedactionBehavior(t *testing.T) {
 	repls := collectJSONLReplacements(obj)
 
 	// expect no replacements, it's an image which is skipped.
-	var wantRepls [][2]string
+	var wantRepls []jsonReplacement
 	if !slices.Equal(repls, wantRepls) {
 		t.Errorf("got %q, want %q", repls, wantRepls)
 	}
@@ -347,7 +927,7 @@ func TestShouldSkipJSONLObject_RedactionBehavior(t *testing.T) {
 		"content": highEntropySecret,
 	}
 	repls2 := collectJSONLReplacements(obj2)
-	wantRepls2 := [][2]string{{highEntropySecret, "REDACTED"}}
+	wantRepls2 := []jsonReplacement{{key: "content", original: highEntropySecret, redacted: "REDACTED"}}
 	if !slices.Equal(repls2, wantRepls2) {
 		t.Errorf("got %q, want %q", repls2, wantRepls2)
 	}
@@ -646,5 +1226,65 @@ func TestJSONLContent_SecretsInContentStillCaught(t *testing.T) {
 	}
 	if !strings.Contains(result, "REDACTED") {
 		t.Error("expected REDACTED in output")
+	}
+}
+
+// Pins a known gap: shell shorthand `--password=...` is not redacted because
+// no detector matches `--password=` (no DB-prefix, no DSN structure, no URI).
+func TestString_MysqlShellShorthandIsNotRedacted(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "mysql cli flag",
+			input: "mysql -u svc --password=hunter2 -h db.example.com app",
+			want:  "mysql -u svc --password=hunter2 -h db.example.com app",
+		},
+		{
+			name:  "psql cli flag",
+			input: "psql --password=hunter2 -U svc -h db.example.com app",
+			want:  "psql --password=hunter2 -U svc -h db.example.com app",
+		},
+	})
+}
+
+// Pins f(f(x)) == f(x): once-redacted output must not match any detector on
+// a second pass.
+func TestString_RedactionIsIdempotent(t *testing.T) {
+	t.Parallel()
+	inputs := []string{
+		"DATABASE_URL=postgres://svc:hunter2@db.example.com/app",
+		"DB_PASSWORD=hunter2",
+		`conn=Server=db.example.com;User ID=svc;Password="se;cret;here";Encrypt=true`,
+		"jdbc:postgresql://db.example.com:5432/app?user=svc&password=hunter2",
+		"my key is " + highEntropySecret + " ok",
+	}
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+			once := String(input)
+			twice := String(once)
+			if once != twice {
+				t.Errorf("not idempotent for %q:\n  once:  %q\n  twice: %q", input, once, twice)
+			}
+		})
+	}
+}
+
+// Pins keyed-JSON replacement as (key, value) rather than (path, value): a
+// shared value under the same key name redacts in every context, not just
+// the credential one. Conservative on purpose — flag if changed.
+func TestJSONLContent_CrossContextValueCollision(t *testing.T) {
+	t.Parallel()
+	input := `{"db":{"host":"db.example.com","user":"svc","password":"shared-secret"},"misc":{"password":"shared-secret"}}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(result, "shared-secret") {
+		t.Errorf("expected shared-secret to be redacted in both contexts, got: %s", result)
+	}
+	if strings.Count(result, `"password":"REDACTED"`) != 2 {
+		t.Errorf("expected both password fields redacted, got: %s", result)
 	}
 }

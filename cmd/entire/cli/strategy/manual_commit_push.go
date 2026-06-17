@@ -2,15 +2,15 @@ package strategy
 
 import (
 	"context"
+	"log/slog"
 
-	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/perf"
 )
 
 // PrePush is called by the git pre-push hook before pushing to a remote.
-// It pushes the entire/checkpoints/v1 branch alongside the user's push,
-// and v2 refs when both checkpoints_v2 and push_v2_refs are enabled.
+// It pushes each ref in refs.Push alongside the user's push.
 //
 // If a checkpoint_remote is configured in settings, checkpoint branches/refs
 // are pushed to the derived URL instead of the user's push remote.
@@ -18,28 +18,48 @@ import (
 // Configuration options (stored in .entire/settings.json under strategy_options):
 //   - push_sessions: false to disable automatic pushing of checkpoints
 //   - checkpoint_remote: {"provider": "github", "repo": "org/repo"} to push to a separate repo
-//   - push_v2_refs: true to enable pushing v2 refs (requires checkpoints_v2)
 func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error {
-	// Load settings once for remote resolution and push_sessions check
-	ps := resolvePushSettings(ctx, remote)
+	// Load settings once for remote resolution and push_sessions check.
+	// Spanned because checkpoint-remote resolution can perform a one-time
+	// network fetch of the metadata branch (fetchMetadataBranchIfMissing),
+	// which is otherwise invisible in the pre-push trace.
+	resolveCtx, resolveSpan := perf.Start(ctx, "resolve_push_settings")
+	ps := resolvePushSettings(resolveCtx, remote)
+	resolveSpan.End()
 
 	if ps.pushDisabled {
 		return nil
 	}
 
-	_, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoints_branch")
-	err := pushBranchIfNeeded(ctx, ps.pushTarget(), paths.MetadataBranchName)
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+
+	refreshMirrorBeforePush(ctx, refs)
+
+	// Thread the span's context into the push so the network push and any
+	// fetch+rebase recovery nest beneath it as child steps in the perf trace.
+	pushCtx, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoint_refs")
+	defer pushCheckpointsSpan.End()
+	for _, ref := range refs.Push {
+		if err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref); err != nil {
+			pushCheckpointsSpan.RecordError(err)
+			return err
+		}
+	}
+	return nil
+}
+
+// refreshMirrorBeforePush advances the mirror to the primary tip before
+// pushing. Best-effort: failures are logged, never blocking the push.
+func refreshMirrorBeforePush(ctx context.Context, refs checkpoint.CommittedRefs) {
+	if !refs.HasMirror() {
+		return
+	}
+	repo, err := OpenRepository(ctx)
 	if err != nil {
-		pushCheckpointsSpan.RecordError(err)
+		logging.Debug(ctx, "pre-push mirror refresh skipped: open repository failed",
+			slog.String("error", err.Error()))
+		return
 	}
-	pushCheckpointsSpan.End()
-
-	// Push v2 refs when both checkpoints_v2 and push_v2_refs are enabled
-	if settings.IsPushV2RefsEnabled(ctx) {
-		_, pushV2Span := perf.Start(ctx, "push_v2_refs")
-		pushV2Refs(ctx, ps.pushTarget())
-		pushV2Span.End()
-	}
-
-	return err
+	defer repo.Close()
+	mirrorCommittedMetadataRefBestEffort(ctx, repo, refs)
 }

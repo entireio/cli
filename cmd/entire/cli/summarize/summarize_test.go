@@ -3,10 +3,14 @@ package summarize
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/redact"
 	"github.com/stretchr/testify/require"
@@ -669,6 +673,40 @@ func TestGenerateFromTranscript(t *testing.T) {
 	}
 }
 
+// TestGenerateFromTranscript_PreservesClaudeError pins both //nolint:wrapcheck
+// contracts in one shot: the stub TextGenerator returns a *ClaudeError, which
+// must survive ClaudeGenerator.Generate (claude.go) AND GenerateFromTranscript
+// (summarize.go) so the explain layer can map it to actionable user messaging
+// via errors.As. A regression at either layer that flattens the typed error
+// (e.g. fmt.Errorf("...: %v", err)) would fail this test.
+func TestGenerateFromTranscript_PreservesClaudeError(t *testing.T) {
+	t.Parallel()
+
+	claudeErr := &claudecode.ClaudeError{
+		Kind:      claudecode.ClaudeErrorRateLimit,
+		Message:   "Rate limit exceeded",
+		APIStatus: 429,
+	}
+	gen := &ClaudeGenerator{TextGenerator: &stubTextGenerator{err: claudeErr}}
+
+	transcript := []byte(`{"type":"user","message":{"content":"Hello"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hi there"}]}}`)
+
+	_, err := GenerateFromTranscript(context.Background(), redact.AlreadyRedacted(transcript), []string{}, "", gen)
+	wrapped := fmt.Errorf("explain generate call: %w", err)
+
+	var ce *claudecode.ClaudeError
+	if !errors.As(wrapped, &ce) {
+		t.Fatalf("errors.As could not recover *ClaudeError from chain: %v", wrapped)
+	}
+	if ce.Kind != claudecode.ClaudeErrorRateLimit {
+		t.Errorf("Kind = %v; want %v", ce.Kind, claudecode.ClaudeErrorRateLimit)
+	}
+	if ce.APIStatus != 429 {
+		t.Errorf("APIStatus = %d; want 429", ce.APIStatus)
+	}
+}
+
 func TestGenerateFromTranscript_EmptyTranscript(t *testing.T) {
 	mockGenerator := &ClaudeGenerator{}
 
@@ -789,9 +827,7 @@ func TestBuildCondensedTranscriptFromBytes_Codex_ExecCommandDetail(t *testing.T)
 			break
 		}
 	}
-	if toolEntry == nil {
-		t.Fatalf("no tool entry found in entries: %#v", entries)
-	}
+	require.NotNil(t, toolEntry, "no tool entry found in entries: %#v", entries)
 	if toolEntry.ToolName != "exec_command" {
 		t.Fatalf("expected exec_command, got %q", toolEntry.ToolName)
 	}
@@ -905,6 +941,29 @@ func TestBuildCondensedTranscriptFromBytes_OpenCodeInvalidJSON(t *testing.T) {
 	_, err := BuildCondensedTranscriptFromBytes(redact.AlreadyRedacted([]byte("not json")), agent.AgentTypeOpenCode)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestBuildCondensedTranscriptFromBytes_CompactTranscriptFallback(t *testing.T) {
+	compactJSONL := `{"v":1,"agent":"pi","cli_version":"test","type":"user","ts":"2026-01-01T00:00:00Z","content":[{"text":"Create bye.txt"}]}
+{"v":1,"agent":"pi","cli_version":"test","type":"assistant","ts":"2026-01-01T00:00:01Z","content":[{"type":"tool_use","id":"tc1","name":"Write","input":{"path":"bye.txt"}},{"type":"text","text":"Created bye.txt"}]}
+`
+
+	entries, err := BuildCondensedTranscriptFromBytes(redact.AlreadyRedacted([]byte(compactJSONL)), types.AgentType("Pi"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+	if entries[0].Type != EntryTypeUser || entries[0].Content != "Create bye.txt" {
+		t.Fatalf("unexpected first entry: %+v", entries[0])
+	}
+	if entries[1].Type != EntryTypeTool || entries[1].ToolName != "Write" || entries[1].ToolDetail != "bye.txt" {
+		t.Fatalf("unexpected tool entry: %+v", entries[1])
+	}
+	if entries[2].Type != EntryTypeAssistant || entries[2].Content != "Created bye.txt" {
+		t.Fatalf("unexpected assistant entry: %+v", entries[2])
 	}
 }
 
@@ -1050,4 +1109,37 @@ func mustMarshal(t *testing.T, v interface{}) json.RawMessage {
 		t.Fatalf("failed to marshal: %v", err)
 	}
 	return data
+}
+
+func TestResolveModel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		provider string
+		model    string
+		want     string
+	}{
+		{
+			name:     "claude code with empty model defaults to DefaultModel",
+			provider: string(agent.AgentNameClaudeCode),
+			model:    "",
+			want:     DefaultModel,
+		},
+		{
+			name:     "other provider passes model through unchanged",
+			provider: "codex",
+			model:    "gpt-5",
+			want:     "gpt-5",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := ResolveModel(types.AgentName(tt.provider), tt.model)
+			if got != tt.want {
+				t.Errorf("ResolveModel(%q, %q) = %q, want %q", tt.provider, tt.model, got, tt.want)
+			}
+		})
+	}
 }

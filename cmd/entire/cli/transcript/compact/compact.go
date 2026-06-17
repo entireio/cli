@@ -94,6 +94,11 @@ func Compact(redacted redact.RedactedBytes, opts MetadataFields) ([]byte, error)
 		return compactGemini(content, opts)
 	}
 
+	// pi: detect on the raw header line. compactPi handles StartLine itself.
+	if isPiFormat(content) {
+		return compactPi(content, opts)
+	}
+
 	if isCodexFormat(content) {
 		return compactCodex(content, opts)
 	}

@@ -68,21 +68,9 @@ func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOption
 	// Get shadow branch name
 	shadowBranchName := ShadowBranchNameForCommit(opts.BaseCommit, opts.WorktreeID)
 
-	// Get or create shadow branch
-	parentHash, baseTreeHash, err := s.getOrCreateShadowBranch(shadowBranchName)
-	if err != nil {
-		return WriteTemporaryResult{}, fmt.Errorf("failed to get shadow branch: %w", err)
-	}
-
-	// Get the last checkpoint's tree hash for deduplication
-	var lastTreeHash plumbing.Hash
-	if parentHash != plumbing.ZeroHash {
-		if lastCommit, err := s.repo.CommitObject(parentHash); err == nil {
-			lastTreeHash = lastCommit.TreeHash
-		}
-	}
-
-	// Collect all files to include
+	// Collect file lists once — the worktree state is stable across retries,
+	// so this work doesn't repeat per CAS attempt. Tree-building (which
+	// depends on the parent tree) is what re-runs inside the retry loop.
 	var allFiles []string
 	var allDeletedFiles []string
 	if opts.IsFirstCheckpoint {
@@ -110,39 +98,86 @@ func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOption
 		allDeletedFiles = opts.DeletedFiles
 	}
 
-	// Build tree with changes
-	treeHash, err := s.buildTreeWithChanges(ctx, baseTreeHash, allFiles, allDeletedFiles, opts.MetadataDir, opts.MetadataDirAbs)
-	if err != nil {
-		return WriteTemporaryResult{}, fmt.Errorf("failed to build tree: %w", err)
-	}
-
-	// Deduplication: skip if tree hash matches the last checkpoint
-	if lastTreeHash != plumbing.ZeroHash && treeHash == lastTreeHash {
-		return WriteTemporaryResult{
-			CommitHash: parentHash,
-			Skipped:    true,
-		}, nil
-	}
-
-	// Create checkpoint commit with trailers
 	commitMsg := trailers.FormatShadowCommit(opts.CommitMessage, opts.MetadataDir, opts.SessionID)
 
-	commitHash, err := s.createCommit(treeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
+	repoRoot, commonDir, err := s.repoDirs(ctx)
 	if err != nil {
-		return WriteTemporaryResult{}, fmt.Errorf("failed to create commit: %w", err)
+		return WriteTemporaryResult{}, fmt.Errorf("failed to resolve repo dirs: %w", err)
 	}
 
-	// Update branch reference
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-	newRef := plumbing.NewHashReference(refName, commitHash)
-	if err := s.repo.Storer.SetReference(newRef); err != nil {
-		return WriteTemporaryResult{}, fmt.Errorf("failed to update branch reference: %w", err)
-	}
+	var result WriteTemporaryResult
+	// withShadowBranchFlock serializes all writers targeting this shadow
+	// branch — across goroutines and across processes — so the inner CAS
+	// only sees contention from external `git update-ref` callers (rare).
+	err = withShadowBranchFlock(commonDir, shadowBranchName, func() error {
+		// Tiny CAS retry budget: with the flock held, races against our own
+		// code are impossible. Retries cover the pathological case of an
+		// external writer (a user invoking `git update-ref` manually, etc.).
+		for attempt := range shadowRefMaxRetries {
+			parentHash, baseTreeHash, gErr := s.getOrCreateShadowBranch(shadowBranchName)
+			if gErr != nil {
+				return fmt.Errorf("failed to get shadow branch: %w", gErr)
+			}
 
-	return WriteTemporaryResult{
-		CommitHash: commitHash,
-		Skipped:    false,
-	}, nil
+			// Get the last checkpoint's tree hash for deduplication
+			var lastTreeHash plumbing.Hash
+			if parentHash != plumbing.ZeroHash {
+				if lastCommit, lcErr := s.repo.CommitObject(parentHash); lcErr == nil {
+					lastTreeHash = lastCommit.TreeHash
+				}
+			}
+
+			treeHash, tErr := s.buildTreeWithChanges(ctx, baseTreeHash, allFiles, allDeletedFiles, opts.MetadataDir, opts.MetadataDirAbs)
+			if tErr != nil {
+				return fmt.Errorf("failed to build tree: %w", tErr)
+			}
+
+			// Deduplication: skip if tree hash matches the current shadow tip.
+			if lastTreeHash != plumbing.ZeroHash && treeHash == lastTreeHash {
+				result = WriteTemporaryResult{
+					CommitHash: parentHash,
+					Skipped:    true,
+				}
+				return nil
+			}
+
+			commitHash, cErr := s.createCommit(ctx, treeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
+			if cErr != nil {
+				return fmt.Errorf("failed to create commit: %w", cErr)
+			}
+
+			refErr := casUpdateShadowBranchRef(ctx, repoRoot, shadowBranchName, commitHash, parentHash)
+			if refErr == nil {
+				result = WriteTemporaryResult{
+					CommitHash: commitHash,
+					Skipped:    false,
+				}
+				return nil
+			}
+			if !errors.Is(refErr, ErrShadowRefBusy) {
+				return fmt.Errorf("failed to update shadow branch reference: %w", refErr)
+			}
+			// Our commit is now dangling — best-effort remove it so we don't
+			// leak loose objects across many losing attempts.
+			tryDeleteLooseObject(commonDir, commitHash)
+			if bErr := shadowRefBackoff(ctx, attempt); bErr != nil {
+				return bErr
+			}
+		}
+		// Retry budget exhausted. With the flock held this means an external
+		// writer beat us shadowRefMaxRetries times in a row — surface it in
+		// .entire/logs/ so operators can see a stuck shadow branch.
+		logging.Warn(logging.WithComponent(ctx, "checkpoint"),
+			"shadow branch CAS retry budget exhausted",
+			slog.String("shadow_branch", shadowBranchName),
+			slog.Int("retries", shadowRefMaxRetries),
+		)
+		return fmt.Errorf("failed to update shadow branch reference after %d CAS retries: %w", shadowRefMaxRetries, ErrShadowRefBusy)
+	})
+	if err != nil {
+		return WriteTemporaryResult{}, err
+	}
+	return result, nil
 }
 
 // ReadTemporary reads the latest checkpoint from a shadow branch.
@@ -200,8 +235,9 @@ func (s *GitStore) ListTemporary(ctx context.Context) ([]TemporaryInfo, error) {
 			return nil
 		}
 
-		// Skip the sessions branch
-		if branchName == paths.MetadataBranchName {
+		// Skip the primary metadata ref when it's a branch (shares the
+		// entire/ prefix but isn't a shadow branch).
+		if s.refs.Primary.IsBranch() && branchName == s.refs.Primary.Short() {
 			return nil
 		}
 
@@ -257,12 +293,6 @@ func (s *GitStore) WriteTemporaryTask(ctx context.Context, opts WriteTemporaryTa
 	// Get shadow branch name
 	shadowBranchName := ShadowBranchNameForCommit(opts.BaseCommit, opts.WorktreeID)
 
-	// Get or create shadow branch
-	parentHash, baseTreeHash, err := s.getOrCreateShadowBranch(shadowBranchName)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to get shadow branch: %w", err)
-	}
-
 	// Collect all files to include in the commit.
 	// Filter out gitignored files — subagent transcripts may report files like .env
 	// that exist on disk but are gitignored. Without filtering, secrets would leak
@@ -272,32 +302,58 @@ func (s *GitStore) WriteTemporaryTask(ctx context.Context, opts WriteTemporaryTa
 	candidateFiles = append(candidateFiles, opts.NewFiles...)
 	allFiles := filterGitIgnoredFiles(ctx, s.repo, candidateFiles)
 
-	// Build new tree with code changes (no metadata dir yet)
-	newTreeHash, err := s.buildTreeWithChanges(ctx, baseTreeHash, allFiles, opts.DeletedFiles, "", "")
+	repoRoot, commonDir, err := s.repoDirs(ctx)
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to build tree: %w", err)
+		return plumbing.ZeroHash, fmt.Errorf("failed to resolve repo dirs: %w", err)
 	}
 
-	// Add task metadata to tree
-	newTreeHash, err = s.addTaskMetadataToTree(ctx, newTreeHash, opts)
+	var resultHash plumbing.Hash
+	err = withShadowBranchFlock(commonDir, shadowBranchName, func() error {
+		for attempt := range shadowRefMaxRetries {
+			parentHash, baseTreeHash, gErr := s.getOrCreateShadowBranch(shadowBranchName)
+			if gErr != nil {
+				return fmt.Errorf("failed to get shadow branch: %w", gErr)
+			}
+
+			newTreeHash, tErr := s.buildTreeWithChanges(ctx, baseTreeHash, allFiles, opts.DeletedFiles, "", "")
+			if tErr != nil {
+				return fmt.Errorf("failed to build tree: %w", tErr)
+			}
+
+			newTreeHash, tErr = s.addTaskMetadataToTree(ctx, newTreeHash, opts)
+			if tErr != nil {
+				return fmt.Errorf("failed to add task metadata: %w", tErr)
+			}
+
+			commitHash, cErr := s.createCommit(ctx, newTreeHash, parentHash, opts.CommitMessage, opts.AuthorName, opts.AuthorEmail)
+			if cErr != nil {
+				return fmt.Errorf("failed to create commit: %w", cErr)
+			}
+
+			refErr := casUpdateShadowBranchRef(ctx, repoRoot, shadowBranchName, commitHash, parentHash)
+			if refErr == nil {
+				resultHash = commitHash
+				return nil
+			}
+			if !errors.Is(refErr, ErrShadowRefBusy) {
+				return fmt.Errorf("failed to update shadow branch reference: %w", refErr)
+			}
+			tryDeleteLooseObject(commonDir, commitHash)
+			if bErr := shadowRefBackoff(ctx, attempt); bErr != nil {
+				return bErr
+			}
+		}
+		logging.Warn(logging.WithComponent(ctx, "checkpoint"),
+			"shadow branch CAS retry budget exhausted (task checkpoint)",
+			slog.String("shadow_branch", shadowBranchName),
+			slog.Int("retries", shadowRefMaxRetries),
+		)
+		return fmt.Errorf("failed to update shadow branch reference after %d CAS retries: %w", shadowRefMaxRetries, ErrShadowRefBusy)
+	})
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to add task metadata: %w", err)
+		return plumbing.ZeroHash, err
 	}
-
-	// Create the commit
-	commitHash, err := s.createCommit(newTreeHash, parentHash, opts.CommitMessage, opts.AuthorName, opts.AuthorEmail)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to create commit: %w", err)
-	}
-
-	// Update shadow branch reference
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-	ref := plumbing.NewHashReference(refName, commitHash)
-	if err := s.repo.Storer.SetReference(ref); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to update shadow branch reference: %w", err)
-	}
-
-	return commitHash, nil
+	return resultHash, nil
 }
 
 // addTaskMetadataToTree adds task checkpoint metadata to a git tree.
@@ -790,8 +846,8 @@ func (s *GitStore) buildTreeWithChanges(
 }
 
 // createCommit creates a commit object.
-func (s *GitStore) createCommit(treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) {
-	return CreateCommit(s.repo, treeHash, parentHash, message, authorName, authorEmail)
+func (s *GitStore) createCommit(ctx context.Context, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) {
+	return CreateCommit(ctx, s.repo, treeHash, parentHash, message, authorName, authorEmail)
 }
 
 // Helper functions extracted from strategy/common.go
@@ -827,30 +883,38 @@ func FlattenTree(repo *git.Repository, tree *object.Tree, prefix string, entries
 
 // fileExists checks if a file exists at the given path.
 func fileExists(path string) bool {
-	_, err := os.Stat(path)
+	_, err := os.Lstat(path)
 	return err == nil
 }
 
 // createBlobFromFile creates a blob object from a file in the working directory.
 func createBlobFromFile(repo *git.Repository, filePath string) (plumbing.Hash, filemode.FileMode, error) {
-	info, err := os.Stat(filePath)
+	info, err := os.Lstat(filePath)
 	if err != nil {
 		return plumbing.ZeroHash, 0, fmt.Errorf("failed to stat file: %w", err)
 	}
 
 	// Determine file mode
 	mode := filemode.Regular
-	if info.Mode()&0o111 != 0 {
-		mode = filemode.Executable
-	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		mode = filemode.Symlink
+	} else if info.Mode()&0o111 != 0 {
+		mode = filemode.Executable
 	}
 
 	// Read file contents
-	content, err := os.ReadFile(filePath) //nolint:gosec // filePath comes from walking the repository
-	if err != nil {
-		return plumbing.ZeroHash, 0, fmt.Errorf("failed to read file: %w", err)
+	var content []byte
+	if mode == filemode.Symlink {
+		target, readErr := os.Readlink(filePath)
+		if readErr != nil {
+			return plumbing.ZeroHash, 0, fmt.Errorf("failed to read symlink: %w", readErr)
+		}
+		content = []byte(target)
+	} else {
+		content, err = os.ReadFile(filePath) //nolint:gosec // filePath comes from walking the repository
+		if err != nil {
+			return plumbing.ZeroHash, 0, fmt.Errorf("failed to read file: %w", err)
+		}
 	}
 
 	// Create blob object
@@ -915,8 +979,8 @@ func addDirectoryToEntriesWithAbsPath(repo *git.Repository, dirPathAbs, dirPathR
 			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
 		}
 
-		// Prevent path traversal via symlinks pointing outside the metadata dir
-		if strings.HasPrefix(relWithinDir, "..") {
+		// Prevent path traversal via unexpected relative paths outside the metadata dir.
+		if paths.IsRelativeTraversal(relWithinDir) {
 			return fmt.Errorf("path traversal detected: %s", relWithinDir)
 		}
 
@@ -977,7 +1041,7 @@ func addDirectoryToChanges(repo *git.Repository, dirPathAbs, dirPathRel string) 
 		if relErr != nil {
 			return fmt.Errorf("failed to get relative path for %s: %w", path, relErr)
 		}
-		if strings.HasPrefix(relWithinDir, "..") {
+		if paths.IsRelativeTraversal(relWithinDir) {
 			return fmt.Errorf("path traversal detected: %s", relWithinDir)
 		}
 
@@ -1139,7 +1203,7 @@ func filterGitIgnoredFiles(ctx context.Context, repo *git.Repository, files []st
 			slog.String("error", err.Error()))
 		return nil
 	}
-	repoRoot := wt.Filesystem.Root()
+	repoRoot := wt.Filesystem().Root()
 
 	// Use git check-ignore to identify which files are ignored.
 	// Pass files via stdin (-z for NUL-separated, --stdin) to handle special characters.
@@ -1208,7 +1272,7 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 	if err != nil {
 		return changedFilesResult{}, fmt.Errorf("failed to get worktree: %w", err)
 	}
-	repoRoot := wt.Filesystem.Root()
+	repoRoot := wt.Filesystem().Root()
 
 	// Use -z for NUL-separated output (handles quoted filenames with spaces/special chars)
 	// Use -uall to list individual untracked files instead of collapsed directories.

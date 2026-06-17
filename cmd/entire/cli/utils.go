@@ -8,35 +8,23 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/uiform"
 )
 
-// IsAccessibleMode returns true if accessibility mode should be enabled.
-// This checks the ACCESSIBLE environment variable.
-// Set ACCESSIBLE=1 (or any non-empty value) to enable accessible mode,
-// which uses simpler prompts that work better with screen readers.
+// IsAccessibleMode returns true if accessibility mode is enabled via the
+// ACCESSIBLE environment variable.
 func IsAccessibleMode() bool {
-	return os.Getenv("ACCESSIBLE") != ""
+	return uiform.IsAccessibleMode()
 }
 
-// entireTheme returns the Dracula theme for consistent styling.
-func entireTheme() *huh.Theme {
-	return huh.ThemeDracula()
-}
-
-// NewAccessibleForm creates a new huh form with accessibility mode
-// enabled if the ACCESSIBLE environment variable is set.
-// Note: WithAccessible() is only available on forms, not individual fields.
-// Always wrap confirmations and other prompts in a form to enable accessibility.
+// NewAccessibleForm creates a new huh form with Entire's standard theme,
+// switching to accessibility mode when ACCESSIBLE is set.
 func NewAccessibleForm(groups ...*huh.Group) *huh.Form {
-	form := huh.NewForm(groups...).WithTheme(entireTheme())
-	if IsAccessibleMode() {
-		form = form.WithAccessible(true)
-	}
-	return form
+	return uiform.New(groups...)
 }
 
 // handleFormCancellation handles cancellation from huh form prompts.

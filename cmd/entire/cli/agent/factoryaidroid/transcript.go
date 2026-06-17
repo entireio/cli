@@ -14,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // TranscriptLine is an alias to the shared transcript.Line type.
@@ -270,8 +271,11 @@ func ExtractSpawnedAgentIDs(transcriptLines []TranscriptLine) map[string]string 
 				}
 			}
 
-			// Look for agentId in the text
-			if agentID := extractAgentIDFromText(textContent); agentID != "" {
+			// Look for agentId in the text. Drop any ID that isn't path-safe:
+			// callers build agent-<id>.jsonl from it and read that file, so this
+			// is the choke point that keeps the path inside subagentsDir,
+			// independent of extractAgentIDFromText's character handling.
+			if agentID := extractAgentIDFromText(textContent); agentID != "" && validation.ValidateAgentID(agentID) == nil {
 				agentIDs[agentID] = block.ToolUseID
 			}
 		}

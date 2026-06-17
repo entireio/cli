@@ -19,7 +19,7 @@ func TestWrapProductionJSONWarningHookCommand(t *testing.T) {
 	if want := `systemMessage`; !strings.Contains(command, want) {
 		t.Fatalf("claude wrapper missing systemMessage JSON, got %q", command)
 	}
-	if !strings.Contains(command, "Powered by Entire") {
+	if !strings.Contains(command, "Entire CLI") {
 		t.Fatalf("claude wrapper missing warning text, got %q", command)
 	}
 	if want := "exec entire hooks claude-code session-start"; !strings.Contains(command, want) {
@@ -38,7 +38,7 @@ func TestWrapProductionPlainTextWarningHookCommand(t *testing.T) {
 	if strings.Contains(command, `>&2`) {
 		t.Fatalf("plain text wrapper should not print warning to stderr, got %q", command)
 	}
-	if !strings.Contains(command, "Powered by Entire: Tracking is enabled") {
+	if !strings.Contains(command, "Entire CLI is enabled but not installed") {
 		t.Fatalf("plain text wrapper missing warning text, got %q", command)
 	}
 	if want := "exec entire hooks factoryai-droid session-start"; !strings.Contains(command, want) {

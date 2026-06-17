@@ -9,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/require"
@@ -261,6 +262,18 @@ func TestFilterAndNormalizePaths_SiblingDirectories(t *testing.T) {
 				// .entire path should be filtered
 			},
 		},
+		{
+			name: "agent-owned opencode paths are filtered",
+			files: []string{
+				"/repo/src/file.ts",
+				"/repo/.opencode/plugins/entire.ts",
+				"/repo/opencode.json",
+			},
+			basePath: "/repo",
+			want: []string{
+				"src/file.ts",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -466,18 +479,20 @@ func TestDetectFileChanges_DeletedFilesWithNilPreState(t *testing.T) {
 	// This test verifies that DetectFileChanges detects deleted files
 	// even when previouslyUntracked is nil. Deleted file detection
 	// doesn't depend on pre-prompt state.
+	const trackedFileName = "tracked.txt"
 
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
 	// Initialize git repo with go-git
-	repo, err := git.PlainInit(tmpDir, false)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open repo: %v", err)
 	}
 
 	// Create and commit a tracked file
-	trackedFile := filepath.Join(tmpDir, "tracked.txt")
+	trackedFile := filepath.Join(tmpDir, trackedFileName)
 	if err := os.WriteFile(trackedFile, []byte("tracked content"), 0o644); err != nil {
 		t.Fatalf("failed to write tracked file: %v", err)
 	}
@@ -487,7 +502,7 @@ func TestDetectFileChanges_DeletedFilesWithNilPreState(t *testing.T) {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
 
-	if _, err := worktree.Add("tracked.txt"); err != nil {
+	if _, err := worktree.Add(trackedFileName); err != nil {
 		t.Fatalf("failed to add file: %v", err)
 	}
 
@@ -518,9 +533,9 @@ func TestDetectFileChanges_DeletedFilesWithNilPreState(t *testing.T) {
 
 	// Deleted should contain the deleted tracked file
 	if len(changes.Deleted) != 1 {
-		t.Errorf("DetectFileChanges(context.Background(),nil) Deleted = %v, want [tracked.txt]", changes.Deleted)
-	} else if changes.Deleted[0] != "tracked.txt" {
-		t.Errorf("DetectFileChanges(context.Background(),nil) Deleted[0] = %v, want tracked.txt", changes.Deleted[0])
+		t.Errorf("DetectFileChanges(context.Background(),nil) Deleted = %v, want [%s]", changes.Deleted, trackedFileName)
+	} else if changes.Deleted[0] != trackedFileName {
+		t.Errorf("DetectFileChanges(context.Background(),nil) Deleted[0] = %v, want %s", changes.Deleted[0], trackedFileName)
 	}
 }
 
@@ -533,9 +548,10 @@ func TestDetectFileChanges_NewAndDeletedFiles(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// Initialize git repo with go-git
-	repo, err := git.PlainInit(tmpDir, false)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open repo: %v", err)
 	}
 
 	// Create and commit tracked files
@@ -614,9 +630,10 @@ func TestDetectFileChanges_NoChanges(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// Initialize git repo with go-git
-	repo, err := git.PlainInit(tmpDir, false)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open repo: %v", err)
 	}
 
 	// Create and commit a tracked file
@@ -670,9 +687,10 @@ func TestDetectFileChanges_NilPreviouslyUntracked_ReturnsModified(t *testing.T) 
 	t.Chdir(tmpDir)
 
 	// Initialize git repo with go-git
-	repo, err := git.PlainInit(tmpDir, false)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open repo: %v", err)
 	}
 
 	// Create and commit a tracked file
@@ -729,6 +747,70 @@ func TestDetectFileChanges_NilPreviouslyUntracked_ReturnsModified(t *testing.T) 
 	}
 
 	// Deleted should be empty
+	if len(changes.Deleted) != 0 {
+		t.Errorf("DetectFileChanges(context.Background(),nil) Deleted = %v, want empty", changes.Deleted)
+	}
+}
+
+func TestDetectFileChanges_IgnoresOpenCodeAgentFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+
+	trackedFile := filepath.Join(tmpDir, "tracked.txt")
+	if err := os.WriteFile(trackedFile, []byte("content"), 0o644); err != nil {
+		t.Fatalf("failed to write tracked file: %v", err)
+	}
+
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	if _, err := worktree.Add("tracked.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+
+	if _, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	}); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	if err := os.WriteFile(trackedFile, []byte("modified content"), 0o644); err != nil {
+		t.Fatalf("failed to modify tracked file: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".opencode", "plugins"), 0o755); err != nil {
+		t.Fatalf("failed to create .opencode/plugins: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".opencode", "plugins", "entire.ts"), []byte("// plugin"), 0o644); err != nil {
+		t.Fatalf("failed to write opencode plugin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("failed to write opencode config: %v", err)
+	}
+
+	changes, err := DetectFileChanges(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("DetectFileChanges(context.Background(),nil) error = %v", err)
+	}
+
+	if len(changes.Modified) != 1 || changes.Modified[0] != "tracked.txt" {
+		t.Errorf("DetectFileChanges(context.Background(),nil) Modified = %v, want [tracked.txt]", changes.Modified)
+	}
+	if len(changes.New) != 0 {
+		t.Errorf("DetectFileChanges(context.Background(),nil) New = %v, want empty", changes.New)
+	}
 	if len(changes.Deleted) != 0 {
 		t.Errorf("DetectFileChanges(context.Background(),nil) Deleted = %v, want empty", changes.Deleted)
 	}
@@ -803,9 +885,10 @@ func TestFilterToUncommittedFiles_ReallyModified(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	repo, err := git.PlainInit(tmpDir, false)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open repo: %v", err)
 	}
 
 	filePath := filepath.Join(tmpDir, "file.txt")

@@ -3,16 +3,21 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -24,10 +29,7 @@ func TestResolveWorktreeBranch_RegularRepo(t *testing.T) {
 		dir = resolved
 	}
 
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("git init: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	// Read the default branch name directly from HEAD to avoid hard-coding it
 	headData, err := os.ReadFile(filepath.Join(dir, ".git", "HEAD"))
@@ -48,9 +50,10 @@ func TestResolveWorktreeBranch_DetachedHEAD(t *testing.T) {
 		dir = resolved
 	}
 
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("git init: %v", err)
+		t.Fatalf("git open: %v", err)
 	}
 
 	// Create a commit so we can detach HEAD
@@ -198,7 +201,7 @@ func TestRunStatus_Enabled(t *testing.T) {
 	writeSettings(t, testSettingsEnabled)
 
 	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false); err != nil {
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 
@@ -212,7 +215,7 @@ func TestRunStatus_Disabled(t *testing.T) {
 	writeSettings(t, testSettingsDisabled)
 
 	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false); err != nil {
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 
@@ -225,7 +228,7 @@ func TestRunStatus_NotSetUp(t *testing.T) {
 	setupTestRepo(t)
 
 	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false); err != nil {
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 
@@ -242,7 +245,7 @@ func TestRunStatus_NotGitRepository(t *testing.T) {
 	setupTestDir(t) // No git init
 
 	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false); err != nil {
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 
@@ -256,7 +259,7 @@ func TestRunStatus_LocalSettingsOnly(t *testing.T) {
 	writeLocalSettings(t, `{"enabled": true}`)
 
 	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, true); err != nil {
+	if err := runStatus(context.Background(), &stdout, true, false); err != nil {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 
@@ -283,7 +286,7 @@ func TestRunStatus_BothProjectAndLocal(t *testing.T) {
 	writeLocalSettings(t, `{"enabled": false}`)
 
 	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, true); err != nil {
+	if err := runStatus(context.Background(), &stdout, true, false); err != nil {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 
@@ -310,7 +313,7 @@ func TestRunStatus_BothProjectAndLocal_Short(t *testing.T) {
 	writeLocalSettings(t, `{"enabled": false}`)
 
 	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false); err != nil {
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 
@@ -326,7 +329,7 @@ func TestRunStatus_ShowsManualCommitStrategy(t *testing.T) {
 	writeSettings(t, `{"enabled": false}`)
 
 	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, true); err != nil {
+	if err := runStatus(context.Background(), &stdout, true, false); err != nil {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 
@@ -581,6 +584,196 @@ func TestWriteActiveSessions_EndedSessionsExcluded(t *testing.T) {
 	// Should produce no output when all sessions are ended
 	if buf.Len() != 0 {
 		t.Errorf("Expected empty output with only ended sessions, got: %s", buf.String())
+	}
+}
+
+func TestWriteActiveSessions_ShowsDivergenceWarningWhenBaseCommitStale(t *testing.T) {
+	setupTestRepo(t)
+
+	repoDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+
+	// Create two commits: the session tracks the first, HEAD is the second
+	testutil.WriteFile(t, repoDir, "tracked.txt", "base")
+	testutil.GitAdd(t, repoDir, "tracked.txt")
+	testutil.GitCommit(t, repoDir, "base commit")
+	baseCommit := testutil.GetHeadHash(t, repoDir)
+
+	testutil.WriteFile(t, repoDir, "tracked.txt", "base\nnew")
+	testutil.GitAdd(t, repoDir, "tracked.txt")
+	testutil.GitCommit(t, repoDir, "second commit")
+
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatalf("NewStateStore() error = %v", err)
+	}
+
+	now := time.Now()
+	state := &session.State{
+		SessionID:             "stale-base-session",
+		WorktreePath:          repoDir,
+		StartedAt:             now.Add(-10 * time.Minute),
+		BaseCommit:            baseCommit,
+		AttributionBaseCommit: baseCommit,
+	}
+	if err := store.Save(context.Background(), state); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	sty := newStatusStyles(&buf)
+	writeActiveSessions(context.Background(), &buf, sty)
+
+	output := buf.String()
+	if !strings.Contains(output, "tracking diverged from current HEAD") {
+		t.Fatalf("expected divergence warning when BaseCommit != HEAD, got: %s", output)
+	}
+
+	// Verify session state was NOT mutated (read-only)
+	reloaded, err := store.Load(context.Background(), state.SessionID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if reloaded.BaseCommit != baseCommit {
+		t.Fatalf("BaseCommit was mutated: got %q, want %q", reloaded.BaseCommit, baseCommit)
+	}
+	if reloaded.AttributionBaseCommit != baseCommit {
+		t.Fatalf("AttributionBaseCommit was mutated: got %q, want %q", reloaded.AttributionBaseCommit, baseCommit)
+	}
+}
+
+func TestWriteActiveSessions_NoWarningWhenReconciled(t *testing.T) {
+	setupTestRepo(t)
+
+	repoDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+
+	testutil.WriteFile(t, repoDir, "tracked.txt", "content")
+	testutil.GitAdd(t, repoDir, "tracked.txt")
+	testutil.GitCommit(t, repoDir, "initial commit")
+	headCommit := testutil.GetHeadHash(t, repoDir)
+
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatalf("NewStateStore() error = %v", err)
+	}
+
+	now := time.Now()
+	state := &session.State{
+		SessionID:             "reconciled-session",
+		WorktreePath:          repoDir,
+		StartedAt:             now.Add(-10 * time.Minute),
+		BaseCommit:            headCommit,
+		AttributionBaseCommit: headCommit,
+	}
+	if err := store.Save(context.Background(), state); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	sty := newStatusStyles(&buf)
+	writeActiveSessions(context.Background(), &buf, sty)
+
+	output := buf.String()
+	if strings.Contains(output, "diverged") || strings.Contains(output, "attribution") {
+		t.Fatalf("expected no divergence or attribution warning when BaseCommit == HEAD and AttributionBaseCommit == BaseCommit, got: %s", output)
+	}
+}
+
+func TestWriteActiveSessions_ShowsSoftWarningWhenAttributionDiverged(t *testing.T) {
+	setupTestRepo(t)
+
+	repoDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+
+	testutil.WriteFile(t, repoDir, "tracked.txt", "content")
+	testutil.GitAdd(t, repoDir, "tracked.txt")
+	testutil.GitCommit(t, repoDir, "initial commit")
+	headCommit := testutil.GetHeadHash(t, repoDir)
+
+	// Simulate: hooks already reconciled BaseCommit to HEAD, but
+	// AttributionBaseCommit is still pointing at the old commit (stale).
+	oldBaseCommit := strings.Repeat("a", 40)
+
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatalf("NewStateStore() error = %v", err)
+	}
+
+	now := time.Now()
+	state := &session.State{
+		SessionID:             "attribution-diverged-session",
+		WorktreePath:          repoDir,
+		StartedAt:             now.Add(-10 * time.Minute),
+		BaseCommit:            headCommit,
+		AttributionBaseCommit: oldBaseCommit,
+	}
+	if err := store.Save(context.Background(), state); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	sty := newStatusStyles(&buf)
+	writeActiveSessions(context.Background(), &buf, sty)
+
+	output := buf.String()
+	if !strings.Contains(output, "attribution") {
+		t.Fatalf("expected attribution warning when AttributionBaseCommit != BaseCommit, got: %s", output)
+	}
+
+	// Verify session state was NOT mutated (read-only)
+	reloaded, err := store.Load(context.Background(), state.SessionID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if reloaded.BaseCommit != headCommit {
+		t.Fatalf("BaseCommit was mutated: got %q, want %q", reloaded.BaseCommit, headCommit)
+	}
+	if reloaded.AttributionBaseCommit != oldBaseCommit {
+		t.Fatalf("AttributionBaseCommit was mutated: got %q, want %q", reloaded.AttributionBaseCommit, oldBaseCommit)
+	}
+}
+
+// TestComputeSessionDivergenceWarnings_EmptyBaseCommit_EmitsLinkageWarning verifies
+// that a partially-initialized session (BaseCommit == "") produces an explicit
+// "linkage incomplete" warning rather than silently disappearing from status.
+// Silently skipping such sessions was flagged as an observability regression:
+// operators lose the clearest signal that the session cannot be migrated or
+// attributed until reinitialization.
+func TestComputeSessionDivergenceWarnings_EmptyBaseCommit_EmitsLinkageWarning(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	head := headLinkage{commitHash: strings.Repeat("e", 40)}
+
+	active := []*session.State{
+		{
+			SessionID:             "partially-initialized",
+			WorktreePath:          repoRoot,
+			BaseCommit:            "",
+			AttributionBaseCommit: strings.Repeat("a", 40),
+		},
+	}
+
+	warnings := computeSessionDivergenceWarnings(repoRoot, active, head)
+
+	msg, ok := warnings["partially-initialized"]
+	if !ok {
+		t.Fatal("expected a linkage-incomplete warning for session with empty BaseCommit, got none")
+	}
+	if !strings.Contains(msg, "linkage incomplete") {
+		t.Fatalf("expected warning to mention linkage incomplete, got %q", msg)
+	}
+	// Must NOT be the attribution-divergence message — that would be misleading
+	// since the session isn't diverged; it's un-initialized.
+	if strings.Contains(msg, "attribution base diverged") {
+		t.Fatalf("empty-BaseCommit session should not produce attribution-divergence wording, got %q", msg)
 	}
 }
 
@@ -1014,7 +1207,7 @@ func TestRunStatus_ShowsEnabledAgents(t *testing.T) {
 	writeClaudeHooksFixture(t)
 
 	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false); err != nil {
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 
@@ -1033,7 +1226,7 @@ func TestRunStatus_EnabledNoAgentsHidesHooksLine(t *testing.T) {
 	// No agent hooks installed
 
 	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false); err != nil {
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 
@@ -1049,7 +1242,7 @@ func TestRunStatus_DetailedShowsEnabledAgents(t *testing.T) {
 	writeClaudeHooksFixture(t)
 
 	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, true); err != nil {
+	if err := runStatus(context.Background(), &stdout, true, false); err != nil {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 
@@ -1153,7 +1346,7 @@ func TestRunStatus_DetailedDisabledDoesNotShowAgents(t *testing.T) {
 	writeClaudeHooksFixture(t)
 
 	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, true); err != nil {
+	if err := runStatus(context.Background(), &stdout, true, false); err != nil {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 
@@ -1169,7 +1362,7 @@ func TestRunStatus_DisabledDoesNotShowAgents(t *testing.T) {
 	writeClaudeHooksFixture(t)
 
 	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false); err != nil {
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 
@@ -1458,5 +1651,301 @@ func TestFormatSettingsStatus_Separators(t *testing.T) {
 	// Should use · as separator (plain text, no ANSI)
 	if !strings.Contains(result, "·") {
 		t.Errorf("Expected '·' separators in output, got: %q", result)
+	}
+}
+
+func TestRunStatusJSON_Enabled(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeClaudeHooksFixture(t)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if !result.Enabled {
+		t.Error("Expected enabled=true")
+	}
+	found := false
+	for _, a := range result.Agents {
+		if a == "Claude Code" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Expected agents to contain 'Claude Code', got %v", result.Agents)
+	}
+	if result.Error != "" {
+		t.Errorf("Expected no error, got %q", result.Error)
+	}
+}
+
+func TestRunStatusJSON_Disabled(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsDisabled)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if result.Enabled {
+		t.Error("Expected enabled=false")
+	}
+}
+
+func TestRunStatusJSON_NotSetUp(t *testing.T) {
+	setupTestRepo(t)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if result.Enabled {
+		t.Error("Expected enabled=false")
+	}
+	if result.Error != "not set up" {
+		t.Errorf("Expected error='not set up', got %q", result.Error)
+	}
+}
+
+func TestRunStatusJSON_NotGitRepo(t *testing.T) {
+	setupTestDir(t)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if result.Enabled {
+		t.Error("Expected enabled=false")
+	}
+	if result.Error != "not a git repository" {
+		t.Errorf("Expected error='not a git repository', got %q", result.Error)
+	}
+}
+
+func TestRunStatusJSON_WithActiveSessions(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeClaudeHooksFixture(t)
+
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatalf("NewStateStore() error = %v", err)
+	}
+
+	state := &session.State{
+		SessionID:    "test-json-session",
+		WorktreePath: "/test/repo",
+		StartedAt:    time.Now(),
+		Phase:        session.PhaseActive,
+		AgentType:    "Claude Code",
+		ModelName:    "sonnet-4.1",
+	}
+	if err := store.Save(context.Background(), state); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if len(result.ActiveSessions) != 1 {
+		t.Fatalf("Expected 1 active session, got %d", len(result.ActiveSessions))
+	}
+	s := result.ActiveSessions[0]
+	if s.Agent != "Claude Code" {
+		t.Errorf("Expected agent='Claude Code', got %q", s.Agent)
+	}
+	if s.Model != "sonnet-4.1" {
+		t.Errorf("Expected model='sonnet-4.1', got %q", s.Model)
+	}
+	if s.Status != "active" {
+		t.Errorf("Expected status='active', got %q", s.Status)
+	}
+}
+
+func TestRunStatusJSON_DeduplicatesSessions(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatalf("NewStateStore() error = %v", err)
+	}
+
+	now := time.Now()
+	states := []*session.State{
+		{
+			SessionID:    "codex-idle-1",
+			WorktreePath: "/test/repo",
+			StartedAt:    now.Add(-30 * time.Minute),
+			Phase:        session.PhaseIdle,
+			AgentType:    "Codex",
+		},
+		{
+			SessionID:    "codex-idle-2",
+			WorktreePath: "/test/repo",
+			StartedAt:    now.Add(-20 * time.Minute),
+			Phase:        session.PhaseIdle,
+			AgentType:    "Codex",
+		},
+		{
+			SessionID:    "codex-active",
+			WorktreePath: "/test/repo",
+			StartedAt:    now.Add(-5 * time.Minute),
+			Phase:        session.PhaseActive,
+			AgentType:    "Codex",
+			ModelName:    "codex-mini",
+		},
+	}
+	for _, s := range states {
+		if err := store.Save(context.Background(), s); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if len(result.ActiveSessions) != 1 {
+		t.Fatalf("Expected 1 deduplicated session, got %d", len(result.ActiveSessions))
+	}
+	s := result.ActiveSessions[0]
+	if s.Agent != "Codex" {
+		t.Errorf("Expected agent='Codex', got %q", s.Agent)
+	}
+	if s.Status != "active" {
+		t.Errorf("Expected status='active' (active wins over idle), got %q", s.Status)
+	}
+	if s.Model != "codex-mini" {
+		t.Errorf("Expected model='codex-mini' from active session, got %q", s.Model)
+	}
+}
+
+// writeStatusHeadCheckpoint writes a v1 checkpoint with the requested
+// review/investigation flags, then amends HEAD to carry the
+// Entire-Checkpoint trailer. Mirrors the helper used in
+// head_checkpoint_flags_test.go but inlined to keep status_test.go
+// self-contained for readers comparing to other status tests.
+func writeStatusHeadCheckpoint(t *testing.T, hasReview, hasInvestigation bool) {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repo, err := git.PlainOpen(cwd)
+	if err != nil {
+		t.Fatalf("PlainOpen: %v", err)
+	}
+
+	// Use a deterministic id per (review, investigation) pairing so multiple
+	// status tests writing different combinations don't collide on the same id.
+	cpHex := "abcdef011234"
+	switch {
+	case hasReview && hasInvestigation:
+		cpHex = "abcdef011111"
+	case hasReview:
+		cpHex = "abcdef012222"
+	case hasInvestigation:
+		cpHex = "abcdef013333"
+	}
+	cpID := id.MustCheckpointID(cpHex)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	if err := store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID:     cpID,
+		SessionID:        "status-test-session",
+		Strategy:         "manual-commit",
+		Transcript:       redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
+		AuthorName:       "Status Test",
+		AuthorEmail:      "status-test@entire.local",
+		HasReview:        hasReview,
+		HasInvestigation: hasInvestigation,
+	}); err != nil {
+		t.Fatalf("WriteCommitted: %v", err)
+	}
+
+	runGitInDir(t, cwd, "commit", "--amend", "-m", "init\n\nEntire-Checkpoint: "+cpID.String())
+}
+
+func TestRunStatus_PrintsInvestigationLine(t *testing.T) {
+	setupTestRepo(t)
+	// Need an initial commit before we can amend it with the trailer.
+	testutil.WriteFile(t, ".", "init.txt", "init")
+	testutil.GitAdd(t, ".", "init.txt")
+	testutil.GitCommit(t, ".", "init")
+	writeSettings(t, `{"enabled": true}`)
+	writeStatusHeadCheckpoint(t, false, true)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Investigation") || !strings.Contains(out, "investigated") {
+		t.Errorf("expected 'Investigation' / 'investigated' line in status output; got:\n%s", out)
+	}
+	if strings.Contains(out, "Review · ") {
+		t.Errorf("Review line must not appear when only HasInvestigation is set; got:\n%s", out)
+	}
+}
+
+func TestRunStatus_PrintsBothReviewAndInvestigation(t *testing.T) {
+	setupTestRepo(t)
+	testutil.WriteFile(t, ".", "init.txt", "init")
+	testutil.GitAdd(t, ".", "init.txt")
+	testutil.GitCommit(t, ".", "init")
+	writeSettings(t, `{"enabled": true}`)
+	writeStatusHeadCheckpoint(t, true, true)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Review") || !strings.Contains(out, "reviewed") {
+		t.Errorf("expected 'Review' / 'reviewed' line in status output; got:\n%s", out)
+	}
+	if !strings.Contains(out, "Investigation") || !strings.Contains(out, "investigated") {
+		t.Errorf("expected 'Investigation' / 'investigated' line in status output; got:\n%s", out)
 	}
 }

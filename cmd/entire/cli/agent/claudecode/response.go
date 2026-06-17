@@ -7,28 +7,48 @@ import (
 )
 
 type responseEnvelope struct {
-	Type   string  `json:"type"`
-	Result *string `json:"result"`
+	Type           string  `json:"type"`
+	Subtype        string  `json:"subtype"`
+	IsError        bool    `json:"is_error"`
+	APIErrorStatus *int    `json:"api_error_status"`
+	Result         *string `json:"result"`
 }
 
-// parseGenerateTextResponse extracts the raw text payload from Claude CLI JSON output.
-// Claude may return either a legacy single object or a newer array of events.
-func parseGenerateTextResponse(stdout []byte) (string, error) {
+// parseGenerateTextResponse extracts the raw text payload and envelope metadata
+// from Claude CLI JSON output. Claude may return either a single object or an array of events.
+// The returned envelope allows callers to check IsError and APIErrorStatus.
+func parseGenerateTextResponse(stdout []byte) (string, *responseEnvelope, error) {
 	var response responseEnvelope
-	if err := json.Unmarshal(stdout, &response); err == nil && response.Result != nil {
-		return *response.Result, nil
+	if err := json.Unmarshal(stdout, &response); err == nil {
+		if response.Result != nil {
+			return *response.Result, &response, nil
+		}
+		// is_error:true with null result is a structured CLI failure; callers
+		// need the envelope (IsError, APIErrorStatus) for classification.
+		if response.IsError {
+			return "", &response, nil
+		}
 	}
 
 	var responses []responseEnvelope
 	if err := json.Unmarshal(stdout, &responses); err != nil {
-		return "", fmt.Errorf("unsupported Claude CLI JSON response: %w", err)
+		return "", nil, fmt.Errorf("unsupported Claude CLI JSON response: %w", err)
 	}
 
 	for i := len(responses) - 1; i >= 0; i-- {
-		if responses[i].Type == "result" && responses[i].Result != nil {
-			return *responses[i].Result, nil
+		if responses[i].Type != "result" {
+			continue
+		}
+		if responses[i].Result != nil {
+			return *responses[i].Result, &responses[i], nil
+		}
+		// Mirror the object-path behavior: is_error:true with null result is
+		// a structured failure whose envelope (IsError, APIErrorStatus) must
+		// reach classifyEnvelopeError.
+		if responses[i].IsError {
+			return "", &responses[i], nil
 		}
 	}
 
-	return "", errors.New("unsupported Claude CLI JSON response: missing result item")
+	return "", nil, errors.New("unsupported Claude CLI JSON response: missing result item")
 }

@@ -17,10 +17,14 @@ func Wrap(ea *Agent) (agent.Agent, error) {
 	if ea == nil {
 		return nil, errors.New("unable to wrap nil agent")
 	}
-	return &wrappedAgent{
+	base := &wrappedAgent{
 		ea:   ea,
 		caps: ea.info.Capabilities,
-	}, nil
+	}
+	if len(ea.info.ProtectedFiles) > 0 {
+		return &wrappedAgentWithProtectedFiles{wrappedAgent: base}, nil
+	}
+	return base, nil
 }
 
 // wrappedAgent forwards all agent.Agent and optional interface methods to the
@@ -29,6 +33,12 @@ func Wrap(ea *Agent) (agent.Agent, error) {
 type wrappedAgent struct {
 	ea   *Agent
 	caps agent.DeclaredCaps
+}
+
+// wrappedAgentWithProtectedFiles opt-ins external agents to ProtectedFilesProvider
+// only when the binary actually advertised protected_files in its info response.
+type wrappedAgentWithProtectedFiles struct {
+	*wrappedAgent
 }
 
 // --- CapabilityDeclarer ---
@@ -114,10 +124,20 @@ func (w *wrappedAgent) GenerateText(ctx context.Context, prompt string, model st
 	return w.ea.GenerateText(ctx, prompt, model)
 }
 
+// --- TranscriptCompactor ---
+
+func (w *wrappedAgent) CompactTranscript(ctx context.Context, sessionRef string) (*agent.CompactedTranscript, error) {
+	return w.ea.CompactTranscript(ctx, sessionRef)
+}
+
 // --- HookResponseWriter ---
 
 func (w *wrappedAgent) WriteHookResponse(message string) error {
 	return w.ea.WriteHookResponse(message)
+}
+
+func (w *wrappedAgentWithProtectedFiles) ProtectedFiles() []string {
+	return w.ea.ProtectedFiles()
 }
 
 // --- SubagentAwareExtractor ---
@@ -131,8 +151,12 @@ func (w *wrappedAgent) CalculateTotalTokenUsage(data []byte, offset int, dir str
 
 // IsExternal reports whether ag is backed by an external agent binary.
 func IsExternal(ag agent.Agent) bool {
-	_, ok := ag.(*wrappedAgent)
-	return ok
+	switch ag.(type) {
+	case *wrappedAgent, *wrappedAgentWithProtectedFiles:
+		return true
+	default:
+		return false
+	}
 }
 
 var (
@@ -142,6 +166,7 @@ var (
 	_ agent.TranscriptPreparer     = (*wrappedAgent)(nil)
 	_ agent.TokenCalculator        = (*wrappedAgent)(nil)
 	_ agent.TextGenerator          = (*wrappedAgent)(nil)
+	_ agent.TranscriptCompactor    = (*wrappedAgent)(nil)
 	_ agent.HookResponseWriter     = (*wrappedAgent)(nil)
 	_ agent.SubagentAwareExtractor = (*wrappedAgent)(nil)
 )

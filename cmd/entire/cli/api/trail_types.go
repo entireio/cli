@@ -7,8 +7,13 @@ import (
 )
 
 // TrailListResponse is the response from GET /api/v1/trails/:org/:repo.
+// The endpoint paginates: Trails holds one page (server max 200 rows) and
+// Total is the full match count for the requested filters.
 type TrailListResponse struct {
 	Trails        []TrailResource `json:"trails"`
+	Total         int             `json:"total"`
+	Limit         int             `json:"limit"`
+	Offset        int             `json:"offset"`
 	RepoFullName  string          `json:"repo_full_name"`
 	DefaultBranch string          `json:"default_branch"`
 	UpdatedAt     time.Time       `json:"updated_at"`
@@ -16,13 +21,14 @@ type TrailListResponse struct {
 
 // TrailResource represents a single trail from the API.
 type TrailResource struct {
-	TrailID         string           `json:"trail_id"`
+	ID              string           `json:"id,omitempty"`
+	Number          int              `json:"number,omitempty"`
 	Branch          string           `json:"branch"`
 	Base            string           `json:"base"`
 	Title           string           `json:"title"`
 	Body            string           `json:"body"`
 	Status          string           `json:"status"`
-	Author          string           `json:"author"`
+	Author          *trail.Author    `json:"author"`
 	Assignees       []string         `json:"assignees"`
 	Labels          []string         `json:"labels"`
 	Priority        string           `json:"priority,omitempty"`
@@ -40,7 +46,8 @@ type TrailResource struct {
 // ToMetadata converts a TrailResource to a trail.Metadata for display.
 func (r *TrailResource) ToMetadata() *trail.Metadata {
 	m := &trail.Metadata{
-		TrailID:   trail.ID(r.TrailID),
+		Number:    r.Number,
+		TrailID:   trail.ID(r.ID),
 		Branch:    r.Branch,
 		Base:      r.Base,
 		Title:     r.Title,

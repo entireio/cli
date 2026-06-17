@@ -10,15 +10,59 @@ This repo contains the CLI for Entire.
 
 ### Commands (`cmd/`)
 
-- `entire/`: Main CLI entry point
-- `entire/cli`: CLI utilities and helpers
+- `entire/`: Main CLI entry point. Also home to kubectl-style external-command resolution (`entire <name>` → `entire-<name>` on PATH) — see [External Commands](docs/architecture/external-commands.md).
+- `entire/cli`: CLI utilities and helpers (Cobra commands, helpers, group roots)
 - `entire/cli/commands`: actual command implementations
-- `entire/cli/agent`: agent implementations (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI) - see [Agent Integration Checklist](docs/architecture/agent-integration-checklist.md) and [Agent Implementation Guide](docs/architecture/agent-guide.md)
+- `entire/cli/agent`: agent implementations (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi) - see [Agent Integration Checklist](docs/architecture/agent-integration-checklist.md) and [Agent Implementation Guide](docs/architecture/agent-guide.md)
 - `entire/cli/strategy`: strategy implementation (manual-commit) - see section below
 - `entire/cli/checkpoint`: checkpoint storage abstractions (temporary and committed)
 - `entire/cli/session`: session state management
 - `entire/cli/integration_test`: integration tests (simulated hooks)
 - `e2e/`: E2E tests with real agent calls (see [e2e/README.md](e2e/README.md))
+
+### Command Layout
+
+The CLI is organized around five noun groups plus a small set of top-level
+verbs. The groups are the canonical home for each verb; legacy top-level
+shortcuts remain functional but hidden, and emit a deprecation hint pointing
+at the canonical group form.
+
+- `session` (alias: `sessions`): `list`, `info`, `stop`, `attach`, `resume`, `current`
+- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `search`, plus
+  the deprecated `rewind` (functional, prints a cobra deprecation message, will
+  be removed in a future release)
+- `agent`: bare opens the interactive agent selector, plus `list`, `add`, `remove`
+- `configure`: bare prints help and a hint pointing at `entire agent`; flags
+  manage non-agent settings (telemetry, git-hook installation mode, strategy
+  options, summary provider). Agent CRUD lives under `entire agent`.
+- `auth`: `login`, `logout`, `status`, `contexts`, `use`. `logout` takes
+  `--everywhere` (revoke every session on the active core, not just the
+  current one) and `--all-contexts` (log out of every saved login)
+- `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+
+Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
+`login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
+`configure`.
+
+Hidden top-level shortcuts (functional, emit a one-line deprecation hint):
+`resume` → `session resume`, `attach` → `session attach`, `explain` →
+`checkpoint explain`, `trace` → `doctor trace`.
+Cobra-native aliases (no hint): `sessions` → `session`, `cp`/`checkpoints` →
+`checkpoint`. The `search` top-level remains hidden without a hint.
+
+Deprecated top-level commands (functional, print a cobra deprecation message):
+`reset` → `clean`, and `rewind` (no replacement, announces removal — same
+deprecation as `checkpoint rewind`).
+
+Hidden infrastructure commands: `hooks`, `trail`,
+`curl-bash-post-install`, `__send_analytics`.
+
+The `hideAsAlias(cmd, canonical)` helper in `cmd/entire/cli/aliascmd.go`
+marks a command Hidden and sets cobra's `Deprecated` field so the hint
+renders to stderr on every invocation while the command stays functional.
+Diagnostic subcommands live alongside `doctor.go` as `doctor_logs.go` and
+`doctor_bundle.go`. Group roots and noun-group children live in files
+named `<noun>_group.go` and `<noun>_<verb>.go` respectively.
 
 ## Tech Stack
 
@@ -50,7 +94,7 @@ This runs unit tests, integration tests, and the E2E canary (Vogon agent) in seq
 
 ### Running E2E Canary Tests (Vogon Agent)
 
-The Vogon agent is a deterministic fake agent that exercises the full E2E test suite without making any API calls. Named after the Vogons from The Hitchhiker's Guide to the Galaxy — bureaucratic, procedural, and deterministic to a fault.
+The Vogon agent is a deterministic fake agent that exercises the full E2E test suite without making any API calls.
 
 ```bash
 mise run test:e2e:canary           # Run all E2E tests with the Vogon agent
@@ -70,12 +114,7 @@ mise run test:e2e:canary TestFoo   # Run a specific test
 
 ```bash
 mise run test:e2e [filter]                          # All agents, filtered
-mise run test:e2e --agent claude-code [filter]       # Claude Code only
-mise run test:e2e --agent gemini-cli [filter]        # Gemini CLI only
-mise run test:e2e --agent opencode [filter]          # OpenCode only
-mise run test:e2e --agent cursor [filter]            # Cursor only
-mise run test:e2e --agent factoryai-droid [filter]   # Factory AI Droid only
-mise run test:e2e --agent copilot-cli [filter]       # Copilot CLI only
+mise run test:e2e --agent claude-code [filter]       # Claude Code only as an example here, replace `claude-code` with other agents to run tests for those agents
 ```
 
 E2E tests:
@@ -83,9 +122,9 @@ E2E tests:
 - Use the `//go:build e2e` build tag
 - Located in `e2e/tests/`
 - See [`e2e/README.md`](e2e/README.md) for full documentation (structure, debugging, adding agents)
-- Test real agent interactions (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, or Vogon creating files, committing, etc.)
+- Test real agent interactions (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi, or Vogon creating files, committing, etc.)
 - Validate checkpoint scenarios documented in `docs/architecture/checkpoint-scenarios.md`
-- Support multiple agents via `E2E_AGENT` env var (`claude-code`, `gemini`, `opencode`, `cursor`, `factoryai-droid`, `copilot-cli`, `vogon`)
+- Support multiple agents via `E2E_AGENT` env var (`claude-code`, `gemini`, `opencode`, `cursor`, `factoryai-droid`, `copilot-cli`, `pi`, `vogon`)
 
 **Environment variables:**
 
@@ -132,7 +171,64 @@ t.Chdir(tmpDir)                                 // redirect CWD-based git resolu
 
 `testutil.InitRepo` configures `user.name`, `user.email`, and disables GPG signing — safe for CI environments without global git config.
 
+**Prefer `testutil.InitRepo()` over direct `git.PlainInit()` in tests.** When a test in this repo needs an initialized repository, use `testutil.InitRepo(t, dir)` unless the test specifically needs lower-level initialization behavior that the helper cannot provide. Do not call `git.PlainInit()` directly and then create commits or run CLI git operations without also reproducing the helper's repo-local config.
+
 **Do NOT** shell out to `git init`/`git commit` directly without setting user config and `--no-gpg-sign`, and **do NOT** run lifecycle/strategy handlers from the real repo CWD in tests.
+
+### Config/Cache/Keyring Isolation in Tests
+
+Tests must never read or write the developer's real `~/.config/entire`
+(contexts.json, version_check.json), `~/.cache/entire` (nodes.json,
+cluster_cores.json, api_discovery.json), or OS keychain. The developer may be
+using `entire` for real while tests run.
+
+- **Single resolver**: `internal/entireclient/userdirs` is the only place
+  that resolves the per-user config dir (`userdirs.Config()`:
+  `$ENTIRE_CONFIG_DIR` else `~/.config/entire`) and cache dir
+  (`userdirs.Cache()`: `$XDG_CACHE_HOME/entire` else `~/.cache/entire`).
+  Never derive these paths anywhere else.
+- **In-process safety net**: `userdirs` and the `tokenstore` default backend
+  detect `go test` (via `internal/testdirs`) and fall back to a throwaway
+  per-process temp directory when their env override is unset. The fallback
+  is shared across tests in one process — for per-test isolation still set
+  `t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())` and
+  `tokenstore.UseFileBackendForTesting(...)`.
+- **Spawned binaries are NOT covered**: `testing.Testing()` is false in a
+  subprocess. The integration and e2e TestMains set `ENTIRE_CONFIG_DIR`,
+  `XDG_CACHE_HOME`, `ENTIRE_TOKEN_STORE=file`, `ENTIRE_TOKEN_STORE_PATH`, and
+  `ENTIRE_TEST_AUTH_STORE_FILE` process-wide so every spawned `entire` (and
+  every agent-invoked hook) inherits isolation. Any new harness that spawns
+  the real binary must do the same.
+- **Legacy auth store**: `auth.NewStore()` talks straight to the zalando
+  keyring; packages whose tests can reach it need `keyring.MockInit()` in
+  `TestMain` (see `cmd/entire/cli/global_test.go`) — the `testdirs` fallback
+  does not cover it in-process.
+
+### Spawning subprocesses in tests (TTY detection)
+
+Tests that spawn the real `entire` or `git` binary need the child to be non-interactive so prompts don't hang on a developer terminal.
+
+`interactive.CanPromptInteractively()` resolves in this order:
+
+1. `ENTIRE_TEST_TTY=1` → force interactive ON (any other non-empty value → force OFF).
+2. `testing.Testing()` → false. In-process `go test` runs are non-interactive by default; no per-test `t.Setenv("ENTIRE_TEST_TTY", "0")` is needed.
+3. Agent sentinels (`GEMINI_CLI`, `COPILOT_CLI`, `PI_CODING_AGENT`, `GIT_TERMINAL_PROMPT=0`) → false.
+4. `CI=<non-empty-non-false>` → false.
+5. `/dev/tty` probe.
+
+For subprocesses spawning the real `entire` binary (e2e, integration tests, `entire` calling itself from a hook), prefer `execx.NonInteractive` over env-var plumbing:
+
+```go
+import "github.com/entireio/cli/cmd/entire/cli/execx"
+
+cmd := execx.NonInteractive(ctx, getTestBinary(), "status")
+cmd.Dir = repoDir
+out, err := cmd.CombinedOutput()
+```
+
+`execx.NonInteractive` puts the child in a new session with no controlling terminal (`Setsid` on Unix, `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows), so the child's `/dev/tty` probe fails naturally. No env var required.
+
+`interactive.UnderTest()` returns true when `testing.Testing()` or `ENTIRE_TEST_TTY` is set — use it where code needs to skip a real-terminal operation even if `CanPromptInteractively()` returns true (e.g., reading from `/dev/tty` directly inside `askConfirmTTY`).
 
 ### Linting and Formatting
 
@@ -161,6 +257,10 @@ mise run test:ci  # Run all tests (unit + integration)
 `mise run check` runs the three commands above.
 
 Safety note: do not treat a clean `mise run lint` result as final unless it was run after the most recent `mise run fmt` pass.
+
+### Before Any Push Or Remote Code Update (REQUIRED)
+
+Before pushing commits or otherwise sending code changes to any remote, run `mise run lint` on the current tree and ensure it passes. If `mise run fmt` changed files, rerun `mise run lint` on the formatted tree before pushing.
 
 **Common CI failures from skipping this:**
 
@@ -217,7 +317,7 @@ if _, err := paths.WorktreeRoot(); err != nil {
 ```
 
 **When NOT to use `SilentError`:**
-For normal errors where the default error message is sufficient, just return the error directly. main.go will print it:
+For normal errors where the default error message is sufficient, return the error directly. main.go will print it:
 
 ```go
 // Normal error - main.go will print "unknown strategy: foo"
@@ -271,7 +371,7 @@ if settings.IsSummarizeEnabled() {
 ### Logging vs User Output
 
 - **Internal/debug logging**: Use `logging.Debug/Info/Warn/Error(ctx, msg, attrs...)` from `cmd/entire/cli/logging/`. Writes to `.entire/logs/`.
-- **Enabling debug/perf logs locally**: Prefer adding `"log_level": "DEBUG"` to `.entire/settings.local.json` when you need detailed hook/perf logs. This file is gitignored, so it is a low-risk local-only change. `ENTIRE_LOG_LEVEL=debug` also works and takes precedence.
+- **Enabling debug/perf logs locally**: Prefer adding `"log_level": "DEBUG"` to `.entire/settings.local.json` when you need detailed hook/perf logs. This file is gitignored. `ENTIRE_LOG_LEVEL=debug` also works and takes precedence.
 - **User-facing output**: Use `fmt.Fprint*(cmd.OutOrStdout(), ...)` or `cmd.ErrOrStderr()`.
 
 Don't use `fmt.Print*` for operational messages (checkpoint saves, hook invocations, strategy decisions) - those should use the `logging` package.
@@ -351,7 +451,6 @@ The `Strategy` interface provides:
 - `SaveTaskStep()` - Save subagent task step checkpoint
 - `GetRewindPoints()` / `Rewind()` - List and restore to checkpoints
 - `GetSessionLog()` / `GetSessionInfo()` - Retrieve session data
-- `ListSessions()` / `GetSession()` - Session discovery
 
 #### How It Works
 
@@ -361,6 +460,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - **Worktree-specific branches** - each git worktree gets its own shadow branch namespace, preventing conflicts
 - **Supports multiple concurrent sessions** - checkpoints from different sessions in the same directory interleave on the same shadow branch
 - Condenses session logs to permanent `entire/checkpoints/v1` branch on user commits
+- When `checkpoints_version` is `1.1`, best-effort mirrors v1 metadata to the `refs/entire/checkpoints/v1.1` read ref after entire-managed v1 writes and fetches; mirror failures are logged, not fatal. The resolver also adds v1.1 to the push set, so `PrePush` pushes it to the configured remote alongside v1 (re-pointing the mirror at the current v1 tip first); v1.1 is a non-branch ref, so it gets no origin-tracking shadow and reads do not bootstrap it from origin (reads target v1.1 while Primary stays v1). The resume bootstrap that promotes local v1 from origin's remote-tracking ref is the deliberate exception — it does not mirror and is skipped entirely in v1.1 mode. Read paths use the configured ref as-is.
 - Uses the `post-rewrite` Git hook to keep local session linkage aligned after amend/rebase rewrites
 - Builds git trees in-memory using go-git plumbing APIs
 - Rewind restores files from shadow branch commit tree (does not use `git reset`)
@@ -376,228 +476,33 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 
 - `strategy.go` - Interface definition and context structs (`StepContext`, `TaskStepContext`, `RewindPoint`, etc.)
 - `common.go` - Helpers for metadata extraction, tree building, rewind validation, `ListCheckpoints()`
-- `session.go` - Session/checkpoint data structures
-- `push_common.go` - PrePush logic for pushing `entire/checkpoints/v1` branch
-- `manual_commit.go` - Manual-commit strategy main implementation
-- `manual_commit_types.go` - Type definitions: `SessionState`, `CheckpointInfo`, `CondenseResult`
-- `manual_commit_session.go` - Session state management (load/save/list session states)
-- `manual_commit_condensation.go` - Condense logic for copying logs to `entire/checkpoints/v1`
-- `manual_commit_rewind.go` - Rewind implementation: file restoration from checkpoint trees
-- `manual_commit_git.go` - Git operations: checkpoint commits, tree building
-- `manual_commit_logs.go` - Session log retrieval and session listing
-- `manual_commit_hooks.go` - Git hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push)
-- `manual_commit_reset.go` - Shadow branch reset/cleanup functionality
-- `session_state.go` - Package-level session state functions (`LoadSessionState`, `SaveSessionState`, `ListSessionStates`, `FindMostRecentSession`)
+- `manual_commit*.go` - Manual-commit strategy: main impl, types, session state, condensation, rewind, git ops, logs, hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push), reset
+- `cleanup.go` - Cleanup discovery/deletion for shadow branches, session states, and checkpoint metadata
+- `session_state.go` - Package-level session state functions
 - `hooks.go` - Git hook installation
 
-#### Checkpoint Package (`cmd/entire/cli/checkpoint/`)
+Note: `checkpoint/configloader.go` overrides go-git's default config loader with a symlink-following `billy.Basic` (`osSymlinkFS`) — go-git's default reads config via `os.Root`, which rejects absolute symlinks in any path component (e.g. a `~/.config` managed by a dotfile tool), silently dropping global config so author identity fell back to "Unknown" and signing was skipped.
 
-- `checkpoint.go` - Data types (`Checkpoint`, `TemporaryCheckpoint`, `CommittedCheckpoint`)
-- `store.go` - `GitStore` struct wrapping git repository
-- `temporary.go` - Shadow branch operations (`WriteTemporary`, `ReadTemporary`, `ListTemporary`)
-- `committed.go` - Metadata branch operations (`WriteCommitted`, `ReadCommitted`, `ListCommitted`)
+#### Deep-Dive Reference
 
-#### Session Package (`cmd/entire/cli/session/`)
+The phase state machine, metadata directory layout, sharded checkpoint format, multi-session metadata, checkpoint ID linking, commit trailers, and concurrent-session / shadow-branch-migration behavior are documented in:
 
-- `session.go` - Session data types and interfaces
-- `state.go` - `StateStore` for managing `.git/entire-sessions/` files
-- `phase.go` - Session phase state machine (phases, events, transitions, actions)
-
-#### Session Phase State Machine
-
-Sessions track their lifecycle through phases managed by a state machine in `session/phase.go`:
-
-**Phases:** `ACTIVE`, `IDLE`, `ENDED`
-
-**Events:**
-
-- `TurnStart` - Agent begins a turn (UserPromptSubmit hook)
-- `TurnEnd` - Agent finishes a turn (Stop hook)
-- `GitCommit` - A git commit was made (PostCommit hook)
-- `SessionStart` - New session started
-- `SessionStop` - Session explicitly stopped
-
-**Key transitions:**
-
-- `IDLE + TurnStart → ACTIVE` - Agent starts working
-- `ACTIVE + TurnEnd → IDLE` - Agent finishes turn
-- `ACTIVE + GitCommit → ACTIVE` - User commits while agent is working (condense immediately)
-- `IDLE + GitCommit → IDLE` - User commits between turns (condense immediately)
-- `ENDED + GitCommit → ENDED` - Post-session commit (condense if files touched)
-
-The state machine emits **actions** (e.g., `ActionCondense`, `ActionUpdateLastInteraction`) that hook handlers dispatch to strategy-specific implementations.
-
-#### Metadata Structure
-
-**Shadow branches** (`entire/<commit-hash[:7]>-<worktreeHash[:6]>`):
-
-```
-.entire/metadata/<session-id>/
-├── full.jsonl               # Session transcript
-├── prompt.txt               # Checkpoint-scoped user prompts
-└── tasks/<tool-use-id>/     # Task checkpoints
-    ├── checkpoint.json      # UUID mapping for rewind
-    └── agent-<id>.jsonl     # Subagent transcript
-```
-
-**Metadata branch** (`entire/checkpoints/v1`) - sharded checkpoint format:
-
-```
-<checkpoint-id[:2]>/<checkpoint-id[2:]>/
-├── metadata.json            # CheckpointSummary (aggregated stats)
-├── 0/                       # First session (0-based indexing)
-│   ├── metadata.json        # Session-specific metadata
-│   ├── full.jsonl           # Session transcript
-│   ├── prompt.txt           # Checkpoint-scoped user prompts
-│   ├── content_hash.txt     # SHA256 of transcript
-│   └── tasks/<tool-use-id>/ # Task checkpoints (if applicable)
-│       ├── checkpoint.json  # UUID mapping
-│       └── agent-<id>.jsonl # Subagent transcript
-├── 1/                       # Second session (if multiple sessions)
-│   ├── metadata.json
-│   ├── full.jsonl
-│   └── ...
-└── ...
-```
-
-**Multi-session metadata.json format:**
-
-```json
-{
-  "checkpoint_id": "abc123def456",
-  "session_id": "2026-01-13-uuid", // Current/latest session
-  "session_ids": ["2026-01-13-uuid1", "2026-01-13-uuid2"], // All sessions
-  "session_count": 2, // Number of sessions in this checkpoint
-  "strategy": "manual-commit",
-  "created_at": "2026-01-13T12:00:00Z",
-  "files_touched": ["file1.txt", "file2.txt"] // Merged from all sessions
-}
-```
-
-When multiple sessions are condensed to the same checkpoint (same base commit):
-
-- Sessions are stored in numbered subfolders using 0-based indexing (`0/`, `1/`, `2/`, etc.)
-- Latest session is always in the highest-numbered folder
-- `session_ids` array tracks all sessions, `session_count` increments
-
-**Session State** (filesystem, `.git/entire-sessions/`):
-
-```
-<session-id>.json            # Active session state (base_commit, checkpoint_count, etc.)
-```
-
-#### Checkpoint ID Linking
-
-The strategy uses a **12-hex-char random checkpoint ID** (e.g., `a3b2c4d5e6f7`) as the stable identifier linking user commits to metadata.
-
-**How checkpoint IDs work:**
-
-1. **Generated once per checkpoint**: When condensing session metadata to the metadata branch
-
-2. **Added to user commits** via `Entire-Checkpoint` trailer:
-   - **Manual-commit**: Added via `prepare-commit-msg` hook (user can remove it before committing)
-
-3. **Used for directory sharding** on `entire/checkpoints/v1` branch:
-   - Path format: `<id[:2]>/<id[2:]>/`
-   - Example: `a3b2c4d5e6f7` → `a3/b2c4d5e6f7/`
-   - Creates 256 shards to avoid directory bloat
-
-4. **Appears in commit subject** on `entire/checkpoints/v1` commits:
-   - Format: `Checkpoint: a3b2c4d5e6f7`
-   - Makes `git log entire/checkpoints/v1` readable and searchable
-
-**Bidirectional linking:**
-
-```
-User commit → Metadata:
-  Extract "Entire-Checkpoint: a3b2c4d5e6f7" trailer
-  → Read a3/b2c4d5e6f7/ directory from entire/checkpoints/v1 tree at HEAD
-
-Metadata → User commits:
-  Given checkpoint ID a3b2c4d5e6f7
-  → Search user branch history for commits with "Entire-Checkpoint: a3b2c4d5e6f7" trailer
-```
-
-Note: Commit subjects on `entire/checkpoints/v1` (e.g., `Checkpoint: a3b2c4d5e6f7`) are
-for human readability in `git log` only. The CLI always reads from the tree at HEAD.
-
-**Example:**
-
-```
-User's commit (on main branch):
-  "Implement login feature
-
-  Entire-Checkpoint: a3b2c4d5e6f7"
-       ↓ ↑
-       Linked via checkpoint ID
-       ↓ ↑
-entire/checkpoints/v1 commit:
-  Subject: "Checkpoint: a3b2c4d5e6f7"
-
-  Tree: a3/b2c4d5e6f7/
-    ├── metadata.json (checkpoint_id: "a3b2c4d5e6f7")
-    ├── full.jsonl (session transcript)
-    └── prompt.txt
-```
-
-#### Commit Trailers
-
-**On user's active branch commits:**
-
-- `Entire-Checkpoint: <checkpoint-id>` - 12-hex-char ID linking to metadata on `entire/checkpoints/v1`
-  - Added via `prepare-commit-msg` hook; user can remove it before committing to skip linking
-
-**On shadow branch commits (`entire/<commit-hash[:7]>-<worktreeHash[:6]>`):**
-
-- `Entire-Session: <session-id>` - Session identifier
-- `Entire-Metadata: <path>` - Path to metadata directory within the tree
-- `Entire-Task-Metadata: <path>` - Path to task metadata directory (for task checkpoints)
-- `Entire-Strategy: manual-commit` - Strategy that created the commit
-
-**On metadata branch commits (`entire/checkpoints/v1`):**
-
-Commit subject: `Checkpoint: <checkpoint-id>` (or custom subject for task checkpoints)
-
-Trailers:
-
-- `Entire-Session: <session-id>` - Session identifier
-- `Entire-Strategy: <strategy>` - Strategy name (manual-commit)
-- `Entire-Agent: <agent-name>` - Agent name (optional, e.g., "Claude Code")
-- `Ephemeral-branch: <branch>` - Shadow branch name (optional)
-- `Entire-Metadata-Task: <path>` - Task metadata path (optional, for task checkpoints)
-
-**Note:** The strategy keeps active branch history clean - the only addition to user commits is the single `Entire-Checkpoint` trailer. It never creates commits on the active branch (the user creates them manually). All detailed session data (transcripts, prompts, context) is stored on the `entire/checkpoints/v1` orphan branch or shadow branches.
-
-#### Multi-Session Behavior
-
-**Concurrent Sessions:**
-
-- When a second session starts in the same directory while another has uncommitted checkpoints, a warning is shown
-- Both sessions can proceed - their checkpoints interleave on the same shadow branch
-- Each session's `RewindPoint` includes `SessionID` and `SessionPrompt` to help identify which checkpoint belongs to which session
-- On commit, all sessions are condensed together with archived sessions in numbered subfolders
-- Note: Different git worktrees have separate shadow branches (worktree-specific naming), so concurrent sessions in different worktrees do not conflict
-
-**Orphaned Shadow Branches:**
-
-- A shadow branch is "orphaned" if it exists but has no corresponding session state file
-- This can happen if the state file is manually deleted or lost
-- When a new session starts with an orphaned branch, the branch is automatically reset
-- If the existing session DOES have a state file (concurrent session in same directory), a `SessionIDConflictError` is returned
-
-**Shadow Branch Migration (Pull/Rebase):**
-
-- If user does stash → pull → apply (or rebase), HEAD changes but work isn't committed
-- The shadow branch would be orphaned at the old commit
-- Detection: base commit changed AND old shadow branch still exists (would be deleted if user committed)
-- Action: shadow branch is renamed from `entire/<old-hash>-<worktreeHash>` to `entire/<new-hash>-<worktreeHash>`
-- Session continues seamlessly with checkpoints preserved
+- [Sessions and Checkpoints](docs/architecture/sessions-and-checkpoints.md) - domain model, storage layout, checkpoint ID linking, commit trailers, package structure
+- [Checkpoint Scenarios](docs/architecture/checkpoint-scenarios.md) - phase state machine and worked condensation scenarios
 
 #### When Modifying the Strategy
 
 - The strategy must implement the full `Strategy` interface
 - Test with `mise run test` - strategy tests are in `*_test.go` files
-- **Update both CLAUDE.md and AGENTS.md** when modifying the strategy to keep documentation current
+- Keep this file and `docs/architecture/sessions-and-checkpoints.md` current when changing strategy behavior (`AGENTS.md` is a symlink to this file)
+
+### `entire review` Command
+
+`entire review` runs a set of configured review skills inside an agent session. The review session is an immutable fact attached to a checkpoint — no verdict, no status tracking, no empty commits. On the next `git commit`, the review session is condensed into the checkpoint metadata alongside normal sessions, permanently recording that the code was reviewed and which skills were run.
+
+Configured per-agent in `.entire/settings.json` (`EntireSettings.Review`); launchable agents (claude-code, codex, gemini-cli) receive `ENTIRE_REVIEW_*` env vars that the `UserPromptSubmit` hook reads to tag the session as `Kind = "agent_review"`. Multi-agent runs use a TUI dashboard + opt-in cross-agent synthesis.
+
+See [Review Command](docs/architecture/review-command.md) for the full command surface, settings schema, env-var handshake, multi-agent UI, anti-features (do NOT recreate), and key-file map.
 
 # Important Notes
 

@@ -21,7 +21,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
@@ -36,7 +36,7 @@ jobs:
 
       - name: Generate Homebrew Tap token
         id: app-token
-        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
           private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
@@ -82,8 +82,19 @@ jobs:
             git log --oneline "${BASE_TAG}..HEAD" --no-merges >> "$RUNNER_TEMP/release_notes.md"
           fi
 
+      - name: Detect macOS signing availability
+        id: signing
+        env:
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+        run: |
+          if [ -n "$MACOS_SIGN_P12" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7
+        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7
         with:
           distribution: goreleaser-pro
           version: latest
@@ -103,13 +114,41 @@ jobs:
           DISCORD_WEBHOOK_ID: ${{ secrets.DISCORD_WEBHOOK_ID }}
           DISCORD_WEBHOOK_TOKEN: ${{ secrets.DISCORD_WEBHOOK_TOKEN }}
 
+      # Guard against the notarize pipe silently skipping (e.g. notarize.macos.ids
+      # not matching the build ids). GoReleaser only warns and exits 0 in that
+      # case, so the job stays green while shipping ad-hoc-signed binaries that
+      # Gatekeeper kills on launch. We can't run codesign/spctl on Linux, but a
+      # Developer ID signed Mach-O embeds the signing certificate, whose subject
+      # ("Developer ID Application: … (TEAMID)") is greppable; an ad-hoc binary
+      # embeds no certificate. Fail closed if any darwin binary is unsigned or if
+      # none are found at all.
+      - name: Verify macOS binaries are Developer ID signed
+        if: steps.signing.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          mapfile -t bins < <(jq -r '.[] | select(.type=="Binary" and .goos=="darwin") | .path' dist/artifacts.json)
+          if [ "${#bins[@]}" -eq 0 ]; then
+            echo "::error::No darwin binaries found in dist/artifacts.json — cannot verify signing. Did the build matrix change?"
+            exit 1
+          fi
+          fail=0
+          for bin in "${bins[@]}"; do
+            if grep -aq "Developer ID Application" "$bin"; then
+              echo "ok: $bin is Developer ID signed"
+            else
+              echo "::error::$bin is NOT Developer ID signed (ad-hoc only) — the notarize pipe was skipped. Check that notarize.macos.ids in .goreleaser.yaml matches the build ids."
+              fail=1
+            fi
+          done
+          exit $fail
+
   notify-slack:
     runs-on: ubuntu-latest
     needs: [release]
     if: ${{ always() && needs.release.result == 'failure' }}
     steps:
       - name: Notify Slack of release failure
-        uses: slackapi/slack-github-action@af78098f536edbc4de71162a307590698245be95 # v3.0.1
+        uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3
         with:
           webhook: ${{ secrets.E2E_SLACK_WEBHOOK_URL }}
           webhook-type: incoming-webhook

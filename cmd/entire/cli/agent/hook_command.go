@@ -17,13 +17,21 @@ const (
 func MissingEntireWarning(format WarningFormat) string {
 	switch format {
 	case WarningFormatSingleLine:
-		return "Powered by Entire: Tracking is enabled, but the Entire CLI is not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
+		return "Entire CLI is enabled but not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
 	case WarningFormatMultiLine:
-		return "\n\nPowered by Entire:\n  Tracking is enabled, but the Entire CLI is not installed or not on PATH.\n  Installation guide: https://docs.entire.io/cli/installation#installation-methods"
+		return "\n\nEntire CLI is enabled but not installed or not on PATH.\nInstallation guide: https://docs.entire.io/cli/installation#installation-methods"
 	default:
 		return MissingEntireWarning(WarningFormatSingleLine)
 	}
 }
+
+// LocalDevHookScript is the local-development hook launcher, with the repo root
+// resolved at hook runtime via git. It points at scripts/entire-dev, which
+// compiles the CLI on demand and falls back to the entire binary on PATH when
+// the tree does not build (e.g. mid merge-conflict-fix). Agents that locate the
+// repo root with `git rev-parse` build their local-dev command prefix from
+// this; claude-code uses ${CLAUDE_PROJECT_DIR} and defines its own prefix.
+const LocalDevHookScript = `"$(git rev-parse --show-toplevel)"/scripts/entire-dev`
 
 // WrapProductionSilentHookCommand exits successfully without output when the
 // Entire CLI is missing from PATH.

@@ -256,6 +256,7 @@ func TestHooksGitCmd_ExposesPostRewriteSubcommand(t *testing.T) {
 	}
 	if found == nil {
 		t.Fatal("expected post-rewrite subcommand, got nil")
+		return
 	}
 	if found.Use != "post-rewrite <rewrite-type>" {
 		t.Fatalf("post-rewrite Use = %q, want %q", found.Use, "post-rewrite <rewrite-type>")

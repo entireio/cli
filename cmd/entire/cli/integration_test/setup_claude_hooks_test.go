@@ -170,7 +170,7 @@ func TestSetupClaudeHooks_PreservesExistingSettings(t *testing.T) {
 	}
 }
 
-func TestSetupClaudeHooks_ConfigureForce_RewritesExistingEntireHooks(t *testing.T) {
+func TestSetupClaudeHooks_AgentAddForce_RewritesExistingEntireHooks(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	env.InitRepo()
@@ -180,16 +180,16 @@ func TestSetupClaudeHooks_ConfigureForce_RewritesExistingEntireHooks(t *testing.
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 
-	output, err := env.RunCLIWithError("configure", "--agent", "claude-code")
+	output, err := env.RunCLIWithError("agent", "add", "claude-code")
 	if err != nil {
-		t.Fatalf("configure claude-hooks command failed: %v\nOutput: %s", err, output)
+		t.Fatalf("agent add claude-code command failed: %v\nOutput: %s", err, output)
 	}
 
 	writeStaleClaudeStopHook(t, env)
 
-	output, err = env.RunCLIWithError("configure", "--agent", "claude-code", "--force")
+	output, err = env.RunCLIWithError("agent", "add", "claude-code", "--force")
 	if err != nil {
-		t.Fatalf("configure --force claude-hooks command failed: %v\nOutput: %s", err, output)
+		t.Fatalf("agent add --force claude-code command failed: %v\nOutput: %s", err, output)
 	}
 
 	assertClaudeStopHookRewritten(t, env)

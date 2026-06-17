@@ -44,6 +44,9 @@ func TestSetupCodexHooks_AddsAllRequiredHooks(t *testing.T) {
 	if !strings.Contains(hooksContent, "entire hooks codex stop") {
 		t.Error("Codex Stop hook should exist")
 	}
+	if !strings.Contains(hooksContent, "entire hooks codex post-tool-use") {
+		t.Error("Codex PostToolUse hook should exist")
+	}
 
 	searchAgentPath := filepath.Join(env.RepoDir, ".codex", "agents", "entire-search.toml")
 	searchData, err := os.ReadFile(searchAgentPath)

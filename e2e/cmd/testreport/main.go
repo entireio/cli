@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"golang.org/x/term"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 )
 
 type TestEvent struct {
@@ -41,7 +41,7 @@ func main() {
 	outputFile := flag.String("o", "", "Write output to file (ANSI + .nocolor.txt)")
 	flag.Parse()
 
-	useColor := *colorFlag || term.IsTerminal(int(os.Stdout.Fd()))
+	useColor := *colorFlag || interactive.IsTerminalWriter(os.Stdout)
 
 	r, err := openInput(flag.Arg(0))
 	if err != nil {

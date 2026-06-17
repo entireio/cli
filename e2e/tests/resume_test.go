@@ -6,11 +6,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/e2e/entire"
 	"github.com/entireio/cli/e2e/testutil"
 	"github.com/stretchr/testify/assert"
@@ -87,7 +87,7 @@ func TestResumeSquashMergeMultipleCheckpoints(t *testing.T) {
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Add red doc")
 		testutil.WaitForCheckpoint(t, s, 30*time.Second)
-		cp1Ref := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
+		cp1Ref := testutil.CurrentCheckpointRef(t, s.Dir)
 
 		_, err = s.RunPrompt(t, ctx,
 			"create a file at docs/blue.md with a paragraph about the colour blue. Do not ask for confirmation or approval, just make the change.")
@@ -145,9 +145,9 @@ func TestResumeSquashMergeMultipleCheckpoints(t *testing.T) {
 		// Commit using the git-generated squash message directly (not via -m).
 		// GIT_EDITOR=true prevents git from opening an editor while letting
 		// it use .git/SQUASH_MSG natively with all hooks running.
-		commitCmd := exec.Command("git", "commit")
+		commitCmd := execx.NonInteractive(ctx, "git", "commit")
 		commitCmd.Dir = s.Dir
-		commitCmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=0", "GIT_EDITOR=true")
+		commitCmd.Env = append(os.Environ(), "GIT_EDITOR=true")
 		commitOut, commitErr := commitCmd.CombinedOutput()
 		fmt.Fprintf(s.ConsoleLog, "> git commit (GIT_EDITOR=true)\n%s\n", commitOut)
 		require.NoError(t, commitErr, "git commit with squash message failed: %s", commitOut)

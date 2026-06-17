@@ -7,8 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 
 	"github.com/go-git/go-git/v6"
@@ -177,15 +180,8 @@ func setupGitRepo(t *testing.T) string {
 
 	dir := t.TempDir()
 
-	repo, err := git.PlainInit(dir, false)
-	require.NoError(t, err)
-
-	// Configure git for commits
-	cfg, err := repo.Config()
-	require.NoError(t, err)
-	cfg.User.Name = "Test User"
-	cfg.User.Email = "test@test.com"
-	err = repo.SetConfig(cfg)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
 	// Create initial commit (required for HEAD to exist)
@@ -301,6 +297,81 @@ func TestInitializeSession_EmptyModelDoesNotOverwrite(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "gpt-4o", state.ModelName,
 		"InitializeSession should not clear ModelName when model parameter is empty")
+}
+
+// TestInitializeSession_ReconcileRecomputesAttributionAgainstNewBase verifies
+// the "reset-to-known-checkpoint" bug fix: when HEAD carries this session's
+// LastCheckpointID, reconcile advances BaseCommit + AttributionBaseCommit to
+// HEAD, and PendingPromptAttribution must be recomputed against the new base.
+// Otherwise the pre-migration attribution (computed against the stale pre-reset
+// base) would misattribute edits from the discarded history segment as churn.
+//
+// Scenario: C0 → C1 (condensed, trailer X) → C2 (discarded). User resets to C1
+// and modifies test.txt with one added line. Session state still references C2
+// (stale) with LastCheckpointID=X. InitializeSession must reconcile and
+// recompute attribution so UserLinesRemoved stays 0 (the "discarded" content
+// must not look like the user removed it).
+func TestInitializeSession_ReconcileRecomputesAttributionAgainstNewBase(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	// C1: condensed checkpoint with a matching Entire-Checkpoint trailer.
+	testutil.WriteFile(t, dir, "test.txt", "init\ncondensed\n")
+	testutil.GitAdd(t, dir, "test.txt")
+	testutil.GitCommit(t, dir, "condensed\n\nEntire-Checkpoint: abc123def456")
+	c1 := testutil.GetHeadHash(t, dir)
+
+	// C2: a discarded commit on top of C1 (simulating work the user reset away).
+	testutil.WriteFile(t, dir, "test.txt", "init\ncondensed\ndiscarded\n")
+	testutil.GitAdd(t, dir, "test.txt")
+	testutil.GitCommit(t, dir, "work the user will reset away")
+	c2 := testutil.GetHeadHash(t, dir)
+
+	// Simulate `git reset --hard C1`: HEAD moves back; worktree matches C1.
+	testutil.GitReset(t, dir, c1)
+
+	// User makes one additional edit after the reset.
+	testutil.WriteFile(t, dir, "test.txt", "init\ncondensed\nmy-edit\n")
+
+	s := &ManualCommitStrategy{}
+	seed := &SessionState{
+		SessionID:             "test-reconcile-attrib",
+		WorktreePath:          dir,
+		BaseCommit:            c2, // stale: session still believes HEAD is at C2
+		AttributionBaseCommit: c2,
+		LastCheckpointID:      id.CheckpointID("abc123def456"),
+		StepCount:             0,
+		StartedAt:             time.Now(),
+	}
+	require.NoError(t, s.saveSessionState(context.Background(), seed))
+
+	err := s.InitializeSession(context.Background(), seed.SessionID, agent.AgentTypeClaudeCode, "", "a prompt", "")
+	require.NoError(t, err)
+
+	reloaded, err := s.loadSessionState(context.Background(), seed.SessionID)
+	require.NoError(t, err)
+	require.NotNil(t, reloaded)
+
+	assert.Equal(t, c1, reloaded.BaseCommit,
+		"reconcile must advance BaseCommit to HEAD (= C1)")
+	assert.Equal(t, c1, reloaded.AttributionBaseCommit,
+		"reconcile must advance AttributionBaseCommit to HEAD (= C1)")
+
+	require.NotNil(t, reloaded.PendingPromptAttribution,
+		"InitializeSession must set PendingPromptAttribution")
+	// Correct attribution against the post-reconcile base (C1):
+	//   C1 test.txt: "init\ncondensed\n"
+	//   worktree:    "init\ncondensed\nmy-edit\n"
+	// → 1 line added, 0 removed.
+	//
+	// Buggy attribution against the stale pre-reset base (C2):
+	//   C2 test.txt: "init\ncondensed\ndiscarded\n"
+	//   worktree:    "init\ncondensed\nmy-edit\n"
+	// → 1 added (my-edit), 1 removed (discarded) — phantom churn.
+	assert.Equal(t, 1, reloaded.PendingPromptAttribution.UserLinesAdded,
+		"UserLinesAdded should reflect exactly the single post-reset edit")
+	assert.Equal(t, 0, reloaded.PendingPromptAttribution.UserLinesRemoved,
+		"UserLinesRemoved must be 0; any non-zero value means attribution ran against the stale pre-reset base and counted discarded-history lines as user removals")
 }
 
 // TestCondenseAndMarkFullyCondensed_Guards verifies the two early-exit conditions

@@ -9,13 +9,22 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
+	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
 )
+
+const goosWindows = "windows"
+
+// goos is a test seam for runtime.GOOS so the Windows-specific auto-install
+// gating can be exercised from a non-Windows host.
+var goos = runtime.GOOS
 
 const (
 	installManagerBrew    = "brew"
@@ -30,8 +39,8 @@ const (
 // This is the main entry point for the version check system.
 // The function is silent on all errors to avoid interrupting CLI operations.
 func CheckAndNotify(ctx context.Context, w io.Writer, currentVersion string) {
-	// Skip checks for dev builds
-	if currentVersion == "dev" || currentVersion == "" {
+	// Skip checks for local/unreleased builds.
+	if isDevBuild(currentVersion) {
 		return
 	}
 
@@ -73,30 +82,34 @@ func CheckAndNotify(ctx context.Context, w io.Writer, currentVersion string) {
 		return
 	}
 
-	// Show notification if outdated
+	// Show notification and offer an interactive upgrade when outdated
 	if isOutdated(currentVersion, latestVersion) {
-		printNotification(w, currentVersion, latestVersion)
+		if cache.SkippedVersion == versionCacheKey(latestVersion) {
+			return
+		}
+
+		action := MaybeAutoUpdate(ctx, w, currentVersion, latestVersion)
+		if action == autoUpdateActionSkipUntilNextVersion {
+			cache.SkippedVersion = versionCacheKey(latestVersion)
+			if saveErr := saveCache(cache); saveErr != nil {
+				logging.Debug(ctx, "version check: failed to save skipped version",
+					"error", saveErr.Error())
+			}
+		}
 	}
 }
 
-// globalConfigDirPath returns the expanded path to the global config directory (~/.config/entire).
-func globalConfigDirPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("getting home directory: %w", err)
-	}
-	return filepath.Join(home, globalConfigDirName), nil
+// globalConfigDirPath returns the CLI's global config directory. Resolution
+// lives in userdirs.Config — the single implementation shared by all
+// config-dir consumers (contexts.json, the file token store, this cache).
+func globalConfigDirPath() string {
+	return userdirs.Config()
 }
 
 // ensureGlobalConfigDir creates the global config directory if it doesn't exist.
 func ensureGlobalConfigDir() error {
-	configDir, err := globalConfigDirPath()
-	if err != nil {
-		return err
-	}
-
 	//nolint:gosec // ~/.config/entire is user home directory, 0o755 is appropriate
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
+	if err := os.MkdirAll(globalConfigDirPath(), 0o755); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
 
@@ -104,23 +117,14 @@ func ensureGlobalConfigDir() error {
 }
 
 // cacheFilePath returns the full path to the version check cache file.
-func cacheFilePath() (string, error) {
-	configDir, err := globalConfigDirPath()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(configDir, cacheFileName), nil
+func cacheFilePath() string {
+	return filepath.Join(globalConfigDirPath(), cacheFileName)
 }
 
 // loadCache loads the version check cache from disk.
 // Returns an error if the file doesn't exist or is corrupted.
 func loadCache() (*VersionCache, error) {
-	filePath, err := cacheFilePath()
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := os.ReadFile(filePath) //nolint:gosec // cacheFilePath is safe
+	data, err := os.ReadFile(cacheFilePath())
 	if err != nil {
 		return nil, fmt.Errorf("reading cache file: %w", err)
 	}
@@ -136,10 +140,7 @@ func loadCache() (*VersionCache, error) {
 // saveCache saves the version check cache to disk.
 // Uses atomic write semantics (write to temp file, then rename).
 func saveCache(cache *VersionCache) error {
-	filePath, err := cacheFilePath()
-	if err != nil {
-		return err
-	}
+	filePath := cacheFilePath()
 
 	// Marshal to JSON
 	data, err := json.MarshalIndent(cache, "", "  ")
@@ -173,10 +174,8 @@ func saveCache(cache *VersionCache) error {
 	return nil
 }
 
-// fetchLatestVersion fetches the latest version from the GitHub API.
-// Returns a timeout-safe version check using the configured HTTP timeout.
+// fetchLatestVersion fetches the latest stable version tag from the GitHub API.
 func fetchLatestVersion(ctx context.Context) (string, error) {
-	// Create a context with timeout for the HTTP request
 	ctx, cancel := context.WithTimeout(ctx, httpTimeout)
 	defer cancel()
 
@@ -185,7 +184,6 @@ func fetchLatestVersion(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("creating request: %w", err)
 	}
 
-	// Set headers to identify as Entire CLI
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "entire-cli")
 
@@ -200,18 +198,15 @@ func fetchLatestVersion(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	// Read response body (limit to 1MB to prevent memory exhaustion)
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return "", fmt.Errorf("reading response: %w", err)
 	}
 
-	// Parse GitHub release response
 	version, err := parseGitHubRelease(body)
 	if err != nil {
 		return "", fmt.Errorf("parsing release: %w", err)
 	}
-
 	return version, nil
 }
 
@@ -223,7 +218,7 @@ func isNightly(version string) bool {
 	return strings.Contains(semver.Prerelease(version), "nightly")
 }
 
-// fetchLatestNightlyVersion fetches the latest nightly version from the GitHub releases list.
+// fetchLatestNightlyVersion fetches the latest nightly version tag from the GitHub releases list.
 func fetchLatestNightlyVersion(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, httpTimeout)
 	defer cancel()
@@ -266,7 +261,7 @@ func fetchLatestNightlyVersion(ctx context.Context) (string, error) {
 	return "", errors.New("no nightly release found")
 }
 
-// parseGitHubRelease parses the GitHub API response and extracts the latest stable version.
+// parseGitHubRelease parses the GitHub API response and returns the latest stable version tag.
 // Filters out prerelease versions.
 func parseGitHubRelease(body []byte) (string, error) {
 	var release GitHubRelease
@@ -274,12 +269,10 @@ func parseGitHubRelease(body []byte) (string, error) {
 		return "", fmt.Errorf("parsing JSON: %w", err)
 	}
 
-	// Skip prerelease versions
 	if release.Prerelease {
 		return "", errors.New("only prerelease versions available")
 	}
 
-	// Ensure we have a tag name
 	if release.TagName == "" {
 		return "", errors.New("empty tag name")
 	}
@@ -298,15 +291,45 @@ func isOutdated(current, latest string) bool {
 		latest = "v" + latest
 	}
 
-	// Skip notification for dev builds (e.g., "1.0.0-dev-xxx").
-	// These are local development builds and shouldn't trigger update notifications.
+	// Local/unreleased builds shouldn't trigger update notifications.
 	// Normal prereleases (e.g., "1.0.0-rc1") should still be compared normally.
-	if strings.Contains(semver.Prerelease(current), "dev") {
+	if isDevBuild(current) {
 		return false
 	}
 
 	// semver.Compare returns -1 if current < latest
 	return semver.Compare(current, latest) < 0
+}
+
+// isDevBuild reports whether v identifies a local, unreleased build that
+// should not be nagged to update. This covers the "dev" sentinel and empty
+// string (an unstamped binary), a Go pseudo-version (built from a commit that
+// isn't a tagged release), and any build carrying +metadata such as "+dirty".
+// Released builds — stable tags, nightly tags, and `go install ...@<tag>` —
+// have clean semver and return false.
+func isDevBuild(v string) bool {
+	if v == "" || v == "dev" {
+		return true
+	}
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	return !semver.IsValid(v) || module.IsPseudoVersion(v) || semver.Build(v) != ""
+}
+
+func versionCacheKey(version string) string {
+	if version == "" || strings.HasPrefix(version, "v") {
+		return version
+	}
+	return "v" + version
+}
+
+func displayVersion(version string) string {
+	return strings.TrimPrefix(version, "v")
+}
+
+func releaseNotesURL(version string) string {
+	return downloadsURL + "/tag/" + versionCacheKey(version)
 }
 
 // executablePath is the function used to get the current executable path.
@@ -347,14 +370,34 @@ func installManagerForCurrentBinary() string {
 	}
 }
 
+// canAutoInstall reports whether updateCommand(currentVersion) is safe to
+// execute on the current OS. Returns false on Windows when the install
+// manager is unknown, because the POSIX curl-pipe-bash fallback can't run
+// from cmd.exe and there's no Windows-native installer to substitute.
+func canAutoInstall() bool {
+	if goos != goosWindows {
+		return true
+	}
+	switch installManagerForCurrentBinary() {
+	case installManagerScoop, installManagerMise:
+		return true
+	default:
+		return false
+	}
+}
+
+// downloadsURL is the public page users visit when we can't offer an
+// auto-installable command on their platform.
+const downloadsURL = "https://github.com/entireio/cli/releases"
+
 // updateCommand returns the appropriate update instruction based on how the binary was installed.
 func updateCommand(currentVersion string) string {
 	switch installManagerForCurrentBinary() {
 	case installManagerBrew:
 		if releaseChannel(currentVersion) == installChannelNightly {
-			return "brew upgrade --cask entire@nightly"
+			return "brew upgrade entire@nightly"
 		}
-		return "brew upgrade --cask entire"
+		return "brew upgrade entire"
 	case installManagerMise:
 		return "mise upgrade entire"
 	case installManagerScoop:
@@ -369,7 +412,6 @@ func updateCommand(currentVersion string) string {
 
 // printNotification prints the version update notification to the user.
 func printNotification(w io.Writer, current, latest string) {
-	msg := fmt.Sprintf("\nA newer version of Entire CLI is available: %s (current: %s)\nRun '%s' to update.\n",
-		latest, current, updateCommand(current))
-	fmt.Fprint(w, msg)
+	fmt.Fprintf(w, "\nUpdate available! %s -> %s\nRelease notes: %s\n",
+		displayVersion(current), displayVersion(latest), releaseNotesURL(latest))
 }

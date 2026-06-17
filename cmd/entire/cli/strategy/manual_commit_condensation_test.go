@@ -3,18 +3,30 @@ package strategy
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
+
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 
 	// Register agents so GetByAgentType works in tests.
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/copilotcli"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/pi"
 )
 
 // calculateTokenUsage is a test helper that looks up an agent by type and
@@ -27,20 +39,114 @@ func calculateTokenUsage(agentType types.AgentType, data []byte, offset int) *ag
 	return agent.CalculateTokenUsage(context.Background(), ag, data, offset, "")
 }
 
-func TestCalculateTokenUsage_CursorReturnsNil(t *testing.T) {
+func writeStrategyExternalSummaryAgentBinary(t *testing.T, dir, name string) {
+	t.Helper()
+
+	script := `#!/bin/sh
+case "$1" in
+  info)
+    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External summary test agent","is_preview":false,"protected_dirs":[],"hook_names":[],"capabilities":{"hooks":false,"transcript_analyzer":false,"transcript_preparer":false,"token_calculator":false,"compact_transcript":false,"text_generator":true,"hook_response_writer":false,"subagent_aware_extractor":false}}'
+    ;;
+  detect)
+    echo '{"present": true}'
+    ;;
+  generate-text)
+    echo '{"text":"{\"intent\":\"Intent\",\"outcome\":\"Outcome\",\"learnings\":{\"repo\":[],\"code\":[],\"workflow\":[]},\"friction\":[],\"open_items\":[]}"}'
+    ;;
+  *)
+    echo '{}'
+    ;;
+esac
+`
+
+	if err := os.WriteFile(filepath.Join(dir, "entire-agent-"+name), []byte(script), 0o755); err != nil {
+		t.Fatalf("write external summary agent binary: %v", err)
+	}
+}
+
+func TestCalculateTokenUsage_CursorAlwaysNil(t *testing.T) {
 	t.Parallel()
 
 	// Cursor transcripts don't contain token usage data, so CalculateTokenUsage
-	// should return nil (not an empty struct) to signal "no data available".
-	transcript := []byte(`{"role":"user","message":{"content":[{"type":"text","text":"hello"}]}}`)
-
-	ag, err := agent.GetByAgentType(agent.AgentTypeCursor)
-	if err != nil {
-		t.Fatalf("GetByAgentType(Cursor) error: %v", err)
+	// should always return nil (not an empty struct) to signal "no data
+	// available" — regardless of transcript shape or offset.
+	tests := []struct {
+		name       string
+		transcript []byte
+		offset     int
+	}{
+		{"single-line transcript", []byte(`{"role":"user","message":{"content":[{"type":"text","text":"hello"}]}}`), 0},
+		{"multi-line real transcript", []byte(cursorSampleTranscript), 0},
+		{"real transcript with offset", []byte(cursorSampleTranscript), 3},
 	}
-	result := agent.CalculateTokenUsage(context.Background(), ag, transcript, 0, "")
-	if result != nil {
-		t.Errorf("CalculateTokenUsage(Cursor) = %+v, want nil", result)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ag, err := agent.GetByAgentType(agent.AgentTypeCursor)
+			if err != nil {
+				t.Fatalf("GetByAgentType(Cursor) error: %v", err)
+			}
+			result := agent.CalculateTokenUsage(context.Background(), ag, tt.transcript, tt.offset, "")
+			if result != nil {
+				t.Errorf("CalculateTokenUsage(Cursor) = %+v, want nil", result)
+			}
+		})
+	}
+}
+
+func TestBuildSummaryGenerator_ExternalProvider(t *testing.T) { //nolint:paralleltest // uses t.Chdir and t.Setenv
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	const provider = "strategy-external-summary"
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".entire", "settings.json"),
+		[]byte(`{"enabled":true,"external_agents":true,"summary_generation":{"provider":"`+provider+`","model":"test-model"}}`),
+		0o644,
+	))
+
+	externalDir := t.TempDir()
+	writeStrategyExternalSummaryAgentBinary(t, externalDir, provider)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if generator := buildSummaryGenerator(context.Background()); generator == nil {
+		t.Fatal("buildSummaryGenerator() = nil for external text_generator provider")
+	}
+}
+
+func TestBuildSummaryGenerator_BuiltInProviderSkipsExternalDiscovery(t *testing.T) { //nolint:paralleltest // uses t.Chdir and package-level stubs
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".entire", "settings.json"),
+		[]byte(`{"enabled":true,"summary_generation":{"provider":"claude-code","model":"test-model"}}`),
+		0o644,
+	))
+
+	originalDiscover := discoverExternalSummaryProviders
+	originalAvailable := isSummaryProviderCLIAvailable
+	t.Cleanup(func() {
+		discoverExternalSummaryProviders = originalDiscover
+		isSummaryProviderCLIAvailable = originalAvailable
+	})
+	discoverExternalSummaryProviders = func(context.Context) {
+		t.Fatal("registered built-in summary provider should not trigger external discovery")
+	}
+	isSummaryProviderCLIAvailable = func(types.AgentName) bool { return true }
+
+	if generator := buildSummaryGenerator(context.Background()); generator == nil {
+		t.Fatal("buildSummaryGenerator() = nil for registered built-in provider")
 	}
 }
 
@@ -175,34 +281,6 @@ func TestExtractUserPrompts_CursorEmpty(t *testing.T) {
 	}
 }
 
-func TestCalculateTokenUsage_CursorRealTranscript(t *testing.T) {
-	t.Parallel()
-
-	// Even with a multi-line real transcript, Cursor should return nil
-	ag, err := agent.GetByAgentType(agent.AgentTypeCursor)
-	if err != nil {
-		t.Fatalf("GetByAgentType(Cursor) error: %v", err)
-	}
-	result := agent.CalculateTokenUsage(context.Background(), ag, []byte(cursorSampleTranscript), 0, "")
-	if result != nil {
-		t.Errorf("CalculateTokenUsage(Cursor, real transcript) = %+v, want nil", result)
-	}
-}
-
-func TestCalculateTokenUsage_CursorWithOffset(t *testing.T) {
-	t.Parallel()
-
-	// Offset should not matter — Cursor always returns nil
-	ag, err := agent.GetByAgentType(agent.AgentTypeCursor)
-	if err != nil {
-		t.Fatalf("GetByAgentType(Cursor) error: %v", err)
-	}
-	result := agent.CalculateTokenUsage(context.Background(), ag, []byte(cursorSampleTranscript), 3, "")
-	if result != nil {
-		t.Errorf("CalculateTokenUsage(Cursor, offset=3) = %+v, want nil", result)
-	}
-}
-
 func TestSessionStateBackfillTokenUsage_CopilotUsesZeroInputSessionAggregate(t *testing.T) {
 	t.Parallel()
 
@@ -227,6 +305,44 @@ func TestSessionStateBackfillTokenUsage_CopilotUsesZeroInputSessionAggregate(t *
 	require.Equal(t, 20, backfillUsage.CacheReadTokens)
 	require.Equal(t, 10, backfillUsage.CacheCreationTokens)
 	require.Equal(t, 3, backfillUsage.APICallCount)
+}
+
+func TestSessionStateBackfillModel_PiReadsModelFromTranscript(t *testing.T) {
+	t.Parallel()
+
+	// Pi records the model on message.model but never reports it through hooks,
+	// so the model is backfilled from the transcript at condensation time.
+	transcript := []byte(strings.Join([]string{
+		`{"type":"session","version":3,"id":"pi-uuid","cwd":"/tmp"}`,
+		`{"type":"message","id":"m1","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"Hi"}]}}`,
+		`{"type":"message","id":"m2","parentId":"m1","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}],"model":"gpt-5.5","provider":"openai-codex","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0}}}`,
+	}, "\n") + "\n")
+
+	ag, err := agent.GetByAgentType(agent.AgentTypePi)
+	require.NoError(t, err)
+
+	model := sessionStateBackfillModel(context.Background(), ag, transcript)
+	require.Equal(t, "gpt-5.5", model)
+}
+
+func TestSessionStateBackfillModel_EmptyTranscript(t *testing.T) {
+	t.Parallel()
+
+	ag, err := agent.GetByAgentType(agent.AgentTypePi)
+	require.NoError(t, err)
+
+	require.Empty(t, sessionStateBackfillModel(context.Background(), ag, nil))
+}
+
+func TestSessionStateBackfillModel_AgentWithoutSupport(t *testing.T) {
+	t.Parallel()
+
+	// Cursor doesn't implement ModelExtractor, so backfill is a no-op even with
+	// transcript data present.
+	ag, err := agent.GetByAgentType(agent.AgentTypeCursor)
+	require.NoError(t, err)
+
+	require.Empty(t, sessionStateBackfillModel(context.Background(), ag, []byte("{}\n")))
 }
 
 // droidMessage builds a Droid JSONL "message" line with the given id, role, and optional usage.
@@ -335,5 +451,137 @@ func TestCalculateTokenUsage_DroidStartOffsetBeyondEnd(t *testing.T) {
 	}
 	if usage.APICallCount != 0 {
 		t.Errorf("APICallCount = %d, want 0", usage.APICallCount)
+	}
+}
+
+// TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation verifies that
+// when state.Kind is KindAgentInvestigate, condensation propagates the kind
+// through to CheckpointSummary.HasInvestigation on the metadata branch and
+// writes the per-session investigate fields into the per-session
+// CommittedMetadata. Mirrors the (untested) review-tagging path so future
+// regressions in either flow are caught here.
+//
+// Tests in this file use t.Chdir for CWD-based git resolution, so this
+// cannot be a parallel test.
+func TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-05-08-investigate-condensation"
+
+	// Stage a transcript and a SaveStep so condensation has something to
+	// process. Then mark the session as KindAgentInvestigate before
+	// CondenseSession runs.
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	transcript := `{"type":"human","message":{"content":"investigate flake"}}
+{"type":"assistant","message":{"content":"On it."}}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
+
+	// Modify a tracked file so SaveStep produces a non-empty session.
+	trackedFile := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(trackedFile, []byte("agent-modified content"), 0o644))
+
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"test.txt"},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Investigate checkpoint 1",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	}))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+
+	// Tag the session as an investigation BEFORE condensation. Mirrors what
+	// adoptInvestigateEnv does on the live session-state file.
+	state.Kind = session.KindAgentInvestigate
+	state.InvestigateRunID = "0123456789ab"
+	state.InvestigateTopic = "Why is checkout flaky?"
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	checkpointID := id.MustCheckpointID("aabbccdd1122")
+	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped, "condensation must not skip when files are touched")
+
+	// Read CheckpointSummary off the metadata branch and assert the
+	// HasInvestigation umbrella flag flowed through.
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+
+	checkpointTree, err := tree.Tree(checkpointID.Path())
+	require.NoError(t, err)
+
+	rootMeta, err := checkpointTree.File(paths.MetadataFileName)
+	require.NoError(t, err)
+	rootBytes, err := rootMeta.Contents()
+	require.NoError(t, err)
+	var summary checkpoint.CheckpointSummary
+	require.NoError(t, json.Unmarshal([]byte(rootBytes), &summary))
+
+	require.True(t, summary.HasInvestigation, "CheckpointSummary.HasInvestigation must be true after investigate condensation")
+	require.False(t, summary.HasReview, "CheckpointSummary.HasReview must remain false")
+
+	// Per-session metadata must round-trip the investigate fields.
+	sessionMeta, err := checkpointTree.File(checkpointID.Path() + "/0/" + paths.MetadataFileName)
+	if err != nil {
+		// Path style varies by tree iteration. Fall back to subtree lookup.
+		subtree, subErr := checkpointTree.Tree("0")
+		require.NoError(t, subErr)
+		sessionMeta, err = subtree.File(paths.MetadataFileName)
+		require.NoError(t, err)
+	}
+	sessionBytes, err := sessionMeta.Contents()
+	require.NoError(t, err)
+	var meta checkpoint.CommittedMetadata
+	require.NoError(t, json.Unmarshal([]byte(sessionBytes), &meta))
+
+	require.Equal(t, string(session.KindAgentInvestigate), meta.Kind, "per-session Kind")
+	require.Equal(t, "0123456789ab", meta.InvestigateRunID, "per-session InvestigateRunID")
+	require.Equal(t, "Why is checkout flaky?", meta.InvestigateTopic, "per-session InvestigateTopic")
+}
+
+// TestCheckpointStepCount covers the prompt-window math that produces the
+// displayed "steps" count: SessionTurnCount - PromptWindowBase, floored at 1.
+func TestCheckpointStepCount(t *testing.T) {
+	tests := []struct {
+		name             string
+		sessionTurnCount int
+		promptWindowBase int
+		want             int
+	}{
+		{"first window of three prompts", 3, 0, 3},
+		{"second window of two prompts", 5, 3, 2},
+		{"no turns counted floors to 1", 0, 0, 1},
+		// Back-to-back checkpoint: base not yet re-anchored, so it reports the same
+		// count as the prior checkpoint rather than 0.
+		{"back-to-back reports same as prior", 3, 0, 3},
+		{"empty window floors to 1", 3, 3, 1},
+		{"negative guard floors to 1", 2, 5, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &SessionState{
+				SessionTurnCount: tt.sessionTurnCount,
+				PromptWindowBase: tt.promptWindowBase,
+			}
+			if got := checkpointStepCount(s); got != tt.want {
+				t.Errorf("checkpointStepCount() = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }

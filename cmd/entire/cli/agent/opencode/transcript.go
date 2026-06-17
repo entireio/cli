@@ -14,6 +14,7 @@ import (
 var (
 	_ agent.TranscriptAnalyzer = (*OpenCodeAgent)(nil)
 	_ agent.TranscriptPreparer = (*OpenCodeAgent)(nil)
+	_ agent.PromptExtractor    = (*OpenCodeAgent)(nil)
 	_ agent.TokenCalculator    = (*OpenCodeAgent)(nil)
 )
 
@@ -276,6 +277,26 @@ func ExtractAllUserPrompts(data []byte) ([]string, error) {
 		if content != "" {
 			prompts = append(prompts, content)
 		}
+	}
+	return prompts, nil
+}
+
+// ExtractPrompts extracts user prompts from an OpenCode export transcript starting
+// at the given message offset.
+func (a *OpenCodeAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, error) {
+	data, err := os.ReadFile(sessionRef) //nolint:gosec // path comes from validated agent session state
+	if err != nil {
+		return nil, fmt.Errorf("failed to read opencode transcript for prompt extraction: %w", err)
+	}
+
+	scoped, err := SliceFromMessage(data, fromOffset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scope opencode transcript for prompt extraction: %w", err)
+	}
+
+	prompts, err := ExtractAllUserPrompts(scoped)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract prompts from opencode transcript: %w", err)
 	}
 	return prompts, nil
 }

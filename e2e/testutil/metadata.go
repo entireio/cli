@@ -53,6 +53,13 @@ type SessionMetadata struct {
 	TokenUsage         TokenUsage  `json:"token_usage"`
 	InitialAttribution Attribution `json:"initial_attribution"`
 	TranscriptPath     string      `json:"transcript_path"`
+
+	// CheckpointTranscriptStart is the transcript.jsonl line offset where this
+	// checkpoint's contributions begin. For the first checkpoint in a session
+	// it's 0; for subsequent checkpoints it must point past prior content so
+	// consumers (explain, attribution, summaries) can scope the transcript
+	// correctly. omitempty in the on-wire form, so we read 0 when absent.
+	CheckpointTranscriptStart int `json:"checkpoint_transcript_start,omitempty"`
 }
 
 func CheckpointPath(id string) string {

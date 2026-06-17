@@ -24,14 +24,28 @@ const WildcardQuery = "*"
 // AllReposFilter is the inline repo filter value that disables repo scoping.
 const AllReposFilter = "*"
 
+// Result type constants.
+const (
+	TypeCheckpoint = "checkpoint"
+	TypeCommit     = "commit"
+	TypeSession    = "session"
+)
+
 // MaxLimit is the maximum number of results the search API will return per request.
 const MaxLimit = 200
 
+// DefaultLimit is the default number of results to fetch per request, matching the UI.
+const DefaultLimit = 100
+
 // Meta contains search ranking metadata for a result.
 type Meta struct {
-	MatchType string  `json:"matchType"`
-	Score     float64 `json:"score"`
-	Snippet   string  `json:"snippet,omitempty"`
+	MatchType string   `json:"matchType"`
+	Score     float64  `json:"score"`
+	Tier      *int     `json:"tier,omitempty"`
+	Snippet   string   `json:"snippet,omitempty"`
+	Summary   string   `json:"summary,omitempty"`
+	BM25Score *float64 `json:"bm25Score,omitempty"`
+	ANNScore  *float64 `json:"annScore,omitempty"`
 }
 
 // CheckpointResult represents a checkpoint returned by the search service.
@@ -39,6 +53,7 @@ type CheckpointResult struct {
 	ID             string   `json:"id"`
 	Prompt         string   `json:"prompt"`
 	CommitMessage  *string  `json:"commitMessage"`
+	CommitSubject  *string  `json:"commitSubject"`
 	CommitSHA      *string  `json:"commitSha"`
 	Branch         string   `json:"branch"`
 	Org            string   `json:"org"`
@@ -49,19 +64,304 @@ type CheckpointResult struct {
 	FilesTouched   []string `json:"filesTouched"`
 }
 
+// CommitResult represents a commit returned by the search service.
+type CommitResult struct {
+	ID             string  `json:"id"`
+	CommitSHA      string  `json:"commitSha"`
+	CommitMessage  string  `json:"commitMessage"`
+	CommitSubject  string  `json:"commitSubject"`
+	Branch         string  `json:"branch"`
+	Org            string  `json:"org"`
+	Repo           string  `json:"repo"`
+	Author         string  `json:"author"`
+	AuthorUsername *string `json:"authorUsername"`
+	CreatedAt      string  `json:"createdAt"`
+	Additions      int     `json:"additions"`
+	Deletions      int     `json:"deletions"`
+	FilesChanged   int     `json:"filesChanged"`
+	HTMLUrl        *string `json:"htmlUrl"`
+}
+
+// SessionResult represents a session returned by the search service.
+type SessionResult struct {
+	SessionID      string  `json:"sessionId"`
+	DisplayName    string  `json:"displayName"`
+	Prompt         *string `json:"prompt"`
+	Agent          *string `json:"agent"`
+	Model          *string `json:"model"`
+	StepCount      int     `json:"stepCount"`
+	Org            string  `json:"org"`
+	Repo           string  `json:"repo"`
+	Branch         *string `json:"branch"`
+	AuthorUsername *string `json:"authorUsername"`
+	CreatedAt      string  `json:"createdAt"`
+}
+
 // Result wraps a search result with its type and ranking metadata.
+// Exactly one of Checkpoint, Commit, or Session is non-nil based on Type.
 type Result struct {
-	Type string           `json:"type"`
-	Data CheckpointResult `json:"data"`
-	Meta Meta             `json:"searchMeta"`
+	Type       string            `json:"-"`
+	Meta       Meta              `json:"-"`
+	Checkpoint *CheckpointResult `json:"-"`
+	Commit     *CommitResult     `json:"-"`
+	Session    *SessionResult    `json:"-"`
+
+	// rawData preserves the original JSON for unknown types (repo, pr)
+	rawData json.RawMessage
+}
+
+// resultJSON is the wire format for JSON marshaling/unmarshaling.
+type resultJSON struct {
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
+	Meta Meta            `json:"searchMeta"`
+}
+
+// MarshalJSON implements custom JSON marshaling to produce the API wire format.
+func (r *Result) MarshalJSON() ([]byte, error) {
+	var data any
+	switch r.Type {
+	case TypeCheckpoint:
+		data = r.Checkpoint
+	case TypeCommit:
+		data = r.Commit
+	case TypeSession:
+		data = r.Session
+	default:
+		data = r.rawData
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling result data: %w", err)
+	}
+	out, err := json.Marshal(resultJSON{
+		Type: r.Type,
+		Data: raw,
+		Meta: r.Meta,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling result: %w", err)
+	}
+	return out, nil
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling to parse typed data.
+func (r *Result) UnmarshalJSON(b []byte) error {
+	var raw resultJSON
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return fmt.Errorf("unmarshaling result: %w", err)
+	}
+	r.Type = raw.Type
+	r.Meta = raw.Meta
+	r.rawData = raw.Data
+	// Clear any previously-decoded payloads so a reused Result keeps the
+	// "exactly one typed pointer is non-nil" invariant.
+	r.Checkpoint, r.Commit, r.Session = nil, nil, nil
+
+	switch raw.Type {
+	case TypeCheckpoint:
+		var d CheckpointResult
+		if err := json.Unmarshal(raw.Data, &d); err != nil {
+			return fmt.Errorf("unmarshaling checkpoint data: %w", err)
+		}
+		r.Checkpoint = &d
+	case TypeCommit:
+		var d CommitResult
+		if err := json.Unmarshal(raw.Data, &d); err != nil {
+			return fmt.Errorf("unmarshaling commit data: %w", err)
+		}
+		r.Commit = &d
+	case TypeSession:
+		var d SessionResult
+		if err := json.Unmarshal(raw.Data, &d); err != nil {
+			return fmt.Errorf("unmarshaling session data: %w", err)
+		}
+		r.Session = &d
+	}
+	return nil
+}
+
+// ResultOrg returns the org for any result type.
+func (r *Result) ResultOrg() string {
+	switch r.Type {
+	case TypeCheckpoint:
+		if r.Checkpoint != nil {
+			return r.Checkpoint.Org
+		}
+	case TypeCommit:
+		if r.Commit != nil {
+			return r.Commit.Org
+		}
+	case TypeSession:
+		if r.Session != nil {
+			return r.Session.Org
+		}
+	}
+	return ""
+}
+
+// ResultRepo returns the repo for any result type.
+func (r *Result) ResultRepo() string {
+	switch r.Type {
+	case TypeCheckpoint:
+		if r.Checkpoint != nil {
+			return r.Checkpoint.Repo
+		}
+	case TypeCommit:
+		if r.Commit != nil {
+			return r.Commit.Repo
+		}
+	case TypeSession:
+		if r.Session != nil {
+			return r.Session.Repo
+		}
+	}
+	return ""
+}
+
+// ResultBranch returns the branch for any result type.
+func (r *Result) ResultBranch() string {
+	switch r.Type {
+	case TypeCheckpoint:
+		if r.Checkpoint != nil {
+			return r.Checkpoint.Branch
+		}
+	case TypeCommit:
+		if r.Commit != nil {
+			return r.Commit.Branch
+		}
+	case TypeSession:
+		if r.Session != nil && r.Session.Branch != nil {
+			return *r.Session.Branch
+		}
+	}
+	return ""
+}
+
+// ResultCreatedAt returns the createdAt for any result type.
+func (r *Result) ResultCreatedAt() string {
+	switch r.Type {
+	case TypeCheckpoint:
+		if r.Checkpoint != nil {
+			return r.Checkpoint.CreatedAt
+		}
+	case TypeCommit:
+		if r.Commit != nil {
+			return r.Commit.CreatedAt
+		}
+	case TypeSession:
+		if r.Session != nil {
+			return r.Session.CreatedAt
+		}
+	}
+	return ""
+}
+
+// ResultAuthor returns the display author for any result type.
+func (r *Result) ResultAuthor() string {
+	switch r.Type {
+	case TypeCheckpoint:
+		if r.Checkpoint != nil {
+			if r.Checkpoint.AuthorUsername != nil && *r.Checkpoint.AuthorUsername != "" {
+				return *r.Checkpoint.AuthorUsername
+			}
+			return r.Checkpoint.Author
+		}
+	case TypeCommit:
+		if r.Commit != nil {
+			if r.Commit.AuthorUsername != nil && *r.Commit.AuthorUsername != "" {
+				return *r.Commit.AuthorUsername
+			}
+			return r.Commit.Author
+		}
+	case TypeSession:
+		if r.Session != nil {
+			if r.Session.AuthorUsername != nil {
+				return *r.Session.AuthorUsername
+			}
+		}
+	}
+	return ""
+}
+
+// ResultID returns the primary ID for any result type.
+func (r *Result) ResultID() string {
+	switch r.Type {
+	case TypeCheckpoint:
+		if r.Checkpoint != nil {
+			return r.Checkpoint.ID
+		}
+	case TypeCommit:
+		if r.Commit != nil {
+			return r.Commit.CommitSHA
+		}
+	case TypeSession:
+		if r.Session != nil {
+			return r.Session.SessionID
+		}
+	}
+	return ""
+}
+
+// ResultTitle returns the primary display text for any result type.
+func (r *Result) ResultTitle() string {
+	switch r.Type {
+	case TypeCheckpoint:
+		if r.Checkpoint != nil {
+			// Prefer the commit title over the prompt; fall back to the prompt
+			// for uncommitted checkpoints. The full prompt remains in the detail view.
+			if r.Checkpoint.CommitSubject != nil && *r.Checkpoint.CommitSubject != "" {
+				return *r.Checkpoint.CommitSubject
+			}
+			if r.Checkpoint.CommitMessage != nil && *r.Checkpoint.CommitMessage != "" {
+				return *r.Checkpoint.CommitMessage
+			}
+			return r.Checkpoint.Prompt
+		}
+	case TypeCommit:
+		if r.Commit != nil {
+			if r.Commit.CommitSubject != "" {
+				return r.Commit.CommitSubject
+			}
+			return r.Commit.CommitMessage
+		}
+	case TypeSession:
+		if r.Session != nil {
+			return r.Session.DisplayName
+		}
+	}
+	return ""
+}
+
+// TypeCounts holds per-type result counts.
+type TypeCounts struct {
+	Repos       int `json:"repos"`
+	Checkpoints int `json:"checkpoints"`
+	Commits     int `json:"commits"`
+	PRs         int `json:"prs"`
+	Sessions    int `json:"sessions"`
+}
+
+// Timing holds search performance timing data.
+type Timing struct {
+	TotalMs            *float64 `json:"total_ms"`
+	KeywordMs          *float64 `json:"keyword_ms"`
+	EmbeddingMs        *float64 `json:"embedding_ms"`
+	VectorMs           *float64 `json:"vector_ms"`
+	RerankMs           *float64 `json:"rerank_ms"`
+	FanoutMs           *float64 `json:"fanout_ms"`
+	SessionHydrationMs *float64 `json:"session_hydration_ms"`
 }
 
 // Response is the search service response.
 type Response struct {
-	Results []Result `json:"results"`
-	Total   int      `json:"total"`
-	Page    int      `json:"page"`
-	Error   string   `json:"error,omitempty"`
+	Results  []Result    `json:"results"`
+	Total    int         `json:"total"`
+	Page     int         `json:"page"`
+	Error    string      `json:"error,omitempty"`
+	Timing   *Timing     `json:"timing,omitempty"`
+	Reranked *bool       `json:"reranked,omitempty"`
+	Counts   *TypeCounts `json:"counts,omitempty"`
 }
 
 // Config holds the configuration for a search request.
@@ -71,6 +371,7 @@ type Config struct {
 	Owner       string
 	Repo        string
 	Repos       []string
+	AllRepos    bool // When true, search all accessible repos (no repo scoping)
 	Query       string
 	Limit       int
 	Author      string // Filter by author name
@@ -81,7 +382,7 @@ type Config struct {
 
 // HasFilters reports whether any filter fields are set on the config.
 func (c Config) HasFilters() bool {
-	return c.Author != "" || c.Date != "" || c.Branch != "" || len(c.Repos) > 0
+	return c.Author != "" || c.Date != "" || c.Branch != "" || len(c.Repos) > 0 || c.AllRepos
 }
 
 // ParsedInput holds the parsed query and optional filters extracted from search input.
@@ -244,15 +545,29 @@ func Search(ctx context.Context, cfg Config) (*Response, error) {
 	if err := ValidateRepoFilters(cfg.Repos); err != nil {
 		return nil, err
 	}
-	allRepos := len(cfg.Repos) == 1 && cfg.Repos[0] == AllReposFilter
-	if len(cfg.Repos) > 0 && !allRepos {
-		for _, repo := range cfg.Repos {
-			q.Add("repo", repo)
+	allRepos := cfg.AllRepos || (len(cfg.Repos) == 1 && cfg.Repos[0] == AllReposFilter)
+	hasExplicitRepo := false
+	for _, repo := range cfg.Repos {
+		if repo != AllReposFilter {
+			hasExplicitRepo = true
+			break
 		}
-	} else if len(cfg.Repos) == 0 && cfg.Owner != "" && cfg.Repo != "" {
+	}
+	switch {
+	case hasExplicitRepo:
+		// An explicit owner/name filter always scopes the search, even when
+		// --all-repos is also set (the more specific filter wins).
+		for _, repo := range cfg.Repos {
+			if repo != AllReposFilter {
+				q.Add("repo", repo)
+			}
+		}
+	case allRepos:
+		// No repo scoping — search every accessible repo.
+	case cfg.Owner != "" && cfg.Repo != "":
 		q.Set("repo", cfg.Owner+"/"+cfg.Repo)
 	}
-	q.Set("types", "checkpoints")
+	// Don't set types — let the API return all types (checkpoints, commits, sessions, etc.)
 	if cfg.Limit > 0 {
 		q.Set("limit", strconv.Itoa(cfg.Limit))
 	}

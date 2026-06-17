@@ -442,7 +442,7 @@ func filesWithRemainingAgentChanges(
 	// differs from shadow (distinguishes replacement from partial staging).
 	var worktreeRoot string
 	if wt, wtErr := repo.Worktree(); wtErr == nil {
-		worktreeRoot = wt.Filesystem.Root()
+		worktreeRoot = wt.Filesystem().Root()
 	}
 
 	var remaining []string

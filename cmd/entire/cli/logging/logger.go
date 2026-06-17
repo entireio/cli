@@ -174,25 +174,6 @@ func resetLogger() {
 	}
 }
 
-// getLogger returns the current logger, or a default stderr logger if not initialized.
-func getLogger() *slog.Logger {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	if logger == nil {
-		// Return default stderr logger
-		return slog.Default()
-	}
-	return logger
-}
-
-// getSessionID returns the current session ID (thread-safe).
-func getSessionID() string {
-	mu.RLock()
-	defer mu.RUnlock()
-	return currentSessionID
-}
-
 // createLogger creates a JSON logger writing to the given writer at the specified level.
 func createLogger(w io.Writer, level slog.Level) *slog.Logger {
 	opts := &slog.HandlerOptions{
@@ -273,14 +254,23 @@ func LogDuration(ctx context.Context, level slog.Level, msg string, start time.T
 }
 
 // log is the internal logging function that extracts context values and logs.
+//
+// The read lock is held across l.Log so Init/Close cannot close logBufWriter
+// mid-write; do not shrink the lock scope to a snapshot pattern.
 func log(ctx context.Context, level slog.Level, msg string, attrs ...any) {
-	l := getLogger()
+	mu.RLock()
+	defer mu.RUnlock()
+
+	l := logger
+	if l == nil {
+		l = slog.Default()
+	}
+	globalSessionID := currentSessionID
 
 	// Build attributes slice with session ID first (if set)
 	var allAttrs []any
 
 	// Add session ID from Init() if set (always first for consistency)
-	globalSessionID := getSessionID()
 	if globalSessionID != "" {
 		allAttrs = append(allAttrs, slog.String("session_id", globalSessionID))
 	}

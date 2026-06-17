@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func strPtr(s string) *string { return &s }
+
 // initTestRepo creates a test git repository with an initial commit.
 func initTestRepo(t *testing.T) *git.Repository {
 	t.Helper()
@@ -88,7 +90,7 @@ func TestStore_WriteAndRead(t *testing.T) {
 		Title:     "Test trail",
 		Body:      "A test trail",
 		Status:    StatusDraft,
-		Author:    "tester",
+		Author:    &Author{ID: "1", Login: strPtr("tester")},
 		Assignees: []string{},
 		Labels:    []string{"test"},
 		CreatedAt: now,
@@ -146,7 +148,7 @@ func TestStore_FindByBranch(t *testing.T) {
 			Base:      "main",
 			Title:     HumanizeBranchName(branch),
 			Status:    StatusDraft,
-			Author:    "test",
+			Author:    &Author{ID: "1", Login: strPtr("test")},
 			Assignees: []string{},
 			Labels:    []string{},
 			CreatedAt: now,
@@ -203,7 +205,7 @@ func TestStore_List(t *testing.T) {
 		Base:      "main",
 		Title:     "Test",
 		Status:    StatusDraft,
-		Author:    "test",
+		Author:    &Author{ID: "1", Login: strPtr("test")},
 		Assignees: []string{},
 		Labels:    []string{},
 		CreatedAt: now,
@@ -241,7 +243,7 @@ func TestStore_Update(t *testing.T) {
 		Base:      "main",
 		Title:     "Original",
 		Status:    StatusDraft,
-		Author:    "test",
+		Author:    &Author{ID: "1", Login: strPtr("test")},
 		Assignees: []string{},
 		Labels:    []string{},
 		CreatedAt: now,
@@ -254,7 +256,7 @@ func TestStore_Update(t *testing.T) {
 	// Update
 	if err := store.Update(context.Background(), id, func(m *Metadata) {
 		m.Title = "Updated"
-		m.Status = StatusInProgress
+		m.Status = StatusOpen
 		m.Labels = []string{"urgent"}
 	}); err != nil {
 		t.Fatalf("Update() error = %v", err)
@@ -268,8 +270,8 @@ func TestStore_Update(t *testing.T) {
 	if updated.Title != "Updated" {
 		t.Errorf("Read() title = %q, want %q", updated.Title, "Updated")
 	}
-	if updated.Status != StatusInProgress {
-		t.Errorf("Read() status = %q, want %q", updated.Status, StatusInProgress)
+	if updated.Status != StatusOpen {
+		t.Errorf("Read() status = %q, want %q", updated.Status, StatusOpen)
 	}
 	if len(updated.Labels) != 1 || updated.Labels[0] != "urgent" {
 		t.Errorf("Read() labels = %v, want [urgent]", updated.Labels)
@@ -295,7 +297,7 @@ func TestStore_Delete(t *testing.T) {
 		Base:      "main",
 		Title:     "To delete",
 		Status:    StatusDraft,
-		Author:    "test",
+		Author:    &Author{ID: "1", Login: strPtr("test")},
 		Assignees: []string{},
 		Labels:    []string{},
 		CreatedAt: now,
@@ -385,8 +387,8 @@ func TestStore_AddCheckpointPreservesOtherFields(t *testing.T) {
 		Base:      "main",
 		Title:     "Preservation test",
 		Body:      "Verify AddCheckpoint doesn't corrupt other fields",
-		Status:    StatusInProgress,
-		Author:    "tester",
+		Status:    StatusOpen,
+		Author:    &Author{ID: "1", Login: strPtr("tester")},
 		Assignees: []string{"alice"},
 		Labels:    []string{"important"},
 		CreatedAt: now,
@@ -425,8 +427,8 @@ func TestStore_AddCheckpointPreservesOtherFields(t *testing.T) {
 	if gotMeta.Body != "Verify AddCheckpoint doesn't corrupt other fields" {
 		t.Errorf("metadata body changed: got %q", gotMeta.Body)
 	}
-	if gotMeta.Status != StatusInProgress {
-		t.Errorf("metadata status changed: got %q, want %q", gotMeta.Status, StatusInProgress)
+	if gotMeta.Status != StatusOpen {
+		t.Errorf("metadata status changed: got %q, want %q", gotMeta.Status, StatusOpen)
 	}
 	if len(gotMeta.Assignees) != 1 || gotMeta.Assignees[0] != "alice" {
 		t.Errorf("metadata assignees changed: got %v", gotMeta.Assignees)

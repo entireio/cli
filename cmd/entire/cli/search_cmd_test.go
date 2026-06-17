@@ -69,7 +69,7 @@ func TestWriteSearchJSON_ZeroLimitFallsBackToDefaultPageSize(t *testing.T) {
 	}
 
 	output := buf.String()
-	if !strings.Contains(output, `"limit": 25`) {
+	if !strings.Contains(output, `"limit": 10`) {
 		t.Fatalf("output missing default limit fallback:\n%s", output)
 	}
 	if !strings.Contains(output, `"total_pages": 1`) {

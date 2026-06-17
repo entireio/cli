@@ -2,6 +2,7 @@ package summarize
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -70,8 +71,8 @@ func TestClaudeGenerator_TextGeneratorError(t *testing.T) {
 		t.Fatal("expected error")
 	}
 
-	if !strings.Contains(err.Error(), "failed to generate summary text") {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected DeadlineExceeded, got: %v", err)
 	}
 }
 

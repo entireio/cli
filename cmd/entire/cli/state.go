@@ -225,6 +225,31 @@ type FileChanges struct {
 	Deleted  []string // Deleted files (staged or unstaged)
 }
 
+// shouldIgnoreSessionTrackingPath returns true for repo files that belong to
+// Entire or the agent integration itself rather than user work.
+func shouldIgnoreSessionTrackingPath(relPath string) bool {
+	cleanPath := filepath.Clean(filepath.FromSlash(relPath))
+	if paths.IsInfrastructurePath(cleanPath) {
+		return true
+	}
+
+	for _, file := range agent.AllProtectedFiles() {
+		cleanFile := filepath.Clean(filepath.FromSlash(file))
+		if cleanPath == cleanFile {
+			return true
+		}
+	}
+
+	for _, dir := range agent.AllProtectedDirs() {
+		cleanDir := filepath.Clean(filepath.FromSlash(dir))
+		if paths.IsSubpath(cleanDir, cleanPath) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // DetectFileChanges returns categorized file changes from the current git status.
 //
 // previouslyUntracked controls new-file detection:
@@ -239,6 +264,7 @@ func DetectFileChanges(ctx context.Context, previouslyUntracked []string) (*File
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -261,7 +287,7 @@ func DetectFileChanges(ctx context.Context, previouslyUntracked []string) (*File
 
 	var changes FileChanges
 	for file, st := range status {
-		if paths.IsInfrastructurePath(file) {
+		if shouldIgnoreSessionTrackingPath(file) {
 			continue
 		}
 
@@ -299,6 +325,7 @@ func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot stri
 	if err != nil {
 		return files // fail open
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
@@ -363,8 +390,8 @@ func FilterAndNormalizePaths(files []string, cwd string) []string {
 		if relPath == "" {
 			continue // outside repo
 		}
-		if paths.IsInfrastructurePath(relPath) {
-			continue // skip .entire directory
+		if shouldIgnoreSessionTrackingPath(relPath) {
+			continue
 		}
 		result = append(result, filepath.ToSlash(relPath))
 	}
@@ -406,6 +433,7 @@ func getUntrackedFilesForState(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -420,8 +448,7 @@ func getUntrackedFilesForState(ctx context.Context) ([]string, error) {
 	untrackedFiles := []string{}
 	for file, st := range status {
 		if st.Worktree == git.Untracked {
-			// Exclude .entire directory
-			if !paths.IsInfrastructurePath(file) {
+			if !shouldIgnoreSessionTrackingPath(file) {
 				untrackedFiles = append(untrackedFiles, file)
 			}
 		}
@@ -611,6 +638,13 @@ func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found boo
 // It counts existing checkpoint files in the task metadata checkpoints directory.
 // Returns 1 if no checkpoints exist yet.
 func GetNextCheckpointSequence(sessionID, taskToolUseID string) int {
+	// sessionID/taskToolUseID arrive from agent hook input and are used as path
+	// components below. Reject unsafe values so a crafted "../.." cannot redirect
+	// the os.ReadDir to an arbitrary directory; an invalid ID just starts at 1.
+	if validation.ValidateSessionID(sessionID) != nil || validation.ValidateToolUseID(taskToolUseID) != nil {
+		return 1
+	}
+
 	// Use the session ID directly as the metadata directory name
 	sessionMetadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
 	taskMetadataDir := strategy.TaskMetadataDir(sessionMetadataDir, taskToolUseID)

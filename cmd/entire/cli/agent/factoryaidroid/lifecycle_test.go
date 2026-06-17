@@ -180,7 +180,13 @@ func TestParseHookEvent_SubagentEnd(t *testing.T) {
 }
 
 func TestParseHookEvent_SubagentStart_MissingToolUseID(t *testing.T) {
-	t.Parallel()
+	repoDir := t.TempDir()
+	if _, err := git.PlainInit(repoDir, false); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	t.Chdir(repoDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
 
 	ag := &FactoryAIDroidAgent{}
 	input := `{"session_id": "sess-4", "transcript_path": "/tmp/t.jsonl", "tool_name": "Task", "tool_input": {"prompt": "do something"}}`
