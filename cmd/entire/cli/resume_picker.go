@@ -73,7 +73,8 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Resume a session").
-				Description("Checks out the branch and prints the command to continue the agent").
+				Description("Checks out the branch and prints the command to continue the agent.\n" +
+					"Lists sessions from this machine — to resume a branch from origin, run: entire resume <branch>").
 				Options(options...).
 				Value(&selected),
 		),
