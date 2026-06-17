@@ -27,7 +27,12 @@ verbs. The groups are the canonical home for each verb; legacy top-level
 shortcuts remain functional but hidden, and emit a deprecation hint pointing
 at the canonical group form.
 
-- `session` (alias: `sessions`): `list`, `info`, `stop`, `attach`, `resume`, `current`
+- `session` (alias: `sessions`): `list`, `info`, `stop`, `attach`, `resume`, `current`.
+  `resume` with a branch arg switches to it and resumes its session; with no arg
+  it opens an interactive picker of stopped sessions (across all worktrees),
+  resolving each to its branch and pointing at the owning worktree when the
+  branch is checked out elsewhere. Resume keeps an existing local session log
+  as-is by default (`--force` overwrites it from the checkpoint).
 - `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `search`, plus
   the deprecated `rewind` (functional, prints a cobra deprecation message, will
   be removed in a future release)

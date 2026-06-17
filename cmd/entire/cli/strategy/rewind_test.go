@@ -251,6 +251,61 @@ func TestRestoreLogsOnly_UsesV11Transcript(t *testing.T) {
 	require.Equal(t, string(v11Transcript), string(got))
 }
 
+// TestRestoreLogsOnly_KeepsExistingLocalLog verifies the default (non-force)
+// behavior: a session log already present on disk is kept untouched and still
+// reported so the caller prints its resume command. --force overwrites it.
+func TestRestoreLogsOnly_KeepsExistingLocalLog(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { repo.Close() })
+
+	agentName := types.AgentName("keep-existing-agent")
+	agentType := types.AgentType("Keep Existing Agent")
+	sessionDir := filepath.Join(dir, "keep-existing-sessions")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o750))
+	agent.Register(agentName, func() agent.Agent {
+		return &restoreLogsOnlyAgent{name: agentName, agentType: agentType, sessionDir: sessionDir}
+	})
+
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("abc111abc111")
+	sessionID := "keep-existing-session"
+
+	checkpointTranscript := []byte(`{"type":"user","timestamp":"2025-01-02T10:00:00Z","message":{"content":[{"type":"text","text":"from checkpoint"}]}}` + "\n")
+	writeCommittedRewindCheckpoint(t, repo, cpID, sessionID, agentType, checkpointTranscript, time.Date(2025, 1, 2, 10, 0, 0, 0, time.UTC))
+
+	// Pre-existing local log with a (different) timestamped entry.
+	localPath := filepath.Join(sessionDir, sessionID+".jsonl")
+	existingLocal := []byte(`{"type":"user","timestamp":"2025-06-01T10:00:00Z","message":{"content":[{"type":"text","text":"live local"}]}}` + "\n")
+	require.NoError(t, os.WriteFile(localPath, existingLocal, 0o600))
+
+	point := RewindPoint{IsLogsOnly: true, CheckpointID: cpID}
+
+	// Non-force: keep the existing local log, but still report the session.
+	var stdout, stderr bytes.Buffer
+	restored, err := NewManualCommitStrategy().RestoreLogsOnly(ctx, &stdout, &stderr, point, false)
+	require.NoError(t, err, "stderr: %s", stderr.String())
+	require.Len(t, restored, 1, "stdout: %s", stdout.String())
+	require.Contains(t, stdout.String(), "Keeping existing")
+
+	got, err := os.ReadFile(localPath)
+	require.NoError(t, err)
+	require.Equal(t, string(existingLocal), string(got), "non-force restore must not overwrite an existing local log")
+
+	// Force: overwrite from the checkpoint.
+	restored, err = NewManualCommitStrategy().RestoreLogsOnly(ctx, io.Discard, io.Discard, point, true)
+	require.NoError(t, err)
+	require.Len(t, restored, 1)
+
+	got, err = os.ReadFile(localPath)
+	require.NoError(t, err)
+	require.Equal(t, string(checkpointTranscript), string(got), "force restore must overwrite from the checkpoint")
+}
+
 func TestResolveAgentForRewind(t *testing.T) {
 	t.Parallel()
 

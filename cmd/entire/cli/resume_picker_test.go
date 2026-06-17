@@ -1,0 +1,294 @@
+package cli
+
+import (
+	"context"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
+
+	"github.com/go-git/go-git/v6"
+)
+
+func ptrTime(t time.Time) *time.Time { return &t }
+
+func TestFilterResumableSessions(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	running := &strategy.SessionState{SessionID: "running", Phase: session.PhaseActive, StartedAt: base, LastInteractionTime: ptrTime(base.Add(5 * time.Hour))}
+	idle := &strategy.SessionState{SessionID: "idle", Phase: session.PhaseIdle, StartedAt: base, LastInteractionTime: ptrTime(base.Add(2 * time.Hour))}
+	endedByPhase := &strategy.SessionState{SessionID: "ended-phase", Phase: session.PhaseEnded, StartedAt: base, EndedAt: ptrTime(base.Add(1 * time.Hour))}
+	endedByTime := &strategy.SessionState{SessionID: "ended-time", Phase: session.PhaseIdle, StartedAt: base, EndedAt: ptrTime(base.Add(3 * time.Hour))}
+
+	got := filterResumableSessions([]*strategy.SessionState{nil, running, idle, endedByPhase, endedByTime})
+
+	// Everything except the currently-active session is resumable (idle included).
+	if len(got) != 3 {
+		t.Fatalf("expected 3 resumable sessions, got %d", len(got))
+	}
+	for _, s := range got {
+		if s.Phase == session.PhaseActive {
+			t.Fatal("active session should be excluded")
+		}
+	}
+	// Sorted most-recently-active first: ended-time (t+3h), idle (t+2h), ended-phase (t+1h).
+	if got[0].SessionID != "ended-time" || got[1].SessionID != "idle" || got[2].SessionID != "ended-phase" {
+		t.Fatalf("unexpected order: %s, %s, %s", got[0].SessionID, got[1].SessionID, got[2].SessionID)
+	}
+}
+
+func TestSessionLastActiveTime(t *testing.T) {
+	t.Parallel()
+
+	started := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	interacted := started.Add(time.Hour)
+	ended := started.Add(2 * time.Hour)
+
+	if got := sessionLastActiveTime(&strategy.SessionState{StartedAt: started}); !got.Equal(started) {
+		t.Errorf("started-only: got %v want %v", got, started)
+	}
+	if got := sessionLastActiveTime(&strategy.SessionState{StartedAt: started, LastInteractionTime: &interacted}); !got.Equal(interacted) {
+		t.Errorf("interaction: got %v want %v", got, interacted)
+	}
+	if got := sessionLastActiveTime(&strategy.SessionState{StartedAt: started, LastInteractionTime: &interacted, EndedAt: &ended}); !got.Equal(ended) {
+		t.Errorf("ended: got %v want %v", got, ended)
+	}
+}
+
+func TestResumeOptionLabel(t *testing.T) {
+	t.Parallel()
+
+	s := &strategy.SessionState{
+		SessionID:  "s1",
+		AgentType:  "Claude Code",
+		LastPrompt: "fix   the\nthing",
+		StartedAt:  time.Now().Add(-2 * time.Hour),
+	}
+
+	selectable := resumeOptionLabel(resumableSession{state: s, branch: "experiment"})
+	if !strings.HasPrefix(selectable, "experiment · ") {
+		t.Errorf("selectable label should start with branch, got %q", selectable)
+	}
+	if !strings.Contains(selectable, "Claude Code") {
+		t.Errorf("selectable label should name the agent, got %q", selectable)
+	}
+	// Whitespace in the prompt is collapsed.
+	if !strings.Contains(selectable, "fix the thing") {
+		t.Errorf("prompt whitespace should be collapsed, got %q", selectable)
+	}
+
+	unresolvable := resumeOptionLabel(resumableSession{state: s, branch: ""})
+	if !strings.Contains(unresolvable, "can't resume") {
+		t.Errorf("unresolvable label should say it can't resume, got %q", unresolvable)
+	}
+}
+
+func TestResumeOptionLabel_EmptyFields(t *testing.T) {
+	t.Parallel()
+
+	label := resumeOptionLabel(resumableSession{
+		state:  &strategy.SessionState{SessionID: "s1", StartedAt: time.Now()},
+		branch: "b",
+	})
+	if !strings.Contains(label, "(unknown agent)") {
+		t.Errorf("missing agent should render placeholder, got %q", label)
+	}
+	if !strings.Contains(label, "(no prompt recorded)") {
+		t.Errorf("missing prompt should render placeholder, got %q", label)
+	}
+}
+
+func TestBuildResumeOptions(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	items := []resumableSession{
+		{state: &strategy.SessionState{SessionID: "a", StartedAt: now}, branch: "feat-a"},
+		{state: &strategy.SessionState{SessionID: "b", StartedAt: now}, branch: ""},
+	}
+
+	options, hasSelectable := buildResumeOptions(items)
+	if !hasSelectable {
+		t.Fatal("expected at least one selectable option")
+	}
+	// One option per item plus Cancel.
+	if len(options) != len(items)+1 {
+		t.Fatalf("expected %d options, got %d", len(items)+1, len(options))
+	}
+	// Per-item options are keyed by index; the last is Cancel.
+	if options[0].Value != strconv.Itoa(0) || options[1].Value != strconv.Itoa(1) {
+		t.Errorf("options should be keyed by index, got %q, %q", options[0].Value, options[1].Value)
+	}
+	if options[len(options)-1].Value != resumePickerCancel {
+		t.Errorf("last option should be Cancel, got %q", options[len(options)-1].Value)
+	}
+}
+
+func TestBuildResumeOptions_NoneSelectable(t *testing.T) {
+	t.Parallel()
+
+	items := []resumableSession{
+		{state: &strategy.SessionState{SessionID: "a", StartedAt: time.Now()}, branch: ""},
+	}
+	_, hasSelectable := buildResumeOptions(items)
+	if hasSelectable {
+		t.Error("expected no selectable options when every branch is empty")
+	}
+}
+
+// TestResolveSessionBranch_Derived covers the fallback that maps a session to a
+// branch via its last checkpoint ID found in that branch's commit trailers.
+func TestResolveSessionBranch_Derived(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "base.txt", "base")
+	testutil.GitAdd(t, tmpDir, "base.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+
+	testutil.GitCheckoutNewBranch(t, tmpDir, "experiment")
+	cpID, err := id.Generate()
+	if err != nil {
+		t.Fatalf("generate checkpoint id: %v", err)
+	}
+	testutil.WriteFile(t, tmpDir, "work.txt", "work")
+	testutil.GitAdd(t, tmpDir, "work.txt")
+	testutil.GitCommit(t, tmpDir, "do work\n\nEntire-Checkpoint: "+cpID.String())
+
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("open repo: %v", err)
+	}
+	defer repo.Close()
+
+	const experimentBranch = "experiment"
+
+	index := buildCheckpointBranchIndex(repo)
+	if got := index[cpID.String()]; got != experimentBranch {
+		t.Fatalf("checkpoint should index to 'experiment', got %q (index=%v)", got, index)
+	}
+
+	// No stored branch → resolves via checkpoint index.
+	derived := &strategy.SessionState{SessionID: "s", LastCheckpointID: cpID}
+	if got := resolveSessionBranch(repo, derived, index); got != experimentBranch {
+		t.Errorf("derived branch: got %q want experiment", got)
+	}
+
+	// Stored branch that exists wins without needing the index.
+	stored := &strategy.SessionState{SessionID: "s2", Branch: experimentBranch}
+	if got := resolveSessionBranch(repo, stored, map[string]string{}); got != experimentBranch {
+		t.Errorf("stored branch: got %q want experiment", got)
+	}
+
+	// Stored branch that no longer exists and no checkpoint match → unresolvable.
+	gone := &strategy.SessionState{SessionID: "s3", Branch: "deleted-branch"}
+	if got := resolveSessionBranch(repo, gone, map[string]string{}); got != "" {
+		t.Errorf("missing branch should be unresolvable, got %q", got)
+	}
+}
+
+// TestBuildCheckpointBranchIndex_SkipsInternalRefs verifies that Entire's own
+// internal refs (entire/checkpoints/*, shadow branches) are never indexed, so a
+// session can't be mis-resolved to a non-resumable internal branch.
+func TestBuildCheckpointBranchIndex_SkipsInternalRefs(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "base.txt", "base")
+	testutil.GitAdd(t, tmpDir, "base.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+
+	// A real user branch carrying a checkpoint trailer.
+	testutil.GitCheckoutNewBranch(t, tmpDir, "user-branch")
+	userCp, err := id.Generate()
+	if err != nil {
+		t.Fatalf("generate checkpoint id: %v", err)
+	}
+	testutil.WriteFile(t, tmpDir, "u.txt", "u")
+	testutil.GitAdd(t, tmpDir, "u.txt")
+	testutil.GitCommit(t, tmpDir, "user work\n\nEntire-Checkpoint: "+userCp.String())
+
+	// An internal entire/ branch that also carries a checkpoint trailer.
+	testutil.GitCheckoutNewBranch(t, tmpDir, "entire/deadbeef-abc123")
+	internalCp, err := id.Generate()
+	if err != nil {
+		t.Fatalf("generate checkpoint id: %v", err)
+	}
+	testutil.WriteFile(t, tmpDir, "i.txt", "i")
+	testutil.GitAdd(t, tmpDir, "i.txt")
+	testutil.GitCommit(t, tmpDir, "internal\n\nEntire-Checkpoint: "+internalCp.String())
+
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("open repo: %v", err)
+	}
+	defer repo.Close()
+
+	index := buildCheckpointBranchIndex(repo)
+	if got := index[userCp.String()]; got != "user-branch" {
+		t.Errorf("user checkpoint should index to 'user-branch', got %q", got)
+	}
+	if got, ok := index[internalCp.String()]; ok {
+		t.Errorf("internal entire/ branch checkpoint should not be indexed, got %q", got)
+	}
+}
+
+// TestBranchCheckedOutElsewhere verifies worktree awareness: a branch checked
+// out in another worktree is detected (with its path), while the current
+// worktree's own branch and unknown branches are not flagged.
+func TestBranchCheckedOutElsewhere(t *testing.T) {
+	// Mutates process cwd via t.Chdir — cannot run in parallel.
+	mainDir := t.TempDir()
+	testutil.InitRepo(t, mainDir)
+	testutil.WriteFile(t, mainDir, "base.txt", "base")
+	testutil.GitAdd(t, mainDir, "base.txt")
+	testutil.GitCommit(t, mainDir, "init")
+
+	mainRepo, err := git.PlainOpen(mainDir)
+	if err != nil {
+		t.Fatalf("open repo: %v", err)
+	}
+	head, err := mainRepo.Head()
+	_ = mainRepo.Close()
+	if err != nil {
+		t.Fatalf("resolve HEAD: %v", err)
+	}
+	currentBranch := head.Name().Short()
+
+	// Create a branch and check it out in a second worktree.
+	const sharedBranch = "shared-wt-branch"
+	testutil.CreateBranch(t, mainDir, sharedBranch)
+	wtDir := filepath.Join(t.TempDir(), "wt")
+	runGit(t, mainDir, "worktree", "add", wtDir, sharedBranch)
+
+	t.Chdir(mainDir)
+	ctx := context.Background()
+
+	// The branch checked out in the other worktree is detected, with its path.
+	gotPath, ok := branchCheckedOutElsewhere(ctx, sharedBranch)
+	if !ok {
+		t.Fatalf("expected %q to be detected as checked out elsewhere", sharedBranch)
+	}
+	if normalizeWorktreePath(gotPath) != normalizeWorktreePath(wtDir) {
+		t.Errorf("worktree path: got %q, want %q", gotPath, wtDir)
+	}
+
+	// The current worktree's own branch is NOT "elsewhere".
+	if _, ok := branchCheckedOutElsewhere(ctx, currentBranch); ok {
+		t.Errorf("current worktree's branch %q should not be reported as elsewhere", currentBranch)
+	}
+
+	// An unknown branch is not flagged.
+	if _, ok := branchCheckedOutElsewhere(ctx, "no-such-branch"); ok {
+		t.Error("unknown branch should not be reported as checked out elsewhere")
+	}
+}

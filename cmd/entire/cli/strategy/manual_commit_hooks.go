@@ -2295,6 +2295,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		if transcriptPath != "" && state.TranscriptPath != transcriptPath {
 			state.TranscriptPath = transcriptPath
 		}
+		captureSessionBranch(repo, state)
 
 		// ORDERING: attribution runs BEFORE migrate to use the pre-migration
 		// BaseCommit as the base tree (preserving correct agent-line counts
@@ -2338,6 +2339,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		}
 		promptAttr := s.calculatePromptAttributionAtStart(ctx, repo, state)
 		state.PendingPromptAttribution = &promptAttr
+		captureSessionBranch(repo, state)
 		return nil
 	})
 	if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
@@ -2347,6 +2349,20 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 	logging.Info(logging.WithComponent(ctx, "hooks"), "initialized shadow session",
 		slog.String("session_id", sessionID))
 	return nil
+}
+
+// captureSessionBranch records the branch HEAD currently points at into the
+// session state so `entire resume` can map a stopped session back to its branch.
+// It is a no-op when HEAD is detached or cannot be read — the branch field is
+// best-effort and resume derives it from commit trailers when absent.
+func captureSessionBranch(repo *git.Repository, state *SessionState) {
+	headRef, err := repo.Head()
+	if err != nil {
+		return
+	}
+	if headRef.Name().IsBranch() {
+		state.Branch = headRef.Name().Short()
+	}
 }
 
 // calculatePromptAttributionAtStart calculates attribution at prompt start (before agent runs).

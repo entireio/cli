@@ -260,22 +260,19 @@ func TestResume_SessionLogAlreadyExists(t *testing.T) {
 		t.Fatalf("resume failed: %v\nOutput: %s", err, output)
 	}
 
-	// Existing log SHOULD be overwritten with checkpoint's transcript
+	// Existing log SHOULD be kept as-is (a present log is never overwritten
+	// without --force, even when it has no parseable timestamp).
 	data, err := os.ReadFile(existingLog)
 	if err != nil {
 		t.Fatalf("failed to read log: %v", err)
 	}
-	if string(data) == existingContent {
-		t.Errorf("existing log should have been overwritten with checkpoint content, but still has: %s", string(data))
-	}
-	// Should contain the actual transcript content (user message)
-	if !strings.Contains(string(data), "Create hello method") {
-		t.Errorf("restored log should contain session transcript, got: %s", string(data))
+	if string(data) != existingContent {
+		t.Errorf("existing log should have been kept, but content changed to: %s", string(data))
 	}
 
-	// Output SHOULD indicate the session was restored (wording varies by code path)
-	if !strings.Contains(output, "Session restored") && !strings.Contains(output, "Writing transcript to") {
-		t.Errorf("output should indicate session restoration, got: %s", output)
+	// Output SHOULD indicate the existing log was kept.
+	if !strings.Contains(output, "Keeping existing") {
+		t.Errorf("output should indicate the existing log was kept, got: %s", output)
 	}
 }
 
@@ -577,7 +574,11 @@ func (env *TestEnv) GitCheckoutBranch(branchName string) {
 // TestResume_LocalLogNewerTimestamp_RequiresForce tests that when local log has newer
 // timestamps than the checkpoint, the command fails in non-interactive mode (no TTY)
 // and does NOT overwrite the local log. This ensures safe behavior in CI environments.
-func TestResume_LocalLogNewerTimestamp_RequiresForce(t *testing.T) {
+// TestResume_ExistingLocalLog_KeptByDefault verifies that resuming without
+// --force never overwrites a session log that already exists locally: the
+// on-disk transcript is the live session, so it's kept and the resume command
+// is printed. This holds regardless of timestamps (here the local log is newer).
+func TestResume_ExistingLocalLog_KeptByDefault(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 
@@ -618,14 +619,16 @@ func TestResume_LocalLogNewerTimestamp_RequiresForce(t *testing.T) {
 	// Switch to main
 	env.GitCheckoutBranch(masterBranch)
 
-	// Resume WITHOUT --force in non-interactive mode (no TTY due to Setsid)
-	// Should fail because it can't prompt for confirmation
+	// Resume WITHOUT --force: succeeds and keeps the existing local log.
 	output, err := env.RunResume(featureBranch)
-	if err == nil {
-		t.Errorf("expected error when resuming without --force in non-interactive mode, got success.\nOutput: %s", output)
+	if err != nil {
+		t.Fatalf("resume should succeed and keep the existing log: %v\nOutput: %s", err, output)
+	}
+	if !strings.Contains(output, "Keeping existing") {
+		t.Errorf("output should indicate the existing log was kept, got: %s", output)
 	}
 
-	// Verify local log was NOT overwritten (safe behavior)
+	// Verify local log was NOT overwritten (kept as-is).
 	data, err := os.ReadFile(existingLog)
 	if err != nil {
 		t.Fatalf("failed to read log: %v", err)
@@ -698,9 +701,11 @@ func TestResume_LocalLogNewerTimestamp_ForceOverwrites(t *testing.T) {
 	}
 }
 
-// TestResume_CheckpointNewerTimestamp tests that when checkpoint has newer timestamps
-// than local log, resume proceeds without requiring --force.
-func TestResume_CheckpointNewerTimestamp(t *testing.T) {
+// TestResume_ExistingLocalLog_KeptEvenWhenCheckpointNewer verifies that an
+// existing local log is kept without --force even when the checkpoint transcript
+// is newer than the local copy. "There is a local log" is what matters, not which
+// side is newer; --force is the only way to overwrite it.
+func TestResume_ExistingLocalLog_KeptEvenWhenCheckpointNewer(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 
@@ -741,22 +746,22 @@ func TestResume_CheckpointNewerTimestamp(t *testing.T) {
 	// Switch to main
 	env.GitCheckoutBranch(masterBranch)
 
-	// Resume WITHOUT --force should succeed because checkpoint is newer (no conflict)
+	// Resume WITHOUT --force should succeed and keep the existing local log.
 	output, err := env.RunResume(featureBranch)
 	if err != nil {
-		t.Fatalf("resume failed (should succeed when checkpoint is newer): %v\nOutput: %s", err, output)
+		t.Fatalf("resume failed (should succeed and keep existing log): %v\nOutput: %s", err, output)
+	}
+	if !strings.Contains(output, "Keeping existing") {
+		t.Errorf("output should indicate the existing log was kept, got: %s", output)
 	}
 
-	// Verify local log was overwritten with checkpoint content
+	// Verify local log was NOT overwritten (kept as-is, even though checkpoint is newer).
 	data, err := os.ReadFile(existingLog)
 	if err != nil {
 		t.Fatalf("failed to read log: %v", err)
 	}
-	if strings.Contains(string(data), "older local work") {
-		t.Errorf("local log should have been overwritten, but still has older content: %s", string(data))
-	}
-	if !strings.Contains(string(data), "Create hello method") {
-		t.Errorf("restored log should contain checkpoint transcript, got: %s", string(data))
+	if !strings.Contains(string(data), "older local work") {
+		t.Errorf("local log should have been kept without --force, but content changed to: %s", string(data))
 	}
 }
 
@@ -867,8 +872,9 @@ func TestResume_MultiSessionMixedTimestamps(t *testing.T) {
 	}
 }
 
-// TestResume_LocalLogNoTimestamp tests that when local log has no valid timestamp,
-// resume proceeds without requiring --force (treated as new).
+// TestResume_LocalLogNoTimestamp tests that a present local log with no parseable
+// timestamp is still kept (not overwritten) without --force: file existence, not
+// timestamp parseability, decides whether a log is preserved.
 func TestResume_LocalLogNoTimestamp(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
@@ -900,7 +906,7 @@ func TestResume_LocalLogNoTimestamp(t *testing.T) {
 		t.Fatalf("failed to create Claude project dir: %v", err)
 	}
 	existingLog := filepath.Join(env.ClaudeProjectDir, session.ID+".jsonl")
-	// Content without timestamp field - should be treated as "new"
+	// Content without timestamp field — the file still exists, so it's kept.
 	noTimestampContent := `{"type":"human","message":{"content":"no timestamp"}}`
 	if err := os.WriteFile(existingLog, []byte(noTimestampContent), 0o644); err != nil {
 		t.Fatalf("failed to write existing log: %v", err)
@@ -909,22 +915,22 @@ func TestResume_LocalLogNoTimestamp(t *testing.T) {
 	// Switch to main
 	env.GitCheckoutBranch(masterBranch)
 
-	// Resume WITHOUT --force should succeed (no timestamp = treated as new)
+	// Resume WITHOUT --force should succeed and keep the existing log.
 	output, err := env.RunResume(featureBranch)
 	if err != nil {
-		t.Fatalf("resume failed (should succeed when local has no timestamp): %v\nOutput: %s", err, output)
+		t.Fatalf("resume failed (should succeed and keep existing log): %v\nOutput: %s", err, output)
+	}
+	if !strings.Contains(output, "Keeping existing") {
+		t.Errorf("output should indicate the existing log was kept, got: %s", output)
 	}
 
-	// Verify local log was overwritten with checkpoint content
+	// Verify local log was kept as-is (present file is never overwritten without --force).
 	data, err := os.ReadFile(existingLog)
 	if err != nil {
 		t.Fatalf("failed to read log: %v", err)
 	}
-	if strings.Contains(string(data), "no timestamp") {
-		t.Errorf("local log should have been overwritten, but still has old content: %s", string(data))
-	}
-	if !strings.Contains(string(data), "Create hello method") {
-		t.Errorf("restored log should contain checkpoint transcript, got: %s", string(data))
+	if !strings.Contains(string(data), "no timestamp") {
+		t.Errorf("local log should have been kept, but content changed to: %s", string(data))
 	}
 }
 

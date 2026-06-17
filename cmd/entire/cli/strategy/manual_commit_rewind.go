@@ -654,24 +654,16 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 		return nil, fmt.Errorf("failed to get worktree root: %w", err)
 	}
 
-	// Check for newer local logs if not forcing
+	// By default (no --force), never overwrite a session log that already exists
+	// locally: the on-disk transcript is the live session being resumed, so we
+	// keep it and only restore logs that are missing. The write loop below skips
+	// any session whose ID is in skipExisting but still reports it so the caller
+	// prints its resume command. --force overwrites everything from the checkpoint.
+	skipExisting := map[string]bool{}
 	if !force {
-		sessions := s.classifySessionsForRestore(ctx, repoRoot, store, point.CheckpointID, summary)
-		hasConflicts := false
-		for _, sess := range sessions {
-			if sess.Status == StatusLocalNewer {
-				hasConflicts = true
-				break
-			}
-		}
-		if hasConflicts {
-			shouldOverwrite, promptErr := PromptOverwriteNewerLogs(errW, sessions)
-			if promptErr != nil {
-				return nil, promptErr
-			}
-			if !shouldOverwrite {
-				fmt.Fprintf(w, "Resume cancelled. Local session logs preserved.\n")
-				return nil, nil
+		for _, sess := range s.classifySessionsForRestore(ctx, repoRoot, store, point.CheckpointID, summary) {
+			if sess.Status != StatusNew {
+				skipExisting[sess.SessionID] = true
 			}
 		}
 	}
@@ -739,6 +731,23 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 
 		// Get first prompt for display
 		promptPreview := ExtractFirstPrompt(content.Prompts)
+
+		// Local log already present and not forcing: keep it untouched, but still
+		// report the session so the caller can print its resume command.
+		if skipExisting[sessionID] {
+			if totalSessions > 1 {
+				fmt.Fprintf(w, "  Session %d: keeping existing local log\n", i+1)
+			} else {
+				fmt.Fprintf(w, "Keeping existing local session log\n")
+			}
+			restored = append(restored, RestoredSession{
+				SessionID: sessionID,
+				Agent:     sessionAgent.Type(),
+				Prompt:    promptPreview,
+				CreatedAt: content.Metadata.CreatedAt,
+			})
+			continue
+		}
 
 		if totalSessions > 1 {
 			isLatest := i == totalSessions-1
@@ -883,6 +892,14 @@ func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, r
 		localTime := paths.GetLastTimestampFromFile(localPath)
 		checkpointTime := paths.GetLastTimestampFromBytes(content.Transcript)
 		status := ClassifyTimestamps(localTime, checkpointTime)
+		// ClassifyTimestamps reports StatusNew when the local file has no parseable
+		// timestamp — but a present-but-untimestamped log still exists and must not
+		// be silently overwritten. Only a truly-absent file counts as new.
+		if status == StatusNew {
+			if _, statErr := os.Stat(localPath); statErr == nil {
+				status = StatusUnchanged
+			}
+		}
 
 		sessions = append(sessions, SessionRestoreInfo{
 			SessionID:      sessionID,

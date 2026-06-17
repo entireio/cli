@@ -106,6 +106,14 @@ type State struct {
 	// Derived from .git/worktrees/<name>/, stable across git worktree move
 	WorktreeID string `json:"worktree_id,omitempty"`
 
+	// Branch is the git branch HEAD pointed at the last time this session took a
+	// turn. Captured on each turn start so it tracks branches created or renamed
+	// after the session began. Empty when HEAD was detached or for sessions
+	// recorded before this field existed (callers derive it from commit trailers
+	// as a fallback). Lets `entire resume` map a stopped session back to its
+	// branch without the user remembering it.
+	Branch string `json:"branch,omitempty"`
+
 	// StartedAt is when the session was started
 	StartedAt time.Time `json:"started_at"`
 

@@ -158,6 +158,13 @@ Location: `.git/entire-sessions/<session-id>.json`
 
 Stored in git common dir (shared across worktrees). Tracks active session info.
 
+The state records `Branch` — the branch HEAD pointed at on the session's last turn
+(captured each turn start, so it follows branches created/renamed after the
+session began). `entire resume` (bare, no arg) uses it to list stopped sessions
+and map each back to its branch; for sessions recorded before the field existed
+it falls back to deriving the branch from the session's last checkpoint ID found
+in branch-only commit trailers.
+
 ### Temporary Checkpoints
 
 Branch: `entire/<commit[:7]>-<worktreeHash[:6]>`
