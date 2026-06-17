@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +40,12 @@ const (
 	trailReviewSeverityHigh     = "high"
 	trailReviewSeverityMedium   = "medium"
 	trailReviewSeverityLow      = "low"
+	// Finding location granularities, mirroring the server's accepted values.
+	// line/range additionally require a non-empty selected_text.
+	trailReviewGranularityWholeChange = "whole_change"
+	trailReviewGranularityFile        = "file"
+	trailReviewGranularityLine        = "line"
+	trailReviewGranularityRange       = "range"
 )
 
 var errTrailReviewDefaultTargetNotFound = errors.New("default trail finding target not found")
@@ -138,18 +145,19 @@ func newTrailFindingListCmd(targetOpts *trailReviewTargetOptions) *cobra.Command
 }
 
 type trailReviewCommentAddOptions struct {
-	Body        string
-	Severity    string
-	Confidence  float64
-	FilePath    string
-	Line        int
-	StartLine   int
-	EndLine     int
-	ClientID    string
-	Patch       string
-	PatchFile   string
-	Instruction string
-	JSON        bool
+	Body         string
+	Severity     string
+	Confidence   float64
+	FilePath     string
+	Line         int
+	StartLine    int
+	EndLine      int
+	SelectedText string
+	ClientID     string
+	Patch        string
+	PatchFile    string
+	Instruction  string
+	JSON         bool
 }
 
 func newTrailFindingAddCmd(targetOpts *trailReviewTargetOptions) *cobra.Command {
@@ -173,6 +181,7 @@ func newTrailFindingAddCmd(targetOpts *trailReviewTargetOptions) *cobra.Command 
 	cmd.Flags().IntVar(&opts.Line, "line", 0, "Line number for the finding location")
 	cmd.Flags().IntVar(&opts.StartLine, "start-line", 0, "Start line for the finding location")
 	cmd.Flags().IntVar(&opts.EndLine, "end-line", 0, "End line for the finding location")
+	cmd.Flags().StringVar(&opts.SelectedText, "selected-text", "", "Exact source text the finding anchors to (required by the server for line/range findings; auto-read from the local file when the working tree matches the trail head)")
 	cmd.Flags().StringVar(&opts.ClientID, "client-id", "", "Client-provided idempotency key for this finding")
 	cmd.Flags().StringVar(&opts.Patch, "patch", "", "Unified-diff suggested change to attach")
 	cmd.Flags().StringVar(&opts.PatchFile, "patch-file", "", "Read unified-diff suggested change from file; use '-' for stdin")
@@ -318,7 +327,29 @@ func runTrailReviewCommentAdd(cmd *cobra.Command, selector string, opts trailRev
 	if err != nil {
 		return err
 	}
-	created, err := createTrailReviewFinding(cmd.Context(), client, target.Trail.ID, input)
+	// Line/range findings require a non-empty selected_text the server uses to
+	// anchor the finding to the diff. When --selected-text wasn't supplied, read
+	// it from the local working tree — but only when that tree provably matches
+	// the trail head, so the anchor text is correct. The branch/clean checks are
+	// local and run before the review is started; the head-SHA check needs the
+	// started review and runs inside the finalize callback below.
+	autoReadSelected := locationNeedsSelectedText(input.Location) && input.Location.SelectedText == nil
+	var selectedText string
+	if autoReadSelected {
+		selectedText, err = readSelectedTextFromWorktree(cmd.Context(), target.Trail, input.Location)
+		if err != nil {
+			return err
+		}
+	}
+	created, err := createTrailReviewFinding(cmd.Context(), client, target.Trail.ID, func(review api.TrailReviewStartResponse) (api.TrailReviewCommentInput, error) {
+		if autoReadSelected {
+			if err := verifyTrailHeadMatchesLocal(cmd.Context(), review.HeadSHA); err != nil {
+				return api.TrailReviewCommentInput{}, err
+			}
+			input.Location.SelectedText = stringPtr(selectedText)
+		}
+		return input, nil
+	})
 	if err != nil {
 		return err
 	}
@@ -687,30 +718,169 @@ func buildTrailReviewCommentLocation(opts trailReviewCommentAddOptions) (api.Tra
 		return api.TrailReviewLocationCreateRequest{}, errors.New("--end-line must be greater than or equal to the start line")
 	}
 
-	loc := api.TrailReviewLocationCreateRequest{Granularity: "whole_change"}
+	loc := api.TrailReviewLocationCreateRequest{Granularity: trailReviewGranularityWholeChange}
 	if filePath == "" {
 		return loc, nil
 	}
-	loc.Granularity = "file"
+	loc.Granularity = trailReviewGranularityFile
 	loc.FilePath = stringPtr(filePath)
 	if line > 0 {
-		loc.Granularity = "line"
+		loc.Granularity = trailReviewGranularityLine
 		loc.StartLine = &line
 		if opts.EndLine > 0 {
 			loc.EndLine = &opts.EndLine
 			if opts.EndLine != line {
-				loc.Granularity = "range"
+				loc.Granularity = trailReviewGranularityRange
 			}
+		}
+		// An explicit --selected-text always wins for line/range findings.
+		// When omitted, the caller auto-reads it from the local working tree
+		// (see readSelectedTextFromWorktree), but only after verifying the tree
+		// matches the trail head — which needs git/trail context this pure
+		// builder does not have. selected_text is meaningless for file
+		// granularity, so it is only attached here, inside the line branch.
+		if opts.SelectedText != "" {
+			loc.SelectedText = stringPtr(opts.SelectedText)
 		}
 	}
 	return loc, nil
 }
 
+// locationNeedsSelectedText reports whether the server requires a non-empty
+// selected_text for this location's granularity. The control-plane rejects
+// line/range findings without it (planetscale/code-review.ts:validateLocationShape);
+// file and whole_change findings never carry selected_text.
+func locationNeedsSelectedText(loc api.TrailReviewLocationCreateRequest) bool {
+	return loc.Granularity == trailReviewGranularityLine || loc.Granularity == trailReviewGranularityRange
+}
+
+// maxSelectedTextLen mirrors the server's selected_text cap
+// (MAX_SELECTED_TEXT_LENGTH in review-publication.ts and the create-comment
+// zod schema). Reading past it would be rejected, so truncate to match.
+const maxSelectedTextLen = 16_384
+
+// readSelectedTextFromWorktree reads the source lines a line/range finding
+// anchors to from the local working tree. It runs the *local* halves of the
+// safety gate — the finding must be raised against the trail's own branch, and
+// the target file must have no uncommitted changes — so the text we read
+// matches the trail's committed code. The remaining gate (local HEAD == trail
+// head) needs the started review and is checked separately by
+// verifyTrailHeadMatchesLocal. Any failure is fatal: the user can always pass
+// --selected-text to anchor the finding explicitly.
+func readSelectedTextFromWorktree(ctx context.Context, t api.TrailResource, loc api.TrailReviewLocationCreateRequest) (string, error) {
+	if loc.FilePath == nil || loc.StartLine == nil {
+		return "", errors.New("internal: line finding missing file or start line")
+	}
+	relPath := *loc.FilePath
+	start := *loc.StartLine
+	end := start
+	if loc.EndLine != nil {
+		end = *loc.EndLine
+	}
+	// --file is user-supplied and used below both as an on-disk read path and a
+	// git pathspec. Constrain it to a repo-relative path (no absolute paths, no
+	// .. escape, no .git) before touching the filesystem; validatePatchPath also
+	// normalizes backslashes so a Windows-style path doesn't slip through.
+	if err := validatePatchPath(relPath); err != nil {
+		return "", fmt.Errorf("cannot auto-read selected text: %w; pass --selected-text to anchor the finding explicitly", err)
+	}
+
+	branch, err := GetCurrentBranch(ctx)
+	if err != nil {
+		return "", fmt.Errorf("cannot auto-read selected text for %s: %w; pass --selected-text to anchor the finding explicitly", relPath, err)
+	}
+	if t.Branch != "" && branch != t.Branch {
+		return "", fmt.Errorf("cannot auto-read selected text: trail is on branch %q but %q is checked out; switch branches or pass --selected-text", t.Branch, branch)
+	}
+
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve worktree root: %w", err)
+	}
+	dirty, err := gitStatusDirty(ctx, root, relPath)
+	if err != nil {
+		return "", fmt.Errorf("cannot auto-read selected text for %s: %w; pass --selected-text to anchor the finding explicitly", relPath, err)
+	}
+	if dirty {
+		return "", fmt.Errorf("cannot auto-read selected text: %s has uncommitted changes; commit them or pass --selected-text", relPath)
+	}
+
+	// Read through os.Root so the open is confined to the repo root by the
+	// kernel — a symlink inside the repo that points outside it can't be used
+	// to escape, which the string checks in validatePatchPath can't catch.
+	osRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return "", fmt.Errorf("open repo root for selected text: %w", err)
+	}
+	defer osRoot.Close()
+	data, err := osRoot.ReadFile(filepath.FromSlash(relPath))
+	if err != nil {
+		return "", fmt.Errorf("read %s for selected text: %w; pass --selected-text", relPath, err)
+	}
+	lines := strings.Split(string(data), "\n")
+	// A trailing newline yields a final empty element that is not a real line;
+	// drop it so line counts match the file's actual lines.
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	if start < 1 || end > len(lines) {
+		return "", fmt.Errorf("lines %d-%d are out of range for %s (%d lines); fix the range or pass --selected-text", start, end, relPath, len(lines))
+	}
+	selected := strings.Join(lines[start-1:end], "\n")
+	if selected == "" {
+		return "", fmt.Errorf("selected text for %s lines %d-%d is empty; pass --selected-text", relPath, start, end)
+	}
+	if len(selected) > maxSelectedTextLen {
+		selected = selected[:maxSelectedTextLen]
+	}
+	return selected, nil
+}
+
+// verifyTrailHeadMatchesLocal is the head-SHA half of the auto-read safety gate:
+// the trail head the finding attaches to must equal the local HEAD, otherwise
+// the working-tree lines we read may not correspond to the reviewed code. A
+// trail with no resolved head SHA (headSHA == nil/empty) skips the check.
+func verifyTrailHeadMatchesLocal(ctx context.Context, headSHA *string) error {
+	want := strings.TrimSpace(stringPtrValue(headSHA))
+	got, matched, err := compareLocalHead(ctx, want)
+	if err != nil {
+		return err
+	}
+	if !matched {
+		return fmt.Errorf("cannot auto-read selected text: trail head is %s but local HEAD is %s; check out that commit or pass --selected-text", abbreviate12(want), abbreviate12(got))
+	}
+	return nil
+}
+
+// compareLocalHead resolves the local HEAD and compares it to want (a trail or
+// review head SHA). An empty want means "no head pinned" and reports matched
+// with an empty got. Callers format their own mismatch message from want/got.
+func compareLocalHead(ctx context.Context, want string) (got string, matched bool, err error) {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return "", true, nil
+	}
+	got, err = resolveGitRev(ctx, "HEAD")
+	if err != nil {
+		return "", false, err
+	}
+	return got, got == want, nil
+}
+
 // createTrailReviewFinding posts a single finding through the current API flow:
 // start a review session, then submit a one-item comment batch under it. It
 // returns the created (or already-existing) finding.
-func createTrailReviewFinding(ctx context.Context, client *api.Client, trailID string, input api.TrailReviewCommentInput) (api.TrailReviewComment, error) {
+//
+// finalize receives the started review (whose HeadSHA pins the code version the
+// finding attaches to) and returns the input to post. It runs after the review
+// is opened so callers that need the trail head — e.g. auto-reading selected
+// text from a working tree that must match that head — can verify it first.
+func createTrailReviewFinding(ctx context.Context, client *api.Client, trailID string, finalize func(api.TrailReviewStartResponse) (api.TrailReviewCommentInput, error)) (api.TrailReviewComment, error) {
 	review, err := startTrailReview(ctx, client, trailID)
+	if err != nil {
+		return api.TrailReviewComment{}, err
+	}
+	input, err := finalize(review)
 	if err != nil {
 		return api.TrailReviewComment{}, err
 	}
@@ -897,14 +1067,11 @@ func trailReviewStatePath(trailID, reviewID, cursor string) string {
 
 func verifyTrailReviewHead(ctx context.Context, state api.TrailReviewStateResponse) error {
 	want := strings.TrimSpace(stringPtrValue(state.CodeVersion.HeadSHA))
-	if want == "" {
-		return nil
-	}
-	got, err := resolveGitRev(ctx, "HEAD")
+	got, matched, err := compareLocalHead(ctx, want)
 	if err != nil {
 		return err
 	}
-	if got != want {
+	if !matched {
 		return fmt.Errorf("finding was created for head %s, but current HEAD is %s; check out that commit before applying", abbreviate12(want), abbreviate12(got))
 	}
 	return nil

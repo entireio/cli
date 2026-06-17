@@ -244,15 +244,33 @@ func GetMergeBase(ctx context.Context, branch1, branch2 string) (*plumbing.Hash,
 
 // HasUncommittedChanges checks if there are any uncommitted changes in the repository.
 // This includes staged changes, unstaged changes, and untracked files.
-// Uses git CLI instead of go-git because go-git doesn't respect global gitignore
-// (core.excludesfile) which can cause false positives for globally ignored files.
 func HasUncommittedChanges(ctx context.Context) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
-	output, err := cmd.Output()
+	return gitStatusDirty(ctx, "")
+}
+
+// gitStatusDirty reports whether `git status --porcelain` shows any staged,
+// unstaged, or untracked changes. An empty root runs in the current directory;
+// a non-empty root runs via `git -C root` (needed when pathspecs are
+// repo-root-relative but the process CWD is a subdirectory). With pathspecs the
+// check is scoped to those paths; untracked paths count as changes too.
+//
+// Uses the git CLI instead of go-git because go-git doesn't respect global
+// gitignore (core.excludesfile), which can cause false positives for globally
+// ignored files.
+func gitStatusDirty(ctx context.Context, root string, pathspecs ...string) (bool, error) {
+	args := make([]string, 0, 4+len(pathspecs))
+	if root != "" {
+		args = append(args, "-C", root)
+	}
+	args = append(args, "status", "--porcelain")
+	if len(pathspecs) > 0 {
+		args = append(args, "--")
+		args = append(args, pathspecs...)
+	}
+	output, err := exec.CommandContext(ctx, "git", args...).Output()
 	if err != nil {
 		return false, fmt.Errorf("failed to get git status: %w", err)
 	}
-
 	// If output is empty, there are no changes
 	return len(strings.TrimSpace(string(output))) > 0, nil
 }

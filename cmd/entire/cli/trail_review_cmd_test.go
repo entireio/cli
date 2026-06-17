@@ -179,6 +179,180 @@ func TestBuildTrailReviewCommentInput(t *testing.T) {
 	}
 }
 
+func TestBuildTrailReviewCommentLocationExplicitSelectedText(t *testing.T) {
+	t.Parallel()
+	loc, err := buildTrailReviewCommentLocation(trailReviewCommentAddOptions{
+		FilePath:     "src/auth/session.ts",
+		Line:         88,
+		SelectedText: "const token = mint()",
+	})
+	if err != nil {
+		t.Fatalf("buildTrailReviewCommentLocation: %v", err)
+	}
+	if loc.Granularity != trailReviewGranularityLine {
+		t.Fatalf("Granularity = %q, want line", loc.Granularity)
+	}
+	if loc.SelectedText == nil || *loc.SelectedText != "const token = mint()" {
+		t.Fatalf("SelectedText = %#v", loc.SelectedText)
+	}
+}
+
+func TestBuildTrailReviewCommentLocationFileGranularityIgnoresSelectedText(t *testing.T) {
+	t.Parallel()
+	// --selected-text without line flags is a file-level finding; selected_text
+	// is meaningless there and must not be attached.
+	loc, err := buildTrailReviewCommentLocation(trailReviewCommentAddOptions{
+		FilePath:     "src/auth/session.ts",
+		SelectedText: "ignored",
+	})
+	if err != nil {
+		t.Fatalf("buildTrailReviewCommentLocation: %v", err)
+	}
+	if loc.Granularity != trailReviewGranularityFile {
+		t.Fatalf("Granularity = %q, want file", loc.Granularity)
+	}
+	if loc.SelectedText != nil {
+		t.Fatalf("SelectedText = %#v, want nil for file granularity", loc.SelectedText)
+	}
+}
+
+func TestLocationNeedsSelectedText(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		granularity string
+		want        bool
+	}{
+		{trailReviewGranularityLine, true},
+		{trailReviewGranularityRange, true},
+		{trailReviewGranularityFile, false},
+		{trailReviewGranularityWholeChange, false},
+	} {
+		if got := locationNeedsSelectedText(api.TrailReviewLocationCreateRequest{Granularity: tc.granularity}); got != tc.want {
+			t.Errorf("locationNeedsSelectedText(%q) = %v, want %v", tc.granularity, got, tc.want)
+		}
+	}
+}
+
+// Not parallel: uses t.Chdir() so git/worktree resolution targets the temp repo.
+func TestReadSelectedTextFromWorktree(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, "src/app.go", "package app\n\nfunc Run() {}\n\nvar X = 1\n")
+	testutil.GitAdd(t, repoDir, "src/app.go")
+	testutil.GitCommit(t, repoDir, "init")
+	t.Chdir(repoDir)
+
+	ctx := context.Background()
+	branch, err := GetCurrentBranch(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentBranch: %v", err)
+	}
+	trail := api.TrailResource{Branch: branch}
+
+	startLine := 3
+	endLine := 5
+	rangeLoc := api.TrailReviewLocationCreateRequest{
+		Granularity: trailReviewGranularityRange,
+		FilePath:    trailReviewStrPtr("src/app.go"),
+		StartLine:   &startLine,
+		EndLine:     &endLine,
+	}
+
+	got, err := readSelectedTextFromWorktree(ctx, trail, rangeLoc)
+	if err != nil {
+		t.Fatalf("readSelectedTextFromWorktree: %v", err)
+	}
+	want := "func Run() {}\n\nvar X = 1"
+	if got != want {
+		t.Fatalf("selected text = %q, want %q", got, want)
+	}
+
+	// Branch mismatch is fatal.
+	if _, err := readSelectedTextFromWorktree(ctx, api.TrailResource{Branch: "other-branch"}, rangeLoc); err == nil ||
+		!strings.Contains(err.Error(), "other-branch") {
+		t.Fatalf("branch mismatch error = %v, want mention of trail branch", err)
+	}
+
+	// Paths that escape the repo root are rejected before any filesystem access.
+	for _, bad := range []string{"/etc/passwd", "../../secret.txt"} {
+		if _, err := readSelectedTextFromWorktree(ctx, trail, api.TrailReviewLocationCreateRequest{
+			Granularity: trailReviewGranularityRange,
+			FilePath:    trailReviewStrPtr(bad),
+			StartLine:   &startLine,
+			EndLine:     &endLine,
+		}); err == nil {
+			t.Fatalf("expected error for escaping path %q", bad)
+		}
+	}
+
+	// os.Root rejects a tracked symlink whose target escapes the repo, even
+	// though the path itself looks repo-relative and the tree is clean —
+	// something validatePatchPath's string checks can't catch.
+	if err := os.Symlink("/etc/hosts", filepath.Join(repoDir, "src/escape.txt")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	testutil.GitAdd(t, repoDir, "src/escape.txt")
+	testutil.GitCommit(t, repoDir, "add escaping symlink")
+	one := 1
+	if _, err := readSelectedTextFromWorktree(ctx, trail, api.TrailReviewLocationCreateRequest{
+		Granularity: trailReviewGranularityLine,
+		FilePath:    trailReviewStrPtr("src/escape.txt"),
+		StartLine:   &one,
+	}); err == nil {
+		t.Fatal("expected error reading a symlink that escapes the repo root")
+	}
+
+	// Out-of-range lines are fatal.
+	bad := startLine
+	huge := 999
+	if _, err := readSelectedTextFromWorktree(ctx, trail, api.TrailReviewLocationCreateRequest{
+		Granularity: trailReviewGranularityRange,
+		FilePath:    trailReviewStrPtr("src/app.go"),
+		StartLine:   &bad,
+		EndLine:     &huge,
+	}); err == nil || !strings.Contains(err.Error(), "out of range") {
+		t.Fatalf("out-of-range error = %v, want 'out of range'", err)
+	}
+
+	// Uncommitted changes to the target file are fatal.
+	testutil.WriteFile(t, repoDir, "src/app.go", "package app\n\nfunc Run() { panic(1) }\n\nvar X = 1\n")
+	if _, err := readSelectedTextFromWorktree(ctx, trail, rangeLoc); err == nil ||
+		!strings.Contains(err.Error(), "uncommitted changes") {
+		t.Fatalf("dirty-file error = %v, want 'uncommitted changes'", err)
+	}
+}
+
+// Not parallel: uses t.Chdir() so resolveGitRev targets the temp repo.
+func TestVerifyTrailHeadMatchesLocal(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, "f.txt", "x\n")
+	testutil.GitAdd(t, repoDir, "f.txt")
+	testutil.GitCommit(t, repoDir, "init")
+	t.Chdir(repoDir)
+
+	ctx := context.Background()
+	head, err := resolveGitRev(ctx, "HEAD")
+	if err != nil {
+		t.Fatalf("resolveGitRev: %v", err)
+	}
+
+	// nil head SHA: nothing to compare, no error.
+	if err := verifyTrailHeadMatchesLocal(ctx, nil); err != nil {
+		t.Fatalf("verifyTrailHeadMatchesLocal(nil) = %v, want nil", err)
+	}
+	// Matching head: ok.
+	if err := verifyTrailHeadMatchesLocal(ctx, &head); err != nil {
+		t.Fatalf("verifyTrailHeadMatchesLocal(head) = %v, want nil", err)
+	}
+	// Divergent head: fatal.
+	other := "0000000000000000000000000000000000000000"
+	if err := verifyTrailHeadMatchesLocal(ctx, &other); err == nil ||
+		!strings.Contains(err.Error(), "local HEAD") {
+		t.Fatalf("verifyTrailHeadMatchesLocal(other) = %v, want HEAD-mismatch error", err)
+	}
+}
+
 func TestBuildTrailReviewCommentInputGeneratesClientID(t *testing.T) {
 	t.Parallel()
 	input, err := buildTrailReviewCommentInput(trailReviewCommentAddOptions{Body: "finding body"})
@@ -219,10 +393,12 @@ func TestCreateTrailReviewFindingStartsReviewThenPostsBatch(t *testing.T) {
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
 	client := api.NewClient("tok")
 
-	created, err := createTrailReviewFinding(context.Background(), client, "trl_1", api.TrailReviewCommentInput{
-		ClientID: "agent-run-1:finding-1",
-		Body:     trailReviewStrPtr("body"),
-		Location: api.TrailReviewLocationCreateRequest{Granularity: "whole_change"},
+	created, err := createTrailReviewFinding(context.Background(), client, "trl_1", func(api.TrailReviewStartResponse) (api.TrailReviewCommentInput, error) {
+		return api.TrailReviewCommentInput{
+			ClientID: "agent-run-1:finding-1",
+			Body:     trailReviewStrPtr("body"),
+			Location: api.TrailReviewLocationCreateRequest{Granularity: "whole_change"},
+		}, nil
 	})
 	if err != nil {
 		t.Fatalf("createTrailReviewFinding: %v", err)
@@ -263,10 +439,12 @@ func TestCreateTrailReviewFindingSurfacesBatchError(t *testing.T) {
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
 	client := api.NewClient("tok")
 
-	_, err := createTrailReviewFinding(context.Background(), client, "trl_1", api.TrailReviewCommentInput{
-		ClientID: "c1",
-		Body:     trailReviewStrPtr("body"),
-		Location: api.TrailReviewLocationCreateRequest{Granularity: "whole_change"},
+	_, err := createTrailReviewFinding(context.Background(), client, "trl_1", func(api.TrailReviewStartResponse) (api.TrailReviewCommentInput, error) {
+		return api.TrailReviewCommentInput{
+			ClientID: "c1",
+			Body:     trailReviewStrPtr("body"),
+			Location: api.TrailReviewLocationCreateRequest{Granularity: "whole_change"},
+		}, nil
 	})
 	if err == nil {
 		t.Fatal("expected an error when the batch result reports status=error")
