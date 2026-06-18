@@ -119,6 +119,14 @@ func (c *CopilotCLIAgent) installVSCodeHooks(worktreeRoot string, localDev bool,
 		}
 	}
 
+	// Nothing was added — all managed hooks are already present — so leave the
+	// file untouched rather than rewriting identical content and churning its
+	// formatting. (Under force the canonical verbs are always re-added, so
+	// count > 0 there; count == 0 strictly means no change.)
+	if count == 0 {
+		return 0, nil
+	}
+
 	if err := writeVSCodeHooksFile(hooksPath, rawFile, rawHooks); err != nil {
 		return 0, err
 	}
