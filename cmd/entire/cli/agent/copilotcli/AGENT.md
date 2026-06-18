@@ -164,19 +164,29 @@ converted names are **not** real VS Code events, so the capture-critical turn ho
 never fire from `entire.json` inside VS Code. The events whose converted names *do*
 line up with a real VS Code event (`sessionStart`, `subagentStop`, `preToolUse`,
 `postToolUse`) are already delivered by VS Code from `entire.json`, so the VS Code
-file only registers the two that don't round-trip:
+file only registers the turn events that don't round-trip:
 
 | VS Code event      | Entire verb              | Lifecycle |
 | ------------------ | ------------------------ | --------- |
 | `UserPromptSubmit` | `user-prompt-submitted`  | TurnStart |
 | `Stop`             | `agent-stop`             | TurnEnd → checkpoint |
+| `Stop`             | `session-end`            | Terminal stop → session end |
 
-Keeping the VS Code file minimal also avoids double-firing the already-covered
-events. VS Code uses the `command` field (not `bash`). The shared
-`entire hooks copilot-cli <verb>` handlers parse both Copilot CLI and VS Code
-payload shapes (`hookEventName`, ISO-8601 `timestamp`, `transcript_path`) — see
-`compat.go` and `parseHookEnvelope`. `entire disable` removes the Entire entries
-from both files, deleting `entire-vscode.json` when nothing user-owned remains.
+VS Code uses a single `Stop` event for both end-of-turn and terminal
+session-stop, so both verbs are registered under it. `validateVSCodeEvent`
+(`compat.go`) routes each payload to the matching handler by reason and the
+non-matching handler no-ops; omitting `session-end` would drop terminal
+`SessionEnd` for VS Code-driven sessions. Keeping the file otherwise minimal
+avoids double-firing the already-covered events.
+
+VS Code uses the `command` field (not `bash`), a `timeout` field in seconds (not
+`timeoutSec`), and has no top-level `version` field — so `entire-vscode.json` is
+just `{"hooks": {...}}`. The shared `entire hooks copilot-cli <verb>` handlers
+parse both Copilot CLI and VS Code payload shapes (`hookEventName`, ISO-8601
+`timestamp`, `transcript_path`) — see `compat.go` and `parseHookEnvelope`.
+`entire disable` removes the Entire entries from both files, deleting
+`entire-vscode.json` only when no hooks and no user-added top-level fields remain
+(user hooks and top-level fields are otherwise preserved on round-trip).
 
 ## CLI Flags
 

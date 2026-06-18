@@ -23,11 +23,9 @@ func readVSCodeFile(t *testing.T, tempDir string) map[string][]VSCodeHookEntry {
 	require.NoError(t, err)
 
 	var file struct {
-		Version int                          `json:"version"`
-		Hooks   map[string][]VSCodeHookEntry `json:"hooks"`
+		Hooks map[string][]VSCodeHookEntry `json:"hooks"`
 	}
 	require.NoError(t, json.Unmarshal(data, &file))
-	require.Equal(t, 1, file.Version, "version field")
 	return file.Hooks
 }
 
@@ -39,6 +37,11 @@ func TestInstallVSCodeHooks_FreshInstall(t *testing.T) {
 	count, err := ag.installVSCodeHooks(tempDir, false, false)
 	require.NoError(t, err)
 	require.Equal(t, 3, count, "user-prompt-submitted + agent-stop + session-end")
+
+	// VS Code's schema has no top-level "version" field; a fresh file is just hooks.
+	raw, err := os.ReadFile(vsCodeHooksPath(tempDir))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), `"version"`, "fresh VS Code file must not carry a version field")
 
 	hooks := readVSCodeFile(t, tempDir)
 
@@ -123,6 +126,50 @@ func TestInstallVSCodeHooks_PreservesUserHooks(t *testing.T) {
 	data, err := os.ReadFile(vsCodeHooksPath(tempDir))
 	require.NoError(t, err)
 	require.Contains(t, string(data), "keep-me")
+}
+
+func TestInstallVSCodeHooks_PreservesUserEntryFields(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+
+	// A user Stop entry exercising every optional VS Code field.
+	seed := `{
+  "hooks": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "./scripts/notify.sh",
+        "windows": "scripts\\notify.ps1",
+        "linux": "./scripts/notify-linux.sh",
+        "osx": "./scripts/notify-mac.sh",
+        "cwd": "tools",
+        "env": {"FOO": "bar"},
+        "timeout": 20
+      }
+    ]
+  }
+}`
+	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, hooksDir), 0o755))
+	require.NoError(t, os.WriteFile(vsCodeHooksPath(tempDir), []byte(seed), 0o600))
+
+	ag := &CopilotCLIAgent{}
+	_, err := ag.installVSCodeHooks(tempDir, false, false)
+	require.NoError(t, err)
+
+	hooks := readVSCodeFile(t, tempDir)
+	var user VSCodeHookEntry
+	for _, e := range hooks[VSCodeEventStop] {
+		if e.Command == "./scripts/notify.sh" {
+			user = e
+		}
+	}
+	require.Equal(t, "./scripts/notify.sh", user.Command, "user entry must survive the rewrite")
+	require.Equal(t, `scripts\notify.ps1`, user.Windows)
+	require.Equal(t, "./scripts/notify-linux.sh", user.Linux)
+	require.Equal(t, "./scripts/notify-mac.sh", user.Osx)
+	require.Equal(t, "tools", user.Cwd)
+	require.Equal(t, map[string]string{"FOO": "bar"}, user.Env)
+	require.Equal(t, 20, user.Timeout)
 }
 
 func TestUninstallVSCodeHooks_DeletesWhenEmpty(t *testing.T) {

@@ -43,13 +43,22 @@ var vsCodeManagedEvents = []struct {
 }
 
 // VSCodeHookEntry represents a single VS Code hook command. VS Code uses the
-// "command" field rather than Copilot CLI's "bash" field. Unknown top-level
-// file fields and unknown event types are preserved on round-trip via raw maps;
-// known optional per-entry fields are retained explicitly.
+// "command" field rather than Copilot CLI's "bash" field, and a "timeout" field
+// in seconds (not Copilot CLI's "timeoutSec"). Unknown top-level file fields and
+// unknown event types are preserved on round-trip via raw maps; the optional
+// per-entry fields VS Code documents are retained explicitly so user-authored
+// entries survive a rewrite. See the schema at
+// https://code.visualstudio.com/docs/copilot/customization/hooks.
 type VSCodeHookEntry struct {
-	Type    string `json:"type"`
-	Command string `json:"command"`
-	Comment string `json:"comment,omitempty"`
+	Type    string            `json:"type"`
+	Command string            `json:"command"`
+	Windows string            `json:"windows,omitempty"`
+	Linux   string            `json:"linux,omitempty"`
+	Osx     string            `json:"osx,omitempty"`
+	Cwd     string            `json:"cwd,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	Timeout int               `json:"timeout,omitempty"`
+	Comment string            `json:"comment,omitempty"`
 }
 
 // vsCodeHookCommand builds the command string for a VS Code hook verb. In
@@ -74,7 +83,9 @@ func (c *CopilotCLIAgent) installVSCodeHooks(worktreeRoot string, localDev bool,
 		return 0, err
 	}
 	if rawFile == nil {
-		rawFile = map[string]json.RawMessage{"version": json.RawMessage(`1`)}
+		// VS Code's hook schema has no top-level "version" field (unlike the
+		// Copilot CLI's entire.json), so a fresh file is just {"hooks": {...}}.
+		rawFile = make(map[string]json.RawMessage)
 	}
 	if rawHooks == nil {
 		rawHooks = make(map[string]json.RawMessage)
@@ -154,8 +165,9 @@ func (c *CopilotCLIAgent) uninstallVSCodeHooks(worktreeRoot string) error {
 }
 
 // hasUserTopLevelFields reports whether rawFile carries any top-level key beyond
-// the structural "version" and "hooks" keys Entire manages — i.e. fields a user
-// added that must survive uninstall.
+// the structural ones — i.e. fields a user added that must survive uninstall.
+// "hooks" is structural; "version" is not part of the VS Code schema but older
+// Entire builds wrote it, so it is treated as non-user to keep cleanup working.
 func hasUserTopLevelFields(rawFile map[string]json.RawMessage) bool {
 	for key := range rawFile {
 		if key != "version" && key != "hooks" {
@@ -187,8 +199,7 @@ func (c *CopilotCLIAgent) areVSCodeHooksInstalled(worktreeRoot string) bool {
 
 // readVSCodeHooksFile reads and parses entire-vscode.json into raw maps,
 // preserving unknown fields. Returns (nil, nil, nil) when the file is absent so
-// callers can distinguish "missing" from "empty". A "version" field is ensured
-// when the file exists.
+// callers can distinguish "missing" from "empty".
 func readVSCodeHooksFile(hooksPath string) (rawFile, rawHooks map[string]json.RawMessage, err error) {
 	data, readErr := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
 	switch {
@@ -200,9 +211,6 @@ func readVSCodeHooksFile(hooksPath string) (rawFile, rawHooks map[string]json.Ra
 			if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
 				return nil, nil, fmt.Errorf("failed to parse hooks in %s: %w", VSCodeHooksFileName, err)
 			}
-		}
-		if _, ok := rawFile["version"]; !ok {
-			rawFile["version"] = json.RawMessage(`1`)
 		}
 	case errors.Is(readErr, os.ErrNotExist):
 		return nil, nil, nil
@@ -219,7 +227,7 @@ func readVSCodeHooksFile(hooksPath string) (rawFile, rawHooks map[string]json.Ra
 // writeVSCodeHooksFile marshals rawHooks back into rawFile and writes it,
 // creating the hooks directory if needed. When no hooks remain the "hooks" key
 // is dropped rather than written as an empty object. Callers must pass a
-// non-nil rawFile (with its "version" already set).
+// non-nil rawFile.
 func writeVSCodeHooksFile(hooksPath string, rawFile, rawHooks map[string]json.RawMessage) error {
 	if len(rawHooks) > 0 {
 		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
