@@ -185,12 +185,9 @@ func readVSCodeHooksFile(hooksPath string) (rawFile, rawHooks map[string]json.Ra
 
 // writeVSCodeHooksFile marshals rawHooks back into rawFile and writes it,
 // creating the hooks directory if needed. When no hooks remain the "hooks" key
-// is dropped rather than written as an empty object.
+// is dropped rather than written as an empty object. Callers must pass a
+// non-nil rawFile (with its "version" already set).
 func writeVSCodeHooksFile(hooksPath string, rawFile, rawHooks map[string]json.RawMessage) error {
-	if rawFile == nil {
-		rawFile = map[string]json.RawMessage{"version": json.RawMessage(`1`)}
-	}
-
 	if len(rawHooks) > 0 {
 		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 		if err != nil {
