@@ -151,6 +151,33 @@ The `TranscriptAnalyzer` interface is implemented for Copilot CLI, providing:
 - No need for read-modify-write of existing files
 - If `entire.json` already exists, read-modify-write to preserve any user additions
 
+## VS Code Agent Hooks (Preview)
+
+`InstallHooks` also writes a second dedicated file, `.github/hooks/entire-vscode.json`,
+so Copilot sessions driven from **VS Code's agent hooks (Preview)** are captured.
+See `vscode_hooks.go`.
+
+Why a separate file is required: VS Code auto-discovers `.github/hooks/*.json` and
+reads Copilot CLI configs by converting lowerCamelCase event names to PascalCase
+(`userPromptSubmitted` → `UserPromptSubmitted`, `agentStop` → `AgentStop`). Those
+converted names are **not** real VS Code events, so the capture-critical turn hooks
+never fire from `entire.json` inside VS Code. The events whose converted names *do*
+line up with a real VS Code event (`sessionStart`, `subagentStop`, `preToolUse`,
+`postToolUse`) are already delivered by VS Code from `entire.json`, so the VS Code
+file only registers the two that don't round-trip:
+
+| VS Code event      | Entire verb              | Lifecycle |
+| ------------------ | ------------------------ | --------- |
+| `UserPromptSubmit` | `user-prompt-submitted`  | TurnStart |
+| `Stop`             | `agent-stop`             | TurnEnd → checkpoint |
+
+Keeping the VS Code file minimal also avoids double-firing the already-covered
+events. VS Code uses the `command` field (not `bash`). The shared
+`entire hooks copilot-cli <verb>` handlers parse both Copilot CLI and VS Code
+payload shapes (`hookEventName`, ISO-8601 `timestamp`, `transcript_path`) — see
+`compat.go` and `parseHookEnvelope`. `entire disable` removes the Entire entries
+from both files, deleting `entire-vscode.json` when nothing user-owned remains.
+
 ## CLI Flags
 
 - Non-interactive prompt (documented): `copilot -p "prompt" --allow-all-tools`
