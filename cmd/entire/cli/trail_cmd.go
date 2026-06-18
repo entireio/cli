@@ -63,6 +63,7 @@ func newTrailCmd() *cobra.Command {
 	cmd.AddCommand(newTrailListCmd())
 	cmd.AddCommand(newTrailCreateCmd())
 	cmd.AddCommand(newTrailUpdateCmd())
+	cmd.AddCommand(newTrailMergeCmd())
 	cmd.AddCommand(newTrailDeleteCmd())
 	cmd.AddCommand(newTrailFindingCmd())
 	cmd.AddCommand(newTrailWatchCmd())
@@ -122,33 +123,44 @@ func runTrailShow(ctx context.Context, w, errW io.Writer, insecureHTTP bool, sel
 			return err
 		}
 
-		selector = strings.TrimSpace(selector)
-		var found *api.TrailResource
-		if selector == "" {
-			branch, err := GetCurrentBranch(ctx)
-			if err != nil {
-				return fmt.Errorf("no trail selector given and current branch is unknown: %w\nhint: run 'entire trail list --status any' or pass a trail number, id, or branch", err)
-			}
-			found, err = findTrailByBranch(ctx, client, forge, owner, repo, branch)
-			if err != nil {
-				return err
-			}
-			if found == nil {
-				return fmt.Errorf("no trail found for current branch %q\nhint: run 'entire trail create' or 'entire trail list --status any'", branch)
-			}
-		} else {
-			found, err = findTrailBySelector(ctx, client, forge, owner, repo, selector)
-			if err != nil {
-				return err
-			}
-			if found == nil {
-				return fmt.Errorf("no trail %q found in %s/%s/%s (run 'entire trail list --status any')", selector, forge, owner, repo)
-			}
+		found, err := resolveTrailBySelector(ctx, client, forge, owner, repo, selector)
+		if err != nil {
+			return err
 		}
 
 		printTrailDetails(w, found.ToMetadata())
 		return nil
 	})
+}
+
+// resolveTrailBySelector resolves a trail by an optional selector (trail
+// number, id, or branch). An empty selector falls back to the current branch's
+// trail. It returns an actionable error (never a nil trail with a nil error)
+// when nothing matches, so callers can rely on a non-nil result.
+func resolveTrailBySelector(ctx context.Context, client *api.Client, forge, owner, repo, selector string) (*api.TrailResource, error) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		branch, err := GetCurrentBranch(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("no trail selector given and current branch is unknown: %w\nhint: run 'entire trail list --status any' or pass a trail number, id, or branch", err)
+		}
+		found, err := findTrailByBranch(ctx, client, forge, owner, repo, branch)
+		if err != nil {
+			return nil, err
+		}
+		if found == nil {
+			return nil, fmt.Errorf("no trail found for current branch %q\nhint: run 'entire trail create' or 'entire trail list --status any'", branch)
+		}
+		return found, nil
+	}
+	found, err := findTrailBySelector(ctx, client, forge, owner, repo, selector)
+	if err != nil {
+		return nil, err
+	}
+	if found == nil {
+		return nil, fmt.Errorf("no trail %q found in %s/%s/%s (run 'entire trail list --status any')", selector, forge, owner, repo)
+	}
+	return found, nil
 }
 
 func printTrailDetails(w io.Writer, m *trail.Metadata) {
@@ -932,6 +944,172 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 	}
 
 	return req
+}
+
+func newTrailMergeCmd() *cobra.Command {
+	var trailSelector string
+	var dryRun bool
+
+	cmd := &cobra.Command{
+		Use:   "merge",
+		Short: "Merge a trail's branch into its base",
+		Long: `Merge a trail's branch into its base branch.
+
+The trail is checked for mergeability first (required approvals, passing CI
+checks, and being up to date with the base branch); the merge is only attempted
+when those gates pass.
+
+With --trail, the trail may be given as a number, id, or branch. Without it, the
+trail for the current branch is used. Pass --dry-run to only report whether the
+trail is mergeable without performing the merge.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runTrailMerge(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailSelector, dryRun)
+		},
+	}
+
+	cmd.Flags().StringVar(&trailSelector, "trail", "", "Trail to merge (number, id, or branch; defaults to the current branch's trail)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Only check whether the trail is mergeable; do not merge")
+
+	return cmd
+}
+
+func runTrailMerge(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector string, dryRun bool) error {
+	return runAuthenticatedDataAPI(ctx, errW, insecureHTTP, func(ctx context.Context, client *api.Client) error {
+		forge, owner, repo, err := resolveTrailRemote(ctx)
+		if err != nil {
+			return err
+		}
+
+		found, err := resolveTrailBySelector(ctx, client, forge, owner, repo, selector)
+		if err != nil {
+			return err
+		}
+		// The merge and mergeability endpoints are keyed by trail number, not id.
+		if found.Number <= 0 {
+			return fmt.Errorf("trail for branch %q has no number yet; cannot merge", found.Branch)
+		}
+
+		// Check mergeability before attempting the merge so an un-mergeable
+		// trail is reported with reasons instead of a raw 422 from the merge call.
+		mergeability, err := fetchTrailMergeability(ctx, client, forge, owner, repo, found.Number)
+		if err != nil {
+			return err
+		}
+		printTrailMergeability(w, found, mergeability)
+
+		if !mergeability.Mergeable {
+			reasons := describeMergeBlockers(mergeability)
+			return fmt.Errorf("trail #%d is not mergeable: %s", found.Number, strings.Join(reasons, "; "))
+		}
+
+		if dryRun {
+			fmt.Fprintf(w, "Trail #%d is mergeable (dry run; no merge performed).\n", found.Number)
+			return nil
+		}
+
+		res, err := mergeTrailByNumber(ctx, client, forge, owner, repo, found.Number)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "Merged trail #%d into %s (%s)\n", found.Number, found.Base, res.MergeCommitSHA)
+		return nil
+	})
+}
+
+// fetchTrailMergeability reads merge readiness for a trail from the API.
+func fetchTrailMergeability(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (*api.TrailMergeabilityResponse, error) {
+	resp, err := client.Get(ctx, trailNumberPath(forge, owner, repo, number)+"/mergeability")
+	if err != nil {
+		return nil, fmt.Errorf("failed to check mergeability: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return nil, err
+	}
+	var m api.TrailMergeabilityResponse
+	if err := api.DecodeJSON(resp, &m); err != nil {
+		return nil, fmt.Errorf("failed to decode mergeability response: %w", err)
+	}
+	return &m, nil
+}
+
+// mergeTrailByNumber merges a trail's branch into its base and verifies the
+// server's {ok:true} signal. Like deleteTrailByNumber, a 2xx alone is not
+// enough: the merge must be confirmed before reporting success.
+func mergeTrailByNumber(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (*api.TrailMergeResponse, error) {
+	resp, err := client.Post(ctx, trailNumberPath(forge, owner, repo, number)+"/merge", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge trail: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return nil, err
+	}
+	var res api.TrailMergeResponse
+	if err := api.DecodeJSON(resp, &res); err != nil {
+		return nil, fmt.Errorf("failed to decode merge response: %w", err)
+	}
+	if !res.OK {
+		return nil, fmt.Errorf("trail API did not confirm merge of trail #%d", number)
+	}
+	return &res, nil
+}
+
+// printTrailMergeability renders the merge-readiness summary for a trail.
+func printTrailMergeability(w io.Writer, t *api.TrailResource, m *api.TrailMergeabilityResponse) {
+	fmt.Fprintf(w, "Trail #%d (%s → %s)\n", t.Number, t.Branch, t.Base)
+	fmt.Fprintf(w, "  Approvals:  %s\n", checkmark(m.ApprovalGatePassed))
+	fmt.Fprintf(w, "  Checks:     %s (%s)\n", checkmark(m.ChecksPassed), trailChecksStatusDisplay(m.ChecksStatus))
+	fmt.Fprintf(w, "  Up to date: %s\n", checkmark(m.ComparisonStatus == "available" && m.BehindBy == 0))
+	fmt.Fprintf(w, "  Mergeable:  %s\n", checkmark(m.Mergeable))
+}
+
+// checkmark renders a boolean gate as a ✓/✗ glyph, matching the status output
+// style used elsewhere in the CLI.
+func checkmark(ok bool) string {
+	if ok {
+		return "✓"
+	}
+	return "✗"
+}
+
+func trailChecksStatusDisplay(status string) string {
+	if strings.TrimSpace(status) == "" {
+		return "none"
+	}
+	return status
+}
+
+// describeMergeBlockers explains why a trail is not mergeable, in the same
+// order the server evaluates its gates. It always returns at least one reason
+// for an un-mergeable trail.
+func describeMergeBlockers(m *api.TrailMergeabilityResponse) []string {
+	var reasons []string
+	if !m.ApprovalGatePassed {
+		reasons = append(reasons, "required approvals are missing")
+	}
+	if !m.ChecksPassed {
+		switch m.ChecksStatus {
+		case "failure":
+			reasons = append(reasons, "CI checks failed")
+		case "pending":
+			reasons = append(reasons, "CI checks are still running")
+		default:
+			reasons = append(reasons, "CI checks have not passed")
+		}
+	}
+	if m.ComparisonStatus != "available" {
+		reasons = append(reasons, "could not compare the branch with its base")
+	} else if m.BehindBy > 0 {
+		reasons = append(reasons, fmt.Sprintf("branch is %d %s behind the base branch", m.BehindBy, pluralize("commit", m.BehindBy)))
+	}
+	if len(reasons) == 0 {
+		// Defensive: the server reported not-mergeable without a recognized
+		// blocker. Surface a generic reason rather than an empty list.
+		reasons = append(reasons, "the trail is not in a mergeable state")
+	}
+	return reasons
 }
 
 // parseTrailNumberArg parses an optional positional trail-number argument.
