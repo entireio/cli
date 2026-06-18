@@ -44,7 +44,7 @@ var hookConfigKey = map[string]string{
 // InstallHooks installs Copilot CLI hooks in .github/hooks/entire.json and the
 // VS Code-native hook file .github/hooks/entire-vscode.json (see vscode_hooks.go).
 // If force is true, removes existing Entire hooks before installing.
-// Returns the number of Copilot CLI hooks installed.
+// Returns the total number of hooks installed across both files.
 // Unknown top-level fields and hook types are preserved on round-trip.
 func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
@@ -54,7 +54,10 @@ func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, localDev bool, force
 
 	// Install the VS Code-native hook file alongside the Copilot CLI file so
 	// Copilot sessions run from VS Code's agent hooks (Preview) are captured.
-	if err := c.installVSCodeHooks(worktreeRoot, localDev, force); err != nil {
+	// Its additions count toward the total so a fresh VS Code-file write is
+	// reported as an install rather than "already installed".
+	vsCodeCount, err := c.installVSCodeHooks(worktreeRoot, localDev, force)
+	if err != nil {
 		return 0, err
 	}
 
@@ -137,7 +140,8 @@ func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, localDev bool, force
 	}
 
 	if count == 0 {
-		return 0, nil
+		// No Copilot CLI changes, but the VS Code file may have been updated.
+		return vsCodeCount, nil
 	}
 
 	// Marshal modified hook types back into rawHooks
@@ -169,7 +173,7 @@ func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, localDev bool, force
 		return 0, fmt.Errorf("failed to write %s: %w", HooksFileName, err)
 	}
 
-	return count, nil
+	return count + vsCodeCount, nil
 }
 
 // UninstallHooks removes Entire hooks from Copilot CLI's entire.json.

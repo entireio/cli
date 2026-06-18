@@ -36,14 +36,17 @@ func TestInstallVSCodeHooks_FreshInstall(t *testing.T) {
 	tempDir := t.TempDir()
 
 	ag := &CopilotCLIAgent{}
-	require.NoError(t, ag.installVSCodeHooks(tempDir, false, false))
+	count, err := ag.installVSCodeHooks(tempDir, false, false)
+	require.NoError(t, err)
+	require.Equal(t, 3, count, "user-prompt-submitted + agent-stop + session-end")
 
 	hooks := readVSCodeFile(t, tempDir)
 
 	// Only the two turn events are registered; the rest come from entire.json.
 	require.Len(t, hooks, 2, "only UserPromptSubmit and Stop should be registered")
 	require.Len(t, hooks[VSCodeEventUserPromptSubmit], 1)
-	require.Len(t, hooks[VSCodeEventStop], 1)
+	// VS Code's single Stop event carries both agent-stop and session-end.
+	require.Len(t, hooks[VSCodeEventStop], 2)
 
 	ups := hooks[VSCodeEventUserPromptSubmit][0]
 	require.Equal(t, "command", ups.Type)
@@ -53,9 +56,21 @@ func TestInstallVSCodeHooks_FreshInstall(t *testing.T) {
 		ups.Command,
 		"VS Code uses the command field, not bash")
 
-	require.Equal(t,
-		agent.WrapProductionSilentHookCommand("entire hooks copilot-cli agent-stop"),
-		hooks[VSCodeEventStop][0].Command)
+	stopCommands := commandsOf(hooks[VSCodeEventStop])
+	require.Contains(t, stopCommands,
+		agent.WrapProductionSilentHookCommand("entire hooks copilot-cli agent-stop"))
+	require.Contains(t, stopCommands,
+		agent.WrapProductionSilentHookCommand("entire hooks copilot-cli session-end"),
+		"terminal VS Code Stop must route to session-end")
+}
+
+// commandsOf extracts the command strings from a slice of hook entries.
+func commandsOf(entries []VSCodeHookEntry) []string {
+	cmds := make([]string, len(entries))
+	for i, e := range entries {
+		cmds[i] = e.Command
+	}
+	return cmds
 }
 
 func TestInstallVSCodeHooks_Idempotent(t *testing.T) {
@@ -63,12 +78,15 @@ func TestInstallVSCodeHooks_Idempotent(t *testing.T) {
 	tempDir := t.TempDir()
 
 	ag := &CopilotCLIAgent{}
-	require.NoError(t, ag.installVSCodeHooks(tempDir, false, false))
-	require.NoError(t, ag.installVSCodeHooks(tempDir, false, false))
+	_, err := ag.installVSCodeHooks(tempDir, false, false)
+	require.NoError(t, err)
+	count, err := ag.installVSCodeHooks(tempDir, false, false)
+	require.NoError(t, err)
+	require.Equal(t, 0, count, "reinstall adds nothing")
 
 	hooks := readVSCodeFile(t, tempDir)
 	require.Len(t, hooks[VSCodeEventUserPromptSubmit], 1, "must not duplicate on reinstall")
-	require.Len(t, hooks[VSCodeEventStop], 1)
+	require.Len(t, hooks[VSCodeEventStop], 2, "agent-stop + session-end, no duplicates")
 }
 
 func TestInstallVSCodeHooks_PreservesUserHooks(t *testing.T) {
@@ -92,12 +110,14 @@ func TestInstallVSCodeHooks_PreservesUserHooks(t *testing.T) {
 	require.NoError(t, os.WriteFile(vsCodeHooksPath(tempDir), []byte(seed), 0o600))
 
 	ag := &CopilotCLIAgent{}
-	require.NoError(t, ag.installVSCodeHooks(tempDir, false, false))
+	_, err := ag.installVSCodeHooks(tempDir, false, false)
+	require.NoError(t, err)
 
 	hooks := readVSCodeFile(t, tempDir)
-	require.Len(t, hooks[VSCodeEventStop], 2, "user Stop hook retained alongside Entire's")
+	require.Len(t, hooks[VSCodeEventStop], 3, "user Stop hook retained alongside Entire's agent-stop + session-end")
 	require.Len(t, hooks[VSCodeEventPreToolUse], 1, "unknown event type preserved")
 	require.Equal(t, "echo user-pretool", hooks[VSCodeEventPreToolUse][0].Command)
+	require.Contains(t, commandsOf(hooks[VSCodeEventStop]), "echo user-stop", "user Stop hook survives")
 
 	// Unknown top-level field is preserved on round-trip.
 	data, err := os.ReadFile(vsCodeHooksPath(tempDir))
@@ -110,12 +130,13 @@ func TestUninstallVSCodeHooks_DeletesWhenEmpty(t *testing.T) {
 	tempDir := t.TempDir()
 
 	ag := &CopilotCLIAgent{}
-	require.NoError(t, ag.installVSCodeHooks(tempDir, false, false))
+	_, err := ag.installVSCodeHooks(tempDir, false, false)
+	require.NoError(t, err)
 	require.True(t, ag.areVSCodeHooksInstalled(tempDir))
 
 	require.NoError(t, ag.uninstallVSCodeHooks(tempDir))
 
-	_, err := os.Stat(vsCodeHooksPath(tempDir))
+	_, err = os.Stat(vsCodeHooksPath(tempDir))
 	require.ErrorIs(t, err, os.ErrNotExist, "file removed when nothing user-owned remains")
 	require.False(t, ag.areVSCodeHooksInstalled(tempDir))
 }
@@ -125,7 +146,8 @@ func TestUninstallVSCodeHooks_KeepsUserHooks(t *testing.T) {
 	tempDir := t.TempDir()
 
 	ag := &CopilotCLIAgent{}
-	require.NoError(t, ag.installVSCodeHooks(tempDir, false, false))
+	_, err := ag.installVSCodeHooks(tempDir, false, false)
+	require.NoError(t, err)
 
 	// Add a user-owned hook to the Stop event.
 	rawFile, rawHooks, err := readVSCodeHooksFile(vsCodeHooksPath(tempDir))
@@ -158,12 +180,42 @@ func TestInstallVSCodeHooks_ForceReinstall(t *testing.T) {
 	tempDir := t.TempDir()
 
 	ag := &CopilotCLIAgent{}
-	require.NoError(t, ag.installVSCodeHooks(tempDir, false, false))
-	require.NoError(t, ag.installVSCodeHooks(tempDir, false, true))
+	_, err := ag.installVSCodeHooks(tempDir, false, false)
+	require.NoError(t, err)
+	_, err = ag.installVSCodeHooks(tempDir, false, true)
+	require.NoError(t, err)
 
 	hooks := readVSCodeFile(t, tempDir)
 	require.Len(t, hooks[VSCodeEventUserPromptSubmit], 1)
-	require.Len(t, hooks[VSCodeEventStop], 1)
+	require.Len(t, hooks[VSCodeEventStop], 2, "force reinstall keeps both agent-stop + session-end")
+}
+
+func TestUninstallVSCodeHooks_PreservesUserTopLevelFields(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+
+	// File with only Entire-managed hooks but a user-added top-level field.
+	seed := `{
+  "version": 1,
+  "customField": "keep-me",
+  "hooks": {
+    "Stop": [
+      {"type": "command", "command": "` + agent.WrapProductionSilentHookCommand("entire hooks copilot-cli agent-stop") + `"}
+    ]
+  }
+}`
+	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, hooksDir), 0o755))
+	require.NoError(t, os.WriteFile(vsCodeHooksPath(tempDir), []byte(seed), 0o600))
+
+	ag := &CopilotCLIAgent{}
+	require.NoError(t, ag.uninstallVSCodeHooks(tempDir))
+
+	// File must survive (custom field) but Entire's hook is gone.
+	require.FileExists(t, vsCodeHooksPath(tempDir), "file kept because customField is user-owned")
+	data, err := os.ReadFile(vsCodeHooksPath(tempDir))
+	require.NoError(t, err)
+	require.Contains(t, string(data), "keep-me")
+	require.False(t, ag.areVSCodeHooksInstalled(tempDir))
 }
 
 func TestInstallHooks_AlsoInstallsVSCodeFile(t *testing.T) {

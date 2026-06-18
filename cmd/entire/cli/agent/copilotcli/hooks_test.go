@@ -22,8 +22,9 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
-	if count != 8 {
-		t.Errorf("InstallHooks() count = %d, want 8", count)
+	// 8 Copilot CLI hooks + 3 VS Code hooks (user-prompt-submitted, agent-stop, session-end).
+	if count != 11 {
+		t.Errorf("InstallHooks() count = %d, want 11", count)
 	}
 
 	hooksFile := readHooksFile(t, tempDir)
@@ -87,8 +88,8 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
-	if count1 != 8 {
-		t.Errorf("first InstallHooks() count = %d, want 8", count1)
+	if count1 != 11 {
+		t.Errorf("first InstallHooks() count = %d, want 11", count1)
 	}
 
 	// Second install
@@ -189,8 +190,8 @@ func TestInstallHooks_ForceReinstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("force InstallHooks() error = %v", err)
 	}
-	if count != 8 {
-		t.Errorf("force InstallHooks() count = %d, want 8", count)
+	if count != 11 {
+		t.Errorf("force InstallHooks() count = %d, want 11", count)
 	}
 
 	// Verify no duplicates
@@ -271,8 +272,8 @@ func TestInstallHooks_PreservesUnknownFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
-	if count != 8 {
-		t.Errorf("InstallHooks() count = %d, want 8", count)
+	if count != 11 {
+		t.Errorf("InstallHooks() count = %d, want 11", count)
 	}
 
 	// Read the raw JSON to verify unknown fields are preserved

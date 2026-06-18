@@ -19,20 +19,27 @@ const VSCodeHooksFileName = "entire-vscode.json"
 // vsCodeManagedEvents lists the VS Code events Entire registers in
 // entire-vscode.json, paired with the CLI hook verb each one invokes.
 //
-// Only the two turn hooks are registered here. VS Code reads Copilot CLI
-// configs by converting lowerCamelCase event names to PascalCase
-// (userPromptSubmitted -> UserPromptSubmitted, agentStop -> AgentStop). Those
-// converted names are not real VS Code events, so the capture-critical turn
-// hooks never fire from entire.json inside VS Code. The events whose converted
-// names line up with a real VS Code event (SessionStart, SubagentStop,
-// PreToolUse, PostToolUse) are already delivered by VS Code from entire.json,
-// so registering them here too would only double-fire them.
+// Only the turn hooks are registered here. VS Code reads Copilot CLI configs by
+// converting lowerCamelCase event names to PascalCase (userPromptSubmitted ->
+// UserPromptSubmitted, agentStop -> AgentStop). Those converted names are not
+// real VS Code events, so the capture-critical turn hooks never fire from
+// entire.json inside VS Code. The events whose converted names line up with a
+// real VS Code event (SessionStart, SubagentStop, PreToolUse, PostToolUse) are
+// already delivered by VS Code from entire.json, so registering them here too
+// would only double-fire them.
+//
+// VS Code uses a single "Stop" event for both end-of-turn and terminal
+// session-stop, where Copilot CLI distinguishes agent-stop from session-end.
+// We therefore register BOTH verbs under "Stop"; validateVSCodeEvent (compat.go)
+// routes each payload to the matching handler by reason, and the non-matching
+// handler no-ops. Omitting session-end here would drop terminal SessionEnd
+// events for VS Code-driven sessions.
 var vsCodeManagedEvents = []struct {
-	Event string // VS Code hookEventName (PascalCase)
-	Verb  string // Entire CLI hook verb
+	Event string   // VS Code hookEventName (PascalCase)
+	Verbs []string // Entire CLI hook verbs registered under that event
 }{
-	{VSCodeEventUserPromptSubmit, HookNameUserPromptSubmitted},
-	{VSCodeEventStop, HookNameAgentStop},
+	{VSCodeEventUserPromptSubmit, []string{HookNameUserPromptSubmitted}},
+	{VSCodeEventStop, []string{HookNameAgentStop, HookNameSessionEnd}},
 }
 
 // VSCodeHookEntry represents a single VS Code hook command. VS Code uses the
@@ -58,12 +65,13 @@ func vsCodeHookCommand(verb string, localDev bool) string {
 // installVSCodeHooks writes/updates .github/hooks/entire-vscode.json with the
 // VS Code turn hooks. If force is true, existing Entire entries are removed
 // before installing. Unknown fields and event types are preserved on round-trip.
-func (c *CopilotCLIAgent) installVSCodeHooks(worktreeRoot string, localDev bool, force bool) error {
+// Returns the number of hook entries newly added.
+func (c *CopilotCLIAgent) installVSCodeHooks(worktreeRoot string, localDev bool, force bool) (int, error) {
 	hooksPath := filepath.Join(worktreeRoot, hooksDir, VSCodeHooksFileName)
 
 	rawFile, rawHooks, err := readVSCodeHooksFile(hooksPath)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if rawFile == nil {
 		rawFile = map[string]json.RawMessage{"version": json.RawMessage(`1`)}
@@ -72,33 +80,45 @@ func (c *CopilotCLIAgent) installVSCodeHooks(worktreeRoot string, localDev bool,
 		rawHooks = make(map[string]json.RawMessage)
 	}
 
+	count := 0
 	for _, h := range vsCodeManagedEvents {
 		var entries []VSCodeHookEntry
 		if err := parseVSCodeHookEvent(rawHooks, h.Event, &entries); err != nil {
-			return err
+			return 0, err
 		}
 		if force {
 			entries = removeEntireVSCodeHooks(entries)
 		}
-		cmd := vsCodeHookCommand(h.Verb, localDev)
-		if !vsCodeCommandExists(entries, cmd) {
-			entries = append(entries, VSCodeHookEntry{
-				Type:    "command",
-				Command: cmd,
-				Comment: "Entire CLI",
-			})
+		// All verbs share one event, so remove-on-force happens once above; then
+		// add each missing verb. Doing the force-removal per verb would wipe a
+		// sibling verb added earlier in this same loop.
+		for _, verb := range h.Verbs {
+			cmd := vsCodeHookCommand(verb, localDev)
+			if !vsCodeCommandExists(entries, cmd) {
+				entries = append(entries, VSCodeHookEntry{
+					Type:    "command",
+					Command: cmd,
+					Comment: "Entire CLI",
+				})
+				count++
+			}
 		}
 		if err := marshalVSCodeHookEvent(rawHooks, h.Event, entries); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
-	return writeVSCodeHooksFile(hooksPath, rawFile, rawHooks)
+	if err := writeVSCodeHooksFile(hooksPath, rawFile, rawHooks); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
-// uninstallVSCodeHooks removes Entire entries from entire-vscode.json. When no
-// hooks of any event type remain afterwards (nothing user-owned), the file is
-// deleted rather than left as an empty shell.
+// uninstallVSCodeHooks removes Entire entries from entire-vscode.json. When the
+// file holds nothing user-owned afterwards (no hooks of any event type and no
+// top-level fields beyond the structural version/hooks keys Entire writes), it
+// is deleted rather than left as an empty shell. If the user added their own
+// hooks or top-level fields, those are preserved and the file is rewritten.
 func (c *CopilotCLIAgent) uninstallVSCodeHooks(worktreeRoot string) error {
 	hooksPath := filepath.Join(worktreeRoot, hooksDir, VSCodeHooksFileName)
 
@@ -121,8 +141,9 @@ func (c *CopilotCLIAgent) uninstallVSCodeHooks(worktreeRoot string) error {
 		}
 	}
 
-	// If nothing user-owned remains, remove the file entirely.
-	if len(rawHooks) == 0 {
+	// Delete the file only when nothing user-owned remains: no hooks left and no
+	// top-level fields other than the structural ones Entire itself writes.
+	if len(rawHooks) == 0 && !hasUserTopLevelFields(rawFile) {
 		if err := os.Remove(hooksPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("failed to remove %s: %w", VSCodeHooksFileName, err)
 		}
@@ -130,6 +151,18 @@ func (c *CopilotCLIAgent) uninstallVSCodeHooks(worktreeRoot string) error {
 	}
 
 	return writeVSCodeHooksFile(hooksPath, rawFile, rawHooks)
+}
+
+// hasUserTopLevelFields reports whether rawFile carries any top-level key beyond
+// the structural "version" and "hooks" keys Entire manages — i.e. fields a user
+// added that must survive uninstall.
+func hasUserTopLevelFields(rawFile map[string]json.RawMessage) bool {
+	for key := range rawFile {
+		if key != "version" && key != "hooks" {
+			return true
+		}
+	}
+	return false
 }
 
 // areVSCodeHooksInstalled reports whether any Entire hook is present in
