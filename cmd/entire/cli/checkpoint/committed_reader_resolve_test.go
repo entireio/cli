@@ -117,6 +117,17 @@ func TestGitStoreSessionStoreReadsByRef(t *testing.T) {
 	require.Equal(t, cpID, infos[0].CheckpointID)
 }
 
+func TestResolveSessionIndexUsesIndexRefDirectly(t *testing.T) {
+	t.Parallel()
+
+	store := &GitStore{}
+	cpID := id.MustCheckpointID("555555555555")
+
+	sessionIndex, err := store.resolveSessionIndex(context.Background(), SessionIndexRef(cpID, 3))
+	require.NoError(t, err)
+	require.Equal(t, 3, sessionIndex)
+}
+
 func TestGitStoreStoresUpdateSpecificSessionAndCheckpoint(t *testing.T) {
 	t.Parallel()
 

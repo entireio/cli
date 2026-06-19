@@ -10,7 +10,7 @@ import (
 var (
 	_ CommittedStore = (*GitStore)(nil)
 	_ SessionStore   = (*GitStore)(nil)
-	_ Store          = (*GitStore)(nil)
+	_ MetadataStore  = (*GitStore)(nil)
 	_ TemporaryStore = (*GitStore)(nil)
 	_ AuthorReader   = (*GitStore)(nil)
 )

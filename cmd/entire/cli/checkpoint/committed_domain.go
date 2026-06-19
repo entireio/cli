@@ -187,8 +187,8 @@ type Writer interface {
 	UpdateCheckpoint(ctx context.Context, checkpointID id.CheckpointID, opts ...WriteOption) error
 }
 
-// Store reads and writes committed checkpoint documents.
-type Store interface {
+// MetadataStore reads and writes committed checkpoint documents.
+type MetadataStore interface {
 	Reader
 	Writer
 }
@@ -364,6 +364,10 @@ func (s *GitStore) resolveSessionID(ctx context.Context, ref SessionRef) (string
 }
 
 func (s *GitStore) resolveSessionIndex(ctx context.Context, ref SessionRef) (int, error) {
+	if ref.sessionRefMode == sessionRefIndex {
+		return ref.sessionIndex, nil
+	}
+
 	summary, err := s.ReadCheckpoint(ctx, ref.checkpointID)
 	if err != nil {
 		return 0, err

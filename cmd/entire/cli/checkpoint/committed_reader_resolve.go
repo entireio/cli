@@ -10,7 +10,7 @@ import (
 // CommittedStore provides the production committed checkpoint storage surface.
 type CommittedStore interface {
 	SessionStore
-	Store
+	MetadataStore
 }
 
 // AuthorReader provides optional checkpoint author lookup.
