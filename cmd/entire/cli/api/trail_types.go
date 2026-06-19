@@ -129,3 +129,27 @@ type TrailUpdateResponse struct {
 type TrailDeleteResponse struct {
 	OK bool `json:"ok"`
 }
+
+// TrailMergeabilityResponse is the response from
+// GET /api/v1/trails/:host/:owner/:repo/:number/mergeability. Mergeable is the
+// server's combined gate (approvals + checks + up-to-date with base); the
+// scalar fields explain why when it is false.
+type TrailMergeabilityResponse struct {
+	ApprovalGatePassed bool `json:"approval_gate_passed"`
+	ChecksPassed       bool `json:"checks_passed"`
+	// ChecksStatus is one of "success", "failure", "pending", or "none".
+	ChecksStatus string `json:"checks_status"`
+	BehindBy     int    `json:"behind_by"`
+	// ComparisonStatus is "available" when the base/branch comparison
+	// succeeded, or "unknown" when the server could not compute it.
+	ComparisonStatus string `json:"comparison_status"`
+	Mergeable        bool   `json:"mergeable"`
+}
+
+// TrailMergeResponse is the response from
+// POST /api/v1/trails/:host/:owner/:repo/:number/merge. OK is the server's
+// explicit success signal; MergeCommitSHA is the resulting merge commit.
+type TrailMergeResponse struct {
+	OK             bool   `json:"ok"`
+	MergeCommitSHA string `json:"merge_commit_sha"`
+}
