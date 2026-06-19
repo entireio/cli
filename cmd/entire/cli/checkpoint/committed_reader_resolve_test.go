@@ -79,6 +79,91 @@ func TestReadRawSessionLogForCheckpointReadsLatestV1Session(t *testing.T) {
 	require.Equal(t, []byte("latest transcript\n"), transcript)
 }
 
+func TestGitStoreSessionStoreReadsByRef(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	repo, err := git.PlainOpen(repoDir)
+	require.NoError(t, err)
+
+	store := NewGitStore(repo, DefaultV1Refs())
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("333333333333")
+
+	writeSessionForStoreTest(t, store, cpID, "session-a", "first transcript\n", "first prompt")
+	writeSessionForStoreTest(t, store, cpID, "session-b", "latest transcript\n", "latest prompt")
+
+	latest, err := store.ReadSession(ctx, LatestSessionRef(cpID))
+	require.NoError(t, err)
+	require.Equal(t, "session-b", latest.Metadata.SessionID)
+	require.Equal(t, []byte("latest transcript\n"), latest.Transcript)
+
+	metadataOnly, err := store.ReadSession(ctx, SessionIndexRef(cpID, 0), WithSessionMetadataOnly())
+	require.NoError(t, err)
+	require.Equal(t, "session-a", metadataOnly.Metadata.SessionID)
+	require.Empty(t, metadataOnly.Transcript)
+	require.Empty(t, metadataOnly.Prompts)
+
+	metadataAndPrompts, err := store.ReadSession(ctx, SessionIDRef(cpID, "session-a"), WithSessionMetadataAndPrompts())
+	require.NoError(t, err)
+	require.Equal(t, "session-a", metadataAndPrompts.Metadata.SessionID)
+	require.Equal(t, "first prompt", metadataAndPrompts.Prompts)
+	require.Empty(t, metadataAndPrompts.Transcript)
+
+	infos, err := store.ListCheckpoints(ctx)
+	require.NoError(t, err)
+	require.Len(t, infos, 1)
+	require.Equal(t, cpID, infos[0].CheckpointID)
+}
+
+func TestGitStoreStoresUpdateSpecificSessionAndCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	repo, err := git.PlainOpen(repoDir)
+	require.NoError(t, err)
+
+	store := NewGitStore(repo, DefaultV1Refs())
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("444444444444")
+
+	writeSessionForStoreTest(t, store, cpID, "session-a", "first transcript\n", "first prompt")
+	writeSessionForStoreTest(t, store, cpID, "session-b", "latest transcript\n", "latest prompt")
+
+	sessionSummary := &Summary{Intent: "summarize first session"}
+	require.NoError(t, store.UpdateSession(ctx, SessionIDRef(cpID, "session-a"), WithSummary(sessionSummary)))
+
+	first, err := store.ReadSession(ctx, SessionIDRef(cpID, "session-a"), WithSessionMetadataOnly())
+	require.NoError(t, err)
+	require.Equal(t, sessionSummary.Intent, first.Metadata.Summary.Intent)
+
+	second, err := store.ReadSession(ctx, SessionIDRef(cpID, "session-b"), WithSessionMetadataOnly())
+	require.NoError(t, err)
+	require.Nil(t, second.Metadata.Summary)
+
+	attribution := &InitialAttribution{AgentLines: 7, TotalCommitted: 11}
+	require.NoError(t, store.UpdateCheckpoint(ctx, cpID, WithAttribution(attribution)))
+
+	checkpointSummary, err := store.ReadCheckpoint(ctx, cpID)
+	require.NoError(t, err)
+	require.Equal(t, 7, checkpointSummary.CombinedAttribution.AgentLines)
+	require.Equal(t, 11, checkpointSummary.CombinedAttribution.TotalCommitted)
+}
+
+func writeSessionForStoreTest(t *testing.T, store *GitStore, cpID id.CheckpointID, sessionID, transcript, prompt string) {
+	t.Helper()
+
+	require.NoError(t, store.WriteSession(t.Context(), SessionIDRef(cpID, sessionID), Session{
+		Strategy:    "manual-commit",
+		Transcript:  redact.AlreadyRedacted([]byte(transcript)),
+		Prompts:     []string{prompt},
+		AuthorName:  "Test",
+		AuthorEmail: "test@example.com",
+	}))
+}
+
 type committedReaderStub struct {
 	summary *CheckpointSummary
 	readErr error
