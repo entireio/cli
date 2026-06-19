@@ -697,7 +697,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 			return fmt.Errorf("open checkpoint store: %w", openErr)
 		}
 		lookup.store = reopened.Primary
-		content, err = checkpoint.ReadLatestSessionContent(ctx, lookup.store, fullCheckpointID, summary)
+		content, err = lookup.store.ReadSession(ctx, checkpoint.LatestSessionRef(fullCheckpointID))
 		if err != nil {
 			stopLoad(false)
 			return fmt.Errorf("failed to reload checkpoint: %w", err)
@@ -750,12 +750,12 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 	prefetchCheckpointBlobs(ctx, lookup.repo, cpID)
 
 	store := lookup.store
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
+	summary, err := store.ReadCheckpoint(ctx, cpID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
 
-	content, contentErr := checkpoint.ReadLatestSessionContent(ctx, store, cpID, summary)
+	content, contentErr := store.ReadSession(ctx, checkpoint.LatestSessionRef(cpID))
 	if contentErr != nil {
 		return nil, nil, fmt.Errorf("failed to read checkpoint content: %w", contentErr)
 	}
@@ -879,7 +879,7 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 		store: store,
 	}
 
-	committed, err := store.ListCommitted(ctx)
+	committed, err := store.ListCheckpoints(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list checkpoints: %w", err)
 	}
@@ -889,7 +889,7 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 }
 
 type checkpointSummaryUpdater interface {
-	UpdateSummary(ctx context.Context, checkpointID id.CheckpointID, summary *checkpoint.Summary) error
+	UpdateSession(ctx context.Context, ref checkpoint.SessionRef, opts ...checkpoint.WriteOption) error
 }
 
 // generateCheckpointSummary generates an AI summary for a checkpoint and persists it.
@@ -946,7 +946,11 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 	}
 	elapsed := time.Since(start)
 
-	if err := store.UpdateSummary(ctx, checkpointID, summary); err != nil {
+	ref := checkpoint.SessionIDRef(checkpointID, content.Metadata.SessionID)
+	if content.Metadata.SessionID == "" {
+		ref = checkpoint.LatestSessionRef(checkpointID)
+	}
+	if err := store.UpdateSession(ctx, ref, checkpoint.WithSummary(summary)); err != nil {
 		return fmt.Errorf("failed to save summary: %w", err)
 	}
 
@@ -2046,7 +2050,7 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	store := stores.Primary
 
 	// Get all committed checkpoints for lookup.
-	committedInfos, err := store.ListCommitted(ctx)
+	committedInfos, err := store.ListCheckpoints(ctx)
 	if err != nil {
 		committedInfos = nil // Continue without committed checkpoints
 	}
@@ -2163,16 +2167,16 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	return points, nil
 }
 
-func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.CommittedListReader, cpID id.CheckpointID, sessionCount int) string {
+func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.SessionReader, cpID id.CheckpointID, sessionCount int) string {
 	if sessionCount <= 0 {
 		return ""
 	}
 	for i := sessionCount - 1; i >= 0; i-- {
-		prompts, err := store.ReadSessionPrompts(ctx, cpID, i)
+		content, err := store.ReadSession(ctx, checkpoint.SessionIndexRef(cpID, i), checkpoint.WithSessionMetadataAndPrompts())
 		if err != nil {
 			continue
 		}
-		if prompt := strategy.ExtractFirstPrompt(prompts); prompt != "" {
+		if prompt := strategy.ExtractFirstPrompt(content.Prompts); prompt != "" {
 			return prompt
 		}
 	}

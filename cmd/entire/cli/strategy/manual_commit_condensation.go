@@ -54,7 +54,7 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 		return nil, err
 	}
 
-	committed, err := store.ListCommitted(ctx)
+	committed, err := store.ListCheckpoints(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list committed checkpoints: %w", err)
 	}
@@ -76,11 +76,7 @@ func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointI
 		return nil, err
 	}
 
-	summary, err := cpkg.ReadCommittedCheckpoint(ctx, store, checkpointID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
-	}
-	content, err := cpkg.ReadLatestSessionContent(ctx, store, checkpointID, summary)
+	content, err := store.ReadSession(ctx, cpkg.LatestSessionRef(checkpointID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
@@ -135,7 +131,7 @@ func checkpointStepCount(s *SessionState) int {
 // CondenseSession condenses a session's shadow branch to permanent storage.
 // checkpointID is the 12-hex-char value from the Entire-Checkpoint trailer.
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/
-// Uses checkpoint.CommittedStore.WriteCommitted for committed storage.
+// Uses checkpoint.CommittedStore.WriteSession for committed storage.
 //
 // For mid-session commits (no Stop/SaveStep called yet), the shadow branch may not exist.
 // In this case, data is extracted from the live transcript instead.
@@ -290,7 +286,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
-	if err := store.WriteCommitted(writeCtx, writeOpts); err != nil {
+	if err := store.WriteSession(writeCtx, cpkg.SessionIDRef(checkpointID, state.SessionID), writeOpts); err != nil {
 		writeCommittedSpan.RecordError(err)
 		writeCommittedSpan.End()
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)

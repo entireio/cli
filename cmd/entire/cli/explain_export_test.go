@@ -489,20 +489,17 @@ func TestRunExplainExport_NoModeFlagFailsLoudly(t *testing.T) {
 	require.Empty(t, stdout.String(), "must not emit JSON when no mode is set")
 }
 
-// stubCommittedReader is a minimal CommittedReader that returns canned
-// metadata or errors per session index. Used to exercise the partial-failure
-// path in buildCheckpointJSONEnvelope without corrupting a real git tree.
 type stubCommittedReader struct {
 	summary  *checkpoint.CheckpointSummary
 	contents map[int]*checkpoint.SessionContent // idx -> content (nil ⇒ return error)
 	err      error                              // err returned for indexes not in contents
 }
 
-func (s *stubCommittedReader) ReadCommitted(_ context.Context, _ id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
-	return s.summary, nil
-}
-
-func (s *stubCommittedReader) ReadSessionContent(_ context.Context, _ id.CheckpointID, idx int) (*checkpoint.SessionContent, error) {
+func (s *stubCommittedReader) ReadSession(_ context.Context, ref checkpoint.SessionRef, _ ...checkpoint.ReadOption) (*checkpoint.SessionContent, error) {
+	idx, ok := ref.SessionIndex()
+	if !ok {
+		return nil, errors.New("stub: expected session index ref")
+	}
 	if c, ok := s.contents[idx]; ok && c != nil {
 		return c, nil
 	}

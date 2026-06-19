@@ -390,11 +390,15 @@ type attributionCheckpointReaderStub struct {
 	content *checkpoint.SessionContent
 }
 
-func (s *attributionCheckpointReaderStub) ReadCommitted(context.Context, checkpointid.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+func (s *attributionCheckpointReaderStub) ListCheckpoints(context.Context) ([]checkpoint.CommittedInfo, error) {
+	return nil, nil
+}
+
+func (s *attributionCheckpointReaderStub) ReadCheckpoint(context.Context, checkpointid.CheckpointID) (*checkpoint.CheckpointSummary, error) {
 	return s.summary, nil
 }
 
-func (s *attributionCheckpointReaderStub) ReadSessionMetadataAndPrompts(context.Context, checkpointid.CheckpointID, int) (*checkpoint.SessionContent, error) {
+func (s *attributionCheckpointReaderStub) ReadSession(context.Context, checkpoint.SessionRef, ...checkpoint.ReadOption) (*checkpoint.SessionContent, error) {
 	return s.content, nil
 }
 

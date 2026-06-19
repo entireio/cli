@@ -309,7 +309,7 @@ func ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
-	committed, err := stores.Primary.ListCommitted(ctx)
+	committed, err := stores.Primary.ListCheckpoints(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list committed checkpoints: %w", err)
 	}

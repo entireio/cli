@@ -628,20 +628,26 @@ type resumeCheckpointInfoReaderStub struct {
 	metadata  map[id.CheckpointID][]checkpoint.CommittedMetadata
 }
 
-func (r *resumeCheckpointInfoReaderStub) ReadCommitted(_ context.Context, checkpointID id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+func (r *resumeCheckpointInfoReaderStub) ListCheckpoints(context.Context) ([]checkpoint.CommittedInfo, error) {
+	return nil, nil
+}
+
+func (r *resumeCheckpointInfoReaderStub) ReadCheckpoint(_ context.Context, checkpointID id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
 	return r.summaries[checkpointID], nil
 }
 
-func (r *resumeCheckpointInfoReaderStub) ReadSessionContent(_ context.Context, _ id.CheckpointID, _ int) (*checkpoint.SessionContent, error) {
-	return nil, checkpoint.ErrCheckpointNotFound
-}
+func (r *resumeCheckpointInfoReaderStub) ReadSession(_ context.Context, ref checkpoint.SessionRef, _ ...checkpoint.ReadOption) (*checkpoint.SessionContent, error) {
+	sessionIndex, ok := ref.SessionIndex()
+	if !ok {
+		return nil, checkpoint.ErrCheckpointNotFound
+	}
 
-func (r *resumeCheckpointInfoReaderStub) ReadSessionMetadata(_ context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.CommittedMetadata, error) {
+	checkpointID := ref.CheckpointID()
 	sessions := r.metadata[checkpointID]
 	if sessionIndex < 0 || sessionIndex >= len(sessions) {
 		return nil, checkpoint.ErrCheckpointNotFound
 	}
-	return &sessions[sessionIndex], nil
+	return &checkpoint.SessionContent{Metadata: sessions[sessionIndex]}, nil
 }
 
 func TestReadCheckpointInfoFromStoreUsesLatestSessionMetadata(t *testing.T) {

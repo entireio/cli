@@ -318,7 +318,7 @@ func ListOrphanedSessionStates(ctx context.Context) ([]CleanupItem, error) {
 	}
 
 	sessionsWithCheckpoints := make(map[string]bool)
-	checkpoints, listErr := cpStores.Primary.ListCommitted(ctx)
+	checkpoints, listErr := cpStores.Primary.ListCheckpoints(ctx)
 	if listErr == nil {
 		for _, cp := range checkpoints {
 			// cp.SessionID is the most-recent session in a multi-session checkpoint;

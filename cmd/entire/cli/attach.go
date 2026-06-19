@@ -337,7 +337,7 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 		writeOpts.HasReview = true
 	}
 
-	if err := store.WriteCommitted(ctx, writeOpts); err != nil {
+	if err := store.WriteSession(ctx, cpkg.SessionIDRef(checkpointID, sessionID), writeOpts); err != nil {
 		return fmt.Errorf("failed to write checkpoint: %w", err)
 	}
 
@@ -370,19 +370,20 @@ func checkpointHasSessionMetadata(ctx context.Context, repo *git.Repository, ref
 	if err != nil {
 		return false, err
 	}
-	summary, err := store.ReadCommitted(ctx, checkpointID)
+	summary, err := store.ReadCheckpoint(ctx, checkpointID)
 	if err != nil {
+		if errors.Is(err, cpkg.ErrCheckpointNotFound) {
+			return false, nil
+		}
 		return false, fmt.Errorf("read checkpoint summary: %w", err)
 	}
-	if summary == nil {
-		return false, nil
-	}
 	for i := range summary.Sessions {
-		metadata, err := store.ReadSessionMetadata(ctx, checkpointID, i)
+		content, err := store.ReadSession(ctx, cpkg.SessionIndexRef(checkpointID, i), cpkg.WithSessionMetadataOnly())
 		if err != nil {
 			return false, fmt.Errorf("read session %d metadata: %w", i, err)
 		}
-		if metadata != nil && metadata.SessionID == sessionID {
+		metadata := content.Metadata
+		if metadata.SessionID == sessionID {
 			return true, nil
 		}
 	}
@@ -473,8 +474,11 @@ func checkpointPresentLocally(ctx context.Context, repo *git.Repository, refs cp
 	if err != nil {
 		return false, err
 	}
-	summary, err := store.ReadCommitted(ctx, checkpointID)
+	summary, err := store.ReadCheckpoint(ctx, checkpointID)
 	if err != nil {
+		if errors.Is(err, cpkg.ErrCheckpointNotFound) {
+			return false, nil
+		}
 		return false, err //nolint:wrapcheck // Caller wraps with checkpoint ID context
 	}
 	return summary != nil, nil

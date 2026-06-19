@@ -329,7 +329,7 @@ func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName 
 
 // resolveLatestCheckpoint reads metadata for each checkpoint ID and returns
 // the checkpoint with the latest CreatedAt.
-func resolveLatestCheckpoint(ctx context.Context, store checkpointInfoReader, checkpointIDs []id.CheckpointID) (*strategy.CheckpointInfo, error) {
+func resolveLatestCheckpoint(ctx context.Context, store committedCheckpointReader, checkpointIDs []id.CheckpointID) (*strategy.CheckpointInfo, error) {
 	infoMap := make(map[id.CheckpointID]strategy.CheckpointInfo, len(checkpointIDs))
 	for _, cpID := range checkpointIDs {
 		metadata, readErr := readCheckpointInfoFromStore(ctx, store, cpID)
@@ -349,13 +349,8 @@ func resolveLatestCheckpoint(ctx context.Context, store checkpointInfoReader, ch
 	return &latest, nil
 }
 
-type checkpointInfoReader interface {
-	checkpoint.CommittedReader
-	ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.CommittedMetadata, error)
-}
-
-func readCheckpointInfoFromStore(ctx context.Context, store checkpointInfoReader, checkpointID id.CheckpointID) (*strategy.CheckpointInfo, error) {
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, checkpointID)
+func readCheckpointInfoFromStore(ctx context.Context, store committedCheckpointReader, checkpointID id.CheckpointID) (*strategy.CheckpointInfo, error) {
+	summary, err := store.ReadCheckpoint(ctx, checkpointID)
 	if err != nil {
 		return nil, fmt.Errorf("read checkpoint: %w", err)
 	}
@@ -366,7 +361,7 @@ func readCheckpointInfoFromStore(ctx context.Context, store checkpointInfoReader
 		SessionCount:     len(summary.Sessions),
 	}
 	for i := range summary.Sessions {
-		metadata, metaErr := store.ReadSessionMetadata(ctx, checkpointID, i)
+		content, metaErr := store.ReadSession(ctx, checkpoint.SessionIndexRef(checkpointID, i), checkpoint.WithSessionMetadataOnly())
 		if metaErr != nil {
 			logging.Debug(ctx, "read checkpoint metadata: session metadata read failed",
 				slog.String("checkpoint_id", checkpointID.String()),
@@ -375,6 +370,7 @@ func readCheckpointInfoFromStore(ctx context.Context, store checkpointInfoReader
 			)
 			continue
 		}
+		metadata := content.Metadata
 		info.SessionIDs = append(info.SessionIDs, metadata.SessionID)
 		if metadata.SessionID != "" {
 			info.SessionID = metadata.SessionID
@@ -942,7 +938,7 @@ func resumeSingleSession(ctx context.Context, w, _ io.Writer, ag agent.Agent, se
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
 	}
-	logContent, _, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, stores.Primary, checkpointID)
+	content, err := stores.Primary.ReadSession(ctx, checkpoint.SessionIDRef(checkpointID, sessionID))
 	if err != nil {
 		if errors.Is(err, checkpoint.ErrCheckpointNotFound) || errors.Is(err, checkpoint.ErrNoTranscript) {
 			logging.Debug(ctx, "resume session completed (no metadata)",
@@ -961,6 +957,7 @@ func resumeSingleSession(ctx context.Context, w, _ io.Writer, ag agent.Agent, se
 		)
 		return fmt.Errorf("failed to get session log: %w", err)
 	}
+	logContent := content.Transcript
 
 	// By default, never overwrite a session log that already exists locally: the
 	// on-disk transcript is the live session the user is resuming, so we keep it

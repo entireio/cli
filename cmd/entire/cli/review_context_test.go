@@ -467,31 +467,15 @@ func (r *countingReviewContextReader) ReadCommitted(
 	return nil, checkpoint.ErrCheckpointNotFound
 }
 
-func (r *countingReviewContextReader) ReadSessionContent(
+func (r *countingReviewContextReader) ReadSession(
 	context.Context,
-	checkpointid.CheckpointID,
-	int,
+	checkpoint.SessionRef,
+	...checkpoint.ReadOption,
 ) (*checkpoint.SessionContent, error) {
-	return &checkpoint.SessionContent{
-		Metadata: r.metadata,
-		Prompts:  r.prompts,
-	}, nil
-}
-
-func (r *countingReviewContextReader) ReadSessionMetadata(
-	context.Context,
-	checkpointid.CheckpointID,
-	int,
-) (*checkpoint.CommittedMetadata, error) {
-	r.metadataCalls++
-	return &r.metadata, r.metadataErr
-}
-
-func (r *countingReviewContextReader) ReadSessionMetadataAndPrompts(
-	context.Context,
-	checkpointid.CheckpointID,
-	int,
-) (*checkpoint.SessionContent, error) {
+	if r.metadataCalls == 0 {
+		r.metadataCalls++
+		return &checkpoint.SessionContent{Metadata: r.metadata}, r.metadataErr
+	}
 	r.promptCalls++
 	return &checkpoint.SessionContent{
 		Metadata: r.metadata,

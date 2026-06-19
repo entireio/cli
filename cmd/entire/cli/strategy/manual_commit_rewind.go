@@ -647,7 +647,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
 	store := stores.Primary
-	summary, err := cpkg.ReadCommittedCheckpoint(ctx, store, point.CheckpointID)
+	summary, err := store.ReadCheckpoint(ctx, point.CheckpointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
@@ -681,7 +681,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 	// Restore all sessions (oldest to newest, using 0-based indexing)
 	var restored []RestoredSession
 	for i := range totalSessions {
-		content, readErr := store.ReadSessionContent(ctx, point.CheckpointID, i)
+		content, readErr := store.ReadSession(ctx, cpkg.SessionIndexRef(point.CheckpointID, i))
 		if readErr != nil {
 			if !errors.Is(readErr, cpkg.ErrNoTranscript) {
 				fmt.Fprintf(errW, "  Warning: failed to read session %d: %v\n", i, readErr)
@@ -860,13 +860,13 @@ type SessionRestoreInfo struct {
 // about each session, including whether local logs have newer timestamps.
 // repoRoot is used to compute per-session agent directories.
 // Sessions without agent metadata are skipped (cannot determine target directory).
-func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, repoRoot string, store cpkg.CommittedReader, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary) []SessionRestoreInfo {
+func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, repoRoot string, store cpkg.SessionReader, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary) []SessionRestoreInfo {
 	var sessions []SessionRestoreInfo
 
 	totalSessions := len(summary.Sessions)
 	// Check all sessions (0-based indexing)
 	for i := range totalSessions {
-		content, err := store.ReadSessionContent(ctx, checkpointID, i)
+		content, err := store.ReadSession(ctx, cpkg.SessionIndexRef(checkpointID, i))
 		if err != nil || content == nil || len(content.Transcript) == 0 {
 			continue
 		}

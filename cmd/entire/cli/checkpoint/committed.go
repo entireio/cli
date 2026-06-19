@@ -1340,7 +1340,11 @@ func LookupSessionLog(ctx context.Context, cpID id.CheckpointID) ([]byte, string
 	if err != nil {
 		return nil, "", fmt.Errorf("open checkpoint store: %w", err)
 	}
-	return ReadRawSessionLogForCheckpoint(ctx, stores.Primary, cpID)
+	content, err := stores.Primary.ReadSession(ctx, LatestSessionRef(cpID))
+	if err != nil {
+		return nil, "", err //nolint:wrapcheck // Checkpoint store errors are already caller-facing sentinel errors.
+	}
+	return content.Transcript, content.Metadata.SessionID, nil
 }
 
 // UpdateSummary updates the summary field in the latest session's metadata.

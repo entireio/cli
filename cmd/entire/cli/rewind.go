@@ -722,10 +722,12 @@ func restoreSessionTranscriptFromStrategy(ctx context.Context, cpID id.Checkpoin
 	if err != nil {
 		return "", fmt.Errorf("open checkpoint store: %w", err)
 	}
-	content, returnedSessionID, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, stores.Primary, cpID)
+	sessionContent, err := stores.Primary.ReadSession(ctx, checkpoint.LatestSessionRef(cpID))
 	if err != nil {
 		return "", fmt.Errorf("failed to get session log: %w", err)
 	}
+	content := sessionContent.Transcript
+	returnedSessionID := sessionContent.Metadata.SessionID
 
 	// Use session ID returned from checkpoint if available
 	// Otherwise fall back to the passed-in sessionID

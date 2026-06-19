@@ -1067,7 +1067,7 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	}
 	store := stores.Primary
 
-	summary, err := store.ReadCommitted(ctx, checkpointID)
+	summary, err := store.ReadCheckpoint(ctx, checkpointID)
 	if err != nil {
 		return fmt.Errorf("reading checkpoint summary: %w", err)
 	}
@@ -1083,10 +1083,11 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	// Old metadata lacks SaveStepCount → 0 → conservatively skipped, matching prior behavior.
 	agentFiles := make(map[string]struct{})
 	for i := range len(summary.Sessions) {
-		metadata, readErr := store.ReadSessionMetadata(ctx, checkpointID, i)
-		if readErr != nil || metadata == nil {
+		content, readErr := store.ReadSession(ctx, checkpoint.SessionIndexRef(checkpointID, i), checkpoint.WithSessionMetadataOnly())
+		if readErr != nil || content == nil {
 			continue
 		}
+		metadata := content.Metadata
 		if metadata.SaveStepCount == 0 {
 			continue // Skip sessions that used the filesTouched fallback
 		}
@@ -1158,7 +1159,7 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 		slog.Float64("agent_percentage", agentPercentage),
 	)
 
-	if err := store.UpdateCheckpointSummary(ctx, checkpointID, combined); err != nil {
+	if err := store.UpdateCheckpoint(ctx, checkpointID, checkpoint.WithAttribution(combined)); err != nil {
 		return fmt.Errorf("persisting combined attribution: %w", err)
 	}
 
@@ -2820,17 +2821,12 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			continue
 		}
 
-		updateOpts := checkpoint.UpdateCommittedOptions{
-			CheckpointID:     cpID,
-			SessionID:        state.SessionID,
-			Transcript:       redactedTranscript,
-			Prompts:          prompts,
-			Agent:            state.AgentType,
-			SkillEvents:      skillEvents,
-			PrecomputedBlobs: precomputed,
-		}
-
-		updateErr := store.UpdateCommitted(ctx, updateOpts)
+		updateErr := store.UpdateSession(ctx, checkpoint.SessionIDRef(cpID, state.SessionID),
+			checkpoint.WithTranscript(redactedTranscript, state.AgentType),
+			checkpoint.WithPrompts(prompts),
+			checkpoint.WithSkillEvents(skillEvents),
+			checkpoint.WithPrecomputedTranscriptBlobs(precomputed),
+		)
 		if updateErr != nil {
 			logging.Warn(logCtx, "finalize: failed to update checkpoint",
 				slog.String("checkpoint_id", cpIDStr),

@@ -114,15 +114,10 @@ type attributionSummary struct {
 	MixedPercentage  int `json:"mixed_percentage"`
 }
 
-type attributionCheckpointReader interface {
-	ReadCommitted(ctx context.Context, checkpointID id.CheckpointID) (*checkpoint.CheckpointSummary, error)
-	ReadSessionMetadataAndPrompts(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.SessionContent, error)
-}
-
 type attributionResolver struct {
 	ctx         context.Context
 	repo        *git.Repository
-	store       attributionCheckpointReader
+	store       committedCheckpointReader
 	fetchOnMiss bool
 
 	commitCache     map[string]*object.Commit
@@ -489,11 +484,11 @@ func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file s
 	return ctx
 }
 
-func readAttributionCheckpointSummary(ctx context.Context, reader attributionCheckpointReader, cpID id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+func readAttributionCheckpointSummary(ctx context.Context, reader committedCheckpointReader, cpID id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err //nolint:wrapcheck // Propagating context cancellation
 	}
-	summary, err := reader.ReadCommitted(ctx, cpID)
+	summary, err := reader.ReadCheckpoint(ctx, cpID)
 	if err != nil {
 		return nil, fmt.Errorf("read committed checkpoint: %w", err)
 	}
@@ -568,7 +563,7 @@ type checkpointSessionForFile struct {
 }
 
 func (r *attributionResolver) readSessionForCheckpoint(cpID id.CheckpointID, index int) (checkpointSessionForFile, error) {
-	content, err := r.store.ReadSessionMetadataAndPrompts(r.ctx, cpID, index)
+	content, err := r.store.ReadSession(r.ctx, checkpoint.SessionIndexRef(cpID, index), checkpoint.WithSessionMetadataAndPrompts())
 	if err != nil {
 		return checkpointSessionForFile{}, err //nolint:wrapcheck // caller skips partial metadata
 	}

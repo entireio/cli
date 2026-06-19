@@ -169,13 +169,17 @@ type committedReaderStub struct {
 	readErr error
 }
 
-func (s *committedReaderStub) ReadCommitted(context.Context, id.CheckpointID) (*CheckpointSummary, error) {
+func (s *committedReaderStub) ListCheckpoints(context.Context) ([]CommittedInfo, error) {
+	return nil, nil
+}
+
+func (s *committedReaderStub) ReadCheckpoint(context.Context, id.CheckpointID) (*CheckpointSummary, error) {
 	if s.readErr != nil {
 		return nil, s.readErr
 	}
 	return s.summary, nil
 }
 
-func (s *committedReaderStub) ReadSessionContent(context.Context, id.CheckpointID, int) (*SessionContent, error) {
+func (s *committedReaderStub) ReadSession(context.Context, SessionRef, ...ReadOption) (*SessionContent, error) {
 	return nil, ErrCheckpointNotFound
 }

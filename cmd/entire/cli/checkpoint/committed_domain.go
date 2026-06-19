@@ -56,6 +56,14 @@ func (r SessionRef) CheckpointID() id.CheckpointID { return r.checkpointID }
 // SessionID returns the target session ID when the ref was created by SessionIDRef.
 func (r SessionRef) SessionID() string { return r.sessionID }
 
+// SessionIndex returns the target index when the ref was created by SessionIndexRef.
+func (r SessionRef) SessionIndex() (int, bool) {
+	if r.sessionRefMode != sessionRefIndex {
+		return 0, false
+	}
+	return r.sessionIndex, true
+}
+
 type sessionReadMode int
 
 const (
@@ -190,7 +198,18 @@ func (s *GitStore) ListCheckpoints(ctx context.Context) ([]CommittedInfo, error)
 }
 
 func (s *GitStore) ReadCheckpoint(ctx context.Context, checkpointID id.CheckpointID) (*CheckpointSummary, error) {
-	return ReadCommittedCheckpoint(ctx, s, checkpointID)
+	if err := ctx.Err(); err != nil {
+		return nil, err //nolint:wrapcheck // Propagating context cancellation
+	}
+
+	summary, err := s.ReadCommitted(ctx, checkpointID)
+	if err != nil {
+		return nil, fmt.Errorf("read committed checkpoint: %w", err)
+	}
+	if summary == nil {
+		return nil, ErrCheckpointNotFound
+	}
+	return summary, nil
 }
 
 func (s *GitStore) ReadSession(ctx context.Context, ref SessionRef, opts ...ReadOption) (*SessionContent, error) {

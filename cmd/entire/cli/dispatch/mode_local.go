@@ -181,7 +181,7 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
 	store := stores.Primary
-	infos, err := store.ListCommitted(ctx)
+	infos, err := store.ListCheckpoints(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list committed checkpoints: %w", err)
 	}
@@ -192,12 +192,9 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 			continue
 		}
 
-		summary, err := store.ReadCommitted(ctx, info.CheckpointID)
+		summary, err := store.ReadCheckpoint(ctx, info.CheckpointID)
 		if err != nil {
 			logging.Warn(ctx, "failed to read committed checkpoint for dispatch", "checkpoint_id", info.CheckpointID.String(), "error", err)
-			continue
-		}
-		if summary == nil {
 			continue
 		}
 		if _, onSelectedBranch := branchSet[summary.Branch]; !onSelectedBranch {
@@ -212,7 +209,9 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 		localSummary := ""
 		if len(summary.Sessions) > 0 {
 			latestIndex := len(summary.Sessions) - 1
-			if metadata, err := store.ReadSessionMetadata(ctx, info.CheckpointID, latestIndex); err == nil && metadata != nil && metadata.Summary != nil {
+			content, err := store.ReadSession(ctx, checkpoint.SessionIndexRef(info.CheckpointID, latestIndex), checkpoint.WithSessionMetadataOnly())
+			if err == nil && content != nil && content.Metadata.Summary != nil {
+				metadata := content.Metadata
 				localSummary = strings.TrimSpace(metadata.Summary.Outcome)
 				if localSummary == "" {
 					localSummary = strings.TrimSpace(metadata.Summary.Intent)

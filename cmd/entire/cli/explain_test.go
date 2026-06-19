@@ -1011,7 +1011,7 @@ func TestGenerateCheckpointSummary_AdvancesV1Metadata(t *testing.T) {
 	require.NoError(t, err)
 	store := stores.Primary
 	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
-	require.NoError(t, store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	require.NoError(t, store.WriteSession(ctx, checkpoint.SessionIDRef(cpID, "session-001"), checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    "session-001",
 		Strategy:     "manual-commit",
@@ -1021,9 +1021,9 @@ func TestGenerateCheckpointSummary_AdvancesV1Metadata(t *testing.T) {
 		AuthorEmail:  "test@test.com",
 		Agent:        agent.AgentTypeClaudeCode,
 	}))
-	cpSummary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
+	cpSummary, err := store.ReadCheckpoint(ctx, cpID)
 	require.NoError(t, err)
-	content, err := checkpoint.ReadLatestSessionContent(ctx, store, cpID, cpSummary)
+	content, err := store.ReadSession(ctx, checkpoint.LatestSessionRef(cpID))
 	require.NoError(t, err)
 
 	v1Before, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
@@ -2137,7 +2137,7 @@ func TestRunExplainCheckpoint_GenerateV1ModeUsesSelectedStore(t *testing.T) {
 		AuthorEmail: "test@example.com",
 		Agent:       agent.AgentTypeClaudeCode,
 	}))
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
+	summary, err := store.ReadCheckpoint(ctx, cpID)
 	require.NoError(t, err)
 	require.Len(t, summary.Sessions, 1)
 
