@@ -1591,6 +1591,300 @@ func (s *GetPermissionsOutputBodyExplain) init() GetPermissionsOutputBodyExplain
 	return m
 }
 
+// Ref: #/components/schemas/GetVersionOutputBody
+type GetVersionOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Server mode.
+	Mode OptGetVersionOutputBodyMode `json:"mode"`
+	// Git commit SHA of the running entire-core binary, or "dev" for an untagged local build.
+	Version         string `json:"version"`
+	AdditionalProps GetVersionOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *GetVersionOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetMode returns the value of Mode.
+func (s *GetVersionOutputBody) GetMode() OptGetVersionOutputBodyMode {
+	return s.Mode
+}
+
+// GetVersion returns the value of Version.
+func (s *GetVersionOutputBody) GetVersion() string {
+	return s.Version
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GetVersionOutputBody) GetAdditionalProps() GetVersionOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *GetVersionOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetMode sets the value of Mode.
+func (s *GetVersionOutputBody) SetMode(val OptGetVersionOutputBodyMode) {
+	s.Mode = val
+}
+
+// SetVersion sets the value of Version.
+func (s *GetVersionOutputBody) SetVersion(val string) {
+	s.Version = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GetVersionOutputBody) SetAdditionalProps(val GetVersionOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GetVersionOutputBodyAdditional map[string]jx.Raw
+
+func (s *GetVersionOutputBodyAdditional) init() GetVersionOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Server mode.
+type GetVersionOutputBodyMode string
+
+const (
+	GetVersionOutputBodyModeStandalone GetVersionOutputBodyMode = "standalone"
+	GetVersionOutputBodyModeGlobal     GetVersionOutputBodyMode = "global"
+	GetVersionOutputBodyModeRegional   GetVersionOutputBodyMode = "regional"
+)
+
+// AllValues returns all GetVersionOutputBodyMode values.
+func (GetVersionOutputBodyMode) AllValues() []GetVersionOutputBodyMode {
+	return []GetVersionOutputBodyMode{
+		GetVersionOutputBodyModeStandalone,
+		GetVersionOutputBodyModeGlobal,
+		GetVersionOutputBodyModeRegional,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GetVersionOutputBodyMode) MarshalText() ([]byte, error) {
+	switch s {
+	case GetVersionOutputBodyModeStandalone:
+		return []byte(s), nil
+	case GetVersionOutputBodyModeGlobal:
+		return []byte(s), nil
+	case GetVersionOutputBodyModeRegional:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GetVersionOutputBodyMode) UnmarshalText(data []byte) error {
+	switch GetVersionOutputBodyMode(data) {
+	case GetVersionOutputBodyModeStandalone:
+		*s = GetVersionOutputBodyModeStandalone
+		return nil
+	case GetVersionOutputBodyModeGlobal:
+		*s = GetVersionOutputBodyModeGlobal
+		return nil
+	case GetVersionOutputBodyModeRegional:
+		*s = GetVersionOutputBodyModeRegional
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Ref: #/components/schemas/GrantMirrorCollaboratorInputBody
+type GrantMirrorCollaboratorInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Public host of the cluster serving the mirror.
+	ClusterHost string `json:"clusterHost"`
+	// Qualified grantee handle, e.g. github:alice.
+	Handle   string                                   `json:"handle"`
+	Owner    string                                   `json:"owner"`
+	Provider GrantMirrorCollaboratorInputBodyProvider `json:"provider"`
+	Repo     string                                   `json:"repo"`
+	// Grant level: reader (pull) or writer (pull+push).
+	Role            GrantMirrorCollaboratorInputBodyRole `json:"role"`
+	AdditionalProps GrantMirrorCollaboratorInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *GrantMirrorCollaboratorInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetClusterHost returns the value of ClusterHost.
+func (s *GrantMirrorCollaboratorInputBody) GetClusterHost() string {
+	return s.ClusterHost
+}
+
+// GetHandle returns the value of Handle.
+func (s *GrantMirrorCollaboratorInputBody) GetHandle() string {
+	return s.Handle
+}
+
+// GetOwner returns the value of Owner.
+func (s *GrantMirrorCollaboratorInputBody) GetOwner() string {
+	return s.Owner
+}
+
+// GetProvider returns the value of Provider.
+func (s *GrantMirrorCollaboratorInputBody) GetProvider() GrantMirrorCollaboratorInputBodyProvider {
+	return s.Provider
+}
+
+// GetRepo returns the value of Repo.
+func (s *GrantMirrorCollaboratorInputBody) GetRepo() string {
+	return s.Repo
+}
+
+// GetRole returns the value of Role.
+func (s *GrantMirrorCollaboratorInputBody) GetRole() GrantMirrorCollaboratorInputBodyRole {
+	return s.Role
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GrantMirrorCollaboratorInputBody) GetAdditionalProps() GrantMirrorCollaboratorInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *GrantMirrorCollaboratorInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetClusterHost sets the value of ClusterHost.
+func (s *GrantMirrorCollaboratorInputBody) SetClusterHost(val string) {
+	s.ClusterHost = val
+}
+
+// SetHandle sets the value of Handle.
+func (s *GrantMirrorCollaboratorInputBody) SetHandle(val string) {
+	s.Handle = val
+}
+
+// SetOwner sets the value of Owner.
+func (s *GrantMirrorCollaboratorInputBody) SetOwner(val string) {
+	s.Owner = val
+}
+
+// SetProvider sets the value of Provider.
+func (s *GrantMirrorCollaboratorInputBody) SetProvider(val GrantMirrorCollaboratorInputBodyProvider) {
+	s.Provider = val
+}
+
+// SetRepo sets the value of Repo.
+func (s *GrantMirrorCollaboratorInputBody) SetRepo(val string) {
+	s.Repo = val
+}
+
+// SetRole sets the value of Role.
+func (s *GrantMirrorCollaboratorInputBody) SetRole(val GrantMirrorCollaboratorInputBodyRole) {
+	s.Role = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GrantMirrorCollaboratorInputBody) SetAdditionalProps(val GrantMirrorCollaboratorInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GrantMirrorCollaboratorInputBodyAdditional map[string]jx.Raw
+
+func (s *GrantMirrorCollaboratorInputBodyAdditional) init() GrantMirrorCollaboratorInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type GrantMirrorCollaboratorInputBodyProvider string
+
+const (
+	GrantMirrorCollaboratorInputBodyProviderGithub GrantMirrorCollaboratorInputBodyProvider = "github"
+)
+
+// AllValues returns all GrantMirrorCollaboratorInputBodyProvider values.
+func (GrantMirrorCollaboratorInputBodyProvider) AllValues() []GrantMirrorCollaboratorInputBodyProvider {
+	return []GrantMirrorCollaboratorInputBodyProvider{
+		GrantMirrorCollaboratorInputBodyProviderGithub,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GrantMirrorCollaboratorInputBodyProvider) MarshalText() ([]byte, error) {
+	switch s {
+	case GrantMirrorCollaboratorInputBodyProviderGithub:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GrantMirrorCollaboratorInputBodyProvider) UnmarshalText(data []byte) error {
+	switch GrantMirrorCollaboratorInputBodyProvider(data) {
+	case GrantMirrorCollaboratorInputBodyProviderGithub:
+		*s = GrantMirrorCollaboratorInputBodyProviderGithub
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Grant level: reader (pull) or writer (pull+push).
+type GrantMirrorCollaboratorInputBodyRole string
+
+const (
+	GrantMirrorCollaboratorInputBodyRoleReader GrantMirrorCollaboratorInputBodyRole = "reader"
+	GrantMirrorCollaboratorInputBodyRoleWriter GrantMirrorCollaboratorInputBodyRole = "writer"
+)
+
+// AllValues returns all GrantMirrorCollaboratorInputBodyRole values.
+func (GrantMirrorCollaboratorInputBodyRole) AllValues() []GrantMirrorCollaboratorInputBodyRole {
+	return []GrantMirrorCollaboratorInputBodyRole{
+		GrantMirrorCollaboratorInputBodyRoleReader,
+		GrantMirrorCollaboratorInputBodyRoleWriter,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GrantMirrorCollaboratorInputBodyRole) MarshalText() ([]byte, error) {
+	switch s {
+	case GrantMirrorCollaboratorInputBodyRoleReader:
+		return []byte(s), nil
+	case GrantMirrorCollaboratorInputBodyRoleWriter:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GrantMirrorCollaboratorInputBodyRole) UnmarshalText(data []byte) error {
+	switch GrantMirrorCollaboratorInputBodyRole(data) {
+	case GrantMirrorCollaboratorInputBodyRoleReader:
+		*s = GrantMirrorCollaboratorInputBodyRoleReader
+		return nil
+	case GrantMirrorCollaboratorInputBodyRoleWriter:
+		*s = GrantMirrorCollaboratorInputBodyRoleWriter
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/GrantProjectAccessInputBody
 type GrantProjectAccessInputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -2110,6 +2404,67 @@ func (s *GrantServiceAccountAccessOutputBodyAdditional) init() GrantServiceAccou
 	return m
 }
 
+// Ref: #/components/schemas/GrantedMirrorCollaborator
+type GrantedMirrorCollaborator struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Entire account the grant was written for.
+	AccountId       string `json:"accountId"`
+	Role            string `json:"role"`
+	AdditionalProps GrantedMirrorCollaboratorAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *GrantedMirrorCollaborator) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAccountId returns the value of AccountId.
+func (s *GrantedMirrorCollaborator) GetAccountId() string {
+	return s.AccountId
+}
+
+// GetRole returns the value of Role.
+func (s *GrantedMirrorCollaborator) GetRole() string {
+	return s.Role
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GrantedMirrorCollaborator) GetAdditionalProps() GrantedMirrorCollaboratorAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *GrantedMirrorCollaborator) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAccountId sets the value of AccountId.
+func (s *GrantedMirrorCollaborator) SetAccountId(val string) {
+	s.AccountId = val
+}
+
+// SetRole sets the value of Role.
+func (s *GrantedMirrorCollaborator) SetRole(val string) {
+	s.Role = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GrantedMirrorCollaborator) SetAdditionalProps(val GrantedMirrorCollaboratorAdditional) {
+	s.AdditionalProps = val
+}
+
+type GrantedMirrorCollaboratorAdditional map[string]jx.Raw
+
+func (s *GrantedMirrorCollaboratorAdditional) init() GrantedMirrorCollaboratorAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListAuditEventsOutputBody
 type ListAuditEventsOutputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -2206,6 +2561,89 @@ func (s *ListBindingsOutputBodyAdditional) init() ListBindingsOutputBodyAddition
 		*s = m
 	}
 	return m
+}
+
+// Ref: #/components/schemas/ListMirrorCollaboratorsOutputBody
+type ListMirrorCollaboratorsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI               `json:"$schema"`
+	Collaborators   []MirrorCollaborator `json:"collaborators"`
+	AdditionalProps ListMirrorCollaboratorsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListMirrorCollaboratorsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetCollaborators returns the value of Collaborators.
+func (s *ListMirrorCollaboratorsOutputBody) GetCollaborators() []MirrorCollaborator {
+	return s.Collaborators
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListMirrorCollaboratorsOutputBody) GetAdditionalProps() ListMirrorCollaboratorsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListMirrorCollaboratorsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetCollaborators sets the value of Collaborators.
+func (s *ListMirrorCollaboratorsOutputBody) SetCollaborators(val []MirrorCollaborator) {
+	s.Collaborators = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListMirrorCollaboratorsOutputBody) SetAdditionalProps(val ListMirrorCollaboratorsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListMirrorCollaboratorsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListMirrorCollaboratorsOutputBodyAdditional) init() ListMirrorCollaboratorsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type ListMirrorCollaboratorsProvider string
+
+const (
+	ListMirrorCollaboratorsProviderGithub ListMirrorCollaboratorsProvider = "github"
+)
+
+// AllValues returns all ListMirrorCollaboratorsProvider values.
+func (ListMirrorCollaboratorsProvider) AllValues() []ListMirrorCollaboratorsProvider {
+	return []ListMirrorCollaboratorsProvider{
+		ListMirrorCollaboratorsProviderGithub,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ListMirrorCollaboratorsProvider) MarshalText() ([]byte, error) {
+	switch s {
+	case ListMirrorCollaboratorsProviderGithub:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ListMirrorCollaboratorsProvider) UnmarshalText(data []byte) error {
+	switch ListMirrorCollaboratorsProvider(data) {
+	case ListMirrorCollaboratorsProviderGithub:
+		*s = ListMirrorCollaboratorsProviderGithub
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // Ref: #/components/schemas/ListMirrorsOutputBody
@@ -3637,6 +4075,67 @@ func (s *MirrorAdditional) init() MirrorAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/MirrorCollaborator
+type MirrorCollaborator struct {
+	AccountId string `json:"accountId"`
+	// Primary handle (provider:label), empty if none resolves.
+	Handle OptString `json:"handle"`
+	// Reader (pull) or writer (pull+push).
+	Role            string `json:"role"`
+	AdditionalProps MirrorCollaboratorAdditional
+}
+
+// GetAccountId returns the value of AccountId.
+func (s *MirrorCollaborator) GetAccountId() string {
+	return s.AccountId
+}
+
+// GetHandle returns the value of Handle.
+func (s *MirrorCollaborator) GetHandle() OptString {
+	return s.Handle
+}
+
+// GetRole returns the value of Role.
+func (s *MirrorCollaborator) GetRole() string {
+	return s.Role
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *MirrorCollaborator) GetAdditionalProps() MirrorCollaboratorAdditional {
+	return s.AdditionalProps
+}
+
+// SetAccountId sets the value of AccountId.
+func (s *MirrorCollaborator) SetAccountId(val string) {
+	s.AccountId = val
+}
+
+// SetHandle sets the value of Handle.
+func (s *MirrorCollaborator) SetHandle(val OptString) {
+	s.Handle = val
+}
+
+// SetRole sets the value of Role.
+func (s *MirrorCollaborator) SetRole(val string) {
+	s.Role = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *MirrorCollaborator) SetAdditionalProps(val MirrorCollaboratorAdditional) {
+	s.AdditionalProps = val
+}
+
+type MirrorCollaboratorAdditional map[string]jx.Raw
+
+func (s *MirrorCollaboratorAdditional) init() MirrorCollaboratorAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/OIDCProvider
 type OIDCProvider struct {
 	Description     OptString `json:"description"`
@@ -4023,6 +4522,52 @@ func (o OptGetPermissionsOutputBodyExplain) Get() (v GetPermissionsOutputBodyExp
 
 // Or returns value if set, or given parameter if does not.
 func (o OptGetPermissionsOutputBodyExplain) Or(d GetPermissionsOutputBodyExplain) GetPermissionsOutputBodyExplain {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptGetVersionOutputBodyMode returns new OptGetVersionOutputBodyMode with value set to v.
+func NewOptGetVersionOutputBodyMode(v GetVersionOutputBodyMode) OptGetVersionOutputBodyMode {
+	return OptGetVersionOutputBodyMode{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptGetVersionOutputBodyMode is optional GetVersionOutputBodyMode.
+type OptGetVersionOutputBodyMode struct {
+	Value GetVersionOutputBodyMode
+	Set   bool
+}
+
+// IsSet returns true if OptGetVersionOutputBodyMode was set.
+func (o OptGetVersionOutputBodyMode) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptGetVersionOutputBodyMode) Reset() {
+	var v GetVersionOutputBodyMode
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptGetVersionOutputBodyMode) SetTo(v GetVersionOutputBodyMode) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptGetVersionOutputBodyMode) Get() (v GetVersionOutputBodyMode, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptGetVersionOutputBodyMode) Or(d GetVersionOutputBodyMode) GetVersionOutputBodyMode {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -4842,6 +5387,8 @@ type Repo struct {
 	ClusterHost       OptString           `json:"clusterHost"`
 	Foreign           OptBool             `json:"foreign"`
 	ID                string              `json:"id"`
+	MirrorSuspended   OptBool             `json:"mirrorSuspended"`
+	MirrorSuspendedAt OptString           `json:"mirrorSuspendedAt"`
 	Name              string              `json:"name"`
 	ObjectFormat      OptRepoObjectFormat `json:"objectFormat"`
 	OwningProjectId   string              `json:"owningProjectId"`
@@ -4870,6 +5417,16 @@ func (s *Repo) GetForeign() OptBool {
 // GetID returns the value of ID.
 func (s *Repo) GetID() string {
 	return s.ID
+}
+
+// GetMirrorSuspended returns the value of MirrorSuspended.
+func (s *Repo) GetMirrorSuspended() OptBool {
+	return s.MirrorSuspended
+}
+
+// GetMirrorSuspendedAt returns the value of MirrorSuspendedAt.
+func (s *Repo) GetMirrorSuspendedAt() OptString {
+	return s.MirrorSuspendedAt
 }
 
 // GetName returns the value of Name.
@@ -4930,6 +5487,16 @@ func (s *Repo) SetForeign(val OptBool) {
 // SetID sets the value of ID.
 func (s *Repo) SetID(val string) {
 	s.ID = val
+}
+
+// SetMirrorSuspended sets the value of MirrorSuspended.
+func (s *Repo) SetMirrorSuspended(val OptBool) {
+	s.MirrorSuspended = val
+}
+
+// SetMirrorSuspendedAt sets the value of MirrorSuspendedAt.
+func (s *Repo) SetMirrorSuspendedAt(val OptString) {
+	s.MirrorSuspendedAt = val
 }
 
 // SetName sets the value of Name.
@@ -5200,6 +5767,43 @@ func (s *ResourceAccessAdditional) init() ResourceAccessAdditional {
 		*s = m
 	}
 	return m
+}
+
+// RevokeMirrorCollaboratorNoContent is response for RevokeMirrorCollaborator operation.
+type RevokeMirrorCollaboratorNoContent struct{}
+
+type RevokeMirrorCollaboratorProvider string
+
+const (
+	RevokeMirrorCollaboratorProviderGithub RevokeMirrorCollaboratorProvider = "github"
+)
+
+// AllValues returns all RevokeMirrorCollaboratorProvider values.
+func (RevokeMirrorCollaboratorProvider) AllValues() []RevokeMirrorCollaboratorProvider {
+	return []RevokeMirrorCollaboratorProvider{
+		RevokeMirrorCollaboratorProviderGithub,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s RevokeMirrorCollaboratorProvider) MarshalText() ([]byte, error) {
+	switch s {
+	case RevokeMirrorCollaboratorProviderGithub:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *RevokeMirrorCollaboratorProvider) UnmarshalText(data []byte) error {
+	switch RevokeMirrorCollaboratorProvider(data) {
+	case RevokeMirrorCollaboratorProviderGithub:
+		*s = RevokeMirrorCollaboratorProviderGithub
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // RevokeProjectAccessByProviderNoContent is response for RevokeProjectAccessByProvider operation.

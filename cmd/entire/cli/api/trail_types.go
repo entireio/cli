@@ -76,15 +76,18 @@ func (r *TrailResource) ToMetadata() *trail.Metadata {
 
 // TrailCreateRequest is the body for POST /api/v1/trails/:host/:owner/:repo.
 type TrailCreateRequest struct {
-	Title      string   `json:"title"`
-	Body       string   `json:"body,omitempty"`
-	BranchName string   `json:"branch_name"`
-	Base       string   `json:"base,omitempty"`
-	Status     string   `json:"status,omitempty"`
-	Assignees  []string `json:"assignees,omitempty"`
-	Labels     []string `json:"labels,omitempty"`
-	Priority   string   `json:"priority,omitempty"`
-	Type       string   `json:"type,omitempty"`
+	Title      string `json:"title"`
+	Body       string `json:"body,omitempty"`
+	BranchName string `json:"branch_name"`
+	// BranchAction is "create" (default) or "link". The CLI sends "link" to
+	// attach the already-pushed branch instead of backfilling it at base.
+	BranchAction string   `json:"branch_action,omitempty"`
+	Base         string   `json:"base,omitempty"`
+	Status       string   `json:"status,omitempty"`
+	Assignees    []string `json:"assignees,omitempty"`
+	Labels       []string `json:"labels,omitempty"`
+	Priority     string   `json:"priority,omitempty"`
+	Type         string   `json:"type,omitempty"`
 }
 
 // TrailCreateResponse is the response from POST /api/v1/trails/:org/:repo.

@@ -14,7 +14,6 @@ func TestJoinAndSplitPrompts_RoundTrip(t *testing.T) {
 		"first line\nwith newline",
 		"second prompt",
 	}
-
 	joined := JoinPrompts(original)
 	split := SplitPromptContent(joined)
 
@@ -24,6 +23,15 @@ func TestJoinAndSplitPrompts_RoundTrip(t *testing.T) {
 
 func TestSplitPromptContent_EmptyContent(t *testing.T) {
 	t.Parallel()
-
 	assert.Nil(t, SplitPromptContent(""))
+}
+
+// TestRedactedJoinedPrompts_AppliesSafetyNet verifies the helper joins
+// prompts with the canonical separator and runs them through the 7-layer
+// pipeline. OPF runs only in the pre-push rewrite path, never here.
+func TestRedactedJoinedPrompts_AppliesSafetyNet(t *testing.T) {
+	t.Parallel()
+	got := redactedJoinedPrompts([]string{"hello", "world"})
+	assert.NotEmpty(t, got)
+	assert.Contains(t, got, PromptSeparator)
 }

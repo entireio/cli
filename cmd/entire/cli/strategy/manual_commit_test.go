@@ -454,64 +454,6 @@ func TestShadowStrategy_GetRewindPoints_NoShadowBranch(t *testing.T) {
 	}
 }
 
-// In v1.1 mode the picker must read prompt text from the topology mirror,
-// not v1.
-func TestShadowStrategy_GetRewindPoints_V11ReadsPromptFromMirror(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "f.txt", "init")
-	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "init")
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	baseRef, err := repo.Head()
-	require.NoError(t, err)
-	baseHash := baseRef.Hash()
-
-	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
-	const wantPrompt = "only-on-mirror"
-
-	require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
-		CheckpointID: cpID,
-		SessionID:    "test-session-v11-rewind",
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
-		Prompts:      []string{wantPrompt},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	}))
-	v1Ref := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	committedRef, err := repo.Reference(v1Ref, true)
-	require.NoError(t, err)
-
-	// Mirror carries the checkpoint; v1 points at the initial commit (no metadata).
-	mirrorRef := plumbing.ReferenceName(paths.MetadataRefName)
-	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(mirrorRef, committedRef.Hash())))
-	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(v1Ref, baseHash)))
-
-	// HEAD trailer drives the picker's log walk.
-	testutil.WriteFile(t, dir, "g.txt", "feat")
-	testutil.GitAdd(t, dir, "g.txt")
-	testutil.GitCommit(t, dir, "feat\n\nEntire-Checkpoint: "+cpID.String())
-
-	t.Chdir(dir)
-	settingsDir := filepath.Join(dir, ".entire")
-	require.NoError(t, os.MkdirAll(settingsDir, 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(settingsDir, paths.SettingsFileName),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
-		0o644,
-	))
-
-	strat := NewManualCommitStrategy()
-	points, err := strat.GetRewindPoints(t.Context(), 10)
-	require.NoError(t, err)
-	require.Len(t, points, 1)
-	assert.Equal(t, wantPrompt, points[0].SessionPrompt, "prompt must come from the mirror, not v1")
-}
-
 // When the most-recent session of a multi-session condensed checkpoint has no
 // prompt, the picker must fall back to the latest non-empty session prompt
 // rather than displaying nothing.
@@ -4198,7 +4140,7 @@ func TestResolveFilesTouched_PrefersStateFallsBackToTranscript(t *testing.T) {
 
 func TestCondenseSession_RedactionFailure_DropsTranscriptButWritesMetadata(t *testing.T) {
 	originalRedact := redactSessionJSONLBytes
-	redactSessionJSONLBytes = func([]byte) (redact.RedactedBytes, error) {
+	redactSessionJSONLBytes = func(context.Context, []byte) (redact.RedactedBytes, error) {
 		return redact.RedactedBytes{}, errors.New("forced redaction failure")
 	}
 	t.Cleanup(func() {
@@ -4252,7 +4194,8 @@ func TestCondenseSession_RedactionFailure_DropsTranscriptButWritesMetadata(t *te
 	require.NoError(t, err, "redaction failure should not abort condensation")
 	require.NotNil(t, result)
 
-	store := s.getCheckpointStore(context.Background(), repo)
+	store, err := s.getCheckpointStore(context.Background(), repo)
+	require.NoError(t, err)
 
 	committed, err := store.ListCommitted(context.Background())
 	require.NoError(t, err)

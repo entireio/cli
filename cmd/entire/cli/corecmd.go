@@ -51,7 +51,22 @@ func insecureHTTPRequested(cmd *cobra.Command) bool {
 // output actionable — only the columns a person acts on — while --json
 // preserves the full model for scripting.
 func runCoreList[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
-	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+	return runCore(cmd, renderCoreList(cmd, headers, row, fn))
+}
+
+// runCoreListForCluster is runCoreList for a resource-provider command (see
+// runCoreForCluster): identical table/JSON rendering, but dialing the core that
+// fronts clusterHost rather than the active context.
+func runCoreListForCluster[T any](cmd *cobra.Command, clusterHost string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
+	return runCoreForCluster(cmd, clusterHost, renderCoreList(cmd, headers, row, fn))
+}
+
+// renderCoreList builds the run-function shared by runCoreList and
+// runCoreListForCluster: fetch via fn, then render as a table (default) or raw
+// JSON (--json). Kept separate from the client-selection so the two list
+// variants differ only in which core they dial.
+func renderCoreList[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) func(context.Context, *coreapi.Client) error {
+	return func(ctx context.Context, c *coreapi.Client) error {
 		items, err := fn(ctx, c)
 		if err != nil {
 			return err
@@ -64,7 +79,7 @@ func runCoreList[T any](cmd *cobra.Command, headers []string, row func(T) []stri
 			return nil
 		}
 		return printTable(cmd.OutOrStdout(), headers, items, row)
-	})
+	}
 }
 
 // runCoreObject fetches a single value via fn and renders it as a vertical
@@ -229,8 +244,32 @@ func runCoreJSON(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Cli
 
 // runCore is the variant for commands that don't render JSON (delete,
 // revoke, remove): it runs the same preamble — silence usage, build
-// client, map API errors — and leaves any success output to fn.
+// client, map API errors — and leaves any success output to fn. The client
+// dials the active context's core (coreapi.New); use runCoreForCluster for
+// commands addressed at a specific cluster.
 func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client) error) error {
+	return runCoreClient(cmd, func(context.Context) (*coreapi.Client, error) { return coreapi.New() }, fn)
+}
+
+// runCoreForCluster is runCore for resource-provider commands addressed at a
+// specific cluster (mirror create/remove, mirror collaborators add/remove/list):
+// it dials the core that fronts clusterHost — discovered from the cluster's
+// /.well-known/entire-cluster.json, authenticating with the matching local
+// context — instead of the active context. So the command works on a cluster in
+// a federation other than the active login, instead of failing with "unknown
+// cluster_host". See coreapi.NewForCluster.
+func runCoreForCluster(cmd *cobra.Command, clusterHost string, fn func(ctx context.Context, c *coreapi.Client) error) error {
+	return runCoreClient(cmd, func(ctx context.Context) (*coreapi.Client, error) {
+		return coreapi.NewForCluster(ctx, clusterHost)
+	}, fn)
+}
+
+// runCoreClient owns the control-plane preamble shared by the active-context
+// (runCore) and cluster-addressed (runCoreForCluster) variants: silence usage,
+// opt into plain-HTTP token exchange if requested, build the client via
+// newClient, run fn, and map API errors. The only difference between the two
+// variants is which core newClient dials.
+func runCoreClient(cmd *cobra.Command, newClient func(context.Context) (*coreapi.Client, error), fn func(ctx context.Context, c *coreapi.Client) error) error {
 	cmd.SilenceUsage = true
 	// Opt into plain-HTTP token exchange before the client (and its lazily
 	// built token manager) is constructed — the manager freezes the
@@ -238,7 +277,7 @@ func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client)
 	if insecureHTTPRequested(cmd) {
 		auth.EnableInsecureHTTP()
 	}
-	client, err := coreapi.New()
+	client, err := newClient(cmd.Context())
 	if err != nil {
 		return fmt.Errorf("connect to Entire control plane: %w", err)
 	}

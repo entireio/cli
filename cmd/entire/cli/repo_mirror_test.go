@@ -324,6 +324,84 @@ func TestClusterArg(t *testing.T) {
 	}
 }
 
+func TestClusterArgAt(t *testing.T) {
+	t.Parallel()
+	// collaborators add/remove put the cluster at the trailing index 2,
+	// after <github-url> <handle>.
+	if got := clusterArgAt([]string{"github.com/o/r", "github:alice", "eu-west-1.entire.io"}, 2); got != "eu-west-1.entire.io" {
+		t.Errorf("explicit cluster = %q, want eu-west-1.entire.io", got)
+	}
+	if got := clusterArgAt([]string{"github.com/o/r", "github:alice"}, 2); got != defaultClusterHost {
+		t.Errorf("omitted cluster = %q, want default %q", got, defaultClusterHost)
+	}
+}
+
+func TestParseMirrorRole(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in      string
+		want    coreapi.GrantMirrorCollaboratorInputBodyRole
+		wantErr bool
+	}{
+		{in: "reader", want: coreapi.GrantMirrorCollaboratorInputBodyRoleReader},
+		{in: "writer", want: coreapi.GrantMirrorCollaboratorInputBodyRoleWriter},
+		{in: "admin", wantErr: true},
+		{in: "", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseMirrorRole(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("parseMirrorRole(%q) = nil error, want error", tt.in)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseMirrorRole(%q) = %v, want nil", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseMirrorRole(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMirrorCollaboratorRow(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   coreapi.MirrorCollaborator
+		want []string
+	}{
+		{
+			name: "resolved handle",
+			in:   coreapi.MirrorCollaborator{AccountId: "01ACCT", Handle: coreapi.NewOptString("github:alice"), Role: "writer"},
+			want: []string{"github:alice", "writer", "01ACCT"},
+		},
+		{
+			name: "no handle falls back to dash",
+			in:   coreapi.MirrorCollaborator{AccountId: "01ACCT", Role: "reader"},
+			want: []string{"-", "reader", "01ACCT"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := mirrorCollaboratorRow(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("mirrorCollaboratorRow len = %d, want %d (%v)", len(got), len(tt.want), got)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Errorf("mirrorCollaboratorRow[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestValidateClusterHost(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

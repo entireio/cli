@@ -82,7 +82,7 @@ func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
 	store := NewGitStore(repo, DefaultV1Refs())
 	entries := make(map[string]object.TreeEntry)
 
-	err = store.copyMetadataDir(metadataDir, "checkpoint/", entries)
+	err = store.copyMetadataDir(context.Background(), metadataDir, "checkpoint/", entries)
 	if err != nil {
 		t.Fatalf("copyMetadataDir failed: %v", err)
 	}
@@ -3547,7 +3547,7 @@ func TestCopyMetadataDir_RedactsSecrets(t *testing.T) {
 	store := NewGitStore(repo, DefaultV1Refs())
 	entries := make(map[string]object.TreeEntry)
 
-	if err := store.copyMetadataDir(metadataDir, "cp/", entries); err != nil {
+	if err := store.copyMetadataDir(context.Background(), metadataDir, "cp/", entries); err != nil {
 		t.Fatalf("copyMetadataDir() error = %v", err)
 	}
 
@@ -4217,7 +4217,7 @@ func TestAddDirectoryToEntries_PathTraversal(t *testing.T) {
 	}
 
 	entries := make(map[string]object.TreeEntry)
-	err = addDirectoryToEntriesWithAbsPath(repo, metadataDir, ".entire/metadata/session", entries)
+	err = addDirectoryToEntriesWithAbsPath(context.Background(), repo, metadataDir, ".entire/metadata/session", entries)
 	if err != nil {
 		t.Fatalf("addDirectoryToEntriesWithAbsPath failed: %v", err)
 	}
@@ -4249,14 +4249,14 @@ func TestMetadataDirectoryWalkersAllowDotDotPrefixedNames(t *testing.T) {
 	expectedPath := filepath.ToSlash(filepath.Join("checkpoint", "..generated", "schema.json"))
 
 	entries := make(map[string]object.TreeEntry)
-	if err := addDirectoryToEntriesWithAbsPath(repo, metadataDir, "checkpoint", entries); err != nil {
+	if err := addDirectoryToEntriesWithAbsPath(context.Background(), repo, metadataDir, "checkpoint", entries); err != nil {
 		t.Fatalf("addDirectoryToEntriesWithAbsPath failed: %v", err)
 	}
 	if _, ok := entries[expectedPath]; !ok {
 		t.Fatalf("expected entry at %q, got entries: %v", expectedPath, entries)
 	}
 
-	changes, err := addDirectoryToChanges(repo, metadataDir, "checkpoint")
+	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, "checkpoint")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
@@ -4266,7 +4266,7 @@ func TestMetadataDirectoryWalkersAllowDotDotPrefixedNames(t *testing.T) {
 
 	committedEntries := make(map[string]object.TreeEntry)
 	store := NewGitStore(repo, DefaultV1Refs())
-	if err := store.copyMetadataDir(metadataDir, "checkpoint/", committedEntries); err != nil {
+	if err := store.copyMetadataDir(context.Background(), metadataDir, "checkpoint/", committedEntries); err != nil {
 		t.Fatalf("copyMetadataDir failed: %v", err)
 	}
 	if _, ok := committedEntries[expectedPath]; !ok {
@@ -4309,7 +4309,7 @@ func TestAddDirectoryToEntries_SkipsSymlinks(t *testing.T) {
 	}
 
 	entries := make(map[string]object.TreeEntry)
-	err = addDirectoryToEntriesWithAbsPath(repo, metadataDir, "checkpoint/", entries)
+	err = addDirectoryToEntriesWithAbsPath(context.Background(), repo, metadataDir, "checkpoint/", entries)
 	if err != nil {
 		t.Fatalf("addDirectoryToEntriesWithAbsPath failed: %v", err)
 	}
@@ -4365,7 +4365,7 @@ func TestAddDirectoryToEntries_SkipsSymlinkedDirectories(t *testing.T) {
 	}
 
 	entries := make(map[string]object.TreeEntry)
-	err = addDirectoryToEntriesWithAbsPath(repo, metadataDir, "checkpoint/", entries)
+	err = addDirectoryToEntriesWithAbsPath(context.Background(), repo, metadataDir, "checkpoint/", entries)
 	if err != nil {
 		t.Fatalf("addDirectoryToEntriesWithAbsPath failed: %v", err)
 	}
@@ -4688,6 +4688,45 @@ func TestCheckpointSummary_HasReview(t *testing.T) {
 	}
 	if strings.Contains(string(bZero), "has_review") {
 		t.Errorf(`expected zero-value summary to omit "has_review" key, got %s`, string(bZero))
+	}
+}
+
+// TestRedactBlobBytes_JSONMetadata pins the .json branch of RedactBlobBytes:
+// checkpoint metadata files (metadata.json) carry free-form fields like
+// Summary.Intent and ReviewPrompt that previously bypassed redaction because
+// the dispatcher only matched .jsonl. The PR 1236 fix extended the JSON-aware
+// branch to .json. We assert via a low-entropy AWS-key shaped secret (catches
+// the 7-layer pipeline) so the test stays deterministic without the OPF binary.
+func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
+	t.Parallel()
+
+	meta := CommittedMetadata{
+		Kind:         "agent_review",
+		ReviewPrompt: "credential leak: key=AKIAYRWQG5EJLPZLBYNP",
+		Summary: &Summary{
+			Intent: "leak: key=AKIAYRWQG5EJLPZLBYNP",
+		},
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	got := RedactBlobBytes(context.Background(), b, "metadata.json", false)
+	if strings.Contains(string(got), "AKIAYRWQG5EJLPZLBYNP") {
+		t.Errorf("expected AWS key redacted in metadata.json blob, got %s", string(got))
+	}
+	if !strings.Contains(string(got), "REDACTED") {
+		t.Errorf("expected REDACTED placeholder in metadata.json blob, got %s", string(got))
+	}
+	// JSON structure must survive — Kind is not redactable content, so it
+	// should round-trip through the JSON-aware redactor.
+	var roundTripped map[string]any
+	if err := json.Unmarshal(got, &roundTripped); err != nil {
+		t.Errorf("redacted .json blob must remain valid JSON, got parse err %v (content: %s)", err, string(got))
+	}
+	if roundTripped["kind"] != "agent_review" {
+		t.Errorf(`expected "kind":"agent_review" preserved after redaction, got %v`, roundTripped["kind"])
 	}
 }
 

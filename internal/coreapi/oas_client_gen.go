@@ -123,6 +123,18 @@ type Invoker interface {
 	//
 	// GET /service-accounts/{accountId}
 	GetServiceAccount(ctx context.Context, params GetServiceAccountParams) (*ServiceAccount, error)
+	// GetVersion invokes getVersion operation.
+	//
+	// Get the server version and mode.
+	//
+	// GET /version
+	GetVersion(ctx context.Context) (*GetVersionOutputBody, error)
+	// GrantMirrorCollaborator invokes grantMirrorCollaborator operation.
+	//
+	// Grant a user reader/writer access to a mirror (live GitHub-admin gated).
+	//
+	// POST /mirrors/collaborators
+	GrantMirrorCollaborator(ctx context.Context, request *GrantMirrorCollaboratorInputBody) (*GrantedMirrorCollaborator, error)
 	// GrantProjectAccess invokes grantProjectAccess operation.
 	//
 	// Grant project access to an identity.
@@ -153,6 +165,12 @@ type Invoker interface {
 	//
 	// GET /service-accounts/{accountId}/bindings
 	ListBindings(ctx context.Context, params ListBindingsParams) (*ListBindingsOutputBody, error)
+	// ListMirrorCollaborators invokes listMirrorCollaborators operation.
+	//
+	// List the principals with access to a mirror (live GitHub-admin gated).
+	//
+	// GET /mirrors/collaborators
+	ListMirrorCollaborators(ctx context.Context, params ListMirrorCollaboratorsParams) (*ListMirrorCollaboratorsOutputBody, error)
 	// ListMirrors invokes listMirrors operation.
 	//
 	// List mirrors visible to the caller.
@@ -231,6 +249,12 @@ type Invoker interface {
 	//
 	// GET /identity/handles/{provider}/{handle}
 	ResolveHandle(ctx context.Context, params ResolveHandleParams) (*ResolvedIdentity, error)
+	// RevokeMirrorCollaborator invokes revokeMirrorCollaborator operation.
+	//
+	// Revoke a user's access to a mirror (live GitHub-admin gated).
+	//
+	// DELETE /mirrors/collaborators
+	RevokeMirrorCollaborator(ctx context.Context, params RevokeMirrorCollaboratorParams) error
 	// RevokeProjectAccess invokes revokeProjectAccess operation.
 	//
 	// Revoke project access by grantee id.
@@ -1991,6 +2015,128 @@ func (c *Client) sendGetServiceAccount(ctx context.Context, params GetServiceAcc
 	return result, nil
 }
 
+// GetVersion invokes getVersion operation.
+//
+// Get the server version and mode.
+//
+// GET /version
+func (c *Client) GetVersion(ctx context.Context) (*GetVersionOutputBody, error) {
+	res, err := c.sendGetVersion(ctx)
+	return res, err
+}
+
+func (c *Client) sendGetVersion(ctx context.Context) (res *GetVersionOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/version"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeGetVersionResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// GrantMirrorCollaborator invokes grantMirrorCollaborator operation.
+//
+// Grant a user reader/writer access to a mirror (live GitHub-admin gated).
+//
+// POST /mirrors/collaborators
+func (c *Client) GrantMirrorCollaborator(ctx context.Context, request *GrantMirrorCollaboratorInputBody) (*GrantedMirrorCollaborator, error) {
+	res, err := c.sendGrantMirrorCollaborator(ctx, request)
+	return res, err
+}
+
+func (c *Client) sendGrantMirrorCollaborator(ctx context.Context, request *GrantMirrorCollaboratorInputBody) (res *GrantedMirrorCollaborator, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/mirrors/collaborators"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeGrantMirrorCollaboratorRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, GrantMirrorCollaboratorOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, GrantMirrorCollaboratorOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeGrantMirrorCollaboratorResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // GrantProjectAccess invokes grantProjectAccess operation.
 //
 // Grant project access to an identity.
@@ -2479,6 +2625,147 @@ func (c *Client) sendListBindings(ctx context.Context, params ListBindingsParams
 	defer body.Close()
 
 	result, err := decodeListBindingsResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ListMirrorCollaborators invokes listMirrorCollaborators operation.
+//
+// List the principals with access to a mirror (live GitHub-admin gated).
+//
+// GET /mirrors/collaborators
+func (c *Client) ListMirrorCollaborators(ctx context.Context, params ListMirrorCollaboratorsParams) (*ListMirrorCollaboratorsOutputBody, error) {
+	res, err := c.sendListMirrorCollaborators(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListMirrorCollaborators(ctx context.Context, params ListMirrorCollaboratorsParams) (res *ListMirrorCollaboratorsOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/mirrors/collaborators"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "provider" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "provider",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			return e.EncodeValue(conv.StringToString(string(params.Provider)))
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "owner" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "owner",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			return e.EncodeValue(conv.StringToString(params.Owner))
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "repo" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "repo",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			return e.EncodeValue(conv.StringToString(params.Repo))
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "clusterHost" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "clusterHost",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			return e.EncodeValue(conv.StringToString(params.ClusterHost))
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListMirrorCollaboratorsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListMirrorCollaboratorsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListMirrorCollaboratorsResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -3862,6 +4149,161 @@ func (c *Client) sendResolveHandle(ctx context.Context, params ResolveHandlePara
 	defer body.Close()
 
 	result, err := decodeResolveHandleResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// RevokeMirrorCollaborator invokes revokeMirrorCollaborator operation.
+//
+// Revoke a user's access to a mirror (live GitHub-admin gated).
+//
+// DELETE /mirrors/collaborators
+func (c *Client) RevokeMirrorCollaborator(ctx context.Context, params RevokeMirrorCollaboratorParams) error {
+	_, err := c.sendRevokeMirrorCollaborator(ctx, params)
+	return err
+}
+
+func (c *Client) sendRevokeMirrorCollaborator(ctx context.Context, params RevokeMirrorCollaboratorParams) (res *RevokeMirrorCollaboratorNoContent, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/mirrors/collaborators"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "provider" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "provider",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			return e.EncodeValue(conv.StringToString(string(params.Provider)))
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "owner" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "owner",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			return e.EncodeValue(conv.StringToString(params.Owner))
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "repo" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "repo",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			return e.EncodeValue(conv.StringToString(params.Repo))
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "clusterHost" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "clusterHost",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			return e.EncodeValue(conv.StringToString(params.ClusterHost))
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "handle" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "handle",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			return e.EncodeValue(conv.StringToString(params.Handle))
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	r, err := ht.NewRequest(ctx, "DELETE", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, RevokeMirrorCollaboratorOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, RevokeMirrorCollaboratorOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeRevokeMirrorCollaboratorResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

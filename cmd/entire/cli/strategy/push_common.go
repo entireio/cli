@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -414,9 +413,8 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 		return fmt.Errorf("failed to get remote ref: %w", err)
 	}
 
-	refs := checkpoint.ResolveCommittedRefs(ctx)
 	advance := func(hash plumbing.Hash) error {
-		if err := AdvanceLocalRef(ctx, repo, refs, ref, hash); err != nil {
+		if err := setRefHash(repo, ref, hash); err != nil {
 			return err
 		}
 		if usedTempRef {

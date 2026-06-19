@@ -269,7 +269,7 @@ func flattenRebuildTree(
 	}
 
 	if metadataDir != "" && metadataDirAbs != "" {
-		if err := addDirectoryToEntriesWithAbsPath(repo, metadataDirAbs, metadataDir, entries); err != nil {
+		if err := addDirectoryToEntriesWithAbsPath(context.Background(), repo, metadataDirAbs, metadataDir, entries); err != nil {
 			t.Fatalf("add metadata: %v", err)
 		}
 	}

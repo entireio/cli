@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -231,6 +232,13 @@ func newHooksGitPrePushCmd() *cobra.Command {
 		Use:   "pre-push <remote>",
 		Short: "Handle pre-push git hook",
 		Args:  cobra.ExactArgs(1),
+		// SilenceUsage/Errors so non-zero exits from privacy-critical
+		// failures (OPF rewrite errors) print only the error message,
+		// not cobra's usage banner. The error message itself already
+		// includes user guidance (see ErrV1Diverged / ErrBootstrapTooLarge /
+		// ErrV1RefMoved in strategy/manual_commit_opf_rewrite.go).
+		SilenceUsage:  true,
+		SilenceErrors: false,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if gitHooksDisabled {
 				return nil
@@ -245,7 +253,20 @@ func newHooksGitPrePushCmd() *cobra.Command {
 			hookErr := g.strategy.PrePush(g.ctx, remote)
 			g.logCompleted(hookErr)
 
-			return nil
+			// Propagate the error so the hook script exits non-zero and
+			// git push aborts the entire batch. PrePush itself only
+			// returns errors for privacy-critical failures (OPF rewrite —
+			// e.g., V1DivergedError, BootstrapTooLargeError,
+			// V1RefMovedError, OPFRuntimeFailedError); transient
+			// checkpoint-push failures are logged and swallowed before
+			// reaching this point. See strategy/manual_commit_push.go
+			// for the contract. We wrap with a short "pre-push:" prefix
+			// so the user sees the source of the abort without losing
+			// the underlying type (errors.As still finds the sentinels).
+			if hookErr == nil {
+				return nil
+			}
+			return fmt.Errorf("pre-push: %w", hookErr)
 		},
 	}
 }

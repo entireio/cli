@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.7] - 2026-06-18
+
+### Added
+
+- `entire trail` (work in progress): trail context is now injected into the model when trails are enabled, an `entire trail delete` subcommand was added, and `entire trail create --branch` defaults to the checked-out branch, alongside command-behavior fixes ([#1435](https://github.com/entireio/cli/pull/1435), [#1455](https://github.com/entireio/cli/pull/1455), [#1456](https://github.com/entireio/cli/pull/1456), [#1447](https://github.com/entireio/cli/pull/1447))
+- Interactive resume picker for stopped/idle sessions ([#1445](https://github.com/entireio/cli/pull/1445))
+- `entire repo mirror collaborators` with `add`/`remove`/`list` subcommands ([#1458](https://github.com/entireio/cli/pull/1458))
+- `ENTIRE_TOKEN` support, along with git-remote-entire push reliability fixes ([#1438](https://github.com/entireio/cli/pull/1438))
+
+### Changed
+
+- Auth was hardened by removing static fallbacks, the legacy store, and the v1 provider ([#1410](https://github.com/entireio/cli/pull/1410))
+- External agent transcripts are now compacted for `--full`/`--verbose` display ([#1421](https://github.com/entireio/cli/pull/1421))
+- Runner configs moved from `.entire/runners/v2` to `.entire/runners` ([#1442](https://github.com/entireio/cli/pull/1442))
+- `entire repo create` now stamps a usable `entire://` remote in its JSON output ([#1441](https://github.com/entireio/cli/pull/1441))
+
+### Fixed
+
+- Fixed dot-dot-prefixed repo path filtering and prevented checkpoint symlink target disclosure ([#1395](https://github.com/entireio/cli/pull/1395), [#1415](https://github.com/entireio/cli/pull/1415))
+- `entire auth status` dates are now stable across timezones ([#1407](https://github.com/entireio/cli/pull/1407))
+- Restored the keyring timeout and corrected stale auth fallback comments ([#1430](https://github.com/entireio/cli/pull/1430))
+- Existence checks on Entire-owned paths now use `os.Lstat` ([#1449](https://github.com/entireio/cli/pull/1449))
+- `entire search` now supports Entire mirror remotes ([#1452](https://github.com/entireio/cli/pull/1452))
+- Control-plane commands now handle cross-jurisdiction routing ([#1457](https://github.com/entireio/cli/pull/1457))
+
+### Housekeeping
+
+- Tests now isolate the token store and git config so spawned binaries skip the keychain, and the trail test build was repaired after the auth-fallback removal ([#1450](https://github.com/entireio/cli/pull/1450), [#1448](https://github.com/entireio/cli/pull/1448), [#1436](https://github.com/entireio/cli/pull/1436))
+- Parallelized pure agent tests and standardized git test repository setup ([#1406](https://github.com/entireio/cli/pull/1406), [#1390](https://github.com/entireio/cli/pull/1390))
+- Copilot E2E now detects the trust dialog case-insensitively ([#1446](https://github.com/entireio/cli/pull/1446))
+- Dependency bumps ([#1432](https://github.com/entireio/cli/pull/1432), [#1437](https://github.com/entireio/cli/pull/1437))
+
+### Thanks
+
+Thanks to @stale2000 for fixing dot-dot-prefixed repo path filtering, preventing checkpoint symlink target disclosure, keeping `entire auth status` dates stable across timezones, and improving the test suite!
+
 ## [0.7.6] - 2026-06-15
 
 ### Added

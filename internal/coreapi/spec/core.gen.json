@@ -549,6 +549,92 @@
         ],
         "type": "object"
       },
+      "GetVersionOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/GetVersionOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "mode": {
+            "description": "Server mode.",
+            "enum": [
+              "standalone",
+              "global",
+              "regional"
+            ],
+            "type": "string"
+          },
+          "version": {
+            "description": "Git commit SHA of the running entire-core binary, or \"dev\" for an untagged local build.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "type": "object"
+      },
+      "GrantMirrorCollaboratorInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/GrantMirrorCollaboratorInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "clusterHost": {
+            "description": "Public host of the cluster serving the mirror.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "handle": {
+            "description": "Qualified grantee handle, e.g. github:alice.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "owner": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "github"
+            ],
+            "type": "string"
+          },
+          "repo": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "role": {
+            "description": "Grant level: reader (pull) or writer (pull+push).",
+            "enum": [
+              "reader",
+              "writer"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "owner",
+          "repo",
+          "clusterHost",
+          "handle",
+          "role"
+        ],
+        "type": "object"
+      },
       "GrantProjectAccessInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -729,6 +815,32 @@
         ],
         "type": "object"
       },
+      "GrantedMirrorCollaborator": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/GrantedMirrorCollaborator.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "accountId": {
+            "description": "Entire account the grant was written for.",
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId",
+          "role"
+        ],
+        "type": "object"
+      },
       "ListAuditEventsOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -774,6 +886,30 @@
         },
         "required": [
           "bindings"
+        ],
+        "type": "object"
+      },
+      "ListMirrorCollaboratorsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListMirrorCollaboratorsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "collaborators": {
+            "items": {
+              "$ref": "#/components/schemas/MirrorCollaborator"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "collaborators"
         ],
         "type": "object"
       },
@@ -1328,6 +1464,27 @@
         ],
         "type": "object"
       },
+      "MirrorCollaborator": {
+        "additionalProperties": true,
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "handle": {
+            "description": "Primary handle (provider:label), empty if none resolves.",
+            "type": "string"
+          },
+          "role": {
+            "description": "reader (pull) or writer (pull+push).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId",
+          "role"
+        ],
+        "type": "object"
+      },
       "OIDCProvider": {
         "additionalProperties": true,
         "properties": {
@@ -1472,6 +1629,12 @@
             "type": "boolean"
           },
           "id": {
+            "type": "string"
+          },
+          "mirrorSuspended": {
+            "type": "boolean"
+          },
+          "mirrorSuspendedAt": {
             "type": "string"
           },
           "name": {
@@ -2203,6 +2366,226 @@
           }
         ],
         "summary": "Create GitHub mirror",
+        "tags": [
+          "mirrors"
+        ]
+      }
+    },
+    "/mirrors/collaborators": {
+      "delete": {
+        "operationId": "revokeMirrorCollaborator",
+        "parameters": [
+          {
+            "explode": false,
+            "in": "query",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "enum": [
+                "github"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "owner",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Public host of the cluster serving the mirror.",
+            "explode": false,
+            "in": "query",
+            "name": "clusterHost",
+            "required": true,
+            "schema": {
+              "description": "Public host of the cluster serving the mirror.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Qualified grantee handle, e.g. github:alice.",
+            "explode": false,
+            "in": "query",
+            "name": "handle",
+            "required": true,
+            "schema": {
+              "description": "Qualified grantee handle, e.g. github:alice.",
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke a user's access to a mirror (live GitHub-admin gated)",
+        "tags": [
+          "mirrors"
+        ]
+      },
+      "get": {
+        "operationId": "listMirrorCollaborators",
+        "parameters": [
+          {
+            "explode": false,
+            "in": "query",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "enum": [
+                "github"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "owner",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Public host of the cluster serving the mirror.",
+            "explode": false,
+            "in": "query",
+            "name": "clusterHost",
+            "required": true,
+            "schema": {
+              "description": "Public host of the cluster serving the mirror.",
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListMirrorCollaboratorsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List the principals with access to a mirror (live GitHub-admin gated)",
+        "tags": [
+          "mirrors"
+        ]
+      },
+      "post": {
+        "operationId": "grantMirrorCollaborator",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantMirrorCollaboratorInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrantedMirrorCollaborator"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Grant a user reader/writer access to a mirror (live GitHub-admin gated)",
         "tags": [
           "mirrors"
         ]
@@ -3700,6 +4083,37 @@
         "summary": "Revoke service account access",
         "tags": [
           "service-accounts"
+        ]
+      }
+    },
+    "/version": {
+      "get": {
+        "operationId": "getVersion",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetVersionOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get the server version and mode",
+        "tags": [
+          "meta"
         ]
       }
     }

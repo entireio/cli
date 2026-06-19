@@ -202,9 +202,12 @@ func resumeByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID i
 	}
 	defer repo.Close()
 
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
-	store.SetBlobFetcher(FetchBlobsByHash)
-	refs := store.Refs()
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash})
+	if err != nil {
+		return fmt.Errorf("open checkpoint store: %w", err)
+	}
+	store := stores.Primary
+	refs := stores.Refs()
 	if refs.ReadBootstrappableFromOrigin() {
 		promoteRemoteTrackingPrimary(ctx, repo, refs)
 	}
@@ -215,7 +218,7 @@ func resumeByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID i
 			slog.String("checkpoint_id", checkpointID.String()),
 			slog.String("error", err.Error()),
 		)
-		return checkRemoteMetadata(ctx, w, errW, checkpointID, store.Refs())
+		return checkRemoteMetadata(ctx, w, errW, checkpointID, stores.Refs())
 	}
 
 	return resumeSession(ctx, w, errW, metadata, force)
@@ -267,10 +270,13 @@ func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName 
 	checkpointID := result.checkpointIDs[0]
 	var metadata *strategy.CheckpointInfo
 
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
-	store.SetBlobFetcher(FetchBlobsByHash)
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash})
+	if err != nil {
+		return fmt.Errorf("open checkpoint store: %w", err)
+	}
+	store := stores.Primary
 
-	refs := store.Refs()
+	refs := stores.Refs()
 	if refs.ReadBootstrappableFromOrigin() {
 		promoteRemoteTrackingPrimary(ctx, repo, refs)
 	}
@@ -286,7 +292,7 @@ func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName 
 			)
 			fmt.Fprintf(w, "Found %d checkpoints for commit %s but metadata is not available\n",
 				len(result.checkpointIDs), result.commitHash[:7])
-			return checkRemoteMetadata(ctx, w, errW, result.checkpointIDs[0], store.Refs())
+			return checkRemoteMetadata(ctx, w, errW, result.checkpointIDs[0], stores.Refs())
 		}
 		skipped := len(result.checkpointIDs) - 1
 		fmt.Fprintf(w, "Found %d checkpoints for commit %s, resuming from the latest (%d older checkpoints skipped)\n",
@@ -308,7 +314,7 @@ func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName 
 				slog.String("checkpoint_id", checkpointID.String()),
 				slog.String("error", storeErr.Error()),
 			)
-			return checkRemoteMetadata(ctx, w, errW, checkpointID, store.Refs())
+			return checkRemoteMetadata(ctx, w, errW, checkpointID, stores.Refs())
 		}
 	}
 
@@ -385,9 +391,11 @@ func readCheckpointInfoFromRef(
 	refs checkpoint.CommittedRefs,
 	checkpointID id.CheckpointID,
 ) (*strategy.CheckpointInfo, error) {
-	store := checkpoint.NewGitStore(repo, refs)
-	store.SetBlobFetcher(FetchBlobsByHash)
-	return readCheckpointInfoFromStore(ctx, store, checkpointID)
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{Refs: &refs, BlobFetcher: FetchBlobsByHash})
+	if err != nil {
+		return nil, fmt.Errorf("open checkpoint store: %w", err)
+	}
+	return readCheckpointInfoFromStore(ctx, stores.Primary, checkpointID)
 }
 
 // getMetadataTree returns the metadata branch tree and a fresh repo handle.
@@ -677,8 +685,7 @@ func promptResumeFromOlderCheckpoint() (bool, error) {
 }
 
 // checkRemoteMetadata checks if checkpoint metadata exists on the remote and
-// fetches it if available. Skips when reads don't target a ref origin tracks
-// (e.g. the local-only v1.1 mirror).
+// fetches it if available. Skips when reads don't target a ref origin tracks.
 func checkRemoteMetadata(
 	ctx context.Context,
 	w, errW io.Writer,
@@ -926,9 +933,11 @@ func resumeSingleSession(ctx context.Context, w, _ io.Writer, ag agent.Agent, se
 		return fmt.Errorf("failed to open repository: %w", repoErr)
 	}
 	defer repo.Close()
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
-	store.SetBlobFetcher(FetchBlobsByHash)
-	logContent, _, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, store, checkpointID)
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash})
+	if err != nil {
+		return fmt.Errorf("open checkpoint store: %w", err)
+	}
+	logContent, _, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, stores.Primary, checkpointID)
 	if err != nil {
 		if errors.Is(err, checkpoint.ErrCheckpointNotFound) || errors.Is(err, checkpoint.ErrNoTranscript) {
 			logging.Debug(ctx, "resume session completed (no metadata)",

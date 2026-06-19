@@ -541,43 +541,6 @@ func TestAttach_SetsSessionTurnCount(t *testing.T) {
 	}
 }
 
-func TestAttach_MirrorsToV1CustomRefWhenOptedIn(t *testing.T) {
-	setupAttachTestRepo(t)
-
-	repoRoot := mustGetwd(t)
-	sessionID := "test-attach-v1-1-mirror"
-	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
-{"type":"assistant","message":{"role":"assistant","content":"hi"},"uuid":"a1"}
-`)
-
-	var out bytes.Buffer
-	opts := attachOptions{
-		Force: true,
-		entireSettings: &settings.EntireSettings{
-			StrategyOptions: map[string]any{"checkpoints_version": "1.1"},
-		},
-	}
-	if err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, opts); err != nil {
-		t.Fatalf("runAttach failed: %v", err)
-	}
-
-	repo, err := git.PlainOpen(repoRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	v1Ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	if err != nil {
-		t.Fatalf("v1 metadata branch missing: %v", err)
-	}
-	customRef, err := repo.Reference(plumbing.ReferenceName(paths.MetadataRefName), true)
-	if err != nil {
-		t.Fatalf("v1.1 custom ref missing: %v", err)
-	}
-	if v1Ref.Hash() != customRef.Hash() {
-		t.Errorf("v1.1 custom ref = %s, want %s (v1 tip)", customRef.Hash(), v1Ref.Hash())
-	}
-}
-
 func TestCountUserTurns(t *testing.T) {
 	t.Parallel()
 

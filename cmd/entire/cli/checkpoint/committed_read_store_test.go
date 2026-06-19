@@ -50,40 +50,6 @@ func setRef(t *testing.T, repo *git.Repository, name plumbing.ReferenceName, has
 func v1BranchRef() plumbing.ReferenceName {
 	return plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 }
-func customRef() plumbing.ReferenceName { return plumbing.ReferenceName(paths.MetadataRefName) }
-func originV1Ref() plumbing.ReferenceName {
-	return plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
-}
-
-func customRefHash(t *testing.T, repo *git.Repository) (plumbing.Hash, bool) {
-	t.Helper()
-	ref, err := repo.Reference(customRef(), true)
-	if err != nil {
-		return plumbing.ZeroHash, false
-	}
-	return ref.Hash(), true
-}
-
-// writeV1Checkpoint writes a committed checkpoint to the v1 branch.
-func writeV1Checkpoint(t *testing.T, repo *git.Repository, cpID id.CheckpointID) {
-	t.Helper()
-	require.NoError(t, NewGitStore(repo, DefaultV1Refs()).WriteCommitted(context.Background(), WriteCommittedOptions{
-		CheckpointID: cpID,
-		SessionID:    "session",
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
-		Prompts:      []string{"prompt"},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	}))
-}
-
-// enableV11 chdirs into dir and opts into checkpoints v1.1.
-func enableV11(t *testing.T, dir string) {
-	t.Helper()
-	t.Chdir(dir)
-	writeSettings(t, dir, `"1.1"`)
-}
 
 // writeSettings writes .entire/settings.json (empty version omits the option).
 func writeSettings(t *testing.T, dir, version string) {
@@ -100,13 +66,13 @@ func TestGitStore_CommittedReadRef(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, v1BranchRef(), NewGitStore(nil, DefaultV1Refs()).CommittedReadRef())
 
-	customRefs := CommittedRefs{
+	syntheticRead := plumbing.ReferenceName("refs/entire/checkpoints/synthetic-read")
+	refs := CommittedRefs{
 		Primary: v1BranchRef(),
-		Read:    customRef(),
-		Mirror:  customRef(),
+		Read:    syntheticRead,
 		Push:    []plumbing.ReferenceName{v1BranchRef()},
 	}
-	assert.Equal(t, customRef(), NewGitStore(nil, customRefs).CommittedReadRef())
+	assert.Equal(t, syntheticRead, NewGitStore(nil, refs).CommittedReadRef())
 }
 
 // Not parallel: WriteCommitted touches repo refs.
@@ -151,8 +117,8 @@ func TestNewGitStore_UsesRefs(t *testing.T) {
 	assert.Equal(t, refs, store.Refs())
 }
 
-// Not parallel: uses t.Chdir() so settings.Load resolves the test repo.
-func TestNewGitStore_SelectsRefByVersion(t *testing.T) {
+// Not parallel: uses t.Chdir() to exercise on-disk settings being ignored.
+func TestNewGitStore_IgnoresCheckpointsVersion(t *testing.T) {
 	dir, repo, h := newTestRepo(t)
 	setRef(t, repo, v1BranchRef(), h)
 	t.Chdir(dir)
@@ -161,65 +127,5 @@ func TestNewGitStore_SelectsRefByVersion(t *testing.T) {
 	assert.Equal(t, v1BranchRef(), NewGitStore(repo, ResolveCommittedRefs(context.Background())).CommittedReadRef())
 
 	writeSettings(t, dir, `"1.1"`)
-	assert.Equal(t, customRef(), NewGitStore(repo, ResolveCommittedRefs(context.Background())).CommittedReadRef())
-}
-
-// v1.1 reads always go through the custom ref as-is (no v1 fallback, and no
-// read-time seeding from v1).
-// Not parallel: subtests use t.Chdir().
-func TestNewGitStore_V11Reads(t *testing.T) {
-	tests := []struct {
-		name      string
-		mutate    func(t *testing.T, dir string, repo *git.Repository) (wantCustomHash plumbing.Hash, wantCustomExists bool)
-		wantFound bool
-	}{
-		{"reads metadata when custom ref points at v1", func(t *testing.T, _ string, repo *git.Repository) (plumbing.Hash, bool) {
-			ref, err := repo.Reference(v1BranchRef(), true)
-			require.NoError(t, err)
-			setRef(t, repo, customRef(), ref.Hash())
-			return ref.Hash(), true
-		}, true},
-		{"does not seed missing custom ref from local v1", func(_ *testing.T, _ string, _ *git.Repository) (plumbing.Hash, bool) {
-			return plumbing.ZeroHash, false
-		}, false},
-		{"does not seed missing custom ref from origin v1", func(t *testing.T, _ string, repo *git.Repository) (plumbing.Hash, bool) {
-			ref, err := repo.Reference(v1BranchRef(), true)
-			require.NoError(t, err)
-			setRef(t, repo, originV1Ref(), ref.Hash())
-			require.NoError(t, repo.Storer.RemoveReference(v1BranchRef()))
-			return plumbing.ZeroHash, false
-		}, false},
-		{"reads custom ref as-is when it differs from v1", func(t *testing.T, dir string, repo *git.Repository) (plumbing.Hash, bool) {
-			hash := commitFile(t, repo, dir, "other.txt", "diverged", "diverged")
-			setRef(t, repo, customRef(), hash)
-			return hash, true
-		}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir, repo, _ := newTestRepo(t)
-			enableV11(t, dir)
-			cpID := id.MustCheckpointID("a1b2c3d4e5f6")
-			writeV1Checkpoint(t, repo, cpID)
-			wantCustomHash, wantCustomExists := tt.mutate(t, dir, repo)
-
-			store := NewGitStore(repo, ResolveCommittedRefs(context.Background()))
-			require.Equal(t, customRef(), store.CommittedReadRef(), "must read the custom ref, not fall back to v1")
-
-			summary, err := store.ReadCommitted(context.Background(), cpID)
-			require.NoError(t, err)
-			if tt.wantFound {
-				require.NotNil(t, summary)
-				assert.Equal(t, cpID, summary.CheckpointID)
-			} else {
-				assert.Nil(t, summary, "must not fall back to v1")
-			}
-
-			gotCustomHash, gotCustomExists := customRefHash(t, repo)
-			require.Equal(t, wantCustomExists, gotCustomExists)
-			if wantCustomExists {
-				assert.Equal(t, wantCustomHash, gotCustomHash)
-			}
-		})
-	}
+	assert.Equal(t, v1BranchRef(), NewGitStore(repo, ResolveCommittedRefs(context.Background())).CommittedReadRef())
 }

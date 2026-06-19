@@ -305,8 +305,11 @@ func ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 	// Warn (once per process) if metadata branches are disconnected
 	WarnIfMetadataDisconnected()
 
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
-	committed, err := store.ListCommitted(ctx)
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("open checkpoint store: %w", err)
+	}
+	committed, err := stores.Primary.ListCommitted(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list committed checkpoints: %w", err)
 	}
@@ -437,6 +440,17 @@ func EnsureRedactionConfigured() {
 				Packs:  packs,
 			})
 		}
+
+		// OpenAI Privacy Filter (opt-in 8th layer).
+		if s.Redaction != nil && s.Redaction.OpenAIPrivacyFilter != nil {
+			opf := s.Redaction.OpenAIPrivacyFilter
+			redact.ConfigurePrivacyFilter(redact.OPFConfig{
+				Enabled:    opf.Enabled,
+				Categories: opf.Categories,
+				Command:    opf.Command,
+				Timeout:    opf.TimeoutSeconds,
+			})
+		}
 	})
 }
 
@@ -478,7 +492,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 			}
 			if isEmpty {
 				// Empty orphan — just point to remote
-				if setErr := AdvanceCommittedPrimary(ctx, repo, refs, remoteRef.Hash()); setErr != nil {
+				if setErr := setRefHash(repo, refs.Primary, remoteRef.Hash()); setErr != nil {
 					return fmt.Errorf("failed to update metadata ref from remote: %w", setErr)
 				}
 				fmt.Fprintf(os.Stderr, "[entire] Updated local ref '%s' from origin\n", primaryName)
@@ -500,7 +514,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 
 	// Local ref doesn't exist — create from remote if available
 	if remoteRef != nil {
-		if err := AdvanceCommittedPrimary(ctx, repo, refs, remoteRef.Hash()); err != nil {
+		if err := setRefHash(repo, refs.Primary, remoteRef.Hash()); err != nil {
 			return fmt.Errorf("failed to create metadata ref from remote: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from origin\n", primaryName)
@@ -556,7 +570,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		return fmt.Errorf("failed to store orphan commit: %w", err)
 	}
 
-	if err := AdvanceCommittedPrimary(ctx, repo, refs, commitHash); err != nil {
+	if err := setRefHash(repo, refs.Primary, commitHash); err != nil {
 		return fmt.Errorf("failed to create metadata ref: %w", err)
 	}
 

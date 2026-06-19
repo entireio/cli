@@ -349,7 +349,7 @@ func (s *GitStore) writeStandardCheckpointEntries(ctx context.Context, opts Writ
 
 	// Copy additional metadata files from directory if specified (to session subdirectory)
 	if opts.MetadataDir != "" {
-		if err := s.copyMetadataDir(opts.MetadataDir, sessionPath, entries); err != nil {
+		if err := s.copyMetadataDir(ctx, opts.MetadataDir, sessionPath, entries); err != nil {
 			return fmt.Errorf("failed to copy metadata directory: %w", err)
 		}
 	}
@@ -412,9 +412,10 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCom
 		filePaths.ContentHash = "/" + sessionPath + paths.ContentHashFileName
 	}
 
-	// Write prompts
+	// Write prompts via the 7-layer pipeline. OPF runs only in the
+	// pre-push rewrite path (manual_commit_opf_rewrite.go).
 	if len(opts.Prompts) > 0 {
-		promptContent := redact.String(JoinPrompts(opts.Prompts))
+		promptContent := redactedJoinedPrompts(opts.Prompts)
 		blobHash, err := CreateBlobFromContent(s.repo, []byte(promptContent))
 		if err != nil {
 			return filePaths, err
@@ -1335,8 +1336,11 @@ func LookupSessionLog(ctx context.Context, cpID id.CheckpointID) ([]byte, string
 		return nil, "", fmt.Errorf("failed to open git repository: %w", err)
 	}
 	defer repo.Close()
-	store := NewGitStore(repo, ResolveCommittedRefs(ctx))
-	return store.GetSessionLog(ctx, cpID)
+	stores, err := Open(ctx, repo, OpenOptions{})
+	if err != nil {
+		return nil, "", fmt.Errorf("open checkpoint store: %w", err)
+	}
+	return stores.Primary.GetSessionLog(ctx, cpID)
 }
 
 // UpdateSummary updates the summary field in the latest session's metadata.
@@ -1504,9 +1508,9 @@ func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOpti
 		}
 	}
 
-	// Replace prompts (apply redaction as safety net)
+	// Replace prompts with 7-layer-redacted content.
 	if len(opts.Prompts) > 0 {
-		promptContent := redact.String(JoinPrompts(opts.Prompts))
+		promptContent := redactedJoinedPrompts(opts.Prompts)
 		blobHash, err := CreateBlobFromContent(s.repo, []byte(promptContent))
 		if err != nil {
 			return fmt.Errorf("failed to create prompt blob: %w", err)
@@ -1812,7 +1816,7 @@ func CreateBlobFromContent(repo *git.Repository, content []byte) (plumbing.Hash,
 
 // copyMetadataDir copies all files from a directory to the checkpoint path.
 // Used to include additional metadata files like task checkpoints, subagent transcripts, etc.
-func (s *GitStore) copyMetadataDir(metadataDir, basePath string, entries map[string]object.TreeEntry) error {
+func (s *GitStore) copyMetadataDir(ctx context.Context, metadataDir, basePath string, entries map[string]object.TreeEntry) error {
 	err := filepath.Walk(metadataDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -1851,8 +1855,13 @@ func (s *GitStore) copyMetadataDir(metadataDir, basePath string, entries map[str
 			return fmt.Errorf("path traversal detected: %s", relPath)
 		}
 
-		// Create blob from file with secrets redaction
-		blobHash, mode, err := createRedactedBlobFromFile(s.repo, path, relPath)
+		// Create blob from file with 7-layer secrets redaction.
+		// Post-commit emits 7-layer-only blobs; the pre-push rewrite
+		// (strategy/manual_commit_opf_rewrite.go) walks the resulting
+		// tree, re-redacts these blobs with OPF when enabled, and
+		// rewrites entire/checkpoints/v1 into 8-layer commits before
+		// they leave the local machine.
+		blobHash, mode, err := createRedactedBlobFromFile(ctx, s.repo, path, relPath)
 		if err != nil {
 			return fmt.Errorf("failed to create blob for %s: %w", path, err)
 		}
@@ -1873,9 +1882,14 @@ func (s *GitStore) copyMetadataDir(metadataDir, basePath string, entries map[str
 	return nil
 }
 
-// createRedactedBlobFromFile reads a file, applies secrets redaction, and creates a git blob.
-// JSONL files get JSONL-aware redaction; all other files get plain string redaction.
-func createRedactedBlobFromFile(repo *git.Repository, filePath, treePath string) (plumbing.Hash, filemode.FileMode, error) {
+// createRedactedBlobFromFile reads a file, applies the 7-layer redaction
+// pipeline, and creates a git blob. Used by committed-checkpoint writes
+// at post-commit time. The OpenAI Privacy Filter is intentionally NOT
+// run here — OPF lives in the pre-push rewrite path
+// (strategy/manual_commit_opf_rewrite.go), which re-redacts the 7-layer
+// blobs into 8-layer commits before they leave the local machine.
+// JSONL files get JSONL-aware redaction; all other files get plain byte redaction.
+func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, filePath, treePath string) (plumbing.Hash, filemode.FileMode, error) {
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return plumbing.ZeroHash, 0, fmt.Errorf("failed to stat file: %w", err)
@@ -1902,22 +1916,51 @@ func createRedactedBlobFromFile(repo *git.Repository, filePath, treePath string)
 		return hash, mode, nil
 	}
 
-	if strings.HasSuffix(treePath, ".jsonl") {
-		redacted, jsonlErr := redact.JSONLBytes(content)
-		if jsonlErr != nil {
-			content = redact.Bytes(content)
-		} else {
-			content = redacted.Bytes()
-		}
-	} else {
-		content = redact.Bytes(content)
-	}
+	content = RedactBlobBytes(ctx, content, treePath, false)
 
 	hash, err := CreateBlobFromContent(repo, content)
 	if err != nil {
 		return plumbing.ZeroHash, 0, fmt.Errorf("failed to create blob: %w", err)
 	}
 	return hash, mode, nil
+}
+
+// RedactBlobBytes redacts a single blob's content given its tree path.
+// JSON-shaped files (.jsonl or .json) get JSON-aware redaction (falling
+// back to plain bytes on parse failure so regex/credential layers
+// still apply); other files get plain byte redaction. When
+// usePrivacyFilter is true the full 8-layer pipeline (including OPF)
+// runs; otherwise the 7-layer pipeline.
+//
+// .json is handled alongside .jsonl because checkpoint metadata files
+// (metadata.json, per-session metadata.json) carry free-form fields
+// like Summary.Intent / Summary.Outcome / ReviewPrompt that can
+// contain PII the regex layers miss. The JSON-aware redactor extracts
+// string leaves and applies OPF only to those, preserving the JSON
+// structure.
+//
+// Post-commit condensation uses false (fast path). The pre-push rewrite
+// (strategy/manual_commit_opf_rewrite.go) uses true.
+func RedactBlobBytes(ctx context.Context, content []byte, treePath string, usePrivacyFilter bool) []byte {
+	if strings.HasSuffix(treePath, ".jsonl") || strings.HasSuffix(treePath, ".json") {
+		var (
+			redacted redact.RedactedBytes
+			err      error
+		)
+		if usePrivacyFilter {
+			redacted, err = redact.JSONLBytesWithPrivacyFilter(ctx, content)
+		} else {
+			redacted, err = redact.JSONLBytes(content)
+		}
+		if err == nil {
+			return redacted.Bytes()
+		}
+		// JSONL parse failed — fall through to plain bytes.
+	}
+	if usePrivacyFilter {
+		return redact.BytesWithPrivacyFilter(ctx, content)
+	}
+	return redact.Bytes(content)
 }
 
 // GetGitAuthorFromRepo retrieves the git user.name and user.email,

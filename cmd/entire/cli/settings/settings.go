@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/redact"
 )
 
 const (
@@ -210,6 +211,10 @@ type RedactionSettings struct {
 	// "[REDACTED_<LABEL>]" token used by PII. Failed regex compilations are
 	// logged via slog.Warn and the rule is skipped.
 	CustomRedactions map[string]string `json:"custom_redactions,omitempty"`
+
+	// OpenAIPrivacyFilter is the optional 8th redaction layer (opt-in).
+	// See docs/security-and-privacy.md.
+	OpenAIPrivacyFilter *OPFSettings `json:"openai_privacy_filter,omitempty"`
 }
 
 // PIISettings configures PII detection categories.
@@ -221,6 +226,35 @@ type PIISettings struct {
 	Address        *bool             `json:"address,omitempty"`
 	CustomPatterns map[string]string `json:"custom_patterns,omitempty"`
 }
+
+// OPFSettings configures the optional OpenAI Privacy Filter detection layer.
+// Disabled by default. Runs only at condensation/export boundaries — see
+// docs/security-and-privacy.md.
+//
+// There is intentionally no "on_failure" field: warn-only is the only mode
+// the runtime currently supports, and DisallowUnknownFields will reject any
+// future user who tries to set it. Adding the field again should land in
+// lockstep with the runtime enforcement.
+type OPFSettings struct {
+	Enabled        bool            `json:"enabled,omitempty"`
+	Categories     map[string]bool `json:"categories,omitempty"`
+	Command        string          `json:"command,omitempty"`
+	TimeoutSeconds int             `json:"timeout_seconds,omitempty"`
+
+	// PromptDefault controls whether the pre-push hook asks the user
+	// before running OPF. "" (default) and "ask" both surface the
+	// interactive prompt; "never" skips OPF and pushes 7-layer content;
+	// "always" runs without asking. ENTIRE_OPF=yes|no on the push
+	// invocation overrides this setting per-push.
+	PromptDefault string `json:"prompt_default,omitempty"`
+}
+
+// Valid PromptDefault values. Empty == OPFPromptAsk.
+const (
+	OPFPromptAsk    = "ask"
+	OPFPromptNever  = "never"
+	OPFPromptAlways = "always"
+)
 
 // GetCommitLinking returns the effective commit linking mode.
 // Returns the explicit value if set, otherwise defaults to "prompt"
@@ -502,6 +536,25 @@ func SaveProjectRaw(path string, raw map[string]json.RawMessage) error {
 	return nil
 }
 
+// SaveLocalRaw writes a generic JSON object back to .entire/settings.local.json
+// atomically (temp file + rename). Mirrors SaveProjectRaw for the per-developer
+// overrides file; the only difference is the error wording, which says "local
+// settings" so failure messages match the file actually being written.
+//
+// Pair with LoadLocalRaw for read-modify-write flows that target the local
+// override (e.g. persisting an interactive prompt's "always" choice without
+// touching the project-wide settings file).
+func SaveLocalRaw(path string, raw map[string]json.RawMessage) error {
+	data, err := jsonutil.MarshalIndentWithNewline(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal local settings: %w", err)
+	}
+	if err := jsonutil.WriteFileAtomic(path, data, 0o644); err != nil {
+		return fmt.Errorf("writing local settings: %w", err)
+	}
+	return nil
+}
+
 // ClonePreferencesPath returns the clone-local preferences path in the git common dir.
 func ClonePreferencesPath(ctx context.Context) (string, error) {
 	commonDir, err := session.GetGitCommonDir(ctx)
@@ -538,6 +591,11 @@ func LoadFromBytes(data []byte) (*EntireSettings, error) {
 	if err := dec.Decode(s); err != nil {
 		return nil, fmt.Errorf("parsing settings: %w", err)
 	}
+	if s.Redaction != nil {
+		if err := validateOPFSettings(s.Redaction.OpenAIPrivacyFilter); err != nil {
+			return nil, err
+		}
+	}
 	return s, nil
 }
 
@@ -570,6 +628,12 @@ func loadFromFile(filePath string) (*EntireSettings, error) {
 	// SummaryGeneration is NOT validated here — individual files may
 	// legitimately contain only a model (provider comes from another file).
 	// Validation happens after merge in Load().
+
+	if settings.Redaction != nil {
+		if err := validateOPFSettings(settings.Redaction.OpenAIPrivacyFilter); err != nil {
+			return nil, err
+		}
+	}
 
 	return settings, nil
 }
@@ -902,7 +966,83 @@ func mergeRedaction(dst *RedactionSettings, data json.RawMessage) error {
 			}
 		}
 	}
+	if opfRaw, ok := raw["openai_privacy_filter"]; ok {
+		if dst.OpenAIPrivacyFilter == nil {
+			dst.OpenAIPrivacyFilter = &OPFSettings{}
+		}
+		if err := mergeOPFSettings(dst.OpenAIPrivacyFilter, opfRaw); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// validateOPFSettings rejects unknown category names so typos surface at
+// parse time. Silent zero-detection of a privacy category is effectively
+// a correctness bug — the user thinks they're protected but they're not.
+func validateOPFSettings(opf *OPFSettings) error {
+	if opf == nil {
+		return nil
+	}
+	for name := range opf.Categories {
+		if !redact.IsKnownOPFCategory(name) {
+			return fmt.Errorf("openai_privacy_filter.categories has unknown key %q (see docs/security-and-privacy.md for the supported set)", name)
+		}
+	}
+	if opf.TimeoutSeconds < 0 {
+		return fmt.Errorf("openai_privacy_filter.timeout_seconds must be greater than or equal to 0 (got %d)", opf.TimeoutSeconds)
+	}
+	switch opf.PromptDefault {
+	case "", OPFPromptAsk, OPFPromptNever, OPFPromptAlways:
+		// ok
+	default:
+		return fmt.Errorf("openai_privacy_filter.prompt_default must be one of %q, %q, %q (got %q)",
+			OPFPromptAsk, OPFPromptNever, OPFPromptAlways, opf.PromptDefault)
+	}
+	return nil
+}
+
+// mergeOPFSettings merges OPF overrides into existing OPFSettings. Only
+// fields present in the override JSON are applied; missing fields preserve
+// the base value.
+func mergeOPFSettings(dst *OPFSettings, data json.RawMessage) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parsing openai_privacy_filter: %w", err)
+	}
+	if v, ok := raw["enabled"]; ok {
+		if err := json.Unmarshal(v, &dst.Enabled); err != nil {
+			return fmt.Errorf("parsing openai_privacy_filter.enabled: %w", err)
+		}
+	}
+	if v, ok := raw["categories"]; ok {
+		var cats map[string]bool
+		if err := json.Unmarshal(v, &cats); err != nil {
+			return fmt.Errorf("parsing openai_privacy_filter.categories: %w", err)
+		}
+		if dst.Categories == nil {
+			dst.Categories = make(map[string]bool, len(cats))
+		}
+		for k, b := range cats {
+			dst.Categories[k] = b
+		}
+	}
+	if v, ok := raw["command"]; ok {
+		if err := json.Unmarshal(v, &dst.Command); err != nil {
+			return fmt.Errorf("parsing openai_privacy_filter.command: %w", err)
+		}
+	}
+	if v, ok := raw["timeout_seconds"]; ok {
+		if err := json.Unmarshal(v, &dst.TimeoutSeconds); err != nil {
+			return fmt.Errorf("parsing openai_privacy_filter.timeout_seconds: %w", err)
+		}
+	}
+	if v, ok := raw["prompt_default"]; ok {
+		if err := json.Unmarshal(v, &dst.PromptDefault); err != nil {
+			return fmt.Errorf("parsing openai_privacy_filter.prompt_default: %w", err)
+		}
+	}
+	return validateOPFSettings(dst)
 }
 
 // mergePIISettings merges PII overrides into existing PIISettings.
@@ -996,16 +1136,6 @@ func IsSetUpAndEnabled(ctx context.Context) bool {
 	return s.Enabled
 }
 
-// MirrorsToV1CustomRef reports whether the v1 custom-ref mirror is opted in.
-// Returns false if settings cannot be loaded.
-func MirrorsToV1CustomRef(ctx context.Context) bool {
-	s, err := Load(ctx)
-	if err != nil {
-		return false
-	}
-	return s.MirrorsToV1CustomRef()
-}
-
 // IsFilteredFetchesEnabled checks if filtered fetches should be used.
 // When enabled, filtered fetches always resolve remote names to URLs first so
 // git does not persist promisor settings onto named remotes in local config.
@@ -1085,24 +1215,6 @@ func (s *EntireSettings) GetCheckpointRemote() *CheckpointRemoteConfig {
 		return nil
 	}
 	return &CheckpointRemoteConfig{Provider: provider, Repo: repo}
-}
-
-// MirrorsToV1CustomRef reports whether checkpoints_version opts into mirroring
-// committed metadata to the v1 custom ref (refs/entire/checkpoints/v1.1). v1
-// remains the source of truth; the v1 custom ref is a local-only mirror.
-// Returns false when unset or set to any other value.
-func (s *EntireSettings) MirrorsToV1CustomRef() bool {
-	if s.StrategyOptions == nil {
-		return false
-	}
-	return isV1CustomRefValue(s.StrategyOptions["checkpoints_version"])
-}
-
-// isV1CustomRefValue reports whether a checkpoints_version value selects the v1
-// custom ref. Only the JSON string "1.1" opts in; numeric values remain plain v1.
-func isV1CustomRefValue(val any) bool {
-	s, ok := val.(string)
-	return ok && s == "1.1"
 }
 
 // IsFilteredFetchesEnabled checks if fetches should use --filter=blob:none.

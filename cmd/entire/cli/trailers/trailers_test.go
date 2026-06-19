@@ -450,3 +450,71 @@ func TestParseCheckpoint(t *testing.T) {
 		})
 	}
 }
+
+// TestHasOPFApplied covers the Entire-OPF-Applied trailer reader. The
+// trailer marks a v1 commit whose blobs have been redacted by the
+// OpenAI Privacy Filter (8-layer); commits without it carry 7-layer
+// content and are eligible for the pre-push rewrite to add OPF.
+func TestHasOPFApplied(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		message string
+		want    bool
+	}{
+		{"present_lowercase_true", "Checkpoint: a1b2c3d4e5f6\n\nEntire-OPF-Applied: true\n", true},
+		{"absent", "Checkpoint: a1b2c3d4e5f6\n", false},
+		{"present_among_other_trailers", "msg\n\nEntire-Session: 2026-01\nEntire-OPF-Applied: true\nEntire-Strategy: manual-commit\n", true},
+		{"value_false_not_applied", "msg\n\nEntire-OPF-Applied: false\n", false},
+		{"value_other_not_applied", "msg\n\nEntire-OPF-Applied: yes\n", false},
+		{"empty_message", "", false},
+		{"trailer_with_extra_spaces", "msg\n\nEntire-OPF-Applied:   true   \n", true},
+		{"body_mention_not_trailer", "msg\n\nThis paragraph mentions a string that looks like metadata.\nEntire-OPF-Applied: true\n\nSigned-off-by: Test User <test@example.com>\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := HasOPFApplied(tc.message); got != tc.want {
+				t.Errorf("HasOPFApplied(%q) = %v, want %v", tc.message, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAppendOPFAppliedTrailer covers the formatter. Appending to a
+// message without a trailer block inserts a blank line; appending to
+// one with a trailer block joins directly. Idempotent — appending to
+// a message that already has the trailer must not duplicate it.
+func TestAppendOPFAppliedTrailer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		msg  string
+		want string
+	}{
+		{
+			name: "no_existing_trailers",
+			msg:  "Checkpoint: a1b2c3d4e5f6\n",
+			want: "Checkpoint: a1b2c3d4e5f6\n\nEntire-OPF-Applied: true\n",
+		},
+		{
+			name: "existing_trailer_block",
+			msg:  "Checkpoint: a1\n\nEntire-Session: s\nEntire-Strategy: manual-commit\n",
+			want: "Checkpoint: a1\n\nEntire-Session: s\nEntire-Strategy: manual-commit\nEntire-OPF-Applied: true\n",
+		},
+		{
+			name: "idempotent_when_already_applied",
+			msg:  "Checkpoint: a1\n\nEntire-OPF-Applied: true\n",
+			want: "Checkpoint: a1\n\nEntire-OPF-Applied: true\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := AppendOPFAppliedTrailer(tt.msg)
+			if got != tt.want {
+				t.Errorf("AppendOPFAppliedTrailer():\n got=%q\nwant=%q", got, tt.want)
+			}
+		})
+	}
+}

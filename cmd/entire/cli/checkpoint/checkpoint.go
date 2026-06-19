@@ -221,7 +221,9 @@ type WriteCommittedOptions struct {
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
 	Transcript redact.RedactedBytes
 
-	// Prompts contains user prompts from the session
+	// Prompts contains the raw user prompts from the session. Run through
+	// redactedJoinedPrompts before persisting — the writer does this
+	// inside writeSessionToSubdirectory.
 	Prompts []string
 
 	// FilesTouched are files modified during the session
@@ -368,7 +370,8 @@ type UpdateCommittedOptions struct {
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
 	Transcript redact.RedactedBytes
 
-	// Prompts contains all user prompts (replaces existing)
+	// Prompts contains the raw user prompts (replaces existing).
+	// See WriteCommittedOptions.Prompts.
 	Prompts []string
 
 	// Agent identifies the agent type (needed for transcript chunking)

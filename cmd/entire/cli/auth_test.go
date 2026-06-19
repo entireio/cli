@@ -113,7 +113,7 @@ func TestRunAuthStatus_RendersSessionsTable(t *testing.T) {
 	if !strings.Contains(got, "Active sessions (2):") {
 		t.Fatalf("output = %q, want active-sessions heading with count", got)
 	}
-	for _, want := range []string{"NAME", "CREATED", "LAST USED", "EXPIRES", "2026-01-01", "never"} {
+	for _, want := range []string{"NAME", "CREATED", "LAST USED", "EXPIRES", formatAuthDate("2026-01-01T00:00:00Z"), "never"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("output = %q, want table to contain %q", got, want)
 		}

@@ -80,6 +80,15 @@ type ListBindingsParams struct {
 	AccountId string
 }
 
+// ListMirrorCollaboratorsParams is parameters of listMirrorCollaborators operation.
+type ListMirrorCollaboratorsParams struct {
+	Provider ListMirrorCollaboratorsProvider
+	Owner    string
+	Repo     string
+	// Public host of the cluster serving the mirror.
+	ClusterHost string
+}
+
 // ListMirrorsParams is parameters of listMirrors operation.
 type ListMirrorsParams struct {
 	// Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to).
@@ -146,6 +155,17 @@ type ResolveHandleParams struct {
 	// IdP slug (e.g. "github").
 	Provider string
 	// User-visible handle at the provider.
+	Handle string
+}
+
+// RevokeMirrorCollaboratorParams is parameters of revokeMirrorCollaborator operation.
+type RevokeMirrorCollaboratorParams struct {
+	Provider RevokeMirrorCollaboratorProvider
+	Owner    string
+	Repo     string
+	// Public host of the cluster serving the mirror.
+	ClusterHost string
+	// Qualified grantee handle, e.g. github:alice.
 	Handle string
 }
 

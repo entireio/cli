@@ -44,8 +44,16 @@ const defaultClusterHost = "aws-us-east-2.entire.io"
 // clusterArg returns the cluster host from the optional second positional
 // (after <github-url>), or defaultClusterHost when it was omitted.
 func clusterArg(args []string) string {
-	if len(args) > 1 {
-		return args[1]
+	return clusterArgAt(args, 1)
+}
+
+// clusterArgAt returns the cluster host from the optional positional at idx,
+// or defaultClusterHost when it was omitted. Commands with an intervening
+// positional (e.g. collaborators add <github-url> <handle> [cluster-host])
+// pass the trailing index.
+func clusterArgAt(args []string, idx int) string {
+	if len(args) > idx {
+		return args[idx]
 	}
 	return defaultClusterHost
 }
@@ -105,6 +113,7 @@ func newRepoMirrorCmd() *cobra.Command {
 	cmd.AddCommand(newRepoMirrorListCmd())
 	cmd.AddCommand(newRepoMirrorGetCmd())
 	cmd.AddCommand(newRepoMirrorRemoveCmd())
+	cmd.AddCommand(newRepoMirrorCollaboratorsCmd())
 	return cmd
 }
 
@@ -136,7 +145,7 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 				cmd.SilenceUsage = true
 				return fmt.Errorf("invalid [cluster-host]: %w", err)
 			}
-			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+			return runCoreForCluster(cmd, clusterHost, func(ctx context.Context, c *coreapi.Client) error {
 				created, err := c.CreateMirror(ctx, &coreapi.CreateMirrorInputBody{
 					Provider:    coreapi.CreateMirrorInputBodyProviderGithub,
 					Owner:       owner,
@@ -230,6 +239,19 @@ func newRepoMirrorListCmd() *cobra.Command {
 		Short: "List mirrors you can see",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// mirror list is identity-scoped: it shows the mirrors visible from
+			// the active login's federation, so name that login server. It makes
+			// a surprising empty result legible — e.g. mirrors that live in a
+			// different deployment than the active context (--cluster is a filter,
+			// not a router). Reuses the same target coreapi.New dials. Best-effort:
+			// no header rather than a hard failure if the active context can't be
+			// resolved. Skipped for --json to keep machine output clean; on stderr
+			// so it never lands in a piped table.
+			if !jsonRequested(cmd) {
+				if t, err := auth.ResolveControlPlaneTarget(); err == nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Listing mirrors on %s\n", t.CoreURL)
+				}
+			}
 			return runCoreList(cmd, mirrorColumns, mirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Mirror, error) {
 				var params coreapi.ListMirrorsParams
 				if cluster != "" {
@@ -293,7 +315,7 @@ func newRepoMirrorRemoveCmd() *cobra.Command {
 				cmd.SilenceUsage = true
 				return fmt.Errorf("invalid [cluster-host]: %w", err)
 			}
-			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+			return runCoreForCluster(cmd, clusterHost, func(ctx context.Context, c *coreapi.Client) error {
 				// Delete by upstream coords in one call. A 404 is a real
 				// error here, not idempotent success: the server only
 				// answers 204 when it actually removed a placement, so a

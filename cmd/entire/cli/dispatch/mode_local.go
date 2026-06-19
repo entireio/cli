@@ -173,13 +173,14 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 		return nil, err
 	}
 
-	// The committed-read topology (and thus the v1.1 mirror opt-in) is resolved
-	// from settings relative to the context's worktree root, which defaults to
-	// the process cwd. repoRoot may be a different repo (--repo/RepoPaths) or
-	// the cwd may not be a repo at all, so scope settings resolution to this
-	// repo before consulting the topology.
+	// repoRoot may be a different repo (--repo/RepoPaths) or the cwd may not be
+	// a repo at all, so scope checkpoint store construction to this repo.
 	repoCtx := settings.WithWorktreeRoot(ctx, repoRoot)
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(repoCtx))
+	stores, err := checkpoint.Open(repoCtx, repo, checkpoint.OpenOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("open checkpoint store: %w", err)
+	}
+	store := stores.Primary
 	infos, err := store.ListCommitted(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list committed checkpoints: %w", err)

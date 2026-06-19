@@ -112,9 +112,8 @@ func ReconcileDisconnectedMetadataRef(
 	remoteRefName plumbing.ReferenceName,
 	w io.Writer,
 ) error {
-	refs := checkpoint.ResolveCommittedRefs(ctx)
 	advance := func(hash plumbing.Hash) error {
-		return AdvanceLocalRef(ctx, repo, refs, localRefName, hash)
+		return setRefHash(repo, localRefName, hash)
 	}
 
 	// Check local ref

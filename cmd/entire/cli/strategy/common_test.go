@@ -1142,17 +1142,11 @@ func TestEnsurePrimaryRef_WritesVercelConfigWhenEnabled(t *testing.T) {
 	}
 }
 
-// Not parallel: uses t.Chdir so settings.Load picks up the v1.1 opt-in.
-func TestEnsurePrimaryRef_MirrorsV11WhenSeedingFromRemote(t *testing.T) {
+// Not parallel: uses t.Chdir.
+func TestEnsurePrimaryRef_SeedsV1FromRemote(t *testing.T) {
 	bareDir := initBareWithMetadataBranch(t)
 	cloneDir, _ := cloneWithConfig(t, bareDir)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(cloneDir, ".entire", paths.SettingsFileName),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
-		0o644,
-	))
 	t.Chdir(cloneDir)
 	paths.ClearWorktreeRootCache()
 
@@ -1161,12 +1155,8 @@ func TestEnsurePrimaryRef_MirrorsV11WhenSeedingFromRemote(t *testing.T) {
 
 	require.NoError(t, EnsurePrimaryRef(t.Context(), repo))
 
-	v1Ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, err, "local v1 branch should be seeded from origin")
-
-	mirrorRef, err := repo.Reference(plumbing.ReferenceName(paths.MetadataRefName), true)
-	require.NoError(t, err, "v1.1 mirror should track the v1 write performed by EnsurePrimaryRef")
-	assert.Equal(t, v1Ref.Hash(), mirrorRef.Hash())
 }
 
 // cloneWithConfig clones bareDir into a new temp directory, configures git identity,

@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,7 +12,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/require"
 )
 
@@ -135,28 +133,4 @@ func TestHeadHasInvestigateCheckpoint_WrapperPreservesContract(t *testing.T) {
 	hasInvestigation, info := headHasInvestigateCheckpoint(context.Background())
 	require.False(t, hasInvestigation, "wrapper must not piggyback on HasReview")
 	require.Empty(t, info, "info must be empty when the wrapper returns false")
-}
-
-func TestHeadCheckpointFlags_V11ReadsCustomRefAsIs(t *testing.T) {
-	repo := setupHeadFlagsRepo(t)
-	cwd, err := os.Getwd()
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(filepath.Join(cwd, paths.EntireDir), 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(cwd, paths.EntireDir, paths.SettingsFileName),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
-		0o644,
-	))
-
-	cpID := writeHeadCheckpointWithFlags(t, repo, true, true)
-	v1Ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err)
-	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(paths.MetadataRefName), v1Ref.Hash())))
-
-	writeHeadCheckpointWithFlags(t, repo, false, false)
-
-	hasReview, hasInvestigation, info := headCheckpointFlags(context.Background())
-	require.True(t, hasReview, "v1.1 reads must use the custom ref, not the diverged v1 branch")
-	require.True(t, hasInvestigation, "v1.1 reads must use the custom ref, not the diverged v1 branch")
-	require.Contains(t, info, cpID.String())
 }

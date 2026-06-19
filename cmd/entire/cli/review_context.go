@@ -98,7 +98,12 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 		return ""
 	}
 	defer repo.Close()
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	if err != nil {
+		logging.Debug(ctx, "review checkpoint context: open store", slog.String("error", err.Error()))
+		return ""
+	}
+	store := stores.Primary
 
 	var lines []string
 	seen := map[checkpointid.CheckpointID]bool{}

@@ -613,7 +613,9 @@ func trailReviewCommentsPath(trailID string, opts trailReviewListOptions) string
 	if opts.Severity != "" {
 		q.Set("severity", opts.Severity)
 	}
-	if opts.Stale != "" && opts.Stale != trailReviewStaleAny {
+	// Unlike status=any (which the API treats as no status filter), stale=any is
+	// semantically significant: omitting stale defaults to current-only server-side.
+	if opts.Stale != "" {
 		q.Set("stale", opts.Stale)
 	}
 	if opts.IncludeDismissed {

@@ -52,8 +52,12 @@ func headCheckpointFlags(ctx context.Context) (hasReview, hasInvestigation bool,
 		return false, false, ""
 	}
 	defer repo.Close()
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	if err != nil {
+		logging.Debug(ctx, "head checkpoint flags: open store", slog.String("error", err.Error()))
+		return false, false, ""
+	}
+	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, stores.Primary, cpID)
 	if err != nil || summary == nil {
 		logging.Debug(ctx, "head checkpoint flags: resolve checkpoint summary",
 			slog.String("checkpoint_id", cpID.String()),

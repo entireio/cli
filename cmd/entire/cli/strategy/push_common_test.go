@@ -146,7 +146,7 @@ func TestPushRefIfNeeded_UnreachableTarget_ReturnsNil(t *testing.T) {
 
 // TestPushRefIfNeeded_NonBranchRef verifies that pushRefIfNeeded accepts
 // arbitrary refs (not just branches under refs/heads) and pushes them with a
-// generic refspec, e.g. refs/entire/checkpoints/v1.1.
+// generic refspec, e.g. refs/entire/checkpoints/custom.
 //
 // Not parallel: uses t.Chdir() (required for OpenRepository).
 func TestPushRefIfNeeded_NonBranchRef(t *testing.T) {
@@ -221,7 +221,7 @@ func TestPushRefIfNeeded_LocalBareRepo_PushesSuccessfully(t *testing.T) {
 }
 
 // TestFetchAndRebase_NonBranchRef verifies the fetch+rebase wiring accepts a
-// non-branch ref (e.g. refs/entire/checkpoints/v1.1). Today's resolver doesn't
+// non-branch ref (e.g. refs/entire/checkpoints/custom). Today's resolver doesn't
 // emit non-branch refs in CommittedRefs.Push, but the helper must remain
 // correct when one is wired in.
 //
@@ -1147,7 +1147,7 @@ func TestFetchAndRebase_FlaggedOriginTarget_UsesTempRef(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, ".entire"), 0o755))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(cloneDir, ".entire", "settings.json"),
-		[]byte(`{"enabled": true, "strategy_options": {"filtered_fetches": true, "checkpoints_version": "1.1"}}`),
+		[]byte(`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`),
 		0o644,
 	))
 
@@ -1172,9 +1172,6 @@ func TestFetchAndRebase_FlaggedOriginTarget_UsesTempRef(t *testing.T) {
 
 	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
 	require.NoError(t, err)
-	customRef, err := repo.Reference(plumbing.ReferenceName(paths.MetadataRefName), true)
-	require.NoError(t, err)
-	assert.Equal(t, localRef.Hash(), customRef.Hash(), "fetchAndRebaseRefCommon should mirror synced v1 metadata to the v1.1 custom ref")
 
 	tipCommit, err := repo.CommitObject(localRef.Hash())
 	require.NoError(t, err)

@@ -49,7 +49,10 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected()
-	store := s.getCheckpointStore(ctx, repo)
+	store, err := s.getCheckpointStore(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
 
 	committed, err := store.ListCommitted(ctx)
 	if err != nil {
@@ -68,7 +71,10 @@ func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointI
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected()
-	store := s.getCheckpointStore(ctx, repo)
+	store, err := s.getCheckpointStore(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
 
 	summary, err := cpkg.ReadCommittedCheckpoint(ctx, store, checkpointID)
 	if err != nil {
@@ -99,7 +105,18 @@ type condenseOpts struct {
 	allAgentFiles    map[string]struct{} // Union of all sessions' FilesTouched for cross-session exclusion (nil = single-session)
 }
 
-var redactSessionJSONLBytes = redact.JSONLBytes
+// redactSessionJSONLBytes runs the 7-layer redaction pipeline over a
+// session transcript at post-commit condensation. OPF is intentionally
+// NOT included here — it runs exclusively in the pre-push rewrite path
+// (strategy/manual_commit_opf_rewrite.go), which re-redacts the
+// 7-layer blobs and produces 8-layer commits before the push.
+//
+// Exposed as a var so tests can inject deterministic success/error
+// returns. The signature still takes a context so the var can be
+// re-wired to JSONLBytesWithPrivacyFilter from tests that need OPF.
+var redactSessionJSONLBytes = func(_ context.Context, b []byte) (redact.RedactedBytes, error) {
+	return redact.JSONLBytes(b)
+}
 
 // checkpointStepCount returns the number of user prompts attributed to the
 // checkpoint being written: the turns counted since the current window's base.
@@ -198,7 +215,10 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		return skipped, nil
 	}
 
-	store := s.getCheckpointStore(ctx, repo)
+	store, err := s.getCheckpointStore(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
 
 	// Get author info
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
@@ -231,6 +251,8 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		summary = generateSummary(ctx, redactedTranscript, sessionData.FilesTouched, state)
 	}
 
+	// Post-commit emits 7-layer-only blobs. OPF runs later in the
+	// pre-push rewrite path, never here.
 	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(sessionData.SkillEvents, state.TurnID))
 
 	writeOpts := cpkg.WriteCommittedOptions{
@@ -281,10 +303,6 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// persistEventMetadataToState) so two checkpoints with no prompt between them
 	// report the same count instead of the second showing 0.
 	state.PromptWindowResetPending = true
-
-	// Mirror the committed write to refs.Mirror when configured (best-effort;
-	// failures are logged, not fatal).
-	mirrorCommittedMetadataRefBestEffort(ctx, repo, store.Refs())
 
 	logging.Debug(logCtx, "condense timings",
 		slog.String("session_id", state.SessionID),
@@ -361,7 +379,7 @@ func redactSessionTranscript(ctx context.Context, transcript []byte) (redact.Red
 		return redact.RedactedBytes{}, time.Since(start), nil
 	}
 
-	redacted, err := redactSessionJSONLBytes(transcript)
+	redacted, err := redactSessionJSONLBytes(ctx, transcript)
 	if err != nil {
 		span.RecordError(err)
 		return redact.RedactedBytes{}, time.Since(start), fmt.Errorf("failed to redact transcript secrets: %w", err)

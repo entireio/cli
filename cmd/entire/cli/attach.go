@@ -21,7 +21,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
@@ -54,16 +53,21 @@ type attachOptions struct {
 	// transcript's first user prompt. Used by `entire review attach` when a
 	// pending-review marker has the exact prompt the user was asked to run.
 	ReviewPromptOverride string
-	// entireSettings, when non-nil, supplies already-resolved settings.
-	entireSettings *settings.EntireSettings
 }
 
-// committedRefs resolves the topology, honoring an injected EntireSettings.
+// committedRefs resolves the committed metadata topology.
 func (opts attachOptions) committedRefs(ctx context.Context) cpkg.CommittedRefs {
-	if opts.entireSettings != nil {
-		return cpkg.ResolveCommittedRefsFromSettings(opts.entireSettings)
-	}
 	return cpkg.ResolveCommittedRefs(ctx)
+}
+
+// openAttachStore opens the committed store for the resolved topology. refs is
+// passed explicitly so attach preserves PrimaryAsRead() pinning.
+func openAttachStore(ctx context.Context, repo *git.Repository, refs cpkg.CommittedRefs) (*cpkg.GitStore, error) {
+	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{Refs: &refs})
+	if err != nil {
+		return nil, fmt.Errorf("open checkpoint store: %w", err)
+	}
+	return stores.Primary, nil
 }
 
 func newAttachCmd() *cobra.Command {
@@ -272,7 +276,10 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 		return err
 	}
 
-	store := cpkg.NewGitStore(repo, refs)
+	store, err := openAttachStore(ctx, repo, refs)
+	if err != nil {
+		return err
+	}
 
 	// Defense-in-depth guard: the earlier existingState.LastCheckpointID
 	// check only fires when the session's state file records its
@@ -334,10 +341,6 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 		return fmt.Errorf("failed to write checkpoint: %w", err)
 	}
 
-	if err := strategy.MirrorCommittedMetadataRef(ctx, repo, refs); err != nil {
-		return fmt.Errorf("checkpoint was written to %s, but failed to mirror to %s: %w", refs.Primary, refs.Mirror, err)
-	}
-
 	// Create or update session state.
 	if err := saveAttachSessionState(logCtx, repo, existingState, sessionID, ag.Type(), transcriptPath, checkpointID, meta, tokenUsage, opts, reviewSkills); err != nil {
 		logging.Warn(logCtx, "failed to save session state", "error", err)
@@ -363,7 +366,10 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 // at Primary. Reads target Primary directly, not refs.Read, because this guard
 // must reflect what the next write would target.
 func checkpointHasSessionMetadata(ctx context.Context, repo *git.Repository, refs cpkg.CommittedRefs, checkpointID id.CheckpointID, sessionID string) (bool, error) {
-	store := cpkg.NewGitStore(repo, refs.PrimaryAsRead())
+	store, err := openAttachStore(ctx, repo, refs.PrimaryAsRead())
+	if err != nil {
+		return false, err
+	}
 	summary, err := store.ReadCommitted(ctx, checkpointID)
 	if err != nil {
 		return false, fmt.Errorf("read checkpoint summary: %w", err)
@@ -463,7 +469,11 @@ func checkpointPresentLocally(ctx context.Context, repo *git.Repository, refs cp
 	if _, err := repo.Reference(refs.Primary, true); err != nil {
 		return false, nil //nolint:nilerr // Missing ref is the "absent" signal, not an error.
 	}
-	summary, err := cpkg.NewGitStore(repo, refs.PrimaryAsRead()).ReadCommitted(ctx, checkpointID)
+	store, err := openAttachStore(ctx, repo, refs.PrimaryAsRead())
+	if err != nil {
+		return false, err
+	}
+	summary, err := store.ReadCommitted(ctx, checkpointID)
 	if err != nil {
 		return false, err //nolint:wrapcheck // Caller wraps with checkpoint ID context
 	}

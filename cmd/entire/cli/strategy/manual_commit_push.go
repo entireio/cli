@@ -2,12 +2,24 @@ package strategy
 
 import (
 	"context"
+	"errors"
+	"io"
 	"log/slog"
+	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/perf"
+	"github.com/entireio/cli/redact"
 )
+
+// errOPFAbortedByUser is returned when the user chose Abort (or pressed
+// Ctrl-C) at the OPF prompt. PrePush returns it verbatim; the hook
+// command propagates the non-zero exit code so git push aborts.
+var errOPFAbortedByUser = errors.New("OPF prompt aborted by user; push cancelled")
+
+var opfPrePushProgressWriter io.Writer = os.Stderr
 
 // PrePush is called by the git pre-push hook before pushing to a remote.
 // It pushes each ref in refs.Push alongside the user's push.
@@ -33,33 +45,80 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 
 	refs := checkpoint.ResolveCommittedRefs(ctx)
 
-	refreshMirrorBeforePush(ctx, refs)
+	// OPF pre-push rewrite: if OPF is configured, resolve the user's
+	// decision (env > settings > prompt > non-TTY auto-run), then
+	// re-redact unpushed v1 commits with the 8-layer pipeline before
+	// pushing. Skipped entirely when OPF is off, so the common-case
+	// fast path is unchanged.
+	if redact.OPFEnabled() {
+		cfg, _ := settings.Load(ctx) //nolint:errcheck // Load already failed at hook init; fall back to nil
+		var opfCfg *settings.OPFSettings
+		if cfg != nil && cfg.Redaction != nil {
+			opfCfg = cfg.Redaction.OpenAIPrivacyFilter
+		}
+		decision, decisionErr := resolveOPFDecisionForPrePush(ctx, opfCfg, opfPrePushProgressWriter)
+		if decisionErr != nil {
+			logging.Warn(ctx, "OPF pre-push decision failed; aborting push",
+				slog.String("error", decisionErr.Error()),
+			)
+			return decisionErr
+		}
+		switch decision {
+		case OPFAbort:
+			return errOPFAbortedByUser
+		case OPFSkip:
+			// User opted out for this push (or settings/env say
+			// "never"). Push 7-layer content as-is.
+			logging.Info(ctx, "OPF skipped for this push (user choice or settings)")
+		case OPFRun:
+			_, opfSpan := perf.Start(ctx, "opf_pre_push_rewrite")
+			repo, repoErr := OpenRepository(ctx)
+			if repoErr != nil {
+				opfSpan.RecordError(repoErr)
+				opfSpan.End()
+				logging.Warn(ctx, "OPF pre-push: failed to open repo; aborting push",
+					slog.String("error", repoErr.Error()),
+				)
+				return repoErr
+			}
+			defer repo.Close()
+			if _, rewriteErr := RewriteUnpushedV1WithOPF(ctx, repo, ps.pushTarget()); rewriteErr != nil {
+				opfSpan.RecordError(rewriteErr)
+				opfSpan.End()
+				logging.Warn(ctx, "OPF pre-push rewrite failed; aborting push",
+					slog.String("error", rewriteErr.Error()),
+				)
+				return rewriteErr
+			}
+			opfSpan.End()
+		}
+	}
 
 	// Thread the span's context into the push so the network push and any
 	// fetch+rebase recovery nest beneath it as child steps in the perf trace.
 	pushCtx, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoint_refs")
-	defer pushCheckpointsSpan.End()
 	for _, ref := range refs.Push {
 		if err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref); err != nil {
 			pushCheckpointsSpan.RecordError(err)
+			pushCheckpointsSpan.End()
 			return err
 		}
 	}
-	return nil
-}
+	pushCheckpointsSpan.End()
 
-// refreshMirrorBeforePush advances the mirror to the primary tip before
-// pushing. Best-effort: failures are logged, never blocking the push.
-func refreshMirrorBeforePush(ctx context.Context, refs checkpoint.CommittedRefs) {
-	if !refs.HasMirror() {
-		return
+	// Post-push cleanup: only when all configured checkpoint refs were pushed
+	// successfully, so we know condensed checkpoint data reached the remote.
+	// Failures here are non-fatal — shadow branches just accumulate until
+	// `entire clean` or the next successful push.
+	if deleted, cleanupErr := CleanupPushedShadowBranches(ctx); cleanupErr != nil {
+		logging.Warn(ctx, "post-push shadow branch cleanup failed",
+			slog.String("error", cleanupErr.Error()),
+		)
+	} else if deleted > 0 {
+		logging.Info(ctx, "cleaned up vestigial shadow branches",
+			slog.Int("count", deleted),
+		)
 	}
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		logging.Debug(ctx, "pre-push mirror refresh skipped: open repository failed",
-			slog.String("error", err.Error()))
-		return
-	}
-	defer repo.Close()
-	mirrorCommittedMetadataRefBestEffort(ctx, repo, refs)
+
+	return nil
 }

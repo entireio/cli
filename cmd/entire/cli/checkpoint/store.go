@@ -12,7 +12,7 @@ var _ Store = (*GitStore)(nil)
 
 // GitStore provides operations for both temporary and committed checkpoint
 // storage. Writes target refs.Primary; committed reads resolve against
-// refs.Read. The store does not advance refs.Mirror.
+// refs.Read.
 type GitStore struct {
 	repo        *git.Repository
 	refs        CommittedRefs
