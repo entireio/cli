@@ -12,8 +12,7 @@ import (
 )
 
 // TestSetupCodexHooks_AddsAllRequiredHooks is a smoke test verifying that
-// `entire enable --agent codex` adds all required hooks and scaffolds the
-// managed search subagent into the project.
+// `entire enable --agent codex` adds all required hooks.
 func TestSetupCodexHooks_AddsAllRequiredHooks(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
@@ -46,18 +45,5 @@ func TestSetupCodexHooks_AddsAllRequiredHooks(t *testing.T) {
 	}
 	if !strings.Contains(hooksContent, "entire hooks codex post-tool-use") {
 		t.Error("Codex PostToolUse hook should exist")
-	}
-
-	searchAgentPath := filepath.Join(env.RepoDir, ".codex", "agents", "entire-search.toml")
-	searchData, err := os.ReadFile(searchAgentPath)
-	if err != nil {
-		t.Fatalf("failed to read generated Codex search subagent: %v", err)
-	}
-	searchContent := string(searchData)
-	if !strings.Contains(searchContent, "ENTIRE-MANAGED SEARCH SUBAGENT") {
-		t.Error("Codex search subagent should be marked as Entire-managed")
-	}
-	if !strings.Contains(searchContent, "entire search --json") {
-		t.Error("Codex search subagent should instruct use of `entire search --json`")
 	}
 }

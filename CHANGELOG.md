@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Removed
+
+- `entire enable` no longer scaffolds the managed `entire-search` subagent into agent config directories (`.claude/agents`, `.codex/agents`, `.gemini/agents`)
+
 ## [0.7.7] - 2026-06-18
 
 ### Added
