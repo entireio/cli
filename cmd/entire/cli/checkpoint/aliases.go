@@ -1,6 +1,11 @@
 package checkpoint
 
-import apicheckpoint "github.com/entireio/cli/api/checkpoint"
+import (
+	"context"
+
+	apicheckpoint "github.com/entireio/cli/api/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+)
 
 // The committed-checkpoint contract (persisted document types, option types,
 // reader/writer interfaces, and the Write request union) lives in the
@@ -45,9 +50,17 @@ var (
 	ErrNoTranscript       = apicheckpoint.ErrNoTranscript
 )
 
-// Contract helper functions, re-exported.
-var (
-	ReadCommittedCheckpoint        = apicheckpoint.ReadCommittedCheckpoint
-	ReadLatestSessionContent       = apicheckpoint.ReadLatestSessionContent
-	ReadRawSessionLogForCheckpoint = apicheckpoint.ReadRawSessionLogForCheckpoint
-)
+// Contract helper functions, re-exported as thin wrappers rather than vars so
+// the facade symbols can't be reassigned by consumers.
+
+func ReadCommittedCheckpoint(ctx context.Context, reader CommittedReader, checkpointID id.CheckpointID) (*CheckpointSummary, error) {
+	return apicheckpoint.ReadCommittedCheckpoint(ctx, reader, checkpointID) //nolint:wrapcheck // thin re-export of the api/checkpoint helper
+}
+
+func ReadLatestSessionContent(ctx context.Context, reader CommittedReader, checkpointID id.CheckpointID, summary *CheckpointSummary) (*SessionContent, error) {
+	return apicheckpoint.ReadLatestSessionContent(ctx, reader, checkpointID, summary) //nolint:wrapcheck // thin re-export of the api/checkpoint helper
+}
+
+func ReadRawSessionLogForCheckpoint(ctx context.Context, reader CommittedReader, checkpointID id.CheckpointID) ([]byte, string, error) {
+	return apicheckpoint.ReadRawSessionLogForCheckpoint(ctx, reader, checkpointID) //nolint:wrapcheck // thin re-export of the api/checkpoint helper
+}

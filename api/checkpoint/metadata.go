@@ -33,9 +33,8 @@ type WriteCommittedOptions struct {
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
 	Transcript redact.RedactedBytes
 
-	// Prompts contains the raw user prompts from the session. Run through
-	// redactedJoinedPrompts before persisting — the writer does this
-	// inside writeSessionToSubdirectory.
+	// Prompts contains the raw user prompts from the session. The store joins
+	// and redacts them before persisting.
 	Prompts []string
 
 	// FilesTouched are files modified during the session
@@ -193,24 +192,23 @@ type UpdateCommittedOptions struct {
 	SkillEvents []types.SkillEvent
 
 	// PrecomputedBlobs, if non-nil, provides chunk blob hashes and the
-	// content-hash blob hash computed once for this transcript. When set,
-	// UpdateCommitted skips the per-call ChunkTranscript + zlib work and
-	// reuses these hashes. Used by finalizeAllTurnCheckpoints to avoid
-	// re-compressing identical content N times.
+	// content-hash blob hash computed once for this transcript. When set, the
+	// store skips per-call transcript chunking + compression and reuses these
+	// hashes — e.g. to avoid re-compressing identical content across the
+	// several checkpoints finalized together in one turn.
 	PrecomputedBlobs *PrecomputedTranscriptBlobs
 }
 
 // PrecomputedTranscriptBlobs holds blob hashes for a transcript that was
 // chunked and written to the object store once, for reuse across multiple
-// UpdateCommitted calls sharing the same transcript content.
-// Callers should avoid constructing this for empty transcripts; agent.ChunkTranscript
-// would otherwise produce a single zero-length chunk and a hash for an empty
-// blob, which downstream stores would never reference.
+// transcript-backfill calls sharing the same transcript content.
+// Callers should avoid constructing this for empty transcripts; transcript
+// chunking would otherwise produce a single zero-length chunk and a hash for an
+// empty blob, which downstream stores would never reference.
 type PrecomputedTranscriptBlobs struct {
 	// ChunkHashes are the blob hashes for each transcript chunk, in order.
-	// Always non-empty when built via PrecomputeTranscriptBlobs (a non-empty
-	// transcript chunks to at least one entry; callers should skip precompute
-	// for empty transcripts).
+	// Always non-empty when built for a non-empty transcript (which chunks to
+	// at least one entry; callers should skip precompute for empty transcripts).
 	ChunkHashes []plumbing.Hash
 
 	// ContentHashBlob is the blob hash of the "sha256:<hex>" content-hash
