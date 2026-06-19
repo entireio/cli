@@ -3,19 +3,17 @@ package checkpoint
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/redact"
 )
 
-// unknownWriteRequest is a WriteRequest the dispatcher does not handle. It is
-// sealed into the union via the unexported marker (only possible in-package),
-// which lets the test exercise the default branch.
-type unknownWriteRequest struct{}
-
-func (unknownWriteRequest) isWriteRequest() {}
+// Note: the Write dispatcher's default ("unsupported request") branch is no
+// longer reachable from this package — the WriteRequest union is sealed to the
+// api/checkpoint contract package, so an unhandled request type can only be
+// introduced there (a forward-safety net for future request types). The
+// per-request dispatch below is the meaningful coverage.
 
 // TestWrite_DispatchesEachRequest verifies that Store.Write routes each request
 // type to the corresponding git operation, observing the effect of each.
@@ -84,22 +82,6 @@ func TestWrite_DispatchesEachRequest(t *testing.T) {
 	}
 	if rootSummary.CombinedAttribution == nil || rootSummary.CombinedAttribution.AgentLines != 42 {
 		t.Errorf("BackfillAttribution not applied: %+v", rootSummary.CombinedAttribution)
-	}
-}
-
-// TestWrite_UnknownRequestErrors verifies the dispatcher surfaces an
-// unhandled request type rather than silently ignoring it.
-func TestWrite_UnknownRequestErrors(t *testing.T) {
-	t.Parallel()
-	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo, DefaultV1Refs())
-
-	err := store.Write(context.Background(), unknownWriteRequest{})
-	if err == nil {
-		t.Fatal("Write(unknownWriteRequest) should error")
-	}
-	if !strings.Contains(err.Error(), "unsupported write request") {
-		t.Errorf("error = %v, want mention of unsupported write request", err)
 	}
 }
 
