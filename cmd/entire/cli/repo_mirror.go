@@ -132,7 +132,7 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 			"(upstream, cluster). The cluster-host defaults to " +
 			defaultClusterHost + " when omitted.",
 		Example: "  entire repo mirror create github.com/octocat/hello-world\n" +
-			"  entire repo mirror create github.com/octocat/hello-world eu-west-1.entire.io",
+			"  entire repo mirror create github.com/octocat/hello-world us-east-2.entire.io",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			owner, repo, err := parseGitHubURL(args[0])
