@@ -1128,9 +1128,10 @@ func TestResolveTrailBodyInput(t *testing.T) {
 
 	t.Run("literal --body", func(t *testing.T) {
 		t.Parallel()
-		text, changed, err := resolveTrailBodyInput("hello world", "", true, false, nil)
-		if err != nil || !changed || text != "hello world" {
-			t.Fatalf("got (%q, %v, %v), want (%q, true, nil)", text, changed, err, "hello world")
+		const want = "a literal body"
+		text, changed, err := resolveTrailBodyInput(want, "", true, false, nil)
+		if err != nil || !changed || text != want {
+			t.Fatalf("got (%q, %v, %v), want (%q, true, nil)", text, changed, err, want)
 		}
 	})
 
@@ -1255,7 +1256,7 @@ func TestApplyTrailUpdateRejectsNumberlessTrail(t *testing.T) {
 
 func TestFetchTrailBodyReturnsRawUntrimmedSnapshot(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if _, err := io.WriteString(w, `{"trail":{"number":5,"body_document":{"text_snapshot":"  spaced body \n"}}}`); err != nil {
 			t.Errorf("write response: %v", err)
 		}
@@ -1279,7 +1280,7 @@ func TestFetchTrailBodyReturnsRawUntrimmedSnapshot(t *testing.T) {
 
 func TestFetchTrailBodyReportsMissingDocument(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if _, err := io.WriteString(w, `{"trail":{"number":5}}`); err != nil {
 			t.Errorf("write response: %v", err)
 		}
@@ -1303,12 +1304,13 @@ func TestInteractiveUpdateInputsMarksOnlyEditedFields(t *testing.T) {
 	}
 
 	// Only the body edited.
-	got = interactiveUpdateInputs(seed, trailUpdateEdits{status: "open", title: "Title", body: "hello world"})
+	const editedBody = "an edited body"
+	got = interactiveUpdateInputs(seed, trailUpdateEdits{status: "open", title: "Title", body: editedBody})
 	if !got.BodyChanged || got.StatusChanged || got.TitleChanged {
 		t.Fatalf("body-only edit flags wrong: %+v", got)
 	}
-	if got.Body != "hello world" {
-		t.Fatalf("Body = %q, want %q", got.Body, "hello world")
+	if got.Body != editedBody {
+		t.Fatalf("Body = %q, want %q", got.Body, editedBody)
 	}
 }
 
