@@ -1253,6 +1253,45 @@ func TestApplyTrailUpdateRejectsNumberlessTrail(t *testing.T) {
 	}
 }
 
+func TestFetchTrailBodyReturnsRawUntrimmedSnapshot(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.WriteString(w, `{"trail":{"number":5,"body_document":{"text_snapshot":"  spaced body \n"}}}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+
+	// fetchTrailBody returns the snapshot verbatim, so an edited interactive save
+	// preserves the document's original surrounding whitespace.
+	raw, exists, err := fetchTrailBody(t.Context(), client, "gh", "acme", "repo", 5)
+	if err != nil || !exists || raw != "  spaced body \n" {
+		t.Fatalf("fetchTrailBody = (%q, %v, %v), want (%q, true, nil)", raw, exists, err, "  spaced body \n")
+	}
+
+	// fetchTrailDescription (used by `show`) still trims for display.
+	desc, err := fetchTrailDescription(t.Context(), client, "gh", "acme", "repo", 5)
+	if err != nil || desc != "spaced body" {
+		t.Fatalf("fetchTrailDescription = (%q, %v), want (%q, nil)", desc, err, "spaced body")
+	}
+}
+
+func TestFetchTrailBodyReportsMissingDocument(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.WriteString(w, `{"trail":{"number":5}}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	raw, exists, err := fetchTrailBody(t.Context(), client, "gh", "acme", "repo", 5)
+	if err != nil || exists || raw != "" {
+		t.Fatalf("fetchTrailBody (no doc) = (%q, %v, %v), want (\"\", false, nil)", raw, exists, err)
+	}
+}
+
 func TestInteractiveUpdateInputsMarksOnlyEditedFields(t *testing.T) {
 	t.Parallel()
 	seed := trailUpdateEdits{status: "open", title: "Title", body: "hello"}

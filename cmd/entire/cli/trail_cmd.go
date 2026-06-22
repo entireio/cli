@@ -241,30 +241,41 @@ func trailWebURL(base, forge, owner, repo string, number int) string {
 	return strings.TrimRight(base, "/") + "/" + forge + "/" + owner + "/" + repo + "/trails/" + strconv.Itoa(number)
 }
 
-// fetchTrailDescription fetches a trail's rendered description text
-// (`trail.body_document.text_snapshot`), which the list endpoint omits, by
-// integer number. It returns only the description — the list result already
-// supplies the metadata — and decodes only the fields it needs, so it is
-// unaffected by the shape of sibling fields like `checkpoints`/`thread`.
-func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, error) {
+// fetchTrailBody fetches a trail's raw body text (`trail.body_document.
+// text_snapshot`, untrimmed), which the list endpoint omits, by integer number.
+// It returns the snapshot verbatim and whether a body document exists, so an
+// edited interactive save preserves the document's original whitespace. It
+// decodes only the fields it needs, so it is unaffected by the shape of sibling
+// fields like `checkpoints`/`thread`.
+func fetchTrailBody(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, bool, error) {
 	resp, err := client.Get(ctx, trailNumberPath(forge, owner, repo, number))
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch trail detail: %w", err)
+		return "", false, fmt.Errorf("failed to fetch trail detail: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		return "", err
+		return "", false, err
 	}
 	var detail struct {
 		Trail api.TrailResource `json:"trail"`
 	}
 	if err := api.DecodeJSON(resp, &detail); err != nil {
-		return "", fmt.Errorf("failed to decode trail detail: %w", err)
+		return "", false, fmt.Errorf("failed to decode trail detail: %w", err)
 	}
 	if detail.Trail.BodyDocument == nil {
-		return "", nil
+		return "", false, nil
 	}
-	return strings.TrimSpace(detail.Trail.BodyDocument.TextSnapshot), nil
+	return detail.Trail.BodyDocument.TextSnapshot, true, nil
+}
+
+// fetchTrailDescription returns the trail's body trimmed for display (used by
+// `trail show`). Editing paths use fetchTrailBody to keep the raw text.
+func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, error) {
+	body, _, err := fetchTrailBody(ctx, client, forge, owner, repo, number)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(body), nil
 }
 
 func newTrailListCmd() *cobra.Command {
@@ -974,16 +985,19 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, stdin io.Reader, ins
 				statusOptions = append(statusOptions, huh.NewOption(label, string(s)))
 			}
 			// Seed the body from the real collaborative document (the list/metadata
-			// body is always empty), so an interactive edit doesn't clobber it.
+			// body is always empty), using the raw snapshot so an edit preserves the
+			// document's whitespace. Fail rather than seed an empty body when it
+			// can't be loaded — otherwise an edit would silently overwrite a body
+			// that merely failed to fetch.
 			seedStatus := string(metadata.Status)
 			seedTitle := metadata.Title
 			seedBody := ""
 			if found.Number > 0 {
-				if bt, derr := fetchTrailDescription(ctx, client, forge, owner, repoName, found.Number); derr == nil {
-					seedBody = bt
-				} else {
-					fmt.Fprintf(errW, "Warning: could not load current body: %v\n", derr)
+				bt, _, derr := fetchTrailBody(ctx, client, forge, owner, repoName, found.Number)
+				if derr != nil {
+					return fmt.Errorf("could not load the current body to edit: %w", derr)
 				}
+				seedBody = bt
 			}
 			body = seedBody
 			statusStr := seedStatus
