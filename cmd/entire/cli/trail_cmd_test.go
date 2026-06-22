@@ -25,7 +25,6 @@ import (
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/go-git/go-git/v6"
-	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -725,12 +724,11 @@ func TestValidateTrailUpdateFieldsRejectsEmptyTitle(t *testing.T) {
 	}
 }
 
-func TestTrailCreateAndUpdateRejectUnexpectedArgs(t *testing.T) {
+func TestTrailCreateRejectsUnexpectedArgs(t *testing.T) {
 	t.Parallel()
-	for _, cmd := range []*cobra.Command{newTrailCreateCmd(), newTrailUpdateCmd()} {
-		if err := cmd.Args(cmd, []string{"unexpected"}); err == nil {
-			t.Fatalf("%s accepted an unexpected positional arg", cmd.Name())
-		}
+	cmd := newTrailCreateCmd()
+	if err := cmd.Args(cmd, []string{"unexpected"}); err == nil {
+		t.Fatalf("%s accepted an unexpected positional arg", cmd.Name())
 	}
 }
 
@@ -1122,5 +1120,146 @@ func TestFetchCurrentUserLoginWrapsGhError(t *testing.T) {
 	// Surface the hint about the --author <login> fallback.
 	if !strings.Contains(err.Error(), "--author <login>") {
 		t.Fatalf("error should mention the --author fallback hint, got: %v", err)
+	}
+}
+
+func TestResolveTrailBodyInput(t *testing.T) {
+	t.Parallel()
+
+	t.Run("literal --body", func(t *testing.T) {
+		t.Parallel()
+		text, changed, err := resolveTrailBodyInput("hello world", "", true, false, nil)
+		if err != nil || !changed || text != "hello world" {
+			t.Fatalf("got (%q, %v, %v), want (%q, true, nil)", text, changed, err, "hello world")
+		}
+	})
+
+	t.Run("--body-file reads file", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "body.md")
+		if err := os.WriteFile(path, []byte("# Title\n\nfrom file\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		text, changed, err := resolveTrailBodyInput("", path, false, true, nil)
+		if err != nil || !changed || text != "# Title\n\nfrom file\n" {
+			t.Fatalf("got (%q, %v, %v), want file contents", text, changed, err)
+		}
+	})
+
+	t.Run("--body - reads stdin", func(t *testing.T) {
+		t.Parallel()
+		text, changed, err := resolveTrailBodyInput("-", "", true, false, strings.NewReader("piped body"))
+		if err != nil || !changed || text != "piped body" {
+			t.Fatalf("got (%q, %v, %v), want (%q, true, nil)", text, changed, err, "piped body")
+		}
+	})
+
+	t.Run("--body-file - reads stdin", func(t *testing.T) {
+		t.Parallel()
+		text, changed, err := resolveTrailBodyInput("", "-", false, true, strings.NewReader("piped via file flag"))
+		if err != nil || !changed || text != "piped via file flag" {
+			t.Fatalf("got (%q, %v, %v), want stdin contents", text, changed, err)
+		}
+	})
+
+	t.Run("--body and --body-file are mutually exclusive", func(t *testing.T) {
+		t.Parallel()
+		if _, _, err := resolveTrailBodyInput("x", "f.md", true, true, nil); err == nil {
+			t.Fatal("expected error when both --body and --body-file are set")
+		}
+	})
+
+	t.Run("nothing set means no change", func(t *testing.T) {
+		t.Parallel()
+		text, changed, err := resolveTrailBodyInput("", "", false, false, nil)
+		if err != nil || changed || text != "" {
+			t.Fatalf("got (%q, %v, %v), want (\"\", false, nil)", text, changed, err)
+		}
+	})
+}
+
+// patchRecorder is an httptest server that records every PATCH it receives.
+func patchRecorder(t *testing.T) (*httptest.Server, *[]api.TrailUpdateRequest) {
+	t.Helper()
+	var got []api.TrailUpdateRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("unexpected method %s", r.Method)
+		}
+		var req api.TrailUpdateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode patch body: %v", err)
+		}
+		got = append(got, req)
+		if _, err := io.WriteString(w, `{"trail":{"number":42}}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &got
+}
+
+func TestApplyTrailUpdateSplitsBodyAndMetadata(t *testing.T) {
+	t.Parallel()
+	srv, got := patchRecorder(t)
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	found := &api.TrailResource{Number: 42}
+
+	err := applyTrailUpdate(t.Context(), client, "gh", "acme", "repo", found, trailUpdateInputs{
+		Status: "open", StatusChanged: true,
+		Body: "new body", BodyChanged: true,
+	})
+	if err != nil {
+		t.Fatalf("applyTrailUpdate: %v", err)
+	}
+	// Body and metadata must go in SEPARATE PATCHes (the API rejects combining them).
+	if len(*got) != 2 {
+		t.Fatalf("got %d PATCH calls, want 2 (metadata + body)", len(*got))
+	}
+	for _, req := range *got {
+		if req.Body != nil && req.Status != nil {
+			t.Fatalf("a single PATCH carried both body and metadata: %+v", req)
+		}
+	}
+}
+
+func TestApplyTrailUpdateBodyOnlyIsSinglePatch(t *testing.T) {
+	t.Parallel()
+	srv, got := patchRecorder(t)
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	found := &api.TrailResource{Number: 1488} // branchless trail: Branch == "" but Number > 0
+
+	err := applyTrailUpdate(t.Context(), client, "gh", "acme", "repo", found, trailUpdateInputs{
+		Body: "branchless body", BodyChanged: true,
+	})
+	if err != nil {
+		t.Fatalf("applyTrailUpdate: %v", err)
+	}
+	if len(*got) != 1 {
+		t.Fatalf("got %d PATCH calls, want 1", len(*got))
+	}
+	if (*got)[0].Body == nil || *(*got)[0].Body != "branchless body" {
+		t.Fatalf("PATCH body = %v, want %q", (*got)[0].Body, "branchless body")
+	}
+}
+
+func TestApplyTrailUpdateRejectsNumberlessTrail(t *testing.T) {
+	t.Parallel()
+	client := api.NewClientWithBaseURL("tok", "http://unused.invalid")
+	found := &api.TrailResource{Number: 0, Title: "Draft"}
+	if err := applyTrailUpdate(t.Context(), client, "gh", "acme", "repo", found, trailUpdateInputs{Body: "x", BodyChanged: true}); err == nil {
+		t.Fatal("expected error updating a trail with no number")
+	}
+}
+
+func TestTrailUpdateAcceptsTrailSelectorArg(t *testing.T) {
+	t.Parallel()
+	cmd := newTrailUpdateCmd()
+	if err := cmd.Args(cmd, []string{"1488"}); err != nil {
+		t.Fatalf("update rejected a single trail selector arg: %v", err)
+	}
+	if err := cmd.Args(cmd, []string{"a", "b"}); err == nil {
+		t.Fatal("update accepted two positional args")
 	}
 }
