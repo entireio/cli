@@ -23,11 +23,11 @@ type OpenOptions struct {
 // Stores is the facade returned by Open: the committed store plus the git-only
 // temporary capability and resolved committed-ref topology.
 type Stores struct {
-	// Primary is the committed store — the source of truth that serves all
-	// committed reads and writes.
-	Primary *GitStore
+	// Primary is the committed store that serves committed reads and writes.
+	Primary CommittedStore
 
-	refs CommittedRefs
+	temporary TemporaryStore
+	refs      CommittedRefs
 }
 
 // Open resolves the checkpoint storage topology and constructs the backing
@@ -41,8 +41,9 @@ func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores,
 		store.SetBlobFetcher(opts.BlobFetcher)
 	}
 	return &Stores{
-		Primary: store,
-		refs:    refs,
+		Primary:   store,
+		temporary: store,
+		refs:      refs,
 	}, nil
 }
 
@@ -53,10 +54,8 @@ func resolveOpenRefs(ctx context.Context, opts OpenOptions) CommittedRefs {
 	return ResolveCommittedRefs(ctx)
 }
 
-// Temporary returns the git-backed temporary (shadow-branch) store. It is the
-// same backing store as Primary; the name marks shadow-branch intent at the
-// call site.
-func (s *Stores) Temporary() *GitStore { return s.Primary }
+// Temporary returns the git-backed temporary shadow-branch store.
+func (s *Stores) Temporary() TemporaryStore { return s.temporary } //nolint:ireturn // temporary store capability is the abstraction boundary
 
 // Refs returns the resolved committed-ref topology.
 func (s *Stores) Refs() CommittedRefs { return s.refs }

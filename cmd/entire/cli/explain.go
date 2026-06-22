@@ -89,7 +89,7 @@ var errCannotGenerateTemporaryCheckpoint = errors.New("cannot generate summary f
 
 type explainCheckpointLookup struct {
 	repo      *git.Repository
-	store     *checkpoint.GitStore
+	store     checkpoint.CommittedStore
 	committed []checkpoint.CommittedInfo
 }
 
@@ -729,8 +729,8 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 			Name:  associatedCommits[0].Author,
 			Email: associatedCommits[0].Email,
 		}
-	} else {
-		author, _ = lookup.store.GetCheckpointAuthor(ctx, fullCheckpointID) //nolint:errcheck // Author is optional
+	} else if authorReader, ok := lookup.store.(checkpoint.AuthorReader); ok {
+		author, _ = authorReader.GetCheckpointAuthor(ctx, fullCheckpointID) //nolint:errcheck // Author is optional
 	}
 
 	// Format and output. Stop spinner BEFORE any write to w to keep stderr
@@ -1204,7 +1204,7 @@ func formatSummaryTimeout(d time.Duration) string {
 // Searches ALL shadow branches, not just the one for current HEAD, to find checkpoints
 // created from different base commits (e.g., if HEAD advanced since session start).
 // The writer w is used for raw transcript output to bypass the pager.
-func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *git.Repository, store *checkpoint.GitStore, shaPrefix string, verbose, full, rawTranscript bool) (string, bool, error) {
+func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *git.Repository, store checkpoint.TemporaryStore, shaPrefix string, verbose, full, rawTranscript bool) (string, bool, error) {
 	// List temporary checkpoints from ALL shadow branches
 	// This ensures we find checkpoints even if HEAD has advanced since the session started
 	tempCheckpoints, err := store.ListAllTemporaryCheckpoints(ctx, "", branchCheckpointsLimit)
@@ -2183,7 +2183,7 @@ func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.Comm
 // whose base commit is reachable from the given HEAD hash and that belong to this worktree.
 // For default branches, all shadow branches for this worktree are included.
 // For feature branches, only shadow branches whose base commit is in HEAD's history are included.
-func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository, store *checkpoint.GitStore, headHash plumbing.Hash, isOnDefault bool, limit int) []strategy.RewindPoint {
+func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository, store checkpoint.TemporaryStore, headHash plumbing.Hash, isOnDefault bool, limit int) []strategy.RewindPoint {
 	var points []strategy.RewindPoint
 
 	// Compute current worktree's hash for filtering shadow branches

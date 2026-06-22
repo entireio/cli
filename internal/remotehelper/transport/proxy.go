@@ -73,9 +73,14 @@ type Proxy struct {
 	// path is the URL path on each node.
 	path string
 
-	client       *http.Client
-	setAuth      SetAuthFunc
-	onNodeFailed func(failedNode string)
+	client *http.Client
+	// discoveryTransport is the RoundTripper used for the cold info/refs
+	// probe to the entry domain (see noRedirectClient). It carries a longer
+	// dial budget than client's transport because that first
+	// replica-discovery connect has no failover to fall back on.
+	discoveryTransport http.RoundTripper
+	setAuth            SetAuthFunc
+	onNodeFailed       func(failedNode string)
 
 	// stickyNode is the URL (matching one of nodes) of the replica
 	// that served the most recent successful request, post-redirects.
@@ -112,16 +117,21 @@ func New(cfg Config) *Proxy {
 	// User-Agent must be set before httpdebug logs the request, so the
 	// wrapper sits outside httpdebug. The order is:
 	//   user-agent → httpdebug → http.Transport
-	// so the debug log captures the same headers the wire sees.
-	var rt http.RoundTripper = httpclient.NewTransport(cfg.SkipTLS)
-	rt = &httpdebug.RoundTripper{Next: rt}
-	if cfg.UserAgent != "" {
-		rt = &httpclient.UserAgentTransport{Next: rt, UA: cfg.UserAgent}
+	// so the debug log captures the same headers the wire sees. Both the
+	// failover client and the discovery probe wrap identically; only the
+	// underlying transport's dial budget differs.
+	wrap := func(base http.RoundTripper) http.RoundTripper {
+		var rt http.RoundTripper = &httpdebug.RoundTripper{Next: base}
+		if cfg.UserAgent != "" {
+			rt = &httpclient.UserAgentTransport{Next: rt, UA: cfg.UserAgent}
+		}
+		return rt
 	}
 	p.client = &http.Client{
-		Transport:     rt,
+		Transport:     wrap(httpclient.NewTransport(cfg.SkipTLS)),
 		CheckRedirect: p.checkRedirect,
 	}
+	p.discoveryTransport = wrap(httpclient.NewDiscoveryTransport(cfg.SkipTLS))
 	return p
 }
 
@@ -350,12 +360,15 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 	return nil, fmt.Errorf("all %d nodes failed, last error: %w", len(nodes), lastErr)
 }
 
-// noRedirectClient returns a one-shot client that shares this proxy's
-// transport (so connection pooling still applies) but never follows
-// redirects, surfacing 3xx responses to the caller.
+// noRedirectClient returns a one-shot client for the cold info/refs probe
+// to the entry domain. It never follows redirects (surfacing 3xx responses
+// to the caller) and uses the discovery transport, whose longer dial budget
+// absorbs the cold first-contact connect that has no replica failover to
+// fall back on. Falls back to the proxy's main transport when no discovery
+// transport was wired (e.g. proxies built directly in tests).
 func (p *Proxy) noRedirectClient() *http.Client {
-	var transport http.RoundTripper
-	if p.client != nil {
+	transport := p.discoveryTransport
+	if transport == nil && p.client != nil {
 		transport = p.client.Transport
 	}
 	return &http.Client{

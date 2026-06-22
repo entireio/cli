@@ -1327,7 +1327,7 @@ func (s *GitStore) GetSessionLog(ctx context.Context, cpID id.CheckpointID) ([]b
 
 // LookupSessionLog is a convenience function that opens the repository and retrieves
 // a session log by checkpoint ID. This is the primary entry point for callers that
-// don't already have a GitStore instance.
+// do not already have a committed store instance.
 // Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
 // Returns ErrNoTranscript if the checkpoint exists but has no transcript.
 func LookupSessionLog(ctx context.Context, cpID id.CheckpointID) ([]byte, string, error) {
@@ -1340,7 +1340,7 @@ func LookupSessionLog(ctx context.Context, cpID id.CheckpointID) ([]byte, string
 	if err != nil {
 		return nil, "", fmt.Errorf("open checkpoint store: %w", err)
 	}
-	return stores.Primary.GetSessionLog(ctx, cpID)
+	return ReadRawSessionLogForCheckpoint(ctx, stores.Primary, cpID)
 }
 
 // UpdateSummary updates the summary field in the latest session's metadata.

@@ -21,7 +21,7 @@ import (
 )
 
 // SaveStep saves a checkpoint to the shadow branch.
-// Uses checkpoint.GitStore.WriteTemporary for git operations.
+// Uses checkpoint.TemporaryStore.WriteTemporary for git operations.
 func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) error {
 	_, openRepoSpan := perf.Start(ctx, "open_repository")
 	repo, err := OpenRepository(ctx)
@@ -52,7 +52,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		}
 		migrateSpan.End()
 
-		store, err := s.getCheckpointStore(ctx, repo)
+		store, err := s.getTemporaryStore(ctx, repo)
 		if err != nil {
 			return err
 		}
@@ -168,7 +168,7 @@ func (s *ManualCommitStrategy) ensureSessionInitialized(ctx context.Context, rep
 }
 
 // SaveTaskStep saves a task step checkpoint to the shadow branch.
-// Uses checkpoint.GitStore.WriteTemporaryTask for git operations.
+// Uses checkpoint.TemporaryStore.WriteTemporaryTask for git operations.
 func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepContext) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -185,7 +185,7 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 			return fmt.Errorf("failed to check/migrate shadow branch: %w", err)
 		}
 
-		store, err := s.getCheckpointStore(ctx, repo)
+		store, err := s.getTemporaryStore(ctx, repo)
 		if err != nil {
 			return err
 		}

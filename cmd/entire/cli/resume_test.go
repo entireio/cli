@@ -592,6 +592,58 @@ func TestResolveLatestCheckpoint(t *testing.T) {
 	}
 }
 
+func TestResolveLatestCheckpointUsesCheckpointInfoReader(t *testing.T) {
+	t.Parallel()
+
+	oldID := id.MustCheckpointID("aaa111bbb222")
+	newID := id.MustCheckpointID("ccc333ddd444")
+	reader := &resumeCheckpointInfoReaderStub{
+		summaries: map[id.CheckpointID]*checkpoint.CheckpointSummary{
+			oldID: {Sessions: []checkpoint.SessionFilePaths{{Metadata: "old"}}},
+			newID: {Sessions: []checkpoint.SessionFilePaths{{Metadata: "new"}}},
+		},
+		metadata: map[id.CheckpointID][]checkpoint.CommittedMetadata{
+			oldID: {{
+				SessionID: "old-session",
+				CreatedAt: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
+			}},
+			newID: {{
+				SessionID: "new-session",
+				CreatedAt: time.Date(2025, 1, 1, 11, 0, 0, 0, time.UTC),
+			}},
+		},
+	}
+
+	latest, err := resolveLatestCheckpoint(context.Background(), reader, []id.CheckpointID{oldID, newID})
+	if err != nil {
+		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
+	}
+	if latest.CheckpointID != newID {
+		t.Errorf("resolveLatestCheckpoint() = %s, want %s", latest.CheckpointID, newID)
+	}
+}
+
+type resumeCheckpointInfoReaderStub struct {
+	summaries map[id.CheckpointID]*checkpoint.CheckpointSummary
+	metadata  map[id.CheckpointID][]checkpoint.CommittedMetadata
+}
+
+func (r *resumeCheckpointInfoReaderStub) ReadCommitted(_ context.Context, checkpointID id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+	return r.summaries[checkpointID], nil
+}
+
+func (r *resumeCheckpointInfoReaderStub) ReadSessionContent(_ context.Context, _ id.CheckpointID, _ int) (*checkpoint.SessionContent, error) {
+	return nil, checkpoint.ErrCheckpointNotFound
+}
+
+func (r *resumeCheckpointInfoReaderStub) ReadSessionMetadata(_ context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.CommittedMetadata, error) {
+	sessions := r.metadata[checkpointID]
+	if sessionIndex < 0 || sessionIndex >= len(sessions) {
+		return nil, checkpoint.ErrCheckpointNotFound
+	}
+	return &sessions[sessionIndex], nil
+}
+
 func TestReadCheckpointInfoFromStoreUsesLatestSessionMetadata(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
