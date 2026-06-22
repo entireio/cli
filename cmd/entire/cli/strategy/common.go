@@ -594,7 +594,7 @@ func isEmptyMetadataBranch(repo *git.Repository, ref *plumbing.Reference) (bool,
 }
 
 // sessionMetadataLite contains only the fields needed from session-level metadata.json.
-// Using a minimal struct avoids allocating large nested objects (Summary, InitialAttribution,
+// Using a minimal struct avoids allocating large nested objects (Summary, Attribution,
 // TokenUsage, etc.) that CommittedMetadata carries but callers never need here.
 type sessionMetadataLite struct {
 	SessionID string          `json:"session_id"`
@@ -660,7 +660,7 @@ func decodeSummaryLiteFromTree(checkpointTree checkpoint.FileReader) (checkpoint
 // also reading session-level metadata for IsTask/ToolUseID fields.
 //
 // Uses streaming json.Decoder and minimal structs to avoid loading large nested
-// objects (Summary, InitialAttribution, TokenUsage) into memory.
+// objects (Summary, Attribution, TokenUsage) into memory.
 func ReadCheckpointMetadata(tree checkpoint.FileReader, checkpointPath string) (*CheckpointInfo, error) {
 	metadataPath := checkpointPath + "/metadata.json"
 	file, err := tree.File(metadataPath)

@@ -2212,10 +2212,10 @@ func TestExtractUserPrompts(t *testing.T) {
 	}
 }
 
-// TestCondenseSession_IncludesInitialAttribution verifies that when manual-commit
-// condenses a session, it calculates InitialAttribution by comparing the shadow branch
+// TestCondenseSession_IncludesAttribution verifies that when manual-commit
+// condenses a session, it calculates Attribution by comparing the shadow branch
 // (agent work) to HEAD (what was committed).
-func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
+func TestCondenseSession_IncludesAttribution(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	repo, err := git.PlainOpen(dir)
@@ -2310,7 +2310,7 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Fatalf("loadSessionState() error = %v", err)
 	}
 
-	// Condense the session - this should calculate InitialAttribution
+	// Condense the session - this should calculate Attribution
 	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
 	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
 	if err != nil {
@@ -2322,7 +2322,7 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Errorf("CheckpointID = %q, want %q", result.CheckpointID, checkpointID)
 	}
 
-	// Read metadata from entire/checkpoints/v1 branch and verify InitialAttribution
+	// Read metadata from entire/checkpoints/v1 branch and verify Attribution
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
 		t.Fatalf("failed to get sessions branch: %v", err)
@@ -2338,7 +2338,7 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Fatalf("failed to get tree: %v", err)
 	}
 
-	// InitialAttribution is stored in session-level metadata (0/metadata.json), not root (0-based indexing)
+	// Attribution is stored in session-level metadata (0/metadata.json), not root (0-based indexing)
 	sessionMetadataPath := checkpointID.Path() + "/0/" + paths.MetadataFileName
 	metadataFile, err := tree.File(sessionMetadataPath)
 	if err != nil {
@@ -2350,9 +2350,9 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Fatalf("failed to read metadata.json: %v", err)
 	}
 
-	// Parse and verify InitialAttribution is present
+	// Parse and verify Attribution is present
 	var metadata struct {
-		InitialAttribution *struct {
+		Attribution *struct {
 			AgentLines      int     `json:"agent_lines"`
 			HumanAdded      int     `json:"human_added"`
 			HumanModified   int     `json:"human_modified"`
@@ -2365,40 +2365,40 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Fatalf("failed to parse metadata.json: %v", err)
 	}
 
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution should be present in session metadata.json for manual-commit")
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution should be present in session metadata.json for manual-commit")
 	}
 
 	// Verify the attribution values are reasonable
 	// Agent added new function, human added a comment line
 	// The exact line counts depend on how the diff algorithm interprets the changes
 	// (insertion vs modification), but we should have non-zero totals and reasonable percentages.
-	if metadata.InitialAttribution.TotalCommitted == 0 {
+	if metadata.Attribution.TotalCommitted == 0 {
 		t.Error("TotalCommitted should be > 0")
 	}
-	if metadata.InitialAttribution.AgentLines == 0 {
+	if metadata.Attribution.AgentLines == 0 {
 		t.Error("AgentLines should be > 0 (agent wrote code)")
 	}
 
 	// Human contribution should be captured in either HumanAdded or HumanModified
 	// When inserting lines in the middle of existing code, the diff algorithm may
 	// interpret it as a modification rather than a pure addition.
-	humanContribution := metadata.InitialAttribution.HumanAdded + metadata.InitialAttribution.HumanModified
+	humanContribution := metadata.Attribution.HumanAdded + metadata.Attribution.HumanModified
 	if humanContribution == 0 {
 		t.Error("Human contribution (HumanAdded + HumanModified) should be > 0")
 	}
 
-	if metadata.InitialAttribution.AgentPercentage <= 0 || metadata.InitialAttribution.AgentPercentage > 100 {
-		t.Errorf("AgentPercentage should be between 0-100, got %f", metadata.InitialAttribution.AgentPercentage)
+	if metadata.Attribution.AgentPercentage <= 0 || metadata.Attribution.AgentPercentage > 100 {
+		t.Errorf("AgentPercentage should be between 0-100, got %f", metadata.Attribution.AgentPercentage)
 	}
 
 	t.Logf("Attribution: agent=%d, human_added=%d, human_modified=%d, human_removed=%d, total=%d, percentage=%.1f%%",
-		metadata.InitialAttribution.AgentLines,
-		metadata.InitialAttribution.HumanAdded,
-		metadata.InitialAttribution.HumanModified,
-		metadata.InitialAttribution.HumanRemoved,
-		metadata.InitialAttribution.TotalCommitted,
-		metadata.InitialAttribution.AgentPercentage)
+		metadata.Attribution.AgentLines,
+		metadata.Attribution.HumanAdded,
+		metadata.Attribution.HumanModified,
+		metadata.Attribution.HumanRemoved,
+		metadata.Attribution.TotalCommitted,
+		metadata.Attribution.AgentPercentage)
 }
 
 // TestCondenseSession_AttributionWithoutShadowBranch verifies that when an agent
@@ -2517,7 +2517,7 @@ func TestCondenseSession_AttributionWithoutShadowBranch(t *testing.T) {
 	}
 
 	var metadata struct {
-		InitialAttribution *struct {
+		Attribution *struct {
 			AgentLines      int     `json:"agent_lines"`
 			HumanAdded      int     `json:"human_added"`
 			TotalCommitted  int     `json:"total_committed"`
@@ -2528,27 +2528,27 @@ func TestCondenseSession_AttributionWithoutShadowBranch(t *testing.T) {
 		t.Fatalf("failed to parse metadata: %v", err)
 	}
 
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution should be present even without shadow branch")
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution should be present even without shadow branch")
 	}
 
 	// Agent created all content (10 lines across 2 files), no human edits
-	if metadata.InitialAttribution.AgentLines == 0 {
+	if metadata.Attribution.AgentLines == 0 {
 		t.Error("AgentLines should be > 0 (agent created the file)")
 	}
-	if metadata.InitialAttribution.TotalCommitted == 0 {
+	if metadata.Attribution.TotalCommitted == 0 {
 		t.Error("TotalCommitted should be > 0")
 	}
-	if metadata.InitialAttribution.AgentPercentage <= 50 {
+	if metadata.Attribution.AgentPercentage <= 50 {
 		t.Errorf("AgentPercentage should be > 50%% (agent wrote all content), got %.1f%%",
-			metadata.InitialAttribution.AgentPercentage)
+			metadata.Attribution.AgentPercentage)
 	}
 
 	t.Logf("Attribution (no shadow branch): agent=%d, human_added=%d, total=%d, percentage=%.1f%%",
-		metadata.InitialAttribution.AgentLines,
-		metadata.InitialAttribution.HumanAdded,
-		metadata.InitialAttribution.TotalCommitted,
-		metadata.InitialAttribution.AgentPercentage)
+		metadata.Attribution.AgentLines,
+		metadata.Attribution.HumanAdded,
+		metadata.Attribution.TotalCommitted,
+		metadata.Attribution.AgentPercentage)
 }
 
 // TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent verifies attribution
@@ -2684,7 +2684,7 @@ func TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent(t *testi
 	}
 
 	var metadata struct {
-		InitialAttribution *struct {
+		Attribution *struct {
 			AgentLines      int     `json:"agent_lines"`
 			HumanAdded      int     `json:"human_added"`
 			TotalCommitted  int     `json:"total_committed"`
@@ -2695,11 +2695,11 @@ func TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent(t *testi
 		t.Fatalf("failed to parse metadata: %v", err)
 	}
 
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution should be present")
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution should be present")
 	}
 
-	attr := metadata.InitialAttribution
+	attr := metadata.Attribution
 	t.Logf("Attribution (mixed, no shadow): agent=%d, human_added=%d, total=%d, percentage=%.1f%%",
 		attr.AgentLines, attr.HumanAdded, attr.TotalCommitted, attr.AgentPercentage)
 
@@ -2989,7 +2989,7 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 		t.Fatalf("failed to get tree: %v", err)
 	}
 
-	// InitialAttribution is stored in session-level metadata (0/metadata.json), not root (0-based indexing)
+	// Attribution is stored in session-level metadata (0/metadata.json), not root (0-based indexing)
 	sessionMetadataPath := checkpointID.Path() + "/0/" + paths.MetadataFileName
 	metadataFile, err := tree.File(sessionMetadataPath)
 	if err != nil {
@@ -3002,7 +3002,7 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 	}
 
 	var metadata struct {
-		InitialAttribution *struct {
+		Attribution *struct {
 			AgentLines      int     `json:"agent_lines"`
 			HumanAdded      int     `json:"human_added"`
 			HumanModified   int     `json:"human_modified"`
@@ -3015,38 +3015,38 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 		t.Fatalf("failed to parse metadata.json: %v", err)
 	}
 
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution should be present in session metadata")
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution should be present in session metadata")
 	}
 
 	t.Logf("Final Attribution: agent=%d, human_added=%d, human_modified=%d, human_removed=%d, total=%d, percentage=%.1f%%",
-		metadata.InitialAttribution.AgentLines,
-		metadata.InitialAttribution.HumanAdded,
-		metadata.InitialAttribution.HumanModified,
-		metadata.InitialAttribution.HumanRemoved,
-		metadata.InitialAttribution.TotalCommitted,
-		metadata.InitialAttribution.AgentPercentage)
+		metadata.Attribution.AgentLines,
+		metadata.Attribution.HumanAdded,
+		metadata.Attribution.HumanModified,
+		metadata.Attribution.HumanRemoved,
+		metadata.Attribution.TotalCommitted,
+		metadata.Attribution.AgentPercentage)
 
 	// Verify the attribution makes sense:
 	// - Agent modified agent.go: added ~8 lines total
 	// - User modified user.go: added ~5 lines
 	// - So agent percentage should be around 50-70%
-	if metadata.InitialAttribution.AgentLines == 0 {
+	if metadata.Attribution.AgentLines == 0 {
 		t.Error("AgentLines should be > 0")
 	}
-	if metadata.InitialAttribution.TotalCommitted == 0 {
+	if metadata.Attribution.TotalCommitted == 0 {
 		t.Error("TotalCommitted should be > 0")
 	}
 
 	// The key test: user's lines should be captured in HumanAdded
-	if metadata.InitialAttribution.HumanAdded == 0 {
+	if metadata.Attribution.HumanAdded == 0 {
 		t.Error("HumanAdded should be > 0 because user added lines to user.go")
 	}
 
 	// Agent percentage should not be 100% since user contributed
-	if metadata.InitialAttribution.AgentPercentage >= 100 {
+	if metadata.Attribution.AgentPercentage >= 100 {
 		t.Errorf("AgentPercentage should be < 100%% since user contributed, got %.1f%%",
-			metadata.InitialAttribution.AgentPercentage)
+			metadata.Attribution.AgentPercentage)
 	}
 }
 

@@ -72,7 +72,7 @@ func TestWrite_DispatchesEachRequest(t *testing.T) {
 	// BackfillAttribution rewrites the checkpoint root combined attribution.
 	if err := store.Write(ctx, BackfillAttribution{
 		CheckpointID: cpID,
-		Attribution:  &InitialAttribution{AgentLines: 42},
+		Attribution:  &Attribution{AgentLines: 42},
 	}); err != nil {
 		t.Fatalf("Write(BackfillAttribution) error = %v", err)
 	}

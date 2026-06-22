@@ -17,15 +17,15 @@ type (
 	// Persisted document types.
 	CommittedMetadata = apicheckpoint.CommittedMetadata
 	//nolint:revive // Named CheckpointSummary to avoid conflict with the Summary struct (matches the contract definition).
-	CheckpointSummary  = apicheckpoint.CheckpointSummary
-	CommittedInfo      = apicheckpoint.CommittedInfo
-	SessionContent     = apicheckpoint.SessionContent
-	SessionFilePaths   = apicheckpoint.SessionFilePaths
-	SessionMetrics     = apicheckpoint.SessionMetrics
-	Summary            = apicheckpoint.Summary
-	LearningsSummary   = apicheckpoint.LearningsSummary
-	CodeLearning       = apicheckpoint.CodeLearning
-	InitialAttribution = apicheckpoint.InitialAttribution
+	CheckpointSummary = apicheckpoint.CheckpointSummary
+	CommittedInfo     = apicheckpoint.CommittedInfo
+	SessionContent    = apicheckpoint.SessionContent
+	SessionFilePaths  = apicheckpoint.SessionFilePaths
+	SessionMetrics    = apicheckpoint.SessionMetrics
+	Summary           = apicheckpoint.Summary
+	LearningsSummary  = apicheckpoint.LearningsSummary
+	CodeLearning      = apicheckpoint.CodeLearning
+	Attribution       = apicheckpoint.Attribution
 
 	// Operation option types.
 	WriteCommittedOptions      = apicheckpoint.WriteCommittedOptions

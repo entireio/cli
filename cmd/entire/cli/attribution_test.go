@@ -98,7 +98,7 @@ func TestAttributionBlameShowsHumanAndAICheckpointLines(t *testing.T) {
 		Agent:            agent.AgentTypeClaudeCode,
 		Model:            "claude-sonnet-test",
 		CheckpointsCount: 1,
-		InitialAttribution: &checkpoint.InitialAttribution{
+		Attribution: &checkpoint.Attribution{
 			AgentLines:        1,
 			TotalCommitted:    1,
 			TotalLinesChanged: 1,
@@ -168,7 +168,7 @@ func TestAttributionBlameLongShowsDetailedColumns(t *testing.T) {
 		Agent:            agent.AgentTypeClaudeCode,
 		Model:            "claude-sonnet-test",
 		CheckpointsCount: 1,
-		InitialAttribution: &checkpoint.InitialAttribution{
+		Attribution: &checkpoint.Attribution{
 			AgentLines:        1,
 			TotalCommitted:    1,
 			TotalLinesChanged: 1,
@@ -200,7 +200,7 @@ func TestAttributionBlameMarksMixedCheckpoint(t *testing.T) {
 		Agent:            agent.AgentTypeClaudeCode,
 		Model:            "claude-sonnet-test",
 		CheckpointsCount: 1,
-		InitialAttribution: &checkpoint.InitialAttribution{
+		Attribution: &checkpoint.Attribution{
 			AgentLines:        1,
 			HumanModified:     1,
 			TotalCommitted:    1,
@@ -315,7 +315,7 @@ func TestAttributionBlameMixedUsesFileMatchingCheckpoint(t *testing.T) {
 		FilesTouched:     []string{"auth.py"},
 		Agent:            agent.AgentTypeClaudeCode,
 		CheckpointsCount: 1,
-		InitialAttribution: &checkpoint.InitialAttribution{
+		Attribution: &checkpoint.Attribution{
 			AgentLines:        1,
 			TotalCommitted:    1,
 			TotalLinesChanged: 1,
@@ -329,7 +329,7 @@ func TestAttributionBlameMixedUsesFileMatchingCheckpoint(t *testing.T) {
 		FilesTouched:     []string{"other.py"},
 		Agent:            agent.AgentTypeClaudeCode,
 		CheckpointsCount: 1,
-		InitialAttribution: &checkpoint.InitialAttribution{
+		Attribution: &checkpoint.Attribution{
 			AgentLines:        1,
 			HumanModified:     1,
 			TotalCommitted:    1,
@@ -407,7 +407,7 @@ func TestAttributionBlameScopesMixedToSessionNotCheckpoint(t *testing.T) {
 		Agent:            agent.AgentTypeClaudeCode,
 		CheckpointsCount: 1,
 		// The session that touched auth.py is purely agent work...
-		InitialAttribution: &checkpoint.InitialAttribution{
+		Attribution: &checkpoint.Attribution{
 			AgentLines:        1,
 			TotalCommitted:    1,
 			TotalLinesChanged: 1,
@@ -416,7 +416,7 @@ func TestAttributionBlameScopesMixedToSessionNotCheckpoint(t *testing.T) {
 		},
 		// ...even though the checkpoint as a whole mixed agent and human work
 		// (e.g. a human-edited file elsewhere in the same checkpoint).
-		CombinedAttribution: &checkpoint.InitialAttribution{
+		CombinedAttribution: &checkpoint.Attribution{
 			AgentLines:        1,
 			HumanModified:     1,
 			TotalCommitted:    2,

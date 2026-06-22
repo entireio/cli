@@ -1137,7 +1137,7 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 		agentPercentage = float64(agentAdded+agentRemoved) / float64(totalLinesChanged) * 100
 	}
 
-	combined := &checkpoint.InitialAttribution{
+	combined := &checkpoint.Attribution{
 		CalculatedAt:      time.Now().UTC(),
 		AgentLines:        agentAdded,
 		AgentRemoved:      agentRemoved,

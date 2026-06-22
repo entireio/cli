@@ -564,7 +564,7 @@ type checkpointSessionForFile struct {
 	Prompt       string
 	Intent       string
 	FilesTouched []string
-	Attribution  *checkpoint.InitialAttribution
+	Attribution  *checkpoint.Attribution
 }
 
 func (r *attributionResolver) readSessionForCheckpoint(cpID id.CheckpointID, index int) (checkpointSessionForFile, error) {
@@ -591,7 +591,7 @@ func (r *attributionResolver) readSessionForCheckpoint(cpID id.CheckpointID, ind
 		Prompt:       prompt,
 		Intent:       intent,
 		FilesTouched: normalizePathSlice(meta.FilesTouched),
-		Attribution:  meta.InitialAttribution,
+		Attribution:  meta.Attribution,
 	}, nil
 }
 
@@ -1202,7 +1202,7 @@ func normalizeGitPath(path string) string {
 	return filepath.ToSlash(path)
 }
 
-func attributionIsMixed(attr *checkpoint.InitialAttribution) bool {
+func attributionIsMixed(attr *checkpoint.Attribution) bool {
 	if attr == nil {
 		return false
 	}

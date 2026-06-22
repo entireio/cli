@@ -109,9 +109,9 @@ type WriteCommittedOptions struct {
 	// SessionMetrics contains hook-provided session metrics (duration, turns, context usage)
 	SessionMetrics *SessionMetrics
 
-	// InitialAttribution is line-level attribution calculated at commit time
+	// Attribution is line-level attribution calculated at commit time
 	// comparing checkpoint tree (agent work) to committed tree (may include human edits)
-	InitialAttribution *InitialAttribution
+	Attribution *Attribution
 
 	// PromptAttributionsJSON is the raw PromptAttributions data, JSON-encoded.
 	// Persisted for diagnostic purposes — shows exactly which prompt recorded
@@ -122,7 +122,7 @@ type WriteCommittedOptions struct {
 	// CombinedAttribution is holistic attribution across all sessions.
 	// Used during migration to preserve v1 root summary attribution.
 	// During normal condensation this is nil (computed post-commit via UpdateCheckpointSummary).
-	CombinedAttribution *InitialAttribution
+	CombinedAttribution *Attribution
 
 	// Summary is an optional AI-generated summary for this checkpoint.
 	// This field may be nil when:
@@ -333,10 +333,10 @@ type CommittedMetadata struct {
 	// AI-generated summary of the checkpoint
 	Summary *Summary `json:"summary,omitempty"`
 
-	// InitialAttribution is line-level attribution calculated at commit time
-	InitialAttribution *InitialAttribution `json:"initial_attribution,omitempty"`
+	// Attribution is line-level attribution calculated at commit time
+	Attribution *Attribution `json:"initial_attribution,omitempty"`
 
-	// PromptAttributions is the raw per-prompt attribution data used to compute InitialAttribution.
+	// PromptAttributions is the raw per-prompt attribution data used to compute Attribution.
 	// Diagnostic field — shows which prompt recorded which "user" lines.
 	PromptAttributions json.RawMessage `json:"prompt_attributions,omitempty"`
 
@@ -400,15 +400,15 @@ type SessionFilePaths struct {
 //
 //nolint:revive // Named CheckpointSummary to avoid conflict with existing Summary struct
 type CheckpointSummary struct {
-	CLIVersion          string              `json:"cli_version,omitempty"`
-	CheckpointID        id.CheckpointID     `json:"checkpoint_id"`
-	Strategy            string              `json:"strategy"`
-	Branch              string              `json:"branch,omitempty"`
-	CheckpointsCount    int                 `json:"checkpoints_count"`
-	FilesTouched        []string            `json:"files_touched"`
-	Sessions            []SessionFilePaths  `json:"sessions"`
-	TokenUsage          *types.TokenUsage   `json:"token_usage,omitempty"`
-	CombinedAttribution *InitialAttribution `json:"combined_attribution,omitempty"`
+	CLIVersion          string             `json:"cli_version,omitempty"`
+	CheckpointID        id.CheckpointID    `json:"checkpoint_id"`
+	Strategy            string             `json:"strategy"`
+	Branch              string             `json:"branch,omitempty"`
+	CheckpointsCount    int                `json:"checkpoints_count"`
+	FilesTouched        []string           `json:"files_touched"`
+	Sessions            []SessionFilePaths `json:"sessions"`
+	TokenUsage          *types.TokenUsage  `json:"token_usage,omitempty"`
+	CombinedAttribution *Attribution       `json:"combined_attribution,omitempty"`
 
 	// HasReview is the umbrella "any review happened" flag: true when at least
 	// one session in this checkpoint has a review-kind Kind (currently
@@ -460,7 +460,7 @@ type CodeLearning struct {
 	Finding string `json:"finding"`            // What was learned
 }
 
-// InitialAttribution captures line-level attribution metrics at commit time.
+// Attribution captures line-level attribution metrics at commit time.
 // This is a point-in-time snapshot comparing the checkpoint tree (agent work)
 // against the committed tree (may include human edits).
 //
@@ -469,7 +469,7 @@ type CodeLearning struct {
 //   - TotalLinesChanged measures total committed line changes (adds + modifies + removes)
 //   - AgentPercentage represents "of the lines changed in this commit, what percentage came from the agent"
 //   - AgentRemoved tracks committed deletions performed by the agent
-type InitialAttribution struct {
+type Attribution struct {
 	CalculatedAt      time.Time `json:"calculated_at"`
 	AgentLines        int       `json:"agent_lines"`              // Lines added by agent that remain in the commit
 	AgentRemoved      int       `json:"agent_removed"`            // Lines removed by agent that remain removed in the commit
