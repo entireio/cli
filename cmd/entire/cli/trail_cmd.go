@@ -841,17 +841,18 @@ func newTrailUpdateCmd() *cobra.Command {
 
 The trail may be given as the first argument or via --trail, as a number, id, or
 branch (so a branchless trail can be updated by number or id). Without one, the
-trail for the current branch is used. --branch remains supported as a selector.
+trail for the current branch is used. --branch resolves by branch name only
+(never as a trail number or id).
 
 The body can be set with --body, --body-file <path>, or --body/--body-file -
 (read from stdin). Body and metadata are sent as separate requests.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			selector, err := trailUpdateSelector(cmd, args, branch)
+			target, err := resolveTrailUpdateTarget(cmd, args)
 			if err != nil {
 				return err
 			}
-			return runTrailUpdate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), cmd.InOrStdin(), trailInsecureHTTP(cmd), selector, trailUpdateInputs{
+			return runTrailUpdate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), cmd.InOrStdin(), trailInsecureHTTP(cmd), target, trailUpdateInputs{
 				Status:          statusStr,
 				StatusChanged:   cmd.Flags().Changed("status"),
 				Title:           title,
@@ -878,28 +879,39 @@ The body can be set with --body, --body-file <path>, or --body/--body-file -
 	return cmd
 }
 
-// trailUpdateSelector reconciles the positional <trail> arg, --trail, and the
-// legacy --branch flag into a single selector for resolveTrailBySelector. At
-// most one may be given; an empty result means "the current branch's trail".
-func trailUpdateSelector(cmd *cobra.Command, args []string, branch string) (string, error) {
-	selector := ""
+// trailUpdateTarget describes how to resolve the trail to update. A non-empty
+// branch means a branch-name-only lookup (the legacy --branch flag), which must
+// never be treated as a trail number or id. Otherwise selector is a generic
+// number/id/branch selector (from the positional arg or --trail); empty means
+// "the current branch's trail".
+type trailUpdateTarget struct {
+	selector string
+	branch   string
+}
+
+// resolveTrailUpdateTarget reconciles the positional <trail> arg, --trail, and
+// the legacy --branch flag. At most one may be given. --branch is kept distinct
+// from the generic selector so that e.g. `--branch 123` resolves the branch
+// named "123" rather than trail #123.
+func resolveTrailUpdateTarget(cmd *cobra.Command, args []string) (trailUpdateTarget, error) {
+	var target trailUpdateTarget
 	sources := 0
 	if cmd.Flags().Changed("trail") {
-		selector, _ = cmd.Flags().GetString("trail") //nolint:errcheck // flag is registered
+		target.selector, _ = cmd.Flags().GetString("trail") //nolint:errcheck // flag is registered
 		sources++
 	}
 	if len(args) == 1 {
-		selector = args[0]
+		target.selector = args[0]
 		sources++
 	}
 	if cmd.Flags().Changed("branch") {
-		selector = branch
+		target.branch, _ = cmd.Flags().GetString("branch") //nolint:errcheck // flag is registered
 		sources++
 	}
 	if sources > 1 {
-		return "", errors.New("specify the trail only once (as an argument, --trail, or --branch)")
+		return trailUpdateTarget{}, errors.New("specify the trail only once (as an argument, --trail, or --branch)")
 	}
-	return selector, nil
+	return target, nil
 }
 
 type trailUpdateInputs struct {
@@ -946,18 +958,30 @@ func trailUpdateHasChanges(inputs trailUpdateInputs) bool {
 		len(inputs.LabelAdd) > 0 || len(inputs.LabelRemove) > 0
 }
 
-func runTrailUpdate(ctx context.Context, w, errW io.Writer, stdin io.Reader, insecureHTTP bool, selector string, inputs trailUpdateInputs) error {
+func runTrailUpdate(ctx context.Context, w, errW io.Writer, stdin io.Reader, insecureHTTP bool, target trailUpdateTarget, inputs trailUpdateInputs) error {
 	return runAuthenticatedDataAPI(ctx, errW, insecureHTTP, func(ctx context.Context, client *api.Client) error {
 		forge, owner, repoName, err := resolveTrailRemote(ctx)
 		if err != nil {
 			return err
 		}
 
-		// Resolve the trail by selector (number, id, or branch; empty = current
-		// branch's trail), so branchless trails are addressable by number/id.
-		found, err := resolveTrailBySelector(ctx, client, forge, owner, repoName, selector)
-		if err != nil {
-			return err
+		// Resolve the trail. --branch is a branch-name-only lookup; otherwise the
+		// selector accepts number/id/branch (empty = current branch's trail), so
+		// branchless trails are addressable by number/id.
+		var found *api.TrailResource
+		if target.branch != "" {
+			found, err = findTrailByBranch(ctx, client, forge, owner, repoName, target.branch)
+			if err != nil {
+				return err
+			}
+			if found == nil {
+				return fmt.Errorf("no trail found for branch %q", target.branch)
+			}
+		} else {
+			found, err = resolveTrailBySelector(ctx, client, forge, owner, repoName, target.selector)
+			if err != nil {
+				return err
+			}
 		}
 
 		// Resolve the body from --body / --body-file / stdin.

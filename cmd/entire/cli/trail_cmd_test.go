@@ -1329,6 +1329,47 @@ func TestInteractiveUpdateInputsUneditedBodyIsNotResent(t *testing.T) {
 	}
 }
 
+func TestResolveTrailUpdateTargetKeepsBranchSeparate(t *testing.T) {
+	t.Parallel()
+
+	// --branch must be a branch-only lookup, never a number/id selector — so
+	// `--branch 123` targets the branch named "123", not trail #123.
+	cmd := newTrailUpdateCmd()
+	if err := cmd.Flags().Set("branch", "123"); err != nil {
+		t.Fatal(err)
+	}
+	target, err := resolveTrailUpdateTarget(cmd, nil)
+	if err != nil || target.branch != "123" || target.selector != "" {
+		t.Fatalf("--branch 123 → %+v (err %v), want branch=123 selector empty", target, err)
+	}
+
+	// A positional arg is a generic selector (number/id/branch).
+	cmd = newTrailUpdateCmd()
+	target, err = resolveTrailUpdateTarget(cmd, []string{"123"})
+	if err != nil || target.selector != "123" || target.branch != "" {
+		t.Fatalf("positional 123 → %+v (err %v), want selector=123 branch empty", target, err)
+	}
+
+	// --trail is a generic selector.
+	cmd = newTrailUpdateCmd()
+	if err := cmd.Flags().Set("trail", "abc"); err != nil {
+		t.Fatal(err)
+	}
+	target, err = resolveTrailUpdateTarget(cmd, nil)
+	if err != nil || target.selector != "abc" || target.branch != "" {
+		t.Fatalf("--trail abc → %+v (err %v), want selector=abc branch empty", target, err)
+	}
+
+	// Combining sources is rejected.
+	cmd = newTrailUpdateCmd()
+	if err := cmd.Flags().Set("branch", "b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveTrailUpdateTarget(cmd, []string{"1"}); err == nil {
+		t.Fatal("combining a positional with --branch should error")
+	}
+}
+
 func TestTrailUpdateAcceptsTrailSelectorArg(t *testing.T) {
 	t.Parallel()
 	cmd := newTrailUpdateCmd()
