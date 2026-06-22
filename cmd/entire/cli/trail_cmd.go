@@ -905,6 +905,36 @@ type trailUpdateInputs struct {
 	LabelRemove     []string
 }
 
+// trailUpdateEdits holds the editable fields of the interactive update form.
+type trailUpdateEdits struct {
+	status string
+	title  string
+	body   string
+}
+
+// interactiveUpdateInputs turns the interactive form's seed and edited values
+// into update inputs, marking a field changed only when the user actually edited
+// it away from the seed. The body in particular must not be re-sent when
+// unedited: its seed may be empty (the current body failed to load) or
+// whitespace-trimmed, and re-PATCHing it would erase or rewrite the live
+// collaborative document.
+func interactiveUpdateInputs(seed, edited trailUpdateEdits) trailUpdateInputs {
+	return trailUpdateInputs{
+		Status:        edited.status,
+		StatusChanged: edited.status != seed.status,
+		Title:         edited.title,
+		TitleChanged:  edited.title != seed.title,
+		Body:          edited.body,
+		BodyChanged:   edited.body != seed.body,
+	}
+}
+
+// trailUpdateHasChanges reports whether any field would actually be sent.
+func trailUpdateHasChanges(inputs trailUpdateInputs) bool {
+	return inputs.StatusChanged || inputs.TitleChanged || inputs.BodyChanged ||
+		len(inputs.LabelAdd) > 0 || len(inputs.LabelRemove) > 0
+}
+
 func runTrailUpdate(ctx context.Context, w, errW io.Writer, stdin io.Reader, insecureHTTP bool, selector string, inputs trailUpdateInputs) error {
 	return runAuthenticatedDataAPI(ctx, errW, insecureHTTP, func(ctx context.Context, client *api.Client) error {
 		forge, owner, repoName, err := resolveTrailRemote(ctx)
@@ -928,8 +958,6 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, stdin io.Reader, ins
 		inputs.BodyChanged = bodyChanged
 
 		// Interactive mode when no update inputs are provided.
-		statusStr := inputs.Status
-		title := inputs.Title
 		noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged && inputs.LabelAdd == nil && inputs.LabelRemove == nil
 		if noFlags {
 			metadata := found.ToMetadata()
@@ -945,18 +973,21 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, stdin io.Reader, ins
 				}
 				statusOptions = append(statusOptions, huh.NewOption(label, string(s)))
 			}
-			statusStr = string(metadata.Status)
-			title = metadata.Title
 			// Seed the body from the real collaborative document (the list/metadata
 			// body is always empty), so an interactive edit doesn't clobber it.
-			body = ""
+			seedStatus := string(metadata.Status)
+			seedTitle := metadata.Title
+			seedBody := ""
 			if found.Number > 0 {
 				if bt, derr := fetchTrailDescription(ctx, client, forge, owner, repoName, found.Number); derr == nil {
-					body = bt
+					seedBody = bt
 				} else {
 					fmt.Fprintf(errW, "Warning: could not load current body: %v\n", derr)
 				}
 			}
+			body = seedBody
+			statusStr := seedStatus
+			title := seedTitle
 
 			form := NewAccessibleForm(
 				huh.NewGroup(
@@ -975,18 +1006,25 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, stdin io.Reader, ins
 			if formErr := form.Run(); formErr != nil {
 				return handleFormCancellation(w, "Trail update", formErr)
 			}
-			inputs.Status = statusStr
-			inputs.StatusChanged = true
-			inputs.Title = title
-			inputs.TitleChanged = true
-			inputs.Body = body
-			inputs.BodyChanged = true
+			// Mark only the fields the user actually edited. Crucially, an unedited
+			// body is left unchanged so it isn't re-sent — re-PATCHing a body that
+			// failed to load (empty seed) or was whitespace-trimmed would erase or
+			// rewrite the live document.
+			inputs = interactiveUpdateInputs(
+				trailUpdateEdits{status: seedStatus, title: seedTitle, body: seedBody},
+				trailUpdateEdits{status: statusStr, title: title, body: body},
+			)
 		}
 
-		inputs.Status = strings.TrimSpace(statusStr)
-		inputs.Title = strings.TrimSpace(title)
+		inputs.Status = strings.TrimSpace(inputs.Status)
+		inputs.Title = strings.TrimSpace(inputs.Title)
 		if err := validateTrailUpdateFields(inputs); err != nil {
 			return err
+		}
+
+		if !trailUpdateHasChanges(inputs) {
+			fmt.Fprintf(w, "No changes to %s\n", describeTrailRef(found))
+			return nil
 		}
 
 		if err := applyTrailUpdate(ctx, client, forge, owner, repoName, found, inputs); err != nil {

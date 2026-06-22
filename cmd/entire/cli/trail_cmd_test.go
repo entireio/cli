@@ -1253,6 +1253,41 @@ func TestApplyTrailUpdateRejectsNumberlessTrail(t *testing.T) {
 	}
 }
 
+func TestInteractiveUpdateInputsMarksOnlyEditedFields(t *testing.T) {
+	t.Parallel()
+	seed := trailUpdateEdits{status: "open", title: "Title", body: "hello"}
+
+	// No edits → nothing marked changed.
+	got := interactiveUpdateInputs(seed, seed)
+	if got.StatusChanged || got.TitleChanged || got.BodyChanged {
+		t.Fatalf("unedited form marked a field changed: %+v", got)
+	}
+
+	// Only the body edited.
+	got = interactiveUpdateInputs(seed, trailUpdateEdits{status: "open", title: "Title", body: "hello world"})
+	if !got.BodyChanged || got.StatusChanged || got.TitleChanged {
+		t.Fatalf("body-only edit flags wrong: %+v", got)
+	}
+	if got.Body != "hello world" {
+		t.Fatalf("Body = %q, want %q", got.Body, "hello world")
+	}
+}
+
+func TestInteractiveUpdateInputsUneditedBodyIsNotResent(t *testing.T) {
+	t.Parallel()
+	// Body failed to load → seed is empty. The user edits status only and leaves
+	// the body untouched. The empty body must NOT be marked changed, or a body
+	// PATCH would erase the live collaborative document.
+	seed := trailUpdateEdits{status: "open", title: "Title", body: ""}
+	got := interactiveUpdateInputs(seed, trailUpdateEdits{status: "closed", title: "Title", body: ""})
+	if got.BodyChanged {
+		t.Fatal("unedited (empty-seed) body marked changed — would erase the document")
+	}
+	if !got.StatusChanged {
+		t.Fatal("status edit should be marked changed")
+	}
+}
+
 func TestTrailUpdateAcceptsTrailSelectorArg(t *testing.T) {
 	t.Parallel()
 	cmd := newTrailUpdateCmd()
