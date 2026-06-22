@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
 const apiTimeout = 30 * time.Second
@@ -590,7 +592,7 @@ func Search(ctx context.Context, cfg Config) (*Response, error) {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.GitHubToken)
-	req.Header.Set("User-Agent", "entire-cli")
+	req.Header.Set("User-Agent", versioninfo.UserAgent())
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

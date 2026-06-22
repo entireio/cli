@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
 
@@ -248,8 +249,8 @@ func TestFetchLatestVersion(t *testing.T) {
 		if r.Header.Get("Accept") != "application/vnd.github+json" {
 			t.Errorf("Accept header = %q, want application/vnd.github+json", r.Header.Get("Accept"))
 		}
-		if r.Header.Get("User-Agent") != "entire-cli" {
-			t.Errorf("User-Agent header = %q, want entire-cli", r.Header.Get("User-Agent"))
+		if want := versioninfo.UserAgent(); r.Header.Get("User-Agent") != want {
+			t.Errorf("User-Agent header = %q, want %q", r.Header.Get("User-Agent"), want)
 		}
 
 		release := GitHubRelease{
