@@ -28,7 +28,7 @@ func committedCheckpointWriteAllowed(ctx context.Context, repo *git.Repository) 
 	return false
 }
 
-func syncCheckpointPolicyForPrePush(ctx context.Context, remoteName string) bool {
+func syncCheckpointPolicyForPrePush(ctx context.Context) bool {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		logging.Warn(ctx, "checkpoint policy pre-push: failed to open repository; allowing checkpoint push",
@@ -38,7 +38,7 @@ func syncCheckpointPolicyForPrePush(ctx context.Context, remoteName string) bool
 	}
 	defer repo.Close()
 
-	target, err := checkpointpolicy.ResolveTarget(ctx, remoteName)
+	target, err := checkpointpolicy.ResolveTarget(ctx)
 	if err != nil {
 		logging.Warn(ctx, "checkpoint policy pre-push: failed to resolve policy remote; allowing checkpoint push",
 			slog.String("error", err.Error()),

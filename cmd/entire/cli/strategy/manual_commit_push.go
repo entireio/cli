@@ -44,7 +44,7 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 	}
 
 	refs := checkpoint.ResolveCommittedRefs(ctx)
-	if !syncCheckpointPolicyForPrePush(ctx, remote) {
+	if !syncCheckpointPolicyForPrePush(ctx) {
 		return nil
 	}
 

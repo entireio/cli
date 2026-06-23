@@ -13,8 +13,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-const defaultBaseRemote = "origin"
-
 const (
 	sha1HexSize   = 40
 	sha256HexSize = 64
@@ -34,22 +32,14 @@ type RemoteState struct {
 	Hash   plumbing.Hash
 }
 
-func ResolveTarget(ctx context.Context, baseRemote string) (Target, error) {
-	if baseRemote == "" {
-		baseRemote = defaultBaseRemote
-	}
+func ResolveTarget(ctx context.Context) (Target, error) {
 	dir, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return Target{}, fmt.Errorf("resolve worktree root: %w", err)
 	}
-	if target, dedicated, err := remote.ConfiguredURL(ctx, baseRemote, dir); err != nil {
-		return Target{}, fmt.Errorf("resolve checkpoint remote URL: %w", err)
-	} else if dedicated {
-		return Target{Remote: target, Dir: dir}, nil
-	}
-	target, _, err := remote.PushURL(ctx, baseRemote)
+	target, err := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: dir})
 	if err != nil {
-		return Target{}, fmt.Errorf("resolve checkpoint push URL: %w", err)
+		return Target{}, fmt.Errorf("resolve checkpoint remote URL: %w", err)
 	}
 	return Target{Remote: target, Dir: dir}, nil
 }

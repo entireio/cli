@@ -39,7 +39,7 @@ func runPolicyCheckpoint(cmd *cobra.Command, opts policyCheckpointOptions) error
 	}
 	defer repo.Close()
 
-	target, err := checkpointpolicy.ResolveTarget(ctx, "origin")
+	target, err := checkpointpolicy.ResolveTarget(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve checkpoint policy remote: %w", err)
 	}

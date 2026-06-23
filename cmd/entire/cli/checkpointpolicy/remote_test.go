@@ -128,7 +128,7 @@ func TestResolveTargetUsesConfiguredCheckpointRemoteWithOriginOwnerMismatch(t *t
 	t.Chdir(localDir)
 	paths.ClearWorktreeRootCache()
 
-	target, err := checkpointpolicy.ResolveTarget(t.Context(), "origin")
+	target, err := checkpointpolicy.ResolveTarget(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, "git@github.com:org/checkpoints.git", target.Remote)
 	wantDir, err := filepath.EvalSymlinks(localDir)
@@ -136,6 +136,20 @@ func TestResolveTargetUsesConfiguredCheckpointRemoteWithOriginOwnerMismatch(t *t
 	gotDir, err := filepath.EvalSymlinks(target.Dir)
 	require.NoError(t, err)
 	require.Equal(t, wantDir, gotDir)
+}
+
+func TestResolveTargetUsesFetchURLPolicyTarget(t *testing.T) {
+	localDir, _ := initPolicyRepoWithDir(t)
+	upstreamDir := filepath.Join(t.TempDir(), "upstream.git")
+	_, err := git.PlainInit(upstreamDir, true)
+	require.NoError(t, err)
+	runPolicyGit(t, localDir, "remote", "add", "upstream", upstreamDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	_, err = checkpointpolicy.ResolveTarget(t.Context())
+	require.ErrorContains(t, err, "no fetch URL found")
 }
 
 func initPolicyRemoteFixture(t *testing.T) (string, *git.Repository, string) {
