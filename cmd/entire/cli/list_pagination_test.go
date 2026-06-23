@@ -22,14 +22,14 @@ func TestOrgList_FollowsCursor(t *testing.T) {
 		if r.URL.Path != "/api/v1/orgs" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
-		cursor := r.URL.Query().Get("cursor")
+		cursor := r.URL.Query().Get("pageToken")
 		gotCursors = append(gotCursors, cursor)
 		w.Header().Set("Content-Type", "application/json")
 		var body coreapi.ListOrgsOutputBody
 		switch cursor {
 		case "":
 			body.Orgs = []coreapi.Org{{ID: "01ORG1", Name: "acme"}, {ID: "01ORG2", Name: "globex"}}
-			body.NextCursor = coreapi.NewOptString("c1")
+			body.NextPageToken = coreapi.NewOptString("c1")
 		case "c1":
 			body.Orgs = []coreapi.Org{{ID: "01ORG3", Name: "initech"}}
 		default:
@@ -57,7 +57,7 @@ func TestOrgList_FollowsCursor(t *testing.T) {
 	stdout := out.String()
 	require.Contains(t, stdout, "acme")
 	require.Contains(t, stdout, "globex")
-	// The second page only renders because the command followed nextCursor.
+	// The second page only renders because the command followed nextPageToken.
 	require.Contains(t, stdout, "initech")
 	require.Equal(t, []string{"", "c1"}, gotCursors)
 }

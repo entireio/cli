@@ -3114,7 +3114,7 @@ type ListOrgMembersOutputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema          OptURI       `json:"$schema"`
 	Members         []Membership `json:"members"`
-	NextCursor      OptString    `json:"nextCursor"`
+	NextPageToken   OptString    `json:"nextPageToken"`
 	AdditionalProps ListOrgMembersOutputBodyAdditional
 }
 
@@ -3128,9 +3128,9 @@ func (s *ListOrgMembersOutputBody) GetMembers() []Membership {
 	return s.Members
 }
 
-// GetNextCursor returns the value of NextCursor.
-func (s *ListOrgMembersOutputBody) GetNextCursor() OptString {
-	return s.NextCursor
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListOrgMembersOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -3148,9 +3148,9 @@ func (s *ListOrgMembersOutputBody) SetMembers(val []Membership) {
 	s.Members = val
 }
 
-// SetNextCursor sets the value of NextCursor.
-func (s *ListOrgMembersOutputBody) SetNextCursor(val OptString) {
-	s.NextCursor = val
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListOrgMembersOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -3173,7 +3173,7 @@ func (s *ListOrgMembersOutputBodyAdditional) init() ListOrgMembersOutputBodyAddi
 type ListOrgProjectsOutputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema          OptURI    `json:"$schema"`
-	NextCursor      OptString `json:"nextCursor"`
+	NextPageToken   OptString `json:"nextPageToken"`
 	Projects        []Project `json:"projects"`
 	AdditionalProps ListOrgProjectsOutputBodyAdditional
 }
@@ -3183,9 +3183,9 @@ func (s *ListOrgProjectsOutputBody) GetSchema() OptURI {
 	return s.Schema
 }
 
-// GetNextCursor returns the value of NextCursor.
-func (s *ListOrgProjectsOutputBody) GetNextCursor() OptString {
-	return s.NextCursor
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListOrgProjectsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetProjects returns the value of Projects.
@@ -3203,9 +3203,9 @@ func (s *ListOrgProjectsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
 }
 
-// SetNextCursor sets the value of NextCursor.
-func (s *ListOrgProjectsOutputBody) SetNextCursor(val OptString) {
-	s.NextCursor = val
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListOrgProjectsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetProjects sets the value of Projects.
@@ -3233,7 +3233,7 @@ func (s *ListOrgProjectsOutputBodyAdditional) init() ListOrgProjectsOutputBodyAd
 type ListOrgsOutputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema          OptURI    `json:"$schema"`
-	NextCursor      OptString `json:"nextCursor"`
+	NextPageToken   OptString `json:"nextPageToken"`
 	Org             OptOrg    `json:"org"`
 	Orgs            []Org     `json:"orgs"`
 	AdditionalProps ListOrgsOutputBodyAdditional
@@ -3244,9 +3244,9 @@ func (s *ListOrgsOutputBody) GetSchema() OptURI {
 	return s.Schema
 }
 
-// GetNextCursor returns the value of NextCursor.
-func (s *ListOrgsOutputBody) GetNextCursor() OptString {
-	return s.NextCursor
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListOrgsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetOrg returns the value of Org.
@@ -3269,9 +3269,9 @@ func (s *ListOrgsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
 }
 
-// SetNextCursor sets the value of NextCursor.
-func (s *ListOrgsOutputBody) SetNextCursor(val OptString) {
-	s.NextCursor = val
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListOrgsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetOrg sets the value of Org.
@@ -3305,7 +3305,7 @@ type ListProjectMembersOutputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema          OptURI         `json:"$schema"`
 	Members         []ProjectGrant `json:"members"`
-	NextCursor      OptString      `json:"nextCursor"`
+	NextPageToken   OptString      `json:"nextPageToken"`
 	AdditionalProps ListProjectMembersOutputBodyAdditional
 }
 
@@ -3319,9 +3319,9 @@ func (s *ListProjectMembersOutputBody) GetMembers() []ProjectGrant {
 	return s.Members
 }
 
-// GetNextCursor returns the value of NextCursor.
-func (s *ListProjectMembersOutputBody) GetNextCursor() OptString {
-	return s.NextCursor
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListProjectMembersOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -3339,9 +3339,9 @@ func (s *ListProjectMembersOutputBody) SetMembers(val []ProjectGrant) {
 	s.Members = val
 }
 
-// SetNextCursor sets the value of NextCursor.
-func (s *ListProjectMembersOutputBody) SetNextCursor(val OptString) {
-	s.NextCursor = val
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListProjectMembersOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -3364,7 +3364,7 @@ func (s *ListProjectMembersOutputBodyAdditional) init() ListProjectMembersOutput
 type ListProjectReposOutputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema          OptURI    `json:"$schema"`
-	NextCursor      OptString `json:"nextCursor"`
+	NextPageToken   OptString `json:"nextPageToken"`
 	Repo            OptRepo   `json:"repo"`
 	Repos           []Repo    `json:"repos"`
 	AdditionalProps ListProjectReposOutputBodyAdditional
@@ -3375,9 +3375,9 @@ func (s *ListProjectReposOutputBody) GetSchema() OptURI {
 	return s.Schema
 }
 
-// GetNextCursor returns the value of NextCursor.
-func (s *ListProjectReposOutputBody) GetNextCursor() OptString {
-	return s.NextCursor
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListProjectReposOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetRepo returns the value of Repo.
@@ -3400,9 +3400,9 @@ func (s *ListProjectReposOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
 }
 
-// SetNextCursor sets the value of NextCursor.
-func (s *ListProjectReposOutputBody) SetNextCursor(val OptString) {
-	s.NextCursor = val
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListProjectReposOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetRepo sets the value of Repo.
@@ -3435,7 +3435,7 @@ func (s *ListProjectReposOutputBodyAdditional) init() ListProjectReposOutputBody
 type ListProjectsOutputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema          OptURI     `json:"$schema"`
-	NextCursor      OptString  `json:"nextCursor"`
+	NextPageToken   OptString  `json:"nextPageToken"`
 	Project         OptProject `json:"project"`
 	Projects        []Project  `json:"projects"`
 	AdditionalProps ListProjectsOutputBodyAdditional
@@ -3446,9 +3446,9 @@ func (s *ListProjectsOutputBody) GetSchema() OptURI {
 	return s.Schema
 }
 
-// GetNextCursor returns the value of NextCursor.
-func (s *ListProjectsOutputBody) GetNextCursor() OptString {
-	return s.NextCursor
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListProjectsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetProject returns the value of Project.
@@ -3471,9 +3471,9 @@ func (s *ListProjectsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
 }
 
-// SetNextCursor sets the value of NextCursor.
-func (s *ListProjectsOutputBody) SetNextCursor(val OptString) {
-	s.NextCursor = val
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListProjectsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetProject sets the value of Project.
@@ -3507,7 +3507,7 @@ type ListRepoGrantsOutputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema          OptURI      `json:"$schema"`
 	Grants          []RepoGrant `json:"grants"`
-	NextCursor      OptString   `json:"nextCursor"`
+	NextPageToken   OptString   `json:"nextPageToken"`
 	AdditionalProps ListRepoGrantsOutputBodyAdditional
 }
 
@@ -3521,9 +3521,9 @@ func (s *ListRepoGrantsOutputBody) GetGrants() []RepoGrant {
 	return s.Grants
 }
 
-// GetNextCursor returns the value of NextCursor.
-func (s *ListRepoGrantsOutputBody) GetNextCursor() OptString {
-	return s.NextCursor
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListRepoGrantsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -3541,9 +3541,9 @@ func (s *ListRepoGrantsOutputBody) SetGrants(val []RepoGrant) {
 	s.Grants = val
 }
 
-// SetNextCursor sets the value of NextCursor.
-func (s *ListRepoGrantsOutputBody) SetNextCursor(val OptString) {
-	s.NextCursor = val
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListRepoGrantsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.

@@ -143,13 +143,13 @@ func newRepoListCmd() *cobra.Command {
 				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Repo, string, error) {
 					params := coreapi.ListProjectReposParams{ProjectId: projID}
 					if cursor != "" {
-						params.Cursor = coreapi.NewOptString(cursor)
+						params.PageToken = coreapi.NewOptString(cursor)
 					}
 					out, err := c.ListProjectRepos(ctx, params)
 					if err != nil {
 						return nil, "", err
 					}
-					return out.Repos, out.NextCursor.Or(""), nil
+					return out.Repos, out.NextPageToken.Or(""), nil
 				})
 			})
 		},

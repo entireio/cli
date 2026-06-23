@@ -63,13 +63,13 @@ func newOrgListCmd() *cobra.Command {
 				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Org, string, error) {
 					params := coreapi.ListOrgsParams{}
 					if cursor != "" {
-						params.Cursor = coreapi.NewOptString(cursor)
+						params.PageToken = coreapi.NewOptString(cursor)
 					}
 					out, err := c.ListOrgs(ctx, params)
 					if err != nil {
 						return nil, "", err
 					}
-					return out.Orgs, out.NextCursor.Or(""), nil
+					return out.Orgs, out.NextPageToken.Or(""), nil
 				})
 			})
 		},

@@ -3596,15 +3596,15 @@ func (c *Client) sendListOrgMembers(ctx context.Context, params ListOrgMembersPa
 		}
 	}
 	{
-		// Encode "cursor" parameter.
+		// Encode "pageToken" parameter.
 		cfg := uri.QueryParameterEncodingConfig{
-			Name:    "cursor",
+			Name:    "pageToken",
 			Style:   uri.QueryStyleForm,
 			Explode: false,
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			if val, ok := params.Cursor.Get(); ok {
+			if val, ok := params.PageToken.Get(); ok {
 				return e.EncodeValue(conv.StringToString(val))
 			}
 			return nil
@@ -3734,15 +3734,15 @@ func (c *Client) sendListOrgProjects(ctx context.Context, params ListOrgProjects
 		}
 	}
 	{
-		// Encode "cursor" parameter.
+		// Encode "pageToken" parameter.
 		cfg := uri.QueryParameterEncodingConfig{
-			Name:    "cursor",
+			Name:    "pageToken",
 			Style:   uri.QueryStyleForm,
 			Explode: false,
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			if val, ok := params.Cursor.Get(); ok {
+			if val, ok := params.PageToken.Get(); ok {
 				return e.EncodeValue(conv.StringToString(val))
 			}
 			return nil
@@ -3870,15 +3870,15 @@ func (c *Client) sendListOrgs(ctx context.Context, params ListOrgsParams) (res *
 		}
 	}
 	{
-		// Encode "cursor" parameter.
+		// Encode "pageToken" parameter.
 		cfg := uri.QueryParameterEncodingConfig{
-			Name:    "cursor",
+			Name:    "pageToken",
 			Style:   uri.QueryStyleForm,
 			Explode: false,
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			if val, ok := params.Cursor.Get(); ok {
+			if val, ok := params.PageToken.Get(); ok {
 				return e.EncodeValue(conv.StringToString(val))
 			}
 			return nil
@@ -4008,15 +4008,15 @@ func (c *Client) sendListProjectMembers(ctx context.Context, params ListProjectM
 		}
 	}
 	{
-		// Encode "cursor" parameter.
+		// Encode "pageToken" parameter.
 		cfg := uri.QueryParameterEncodingConfig{
-			Name:    "cursor",
+			Name:    "pageToken",
 			Style:   uri.QueryStyleForm,
 			Explode: false,
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			if val, ok := params.Cursor.Get(); ok {
+			if val, ok := params.PageToken.Get(); ok {
 				return e.EncodeValue(conv.StringToString(val))
 			}
 			return nil
@@ -4163,15 +4163,15 @@ func (c *Client) sendListProjectRepos(ctx context.Context, params ListProjectRep
 		}
 	}
 	{
-		// Encode "cursor" parameter.
+		// Encode "pageToken" parameter.
 		cfg := uri.QueryParameterEncodingConfig{
-			Name:    "cursor",
+			Name:    "pageToken",
 			Style:   uri.QueryStyleForm,
 			Explode: false,
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			if val, ok := params.Cursor.Get(); ok {
+			if val, ok := params.PageToken.Get(); ok {
 				return e.EncodeValue(conv.StringToString(val))
 			}
 			return nil
@@ -4299,15 +4299,15 @@ func (c *Client) sendListProjects(ctx context.Context, params ListProjectsParams
 		}
 	}
 	{
-		// Encode "cursor" parameter.
+		// Encode "pageToken" parameter.
 		cfg := uri.QueryParameterEncodingConfig{
-			Name:    "cursor",
+			Name:    "pageToken",
 			Style:   uri.QueryStyleForm,
 			Explode: false,
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			if val, ok := params.Cursor.Get(); ok {
+			if val, ok := params.PageToken.Get(); ok {
 				return e.EncodeValue(conv.StringToString(val))
 			}
 			return nil
@@ -4437,15 +4437,15 @@ func (c *Client) sendListRepoGrants(ctx context.Context, params ListRepoGrantsPa
 		}
 	}
 	{
-		// Encode "cursor" parameter.
+		// Encode "pageToken" parameter.
 		cfg := uri.QueryParameterEncodingConfig{
-			Name:    "cursor",
+			Name:    "pageToken",
 			Style:   uri.QueryStyleForm,
 			Explode: false,
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			if val, ok := params.Cursor.Get(); ok {
+			if val, ok := params.PageToken.Get(); ok {
 				return e.EncodeValue(conv.StringToString(val))
 			}
 			return nil

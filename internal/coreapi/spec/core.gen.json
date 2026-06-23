@@ -1053,7 +1053,7 @@
             },
             "type": "array"
           },
-          "nextCursor": {
+          "nextPageToken": {
             "type": "string"
           }
         },
@@ -1074,7 +1074,7 @@
             "readOnly": true,
             "type": "string"
           },
-          "nextCursor": {
+          "nextPageToken": {
             "type": "string"
           },
           "projects": {
@@ -1101,7 +1101,7 @@
             "readOnly": true,
             "type": "string"
           },
-          "nextCursor": {
+          "nextPageToken": {
             "type": "string"
           },
           "org": {
@@ -1134,7 +1134,7 @@
             },
             "type": "array"
           },
-          "nextCursor": {
+          "nextPageToken": {
             "type": "string"
           }
         },
@@ -1155,7 +1155,7 @@
             "readOnly": true,
             "type": "string"
           },
-          "nextCursor": {
+          "nextPageToken": {
             "type": "string"
           },
           "repo": {
@@ -1182,7 +1182,7 @@
             "readOnly": true,
             "type": "string"
           },
-          "nextCursor": {
+          "nextPageToken": {
             "type": "string"
           },
           "project": {
@@ -1215,7 +1215,7 @@
             },
             "type": "array"
           },
-          "nextCursor": {
+          "nextPageToken": {
             "type": "string"
           }
         },
@@ -2898,12 +2898,12 @@
             }
           },
           {
-            "description": "Opaque cursor from a previous response's nextCursor.",
+            "description": "Opaque cursor from a previous response's nextPageToken.",
             "explode": false,
             "in": "query",
-            "name": "cursor",
+            "name": "pageToken",
             "schema": {
-              "description": "Opaque cursor from a previous response's nextCursor.",
+              "description": "Opaque cursor from a previous response's nextPageToken.",
               "type": "string"
             }
           }
@@ -3109,12 +3109,12 @@
             }
           },
           {
-            "description": "Opaque cursor from a previous response's nextCursor.",
+            "description": "Opaque cursor from a previous response's nextPageToken.",
             "explode": false,
             "in": "query",
-            "name": "cursor",
+            "name": "pageToken",
             "schema": {
-              "description": "Opaque cursor from a previous response's nextCursor.",
+              "description": "Opaque cursor from a previous response's nextPageToken.",
               "type": "string"
             }
           }
@@ -3301,12 +3301,12 @@
             }
           },
           {
-            "description": "Opaque cursor from a previous response's nextCursor.",
+            "description": "Opaque cursor from a previous response's nextPageToken.",
             "explode": false,
             "in": "query",
-            "name": "cursor",
+            "name": "pageToken",
             "schema": {
-              "description": "Opaque cursor from a previous response's nextCursor.",
+              "description": "Opaque cursor from a previous response's nextPageToken.",
               "type": "string"
             }
           }
@@ -3375,12 +3375,12 @@
             }
           },
           {
-            "description": "Opaque cursor from a previous response's nextCursor.",
+            "description": "Opaque cursor from a previous response's nextPageToken.",
             "explode": false,
             "in": "query",
-            "name": "cursor",
+            "name": "pageToken",
             "schema": {
-              "description": "Opaque cursor from a previous response's nextCursor.",
+              "description": "Opaque cursor from a previous response's nextPageToken.",
               "type": "string"
             }
           }
@@ -3768,12 +3768,12 @@
             }
           },
           {
-            "description": "Opaque cursor from a previous response's nextCursor.",
+            "description": "Opaque cursor from a previous response's nextPageToken.",
             "explode": false,
             "in": "query",
-            "name": "cursor",
+            "name": "pageToken",
             "schema": {
-              "description": "Opaque cursor from a previous response's nextCursor.",
+              "description": "Opaque cursor from a previous response's nextPageToken.",
               "type": "string"
             }
           }
@@ -3851,12 +3851,12 @@
             }
           },
           {
-            "description": "Opaque cursor from a previous response's nextCursor.",
+            "description": "Opaque cursor from a previous response's nextPageToken.",
             "explode": false,
             "in": "query",
-            "name": "cursor",
+            "name": "pageToken",
             "schema": {
-              "description": "Opaque cursor from a previous response's nextCursor.",
+              "description": "Opaque cursor from a previous response's nextPageToken.",
               "type": "string"
             }
           }
@@ -4064,12 +4064,12 @@
             }
           },
           {
-            "description": "Opaque cursor from a previous response's nextCursor.",
+            "description": "Opaque cursor from a previous response's nextPageToken.",
             "explode": false,
             "in": "query",
-            "name": "cursor",
+            "name": "pageToken",
             "schema": {
-              "description": "Opaque cursor from a previous response's nextCursor.",
+              "description": "Opaque cursor from a previous response's nextPageToken.",
               "type": "string"
             }
           }

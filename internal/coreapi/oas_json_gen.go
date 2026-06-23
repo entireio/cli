@@ -7906,9 +7906,9 @@ func (s *ListOrgMembersOutputBody) encodeFields(e *jx.Encoder) {
 		e.ArrEnd()
 	}
 	{
-		if s.NextCursor.Set {
-			e.FieldStart("nextCursor")
-			s.NextCursor.Encode(e)
+		if s.NextPageToken.Set {
+			e.FieldStart("nextPageToken")
+			s.NextPageToken.Encode(e)
 		}
 	}
 	for k, elem := range s.AdditionalProps {
@@ -7923,7 +7923,7 @@ func (s *ListOrgMembersOutputBody) encodeFields(e *jx.Encoder) {
 var jsonFieldsNameOfListOrgMembersOutputBody = [3]string{
 	0: "$schema",
 	1: "members",
-	2: "nextCursor",
+	2: "nextPageToken",
 }
 
 // Decode decodes ListOrgMembersOutputBody from json.
@@ -7964,15 +7964,15 @@ func (s *ListOrgMembersOutputBody) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"members\"")
 			}
-		case "nextCursor":
+		case "nextPageToken":
 			if err := func() error {
-				s.NextCursor.Reset()
-				if err := s.NextCursor.Decode(d); err != nil {
+				s.NextPageToken.Reset()
+				if err := s.NextPageToken.Decode(d); err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
-				return errors.Wrap(err, "decode field \"nextCursor\"")
+				return errors.Wrap(err, "decode field \"nextPageToken\"")
 			}
 		default:
 			var elem jx.Raw
@@ -8115,9 +8115,9 @@ func (s *ListOrgProjectsOutputBody) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
-		if s.NextCursor.Set {
-			e.FieldStart("nextCursor")
-			s.NextCursor.Encode(e)
+		if s.NextPageToken.Set {
+			e.FieldStart("nextPageToken")
+			s.NextPageToken.Encode(e)
 		}
 	}
 	{
@@ -8139,7 +8139,7 @@ func (s *ListOrgProjectsOutputBody) encodeFields(e *jx.Encoder) {
 
 var jsonFieldsNameOfListOrgProjectsOutputBody = [3]string{
 	0: "$schema",
-	1: "nextCursor",
+	1: "nextPageToken",
 	2: "projects",
 }
 
@@ -8163,15 +8163,15 @@ func (s *ListOrgProjectsOutputBody) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"$schema\"")
 			}
-		case "nextCursor":
+		case "nextPageToken":
 			if err := func() error {
-				s.NextCursor.Reset()
-				if err := s.NextCursor.Decode(d); err != nil {
+				s.NextPageToken.Reset()
+				if err := s.NextPageToken.Decode(d); err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
-				return errors.Wrap(err, "decode field \"nextCursor\"")
+				return errors.Wrap(err, "decode field \"nextPageToken\"")
 			}
 		case "projects":
 			requiredBitSet[0] |= 1 << 2
@@ -8332,9 +8332,9 @@ func (s *ListOrgsOutputBody) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
-		if s.NextCursor.Set {
-			e.FieldStart("nextCursor")
-			s.NextCursor.Encode(e)
+		if s.NextPageToken.Set {
+			e.FieldStart("nextPageToken")
+			s.NextPageToken.Encode(e)
 		}
 	}
 	{
@@ -8364,7 +8364,7 @@ func (s *ListOrgsOutputBody) encodeFields(e *jx.Encoder) {
 
 var jsonFieldsNameOfListOrgsOutputBody = [4]string{
 	0: "$schema",
-	1: "nextCursor",
+	1: "nextPageToken",
 	2: "org",
 	3: "orgs",
 }
@@ -8388,15 +8388,15 @@ func (s *ListOrgsOutputBody) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"$schema\"")
 			}
-		case "nextCursor":
+		case "nextPageToken":
 			if err := func() error {
-				s.NextCursor.Reset()
-				if err := s.NextCursor.Decode(d); err != nil {
+				s.NextPageToken.Reset()
+				if err := s.NextPageToken.Decode(d); err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
-				return errors.Wrap(err, "decode field \"nextCursor\"")
+				return errors.Wrap(err, "decode field \"nextPageToken\"")
 			}
 		case "org":
 			if err := func() error {
@@ -8542,9 +8542,9 @@ func (s *ListProjectMembersOutputBody) encodeFields(e *jx.Encoder) {
 		e.ArrEnd()
 	}
 	{
-		if s.NextCursor.Set {
-			e.FieldStart("nextCursor")
-			s.NextCursor.Encode(e)
+		if s.NextPageToken.Set {
+			e.FieldStart("nextPageToken")
+			s.NextPageToken.Encode(e)
 		}
 	}
 	for k, elem := range s.AdditionalProps {
@@ -8559,7 +8559,7 @@ func (s *ListProjectMembersOutputBody) encodeFields(e *jx.Encoder) {
 var jsonFieldsNameOfListProjectMembersOutputBody = [3]string{
 	0: "$schema",
 	1: "members",
-	2: "nextCursor",
+	2: "nextPageToken",
 }
 
 // Decode decodes ListProjectMembersOutputBody from json.
@@ -8600,15 +8600,15 @@ func (s *ListProjectMembersOutputBody) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"members\"")
 			}
-		case "nextCursor":
+		case "nextPageToken":
 			if err := func() error {
-				s.NextCursor.Reset()
-				if err := s.NextCursor.Decode(d); err != nil {
+				s.NextPageToken.Reset()
+				if err := s.NextPageToken.Decode(d); err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
-				return errors.Wrap(err, "decode field \"nextCursor\"")
+				return errors.Wrap(err, "decode field \"nextPageToken\"")
 			}
 		default:
 			var elem jx.Raw
@@ -8751,9 +8751,9 @@ func (s *ListProjectReposOutputBody) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
-		if s.NextCursor.Set {
-			e.FieldStart("nextCursor")
-			s.NextCursor.Encode(e)
+		if s.NextPageToken.Set {
+			e.FieldStart("nextPageToken")
+			s.NextPageToken.Encode(e)
 		}
 	}
 	{
@@ -8783,7 +8783,7 @@ func (s *ListProjectReposOutputBody) encodeFields(e *jx.Encoder) {
 
 var jsonFieldsNameOfListProjectReposOutputBody = [4]string{
 	0: "$schema",
-	1: "nextCursor",
+	1: "nextPageToken",
 	2: "repo",
 	3: "repos",
 }
@@ -8807,15 +8807,15 @@ func (s *ListProjectReposOutputBody) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"$schema\"")
 			}
-		case "nextCursor":
+		case "nextPageToken":
 			if err := func() error {
-				s.NextCursor.Reset()
-				if err := s.NextCursor.Decode(d); err != nil {
+				s.NextPageToken.Reset()
+				if err := s.NextPageToken.Decode(d); err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
-				return errors.Wrap(err, "decode field \"nextCursor\"")
+				return errors.Wrap(err, "decode field \"nextPageToken\"")
 			}
 		case "repo":
 			if err := func() error {
@@ -8953,9 +8953,9 @@ func (s *ListProjectsOutputBody) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
-		if s.NextCursor.Set {
-			e.FieldStart("nextCursor")
-			s.NextCursor.Encode(e)
+		if s.NextPageToken.Set {
+			e.FieldStart("nextPageToken")
+			s.NextPageToken.Encode(e)
 		}
 	}
 	{
@@ -8985,7 +8985,7 @@ func (s *ListProjectsOutputBody) encodeFields(e *jx.Encoder) {
 
 var jsonFieldsNameOfListProjectsOutputBody = [4]string{
 	0: "$schema",
-	1: "nextCursor",
+	1: "nextPageToken",
 	2: "project",
 	3: "projects",
 }
@@ -9009,15 +9009,15 @@ func (s *ListProjectsOutputBody) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"$schema\"")
 			}
-		case "nextCursor":
+		case "nextPageToken":
 			if err := func() error {
-				s.NextCursor.Reset()
-				if err := s.NextCursor.Decode(d); err != nil {
+				s.NextPageToken.Reset()
+				if err := s.NextPageToken.Decode(d); err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
-				return errors.Wrap(err, "decode field \"nextCursor\"")
+				return errors.Wrap(err, "decode field \"nextPageToken\"")
 			}
 		case "project":
 			if err := func() error {
@@ -9163,9 +9163,9 @@ func (s *ListRepoGrantsOutputBody) encodeFields(e *jx.Encoder) {
 		e.ArrEnd()
 	}
 	{
-		if s.NextCursor.Set {
-			e.FieldStart("nextCursor")
-			s.NextCursor.Encode(e)
+		if s.NextPageToken.Set {
+			e.FieldStart("nextPageToken")
+			s.NextPageToken.Encode(e)
 		}
 	}
 	for k, elem := range s.AdditionalProps {
@@ -9180,7 +9180,7 @@ func (s *ListRepoGrantsOutputBody) encodeFields(e *jx.Encoder) {
 var jsonFieldsNameOfListRepoGrantsOutputBody = [3]string{
 	0: "$schema",
 	1: "grants",
-	2: "nextCursor",
+	2: "nextPageToken",
 }
 
 // Decode decodes ListRepoGrantsOutputBody from json.
@@ -9221,15 +9221,15 @@ func (s *ListRepoGrantsOutputBody) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"grants\"")
 			}
-		case "nextCursor":
+		case "nextPageToken":
 			if err := func() error {
-				s.NextCursor.Reset()
-				if err := s.NextCursor.Decode(d); err != nil {
+				s.NextPageToken.Reset()
+				if err := s.NextPageToken.Decode(d); err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
-				return errors.Wrap(err, "decode field \"nextCursor\"")
+				return errors.Wrap(err, "decode field \"nextPageToken\"")
 			}
 		default:
 			var elem jx.Raw

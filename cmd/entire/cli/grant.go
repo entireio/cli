@@ -144,13 +144,13 @@ func newGrantOrgListCmd() *cobra.Command {
 				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Membership, string, error) {
 					params := coreapi.ListOrgMembersParams{OrgId: orgID}
 					if cursor != "" {
-						params.Cursor = coreapi.NewOptString(cursor)
+						params.PageToken = coreapi.NewOptString(cursor)
 					}
 					out, err := c.ListOrgMembers(ctx, params)
 					if err != nil {
 						return nil, "", err
 					}
-					return out.Members, out.NextCursor.Or(""), nil
+					return out.Members, out.NextPageToken.Or(""), nil
 				})
 			})
 		},
@@ -247,13 +247,13 @@ func newGrantProjectListCmd() *cobra.Command {
 				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.ProjectGrant, string, error) {
 					params := coreapi.ListProjectMembersParams{ProjectId: projID}
 					if cursor != "" {
-						params.Cursor = coreapi.NewOptString(cursor)
+						params.PageToken = coreapi.NewOptString(cursor)
 					}
 					out, err := c.ListProjectMembers(ctx, params)
 					if err != nil {
 						return nil, "", err
 					}
-					return out.Members, out.NextCursor.Or(""), nil
+					return out.Members, out.NextPageToken.Or(""), nil
 				})
 			})
 		},
@@ -410,13 +410,13 @@ func newGrantRepoListCmd() *cobra.Command {
 				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.RepoGrant, string, error) {
 					params := coreapi.ListRepoGrantsParams{RepoId: repoID}
 					if cursor != "" {
-						params.Cursor = coreapi.NewOptString(cursor)
+						params.PageToken = coreapi.NewOptString(cursor)
 					}
 					out, err := c.ListRepoGrants(ctx, params)
 					if err != nil {
 						return nil, "", err
 					}
-					return out.Grants, out.NextCursor.Or(""), nil
+					return out.Grants, out.NextPageToken.Or(""), nil
 				})
 			})
 		},

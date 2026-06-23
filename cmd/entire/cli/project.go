@@ -107,13 +107,13 @@ func newProjectListCmd() *cobra.Command {
 					projects, err := fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Project, string, error) {
 						params := coreapi.ListOrgProjectsParams{OrgId: orgID}
 						if cursor != "" {
-							params.Cursor = coreapi.NewOptString(cursor)
+							params.PageToken = coreapi.NewOptString(cursor)
 						}
 						out, err := c.ListOrgProjects(ctx, params)
 						if err != nil {
 							return nil, "", err
 						}
-						return out.Projects, out.NextCursor.Or(""), nil
+						return out.Projects, out.NextPageToken.Or(""), nil
 					})
 					if err != nil {
 						return nil, err
@@ -138,13 +138,13 @@ func newProjectListCmd() *cobra.Command {
 				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Project, string, error) {
 					params := coreapi.ListProjectsParams{}
 					if cursor != "" {
-						params.Cursor = coreapi.NewOptString(cursor)
+						params.PageToken = coreapi.NewOptString(cursor)
 					}
 					out, err := c.ListProjects(ctx, params)
 					if err != nil {
 						return nil, "", err
 					}
-					return out.Projects, out.NextCursor.Or(""), nil
+					return out.Projects, out.NextPageToken.Or(""), nil
 				})
 			})
 		},
