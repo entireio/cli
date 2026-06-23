@@ -908,6 +908,10 @@
               "$ref": "#/components/schemas/AuditEvent"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -956,6 +960,10 @@
               "$ref": "#/components/schemas/Binding"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -1004,6 +1012,10 @@
               "$ref": "#/components/schemas/Mirror"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -1021,6 +1033,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "providers": {
@@ -1248,6 +1264,10 @@
               "$ref": "#/components/schemas/ServiceAccountGrant"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -1265,6 +1285,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "serviceAccounts": {
@@ -1343,6 +1367,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "permission": {
@@ -2007,6 +2035,29 @@
         "operationId": "lookupResources",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "description": "SpiceDB resource type (e.g. \"repo\", \"project\", \"org\").",
             "in": "path",
             "name": "resourceType",
@@ -2018,12 +2069,12 @@
             }
           },
           {
-            "description": "Optional: only list resources where the caller has this permission.",
+            "description": "Optional: only list resources where the caller has this permission. pageSize/pageToken apply only when set.",
             "explode": false,
             "in": "query",
             "name": "permission",
             "schema": {
-              "description": "Optional: only list resources where the caller has this permission.",
+              "description": "Optional: only list resources where the caller has this permission. pageSize/pageToken apply only when set.",
               "type": "string"
             }
           }
@@ -2136,6 +2187,31 @@
     "/audit": {
       "get": {
         "operationId": "listAuditEvents",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2403,6 +2479,29 @@
       "get": {
         "operationId": "listMirrors",
         "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
           {
             "description": "Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to).",
             "explode": false,
@@ -2841,6 +2940,31 @@
     "/oidc-providers": {
       "get": {
         "operationId": "listOIDCProviders",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -4302,6 +4426,29 @@
         "operationId": "listServiceAccounts",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "explode": false,
             "in": "query",
             "name": "orgId",
@@ -4491,6 +4638,29 @@
         "operationId": "listBindings",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "accountId",
             "required": true,
@@ -4650,6 +4820,29 @@
       "get": {
         "operationId": "listServiceAccountGrants",
         "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
           {
             "in": "path",
             "name": "accountId",

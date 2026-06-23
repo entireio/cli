@@ -287,21 +287,26 @@ func newRepoMirrorListCmd() *cobra.Command {
 				if !jsonRequested(cmd) {
 					fmt.Fprintf(cmd.ErrOrStderr(), "Listing mirrors on %s\n", c.CoreOrigin())
 				}
-				var params coreapi.ListMirrorsParams
-				if cluster != "" {
-					params.Cluster = coreapi.NewOptString(cluster)
-				}
-				if provider != "" {
-					params.Provider = coreapi.NewOptString(provider)
-				}
-				if owner != "" {
-					params.Owner = coreapi.NewOptString(owner)
-				}
-				out, err := c.ListMirrors(ctx, params)
-				if err != nil {
-					return nil, err
-				}
-				return out.Mirrors, nil
+				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Mirror, string, error) {
+					params := coreapi.ListMirrorsParams{}
+					if cluster != "" {
+						params.Cluster = coreapi.NewOptString(cluster)
+					}
+					if provider != "" {
+						params.Provider = coreapi.NewOptString(provider)
+					}
+					if owner != "" {
+						params.Owner = coreapi.NewOptString(owner)
+					}
+					if cursor != "" {
+						params.PageToken = coreapi.NewOptString(cursor)
+					}
+					out, err := c.ListMirrors(ctx, params)
+					if err != nil {
+						return nil, "", err
+					}
+					return out.Mirrors, out.NextPageToken.Or(""), nil
+				})
 			})
 		},
 	}

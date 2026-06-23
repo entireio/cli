@@ -182,7 +182,7 @@ type Invoker interface {
 	// List the calling account's recent audit events.
 	//
 	// GET /audit
-	ListAuditEvents(ctx context.Context) (*ListAuditEventsOutputBody, error)
+	ListAuditEvents(ctx context.Context, params ListAuditEventsParams) (*ListAuditEventsOutputBody, error)
 	// ListAvailableMirrors invokes listAvailableMirrors operation.
 	//
 	// List GitHub repos the caller could onboard as mirrors.
@@ -212,7 +212,7 @@ type Invoker interface {
 	// List federated OIDC identity providers.
 	//
 	// GET /oidc-providers
-	ListOIDCProviders(ctx context.Context) (*ListOIDCProvidersOutputBody, error)
+	ListOIDCProviders(ctx context.Context, params ListOIDCProvidersParams) (*ListOIDCProvidersOutputBody, error)
 	// ListOrgMembers invokes listOrgMembers operation.
 	//
 	// List members of an organization.
@@ -2902,17 +2902,54 @@ func (c *Client) sendGrantServiceAccountAccess(ctx context.Context, request *Gra
 // List the calling account's recent audit events.
 //
 // GET /audit
-func (c *Client) ListAuditEvents(ctx context.Context) (*ListAuditEventsOutputBody, error) {
-	res, err := c.sendListAuditEvents(ctx)
+func (c *Client) ListAuditEvents(ctx context.Context, params ListAuditEventsParams) (*ListAuditEventsOutputBody, error) {
+	res, err := c.sendListAuditEvents(ctx, params)
 	return res, err
 }
 
-func (c *Client) sendListAuditEvents(ctx context.Context) (res *ListAuditEventsOutputBody, err error) {
+func (c *Client) sendListAuditEvents(ctx context.Context, params ListAuditEventsParams) (res *ListAuditEventsOutputBody, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [1]string
 	pathParts[0] = "/audit"
 	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "pageSize" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageSize",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageSize.Get(); ok {
+				return e.EncodeValue(conv.Int32ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "pageToken" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageToken",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageToken.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
 
 	r, err := ht.NewRequest(ctx, "GET", u)
 	if err != nil {
@@ -3116,6 +3153,43 @@ func (c *Client) sendListBindings(ctx context.Context, params ListBindingsParams
 	}
 	pathParts[2] = "/bindings"
 	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "pageSize" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageSize",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageSize.Get(); ok {
+				return e.EncodeValue(conv.Int32ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "pageToken" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageToken",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageToken.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
 
 	r, err := ht.NewRequest(ctx, "GET", u)
 	if err != nil {
@@ -3342,6 +3416,40 @@ func (c *Client) sendListMirrors(ctx context.Context, params ListMirrorsParams) 
 
 	q := uri.NewQueryEncoder()
 	{
+		// Encode "pageSize" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageSize",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageSize.Get(); ok {
+				return e.EncodeValue(conv.Int32ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "pageToken" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageToken",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageToken.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
 		// Encode "cluster" parameter.
 		cfg := uri.QueryParameterEncodingConfig{
 			Name:    "cluster",
@@ -3464,17 +3572,54 @@ func (c *Client) sendListMirrors(ctx context.Context, params ListMirrorsParams) 
 // List federated OIDC identity providers.
 //
 // GET /oidc-providers
-func (c *Client) ListOIDCProviders(ctx context.Context) (*ListOIDCProvidersOutputBody, error) {
-	res, err := c.sendListOIDCProviders(ctx)
+func (c *Client) ListOIDCProviders(ctx context.Context, params ListOIDCProvidersParams) (*ListOIDCProvidersOutputBody, error) {
+	res, err := c.sendListOIDCProviders(ctx, params)
 	return res, err
 }
 
-func (c *Client) sendListOIDCProviders(ctx context.Context) (res *ListOIDCProvidersOutputBody, err error) {
+func (c *Client) sendListOIDCProviders(ctx context.Context, params ListOIDCProvidersParams) (res *ListOIDCProvidersOutputBody, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [1]string
 	pathParts[0] = "/oidc-providers"
 	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "pageSize" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageSize",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageSize.Get(); ok {
+				return e.EncodeValue(conv.Int32ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "pageToken" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageToken",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageToken.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
 
 	r, err := ht.NewRequest(ctx, "GET", u)
 	if err != nil {
@@ -4556,6 +4701,43 @@ func (c *Client) sendListServiceAccountGrants(ctx context.Context, params ListSe
 	pathParts[2] = "/grants"
 	uri.AddPathParts(u, pathParts[:]...)
 
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "pageSize" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageSize",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageSize.Get(); ok {
+				return e.EncodeValue(conv.Int32ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "pageToken" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageToken",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageToken.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
 	r, err := ht.NewRequest(ctx, "GET", u)
 	if err != nil {
 		return res, errors.Wrap(err, "create request")
@@ -4639,6 +4821,40 @@ func (c *Client) sendListServiceAccounts(ctx context.Context, params ListService
 	uri.AddPathParts(u, pathParts[:]...)
 
 	q := uri.NewQueryEncoder()
+	{
+		// Encode "pageSize" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageSize",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageSize.Get(); ok {
+				return e.EncodeValue(conv.Int32ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "pageToken" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageToken",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageToken.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
 	{
 		// Encode "orgId" parameter.
 		cfg := uri.QueryParameterEncodingConfig{
@@ -4756,6 +4972,40 @@ func (c *Client) sendLookupResources(ctx context.Context, params LookupResources
 	uri.AddPathParts(u, pathParts[:]...)
 
 	q := uri.NewQueryEncoder()
+	{
+		// Encode "pageSize" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageSize",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageSize.Get(); ok {
+				return e.EncodeValue(conv.Int32ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "pageToken" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageToken",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageToken.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
 	{
 		// Encode "permission" parameter.
 		cfg := uri.QueryParameterEncodingConfig{

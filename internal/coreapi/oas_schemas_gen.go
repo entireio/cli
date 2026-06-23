@@ -2784,8 +2784,10 @@ func (s *GrantedMirrorCollaboratorAdditional) init() GrantedMirrorCollaboratorAd
 // Ref: #/components/schemas/ListAuditEventsOutputBody
 type ListAuditEventsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI       `json:"$schema"`
-	Events          []AuditEvent `json:"events"`
+	Schema OptURI       `json:"$schema"`
+	Events []AuditEvent `json:"events"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListAuditEventsOutputBodyAdditional
 }
 
@@ -2797,6 +2799,11 @@ func (s *ListAuditEventsOutputBody) GetSchema() OptURI {
 // GetEvents returns the value of Events.
 func (s *ListAuditEventsOutputBody) GetEvents() []AuditEvent {
 	return s.Events
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListAuditEventsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -2812,6 +2819,11 @@ func (s *ListAuditEventsOutputBody) SetSchema(val OptURI) {
 // SetEvents sets the value of Events.
 func (s *ListAuditEventsOutputBody) SetEvents(val []AuditEvent) {
 	s.Events = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListAuditEventsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -2882,8 +2894,10 @@ func (s *ListAvailableMirrorsOutputBodyAdditional) init() ListAvailableMirrorsOu
 // Ref: #/components/schemas/ListBindingsOutputBody
 type ListBindingsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI    `json:"$schema"`
-	Bindings        []Binding `json:"bindings"`
+	Schema   OptURI    `json:"$schema"`
+	Bindings []Binding `json:"bindings"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListBindingsOutputBodyAdditional
 }
 
@@ -2895,6 +2909,11 @@ func (s *ListBindingsOutputBody) GetSchema() OptURI {
 // GetBindings returns the value of Bindings.
 func (s *ListBindingsOutputBody) GetBindings() []Binding {
 	return s.Bindings
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListBindingsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -2910,6 +2929,11 @@ func (s *ListBindingsOutputBody) SetSchema(val OptURI) {
 // SetBindings sets the value of Bindings.
 func (s *ListBindingsOutputBody) SetBindings(val []Binding) {
 	s.Bindings = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListBindingsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -3014,8 +3038,10 @@ func (s *ListMirrorCollaboratorsProvider) UnmarshalText(data []byte) error {
 // Ref: #/components/schemas/ListMirrorsOutputBody
 type ListMirrorsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI   `json:"$schema"`
-	Mirrors         []Mirror `json:"mirrors"`
+	Schema  OptURI   `json:"$schema"`
+	Mirrors []Mirror `json:"mirrors"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListMirrorsOutputBodyAdditional
 }
 
@@ -3027,6 +3053,11 @@ func (s *ListMirrorsOutputBody) GetSchema() OptURI {
 // GetMirrors returns the value of Mirrors.
 func (s *ListMirrorsOutputBody) GetMirrors() []Mirror {
 	return s.Mirrors
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListMirrorsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -3042,6 +3073,11 @@ func (s *ListMirrorsOutputBody) SetSchema(val OptURI) {
 // SetMirrors sets the value of Mirrors.
 func (s *ListMirrorsOutputBody) SetMirrors(val []Mirror) {
 	s.Mirrors = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListMirrorsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -3063,7 +3099,9 @@ func (s *ListMirrorsOutputBodyAdditional) init() ListMirrorsOutputBodyAdditional
 // Ref: #/components/schemas/ListOIDCProvidersOutputBody
 type ListOIDCProvidersOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI         `json:"$schema"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString      `json:"nextPageToken"`
 	Providers       []OIDCProvider `json:"providers"`
 	AdditionalProps ListOIDCProvidersOutputBodyAdditional
 }
@@ -3071,6 +3109,11 @@ type ListOIDCProvidersOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *ListOIDCProvidersOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListOIDCProvidersOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetProviders returns the value of Providers.
@@ -3086,6 +3129,11 @@ func (s *ListOIDCProvidersOutputBody) GetAdditionalProps() ListOIDCProvidersOutp
 // SetSchema sets the value of Schema.
 func (s *ListOIDCProvidersOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListOIDCProvidersOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetProviders sets the value of Providers.
@@ -3572,8 +3620,10 @@ func (s *ListRepoGrantsOutputBodyAdditional) init() ListRepoGrantsOutputBodyAddi
 // Ref: #/components/schemas/ListServiceAccountGrantsOutputBody
 type ListServiceAccountGrantsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI                `json:"$schema"`
-	Grants          []ServiceAccountGrant `json:"grants"`
+	Schema OptURI                `json:"$schema"`
+	Grants []ServiceAccountGrant `json:"grants"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListServiceAccountGrantsOutputBodyAdditional
 }
 
@@ -3585,6 +3635,11 @@ func (s *ListServiceAccountGrantsOutputBody) GetSchema() OptURI {
 // GetGrants returns the value of Grants.
 func (s *ListServiceAccountGrantsOutputBody) GetGrants() []ServiceAccountGrant {
 	return s.Grants
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListServiceAccountGrantsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -3600,6 +3655,11 @@ func (s *ListServiceAccountGrantsOutputBody) SetSchema(val OptURI) {
 // SetGrants sets the value of Grants.
 func (s *ListServiceAccountGrantsOutputBody) SetGrants(val []ServiceAccountGrant) {
 	s.Grants = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListServiceAccountGrantsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -3621,7 +3681,9 @@ func (s *ListServiceAccountGrantsOutputBodyAdditional) init() ListServiceAccount
 // Ref: #/components/schemas/ListServiceAccountsOutputBody
 type ListServiceAccountsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI                     `json:"$schema"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString                  `json:"nextPageToken"`
 	ServiceAccounts []ServiceAccountWithGrants `json:"serviceAccounts"`
 	AdditionalProps ListServiceAccountsOutputBodyAdditional
 }
@@ -3629,6 +3691,11 @@ type ListServiceAccountsOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *ListServiceAccountsOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListServiceAccountsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetServiceAccounts returns the value of ServiceAccounts.
@@ -3644,6 +3711,11 @@ func (s *ListServiceAccountsOutputBody) GetAdditionalProps() ListServiceAccounts
 // SetSchema sets the value of Schema.
 func (s *ListServiceAccountsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListServiceAccountsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetServiceAccounts sets the value of ServiceAccounts.
@@ -3863,7 +3935,9 @@ func (s *LookupRefResultOwnerType) UnmarshalText(data []byte) error {
 // Ref: #/components/schemas/LookupResourcesOutputBody
 type LookupResourcesOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI           `json:"$schema"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString        `json:"nextPageToken"`
 	Permission      OptString        `json:"permission"`
 	ResourceIds     []string         `json:"resourceIds"`
 	ResourceType    string           `json:"resourceType"`
@@ -3874,6 +3948,11 @@ type LookupResourcesOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *LookupResourcesOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *LookupResourcesOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetPermission returns the value of Permission.
@@ -3904,6 +3983,11 @@ func (s *LookupResourcesOutputBody) GetAdditionalProps() LookupResourcesOutputBo
 // SetSchema sets the value of Schema.
 func (s *LookupResourcesOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *LookupResourcesOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetPermission sets the value of Permission.

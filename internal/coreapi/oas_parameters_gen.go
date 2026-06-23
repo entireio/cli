@@ -95,6 +95,14 @@ type GrantServiceAccountAccessParams struct {
 	AccountId string
 }
 
+// ListAuditEventsParams is parameters of listAuditEvents operation.
+type ListAuditEventsParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+}
+
 // ListAvailableMirrorsParams is parameters of listAvailableMirrors operation.
 type ListAvailableMirrorsParams struct {
 	// Optional: restrict to repos with this owner login.
@@ -103,6 +111,10 @@ type ListAvailableMirrorsParams struct {
 
 // ListBindingsParams is parameters of listBindings operation.
 type ListBindingsParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
 	AccountId string
 }
 
@@ -117,12 +129,24 @@ type ListMirrorCollaboratorsParams struct {
 
 // ListMirrorsParams is parameters of listMirrors operation.
 type ListMirrorsParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
 	// Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to).
 	Cluster OptString `json:",omitempty,omitzero"`
 	// Optional: restrict to mirrors of this upstream provider (e.g. "github").
 	Provider OptString `json:",omitempty,omitzero"`
 	// Optional: restrict to mirrors with this upstream owner login.
 	Owner OptString `json:",omitempty,omitzero"`
+}
+
+// ListOIDCProvidersParams is parameters of listOIDCProviders operation.
+type ListOIDCProvidersParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
 }
 
 // ListOrgMembersParams is parameters of listOrgMembers operation.
@@ -194,19 +218,32 @@ type ListRepoGrantsParams struct {
 
 // ListServiceAccountGrantsParams is parameters of listServiceAccountGrants operation.
 type ListServiceAccountGrantsParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
 	AccountId string
 }
 
 // ListServiceAccountsParams is parameters of listServiceAccounts operation.
 type ListServiceAccountsParams struct {
-	OrgId string
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	OrgId     string
 }
 
 // LookupResourcesParams is parameters of lookupResources operation.
 type LookupResourcesParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
 	// SpiceDB resource type (e.g. "repo", "project", "org").
 	ResourceType string
-	// Optional: only list resources where the caller has this permission.
+	// Optional: only list resources where the caller has this permission. pageSize/pageToken apply only
+	// when set.
 	Permission OptString `json:",omitempty,omitzero"`
 }
 

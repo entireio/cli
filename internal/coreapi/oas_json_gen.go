@@ -6705,6 +6705,12 @@ func (s *ListAuditEventsOutputBody) encodeFields(e *jx.Encoder) {
 		}
 		e.ArrEnd()
 	}
+	{
+		if s.NextPageToken.Set {
+			e.FieldStart("nextPageToken")
+			s.NextPageToken.Encode(e)
+		}
+	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
 
@@ -6714,9 +6720,10 @@ func (s *ListAuditEventsOutputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfListAuditEventsOutputBody = [2]string{
+var jsonFieldsNameOfListAuditEventsOutputBody = [3]string{
 	0: "$schema",
 	1: "events",
+	2: "nextPageToken",
 }
 
 // Decode decodes ListAuditEventsOutputBody from json.
@@ -6756,6 +6763,16 @@ func (s *ListAuditEventsOutputBody) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"events\"")
+			}
+		case "nextPageToken":
+			if err := func() error {
+				s.NextPageToken.Reset()
+				if err := s.NextPageToken.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"nextPageToken\"")
 			}
 		default:
 			var elem jx.Raw
@@ -7105,6 +7122,12 @@ func (s *ListBindingsOutputBody) encodeFields(e *jx.Encoder) {
 		}
 		e.ArrEnd()
 	}
+	{
+		if s.NextPageToken.Set {
+			e.FieldStart("nextPageToken")
+			s.NextPageToken.Encode(e)
+		}
+	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
 
@@ -7114,9 +7137,10 @@ func (s *ListBindingsOutputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfListBindingsOutputBody = [2]string{
+var jsonFieldsNameOfListBindingsOutputBody = [3]string{
 	0: "$schema",
 	1: "bindings",
+	2: "nextPageToken",
 }
 
 // Decode decodes ListBindingsOutputBody from json.
@@ -7156,6 +7180,16 @@ func (s *ListBindingsOutputBody) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"bindings\"")
+			}
+		case "nextPageToken":
+			if err := func() error {
+				s.NextPageToken.Reset()
+				if err := s.NextPageToken.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"nextPageToken\"")
 			}
 		default:
 			var elem jx.Raw
@@ -7505,6 +7539,12 @@ func (s *ListMirrorsOutputBody) encodeFields(e *jx.Encoder) {
 		}
 		e.ArrEnd()
 	}
+	{
+		if s.NextPageToken.Set {
+			e.FieldStart("nextPageToken")
+			s.NextPageToken.Encode(e)
+		}
+	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
 
@@ -7514,9 +7554,10 @@ func (s *ListMirrorsOutputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfListMirrorsOutputBody = [2]string{
+var jsonFieldsNameOfListMirrorsOutputBody = [3]string{
 	0: "$schema",
 	1: "mirrors",
+	2: "nextPageToken",
 }
 
 // Decode decodes ListMirrorsOutputBody from json.
@@ -7556,6 +7597,16 @@ func (s *ListMirrorsOutputBody) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"mirrors\"")
+			}
+		case "nextPageToken":
+			if err := func() error {
+				s.NextPageToken.Reset()
+				if err := s.NextPageToken.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"nextPageToken\"")
 			}
 		default:
 			var elem jx.Raw
@@ -7698,6 +7749,12 @@ func (s *ListOIDCProvidersOutputBody) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.NextPageToken.Set {
+			e.FieldStart("nextPageToken")
+			s.NextPageToken.Encode(e)
+		}
+	}
+	{
 		e.FieldStart("providers")
 		e.ArrStart()
 		for _, elem := range s.Providers {
@@ -7714,9 +7771,10 @@ func (s *ListOIDCProvidersOutputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfListOIDCProvidersOutputBody = [2]string{
+var jsonFieldsNameOfListOIDCProvidersOutputBody = [3]string{
 	0: "$schema",
-	1: "providers",
+	1: "nextPageToken",
+	2: "providers",
 }
 
 // Decode decodes ListOIDCProvidersOutputBody from json.
@@ -7739,8 +7797,18 @@ func (s *ListOIDCProvidersOutputBody) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"$schema\"")
 			}
+		case "nextPageToken":
+			if err := func() error {
+				s.NextPageToken.Reset()
+				if err := s.NextPageToken.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"nextPageToken\"")
+			}
 		case "providers":
-			requiredBitSet[0] |= 1 << 1
+			requiredBitSet[0] |= 1 << 2
 			if err := func() error {
 				s.Providers = make([]OIDCProvider, 0)
 				if err := d.Arr(func(d *jx.Decoder) error {
@@ -7778,7 +7846,7 @@ func (s *ListOIDCProvidersOutputBody) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00000010,
+		0b00000100,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -9379,6 +9447,12 @@ func (s *ListServiceAccountGrantsOutputBody) encodeFields(e *jx.Encoder) {
 		}
 		e.ArrEnd()
 	}
+	{
+		if s.NextPageToken.Set {
+			e.FieldStart("nextPageToken")
+			s.NextPageToken.Encode(e)
+		}
+	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
 
@@ -9388,9 +9462,10 @@ func (s *ListServiceAccountGrantsOutputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfListServiceAccountGrantsOutputBody = [2]string{
+var jsonFieldsNameOfListServiceAccountGrantsOutputBody = [3]string{
 	0: "$schema",
 	1: "grants",
+	2: "nextPageToken",
 }
 
 // Decode decodes ListServiceAccountGrantsOutputBody from json.
@@ -9430,6 +9505,16 @@ func (s *ListServiceAccountGrantsOutputBody) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"grants\"")
+			}
+		case "nextPageToken":
+			if err := func() error {
+				s.NextPageToken.Reset()
+				if err := s.NextPageToken.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"nextPageToken\"")
 			}
 		default:
 			var elem jx.Raw
@@ -9572,6 +9657,12 @@ func (s *ListServiceAccountsOutputBody) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.NextPageToken.Set {
+			e.FieldStart("nextPageToken")
+			s.NextPageToken.Encode(e)
+		}
+	}
+	{
 		e.FieldStart("serviceAccounts")
 		e.ArrStart()
 		for _, elem := range s.ServiceAccounts {
@@ -9588,9 +9679,10 @@ func (s *ListServiceAccountsOutputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfListServiceAccountsOutputBody = [2]string{
+var jsonFieldsNameOfListServiceAccountsOutputBody = [3]string{
 	0: "$schema",
-	1: "serviceAccounts",
+	1: "nextPageToken",
+	2: "serviceAccounts",
 }
 
 // Decode decodes ListServiceAccountsOutputBody from json.
@@ -9613,8 +9705,18 @@ func (s *ListServiceAccountsOutputBody) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"$schema\"")
 			}
+		case "nextPageToken":
+			if err := func() error {
+				s.NextPageToken.Reset()
+				if err := s.NextPageToken.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"nextPageToken\"")
+			}
 		case "serviceAccounts":
-			requiredBitSet[0] |= 1 << 1
+			requiredBitSet[0] |= 1 << 2
 			if err := func() error {
 				s.ServiceAccounts = make([]ServiceAccountWithGrants, 0)
 				if err := d.Arr(func(d *jx.Decoder) error {
@@ -9652,7 +9754,7 @@ func (s *ListServiceAccountsOutputBody) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00000010,
+		0b00000100,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -10277,6 +10379,12 @@ func (s *LookupResourcesOutputBody) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.NextPageToken.Set {
+			e.FieldStart("nextPageToken")
+			s.NextPageToken.Encode(e)
+		}
+	}
+	{
 		if s.Permission.Set {
 			e.FieldStart("permission")
 			s.Permission.Encode(e)
@@ -10315,12 +10423,13 @@ func (s *LookupResourcesOutputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfLookupResourcesOutputBody = [5]string{
+var jsonFieldsNameOfLookupResourcesOutputBody = [6]string{
 	0: "$schema",
-	1: "permission",
-	2: "resourceIds",
-	3: "resourceType",
-	4: "resources",
+	1: "nextPageToken",
+	2: "permission",
+	3: "resourceIds",
+	4: "resourceType",
+	5: "resources",
 }
 
 // Decode decodes LookupResourcesOutputBody from json.
@@ -10342,6 +10451,16 @@ func (s *LookupResourcesOutputBody) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"$schema\"")
+			}
+		case "nextPageToken":
+			if err := func() error {
+				s.NextPageToken.Reset()
+				if err := s.NextPageToken.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"nextPageToken\"")
 			}
 		case "permission":
 			if err := func() error {
@@ -10373,7 +10492,7 @@ func (s *LookupResourcesOutputBody) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"resourceIds\"")
 			}
 		case "resourceType":
-			requiredBitSet[0] |= 1 << 3
+			requiredBitSet[0] |= 1 << 4
 			if err := func() error {
 				v, err := d.Str()
 				s.ResourceType = string(v)
@@ -10422,7 +10541,7 @@ func (s *LookupResourcesOutputBody) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00001000,
+		0b00010000,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
