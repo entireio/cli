@@ -975,7 +975,6 @@ type trailUpdateInputs struct {
 	BodyChanged     bool
 	BodyFile        string
 	BodyFileChanged bool
-	Branch          string
 	LabelAdd        []string
 	LabelRemove     []string
 }
@@ -1001,6 +1000,22 @@ func interactiveUpdateInputs(seed, edited trailUpdateEdits) trailUpdateInputs {
 		TitleChanged:  edited.title != seed.title,
 		Body:          edited.body,
 		BodyChanged:   edited.body != seed.body,
+	}
+}
+
+// interactiveBodySeed picks the seed for the interactive Body field from a
+// fetchTrailBody result and the list body. A fetch error omits the field
+// (loaded=false) so a transient failure can't blank the document; an absent
+// document falls back to the list body so a description that is present isn't
+// shown blank and silently overwritten.
+func interactiveBodySeed(fetched string, exists bool, fetchErr error, listBody string) (seed string, loaded bool) {
+	switch {
+	case fetchErr != nil:
+		return "", false
+	case exists:
+		return fetched, true
+	default:
+		return listBody, true
 	}
 }
 
@@ -1066,22 +1081,20 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, stdin io.Reader, ins
 				}
 				statusOptions = append(statusOptions, huh.NewOption(label, string(s)))
 			}
-			// Seed the body from the real collaborative document (the list/metadata
-			// body is always empty), using the raw snapshot so an edit preserves the
-			// document's whitespace. If the body can't be loaded, omit the body
-			// field entirely so status/title stay editable — never seed an empty
-			// body into an editable field, as saving it would overwrite a document
-			// that merely failed to fetch.
+			// Seed the body from the real collaborative document (body_document),
+			// using the raw snapshot so an edit preserves the document's whitespace.
+			// If the document is absent (an older/partial server that omits it), fall
+			// back to the list body so a description that IS present isn't shown blank
+			// and silently overwritten — the `show` path guards this same case. If the
+			// fetch fails outright, omit the body field so status/title stay editable
+			// and a transient error can't blank a document that merely failed to load.
 			seedStatus := string(metadata.Status)
 			seedTitle := metadata.Title
-			seedBody := ""
-			bodyLoaded := false
-			if bt, _, derr := fetchTrailBody(ctx, client, forge, owner, repoName, found.Number); derr != nil {
-				fmt.Fprintf(errW, "Warning: could not load the current body to edit (%v); leaving it unchanged. Use --body-file to set it.\n", derr)
-			} else {
-				seedBody = bt
-				bodyLoaded = true
+			bt, exists, derr := fetchTrailBody(ctx, client, forge, owner, repoName, found.Number)
+			if derr != nil {
+				fmt.Fprintf(errW, "Warning: could not load the current body to edit (%v); leaving it unchanged. Use --body or --body-file to set it.\n", derr)
 			}
+			seedBody, bodyLoaded := interactiveBodySeed(bt, exists, derr, metadata.Body)
 			body = seedBody
 			statusStr := seedStatus
 			title := seedTitle

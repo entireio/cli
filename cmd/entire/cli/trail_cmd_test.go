@@ -772,6 +772,38 @@ func TestValidateTrailUpdateFieldsRejectsEmptyTitle(t *testing.T) {
 	}
 }
 
+func TestValidateTrailUpdateFieldsRejectsInvalidStatus(t *testing.T) {
+	t.Parallel()
+	if err := validateTrailUpdateFields(trailUpdateInputs{StatusChanged: true, Status: "bogus"}); err == nil {
+		t.Fatal("expected an invalid status to be rejected")
+	}
+	// An unchanged status is not validated even if its (unset) value is invalid.
+	if err := validateTrailUpdateFields(trailUpdateInputs{Status: "bogus"}); err != nil {
+		t.Fatalf("unchanged status should not be validated: %v", err)
+	}
+}
+
+func TestInteractiveBodySeed(t *testing.T) {
+	t.Parallel()
+
+	// Fetch error → omit the field so a transient failure can't blank the doc.
+	if seed, loaded := interactiveBodySeed("", false, errors.New("boom"), "list body"); loaded || seed != "" {
+		t.Fatalf("fetch error → (%q, %v), want (\"\", false)", seed, loaded)
+	}
+	// Document present → seed from the fetched snapshot verbatim.
+	if seed, loaded := interactiveBodySeed("doc body", true, nil, "list body"); !loaded || seed != "doc body" {
+		t.Fatalf("present doc → (%q, %v), want (\"doc body\", true)", seed, loaded)
+	}
+	// Document absent but a list body exists → fall back to it, do NOT show blank.
+	if seed, loaded := interactiveBodySeed("", false, nil, "list body"); !loaded || seed != "list body" {
+		t.Fatalf("absent doc with list body → (%q, %v), want (\"list body\", true)", seed, loaded)
+	}
+	// Document absent and no list body → an empty, editable field is correct.
+	if seed, loaded := interactiveBodySeed("", false, nil, ""); !loaded || seed != "" {
+		t.Fatalf("absent doc no list body → (%q, %v), want (\"\", true)", seed, loaded)
+	}
+}
+
 func TestTrailCreateRejectsUnexpectedArgs(t *testing.T) {
 	t.Parallel()
 	cmd := newTrailCreateCmd()
@@ -1255,6 +1287,21 @@ func TestResolveTrailBodyInput(t *testing.T) {
 			t.Fatalf("got (%q, %v, %v), want (\"\", false, nil)", text, changed, err)
 		}
 	})
+
+	t.Run("--body - with no stdin errors", func(t *testing.T) {
+		t.Parallel()
+		if _, _, err := resolveTrailBodyInput("-", "", true, false, nil); err == nil {
+			t.Fatal("expected an error reading stdin when none is available")
+		}
+	})
+
+	t.Run("--body-file with missing path errors", func(t *testing.T) {
+		t.Parallel()
+		missing := filepath.Join(t.TempDir(), "does-not-exist.md")
+		if _, _, err := resolveTrailBodyInput("", missing, false, true, nil); err == nil {
+			t.Fatal("expected an error reading a nonexistent body file")
+		}
+	})
 }
 
 // patchRecorder is an httptest server that records every PATCH it receives.
@@ -1480,6 +1527,16 @@ func TestResolveTrailUpdateTargetKeepsBranchSeparate(t *testing.T) {
 	}
 	if _, err := resolveTrailUpdateTarget(cmd, []string{"1"}); err == nil {
 		t.Fatal("combining a positional with --branch should error")
+	}
+
+	// --trail and a positional both feed target.selector; supplying both must
+	// still error rather than letting the positional silently clobber --trail.
+	cmd = newTrailUpdateCmd()
+	if err := cmd.Flags().Set("trail", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveTrailUpdateTarget(cmd, []string{"b"}); err == nil {
+		t.Fatal("combining a positional with --trail should error")
 	}
 }
 
