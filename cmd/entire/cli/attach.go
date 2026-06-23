@@ -337,7 +337,7 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 		writeOpts.HasReview = true
 	}
 
-	if err := store.WriteCommitted(ctx, writeOpts); err != nil {
+	if err := store.Write(ctx, cpkg.WriteSession(writeOpts)); err != nil {
 		return fmt.Errorf("failed to write checkpoint: %w", err)
 	}
 

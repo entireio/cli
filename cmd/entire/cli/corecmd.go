@@ -242,13 +242,19 @@ func runCoreJSON(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Cli
 	})
 }
 
+// activeCoreClient builds the control-plane client for active-context
+// commands. A package-level seam (production wiring is coreapi.New) so
+// command-level tests can point the whole command tree at an httptest server
+// without standing up the auth/context/TLS stack.
+var activeCoreClient = func(context.Context) (*coreapi.Client, error) { return coreapi.New() }
+
 // runCore is the variant for commands that don't render JSON (delete,
 // revoke, remove): it runs the same preamble — silence usage, build
 // client, map API errors — and leaves any success output to fn. The client
 // dials the active context's core (coreapi.New); use runCoreForCluster for
 // commands addressed at a specific cluster.
 func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client) error) error {
-	return runCoreClient(cmd, func(context.Context) (*coreapi.Client, error) { return coreapi.New() }, fn)
+	return runCoreClient(cmd, activeCoreClient, fn)
 }
 
 // runCoreForCluster is runCore for resource-provider commands addressed at a

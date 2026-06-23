@@ -12,7 +12,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/redact"
@@ -28,6 +27,9 @@ var (
 	// ErrNoTranscript is returned when a checkpoint exists but has no transcript.
 	ErrNoTranscript = errors.New("no transcript found for checkpoint")
 )
+
+// CheckpointVersionBranchV1 identifies the branch-backed checkpoint metadata format.
+const CheckpointVersionBranchV1 = "branch-v1"
 
 // Checkpoint represents a save point within a session.
 type Checkpoint struct {
@@ -250,10 +252,10 @@ type WriteCommittedOptions struct {
 	// and the deprecated CommittedMetadata.TranscriptLinesAtStart for backward compatibility.
 
 	// TokenUsage contains the token usage for this checkpoint
-	TokenUsage *agent.TokenUsage
+	TokenUsage *types.TokenUsage
 
 	// SkillEvents records explicit native skill signals observed in this session.
-	SkillEvents []agent.SkillEvent
+	SkillEvents []types.SkillEvent
 
 	// SessionMetrics contains hook-provided session metrics (duration, turns, context usage)
 	SessionMetrics *SessionMetrics
@@ -338,7 +340,7 @@ type UpdateCommittedOptions struct {
 	Agent types.AgentType
 
 	// SkillEvents replaces the session metadata skill_events when non-empty.
-	SkillEvents []agent.SkillEvent
+	SkillEvents []types.SkillEvent
 
 	// PrecomputedBlobs, if non-nil, provides chunk blob hashes and the
 	// content-hash blob hash computed once for this transcript. When set,
@@ -469,12 +471,12 @@ type CommittedMetadata struct {
 	TranscriptLinesAtStart int `json:"transcript_lines_at_start,omitempty"`
 
 	// Token usage for this checkpoint
-	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
+	TokenUsage *types.TokenUsage `json:"token_usage,omitempty"`
 
 	// SkillEvents records explicit native skill signals observed in this session.
 	// Consumers use these anchors to collapse skill-related raw transcript events.
 	SkillEventsVersion int                `json:"skill_events_version,omitempty"`
-	SkillEvents        []agent.SkillEvent `json:"skill_events,omitempty"`
+	SkillEvents        []types.SkillEvent `json:"skill_events,omitempty"`
 
 	// SessionMetrics contains hook-provided session metrics (duration, turns, context usage).
 	// Populated for agents that provide these metrics via hooks (e.g., Cursor).
@@ -525,7 +527,10 @@ func (m CommittedMetadata) GetTranscriptStart() int {
 // Paths include the full checkpoint path prefix (e.g., "/a1/b2c3d4e5f6/1/metadata.json").
 // Used in CheckpointSummary.Sessions to map session IDs to their file locations.
 type SessionFilePaths struct {
-	Metadata    string `json:"metadata"`
+	Metadata string `json:"metadata"`
+	// Transcript points at the compact transcript.jsonl when one was
+	// generated, otherwise at the raw full.jsonl. Checkpoints written by
+	// older CLI versions always point at full.jsonl.
 	Transcript  string `json:"transcript,omitempty"`
 	ContentHash string `json:"content_hash,omitempty"`
 	Prompt      string `json:"prompt"`
@@ -542,7 +547,8 @@ type SessionFilePaths struct {
 //	├── metadata.json         # This CheckpointSummary
 //	├── 1/                    # First session
 //	│   ├── metadata.json     # Session-specific CommittedMetadata
-//	│   ├── full.jsonl
+//	│   ├── full.jsonl        # Raw agent transcript
+//	│   ├── transcript.jsonl  # Compact transcript scoped to this checkpoint
 //	│   ├── prompt.txt
 //	│   └── content_hash.txt
 //	├── 2/                    # Second session
@@ -551,13 +557,14 @@ type SessionFilePaths struct {
 //nolint:revive // Named CheckpointSummary to avoid conflict with existing Summary struct
 type CheckpointSummary struct {
 	CLIVersion          string              `json:"cli_version,omitempty"`
+	CheckpointVersion   string              `json:"checkpoint_version,omitempty"`
 	CheckpointID        id.CheckpointID     `json:"checkpoint_id"`
 	Strategy            string              `json:"strategy"`
 	Branch              string              `json:"branch,omitempty"`
 	CheckpointsCount    int                 `json:"checkpoints_count"`
 	FilesTouched        []string            `json:"files_touched"`
 	Sessions            []SessionFilePaths  `json:"sessions"`
-	TokenUsage          *agent.TokenUsage   `json:"token_usage,omitempty"`
+	TokenUsage          *types.TokenUsage   `json:"token_usage,omitempty"`
 	CombinedAttribution *InitialAttribution `json:"combined_attribution,omitempty"`
 
 	// HasReview is the umbrella "any review happened" flag: true when at least
@@ -574,6 +581,16 @@ type CheckpointSummary struct {
 	// be set so callers can keep asking "was this investigated in any way?"
 	// without caring about the variant.
 	HasInvestigation bool `json:"has_investigation,omitempty"`
+}
+
+func normalizeCheckpointSummary(summary *CheckpointSummary) *CheckpointSummary {
+	if summary == nil {
+		return nil
+	}
+	if summary.CheckpointVersion == "" {
+		summary.CheckpointVersion = CheckpointVersionBranchV1
+	}
+	return summary
 }
 
 // SessionMetrics contains hook-provided session metrics from agents that report

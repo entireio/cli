@@ -159,6 +159,12 @@ type Invoker interface {
 	//
 	// GET /audit
 	ListAuditEvents(ctx context.Context) (*ListAuditEventsOutputBody, error)
+	// ListAvailableMirrors invokes listAvailableMirrors operation.
+	//
+	// List GitHub repos the caller could onboard as mirrors.
+	//
+	// GET /mirrors/available
+	ListAvailableMirrors(ctx context.Context, params ListAvailableMirrorsParams) (*ListAvailableMirrorsOutputBody, error)
 	// ListBindings invokes listBindings operation.
 	//
 	// List OIDC bindings.
@@ -2524,6 +2530,108 @@ func (c *Client) sendListAuditEvents(ctx context.Context) (res *ListAuditEventsO
 	defer body.Close()
 
 	result, err := decodeListAuditEventsResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ListAvailableMirrors invokes listAvailableMirrors operation.
+//
+// List GitHub repos the caller could onboard as mirrors.
+//
+// GET /mirrors/available
+func (c *Client) ListAvailableMirrors(ctx context.Context, params ListAvailableMirrorsParams) (*ListAvailableMirrorsOutputBody, error) {
+	res, err := c.sendListAvailableMirrors(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListAvailableMirrors(ctx context.Context, params ListAvailableMirrorsParams) (res *ListAvailableMirrorsOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/mirrors/available"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "owner" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "owner",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Owner.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListAvailableMirrorsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListAvailableMirrorsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListAvailableMirrorsResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

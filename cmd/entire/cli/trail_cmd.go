@@ -127,7 +127,37 @@ func runTrailShow(ctx context.Context, w, errW io.Writer, insecureHTTP bool, sel
 			return err
 		}
 
-		printTrailDetails(w, found.ToMetadata())
+		// Enrich the list result with the detail endpoint, which carries the
+		// rendered description (trail.body_document.text_snapshot) the list
+		// omits, and surface a browser URL. The detail fetch is best-effort:
+		// the core metadata already came from the list, so a detail failure
+		// falls back to the list body with a warning rather than failing.
+		m := found.ToMetadata()
+		webURL := ""
+		// Seed the description from the list body so a failed (or skipped)
+		// detail fetch still shows something; a successful detail fetch
+		// supersedes it with the richer body_document text below.
+		bodyText := found.Body
+		descriptionLoaded := strings.TrimSpace(found.Body) != ""
+		if found.Number > 0 {
+			webURL = trailWebURL(api.BaseURL(), forge, owner, repo, found.Number)
+			if bt, derr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number); derr == nil {
+				// A successful fetch means we authoritatively consulted the
+				// description, but it only supersedes the seeded list body when
+				// it actually carries text: an older/partial server that omits
+				// body_document returns "" here and must not blank out a list
+				// body that is present.
+				descriptionLoaded = true
+				if strings.TrimSpace(bt) != "" {
+					bodyText = bt
+				}
+			} else {
+				// Best-effort: warn but still render metadata + URL (and the
+				// list body) rather than failing the whole command.
+				fmt.Fprintf(errW, "Warning: could not load trail description: %v\n", derr)
+			}
+		}
+		printTrailDetails(w, m, webURL, trailDescriptionForDisplay(bodyText, descriptionLoaded))
 		return nil
 	})
 }
@@ -162,7 +192,7 @@ func resolveTrailBySelector(ctx context.Context, client *api.Client, forge, owne
 	return found, nil
 }
 
-func printTrailDetails(w io.Writer, m *trail.Metadata) {
+func printTrailDetails(w io.Writer, m *trail.Metadata, webURL, bodyText string) {
 	fmt.Fprintf(w, "Trail: %s\n", m.Title)
 	if m.Number > 0 {
 		fmt.Fprintf(w, "  Number:  %d\n", m.Number)
@@ -177,8 +207,8 @@ func printTrailDetails(w io.Writer, m *trail.Metadata) {
 	if strings.TrimSpace(m.Phase) != "" {
 		fmt.Fprintf(w, "  Phase:   %s\n", trailPhaseDisplay(m.Phase))
 	}
-	if m.Body != "" {
-		fmt.Fprintf(w, "  Body:    %s\n", m.Body)
+	if webURL != "" {
+		fmt.Fprintf(w, "  URL:     %s\n", webURL)
 	}
 	if len(m.Labels) > 0 {
 		fmt.Fprintf(w, "  Labels:  %s\n", strings.Join(m.Labels, ", "))
@@ -188,6 +218,62 @@ func printTrailDetails(w io.Writer, m *trail.Metadata) {
 	}
 	fmt.Fprintf(w, "  Created: %s\n", m.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
 	fmt.Fprintf(w, "  Updated: %s\n", m.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"))
+	if strings.TrimSpace(bodyText) != "" {
+		fmt.Fprintf(w, "\nDescription:\n%s\n", bodyText)
+	}
+}
+
+// noTrailDescription is shown by `trail show` when a trail's description loaded
+// successfully but is empty — distinguishing "no description yet" from a load
+// failure (which warns and renders nothing).
+const noTrailDescription = "-- no description provided --"
+
+// trailDescriptionForDisplay returns the text `trail show` renders for the
+// description: the body when present; the placeholder when it loaded but is
+// empty; or "" when it couldn't be loaded (the caller has already warned).
+func trailDescriptionForDisplay(bodyText string, loaded bool) string {
+	if strings.TrimSpace(bodyText) != "" {
+		return bodyText
+	}
+	if loaded {
+		return noTrailDescription
+	}
+	return ""
+}
+
+// trailWebURL builds the browser URL for a trail:
+// <web-origin>/<forge>/<owner>/<repo>/trails/<number>. In production the web app
+// is served from the same origin as the data API, so the API base URL doubles
+// as the web origin. A split local-dev setup (API and frontend on different
+// ports) would point this at the API port rather than the dev frontend.
+func trailWebURL(base, forge, owner, repo string, number int) string {
+	return strings.TrimRight(base, "/") + "/" + forge + "/" + owner + "/" + repo + "/trails/" + strconv.Itoa(number)
+}
+
+// fetchTrailDescription fetches a trail's rendered description text
+// (`trail.body_document.text_snapshot`), which the list endpoint omits, by
+// integer number. It returns only the description — the list result already
+// supplies the metadata — and decodes only the fields it needs, so it is
+// unaffected by the shape of sibling fields like `checkpoints`/`thread`.
+func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, error) {
+	resp, err := client.Get(ctx, trailNumberPath(forge, owner, repo, number))
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch trail detail: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return "", err
+	}
+	var detail struct {
+		Trail api.TrailResource `json:"trail"`
+	}
+	if err := api.DecodeJSON(resp, &detail); err != nil {
+		return "", fmt.Errorf("failed to decode trail detail: %w", err)
+	}
+	if detail.Trail.BodyDocument == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(detail.Trail.BodyDocument.TextSnapshot), nil
 }
 
 func newTrailListCmd() *cobra.Command {

@@ -42,6 +42,15 @@ type TrailResource struct {
 	UnresolvedCount int              `json:"unresolved_count,omitempty"`
 	CheckpointCount int              `json:"checkpoint_count,omitempty"`
 	CommitsAhead    int              `json:"commits_ahead,omitempty"`
+	// BodyDocument carries the trail's description (collaborative editor doc).
+	// The list endpoint omits it; the detail endpoint populates it.
+	BodyDocument *TrailBodyDocument `json:"body_document,omitempty"`
+}
+
+// TrailBodyDocument is the trail's description editor document. TextSnapshot is
+// the rendered plain text the CLI displays.
+type TrailBodyDocument struct {
+	TextSnapshot string `json:"text_snapshot"`
 }
 
 // ToMetadata converts a TrailResource to a trail.Metadata for display.

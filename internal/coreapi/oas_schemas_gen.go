@@ -240,6 +240,200 @@ func (s *AuditEventMetadata) init() AuditEventMetadata {
 	return m
 }
 
+// Ref: #/components/schemas/AvailableMirror
+type AvailableMirror struct {
+	// Caller's effective GitHub access: read, write, or admin.
+	Access     AvailableMirrorAccess `json:"access"`
+	IsArchived OptBool               `json:"isArchived"`
+	IsPrivate  OptBool               `json:"isPrivate"`
+	Owner      string                `json:"owner"`
+	Repo       string                `json:"repo"`
+	// Available (can onboard), mirrored (already mirrored), or owner-only (personal repo of another
+	// user).
+	Status          AvailableMirrorStatus `json:"status"`
+	AdditionalProps AvailableMirrorAdditional
+}
+
+// GetAccess returns the value of Access.
+func (s *AvailableMirror) GetAccess() AvailableMirrorAccess {
+	return s.Access
+}
+
+// GetIsArchived returns the value of IsArchived.
+func (s *AvailableMirror) GetIsArchived() OptBool {
+	return s.IsArchived
+}
+
+// GetIsPrivate returns the value of IsPrivate.
+func (s *AvailableMirror) GetIsPrivate() OptBool {
+	return s.IsPrivate
+}
+
+// GetOwner returns the value of Owner.
+func (s *AvailableMirror) GetOwner() string {
+	return s.Owner
+}
+
+// GetRepo returns the value of Repo.
+func (s *AvailableMirror) GetRepo() string {
+	return s.Repo
+}
+
+// GetStatus returns the value of Status.
+func (s *AvailableMirror) GetStatus() AvailableMirrorStatus {
+	return s.Status
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *AvailableMirror) GetAdditionalProps() AvailableMirrorAdditional {
+	return s.AdditionalProps
+}
+
+// SetAccess sets the value of Access.
+func (s *AvailableMirror) SetAccess(val AvailableMirrorAccess) {
+	s.Access = val
+}
+
+// SetIsArchived sets the value of IsArchived.
+func (s *AvailableMirror) SetIsArchived(val OptBool) {
+	s.IsArchived = val
+}
+
+// SetIsPrivate sets the value of IsPrivate.
+func (s *AvailableMirror) SetIsPrivate(val OptBool) {
+	s.IsPrivate = val
+}
+
+// SetOwner sets the value of Owner.
+func (s *AvailableMirror) SetOwner(val string) {
+	s.Owner = val
+}
+
+// SetRepo sets the value of Repo.
+func (s *AvailableMirror) SetRepo(val string) {
+	s.Repo = val
+}
+
+// SetStatus sets the value of Status.
+func (s *AvailableMirror) SetStatus(val AvailableMirrorStatus) {
+	s.Status = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *AvailableMirror) SetAdditionalProps(val AvailableMirrorAdditional) {
+	s.AdditionalProps = val
+}
+
+// Caller's effective GitHub access: read, write, or admin.
+type AvailableMirrorAccess string
+
+const (
+	AvailableMirrorAccessRead  AvailableMirrorAccess = "read"
+	AvailableMirrorAccessWrite AvailableMirrorAccess = "write"
+	AvailableMirrorAccessAdmin AvailableMirrorAccess = "admin"
+)
+
+// AllValues returns all AvailableMirrorAccess values.
+func (AvailableMirrorAccess) AllValues() []AvailableMirrorAccess {
+	return []AvailableMirrorAccess{
+		AvailableMirrorAccessRead,
+		AvailableMirrorAccessWrite,
+		AvailableMirrorAccessAdmin,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s AvailableMirrorAccess) MarshalText() ([]byte, error) {
+	switch s {
+	case AvailableMirrorAccessRead:
+		return []byte(s), nil
+	case AvailableMirrorAccessWrite:
+		return []byte(s), nil
+	case AvailableMirrorAccessAdmin:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *AvailableMirrorAccess) UnmarshalText(data []byte) error {
+	switch AvailableMirrorAccess(data) {
+	case AvailableMirrorAccessRead:
+		*s = AvailableMirrorAccessRead
+		return nil
+	case AvailableMirrorAccessWrite:
+		*s = AvailableMirrorAccessWrite
+		return nil
+	case AvailableMirrorAccessAdmin:
+		*s = AvailableMirrorAccessAdmin
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type AvailableMirrorAdditional map[string]jx.Raw
+
+func (s *AvailableMirrorAdditional) init() AvailableMirrorAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Available (can onboard), mirrored (already mirrored), or owner-only (personal repo of another
+// user).
+type AvailableMirrorStatus string
+
+const (
+	AvailableMirrorStatusAvailable AvailableMirrorStatus = "available"
+	AvailableMirrorStatusMirrored  AvailableMirrorStatus = "mirrored"
+	AvailableMirrorStatusOwnerOnly AvailableMirrorStatus = "owner-only"
+)
+
+// AllValues returns all AvailableMirrorStatus values.
+func (AvailableMirrorStatus) AllValues() []AvailableMirrorStatus {
+	return []AvailableMirrorStatus{
+		AvailableMirrorStatusAvailable,
+		AvailableMirrorStatusMirrored,
+		AvailableMirrorStatusOwnerOnly,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s AvailableMirrorStatus) MarshalText() ([]byte, error) {
+	switch s {
+	case AvailableMirrorStatusAvailable:
+		return []byte(s), nil
+	case AvailableMirrorStatusMirrored:
+		return []byte(s), nil
+	case AvailableMirrorStatusOwnerOnly:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *AvailableMirrorStatus) UnmarshalText(data []byte) error {
+	switch AvailableMirrorStatus(data) {
+	case AvailableMirrorStatusAvailable:
+		*s = AvailableMirrorStatusAvailable
+		return nil
+	case AvailableMirrorStatusMirrored:
+		*s = AvailableMirrorStatusMirrored
+		return nil
+	case AvailableMirrorStatusOwnerOnly:
+		*s = AvailableMirrorStatusOwnerOnly
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/BatchLookupInputBody
 type BatchLookupInputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -2506,6 +2700,55 @@ func (s *ListAuditEventsOutputBody) SetAdditionalProps(val ListAuditEventsOutput
 type ListAuditEventsOutputBodyAdditional map[string]jx.Raw
 
 func (s *ListAuditEventsOutputBodyAdditional) init() ListAuditEventsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ListAvailableMirrorsOutputBody
+type ListAvailableMirrorsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI            `json:"$schema"`
+	Available       []AvailableMirror `json:"available"`
+	AdditionalProps ListAvailableMirrorsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListAvailableMirrorsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAvailable returns the value of Available.
+func (s *ListAvailableMirrorsOutputBody) GetAvailable() []AvailableMirror {
+	return s.Available
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListAvailableMirrorsOutputBody) GetAdditionalProps() ListAvailableMirrorsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListAvailableMirrorsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAvailable sets the value of Available.
+func (s *ListAvailableMirrorsOutputBody) SetAvailable(val []AvailableMirror) {
+	s.Available = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListAvailableMirrorsOutputBody) SetAdditionalProps(val ListAvailableMirrorsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListAvailableMirrorsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListAvailableMirrorsOutputBodyAdditional) init() ListAvailableMirrorsOutputBodyAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}

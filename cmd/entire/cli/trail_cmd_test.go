@@ -290,6 +290,65 @@ func TestTrailNumberPath(t *testing.T) {
 	}
 }
 
+func TestTrailWebURL(t *testing.T) {
+	t.Parallel()
+	want := "https://entire.io/gh/acme/repo/trails/575"
+	if got := trailWebURL("https://entire.io", "gh", "acme", "repo", 575); got != want {
+		t.Fatalf("trailWebURL = %q, want %q", got, want)
+	}
+	// A trailing slash on the base must not double up.
+	if got := trailWebURL("https://entire.io/", "gh", "acme", "repo", 575); got != want {
+		t.Fatalf("trailWebURL(trailing slash) = %q, want %q", got, want)
+	}
+}
+
+func TestTrailDescriptionForDisplay(t *testing.T) {
+	t.Parallel()
+	if got := trailDescriptionForDisplay("the body", true); got != "the body" {
+		t.Fatalf("non-empty body: got %q, want %q", got, "the body")
+	}
+	if got := trailDescriptionForDisplay("the body", false); got != "the body" {
+		t.Fatalf("non-empty body (not loaded): got %q, want %q", got, "the body")
+	}
+	// Loaded but empty/whitespace → explicit placeholder.
+	if got := trailDescriptionForDisplay("", true); got != noTrailDescription {
+		t.Fatalf("loaded+empty: got %q, want %q", got, noTrailDescription)
+	}
+	if got := trailDescriptionForDisplay("   ", true); got != noTrailDescription {
+		t.Fatalf("loaded+whitespace: got %q, want %q", got, noTrailDescription)
+	}
+	// Not loaded (fetch failed) → nothing (the caller already warned).
+	if got := trailDescriptionForDisplay("", false); got != "" {
+		t.Fatalf("not loaded+empty: got %q, want empty", got)
+	}
+}
+
+func TestFetchTrailDescription_ReadsNestedBodyDocument(t *testing.T) {
+	t.Parallel()
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		// Regression guard: body_document is nested under `trail`, and
+		// `checkpoints` is a bare array the decode must ignore.
+		if _, err := io.WriteString(w, `{"trail":{"number":777,"branch":"feat/x","body_document":{"text_snapshot":"the intent text"}},"checkpoints":[],"has_write_permission":true}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	bodyText, err := fetchTrailDescription(t.Context(), client, "gh", "acme", "repo", 777)
+	if err != nil {
+		t.Fatalf("fetchTrailDescription: %v", err)
+	}
+	if want := "/api/v1/trails/gh/acme/repo/777"; gotPath != want {
+		t.Fatalf("path = %q, want %q", gotPath, want)
+	}
+	if bodyText != "the intent text" {
+		t.Fatalf("bodyText = %q, want %q", bodyText, "the intent text")
+	}
+}
+
 func TestResolveCreateBranch(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -839,10 +898,32 @@ func TestPrintTrailDetailsOmitsWhitespacePhase(t *testing.T) {
 		Base:   "main",
 		Status: trail.StatusOpen,
 		Phase:  "   ",
-	})
+	}, "", "")
 
 	if text := out.String(); strings.Contains(text, "Phase:") {
 		t.Fatalf("expected whitespace phase to be omitted, got:\n%s", text)
+	}
+}
+
+func TestPrintTrailDetailsRendersURLAndDescription(t *testing.T) {
+	t.Parallel()
+	m := &trail.Metadata{Title: "T", Branch: "feat/a", Base: "main", Status: trail.StatusOpen}
+
+	var out bytes.Buffer
+	printTrailDetails(&out, m, "https://entire.io/gh/acme/repo/trails/5", "line one\nline two")
+	text := out.String()
+	if !strings.Contains(text, "URL:") || !strings.Contains(text, "https://entire.io/gh/acme/repo/trails/5") {
+		t.Fatalf("expected a URL line, got:\n%s", text)
+	}
+	if !strings.Contains(text, "Description:") || !strings.Contains(text, "line one\nline two") {
+		t.Fatalf("expected a Description block, got:\n%s", text)
+	}
+
+	// Empty URL and whitespace-only body are omitted.
+	out.Reset()
+	printTrailDetails(&out, m, "", "   ")
+	if text := out.String(); strings.Contains(text, "URL:") || strings.Contains(text, "Description:") {
+		t.Fatalf("expected URL/Description omitted for empty values, got:\n%s", text)
 	}
 }
 

@@ -29,6 +29,7 @@ const (
 	GrantRepoAccessOperation               OperationName = "GrantRepoAccess"
 	GrantServiceAccountAccessOperation     OperationName = "GrantServiceAccountAccess"
 	ListAuditEventsOperation               OperationName = "ListAuditEvents"
+	ListAvailableMirrorsOperation          OperationName = "ListAvailableMirrors"
 	ListBindingsOperation                  OperationName = "ListBindings"
 	ListMirrorCollaboratorsOperation       OperationName = "ListMirrorCollaborators"
 	ListMirrorsOperation                   OperationName = "ListMirrors"

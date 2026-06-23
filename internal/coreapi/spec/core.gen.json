@@ -71,6 +71,48 @@
         ],
         "type": "object"
       },
+      "AvailableMirror": {
+        "additionalProperties": true,
+        "properties": {
+          "access": {
+            "description": "Caller's effective GitHub access: read, write, or admin.",
+            "enum": [
+              "read",
+              "write",
+              "admin"
+            ],
+            "type": "string"
+          },
+          "isArchived": {
+            "type": "boolean"
+          },
+          "isPrivate": {
+            "type": "boolean"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "status": {
+            "description": "available (can onboard), mirrored (already mirrored), or owner-only (personal repo of another user).",
+            "enum": [
+              "available",
+              "mirrored",
+              "owner-only"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "access",
+          "status"
+        ],
+        "type": "object"
+      },
       "BatchLookupInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -862,6 +904,30 @@
         },
         "required": [
           "events"
+        ],
+        "type": "object"
+      },
+      "ListAvailableMirrorsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListAvailableMirrorsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "available": {
+            "items": {
+              "$ref": "#/components/schemas/AvailableMirror"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "available"
         ],
         "type": "object"
       },
@@ -2366,6 +2432,57 @@
           }
         ],
         "summary": "Create GitHub mirror",
+        "tags": [
+          "mirrors"
+        ]
+      }
+    },
+    "/mirrors/available": {
+      "get": {
+        "operationId": "listAvailableMirrors",
+        "parameters": [
+          {
+            "description": "Optional: restrict to repos with this owner login.",
+            "explode": false,
+            "in": "query",
+            "name": "owner",
+            "schema": {
+              "description": "Optional: restrict to repos with this owner login.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListAvailableMirrorsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List GitHub repos the caller could onboard as mirrors",
         "tags": [
           "mirrors"
         ]

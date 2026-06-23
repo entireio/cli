@@ -56,3 +56,6 @@ func (s *GitStore) setPrimaryRef(hash plumbing.Hash) error {
 	}
 	return nil
 }
+
+// Compile-time check: GitStore satisfies the unified write surface.
+var _ Writer = (*GitStore)(nil)

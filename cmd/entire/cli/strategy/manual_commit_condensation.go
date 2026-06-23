@@ -290,7 +290,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
-	if err := store.WriteCommitted(writeCtx, writeOpts); err != nil {
+	if err := store.Write(writeCtx, cpkg.WriteSession(writeOpts)); err != nil {
 		writeCommittedSpan.RecordError(err)
 		writeCommittedSpan.End()
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)

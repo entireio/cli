@@ -35,6 +35,19 @@ func mirrorRow(m coreapi.Mirror) []string {
 	return []string{repo, cloneURL, private}
 }
 
+// availableMirrorColumns is the view of a repo you *could* mirror: the
+// scannable repo name, your effective GitHub access, and whether it's
+// onboardable. STATUS is "available" (run `entire repo mirror create` to
+// onboard), "mirrored" (already done — `entire repo mirror list` shows the
+// clone URL), or "owner-only" (a personal repo of another user; only its
+// owner may mirror it). No clone URL column: an un-onboarded repo doesn't
+// have one yet.
+var availableMirrorColumns = []string{"REPO", "ACCESS", "STATUS"}
+
+func availableMirrorRow(m coreapi.AvailableMirror) []string {
+	return []string{m.Owner + "/" + m.Repo, string(m.Access), string(m.Status)}
+}
+
 // defaultClusterHost is the cluster the mirror commands target when the
 // caller omits the <cluster-host> argument. A pragmatic single-region
 // default for now — once multi-cluster selection lands this should come
@@ -234,11 +247,32 @@ func finishMirrorCreate(out, errW io.Writer, created *coreapi.CreatedMirror, noW
 
 func newRepoMirrorListCmd() *cobra.Command {
 	var cluster, provider, owner string
+	var showAvailable bool
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List mirrors you can see",
+		Short: "List mirrors you can see (or, with --show-available, repos you could mirror)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if showAvailable {
+				return runCoreList(cmd, availableMirrorColumns, availableMirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.AvailableMirror, error) {
+					// Computed live from GitHub using your own login, so name the
+					// core being dialled (same rationale as the existing-mirror
+					// banner). --cluster/--provider don't apply here: the
+					// onboardable set is cluster-agnostic and GitHub-only.
+					if !jsonRequested(cmd) {
+						fmt.Fprintf(cmd.ErrOrStderr(), "Listing repos you could mirror, via %s\n", c.CoreOrigin())
+					}
+					var params coreapi.ListAvailableMirrorsParams
+					if owner != "" {
+						params.Owner = coreapi.NewOptString(owner)
+					}
+					out, err := c.ListAvailableMirrors(ctx, params)
+					if err != nil {
+						return nil, err
+					}
+					return out.Available, nil
+				})
+			}
 			return runCoreList(cmd, mirrorColumns, mirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Mirror, error) {
 				// mirror list is identity-scoped: it shows the mirrors visible
 				// from the active login's federation, so naming that login server
@@ -274,6 +308,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cluster, "cluster", "", "filter by cluster public host")
 	cmd.Flags().StringVar(&provider, "provider", "", "filter by upstream provider (e.g. github)")
 	cmd.Flags().StringVar(&owner, "owner", "", "filter by upstream owner login")
+	cmd.Flags().BoolVar(&showAvailable, "show-available", false, "instead of existing mirrors, list GitHub repos you could onboard as mirrors (ignores --cluster/--provider)")
 	return cmd
 }
 
