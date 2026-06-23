@@ -55,7 +55,7 @@ func resolveOpenRefs(ctx context.Context, opts OpenOptions) CommittedRefs {
 }
 
 // Temporary returns the git-backed temporary shadow-branch store.
-func (s *Stores) Temporary() TemporaryStore { return s.temporary }
+func (s *Stores) Temporary() TemporaryStore { return s.temporary } //nolint:ireturn // temporary store capability is the abstraction boundary
 
 // Refs returns the resolved committed-ref topology.
 func (s *Stores) Refs() CommittedRefs { return s.refs }
