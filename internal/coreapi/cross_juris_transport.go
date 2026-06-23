@@ -18,13 +18,28 @@ import (
 	"github.com/entireio/cli/internal/entireclient/httputil"
 )
 
+// controlPlaneRequestTimeout caps a whole control-plane HTTP exchange —
+// connect, TLS, headers, body, and any 421-follow / token-exchange retry —
+// so a draining or black-holed core (one that accepts the connection but
+// never answers) fails fast instead of hanging on the OS TCP timeout. The
+// connect step is separately bounded by httpclient.DefaultDialTimeout.
+const controlPlaneRequestTimeout = 30 * time.Second
+
 // newCrossJurisHTTPClient builds the *http.Client the control-plane
 // (coreapi) client dials with. Its transport follows cross-jurisdiction
 // 421 redirects and runs the RFC 8693 token exchange a foreign core
 // requires, so a home-region login JWT can operate on a resource whose
 // home jurisdiction is another region. Inert for same-jurisdiction calls.
 func newCrossJurisHTTPClient() *http.Client {
+	return newCrossJurisHTTPClientWithTimeout(controlPlaneRequestTimeout)
+}
+
+// newCrossJurisHTTPClientWithTimeout is newCrossJurisHTTPClient with an
+// explicit overall timeout, so tests can exercise the deadline on a short
+// budget.
+func newCrossJurisHTTPClientWithTimeout(timeout time.Duration) *http.Client {
 	return &http.Client{
+		Timeout:   timeout,
 		Transport: newCrossJurisRoundTripper(httpclient.NewTransport(false)),
 	}
 }
