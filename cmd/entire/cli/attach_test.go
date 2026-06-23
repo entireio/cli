@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -65,6 +66,39 @@ func TestAttach_TranscriptNotFound(t *testing.T) {
 	err := runAttach(context.Background(), &out, "nonexistent-session-id", agent.AgentNameClaudeCode, attachOptions{Force: true})
 	if err == nil {
 		t.Fatal("expected error for missing transcript")
+	}
+}
+
+func TestAttachRejectsUnsupportedCheckpointWritePolicy(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	repoRoot := mustGetwd(t)
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := checkpointpolicy.WriteLocal(context.Background(), repo, plumbing.ZeroHash, checkpointpolicy.Policy{
+		CheckpointVersion:    "refs-v1",
+		CheckpointMinVersion: "branch-v1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionID := "test-attach-policy-unsupported"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"create a file"},"uuid":"uuid-1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done"}]},"uuid":"uuid-2"}
+`)
+
+	var out bytes.Buffer
+	err = runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
+	if err == nil {
+		t.Fatal("expected unsupported checkpoint policy error")
+	}
+	if !strings.Contains(err.Error(), `checkpoint_version "refs-v1"`) {
+		t.Fatalf("error = %v, want checkpoint policy version", err)
+	}
+	if _, refErr := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true); refErr == nil {
+		t.Fatal("metadata branch exists after rejected attach")
 	}
 }
 

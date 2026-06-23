@@ -228,6 +228,10 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 		return nil
 	}
 
+	if err := ensureCommittedCheckpointWritePolicy(ctx, repo); err != nil {
+		return err
+	}
+
 	// Resolve agent and transcript path.
 	ag, transcriptPath, err := resolveAgentAndTranscript(logCtx, w, sessionID, agentName, existingState)
 	if err != nil {

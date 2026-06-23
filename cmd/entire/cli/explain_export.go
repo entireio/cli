@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
@@ -265,6 +266,9 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 	if err != nil {
 		return fmt.Errorf("failed to read checkpoint: %w", err)
 	}
+	if err := checkpointpolicy.EnsureCanReadVersion(cpID.String(), summary.CheckpointVersion); err != nil {
+		return fmt.Errorf("check checkpoint version: %w", err)
+	}
 
 	idx, err := resolveSessionIndex(summary, opts.sessionIndex)
 	if err != nil {
@@ -358,6 +362,9 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
 	if err != nil {
 		return fmt.Errorf("failed to read checkpoint: %w", err)
+	}
+	if err := checkpointpolicy.EnsureCanReadVersion(cpID.String(), summary.CheckpointVersion); err != nil {
+		return fmt.Errorf("check checkpoint version: %w", err)
 	}
 
 	envelope, failedSessions := buildCheckpointJSONEnvelope(ctx, store, summary, cpID)

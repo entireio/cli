@@ -571,9 +571,12 @@ func TestResolveLatestCheckpoint(t *testing.T) {
 	// simulating git CLI squash merge trailer order.
 	reverseOrderIDs := []id.CheckpointID{cpID3, cpID2, cpID1}
 	reader := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	latest, err := resolveLatestCheckpoint(context.Background(), reader, reverseOrderIDs)
+	latest, found, err := resolveLatestCheckpoint(context.Background(), reader, reverseOrderIDs)
 	if err != nil {
 		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
+	}
+	if !found {
+		t.Fatal("resolveLatestCheckpoint() found = false")
 	}
 
 	// Should return the newest checkpoint regardless of input order
@@ -583,9 +586,12 @@ func TestResolveLatestCheckpoint(t *testing.T) {
 
 	// Also verify with chronological order
 	chronologicalIDs := []id.CheckpointID{cpID1, cpID2, cpID3}
-	latest2, err := resolveLatestCheckpoint(context.Background(), reader, chronologicalIDs)
+	latest2, found, err := resolveLatestCheckpoint(context.Background(), reader, chronologicalIDs)
 	if err != nil {
 		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
+	}
+	if !found {
+		t.Fatal("resolveLatestCheckpoint() found = false")
 	}
 	if latest2.CheckpointID.String() != cpID3.String() {
 		t.Errorf("resolveLatestCheckpoint() = %s, want newest %s", latest2.CheckpointID, cpID3)
@@ -614,9 +620,12 @@ func TestResolveLatestCheckpointUsesCheckpointInfoReader(t *testing.T) {
 		},
 	}
 
-	latest, err := resolveLatestCheckpoint(context.Background(), reader, []id.CheckpointID{oldID, newID})
+	latest, found, err := resolveLatestCheckpoint(context.Background(), reader, []id.CheckpointID{oldID, newID})
 	if err != nil {
 		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
+	}
+	if !found {
+		t.Fatal("resolveLatestCheckpoint() found = false")
 	}
 	if latest.CheckpointID != newID {
 		t.Errorf("resolveLatestCheckpoint() = %s, want %s", latest.CheckpointID, newID)
@@ -716,9 +725,12 @@ func TestResolveLatestCheckpointUsesV1Checkpoint(t *testing.T) {
 
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 
-	latest, err := resolveLatestCheckpoint(context.Background(), store, []id.CheckpointID{targetID})
+	latest, found, err := resolveLatestCheckpoint(context.Background(), store, []id.CheckpointID{targetID})
 	if err != nil {
 		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
+	}
+	if !found {
+		t.Fatal("resolveLatestCheckpoint() found = false")
 	}
 	if latest.CheckpointID != targetID {
 		t.Errorf("resolveLatestCheckpoint() = %s, want %s", latest.CheckpointID, targetID)

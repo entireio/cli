@@ -38,6 +38,11 @@ func ResolveTarget(ctx context.Context, baseRemote string) (Target, error) {
 	if err != nil {
 		return Target{}, fmt.Errorf("resolve worktree root: %w", err)
 	}
+	if target, dedicated, err := remote.ConfiguredURL(ctx, baseRemote, dir); err != nil {
+		return Target{}, fmt.Errorf("resolve checkpoint remote URL: %w", err)
+	} else if dedicated {
+		return Target{Remote: target, Label: "checkpoint remote", Dir: dir}, nil
+	}
 	target, dedicated, err := remote.PushURL(ctx, baseRemote)
 	if err != nil {
 		return Target{}, fmt.Errorf("resolve checkpoint push URL: %w", err)

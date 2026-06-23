@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -995,7 +996,18 @@ func TestGenerateCheckpointAISummary_PreservesClaudeErrorWhenCtxIsDone(t *testin
 }
 
 // Not parallel: uses t.Chdir() and package-level var stubs.
-func TestGenerateCheckpointSummary_AdvancesV1Metadata(t *testing.T) {
+type generateSummaryFixture struct {
+	ctx       context.Context
+	repo      *git.Repository
+	store     checkpoint.CommittedStore
+	cpID      id.CheckpointID
+	cpSummary *checkpoint.CheckpointSummary
+	content   *checkpoint.SessionContent
+	v1Hash    plumbing.Hash
+}
+
+func setupGenerateSummaryFixture(t *testing.T) generateSummaryFixture {
+	t.Helper()
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -1029,6 +1041,20 @@ func TestGenerateCheckpointSummary_AdvancesV1Metadata(t *testing.T) {
 	v1Before, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, err)
 
+	return generateSummaryFixture{
+		ctx:       ctx,
+		repo:      repo,
+		store:     store,
+		cpID:      cpID,
+		cpSummary: cpSummary,
+		content:   content,
+		v1Hash:    v1Before.Hash(),
+	}
+}
+
+func stubSummaryProviderForTest(t *testing.T) {
+	t.Helper()
+
 	origLoad := loadSummarySettings
 	origGet := getSummaryAgent
 	origCLI := isSummaryCLIAvailable
@@ -1054,13 +1080,57 @@ func TestGenerateCheckpointSummary_AdvancesV1Metadata(t *testing.T) {
 	generateTranscriptSummary = func(context.Context, redact.RedactedBytes, []string, types.AgentType, summarize.Generator) (*checkpoint.Summary, error) {
 		return &checkpoint.Summary{Intent: "i", Outcome: "o"}, nil
 	}
+}
+
+func TestGenerateCheckpointSummary_AdvancesV1Metadata(t *testing.T) {
+	fixture := setupGenerateSummaryFixture(t)
+	stubSummaryProviderForTest(t)
 
 	var stdout, stderr bytes.Buffer
-	require.NoError(t, generateCheckpointSummary(ctx, &stdout, &stderr, stores.Primary, cpID, cpSummary, content, false, 0))
+	require.NoError(t, generateCheckpointSummary(
+		fixture.ctx,
+		&stdout,
+		&stderr,
+		fixture.repo,
+		fixture.store,
+		fixture.cpID,
+		fixture.cpSummary,
+		fixture.content,
+		false,
+		0,
+	))
 
-	v1After, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	v1After, err := fixture.repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, err)
-	require.NotEqual(t, v1Before.Hash(), v1After.Hash(), "v1 metadata branch must advance after UpdateSummary")
+	require.NotEqual(t, fixture.v1Hash, v1After.Hash(), "v1 metadata branch must advance after UpdateSummary")
+}
+
+func TestGenerateCheckpointSummaryRejectsUnsupportedCheckpointWritePolicy(t *testing.T) {
+	fixture := setupGenerateSummaryFixture(t)
+	_, err := checkpointpolicy.WriteLocal(fixture.ctx, fixture.repo, plumbing.ZeroHash, checkpointpolicy.Policy{
+		CheckpointVersion:    "refs-v1",
+		CheckpointMinVersion: "branch-v1",
+	})
+	require.NoError(t, err)
+
+	var stdout, stderr bytes.Buffer
+	err = generateCheckpointSummary(
+		fixture.ctx,
+		&stdout,
+		&stderr,
+		fixture.repo,
+		fixture.store,
+		fixture.cpID,
+		fixture.cpSummary,
+		fixture.content,
+		false,
+		0,
+	)
+	require.ErrorContains(t, err, `checkpoint_version "refs-v1"`)
+
+	v1After, refErr := fixture.repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, refErr)
+	require.Equal(t, fixture.v1Hash, v1After.Hash(), "v1 metadata branch must not advance after rejected summary write")
 }
 
 func TestGenerateCheckpointAISummary_ClampsLongParentDeadlineToDefaultTimeout(t *testing.T) {

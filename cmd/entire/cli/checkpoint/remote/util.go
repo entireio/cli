@@ -186,27 +186,7 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 		}
 		return "", true, fmt.Errorf("no push URL found: %w", err)
 	}
-	if strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)) != "" && isDerivableProtocol(pushInfo.Protocol) {
-		// Coerce a derivable (ssh/https) remote to HTTPS so the token applies,
-		// keeping the host so enterprise installations stay on their own host.
-		// A non-derivable protocol (e.g. entire://) carries a host that isn't a
-		// usable HTTPS host, so it's left untouched and falls through to the
-		// providerCheckpointURL fallback below.
-		//
-		// Keep the port only when the source was already HTTPS. SSH ports
-		// (e.g., :2222) don't map to HTTPS ports on the same host.
-		port := ""
-		if pushInfo.Protocol == ProtocolHTTPS {
-			port = pushInfo.Port
-		}
-		pushInfo = &Info{
-			Protocol: ProtocolHTTPS,
-			Host:     pushInfo.Host,
-			Port:     port,
-			Owner:    pushInfo.Owner,
-			Repo:     pushInfo.Repo,
-		}
-	}
+	pushInfo = checkpointTokenTransport(pushInfo)
 
 	checkpointOwner := config.Owner()
 	if pushInfo.Owner != "" && checkpointOwner != "" && !strings.EqualFold(pushInfo.Owner, checkpointOwner) {
@@ -237,6 +217,38 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 	}
 
 	return pushURL, true, nil
+}
+
+// ConfiguredURL returns the configured checkpoint_remote URL without the
+// push-owner fallback used by PushURL. The boolean reports whether a
+// checkpoint_remote is configured.
+func ConfiguredURL(ctx context.Context, remoteName, dir string) (string, bool, error) {
+	s, err := settings.Load(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("load settings: %w", err)
+	}
+	config := s.GetCheckpointRemote()
+	if config == nil {
+		return "", false, nil
+	}
+
+	remoteURL, remoteErr := GetRemoteURLInDir(ctx, dir, remoteName)
+	if remoteErr == nil {
+		info, parseErr := ParseURL(remoteURL)
+		if parseErr == nil {
+			if checkpointURL, deriveErr := deriveCheckpointURLFromInfo(checkpointTokenTransport(info), config); deriveErr == nil {
+				return checkpointURL, true, nil
+			}
+		}
+	}
+
+	if providerURL, ok := resolveProviderCheckpointURL(config, remoteName, dir); ok {
+		return providerURL, true, nil
+	}
+	if remoteErr != nil {
+		return "", true, fmt.Errorf("get %s remote URL: %w", remoteName, remoteErr)
+	}
+	return "", true, fmt.Errorf("resolve checkpoint remote URL from %s", remoteName)
 }
 
 // Configured reports whether a structured checkpoint_remote is configured.
@@ -291,6 +303,24 @@ func DeriveCheckpointURL(pushRemoteURL string, config *settings.CheckpointRemote
 // helper scheme like entire:// or a local file://).
 func isDerivableProtocol(protocol string) bool {
 	return protocol == ProtocolSSH || protocol == ProtocolHTTPS
+}
+
+func checkpointTokenTransport(info *Info) *Info {
+	if strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)) == "" || !isDerivableProtocol(info.Protocol) {
+		return info
+	}
+
+	port := ""
+	if info.Protocol == ProtocolHTTPS {
+		port = info.Port
+	}
+	return &Info{
+		Protocol: ProtocolHTTPS,
+		Host:     info.Host,
+		Port:     port,
+		Owner:    info.Owner,
+		Repo:     info.Repo,
+	}
 }
 
 func deriveCheckpointURLFromInfo(info *Info, config *settings.CheckpointRemoteConfig) (string, error) {

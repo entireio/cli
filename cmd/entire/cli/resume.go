@@ -215,6 +215,9 @@ func resumeByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID i
 
 	metadata, err := readCheckpointInfoFromStore(ctx, store, checkpointID)
 	if err != nil {
+		if checkpointpolicy.IsUnsupportedVersion(err) {
+			return err
+		}
 		logging.Debug(ctx, "resume by checkpoint: metadata read failed, checking remote",
 			slog.String("checkpoint_id", checkpointID.String()),
 			slog.String("error", err.Error()),
@@ -284,12 +287,14 @@ func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName 
 
 	// Multiple checkpoints (squash merge): resolve latest by CreatedAt timestamp.
 	if len(result.checkpointIDs) > 1 {
-		latestMetadata, err := resolveLatestCheckpoint(ctx, store, result.checkpointIDs)
+		latestMetadata, found, err := resolveLatestCheckpoint(ctx, store, result.checkpointIDs)
 		if err != nil {
+			return err
+		}
+		if !found {
 			// No metadata available — nothing to resume from
 			logging.Warn(logCtx, "resolveLatestCheckpoint failed",
 				slog.Int("checkpoint_count", len(result.checkpointIDs)),
-				slog.String("error", err.Error()),
 			)
 			fmt.Fprintf(w, "Found %d checkpoints for commit %s but metadata is not available\n",
 				len(result.checkpointIDs), result.commitHash[:7])
@@ -307,6 +312,9 @@ func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName 
 		if storeErr == nil {
 			metadata = storeInfo
 		} else {
+			if checkpointpolicy.IsUnsupportedVersion(storeErr) {
+				return storeErr
+			}
 			logging.Debug(ctx, "checkpoint store metadata read failed",
 				slog.String("checkpoint_id", checkpointID.String()),
 				slog.String("error", storeErr.Error()),
@@ -330,11 +338,14 @@ func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName 
 
 // resolveLatestCheckpoint reads metadata for each checkpoint ID and returns
 // the checkpoint with the latest CreatedAt.
-func resolveLatestCheckpoint(ctx context.Context, store checkpointInfoReader, checkpointIDs []id.CheckpointID) (*strategy.CheckpointInfo, error) {
+func resolveLatestCheckpoint(ctx context.Context, store checkpointInfoReader, checkpointIDs []id.CheckpointID) (*strategy.CheckpointInfo, bool, error) {
 	infoMap := make(map[id.CheckpointID]strategy.CheckpointInfo, len(checkpointIDs))
 	for _, cpID := range checkpointIDs {
 		metadata, readErr := readCheckpointInfoFromStore(ctx, store, cpID)
 		if readErr != nil {
+			if checkpointpolicy.IsUnsupportedVersion(readErr) {
+				return nil, false, readErr
+			}
 			logging.Debug(ctx, "resolveLatestCheckpoint: checkpoint metadata read failed",
 				slog.String("checkpoint_id", cpID.String()),
 				slog.String("error", readErr.Error()),
@@ -345,9 +356,9 @@ func resolveLatestCheckpoint(ctx context.Context, store checkpointInfoReader, ch
 	}
 	latest, found := strategy.ResolveLatestCheckpointFromMap(checkpointIDs, infoMap)
 	if !found {
-		return nil, errors.New("no checkpoint metadata found")
+		return nil, false, nil
 	}
-	return &latest, nil
+	return &latest, true, nil
 }
 
 type checkpointInfoReader interface {

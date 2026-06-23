@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -330,9 +331,12 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 	var restored bool
 	if !selectedPoint.CheckpointID.IsEmpty() {
 		// Try checkpoint storage first for committed checkpoints
-		if returnedSessionID, err := restoreSessionTranscriptFromStrategy(ctx, selectedPoint.CheckpointID, sessionID, agent); err == nil {
+		returnedSessionID, err := restoreSessionTranscriptFromStrategy(ctx, selectedPoint.CheckpointID, sessionID, agent)
+		if err == nil {
 			sessionID = returnedSessionID
 			restored = true
+		} else if checkpointpolicy.IsUnsupportedVersion(err) {
+			return err
 		}
 	}
 
@@ -533,9 +537,12 @@ func runRewindToInternal(ctx context.Context, w, errW io.Writer, commitID string
 	var restored bool
 	if !selectedPoint.CheckpointID.IsEmpty() {
 		// Try checkpoint storage first for committed checkpoints
-		if returnedSessionID, err := restoreSessionTranscriptFromStrategy(ctx, selectedPoint.CheckpointID, sessionID, agent); err == nil {
+		returnedSessionID, err := restoreSessionTranscriptFromStrategy(ctx, selectedPoint.CheckpointID, sessionID, agent)
+		if err == nil {
 			sessionID = returnedSessionID
 			restored = true
+		} else if checkpointpolicy.IsUnsupportedVersion(err) {
+			return err
 		}
 	}
 
@@ -722,13 +729,22 @@ func restoreSessionTranscriptFromStrategy(ctx context.Context, cpID id.Checkpoin
 	if err != nil {
 		return "", fmt.Errorf("open checkpoint store: %w", err)
 	}
-	content, returnedSessionID, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, stores.Primary, cpID)
+	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, stores.Primary, cpID)
+	if err != nil {
+		return "", fmt.Errorf("failed to read checkpoint: %w", err)
+	}
+	if err := checkpointpolicy.EnsureCanReadVersion(cpID.String(), summary.CheckpointVersion); err != nil {
+		return "", fmt.Errorf("check checkpoint version: %w", err)
+	}
+
+	content, err := checkpoint.ReadLatestSessionContent(ctx, stores.Primary, cpID, summary)
 	if err != nil {
 		return "", fmt.Errorf("failed to get session log: %w", err)
 	}
 
 	// Use session ID returned from checkpoint if available
 	// Otherwise fall back to the passed-in sessionID
+	returnedSessionID := content.Metadata.SessionID
 	if returnedSessionID != "" {
 		sessionID = returnedSessionID
 	}
@@ -744,7 +760,7 @@ func restoreSessionTranscriptFromStrategy(ctx context.Context, cpID id.Checkpoin
 		SessionID:  sessionID,
 		AgentName:  agent.Name(),
 		SessionRef: sessionFile,
-		NativeData: content,
+		NativeData: content.Transcript,
 	}
 	if err := agent.WriteSession(ctx, agentSession); err != nil {
 		return "", fmt.Errorf("failed to write session: %w", err)

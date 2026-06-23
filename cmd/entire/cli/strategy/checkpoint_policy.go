@@ -50,6 +50,10 @@ func syncCheckpointPolicyForPrePush(ctx context.Context, remoteName string) bool
 		warnOrLogCheckpointPolicySyncFailure(ctx, err)
 		return true
 	}
+	if state.Source == checkpointpolicy.SourceLocalDiverged {
+		warnOrLogCheckpointPolicyDiverged(ctx, state)
+		return false
+	}
 	if !checkpointpolicy.UnsupportedWrite(state.Policy) {
 		return true
 	}
@@ -64,6 +68,17 @@ func warnOrLogCheckpointPolicySyncFailure(ctx context.Context, err error) {
 	}
 	logging.Warn(ctx, "checkpoint policy sync failed",
 		slog.String("error", err.Error()),
+	)
+}
+
+func warnOrLogCheckpointPolicyDiverged(ctx context.Context, state checkpointpolicy.State) {
+	if interactive.CanPromptInteractively() {
+		fmt.Fprintf(stderrWriter, "[entire] Could not reconcile checkpoint policy: %s\n", state.Warning)
+		return
+	}
+	logging.Warn(ctx, "checkpoint policy diverged; skipping checkpoint push",
+		slog.String("local_hash", state.Hash.String()),
+		slog.String("remote_hash", state.RemoteHash.String()),
 	)
 }
 

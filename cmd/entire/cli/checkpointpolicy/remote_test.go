@@ -2,11 +2,13 @@ package checkpointpolicy_test
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -109,6 +111,34 @@ func TestPushPolicyRejectsNonFastForward(t *testing.T) {
 	require.ErrorContains(t, err, "push checkpoint policy")
 }
 
+func TestResolveTargetUsesConfiguredCheckpointRemoteWithOriginOwnerMismatch(t *testing.T) {
+	localDir, _ := initPolicyRepoWithDir(t)
+	runPolicyGit(t, localDir, "remote", "add", "origin", "git@github.com:fork/cli.git")
+	require.NoError(t, os.MkdirAll(filepath.Join(localDir, ".entire"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(localDir, ".entire", "settings.json"), []byte(`{
+  "enabled": true,
+  "strategy_options": {
+    "checkpoint_remote": {
+      "provider": "github",
+      "repo": "org/checkpoints"
+    }
+  }
+}`), 0o600))
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	target, err := checkpointpolicy.ResolveTarget(t.Context(), "origin")
+	require.NoError(t, err)
+	require.Equal(t, "git@github.com:org/checkpoints.git", target.Remote)
+	require.Equal(t, "checkpoint remote", target.Label)
+	wantDir, err := filepath.EvalSymlinks(localDir)
+	require.NoError(t, err)
+	gotDir, err := filepath.EvalSymlinks(target.Dir)
+	require.NoError(t, err)
+	require.Equal(t, wantDir, gotDir)
+}
+
 func initPolicyRemoteFixture(t *testing.T) (string, *git.Repository, string) {
 	t.Helper()
 	localDir, repo := initPolicyRepoWithDir(t)
@@ -130,7 +160,12 @@ func initPolicyRepoWithDir(t *testing.T) (string, *git.Repository) {
 func pushPolicyRefWithGit(t *testing.T, dir, remote string) {
 	t.Helper()
 	refspec := checkpointpolicy.RefName.String() + ":" + checkpointpolicy.RefName.String()
-	cmd := exec.CommandContext(context.Background(), "git", "push", remote, refspec)
+	runPolicyGit(t, dir, "push", remote, refspec)
+}
+
+func runPolicyGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.CommandContext(context.Background(), "git", args...)
 	cmd.Dir = dir
 	cmd.Env = testutil.GitIsolatedEnv()
 	output, err := cmd.CombinedOutput()

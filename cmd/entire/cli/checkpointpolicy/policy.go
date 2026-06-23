@@ -1,6 +1,7 @@
 package checkpointpolicy
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -75,14 +76,42 @@ func UpgradeWarning(updateCommand string) string {
 	return fmt.Sprintf("[entire] This repository requires checkpoint support newer than this Entire CLI.\n[entire] Upgrade Entire, then rerun the command:\n[entire]   %s\n", updateCommand)
 }
 
+// IsUnsupportedVersion reports whether err wraps a checkpoint version incompatibility.
+func IsUnsupportedVersion(err error) bool {
+	var unsupported *unsupportedVersionError
+	return errors.As(err, &unsupported)
+}
+
 func EnsureCanReadVersion(checkpointID, version string) error {
 	policy := Normalize(Policy{CheckpointMinVersion: version})
 	format, err := ParseFormat(policy.CheckpointMinVersion)
 	if err != nil {
-		return fmt.Errorf("checkpoint %s uses unsupported checkpoint_version %q: %w", checkpointID, policy.CheckpointMinVersion, err)
+		return &unsupportedVersionError{
+			CheckpointID: checkpointID,
+			Version:      policy.CheckpointMinVersion,
+			Err:          err,
+		}
 	}
 	if !CanRead(format) {
-		return fmt.Errorf("checkpoint %s uses unsupported checkpoint_version %q: not read-supported by this Entire CLI", checkpointID, policy.CheckpointMinVersion)
+		return &unsupportedVersionError{
+			CheckpointID: checkpointID,
+			Version:      policy.CheckpointMinVersion,
+			Err:          errors.New("not read-supported by this Entire CLI"),
+		}
 	}
 	return nil
+}
+
+type unsupportedVersionError struct {
+	CheckpointID string
+	Version      string
+	Err          error
+}
+
+func (e unsupportedVersionError) Error() string {
+	return fmt.Sprintf("checkpoint %s uses unsupported checkpoint_version %q: %v", e.CheckpointID, e.Version, e.Err)
+}
+
+func (e unsupportedVersionError) Unwrap() error {
+	return e.Err
 }
