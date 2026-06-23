@@ -227,3 +227,14 @@ func APIError(err error) string {
 		return fmt.Sprintf("control-plane request failed with status %d", statusErr.StatusCode)
 	}
 }
+
+// HTTPStatus reports the HTTP status code carried by a control-plane API
+// error and whether err was one. It returns (0, false) for transport or
+// local failures that never reached the server.
+func HTTPStatus(err error) (int, bool) {
+	var statusErr *ErrorModelStatusCode
+	if !errors.As(err, &statusErr) {
+		return 0, false
+	}
+	return statusErr.StatusCode, true
+}

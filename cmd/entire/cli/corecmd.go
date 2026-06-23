@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -305,17 +306,25 @@ func markRequired(cmd *cobra.Command, names ...string) {
 	}
 }
 
+// maintenanceMessage is the shared 503 scheduled-maintenance copy, kept
+// identical to the Cloudflare edge 503 page (COR-566) and the SPA banner.
+const maintenanceMessage = "Entire is under scheduled maintenance — please try again shortly"
+
 // renderCoreError converts a Core API error into the server's
 // problem-detail message (so users see "organization name already taken"
 // rather than ogen's decode-wrapped string), falling back to the raw error
-// for transport/local failures. It returns a plain error, not a
-// SilentError: main.go prints plain errors, and runCore has already set
-// SilenceUsage, so the message reaches the user without a usage dump. (A
+// for transport/local failures. A 503 is special-cased to the
+// scheduled-maintenance copy regardless of body. It returns a plain error,
+// not a SilentError: main.go prints plain errors, and runCore has already
+// set SilenceUsage, so the message reaches the user without a usage dump. (A
 // SilentError here would be swallowed — main.go skips printing those —
 // leaving e.g. a 409 conflict with no output.)
 func renderCoreError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if status, ok := coreapi.HTTPStatus(err); ok && status == http.StatusServiceUnavailable {
+		return errors.New(maintenanceMessage) //nolint:staticcheck // user-facing copy, shared verbatim across CLI/SPA/edge
 	}
 	if msg := coreapi.APIError(err); msg != "" {
 		return errors.New(msg)
