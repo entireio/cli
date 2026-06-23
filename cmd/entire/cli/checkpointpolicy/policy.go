@@ -86,11 +86,7 @@ func EnsureCanReadVersion(checkpointID, version string) error {
 	policy := Normalize(Policy{CheckpointMinVersion: version})
 	format, err := ParseFormat(policy.CheckpointMinVersion)
 	if err != nil {
-		return &unsupportedVersionError{
-			CheckpointID: checkpointID,
-			Version:      policy.CheckpointMinVersion,
-			Err:          err,
-		}
+		return fmt.Errorf("checkpoint %s has invalid checkpoint_version %q: %w", checkpointID, policy.CheckpointMinVersion, err)
 	}
 	if !CanRead(format) {
 		return &unsupportedVersionError{

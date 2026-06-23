@@ -27,4 +27,14 @@ func TestEnsureCanReadVersion(t *testing.T) {
 	err := checkpointpolicy.EnsureCanReadVersion("abc123", "refs-v1")
 	require.ErrorContains(t, err, `checkpoint abc123 uses unsupported checkpoint_version "refs-v1"`)
 	require.ErrorContains(t, err, "not read-supported")
+	require.True(t, checkpointpolicy.IsUnsupportedVersion(err))
+}
+
+func TestEnsureCanReadVersionParseErrorIsNotUnsupportedVersion(t *testing.T) {
+	t.Parallel()
+
+	err := checkpointpolicy.EnsureCanReadVersion("abc123", "not-a-format")
+
+	require.ErrorContains(t, err, `checkpoint abc123 has invalid checkpoint_version "not-a-format"`)
+	require.False(t, checkpointpolicy.IsUnsupportedVersion(err))
 }
