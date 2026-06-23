@@ -1045,8 +1045,14 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, stdin io.Reader, ins
 		inputs.BodyChanged = bodyChanged
 
 		// Interactive mode when no update inputs are provided.
-		noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged && inputs.LabelAdd == nil && inputs.LabelRemove == nil
+		noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged && len(inputs.LabelAdd) == 0 && len(inputs.LabelRemove) == 0
 		if noFlags {
+			// The interactive form seeds the body from the trail's collaborative
+			// document, which is keyed by number — reject a numberless trail up
+			// front rather than after the user has filled out the form.
+			if found.Number <= 0 {
+				return fmt.Errorf("%s has no number yet; cannot update", describeTrailRef(found))
+			}
 			metadata := found.ToMetadata()
 			// Build status options with current value as default.
 			var statusOptions []huh.Option[string]
@@ -1062,37 +1068,39 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, stdin io.Reader, ins
 			}
 			// Seed the body from the real collaborative document (the list/metadata
 			// body is always empty), using the raw snapshot so an edit preserves the
-			// document's whitespace. Fail rather than seed an empty body when it
-			// can't be loaded — otherwise an edit would silently overwrite a body
+			// document's whitespace. If the body can't be loaded, omit the body
+			// field entirely so status/title stay editable — never seed an empty
+			// body into an editable field, as saving it would overwrite a document
 			// that merely failed to fetch.
 			seedStatus := string(metadata.Status)
 			seedTitle := metadata.Title
 			seedBody := ""
-			if found.Number > 0 {
-				bt, _, derr := fetchTrailBody(ctx, client, forge, owner, repoName, found.Number)
-				if derr != nil {
-					return fmt.Errorf("could not load the current body to edit: %w", derr)
-				}
+			bodyLoaded := false
+			if bt, _, derr := fetchTrailBody(ctx, client, forge, owner, repoName, found.Number); derr != nil {
+				fmt.Fprintf(errW, "Warning: could not load the current body to edit (%v); leaving it unchanged. Use --body-file to set it.\n", derr)
+			} else {
 				seedBody = bt
+				bodyLoaded = true
 			}
 			body = seedBody
 			statusStr := seedStatus
 			title := seedTitle
 
-			form := NewAccessibleForm(
-				huh.NewGroup(
-					huh.NewSelect[string]().
-						Title("Status").
-						Options(statusOptions...).
-						Value(&statusStr),
-					huh.NewInput().
-						Title("Title").
-						Value(&title),
-					huh.NewText().
-						Title("Body").
-						Value(&body),
-				),
-			)
+			fields := []huh.Field{
+				huh.NewSelect[string]().
+					Title("Status").
+					Options(statusOptions...).
+					Value(&statusStr),
+				huh.NewInput().
+					Title("Title").
+					Value(&title),
+			}
+			if bodyLoaded {
+				fields = append(fields, huh.NewText().
+					Title("Body").
+					Value(&body))
+			}
+			form := NewAccessibleForm(huh.NewGroup(fields...))
 			if formErr := form.Run(); formErr != nil {
 				return handleFormCancellation(w, "Trail update", formErr)
 			}
@@ -1233,7 +1241,10 @@ func validateTrailUpdateFields(inputs trailUpdateInputs) error {
 	return nil
 }
 
-// buildTrailUpdateRequest constructs a PATCH request body from the current trail and the requested changes.
+// buildTrailUpdateRequest constructs a metadata PATCH request body from the
+// current trail and the requested changes. The body is never included here — it
+// is sent as a separate PATCH by applyTrailUpdate (the API rejects combining the
+// two), so this builder only handles status, title, and labels.
 func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInputs) api.TrailUpdateRequest {
 	var req api.TrailUpdateRequest
 
@@ -1242,9 +1253,6 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 	}
 	if inputs.TitleChanged {
 		req.Title = &inputs.Title
-	}
-	if inputs.BodyChanged {
-		req.Body = &inputs.Body
 	}
 
 	// Handle label changes: merge adds, remove removes.

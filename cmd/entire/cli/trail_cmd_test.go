@@ -749,14 +749,19 @@ func TestFindTrailStopsAtMaxPagesWithoutTotal(t *testing.T) {
 	}
 }
 
-func TestBuildTrailUpdateRequestCanClearBody(t *testing.T) {
+func TestBuildTrailUpdateRequestNeverIncludesBody(t *testing.T) {
 	t.Parallel()
-	req := buildTrailUpdateRequest(&api.TrailResource{Body: "old"}, trailUpdateInputs{BodyChanged: true, Body: ""})
-	if req.Body == nil {
-		t.Fatal("Body pointer is nil, want empty string pointer")
+	// The body is always sent as a separate PATCH by applyTrailUpdate, so the
+	// metadata request builder must never carry it — even when BodyChanged is set.
+	req := buildTrailUpdateRequest(&api.TrailResource{Body: "old"}, trailUpdateInputs{
+		Status: string(trail.StatusOpen), StatusChanged: true,
+		BodyChanged: true, Body: "new body",
+	})
+	if req.Body != nil {
+		t.Fatalf("Body = %q, want nil (body is sent in a separate PATCH)", *req.Body)
 	}
-	if *req.Body != "" {
-		t.Fatalf("Body = %q, want empty string", *req.Body)
+	if req.Status == nil || *req.Status != string(trail.StatusOpen) {
+		t.Fatalf("Status = %v, want %q", req.Status, trail.StatusOpen)
 	}
 }
 
@@ -1323,6 +1328,42 @@ func TestApplyTrailUpdateRejectsNumberlessTrail(t *testing.T) {
 	found := &api.TrailResource{Number: 0, Title: "Draft"}
 	if err := applyTrailUpdate(t.Context(), client, "gh", "acme", "repo", found, trailUpdateInputs{Body: "x", BodyChanged: true}); err == nil {
 		t.Fatal("expected error updating a trail with no number")
+	}
+}
+
+func TestApplyTrailUpdateReportsPartialFailureWhenBodyPatchFails(t *testing.T) {
+	t.Parallel()
+	// Metadata PATCH lands first and succeeds; the body PATCH (second) fails. The
+	// error must surface that the metadata change already landed so the partial
+	// outcome isn't hidden from the user.
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			if _, err := io.WriteString(w, `{"trail":{"number":42}}`); err != nil {
+				t.Errorf("write response: %v", err)
+			}
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		if _, err := io.WriteString(w, `{"error":"body write failed"}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+
+	err := applyTrailUpdate(t.Context(), client, "gh", "acme", "repo", &api.TrailResource{Number: 42}, trailUpdateInputs{
+		Status: string(trail.StatusOpen), StatusChanged: true,
+		Body: "new body", BodyChanged: true,
+	})
+	if err == nil {
+		t.Fatal("expected an error when the body PATCH fails")
+	}
+	if !strings.Contains(err.Error(), "metadata updated, but body update failed") {
+		t.Fatalf("error = %q, want it to report the partial failure", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("got %d PATCH calls, want 2 (metadata succeeded, body attempted)", got)
 	}
 }
 
