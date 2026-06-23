@@ -4798,6 +4798,10 @@ func readSummaryFromBranch(t *testing.T, repo *git.Repository, checkpointID id.C
 
 // readSessionMetadataAtIndex reads the per-session CommittedMetadata for
 // session at numbered subfolder `index` (0-based) under the checkpoint.
+// index is part of the helper's contract (checkpoints can hold multiple
+// 0-indexed sessions), even though current callers only read session 0.
+//
+//nolint:unparam // see above — index generalizes to multi-session checkpoints
 func readSessionMetadataAtIndex(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID, index int) CommittedMetadata {
 	t.Helper()
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)

@@ -391,6 +391,32 @@ func (s *GitStore) writeStandardCheckpointEntries(ctx context.Context, opts Writ
 	return s.writeCheckpointSummary(opts, basePath, entries, sessions)
 }
 
+// transcriptPointer returns the value for the root metadata.json
+// sessions[].transcript field of the session at sessionPath. It prefers the
+// compact transcript.jsonl when one was written into the tree and falls back to
+// the raw full.jsonl otherwise. Returns "" when no transcript was written.
+//
+// The pointer is derived from the actual tree entries so it can never dangle:
+// transcript.jsonl is best-effort (writeCompactTranscript skips it on
+// compaction failure, empty output, or oversized blobs) and checkpoints written
+// by older CLI versions never had it — in all those cases this falls back to
+// full.jsonl, which always exists (as chunk 0) when a transcript was written.
+//
+// NOTE: the compact transcript is stored in full (never trimmed) and uses the
+// normalized compact schema rather than the raw agent format. Consumers slice
+// it numerically by the session metadata's compact_transcript_start (a
+// compacted-line offset), NOT by checkpoint_transcript_start (which indexes the
+// raw full.jsonl), and must not parse it as agent-native JSONL.
+func transcriptPointer(sessionPath string, entries map[string]object.TreeEntry) string {
+	if _, ok := entries[sessionPath+paths.CompactTranscriptFileName]; ok {
+		return "/" + sessionPath + paths.CompactTranscriptFileName
+	}
+	if _, ok := entries[sessionPath+paths.TranscriptFileName]; ok {
+		return "/" + sessionPath + paths.TranscriptFileName
+	}
+	return ""
+}
+
 // writeSessionToSubdirectory writes a single session's files to a numbered subdirectory.
 // Returns the absolute file paths from the git tree root for the sessions map.
 func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCommittedOptions, sessionPath string, entries map[string]object.TreeEntry) (SessionFilePaths, error) {
@@ -404,15 +430,17 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCom
 		}
 	}
 
-	// Write transcript. The pointer targets full.jsonl, which CLI
-	// rewind/resume/explain read by filename. The compact transcript.jsonl is
-	// also written into the tree (so it is pushed) but is not yet pointed at.
-	wroteTranscript, err := s.writeTranscript(ctx, opts, sessionPath, entries)
+	// Write transcript. The pointer prefers the compact transcript.jsonl when
+	// one was written into the tree, falling back to the raw full.jsonl (see
+	// transcriptPointer). CLI read paths (rewind/resume/explain) resolve
+	// transcripts by filename and ignore this pointer; it is consumed by
+	// external readers (server/UI).
+	wroteTranscript, compactStart, err := s.writeTranscript(ctx, opts, sessionPath, entries)
 	if err != nil {
 		return filePaths, err
 	}
 	if wroteTranscript {
-		filePaths.Transcript = "/" + sessionPath + paths.TranscriptFileName
+		filePaths.Transcript = transcriptPointer(sessionPath, entries)
 		filePaths.ContentHash = "/" + sessionPath + paths.ContentHashFileName
 	}
 
@@ -449,6 +477,7 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCom
 		ToolUseID:                   opts.ToolUseID,
 		TranscriptIdentifierAtStart: opts.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   opts.CheckpointTranscriptStart,
+		CompactTranscriptStart:      compactStart,
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, // Deprecated: kept for backward compat
 		TokenUsage:                  opts.TokenUsage,
 		SkillEventsVersion:          skillEventsVersion(opts.SkillEvents),
@@ -723,10 +752,10 @@ func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 
 // writeTranscript writes the transcript, compact transcript, and content hash
 // to the checkpoint entries. The compact transcript.jsonl is written into the
-// tree (so it is pushed alongside full.jsonl) but is not yet referenced by
-// metadata. Returns true when a transcript was written, false when it was
-// empty and nothing was written.
-func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry) (bool, error) {
+// tree (so it is pushed alongside full.jsonl). Returns whether a transcript was
+// written (false when empty) and the compact_transcript_start offset for the
+// stored compact transcript (0 when no compact transcript was written).
+func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry) (bool, int, error) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	transcriptBytes := opts.Transcript.Bytes()
 
@@ -742,13 +771,13 @@ func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptio
 		if len(rawData) > 0 {
 			redacted, redactErr := redact.JSONLBytes(rawData)
 			if redactErr != nil {
-				return false, fmt.Errorf("failed to redact transcript from file: %w", redactErr)
+				return false, 0, fmt.Errorf("failed to redact transcript from file: %w", redactErr)
 			}
 			transcriptBytes = redacted.Bytes()
 		}
 	}
 	if len(transcriptBytes) == 0 {
-		return false, nil
+		return false, 0, nil
 	}
 
 	if opts.Agent == agent.AgentTypeCodex {
@@ -762,7 +791,7 @@ func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptio
 	if err != nil {
 		chunkTranscriptSpan.RecordError(err)
 		chunkTranscriptSpan.End()
-		return false, fmt.Errorf("failed to chunk transcript: %w", err)
+		return false, 0, fmt.Errorf("failed to chunk transcript: %w", err)
 	}
 	chunkTranscriptSpan.End()
 	chunkDuration := time.Since(chunkStart)
@@ -776,7 +805,7 @@ func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptio
 		if err != nil {
 			writeTranscriptBlobsSpan.RecordError(err)
 			writeTranscriptBlobsSpan.End()
-			return false, err
+			return false, 0, err
 		}
 		entries[chunkPath] = object.TreeEntry{
 			Name: chunkPath,
@@ -795,7 +824,7 @@ func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptio
 	if err != nil {
 		contentHashSpan.RecordError(err)
 		contentHashSpan.End()
-		return false, err
+		return false, 0, err
 	}
 	entries[basePath+paths.ContentHashFileName] = object.TreeEntry{
 		Name: basePath + paths.ContentHashFileName,
@@ -805,10 +834,11 @@ func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptio
 	contentHashSpan.End()
 
 	// Write the compact transcript (transcript.jsonl) into the tree so it is
-	// pushed alongside full.jsonl. The metadata pointer intentionally stays on
-	// full.jsonl for now — pointing it at the compact transcript is deferred to
-	// a later change.
-	s.writeCompactTranscript(logCtx, opts.Agent, opts.CheckpointTranscriptStart, transcriptBytes, basePath, entries)
+	// pushed alongside full.jsonl. It is stored in full; the returned offset is
+	// where this checkpoint begins within it (compact_transcript_start). The
+	// metadata pointer prefers it when present; writeSessionToSubdirectory sets
+	// that pointer (via transcriptPointer) after this returns.
+	compactStart := s.writeCompactTranscript(logCtx, opts.Agent, opts.CheckpointTranscriptStart, transcriptBytes, basePath, entries)
 
 	logging.Debug(logCtx, "write transcript timings",
 		slog.String("session_id", opts.SessionID),
@@ -820,7 +850,7 @@ func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptio
 		slog.Int("transcript_bytes", len(transcriptBytes)),
 		slog.Int("chunk_count", len(chunks)),
 	)
-	return true, nil
+	return true, compactStart, nil
 }
 
 // compactAgentName resolves the agent slug used in compact transcript lines
@@ -834,20 +864,32 @@ func compactAgentName(agentType types.AgentType) string {
 }
 
 // writeCompactTranscript converts the pre-redacted full transcript into the
-// compact transcript.jsonl format, scoped to this checkpoint via startLine,
-// and records it at sessionPath in the tree. Best-effort: the compact
-// transcript is derived data, so failures are logged and never fail the
-// checkpoint write. transcriptBytes must already be sanitized for the agent
-// (e.g. Codex portable-transcript sanitization); callers sanitize before
-// calling so the expensive pass runs exactly once.
-func (s *GitStore) writeCompactTranscript(ctx context.Context, agentType types.AgentType, startLine int, transcriptBytes []byte, sessionPath string, entries map[string]object.TreeEntry) {
+// compact transcript.jsonl format and records it at sessionPath in the tree.
+//
+// The compact transcript is stored in FULL (never trimmed), mirroring full.jsonl:
+// every checkpoint/session in a turn stores the same full compacted transcript
+// and is distinguished only by an offset. The returned value is that offset —
+// the line index within the stored compact transcript at which this checkpoint's
+// data begins (compact_transcript_start). It differs from startLine (which
+// indexes the raw transcript) because compaction merges/drops lines.
+//
+// Best-effort: the compact transcript is derived data, so failures are logged
+// and never fail the checkpoint write; on any failure nothing is written and 0
+// is returned. transcriptBytes must already be sanitized for the agent (e.g.
+// Codex portable-transcript sanitization); callers sanitize before calling so
+// the expensive pass runs exactly once.
+func (s *GitStore) writeCompactTranscript(ctx context.Context, agentType types.AgentType, startLine int, transcriptBytes []byte, sessionPath string, entries map[string]object.TreeEntry) int {
 	compactCtx, compactSpan := perf.Start(ctx, "write_compact_transcript")
 	defer compactSpan.End()
 
+	agentName := compactAgentName(agentType)
+
+	// Compact the full transcript (StartLine: 0 — no truncation). This is what
+	// gets stored; it is identical for every checkpoint sharing this transcript.
 	compacted, err := transcriptcompact.Compact(redact.AlreadyRedacted(transcriptBytes), transcriptcompact.MetadataFields{
-		Agent:      compactAgentName(agentType),
+		Agent:      agentName,
 		CLIVersion: versioninfo.Version,
-		StartLine:  startLine,
+		StartLine:  0,
 	})
 	if err != nil {
 		compactSpan.RecordError(err)
@@ -855,20 +897,20 @@ func (s *GitStore) writeCompactTranscript(ctx context.Context, agentType types.A
 			slog.String("agent", string(agentType)),
 			slog.String("error", err.Error()),
 		)
-		return
+		return 0
 	}
 	if len(bytes.TrimSpace(compacted)) == 0 {
 		logging.Debug(compactCtx, "compact transcript empty, skipping transcript.jsonl",
 			slog.String("agent", string(agentType)),
 		)
-		return
+		return 0
 	}
 	if len(compacted) > agent.MaxChunkSize {
 		logging.Warn(compactCtx, "compact transcript exceeds max blob size, skipping transcript.jsonl",
 			slog.String("agent", string(agentType)),
 			slog.Int("compact_bytes", len(compacted)),
 		)
-		return
+		return 0
 	}
 
 	blobHash, err := CreateBlobFromContent(s.repo, compacted)
@@ -877,7 +919,7 @@ func (s *GitStore) writeCompactTranscript(ctx context.Context, agentType types.A
 		logging.Warn(compactCtx, "failed to create compact transcript blob, skipping transcript.jsonl",
 			slog.String("error", err.Error()),
 		)
-		return
+		return 0
 	}
 	compactPath := sessionPath + paths.CompactTranscriptFileName
 	entries[compactPath] = object.TreeEntry{
@@ -885,6 +927,46 @@ func (s *GitStore) writeCompactTranscript(ctx context.Context, agentType types.A
 		Mode: filemode.Regular,
 		Hash: blobHash,
 	}
+
+	return compactStartOffset(compactCtx, agentName, startLine, transcriptBytes, compacted)
+}
+
+// compactStartOffset returns the line index within the stored (full) compact
+// transcript at which the checkpoint beginning at raw offset startLine starts.
+//
+// It compacts the checkpoint's own portion (using the agent-correct StartLine
+// handling) and subtracts its line count from the full compact's line count.
+// Checkpoint boundaries fall on user-prompt boundaries, where compaction does
+// not merge across the boundary, so full[offset:] == scoped. Best-effort: on
+// failure it returns 0 (no truncation), which over-includes earlier content
+// rather than dropping any.
+func compactStartOffset(ctx context.Context, agentName string, startLine int, transcriptBytes, fullCompacted []byte) int {
+	if startLine <= 0 {
+		return 0
+	}
+	scoped, err := transcriptcompact.Compact(redact.AlreadyRedacted(transcriptBytes), transcriptcompact.MetadataFields{
+		Agent:      agentName,
+		CLIVersion: versioninfo.Version,
+		StartLine:  startLine,
+	})
+	if err != nil {
+		logging.Warn(ctx, "compact start offset computation failed, defaulting to 0",
+			slog.String("agent", agentName),
+			slog.String("error", err.Error()),
+		)
+		return 0
+	}
+	offset := countLines(fullCompacted) - countLines(scoped)
+	if offset < 0 {
+		offset = 0
+	}
+	return offset
+}
+
+// countLines counts newline-terminated lines in b. Compact output terminates
+// every line with '\n', so this is the line count of a compact transcript.
+func countLines(b []byte) int {
+	return bytes.Count(b, []byte{'\n'})
 }
 
 // mergeFilesTouched combines two file lists, removing duplicates.
@@ -1595,8 +1677,44 @@ func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOpti
 				agentType = sessionMeta.Agent
 			}
 		}
-		if err := s.replaceTranscript(ctx, opts.Transcript, agentType, startLine, opts.PrecomputedBlobs, sessionPath, entries); err != nil {
+		compactStart, regenerated, err := s.replaceTranscript(ctx, opts.Transcript, agentType, startLine, opts.PrecomputedBlobs, sessionPath, entries)
+		if err != nil {
 			return fmt.Errorf("failed to replace transcript: %w", err)
+		}
+
+		// Record where this checkpoint begins within the (full) compact
+		// transcript. Only when the transcript was actually regenerated — a
+		// short-circuited replace leaves the existing transcript.jsonl and its
+		// recorded offset valid.
+		if regenerated {
+			if err := s.mutateSessionMetadata(sessionPath, entries, func(m *CommittedMetadata) {
+				m.CompactTranscriptStart = compactStart
+			}); err != nil {
+				return fmt.Errorf("failed to update compact transcript start: %w", err)
+			}
+		}
+
+		// Keep the root metadata.json transcript pointer consistent with the
+		// finalized tree. replaceTranscript may have (re)written transcript.jsonl,
+		// which the pointer prefers over full.jsonl (see transcriptPointer).
+		// WriteCommitted set the pointer at create time, but the transcript may
+		// have been empty then (deferred finalization), so re-derive it here.
+		if newPointer := transcriptPointer(sessionPath, entries); newPointer != "" &&
+			checkpointSummary.Sessions[sessionIndex].Transcript != newPointer {
+			checkpointSummary.Sessions[sessionIndex].Transcript = newPointer
+			summaryJSON, err := jsonutil.MarshalIndentWithNewline(checkpointSummary, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to marshal checkpoint summary: %w", err)
+			}
+			summaryHash, err := CreateBlobFromContent(s.repo, summaryJSON)
+			if err != nil {
+				return fmt.Errorf("failed to create checkpoint summary blob: %w", err)
+			}
+			entries[rootMetadataPath] = object.TreeEntry{
+				Name: rootMetadataPath,
+				Mode: filemode.Regular,
+				Hash: summaryHash,
+			}
 		}
 	}
 
@@ -1641,6 +1759,15 @@ func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOpti
 }
 
 func (s *GitStore) replaceSkillEvents(skillEvents []agent.SkillEvent, sessionPath string, entries map[string]object.TreeEntry) error {
+	return s.mutateSessionMetadata(sessionPath, entries, func(metadata *CommittedMetadata) {
+		metadata.SkillEventsVersion = skillEventsVersion(skillEvents)
+		metadata.SkillEvents = skillEvents
+	})
+}
+
+// mutateSessionMetadata reads the session metadata.json at sessionPath from
+// entries, applies fn to it, and writes the re-marshaled blob back into entries.
+func (s *GitStore) mutateSessionMetadata(sessionPath string, entries map[string]object.TreeEntry, fn func(*CommittedMetadata)) error {
 	metadataPath := sessionPath + paths.MetadataFileName
 	entry, exists := entries[metadataPath]
 	if !exists {
@@ -1651,8 +1778,7 @@ func (s *GitStore) replaceSkillEvents(skillEvents []agent.SkillEvent, sessionPat
 	if err != nil {
 		return fmt.Errorf("read session metadata: %w", err)
 	}
-	metadata.SkillEventsVersion = skillEventsVersion(skillEvents)
-	metadata.SkillEvents = skillEvents
+	fn(metadata)
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(metadata, "", "  ")
 	if err != nil {
@@ -1671,18 +1797,21 @@ func (s *GitStore) replaceSkillEvents(skillEvents []agent.SkillEvent, sessionPat
 }
 
 // replaceTranscript writes the full transcript content, replacing any existing
-// transcript, and regenerates the compact transcript.jsonl scoped at startLine
-// (the checkpoint's transcript start). Also removes any chunk files from a
-// previous write and updates the content hash.
+// transcript, and regenerates the compact transcript.jsonl. Also removes any
+// chunk files from a previous write and updates the content hash.
 //
-// Short-circuits when the existing content_hash.txt already matches the new
-// transcript's sha256 — in that case the chunk entries are preserved as-is and
-// no chunking/zlib happens. Use precomputed (non-nil) to reuse blob hashes
-// computed once across multiple checkpoints. The compact transcript cannot
-// reuse precomputed blobs: each checkpoint in a turn shares the full
-// transcript but has its own start offset, so the compact content differs per
-// checkpoint.
-func (s *GitStore) replaceTranscript(ctx context.Context, transcript redact.RedactedBytes, agentType types.AgentType, startLine int, precomputed *PrecomputedTranscriptBlobs, sessionPath string, entries map[string]object.TreeEntry) error {
+// Returns the compact_transcript_start offset (where startLine maps to within
+// the stored full compact transcript) and whether the transcript was actually
+// regenerated. regenerated is false when the call short-circuits because the
+// existing content_hash.txt already matches the new transcript's sha256 — in
+// that case the chunk entries and the existing transcript.jsonl are preserved
+// as-is and the caller should leave the recorded offset untouched.
+//
+// Use precomputed (non-nil) to reuse blob hashes computed once across multiple
+// checkpoints. The compact transcript cannot reuse precomputed blobs: although
+// every checkpoint in a turn shares the same full compact transcript, its
+// start offset differs, and the offset is derived during compaction.
+func (s *GitStore) replaceTranscript(ctx context.Context, transcript redact.RedactedBytes, agentType types.AgentType, startLine int, precomputed *PrecomputedTranscriptBlobs, sessionPath string, entries map[string]object.TreeEntry) (int, bool, error) {
 	// Ignore precompute if invariants are violated — fall back to fresh chunking.
 	if precomputed != nil && !precomputed.isUsable() {
 		precomputed = nil
@@ -1706,7 +1835,7 @@ func (s *GitStore) replaceTranscript(ctx context.Context, transcript redact.Reda
 				existingHash, readErr := io.ReadAll(rdr)
 				_ = rdr.Close()
 				if readErr == nil && string(existingHash) == newContentHash {
-					return nil
+					return 0, false, nil
 				}
 			}
 		}
@@ -1727,13 +1856,13 @@ func (s *GitStore) replaceTranscript(ctx context.Context, transcript redact.Reda
 	} else {
 		chunks, err := chunkTranscript(ctx, transcript.Bytes(), agentType)
 		if err != nil {
-			return fmt.Errorf("failed to chunk transcript: %w", err)
+			return 0, false, fmt.Errorf("failed to chunk transcript: %w", err)
 		}
 		chunkHashes = make([]plumbing.Hash, len(chunks))
 		for i, chunk := range chunks {
 			blobHash, err := CreateBlobFromContent(s.repo, chunk)
 			if err != nil {
-				return fmt.Errorf("failed to create transcript blob: %w", err)
+				return 0, false, fmt.Errorf("failed to create transcript blob: %w", err)
 			}
 			chunkHashes[i] = blobHash
 		}
@@ -1756,7 +1885,7 @@ func (s *GitStore) replaceTranscript(ctx context.Context, transcript redact.Reda
 	} else {
 		h, err := CreateBlobFromContent(s.repo, []byte(newContentHash))
 		if err != nil {
-			return fmt.Errorf("failed to create content hash blob: %w", err)
+			return 0, false, fmt.Errorf("failed to create content hash blob: %w", err)
 		}
 		hashBlob = h
 	}
@@ -1776,9 +1905,9 @@ func (s *GitStore) replaceTranscript(ctx context.Context, transcript redact.Reda
 	if agentType == agent.AgentTypeCodex {
 		compactBytes = codex.SanitizePortableTranscript(compactBytes)
 	}
-	s.writeCompactTranscript(ctx, agentType, startLine, compactBytes, sessionPath, entries)
+	compactStart := s.writeCompactTranscript(ctx, agentType, startLine, compactBytes, sessionPath, entries)
 
-	return nil
+	return compactStart, true, nil
 }
 
 // PrecomputeTranscriptBlobs chunks the given transcript and writes each chunk

@@ -200,7 +200,7 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 ├── 0/                   # First session (0-based indexing)
 │   ├── metadata.json    # Session-specific CommittedMetadata
 │   ├── full.jsonl       # Raw agent transcript (CLI rewind/resume/explain)
-│   ├── transcript.jsonl # Compact transcript, scoped to this checkpoint
+│   ├── transcript.jsonl # Full compact transcript (per-checkpoint start in metadata)
 │   ├── prompt.txt       # Checkpoint-scoped user prompts
 │   └── content_hash.txt # sha256 of full.jsonl (dedup short-circuit)
 ├── 1/                   # Second session
@@ -212,18 +212,24 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 
 **Compact transcript (`transcript.jsonl`):** generated best-effort from
 `full.jsonl` via `transcript/compact` on every committed write and on
-transcript replacement during finalization. Unlike `full.jsonl` (the
-cumulative session transcript, scoped at read time via
-`checkpoint_transcript_start`), `transcript.jsonl` is pre-sliced to the
-checkpoint's own portion (`compact.Compact` is called with
-`StartLine = checkpoint_transcript_start`), so it needs no offset to consume.
-It is written into the checkpoint tree and pushed alongside `full.jsonl`, but
-the root `metadata.json` `sessions[].transcript` pointer still targets
-`full.jsonl`; pointing it at `transcript.jsonl` is deferred to a later change.
-CLI read paths (rewind/resume/explain) read `full.jsonl` by filename. Compact
-generation is best-effort: failures are logged but never fail the checkpoint
-write, and during finalization a failed regeneration keeps the previous
-`transcript.jsonl`.
+transcript replacement during finalization. It mirrors `full.jsonl`: it is
+stored in **full** (never trimmed) — every checkpoint/session in a turn stores
+the same full compact transcript — and each checkpoint's start is recorded as a
+**compact-line** offset, `compact_transcript_start`, in its session
+`metadata.json`. That offset is distinct from `checkpoint_transcript_start`
+(which indexes the raw `full.jsonl`): compaction merges/drops lines, so a raw
+offset cannot index the compacted file. Consumers slice `transcript.jsonl`
+numerically by `compact_transcript_start`. The offset is computed at write time
+by compacting the checkpoint's own portion and subtracting its line count from
+the full compact's line count.
+
+The root `metadata.json` `sessions[].transcript` pointer prefers
+`transcript.jsonl` when one was written, falling back to `full.jsonl`. CLI read
+paths (rewind/resume/explain) read `full.jsonl` by filename and ignore the
+pointer. Compact generation is best-effort: failures (including oversized
+output) are logged but never fail the checkpoint write — the pointer then falls
+back to `full.jsonl`. During finalization a failed regeneration keeps the
+previous `transcript.jsonl` and its recorded offset.
 
 **Root-level metadata.json (`CheckpointSummary`):**
 ```json

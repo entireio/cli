@@ -462,7 +462,15 @@ type CommittedMetadata struct {
 
 	// Transcript position at checkpoint start - tracks what was added during this checkpoint
 	TranscriptIdentifierAtStart string `json:"transcript_identifier_at_start,omitempty"` // Last identifier when checkpoint started (UUID for Claude, message ID for Gemini)
-	CheckpointTranscriptStart   int    `json:"checkpoint_transcript_start,omitempty"`    // Transcript line offset at start of this checkpoint's data
+	CheckpointTranscriptStart   int    `json:"checkpoint_transcript_start,omitempty"`    // Transcript line offset at start of this checkpoint's data (indexes the raw full.jsonl)
+
+	// CompactTranscriptStart is the line offset at which this checkpoint's data
+	// begins within the stored compact transcript.jsonl. The compact transcript
+	// is stored in full (never trimmed), mirroring full.jsonl; consumers slice it
+	// numerically by this offset. It differs from CheckpointTranscriptStart
+	// because compaction merges/drops lines, so the raw offset cannot index the
+	// compacted file. 0 means the checkpoint starts at the beginning.
+	CompactTranscriptStart int `json:"compact_transcript_start,omitempty"`
 
 	// Deprecated: Use CheckpointTranscriptStart instead. Written for backward compatibility with older CLI versions.
 	TranscriptLinesAtStart int `json:"transcript_lines_at_start,omitempty"`
@@ -545,7 +553,7 @@ type SessionFilePaths struct {
 //	├── 1/                    # First session
 //	│   ├── metadata.json     # Session-specific CommittedMetadata
 //	│   ├── full.jsonl        # Raw agent transcript
-//	│   ├── transcript.jsonl  # Compact transcript scoped to this checkpoint
+//	│   ├── transcript.jsonl  # Full compact transcript (per-checkpoint start in metadata)
 //	│   ├── prompt.txt
 //	│   └── content_hash.txt
 //	├── 2/                    # Second session
