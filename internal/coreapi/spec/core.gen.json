@@ -1054,6 +1054,7 @@
             "type": "array"
           },
           "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           }
         },
@@ -1075,6 +1076,7 @@
             "type": "string"
           },
           "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "projects": {
@@ -1102,6 +1104,7 @@
             "type": "string"
           },
           "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "org": {
@@ -1135,6 +1138,7 @@
             "type": "array"
           },
           "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           }
         },
@@ -1156,6 +1160,7 @@
             "type": "string"
           },
           "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "repo": {
@@ -1183,6 +1188,7 @@
             "type": "string"
           },
           "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "project": {
@@ -1216,6 +1222,7 @@
             "type": "array"
           },
           "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           }
         },
@@ -2875,24 +2882,14 @@
         "operationId": "listOrgs",
         "parameters": [
           {
-            "description": "Optional: exact-match org name.",
+            "description": "Maximum entries to return; server may cap further.",
             "explode": false,
             "in": "query",
-            "name": "name",
+            "name": "pageSize",
             "schema": {
-              "description": "Optional: exact-match org name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Max items per page; default 50, max 200 (ignored when name is set).",
-            "explode": false,
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "description": "Max items per page; default 50, max 200 (ignored when name is set).",
-              "format": "int64",
-              "maximum": 200,
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
               "minimum": 0,
               "type": "integer"
             }
@@ -2904,6 +2901,16 @@
             "name": "pageToken",
             "schema": {
               "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match org name.",
+            "explode": false,
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "description": "Optional: exact-match org name.",
               "type": "string"
             }
           }
@@ -3087,23 +3094,14 @@
         "operationId": "listOrgMembers",
         "parameters": [
           {
-            "in": "path",
-            "name": "orgId",
-            "required": true,
-            "schema": {
-              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Max items per page; default 50, max 200.",
+            "description": "Maximum entries to return; server may cap further.",
             "explode": false,
             "in": "query",
-            "name": "limit",
+            "name": "pageSize",
             "schema": {
-              "description": "Max items per page; default 50, max 200.",
-              "format": "int64",
-              "maximum": 200,
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
               "minimum": 0,
               "type": "integer"
             }
@@ -3115,6 +3113,15 @@
             "name": "pageToken",
             "schema": {
               "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
             }
           }
@@ -3279,23 +3286,14 @@
         "operationId": "listOrgProjects",
         "parameters": [
           {
-            "in": "path",
-            "name": "orgId",
-            "required": true,
-            "schema": {
-              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Max items per page; default 50, max 200.",
+            "description": "Maximum entries to return; server may cap further.",
             "explode": false,
             "in": "query",
-            "name": "limit",
+            "name": "pageSize",
             "schema": {
-              "description": "Max items per page; default 50, max 200.",
-              "format": "int64",
-              "maximum": 200,
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
               "minimum": 0,
               "type": "integer"
             }
@@ -3307,6 +3305,15 @@
             "name": "pageToken",
             "schema": {
               "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
             }
           }
@@ -3352,24 +3359,14 @@
         "operationId": "listProjects",
         "parameters": [
           {
-            "description": "Optional: exact-match project name.",
+            "description": "Maximum entries to return; server may cap further.",
             "explode": false,
             "in": "query",
-            "name": "name",
+            "name": "pageSize",
             "schema": {
-              "description": "Optional: exact-match project name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Max items per page; default 50, max 200 (ignored when name is set).",
-            "explode": false,
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "description": "Max items per page; default 50, max 200 (ignored when name is set).",
-              "format": "int64",
-              "maximum": 200,
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
               "minimum": 0,
               "type": "integer"
             }
@@ -3381,6 +3378,16 @@
             "name": "pageToken",
             "schema": {
               "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match project name.",
+            "explode": false,
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "description": "Optional: exact-match project name.",
               "type": "string"
             }
           }
@@ -3746,23 +3753,14 @@
         "operationId": "listProjectMembers",
         "parameters": [
           {
-            "in": "path",
-            "name": "projectId",
-            "required": true,
-            "schema": {
-              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Max items per page; default 50, max 200.",
+            "description": "Maximum entries to return; server may cap further.",
             "explode": false,
             "in": "query",
-            "name": "limit",
+            "name": "pageSize",
             "schema": {
-              "description": "Max items per page; default 50, max 200.",
-              "format": "int64",
-              "maximum": 200,
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
               "minimum": 0,
               "type": "integer"
             }
@@ -3774,6 +3772,15 @@
             "name": "pageToken",
             "schema": {
               "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
             }
           }
@@ -3819,6 +3826,29 @@
         "operationId": "listProjectRepos",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "projectId",
             "required": true,
@@ -3834,29 +3864,6 @@
             "name": "name",
             "schema": {
               "description": "Optional: exact-match repo name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Max items per page; default 50, max 200 (ignored when name is set).",
-            "explode": false,
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "description": "Max items per page; default 50, max 200 (ignored when name is set).",
-              "format": "int64",
-              "maximum": 200,
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          {
-            "description": "Opaque cursor from a previous response's nextPageToken.",
-            "explode": false,
-            "in": "query",
-            "name": "pageToken",
-            "schema": {
-              "description": "Opaque cursor from a previous response's nextPageToken.",
               "type": "string"
             }
           }
@@ -4042,23 +4049,14 @@
         "operationId": "listRepoGrants",
         "parameters": [
           {
-            "in": "path",
-            "name": "repoId",
-            "required": true,
-            "schema": {
-              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Max items per page; default 50, max 200.",
+            "description": "Maximum entries to return; server may cap further.",
             "explode": false,
             "in": "query",
-            "name": "limit",
+            "name": "pageSize",
             "schema": {
-              "description": "Max items per page; default 50, max 200.",
-              "format": "int64",
-              "maximum": 200,
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
               "minimum": 0,
               "type": "integer"
             }
@@ -4070,6 +4068,15 @@
             "name": "pageToken",
             "schema": {
               "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
             }
           }

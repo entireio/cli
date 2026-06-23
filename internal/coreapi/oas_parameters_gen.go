@@ -127,69 +127,69 @@ type ListMirrorsParams struct {
 
 // ListOrgMembersParams is parameters of listOrgMembers operation.
 type ListOrgMembersParams struct {
-	OrgId string
-	// Max items per page; default 50, max 200.
-	Limit OptInt64 `json:",omitempty,omitzero"`
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
+	OrgId     string
 }
 
 // ListOrgProjectsParams is parameters of listOrgProjects operation.
 type ListOrgProjectsParams struct {
-	OrgId string
-	// Max items per page; default 50, max 200.
-	Limit OptInt64 `json:",omitempty,omitzero"`
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
+	OrgId     string
 }
 
 // ListOrgsParams is parameters of listOrgs operation.
 type ListOrgsParams struct {
-	// Optional: exact-match org name.
-	Name OptString `json:",omitempty,omitzero"`
-	// Max items per page; default 50, max 200 (ignored when name is set).
-	Limit OptInt64 `json:",omitempty,omitzero"`
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
+	// Optional: exact-match org name.
+	Name OptString `json:",omitempty,omitzero"`
 }
 
 // ListProjectMembersParams is parameters of listProjectMembers operation.
 type ListProjectMembersParams struct {
-	ProjectId string
-	// Max items per page; default 50, max 200.
-	Limit OptInt64 `json:",omitempty,omitzero"`
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
+	ProjectId string
 }
 
 // ListProjectReposParams is parameters of listProjectRepos operation.
 type ListProjectReposParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
 	ProjectId string
 	// Optional: exact-match repo name.
 	Name OptString `json:",omitempty,omitzero"`
-	// Max items per page; default 50, max 200 (ignored when name is set).
-	Limit OptInt64 `json:",omitempty,omitzero"`
-	// Opaque cursor from a previous response's nextPageToken.
-	PageToken OptString `json:",omitempty,omitzero"`
 }
 
 // ListProjectsParams is parameters of listProjects operation.
 type ListProjectsParams struct {
-	// Optional: exact-match project name.
-	Name OptString `json:",omitempty,omitzero"`
-	// Max items per page; default 50, max 200 (ignored when name is set).
-	Limit OptInt64 `json:",omitempty,omitzero"`
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
+	// Optional: exact-match project name.
+	Name OptString `json:",omitempty,omitzero"`
 }
 
 // ListRepoGrantsParams is parameters of listRepoGrants operation.
 type ListRepoGrantsParams struct {
-	RepoId string
-	// Max items per page; default 50, max 200.
-	Limit OptInt64 `json:",omitempty,omitzero"`
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
+	RepoId    string
 }
 
 // ListServiceAccountGrantsParams is parameters of listServiceAccountGrants operation.
