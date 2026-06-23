@@ -52,26 +52,8 @@ func updateBaseline(ctx context.Context, repo *git.Repository, target Target) (S
 		return State{}, err
 	}
 
-	remoteState, err := CheckRemote(ctx, target)
-	if err != nil {
-		return State{}, err
-	}
-	if !remoteState.Exists {
-		return local, nil
-	}
-	if local.Hash == remoteState.Hash {
-		local.Source = SourceRemote
-		local.RemoteHash = remoteState.Hash
-		return local, nil
-	}
-
-	fetched, err := fetchRemotePolicy(ctx, repo, target)
-	if err != nil {
-		return State{}, err
-	}
-	fetched.RemoteHash = remoteState.Hash
-	defer removeFetchRef(repo)
-	return fetched, nil
+	baseline, _, err := remoteBaseline(ctx, repo, target, local)
+	return baseline, err
 }
 
 func rejectDowngrades(before, after Policy, opts UpdateOptions) error {

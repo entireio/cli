@@ -21,7 +21,6 @@ var errStopTraversal = errors.New("stop traversal")
 
 type Target struct {
 	Remote string
-	Label  string
 	Dir    string
 }
 
@@ -41,17 +40,13 @@ func ResolveTarget(ctx context.Context, baseRemote string) (Target, error) {
 	if target, dedicated, err := remote.ConfiguredURL(ctx, baseRemote, dir); err != nil {
 		return Target{}, fmt.Errorf("resolve checkpoint remote URL: %w", err)
 	} else if dedicated {
-		return Target{Remote: target, Label: "checkpoint remote", Dir: dir}, nil
+		return Target{Remote: target, Dir: dir}, nil
 	}
-	target, dedicated, err := remote.PushURL(ctx, baseRemote)
+	target, _, err := remote.PushURL(ctx, baseRemote)
 	if err != nil {
 		return Target{}, fmt.Errorf("resolve checkpoint push URL: %w", err)
 	}
-	label := baseRemote
-	if dedicated {
-		label = "checkpoint remote"
-	}
-	return Target{Remote: target, Label: label, Dir: dir}, nil
+	return Target{Remote: target, Dir: dir}, nil
 }
 
 func CheckRemote(ctx context.Context, target Target) (RemoteState, error) {
@@ -75,38 +70,48 @@ func Sync(ctx context.Context, repo *git.Repository, target Target) (State, erro
 		return State{}, err
 	}
 
-	remoteState, err := CheckRemote(ctx, target)
+	baseline, remoteFound, err := remoteBaseline(ctx, repo, target, local)
 	if err != nil {
 		return State{}, err
 	}
+	if !remoteFound || local.Hash == baseline.Hash {
+		return baseline, nil
+	}
+
+	if local.Hash.IsZero() || isAncestorOf(ctx, repo, local.Hash, baseline.Hash) {
+		if err := SetRef(repo, RefName, baseline.Hash); err != nil {
+			return State{}, err
+		}
+		baseline.Source = SourceRemote
+		return baseline, nil
+	}
+
+	local.Source = SourceLocalDiverged
+	local.RemoteHash = baseline.RemoteHash
+	return local, nil
+}
+
+func remoteBaseline(ctx context.Context, repo *git.Repository, target Target, local State) (State, bool, error) {
+	remoteState, err := CheckRemote(ctx, target)
+	if err != nil {
+		return State{}, false, err
+	}
 	if !remoteState.Exists {
-		return local, nil
+		return local, false, nil
 	}
 	if local.Hash == remoteState.Hash {
 		local.Source = SourceRemote
 		local.RemoteHash = remoteState.Hash
-		return local, nil
+		return local, true, nil
 	}
 
 	fetched, err := fetchRemotePolicy(ctx, repo, target)
 	if err != nil {
-		return State{}, err
+		return State{}, false, err
 	}
 	fetched.RemoteHash = remoteState.Hash
 	defer removeFetchRef(repo)
-
-	if local.Hash.IsZero() || isAncestorOf(ctx, repo, local.Hash, fetched.Hash) {
-		if err := SetRef(repo, RefName, fetched.Hash); err != nil {
-			return State{}, err
-		}
-		fetched.Source = SourceRemote
-		return fetched, nil
-	}
-
-	local.Source = SourceLocalDiverged
-	local.RemoteHash = remoteState.Hash
-	local.Warning = fmt.Sprintf("local checkpoint policy %s diverges from remote %s", local.Hash, remoteState.Hash)
-	return local, nil
+	return fetched, true, nil
 }
 
 func Push(ctx context.Context, target Target) error {

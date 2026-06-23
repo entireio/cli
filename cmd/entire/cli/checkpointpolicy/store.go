@@ -32,7 +32,6 @@ type State struct {
 	Source     Source
 	Hash       plumbing.Hash
 	RemoteHash plumbing.Hash
-	Warning    string
 }
 
 func ReadLocal(ctx context.Context, repo *git.Repository) (State, error) {

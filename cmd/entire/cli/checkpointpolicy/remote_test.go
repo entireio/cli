@@ -131,7 +131,6 @@ func TestResolveTargetUsesConfiguredCheckpointRemoteWithOriginOwnerMismatch(t *t
 	target, err := checkpointpolicy.ResolveTarget(t.Context(), "origin")
 	require.NoError(t, err)
 	require.Equal(t, "git@github.com:org/checkpoints.git", target.Remote)
-	require.Equal(t, "checkpoint remote", target.Label)
 	wantDir, err := filepath.EvalSymlinks(localDir)
 	require.NoError(t, err)
 	gotDir, err := filepath.EvalSymlinks(target.Dir)

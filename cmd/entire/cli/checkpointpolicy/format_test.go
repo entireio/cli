@@ -45,12 +45,10 @@ func TestSupportedFormats(t *testing.T) {
 	refsV1, err := checkpointpolicy.ParseFormat("refs-v1")
 	require.NoError(t, err)
 
-	require.True(t, checkpointpolicy.KnowsFormat(branchV1))
 	require.True(t, checkpointpolicy.CanRead(branchV1))
 	require.True(t, checkpointpolicy.CanWrite(branchV1))
 	require.Equal(t, checkpoint.CheckpointVersionBranchV1, branchV1.String())
 
-	require.True(t, checkpointpolicy.KnowsFormat(refsV1))
 	require.False(t, checkpointpolicy.CanRead(refsV1))
 	require.False(t, checkpointpolicy.CanWrite(refsV1))
 	require.Negative(t, checkpointpolicy.Compare(branchV1, refsV1))

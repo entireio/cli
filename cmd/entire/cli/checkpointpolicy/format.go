@@ -53,11 +53,6 @@ func Compare(a, b CheckpointFormat) int {
 	return compareInt(a.Major, b.Major)
 }
 
-func KnowsFormat(format CheckpointFormat) bool {
-	_, ok := knownFormats[format]
-	return ok
-}
-
 func CanRead(format CheckpointFormat) bool {
 	return readFormats[format]
 }
@@ -82,15 +77,9 @@ var familyRanks = map[CheckpointFamily]int{
 	CheckpointFamilyRefs:   1,
 }
 
+var branchV1Format = CheckpointFormat{Family: CheckpointFamilyBranch, Major: 1}
+
 var (
-	branchV1Format = CheckpointFormat{Family: CheckpointFamilyBranch, Major: 1}
-	refsV1Format   = CheckpointFormat{Family: CheckpointFamilyRefs, Major: 1}
-
-	knownFormats = map[CheckpointFormat]struct{}{
-		branchV1Format: {},
-		refsV1Format:   {},
-	}
-
 	readFormats = map[CheckpointFormat]bool{
 		branchV1Format: true,
 	}
