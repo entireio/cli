@@ -707,7 +707,11 @@
             "type": "string"
           },
           "role": {
-            "minLength": 1,
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
             "type": "string"
           }
         },
@@ -769,7 +773,11 @@
             "type": "string"
           },
           "role": {
-            "minLength": 1,
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
             "type": "string"
           }
         },
@@ -825,7 +833,11 @@
             "type": "string"
           },
           "role": {
-            "minLength": 1,
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
             "type": "string"
           }
         },
@@ -1169,6 +1181,30 @@
             "type": "array"
           }
         },
+        "type": "object"
+      },
+      "ListRepoGrantsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListRepoGrantsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "grants": {
+            "items": {
+              "$ref": "#/components/schemas/RepoGrant"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "grants"
+        ],
         "type": "object"
       },
       "ListServiceAccountGrantsOutputBody": {
@@ -1739,6 +1775,26 @@
           "id",
           "owningProjectId",
           "name"
+        ],
+        "type": "object"
+      },
+      "RepoGrant": {
+        "additionalProperties": true,
+        "properties": {
+          "granteeId": {
+            "type": "string"
+          },
+          "granteeType": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "granteeType",
+          "granteeId",
+          "role"
         ],
         "type": "object"
       },
@@ -2883,6 +2939,97 @@
         ]
       }
     },
+    "/orgs/{orgId}": {
+      "delete": {
+        "operationId": "deleteOrg",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete an organization",
+        "tags": [
+          "orgs"
+        ]
+      },
+      "get": {
+        "operationId": "getOrg",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Org"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get an organization",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
     "/orgs/{orgId}/members": {
       "get": {
         "operationId": "listOrgMembers",
@@ -3195,6 +3342,97 @@
           }
         ],
         "summary": "Create project",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/projects/{projectId}": {
+      "delete": {
+        "operationId": "deleteProject",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete a project",
+        "tags": [
+          "projects"
+        ]
+      },
+      "get": {
+        "operationId": "getProject",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get a project by id",
         "tags": [
           "projects"
         ]
@@ -3623,6 +3861,54 @@
       }
     },
     "/repos/{repoId}/grants": {
+      "get": {
+        "operationId": "listRepoGrants",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRepoGrantsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List repo grants",
+        "tags": [
+          "repos"
+        ]
+      },
       "post": {
         "operationId": "grantRepoAccess",
         "parameters": [
@@ -3677,6 +3963,128 @@
           }
         ],
         "summary": "Grant repo access to an identity",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/grants/account/{provider}/{providerUserId}": {
+      "delete": {
+        "operationId": "revokeRepoAccessByProvider",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "providerUserId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke repo access by provider identity",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/grants/{granteeType}/{granteeId}": {
+      "delete": {
+        "operationId": "revokeRepoAccess",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "granteeType",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "granteeId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke repo access by grantee id",
         "tags": [
           "repos"
         ]

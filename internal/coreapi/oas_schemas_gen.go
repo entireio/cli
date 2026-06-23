@@ -1335,6 +1335,12 @@ func (s *DeleteMirrorProvider) UnmarshalText(data []byte) error {
 	}
 }
 
+// DeleteOrgNoContent is response for DeleteOrg operation.
+type DeleteOrgNoContent struct{}
+
+// DeleteProjectNoContent is response for DeleteProject operation.
+type DeleteProjectNoContent struct{}
+
 // DeleteRepoNoContent is response for DeleteRepo operation.
 type DeleteRepoNoContent struct{}
 
@@ -2086,7 +2092,7 @@ type GrantProjectAccessInputBody struct {
 	GranteeType     OptGrantProjectAccessInputBodyGranteeType `json:"granteeType"`
 	Provider        string                                    `json:"provider"`
 	ProviderUserId  string                                    `json:"providerUserId"`
-	Role            string                                    `json:"role"`
+	Role            GrantProjectAccessInputBodyRole           `json:"role"`
 	AdditionalProps GrantProjectAccessInputBodyAdditional
 }
 
@@ -2111,7 +2117,7 @@ func (s *GrantProjectAccessInputBody) GetProviderUserId() string {
 }
 
 // GetRole returns the value of Role.
-func (s *GrantProjectAccessInputBody) GetRole() string {
+func (s *GrantProjectAccessInputBody) GetRole() GrantProjectAccessInputBodyRole {
 	return s.Role
 }
 
@@ -2141,7 +2147,7 @@ func (s *GrantProjectAccessInputBody) SetProviderUserId(val string) {
 }
 
 // SetRole sets the value of Role.
-func (s *GrantProjectAccessInputBody) SetRole(val string) {
+func (s *GrantProjectAccessInputBody) SetRole(val GrantProjectAccessInputBodyRole) {
 	s.Role = val
 }
 
@@ -2209,6 +2215,54 @@ func (s *GrantProjectAccessInputBodyGranteeType) UnmarshalText(data []byte) erro
 	}
 }
 
+type GrantProjectAccessInputBodyRole string
+
+const (
+	GrantProjectAccessInputBodyRoleReader GrantProjectAccessInputBodyRole = "reader"
+	GrantProjectAccessInputBodyRoleWriter GrantProjectAccessInputBodyRole = "writer"
+	GrantProjectAccessInputBodyRoleAdmin  GrantProjectAccessInputBodyRole = "admin"
+)
+
+// AllValues returns all GrantProjectAccessInputBodyRole values.
+func (GrantProjectAccessInputBodyRole) AllValues() []GrantProjectAccessInputBodyRole {
+	return []GrantProjectAccessInputBodyRole{
+		GrantProjectAccessInputBodyRoleReader,
+		GrantProjectAccessInputBodyRoleWriter,
+		GrantProjectAccessInputBodyRoleAdmin,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GrantProjectAccessInputBodyRole) MarshalText() ([]byte, error) {
+	switch s {
+	case GrantProjectAccessInputBodyRoleReader:
+		return []byte(s), nil
+	case GrantProjectAccessInputBodyRoleWriter:
+		return []byte(s), nil
+	case GrantProjectAccessInputBodyRoleAdmin:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GrantProjectAccessInputBodyRole) UnmarshalText(data []byte) error {
+	switch GrantProjectAccessInputBodyRole(data) {
+	case GrantProjectAccessInputBodyRoleReader:
+		*s = GrantProjectAccessInputBodyRoleReader
+		return nil
+	case GrantProjectAccessInputBodyRoleWriter:
+		*s = GrantProjectAccessInputBodyRoleWriter
+		return nil
+	case GrantProjectAccessInputBodyRoleAdmin:
+		*s = GrantProjectAccessInputBodyRoleAdmin
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/GrantProjectAccessOutputBody
 type GrantProjectAccessOutputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -2265,7 +2319,7 @@ type GrantRepoAccessInputBody struct {
 	GranteeType     OptGrantRepoAccessInputBodyGranteeType `json:"granteeType"`
 	Provider        string                                 `json:"provider"`
 	ProviderUserId  string                                 `json:"providerUserId"`
-	Role            string                                 `json:"role"`
+	Role            GrantRepoAccessInputBodyRole           `json:"role"`
 	AdditionalProps GrantRepoAccessInputBodyAdditional
 }
 
@@ -2290,7 +2344,7 @@ func (s *GrantRepoAccessInputBody) GetProviderUserId() string {
 }
 
 // GetRole returns the value of Role.
-func (s *GrantRepoAccessInputBody) GetRole() string {
+func (s *GrantRepoAccessInputBody) GetRole() GrantRepoAccessInputBodyRole {
 	return s.Role
 }
 
@@ -2320,7 +2374,7 @@ func (s *GrantRepoAccessInputBody) SetProviderUserId(val string) {
 }
 
 // SetRole sets the value of Role.
-func (s *GrantRepoAccessInputBody) SetRole(val string) {
+func (s *GrantRepoAccessInputBody) SetRole(val GrantRepoAccessInputBodyRole) {
 	s.Role = val
 }
 
@@ -2388,6 +2442,54 @@ func (s *GrantRepoAccessInputBodyGranteeType) UnmarshalText(data []byte) error {
 	}
 }
 
+type GrantRepoAccessInputBodyRole string
+
+const (
+	GrantRepoAccessInputBodyRoleReader GrantRepoAccessInputBodyRole = "reader"
+	GrantRepoAccessInputBodyRoleWriter GrantRepoAccessInputBodyRole = "writer"
+	GrantRepoAccessInputBodyRoleAdmin  GrantRepoAccessInputBodyRole = "admin"
+)
+
+// AllValues returns all GrantRepoAccessInputBodyRole values.
+func (GrantRepoAccessInputBodyRole) AllValues() []GrantRepoAccessInputBodyRole {
+	return []GrantRepoAccessInputBodyRole{
+		GrantRepoAccessInputBodyRoleReader,
+		GrantRepoAccessInputBodyRoleWriter,
+		GrantRepoAccessInputBodyRoleAdmin,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GrantRepoAccessInputBodyRole) MarshalText() ([]byte, error) {
+	switch s {
+	case GrantRepoAccessInputBodyRoleReader:
+		return []byte(s), nil
+	case GrantRepoAccessInputBodyRoleWriter:
+		return []byte(s), nil
+	case GrantRepoAccessInputBodyRoleAdmin:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GrantRepoAccessInputBodyRole) UnmarshalText(data []byte) error {
+	switch GrantRepoAccessInputBodyRole(data) {
+	case GrantRepoAccessInputBodyRoleReader:
+		*s = GrantRepoAccessInputBodyRoleReader
+		return nil
+	case GrantRepoAccessInputBodyRoleWriter:
+		*s = GrantRepoAccessInputBodyRoleWriter
+		return nil
+	case GrantRepoAccessInputBodyRoleAdmin:
+		*s = GrantRepoAccessInputBodyRoleAdmin
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/GrantRepoAccessOutputBody
 type GrantRepoAccessOutputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -2443,7 +2545,7 @@ type GrantServiceAccountAccessInputBody struct {
 	Schema          OptURI                                         `json:"$schema"`
 	ResourceId      string                                         `json:"resourceId"`
 	ResourceType    GrantServiceAccountAccessInputBodyResourceType `json:"resourceType"`
-	Role            string                                         `json:"role"`
+	Role            GrantServiceAccountAccessInputBodyRole         `json:"role"`
 	AdditionalProps GrantServiceAccountAccessInputBodyAdditional
 }
 
@@ -2463,7 +2565,7 @@ func (s *GrantServiceAccountAccessInputBody) GetResourceType() GrantServiceAccou
 }
 
 // GetRole returns the value of Role.
-func (s *GrantServiceAccountAccessInputBody) GetRole() string {
+func (s *GrantServiceAccountAccessInputBody) GetRole() GrantServiceAccountAccessInputBodyRole {
 	return s.Role
 }
 
@@ -2488,7 +2590,7 @@ func (s *GrantServiceAccountAccessInputBody) SetResourceType(val GrantServiceAcc
 }
 
 // SetRole sets the value of Role.
-func (s *GrantServiceAccountAccessInputBody) SetRole(val string) {
+func (s *GrantServiceAccountAccessInputBody) SetRole(val GrantServiceAccountAccessInputBodyRole) {
 	s.Role = val
 }
 
@@ -2543,6 +2645,54 @@ func (s *GrantServiceAccountAccessInputBodyResourceType) UnmarshalText(data []by
 		return nil
 	case GrantServiceAccountAccessInputBodyResourceTypeProject:
 		*s = GrantServiceAccountAccessInputBodyResourceTypeProject
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type GrantServiceAccountAccessInputBodyRole string
+
+const (
+	GrantServiceAccountAccessInputBodyRoleReader GrantServiceAccountAccessInputBodyRole = "reader"
+	GrantServiceAccountAccessInputBodyRoleWriter GrantServiceAccountAccessInputBodyRole = "writer"
+	GrantServiceAccountAccessInputBodyRoleAdmin  GrantServiceAccountAccessInputBodyRole = "admin"
+)
+
+// AllValues returns all GrantServiceAccountAccessInputBodyRole values.
+func (GrantServiceAccountAccessInputBodyRole) AllValues() []GrantServiceAccountAccessInputBodyRole {
+	return []GrantServiceAccountAccessInputBodyRole{
+		GrantServiceAccountAccessInputBodyRoleReader,
+		GrantServiceAccountAccessInputBodyRoleWriter,
+		GrantServiceAccountAccessInputBodyRoleAdmin,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GrantServiceAccountAccessInputBodyRole) MarshalText() ([]byte, error) {
+	switch s {
+	case GrantServiceAccountAccessInputBodyRoleReader:
+		return []byte(s), nil
+	case GrantServiceAccountAccessInputBodyRoleWriter:
+		return []byte(s), nil
+	case GrantServiceAccountAccessInputBodyRoleAdmin:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GrantServiceAccountAccessInputBodyRole) UnmarshalText(data []byte) error {
+	switch GrantServiceAccountAccessInputBodyRole(data) {
+	case GrantServiceAccountAccessInputBodyRoleReader:
+		*s = GrantServiceAccountAccessInputBodyRoleReader
+		return nil
+	case GrantServiceAccountAccessInputBodyRoleWriter:
+		*s = GrantServiceAccountAccessInputBodyRoleWriter
+		return nil
+	case GrantServiceAccountAccessInputBodyRoleAdmin:
+		*s = GrantServiceAccountAccessInputBodyRoleAdmin
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -3284,6 +3434,55 @@ func (s *ListProjectsOutputBody) SetAdditionalProps(val ListProjectsOutputBodyAd
 type ListProjectsOutputBodyAdditional map[string]jx.Raw
 
 func (s *ListProjectsOutputBodyAdditional) init() ListProjectsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ListRepoGrantsOutputBody
+type ListRepoGrantsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI      `json:"$schema"`
+	Grants          []RepoGrant `json:"grants"`
+	AdditionalProps ListRepoGrantsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListRepoGrantsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetGrants returns the value of Grants.
+func (s *ListRepoGrantsOutputBody) GetGrants() []RepoGrant {
+	return s.Grants
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListRepoGrantsOutputBody) GetAdditionalProps() ListRepoGrantsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListRepoGrantsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetGrants sets the value of Grants.
+func (s *ListRepoGrantsOutputBody) SetGrants(val []RepoGrant) {
+	s.Grants = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListRepoGrantsOutputBody) SetAdditionalProps(val ListRepoGrantsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListRepoGrantsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListRepoGrantsOutputBodyAdditional) init() ListRepoGrantsOutputBodyAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}
@@ -5793,6 +5992,65 @@ func (s *RepoAdditional) init() RepoAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/RepoGrant
+type RepoGrant struct {
+	GranteeId       string `json:"granteeId"`
+	GranteeType     string `json:"granteeType"`
+	Role            string `json:"role"`
+	AdditionalProps RepoGrantAdditional
+}
+
+// GetGranteeId returns the value of GranteeId.
+func (s *RepoGrant) GetGranteeId() string {
+	return s.GranteeId
+}
+
+// GetGranteeType returns the value of GranteeType.
+func (s *RepoGrant) GetGranteeType() string {
+	return s.GranteeType
+}
+
+// GetRole returns the value of Role.
+func (s *RepoGrant) GetRole() string {
+	return s.Role
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *RepoGrant) GetAdditionalProps() RepoGrantAdditional {
+	return s.AdditionalProps
+}
+
+// SetGranteeId sets the value of GranteeId.
+func (s *RepoGrant) SetGranteeId(val string) {
+	s.GranteeId = val
+}
+
+// SetGranteeType sets the value of GranteeType.
+func (s *RepoGrant) SetGranteeType(val string) {
+	s.GranteeType = val
+}
+
+// SetRole sets the value of Role.
+func (s *RepoGrant) SetRole(val string) {
+	s.Role = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *RepoGrant) SetAdditionalProps(val RepoGrantAdditional) {
+	s.AdditionalProps = val
+}
+
+type RepoGrantAdditional map[string]jx.Raw
+
+func (s *RepoGrantAdditional) init() RepoGrantAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 type RepoObjectFormat string
 
 const (
@@ -6054,6 +6312,12 @@ type RevokeProjectAccessByProviderNoContent struct{}
 
 // RevokeProjectAccessNoContent is response for RevokeProjectAccess operation.
 type RevokeProjectAccessNoContent struct{}
+
+// RevokeRepoAccessByProviderNoContent is response for RevokeRepoAccessByProvider operation.
+type RevokeRepoAccessByProviderNoContent struct{}
+
+// RevokeRepoAccessNoContent is response for RevokeRepoAccess operation.
+type RevokeRepoAccessNoContent struct{}
 
 // RevokeServiceAccountAccessNoContent is response for RevokeServiceAccountAccess operation.
 type RevokeServiceAccountAccessNoContent struct{}

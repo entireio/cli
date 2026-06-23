@@ -27,6 +27,16 @@ type DeleteMirrorParams struct {
 	ClusterHost string
 }
 
+// DeleteOrgParams is parameters of deleteOrg operation.
+type DeleteOrgParams struct {
+	OrgId string
+}
+
+// DeleteProjectParams is parameters of deleteProject operation.
+type DeleteProjectParams struct {
+	ProjectId string
+}
+
 // DeleteRepoParams is parameters of deleteRepo operation.
 type DeleteRepoParams struct {
 	RepoId string
@@ -42,12 +52,22 @@ type GetMirrorParams struct {
 	MirrorId string
 }
 
+// GetOrgParams is parameters of getOrg operation.
+type GetOrgParams struct {
+	OrgId string
+}
+
 // GetPermissionsParams is parameters of getPermissions operation.
 type GetPermissionsParams struct {
 	ResourceType string
 	ResourceId   string
 	// If set, return the SpiceDB trace for this permission instead of the permission list.
 	Explain OptString `json:",omitempty,omitzero"`
+}
+
+// GetProjectParams is parameters of getProject operation.
+type GetProjectParams struct {
+	ProjectId string
 }
 
 // GetRepoParams is parameters of getRepo operation.
@@ -131,6 +151,11 @@ type ListProjectsParams struct {
 	Name OptString `json:",omitempty,omitzero"`
 }
 
+// ListRepoGrantsParams is parameters of listRepoGrants operation.
+type ListRepoGrantsParams struct {
+	RepoId string
+}
+
 // ListServiceAccountGrantsParams is parameters of listServiceAccountGrants operation.
 type ListServiceAccountGrantsParams struct {
 	AccountId string
@@ -185,6 +210,20 @@ type RevokeProjectAccessParams struct {
 // RevokeProjectAccessByProviderParams is parameters of revokeProjectAccessByProvider operation.
 type RevokeProjectAccessByProviderParams struct {
 	ProjectId      string
+	Provider       string
+	ProviderUserId string
+}
+
+// RevokeRepoAccessParams is parameters of revokeRepoAccess operation.
+type RevokeRepoAccessParams struct {
+	RepoId      string
+	GranteeType string
+	GranteeId   string
+}
+
+// RevokeRepoAccessByProviderParams is parameters of revokeRepoAccessByProvider operation.
+type RevokeRepoAccessByProviderParams struct {
+	RepoId         string
 	Provider       string
 	ProviderUserId string
 }
