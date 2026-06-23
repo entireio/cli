@@ -29,6 +29,20 @@ func parseOrgRole(s string) (coreapi.AddOrgMemberInputBodyRole, error) {
 	}
 }
 
+// validateGrantRole rejects unknown project/repo grant roles at the CLI
+// boundary (reader, writer, admin) so the user gets a clear message instead of
+// a server 422. The GrantProjectAccess and GrantRepoAccess input bodies use
+// distinct enum types that share these values, so callers cast the validated
+// string to whichever type they need.
+func validateGrantRole(role string) error {
+	switch role {
+	case "reader", "writer", "admin":
+		return nil
+	default:
+		return fmt.Errorf("invalid --role %q: must be \"reader\", \"writer\", or \"admin\"", role)
+	}
+}
+
 // newGrantCmd is the hidden `entire grant` command group: manage access
 // grants and org membership on the Entire control plane. Surface follows
 // what the Core API exposes per resource: org and project support
@@ -181,6 +195,10 @@ func newGrantProjectAddCmd() *cobra.Command {
 		Short: "Grant access to a project",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateGrantRole(role); err != nil {
+				cmd.SilenceUsage = true
+				return err
+			}
 			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
 				projID, err := resolveProjectRef(ctx, c, args[0])
 				if err != nil {
@@ -189,7 +207,7 @@ func newGrantProjectAddCmd() *cobra.Command {
 				body := &coreapi.GrantProjectAccessInputBody{
 					Provider:       provider,
 					ProviderUserId: providerUserID,
-					Role:           role,
+					Role:           coreapi.GrantProjectAccessInputBodyRole(role),
 				}
 				if granteeType != "" {
 					body.GranteeType = coreapi.NewOptGrantProjectAccessInputBodyGranteeType(coreapi.GrantProjectAccessInputBodyGranteeType(granteeType))
@@ -329,11 +347,15 @@ func newGrantRepoAddCmd() *cobra.Command {
 		Short: "Grant access to a repo",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateGrantRole(role); err != nil {
+				cmd.SilenceUsage = true
+				return err
+			}
 			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
 				body := &coreapi.GrantRepoAccessInputBody{
 					Provider:       provider,
 					ProviderUserId: providerUserID,
-					Role:           role,
+					Role:           coreapi.GrantRepoAccessInputBodyRole(role),
 				}
 				if granteeType != "" {
 					body.GranteeType = coreapi.NewOptGrantRepoAccessInputBodyGranteeType(coreapi.GrantRepoAccessInputBodyGranteeType(granteeType))
