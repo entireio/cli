@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
@@ -33,15 +35,18 @@ func newPolicyCheckpointCmd() *cobra.Command {
 
 func runPolicyCheckpoint(cmd *cobra.Command, opts policyCheckpointOptions) error {
 	ctx := cmd.Context()
+	if err := ctx.Err(); err != nil {
+		return NewSilentError(err)
+	}
 	repo, err := gitrepo.OpenCurrent(ctx)
 	if err != nil {
-		return fmt.Errorf("open repository: %w", err)
+		return policyCheckpointError("open repository", err)
 	}
 	defer repo.Close()
 
 	target, err := checkpointpolicy.ResolveTarget(ctx)
 	if err != nil {
-		return fmt.Errorf("resolve checkpoint policy remote: %w", err)
+		return policyCheckpointError("resolve checkpoint policy remote", err)
 	}
 
 	var state checkpointpolicy.State
@@ -52,16 +57,16 @@ func runPolicyCheckpoint(cmd *cobra.Command, opts policyCheckpointOptions) error
 			Force:                opts.force,
 		})
 		if err != nil {
-			return fmt.Errorf("update checkpoint policy: %w", err)
+			return policyCheckpointError("update checkpoint policy", err)
 		}
 		if err := checkpointpolicy.Push(ctx, target); err != nil {
-			return fmt.Errorf("push checkpoint policy: %w", err)
+			return policyCheckpointError("push checkpoint policy", err)
 		}
 		state.Source = checkpointpolicy.SourceRemote
 	} else {
 		state, err = checkpointpolicy.Sync(ctx, repo, target)
 		if err != nil {
-			return fmt.Errorf("sync checkpoint policy: %w", err)
+			return policyCheckpointError("sync checkpoint policy", err)
 		}
 	}
 
@@ -73,4 +78,12 @@ func runPolicyCheckpoint(cmd *cobra.Command, opts policyCheckpointOptions) error
 
 func hasPolicyCheckpointUpdate(opts policyCheckpointOptions) bool {
 	return opts.version != "" || opts.minVersion != ""
+}
+
+func policyCheckpointError(message string, err error) error {
+	wrapped := fmt.Errorf("%s: %w", message, err)
+	if errors.Is(wrapped, context.Canceled) {
+		return NewSilentError(wrapped)
+	}
+	return wrapped
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,6 +81,29 @@ func TestPolicyCheckpointCmd_UpdatesAndPushesOnlyPolicyRef(t *testing.T) {
 
 	branches := runPolicyCheckpointGit(t, dir, "ls-remote", bareDir, "refs/heads/*")
 	require.Empty(t, strings.TrimSpace(branches))
+}
+
+func TestPolicyCheckpointCmd_SilencesContextCanceled(t *testing.T) {
+	cmd := &cobra.Command{}
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cmd.SetContext(ctx)
+
+	err := runPolicyCheckpoint(cmd, policyCheckpointOptions{})
+	require.ErrorIs(t, err, context.Canceled)
+	var silent *SilentError
+	require.ErrorAs(t, err, &silent, "error = %T %v, want SilentError", err, err)
+	require.Empty(t, stderr.String())
+}
+
+func TestPolicyCheckpointErrorSilencesWrappedContextCanceled(t *testing.T) {
+	err := policyCheckpointError("sync checkpoint policy", fmt.Errorf("remote: %w", context.Canceled))
+	require.ErrorIs(t, err, context.Canceled)
+	var silent *SilentError
+	require.ErrorAs(t, err, &silent, "error = %T %v, want SilentError", err, err)
 }
 
 func setupPolicyCheckpointRepo(t *testing.T) (string, string) {

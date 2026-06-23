@@ -340,11 +340,15 @@ func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName 
 // the checkpoint with the latest CreatedAt.
 func resolveLatestCheckpoint(ctx context.Context, store checkpointInfoReader, checkpointIDs []id.CheckpointID) (*strategy.CheckpointInfo, bool, error) {
 	infoMap := make(map[id.CheckpointID]strategy.CheckpointInfo, len(checkpointIDs))
+	var unsupportedErr error
 	for _, cpID := range checkpointIDs {
 		metadata, readErr := readCheckpointInfoFromStore(ctx, store, cpID)
 		if readErr != nil {
 			if checkpointpolicy.IsUnsupportedVersion(readErr) {
-				return nil, false, readErr
+				if unsupportedErr == nil {
+					unsupportedErr = readErr
+				}
+				continue
 			}
 			logging.Debug(ctx, "resolveLatestCheckpoint: checkpoint metadata read failed",
 				slog.String("checkpoint_id", cpID.String()),
@@ -356,6 +360,9 @@ func resolveLatestCheckpoint(ctx context.Context, store checkpointInfoReader, ch
 	}
 	latest, found := strategy.ResolveLatestCheckpointFromMap(checkpointIDs, infoMap)
 	if !found {
+		if unsupportedErr != nil {
+			return nil, false, unsupportedErr
+		}
 		return nil, false, nil
 	}
 	return &latest, true, nil

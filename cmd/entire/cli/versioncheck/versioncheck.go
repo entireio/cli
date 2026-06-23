@@ -411,6 +411,9 @@ func updateCommand(currentVersion string) string {
 }
 
 func UpdateCommandForCurrentBinary(currentVersion string) string {
+	if !canAutoInstall() {
+		return downloadsURL
+	}
 	return updateCommand(currentVersion)
 }
 

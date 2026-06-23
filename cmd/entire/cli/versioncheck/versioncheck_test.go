@@ -346,6 +346,8 @@ func TestParseGitHubRelease(t *testing.T) {
 // it without tripping goconst on repeated string literals.
 const brewUpgradeCmd = "brew upgrade entire"
 
+const scoopExecutablePath = `C:\Users\test\scoop\apps\cli\current\entire.exe`
+
 func TestUpdateCommand(t *testing.T) {
 	const plainBinPath = "/usr/local/bin/entire"
 	tests := []struct {
@@ -387,7 +389,7 @@ func TestUpdateCommand(t *testing.T) {
 		{
 			name:           "scoop path",
 			currentVersion: "1.0.0",
-			execPath:       func() (string, error) { return `C:\Users\test\scoop\apps\cli\current\entire.exe`, nil },
+			execPath:       func() (string, error) { return scoopExecutablePath, nil },
 			want:           "scoop update entire/cli",
 		},
 		{
@@ -424,11 +426,50 @@ func TestUpdateCommand(t *testing.T) {
 }
 
 func TestUpdateCommandForCurrentBinary(t *testing.T) {
-	t.Parallel()
+	tests := []struct {
+		name           string
+		currentVersion string
+		goos           string
+		execPath       func() (string, error)
+		want           string
+	}{
+		{
+			name:           "known installer returns command",
+			currentVersion: "1.2.3",
+			goos:           goosWindows,
+			execPath:       func() (string, error) { return scoopExecutablePath, nil },
+			want:           "scoop update entire/cli",
+		},
+		{
+			name:           "windows unknown installer returns releases URL",
+			currentVersion: "1.2.3",
+			goos:           goosWindows,
+			execPath:       func() (string, error) { return `C:\Program Files\Entire\entire.exe`, nil },
+			want:           downloadsURL,
+		},
+		{
+			name:           "non-windows unknown installer returns curl command",
+			currentVersion: "1.2.3",
+			goos:           "linux",
+			execPath:       func() (string, error) { return "/usr/local/bin/entire", nil },
+			want:           "curl -fsSL https://entire.io/install.sh | bash",
+		},
+	}
 
-	got := UpdateCommandForCurrentBinary("1.2.3")
-	if got == "" {
-		t.Fatal("UpdateCommandForCurrentBinary returned empty command")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originalExecPath := executablePath
+			executablePath = tt.execPath
+			t.Cleanup(func() { executablePath = originalExecPath })
+
+			originalGOOS := goos
+			goos = tt.goos
+			t.Cleanup(func() { goos = originalGOOS })
+
+			if got := UpdateCommandForCurrentBinary(tt.currentVersion); got != tt.want {
+				t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

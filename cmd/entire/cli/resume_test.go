@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -629,6 +630,58 @@ func TestResolveLatestCheckpointUsesCheckpointInfoReader(t *testing.T) {
 	}
 	if latest.CheckpointID != newID {
 		t.Errorf("resolveLatestCheckpoint() = %s, want %s", latest.CheckpointID, newID)
+	}
+}
+
+func TestResolveLatestCheckpointSkipsUnsupportedCheckpointWhenReadableCheckpointExists(t *testing.T) {
+	t.Parallel()
+
+	unsupportedID := id.MustCheckpointID("aaa111bbb222")
+	newID := id.MustCheckpointID("ccc333ddd444")
+	reader := &resumeCheckpointInfoReaderStub{
+		summaries: map[id.CheckpointID]*checkpoint.CheckpointSummary{
+			unsupportedID: {CheckpointVersion: "refs-v1"},
+			newID:         {Sessions: []checkpoint.SessionFilePaths{{Metadata: "new"}}},
+		},
+		metadata: map[id.CheckpointID][]checkpoint.CommittedMetadata{
+			newID: {{
+				SessionID: "new-session",
+				CreatedAt: time.Date(2025, 1, 1, 11, 0, 0, 0, time.UTC),
+			}},
+		},
+	}
+
+	latest, found, err := resolveLatestCheckpoint(context.Background(), reader, []id.CheckpointID{unsupportedID, newID})
+	if err != nil {
+		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
+	}
+	if !found {
+		t.Fatal("resolveLatestCheckpoint() found = false")
+	}
+	if latest.CheckpointID != newID {
+		t.Errorf("resolveLatestCheckpoint() = %s, want %s", latest.CheckpointID, newID)
+	}
+}
+
+func TestResolveLatestCheckpointReturnsUnsupportedWhenNoReadableCheckpointExists(t *testing.T) {
+	t.Parallel()
+
+	unsupportedID := id.MustCheckpointID("aaa111bbb222")
+	reader := &resumeCheckpointInfoReaderStub{
+		summaries: map[id.CheckpointID]*checkpoint.CheckpointSummary{
+			unsupportedID: {CheckpointVersion: "refs-v1"},
+		},
+	}
+
+	_, found, err := resolveLatestCheckpoint(context.Background(), reader, []id.CheckpointID{unsupportedID})
+	if err == nil {
+		t.Fatal("resolveLatestCheckpoint() error = nil, want unsupported version")
+	}
+	if found {
+		t.Fatal("resolveLatestCheckpoint() found = true")
+	}
+	if !checkpointpolicy.IsUnsupportedVersion(err) {
+		t.Fatalf("resolveLatestCheckpoint() error = %v, want unsupported version", err)
 	}
 }
 
