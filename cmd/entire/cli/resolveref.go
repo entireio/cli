@@ -122,7 +122,9 @@ func pickOrg(orgs []coreapi.Org, name string) (string, error) {
 // pickProject selects the single project named name. Project names are unique
 // only within an owner, so a bare name can match several projects across
 // different orgs/accounts; on ambiguity the candidates (id + owner) are listed
-// so the user can pass the ULID or scope by org.
+// so the user can pass the intended ULID. (We can't suggest re-scoping the
+// failing command: resolveProjectRef's callers — repo create/list, grant
+// project … — have no --org flag; only `entire project list` does.)
 func pickProject(projects []coreapi.Project, name string) (string, error) {
 	var matches []coreapi.Project
 	for _, p := range projects {
@@ -140,7 +142,7 @@ func pickProject(projects []coreapi.Project, name string) (string, error) {
 		for i, p := range matches {
 			parts[i] = fmt.Sprintf("%s (owner %s)", p.ID, p.OwnerId)
 		}
-		return "", fmt.Errorf("project name %q is ambiguous (%s); pass a ULID or scope with --org", name, strings.Join(parts, ", "))
+		return "", fmt.Errorf("project name %q is ambiguous (%s); pass the intended ULID (run `entire project list --org <org>` to find it)", name, strings.Join(parts, ", "))
 	}
 }
 
