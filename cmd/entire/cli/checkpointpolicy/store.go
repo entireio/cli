@@ -62,7 +62,7 @@ func WriteLocal(ctx context.Context, repo *git.Repository, parent plumbing.Hash,
 	}
 	blobHash, err := checkpoint.CreateBlobFromContent(repo, data)
 	if err != nil {
-		return plumbing.ZeroHash, err
+		return plumbing.ZeroHash, fmt.Errorf("create checkpoint policy blob: %w", err)
 	}
 	treeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, map[string]object.TreeEntry{
 		PolicyFileName: {Name: PolicyFileName, Mode: filemode.Regular, Hash: blobHash},
@@ -73,7 +73,7 @@ func WriteLocal(ctx context.Context, repo *git.Repository, parent plumbing.Hash,
 	authorName, authorEmail := checkpoint.GetGitAuthorFromRepo(repo)
 	commitHash, err := checkpoint.CreateCommit(ctx, repo, treeHash, parent, "Update checkpoint policy", authorName, authorEmail)
 	if err != nil {
-		return plumbing.ZeroHash, err
+		return plumbing.ZeroHash, fmt.Errorf("create checkpoint policy commit: %w", err)
 	}
 	if err := SetRef(repo, RefName, commitHash); err != nil {
 		return plumbing.ZeroHash, err
@@ -90,7 +90,7 @@ func SetRef(repo *git.Repository, ref plumbing.ReferenceName, hash plumbing.Hash
 
 func readFromHash(ctx context.Context, repo *git.Repository, hash plumbing.Hash, source Source) (State, error) {
 	if err := ctx.Err(); err != nil {
-		return State{}, err
+		return State{}, fmt.Errorf("read checkpoint policy: %w", err)
 	}
 	commit, err := repo.CommitObject(hash)
 	if err != nil {

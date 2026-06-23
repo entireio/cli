@@ -1,0 +1,110 @@
+package checkpointpolicy
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/go-git/go-git/v6"
+)
+
+type UpdateOptions struct {
+	CheckpointVersion    string
+	CheckpointMinVersion string
+	Force                bool
+}
+
+func Update(ctx context.Context, repo *git.Repository, target Target, opts UpdateOptions) (State, error) {
+	baseline, err := updateBaseline(ctx, repo, target)
+	if err != nil {
+		return State{}, err
+	}
+
+	policy := baseline.Policy
+	if opts.CheckpointVersion != "" {
+		policy.CheckpointVersion = opts.CheckpointVersion
+	}
+	if opts.CheckpointMinVersion != "" {
+		policy.CheckpointMinVersion = opts.CheckpointMinVersion
+	}
+
+	if err := rejectDowngrades(baseline.Policy, policy, opts); err != nil {
+		return State{}, err
+	}
+	if err := ValidatePolicy(policy); err != nil {
+		return State{}, err
+	}
+
+	hash, err := WriteLocal(ctx, repo, baseline.Hash, policy)
+	if err != nil {
+		return State{}, err
+	}
+	return State{
+		Policy:     Normalize(policy),
+		Source:     SourceLocal,
+		Hash:       hash,
+		RemoteHash: baseline.RemoteHash,
+	}, nil
+}
+
+func updateBaseline(ctx context.Context, repo *git.Repository, target Target) (State, error) {
+	local, err := ReadLocal(ctx, repo)
+	if err != nil {
+		return State{}, err
+	}
+
+	remoteState, err := CheckRemote(ctx, target)
+	if err != nil {
+		return State{}, err
+	}
+	if !remoteState.Exists {
+		return local, nil
+	}
+	if local.Hash == remoteState.Hash {
+		local.Source = SourceRemote
+		local.RemoteHash = remoteState.Hash
+		return local, nil
+	}
+
+	fetched, err := fetchRemotePolicy(ctx, repo, target)
+	if err != nil {
+		return State{}, err
+	}
+	fetched.RemoteHash = remoteState.Hash
+	defer removeFetchRef(repo)
+	return fetched, nil
+}
+
+func rejectDowngrades(before, after Policy, opts UpdateOptions) error {
+	before = Normalize(before)
+	after = Normalize(after)
+
+	if opts.Force {
+		return nil
+	}
+	if opts.CheckpointVersion != "" {
+		if err := rejectFieldDowngrade("checkpoint_version", before.CheckpointVersion, after.CheckpointVersion); err != nil {
+			return err
+		}
+	}
+	if opts.CheckpointMinVersion != "" {
+		if err := rejectFieldDowngrade("checkpoint_min_version", before.CheckpointMinVersion, after.CheckpointMinVersion); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rejectFieldDowngrade(field, beforeRaw, afterRaw string) error {
+	before, err := ParseFormat(beforeRaw)
+	if err != nil {
+		return fmt.Errorf("%s existing value %q: %w", field, beforeRaw, err)
+	}
+	after, err := ParseFormat(afterRaw)
+	if err != nil {
+		return fmt.Errorf("%s: %w", field, err)
+	}
+	if Compare(after, before) < 0 {
+		return fmt.Errorf("would downgrade %s from %q to %q; pass --force to allow this", field, beforeRaw, afterRaw)
+	}
+	return nil
+}

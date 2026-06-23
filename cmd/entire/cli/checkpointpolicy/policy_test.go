@@ -28,7 +28,6 @@ func TestValidatePolicy(t *testing.T) {
 		{name: "unsupported minimum", policy: checkpointpolicy.Policy{CheckpointVersion: "branch-v1", CheckpointMinVersion: "refs-v1"}, wantErr: "not read-supported"},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			err := checkpointpolicy.ValidatePolicy(tt.policy)

@@ -24,7 +24,6 @@ func TestParseFormat(t *testing.T) {
 		{name: "non numeric major", input: "branch-vx", wantErr: "invalid checkpoint major"},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := checkpointpolicy.ParseFormat(tt.input)
@@ -54,5 +53,5 @@ func TestSupportedFormats(t *testing.T) {
 	require.True(t, checkpointpolicy.KnowsFormat(refsV1))
 	require.False(t, checkpointpolicy.CanRead(refsV1))
 	require.False(t, checkpointpolicy.CanWrite(refsV1))
-	require.Less(t, checkpointpolicy.Compare(branchV1, refsV1), 0)
+	require.Negative(t, checkpointpolicy.Compare(branchV1, refsV1))
 }

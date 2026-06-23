@@ -36,11 +36,11 @@ func ResolveTarget(ctx context.Context, baseRemote string) (Target, error) {
 	}
 	dir, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return Target{}, err
+		return Target{}, fmt.Errorf("resolve worktree root: %w", err)
 	}
 	target, dedicated, err := remote.PushURL(ctx, baseRemote)
 	if err != nil {
-		return Target{}, err
+		return Target{}, fmt.Errorf("resolve checkpoint push URL: %w", err)
 	}
 	label := baseRemote
 	if dedicated {
@@ -52,7 +52,7 @@ func ResolveTarget(ctx context.Context, baseRemote string) (Target, error) {
 func CheckRemote(ctx context.Context, target Target) (RemoteState, error) {
 	output, err := remote.LsRemoteInDir(ctx, target.Dir, target.Remote, RefName.String())
 	if err != nil {
-		return RemoteState{}, err
+		return RemoteState{}, fmt.Errorf("check remote checkpoint policy ref: %w", err)
 	}
 	fields := strings.Fields(string(output))
 	if len(fields) == 0 {
@@ -88,9 +88,7 @@ func Sync(ctx context.Context, repo *git.Repository, target Target) (State, erro
 		return State{}, err
 	}
 	fetched.RemoteHash = remoteState.Hash
-	defer func() {
-		_ = repo.Storer.RemoveReference(fetchRefName)
-	}()
+	defer removeFetchRef(repo)
 
 	if local.Hash.IsZero() || isAncestorOf(ctx, repo, local.Hash, fetched.Hash) {
 		if err := SetRef(repo, RefName, fetched.Hash); err != nil {
@@ -132,9 +130,15 @@ func fetchRemotePolicy(ctx context.Context, repo *git.Repository, target Target)
 		NoFilter: true,
 		Dir:      target.Dir,
 	}); err != nil {
-		return State{}, err
+		return State{}, fmt.Errorf("fetch checkpoint policy ref: %w", err)
 	}
 	return ReadFromRef(ctx, repo, fetchRefName, SourceRemote)
+}
+
+func removeFetchRef(repo *git.Repository) {
+	if err := repo.Storer.RemoveReference(fetchRefName); err != nil {
+		return
+	}
 }
 
 func isAncestorOf(ctx context.Context, repo *git.Repository, ancestor, target plumbing.Hash) bool {
@@ -149,9 +153,9 @@ func isAncestorOf(ctx context.Context, repo *git.Repository, ancestor, target pl
 	defer iter.Close()
 
 	found := false
-	_ = iter.ForEach(func(commit *object.Commit) error {
+	err = iter.ForEach(func(commit *object.Commit) error {
 		if err := ctx.Err(); err != nil {
-			return err
+			return fmt.Errorf("traverse checkpoint policy ancestry: %w", err)
 		}
 		if commit.Hash == ancestor {
 			found = true
@@ -159,5 +163,8 @@ func isAncestorOf(ctx context.Context, repo *git.Repository, ancestor, target pl
 		}
 		return nil
 	})
+	if err != nil && !errors.Is(err, errStopTraversal) {
+		return false
+	}
 	return found
 }
