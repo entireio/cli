@@ -20,6 +20,8 @@ func newOrgCmd() *cobra.Command {
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newOrgCreateCmd())
 	cmd.AddCommand(newOrgListCmd())
+	cmd.AddCommand(newOrgGetCmd())
+	cmd.AddCommand(newOrgDeleteCmd())
 	return cmd
 }
 
@@ -63,6 +65,44 @@ func newOrgListCmd() *cobra.Command {
 					return nil, err
 				}
 				return out.Orgs, nil
+			})
+		},
+	}
+}
+
+func newOrgGetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "get <org>",
+		Short: "Show an organization by name or ULID",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runCoreObject(cmd, orgColumns, orgRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Org, error) {
+				orgID, err := resolveOrgRef(ctx, c, args[0])
+				if err != nil {
+					return nil, err
+				}
+				return c.GetOrg(ctx, coreapi.GetOrgParams{OrgId: orgID})
+			})
+		},
+	}
+}
+
+func newOrgDeleteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "delete <org>",
+		Short: "Delete an organization by name or ULID",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+				orgID, err := resolveOrgRef(ctx, c, args[0])
+				if err != nil {
+					return err
+				}
+				if err := c.DeleteOrg(ctx, coreapi.DeleteOrgParams{OrgId: orgID}); err != nil {
+					return err
+				}
+				cmd.Printf("Deleted org %s\n", args[0])
+				return nil
 			})
 		},
 	}

@@ -20,6 +20,8 @@ func newProjectCmd() *cobra.Command {
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newProjectCreateCmd())
 	cmd.AddCommand(newProjectListCmd())
+	cmd.AddCommand(newProjectGetCmd())
+	cmd.AddCommand(newProjectDeleteCmd())
 	return cmd
 }
 
@@ -123,6 +125,44 @@ func newProjectListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&name, "name", "", "filter by exact project name")
 	cmd.Flags().StringVar(&org, "org", "", "list projects owned by this org (name or ULID)")
 	return cmd
+}
+
+func newProjectGetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "get <project>",
+		Short: "Show a project by name or ULID",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runCoreObject(cmd, projectColumns, projectRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Project, error) {
+				projID, err := resolveProjectRef(ctx, c, args[0])
+				if err != nil {
+					return nil, err
+				}
+				return c.GetProject(ctx, coreapi.GetProjectParams{ProjectId: projID})
+			})
+		},
+	}
+}
+
+func newProjectDeleteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "delete <project>",
+		Short: "Delete a project by name or ULID",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+				projID, err := resolveProjectRef(ctx, c, args[0])
+				if err != nil {
+					return err
+				}
+				if err := c.DeleteProject(ctx, coreapi.DeleteProjectParams{ProjectId: projID}); err != nil {
+					return err
+				}
+				cmd.Printf("Deleted project %s\n", args[0])
+				return nil
+			})
+		},
+	}
 }
 
 // parseProjectOwnerType maps the --owner-type flag to the generated enum,

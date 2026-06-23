@@ -6,7 +6,21 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-func TestProjectGranteeMode(t *testing.T) {
+func TestValidateGrantRole(t *testing.T) {
+	t.Parallel()
+	for _, ok := range []string{"reader", "writer", "admin"} {
+		if err := validateGrantRole(ok); err != nil {
+			t.Errorf("validateGrantRole(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "owner", "Reader", "member"} {
+		if err := validateGrantRole(bad); err == nil {
+			t.Errorf("validateGrantRole(%q) expected error", bad)
+		}
+	}
+}
+
+func TestParseGranteeMode(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name                                 string
@@ -24,15 +38,15 @@ func TestProjectGranteeMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := projectGranteeMode(tt.provider, tt.providerUserID, tt.gType, tt.gID)
+			got, err := parseGranteeMode(tt.provider, tt.providerUserID, tt.gType, tt.gID)
 			if tt.wantErr {
 				if err == nil {
-					t.Errorf("projectGranteeMode(%q,%q,%q,%q) expected error", tt.provider, tt.providerUserID, tt.gType, tt.gID)
+					t.Errorf("parseGranteeMode(%q,%q,%q,%q) expected error", tt.provider, tt.providerUserID, tt.gType, tt.gID)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("projectGranteeMode: %v", err)
+				t.Fatalf("parseGranteeMode: %v", err)
 			}
 			if got != tt.want {
 				t.Errorf("got mode %d, want %d", got, tt.want)
