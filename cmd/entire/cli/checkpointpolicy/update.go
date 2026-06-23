@@ -52,8 +52,21 @@ func updateBaseline(ctx context.Context, repo *git.Repository, target Target) (S
 		return State{}, err
 	}
 
-	baseline, _, err := remoteBaseline(ctx, repo, target, local)
-	return baseline, err
+	baseline, remoteFound, err := remoteBaseline(ctx, repo, target, local)
+	if err != nil {
+		return State{}, err
+	}
+	if !remoteFound || local.Hash == baseline.Hash {
+		return baseline, nil
+	}
+	if local.Hash.IsZero() || isAncestorOf(ctx, repo, local.Hash, baseline.Hash) {
+		return baseline, nil
+	}
+	if isAncestorOf(ctx, repo, baseline.Hash, local.Hash) {
+		local.RemoteHash = baseline.RemoteHash
+		return local, nil
+	}
+	return State{}, fmt.Errorf("local checkpoint policy %s diverges from remote %s; push or reconcile the policy before updating", local.Hash, baseline.RemoteHash)
 }
 
 func rejectDowngrades(before, after Policy, opts UpdateOptions) error {

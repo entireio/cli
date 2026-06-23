@@ -16,11 +16,20 @@ func ShouldCheckCheckpointPolicyWarning(cmd *cobra.Command) bool {
 		return false
 	}
 	for c := cmd; c != nil; c = c.Parent() {
-		if c.Hidden || c.Name() == "hooks" {
+		if isCheckpointPolicyWarningExcludedCommand(c.Name()) {
 			return false
 		}
 	}
 	return true
+}
+
+func isCheckpointPolicyWarningExcludedCommand(name string) bool {
+	switch name {
+	case "hooks", "__send_analytics", "curl-bash-post-install":
+		return true
+	default:
+		return false
+	}
 }
 
 func WarnCheckpointPolicyIfNeeded(ctx context.Context, w io.Writer, currentVersion string) {

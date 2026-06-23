@@ -41,6 +41,14 @@ func TestShouldCheckCheckpointPolicyWarning(t *testing.T) {
 	hooks.AddCommand(gitHook)
 	root.AddCommand(hooks)
 
+	hiddenAlias := &cobra.Command{Use: "explain", Hidden: true}
+	root.AddCommand(hiddenAlias)
+
+	sendAnalytics := &cobra.Command{Use: "__send_analytics", Hidden: true}
+	root.AddCommand(sendAnalytics)
+
 	require.True(t, ShouldCheckCheckpointPolicyWarning(visible))
+	require.True(t, ShouldCheckCheckpointPolicyWarning(hiddenAlias))
 	require.False(t, ShouldCheckCheckpointPolicyWarning(gitHook))
+	require.False(t, ShouldCheckCheckpointPolicyWarning(sendAnalytics))
 }

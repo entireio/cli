@@ -15,6 +15,11 @@ import (
 
 const defaultBaseRemote = "origin"
 
+const (
+	sha1HexSize   = 40
+	sha256HexSize = 64
+)
+
 const fetchRefName = plumbing.ReferenceName("refs/entire/policies/checkpoint-fetch")
 
 var errStopTraversal = errors.New("stop traversal")
@@ -58,10 +63,11 @@ func CheckRemote(ctx context.Context, target Target) (RemoteState, error) {
 	if len(fields) == 0 {
 		return RemoteState{}, nil
 	}
-	if len(fields[0]) != 40 {
-		return RemoteState{}, fmt.Errorf("invalid remote checkpoint policy hash %q", fields[0])
+	hash, err := parseRemotePolicyHash(fields[0])
+	if err != nil {
+		return RemoteState{}, err
 	}
-	return RemoteState{Exists: true, Hash: plumbing.NewHash(fields[0])}, nil
+	return RemoteState{Exists: true, Hash: hash}, nil
 }
 
 func Sync(ctx context.Context, repo *git.Repository, target Target) (State, error) {
@@ -112,6 +118,21 @@ func remoteBaseline(ctx context.Context, repo *git.Repository, target Target, lo
 	fetched.RemoteHash = remoteState.Hash
 	defer removeFetchRef(repo)
 	return fetched, true, nil
+}
+
+func parseRemotePolicyHash(raw string) (plumbing.Hash, error) {
+	if !isSupportedRemotePolicyHashLength(raw) {
+		return plumbing.ZeroHash, fmt.Errorf("invalid remote checkpoint policy hash %q", raw)
+	}
+	hash, ok := plumbing.FromHex(raw)
+	if !ok {
+		return plumbing.ZeroHash, fmt.Errorf("invalid remote checkpoint policy hash %q", raw)
+	}
+	return hash, nil
+}
+
+func isSupportedRemotePolicyHashLength(raw string) bool {
+	return len(raw) == sha1HexSize || len(raw) == sha256HexSize
 }
 
 func Push(ctx context.Context, target Target) error {
