@@ -749,17 +749,6 @@ func TestFindTrailStopsAtMaxPagesWithoutTotal(t *testing.T) {
 	}
 }
 
-func TestBuildTrailUpdateRequestCanClearBody(t *testing.T) {
-	t.Parallel()
-	req := buildTrailUpdateRequest(&api.TrailResource{Body: "old"}, trailUpdateInputs{BodyChanged: true, Body: ""})
-	if req.Body == nil {
-		t.Fatal("Body pointer is nil, want empty string pointer")
-	}
-	if *req.Body != "" {
-		t.Fatalf("Body = %q, want empty string", *req.Body)
-	}
-}
-
 func TestValidateTrailUpdateFieldsRejectsEmptyTitle(t *testing.T) {
 	t.Parallel()
 	if err := validateTrailUpdateFields(trailUpdateInputs{TitleChanged: true, Title: "   "}); err == nil {
@@ -1323,6 +1312,39 @@ func TestApplyTrailUpdateRejectsNumberlessTrail(t *testing.T) {
 	found := &api.TrailResource{Number: 0, Title: "Draft"}
 	if err := applyTrailUpdate(t.Context(), client, "gh", "acme", "repo", found, trailUpdateInputs{Body: "x", BodyChanged: true}); err == nil {
 		t.Fatal("expected error updating a trail with no number")
+	}
+}
+
+func TestApplyTrailUpdateReportsBodyFailureAfterMetadata(t *testing.T) {
+	t.Parallel()
+	// Metadata is PATCHed first and succeeds; the body PATCH (second) fails. The
+	// error must say the metadata already landed so the partial outcome isn't hidden.
+	var patches int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&patches, 1) == 1 {
+			if _, err := io.WriteString(w, `{"trail":{"number":42}}`); err != nil {
+				t.Errorf("write response: %v", err)
+			}
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	found := &api.TrailResource{Number: 42}
+
+	err := applyTrailUpdate(t.Context(), client, "gh", "acme", "repo", found, trailUpdateInputs{
+		Status: "open", StatusChanged: true,
+		Body: "new body", BodyChanged: true,
+	})
+	if err == nil {
+		t.Fatal("expected an error when the body PATCH fails")
+	}
+	if !strings.Contains(err.Error(), "metadata updated, but body update failed") {
+		t.Fatalf("error = %q, want it to report the metadata already landed", err)
+	}
+	if got := atomic.LoadInt32(&patches); got != 2 {
+		t.Fatalf("got %d PATCH calls, want 2 (metadata succeeded, body attempted)", got)
 	}
 }
 

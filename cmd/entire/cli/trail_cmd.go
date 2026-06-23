@@ -1045,8 +1045,14 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, stdin io.Reader, ins
 		inputs.BodyChanged = bodyChanged
 
 		// Interactive mode when no update inputs are provided.
-		noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged && inputs.LabelAdd == nil && inputs.LabelRemove == nil
+		noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged && len(inputs.LabelAdd) == 0 && len(inputs.LabelRemove) == 0
 		if noFlags {
+			// A trail with no number can't be updated (the single-trail endpoint
+			// is keyed by number). Fail now rather than after the user has filled
+			// in the whole form only for applyTrailUpdate to reject it.
+			if found.Number <= 0 {
+				return fmt.Errorf("%s has no number yet; cannot update", describeTrailRef(found))
+			}
 			metadata := found.ToMetadata()
 			// Build status options with current value as default.
 			var statusOptions []huh.Option[string]
@@ -1062,37 +1068,41 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, stdin io.Reader, ins
 			}
 			// Seed the body from the real collaborative document (the list/metadata
 			// body is always empty), using the raw snapshot so an edit preserves the
-			// document's whitespace. Fail rather than seed an empty body when it
-			// can't be loaded — otherwise an edit would silently overwrite a body
-			// that merely failed to fetch.
+			// document's whitespace. The body is a separate collaborative-editor
+			// document from the status/title row and can be unreachable while
+			// metadata is fine; when it fails to load, warn and drop the Body field
+			// rather than blocking a status/title edit. Omitting the field (instead
+			// of seeding it empty) keeps the live document safe: with no Body input
+			// nothing is marked changed, so the document is never overwritten.
 			seedStatus := string(metadata.Status)
 			seedTitle := metadata.Title
 			seedBody := ""
-			if found.Number > 0 {
-				bt, _, derr := fetchTrailBody(ctx, client, forge, owner, repoName, found.Number)
-				if derr != nil {
-					return fmt.Errorf("could not load the current body to edit: %w", derr)
-				}
+			bodyEditable := true
+			if bt, _, derr := fetchTrailBody(ctx, client, forge, owner, repoName, found.Number); derr != nil {
+				fmt.Fprintf(errW, "Warning: could not load the current body to edit; leaving it unchanged: %v\n", derr)
+				bodyEditable = false
+			} else {
 				seedBody = bt
 			}
 			body = seedBody
 			statusStr := seedStatus
 			title := seedTitle
 
-			form := NewAccessibleForm(
-				huh.NewGroup(
-					huh.NewSelect[string]().
-						Title("Status").
-						Options(statusOptions...).
-						Value(&statusStr),
-					huh.NewInput().
-						Title("Title").
-						Value(&title),
-					huh.NewText().
-						Title("Body").
-						Value(&body),
-				),
-			)
+			fields := []huh.Field{
+				huh.NewSelect[string]().
+					Title("Status").
+					Options(statusOptions...).
+					Value(&statusStr),
+				huh.NewInput().
+					Title("Title").
+					Value(&title),
+			}
+			if bodyEditable {
+				fields = append(fields, huh.NewText().
+					Title("Body").
+					Value(&body))
+			}
+			form := NewAccessibleForm(huh.NewGroup(fields...))
 			if formErr := form.Run(); formErr != nil {
 				return handleFormCancellation(w, "Trail update", formErr)
 			}
@@ -1233,7 +1243,10 @@ func validateTrailUpdateFields(inputs trailUpdateInputs) error {
 	return nil
 }
 
-// buildTrailUpdateRequest constructs a PATCH request body from the current trail and the requested changes.
+// buildTrailUpdateRequest constructs the metadata PATCH body (status, title,
+// labels) from the current trail and the requested changes. The body is never
+// included here: applyTrailUpdate sends it as a separate PATCH because the API
+// rejects combining a body edit with a metadata edit.
 func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInputs) api.TrailUpdateRequest {
 	var req api.TrailUpdateRequest
 
@@ -1242,9 +1255,6 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 	}
 	if inputs.TitleChanged {
 		req.Title = &inputs.Title
-	}
-	if inputs.BodyChanged {
-		req.Body = &inputs.Body
 	}
 
 	// Handle label changes: merge adds, remove removes.
