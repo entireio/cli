@@ -120,6 +120,14 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	}
 	defer repo.Close()
 
+	// Finalize any ACTIVE session whose agent process has exited (no SessionStop
+	// hook fired). A gone process is unambiguous, so these are condensed on the
+	// spot rather than left for the interactive prompt below; the sweep marks
+	// them ended in place so classifySession won't re-flag them.
+	if n := finalizeExitedSessions(ctx, states); n > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Finalized %d exited session(s) (agent process gone).\n\n", n)
+	}
+
 	// Identify stuck sessions
 	now := time.Now()
 	var stuck []stuckSession
@@ -210,14 +218,22 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 
 	switch {
 	case state.Phase.IsActive():
-		if !state.IsStuckActive() {
-			return nil
-		}
-
 		var reason string
-		if state.LastInteractionTime != nil {
+		switch {
+		case state.OwnerExited():
+			// Detected immediately (no timeout wait): the owning agent process
+			// is gone. Normally finalized up front in runSessionsFix; this
+			// branch covers a session that couldn't be finalized there.
+			pid := 0
+			if state.Owner != nil {
+				pid = state.Owner.PID
+			}
+			reason = fmt.Sprintf("agent process %d exited (no longer running)", pid)
+		case !state.IsStuckActive():
+			return nil
+		case state.LastInteractionTime != nil:
 			reason = fmt.Sprintf("active, last interaction %s ago", now.Sub(*state.LastInteractionTime).Truncate(time.Minute))
-		} else {
+		default:
 			reason = fmt.Sprintf("active, started %s ago with no recorded interaction", now.Sub(state.StartedAt).Truncate(time.Minute))
 		}
 

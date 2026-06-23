@@ -271,6 +271,14 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 		return
 	}
 
+	// Finalize any ACTIVE session whose agent process has exited without a
+	// SessionStop hook firing, so it doesn't linger as "active" until the
+	// inactivity timeout. The sweep marks them ended in place, so the filter
+	// below drops them.
+	if n := finalizeExitedSessions(ctx, states); n > 0 {
+		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("Finalized %d exited session(s) (agent process gone).", n)))
+	}
+
 	// Filter to active sessions only
 	var active []*session.State
 	for _, s := range states {
@@ -379,11 +387,18 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 			}
 
 			statsLine := strings.Join(stats, sty.render(sty.dim, " · "))
-			if st.IsStuckActive() {
+			switch {
+			case st.OwnerExited():
+				// Agent process is gone but the session couldn't be finalized
+				// above (e.g. condense/transition error); flag it explicitly.
+				fmt.Fprintf(w, "%s %s %s\n", sty.render(sty.dim, statsLine),
+					sty.render(sty.dim, "·"),
+					sty.render(sty.yellow, "exited")+" (run 'entire doctor')")
+			case st.IsStuckActive():
 				fmt.Fprintf(w, "%s %s %s\n", sty.render(sty.dim, statsLine),
 					sty.render(sty.dim, "·"),
 					sty.render(sty.yellow, "stale")+" (run 'entire doctor')")
-			} else {
+			default:
 				fmt.Fprintln(w, sty.render(sty.dim, statsLine))
 			}
 			if warning := divergenceWarnings[st.SessionID]; warning != "" {
@@ -622,6 +637,10 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 
 		if store, err := session.NewStateStore(ctx); err == nil {
 			if states, err := store.List(ctx); err == nil {
+				// Finalize sessions whose agent has exited (matches the human
+				// status path) so --json doesn't leave them orphaned ACTIVE or
+				// report them under active_sessions.
+				finalizeExitedSessions(ctx, states)
 				// Deduplicate by agent: one entry per agent, "active" wins over "idle".
 				type agentEntry struct {
 					brief    sessionBriefJSON
@@ -671,6 +690,10 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 func sessionStatusLabel(s *session.State) string {
 	if s.EndedAt != nil {
 		return "ended"
+	}
+	if s.OwnerExited() {
+		// ACTIVE on disk, but the owning agent process is gone.
+		return "exited"
 	}
 	if s.Phase != "" {
 		return string(s.Phase)

@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
@@ -300,6 +301,15 @@ type State struct {
 	// PendingPromptAttribution holds attribution calculated at prompt start (before agent runs).
 	// This is moved to PromptAttributions when SaveStep is called.
 	PendingPromptAttribution *PromptAttribution `json:"pending_prompt_attribution,omitempty"`
+
+	// Owner fingerprints the process that owns this session's agent turn,
+	// captured at each turn start via proclive.ResolveOwner. It lets liveness
+	// checks detect an ACTIVE session whose agent has exited (clean /exit,
+	// crash, kill, terminal close, reboot) without a SessionStop hook firing —
+	// see OwnerExited. nil for legacy sessions or when the owner couldn't be
+	// resolved, in which case liveness falls back to the StuckActiveThreshold
+	// timeout. Only meaningful on Owner.Host.
+	Owner *proclive.Identity `json:"owner,omitempty"`
 }
 
 // PromptAttribution captures line-level attribution data at the start of each prompt.
@@ -408,6 +418,31 @@ func (s *State) IsStuckActive() bool {
 		ref = &s.StartedAt
 	}
 	return time.Since(*ref) > StuckActiveThreshold
+}
+
+// OwnerLiveness reports the liveness of this session's recorded owner process.
+// It returns proclive.LivenessUnknown when no owner was recorded (legacy
+// sessions, or sessions where the owner couldn't be resolved), so callers can
+// fall back to the time-based IsStuckActive heuristic.
+func (s *State) OwnerLiveness() proclive.Liveness {
+	if s.Owner == nil {
+		return proclive.LivenessUnknown
+	}
+	return proclive.Check(*s.Owner)
+}
+
+// OwnerExited reports true when this session is ACTIVE but its owning agent
+// process is gone — exited cleanly, crashed, was killed, or the machine
+// rebooted — without a SessionStop hook firing. Unlike IsStuckActive (a
+// time-based heuristic), this is detected immediately, regardless of how
+// recently the session interacted. It returns false when liveness is Unknown
+// (no owner recorded, cross-host state, or an unsupported platform) so behavior
+// degrades to the StuckActiveThreshold timeout.
+func (s *State) OwnerExited() bool {
+	if !s.Phase.IsActive() {
+		return false
+	}
+	return s.OwnerLiveness() == proclive.LivenessDead
 }
 
 func (s *State) IsStale() bool {
