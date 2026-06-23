@@ -891,6 +891,21 @@ func TestTotalTokens_DeepSubagentNesting(t *testing.T) {
 	}
 }
 
+func TestTotalTokens_SaturatesOverflow(t *testing.T) {
+	t.Parallel()
+
+	maxInt := int(^uint(0) >> 1)
+	tu := &agent.TokenUsage{
+		InputTokens: maxInt,
+		SubagentTokens: &agent.TokenUsage{
+			OutputTokens: 1,
+		},
+	}
+	if got := totalTokens(tu); got != maxInt {
+		t.Errorf("totalTokens() = %d, want %d", got, maxInt)
+	}
+}
+
 func TestActiveTimeDisplay(t *testing.T) {
 	t.Parallel()
 

@@ -22,18 +22,20 @@ This repo contains the CLI for Entire.
 
 ### Command Layout
 
-The CLI is organized around five noun groups plus a small set of top-level
-verbs. The groups are the canonical home for each verb; legacy top-level
-shortcuts remain functional but hidden, and emit a deprecation hint pointing
-at the canonical group form.
+The visible CLI is organized around five noun groups plus a small set of
+top-level verbs. The groups are the canonical home for each verb; legacy
+top-level shortcuts remain functional but hidden, and emit a deprecation hint
+pointing at the canonical group form. Newer experimental command families are
+discoverable through `entire labs` and may remain hidden from root help while
+their canonical paths are still runnable.
 
-- `session` (alias: `sessions`): `list`, `info`, `stop`, `attach`, `resume`, `current`.
+- `session` (alias: `sessions`): `list`, `info`, `tokens`, `stop`, `attach`, `resume`, `current`.
   `resume` with a branch arg switches to it and resumes its session; with no arg
   it opens an interactive picker of stopped sessions (across all worktrees),
   resolving each to its branch and pointing at the owning worktree when the
   branch is checked out elsewhere. Resume keeps an existing local session log
   as-is by default (`--force` overwrites it from the checkpoint).
-- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `search`, plus
+- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`, plus
   the deprecated `rewind` (functional, prints a cobra deprecation message, will
   be removed in a future release)
 - `agent`: bare opens the interactive agent selector, plus `list`, `add`, `remove`
@@ -44,6 +46,10 @@ at the canonical group form.
   `--everywhere` (revoke every session on the active core, not just the
   current one) and `--all-contexts` (log out of every saved login)
 - `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+
+Experimental command families advertised through `entire labs`:
+
+- `tokens`: `profile` (hidden from root help while token diagnostics mature)
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,

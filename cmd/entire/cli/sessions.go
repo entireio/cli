@@ -164,6 +164,7 @@ func newSessionsCmd() *cobra.Command {
 Commands:
   list     List all sessions across all worktrees
   info     Show detailed information for a specific session
+  tokens   Show token usage and optimization recommendations
   stop     Stop one or more active sessions
   current  Show the active session for the current worktree
   attach   Attach an existing agent session
@@ -173,6 +174,7 @@ Examples:
   entire session list                      List all sessions
   entire session info <session-id>         Show session details
   entire session info <session-id> --json  Output as JSON
+  entire session tokens <session-id>       Show token usage
   entire session stop                      Interactive stop
   entire session current                   Active session for cwd
   entire session attach <session-id>       Attach an external session
@@ -187,6 +189,7 @@ Examples:
 
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newInfoCmd())
+	cmd.AddCommand(newTokensCmd())
 	cmd.AddCommand(newStopCmd())
 	cmd.AddCommand(newSessionCurrentCmd())
 	cmd.AddCommand(newAttachCmd())

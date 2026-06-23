@@ -28,7 +28,7 @@ const (
 	reviewContextCommitSeparator = "\x1e"
 )
 
-type reviewContextSessionMetadataReader interface {
+type checkpointSessionMetadataReader interface {
 	ReadSessionMetadata(ctx context.Context, checkpointID checkpointid.CheckpointID, sessionIndex int) (*checkpoint.CommittedMetadata, error)
 }
 
@@ -311,7 +311,7 @@ func readReviewContextSessionMetadata(
 	cpID checkpointid.CheckpointID,
 	sessionIndex int,
 ) (*checkpoint.CommittedMetadata, error) {
-	if r, ok := reader.(reviewContextSessionMetadataReader); ok {
+	if r, ok := reader.(checkpointSessionMetadataReader); ok {
 		return r.ReadSessionMetadata(ctx, cpID, sessionIndex) //nolint:wrapcheck // Best-effort prompt context.
 	}
 	content, err := reader.ReadSessionContent(ctx, cpID, sessionIndex)

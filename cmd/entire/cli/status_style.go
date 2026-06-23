@@ -109,8 +109,10 @@ func totalTokens(tu *agent.TokenUsage) int {
 	if tu == nil {
 		return 0
 	}
-	total := tu.InputTokens + tu.CacheCreationTokens + tu.CacheReadTokens + tu.OutputTokens
-	total += totalTokens(tu.SubagentTokens)
+	total := saturatingIntAdd(tu.InputTokens, tu.CacheCreationTokens)
+	total = saturatingIntAdd(total, tu.CacheReadTokens)
+	total = saturatingIntAdd(total, tu.OutputTokens)
+	total = saturatingIntAdd(total, totalTokens(tu.SubagentTokens))
 	return total
 }
 
