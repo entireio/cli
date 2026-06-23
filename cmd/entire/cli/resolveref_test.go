@@ -115,13 +115,16 @@ const validULID = "01J0ABCDEFGHJKMNPQRSTVWXYZ"
 const apiProjectsPath = "/api/v1/projects"
 
 func TestResolveOrgRef(t *testing.T) {
+	t.Parallel()
 	t.Run("ULID passes through with no network call", func(t *testing.T) {
+		t.Parallel()
 		got, err := resolveOrgRef(t.Context(), failingCoreClient(t), validULID)
 		require.NoError(t, err)
 		require.Equal(t, validULID, got)
 	})
 
 	t.Run("name resolves via ?name= to the single org id", func(t *testing.T) {
+		t.Parallel()
 		c := newResolverTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/api/v1/orgs" || r.URL.Query().Get("name") != "acme" {
 				t.Errorf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
@@ -135,6 +138,7 @@ func TestResolveOrgRef(t *testing.T) {
 	})
 
 	t.Run("404 becomes a friendly not-found error", func(t *testing.T) {
+		t.Parallel()
 		c := newResolverTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 			writeProblem(t, w, http.StatusNotFound)
 		})
@@ -144,13 +148,16 @@ func TestResolveOrgRef(t *testing.T) {
 }
 
 func TestResolveProjectRef(t *testing.T) {
+	t.Parallel()
 	t.Run("ULID passes through with no network call", func(t *testing.T) {
+		t.Parallel()
 		got, err := resolveProjectRef(t.Context(), failingCoreClient(t), validULID)
 		require.NoError(t, err)
 		require.Equal(t, validULID, got)
 	})
 
 	t.Run("name resolves via ?name= to the single project id", func(t *testing.T) {
+		t.Parallel()
 		c := newResolverTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != apiProjectsPath || r.URL.Query().Get("name") != "widgets" {
 				t.Errorf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
@@ -164,6 +171,7 @@ func TestResolveProjectRef(t *testing.T) {
 	})
 
 	t.Run("404 becomes a friendly not-found error", func(t *testing.T) {
+		t.Parallel()
 		c := newResolverTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 			writeProblem(t, w, http.StatusNotFound)
 		})
@@ -173,20 +181,24 @@ func TestResolveProjectRef(t *testing.T) {
 }
 
 func TestResolveRepoRef(t *testing.T) {
+	t.Parallel()
 	const projID = "01J0PRJ0000000000000000001"
 
 	t.Run("ULID passes through with no network call", func(t *testing.T) {
+		t.Parallel()
 		got, err := resolveRepoRef(t.Context(), failingCoreClient(t), validULID, "")
 		require.NoError(t, err)
 		require.Equal(t, validULID, got)
 	})
 
 	t.Run("name without --project is rejected before any call", func(t *testing.T) {
+		t.Parallel()
 		_, err := resolveRepoRef(t.Context(), failingCoreClient(t), "web", "")
 		require.ErrorContains(t, err, "pass --project")
 	})
 
 	t.Run("name resolves project then repo via ?name=", func(t *testing.T) {
+		t.Parallel()
 		c := newResolverTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			switch r.URL.Path {
@@ -207,6 +219,7 @@ func TestResolveRepoRef(t *testing.T) {
 	})
 
 	t.Run("repo 404 becomes a friendly not-found error", func(t *testing.T) {
+		t.Parallel()
 		c := newResolverTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case apiProjectsPath:

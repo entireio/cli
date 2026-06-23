@@ -43,6 +43,21 @@ func validateGrantRole(role string) error {
 	}
 }
 
+// validateGrantGranteeType rejects grantee kinds the control plane no longer
+// accepts when granting. A grant resolves to an account (from the provider
+// identity), so "account" is the only valid kind ("" means the default,
+// account). org/team granting was dropped server-side (COR-561) and the
+// generated client enum is account-only, so catch it here with a clear message
+// instead of an opaque enum-encoding error.
+func validateGrantGranteeType(granteeType string) error {
+	switch granteeType {
+	case "", "account":
+		return nil
+	default:
+		return fmt.Errorf("invalid --grantee-type %q: only \"account\" is supported", granteeType)
+	}
+}
+
 // newGrantCmd is the hidden `entire grant` command group: manage access
 // grants and org membership on the Entire control plane. Org, project, and
 // repo each support add / list / remove. Surfaced via `entire labs`.
@@ -209,6 +224,10 @@ func newGrantProjectAddCmd() *cobra.Command {
 				cmd.SilenceUsage = true
 				return err
 			}
+			if err := validateGrantGranteeType(granteeType); err != nil {
+				cmd.SilenceUsage = true
+				return err
+			}
 			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
 				projID, err := resolveProjectRef(ctx, c, args[0])
 				if err != nil {
@@ -228,7 +247,7 @@ func newGrantProjectAddCmd() *cobra.Command {
 	}
 	bindGranteeFlags(cmd, &provider, &providerUserID)
 	cmd.Flags().StringVar(&role, "role", "", "project role (required)")
-	cmd.Flags().StringVar(&granteeType, "grantee-type", "", "grantee kind: account, org, or team (default account)")
+	cmd.Flags().StringVar(&granteeType, "grantee-type", "", "grantee kind: account (the only supported kind; default)")
 	markRequired(cmd, "role")
 	return cmd
 }
@@ -267,8 +286,8 @@ func newGrantProjectRemoveCmd() *cobra.Command {
 		Short: "Revoke project access from a grantee",
 		Long: "Revoke a grantee's access to a project (addressed by name or ULID). " +
 			"Identify the grantee either by --provider/--provider-user-id (an " +
-			"account, e.g. github + user id) or by --grantee-type/--grantee-id (a " +
-			"ULID, for account/org/team grantees).",
+			"account, e.g. github + user id) or by --grantee-type account " +
+			"--grantee-id <ULID>.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			mode, err := parseGranteeMode(provider, providerUserID, granteeType, granteeID)
@@ -304,7 +323,7 @@ func newGrantProjectRemoveCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&granteeType, "grantee-type", "", "grantee kind: account, org, or team (with --grantee-id)")
+	cmd.Flags().StringVar(&granteeType, "grantee-type", "", "grantee kind: account (with --grantee-id)")
 	cmd.Flags().StringVar(&granteeID, "grantee-id", "", "grantee ULID (with --grantee-type)")
 	cmd.Flags().StringVar(&provider, "provider", "", "identity provider, e.g. github (with --provider-user-id)")
 	cmd.Flags().StringVar(&providerUserID, "provider-user-id", "", "provider-specific user id (with --provider)")
@@ -370,6 +389,10 @@ func newGrantRepoAddCmd() *cobra.Command {
 				cmd.SilenceUsage = true
 				return err
 			}
+			if err := validateGrantGranteeType(granteeType); err != nil {
+				cmd.SilenceUsage = true
+				return err
+			}
 			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
 				repoID, err := resolveRepoRef(ctx, c, args[0], project)
 				if err != nil {
@@ -389,7 +412,7 @@ func newGrantRepoAddCmd() *cobra.Command {
 	}
 	bindGranteeFlags(cmd, &provider, &providerUserID)
 	cmd.Flags().StringVar(&role, "role", "", "repo role (required)")
-	cmd.Flags().StringVar(&granteeType, "grantee-type", "", "grantee kind: account, org, or team (default account)")
+	cmd.Flags().StringVar(&granteeType, "grantee-type", "", "grantee kind: account (the only supported kind; default)")
 	bindRepoProjectFlag(cmd, &project)
 	markRequired(cmd, "role")
 	return cmd
@@ -432,7 +455,7 @@ func newGrantRepoRemoveCmd() *cobra.Command {
 		Short: "Revoke repo access from a grantee",
 		Long: "Revoke a grantee's access to a repo. Identify the grantee either by " +
 			"--provider/--provider-user-id (an account, e.g. github + user id) or by " +
-			"--grantee-type/--grantee-id (a ULID, for account/org/team grantees).",
+			"--grantee-type account --grantee-id <ULID>.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			mode, err := parseGranteeMode(provider, providerUserID, granteeType, granteeID)
@@ -468,7 +491,7 @@ func newGrantRepoRemoveCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&granteeType, "grantee-type", "", "grantee kind: account, org, or team (with --grantee-id)")
+	cmd.Flags().StringVar(&granteeType, "grantee-type", "", "grantee kind: account (with --grantee-id)")
 	cmd.Flags().StringVar(&granteeID, "grantee-id", "", "grantee ULID (with --grantee-type)")
 	cmd.Flags().StringVar(&provider, "provider", "", "identity provider, e.g. github (with --provider-user-id)")
 	cmd.Flags().StringVar(&providerUserID, "provider-user-id", "", "provider-specific user id (with --provider)")

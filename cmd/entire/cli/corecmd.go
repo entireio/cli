@@ -84,11 +84,11 @@ func renderCoreList[T any](cmd *cobra.Command, headers []string, row func(T) []s
 
 // fetchAllPages drives a keyset-paginated list endpoint to completion: it
 // calls fetch with an empty cursor, then re-calls it with each returned
-// nextCursor until the cursor comes back empty, concatenating every page.
-// The control plane caps page size (default 50, max 200), so a single call
-// only ever returns the first page — list commands must loop or they
-// silently truncate. The next==cursor guard turns a misbehaving server that
-// fails to advance the cursor into an error instead of an infinite loop.
+// nextPageToken until the cursor comes back empty, concatenating every page.
+// The control plane caps the page size (and may cap it further than a caller
+// requests), so a single call only returns one page — list commands must loop
+// or they silently truncate. The next==cursor guard turns a misbehaving server
+// that fails to advance the cursor into an error instead of an infinite loop.
 func fetchAllPages[T any](ctx context.Context, fetch func(ctx context.Context, cursor string) (items []T, next string, err error)) ([]T, error) {
 	var all []T
 	cursor := ""
