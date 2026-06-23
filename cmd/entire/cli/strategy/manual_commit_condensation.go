@@ -147,6 +147,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	condenseStart := time.Now()
+	if !committedCheckpointWriteAllowed(ctx, repo) {
+		return newSkippedResult(checkpointID, state.SessionID), nil
+	}
 
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	ref, hasShadowBranch := resolveShadowRef(repo, shadowBranchName, o.shadowRef)

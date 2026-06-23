@@ -2762,6 +2762,10 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		return 1 // Count as error - all checkpoints will be skipped
 	}
 	defer repo.Close()
+	if !committedCheckpointWriteAllowed(ctx, repo) {
+		state.TurnCheckpointIDs = nil
+		return 0
+	}
 
 	prompts := readPromptsFromShadowBranch(ctx, repo, state)
 	if len(prompts) == 0 {

@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -753,6 +754,9 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read checkpoint: %w", err)
+	}
+	if err := checkpointpolicy.EnsureCanReadVersion(cpID.String(), summary.CheckpointVersion); err != nil {
+		return nil, nil, fmt.Errorf("check checkpoint version: %w", err)
 	}
 
 	content, contentErr := checkpoint.ReadLatestSessionContent(ctx, store, cpID, summary)

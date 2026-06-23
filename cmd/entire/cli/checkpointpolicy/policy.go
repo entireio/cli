@@ -70,3 +70,19 @@ func UnsupportedWrite(policy Policy) bool {
 	}
 	return !CanWrite(version)
 }
+
+func UpgradeWarning(updateCommand string) string {
+	return fmt.Sprintf("[entire] This repository requires checkpoint support newer than this Entire CLI.\n[entire] Upgrade Entire, then rerun the command:\n[entire]   %s\n", updateCommand)
+}
+
+func EnsureCanReadVersion(checkpointID, version string) error {
+	policy := Normalize(Policy{CheckpointMinVersion: version})
+	format, err := ParseFormat(policy.CheckpointMinVersion)
+	if err != nil {
+		return fmt.Errorf("checkpoint %s uses unsupported checkpoint_version %q: %w", checkpointID, policy.CheckpointMinVersion, err)
+	}
+	if !CanRead(format) {
+		return fmt.Errorf("checkpoint %s uses unsupported checkpoint_version %q: not read-supported by this Entire CLI", checkpointID, policy.CheckpointMinVersion)
+	}
+	return nil
+}

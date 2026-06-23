@@ -423,6 +423,15 @@ func TestUpdateCommand(t *testing.T) {
 	}
 }
 
+func TestUpdateCommandForCurrentBinary(t *testing.T) {
+	t.Parallel()
+
+	got := UpdateCommandForCurrentBinary("1.2.3")
+	if got == "" {
+		t.Fatal("UpdateCommandForCurrentBinary returned empty command")
+	}
+}
+
 // setupCheckAndNotifyTest points the global config dir at a per-test temp
 // dir and overrides githubAPIURL. Returns a cobra.Command with captured
 // stdout and a cleanup function.

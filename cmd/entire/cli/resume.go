@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -358,6 +359,9 @@ func readCheckpointInfoFromStore(ctx context.Context, store checkpointInfoReader
 	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, checkpointID)
 	if err != nil {
 		return nil, fmt.Errorf("read checkpoint: %w", err)
+	}
+	if err := checkpointpolicy.EnsureCanReadVersion(checkpointID.String(), summary.CheckpointVersion); err != nil {
+		return nil, fmt.Errorf("check checkpoint version: %w", err)
 	}
 	info := &strategy.CheckpointInfo{
 		CheckpointID:     checkpointID,
@@ -942,7 +946,14 @@ func resumeSingleSession(ctx context.Context, w, _ io.Writer, ag agent.Agent, se
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
 	}
-	logContent, _, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, stores.Primary, checkpointID)
+	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, stores.Primary, checkpointID)
+	if err == nil {
+		err = checkpointpolicy.EnsureCanReadVersion(checkpointID.String(), summary.CheckpointVersion)
+	}
+	var content *checkpoint.SessionContent
+	if err == nil {
+		content, err = checkpoint.ReadLatestSessionContent(ctx, stores.Primary, checkpointID, summary)
+	}
 	if err != nil {
 		if errors.Is(err, checkpoint.ErrCheckpointNotFound) || errors.Is(err, checkpoint.ErrNoTranscript) {
 			logging.Debug(ctx, "resume session completed (no metadata)",
@@ -961,6 +972,7 @@ func resumeSingleSession(ctx context.Context, w, _ io.Writer, ag agent.Agent, se
 		)
 		return fmt.Errorf("failed to get session log: %w", err)
 	}
+	logContent := content.Transcript
 
 	// By default, never overwrite a session log that already exists locally: the
 	// on-disk transcript is the live session the user is resuming, so we keep it
