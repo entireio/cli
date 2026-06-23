@@ -692,9 +692,7 @@
           "granteeType": {
             "default": "account",
             "enum": [
-              "account",
-              "org",
-              "team"
+              "account"
             ],
             "type": "string"
           },
@@ -758,9 +756,7 @@
           "granteeType": {
             "default": "account",
             "enum": [
-              "account",
-              "org",
-              "team"
+              "account"
             ],
             "type": "string"
           },
@@ -1056,6 +1052,9 @@
               "$ref": "#/components/schemas/Membership"
             },
             "type": "array"
+          },
+          "nextCursor": {
+            "type": "string"
           }
         },
         "required": [
@@ -1073,6 +1072,9 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextCursor": {
             "type": "string"
           },
           "projects": {
@@ -1099,6 +1101,12 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextCursor": {
+            "type": "string"
+          },
+          "org": {
+            "$ref": "#/components/schemas/Org"
+          },
           "orgs": {
             "items": {
               "$ref": "#/components/schemas/Org"
@@ -1106,9 +1114,6 @@
             "type": "array"
           }
         },
-        "required": [
-          "orgs"
-        ],
         "type": "object"
       },
       "ListProjectMembersOutputBody": {
@@ -1128,6 +1133,9 @@
               "$ref": "#/components/schemas/ProjectGrant"
             },
             "type": "array"
+          },
+          "nextCursor": {
+            "type": "string"
           }
         },
         "required": [
@@ -1147,6 +1155,12 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextCursor": {
+            "type": "string"
+          },
+          "repo": {
+            "$ref": "#/components/schemas/Repo"
+          },
           "repos": {
             "items": {
               "$ref": "#/components/schemas/Repo"
@@ -1154,9 +1168,6 @@
             "type": "array"
           }
         },
-        "required": [
-          "repos"
-        ],
         "type": "object"
       },
       "ListProjectsOutputBody": {
@@ -1169,6 +1180,9 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextCursor": {
             "type": "string"
           },
           "project": {
@@ -1200,6 +1214,9 @@
               "$ref": "#/components/schemas/RepoGrant"
             },
             "type": "array"
+          },
+          "nextCursor": {
+            "type": "string"
           }
         },
         "required": [
@@ -2856,6 +2873,41 @@
     "/orgs": {
       "get": {
         "operationId": "listOrgs",
+        "parameters": [
+          {
+            "description": "Optional: exact-match org name.",
+            "explode": false,
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "description": "Optional: exact-match org name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Max items per page; default 50, max 200 (ignored when name is set).",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Max items per page; default 50, max 200 (ignored when name is set).",
+              "format": "int64",
+              "maximum": 200,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextCursor.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextCursor.",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2886,7 +2938,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "List organizations the caller can see",
+        "summary": "List organizations the caller can see (or one by name)",
         "tags": [
           "orgs"
         ]
@@ -3040,6 +3092,29 @@
             "required": true,
             "schema": {
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Max items per page; default 50, max 200.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Max items per page; default 50, max 200.",
+              "format": "int64",
+              "maximum": 200,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextCursor.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextCursor.",
               "type": "string"
             }
           }
@@ -3211,6 +3286,29 @@
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
             }
+          },
+          {
+            "description": "Max items per page; default 50, max 200.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Max items per page; default 50, max 200.",
+              "format": "int64",
+              "maximum": 200,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextCursor.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextCursor.",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -3260,6 +3358,29 @@
             "name": "name",
             "schema": {
               "description": "Optional: exact-match project name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Max items per page; default 50, max 200 (ignored when name is set).",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Max items per page; default 50, max 200 (ignored when name is set).",
+              "format": "int64",
+              "maximum": 200,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextCursor.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextCursor.",
               "type": "string"
             }
           }
@@ -3632,6 +3753,29 @@
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
             }
+          },
+          {
+            "description": "Max items per page; default 50, max 200.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Max items per page; default 50, max 200.",
+              "format": "int64",
+              "maximum": 200,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextCursor.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextCursor.",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -3682,6 +3826,39 @@
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
             }
+          },
+          {
+            "description": "Optional: exact-match repo name.",
+            "explode": false,
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "description": "Optional: exact-match repo name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Max items per page; default 50, max 200 (ignored when name is set).",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Max items per page; default 50, max 200 (ignored when name is set).",
+              "format": "int64",
+              "maximum": 200,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextCursor.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextCursor.",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -3714,7 +3891,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "List repositories in a project",
+        "summary": "List repositories in a project (or one by name)",
         "tags": [
           "repos"
         ]
@@ -3870,6 +4047,29 @@
             "required": true,
             "schema": {
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Max items per page; default 50, max 200.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Max items per page; default 50, max 200.",
+              "format": "int64",
+              "maximum": 200,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextCursor.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextCursor.",
               "type": "string"
             }
           }

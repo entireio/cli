@@ -141,11 +141,17 @@ func newGrantOrgListCmd() *cobra.Command {
 				if err != nil {
 					return nil, err
 				}
-				out, err := c.ListOrgMembers(ctx, coreapi.ListOrgMembersParams{OrgId: orgID})
-				if err != nil {
-					return nil, err
-				}
-				return out.Members, nil
+				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Membership, string, error) {
+					params := coreapi.ListOrgMembersParams{OrgId: orgID}
+					if cursor != "" {
+						params.Cursor = coreapi.NewOptString(cursor)
+					}
+					out, err := c.ListOrgMembers(ctx, params)
+					if err != nil {
+						return nil, "", err
+					}
+					return out.Members, out.NextCursor.Or(""), nil
+				})
 			})
 		},
 	}
@@ -238,11 +244,17 @@ func newGrantProjectListCmd() *cobra.Command {
 				if err != nil {
 					return nil, err
 				}
-				out, err := c.ListProjectMembers(ctx, coreapi.ListProjectMembersParams{ProjectId: projID})
-				if err != nil {
-					return nil, err
-				}
-				return out.Members, nil
+				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.ProjectGrant, string, error) {
+					params := coreapi.ListProjectMembersParams{ProjectId: projID}
+					if cursor != "" {
+						params.Cursor = coreapi.NewOptString(cursor)
+					}
+					out, err := c.ListProjectMembers(ctx, params)
+					if err != nil {
+						return nil, "", err
+					}
+					return out.Members, out.NextCursor.Or(""), nil
+				})
 			})
 		},
 	}
@@ -395,11 +407,17 @@ func newGrantRepoListCmd() *cobra.Command {
 				if err != nil {
 					return nil, err
 				}
-				out, err := c.ListRepoGrants(ctx, coreapi.ListRepoGrantsParams{RepoId: repoID})
-				if err != nil {
-					return nil, err
-				}
-				return out.Grants, nil
+				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.RepoGrant, string, error) {
+					params := coreapi.ListRepoGrantsParams{RepoId: repoID}
+					if cursor != "" {
+						params.Cursor = coreapi.NewOptString(cursor)
+					}
+					out, err := c.ListRepoGrants(ctx, params)
+					if err != nil {
+						return nil, "", err
+					}
+					return out.Grants, out.NextCursor.Or(""), nil
+				})
 			})
 		},
 	}

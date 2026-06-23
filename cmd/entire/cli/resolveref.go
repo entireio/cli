@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/entireio/cli/internal/coreapi"
@@ -37,16 +39,24 @@ func looksLikeULID(s string) bool {
 }
 
 // resolveOrgRef turns an org reference (ULID or name) into its ULID. A ULID is
-// returned unchanged; a name is looked up against the caller's visible orgs.
+// returned unchanged; a name is resolved by the server's exact-name lookup
+// (GET /orgs?name=), an O(1) match that doesn't depend on the org landing on
+// the first page of a now-paginated list.
 func resolveOrgRef(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
 	if looksLikeULID(ref) {
 		return ref, nil
 	}
-	out, err := c.ListOrgs(ctx)
+	out, err := c.ListOrgs(ctx, coreapi.ListOrgsParams{Name: coreapi.NewOptString(ref)})
 	if err != nil {
+		if isNotFound(err) {
+			return "", fmt.Errorf("no org named %q (run `entire org list` to see names, or pass a ULID)", ref)
+		}
 		return "", err
 	}
-	return pickOrg(out.Orgs, ref)
+	if !out.Org.Set {
+		return "", fmt.Errorf("no org named %q (run `entire org list` to see names, or pass a ULID)", ref)
+	}
+	return out.Org.Value.ID, nil
 }
 
 // resolveAccountRef turns an account reference into its ULID. A ULID passes
@@ -81,75 +91,30 @@ func parseQualifiedHandle(ref string) (provider, handle string, err error) {
 }
 
 // resolveProjectRef turns a project reference (ULID or name) into its ULID. A
-// ULID is returned unchanged; a name is looked up via the server's exact-name
-// filter (the same call `entire project list --name` uses).
+// ULID is returned unchanged; a name is resolved by the server's exact-name
+// lookup (GET /projects?name=), which returns the single match under `project`.
+// Project names are globally unique, so there's no client-side disambiguation.
 func resolveProjectRef(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
 	if looksLikeULID(ref) {
 		return ref, nil
 	}
 	out, err := c.ListProjects(ctx, coreapi.ListProjectsParams{Name: coreapi.NewOptString(ref)})
 	if err != nil {
+		if isNotFound(err) {
+			return "", fmt.Errorf("no project named %q (run `entire project list` to see names, or pass a ULID)", ref)
+		}
 		return "", err
 	}
-	return pickProject(out.Projects, ref)
-}
-
-// pickOrg selects the single org named name. Org names are unique, so a name
-// matches at most one org; zero matches is an error pointing at `org list`, and
-// (defensively) multiple matches list the colliding ids so the user can fall
-// back to a ULID.
-func pickOrg(orgs []coreapi.Org, name string) (string, error) {
-	var matches []coreapi.Org
-	for _, o := range orgs {
-		if o.Name == name {
-			matches = append(matches, o)
-		}
+	if !out.Project.Set {
+		return "", fmt.Errorf("no project named %q (run `entire project list` to see names, or pass a ULID)", ref)
 	}
-	switch len(matches) {
-	case 1:
-		return matches[0].ID, nil
-	case 0:
-		return "", fmt.Errorf("no org named %q (run `entire org list` to see names, or pass a ULID)", name)
-	default:
-		ids := make([]string, len(matches))
-		for i, o := range matches {
-			ids[i] = o.ID
-		}
-		return "", fmt.Errorf("org name %q is ambiguous (%s); pass a ULID instead", name, strings.Join(ids, ", "))
-	}
-}
-
-// pickProject selects the single project named name. Project names are unique
-// only within an owner, so a bare name can match several projects across
-// different orgs/accounts; on ambiguity the candidates (id + owner) are listed
-// so the user can pass the intended ULID. (We can't suggest re-scoping the
-// failing command: resolveProjectRef's callers — repo create/list, grant
-// project … — have no --org flag; only `entire project list` does.)
-func pickProject(projects []coreapi.Project, name string) (string, error) {
-	var matches []coreapi.Project
-	for _, p := range projects {
-		if p.Name == name {
-			matches = append(matches, p)
-		}
-	}
-	switch len(matches) {
-	case 1:
-		return matches[0].ID, nil
-	case 0:
-		return "", fmt.Errorf("no project named %q (run `entire project list` to see names, or pass a ULID)", name)
-	default:
-		parts := make([]string, len(matches))
-		for i, p := range matches {
-			parts[i] = fmt.Sprintf("%s (owner %s)", p.ID, p.OwnerId)
-		}
-		return "", fmt.Errorf("project name %q is ambiguous (%s); pass the intended ULID (run `entire project list --org <org>` to find it)", name, strings.Join(parts, ", "))
-	}
+	return out.Project.Value.ID, nil
 }
 
 // resolveRepoRef turns a repo reference into its ULID. A ULID passes through.
 // A name requires a project scope (projectRef, itself a name or ULID) because
-// repo names are unique only within a project: we list that project's repos and
-// match by name.
+// repo names are unique only within a project: the server's exact-name lookup
+// (GET /projects/{id}/repos?name=) returns the single match under `repo`.
 func resolveRepoRef(ctx context.Context, c *coreapi.Client, ref, projectRef string) (string, error) {
 	if looksLikeULID(ref) {
 		return ref, nil
@@ -161,36 +126,25 @@ func resolveRepoRef(ctx context.Context, c *coreapi.Client, ref, projectRef stri
 	if err != nil {
 		return "", err
 	}
-	out, err := c.ListProjectRepos(ctx, coreapi.ListProjectReposParams{ProjectId: projID})
+	out, err := c.ListProjectRepos(ctx, coreapi.ListProjectReposParams{ProjectId: projID, Name: coreapi.NewOptString(ref)})
 	if err != nil {
+		if isNotFound(err) {
+			return "", fmt.Errorf("no repo named %q in that project (run `entire repo list <project>` to see names, or pass a ULID)", ref)
+		}
 		return "", err
 	}
-	return pickRepo(out.Repos, ref)
+	if !out.Repo.Set {
+		return "", fmt.Errorf("no repo named %q in that project (run `entire repo list <project>` to see names, or pass a ULID)", ref)
+	}
+	return out.Repo.Value.ID, nil
 }
 
-// pickRepo selects the single repo named name within an already-scoped project
-// listing. Repo names are unique per project, so a name matches at most one;
-// zero is an error pointing at `repo list`, and (defensively) multiple lists
-// the colliding ids.
-func pickRepo(repos []coreapi.Repo, name string) (string, error) {
-	var matches []coreapi.Repo
-	for _, r := range repos {
-		if r.Name == name {
-			matches = append(matches, r)
-		}
-	}
-	switch len(matches) {
-	case 1:
-		return matches[0].ID, nil
-	case 0:
-		return "", fmt.Errorf("no repo named %q in that project (run `entire repo list <project>` to see names, or pass a ULID)", name)
-	default:
-		ids := make([]string, len(matches))
-		for i, r := range matches {
-			ids[i] = r.ID
-		}
-		return "", fmt.Errorf("repo name %q is ambiguous (%s); pass a ULID instead", name, strings.Join(ids, ", "))
-	}
+// isNotFound reports whether err is a control-plane 404. The exact-name
+// lookups (resolveOrgRef/resolveProjectRef/resolveRepoRef) map it to a
+// friendly "no X named …" hint rather than surfacing the raw problem detail.
+func isNotFound(err error) bool {
+	var se *coreapi.ErrorModelStatusCode
+	return errors.As(err, &se) && se.StatusCode == http.StatusNotFound
 }
 
 // filterProjectsByName narrows projects to exact name matches, returning all of

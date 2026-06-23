@@ -60,11 +60,17 @@ func newOrgListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runCoreList(cmd, orgColumns, orgRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Org, error) {
-				out, err := c.ListOrgs(ctx)
-				if err != nil {
-					return nil, err
-				}
-				return out.Orgs, nil
+				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Org, string, error) {
+					params := coreapi.ListOrgsParams{}
+					if cursor != "" {
+						params.Cursor = coreapi.NewOptString(cursor)
+					}
+					out, err := c.ListOrgs(ctx, params)
+					if err != nil {
+						return nil, "", err
+					}
+					return out.Orgs, out.NextCursor.Or(""), nil
+				})
 			})
 		},
 	}

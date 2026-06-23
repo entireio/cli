@@ -5221,10 +5221,6 @@ func (s *GrantProjectAccessInputBodyGranteeType) Decode(d *jx.Decoder) error {
 	switch GrantProjectAccessInputBodyGranteeType(v) {
 	case GrantProjectAccessInputBodyGranteeTypeAccount:
 		*s = GrantProjectAccessInputBodyGranteeTypeAccount
-	case GrantProjectAccessInputBodyGranteeTypeOrg:
-		*s = GrantProjectAccessInputBodyGranteeTypeOrg
-	case GrantProjectAccessInputBodyGranteeTypeTeam:
-		*s = GrantProjectAccessInputBodyGranteeTypeTeam
 	default:
 		*s = GrantProjectAccessInputBodyGranteeType(v)
 	}
@@ -5735,10 +5731,6 @@ func (s *GrantRepoAccessInputBodyGranteeType) Decode(d *jx.Decoder) error {
 	switch GrantRepoAccessInputBodyGranteeType(v) {
 	case GrantRepoAccessInputBodyGranteeTypeAccount:
 		*s = GrantRepoAccessInputBodyGranteeTypeAccount
-	case GrantRepoAccessInputBodyGranteeTypeOrg:
-		*s = GrantRepoAccessInputBodyGranteeTypeOrg
-	case GrantRepoAccessInputBodyGranteeTypeTeam:
-		*s = GrantRepoAccessInputBodyGranteeTypeTeam
 	default:
 		*s = GrantRepoAccessInputBodyGranteeType(v)
 	}
@@ -7913,6 +7905,12 @@ func (s *ListOrgMembersOutputBody) encodeFields(e *jx.Encoder) {
 		}
 		e.ArrEnd()
 	}
+	{
+		if s.NextCursor.Set {
+			e.FieldStart("nextCursor")
+			s.NextCursor.Encode(e)
+		}
+	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
 
@@ -7922,9 +7920,10 @@ func (s *ListOrgMembersOutputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfListOrgMembersOutputBody = [2]string{
+var jsonFieldsNameOfListOrgMembersOutputBody = [3]string{
 	0: "$schema",
 	1: "members",
+	2: "nextCursor",
 }
 
 // Decode decodes ListOrgMembersOutputBody from json.
@@ -7964,6 +7963,16 @@ func (s *ListOrgMembersOutputBody) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"members\"")
+			}
+		case "nextCursor":
+			if err := func() error {
+				s.NextCursor.Reset()
+				if err := s.NextCursor.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"nextCursor\"")
 			}
 		default:
 			var elem jx.Raw
@@ -8106,6 +8115,12 @@ func (s *ListOrgProjectsOutputBody) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.NextCursor.Set {
+			e.FieldStart("nextCursor")
+			s.NextCursor.Encode(e)
+		}
+	}
+	{
 		e.FieldStart("projects")
 		e.ArrStart()
 		for _, elem := range s.Projects {
@@ -8122,9 +8137,10 @@ func (s *ListOrgProjectsOutputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfListOrgProjectsOutputBody = [2]string{
+var jsonFieldsNameOfListOrgProjectsOutputBody = [3]string{
 	0: "$schema",
-	1: "projects",
+	1: "nextCursor",
+	2: "projects",
 }
 
 // Decode decodes ListOrgProjectsOutputBody from json.
@@ -8147,8 +8163,18 @@ func (s *ListOrgProjectsOutputBody) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"$schema\"")
 			}
+		case "nextCursor":
+			if err := func() error {
+				s.NextCursor.Reset()
+				if err := s.NextCursor.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"nextCursor\"")
+			}
 		case "projects":
-			requiredBitSet[0] |= 1 << 1
+			requiredBitSet[0] |= 1 << 2
 			if err := func() error {
 				s.Projects = make([]Project, 0)
 				if err := d.Arr(func(d *jx.Decoder) error {
@@ -8186,7 +8212,7 @@ func (s *ListOrgProjectsOutputBody) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00000010,
+		0b00000100,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -8306,12 +8332,26 @@ func (s *ListOrgsOutputBody) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
-		e.FieldStart("orgs")
-		e.ArrStart()
-		for _, elem := range s.Orgs {
-			elem.Encode(e)
+		if s.NextCursor.Set {
+			e.FieldStart("nextCursor")
+			s.NextCursor.Encode(e)
 		}
-		e.ArrEnd()
+	}
+	{
+		if s.Org.Set {
+			e.FieldStart("org")
+			s.Org.Encode(e)
+		}
+	}
+	{
+		if s.Orgs != nil {
+			e.FieldStart("orgs")
+			e.ArrStart()
+			for _, elem := range s.Orgs {
+				elem.Encode(e)
+			}
+			e.ArrEnd()
+		}
 	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
@@ -8322,9 +8362,11 @@ func (s *ListOrgsOutputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfListOrgsOutputBody = [2]string{
+var jsonFieldsNameOfListOrgsOutputBody = [4]string{
 	0: "$schema",
-	1: "orgs",
+	1: "nextCursor",
+	2: "org",
+	3: "orgs",
 }
 
 // Decode decodes ListOrgsOutputBody from json.
@@ -8332,7 +8374,6 @@ func (s *ListOrgsOutputBody) Decode(d *jx.Decoder) error {
 	if s == nil {
 		return errors.New("invalid: unable to decode ListOrgsOutputBody to nil")
 	}
-	var requiredBitSet [1]uint8
 	s.AdditionalProps = map[string]jx.Raw{}
 
 	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
@@ -8347,8 +8388,27 @@ func (s *ListOrgsOutputBody) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"$schema\"")
 			}
+		case "nextCursor":
+			if err := func() error {
+				s.NextCursor.Reset()
+				if err := s.NextCursor.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"nextCursor\"")
+			}
+		case "org":
+			if err := func() error {
+				s.Org.Reset()
+				if err := s.Org.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"org\"")
+			}
 		case "orgs":
-			requiredBitSet[0] |= 1 << 1
 			if err := func() error {
 				s.Orgs = make([]Org, 0)
 				if err := d.Arr(func(d *jx.Decoder) error {
@@ -8382,38 +8442,6 @@ func (s *ListOrgsOutputBody) Decode(d *jx.Decoder) error {
 		return nil
 	}); err != nil {
 		return errors.Wrap(err, "decode ListOrgsOutputBody")
-	}
-	// Validate required fields.
-	var failures []validate.FieldError
-	for i, mask := range [1]uint8{
-		0b00000010,
-	} {
-		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
-			// Mask only required fields and check equality to mask using XOR.
-			//
-			// If XOR result is not zero, result is not equal to expected, so some fields are missed.
-			// Bits of fields which would be set are actually bits of missed fields.
-			missed := bits.OnesCount8(result)
-			for bitN := 0; bitN < missed; bitN++ {
-				bitIdx := bits.TrailingZeros8(result)
-				fieldIdx := i*8 + bitIdx
-				var name string
-				if fieldIdx < len(jsonFieldsNameOfListOrgsOutputBody) {
-					name = jsonFieldsNameOfListOrgsOutputBody[fieldIdx]
-				} else {
-					name = strconv.Itoa(fieldIdx)
-				}
-				failures = append(failures, validate.FieldError{
-					Name:  name,
-					Error: validate.ErrFieldRequired,
-				})
-				// Reset bit.
-				result &^= 1 << bitIdx
-			}
-		}
-	}
-	if len(failures) > 0 {
-		return &validate.Error{Fields: failures}
 	}
 
 	return nil
@@ -8513,6 +8541,12 @@ func (s *ListProjectMembersOutputBody) encodeFields(e *jx.Encoder) {
 		}
 		e.ArrEnd()
 	}
+	{
+		if s.NextCursor.Set {
+			e.FieldStart("nextCursor")
+			s.NextCursor.Encode(e)
+		}
+	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
 
@@ -8522,9 +8556,10 @@ func (s *ListProjectMembersOutputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfListProjectMembersOutputBody = [2]string{
+var jsonFieldsNameOfListProjectMembersOutputBody = [3]string{
 	0: "$schema",
 	1: "members",
+	2: "nextCursor",
 }
 
 // Decode decodes ListProjectMembersOutputBody from json.
@@ -8564,6 +8599,16 @@ func (s *ListProjectMembersOutputBody) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"members\"")
+			}
+		case "nextCursor":
+			if err := func() error {
+				s.NextCursor.Reset()
+				if err := s.NextCursor.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"nextCursor\"")
 			}
 		default:
 			var elem jx.Raw
@@ -8706,12 +8751,26 @@ func (s *ListProjectReposOutputBody) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
-		e.FieldStart("repos")
-		e.ArrStart()
-		for _, elem := range s.Repos {
-			elem.Encode(e)
+		if s.NextCursor.Set {
+			e.FieldStart("nextCursor")
+			s.NextCursor.Encode(e)
 		}
-		e.ArrEnd()
+	}
+	{
+		if s.Repo.Set {
+			e.FieldStart("repo")
+			s.Repo.Encode(e)
+		}
+	}
+	{
+		if s.Repos != nil {
+			e.FieldStart("repos")
+			e.ArrStart()
+			for _, elem := range s.Repos {
+				elem.Encode(e)
+			}
+			e.ArrEnd()
+		}
 	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
@@ -8722,9 +8781,11 @@ func (s *ListProjectReposOutputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfListProjectReposOutputBody = [2]string{
+var jsonFieldsNameOfListProjectReposOutputBody = [4]string{
 	0: "$schema",
-	1: "repos",
+	1: "nextCursor",
+	2: "repo",
+	3: "repos",
 }
 
 // Decode decodes ListProjectReposOutputBody from json.
@@ -8732,7 +8793,6 @@ func (s *ListProjectReposOutputBody) Decode(d *jx.Decoder) error {
 	if s == nil {
 		return errors.New("invalid: unable to decode ListProjectReposOutputBody to nil")
 	}
-	var requiredBitSet [1]uint8
 	s.AdditionalProps = map[string]jx.Raw{}
 
 	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
@@ -8747,8 +8807,27 @@ func (s *ListProjectReposOutputBody) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"$schema\"")
 			}
+		case "nextCursor":
+			if err := func() error {
+				s.NextCursor.Reset()
+				if err := s.NextCursor.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"nextCursor\"")
+			}
+		case "repo":
+			if err := func() error {
+				s.Repo.Reset()
+				if err := s.Repo.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"repo\"")
+			}
 		case "repos":
-			requiredBitSet[0] |= 1 << 1
 			if err := func() error {
 				s.Repos = make([]Repo, 0)
 				if err := d.Arr(func(d *jx.Decoder) error {
@@ -8782,38 +8861,6 @@ func (s *ListProjectReposOutputBody) Decode(d *jx.Decoder) error {
 		return nil
 	}); err != nil {
 		return errors.Wrap(err, "decode ListProjectReposOutputBody")
-	}
-	// Validate required fields.
-	var failures []validate.FieldError
-	for i, mask := range [1]uint8{
-		0b00000010,
-	} {
-		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
-			// Mask only required fields and check equality to mask using XOR.
-			//
-			// If XOR result is not zero, result is not equal to expected, so some fields are missed.
-			// Bits of fields which would be set are actually bits of missed fields.
-			missed := bits.OnesCount8(result)
-			for bitN := 0; bitN < missed; bitN++ {
-				bitIdx := bits.TrailingZeros8(result)
-				fieldIdx := i*8 + bitIdx
-				var name string
-				if fieldIdx < len(jsonFieldsNameOfListProjectReposOutputBody) {
-					name = jsonFieldsNameOfListProjectReposOutputBody[fieldIdx]
-				} else {
-					name = strconv.Itoa(fieldIdx)
-				}
-				failures = append(failures, validate.FieldError{
-					Name:  name,
-					Error: validate.ErrFieldRequired,
-				})
-				// Reset bit.
-				result &^= 1 << bitIdx
-			}
-		}
-	}
-	if len(failures) > 0 {
-		return &validate.Error{Fields: failures}
 	}
 
 	return nil
@@ -8906,6 +8953,12 @@ func (s *ListProjectsOutputBody) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.NextCursor.Set {
+			e.FieldStart("nextCursor")
+			s.NextCursor.Encode(e)
+		}
+	}
+	{
 		if s.Project.Set {
 			e.FieldStart("project")
 			s.Project.Encode(e)
@@ -8930,10 +8983,11 @@ func (s *ListProjectsOutputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfListProjectsOutputBody = [3]string{
+var jsonFieldsNameOfListProjectsOutputBody = [4]string{
 	0: "$schema",
-	1: "project",
-	2: "projects",
+	1: "nextCursor",
+	2: "project",
+	3: "projects",
 }
 
 // Decode decodes ListProjectsOutputBody from json.
@@ -8954,6 +9008,16 @@ func (s *ListProjectsOutputBody) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"$schema\"")
+			}
+		case "nextCursor":
+			if err := func() error {
+				s.NextCursor.Reset()
+				if err := s.NextCursor.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"nextCursor\"")
 			}
 		case "project":
 			if err := func() error {
@@ -9098,6 +9162,12 @@ func (s *ListRepoGrantsOutputBody) encodeFields(e *jx.Encoder) {
 		}
 		e.ArrEnd()
 	}
+	{
+		if s.NextCursor.Set {
+			e.FieldStart("nextCursor")
+			s.NextCursor.Encode(e)
+		}
+	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
 
@@ -9107,9 +9177,10 @@ func (s *ListRepoGrantsOutputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfListRepoGrantsOutputBody = [2]string{
+var jsonFieldsNameOfListRepoGrantsOutputBody = [3]string{
 	0: "$schema",
 	1: "grants",
+	2: "nextCursor",
 }
 
 // Decode decodes ListRepoGrantsOutputBody from json.
@@ -9149,6 +9220,16 @@ func (s *ListRepoGrantsOutputBody) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"grants\"")
+			}
+		case "nextCursor":
+			if err := func() error {
+				s.NextCursor.Reset()
+				if err := s.NextCursor.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"nextCursor\"")
 			}
 		default:
 			var elem jx.Raw
@@ -13115,6 +13196,39 @@ func (s *OptMeRegionalUnavailable) UnmarshalJSON(data []byte) error {
 	return s.Decode(d)
 }
 
+// Encode encodes Org as json.
+func (o OptOrg) Encode(e *jx.Encoder) {
+	if !o.Set {
+		return
+	}
+	o.Value.Encode(e)
+}
+
+// Decode decodes Org from json.
+func (o *OptOrg) Decode(d *jx.Decoder) error {
+	if o == nil {
+		return errors.New("invalid: unable to decode OptOrg to nil")
+	}
+	o.Set = true
+	if err := o.Value.Decode(d); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s OptOrg) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *OptOrg) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
 // Encode encodes Project as json.
 func (o OptProject) Encode(e *jx.Encoder) {
 	if !o.Set {
@@ -13144,6 +13258,39 @@ func (s OptProject) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *OptProject) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes Repo as json.
+func (o OptRepo) Encode(e *jx.Encoder) {
+	if !o.Set {
+		return
+	}
+	o.Value.Encode(e)
+}
+
+// Decode decodes Repo from json.
+func (o *OptRepo) Decode(d *jx.Decoder) error {
+	if o == nil {
+		return errors.New("invalid: unable to decode OptRepo to nil")
+	}
+	o.Set = true
+	if err := o.Value.Decode(d); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s OptRepo) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *OptRepo) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }

@@ -1003,10 +1003,6 @@ func (s GrantProjectAccessInputBodyGranteeType) Validate() error {
 	switch s {
 	case "account":
 		return nil
-	case "org":
-		return nil
-	case "team":
-		return nil
 	default:
 		return errors.Errorf("invalid value: %v", s)
 	}
@@ -1115,10 +1111,6 @@ func (s *GrantRepoAccessInputBody) Validate() error {
 func (s GrantRepoAccessInputBodyGranteeType) Validate() error {
 	switch s {
 	case "account":
-		return nil
-	case "org":
-		return nil
-	case "team":
 		return nil
 	default:
 		return errors.Errorf("invalid value: %v", s)
@@ -1446,29 +1438,6 @@ func (s *ListOrgProjectsOutputBody) Validate() error {
 	return nil
 }
 
-func (s *ListOrgsOutputBody) Validate() error {
-	if s == nil {
-		return validate.ErrNilPointer
-	}
-
-	var failures []validate.FieldError
-	if err := func() error {
-		if s.Orgs == nil {
-			return errors.New("nil is invalid value")
-		}
-		return nil
-	}(); err != nil {
-		failures = append(failures, validate.FieldError{
-			Name:  "orgs",
-			Error: err,
-		})
-	}
-	if len(failures) > 0 {
-		return &validate.Error{Fields: failures}
-	}
-	return nil
-}
-
 func (s *ListProjectMembersOutputBody) Validate() error {
 	if s == nil {
 		return validate.ErrNilPointer
@@ -1499,9 +1468,24 @@ func (s *ListProjectReposOutputBody) Validate() error {
 
 	var failures []validate.FieldError
 	if err := func() error {
-		if s.Repos == nil {
-			return errors.New("nil is invalid value")
+		if value, ok := s.Repo.Get(); ok {
+			if err := func() error {
+				if err := value.Validate(); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
 		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "repo",
+			Error: err,
+		})
+	}
+	if err := func() error {
 		var failures []validate.FieldError
 		for i, elem := range s.Repos {
 			if err := func() error {

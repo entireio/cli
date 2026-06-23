@@ -2171,16 +2171,12 @@ type GrantProjectAccessInputBodyGranteeType string
 
 const (
 	GrantProjectAccessInputBodyGranteeTypeAccount GrantProjectAccessInputBodyGranteeType = "account"
-	GrantProjectAccessInputBodyGranteeTypeOrg     GrantProjectAccessInputBodyGranteeType = "org"
-	GrantProjectAccessInputBodyGranteeTypeTeam    GrantProjectAccessInputBodyGranteeType = "team"
 )
 
 // AllValues returns all GrantProjectAccessInputBodyGranteeType values.
 func (GrantProjectAccessInputBodyGranteeType) AllValues() []GrantProjectAccessInputBodyGranteeType {
 	return []GrantProjectAccessInputBodyGranteeType{
 		GrantProjectAccessInputBodyGranteeTypeAccount,
-		GrantProjectAccessInputBodyGranteeTypeOrg,
-		GrantProjectAccessInputBodyGranteeTypeTeam,
 	}
 }
 
@@ -2188,10 +2184,6 @@ func (GrantProjectAccessInputBodyGranteeType) AllValues() []GrantProjectAccessIn
 func (s GrantProjectAccessInputBodyGranteeType) MarshalText() ([]byte, error) {
 	switch s {
 	case GrantProjectAccessInputBodyGranteeTypeAccount:
-		return []byte(s), nil
-	case GrantProjectAccessInputBodyGranteeTypeOrg:
-		return []byte(s), nil
-	case GrantProjectAccessInputBodyGranteeTypeTeam:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -2203,12 +2195,6 @@ func (s *GrantProjectAccessInputBodyGranteeType) UnmarshalText(data []byte) erro
 	switch GrantProjectAccessInputBodyGranteeType(data) {
 	case GrantProjectAccessInputBodyGranteeTypeAccount:
 		*s = GrantProjectAccessInputBodyGranteeTypeAccount
-		return nil
-	case GrantProjectAccessInputBodyGranteeTypeOrg:
-		*s = GrantProjectAccessInputBodyGranteeTypeOrg
-		return nil
-	case GrantProjectAccessInputBodyGranteeTypeTeam:
-		*s = GrantProjectAccessInputBodyGranteeTypeTeam
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -2398,16 +2384,12 @@ type GrantRepoAccessInputBodyGranteeType string
 
 const (
 	GrantRepoAccessInputBodyGranteeTypeAccount GrantRepoAccessInputBodyGranteeType = "account"
-	GrantRepoAccessInputBodyGranteeTypeOrg     GrantRepoAccessInputBodyGranteeType = "org"
-	GrantRepoAccessInputBodyGranteeTypeTeam    GrantRepoAccessInputBodyGranteeType = "team"
 )
 
 // AllValues returns all GrantRepoAccessInputBodyGranteeType values.
 func (GrantRepoAccessInputBodyGranteeType) AllValues() []GrantRepoAccessInputBodyGranteeType {
 	return []GrantRepoAccessInputBodyGranteeType{
 		GrantRepoAccessInputBodyGranteeTypeAccount,
-		GrantRepoAccessInputBodyGranteeTypeOrg,
-		GrantRepoAccessInputBodyGranteeTypeTeam,
 	}
 }
 
@@ -2415,10 +2397,6 @@ func (GrantRepoAccessInputBodyGranteeType) AllValues() []GrantRepoAccessInputBod
 func (s GrantRepoAccessInputBodyGranteeType) MarshalText() ([]byte, error) {
 	switch s {
 	case GrantRepoAccessInputBodyGranteeTypeAccount:
-		return []byte(s), nil
-	case GrantRepoAccessInputBodyGranteeTypeOrg:
-		return []byte(s), nil
-	case GrantRepoAccessInputBodyGranteeTypeTeam:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -2430,12 +2408,6 @@ func (s *GrantRepoAccessInputBodyGranteeType) UnmarshalText(data []byte) error {
 	switch GrantRepoAccessInputBodyGranteeType(data) {
 	case GrantRepoAccessInputBodyGranteeTypeAccount:
 		*s = GrantRepoAccessInputBodyGranteeTypeAccount
-		return nil
-	case GrantRepoAccessInputBodyGranteeTypeOrg:
-		*s = GrantRepoAccessInputBodyGranteeTypeOrg
-		return nil
-	case GrantRepoAccessInputBodyGranteeTypeTeam:
-		*s = GrantRepoAccessInputBodyGranteeTypeTeam
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -3142,6 +3114,7 @@ type ListOrgMembersOutputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema          OptURI       `json:"$schema"`
 	Members         []Membership `json:"members"`
+	NextCursor      OptString    `json:"nextCursor"`
 	AdditionalProps ListOrgMembersOutputBodyAdditional
 }
 
@@ -3153,6 +3126,11 @@ func (s *ListOrgMembersOutputBody) GetSchema() OptURI {
 // GetMembers returns the value of Members.
 func (s *ListOrgMembersOutputBody) GetMembers() []Membership {
 	return s.Members
+}
+
+// GetNextCursor returns the value of NextCursor.
+func (s *ListOrgMembersOutputBody) GetNextCursor() OptString {
+	return s.NextCursor
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -3168,6 +3146,11 @@ func (s *ListOrgMembersOutputBody) SetSchema(val OptURI) {
 // SetMembers sets the value of Members.
 func (s *ListOrgMembersOutputBody) SetMembers(val []Membership) {
 	s.Members = val
+}
+
+// SetNextCursor sets the value of NextCursor.
+func (s *ListOrgMembersOutputBody) SetNextCursor(val OptString) {
+	s.NextCursor = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -3190,6 +3173,7 @@ func (s *ListOrgMembersOutputBodyAdditional) init() ListOrgMembersOutputBodyAddi
 type ListOrgProjectsOutputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema          OptURI    `json:"$schema"`
+	NextCursor      OptString `json:"nextCursor"`
 	Projects        []Project `json:"projects"`
 	AdditionalProps ListOrgProjectsOutputBodyAdditional
 }
@@ -3197,6 +3181,11 @@ type ListOrgProjectsOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *ListOrgProjectsOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextCursor returns the value of NextCursor.
+func (s *ListOrgProjectsOutputBody) GetNextCursor() OptString {
+	return s.NextCursor
 }
 
 // GetProjects returns the value of Projects.
@@ -3212,6 +3201,11 @@ func (s *ListOrgProjectsOutputBody) GetAdditionalProps() ListOrgProjectsOutputBo
 // SetSchema sets the value of Schema.
 func (s *ListOrgProjectsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextCursor sets the value of NextCursor.
+func (s *ListOrgProjectsOutputBody) SetNextCursor(val OptString) {
+	s.NextCursor = val
 }
 
 // SetProjects sets the value of Projects.
@@ -3238,14 +3232,26 @@ func (s *ListOrgProjectsOutputBodyAdditional) init() ListOrgProjectsOutputBodyAd
 // Ref: #/components/schemas/ListOrgsOutputBody
 type ListOrgsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI `json:"$schema"`
-	Orgs            []Org  `json:"orgs"`
+	Schema          OptURI    `json:"$schema"`
+	NextCursor      OptString `json:"nextCursor"`
+	Org             OptOrg    `json:"org"`
+	Orgs            []Org     `json:"orgs"`
 	AdditionalProps ListOrgsOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
 func (s *ListOrgsOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextCursor returns the value of NextCursor.
+func (s *ListOrgsOutputBody) GetNextCursor() OptString {
+	return s.NextCursor
+}
+
+// GetOrg returns the value of Org.
+func (s *ListOrgsOutputBody) GetOrg() OptOrg {
+	return s.Org
 }
 
 // GetOrgs returns the value of Orgs.
@@ -3261,6 +3267,16 @@ func (s *ListOrgsOutputBody) GetAdditionalProps() ListOrgsOutputBodyAdditional {
 // SetSchema sets the value of Schema.
 func (s *ListOrgsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextCursor sets the value of NextCursor.
+func (s *ListOrgsOutputBody) SetNextCursor(val OptString) {
+	s.NextCursor = val
+}
+
+// SetOrg sets the value of Org.
+func (s *ListOrgsOutputBody) SetOrg(val OptOrg) {
+	s.Org = val
 }
 
 // SetOrgs sets the value of Orgs.
@@ -3289,6 +3305,7 @@ type ListProjectMembersOutputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema          OptURI         `json:"$schema"`
 	Members         []ProjectGrant `json:"members"`
+	NextCursor      OptString      `json:"nextCursor"`
 	AdditionalProps ListProjectMembersOutputBodyAdditional
 }
 
@@ -3300,6 +3317,11 @@ func (s *ListProjectMembersOutputBody) GetSchema() OptURI {
 // GetMembers returns the value of Members.
 func (s *ListProjectMembersOutputBody) GetMembers() []ProjectGrant {
 	return s.Members
+}
+
+// GetNextCursor returns the value of NextCursor.
+func (s *ListProjectMembersOutputBody) GetNextCursor() OptString {
+	return s.NextCursor
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -3315,6 +3337,11 @@ func (s *ListProjectMembersOutputBody) SetSchema(val OptURI) {
 // SetMembers sets the value of Members.
 func (s *ListProjectMembersOutputBody) SetMembers(val []ProjectGrant) {
 	s.Members = val
+}
+
+// SetNextCursor sets the value of NextCursor.
+func (s *ListProjectMembersOutputBody) SetNextCursor(val OptString) {
+	s.NextCursor = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -3336,14 +3363,26 @@ func (s *ListProjectMembersOutputBodyAdditional) init() ListProjectMembersOutput
 // Ref: #/components/schemas/ListProjectReposOutputBody
 type ListProjectReposOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI `json:"$schema"`
-	Repos           []Repo `json:"repos"`
+	Schema          OptURI    `json:"$schema"`
+	NextCursor      OptString `json:"nextCursor"`
+	Repo            OptRepo   `json:"repo"`
+	Repos           []Repo    `json:"repos"`
 	AdditionalProps ListProjectReposOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
 func (s *ListProjectReposOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextCursor returns the value of NextCursor.
+func (s *ListProjectReposOutputBody) GetNextCursor() OptString {
+	return s.NextCursor
+}
+
+// GetRepo returns the value of Repo.
+func (s *ListProjectReposOutputBody) GetRepo() OptRepo {
+	return s.Repo
 }
 
 // GetRepos returns the value of Repos.
@@ -3359,6 +3398,16 @@ func (s *ListProjectReposOutputBody) GetAdditionalProps() ListProjectReposOutput
 // SetSchema sets the value of Schema.
 func (s *ListProjectReposOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextCursor sets the value of NextCursor.
+func (s *ListProjectReposOutputBody) SetNextCursor(val OptString) {
+	s.NextCursor = val
+}
+
+// SetRepo sets the value of Repo.
+func (s *ListProjectReposOutputBody) SetRepo(val OptRepo) {
+	s.Repo = val
 }
 
 // SetRepos sets the value of Repos.
@@ -3386,6 +3435,7 @@ func (s *ListProjectReposOutputBodyAdditional) init() ListProjectReposOutputBody
 type ListProjectsOutputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema          OptURI     `json:"$schema"`
+	NextCursor      OptString  `json:"nextCursor"`
 	Project         OptProject `json:"project"`
 	Projects        []Project  `json:"projects"`
 	AdditionalProps ListProjectsOutputBodyAdditional
@@ -3394,6 +3444,11 @@ type ListProjectsOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *ListProjectsOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextCursor returns the value of NextCursor.
+func (s *ListProjectsOutputBody) GetNextCursor() OptString {
+	return s.NextCursor
 }
 
 // GetProject returns the value of Project.
@@ -3414,6 +3469,11 @@ func (s *ListProjectsOutputBody) GetAdditionalProps() ListProjectsOutputBodyAddi
 // SetSchema sets the value of Schema.
 func (s *ListProjectsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextCursor sets the value of NextCursor.
+func (s *ListProjectsOutputBody) SetNextCursor(val OptString) {
+	s.NextCursor = val
 }
 
 // SetProject sets the value of Project.
@@ -3447,6 +3507,7 @@ type ListRepoGrantsOutputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema          OptURI      `json:"$schema"`
 	Grants          []RepoGrant `json:"grants"`
+	NextCursor      OptString   `json:"nextCursor"`
 	AdditionalProps ListRepoGrantsOutputBodyAdditional
 }
 
@@ -3458,6 +3519,11 @@ func (s *ListRepoGrantsOutputBody) GetSchema() OptURI {
 // GetGrants returns the value of Grants.
 func (s *ListRepoGrantsOutputBody) GetGrants() []RepoGrant {
 	return s.Grants
+}
+
+// GetNextCursor returns the value of NextCursor.
+func (s *ListRepoGrantsOutputBody) GetNextCursor() OptString {
+	return s.NextCursor
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -3473,6 +3539,11 @@ func (s *ListRepoGrantsOutputBody) SetSchema(val OptURI) {
 // SetGrants sets the value of Grants.
 func (s *ListRepoGrantsOutputBody) SetGrants(val []RepoGrant) {
 	s.Grants = val
+}
+
+// SetNextCursor sets the value of NextCursor.
+func (s *ListRepoGrantsOutputBody) SetNextCursor(val OptString) {
+	s.NextCursor = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -5292,6 +5363,52 @@ func (o OptMeRegionalUnavailable) Or(d MeRegionalUnavailable) MeRegionalUnavaila
 	return d
 }
 
+// NewOptOrg returns new OptOrg with value set to v.
+func NewOptOrg(v Org) OptOrg {
+	return OptOrg{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptOrg is optional Org.
+type OptOrg struct {
+	Value Org
+	Set   bool
+}
+
+// IsSet returns true if OptOrg was set.
+func (o OptOrg) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptOrg) Reset() {
+	var v Org
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptOrg) SetTo(v Org) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptOrg) Get() (v Org, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptOrg) Or(d Org) Org {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptProject returns new OptProject with value set to v.
 func NewOptProject(v Project) OptProject {
 	return OptProject{
@@ -5332,6 +5449,52 @@ func (o OptProject) Get() (v Project, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptProject) Or(d Project) Project {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptRepo returns new OptRepo with value set to v.
+func NewOptRepo(v Repo) OptRepo {
+	return OptRepo{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptRepo is optional Repo.
+type OptRepo struct {
+	Value Repo
+	Set   bool
+}
+
+// IsSet returns true if OptRepo was set.
+func (o OptRepo) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptRepo) Reset() {
+	var v Repo
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptRepo) SetTo(v Repo) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptRepo) Get() (v Repo, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptRepo) Or(d Repo) Repo {
 	if v, ok := o.Get(); ok {
 		return v
 	}
