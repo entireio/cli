@@ -49,6 +49,37 @@ func resolveOrgRef(ctx context.Context, c *coreapi.Client, ref string) (string, 
 	return pickOrg(out.Orgs, ref)
 }
 
+// resolveAccountRef turns an account reference into its ULID. A ULID passes
+// through unchanged; otherwise the ref is a provider-qualified handle (e.g.
+// "github:alice") resolved via the control plane. We support github-backed
+// user accounts today; other providers will resolve once they exist server-side.
+func resolveAccountRef(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
+	if looksLikeULID(ref) {
+		return ref, nil
+	}
+	provider, handle, err := parseQualifiedHandle(ref)
+	if err != nil {
+		return "", err
+	}
+	id, err := c.ResolveHandle(ctx, coreapi.ResolveHandleParams{Provider: provider, Handle: handle})
+	if err != nil {
+		return "", err
+	}
+	return id.AccountId, nil
+}
+
+// parseQualifiedHandle splits a provider-qualified handle like "github:alice"
+// into its provider ("github") and handle ("alice"). Accounts are addressed by
+// this friendly form; a value with no "provider:" prefix is rejected so the
+// user gets a clear hint rather than a confusing lookup miss.
+func parseQualifiedHandle(ref string) (provider, handle string, err error) {
+	provider, handle, ok := strings.Cut(ref, ":")
+	if !ok || provider == "" || handle == "" {
+		return "", "", fmt.Errorf("account %q must be a qualified handle like \"github:alice\" (or a ULID)", ref)
+	}
+	return provider, handle, nil
+}
+
 // resolveProjectRef turns a project reference (ULID or name) into its ULID. A
 // ULID is returned unchanged; a name is looked up via the server's exact-name
 // filter (the same call `entire project list --name` uses).

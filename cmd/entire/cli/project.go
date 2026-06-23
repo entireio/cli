@@ -40,12 +40,12 @@ func newProjectCreateCmd() *cobra.Command {
 		Use:   "create <name>",
 		Short: "Create a project under an org or account",
 		Long: "Creates a project owned by an org or an account. --owner is the " +
-			"owning org (name or ULID) or account ULID, and --owner-type selects " +
-			"which (org or account).",
+			"owning org (name or ULID) or account (github:handle or ULID), and " +
+			"--owner-type selects which (org or account).",
 		Example: "  # Project under an org (by name)\n" +
 			"  entire project create widgets --owner acme --owner-type org\n\n" +
-			"  # Project owned by an account\n" +
-			"  entire project create widgets --owner 01J0... --owner-type account",
+			"  # Project owned by an account (by handle)\n" +
+			"  entire project create widgets --owner github:alice --owner-type account",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
@@ -54,15 +54,17 @@ func newProjectCreateCmd() *cobra.Command {
 				return err
 			}
 			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
-				ownerRef := ownerID
-				// Only org owners have a friendly-name index; account owners
-				// must be addressed by ULID.
-				if ot == coreapi.CreateProjectInputBodyOwnerTypeOrg {
-					resolved, err := resolveOrgRef(ctx, c, ownerID)
-					if err != nil {
-						return nil, err
-					}
-					ownerRef = resolved
+				// Orgs are addressed by name, accounts by github:handle; both
+				// also accept a raw ULID.
+				var ownerRef string
+				switch ot {
+				case coreapi.CreateProjectInputBodyOwnerTypeOrg:
+					ownerRef, err = resolveOrgRef(ctx, c, ownerID)
+				case coreapi.CreateProjectInputBodyOwnerTypeAccount:
+					ownerRef, err = resolveAccountRef(ctx, c, ownerID)
+				}
+				if err != nil {
+					return nil, err
 				}
 				body := &coreapi.CreateProjectInputBody{
 					Name:      args[0],
@@ -76,7 +78,7 @@ func newProjectCreateCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&ownerID, "owner", "", "owning org (name or ULID), or account ULID (required)")
+	cmd.Flags().StringVar(&ownerID, "owner", "", "owning org (name or ULID), or account (github:handle or ULID) (required)")
 	cmd.Flags().StringVar(&ownerType, "owner-type", "org", "owner kind: org or account")
 	cmd.Flags().StringVar(&region, "region", "", "jurisdiction slug (defaults to the server's home jurisdiction)")
 	markRequired(cmd, "owner")

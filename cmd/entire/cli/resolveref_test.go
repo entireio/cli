@@ -34,6 +34,41 @@ func TestLooksLikeULID(t *testing.T) {
 	}
 }
 
+func TestParseQualifiedHandle(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in           string
+		wantProvider string
+		wantHandle   string
+		wantErr      bool
+	}{
+		{in: "github:alice", wantProvider: "github", wantHandle: "alice"},
+		{in: "github:alice:bob", wantProvider: "github", wantHandle: "alice:bob"}, // only first colon splits
+		{in: "alice", wantErr: true},                                              // no provider prefix
+		{in: "github:", wantErr: true},                                            // empty handle
+		{in: ":alice", wantErr: true},                                             // empty provider
+		{in: "", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			provider, handle, err := parseQualifiedHandle(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("parseQualifiedHandle(%q) expected error", tt.in)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseQualifiedHandle(%q): %v", tt.in, err)
+			}
+			if provider != tt.wantProvider || handle != tt.wantHandle {
+				t.Errorf("parseQualifiedHandle(%q) = (%q, %q), want (%q, %q)", tt.in, provider, handle, tt.wantProvider, tt.wantHandle)
+			}
+		})
+	}
+}
+
 func TestPickOrg(t *testing.T) {
 	t.Parallel()
 	orgs := []coreapi.Org{
