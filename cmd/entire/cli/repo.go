@@ -151,30 +151,38 @@ func newRepoListCmd() *cobra.Command {
 }
 
 func newRepoGetCmd() *cobra.Command {
-	return &cobra.Command{
+	var project string
+	cmd := &cobra.Command{
 		Use:   "get <repo>",
-		Short: "Show a repository by ULID",
+		Short: "Show a repository by name or ULID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreObject(cmd, repoColumns, repoRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Repo, error) {
-				sc, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: args[0]})
+				repoID, err := resolveRepoRef(ctx, c, args[0], project)
 				if err != nil {
 					return nil, err
 				}
-				return sc, nil
+				return c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
 			})
 		},
 	}
+	bindRepoProjectFlag(cmd, &project)
+	return cmd
 }
 
 func newRepoDeleteCmd() *cobra.Command {
-	return &cobra.Command{
+	var project string
+	cmd := &cobra.Command{
 		Use:   "delete <repo>",
-		Short: "Delete a repository by ULID",
+		Short: "Delete a repository by name or ULID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-				if err := c.DeleteRepo(ctx, coreapi.DeleteRepoParams{RepoId: args[0]}); err != nil {
+				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				if err != nil {
+					return err
+				}
+				if err := c.DeleteRepo(ctx, coreapi.DeleteRepoParams{RepoId: repoID}); err != nil {
 					return err
 				}
 				cmd.Printf("Deleted repo %s\n", args[0])
@@ -182,4 +190,13 @@ func newRepoDeleteCmd() *cobra.Command {
 			})
 		},
 	}
+	bindRepoProjectFlag(cmd, &project)
+	return cmd
+}
+
+// bindRepoProjectFlag wires the shared --project scope used to resolve a repo
+// addressed by name (a repo name is unique only within its project). Ignored
+// when the repo arg is already a ULID.
+func bindRepoProjectFlag(cmd *cobra.Command, project *string) {
+	cmd.Flags().StringVar(project, "project", "", "owning project (name or ULID); required when <repo> is a name")
 }

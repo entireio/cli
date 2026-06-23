@@ -143,6 +143,43 @@ func TestPickProject(t *testing.T) {
 	})
 }
 
+func TestPickRepo(t *testing.T) {
+	t.Parallel()
+	repos := []coreapi.Repo{
+		{ID: "01J0REPO000000000000000001", Name: "api"},
+		{ID: "01J0REPO000000000000000002", Name: "web"},
+	}
+
+	t.Run("unique match", func(t *testing.T) {
+		t.Parallel()
+		got, err := pickRepo(repos, "web")
+		if err != nil {
+			t.Fatalf("pickRepo: %v", err)
+		}
+		if got != "01J0REPO000000000000000002" {
+			t.Errorf("pickRepo = %q, want web id", got)
+		}
+	})
+
+	t.Run("no match", func(t *testing.T) {
+		t.Parallel()
+		if _, err := pickRepo(repos, "missing"); err == nil {
+			t.Error("pickRepo expected error for unknown name")
+		}
+	})
+
+	t.Run("ambiguous", func(t *testing.T) {
+		t.Parallel()
+		dupes := []coreapi.Repo{
+			{ID: "01J0REPO00000000000000000A", Name: "dup"},
+			{ID: "01J0REPO00000000000000000B", Name: "dup"},
+		}
+		if _, err := pickRepo(dupes, "dup"); err == nil {
+			t.Error("pickRepo expected error for ambiguous name")
+		}
+	})
+}
+
 func TestFilterProjectsByName(t *testing.T) {
 	t.Parallel()
 	projects := []coreapi.Project{

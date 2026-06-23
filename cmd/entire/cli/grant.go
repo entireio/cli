@@ -348,7 +348,7 @@ func newGrantRepoCmd() *cobra.Command {
 }
 
 func newGrantRepoAddCmd() *cobra.Command {
-	var provider, providerUserID, role, granteeType string
+	var provider, providerUserID, role, granteeType, project string
 	cmd := &cobra.Command{
 		Use:   "add <repo>",
 		Short: "Grant access to a repo",
@@ -359,6 +359,10 @@ func newGrantRepoAddCmd() *cobra.Command {
 				return err
 			}
 			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
+				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				if err != nil {
+					return nil, err
+				}
 				body := &coreapi.GrantRepoAccessInputBody{
 					Provider:       provider,
 					ProviderUserId: providerUserID,
@@ -367,25 +371,31 @@ func newGrantRepoAddCmd() *cobra.Command {
 				if granteeType != "" {
 					body.GranteeType = coreapi.NewOptGrantRepoAccessInputBodyGranteeType(coreapi.GrantRepoAccessInputBodyGranteeType(granteeType))
 				}
-				return c.GrantRepoAccess(ctx, body, coreapi.GrantRepoAccessParams{RepoId: args[0]})
+				return c.GrantRepoAccess(ctx, body, coreapi.GrantRepoAccessParams{RepoId: repoID})
 			})
 		},
 	}
 	bindGranteeFlags(cmd, &provider, &providerUserID)
 	cmd.Flags().StringVar(&role, "role", "", "repo role (required)")
 	cmd.Flags().StringVar(&granteeType, "grantee-type", "", "grantee kind: account, org, or team (default account)")
+	bindRepoProjectFlag(cmd, &project)
 	markRequired(cmd, "role")
 	return cmd
 }
 
 func newGrantRepoListCmd() *cobra.Command {
-	return &cobra.Command{
+	var project string
+	cmd := &cobra.Command{
 		Use:   "list <repo>",
 		Short: "List repo grants",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreList(cmd, projectGrantColumns, repoGrantRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.RepoGrant, error) {
-				out, err := c.ListRepoGrants(ctx, coreapi.ListRepoGrantsParams{RepoId: args[0]})
+				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				if err != nil {
+					return nil, err
+				}
+				out, err := c.ListRepoGrants(ctx, coreapi.ListRepoGrantsParams{RepoId: repoID})
 				if err != nil {
 					return nil, err
 				}
@@ -393,10 +403,12 @@ func newGrantRepoListCmd() *cobra.Command {
 			})
 		},
 	}
+	bindRepoProjectFlag(cmd, &project)
+	return cmd
 }
 
 func newGrantRepoRemoveCmd() *cobra.Command {
-	var granteeType, granteeID, provider, providerUserID string
+	var granteeType, granteeID, provider, providerUserID, project string
 	cmd := &cobra.Command{
 		Use:   "remove <repo>",
 		Short: "Revoke repo access from a grantee",
@@ -411,9 +423,13 @@ func newGrantRepoRemoveCmd() *cobra.Command {
 				return err
 			}
 			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				if err != nil {
+					return err
+				}
 				if mode == granteeModeProvider {
 					if err := c.RevokeRepoAccessByProvider(ctx, coreapi.RevokeRepoAccessByProviderParams{
-						RepoId:         args[0],
+						RepoId:         repoID,
 						Provider:       provider,
 						ProviderUserId: providerUserID,
 					}); err != nil {
@@ -423,7 +439,7 @@ func newGrantRepoRemoveCmd() *cobra.Command {
 					return nil
 				}
 				if err := c.RevokeRepoAccess(ctx, coreapi.RevokeRepoAccessParams{
-					RepoId:      args[0],
+					RepoId:      repoID,
 					GranteeType: granteeType,
 					GranteeId:   granteeID,
 				}); err != nil {
@@ -438,6 +454,7 @@ func newGrantRepoRemoveCmd() *cobra.Command {
 	cmd.Flags().StringVar(&granteeID, "grantee-id", "", "grantee ULID (with --grantee-type)")
 	cmd.Flags().StringVar(&provider, "provider", "", "identity provider, e.g. github (with --provider-user-id)")
 	cmd.Flags().StringVar(&providerUserID, "provider-user-id", "", "provider-specific user id (with --provider)")
+	bindRepoProjectFlag(cmd, &project)
 	return cmd
 }
 

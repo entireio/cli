@@ -146,6 +146,53 @@ func pickProject(projects []coreapi.Project, name string) (string, error) {
 	}
 }
 
+// resolveRepoRef turns a repo reference into its ULID. A ULID passes through.
+// A name requires a project scope (projectRef, itself a name or ULID) because
+// repo names are unique only within a project: we list that project's repos and
+// match by name.
+func resolveRepoRef(ctx context.Context, c *coreapi.Client, ref, projectRef string) (string, error) {
+	if looksLikeULID(ref) {
+		return ref, nil
+	}
+	if projectRef == "" {
+		return "", fmt.Errorf("repo %q is a name; pass --project <name|ULID> to resolve it, or use a repo ULID", ref)
+	}
+	projID, err := resolveProjectRef(ctx, c, projectRef)
+	if err != nil {
+		return "", err
+	}
+	out, err := c.ListProjectRepos(ctx, coreapi.ListProjectReposParams{ProjectId: projID})
+	if err != nil {
+		return "", err
+	}
+	return pickRepo(out.Repos, ref)
+}
+
+// pickRepo selects the single repo named name within an already-scoped project
+// listing. Repo names are unique per project, so a name matches at most one;
+// zero is an error pointing at `repo list`, and (defensively) multiple lists
+// the colliding ids.
+func pickRepo(repos []coreapi.Repo, name string) (string, error) {
+	var matches []coreapi.Repo
+	for _, r := range repos {
+		if r.Name == name {
+			matches = append(matches, r)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0].ID, nil
+	case 0:
+		return "", fmt.Errorf("no repo named %q in that project (run `entire repo list <project>` to see names, or pass a ULID)", name)
+	default:
+		ids := make([]string, len(matches))
+		for i, r := range matches {
+			ids[i] = r.ID
+		}
+		return "", fmt.Errorf("repo name %q is ambiguous (%s); pass a ULID instead", name, strings.Join(ids, ", "))
+	}
+}
+
 // filterProjectsByName narrows projects to exact name matches, returning all of
 // them when name is empty. Used by `project list --org` to apply --name
 // client-side, since the org-scoped list endpoint has no name parameter.
