@@ -9,8 +9,9 @@ import (
 
 func newPolicyCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "policy",
-		Short: "Manage repo-wide Entire policies",
+		Use:    "policy",
+		Short:  "Manage repo-wide Entire policies",
+		Hidden: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
 				return errors.New("not a git repository")
