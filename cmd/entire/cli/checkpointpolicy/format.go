@@ -1,6 +1,7 @@
 package checkpointpolicy
 
 import (
+	"cmp"
 	"fmt"
 	"strconv"
 	"strings"
@@ -48,9 +49,9 @@ func Compare(a, b CheckpointFormat) int {
 	aRank := familyRanks[a.Family]
 	bRank := familyRanks[b.Family]
 	if aRank != bRank {
-		return compareInt(aRank, bRank)
+		return cmp.Compare(aRank, bRank)
 	}
-	return compareInt(a.Major, b.Major)
+	return cmp.Compare(a.Major, b.Major)
 }
 
 func CanRead(format CheckpointFormat) bool {
@@ -59,17 +60,6 @@ func CanRead(format CheckpointFormat) bool {
 
 func CanWrite(format CheckpointFormat) bool {
 	return writeFormats[format]
-}
-
-func compareInt(a, b int) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	default:
-		return 0
-	}
 }
 
 var familyRanks = map[CheckpointFamily]int{

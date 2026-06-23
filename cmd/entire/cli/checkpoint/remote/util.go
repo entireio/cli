@@ -219,38 +219,6 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 	return pushURL, true, nil
 }
 
-// ConfiguredURL returns the configured checkpoint_remote URL without the
-// push-owner fallback used by PushURL. The boolean reports whether a
-// checkpoint_remote is configured.
-func ConfiguredURL(ctx context.Context, remoteName, dir string) (string, bool, error) {
-	s, err := settings.Load(ctx)
-	if err != nil {
-		return "", false, fmt.Errorf("load settings: %w", err)
-	}
-	config := s.GetCheckpointRemote()
-	if config == nil {
-		return "", false, nil
-	}
-
-	remoteURL, remoteErr := GetRemoteURLInDir(ctx, dir, remoteName)
-	if remoteErr == nil {
-		info, parseErr := ParseURL(remoteURL)
-		if parseErr == nil {
-			if checkpointURL, deriveErr := deriveCheckpointURLFromInfo(checkpointTokenTransport(info), config); deriveErr == nil {
-				return checkpointURL, true, nil
-			}
-		}
-	}
-
-	if providerURL, ok := resolveProviderCheckpointURL(config, remoteName, dir); ok {
-		return providerURL, true, nil
-	}
-	if remoteErr != nil {
-		return "", true, fmt.Errorf("get %s remote URL: %w", remoteName, remoteErr)
-	}
-	return "", true, fmt.Errorf("resolve checkpoint remote URL from %s", remoteName)
-}
-
 // Configured reports whether a structured checkpoint_remote is configured.
 func Configured(ctx context.Context) bool {
 	s, err := settings.Load(ctx)
