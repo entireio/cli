@@ -21,6 +21,21 @@ type CommittedListReader interface {
 	ReadSessionPrompts(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (string, error)
 }
 
+// CommittedStore provides the production committed checkpoint storage surface.
+// Writes go through the unified Writer.Write(ctx, WriteRequest); the concrete
+// per-operation methods (WriteCommitted/UpdateCommitted/...) remain on GitStore
+// as the implementation Write dispatches to.
+type CommittedStore interface {
+	CommittedListReader
+	ReadSessionMetadataAndPrompts(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*SessionContent, error)
+	Writer
+}
+
+// AuthorReader provides optional checkpoint author lookup.
+type AuthorReader interface {
+	GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (Author, error)
+}
+
 // ReadCommittedCheckpoint reads a committed checkpoint summary and normalizes
 // a nil store response into ErrCheckpointNotFound.
 func ReadCommittedCheckpoint(ctx context.Context, reader CommittedReader, checkpointID id.CheckpointID) (*CheckpointSummary, error) {

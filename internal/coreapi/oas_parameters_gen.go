@@ -75,6 +75,12 @@ type GrantServiceAccountAccessParams struct {
 	AccountId string
 }
 
+// ListAvailableMirrorsParams is parameters of listAvailableMirrors operation.
+type ListAvailableMirrorsParams struct {
+	// Optional: restrict to repos with this owner login.
+	Owner OptString `json:",omitempty,omitzero"`
+}
+
 // ListBindingsParams is parameters of listBindings operation.
 type ListBindingsParams struct {
 	AccountId string

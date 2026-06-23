@@ -47,8 +47,12 @@ func proxyWithClient(nodes []string, path, entryURL, clusterHost string, client 
 	})
 	if client != nil {
 		// Swap in the test-provided client (e.g. one we want to
-		// inspect or one with a custom CheckRedirect).
+		// inspect or one with a custom CheckRedirect). Point the
+		// discovery probe at the same transport so the cold info/refs
+		// path honors the test's TLS trust / routing instead of the
+		// real-network discovery transport New wired up.
 		p.client = client
+		p.discoveryTransport = client.Transport
 	}
 	return p
 }
@@ -1245,13 +1249,27 @@ func TestNoRedirectClientShareTransport(t *testing.T) {
 	p := &Proxy{client: &http.Client{Transport: transport}}
 	got := p.noRedirectClient()
 	if got.Transport != transport {
-		t.Errorf("NoRedirectClient transport = %v, want %v", got.Transport, transport)
+		t.Errorf("NoRedirectClient transport = %v, want %v (fallback to client transport)", got.Transport, transport)
 	}
 	if got.CheckRedirect == nil {
 		t.Fatal("NoRedirectClient must set CheckRedirect")
 	}
 	if err := got.CheckRedirect(nil, nil); !errors.Is(err, http.ErrUseLastResponse) {
 		t.Errorf("CheckRedirect returned %v, want http.ErrUseLastResponse", err)
+	}
+}
+
+func TestNoRedirectClientPrefersDiscoveryTransport(t *testing.T) {
+	t.Parallel()
+	clientTransport := &fakeTransport{}
+	discovery := &fakeTransport{}
+	p := &Proxy{
+		client:             &http.Client{Transport: clientTransport},
+		discoveryTransport: discovery,
+	}
+	got := p.noRedirectClient()
+	if got.Transport != discovery {
+		t.Errorf("NoRedirectClient transport = %v, want discovery transport %v", got.Transport, discovery)
 	}
 }
 

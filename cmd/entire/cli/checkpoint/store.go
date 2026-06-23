@@ -7,8 +7,11 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
-// Compile-time check that GitStore implements the Store interface.
-var _ Store = (*GitStore)(nil)
+var (
+	_ CommittedStore = (*GitStore)(nil)
+	_ TemporaryStore = (*GitStore)(nil)
+	_ AuthorReader   = (*GitStore)(nil)
+)
 
 // GitStore provides operations for both temporary and committed checkpoint
 // storage. Writes target refs.Primary; committed reads resolve against
@@ -53,3 +56,6 @@ func (s *GitStore) setPrimaryRef(hash plumbing.Hash) error {
 	}
 	return nil
 }
+
+// Compile-time check: GitStore satisfies the unified write surface.
+var _ Writer = (*GitStore)(nil)

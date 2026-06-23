@@ -1011,7 +1011,7 @@ func TestGenerateCheckpointSummary_AdvancesV1Metadata(t *testing.T) {
 	require.NoError(t, err)
 	store := stores.Primary
 	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
-	require.NoError(t, store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	require.NoError(t, store.Write(ctx, checkpoint.WriteSession{
 		CheckpointID: cpID,
 		SessionID:    "session-001",
 		Strategy:     "manual-commit",

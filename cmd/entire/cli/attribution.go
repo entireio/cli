@@ -114,10 +114,15 @@ type attributionSummary struct {
 	MixedPercentage  int `json:"mixed_percentage"`
 }
 
+type attributionCheckpointReader interface {
+	ReadCommitted(ctx context.Context, checkpointID id.CheckpointID) (*checkpoint.CheckpointSummary, error)
+	ReadSessionMetadataAndPrompts(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.SessionContent, error)
+}
+
 type attributionResolver struct {
 	ctx         context.Context
 	repo        *git.Repository
-	store       *checkpoint.GitStore
+	store       attributionCheckpointReader
 	fetchOnMiss bool
 
 	commitCache     map[string]*object.Commit
@@ -406,7 +411,7 @@ func (r *attributionResolver) checkpointContext(cpID id.CheckpointID, file strin
 
 func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file string) attributionCheckpointContext {
 	ctx := attributionCheckpointContext{CheckpointID: cpID.String()}
-	summary, err := checkpoint.ReadCommittedCheckpoint(r.ctx, r.store, cpID)
+	summary, err := readAttributionCheckpointSummary(r.ctx, r.store, cpID)
 	if err != nil && r.fetchOnMiss {
 		if fetched, fetchErr := r.fetchCheckpointContext(cpID, file); fetchErr == nil {
 			return fetched
@@ -482,6 +487,20 @@ func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file s
 		ctx.FilesTouched = normalizePathSlice(summary.FilesTouched)
 	}
 	return ctx
+}
+
+func readAttributionCheckpointSummary(ctx context.Context, reader attributionCheckpointReader, cpID id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err //nolint:wrapcheck // Propagating context cancellation
+	}
+	summary, err := reader.ReadCommitted(ctx, cpID)
+	if err != nil {
+		return nil, fmt.Errorf("read committed checkpoint: %w", err)
+	}
+	if summary == nil {
+		return nil, checkpoint.ErrCheckpointNotFound
+	}
+	return summary, nil
 }
 
 func enrichAttributionLineWithFetch(ctx context.Context, file string, line *attributionLine, checkpoints map[string]attributionCheckpointContext) error {

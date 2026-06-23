@@ -933,26 +933,39 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 	// the transcript to extract file changes. Cleanup is handled by
 	// `entire clean` or when the session state is fully removed.
 
-	if err := markSessionEnded(ctx, event, event.SessionID); err != nil {
+	if _, err := endSessionNow(ctx, event, event.SessionID, nil); err != nil {
 		logging.Warn(logCtx, "failed to mark session ended",
-			slog.String("error", err.Error()))
-		// Don't attempt eager condense if we couldn't even mark the session ended —
-		// the session state may be in an inconsistent state.
-		return nil
-	}
-
-	// Eagerly condense session data so PostCommit doesn't have to process it.
-	// This prevents zombie ENDED sessions from accumulating and causing O(N)
-	// overhead on every future commit (GitHub issue #591).
-	// Fail-open: if this fails, PostCommit will still process it on the next commit.
-	strat := GetStrategy(ctx)
-	if err := strat.CondenseAndMarkFullyCondensed(ctx, event.SessionID); err != nil {
-		logging.Warn(logCtx, "eager condense on session stop failed",
-			slog.String("session_id", event.SessionID),
 			slog.String("error", err.Error()))
 	}
 
 	return nil
+}
+
+// endSessionNow runs the canonical "this session is over" sequence: it marks the
+// session ended (firing the SessionStop transition → PhaseEnded + EndedAt) and
+// eagerly condenses its pending work so PostCommit need not. This prevents
+// zombie ENDED sessions from accumulating and causing O(N) overhead on every
+// future commit (GitHub issue #591). It is shared by the SessionStop hook
+// (handleLifecycleSessionEnd) and the exited-session sweep
+// (finalizeExitedSessions), so the two stay in lockstep.
+//
+// The condense is fail-open (PostCommit retries on the next commit); an error
+// marking the session ended is returned so callers can react, and skips the
+// condense since the state may be inconsistent. event may be nil when no hook
+// event drives the end (the sweep), which skips event-metadata persistence.
+// guard is forwarded to markSessionEnded (see there); when it skips the end,
+// the condense is skipped too and ended is false.
+func endSessionNow(ctx context.Context, event *agent.Event, sessionID string, guard func(*strategy.SessionState) bool) (ended bool, err error) {
+	ended, err = markSessionEnded(ctx, event, sessionID, guard)
+	if err != nil || !ended {
+		return ended, err
+	}
+	if condErr := GetStrategy(ctx).CondenseAndMarkFullyCondensed(ctx, sessionID); condErr != nil {
+		logging.Warn(logging.WithComponent(ctx, "lifecycle"), "eager condense on session end failed",
+			slog.String("session_id", sessionID),
+			slog.String("error", condErr.Error()))
+	}
+	return true, nil
 }
 
 // handleLifecycleSubagentStart handles subagent start: captures pre-task state.
@@ -1170,8 +1183,18 @@ func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agen
 
 // markSessionEnded transitions the session to ENDED phase via the state machine.
 // If event is non-nil, hook-provided metrics are persisted to state before saving.
-func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string) error {
+// markSessionEnded fires the SessionStop transition (PhaseEnded + EndedAt) under
+// the session-state lock. When guard is non-nil and returns false on the
+// freshly-loaded state, the transition is skipped — callers use it to
+// re-validate a precondition that may have changed since their snapshot (the
+// exited-session sweep re-checks OwnerExited under the lock so it never ends a
+// session a concurrent turn just revived). It reports whether the session was
+// actually ended.
+func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string, guard func(*strategy.SessionState) bool) (ended bool, err error) {
 	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if guard != nil && !guard(state) {
+			return strategy.ErrMutationSkip
+		}
 		if event != nil {
 			persistEventMetadataToState(event, state)
 		}
@@ -1181,15 +1204,16 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string)
 		}
 		now := time.Now()
 		state.EndedAt = &now
+		ended = true
 		return nil
 	})
-	if errors.Is(mutErr, strategy.ErrStateNotFound) {
-		return nil
+	if errors.Is(mutErr, strategy.ErrStateNotFound) || errors.Is(mutErr, strategy.ErrMutationSkip) {
+		return false, nil
 	}
 	if mutErr != nil {
-		return fmt.Errorf("failed to save session state: %w", mutErr)
+		return false, fmt.Errorf("failed to save session state: %w", mutErr)
 	}
-	return nil
+	return ended, nil
 }
 
 // logFileChanges logs the files modified, created, and deleted during a session.

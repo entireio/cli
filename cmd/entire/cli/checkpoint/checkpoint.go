@@ -12,7 +12,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/redact"
@@ -28,6 +27,9 @@ var (
 	// ErrNoTranscript is returned when a checkpoint exists but has no transcript.
 	ErrNoTranscript = errors.New("no transcript found for checkpoint")
 )
+
+// CheckpointVersionBranchV1 identifies the branch-backed checkpoint metadata format.
+const CheckpointVersionBranchV1 = "branch-v1"
 
 // Checkpoint represents a save point within a session.
 type Checkpoint struct {
@@ -60,56 +62,16 @@ const (
 	Committed
 )
 
-// Store provides low-level primitives for reading and writing checkpoints.
-// This is used by strategies to implement their storage approach.
-//
-// The interface matches the GitStore implementation signatures directly:
-// - WriteTemporary takes WriteTemporaryOptions and returns a result with commit hash and skip status
-// - ReadTemporary takes baseCommit (not sessionID) since shadow branches are keyed by commit
-// - List methods return implementation-specific info types for richer data
-type Store interface {
-	// WriteTemporary writes a temporary checkpoint (full state) to a shadow branch.
-	// Shadow branches are named entire/<base-commit-short-hash>.
-	// Returns a result containing the commit hash and whether the checkpoint was skipped.
-	// Checkpoints are skipped (deduplicated) when the tree hash matches the previous checkpoint.
+// TemporaryStore provides the production shadow-branch checkpoint surface.
+type TemporaryStore interface {
 	WriteTemporary(ctx context.Context, opts WriteTemporaryOptions) (WriteTemporaryResult, error)
-
-	// ReadTemporary reads the latest checkpoint from a shadow branch.
-	// baseCommit is the commit hash the session is based on.
-	// worktreeID is the internal git worktree identifier (empty for main worktree).
-	// Returns nil, nil if the shadow branch doesn't exist.
-	ReadTemporary(ctx context.Context, baseCommit, worktreeID string) (*ReadTemporaryResult, error)
-
-	// ListTemporary lists all shadow branches with their checkpoint info.
+	WriteTemporaryTask(ctx context.Context, opts WriteTemporaryTaskOptions) (plumbing.Hash, error)
 	ListTemporary(ctx context.Context) ([]TemporaryInfo, error)
-
-	// WriteCommitted writes a committed checkpoint to the entire/checkpoints/v1 branch.
-	// Checkpoints are stored at sharded paths: <id[:2]>/<id[2:]>/
-	WriteCommitted(ctx context.Context, opts WriteCommittedOptions) error
-
-	// ReadCommitted reads a committed checkpoint's summary by ID.
-	// Returns only the CheckpointSummary (paths + aggregated stats), not actual content.
-	// Use ReadSessionContent to read actual transcript/prompts.
-	// Returns nil, nil if the checkpoint does not exist.
-	ReadCommitted(ctx context.Context, checkpointID id.CheckpointID) (*CheckpointSummary, error)
-
-	// ReadSessionContent reads the actual content for a specific session within a checkpoint.
-	// sessionIndex is 0-based (0 for first session, 1 for second, etc.).
-	// Returns the session's metadata, transcript, and prompts.
-	ReadSessionContent(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*SessionContent, error)
-
-	// ReadSessionContentByID reads a session's content by its session ID.
-	// Useful when you have the session ID but don't know its index within the checkpoint.
-	ReadSessionContentByID(ctx context.Context, checkpointID id.CheckpointID, sessionID string) (*SessionContent, error)
-
-	// ListCommitted lists all committed checkpoints.
-	ListCommitted(ctx context.Context) ([]CommittedInfo, error)
-
-	// UpdateCommitted replaces the transcript and prompts for an existing
-	// committed checkpoint. Used at stop time to finalize checkpoints with the full
-	// session transcript (prompt to stop event).
-	// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
-	UpdateCommitted(ctx context.Context, opts UpdateCommittedOptions) error
+	ListTemporaryCheckpoints(ctx context.Context, baseCommit, worktreeID, sessionID string, limit int) ([]TemporaryCheckpointInfo, error)
+	ListCheckpointsForBranch(ctx context.Context, branchName, sessionID string, limit int) ([]TemporaryCheckpointInfo, error)
+	ListAllTemporaryCheckpoints(ctx context.Context, sessionID string, limit int) ([]TemporaryCheckpointInfo, error)
+	GetTranscriptFromCommit(ctx context.Context, commitHash plumbing.Hash, metadataDir string, agentType types.AgentType) ([]byte, error)
+	ShadowBranchExists(baseCommit, worktreeID string) bool
 }
 
 // WriteTemporaryResult contains the result of writing a temporary checkpoint.
@@ -290,10 +252,10 @@ type WriteCommittedOptions struct {
 	// and the deprecated CommittedMetadata.TranscriptLinesAtStart for backward compatibility.
 
 	// TokenUsage contains the token usage for this checkpoint
-	TokenUsage *agent.TokenUsage
+	TokenUsage *types.TokenUsage
 
 	// SkillEvents records explicit native skill signals observed in this session.
-	SkillEvents []agent.SkillEvent
+	SkillEvents []types.SkillEvent
 
 	// SessionMetrics contains hook-provided session metrics (duration, turns, context usage)
 	SessionMetrics *SessionMetrics
@@ -378,7 +340,7 @@ type UpdateCommittedOptions struct {
 	Agent types.AgentType
 
 	// SkillEvents replaces the session metadata skill_events when non-empty.
-	SkillEvents []agent.SkillEvent
+	SkillEvents []types.SkillEvent
 
 	// PrecomputedBlobs, if non-nil, provides chunk blob hashes and the
 	// content-hash blob hash computed once for this transcript. When set,
@@ -509,12 +471,12 @@ type CommittedMetadata struct {
 	TranscriptLinesAtStart int `json:"transcript_lines_at_start,omitempty"`
 
 	// Token usage for this checkpoint
-	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
+	TokenUsage *types.TokenUsage `json:"token_usage,omitempty"`
 
 	// SkillEvents records explicit native skill signals observed in this session.
 	// Consumers use these anchors to collapse skill-related raw transcript events.
 	SkillEventsVersion int                `json:"skill_events_version,omitempty"`
-	SkillEvents        []agent.SkillEvent `json:"skill_events,omitempty"`
+	SkillEvents        []types.SkillEvent `json:"skill_events,omitempty"`
 
 	// SessionMetrics contains hook-provided session metrics (duration, turns, context usage).
 	// Populated for agents that provide these metrics via hooks (e.g., Cursor).
@@ -565,7 +527,10 @@ func (m CommittedMetadata) GetTranscriptStart() int {
 // Paths include the full checkpoint path prefix (e.g., "/a1/b2c3d4e5f6/1/metadata.json").
 // Used in CheckpointSummary.Sessions to map session IDs to their file locations.
 type SessionFilePaths struct {
-	Metadata    string `json:"metadata"`
+	Metadata string `json:"metadata"`
+	// Transcript points at the compact transcript.jsonl when one was
+	// generated, otherwise at the raw full.jsonl. Checkpoints written by
+	// older CLI versions always point at full.jsonl.
 	Transcript  string `json:"transcript,omitempty"`
 	ContentHash string `json:"content_hash,omitempty"`
 	Prompt      string `json:"prompt"`
@@ -582,7 +547,8 @@ type SessionFilePaths struct {
 //	├── metadata.json         # This CheckpointSummary
 //	├── 1/                    # First session
 //	│   ├── metadata.json     # Session-specific CommittedMetadata
-//	│   ├── full.jsonl
+//	│   ├── full.jsonl        # Raw agent transcript
+//	│   ├── transcript.jsonl  # Compact transcript scoped to this checkpoint
 //	│   ├── prompt.txt
 //	│   └── content_hash.txt
 //	├── 2/                    # Second session
@@ -591,13 +557,14 @@ type SessionFilePaths struct {
 //nolint:revive // Named CheckpointSummary to avoid conflict with existing Summary struct
 type CheckpointSummary struct {
 	CLIVersion          string              `json:"cli_version,omitempty"`
+	CheckpointVersion   string              `json:"checkpoint_version,omitempty"`
 	CheckpointID        id.CheckpointID     `json:"checkpoint_id"`
 	Strategy            string              `json:"strategy"`
 	Branch              string              `json:"branch,omitempty"`
 	CheckpointsCount    int                 `json:"checkpoints_count"`
 	FilesTouched        []string            `json:"files_touched"`
 	Sessions            []SessionFilePaths  `json:"sessions"`
-	TokenUsage          *agent.TokenUsage   `json:"token_usage,omitempty"`
+	TokenUsage          *types.TokenUsage   `json:"token_usage,omitempty"`
 	CombinedAttribution *InitialAttribution `json:"combined_attribution,omitempty"`
 
 	// HasReview is the umbrella "any review happened" flag: true when at least
@@ -614,6 +581,16 @@ type CheckpointSummary struct {
 	// be set so callers can keep asking "was this investigated in any way?"
 	// without caring about the variant.
 	HasInvestigation bool `json:"has_investigation,omitempty"`
+}
+
+func normalizeCheckpointSummary(summary *CheckpointSummary) *CheckpointSummary {
+	if summary == nil {
+		return nil
+	}
+	if summary.CheckpointVersion == "" {
+		summary.CheckpointVersion = CheckpointVersionBranchV1
+	}
+	return summary
 }
 
 // SessionMetrics contains hook-provided session metrics from agents that report

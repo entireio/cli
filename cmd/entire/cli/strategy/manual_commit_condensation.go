@@ -135,7 +135,7 @@ func checkpointStepCount(s *SessionState) int {
 // CondenseSession condenses a session's shadow branch to permanent storage.
 // checkpointID is the 12-hex-char value from the Entire-Checkpoint trailer.
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/
-// Uses checkpoint.GitStore.WriteCommitted for the git operations.
+// Uses checkpoint.CommittedStore.WriteCommitted for committed storage.
 //
 // For mid-session commits (no Stop/SaveStep called yet), the shadow branch may not exist.
 // In this case, data is extracted from the live transcript instead.
@@ -290,7 +290,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
-	if err := store.WriteCommitted(writeCtx, writeOpts); err != nil {
+	if err := store.Write(writeCtx, cpkg.WriteSession(writeOpts)); err != nil {
 		writeCommittedSpan.RecordError(err)
 		writeCommittedSpan.End()
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)
@@ -533,7 +533,7 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 // The return type is the summarize.Generator interface rather than the concrete
 // adapter pointer so callers can't accidentally hold a non-nil interface that
 // wraps a nil pointer (the classic Go nil-interface footgun).
-func buildSummaryGenerator(ctx context.Context) summarize.Generator { //nolint:ireturn,nolintlint // interface return is intentional for provider abstraction and nil-safety; nolintlint flagged as "unused" under some linter versions but ireturn fires in others
+func buildSummaryGenerator(ctx context.Context) summarize.Generator {
 	s, err := settings.Load(ctx)
 	if err != nil {
 		// Warn (not Debug): this is the auto-summarize hot path on every commit.

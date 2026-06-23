@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
 const testOwner = "entirehq"
@@ -173,8 +175,8 @@ func TestSearch_URLConstruction(t *testing.T) {
 	if capturedReq.Header.Get("Authorization") != "Bearer ghp_test123" {
 		t.Errorf("auth header = %s, want 'Bearer ghp_test123'", capturedReq.Header.Get("Authorization"))
 	}
-	if capturedReq.Header.Get("User-Agent") != "entire-cli" {
-		t.Errorf("user-agent = %s, want 'entire-cli'", capturedReq.Header.Get("User-Agent"))
+	if want := versioninfo.UserAgent(); capturedReq.Header.Get("User-Agent") != want {
+		t.Errorf("user-agent = %s, want %q", capturedReq.Header.Get("User-Agent"), want)
 	}
 }
 

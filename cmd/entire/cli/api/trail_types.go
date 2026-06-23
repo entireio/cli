@@ -23,6 +23,7 @@ type TrailListResponse struct {
 type TrailResource struct {
 	ID              string           `json:"id,omitempty"`
 	Number          int              `json:"number,omitempty"`
+	URL             string           `json:"url,omitempty"`
 	Branch          string           `json:"branch"`
 	Base            string           `json:"base"`
 	Title           string           `json:"title"`
@@ -58,6 +59,7 @@ func (r *TrailResource) ToMetadata() *trail.Metadata {
 	m := &trail.Metadata{
 		Number:    r.Number,
 		TrailID:   trail.ID(r.ID),
+		URL:       r.URL,
 		Branch:    r.Branch,
 		Base:      r.Base,
 		Title:     r.Title,

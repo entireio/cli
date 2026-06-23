@@ -89,7 +89,7 @@ var errCannotGenerateTemporaryCheckpoint = errors.New("cannot generate summary f
 
 type explainCheckpointLookup struct {
 	repo      *git.Repository
-	store     *checkpoint.GitStore
+	store     checkpoint.CommittedStore
 	committed []checkpoint.CommittedInfo
 }
 
@@ -729,8 +729,8 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 			Name:  associatedCommits[0].Author,
 			Email: associatedCommits[0].Email,
 		}
-	} else {
-		author, _ = lookup.store.GetCheckpointAuthor(ctx, fullCheckpointID) //nolint:errcheck // Author is optional
+	} else if authorReader, ok := lookup.store.(checkpoint.AuthorReader); ok {
+		author, _ = authorReader.GetCheckpointAuthor(ctx, fullCheckpointID) //nolint:errcheck // Author is optional
 	}
 
 	// Format and output. Stop spinner BEFORE any write to w to keep stderr
@@ -888,10 +888,6 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 	return lookup, nil
 }
 
-type checkpointSummaryUpdater interface {
-	UpdateSummary(ctx context.Context, checkpointID id.CheckpointID, summary *checkpoint.Summary) error
-}
-
 // generateCheckpointSummary generates an AI summary for a checkpoint and persists it.
 // The summary is generated from the scoped transcript (only this checkpoint's portion),
 // not the entire session transcript.
@@ -899,7 +895,7 @@ type checkpointSummaryUpdater interface {
 // summaryTimeoutSeconds is the per-invocation --summary-timeout-seconds flag
 // value (0 = unset). Effective precedence for the deadline: flag > settings >
 // package default. See resolveSummaryTimeout for the resolution.
-func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store checkpointSummaryUpdater, checkpointID id.CheckpointID, cpSummary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, force bool, summaryTimeoutSeconds int) error {
+func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store checkpoint.Writer, checkpointID id.CheckpointID, cpSummary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, force bool, summaryTimeoutSeconds int) error {
 	// Check if summary already exists
 	if content.Metadata.Summary != nil && !force {
 		return renderExplainFailure(errW, "Summary already exists", []explainRow{
@@ -946,7 +942,7 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 	}
 	elapsed := time.Since(start)
 
-	if err := store.UpdateSummary(ctx, checkpointID, summary); err != nil {
+	if err := store.Write(ctx, checkpoint.BackfillSummary{CheckpointID: checkpointID, Summary: summary}); err != nil {
 		return fmt.Errorf("failed to save summary: %w", err)
 	}
 
@@ -1204,7 +1200,7 @@ func formatSummaryTimeout(d time.Duration) string {
 // Searches ALL shadow branches, not just the one for current HEAD, to find checkpoints
 // created from different base commits (e.g., if HEAD advanced since session start).
 // The writer w is used for raw transcript output to bypass the pager.
-func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *git.Repository, store *checkpoint.GitStore, shaPrefix string, verbose, full, rawTranscript bool) (string, bool, error) {
+func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *git.Repository, store checkpoint.TemporaryStore, shaPrefix string, verbose, full, rawTranscript bool) (string, bool, error) {
 	// List temporary checkpoints from ALL shadow branches
 	// This ensures we find checkpoints even if HEAD has advanced since the session started
 	tempCheckpoints, err := store.ListAllTemporaryCheckpoints(ctx, "", branchCheckpointsLimit)
@@ -2183,7 +2179,7 @@ func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.Comm
 // whose base commit is reachable from the given HEAD hash and that belong to this worktree.
 // For default branches, all shadow branches for this worktree are included.
 // For feature branches, only shadow branches whose base commit is in HEAD's history are included.
-func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository, store *checkpoint.GitStore, headHash plumbing.Hash, isOnDefault bool, limit int) []strategy.RewindPoint {
+func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository, store checkpoint.TemporaryStore, headHash plumbing.Hash, isOnDefault bool, limit int) []strategy.RewindPoint {
 	var points []strategy.RewindPoint
 
 	// Compute current worktree's hash for filtering shadow branches

@@ -353,6 +353,51 @@ func TestAttributionBlameMixedUsesFileMatchingCheckpoint(t *testing.T) {
 	require.Equal(t, 1, payload.Summary.AILines)
 }
 
+func TestAttributionResolverUsesCheckpointReader(t *testing.T) {
+	t.Parallel()
+
+	cpID := checkpointid.MustCheckpointID("d9b2c3d4e5f6")
+	reader := &attributionCheckpointReaderStub{
+		summary: &checkpoint.CheckpointSummary{
+			FilesTouched: []string{"auth.py"},
+			Sessions:     []checkpoint.SessionFilePaths{{Metadata: "metadata.json"}},
+		},
+		content: &checkpoint.SessionContent{
+			Metadata: checkpoint.CommittedMetadata{
+				SessionID:    "session-ai",
+				FilesTouched: []string{"auth.py"},
+				Agent:        agent.AgentTypeClaudeCode,
+				Model:        "claude-test",
+			},
+			Prompts: "Explain the authentication change.",
+		},
+	}
+	resolver := &attributionResolver{
+		ctx:             context.Background(),
+		store:           reader,
+		checkpointCache: make(map[string]attributionCheckpointContext),
+	}
+
+	ctx := resolver.readCheckpointContext(cpID, "auth.py")
+	require.Equal(t, "session-ai", ctx.SessionID)
+	require.Equal(t, "Claude Code", ctx.Agent)
+	require.Equal(t, "claude-test", ctx.Model)
+	require.Equal(t, "Explain the authentication change.", ctx.Prompt)
+}
+
+type attributionCheckpointReaderStub struct {
+	summary *checkpoint.CheckpointSummary
+	content *checkpoint.SessionContent
+}
+
+func (s *attributionCheckpointReaderStub) ReadCommitted(context.Context, checkpointid.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+	return s.summary, nil
+}
+
+func (s *attributionCheckpointReaderStub) ReadSessionMetadataAndPrompts(context.Context, checkpointid.CheckpointID, int) (*checkpoint.SessionContent, error) {
+	return s.content, nil
+}
+
 func TestAttributionBlameScopesMixedToSessionNotCheckpoint(t *testing.T) {
 	repoRoot := newAttributionRepo(t)
 	writeAttributionCheckpoint(t, repoRoot, "a9b2c3d4e5f6", checkpoint.WriteCommittedOptions{

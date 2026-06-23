@@ -398,7 +398,7 @@ func (br *BenchRepo) SeedMetadataBranch(b *testing.B, checkpointCount int) {
 			files = append(files, fmt.Sprintf("src/file_%03d.go", (i*5+j)%100))
 		}
 
-		err = br.Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		err = br.Store.Write(context.Background(), checkpoint.WriteSession{
 			CheckpointID:     cpID,
 			SessionID:        sessionID,
 			Strategy:         br.Strategy,
