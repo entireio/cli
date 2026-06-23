@@ -306,9 +306,9 @@ func markRequired(cmd *cobra.Command, names ...string) {
 	}
 }
 
-// maintenanceMessage is the shared 503 scheduled-maintenance copy, kept
-// identical to the Cloudflare edge 503 page (COR-566) and the SPA banner.
-const maintenanceMessage = "Entire is under scheduled maintenance — please try again shortly"
+// maintenanceMessage is the canonical 503 headline, byte-identical to the
+// COR-566 edge page <h1> and the SPA maintenance banner heading.
+const maintenanceMessage = "Entire is under scheduled maintenance"
 
 // renderCoreError converts a Core API error into the server's
 // problem-detail message (so users see "organization name already taken"
@@ -323,6 +323,8 @@ func renderCoreError(err error) error {
 	if err == nil {
 		return nil
 	}
+	// Only an explicit 503 maps to maintenance copy. A draining or black-holed
+	// host (COR-572) surfaces as a timeout, not a 503, and stays a generic error.
 	if status, ok := coreapi.HTTPStatus(err); ok && status == http.StatusServiceUnavailable {
 		return errors.New(maintenanceMessage) //nolint:staticcheck // user-facing copy, shared verbatim across CLI/SPA/edge
 	}
