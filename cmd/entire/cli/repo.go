@@ -103,9 +103,13 @@ func newRepoCreateCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
+				projID, err := resolveProjectRef(ctx, c, projectID)
+				if err != nil {
+					return nil, err
+				}
 				body := &coreapi.CreateRepoInputBody{
 					Name:      args[0],
-					ProjectId: projectID,
+					ProjectId: projID,
 				}
 				if clusterHost != "" {
 					body.ClusterHost = coreapi.NewOptString(clusterHost)
@@ -118,7 +122,7 @@ func newRepoCreateCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&projectID, "project", "", "owning project ULID (required)")
+	cmd.Flags().StringVar(&projectID, "project", "", "owning project (name or ULID) (required)")
 	cmd.Flags().StringVar(&clusterHost, "cluster-host", "", "public host of the cluster to pin the repo to (defaults to the jurisdiction default)")
 	markRequired(cmd, "project")
 	return cmd
@@ -128,10 +132,15 @@ func newRepoListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list <project>",
 		Short: "List repositories in a project",
+		Long:  "List repositories in a project, addressed by name or ULID.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreList(cmd, repoColumns, repoRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Repo, error) {
-				out, err := c.ListProjectRepos(ctx, coreapi.ListProjectReposParams{ProjectId: args[0]})
+				projID, err := resolveProjectRef(ctx, c, args[0])
+				if err != nil {
+					return nil, err
+				}
+				out, err := c.ListProjectRepos(ctx, coreapi.ListProjectReposParams{ProjectId: projID})
 				if err != nil {
 					return nil, err
 				}

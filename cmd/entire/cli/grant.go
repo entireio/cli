@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -98,7 +99,11 @@ func newGrantOrgAddCmd() *cobra.Command {
 				body.Role = coreapi.NewOptAddOrgMemberInputBodyRole(r)
 			}
 			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
-				return c.AddOrgMember(ctx, body, coreapi.AddOrgMemberParams{OrgId: args[0]})
+				orgID, err := resolveOrgRef(ctx, c, args[0])
+				if err != nil {
+					return nil, err
+				}
+				return c.AddOrgMember(ctx, body, coreapi.AddOrgMemberParams{OrgId: orgID})
 			})
 		},
 	}
@@ -114,7 +119,11 @@ func newGrantOrgListCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreList(cmd, orgMemberColumns, orgMemberRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Membership, error) {
-				out, err := c.ListOrgMembers(ctx, coreapi.ListOrgMembersParams{OrgId: args[0]})
+				orgID, err := resolveOrgRef(ctx, c, args[0])
+				if err != nil {
+					return nil, err
+				}
+				out, err := c.ListOrgMembers(ctx, coreapi.ListOrgMembersParams{OrgId: orgID})
 				if err != nil {
 					return nil, err
 				}
@@ -132,8 +141,12 @@ func newGrantOrgRemoveCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+				orgID, err := resolveOrgRef(ctx, c, args[0])
+				if err != nil {
+					return err
+				}
 				if err := c.RemoveOrgMember(ctx, coreapi.RemoveOrgMemberParams{
-					OrgId:          args[0],
+					OrgId:          orgID,
 					Provider:       provider,
 					ProviderUserId: providerUserID,
 				}); err != nil {
@@ -169,6 +182,10 @@ func newGrantProjectAddCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
+				projID, err := resolveProjectRef(ctx, c, args[0])
+				if err != nil {
+					return nil, err
+				}
 				body := &coreapi.GrantProjectAccessInputBody{
 					Provider:       provider,
 					ProviderUserId: providerUserID,
@@ -177,7 +194,7 @@ func newGrantProjectAddCmd() *cobra.Command {
 				if granteeType != "" {
 					body.GranteeType = coreapi.NewOptGrantProjectAccessInputBodyGranteeType(coreapi.GrantProjectAccessInputBodyGranteeType(granteeType))
 				}
-				return c.GrantProjectAccess(ctx, body, coreapi.GrantProjectAccessParams{ProjectId: args[0]})
+				return c.GrantProjectAccess(ctx, body, coreapi.GrantProjectAccessParams{ProjectId: projID})
 			})
 		},
 	}
@@ -195,7 +212,11 @@ func newGrantProjectListCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreList(cmd, projectGrantColumns, projectGrantRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.ProjectGrant, error) {
-				out, err := c.ListProjectMembers(ctx, coreapi.ListProjectMembersParams{ProjectId: args[0]})
+				projID, err := resolveProjectRef(ctx, c, args[0])
+				if err != nil {
+					return nil, err
+				}
+				out, err := c.ListProjectMembers(ctx, coreapi.ListProjectMembersParams{ProjectId: projID})
 				if err != nil {
 					return nil, err
 				}
@@ -206,15 +227,39 @@ func newGrantProjectListCmd() *cobra.Command {
 }
 
 func newGrantProjectRemoveCmd() *cobra.Command {
-	var granteeType, granteeID string
+	var granteeType, granteeID, provider, providerUserID string
 	cmd := &cobra.Command{
 		Use:   "remove <project>",
 		Short: "Revoke project access from a grantee",
-		Args:  cobra.ExactArgs(1),
+		Long: "Revoke a grantee's access to a project (addressed by name or ULID). " +
+			"Identify the grantee either by --provider/--provider-user-id (an " +
+			"account, e.g. github + user id) or by --grantee-type/--grantee-id (a " +
+			"ULID, for account/org/team grantees).",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			mode, err := projectGranteeMode(provider, providerUserID, granteeType, granteeID)
+			if err != nil {
+				cmd.SilenceUsage = true
+				return err
+			}
 			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+				projID, err := resolveProjectRef(ctx, c, args[0])
+				if err != nil {
+					return err
+				}
+				if mode == granteeModeProvider {
+					if err := c.RevokeProjectAccessByProvider(ctx, coreapi.RevokeProjectAccessByProviderParams{
+						ProjectId:      projID,
+						Provider:       provider,
+						ProviderUserId: providerUserID,
+					}); err != nil {
+						return err
+					}
+					cmd.Printf("Revoked %s/%s from project %s\n", provider, providerUserID, args[0])
+					return nil
+				}
 				if err := c.RevokeProjectAccess(ctx, coreapi.RevokeProjectAccessParams{
-					ProjectId:   args[0],
+					ProjectId:   projID,
 					GranteeType: granteeType,
 					GranteeId:   granteeID,
 				}); err != nil {
@@ -225,10 +270,45 @@ func newGrantProjectRemoveCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&granteeType, "grantee-type", "", "grantee kind: account, org, or team (required)")
-	cmd.Flags().StringVar(&granteeID, "grantee-id", "", "grantee ULID (required)")
-	markRequired(cmd, "grantee-type", "grantee-id")
+	cmd.Flags().StringVar(&granteeType, "grantee-type", "", "grantee kind: account, org, or team (with --grantee-id)")
+	cmd.Flags().StringVar(&granteeID, "grantee-id", "", "grantee ULID (with --grantee-type)")
+	cmd.Flags().StringVar(&provider, "provider", "", "identity provider, e.g. github (with --provider-user-id)")
+	cmd.Flags().StringVar(&providerUserID, "provider-user-id", "", "provider-specific user id (with --provider)")
 	return cmd
+}
+
+// granteeMode names the two ways `grant project remove` can address a grantee.
+type granteeMode int
+
+const (
+	granteeModeProvider granteeMode = iota // --provider + --provider-user-id
+	granteeModeID                          // --grantee-type + --grantee-id
+)
+
+// projectGranteeMode validates that exactly one addressing mode was supplied
+// and fully specified, returning which one. The two modes are mutually
+// exclusive: a provider account (github + user id) hits the by-provider revoke
+// route, while a ULID grantee hits the typed-id route that also covers org and
+// team grantees.
+func projectGranteeMode(provider, providerUserID, granteeType, granteeID string) (granteeMode, error) {
+	byProvider := provider != "" || providerUserID != ""
+	byID := granteeType != "" || granteeID != ""
+	switch {
+	case byProvider && byID:
+		return 0, errors.New("specify either --provider/--provider-user-id or --grantee-type/--grantee-id, not both")
+	case byProvider:
+		if provider == "" || providerUserID == "" {
+			return 0, errors.New("both --provider and --provider-user-id are required")
+		}
+		return granteeModeProvider, nil
+	case byID:
+		if granteeType == "" || granteeID == "" {
+			return 0, errors.New("both --grantee-type and --grantee-id are required")
+		}
+		return granteeModeID, nil
+	default:
+		return 0, errors.New("identify the grantee with --provider/--provider-user-id or --grantee-type/--grantee-id")
+	}
 }
 
 // --- repo grants ----------------------------------------------------------

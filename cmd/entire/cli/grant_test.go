@@ -6,6 +6,41 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
+func TestProjectGranteeMode(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                                 string
+		provider, providerUserID, gType, gID string
+		want                                 granteeMode
+		wantErr                              bool
+	}{
+		{name: "provider mode", provider: "github", providerUserID: "123", want: granteeModeProvider},
+		{name: "id mode", gType: "org", gID: "01J0", want: granteeModeID},
+		{name: "both modes rejected", provider: "github", providerUserID: "123", gType: "org", gID: "01J0", wantErr: true},
+		{name: "partial provider", provider: "github", wantErr: true},
+		{name: "partial id", gType: "org", wantErr: true},
+		{name: "nothing", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := projectGranteeMode(tt.provider, tt.providerUserID, tt.gType, tt.gID)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("projectGranteeMode(%q,%q,%q,%q) expected error", tt.provider, tt.providerUserID, tt.gType, tt.gID)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("projectGranteeMode: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("got mode %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseOrgRole(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

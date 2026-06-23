@@ -40,9 +40,10 @@ func newProjectCreateCmd() *cobra.Command {
 		Use:   "create <name>",
 		Short: "Create a project under an org or account",
 		Long: "Creates a project owned by an org or an account. --owner is the " +
-			"owning org/account ULID and --owner-type selects which (org or account).",
-		Example: "  # Project under an org\n" +
-			"  entire project create widgets --owner 01J0... --owner-type org\n\n" +
+			"owning org (name or ULID) or account ULID, and --owner-type selects " +
+			"which (org or account).",
+		Example: "  # Project under an org (by name)\n" +
+			"  entire project create widgets --owner acme --owner-type org\n\n" +
 			"  # Project owned by an account\n" +
 			"  entire project create widgets --owner 01J0... --owner-type account",
 		Args: cobra.ExactArgs(1),
@@ -53,9 +54,19 @@ func newProjectCreateCmd() *cobra.Command {
 				return err
 			}
 			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
+				ownerRef := ownerID
+				// Only org owners have a friendly-name index; account owners
+				// must be addressed by ULID.
+				if ot == coreapi.CreateProjectInputBodyOwnerTypeOrg {
+					resolved, err := resolveOrgRef(ctx, c, ownerID)
+					if err != nil {
+						return nil, err
+					}
+					ownerRef = resolved
+				}
 				body := &coreapi.CreateProjectInputBody{
 					Name:      args[0],
-					OwnerId:   ownerID,
+					OwnerId:   ownerRef,
 					OwnerType: ot,
 				}
 				if region != "" {
@@ -65,7 +76,7 @@ func newProjectCreateCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&ownerID, "owner", "", "owning org or account ULID (required)")
+	cmd.Flags().StringVar(&ownerID, "owner", "", "owning org (name or ULID), or account ULID (required)")
 	cmd.Flags().StringVar(&ownerType, "owner-type", "org", "owner kind: org or account")
 	cmd.Flags().StringVar(&region, "region", "", "jurisdiction slug (defaults to the server's home jurisdiction)")
 	markRequired(cmd, "owner")
@@ -73,13 +84,28 @@ func newProjectCreateCmd() *cobra.Command {
 }
 
 func newProjectListCmd() *cobra.Command {
-	var name string
+	var name, org string
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List projects you can see",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runCoreList(cmd, projectColumns, projectRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Project, error) {
+				// --org scopes to one org's projects via the org-scoped
+				// endpoint, which has no name parameter, so --name is applied
+				// client-side. Without --org we use the global list, where the
+				// server filters by name for us.
+				if org != "" {
+					orgID, err := resolveOrgRef(ctx, c, org)
+					if err != nil {
+						return nil, err
+					}
+					out, err := c.ListOrgProjects(ctx, coreapi.ListOrgProjectsParams{OrgId: orgID})
+					if err != nil {
+						return nil, err
+					}
+					return filterProjectsByName(out.Projects, name), nil
+				}
 				var params coreapi.ListProjectsParams
 				if name != "" {
 					params.Name = coreapi.NewOptString(name)
@@ -93,6 +119,7 @@ func newProjectListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "filter by exact project name")
+	cmd.Flags().StringVar(&org, "org", "", "list projects owned by this org (name or ULID)")
 	return cmd
 }
 
