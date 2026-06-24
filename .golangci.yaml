@@ -114,6 +114,8 @@ linters:
         - empty
         - stdlib
         - charm.land/bubbletea/v2.Model
+        - charm.land/bubbletea/v2.Msg
+        - charm.land/huh/v2.Theme
         - grpc.DialOption
         - github.com/entireio/cli/cmd/entire/cli/summarize.Generator
         - github.com/entireio/cli/cmd/entire/cli/agent\..+
@@ -121,7 +123,9 @@ linters:
         - github.com/entireio/cli/cmd/entire/cli/review/types.Process
         - github.com/entireio/cli/cmd/entire/cli/review/types.AgentReviewer
         - github.com/entireio/cli/cmd/entire/cli/review.SynthesisProvider
-        - github.com/entireio/cli/cmd/entire/cli/checkpoint.CommittedReader
+        - github.com/entireio/cli/cmd/entire/cli/checkpoint.CheckpointReader
+        - github.com/entireio/cli/cmd/entire/cli/checkpoint.PersistentStore
+        - github.com/entireio/cli/cmd/entire/cli/checkpoint.EphemeralStore
         - github.com/entireio/cli/cmd/entire/cli/strategy.Strategy
         - github.com/entireio/cli/internal/entireclient/tokenstore.store
         - github.com/go-git/go-git/v6/x/plugin.Signer

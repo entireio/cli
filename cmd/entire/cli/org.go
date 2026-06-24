@@ -58,7 +58,7 @@ func newOrgListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runCoreList(cmd, orgColumns, orgRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Org, error) {
-				out, err := c.ListOrgs(ctx)
+				out, err := c.ListOrgs(ctx, coreapi.ListOrgsParams{})
 				if err != nil {
 					return nil, err
 				}

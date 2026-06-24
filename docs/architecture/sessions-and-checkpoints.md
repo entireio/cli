@@ -42,15 +42,15 @@ The low-level `checkpoint.Type` (from `checkpoint/checkpoint.go`) indicates stor
 type Type int
 
 const (
-    Temporary Type = iota // Full state snapshot, shadow branch
-    Committed             // Metadata + commit ref, entire/checkpoints/v1
+    Ephemeral Type = iota // Full state snapshot, shadow branch
+    Persistent            // Metadata + commit ref, entire/checkpoints/v1
 )
 ```
 
 | Type | Contents | Use Case |
 |------|----------|----------|
-| Temporary | Full state (code + metadata) | Intra-session rewind, pre-commit |
-| Committed | Metadata + commit reference | Permanent record, post-commit rewind |
+| Ephemeral | Full state (code + metadata) | Intra-session rewind, pre-commit |
+| Persistent | Metadata + commit reference | Permanent record, post-commit rewind |
 
 ## Interface
 
@@ -59,62 +59,58 @@ const (
 `strategy/session.go` keeps the `Session` and `Checkpoint` data types used by
 status/explain formatting. Active session state is read from `.git/entire-sessions/`
 through `session.StateStore`; committed checkpoint/session content is read
-through a `checkpoint.GitStore` built with resolved committed refs (for example,
-`checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))`) and
-command-specific strategy methods such as `GetSessionInfo`.
+through the checkpoint facade (`checkpoint.Open(ctx, repo, opts)`, which resolves
+the ref topology and wires the blob fetcher) and command-specific strategy
+methods such as `GetSessionInfo`.
 
 ### Checkpoint Storage (Low-Level)
 
-The `checkpoint.Store` interface (from `checkpoint/checkpoint.go`) provides primitives for reading/writing checkpoints. Used by strategies.
+`checkpoint.Open` returns a `*Stores` facade exposing two independent stores,
+split by lifecycle:
+
+- `stores.Persistent` — the permanent record on `entire/checkpoints/v1`
+  (a `PersistentStore`). This is the pluggable surface.
+- `stores.Ephemeral()` — the git-only shadow-branch store for intra-session
+  state (an `EphemeralStore`).
+
+Both present a symmetric generic surface — `Read` (differentiated by return
+type), `Write` (a sealed request union), and `List`:
 
 ```go
-type Store interface {
-    // Temporary checkpoint operations (shadow branches - full state)
-    WriteTemporary(ctx context.Context, opts WriteTemporaryOptions) (WriteTemporaryResult, error)
-    ReadTemporary(ctx context.Context, baseCommit, worktreeID string) (*ReadTemporaryResult, error)
-    ListTemporary(ctx context.Context) ([]TemporaryInfo, error)
+type PersistentStore interface {
+    Read(ctx, checkpointID id.CheckpointID) (*CheckpointSummary, error)
+    List(ctx) ([]CheckpointInfo, error)
+    ReadSessionContent(ctx, checkpointID id.CheckpointID, sessionIndex int) (*SessionContent, error)
+    Write(ctx, req WriteRequest) error    // WriteSession / BackfillTranscript / BackfillSummary / BackfillAttribution
+    // ...session reads
+}
 
-    // Committed checkpoint operations (metadata only)
-    // Writes target v1. Reads use the configured committed-read ref.
-    WriteCommitted(ctx context.Context, opts WriteCommittedOptions) error
-    ReadCommitted(ctx context.Context, checkpointID id.CheckpointID) (*CheckpointSummary, error)
-    ReadSessionContent(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*SessionContent, error)
-    ReadSessionContentByID(ctx context.Context, checkpointID id.CheckpointID, sessionID string) (*SessionContent, error)
-    ListCommitted(ctx context.Context) ([]CommittedInfo, error)
+type EphemeralStore interface {
+    Read(ctx, baseCommit, worktreeID string) (*ReadEphemeralResult, error)
+    List(ctx) ([]EphemeralInfo, error)
+    Write(ctx, req EphemeralWriteRequest) (WriteEphemeralResult, error) // WriteCheckpoint / WriteTask
+    // ...shadow-branch queries
 }
 ```
 
-Key option types (abbreviated):
+Writes go through the request unions rather than per-operation methods, so a
+mirror/fan-out store just forwards the request value:
 
 ```go
-type WriteTemporaryOptions struct {
-    SessionID      string
-    BaseCommit     string
-    WorktreeID     string   // Internal git worktree identifier (empty for main)
-    ModifiedFiles  []string
-    NewFiles       []string
-    DeletedFiles   []string
-    MetadataDir    string   // Relative path to metadata directory
-    MetadataDirAbs string   // Absolute path
-    CommitMessage  string
-    // ...
-}
+// Persistent: condensation, stop-time backfill, async summary, attribution
+stores.Persistent.Write(ctx, checkpoint.WriteSession{CheckpointID: id, /* ... */})
+stores.Persistent.Write(ctx, checkpoint.BackfillSummary{CheckpointID: id, Summary: s})
 
-type WriteCommittedOptions struct {
-    CheckpointID id.CheckpointID
-    SessionID    string
-    Strategy     string
-    Branch       string
-    Transcript   []byte
-    Prompts      []string
-    Context      []byte
-    FilesTouched []string
-    TokenUsage   *agent.TokenUsage
-    // ...
-}
+// Ephemeral: shadow-branch capture / task checkpoints
+res, _ := stores.Ephemeral().Write(ctx, checkpoint.WriteCheckpoint{BaseCommit: base, /* ... */})
 ```
 
-Token usage is defined in `agent/types.go`:
+`WriteSession`/`BackfillTranscript` are defined types over the option structs
+(`WriteOptions`/`UpdateOptions`); `WriteCheckpoint`/`WriteTask` over
+`WriteEphemeralOptions`/`WriteEphemeralTaskOptions`.
+
+Token usage and skill events live in the leaf `agent/types` package (so the
+contract doesn't pull in the full `agent` package):
 
 ```go
 type TokenUsage struct {
@@ -147,8 +143,8 @@ func (s *ManualCommitStrategy) CondenseSession(
 | Type | Location | Contents |
 |------|----------|----------|
 | Session State | `.git/entire-sessions/<id>.json` | Active session tracking |
-| Temporary | `entire/<commit[:7]>-<worktreeHash[:6]>` branch | Full state (code + metadata) |
-| Committed | `entire/checkpoints/v1` branch (sharded) | Metadata + commit reference |
+| Ephemeral | `entire/<commit[:7]>-<worktreeHash[:6]>` branch | Full state (code + metadata) |
+| Persistent | `entire/checkpoints/v1` branch (sharded) | Metadata + commit reference |
 
 ### Session State
 
@@ -198,7 +194,7 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 <id[:2]>/<id[2:]>/
 ├── metadata.json        # CheckpointSummary (aggregated stats)
 ├── 0/                   # First session (0-based indexing)
-│   ├── metadata.json    # Session-specific CommittedMetadata
+│   ├── metadata.json    # Session-specific Metadata
 │   ├── full.jsonl       # Raw agent transcript (CLI rewind/resume/explain)
 │   ├── transcript.jsonl # Compact transcript, scoped to this checkpoint
 │   ├── prompt.txt       # Checkpoint-scoped user prompts
@@ -217,9 +213,11 @@ cumulative session transcript, scoped at read time via
 `checkpoint_transcript_start`), `transcript.jsonl` is pre-sliced to the
 checkpoint's own portion (`compact.Compact` is called with
 `StartLine = checkpoint_transcript_start`), so it needs no offset to consume.
-It is written into the checkpoint tree and pushed alongside `full.jsonl`, but
-the root `metadata.json` `sessions[].transcript` pointer still targets
-`full.jsonl`; pointing it at `transcript.jsonl` is deferred to a later change.
+It is written into the checkpoint tree and pushed alongside `full.jsonl`. The
+root `metadata.json` `sessions[].transcript` pointer keeps targeting
+`full.jsonl`; when a compact transcript was generated the session entry also
+carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted
+otherwise) so external readers can find it next to `full.jsonl`.
 CLI read paths (rewind/resume/explain) read `full.jsonl` by filename. Compact
 generation is best-effort: failures are logged but never fail the checkpoint
 write, and during finalization a failed regeneration keeps the previous
@@ -238,7 +236,8 @@ write, and during finalization a failed regeneration keeps the previous
   "sessions": [
     {
       "metadata": "/ab/c123def456/0/metadata.json",
-      "transcript": "/ab/c123def456/0/transcript.jsonl",
+      "transcript": "/ab/c123def456/0/full.jsonl",
+      "compact_transcript": "/ab/c123def456/0/transcript.jsonl",
       "content_hash": "/ab/c123def456/0/content_hash.txt",
       "prompt": "/ab/c123def456/0/prompt.txt"
     }
@@ -255,7 +254,7 @@ write, and during finalization a failed regeneration keeps the previous
 
 `checkpoints_count` in the root summary is the aggregate displayed "steps" count: the sum of per-session prompt-window counts. Despite the historical name, it is not a count of checkpoint records.
 
-**Session-level metadata.json (`CommittedMetadata`, abbreviated):**
+**Session-level metadata.json (`Metadata`, abbreviated):**
 ```json
 {
   "checkpoint_id": "abc123def456",

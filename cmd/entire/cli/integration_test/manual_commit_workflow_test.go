@@ -692,7 +692,7 @@ func TestShadow_TranscriptCondensation(t *testing.T) {
 	if !found {
 		t.Fatal("session metadata.json should be readable")
 	}
-	var sessionMetadata checkpoint.CommittedMetadata
+	var sessionMetadata checkpoint.Metadata
 	if err := json.Unmarshal([]byte(sessionMetadataContent), &sessionMetadata); err != nil {
 		t.Fatalf("failed to parse session metadata.json: %v", err)
 	}

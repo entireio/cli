@@ -25,6 +25,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
@@ -1065,9 +1066,9 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
 	}
-	store := stores.Primary
+	store := stores.Persistent
 
-	summary, err := store.ReadCommitted(ctx, checkpointID)
+	summary, err := store.Read(ctx, checkpointID)
 	if err != nil {
 		return fmt.Errorf("reading checkpoint summary: %w", err)
 	}
@@ -1137,7 +1138,7 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 		agentPercentage = float64(agentAdded+agentRemoved) / float64(totalLinesChanged) * 100
 	}
 
-	combined := &checkpoint.InitialAttribution{
+	combined := &checkpoint.Attribution{
 		CalculatedAt:      time.Now().UTC(),
 		AgentLines:        agentAdded,
 		AgentRemoved:      agentRemoved,
@@ -1158,7 +1159,7 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 		slog.Float64("agent_percentage", agentPercentage),
 	)
 
-	if err := store.Write(ctx, checkpoint.BackfillAttribution{CheckpointID: checkpointID, Attribution: combined}); err != nil {
+	if err := store.Write(ctx, checkpoint.CheckpointAttribution{CheckpointID: checkpointID, Attribution: combined}); err != nil {
 		return fmt.Errorf("persisting combined attribution: %w", err)
 	}
 
@@ -2296,6 +2297,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 			state.TranscriptPath = transcriptPath
 		}
 		captureSessionBranch(repo, state)
+		captureSessionOwner(state)
 
 		// ORDERING: attribution runs BEFORE migrate to use the pre-migration
 		// BaseCommit as the base tree (preserving correct agent-line counts
@@ -2340,6 +2342,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		promptAttr := s.calculatePromptAttributionAtStart(ctx, repo, state)
 		state.PendingPromptAttribution = &promptAttr
 		captureSessionBranch(repo, state)
+		captureSessionOwner(state)
 		return nil
 	})
 	if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
@@ -2367,6 +2370,26 @@ func captureSessionBranch(repo *git.Repository, state *SessionState) {
 		// falls back to deriving the branch from checkpoint trailers instead of
 		// using a stale, now-incorrect value.
 		state.Branch = ""
+	}
+}
+
+// captureSessionOwner records the owning agent process (PID + start-time
+// fingerprint) into the session state so liveness checks can later detect an
+// ACTIVE session whose agent exited without firing a SessionStop hook. The hook
+// runs as a short-lived child of the agent, so proclive.ResolveOwner walks up
+// past our own binary and any shells to the long-lived agent process.
+//
+// It is best-effort and re-run on every turn start: if the owner can't be
+// resolved (unsupported platform, transient-only ancestry) the field is cleared
+// and liveness degrades to the inactivity timeout; re-resolving each turn keeps
+// the fingerprint current across agent restarts.
+func captureSessionOwner(state *SessionState) {
+	// Clear first: a failed resolve must never leave a stale owner from an
+	// earlier turn. Otherwise a now-live session (agent restarted with a new
+	// PID) could still carry a dead PID and be wrongly finalized as exited.
+	state.Owner = nil
+	if owner, ok := proclive.ResolveOwner(); ok {
+		state.Owner = &owner
 	}
 }
 
@@ -2804,7 +2827,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		)
 		return 1 // Count as error - all checkpoints will be skipped
 	}
-	store := stores.Primary
+	store := stores.Persistent
 
 	precomputed := precomputeTranscriptBlobsForFinalize(logCtx, repo, redactedTranscript, state)
 
@@ -2820,7 +2843,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			continue
 		}
 
-		updateOpts := checkpoint.UpdateCommittedOptions{
+		updateOpts := checkpoint.UpdateOptions{
 			CheckpointID:     cpID,
 			SessionID:        state.SessionID,
 			Transcript:       redactedTranscript,
@@ -2830,7 +2853,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			PrecomputedBlobs: precomputed,
 		}
 
-		updateErr := store.Write(ctx, checkpoint.BackfillTranscript(updateOpts))
+		updateErr := store.Write(ctx, checkpoint.SessionTranscript(updateOpts))
 		if updateErr != nil {
 			logging.Warn(logCtx, "finalize: failed to update checkpoint",
 				slog.String("checkpoint_id", cpIDStr),
@@ -2929,7 +2952,7 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 	// Including the transcript would cause sessionHasNewContent to always return true
 	// because CheckpointTranscriptStart is reset to 0 for carry-forward.
 	writeCtx, carryForwardWriteSpan := perf.Start(ctx, "write_carry_forward_shadow")
-	result, err := stores.Temporary().WriteTemporary(writeCtx, checkpoint.WriteTemporaryOptions{
+	result, err := stores.Ephemeral().Write(writeCtx, checkpoint.Step{
 		SessionID:         state.SessionID,
 		BaseCommit:        state.BaseCommit,
 		WorktreeID:        state.WorktreeID,

@@ -138,20 +138,40 @@ func FindMostRecentSession(ctx context.Context) string {
 	}
 
 	// Scope to current worktree to prevent cross-worktree pollution.
-	worktreePath, wpErr := paths.WorktreeRoot(ctx)
-	if wpErr == nil && worktreePath != "" {
-		var filtered []*SessionState
-		for _, s := range states {
-			if s.WorktreePath == worktreePath {
-				filtered = append(filtered, s)
-			}
-		}
-		if len(filtered) > 0 {
-			states = filtered
-		}
-		// If no sessions match the worktree, fall back to all sessions
+	if filtered := sessionStatesForCurrentWorktree(ctx, states); len(filtered) > 0 {
+		states = filtered
+		// If no sessions match the worktree, fall back to all sessions.
 	}
 
+	return mostRecentSessionID(states)
+}
+
+// FindMostRecentSessionInCurrentWorktree returns the most recently interacted
+// session from the current worktree only. Unlike FindMostRecentSession, it does
+// not fall back to sessions from other worktrees.
+func FindMostRecentSessionInCurrentWorktree(ctx context.Context) string {
+	states, err := ListSessionStates(ctx)
+	if err != nil || len(states) == 0 {
+		return ""
+	}
+	return mostRecentSessionID(sessionStatesForCurrentWorktree(ctx, states))
+}
+
+func sessionStatesForCurrentWorktree(ctx context.Context, states []*SessionState) []*SessionState {
+	worktreePath, err := paths.WorktreeRoot(ctx)
+	if err != nil || worktreePath == "" {
+		return nil
+	}
+	filtered := make([]*SessionState, 0, len(states))
+	for _, s := range states {
+		if s.WorktreePath == worktreePath {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered
+}
+
+func mostRecentSessionID(states []*SessionState) string {
 	var best *SessionState
 	for _, s := range states {
 		if s.LastInteractionTime == nil {

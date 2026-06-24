@@ -35,7 +35,7 @@ const shadowRefMaxJitter = 8 * time.Millisecond
 // repository. Callers use the worktree root as cmd.Dir for git invocations
 // and the common dir to locate filesystem paths (lock files, loose objects)
 // — both without depending on the process cwd.
-func (s *GitStore) repoDirs(ctx context.Context) (worktreeRoot, commonDir string, err error) {
+func (s *ephemeralStore) repoDirs(ctx context.Context) (worktreeRoot, commonDir string, err error) {
 	wt, err := s.repo.Worktree()
 	if err != nil {
 		return "", "", fmt.Errorf("open worktree: %w", err)

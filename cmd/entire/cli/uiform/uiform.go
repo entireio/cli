@@ -20,8 +20,6 @@ func IsAccessibleMode() bool {
 }
 
 // Theme returns Entire's standard huh theme.
-//
-//nolint:ireturn // huh.Theme is an interface in v2
 func Theme() huh.Theme {
 	return huh.ThemeFunc(huh.ThemeDracula)
 }

@@ -19,7 +19,7 @@ import (
 // tree hashes to the old FlattenTree+BuildTreeFromEntries approach.
 func TestBuildTreeWithChanges_EquivalenceWithFlattenRebuild(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
 	repo, dir := setupTestRepo(t)
-	store := NewGitStore(repo, DefaultV1Refs())
+	store := newEphemeralStore(repo, DefaultV1Refs())
 
 	// Get the base tree hash from HEAD
 	head, err := repo.Head()
@@ -77,7 +77,7 @@ func TestAddTaskMetadataToTree_EquivalenceWithFlattenRebuild(t *testing.T) {
 	t.Parallel()
 
 	repo, _ := setupTestRepo(t)
-	store := NewGitStore(repo, DefaultV1Refs())
+	store := newEphemeralStore(repo, DefaultV1Refs())
 
 	head, err := repo.Head()
 	if err != nil {
@@ -91,7 +91,7 @@ func TestAddTaskMetadataToTree_EquivalenceWithFlattenRebuild(t *testing.T) {
 
 	// Test without transcripts — the tree structure equivalence is what matters.
 	// Transcript processing (chunking, redaction) is covered by integration tests.
-	opts := WriteTemporaryTaskOptions{
+	opts := WriteEphemeralTaskOptions{
 		SessionID:      "sess-001",
 		ToolUseID:      "tool-001",
 		AgentID:        "agent-001",
@@ -120,7 +120,7 @@ func TestAddTaskMetadataToTree_IncrementalPath(t *testing.T) {
 	t.Parallel()
 
 	repo, _ := setupTestRepo(t)
-	store := NewGitStore(repo, DefaultV1Refs())
+	store := newEphemeralStore(repo, DefaultV1Refs())
 
 	head, err := repo.Head()
 	if err != nil {
@@ -131,7 +131,7 @@ func TestAddTaskMetadataToTree_IncrementalPath(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	opts := WriteTemporaryTaskOptions{
+	opts := WriteEphemeralTaskOptions{
 		SessionID:           "sess-002",
 		ToolUseID:           "tool-002",
 		IsIncremental:       true,
@@ -286,7 +286,7 @@ func flattenRebuildTree(
 func flattenRebuildTaskMetadata(
 	t *testing.T, repo *gogit.Repository,
 	baseTreeHash plumbing.Hash,
-	opts WriteTemporaryTaskOptions,
+	opts WriteEphemeralTaskOptions,
 ) plumbing.Hash {
 	t.Helper()
 

@@ -261,7 +261,7 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 	defer lookup.Close()
 
 	store := lookup.store
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
+	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
 	if err != nil {
 		return fmt.Errorf("failed to read checkpoint: %w", err)
 	}
@@ -283,7 +283,7 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 
 // checkpointExportJSON is the metadata-only envelope returned by
 // `entire checkpoint explain --json`. It exposes only existing CheckpointSummary
-// and CommittedMetadata fields — no schema invention, no transcript bytes.
+// and Metadata fields — no schema invention, no transcript bytes.
 //
 // `partial` is true when any session metadata read failed; the offending
 // entries surface their cause via Sessions[].error. Consumers that don't
@@ -355,7 +355,7 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 	defer lookup.Close()
 
 	store := lookup.store
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
+	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
 	if err != nil {
 		return fmt.Errorf("failed to read checkpoint: %w", err)
 	}
@@ -385,7 +385,7 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 // plus the list of session indexes that failed to read; a non-empty failed
 // list means envelope.Partial is true. Extracted from runExplainCheckpointJSON so
 // the envelope-building behavior can be tested independently of git storage.
-func buildCheckpointJSONEnvelope(ctx context.Context, reader checkpoint.CommittedReader, summary *checkpoint.CheckpointSummary, cpID id.CheckpointID) (checkpointExportJSON, []int) {
+func buildCheckpointJSONEnvelope(ctx context.Context, reader checkpoint.SessionReader, summary *checkpoint.CheckpointSummary, cpID id.CheckpointID) (checkpointExportJSON, []int) {
 	envelope := checkpointExportJSON{
 		CheckpointID:     cpID.String(),
 		Strategy:         summary.Strategy,
@@ -422,28 +422,15 @@ func buildCheckpointJSONEnvelope(ctx context.Context, reader checkpoint.Committe
 // readSessionMetadataForExport reads only metadata.json for a session — no
 // transcript or prompt bytes. GitStore exposes a metadata-only reader, so this
 // never depends on transcript availability.
-func readSessionMetadataForExport(ctx context.Context, reader checkpoint.CommittedReader, cpID id.CheckpointID, idx int) (*checkpoint.CommittedMetadata, error) {
-	if r, ok := reader.(interface {
-		ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.CommittedMetadata, error)
-	}); ok {
-		meta, err := r.ReadSessionMetadata(ctx, cpID, idx)
-		if err != nil {
-			return nil, fmt.Errorf("read session metadata: %w", err)
-		}
-		return meta, nil
-	}
-	// CommittedReader doesn't promise a metadata-only method; fall back
-	// to the heavier ReadSessionContent path. Reachable only if a third
-	// store implementation is added without exposing metadata reads.
-	content, err := reader.ReadSessionContent(ctx, cpID, idx)
+func readSessionMetadataForExport(ctx context.Context, reader checkpoint.SessionReader, cpID id.CheckpointID, idx int) (*checkpoint.Metadata, error) {
+	meta, err := reader.ReadSessionMetadata(ctx, cpID, idx)
 	if err != nil {
-		return nil, fmt.Errorf("read session content: %w", err)
+		return nil, fmt.Errorf("read session metadata: %w", err)
 	}
-	meta := content.Metadata
-	return &meta, nil
+	return meta, nil
 }
 
-func sessionMetadataToJSON(idx int, meta *checkpoint.CommittedMetadata) checkpointSessionJSON {
+func sessionMetadataToJSON(idx int, meta *checkpoint.Metadata) checkpointSessionJSON {
 	out := checkpointSessionJSON{
 		Index:            idx,
 		SessionID:        meta.SessionID,

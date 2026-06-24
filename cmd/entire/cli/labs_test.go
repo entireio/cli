@@ -26,6 +26,9 @@ func TestLabsCmd_PrintsExperimentalCommandList(t *testing.T) {
 		"Available experimental commands",
 		"entire review",
 		"entire review --help",
+		"entire tokens",
+		"entire tokens profile",
+		"entire tokens profile --help",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("entire labs output missing %q:\n%s", want, got)
@@ -93,8 +96,13 @@ func TestRootHelp_ShowsLabsButHidesReview(t *testing.T) {
 	if !strings.Contains(got, "labs") || !strings.Contains(got, "Explore experimental Entire workflows") {
 		t.Fatalf("root help should include labs command, got:\n%s", got)
 	}
-	if strings.Contains(got, "review") {
-		t.Fatalf("root help should not include review while it is listed in labs, got:\n%s", got)
+	for _, hiddenExperimentalCommand := range []string{
+		"review",
+		"tokens                 Analyze token usage across sessions and checkpoints",
+	} {
+		if strings.Contains(got, hiddenExperimentalCommand) {
+			t.Fatalf("root help should not include %q while it is listed in labs, got:\n%s", hiddenExperimentalCommand, got)
+		}
 	}
 }
 
@@ -143,12 +151,12 @@ func TestRenderExperimentalCommands_ColumnWidthAdjustsToLongest(t *testing.T) {
 	t.Parallel()
 
 	short := []experimentalCommandInfo{
-		{Name: "a", Invocation: "entire a", Summary: "first"},
-		{Name: "b", Invocation: "entire b", Summary: "second"},
+		{Invocation: "entire a", Summary: "first"},
+		{Invocation: "entire b", Summary: "second"},
 	}
 	long := []experimentalCommandInfo{
-		{Name: "a", Invocation: "entire a", Summary: "first"},
-		{Name: "verylongcommand", Invocation: "entire verylongcommand", Summary: "second"},
+		{Invocation: "entire a", Summary: "first"},
+		{Invocation: "entire verylongcommand", Summary: "second"},
 	}
 
 	shortCol := summaryColumns(t, short)[0]
@@ -173,8 +181,8 @@ func TestRenderExperimentalCommands_MultiByteInvocationAligns(t *testing.T) {
 	// padding, len("entire ▶▶") == 13 >= 12 would skip padding and misalign the
 	// row; rune-based padding correctly adds 3 spaces.
 	commands := []experimentalCommandInfo{
-		{Name: "long", Invocation: "entire aaaaa", Summary: "first"},
-		{Name: "multibyte", Invocation: "entire ▶▶", Summary: "second"},
+		{Invocation: "entire aaaaa", Summary: "first"},
+		{Invocation: "entire ▶▶", Summary: "second"},
 	}
 
 	if got := len("entire ▶▶"); got < 12 {
@@ -192,12 +200,12 @@ func TestLabsRegistryCommandsExistAtCanonicalPaths(t *testing.T) {
 
 	root := NewRootCmd()
 	for _, info := range experimentalCommands {
-		cmd, _, err := root.Find([]string{info.Name})
+		cmd, _, err := root.Find(info.CommandPath)
 		if err != nil {
-			t.Fatalf("labs command %q should exist at canonical path: %v", info.Name, err)
+			t.Fatalf("labs command %q should exist at canonical path: %v", info.Invocation, err)
 		}
 		if cmd == nil {
-			t.Fatalf("labs command %q resolved to nil command", info.Name)
+			t.Fatalf("labs command %q resolved to nil command", info.Invocation)
 		}
 	}
 }

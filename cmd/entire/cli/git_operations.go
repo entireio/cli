@@ -451,7 +451,7 @@ func FetchMetadataTreeOnly(ctx context.Context) error {
 }
 
 func fetchMetadataFromOrigin(ctx context.Context, noFilter bool) error {
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	if !refs.Primary.IsBranch() {
 		return fmt.Errorf("primary metadata ref %s is not a branch", refs.Primary)
 	}

@@ -64,15 +64,15 @@ func writeSettings(t *testing.T, dir, version string) {
 
 func TestGitStore_CommittedReadRef(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, v1BranchRef(), NewGitStore(nil, DefaultV1Refs()).CommittedReadRef())
+	assert.Equal(t, v1BranchRef(), NewGitStore(nil, DefaultV1Refs()).PersistentReadRef())
 
 	syntheticRead := plumbing.ReferenceName("refs/entire/checkpoints/synthetic-read")
-	refs := CommittedRefs{
+	refs := PersistentRefs{
 		Primary: v1BranchRef(),
 		Read:    syntheticRead,
 		Push:    []plumbing.ReferenceName{v1BranchRef()},
 	}
-	assert.Equal(t, syntheticRead, NewGitStore(nil, refs).CommittedReadRef())
+	assert.Equal(t, syntheticRead, NewGitStore(nil, refs).PersistentReadRef())
 }
 
 // Not parallel: WriteCommitted touches repo refs.
@@ -81,11 +81,11 @@ func TestGitStore_WriteCommittedTargetsPrimary(t *testing.T) {
 	t.Chdir(dir)
 
 	synthetic := plumbing.ReferenceName("refs/entire/checkpoints/synthetic-primary")
-	refs := CommittedRefs{Primary: synthetic, Read: synthetic, Push: []plumbing.ReferenceName{synthetic}}
+	refs := PersistentRefs{Primary: synthetic, Read: synthetic, Push: []plumbing.ReferenceName{synthetic}}
 	store := NewGitStore(repo, refs)
 
 	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
-	require.NoError(t, store.WriteCommitted(context.Background(), WriteCommittedOptions{
+	require.NoError(t, store.Write(context.Background(), Session{
 		CheckpointID: cpID,
 		SessionID:    "session",
 		Strategy:     "manual-commit",
@@ -111,9 +111,9 @@ func TestNewGitStore_UsesRefs(t *testing.T) {
 	require.NoError(t, err)
 
 	synthetic := plumbing.ReferenceName("refs/entire/checkpoints/synthetic")
-	refs := CommittedRefs{Primary: synthetic, Read: synthetic, Push: []plumbing.ReferenceName{synthetic}}
+	refs := PersistentRefs{Primary: synthetic, Read: synthetic, Push: []plumbing.ReferenceName{synthetic}}
 	store := NewGitStore(repo, refs)
-	assert.Equal(t, synthetic, store.CommittedReadRef())
+	assert.Equal(t, synthetic, store.PersistentReadRef())
 	assert.Equal(t, refs, store.Refs())
 }
 
@@ -124,8 +124,8 @@ func TestNewGitStore_IgnoresCheckpointsVersion(t *testing.T) {
 	t.Chdir(dir)
 
 	writeSettings(t, dir, "") // v1 only
-	assert.Equal(t, v1BranchRef(), NewGitStore(repo, ResolveCommittedRefs(context.Background())).CommittedReadRef())
+	assert.Equal(t, v1BranchRef(), NewGitStore(repo, ResolveRefs(context.Background())).PersistentReadRef())
 
 	writeSettings(t, dir, `"1.1"`)
-	assert.Equal(t, v1BranchRef(), NewGitStore(repo, ResolveCommittedRefs(context.Background())).CommittedReadRef())
+	assert.Equal(t, v1BranchRef(), NewGitStore(repo, ResolveRefs(context.Background())).PersistentReadRef())
 }

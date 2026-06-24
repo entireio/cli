@@ -70,7 +70,7 @@ func runActivityTUI(ctx context.Context, client *api.Client) error {
 	return nil
 }
 
-func (m activityModel) fetchData() tea.Msg { //nolint:ireturn // bubbletea Cmd signature requires tea.Msg return
+func (m activityModel) fetchData() tea.Msg {
 	activity, commits, err := fetchActivityData(m.ctx, m.client)
 	if err != nil {
 		return activityErrMsg{err: err}

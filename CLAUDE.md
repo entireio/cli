@@ -15,25 +15,27 @@ This repo contains the CLI for Entire.
 - `entire/cli/commands`: actual command implementations
 - `entire/cli/agent`: agent implementations (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi) - see [Agent Integration Checklist](docs/architecture/agent-integration-checklist.md) and [Agent Implementation Guide](docs/architecture/agent-guide.md)
 - `entire/cli/strategy`: strategy implementation (manual-commit) - see section below
-- `entire/cli/checkpoint`: checkpoint storage abstractions (temporary and committed)
+- `entire/cli/checkpoint`: checkpoint storage abstractions (ephemeral and persistent)
 - `entire/cli/session`: session state management
 - `entire/cli/integration_test`: integration tests (simulated hooks)
 - `e2e/`: E2E tests with real agent calls (see [e2e/README.md](e2e/README.md))
 
 ### Command Layout
 
-The CLI is organized around five noun groups plus a small set of top-level
-verbs. The groups are the canonical home for each verb; legacy top-level
-shortcuts remain functional but hidden, and emit a deprecation hint pointing
-at the canonical group form.
+The visible CLI is organized around five noun groups plus a small set of
+top-level verbs. The groups are the canonical home for each verb; legacy
+top-level shortcuts remain functional but hidden, and emit a deprecation hint
+pointing at the canonical group form. Newer experimental command families are
+discoverable through `entire labs` and may remain hidden from root help while
+their canonical paths are still runnable.
 
-- `session` (alias: `sessions`): `list`, `info`, `stop`, `attach`, `resume`, `current`.
+- `session` (alias: `sessions`): `list`, `info`, `tokens`, `stop`, `attach`, `resume`, `current`.
   `resume` with a branch arg switches to it and resumes its session; with no arg
   it opens an interactive picker of stopped sessions (across all worktrees),
   resolving each to its branch and pointing at the owning worktree when the
   branch is checked out elsewhere. Resume keeps an existing local session log
   as-is by default (`--force` overwrites it from the checkpoint).
-- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `search`, plus
+- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`, plus
   the deprecated `rewind` (functional, prints a cobra deprecation message, will
   be removed in a future release)
 - `agent`: bare opens the interactive agent selector, plus `list`, `add`, `remove`
@@ -44,6 +46,10 @@ at the canonical group form.
   `--everywhere` (revoke every session on the active core, not just the
   current one) and `--all-contexts` (log out of every saved login)
 - `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+
+Experimental command families advertised through `entire labs`:
+
+- `tokens`: `profile` (hidden from root help while token diagnostics mature)
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
@@ -489,7 +495,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - **Worktree-specific branches** - each git worktree gets its own shadow branch namespace, preventing conflicts
 - **Supports multiple concurrent sessions** - checkpoints from different sessions in the same directory interleave on the same shadow branch
 - Condenses session logs to permanent `entire/checkpoints/v1` branch on user commits
-- Each committed session stores the raw transcript (`full.jsonl`, read by CLI rewind/resume/explain) plus a best-effort compact transcript (`transcript.jsonl`, generated via `transcript/compact` and pre-sliced to the checkpoint's `checkpoint_transcript_start`). Both are pushed with the v1 branch. The root `metadata.json` `sessions[].transcript` pointer still targets `full.jsonl`; pointing it at `transcript.jsonl` is deferred to a later change.
+- Each committed session stores the raw transcript (`full.jsonl`, read by CLI rewind/resume/explain) plus a best-effort compact transcript (`transcript.jsonl`, generated via `transcript/compact` and pre-sliced to the checkpoint's `checkpoint_transcript_start`). Both are pushed with the v1 branch. The root `metadata.json` `sessions[].transcript` pointer keeps targeting `full.jsonl`; when the compact transcript was generated the session entry also carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted otherwise) so external readers can locate it next to `full.jsonl`.
 - Uses the `post-rewrite` Git hook to keep local session linkage aligned after amend/rebase rewrites
 - Builds git trees in-memory using go-git plumbing APIs
 - Rewind restores files from shadow branch commit tree (does not use `git reset`)

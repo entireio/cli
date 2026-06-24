@@ -650,6 +650,76 @@ func (s *BindingAdditional) init() BindingAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/Cluster
+type Cluster struct {
+	IsDefault       bool   `json:"isDefault"`
+	Jurisdiction    string `json:"jurisdiction"`
+	PublicUrl       string `json:"publicUrl"`
+	Slug            string `json:"slug"`
+	AdditionalProps ClusterAdditional
+}
+
+// GetIsDefault returns the value of IsDefault.
+func (s *Cluster) GetIsDefault() bool {
+	return s.IsDefault
+}
+
+// GetJurisdiction returns the value of Jurisdiction.
+func (s *Cluster) GetJurisdiction() string {
+	return s.Jurisdiction
+}
+
+// GetPublicUrl returns the value of PublicUrl.
+func (s *Cluster) GetPublicUrl() string {
+	return s.PublicUrl
+}
+
+// GetSlug returns the value of Slug.
+func (s *Cluster) GetSlug() string {
+	return s.Slug
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *Cluster) GetAdditionalProps() ClusterAdditional {
+	return s.AdditionalProps
+}
+
+// SetIsDefault sets the value of IsDefault.
+func (s *Cluster) SetIsDefault(val bool) {
+	s.IsDefault = val
+}
+
+// SetJurisdiction sets the value of Jurisdiction.
+func (s *Cluster) SetJurisdiction(val string) {
+	s.Jurisdiction = val
+}
+
+// SetPublicUrl sets the value of PublicUrl.
+func (s *Cluster) SetPublicUrl(val string) {
+	s.PublicUrl = val
+}
+
+// SetSlug sets the value of Slug.
+func (s *Cluster) SetSlug(val string) {
+	s.Slug = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *Cluster) SetAdditionalProps(val ClusterAdditional) {
+	s.AdditionalProps = val
+}
+
+type ClusterAdditional map[string]jx.Raw
+
+func (s *ClusterAdditional) init() ClusterAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/CreateBindingInputBody
 type CreateBindingInputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -1334,6 +1404,12 @@ func (s *DeleteMirrorProvider) UnmarshalText(data []byte) error {
 		return errors.Errorf("invalid value: %q", data)
 	}
 }
+
+// DeleteOrgNoContent is response for DeleteOrg operation.
+type DeleteOrgNoContent struct{}
+
+// DeleteProjectNoContent is response for DeleteProject operation.
+type DeleteProjectNoContent struct{}
 
 // DeleteRepoNoContent is response for DeleteRepo operation.
 type DeleteRepoNoContent struct{}
@@ -2086,7 +2162,7 @@ type GrantProjectAccessInputBody struct {
 	GranteeType     OptGrantProjectAccessInputBodyGranteeType `json:"granteeType"`
 	Provider        string                                    `json:"provider"`
 	ProviderUserId  string                                    `json:"providerUserId"`
-	Role            string                                    `json:"role"`
+	Role            GrantProjectAccessInputBodyRole           `json:"role"`
 	AdditionalProps GrantProjectAccessInputBodyAdditional
 }
 
@@ -2111,7 +2187,7 @@ func (s *GrantProjectAccessInputBody) GetProviderUserId() string {
 }
 
 // GetRole returns the value of Role.
-func (s *GrantProjectAccessInputBody) GetRole() string {
+func (s *GrantProjectAccessInputBody) GetRole() GrantProjectAccessInputBodyRole {
 	return s.Role
 }
 
@@ -2141,7 +2217,7 @@ func (s *GrantProjectAccessInputBody) SetProviderUserId(val string) {
 }
 
 // SetRole sets the value of Role.
-func (s *GrantProjectAccessInputBody) SetRole(val string) {
+func (s *GrantProjectAccessInputBody) SetRole(val GrantProjectAccessInputBodyRole) {
 	s.Role = val
 }
 
@@ -2165,16 +2241,12 @@ type GrantProjectAccessInputBodyGranteeType string
 
 const (
 	GrantProjectAccessInputBodyGranteeTypeAccount GrantProjectAccessInputBodyGranteeType = "account"
-	GrantProjectAccessInputBodyGranteeTypeOrg     GrantProjectAccessInputBodyGranteeType = "org"
-	GrantProjectAccessInputBodyGranteeTypeTeam    GrantProjectAccessInputBodyGranteeType = "team"
 )
 
 // AllValues returns all GrantProjectAccessInputBodyGranteeType values.
 func (GrantProjectAccessInputBodyGranteeType) AllValues() []GrantProjectAccessInputBodyGranteeType {
 	return []GrantProjectAccessInputBodyGranteeType{
 		GrantProjectAccessInputBodyGranteeTypeAccount,
-		GrantProjectAccessInputBodyGranteeTypeOrg,
-		GrantProjectAccessInputBodyGranteeTypeTeam,
 	}
 }
 
@@ -2182,10 +2254,6 @@ func (GrantProjectAccessInputBodyGranteeType) AllValues() []GrantProjectAccessIn
 func (s GrantProjectAccessInputBodyGranteeType) MarshalText() ([]byte, error) {
 	switch s {
 	case GrantProjectAccessInputBodyGranteeTypeAccount:
-		return []byte(s), nil
-	case GrantProjectAccessInputBodyGranteeTypeOrg:
-		return []byte(s), nil
-	case GrantProjectAccessInputBodyGranteeTypeTeam:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -2198,11 +2266,53 @@ func (s *GrantProjectAccessInputBodyGranteeType) UnmarshalText(data []byte) erro
 	case GrantProjectAccessInputBodyGranteeTypeAccount:
 		*s = GrantProjectAccessInputBodyGranteeTypeAccount
 		return nil
-	case GrantProjectAccessInputBodyGranteeTypeOrg:
-		*s = GrantProjectAccessInputBodyGranteeTypeOrg
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type GrantProjectAccessInputBodyRole string
+
+const (
+	GrantProjectAccessInputBodyRoleReader GrantProjectAccessInputBodyRole = "reader"
+	GrantProjectAccessInputBodyRoleWriter GrantProjectAccessInputBodyRole = "writer"
+	GrantProjectAccessInputBodyRoleAdmin  GrantProjectAccessInputBodyRole = "admin"
+)
+
+// AllValues returns all GrantProjectAccessInputBodyRole values.
+func (GrantProjectAccessInputBodyRole) AllValues() []GrantProjectAccessInputBodyRole {
+	return []GrantProjectAccessInputBodyRole{
+		GrantProjectAccessInputBodyRoleReader,
+		GrantProjectAccessInputBodyRoleWriter,
+		GrantProjectAccessInputBodyRoleAdmin,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GrantProjectAccessInputBodyRole) MarshalText() ([]byte, error) {
+	switch s {
+	case GrantProjectAccessInputBodyRoleReader:
+		return []byte(s), nil
+	case GrantProjectAccessInputBodyRoleWriter:
+		return []byte(s), nil
+	case GrantProjectAccessInputBodyRoleAdmin:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GrantProjectAccessInputBodyRole) UnmarshalText(data []byte) error {
+	switch GrantProjectAccessInputBodyRole(data) {
+	case GrantProjectAccessInputBodyRoleReader:
+		*s = GrantProjectAccessInputBodyRoleReader
 		return nil
-	case GrantProjectAccessInputBodyGranteeTypeTeam:
-		*s = GrantProjectAccessInputBodyGranteeTypeTeam
+	case GrantProjectAccessInputBodyRoleWriter:
+		*s = GrantProjectAccessInputBodyRoleWriter
+		return nil
+	case GrantProjectAccessInputBodyRoleAdmin:
+		*s = GrantProjectAccessInputBodyRoleAdmin
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -2265,7 +2375,7 @@ type GrantRepoAccessInputBody struct {
 	GranteeType     OptGrantRepoAccessInputBodyGranteeType `json:"granteeType"`
 	Provider        string                                 `json:"provider"`
 	ProviderUserId  string                                 `json:"providerUserId"`
-	Role            string                                 `json:"role"`
+	Role            GrantRepoAccessInputBodyRole           `json:"role"`
 	AdditionalProps GrantRepoAccessInputBodyAdditional
 }
 
@@ -2290,7 +2400,7 @@ func (s *GrantRepoAccessInputBody) GetProviderUserId() string {
 }
 
 // GetRole returns the value of Role.
-func (s *GrantRepoAccessInputBody) GetRole() string {
+func (s *GrantRepoAccessInputBody) GetRole() GrantRepoAccessInputBodyRole {
 	return s.Role
 }
 
@@ -2320,7 +2430,7 @@ func (s *GrantRepoAccessInputBody) SetProviderUserId(val string) {
 }
 
 // SetRole sets the value of Role.
-func (s *GrantRepoAccessInputBody) SetRole(val string) {
+func (s *GrantRepoAccessInputBody) SetRole(val GrantRepoAccessInputBodyRole) {
 	s.Role = val
 }
 
@@ -2344,16 +2454,12 @@ type GrantRepoAccessInputBodyGranteeType string
 
 const (
 	GrantRepoAccessInputBodyGranteeTypeAccount GrantRepoAccessInputBodyGranteeType = "account"
-	GrantRepoAccessInputBodyGranteeTypeOrg     GrantRepoAccessInputBodyGranteeType = "org"
-	GrantRepoAccessInputBodyGranteeTypeTeam    GrantRepoAccessInputBodyGranteeType = "team"
 )
 
 // AllValues returns all GrantRepoAccessInputBodyGranteeType values.
 func (GrantRepoAccessInputBodyGranteeType) AllValues() []GrantRepoAccessInputBodyGranteeType {
 	return []GrantRepoAccessInputBodyGranteeType{
 		GrantRepoAccessInputBodyGranteeTypeAccount,
-		GrantRepoAccessInputBodyGranteeTypeOrg,
-		GrantRepoAccessInputBodyGranteeTypeTeam,
 	}
 }
 
@@ -2361,10 +2467,6 @@ func (GrantRepoAccessInputBodyGranteeType) AllValues() []GrantRepoAccessInputBod
 func (s GrantRepoAccessInputBodyGranteeType) MarshalText() ([]byte, error) {
 	switch s {
 	case GrantRepoAccessInputBodyGranteeTypeAccount:
-		return []byte(s), nil
-	case GrantRepoAccessInputBodyGranteeTypeOrg:
-		return []byte(s), nil
-	case GrantRepoAccessInputBodyGranteeTypeTeam:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -2377,11 +2479,53 @@ func (s *GrantRepoAccessInputBodyGranteeType) UnmarshalText(data []byte) error {
 	case GrantRepoAccessInputBodyGranteeTypeAccount:
 		*s = GrantRepoAccessInputBodyGranteeTypeAccount
 		return nil
-	case GrantRepoAccessInputBodyGranteeTypeOrg:
-		*s = GrantRepoAccessInputBodyGranteeTypeOrg
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type GrantRepoAccessInputBodyRole string
+
+const (
+	GrantRepoAccessInputBodyRoleReader GrantRepoAccessInputBodyRole = "reader"
+	GrantRepoAccessInputBodyRoleWriter GrantRepoAccessInputBodyRole = "writer"
+	GrantRepoAccessInputBodyRoleAdmin  GrantRepoAccessInputBodyRole = "admin"
+)
+
+// AllValues returns all GrantRepoAccessInputBodyRole values.
+func (GrantRepoAccessInputBodyRole) AllValues() []GrantRepoAccessInputBodyRole {
+	return []GrantRepoAccessInputBodyRole{
+		GrantRepoAccessInputBodyRoleReader,
+		GrantRepoAccessInputBodyRoleWriter,
+		GrantRepoAccessInputBodyRoleAdmin,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GrantRepoAccessInputBodyRole) MarshalText() ([]byte, error) {
+	switch s {
+	case GrantRepoAccessInputBodyRoleReader:
+		return []byte(s), nil
+	case GrantRepoAccessInputBodyRoleWriter:
+		return []byte(s), nil
+	case GrantRepoAccessInputBodyRoleAdmin:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GrantRepoAccessInputBodyRole) UnmarshalText(data []byte) error {
+	switch GrantRepoAccessInputBodyRole(data) {
+	case GrantRepoAccessInputBodyRoleReader:
+		*s = GrantRepoAccessInputBodyRoleReader
 		return nil
-	case GrantRepoAccessInputBodyGranteeTypeTeam:
-		*s = GrantRepoAccessInputBodyGranteeTypeTeam
+	case GrantRepoAccessInputBodyRoleWriter:
+		*s = GrantRepoAccessInputBodyRoleWriter
+		return nil
+	case GrantRepoAccessInputBodyRoleAdmin:
+		*s = GrantRepoAccessInputBodyRoleAdmin
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -2443,7 +2587,7 @@ type GrantServiceAccountAccessInputBody struct {
 	Schema          OptURI                                         `json:"$schema"`
 	ResourceId      string                                         `json:"resourceId"`
 	ResourceType    GrantServiceAccountAccessInputBodyResourceType `json:"resourceType"`
-	Role            string                                         `json:"role"`
+	Role            GrantServiceAccountAccessInputBodyRole         `json:"role"`
 	AdditionalProps GrantServiceAccountAccessInputBodyAdditional
 }
 
@@ -2463,7 +2607,7 @@ func (s *GrantServiceAccountAccessInputBody) GetResourceType() GrantServiceAccou
 }
 
 // GetRole returns the value of Role.
-func (s *GrantServiceAccountAccessInputBody) GetRole() string {
+func (s *GrantServiceAccountAccessInputBody) GetRole() GrantServiceAccountAccessInputBodyRole {
 	return s.Role
 }
 
@@ -2488,7 +2632,7 @@ func (s *GrantServiceAccountAccessInputBody) SetResourceType(val GrantServiceAcc
 }
 
 // SetRole sets the value of Role.
-func (s *GrantServiceAccountAccessInputBody) SetRole(val string) {
+func (s *GrantServiceAccountAccessInputBody) SetRole(val GrantServiceAccountAccessInputBodyRole) {
 	s.Role = val
 }
 
@@ -2543,6 +2687,54 @@ func (s *GrantServiceAccountAccessInputBodyResourceType) UnmarshalText(data []by
 		return nil
 	case GrantServiceAccountAccessInputBodyResourceTypeProject:
 		*s = GrantServiceAccountAccessInputBodyResourceTypeProject
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type GrantServiceAccountAccessInputBodyRole string
+
+const (
+	GrantServiceAccountAccessInputBodyRoleReader GrantServiceAccountAccessInputBodyRole = "reader"
+	GrantServiceAccountAccessInputBodyRoleWriter GrantServiceAccountAccessInputBodyRole = "writer"
+	GrantServiceAccountAccessInputBodyRoleAdmin  GrantServiceAccountAccessInputBodyRole = "admin"
+)
+
+// AllValues returns all GrantServiceAccountAccessInputBodyRole values.
+func (GrantServiceAccountAccessInputBodyRole) AllValues() []GrantServiceAccountAccessInputBodyRole {
+	return []GrantServiceAccountAccessInputBodyRole{
+		GrantServiceAccountAccessInputBodyRoleReader,
+		GrantServiceAccountAccessInputBodyRoleWriter,
+		GrantServiceAccountAccessInputBodyRoleAdmin,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GrantServiceAccountAccessInputBodyRole) MarshalText() ([]byte, error) {
+	switch s {
+	case GrantServiceAccountAccessInputBodyRoleReader:
+		return []byte(s), nil
+	case GrantServiceAccountAccessInputBodyRoleWriter:
+		return []byte(s), nil
+	case GrantServiceAccountAccessInputBodyRoleAdmin:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GrantServiceAccountAccessInputBodyRole) UnmarshalText(data []byte) error {
+	switch GrantServiceAccountAccessInputBodyRole(data) {
+	case GrantServiceAccountAccessInputBodyRoleReader:
+		*s = GrantServiceAccountAccessInputBodyRoleReader
+		return nil
+	case GrantServiceAccountAccessInputBodyRoleWriter:
+		*s = GrantServiceAccountAccessInputBodyRoleWriter
+		return nil
+	case GrantServiceAccountAccessInputBodyRoleAdmin:
+		*s = GrantServiceAccountAccessInputBodyRoleAdmin
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -2662,8 +2854,10 @@ func (s *GrantedMirrorCollaboratorAdditional) init() GrantedMirrorCollaboratorAd
 // Ref: #/components/schemas/ListAuditEventsOutputBody
 type ListAuditEventsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI       `json:"$schema"`
-	Events          []AuditEvent `json:"events"`
+	Schema OptURI       `json:"$schema"`
+	Events []AuditEvent `json:"events"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListAuditEventsOutputBodyAdditional
 }
 
@@ -2675,6 +2869,11 @@ func (s *ListAuditEventsOutputBody) GetSchema() OptURI {
 // GetEvents returns the value of Events.
 func (s *ListAuditEventsOutputBody) GetEvents() []AuditEvent {
 	return s.Events
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListAuditEventsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -2690,6 +2889,11 @@ func (s *ListAuditEventsOutputBody) SetSchema(val OptURI) {
 // SetEvents sets the value of Events.
 func (s *ListAuditEventsOutputBody) SetEvents(val []AuditEvent) {
 	s.Events = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListAuditEventsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -2760,8 +2964,10 @@ func (s *ListAvailableMirrorsOutputBodyAdditional) init() ListAvailableMirrorsOu
 // Ref: #/components/schemas/ListBindingsOutputBody
 type ListBindingsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI    `json:"$schema"`
-	Bindings        []Binding `json:"bindings"`
+	Schema   OptURI    `json:"$schema"`
+	Bindings []Binding `json:"bindings"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListBindingsOutputBodyAdditional
 }
 
@@ -2773,6 +2979,11 @@ func (s *ListBindingsOutputBody) GetSchema() OptURI {
 // GetBindings returns the value of Bindings.
 func (s *ListBindingsOutputBody) GetBindings() []Binding {
 	return s.Bindings
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListBindingsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -2790,6 +3001,11 @@ func (s *ListBindingsOutputBody) SetBindings(val []Binding) {
 	s.Bindings = val
 }
 
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListBindingsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
+}
+
 // SetAdditionalProps sets the value of AdditionalProps.
 func (s *ListBindingsOutputBody) SetAdditionalProps(val ListBindingsOutputBodyAdditional) {
 	s.AdditionalProps = val
@@ -2798,6 +3014,55 @@ func (s *ListBindingsOutputBody) SetAdditionalProps(val ListBindingsOutputBodyAd
 type ListBindingsOutputBodyAdditional map[string]jx.Raw
 
 func (s *ListBindingsOutputBodyAdditional) init() ListBindingsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ListClustersOutputBody
+type ListClustersOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI    `json:"$schema"`
+	Clusters        []Cluster `json:"clusters"`
+	AdditionalProps ListClustersOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListClustersOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetClusters returns the value of Clusters.
+func (s *ListClustersOutputBody) GetClusters() []Cluster {
+	return s.Clusters
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListClustersOutputBody) GetAdditionalProps() ListClustersOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListClustersOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetClusters sets the value of Clusters.
+func (s *ListClustersOutputBody) SetClusters(val []Cluster) {
+	s.Clusters = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListClustersOutputBody) SetAdditionalProps(val ListClustersOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListClustersOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListClustersOutputBodyAdditional) init() ListClustersOutputBodyAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}
@@ -2892,8 +3157,10 @@ func (s *ListMirrorCollaboratorsProvider) UnmarshalText(data []byte) error {
 // Ref: #/components/schemas/ListMirrorsOutputBody
 type ListMirrorsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI   `json:"$schema"`
-	Mirrors         []Mirror `json:"mirrors"`
+	Schema  OptURI   `json:"$schema"`
+	Mirrors []Mirror `json:"mirrors"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListMirrorsOutputBodyAdditional
 }
 
@@ -2905,6 +3172,11 @@ func (s *ListMirrorsOutputBody) GetSchema() OptURI {
 // GetMirrors returns the value of Mirrors.
 func (s *ListMirrorsOutputBody) GetMirrors() []Mirror {
 	return s.Mirrors
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListMirrorsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -2920,6 +3192,11 @@ func (s *ListMirrorsOutputBody) SetSchema(val OptURI) {
 // SetMirrors sets the value of Mirrors.
 func (s *ListMirrorsOutputBody) SetMirrors(val []Mirror) {
 	s.Mirrors = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListMirrorsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -2941,7 +3218,9 @@ func (s *ListMirrorsOutputBodyAdditional) init() ListMirrorsOutputBodyAdditional
 // Ref: #/components/schemas/ListOIDCProvidersOutputBody
 type ListOIDCProvidersOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI         `json:"$schema"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString      `json:"nextPageToken"`
 	Providers       []OIDCProvider `json:"providers"`
 	AdditionalProps ListOIDCProvidersOutputBodyAdditional
 }
@@ -2949,6 +3228,11 @@ type ListOIDCProvidersOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *ListOIDCProvidersOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListOIDCProvidersOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetProviders returns the value of Providers.
@@ -2964,6 +3248,11 @@ func (s *ListOIDCProvidersOutputBody) GetAdditionalProps() ListOIDCProvidersOutp
 // SetSchema sets the value of Schema.
 func (s *ListOIDCProvidersOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListOIDCProvidersOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetProviders sets the value of Providers.
@@ -2990,8 +3279,10 @@ func (s *ListOIDCProvidersOutputBodyAdditional) init() ListOIDCProvidersOutputBo
 // Ref: #/components/schemas/ListOrgMembersOutputBody
 type ListOrgMembersOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI       `json:"$schema"`
-	Members         []Membership `json:"members"`
+	Schema  OptURI       `json:"$schema"`
+	Members []Membership `json:"members"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListOrgMembersOutputBodyAdditional
 }
 
@@ -3003,6 +3294,11 @@ func (s *ListOrgMembersOutputBody) GetSchema() OptURI {
 // GetMembers returns the value of Members.
 func (s *ListOrgMembersOutputBody) GetMembers() []Membership {
 	return s.Members
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListOrgMembersOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -3018,6 +3314,11 @@ func (s *ListOrgMembersOutputBody) SetSchema(val OptURI) {
 // SetMembers sets the value of Members.
 func (s *ListOrgMembersOutputBody) SetMembers(val []Membership) {
 	s.Members = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListOrgMembersOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -3039,14 +3340,27 @@ func (s *ListOrgMembersOutputBodyAdditional) init() ListOrgMembersOutputBodyAddi
 // Ref: #/components/schemas/ListOrgProjectsOutputBody
 type ListOrgProjectsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI    `json:"$schema"`
-	Projects        []Project `json:"projects"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString  `json:"nextPageToken"`
+	Project         OptProject `json:"project"`
+	Projects        []Project  `json:"projects"`
 	AdditionalProps ListOrgProjectsOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
 func (s *ListOrgProjectsOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListOrgProjectsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
+}
+
+// GetProject returns the value of Project.
+func (s *ListOrgProjectsOutputBody) GetProject() OptProject {
+	return s.Project
 }
 
 // GetProjects returns the value of Projects.
@@ -3062,6 +3376,16 @@ func (s *ListOrgProjectsOutputBody) GetAdditionalProps() ListOrgProjectsOutputBo
 // SetSchema sets the value of Schema.
 func (s *ListOrgProjectsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListOrgProjectsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
+}
+
+// SetProject sets the value of Project.
+func (s *ListOrgProjectsOutputBody) SetProject(val OptProject) {
+	s.Project = val
 }
 
 // SetProjects sets the value of Projects.
@@ -3088,14 +3412,27 @@ func (s *ListOrgProjectsOutputBodyAdditional) init() ListOrgProjectsOutputBodyAd
 // Ref: #/components/schemas/ListOrgsOutputBody
 type ListOrgsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI `json:"$schema"`
-	Orgs            []Org  `json:"orgs"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
+	Org             OptOrg    `json:"org"`
+	Orgs            []Org     `json:"orgs"`
 	AdditionalProps ListOrgsOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
 func (s *ListOrgsOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListOrgsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
+}
+
+// GetOrg returns the value of Org.
+func (s *ListOrgsOutputBody) GetOrg() OptOrg {
+	return s.Org
 }
 
 // GetOrgs returns the value of Orgs.
@@ -3111,6 +3448,16 @@ func (s *ListOrgsOutputBody) GetAdditionalProps() ListOrgsOutputBodyAdditional {
 // SetSchema sets the value of Schema.
 func (s *ListOrgsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListOrgsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
+}
+
+// SetOrg sets the value of Org.
+func (s *ListOrgsOutputBody) SetOrg(val OptOrg) {
+	s.Org = val
 }
 
 // SetOrgs sets the value of Orgs.
@@ -3137,8 +3484,10 @@ func (s *ListOrgsOutputBodyAdditional) init() ListOrgsOutputBodyAdditional {
 // Ref: #/components/schemas/ListProjectMembersOutputBody
 type ListProjectMembersOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI         `json:"$schema"`
-	Members         []ProjectGrant `json:"members"`
+	Schema  OptURI         `json:"$schema"`
+	Members []ProjectGrant `json:"members"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListProjectMembersOutputBodyAdditional
 }
 
@@ -3150,6 +3499,11 @@ func (s *ListProjectMembersOutputBody) GetSchema() OptURI {
 // GetMembers returns the value of Members.
 func (s *ListProjectMembersOutputBody) GetMembers() []ProjectGrant {
 	return s.Members
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListProjectMembersOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -3165,6 +3519,11 @@ func (s *ListProjectMembersOutputBody) SetSchema(val OptURI) {
 // SetMembers sets the value of Members.
 func (s *ListProjectMembersOutputBody) SetMembers(val []ProjectGrant) {
 	s.Members = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListProjectMembersOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -3186,14 +3545,27 @@ func (s *ListProjectMembersOutputBodyAdditional) init() ListProjectMembersOutput
 // Ref: #/components/schemas/ListProjectReposOutputBody
 type ListProjectReposOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI `json:"$schema"`
-	Repos           []Repo `json:"repos"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
+	Repo            OptRepo   `json:"repo"`
+	Repos           []Repo    `json:"repos"`
 	AdditionalProps ListProjectReposOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
 func (s *ListProjectReposOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListProjectReposOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
+}
+
+// GetRepo returns the value of Repo.
+func (s *ListProjectReposOutputBody) GetRepo() OptRepo {
+	return s.Repo
 }
 
 // GetRepos returns the value of Repos.
@@ -3209,6 +3581,16 @@ func (s *ListProjectReposOutputBody) GetAdditionalProps() ListProjectReposOutput
 // SetSchema sets the value of Schema.
 func (s *ListProjectReposOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListProjectReposOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
+}
+
+// SetRepo sets the value of Repo.
+func (s *ListProjectReposOutputBody) SetRepo(val OptRepo) {
+	s.Repo = val
 }
 
 // SetRepos sets the value of Repos.
@@ -3235,7 +3617,9 @@ func (s *ListProjectReposOutputBodyAdditional) init() ListProjectReposOutputBody
 // Ref: #/components/schemas/ListProjectsOutputBody
 type ListProjectsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI     `json:"$schema"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString  `json:"nextPageToken"`
 	Project         OptProject `json:"project"`
 	Projects        []Project  `json:"projects"`
 	AdditionalProps ListProjectsOutputBodyAdditional
@@ -3244,6 +3628,11 @@ type ListProjectsOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *ListProjectsOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListProjectsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetProject returns the value of Project.
@@ -3264,6 +3653,11 @@ func (s *ListProjectsOutputBody) GetAdditionalProps() ListProjectsOutputBodyAddi
 // SetSchema sets the value of Schema.
 func (s *ListProjectsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListProjectsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetProject sets the value of Project.
@@ -3292,11 +3686,74 @@ func (s *ListProjectsOutputBodyAdditional) init() ListProjectsOutputBodyAddition
 	return m
 }
 
+// Ref: #/components/schemas/ListRepoGrantsOutputBody
+type ListRepoGrantsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI      `json:"$schema"`
+	Grants []RepoGrant `json:"grants"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
+	AdditionalProps ListRepoGrantsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListRepoGrantsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetGrants returns the value of Grants.
+func (s *ListRepoGrantsOutputBody) GetGrants() []RepoGrant {
+	return s.Grants
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListRepoGrantsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListRepoGrantsOutputBody) GetAdditionalProps() ListRepoGrantsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListRepoGrantsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetGrants sets the value of Grants.
+func (s *ListRepoGrantsOutputBody) SetGrants(val []RepoGrant) {
+	s.Grants = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListRepoGrantsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListRepoGrantsOutputBody) SetAdditionalProps(val ListRepoGrantsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListRepoGrantsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListRepoGrantsOutputBodyAdditional) init() ListRepoGrantsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListServiceAccountGrantsOutputBody
 type ListServiceAccountGrantsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI                `json:"$schema"`
-	Grants          []ServiceAccountGrant `json:"grants"`
+	Schema OptURI                `json:"$schema"`
+	Grants []ServiceAccountGrant `json:"grants"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListServiceAccountGrantsOutputBodyAdditional
 }
 
@@ -3308,6 +3765,11 @@ func (s *ListServiceAccountGrantsOutputBody) GetSchema() OptURI {
 // GetGrants returns the value of Grants.
 func (s *ListServiceAccountGrantsOutputBody) GetGrants() []ServiceAccountGrant {
 	return s.Grants
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListServiceAccountGrantsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -3323,6 +3785,11 @@ func (s *ListServiceAccountGrantsOutputBody) SetSchema(val OptURI) {
 // SetGrants sets the value of Grants.
 func (s *ListServiceAccountGrantsOutputBody) SetGrants(val []ServiceAccountGrant) {
 	s.Grants = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListServiceAccountGrantsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -3344,7 +3811,9 @@ func (s *ListServiceAccountGrantsOutputBodyAdditional) init() ListServiceAccount
 // Ref: #/components/schemas/ListServiceAccountsOutputBody
 type ListServiceAccountsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI                     `json:"$schema"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString                  `json:"nextPageToken"`
 	ServiceAccounts []ServiceAccountWithGrants `json:"serviceAccounts"`
 	AdditionalProps ListServiceAccountsOutputBodyAdditional
 }
@@ -3352,6 +3821,11 @@ type ListServiceAccountsOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *ListServiceAccountsOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListServiceAccountsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetServiceAccounts returns the value of ServiceAccounts.
@@ -3367,6 +3841,11 @@ func (s *ListServiceAccountsOutputBody) GetAdditionalProps() ListServiceAccounts
 // SetSchema sets the value of Schema.
 func (s *ListServiceAccountsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListServiceAccountsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetServiceAccounts sets the value of ServiceAccounts.
@@ -3586,7 +4065,9 @@ func (s *LookupRefResultOwnerType) UnmarshalText(data []byte) error {
 // Ref: #/components/schemas/LookupResourcesOutputBody
 type LookupResourcesOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI           `json:"$schema"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString        `json:"nextPageToken"`
 	Permission      OptString        `json:"permission"`
 	ResourceIds     []string         `json:"resourceIds"`
 	ResourceType    string           `json:"resourceType"`
@@ -3597,6 +4078,11 @@ type LookupResourcesOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *LookupResourcesOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *LookupResourcesOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetPermission returns the value of Permission.
@@ -3627,6 +4113,11 @@ func (s *LookupResourcesOutputBody) GetAdditionalProps() LookupResourcesOutputBo
 // SetSchema sets the value of Schema.
 func (s *LookupResourcesOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *LookupResourcesOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetPermission sets the value of Permission.
@@ -3796,10 +4287,18 @@ func (s *MeGlobalAdditional) init() MeGlobalAdditional {
 
 // Ref: #/components/schemas/MeIdentityHandle
 type MeIdentityHandle struct {
-	Handle          string `json:"handle"`
-	Provider        string `json:"provider"`
-	ProviderUserId  string `json:"providerUserId"`
+	// The provider's publicly-visible profile email (from the provider at login; may be empty). NOT the
+	// account's contact email.
+	Email           OptString `json:"email"`
+	Handle          string    `json:"handle"`
+	Provider        string    `json:"provider"`
+	ProviderUserId  string    `json:"providerUserId"`
 	AdditionalProps MeIdentityHandleAdditional
+}
+
+// GetEmail returns the value of Email.
+func (s *MeIdentityHandle) GetEmail() OptString {
+	return s.Email
 }
 
 // GetHandle returns the value of Handle.
@@ -3820,6 +4319,11 @@ func (s *MeIdentityHandle) GetProviderUserId() string {
 // GetAdditionalProps returns the value of AdditionalProps.
 func (s *MeIdentityHandle) GetAdditionalProps() MeIdentityHandleAdditional {
 	return s.AdditionalProps
+}
+
+// SetEmail sets the value of Email.
+func (s *MeIdentityHandle) SetEmail(val OptString) {
+	s.Email = val
 }
 
 // SetHandle sets the value of Handle.
@@ -4162,6 +4666,8 @@ func (s *MembershipAdditional) init() MembershipAdditional {
 type Mirror struct {
 	// A URL to the JSON Schema for this object.
 	Schema OptURI `json:"$schema"`
+	// Physical cell the mirror's cluster runs in, e.g. aws-us-east-2.
+	Cell OptString `json:"cell"`
 	// Public host of the cluster serving this mirror.
 	ClusterHost     string      `json:"clusterHost"`
 	CreatedAt       time.Time   `json:"createdAt"`
@@ -4180,6 +4686,11 @@ type Mirror struct {
 // GetSchema returns the value of Schema.
 func (s *Mirror) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetCell returns the value of Cell.
+func (s *Mirror) GetCell() OptString {
+	return s.Cell
 }
 
 // GetClusterHost returns the value of ClusterHost.
@@ -4245,6 +4756,11 @@ func (s *Mirror) GetAdditionalProps() MirrorAdditional {
 // SetSchema sets the value of Schema.
 func (s *Mirror) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetCell sets the value of Cell.
+func (s *Mirror) SetCell(val OptString) {
+	s.Cell = val
 }
 
 // SetClusterHost sets the value of ClusterHost.
@@ -4909,6 +5425,52 @@ func (o OptGrantRepoAccessInputBodyGranteeType) Or(d GrantRepoAccessInputBodyGra
 	return d
 }
 
+// NewOptInt32 returns new OptInt32 with value set to v.
+func NewOptInt32(v int32) OptInt32 {
+	return OptInt32{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptInt32 is optional int32.
+type OptInt32 struct {
+	Value int32
+	Set   bool
+}
+
+// IsSet returns true if OptInt32 was set.
+func (o OptInt32) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptInt32) Reset() {
+	var v int32
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptInt32) SetTo(v int32) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptInt32) Get() (v int32, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptInt32) Or(d int32) int32 {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptInt64 returns new OptInt64 with value set to v.
 func NewOptInt64(v int64) OptInt64 {
 	return OptInt64{
@@ -5093,6 +5655,52 @@ func (o OptMeRegionalUnavailable) Or(d MeRegionalUnavailable) MeRegionalUnavaila
 	return d
 }
 
+// NewOptOrg returns new OptOrg with value set to v.
+func NewOptOrg(v Org) OptOrg {
+	return OptOrg{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptOrg is optional Org.
+type OptOrg struct {
+	Value Org
+	Set   bool
+}
+
+// IsSet returns true if OptOrg was set.
+func (o OptOrg) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptOrg) Reset() {
+	var v Org
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptOrg) SetTo(v Org) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptOrg) Get() (v Org, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptOrg) Or(d Org) Org {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptProject returns new OptProject with value set to v.
 func NewOptProject(v Project) OptProject {
 	return OptProject{
@@ -5133,6 +5741,52 @@ func (o OptProject) Get() (v Project, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptProject) Or(d Project) Project {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptRepo returns new OptRepo with value set to v.
+func NewOptRepo(v Repo) OptRepo {
+	return OptRepo{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptRepo is optional Repo.
+type OptRepo struct {
+	Value Repo
+	Set   bool
+}
+
+// IsSet returns true if OptRepo was set.
+func (o OptRepo) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptRepo) Reset() {
+	var v Repo
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptRepo) SetTo(v Repo) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptRepo) Get() (v Repo, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptRepo) Or(d Repo) Repo {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -5793,6 +6447,65 @@ func (s *RepoAdditional) init() RepoAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/RepoGrant
+type RepoGrant struct {
+	GranteeId       string `json:"granteeId"`
+	GranteeType     string `json:"granteeType"`
+	Role            string `json:"role"`
+	AdditionalProps RepoGrantAdditional
+}
+
+// GetGranteeId returns the value of GranteeId.
+func (s *RepoGrant) GetGranteeId() string {
+	return s.GranteeId
+}
+
+// GetGranteeType returns the value of GranteeType.
+func (s *RepoGrant) GetGranteeType() string {
+	return s.GranteeType
+}
+
+// GetRole returns the value of Role.
+func (s *RepoGrant) GetRole() string {
+	return s.Role
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *RepoGrant) GetAdditionalProps() RepoGrantAdditional {
+	return s.AdditionalProps
+}
+
+// SetGranteeId sets the value of GranteeId.
+func (s *RepoGrant) SetGranteeId(val string) {
+	s.GranteeId = val
+}
+
+// SetGranteeType sets the value of GranteeType.
+func (s *RepoGrant) SetGranteeType(val string) {
+	s.GranteeType = val
+}
+
+// SetRole sets the value of Role.
+func (s *RepoGrant) SetRole(val string) {
+	s.Role = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *RepoGrant) SetAdditionalProps(val RepoGrantAdditional) {
+	s.AdditionalProps = val
+}
+
+type RepoGrantAdditional map[string]jx.Raw
+
+func (s *RepoGrantAdditional) init() RepoGrantAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 type RepoObjectFormat string
 
 const (
@@ -6054,6 +6767,12 @@ type RevokeProjectAccessByProviderNoContent struct{}
 
 // RevokeProjectAccessNoContent is response for RevokeProjectAccess operation.
 type RevokeProjectAccessNoContent struct{}
+
+// RevokeRepoAccessByProviderNoContent is response for RevokeRepoAccessByProvider operation.
+type RevokeRepoAccessByProviderNoContent struct{}
+
+// RevokeRepoAccessNoContent is response for RevokeRepoAccess operation.
+type RevokeRepoAccessNoContent struct{}
 
 // RevokeServiceAccountAccessNoContent is response for RevokeServiceAccountAccess operation.
 type RevokeServiceAccountAccessNoContent struct{}
@@ -6399,4 +7118,103 @@ func (s *SessionAuth) SetAPIKey(val string) {
 // SetRoles sets the value of Roles.
 func (s *SessionAuth) SetRoles(val []string) {
 	s.Roles = val
+}
+
+// Ref: #/components/schemas/UpdateMeInputBody
+type UpdateMeInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Contact email.
+	Email           string `json:"email"`
+	AdditionalProps UpdateMeInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *UpdateMeInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetEmail returns the value of Email.
+func (s *UpdateMeInputBody) GetEmail() string {
+	return s.Email
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *UpdateMeInputBody) GetAdditionalProps() UpdateMeInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *UpdateMeInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetEmail sets the value of Email.
+func (s *UpdateMeInputBody) SetEmail(val string) {
+	s.Email = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *UpdateMeInputBody) SetAdditionalProps(val UpdateMeInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type UpdateMeInputBodyAdditional map[string]jx.Raw
+
+func (s *UpdateMeInputBodyAdditional) init() UpdateMeInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/UpdateMeOutputBody
+type UpdateMeOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI `json:"$schema"`
+	Email           string `json:"email"`
+	AdditionalProps UpdateMeOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *UpdateMeOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetEmail returns the value of Email.
+func (s *UpdateMeOutputBody) GetEmail() string {
+	return s.Email
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *UpdateMeOutputBody) GetAdditionalProps() UpdateMeOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *UpdateMeOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetEmail sets the value of Email.
+func (s *UpdateMeOutputBody) SetEmail(val string) {
+	s.Email = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *UpdateMeOutputBody) SetAdditionalProps(val UpdateMeOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type UpdateMeOutputBodyAdditional map[string]jx.Raw
+
+func (s *UpdateMeOutputBodyAdditional) init() UpdateMeOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }

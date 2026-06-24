@@ -29,11 +29,7 @@ const (
 )
 
 type reviewContextSessionMetadataReader interface {
-	ReadSessionMetadata(ctx context.Context, checkpointID checkpointid.CheckpointID, sessionIndex int) (*checkpoint.CommittedMetadata, error)
-}
-
-type reviewContextSessionMetadataPromptsReader interface {
-	ReadSessionMetadataAndPrompts(ctx context.Context, checkpointID checkpointid.CheckpointID, sessionIndex int) (*checkpoint.SessionContent, error)
+	ReadSessionMetadata(ctx context.Context, checkpointID checkpointid.CheckpointID, sessionIndex int) (*checkpoint.Metadata, error)
 }
 
 func reviewCheckpointContext(ctx context.Context, worktreeRoot string, scopeBaseRef string) string {
@@ -103,7 +99,7 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 		logging.Debug(ctx, "review checkpoint context: open store", slog.String("error", err.Error()))
 		return ""
 	}
-	store := stores.Primary
+	store := stores.Persistent
 
 	var lines []string
 	seen := map[checkpointid.CheckpointID]bool{}
@@ -120,7 +116,7 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 				continue
 			}
 
-			summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
+			summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
 			if err != nil {
 				lines = append(lines, fmt.Sprintf("- %s: checkpoint metadata unavailable", cpID))
 				continue
@@ -273,7 +269,7 @@ func formatReviewSessionLine(worktreeRoot string, st *session.State) string {
 
 func reviewCheckpointDetail(
 	ctx context.Context,
-	reader checkpoint.CommittedReader,
+	reader checkpoint.SessionReader,
 	cpID checkpointid.CheckpointID,
 	summary *checkpoint.CheckpointSummary,
 ) string {
@@ -307,10 +303,10 @@ type reviewContextSessionDetail struct {
 
 func readReviewContextSessionMetadata(
 	ctx context.Context,
-	reader checkpoint.CommittedReader,
+	reader checkpoint.SessionReader,
 	cpID checkpointid.CheckpointID,
 	sessionIndex int,
-) (*checkpoint.CommittedMetadata, error) {
+) (*checkpoint.Metadata, error) {
 	if r, ok := reader.(reviewContextSessionMetadataReader); ok {
 		return r.ReadSessionMetadata(ctx, cpID, sessionIndex) //nolint:wrapcheck // Best-effort prompt context.
 	}
@@ -326,30 +322,15 @@ func readReviewContextSessionMetadata(
 
 func readReviewContextSessionPrompts(
 	ctx context.Context,
-	reader checkpoint.CommittedReader,
+	reader checkpoint.SessionReader,
 	cpID checkpointid.CheckpointID,
 	sessionIndex int,
 ) (string, error) {
-	if r, ok := reader.(reviewContextSessionMetadataPromptsReader); ok {
-		content, err := r.ReadSessionMetadataAndPrompts(ctx, cpID, sessionIndex)
-		if err == nil {
-			if content == nil {
-				return "", errors.New("session content is nil")
-			}
-			return content.Prompts, nil
-		}
-		if !errors.Is(err, checkpoint.ErrCheckpointNotFound) {
-			return "", err //nolint:wrapcheck // Best-effort prompt context.
-		}
-	}
-	content, err := reader.ReadSessionContent(ctx, cpID, sessionIndex)
+	prompts, err := reader.ReadSessionPrompts(ctx, cpID, sessionIndex)
 	if err != nil {
 		return "", err //nolint:wrapcheck // Best-effort prompt context.
 	}
-	if content == nil {
-		return "", errors.New("session content is nil")
-	}
-	return content.Prompts, nil
+	return prompts, nil
 }
 
 func reviewSummaryText(summary *checkpoint.Summary) string {

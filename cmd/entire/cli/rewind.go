@@ -722,7 +722,7 @@ func restoreSessionTranscriptFromStrategy(ctx context.Context, cpID id.Checkpoin
 	if err != nil {
 		return "", fmt.Errorf("open checkpoint store: %w", err)
 	}
-	content, returnedSessionID, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, stores.Primary, cpID)
+	content, returnedSessionID, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, stores.Persistent, cpID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get session log: %w", err)
 	}
@@ -773,7 +773,7 @@ func restoreSessionTranscriptFromShadow(ctx context.Context, commitHash, metadat
 	if err != nil {
 		return "", fmt.Errorf("open checkpoint store: %w", err)
 	}
-	content, err := stores.Temporary().GetTranscriptFromCommit(ctx, hash, metadataDir, agent.Type())
+	content, err := stores.Ephemeral().GetTranscriptFromCommit(ctx, hash, metadataDir, agent.Type())
 	if err != nil {
 		return "", fmt.Errorf("failed to get transcript from shadow branch: %w", err)
 	}

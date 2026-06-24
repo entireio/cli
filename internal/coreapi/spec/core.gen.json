@@ -199,6 +199,30 @@
         ],
         "type": "object"
       },
+      "Cluster": {
+        "additionalProperties": true,
+        "properties": {
+          "isDefault": {
+            "type": "boolean"
+          },
+          "jurisdiction": {
+            "type": "string"
+          },
+          "publicUrl": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "jurisdiction",
+          "publicUrl",
+          "isDefault"
+        ],
+        "type": "object"
+      },
       "CreateBindingInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -692,9 +716,7 @@
           "granteeType": {
             "default": "account",
             "enum": [
-              "account",
-              "org",
-              "team"
+              "account"
             ],
             "type": "string"
           },
@@ -707,7 +729,11 @@
             "type": "string"
           },
           "role": {
-            "minLength": 1,
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
             "type": "string"
           }
         },
@@ -754,9 +780,7 @@
           "granteeType": {
             "default": "account",
             "enum": [
-              "account",
-              "org",
-              "team"
+              "account"
             ],
             "type": "string"
           },
@@ -769,7 +793,11 @@
             "type": "string"
           },
           "role": {
-            "minLength": 1,
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
             "type": "string"
           }
         },
@@ -825,7 +853,11 @@
             "type": "string"
           },
           "role": {
-            "minLength": 1,
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
             "type": "string"
           }
         },
@@ -900,6 +932,10 @@
               "$ref": "#/components/schemas/AuditEvent"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -948,10 +984,38 @@
               "$ref": "#/components/schemas/Binding"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
           "bindings"
+        ],
+        "type": "object"
+      },
+      "ListClustersOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListClustersOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "clusters": {
+            "items": {
+              "$ref": "#/components/schemas/Cluster"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "clusters"
         ],
         "type": "object"
       },
@@ -996,6 +1060,10 @@
               "$ref": "#/components/schemas/Mirror"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -1013,6 +1081,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "providers": {
@@ -1044,6 +1116,10 @@
               "$ref": "#/components/schemas/Membership"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -1063,6 +1139,13 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
+          "project": {
+            "$ref": "#/components/schemas/Project"
+          },
           "projects": {
             "items": {
               "$ref": "#/components/schemas/Project"
@@ -1070,9 +1153,6 @@
             "type": "array"
           }
         },
-        "required": [
-          "projects"
-        ],
         "type": "object"
       },
       "ListOrgsOutputBody": {
@@ -1087,6 +1167,13 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
+          "org": {
+            "$ref": "#/components/schemas/Org"
+          },
           "orgs": {
             "items": {
               "$ref": "#/components/schemas/Org"
@@ -1094,9 +1181,6 @@
             "type": "array"
           }
         },
-        "required": [
-          "orgs"
-        ],
         "type": "object"
       },
       "ListProjectMembersOutputBody": {
@@ -1116,6 +1200,10 @@
               "$ref": "#/components/schemas/ProjectGrant"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -1135,6 +1223,13 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
+          "repo": {
+            "$ref": "#/components/schemas/Repo"
+          },
           "repos": {
             "items": {
               "$ref": "#/components/schemas/Repo"
@@ -1142,9 +1237,6 @@
             "type": "array"
           }
         },
-        "required": [
-          "repos"
-        ],
         "type": "object"
       },
       "ListProjectsOutputBody": {
@@ -1159,6 +1251,10 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
           "project": {
             "$ref": "#/components/schemas/Project"
           },
@@ -1169,6 +1265,34 @@
             "type": "array"
           }
         },
+        "type": "object"
+      },
+      "ListRepoGrantsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListRepoGrantsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "grants": {
+            "items": {
+              "$ref": "#/components/schemas/RepoGrant"
+            },
+            "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "grants"
+        ],
         "type": "object"
       },
       "ListServiceAccountGrantsOutputBody": {
@@ -1188,6 +1312,10 @@
               "$ref": "#/components/schemas/ServiceAccountGrant"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -1205,6 +1333,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "serviceAccounts": {
@@ -1285,6 +1417,10 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
           "permission": {
             "type": "string"
           },
@@ -1356,6 +1492,10 @@
       "MeIdentityHandle": {
         "additionalProperties": true,
         "properties": {
+          "email": {
+            "description": "The provider's publicly-visible profile email (from the provider at login; may be empty). NOT the account's contact email.",
+            "type": "string"
+          },
           "handle": {
             "type": "string"
           },
@@ -1480,6 +1620,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "cell": {
+            "description": "Physical cell the mirror's cluster runs in, e.g. aws-us-east-2.",
             "type": "string"
           },
           "clusterHost": {
@@ -1742,6 +1886,26 @@
         ],
         "type": "object"
       },
+      "RepoGrant": {
+        "additionalProperties": true,
+        "properties": {
+          "granteeId": {
+            "type": "string"
+          },
+          "granteeType": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "granteeType",
+          "granteeId",
+          "role"
+        ],
+        "type": "object"
+      },
       "ResolvedIdentity": {
         "additionalProperties": true,
         "properties": {
@@ -1898,6 +2062,52 @@
           "createdAt"
         ],
         "type": "object"
+      },
+      "UpdateMeInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/UpdateMeInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "email": {
+            "description": "Contact email.",
+            "format": "email",
+            "maxLength": 254,
+            "minLength": 5,
+            "type": "string"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "type": "object"
+      },
+      "UpdateMeOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/UpdateMeOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -1927,6 +2137,29 @@
         "operationId": "lookupResources",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "description": "SpiceDB resource type (e.g. \"repo\", \"project\", \"org\").",
             "in": "path",
             "name": "resourceType",
@@ -1938,12 +2171,12 @@
             }
           },
           {
-            "description": "Optional: only list resources where the caller has this permission.",
+            "description": "Optional: only list resources where the caller has this permission. pageSize/pageToken apply only when set.",
             "explode": false,
             "in": "query",
             "name": "permission",
             "schema": {
-              "description": "Optional: only list resources where the caller has this permission.",
+              "description": "Optional: only list resources where the caller has this permission. pageSize/pageToken apply only when set.",
               "type": "string"
             }
           }
@@ -2056,6 +2289,31 @@
     "/audit": {
       "get": {
         "operationId": "listAuditEvents",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2089,6 +2347,45 @@
         "summary": "List the calling account's recent audit events",
         "tags": [
           "identity"
+        ]
+      }
+    },
+    "/clusters": {
+      "get": {
+        "operationId": "listClusters",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListClustersOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List data-plane clusters attached to this control plane",
+        "tags": [
+          "clusters"
         ]
       }
     },
@@ -2241,6 +2538,53 @@
         "tags": [
           "identity"
         ]
+      },
+      "patch": {
+        "operationId": "updateMe",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMeInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateMeOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Update the calling account's contact email",
+        "tags": [
+          "identity"
+        ]
       }
     },
     "/mirrors": {
@@ -2323,6 +2667,29 @@
       "get": {
         "operationId": "listMirrors",
         "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
           {
             "description": "Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to).",
             "explode": false,
@@ -2761,6 +3128,31 @@
     "/oidc-providers": {
       "get": {
         "operationId": "listOIDCProviders",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2800,6 +3192,41 @@
     "/orgs": {
       "get": {
         "operationId": "listOrgs",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match org name.",
+            "explode": false,
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "description": "Optional: exact-match org name.",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2830,7 +3257,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "List organizations the caller can see",
+        "summary": "List organizations the caller can see (or one by name)",
         "tags": [
           "orgs"
         ]
@@ -2883,10 +3310,124 @@
         ]
       }
     },
+    "/orgs/{orgId}": {
+      "delete": {
+        "operationId": "deleteOrg",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete an organization",
+        "tags": [
+          "orgs"
+        ]
+      },
+      "get": {
+        "operationId": "getOrg",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Org"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get an organization",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
     "/orgs/{orgId}/members": {
       "get": {
         "operationId": "listOrgMembers",
         "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
           {
             "in": "path",
             "name": "orgId",
@@ -3057,11 +3598,44 @@
         "operationId": "listOrgProjects",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "orgId",
             "required": true,
             "schema": {
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match project name (case-insensitive).",
+            "explode": false,
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "description": "Optional: exact-match project name (case-insensitive).",
               "type": "string"
             }
           }
@@ -3106,6 +3680,29 @@
       "get": {
         "operationId": "listProjects",
         "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
           {
             "description": "Optional: exact-match project name.",
             "explode": false,
@@ -3195,6 +3792,97 @@
           }
         ],
         "summary": "Create project",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/projects/{projectId}": {
+      "delete": {
+        "operationId": "deleteProject",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete a project",
+        "tags": [
+          "projects"
+        ]
+      },
+      "get": {
+        "operationId": "getProject",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get a project by id",
         "tags": [
           "projects"
         ]
@@ -3387,6 +4075,29 @@
         "operationId": "listProjectMembers",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "projectId",
             "required": true,
@@ -3437,11 +4148,44 @@
         "operationId": "listProjectRepos",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "projectId",
             "required": true,
             "schema": {
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match repo name.",
+            "explode": false,
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "description": "Optional: exact-match repo name.",
               "type": "string"
             }
           }
@@ -3476,7 +4220,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "List repositories in a project",
+        "summary": "List repositories in a project (or one by name)",
         "tags": [
           "repos"
         ]
@@ -3623,6 +4367,77 @@
       }
     },
     "/repos/{repoId}/grants": {
+      "get": {
+        "operationId": "listRepoGrants",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRepoGrantsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List repo grants",
+        "tags": [
+          "repos"
+        ]
+      },
       "post": {
         "operationId": "grantRepoAccess",
         "parameters": [
@@ -3682,10 +4497,155 @@
         ]
       }
     },
+    "/repos/{repoId}/grants/account/{provider}/{providerUserId}": {
+      "delete": {
+        "operationId": "revokeRepoAccessByProvider",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "providerUserId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke repo access by provider identity",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/grants/{granteeType}/{granteeId}": {
+      "delete": {
+        "operationId": "revokeRepoAccess",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "granteeType",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "granteeId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke repo access by grantee id",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
     "/service-accounts": {
       "get": {
         "operationId": "listServiceAccounts",
         "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
           {
             "explode": false,
             "in": "query",
@@ -3876,6 +4836,29 @@
         "operationId": "listBindings",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "accountId",
             "required": true,
@@ -4035,6 +5018,29 @@
       "get": {
         "operationId": "listServiceAccountGrants",
         "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
           {
             "in": "path",
             "name": "accountId",

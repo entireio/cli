@@ -48,7 +48,7 @@ func TestWriteCommitted_WritesCompactTranscript(t *testing.T) {
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
 
-	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+	err := store.Write(context.Background(), Session{
 		CheckpointID: cpID,
 		SessionID:    "session-001",
 		Strategy:     "manual-commit",
@@ -80,8 +80,8 @@ func TestWriteCommitted_WritesCompactTranscript(t *testing.T) {
 		t.Error("compact transcript missing assistant content")
 	}
 
-	// Root metadata.json still points at full.jsonl; the compact transcript is
-	// written into the tree (and pushed) but not yet referenced by metadata.
+	// Root metadata.json: transcript points at full.jsonl, compact_transcript
+	// at transcript.jsonl.
 	summary := readSummaryFromBranch(t, repo, cpID)
 	if len(summary.Sessions) != 1 {
 		t.Fatalf("session count = %d, want 1", len(summary.Sessions))
@@ -94,6 +94,10 @@ func TestWriteCommitted_WritesCompactTranscript(t *testing.T) {
 	if summary.Sessions[0].ContentHash != wantHash {
 		t.Errorf("sessions[0].content_hash = %q, want %q", summary.Sessions[0].ContentHash, wantHash)
 	}
+	wantCompact := "/" + sessionPath + paths.CompactTranscriptFileName
+	if summary.Sessions[0].CompactTranscript != wantCompact {
+		t.Errorf("sessions[0].compact_transcript = %q, want %q", summary.Sessions[0].CompactTranscript, wantCompact)
+	}
 }
 
 func TestWriteCommitted_CompactTranscriptScopedToCheckpointStart(t *testing.T) {
@@ -102,7 +106,7 @@ func TestWriteCommitted_CompactTranscriptScopedToCheckpointStart(t *testing.T) {
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("b2c3d4e5f6a1")
 
-	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+	err := store.Write(context.Background(), Session{
 		CheckpointID:              cpID,
 		SessionID:                 "session-001",
 		Strategy:                  "manual-commit",
@@ -134,7 +138,7 @@ func TestWriteCommitted_NonCompactableTranscriptPointsAtFull(t *testing.T) {
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("c3d4e5f6a1b2")
 
-	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+	err := store.Write(context.Background(), Session{
 		CheckpointID: cpID,
 		SessionID:    "session-001",
 		Strategy:     "manual-commit",
@@ -156,6 +160,62 @@ func TestWriteCommitted_NonCompactableTranscriptPointsAtFull(t *testing.T) {
 	wantTranscript := "/" + sessionPath + paths.TranscriptFileName
 	if summary.Sessions[0].Transcript != wantTranscript {
 		t.Errorf("sessions[0].transcript = %q, want %q", summary.Sessions[0].Transcript, wantTranscript)
+	}
+	if summary.Sessions[0].CompactTranscript != "" {
+		t.Errorf("sessions[0].compact_transcript = %q for non-compactable transcript, want empty", summary.Sessions[0].CompactTranscript)
+	}
+}
+
+// TestUpdateCommitted_RefreshesCompactTranscriptPointer guards against the
+// finalize path writing transcript.jsonl without updating the root
+// metadata.json. When the initial write produced no compact transcript but a
+// later backfill does, sessions[].compact_transcript must be refreshed to point
+// at it rather than staying omitted.
+func TestUpdateCommitted_RefreshesCompactTranscriptPointer(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	cpID := id.MustCheckpointID("f6a1b2c3d4e5")
+
+	// Initial write with a non-compactable transcript: full.jsonl is written but
+	// no transcript.jsonl, so compact_transcript is omitted.
+	err := store.Write(context.Background(), Session{
+		CheckpointID: cpID,
+		SessionID:    "session-001",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("not json at all\nstill not json\n")),
+		Agent:        agent.AgentTypeClaudeCode,
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+	summary := readSummaryFromBranch(t, repo, cpID)
+	if summary.Sessions[0].CompactTranscript != "" {
+		t.Fatalf("precondition: compact_transcript = %q, want empty", summary.Sessions[0].CompactTranscript)
+	}
+
+	// Finalize with a compactable transcript: transcript.jsonl is now written and
+	// the root summary's compact_transcript must be refreshed to match.
+	err = store.Write(context.Background(), SessionTranscript{
+		CheckpointID: cpID,
+		SessionID:    "session-001",
+		Transcript:   redact.AlreadyRedacted(claudeStyleTranscript()),
+		Agent:        agent.AgentTypeClaudeCode,
+	})
+	if err != nil {
+		t.Fatalf("UpdateCommitted() error = %v", err)
+	}
+
+	sessionPath := cpID.Path() + "/0/"
+	if _, ok := readBranchFile(t, store, sessionPath+paths.CompactTranscriptFileName); !ok {
+		t.Fatal("transcript.jsonl missing after finalize")
+	}
+	summary = readSummaryFromBranch(t, repo, cpID)
+	wantCompact := "/" + sessionPath + paths.CompactTranscriptFileName
+	if summary.Sessions[0].CompactTranscript != wantCompact {
+		t.Errorf("sessions[0].compact_transcript = %q, want %q", summary.Sessions[0].CompactTranscript, wantCompact)
 	}
 }
 
@@ -191,7 +251,7 @@ func TestUpdateCommitted_CodexCompactSanitizedLikeInitialWrite(t *testing.T) {
 
 	// Initial write sanitizes before compaction. With start=2 the dropped
 	// compaction line shifts the window so only "gamma" survives.
-	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+	err := store.Write(context.Background(), Session{
 		CheckpointID:              cpID,
 		SessionID:                 "session-001",
 		Strategy:                  "manual-commit",
@@ -218,7 +278,7 @@ func TestUpdateCommitted_CodexCompactSanitizedLikeInitialWrite(t *testing.T) {
 	// Finalize with the same raw transcript. replaceTranscript must sanitize
 	// before compaction; otherwise the raw slice at line 2 would reintroduce
 	// "beta".
-	err = store.UpdateCommitted(context.Background(), UpdateCommittedOptions{
+	err = store.Write(context.Background(), SessionTranscript{
 		CheckpointID: cpID,
 		SessionID:    "session-001",
 		Transcript:   redact.AlreadyRedacted(raw),
@@ -246,7 +306,7 @@ func TestUpdateCommitted_RegeneratesCompactTranscript(t *testing.T) {
 	cpID := id.MustCheckpointID("d4e5f6a1b2c3")
 
 	initial := claudeStyleTranscript()
-	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+	err := store.Write(context.Background(), Session{
 		CheckpointID: cpID,
 		SessionID:    "session-001",
 		Strategy:     "manual-commit",
@@ -262,7 +322,7 @@ func TestUpdateCommitted_RegeneratesCompactTranscript(t *testing.T) {
 	extended := append([]byte{}, initial...)
 	extended = append(extended,
 		[]byte(`{"type":"user","uuid":"u3","timestamp":"2026-01-01T00:00:04Z","message":{"role":"user","content":"hello three"}}`+"\n")...)
-	err = store.UpdateCommitted(context.Background(), UpdateCommittedOptions{
+	err = store.Write(context.Background(), SessionTranscript{
 		CheckpointID: cpID,
 		SessionID:    "session-001",
 		Transcript:   redact.AlreadyRedacted(extended),

@@ -8,7 +8,7 @@ import (
 )
 
 // newCheckpointGroupCmd builds the `entire checkpoint` parent command and
-// registers list/explain/search as children, plus the deprecated rewind.
+// registers list/explain/tokens/search as children, plus the deprecated rewind.
 func newCheckpointGroupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "checkpoint",
@@ -19,11 +19,13 @@ func newCheckpointGroupCmd() *cobra.Command {
 Commands:
   list     List checkpoints on the current branch
   explain  Explain a checkpoint, commit, or session
+  tokens   Show token usage and optimization recommendations
   search   Search checkpoints (semantic + keyword)
 
 Examples:
   entire checkpoint list
   entire checkpoint explain <id|sha>
+  entire checkpoint tokens <id>
   entire checkpoint search "fix login"`,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
@@ -35,6 +37,7 @@ Examples:
 
 	cmd.AddCommand(newCheckpointListCmd())
 	cmd.AddCommand(newExplainCmd())
+	cmd.AddCommand(newCheckpointTokensCmd())
 	cmd.AddCommand(newRewindCmd())
 	cmd.AddCommand(newCheckpointSearchCmd())
 

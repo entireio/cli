@@ -71,7 +71,7 @@ func (s *ManualCommitStrategy) GetMetadataRef(ctx context.Context, cp Checkpoint
 	if cp.CheckpointID.IsEmpty() {
 		return ""
 	}
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	return refs.Primary.Short() + ":" + cp.CheckpointID.Path()
 }
 
@@ -84,7 +84,7 @@ func (s *ManualCommitStrategy) GetSessionMetadataRef(ctx context.Context, _ stri
 	}
 	defer repo.Close()
 
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	ref, err := repo.Reference(refs.Primary, true)
 	if err != nil {
 		return ""

@@ -67,4 +67,7 @@ docs/superpowers
 tmp/
 .tmp/
 .superpowers/
+.clawpatch/
+entire-external-cp-test/
+/skills/
 /git-remote-entire

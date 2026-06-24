@@ -12,24 +12,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestReadCommittedCheckpointNormalizesNilSummary(t *testing.T) {
+func TestReadCheckpointNormalizesNilSummary(t *testing.T) {
 	t.Parallel()
 
 	reader := &committedReaderStub{}
-	summary, err := ReadCommittedCheckpoint(context.Background(), reader, id.MustCheckpointID("111111111111"))
+	summary, err := ReadCheckpoint(context.Background(), reader, id.MustCheckpointID("111111111111"))
 	require.Nil(t, summary)
 	require.ErrorIs(t, err, ErrCheckpointNotFound)
 }
 
-func TestReadCommittedCheckpointWrapsReaderError(t *testing.T) {
+func TestReadCheckpointWrapsReaderError(t *testing.T) {
 	t.Parallel()
 
 	readerErr := errors.New("boom")
 	reader := &committedReaderStub{readErr: readerErr}
-	summary, err := ReadCommittedCheckpoint(context.Background(), reader, id.MustCheckpointID("111111111111"))
+	summary, err := ReadCheckpoint(context.Background(), reader, id.MustCheckpointID("111111111111"))
 	require.Nil(t, summary)
 	require.ErrorIs(t, err, readerErr)
-	require.ErrorContains(t, err, "read committed checkpoint")
+	require.ErrorContains(t, err, "read persistent checkpoint")
 }
 
 func TestReadLatestSessionContentEmptySummaryReturnsNotFound(t *testing.T) {
@@ -56,7 +56,7 @@ func TestReadRawSessionLogForCheckpointReadsLatestV1Session(t *testing.T) {
 	ctx := context.Background()
 	cpID := id.MustCheckpointID("222222222222")
 
-	require.NoError(t, store.WriteCommitted(ctx, WriteCommittedOptions{
+	require.NoError(t, store.Write(ctx, Session{
 		CheckpointID: cpID,
 		SessionID:    "session-a",
 		Strategy:     "manual-commit",
@@ -64,7 +64,7 @@ func TestReadRawSessionLogForCheckpointReadsLatestV1Session(t *testing.T) {
 		AuthorName:   "Test",
 		AuthorEmail:  "test@example.com",
 	}))
-	require.NoError(t, store.WriteCommitted(ctx, WriteCommittedOptions{
+	require.NoError(t, store.Write(ctx, Session{
 		CheckpointID: cpID,
 		SessionID:    "session-b",
 		Strategy:     "manual-commit",
@@ -84,7 +84,7 @@ type committedReaderStub struct {
 	readErr error
 }
 
-func (s *committedReaderStub) ReadCommitted(context.Context, id.CheckpointID) (*CheckpointSummary, error) {
+func (s *committedReaderStub) Read(context.Context, id.CheckpointID) (*CheckpointSummary, error) {
 	if s.readErr != nil {
 		return nil, s.readErr
 	}
@@ -93,4 +93,20 @@ func (s *committedReaderStub) ReadCommitted(context.Context, id.CheckpointID) (*
 
 func (s *committedReaderStub) ReadSessionContent(context.Context, id.CheckpointID, int) (*SessionContent, error) {
 	return nil, ErrCheckpointNotFound
+}
+
+func (s *committedReaderStub) List(context.Context) ([]CheckpointInfo, error) {
+	return nil, nil
+}
+
+func (s *committedReaderStub) ReadSessionMetadata(context.Context, id.CheckpointID, int) (*Metadata, error) {
+	return nil, ErrCheckpointNotFound
+}
+
+func (s *committedReaderStub) ReadSessionPrompts(context.Context, id.CheckpointID, int) (string, error) {
+	return "", ErrCheckpointNotFound
+}
+
+func (s *committedReaderStub) ReadSessionMetadataAndPrompts(context.Context, id.CheckpointID, int) (*Metadata, string, error) {
+	return nil, "", ErrCheckpointNotFound
 }

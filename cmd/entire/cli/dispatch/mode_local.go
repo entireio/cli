@@ -180,8 +180,8 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
-	store := stores.Primary
-	infos, err := store.ListCommitted(ctx)
+	store := stores.Persistent
+	infos, err := store.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list committed checkpoints: %w", err)
 	}
@@ -192,7 +192,7 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 			continue
 		}
 
-		summary, err := store.ReadCommitted(ctx, info.CheckpointID)
+		summary, err := store.Read(ctx, info.CheckpointID)
 		if err != nil {
 			logging.Warn(ctx, "failed to read committed checkpoint for dispatch", "checkpoint_id", info.CheckpointID.String(), "error", err)
 			continue

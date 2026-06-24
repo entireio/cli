@@ -60,7 +60,7 @@ func setupExportRepo(t *testing.T) *git.Repository {
 	return repo
 }
 
-func writeCheckpointForExport(t *testing.T, repo *git.Repository, cpID id.CheckpointID, opts checkpoint.WriteCommittedOptions) {
+func writeCheckpointForExport(t *testing.T, repo *git.Repository, cpID id.CheckpointID, opts checkpoint.WriteOptions) {
 	t.Helper()
 	if opts.CheckpointID.IsEmpty() {
 		opts.CheckpointID = cpID
@@ -75,14 +75,14 @@ func writeCheckpointForExport(t *testing.T, repo *git.Repository, cpID id.Checkp
 		opts.AuthorEmail = exportTestAuthorEmail
 	}
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	require.NoError(t, store.WriteCommitted(context.Background(), opts))
+	require.NoError(t, store.Write(context.Background(), checkpoint.Session(opts)))
 }
 
 func TestRunExplainExport_JSONSingleCheckpoint(t *testing.T) {
 	repo := setupExportRepo(t)
 
 	cpID := id.MustCheckpointID("aaaa11112222")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-json",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
 	})
@@ -127,7 +127,7 @@ func TestRunExplainExport_JSONFetchesRemoteV1Metadata(t *testing.T) {
 	runGit(t, tmpDir, "clone", "--branch", "main", bareDir, localDir)
 
 	targetID := id.MustCheckpointID("aaaa99998888")
-	writeCheckpointForExport(t, producerRepo, targetID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, producerRepo, targetID, checkpoint.WriteOptions{
 		SessionID:  "remote-v1-session",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"remote"}]}}` + "\n")),
 	})
@@ -166,7 +166,7 @@ func TestRunExplainExport_JSONUsesMetadataOnlyReader(t *testing.T) {
 
 	cpID := id.MustCheckpointID("777711112222")
 	v1 := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	require.NoError(t, v1.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	require.NoError(t, v1.Write(context.Background(), checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    "session-v1-only",
 		Strategy:     "manual-commit",
@@ -195,7 +195,7 @@ func TestRunExplainExport_JSONNeverEmbedsTranscript(t *testing.T) {
 	repo := setupExportRepo(t)
 
 	cpID := id.MustCheckpointID("bbbb11112222")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-no-leak",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"SECRET-RAW"}]}}` + "\n")),
 	})
@@ -217,7 +217,7 @@ func TestRunExplainExport_TranscriptStreamsStoredBytes(t *testing.T) {
 
 	cpID := id.MustCheckpointID("cccc11112222")
 	raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"stored line"}]}}` + "\n")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-stored",
 		Transcript: redact.AlreadyRedacted(raw),
 	})
@@ -237,7 +237,7 @@ func TestRunExplainExport_RawTranscriptStreamsRawBytes(t *testing.T) {
 
 	cpID := id.MustCheckpointID("dddd11112222")
 	raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello raw"}]}}` + "\n")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-raw",
 		Transcript: redact.AlreadyRedacted(raw),
 	})
@@ -262,7 +262,7 @@ func TestExplainCmd_RawTranscriptWithSessionIndexRoutesToExportPath(t *testing.T
 
 	cpID := id.MustCheckpointID("ffff11112222")
 	raw0 := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello session 0"}]}}` + "\n")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-zero",
 		Transcript: redact.AlreadyRedacted(raw0),
 	})
@@ -290,12 +290,12 @@ func TestExplainCmd_RawTranscriptMultiSessionDistinctContent(t *testing.T) {
 	rawSession0 := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"SESSION-ZERO-MARKER"}]}}` + "\n")
 	rawSession1 := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"SESSION-ONE-DIFFERENT-MARKER"}]}}` + "\n")
 
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-zero",
 		Transcript: redact.AlreadyRedacted(rawSession0),
 	})
 	// Second fixture write with the same checkpoint ID appends session 1.
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-one",
 		Transcript: redact.AlreadyRedacted(rawSession1),
 	})
@@ -337,7 +337,7 @@ func TestRunExplainExport_TranscriptOutOfRangeSessionIndex(t *testing.T) {
 	repo := setupExportRepo(t)
 
 	cpID := id.MustCheckpointID("eeee11112222")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-only",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
 	})
@@ -424,7 +424,7 @@ func TestRunExplainExport_PositionalCommitSHAFallback(t *testing.T) {
 	repo := setupExportRepo(t)
 
 	cpID := id.MustCheckpointID("aaaabbbb1234")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-via-commit",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
 	})
@@ -489,7 +489,7 @@ func TestRunExplainExport_NoModeFlagFailsLoudly(t *testing.T) {
 	require.Empty(t, stdout.String(), "must not emit JSON when no mode is set")
 }
 
-// stubCommittedReader is a minimal CommittedReader that returns canned
+// stubCommittedReader is a minimal PersistentReader that returns canned
 // metadata or errors per session index. Used to exercise the partial-failure
 // path in buildCheckpointJSONEnvelope without corrupting a real git tree.
 type stubCommittedReader struct {
@@ -498,8 +498,28 @@ type stubCommittedReader struct {
 	err      error                              // err returned for indexes not in contents
 }
 
-func (s *stubCommittedReader) ReadCommitted(_ context.Context, _ id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+//nolint:unparam // test stub; signature matches CheckpointReader.Read.
+func (s *stubCommittedReader) Read(_ context.Context, _ id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
 	return s.summary, nil
+}
+
+func (s *stubCommittedReader) ReadSessionMetadata(_ context.Context, _ id.CheckpointID, idx int) (*checkpoint.Metadata, error) {
+	if c, ok := s.contents[idx]; ok && c != nil {
+		m := c.Metadata
+		return &m, nil
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	return nil, errors.New("stub: session not configured")
+}
+
+func (s *stubCommittedReader) ReadSessionPrompts(_ context.Context, _ id.CheckpointID, _ int) (string, error) {
+	return "", errors.New("stub: ReadSessionPrompts not configured")
+}
+
+func (s *stubCommittedReader) ReadSessionMetadataAndPrompts(_ context.Context, _ id.CheckpointID, _ int) (*checkpoint.Metadata, string, error) {
+	return nil, "", errors.New("stub: ReadSessionMetadataAndPrompts not configured")
 }
 
 func (s *stubCommittedReader) ReadSessionContent(_ context.Context, _ id.CheckpointID, idx int) (*checkpoint.SessionContent, error) {
@@ -532,7 +552,7 @@ func TestBuildCheckpointJSONEnvelope_PartialFailureFromMockReader(t *testing.T) 
 	reader := &stubCommittedReader{
 		summary: summary,
 		contents: map[int]*checkpoint.SessionContent{
-			0: {Metadata: checkpoint.CommittedMetadata{
+			0: {Metadata: checkpoint.Metadata{
 				SessionID: "good-session",
 				Agent:     "Claude Code",
 			}},
@@ -699,12 +719,12 @@ func TestExplainExport_PerSessionInvestigateFields(t *testing.T) {
 }
 
 // TestSessionMetadataToJSON_CopiesInvestigateFields pins that
-// sessionMetadataToJSON copies the investigate fields from CommittedMetadata
+// sessionMetadataToJSON copies the investigate fields from Metadata
 // into the per-session JSON struct.
 func TestSessionMetadataToJSON_CopiesInvestigateFields(t *testing.T) {
 	t.Parallel()
 
-	meta := &checkpoint.CommittedMetadata{
+	meta := &checkpoint.Metadata{
 		SessionID:        "investigate-session",
 		Kind:             "agent_investigate",
 		InvestigateRunID: "0123456789ab",
@@ -734,7 +754,7 @@ func TestBuildCheckpointJSONEnvelope_PropagatesHasInvestigation(t *testing.T) {
 	reader := &stubCommittedReader{
 		summary: summary,
 		contents: map[int]*checkpoint.SessionContent{
-			0: {Metadata: checkpoint.CommittedMetadata{
+			0: {Metadata: checkpoint.Metadata{
 				SessionID:        "investigate-session",
 				Kind:             "agent_investigate",
 				InvestigateRunID: "0123456789ab",

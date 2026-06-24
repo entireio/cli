@@ -458,7 +458,7 @@ func TestCalculateTokenUsage_DroidStartOffsetBeyondEnd(t *testing.T) {
 // when state.Kind is KindAgentInvestigate, condensation propagates the kind
 // through to CheckpointSummary.HasInvestigation on the metadata branch and
 // writes the per-session investigate fields into the per-session
-// CommittedMetadata. Mirrors the (untested) review-tagging path so future
+// Metadata. Mirrors the (untested) review-tagging path so future
 // regressions in either flow are caught here.
 //
 // Tests in this file use t.Chdir for CWD-based git resolution, so this
@@ -547,7 +547,7 @@ func TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation(t *testing.T)
 	}
 	sessionBytes, err := sessionMeta.Contents()
 	require.NoError(t, err)
-	var meta checkpoint.CommittedMetadata
+	var meta checkpoint.Metadata
 	require.NoError(t, json.Unmarshal([]byte(sessionBytes), &meta))
 
 	require.Equal(t, string(session.KindAgentInvestigate), meta.Kind, "per-session Kind")

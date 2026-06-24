@@ -9,17 +9,17 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// CommittedRefs is the committed-metadata ref topology.
-type CommittedRefs struct {
+// PersistentRefs is the committed-metadata ref topology.
+type PersistentRefs struct {
 	Primary plumbing.ReferenceName
 	Read    plumbing.ReferenceName
 	Push    []plumbing.ReferenceName
 }
 
 // DefaultV1Refs returns the v1-only topology.
-func DefaultV1Refs() CommittedRefs {
+func DefaultV1Refs() PersistentRefs {
 	v1Branch := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	return CommittedRefs{
+	return PersistentRefs{
 		Primary: v1Branch,
 		Read:    v1Branch,
 		Push:    []plumbing.ReferenceName{v1Branch},
@@ -27,23 +27,23 @@ func DefaultV1Refs() CommittedRefs {
 }
 
 // PrimaryFetchableFromOrigin reports whether Primary has an origin-tracking shadow.
-func (r CommittedRefs) PrimaryFetchableFromOrigin() bool {
+func (r PersistentRefs) PrimaryFetchableFromOrigin() bool {
 	return r.Primary.IsBranch() && slices.Contains(r.Push, r.Primary)
 }
 
 // ReadBootstrappableFromOrigin reports whether reads can be bootstrapped from
 // origin: true when reads target Primary and Primary is fetchable from origin.
-func (r CommittedRefs) ReadBootstrappableFromOrigin() bool {
+func (r PersistentRefs) ReadBootstrappableFromOrigin() bool {
 	return r.Read == r.Primary && r.PrimaryFetchableFromOrigin()
 }
 
 // PrimaryAsRead returns a copy of r with Read pinned to Primary.
-func (r CommittedRefs) PrimaryAsRead() CommittedRefs {
+func (r PersistentRefs) PrimaryAsRead() PersistentRefs {
 	r.Read = r.Primary
 	return r
 }
 
-// ResolveCommittedRefs returns the committed metadata topology.
-func ResolveCommittedRefs(_ context.Context) CommittedRefs {
+// ResolveRefs returns the committed metadata topology.
+func ResolveRefs(_ context.Context) PersistentRefs {
 	return DefaultV1Refs()
 }
