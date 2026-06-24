@@ -222,7 +222,7 @@ func TestPushRefIfNeeded_LocalBareRepo_PushesSuccessfully(t *testing.T) {
 
 // TestFetchAndRebase_NonBranchRef verifies the fetch+rebase wiring accepts a
 // non-branch ref (e.g. refs/entire/checkpoints/custom). Today's resolver doesn't
-// emit non-branch refs in CommittedRefs.Push, but the helper must remain
+// emit non-branch refs in PersistentRefs.Push, but the helper must remain
 // correct when one is wired in.
 //
 // Not parallel: uses t.Chdir() (required for OpenRepository).

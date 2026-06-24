@@ -48,26 +48,26 @@ func (s *ManualCommitStrategy) getCheckpointStores(ctx context.Context, repo *gi
 	return stores, nil
 }
 
-// getCheckpointStore returns a store bound to the resolved committed-metadata
+// getPersistentStore returns a store bound to the resolved committed-metadata
 // topology. Writes target refs.Primary; reads target refs.Read. The strategy's
 // blob fetcher is wired in so reads can fetch blobs on demand after a treeless
 // fetch.
-func (s *ManualCommitStrategy) getCheckpointStore(ctx context.Context, repo *git.Repository) (checkpoint.CommittedStore, error) {
+func (s *ManualCommitStrategy) getPersistentStore(ctx context.Context, repo *git.Repository) (checkpoint.PersistentStore, error) {
 	stores, err := s.getCheckpointStores(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
-	return stores.Primary, nil
+	return stores.Persistent, nil
 }
 
-// getTemporaryStore returns the git-backed shadow-branch store with the
+// getEphemeralStore returns the git-backed shadow-branch store with the
 // strategy's blob fetcher wired in.
-func (s *ManualCommitStrategy) getTemporaryStore(ctx context.Context, repo *git.Repository) (checkpoint.TemporaryStore, error) {
+func (s *ManualCommitStrategy) getEphemeralStore(ctx context.Context, repo *git.Repository) (checkpoint.EphemeralStore, error) {
 	stores, err := s.getCheckpointStores(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
-	return stores.Temporary(), nil
+	return stores.Ephemeral(), nil
 }
 
 // NewManualCommitStrategy creates a new manual-commit strategy instance.

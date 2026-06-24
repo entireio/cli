@@ -49,12 +49,12 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected()
-	store, err := s.getCheckpointStore(ctx, repo)
+	store, err := s.getPersistentStore(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
 
-	committed, err := store.ListCommitted(ctx)
+	committed, err := store.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list committed checkpoints: %w", err)
 	}
@@ -71,12 +71,12 @@ func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointI
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected()
-	store, err := s.getCheckpointStore(ctx, repo)
+	store, err := s.getPersistentStore(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
 
-	summary, err := cpkg.ReadCommittedCheckpoint(ctx, store, checkpointID)
+	summary, err := cpkg.ReadCheckpoint(ctx, store, checkpointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
@@ -135,7 +135,7 @@ func checkpointStepCount(s *SessionState) int {
 // CondenseSession condenses a session's shadow branch to permanent storage.
 // checkpointID is the 12-hex-char value from the Entire-Checkpoint trailer.
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/
-// Uses checkpoint.CommittedStore.WriteCommitted for committed storage.
+// Uses checkpoint.PersistentStore.Write with a checkpoint.Session request for persistent storage.
 //
 // For mid-session commits (no Stop/SaveStep called yet), the shadow branch may not exist.
 // In this case, data is extracted from the live transcript instead.
@@ -215,7 +215,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		return skipped, nil
 	}
 
-	store, err := s.getCheckpointStore(ctx, repo)
+	store, err := s.getPersistentStore(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +255,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// pre-push rewrite path, never here.
 	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(sessionData.SkillEvents, state.TurnID))
 
-	writeOpts := cpkg.WriteCommittedOptions{
+	writeOpts := cpkg.WriteOptions{
 		CheckpointID:                checkpointID,
 		SessionID:                   state.SessionID,
 		Strategy:                    StrategyNameManualCommit,
@@ -276,7 +276,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TokenUsage:                  sessionData.TokenUsage,
 		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),
-		InitialAttribution:          attribution,
+		Attribution:                 attribution,
 		PromptAttributionsJSON:      marshalPromptAttributionsIncludingPending(state),
 		Summary:                     summary,
 		Kind:                        string(state.Kind),
@@ -290,7 +290,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
-	if err := store.Write(writeCtx, cpkg.WriteSession(writeOpts)); err != nil {
+	if err := store.Write(writeCtx, cpkg.Session(writeOpts)); err != nil {
 		writeCommittedSpan.RecordError(err)
 		writeCommittedSpan.End()
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)
@@ -585,7 +585,7 @@ func buildSummaryGenerator(ctx context.Context) summarize.Generator {
 // marshalPromptAttributionsIncludingPending builds the complete prompt attribution slice
 // (including PendingPromptAttribution for mid-turn commits) and encodes it to JSON.
 // This must stay consistent with the slice used by calculateSessionAttributions so the
-// persisted diagnostics match the computed InitialAttribution.
+// persisted diagnostics match the computed Attribution.
 func marshalPromptAttributionsIncludingPending(state *SessionState) json.RawMessage {
 	pas := make([]PromptAttribution, len(state.PromptAttributions), len(state.PromptAttributions)+1)
 	copy(pas, state.PromptAttributions)
@@ -680,7 +680,7 @@ type attributionOpts struct {
 	allAgentFiles         map[string]struct{} // Union of all sessions' FilesTouched (nil = single-session)
 }
 
-func calculateSessionAttributions(ctx context.Context, repo *git.Repository, shadowRef *plumbing.Reference, sessionData *ExtractedSessionData, state *SessionState, opts ...attributionOpts) *cpkg.InitialAttribution {
+func calculateSessionAttributions(ctx context.Context, repo *git.Repository, shadowRef *plumbing.Reference, sessionData *ExtractedSessionData, state *SessionState, opts ...attributionOpts) *cpkg.Attribution {
 	// Calculate initial attribution using accumulated prompt attribution data.
 	// This uses user edits captured at each prompt start (before agent works),
 	// plus any user edits after the final checkpoint (shadow → head).

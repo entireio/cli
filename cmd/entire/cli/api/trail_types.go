@@ -89,9 +89,10 @@ func (r *TrailResource) ToMetadata() *trail.Metadata {
 type TrailCreateRequest struct {
 	Title      string `json:"title"`
 	Body       string `json:"body,omitempty"`
-	BranchName string `json:"branch_name"`
+	BranchName string `json:"branch_name,omitempty"`
 	// BranchAction is "create" (default) or "link". The CLI sends "link" to
-	// attach the already-pushed branch instead of backfilling it at base.
+	// attach an already-pushed branch instead of backfilling it at base. Omit
+	// both branch_name and branch_action to create a branchless trail.
 	BranchAction string   `json:"branch_action,omitempty"`
 	Base         string   `json:"base,omitempty"`
 	Status       string   `json:"status,omitempty"`

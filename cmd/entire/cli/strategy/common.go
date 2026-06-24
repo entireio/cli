@@ -103,7 +103,7 @@ const FetchTmpRefPrefix = "refs/entire-fetch-tmp/"
 // label is a short human-readable name used in error messages. Typical use:
 //
 //	// fetch with refspec "+<src>:<tmpRefName>"
-//	refs := checkpoint.ResolveCommittedRefs(ctx)
+//	refs := checkpoint.ResolveRefs(ctx)
 //	return PromoteTmpRefSafely(ctx, tmpRefName, refs.Primary, refs.Primary.Short())
 func PromoteTmpRefSafely(ctx context.Context, tmpRefName, destRefName plumbing.ReferenceName, label string) error {
 	repo, err := OpenRepository(ctx)
@@ -309,14 +309,14 @@ func ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
-	committed, err := stores.Primary.ListCommitted(ctx)
+	committed, err := stores.Persistent.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list committed checkpoints: %w", err)
 	}
 	return checkpointInfosFromCommitted(committed), nil
 }
 
-func checkpointInfosFromCommitted(committed []checkpoint.CommittedInfo) []CheckpointInfo {
+func checkpointInfosFromCommitted(committed []checkpoint.CheckpointInfo) []CheckpointInfo {
 	result := make([]CheckpointInfo, 0, len(committed))
 	for _, c := range committed {
 		result = append(result, CheckpointInfo{
@@ -468,7 +468,7 @@ func resolveAgentType(ctxAgentType types.AgentType, state *SessionState) types.A
 // empty, creates/updates the local ref from origin's remote-tracking ref.
 // Otherwise creates an empty orphan.
 func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	primaryName := refs.Primary.Short()
 
 	// Origin only tracks Primary when Primary is in Push.
@@ -594,8 +594,8 @@ func isEmptyMetadataBranch(repo *git.Repository, ref *plumbing.Reference) (bool,
 }
 
 // sessionMetadataLite contains only the fields needed from session-level metadata.json.
-// Using a minimal struct avoids allocating large nested objects (Summary, InitialAttribution,
-// TokenUsage, etc.) that CommittedMetadata carries but callers never need here.
+// Using a minimal struct avoids allocating large nested objects (Summary, Attribution,
+// TokenUsage, etc.) that Metadata carries but callers never need here.
 type sessionMetadataLite struct {
 	SessionID string          `json:"session_id"`
 	Agent     types.AgentType `json:"agent,omitempty"`
@@ -660,7 +660,7 @@ func decodeSummaryLiteFromTree(checkpointTree checkpoint.FileReader) (checkpoint
 // also reading session-level metadata for IsTask/ToolUseID fields.
 //
 // Uses streaming json.Decoder and minimal structs to avoid loading large nested
-// objects (Summary, InitialAttribution, TokenUsage) into memory.
+// objects (Summary, Attribution, TokenUsage) into memory.
 func ReadCheckpointMetadata(tree checkpoint.FileReader, checkpointPath string) (*CheckpointInfo, error) {
 	metadataPath := checkpointPath + "/metadata.json"
 	file, err := tree.File(metadataPath)
@@ -843,7 +843,7 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 	metadataPath := checkpointPath + "/" + paths.MetadataFileName
 	if file, err := tree.File(metadataPath); err == nil {
 		if content, err := file.Contents(); err == nil {
-			var metadata checkpoint.CommittedMetadata
+			var metadata checkpoint.Metadata
 			if err := json.Unmarshal([]byte(content), &metadata); err == nil && metadata.Agent != "" {
 				return metadata.Agent
 			}
@@ -908,7 +908,7 @@ func isOnlySeparators(s string) bool {
 //
 // Falls back through earlier sessions when the latest has no prompt.
 // Avoids reading full transcripts — only reads prompt.txt files.
-// sessionCount is the number of sessions in the checkpoint (from CommittedInfo.SessionCount).
+// sessionCount is the number of sessions in the checkpoint (from CheckpointInfo.SessionCount).
 func ReadLatestSessionPromptFromCommittedTree(tree *object.Tree, cpID id.CheckpointID, sessionCount int) string {
 	cpPath := cpID.Path()
 	cpTree, err := tree.Tree(cpPath)
@@ -983,7 +983,7 @@ func ReadAllSessionPromptsFromTree(tree *object.Tree, checkpointPath string, ses
 // GetRemotePrimaryTree returns the tree at origin's remote-tracking ref for
 // the configured Primary. Errors when Primary isn't in Push (no origin shadow).
 func GetRemotePrimaryTree(ctx context.Context, repo *git.Repository) (*object.Tree, error) {
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	if !refs.PrimaryFetchableFromOrigin() {
 		return nil, fmt.Errorf("primary metadata ref %s is not pushed to origin", refs.Primary)
 	}

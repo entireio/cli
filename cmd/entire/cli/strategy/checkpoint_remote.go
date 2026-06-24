@@ -103,7 +103,7 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 // The fetch is unfiltered (NoFilter: true) because resume needs blob content
 // (transcripts, metadata JSON) — not just tree objects.
 func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	if !refs.Primary.IsBranch() {
 		return fmt.Errorf("primary metadata ref %s is not a branch", refs.Primary)
 	}
@@ -167,7 +167,7 @@ func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) error {
 	defer repo.Close()
 
 	// Check if branch already exists locally - if so, nothing to do
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	if _, err := repo.Reference(refs.Primary, true); err == nil {
 		return nil // Branch exists locally, skip fetch
 	}

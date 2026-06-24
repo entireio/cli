@@ -89,8 +89,8 @@ var errCannotGenerateTemporaryCheckpoint = errors.New("cannot generate summary f
 
 type explainCheckpointLookup struct {
 	repo      *git.Repository
-	store     checkpoint.CommittedStore
-	committed []checkpoint.CommittedInfo
+	store     checkpoint.PersistentStore
+	committed []checkpoint.CheckpointInfo
 }
 
 func (l *explainCheckpointLookup) Close() error {
@@ -642,7 +642,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		if openErr != nil {
 			return fmt.Errorf("open checkpoint store: %w", openErr)
 		}
-		output, found, tempErr := explainTemporaryCheckpoint(ctx, w, errW, lookup.repo, tempStores.Temporary(), checkpointIDPrefix, verbose, full, rawTranscript)
+		output, found, tempErr := explainTemporaryCheckpoint(ctx, w, errW, lookup.repo, tempStores.Ephemeral(), checkpointIDPrefix, verbose, full, rawTranscript)
 		if tempErr != nil {
 			return tempErr
 		}
@@ -686,7 +686,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		if openErr != nil {
 			return fmt.Errorf("open checkpoint store: %w", openErr)
 		}
-		if err := generateCheckpointSummary(ctx, w, errW, writeStores.Primary, fullCheckpointID, summary, content, force, summaryTimeoutSeconds); err != nil {
+		if err := generateCheckpointSummary(ctx, w, errW, writeStores.Persistent, fullCheckpointID, summary, content, force, summaryTimeoutSeconds); err != nil {
 			return err
 		}
 		// Reload to get the updated summary.
@@ -696,7 +696,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 			stopLoad(false)
 			return fmt.Errorf("open checkpoint store: %w", openErr)
 		}
-		lookup.store = reopened.Primary
+		lookup.store = reopened.Persistent
 		content, err = checkpoint.ReadLatestSessionContent(ctx, lookup.store, fullCheckpointID, summary)
 		if err != nil {
 			stopLoad(false)
@@ -750,7 +750,7 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 	prefetchCheckpointBlobs(ctx, lookup.repo, cpID)
 
 	store := lookup.store
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
+	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
@@ -773,7 +773,7 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 // inside this function so the caller's spinner provides continuous
 // feedback.
 func prefetchCheckpointBlobs(ctx context.Context, repo *git.Repository, cpID id.CheckpointID) {
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	loadPrimaryRoot := func(repo *git.Repository) (*object.Tree, error) {
 		return loadPrimaryMetadataRootTree(ctx, repo, refs)
 	}
@@ -838,7 +838,7 @@ func runPreFetch(ctx context.Context, ft *checkpoint.FetchingTree, cpID id.Check
 
 // loadPrimaryMetadataRootTree reads the tree at refs.Primary, falling back to
 // origin's remote-tracking ref when Primary is pushed.
-func loadPrimaryMetadataRootTree(ctx context.Context, repo *git.Repository, refs checkpoint.CommittedRefs) (*object.Tree, error) {
+func loadPrimaryMetadataRootTree(ctx context.Context, repo *git.Repository, refs checkpoint.PersistentRefs) (*object.Tree, error) {
 	if tree, err := strategy.GetMetadataRefTree(repo, refs.Primary); err == nil {
 		return tree, nil
 	}
@@ -872,14 +872,14 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
-	store := stores.Primary
+	store := stores.Persistent
 
 	lookup := &explainCheckpointLookup{
 		repo:  repo,
 		store: store,
 	}
 
-	committed, err := store.ListCommitted(ctx)
+	committed, err := store.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list checkpoints: %w", err)
 	}
@@ -942,7 +942,7 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 	}
 	elapsed := time.Since(start)
 
-	if err := store.Write(ctx, checkpoint.BackfillSummary{CheckpointID: checkpointID, Summary: summary}); err != nil {
+	if err := store.Write(ctx, checkpoint.SessionSummary{CheckpointID: checkpointID, Summary: summary}); err != nil {
 		return fmt.Errorf("failed to save summary: %w", err)
 	}
 
@@ -1200,16 +1200,16 @@ func formatSummaryTimeout(d time.Duration) string {
 // Searches ALL shadow branches, not just the one for current HEAD, to find checkpoints
 // created from different base commits (e.g., if HEAD advanced since session start).
 // The writer w is used for raw transcript output to bypass the pager.
-func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *git.Repository, store checkpoint.TemporaryStore, shaPrefix string, verbose, full, rawTranscript bool) (string, bool, error) {
+func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *git.Repository, store checkpoint.EphemeralStore, shaPrefix string, verbose, full, rawTranscript bool) (string, bool, error) {
 	// List temporary checkpoints from ALL shadow branches
 	// This ensures we find checkpoints even if HEAD has advanced since the session started
-	tempCheckpoints, err := store.ListAllTemporaryCheckpoints(ctx, "", branchCheckpointsLimit)
+	tempCheckpoints, err := store.ListAllCheckpoints(ctx, "", branchCheckpointsLimit)
 	if err != nil {
 		return "", false, nil //nolint:nilerr // best-effort: caller falls back to ErrCheckpointNotFound when no temp checkpoint is found
 	}
 
 	// Find checkpoints matching the SHA prefix - check for ambiguity
-	var matches []checkpoint.TemporaryCheckpointInfo
+	var matches []checkpoint.EphemeralCheckpointInfo
 	for _, tc := range tempCheckpoints {
 		if strings.HasPrefix(tc.CommitHash.String(), shaPrefix) {
 			matches = append(matches, tc)
@@ -1571,9 +1571,9 @@ func buildAmbiguousCommitMatches(repo *git.Repository, hashes []plumbing.Hash) [
 // into ambiguousMatch entries enriched with timestamps and session IDs from
 // the loaded committed-checkpoint listing. Caps at 5 entries to keep the
 // failure block readable when a short prefix collides on many checkpoints.
-func buildAmbiguousCheckpointMatches(ids []id.CheckpointID, committed []checkpoint.CommittedInfo) []ambiguousMatch {
+func buildAmbiguousCheckpointMatches(ids []id.CheckpointID, committed []checkpoint.CheckpointInfo) []ambiguousMatch {
 	const maxMatches = 5
-	infoByID := make(map[id.CheckpointID]checkpoint.CommittedInfo, len(committed))
+	infoByID := make(map[id.CheckpointID]checkpoint.CheckpointInfo, len(committed))
 	for _, info := range committed {
 		infoByID[info.CheckpointID] = info
 	}
@@ -1757,7 +1757,7 @@ func buildCondensedCompactTranscriptEntries(transcriptBytes []byte) ([]summarize
 // otherwise the same compact shape is returned as plain text.
 func formatCheckpointHeader(
 	summary *checkpoint.CheckpointSummary,
-	meta checkpoint.CommittedMetadata,
+	meta checkpoint.Metadata,
 	cpID id.CheckpointID,
 	commits []associatedCommit,
 	author checkpoint.Author,
@@ -2039,16 +2039,16 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
-	store := stores.Primary
+	store := stores.Persistent
 
 	// Get all committed checkpoints for lookup.
-	committedInfos, err := store.ListCommitted(ctx)
+	committedInfos, err := store.List(ctx)
 	if err != nil {
 		committedInfos = nil // Continue without committed checkpoints
 	}
 
 	// Build map of checkpoint ID -> committed info
-	committedByID := make(map[id.CheckpointID]checkpoint.CommittedInfo)
+	committedByID := make(map[id.CheckpointID]checkpoint.CheckpointInfo)
 	for _, info := range committedInfos {
 		if !info.CheckpointID.IsEmpty() {
 			committedByID[info.CheckpointID] = info
@@ -2143,7 +2143,7 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	}
 
 	// Get temporary checkpoints from ALL shadow branches whose base commit is reachable from HEAD.
-	tempPoints := getReachableTemporaryCheckpoints(ctx, repo, stores.Temporary(), head.Hash(), isOnDefault, limit)
+	tempPoints := getReachableTemporaryCheckpoints(ctx, repo, stores.Ephemeral(), head.Hash(), isOnDefault, limit)
 	points = append(points, tempPoints...)
 
 	// Sort by date, most recent first
@@ -2159,7 +2159,7 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	return points, nil
 }
 
-func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.CommittedListReader, cpID id.CheckpointID, sessionCount int) string {
+func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.SessionReader, cpID id.CheckpointID, sessionCount int) string {
 	if sessionCount <= 0 {
 		return ""
 	}
@@ -2179,13 +2179,13 @@ func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.Comm
 // whose base commit is reachable from the given HEAD hash and that belong to this worktree.
 // For default branches, all shadow branches for this worktree are included.
 // For feature branches, only shadow branches whose base commit is in HEAD's history are included.
-func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository, store checkpoint.TemporaryStore, headHash plumbing.Hash, isOnDefault bool, limit int) []strategy.RewindPoint {
+func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository, store checkpoint.EphemeralStore, headHash plumbing.Hash, isOnDefault bool, limit int) []strategy.RewindPoint {
 	var points []strategy.RewindPoint
 
 	// Compute current worktree's hash for filtering shadow branches
 	currentWorktreeHash := getCurrentWorktreeHash(ctx)
 
-	shadowBranches, _ := store.ListTemporary(ctx) //nolint:errcheck // Best-effort
+	shadowBranches, _ := store.List(ctx) //nolint:errcheck // Best-effort
 	for _, sb := range shadowBranches {
 		// Filter by worktree: only show shadow branches belonging to this worktree.
 		// Skip filtering if currentWorktreeHash is empty (error computing it) to avoid
@@ -2235,14 +2235,14 @@ func isShadowBranchReachable(ctx context.Context, repo *git.Repository, baseComm
 	return found
 }
 
-// convertTemporaryCheckpoint converts a TemporaryCheckpointInfo to a RewindPoint.
+// convertTemporaryCheckpoint converts a EphemeralCheckpointInfo to a RewindPoint.
 // Returns nil if the checkpoint should be skipped (no tree changes or can't be read).
 //
 // Filtering uses hasAnyChanges (O(1) tree hash comparison) rather than hasCodeChanges
 // (O(files) full diff). This means metadata-only checkpoints (.entire/ changes without
 // code changes) are kept — only true no-ops (identical tree as parent) are dropped.
 // This trade-off is intentional for list-view performance.
-func convertTemporaryCheckpoint(repo *git.Repository, tc checkpoint.TemporaryCheckpointInfo) *strategy.RewindPoint {
+func convertTemporaryCheckpoint(repo *git.Repository, tc checkpoint.EphemeralCheckpointInfo) *strategy.RewindPoint {
 	shadowCommit, commitErr := repo.CommitObject(tc.CommitHash)
 	if commitErr != nil {
 		return nil

@@ -46,7 +46,7 @@ func writeHeadCheckpointWithFlags(t *testing.T, repo *git.Repository, hasReview,
 	t.Helper()
 	cpID := id.MustCheckpointID("aabbccdd1122")
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	require.NoError(t, store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	require.NoError(t, store.Write(context.Background(), checkpoint.Session{
 		CheckpointID:     cpID,
 		SessionID:        "head-flags-session",
 		Strategy:         "manual-commit",

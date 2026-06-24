@@ -212,7 +212,7 @@ func TestAgentHookInstallation(t *testing.T) {
 	})
 }
 
-// TestAgentSessionOperations verifies ReadSession/WriteSession via agent interface.
+// TestAgentSessionOperations verifies ReadSession/Session via agent interface.
 func TestAgentSessionOperations(t *testing.T) {
 	t.Parallel()
 
@@ -260,7 +260,7 @@ func TestAgentSessionOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("WriteSession writes NativeData to file", func(t *testing.T) {
+	t.Run("Session writes NativeData to file", func(t *testing.T) {
 		t.Parallel()
 		env := NewTestEnv(t)
 		env.InitRepo()
@@ -298,7 +298,7 @@ func TestAgentSessionOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("WriteSession rejects wrong agent", func(t *testing.T) {
+	t.Run("Session rejects wrong agent", func(t *testing.T) {
 		t.Parallel()
 
 		ag, _ := agent.Get("claude-code")
@@ -671,7 +671,7 @@ func TestGeminiCLIHookInstallation(t *testing.T) {
 	})
 }
 
-// TestGeminiCLISessionOperations verifies ReadSession/WriteSession via Gemini agent interface.
+// TestGeminiCLISessionOperations verifies ReadSession/Session via Gemini agent interface.
 func TestGeminiCLISessionOperations(t *testing.T) {
 	t.Parallel()
 
@@ -722,7 +722,7 @@ func TestGeminiCLISessionOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("WriteSession writes NativeData to file", func(t *testing.T) {
+	t.Run("Session writes NativeData to file", func(t *testing.T) {
 		t.Parallel()
 		env := NewTestEnv(t)
 		env.InitRepo()
@@ -759,7 +759,7 @@ func TestGeminiCLISessionOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("WriteSession rejects wrong agent", func(t *testing.T) {
+	t.Run("Session rejects wrong agent", func(t *testing.T) {
 		t.Parallel()
 
 		ag, _ := agent.Get("gemini")
@@ -1069,7 +1069,7 @@ func TestFactoryAIDroidHookInstallation(t *testing.T) {
 	})
 }
 
-// TestFactoryAIDroidSessionMethods verifies ReadSession, WriteSession, and GetSessionDir.
+// TestFactoryAIDroidSessionMethods verifies ReadSession, Session, and GetSessionDir.
 func TestFactoryAIDroidSessionMethods(t *testing.T) {
 	t.Parallel()
 
@@ -1113,7 +1113,7 @@ func TestFactoryAIDroidSessionMethods(t *testing.T) {
 		}
 	})
 
-	t.Run("WriteSession round-trips with ReadSession", func(t *testing.T) {
+	t.Run("Session round-trips with ReadSession", func(t *testing.T) {
 		t.Parallel()
 
 		tmpDir := t.TempDir()
@@ -1330,7 +1330,7 @@ func TestOpenCodeHookInstallation(t *testing.T) {
 	})
 }
 
-// TestOpenCodeSessionOperations verifies ReadSession/WriteSession via OpenCode agent interface.
+// TestOpenCodeSessionOperations verifies ReadSession/Session via OpenCode agent interface.
 func TestOpenCodeSessionOperations(t *testing.T) {
 	t.Parallel()
 
@@ -1382,7 +1382,7 @@ func TestOpenCodeSessionOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("WriteSession validates input", func(t *testing.T) {
+	t.Run("Session validates input", func(t *testing.T) {
 		t.Parallel()
 
 		ag, _ := agent.Get("opencode")
@@ -1391,7 +1391,7 @@ func TestOpenCodeSessionOperations(t *testing.T) {
 			t.Error("WriteSession(nil) should error")
 		}
 		if err := ag.WriteSession(context.Background(), &agent.AgentSession{}); err == nil {
-			t.Error("WriteSession with empty NativeData should error")
+			t.Error("Session with empty NativeData should error")
 		}
 	})
 }

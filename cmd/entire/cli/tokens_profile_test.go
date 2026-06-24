@@ -308,7 +308,7 @@ func signalCount(signals []tokensProfileSignal, id string) int {
 func writeProfileTokenCheckpoint(ctx context.Context, t *testing.T, store *checkpoint.GitStore, checkpointID string, sessionID string, usage *agent.TokenUsage) {
 	t.Helper()
 
-	if err := store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	if err := store.Write(ctx, checkpoint.Session{
 		CheckpointID: id.MustCheckpointID(checkpointID),
 		SessionID:    sessionID,
 		Strategy:     strategy.StrategyNameManualCommit,

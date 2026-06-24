@@ -172,7 +172,7 @@ func newGrantProjectAddCmd() *cobra.Command {
 				body := &coreapi.GrantProjectAccessInputBody{
 					Provider:       provider,
 					ProviderUserId: providerUserID,
-					Role:           role,
+					Role:           coreapi.GrantProjectAccessInputBodyRole(role),
 				}
 				if granteeType != "" {
 					body.GranteeType = coreapi.NewOptGrantProjectAccessInputBodyGranteeType(coreapi.GrantProjectAccessInputBodyGranteeType(granteeType))
@@ -253,7 +253,7 @@ func newGrantRepoAddCmd() *cobra.Command {
 				body := &coreapi.GrantRepoAccessInputBody{
 					Provider:       provider,
 					ProviderUserId: providerUserID,
-					Role:           role,
+					Role:           coreapi.GrantRepoAccessInputBodyRole(role),
 				}
 				if granteeType != "" {
 					body.GranteeType = coreapi.NewOptGrantRepoAccessInputBodyGranteeType(coreapi.GrantRepoAccessInputBodyGranteeType(granteeType))

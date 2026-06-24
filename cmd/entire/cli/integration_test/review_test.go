@@ -290,7 +290,7 @@ func readCheckpointSummary(t *testing.T, env *TestEnv, checkpointID string) chec
 	return summary
 }
 
-func readSessionMetadata(t *testing.T, env *TestEnv, checkpointID string) checkpoint.CommittedMetadata {
+func readSessionMetadata(t *testing.T, env *TestEnv, checkpointID string) checkpoint.Metadata {
 	t.Helper()
 
 	content, found := env.ReadFileFromBranch(paths.MetadataBranchName, SessionMetadataPath(checkpointID))
@@ -298,7 +298,7 @@ func readSessionMetadata(t *testing.T, env *TestEnv, checkpointID string) checkp
 		t.Fatalf("session metadata not found for %s", checkpointID)
 	}
 
-	var metadata checkpoint.CommittedMetadata
+	var metadata checkpoint.Metadata
 	if err := json.Unmarshal([]byte(content), &metadata); err != nil {
 		t.Fatalf("failed to parse session metadata: %v\n%s", err, content)
 	}

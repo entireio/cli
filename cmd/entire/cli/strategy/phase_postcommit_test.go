@@ -780,7 +780,7 @@ func TestPostCommit_FilesTouched_ResetsAfterCondensation(t *testing.T) {
 	// Verify first condensation contains A.txt and B.txt
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	cpID1 := id.MustCheckpointID(checkpointID1)
-	summary1, err := store.ReadCommitted(context.Background(), cpID1)
+	summary1, err := store.Read(context.Background(), cpID1)
 	require.NoError(t, err)
 	require.NotNil(t, summary1)
 	assert.ElementsMatch(t, []string{"A.txt", "B.txt"}, summary1.FilesTouched,
@@ -842,7 +842,7 @@ func TestPostCommit_FilesTouched_ResetsAfterCondensation(t *testing.T) {
 
 	// Verify second condensation contains ONLY C.txt and D.txt
 	cpID2 := id.MustCheckpointID(checkpointID2)
-	summary2, err := store.ReadCommitted(context.Background(), cpID2)
+	summary2, err := store.Read(context.Background(), cpID2)
 	require.NoError(t, err)
 	require.NotNil(t, summary2, "Second condensation should exist")
 	assert.ElementsMatch(t, []string{"C.txt", "D.txt"}, summary2.FilesTouched,

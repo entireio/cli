@@ -141,7 +141,7 @@ func loadCheckpointTokensReport(ctx context.Context, cmd *cobra.Command, checkpo
 		return checkpointTokensReport{}, lookup, err
 	}
 
-	summary, err := lookup.store.ReadCommitted(ctx, cpID)
+	summary, err := lookup.store.Read(ctx, cpID)
 	if err != nil {
 		return checkpointTokensReport{}, lookup, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
@@ -159,11 +159,11 @@ func loadCheckpointTokensReport(ctx context.Context, cmd *cobra.Command, checkpo
 	return buildCheckpointTokensReport(cpID, summary, metas, metadataWarnings), lookup, nil
 }
 
-func readCheckpointTokenSessionMetadata(ctx context.Context, store checkpointSessionMetadataReader, cpID id.CheckpointID, sessionCount int) ([]*checkpoint.CommittedMetadata, int, error) {
+func readCheckpointTokenSessionMetadata(ctx context.Context, store reviewContextSessionMetadataReader, cpID id.CheckpointID, sessionCount int) ([]*checkpoint.Metadata, int, error) {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, 0, ctxErr //nolint:wrapcheck // Propagating context cancellation.
 	}
-	metas := make([]*checkpoint.CommittedMetadata, 0, sessionCount)
+	metas := make([]*checkpoint.Metadata, 0, sessionCount)
 	var warnings int
 	for i := range sessionCount {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -182,7 +182,7 @@ func readCheckpointTokenSessionMetadata(ctx context.Context, store checkpointSes
 	return metas, warnings, nil
 }
 
-func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.CheckpointSummary, metas []*checkpoint.CommittedMetadata, metadataWarnings int) checkpointTokensReport {
+func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.CheckpointSummary, metas []*checkpoint.Metadata, metadataWarnings int) checkpointTokensReport {
 	report := checkpointTokensReport{
 		CheckpointID: cpID.String(),
 		Source:       "committed_checkpoint",
@@ -293,7 +293,7 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 	return report
 }
 
-func checkpointAgentLabels(metas []*checkpoint.CommittedMetadata) []string {
+func checkpointAgentLabels(metas []*checkpoint.Metadata) []string {
 	labels := make([]string, 0, len(metas))
 	seen := make(map[string]struct{}, len(metas))
 	for _, meta := range metas {
@@ -310,7 +310,7 @@ func checkpointAgentLabels(metas []*checkpoint.CommittedMetadata) []string {
 	return labels
 }
 
-func checkpointModelLabels(metas []*checkpoint.CommittedMetadata) []string {
+func checkpointModelLabels(metas []*checkpoint.Metadata) []string {
 	labels := make([]string, 0, len(metas))
 	seen := make(map[string]struct{}, len(metas))
 	for _, meta := range metas {
@@ -326,7 +326,7 @@ func checkpointModelLabels(metas []*checkpoint.CommittedMetadata) []string {
 	return labels
 }
 
-func firstCheckpointBranch(metas []*checkpoint.CommittedMetadata) string {
+func firstCheckpointBranch(metas []*checkpoint.Metadata) string {
 	for _, meta := range metas {
 		if meta != nil && meta.Branch != "" {
 			return meta.Branch
@@ -335,7 +335,7 @@ func firstCheckpointBranch(metas []*checkpoint.CommittedMetadata) string {
 	return ""
 }
 
-func aggregateCheckpointTokenUsage(metas []*checkpoint.CommittedMetadata) *agent.TokenUsage {
+func aggregateCheckpointTokenUsage(metas []*checkpoint.Metadata) *agent.TokenUsage {
 	var total *agent.TokenUsage
 	for _, meta := range metas {
 		if meta == nil {
@@ -346,7 +346,7 @@ func aggregateCheckpointTokenUsage(metas []*checkpoint.CommittedMetadata) *agent
 	return total
 }
 
-func checkpointTokenUsage(summary *checkpoint.CheckpointSummary, metas []*checkpoint.CommittedMetadata, metadataReadWarning bool) *agent.TokenUsage {
+func checkpointTokenUsage(summary *checkpoint.CheckpointSummary, metas []*checkpoint.Metadata, metadataReadWarning bool) *agent.TokenUsage {
 	sessionUsage := aggregateCheckpointTokenUsage(metas)
 	if !metadataReadWarning && sessionUsage != nil {
 		return sessionUsage

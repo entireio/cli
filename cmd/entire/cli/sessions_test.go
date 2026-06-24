@@ -1906,7 +1906,7 @@ func TestCheckpointTokensCmd_TextOutputWithRealCheckpointShape(t *testing.T) {
 	repo, _ := runExplainAutoTestRepo(t)
 	ctx := context.Background()
 	cpID := id.MustCheckpointID("beefbeefcafe")
-	if err := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	if err := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(ctx, checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    "checkpoint-token-session",
 		Strategy:     strategy.StrategyNameManualCommit,
@@ -1969,7 +1969,7 @@ func TestCheckpointTokensCmd_AgentBriefGivesOperationalBudget(t *testing.T) {
 	repo, _ := runExplainAutoTestRepo(t)
 	ctx := context.Background()
 	cpID := id.MustCheckpointID("b1efbeefcafe")
-	if err := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	if err := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(ctx, checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    "checkpoint-token-brief",
 		Strategy:     strategy.StrategyNameManualCommit,
@@ -2062,7 +2062,7 @@ func TestCheckpointTokensCmd_TextOutputWithMultipleSessionsUsesAggregateScope(t 
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	cpID := id.MustCheckpointID("feedfeedcafe")
 
-	if err := store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	if err := store.Write(ctx, checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    "checkpoint-token-session-one",
 		Strategy:     strategy.StrategyNameManualCommit,
@@ -2083,7 +2083,7 @@ func TestCheckpointTokensCmd_TextOutputWithMultipleSessionsUsesAggregateScope(t 
 	}); err != nil {
 		t.Fatalf("WriteCommitted() first session error = %v", err)
 	}
-	if err := store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	if err := store.Write(ctx, checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    "checkpoint-token-session-two",
 		Strategy:     strategy.StrategyNameManualCommit,
@@ -2137,7 +2137,7 @@ func TestCheckpointTokensCmd_JSONOutput(t *testing.T) {
 	repo, _ := runExplainAutoTestRepo(t)
 	ctx := context.Background()
 	cpID := id.MustCheckpointID("cafe00001234")
-	if err := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	if err := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(ctx, checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    "checkpoint-token-json",
 		Strategy:     strategy.StrategyNameManualCommit,
@@ -2196,7 +2196,7 @@ func TestCheckpointTokensReport_UsesRootSummaryWhenSessionMetadataIncomplete(t *
 				APICallCount: 7,
 			},
 		},
-		[]*checkpoint.CommittedMetadata{
+		[]*checkpoint.Metadata{
 			{
 				SessionID: "readable-session",
 				Agent:     "Claude Code",
@@ -2313,13 +2313,13 @@ func (r *cancelingCheckpointMetadataReader) ReadSessionMetadata(
 	_ context.Context,
 	_ id.CheckpointID,
 	_ int,
-) (*checkpoint.CommittedMetadata, error) {
+) (*checkpoint.Metadata, error) {
 	r.calls++
 	if r.calls == 1 {
 		r.cancel()
-		return &checkpoint.CommittedMetadata{SessionID: "read-before-cancel"}, nil
+		return &checkpoint.Metadata{SessionID: "read-before-cancel"}, nil
 	}
-	return &checkpoint.CommittedMetadata{SessionID: "read-after-cancel"}, nil
+	return &checkpoint.Metadata{SessionID: "read-after-cancel"}, nil
 }
 
 func TestReadCheckpointTokenSessionMetadataStopsBetweenReadsWhenContextCanceled(t *testing.T) {
@@ -2362,7 +2362,7 @@ func TestCheckpointTokensCmd_TextOutputWithComparison(t *testing.T) {
 	baselineID := id.MustCheckpointID("aaa111bbb222")
 	currentID := id.MustCheckpointID("bbb222ccc333")
 
-	if err := store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	if err := store.Write(ctx, checkpoint.Session{
 		CheckpointID: baselineID,
 		SessionID:    "checkpoint-token-baseline",
 		Strategy:     strategy.StrategyNameManualCommit,
@@ -2381,7 +2381,7 @@ func TestCheckpointTokensCmd_TextOutputWithComparison(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("WriteCommitted() baseline error = %v", err)
 	}
-	if err := store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	if err := store.Write(ctx, checkpoint.Session{
 		CheckpointID: currentID,
 		SessionID:    "checkpoint-token-current",
 		Strategy:     strategy.StrategyNameManualCommit,
@@ -2473,7 +2473,7 @@ func TestCheckpointTokensCmd_JSONOutputWithComparison(t *testing.T) {
 	baselineID := id.MustCheckpointID("abc111abc111")
 	currentID := id.MustCheckpointID("abc222abc222")
 
-	if err := store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	if err := store.Write(ctx, checkpoint.Session{
 		CheckpointID: baselineID,
 		SessionID:    "checkpoint-token-json-baseline",
 		Strategy:     strategy.StrategyNameManualCommit,
@@ -2491,7 +2491,7 @@ func TestCheckpointTokensCmd_JSONOutputWithComparison(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("WriteCommitted() baseline error = %v", err)
 	}
-	if err := store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	if err := store.Write(ctx, checkpoint.Session{
 		CheckpointID: currentID,
 		SessionID:    "checkpoint-token-json-current",
 		Strategy:     strategy.StrategyNameManualCommit,
@@ -2894,7 +2894,7 @@ func TestCheckpointTokensCmd_ComparisonOmitsPercentWhenBaselineMetricIsZero(t *t
 func writeCommittedTokenCheckpoint(ctx context.Context, t *testing.T, store *checkpoint.GitStore, cpID id.CheckpointID, sessionID string, usage *agent.TokenUsage) {
 	t.Helper()
 
-	if err := store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	if err := store.Write(ctx, checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    sessionID,
 		Strategy:     strategy.StrategyNameManualCommit,

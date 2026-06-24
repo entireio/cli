@@ -353,7 +353,7 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	defer repo.Close()
 
 	ctx := cmd.Context()
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	w := cmd.OutOrStdout()
 	if !refs.PrimaryFetchableFromOrigin() {
 		fmt.Fprintf(w, "✓ Metadata branches: OK (primary ref %s is not pushed to origin)\n", refs.Primary)

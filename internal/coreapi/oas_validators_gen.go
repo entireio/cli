@@ -983,20 +983,8 @@ func (s *GrantProjectAccessInputBody) Validate() error {
 		})
 	}
 	if err := func() error {
-		if err := (validate.String{
-			MinLength:     1,
-			MinLengthSet:  true,
-			MaxLength:     0,
-			MaxLengthSet:  false,
-			Email:         false,
-			Hostname:      false,
-			Regex:         nil,
-			MinNumeric:    0,
-			MinNumericSet: false,
-			MaxNumeric:    0,
-			MaxNumericSet: false,
-		}).Validate(string(s.Role)); err != nil {
-			return errors.Wrap(err, "string")
+		if err := s.Role.Validate(); err != nil {
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -1015,9 +1003,18 @@ func (s GrantProjectAccessInputBodyGranteeType) Validate() error {
 	switch s {
 	case "account":
 		return nil
-	case "org":
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
+func (s GrantProjectAccessInputBodyRole) Validate() error {
+	switch s {
+	case "reader":
 		return nil
-	case "team":
+	case "writer":
+		return nil
+	case "admin":
 		return nil
 	default:
 		return errors.Errorf("invalid value: %v", s)
@@ -1095,20 +1092,8 @@ func (s *GrantRepoAccessInputBody) Validate() error {
 		})
 	}
 	if err := func() error {
-		if err := (validate.String{
-			MinLength:     1,
-			MinLengthSet:  true,
-			MaxLength:     0,
-			MaxLengthSet:  false,
-			Email:         false,
-			Hostname:      false,
-			Regex:         nil,
-			MinNumeric:    0,
-			MinNumericSet: false,
-			MaxNumeric:    0,
-			MaxNumericSet: false,
-		}).Validate(string(s.Role)); err != nil {
-			return errors.Wrap(err, "string")
+		if err := s.Role.Validate(); err != nil {
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -1127,9 +1112,18 @@ func (s GrantRepoAccessInputBodyGranteeType) Validate() error {
 	switch s {
 	case "account":
 		return nil
-	case "org":
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
+func (s GrantRepoAccessInputBodyRole) Validate() error {
+	switch s {
+	case "reader":
 		return nil
-	case "team":
+	case "writer":
+		return nil
+	case "admin":
 		return nil
 	default:
 		return errors.Errorf("invalid value: %v", s)
@@ -1177,20 +1171,8 @@ func (s *GrantServiceAccountAccessInputBody) Validate() error {
 		})
 	}
 	if err := func() error {
-		if err := (validate.String{
-			MinLength:     1,
-			MinLengthSet:  true,
-			MaxLength:     0,
-			MaxLengthSet:  false,
-			Email:         false,
-			Hostname:      false,
-			Regex:         nil,
-			MinNumeric:    0,
-			MinNumericSet: false,
-			MaxNumeric:    0,
-			MaxNumericSet: false,
-		}).Validate(string(s.Role)); err != nil {
-			return errors.Wrap(err, "string")
+		if err := s.Role.Validate(); err != nil {
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -1210,6 +1192,19 @@ func (s GrantServiceAccountAccessInputBodyResourceType) Validate() error {
 	case "repo":
 		return nil
 	case "project":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
+func (s GrantServiceAccountAccessInputBodyRole) Validate() error {
+	switch s {
+	case "reader":
+		return nil
+	case "writer":
+		return nil
+	case "admin":
 		return nil
 	default:
 		return errors.Errorf("invalid value: %v", s)
@@ -1293,6 +1288,29 @@ func (s *ListBindingsOutputBody) Validate() error {
 	}(); err != nil {
 		failures = append(failures, validate.FieldError{
 			Name:  "bindings",
+			Error: err,
+		})
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+	return nil
+}
+
+func (s *ListClustersOutputBody) Validate() error {
+	if s == nil {
+		return validate.ErrNilPointer
+	}
+
+	var failures []validate.FieldError
+	if err := func() error {
+		if s.Clusters == nil {
+			return errors.New("nil is invalid value")
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "clusters",
 			Error: err,
 		})
 	}
@@ -1410,9 +1428,24 @@ func (s *ListOrgProjectsOutputBody) Validate() error {
 
 	var failures []validate.FieldError
 	if err := func() error {
-		if s.Projects == nil {
-			return errors.New("nil is invalid value")
+		if value, ok := s.Project.Get(); ok {
+			if err := func() error {
+				if err := value.Validate(); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
 		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "project",
+			Error: err,
+		})
+	}
+	if err := func() error {
 		var failures []validate.FieldError
 		for i, elem := range s.Projects {
 			if err := func() error {
@@ -1434,29 +1467,6 @@ func (s *ListOrgProjectsOutputBody) Validate() error {
 	}(); err != nil {
 		failures = append(failures, validate.FieldError{
 			Name:  "projects",
-			Error: err,
-		})
-	}
-	if len(failures) > 0 {
-		return &validate.Error{Fields: failures}
-	}
-	return nil
-}
-
-func (s *ListOrgsOutputBody) Validate() error {
-	if s == nil {
-		return validate.ErrNilPointer
-	}
-
-	var failures []validate.FieldError
-	if err := func() error {
-		if s.Orgs == nil {
-			return errors.New("nil is invalid value")
-		}
-		return nil
-	}(); err != nil {
-		failures = append(failures, validate.FieldError{
-			Name:  "orgs",
 			Error: err,
 		})
 	}
@@ -1496,9 +1506,24 @@ func (s *ListProjectReposOutputBody) Validate() error {
 
 	var failures []validate.FieldError
 	if err := func() error {
-		if s.Repos == nil {
-			return errors.New("nil is invalid value")
+		if value, ok := s.Repo.Get(); ok {
+			if err := func() error {
+				if err := value.Validate(); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
 		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "repo",
+			Error: err,
+		})
+	}
+	if err := func() error {
 		var failures []validate.FieldError
 		for i, elem := range s.Repos {
 			if err := func() error {
@@ -1575,6 +1600,29 @@ func (s *ListProjectsOutputBody) Validate() error {
 	}(); err != nil {
 		failures = append(failures, validate.FieldError{
 			Name:  "projects",
+			Error: err,
+		})
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+	return nil
+}
+
+func (s *ListRepoGrantsOutputBody) Validate() error {
+	if s == nil {
+		return validate.ErrNilPointer
+	}
+
+	var failures []validate.FieldError
+	if err := func() error {
+		if s.Grants == nil {
+			return errors.New("nil is invalid value")
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "grants",
 			Error: err,
 		})
 	}
@@ -2001,6 +2049,41 @@ func (s *ServiceAccountWithGrants) Validate() error {
 	}(); err != nil {
 		failures = append(failures, validate.FieldError{
 			Name:  "grants",
+			Error: err,
+		})
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+	return nil
+}
+
+func (s *UpdateMeInputBody) Validate() error {
+	if s == nil {
+		return validate.ErrNilPointer
+	}
+
+	var failures []validate.FieldError
+	if err := func() error {
+		if err := (validate.String{
+			MinLength:     5,
+			MinLengthSet:  true,
+			MaxLength:     254,
+			MaxLengthSet:  true,
+			Email:         true,
+			Hostname:      false,
+			Regex:         nil,
+			MinNumeric:    0,
+			MinNumericSet: false,
+			MaxNumeric:    0,
+			MaxNumericSet: false,
+		}).Validate(string(s.Email)); err != nil {
+			return errors.Wrap(err, "string")
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "email",
 			Error: err,
 		})
 	}

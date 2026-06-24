@@ -29,7 +29,7 @@ var disconnectedOnce sync.Once //nolint:gochecknoglobals // intentional per-proc
 // the provided fetched or remote-tracking ref exist but share no common
 // ancestor.
 func IsMetadataDisconnected(ctx context.Context, repo *git.Repository, remoteRefName plumbing.ReferenceName) (bool, error) {
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	localRef, err := repo.Reference(refs.Primary, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return false, nil
@@ -75,7 +75,7 @@ func WarnIfMetadataDisconnected() {
 			return
 		}
 		defer repo.Close()
-		refs := checkpoint.ResolveCommittedRefs(ctx)
+		refs := checkpoint.ResolveRefs(ctx)
 		if !refs.PrimaryFetchableFromOrigin() {
 			return // origin doesn't track Primary; nothing to disconnect from
 		}

@@ -48,7 +48,7 @@ func TestWriteCommitted_WritesCompactTranscript(t *testing.T) {
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
 
-	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+	err := store.Write(context.Background(), Session{
 		CheckpointID: cpID,
 		SessionID:    "session-001",
 		Strategy:     "manual-commit",
@@ -102,7 +102,7 @@ func TestWriteCommitted_CompactTranscriptScopedToCheckpointStart(t *testing.T) {
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("b2c3d4e5f6a1")
 
-	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+	err := store.Write(context.Background(), Session{
 		CheckpointID:              cpID,
 		SessionID:                 "session-001",
 		Strategy:                  "manual-commit",
@@ -134,7 +134,7 @@ func TestWriteCommitted_NonCompactableTranscriptPointsAtFull(t *testing.T) {
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("c3d4e5f6a1b2")
 
-	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+	err := store.Write(context.Background(), Session{
 		CheckpointID: cpID,
 		SessionID:    "session-001",
 		Strategy:     "manual-commit",
@@ -191,7 +191,7 @@ func TestUpdateCommitted_CodexCompactSanitizedLikeInitialWrite(t *testing.T) {
 
 	// Initial write sanitizes before compaction. With start=2 the dropped
 	// compaction line shifts the window so only "gamma" survives.
-	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+	err := store.Write(context.Background(), Session{
 		CheckpointID:              cpID,
 		SessionID:                 "session-001",
 		Strategy:                  "manual-commit",
@@ -218,7 +218,7 @@ func TestUpdateCommitted_CodexCompactSanitizedLikeInitialWrite(t *testing.T) {
 	// Finalize with the same raw transcript. replaceTranscript must sanitize
 	// before compaction; otherwise the raw slice at line 2 would reintroduce
 	// "beta".
-	err = store.UpdateCommitted(context.Background(), UpdateCommittedOptions{
+	err = store.Write(context.Background(), SessionTranscript{
 		CheckpointID: cpID,
 		SessionID:    "session-001",
 		Transcript:   redact.AlreadyRedacted(raw),
@@ -246,7 +246,7 @@ func TestUpdateCommitted_RegeneratesCompactTranscript(t *testing.T) {
 	cpID := id.MustCheckpointID("d4e5f6a1b2c3")
 
 	initial := claudeStyleTranscript()
-	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+	err := store.Write(context.Background(), Session{
 		CheckpointID: cpID,
 		SessionID:    "session-001",
 		Strategy:     "manual-commit",
@@ -262,7 +262,7 @@ func TestUpdateCommitted_RegeneratesCompactTranscript(t *testing.T) {
 	extended := append([]byte{}, initial...)
 	extended = append(extended,
 		[]byte(`{"type":"user","uuid":"u3","timestamp":"2026-01-01T00:00:04Z","message":{"role":"user","content":"hello three"}}`+"\n")...)
-	err = store.UpdateCommitted(context.Background(), UpdateCommittedOptions{
+	err = store.Write(context.Background(), SessionTranscript{
 		CheckpointID: cpID,
 		SessionID:    "session-001",
 		Transcript:   redact.AlreadyRedacted(extended),

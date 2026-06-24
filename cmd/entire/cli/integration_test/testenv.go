@@ -948,7 +948,7 @@ func (env *TestEnv) sessionMetadataMatchesID(metadataPath, sessionID string) boo
 	if !found {
 		return false
 	}
-	var meta checkpoint.CommittedMetadata
+	var meta checkpoint.Metadata
 	if err := json.Unmarshal([]byte(content), &meta); err != nil {
 		return false
 	}
@@ -1541,7 +1541,7 @@ type CheckpointValidation struct {
 // ValidateCheckpoint performs comprehensive validation of a checkpoint on the metadata branch.
 // It validates:
 // - Root metadata.json (CheckpointSummary) structure and expected fields
-// - Session metadata.json (CommittedMetadata) structure and expected fields
+// - Session metadata.json (Metadata) structure and expected fields
 // - Transcript file (full.jsonl) is valid JSONL and contains expected content
 // - Content hash file (content_hash.txt) matches SHA256 of transcript
 // - Prompt file (prompt.txt) contains expected prompts
@@ -1551,7 +1551,7 @@ func (env *TestEnv) ValidateCheckpoint(v CheckpointValidation) {
 	// Validate root metadata.json (CheckpointSummary)
 	env.validateCheckpointSummary(v)
 
-	// Validate session metadata.json (CommittedMetadata)
+	// Validate session metadata.json (Metadata)
 	env.validateSessionMetadata(v)
 
 	// Validate transcript is valid JSONL
@@ -1615,7 +1615,7 @@ func (env *TestEnv) validateCheckpointSummary(v CheckpointValidation) {
 	}
 }
 
-// validateSessionMetadata validates the session-level metadata.json (CommittedMetadata).
+// validateSessionMetadata validates the session-level metadata.json (Metadata).
 func (env *TestEnv) validateSessionMetadata(v CheckpointValidation) {
 	env.T.Helper()
 
@@ -1625,29 +1625,29 @@ func (env *TestEnv) validateSessionMetadata(v CheckpointValidation) {
 		env.T.Fatalf("Session metadata not found at %s", metadataPath)
 	}
 
-	var metadata checkpoint.CommittedMetadata
+	var metadata checkpoint.Metadata
 	if err := json.Unmarshal([]byte(content), &metadata); err != nil {
-		env.T.Fatalf("Failed to parse CommittedMetadata: %v\nContent: %s", err, content)
+		env.T.Fatalf("Failed to parse Metadata: %v\nContent: %s", err, content)
 	}
 
 	// Validate checkpoint_id
 	if metadata.CheckpointID.String() != v.CheckpointID {
-		env.T.Errorf("CommittedMetadata.CheckpointID = %q, want %q", metadata.CheckpointID, v.CheckpointID)
+		env.T.Errorf("Metadata.CheckpointID = %q, want %q", metadata.CheckpointID, v.CheckpointID)
 	}
 
 	// Validate session_id
 	if v.SessionID != "" && metadata.SessionID != v.SessionID {
-		env.T.Errorf("CommittedMetadata.SessionID = %q, want %q", metadata.SessionID, v.SessionID)
+		env.T.Errorf("Metadata.SessionID = %q, want %q", metadata.SessionID, v.SessionID)
 	}
 
 	// Validate strategy
 	if v.Strategy != "" && metadata.Strategy != v.Strategy {
-		env.T.Errorf("CommittedMetadata.Strategy = %q, want %q", metadata.Strategy, v.Strategy)
+		env.T.Errorf("Metadata.Strategy = %q, want %q", metadata.Strategy, v.Strategy)
 	}
 
 	// Validate created_at is not zero
 	if metadata.CreatedAt.IsZero() {
-		env.T.Error("CommittedMetadata.CreatedAt should not be zero")
+		env.T.Error("Metadata.CreatedAt should not be zero")
 	}
 
 	// Validate files_touched
@@ -1658,14 +1658,14 @@ func (env *TestEnv) validateSessionMetadata(v CheckpointValidation) {
 		}
 		for _, expected := range v.FilesTouched {
 			if !touchedSet[expected] {
-				env.T.Errorf("CommittedMetadata.FilesTouched missing %q, got %v", expected, metadata.FilesTouched)
+				env.T.Errorf("Metadata.FilesTouched missing %q, got %v", expected, metadata.FilesTouched)
 			}
 		}
 	}
 
 	// Validate checkpoints_count
 	if v.CheckpointsCount > 0 && metadata.CheckpointsCount != v.CheckpointsCount {
-		env.T.Errorf("CommittedMetadata.CheckpointsCount = %d, want %d", metadata.CheckpointsCount, v.CheckpointsCount)
+		env.T.Errorf("Metadata.CheckpointsCount = %d, want %d", metadata.CheckpointsCount, v.CheckpointsCount)
 	}
 }
 

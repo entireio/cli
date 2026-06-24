@@ -113,9 +113,9 @@ func runTokensProfile(ctx context.Context, cmd *cobra.Command, jsonOutput bool, 
 	}
 	defer repo.Close()
 
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
+	store := checkpoint.NewGitStore(repo, checkpoint.ResolveRefs(ctx))
 	store.SetBlobFetcher(FetchBlobsByHash)
-	infos, err := store.ListCommitted(ctx)
+	infos, err := store.List(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list checkpoints: %w", err)
 	}
@@ -132,7 +132,7 @@ func runTokensProfile(ctx context.Context, cmd *cobra.Command, jsonOutput bool, 
 	return nil
 }
 
-func buildTokensProfileReport(ctx context.Context, store *checkpoint.GitStore, infos []checkpoint.CommittedInfo, limit int) (tokensProfileReport, error) {
+func buildTokensProfileReport(ctx context.Context, store *checkpoint.GitStore, infos []checkpoint.CheckpointInfo, limit int) (tokensProfileReport, error) {
 	checkpointsAvailable := len(infos)
 	infos = limitTokensProfileCheckpoints(infos, limit)
 	report := tokensProfileReport{
@@ -149,7 +149,7 @@ func buildTokensProfileReport(ctx context.Context, store *checkpoint.GitStore, i
 			return tokensProfileReport{}, err //nolint:wrapcheck // Propagating context cancellation.
 		}
 
-		summary, err := store.ReadCommitted(ctx, info.CheckpointID)
+		summary, err := store.Read(ctx, info.CheckpointID)
 		if err != nil {
 			return tokensProfileReport{}, fmt.Errorf("failed to read checkpoint %s: %w", info.CheckpointID, err)
 		}
@@ -185,7 +185,7 @@ func buildTokensProfileReport(ctx context.Context, store *checkpoint.GitStore, i
 	return report, nil
 }
 
-func limitTokensProfileCheckpoints(infos []checkpoint.CommittedInfo, limit int) []checkpoint.CommittedInfo {
+func limitTokensProfileCheckpoints(infos []checkpoint.CheckpointInfo, limit int) []checkpoint.CheckpointInfo {
 	if limit <= 0 || len(infos) <= limit {
 		return infos
 	}
@@ -197,7 +197,7 @@ func tokensProfileCheckpointUsage(ctx context.Context, store *checkpoint.GitStor
 		return nil, false, nil
 	}
 
-	metas := make([]*checkpoint.CommittedMetadata, 0, len(summary.Sessions))
+	metas := make([]*checkpoint.Metadata, 0, len(summary.Sessions))
 	metadataReadWarning := false
 	for i := range len(summary.Sessions) {
 		meta, err := store.ReadSessionMetadata(ctx, checkpointID, i)

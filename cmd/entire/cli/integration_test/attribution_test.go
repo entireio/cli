@@ -152,7 +152,7 @@ func TestManualCommit_Attribution(t *testing.T) {
 		t.Fatalf("Failed to get sessions tree: %v", err)
 	}
 
-	// Read session-level metadata.json from sharded path (InitialAttribution is in 0/metadata.json)
+	// Read session-level metadata.json from sharded path (Attribution is in 0/metadata.json)
 	metadataPath := SessionMetadataPath(checkpointID.String())
 	metadataFile, err := sessionsTree.File(metadataPath)
 	if err != nil {
@@ -164,17 +164,17 @@ func TestManualCommit_Attribution(t *testing.T) {
 		t.Fatalf("Failed to read metadata content: %v", err)
 	}
 
-	var metadata checkpoint.CommittedMetadata
+	var metadata checkpoint.Metadata
 	if err := json.Unmarshal([]byte(metadataContent), &metadata); err != nil {
 		t.Fatalf("Failed to parse metadata.json: %v", err)
 	}
 
-	// Verify InitialAttribution exists
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution is nil")
+	// Verify Attribution exists
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution is nil")
 	}
 
-	attr := metadata.InitialAttribution
+	attr := metadata.Attribution
 	t.Logf("Attribution: agent=%d, human_added=%d, human_modified=%d, human_removed=%d, total=%d, percentage=%.1f%%",
 		attr.AgentLines, attr.HumanAdded, attr.HumanModified, attr.HumanRemoved,
 		attr.TotalCommitted, attr.AgentPercentage)
@@ -295,7 +295,7 @@ func TestManualCommit_AttributionDeletionOnly(t *testing.T) {
 		t.Fatalf("Failed to get sessions tree: %v", err)
 	}
 
-	// Read session-level metadata.json (InitialAttribution is in 0/metadata.json)
+	// Read session-level metadata.json (Attribution is in 0/metadata.json)
 	metadataPath := SessionMetadataPath(checkpointID.String())
 	metadataFile, err := sessionsTree.File(metadataPath)
 	if err != nil {
@@ -307,16 +307,16 @@ func TestManualCommit_AttributionDeletionOnly(t *testing.T) {
 		t.Fatalf("Failed to read metadata content: %v", err)
 	}
 
-	var metadata checkpoint.CommittedMetadata
+	var metadata checkpoint.Metadata
 	if err := json.Unmarshal([]byte(metadataContent), &metadata); err != nil {
 		t.Fatalf("Failed to parse metadata.json: %v", err)
 	}
 
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution is nil")
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution is nil")
 	}
 
-	attr := metadata.InitialAttribution
+	attr := metadata.Attribution
 	t.Logf("Attribution (deletion-only): agent_added=%d, agent_removed=%d, human_added=%d, human_removed=%d, total=%d, changed=%d, percentage=%.1f%%",
 		attr.AgentLines, attr.AgentRemoved, attr.HumanAdded, attr.HumanRemoved,
 		attr.TotalCommitted, attr.TotalLinesChanged, attr.AgentPercentage)
@@ -823,8 +823,8 @@ func TestManualCommit_AttributionStaleBase_BranchSwitch(t *testing.T) {
 }
 
 // getAttributionFromMetadata reads attribution from a checkpoint on entire/checkpoints/v1 branch.
-// InitialAttribution is stored in session-level metadata (0/metadata.json).
-func getAttributionFromMetadata(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID) *checkpoint.InitialAttribution {
+// Attribution is stored in session-level metadata (0/metadata.json).
+func getAttributionFromMetadata(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID) *checkpoint.Attribution {
 	t.Helper()
 
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
@@ -842,7 +842,7 @@ func getAttributionFromMetadata(t *testing.T, repo *git.Repository, checkpointID
 		t.Fatalf("Failed to get sessions tree: %v", err)
 	}
 
-	// Read session-level metadata (InitialAttribution is in 0/metadata.json)
+	// Read session-level metadata (Attribution is in 0/metadata.json)
 	metadataPath := SessionMetadataPath(checkpointID.String())
 	metadataFile, err := sessionsTree.File(metadataPath)
 	if err != nil {
@@ -854,14 +854,14 @@ func getAttributionFromMetadata(t *testing.T, repo *git.Repository, checkpointID
 		t.Fatalf("Failed to read metadata content: %v", err)
 	}
 
-	var metadata checkpoint.CommittedMetadata
+	var metadata checkpoint.Metadata
 	if err := json.Unmarshal([]byte(metadataContent), &metadata); err != nil {
 		t.Fatalf("Failed to parse metadata.json: %v", err)
 	}
 
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution is nil")
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution is nil")
 	}
 
-	return metadata.InitialAttribution
+	return metadata.Attribution
 }

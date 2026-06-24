@@ -15,7 +15,7 @@ This repo contains the CLI for Entire.
 - `entire/cli/commands`: actual command implementations
 - `entire/cli/agent`: agent implementations (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi) - see [Agent Integration Checklist](docs/architecture/agent-integration-checklist.md) and [Agent Implementation Guide](docs/architecture/agent-guide.md)
 - `entire/cli/strategy`: strategy implementation (manual-commit) - see section below
-- `entire/cli/checkpoint`: checkpoint storage abstractions (temporary and committed)
+- `entire/cli/checkpoint`: checkpoint storage abstractions (ephemeral and persistent)
 - `entire/cli/session`: session state management
 - `entire/cli/integration_test`: integration tests (simulated hooks)
 - `e2e/`: E2E tests with real agent calls (see [e2e/README.md](e2e/README.md))

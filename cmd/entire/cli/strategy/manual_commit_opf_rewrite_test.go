@@ -134,7 +134,7 @@ func addV1Checkpoint(t *testing.T, repo *git.Repository, cpIDString, sessionID, 
 	t.Helper()
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	cpID := id.MustCheckpointID(cpIDString)
-	require.NoError(t, store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	require.NoError(t, store.Write(context.Background(), checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    sessionID,
 		Strategy:     "manual-commit",

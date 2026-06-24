@@ -325,7 +325,7 @@ func TestLocalMode_ImplicitCurrentBranchUsesHEADReachability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	err = store.Write(context.Background(), checkpoint.Session{
 		CheckpointID:     parsedID,
 		SessionID:        "session-1",
 		Strategy:         "manual-commit",
@@ -392,7 +392,7 @@ func TestLocalMode_ExplicitBranchesRemainExact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	err = store.Write(context.Background(), checkpoint.Session{
 		CheckpointID:     parsedID,
 		SessionID:        "session-1",
 		Strategy:         "manual-commit",
@@ -834,7 +834,7 @@ func seedCommittedCheckpoint(t *testing.T, repoDir string, cp seededCheckpoint) 
 		t.Fatal(err)
 	}
 
-	err = store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	err = store.Write(context.Background(), checkpoint.Session{
 		CheckpointID:     cpID,
 		SessionID:        "session-1",
 		Strategy:         "manual-commit",

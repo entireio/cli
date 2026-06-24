@@ -8,28 +8,12 @@ package checkpoint
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6/plumbing"
 )
-
-// Errors returned by checkpoint operations.
-var (
-	// ErrCheckpointNotFound is returned when a checkpoint ID doesn't exist.
-	ErrCheckpointNotFound = errors.New("checkpoint not found")
-
-	// ErrNoTranscript is returned when a checkpoint exists but has no transcript.
-	ErrNoTranscript = errors.New("no transcript found for checkpoint")
-)
-
-// CheckpointVersionBranchV1 identifies the branch-backed checkpoint metadata format.
-const CheckpointVersionBranchV1 = "branch-v1"
 
 // Checkpoint represents a save point within a session.
 type Checkpoint struct {
@@ -53,29 +37,29 @@ type Checkpoint struct {
 type Type int
 
 const (
-	// Temporary checkpoints contain full state (code + metadata) and are stored
+	// Ephemeral checkpoints contain full state (code + metadata) and are stored
 	// on shadow branches (entire/<commit-hash>). Used for intra-session rewind.
-	Temporary Type = iota
+	Ephemeral Type = iota
 
-	// Committed checkpoints contain metadata + commit reference and are stored
+	// Persistent checkpoints contain metadata + commit reference and are stored
 	// on the entire/checkpoints/v1 branch. They are the permanent record.
-	Committed
+	Persistent
 )
 
-// TemporaryStore provides the production shadow-branch checkpoint surface.
-type TemporaryStore interface {
-	WriteTemporary(ctx context.Context, opts WriteTemporaryOptions) (WriteTemporaryResult, error)
-	WriteTemporaryTask(ctx context.Context, opts WriteTemporaryTaskOptions) (plumbing.Hash, error)
-	ListTemporary(ctx context.Context) ([]TemporaryInfo, error)
-	ListTemporaryCheckpoints(ctx context.Context, baseCommit, worktreeID, sessionID string, limit int) ([]TemporaryCheckpointInfo, error)
-	ListCheckpointsForBranch(ctx context.Context, branchName, sessionID string, limit int) ([]TemporaryCheckpointInfo, error)
-	ListAllTemporaryCheckpoints(ctx context.Context, sessionID string, limit int) ([]TemporaryCheckpointInfo, error)
+// EphemeralStore provides the production shadow-branch checkpoint surface.
+type EphemeralStore interface {
+	Write(ctx context.Context, req EphemeralWriteRequest) (WriteEphemeralResult, error)
+	Read(ctx context.Context, baseCommit, worktreeID string) (*ReadEphemeralResult, error)
+	List(ctx context.Context) ([]EphemeralInfo, error)
+	ListCheckpoints(ctx context.Context, baseCommit, worktreeID, sessionID string, limit int) ([]EphemeralCheckpointInfo, error)
+	ListCheckpointsForBranch(ctx context.Context, branchName, sessionID string, limit int) ([]EphemeralCheckpointInfo, error)
+	ListAllCheckpoints(ctx context.Context, sessionID string, limit int) ([]EphemeralCheckpointInfo, error)
 	GetTranscriptFromCommit(ctx context.Context, commitHash plumbing.Hash, metadataDir string, agentType types.AgentType) ([]byte, error)
 	ShadowBranchExists(baseCommit, worktreeID string) bool
 }
 
-// WriteTemporaryResult contains the result of writing a temporary checkpoint.
-type WriteTemporaryResult struct {
+// WriteEphemeralResult contains the result of writing a temporary checkpoint.
+type WriteEphemeralResult struct {
 	// CommitHash is the hash of the created or existing checkpoint commit
 	CommitHash plumbing.Hash
 
@@ -84,8 +68,8 @@ type WriteTemporaryResult struct {
 	Skipped bool
 }
 
-// WriteTemporaryOptions contains options for writing a temporary checkpoint.
-type WriteTemporaryOptions struct {
+// WriteEphemeralOptions contains options for writing a temporary checkpoint.
+type WriteEphemeralOptions struct {
 	// SessionID is the session identifier
 	SessionID string
 
@@ -125,8 +109,8 @@ type WriteTemporaryOptions struct {
 	IsFirstCheckpoint bool
 }
 
-// ReadTemporaryResult contains the result of reading a temporary checkpoint.
-type ReadTemporaryResult struct {
+// ReadEphemeralResult contains the result of reading a temporary checkpoint.
+type ReadEphemeralResult struct {
 	// CommitHash is the hash of the checkpoint commit
 	CommitHash plumbing.Hash
 
@@ -143,8 +127,8 @@ type ReadTemporaryResult struct {
 	Timestamp time.Time
 }
 
-// TemporaryInfo contains summary information about a shadow branch.
-type TemporaryInfo struct {
+// EphemeralInfo contains summary information about a shadow branch.
+type EphemeralInfo struct {
 	// BranchName is the full branch name (e.g., "entire/abc1234")
 	BranchName string
 
@@ -159,494 +143,6 @@ type TemporaryInfo struct {
 
 	// Timestamp is when the latest checkpoint was created
 	Timestamp time.Time
-}
-
-// WriteCommittedOptions contains options for writing a committed checkpoint.
-type WriteCommittedOptions struct {
-	// CheckpointID is the stable 12-hex-char identifier
-	CheckpointID id.CheckpointID
-
-	// SessionID is the session identifier
-	SessionID string
-
-	// CreatedAt is when the checkpoint was originally created.
-	// When zero, writers use the current time.
-	CreatedAt time.Time
-
-	// Strategy is the name of the strategy that created this checkpoint
-	Strategy string
-
-	// Branch is the branch name where the checkpoint was created (empty if detached HEAD)
-	Branch string
-
-	// Transcript is the session transcript content (full.jsonl).
-	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
-	Transcript redact.RedactedBytes
-
-	// Prompts contains the raw user prompts from the session. Run through
-	// redactedJoinedPrompts before persisting — the writer does this
-	// inside writeSessionToSubdirectory.
-	Prompts []string
-
-	// FilesTouched are files modified during the session
-	FilesTouched []string
-
-	// CheckpointsCount is the displayed "steps" count for this session: the number
-	// of user prompts attributed to this checkpoint (floored at 1). Despite the
-	// historical name/JSON tag, it is no longer a count of checkpoints.
-	CheckpointsCount int
-
-	// SaveStepCount is the number of SaveStep-recorded steps (shadow-branch
-	// commits) for this session. Distinct from CheckpointsCount (the displayed
-	// prompt count): this is the honest "did real checkpoint work happen" signal
-	// used to gate combined attribution. 0 means a commit-only / fallback session.
-	SaveStepCount int
-
-	// EphemeralBranch is the shadow branch name (for manual-commit strategy)
-	EphemeralBranch string
-
-	// AuthorName is the name to use for commits
-	AuthorName string
-
-	// AuthorEmail is the email to use for commits
-	AuthorEmail string
-
-	// MetadataDir is a directory containing additional metadata files to copy
-	// If set, all files in this directory will be copied to the checkpoint path
-	// This is useful for copying task metadata files, subagent transcripts, etc.
-	MetadataDir string
-
-	// Task checkpoint fields (for task/subagent checkpoints)
-	IsTask    bool   // Whether this is a task checkpoint
-	ToolUseID string // Tool use ID for task checkpoints
-
-	// Additional task checkpoint fields for subagent checkpoints
-	AgentID                string // Subagent identifier
-	CheckpointUUID         string // UUID for transcript truncation when rewinding
-	TranscriptPath         string // Path to session transcript file (alternative to in-memory Transcript)
-	SubagentTranscriptPath string // Path to subagent's transcript file
-
-	// Incremental checkpoint fields
-	IsIncremental       bool   // Whether this is an incremental checkpoint
-	IncrementalSequence int    // Checkpoint sequence number
-	IncrementalType     string // Tool type that triggered this checkpoint
-	IncrementalData     []byte // Tool input payload for this checkpoint
-
-	// Commit message fields (used for task checkpoints)
-	CommitSubject string // Subject line for the metadata commit (overrides default)
-
-	// Agent identifies the agent that created this checkpoint (e.g., "Claude Code", "Cursor")
-	Agent types.AgentType
-
-	// Model is the LLM model used during the session (e.g., "claude-sonnet-4-20250514")
-	Model string
-
-	// TurnID correlates checkpoints from the same agent turn.
-	TurnID string
-
-	// Transcript position at checkpoint start - tracks what was added during this checkpoint
-	TranscriptIdentifierAtStart string // Last identifier when checkpoint started (UUID for Claude, message ID for Gemini)
-	CheckpointTranscriptStart   int    // Transcript line offset at start of this checkpoint's data
-
-	// CheckpointTranscriptStart is written to both CommittedMetadata.CheckpointTranscriptStart
-	// and the deprecated CommittedMetadata.TranscriptLinesAtStart for backward compatibility.
-
-	// TokenUsage contains the token usage for this checkpoint
-	TokenUsage *types.TokenUsage
-
-	// SkillEvents records explicit native skill signals observed in this session.
-	SkillEvents []types.SkillEvent
-
-	// SessionMetrics contains hook-provided session metrics (duration, turns, context usage)
-	SessionMetrics *SessionMetrics
-
-	// InitialAttribution is line-level attribution calculated at commit time
-	// comparing checkpoint tree (agent work) to committed tree (may include human edits)
-	InitialAttribution *InitialAttribution
-
-	// PromptAttributionsJSON is the raw PromptAttributions data, JSON-encoded.
-	// Persisted for diagnostic purposes — shows exactly which prompt recorded
-	// which "user" lines, enabling root cause analysis of attribution bugs.
-	// Uses json.RawMessage to avoid importing session package.
-	PromptAttributionsJSON json.RawMessage
-
-	// CombinedAttribution is holistic attribution across all sessions.
-	// Used during migration to preserve v1 root summary attribution.
-	// During normal condensation this is nil (computed post-commit via UpdateCheckpointSummary).
-	CombinedAttribution *InitialAttribution
-
-	// Summary is an optional AI-generated summary for this checkpoint.
-	// This field may be nil when:
-	//   - summarization is disabled in settings
-	//   - summary generation failed (non-blocking, logged as warning)
-	//   - the transcript was empty or too short to summarize
-	//   - the checkpoint predates the summarization feature
-	Summary *Summary
-
-	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
-	Kind string
-
-	// ReviewSkills is the snapshot of skills used (only meaningful when Kind is a review kind).
-	// May be empty when a review is attached post-hoc without declared skills.
-	ReviewSkills []string
-
-	// ReviewPrompt is the actual text of the review request (composed prompt
-	// for spawn, first user prompt for attach). Only meaningful when Kind is
-	// a review kind.
-	ReviewPrompt string
-
-	// HasReview is set by the caller when this session should mark its
-	// checkpoint as reviewed. The caller computes this (e.g. via
-	// session.Kind.IsReview) because checkpoint can't import session
-	// — the session package imports checkpoint, creating a cycle.
-	HasReview bool
-
-	// InvestigateRunID is the 12-hex-char ID of the parent investigation
-	// run (only meaningful when Kind is an investigate kind).
-	InvestigateRunID string
-
-	// InvestigateTopic is the human-readable topic the investigation was
-	// asked to investigate (only meaningful when Kind is an investigate
-	// kind).
-	InvestigateTopic string
-
-	// HasInvestigation is set by the caller when this session should mark
-	// its checkpoint as part of an investigation. The caller computes this
-	// (e.g. via session.Kind.IsInvestigate) because checkpoint can't import
-	// session — the session package imports checkpoint, creating a cycle.
-	HasInvestigation bool
-}
-
-// UpdateCommittedOptions contains options for updating an existing committed checkpoint.
-// Uses replace semantics: the transcript and prompts are fully replaced,
-// not appended. At stop time we have the complete session transcript and want every
-// checkpoint to contain it identically.
-type UpdateCommittedOptions struct {
-	// CheckpointID identifies the checkpoint to update
-	CheckpointID id.CheckpointID
-
-	// SessionID identifies which session slot to update within the checkpoint
-	SessionID string
-
-	// Transcript is the full session transcript (replaces existing).
-	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
-	Transcript redact.RedactedBytes
-
-	// Prompts contains the raw user prompts (replaces existing).
-	// See WriteCommittedOptions.Prompts.
-	Prompts []string
-
-	// Agent identifies the agent type (needed for transcript chunking)
-	Agent types.AgentType
-
-	// SkillEvents replaces the session metadata skill_events when non-empty.
-	SkillEvents []types.SkillEvent
-
-	// PrecomputedBlobs, if non-nil, provides chunk blob hashes and the
-	// content-hash blob hash computed once for this transcript. When set,
-	// UpdateCommitted skips the per-call ChunkTranscript + zlib work and
-	// reuses these hashes. Used by finalizeAllTurnCheckpoints to avoid
-	// re-compressing identical content N times.
-	PrecomputedBlobs *PrecomputedTranscriptBlobs
-}
-
-// PrecomputedTranscriptBlobs holds blob hashes for a transcript that was
-// chunked and written to the object store once, for reuse across multiple
-// UpdateCommitted calls sharing the same transcript content.
-// Callers should avoid constructing this for empty transcripts; agent.ChunkTranscript
-// would otherwise produce a single zero-length chunk and a hash for an empty
-// blob, which downstream stores would never reference.
-type PrecomputedTranscriptBlobs struct {
-	// ChunkHashes are the blob hashes for each transcript chunk, in order.
-	// Always non-empty when built via PrecomputeTranscriptBlobs (a non-empty
-	// transcript chunks to at least one entry; callers should skip precompute
-	// for empty transcripts).
-	ChunkHashes []plumbing.Hash
-
-	// ContentHashBlob is the blob hash of the "sha256:<hex>" content-hash
-	// string for the transcript.
-	ContentHashBlob plumbing.Hash
-
-	// ContentHash is the "sha256:<hex>" string itself, so the short-circuit
-	// path can compare without re-reading the blob.
-	ContentHash string
-}
-
-// isUsable reports whether the precomputed blobs satisfy the invariants that
-// consumers depend on: a non-zero content-hash blob and at least one chunk
-// hash. Callers should fall back to the fresh-write path when this is false.
-func (p *PrecomputedTranscriptBlobs) isUsable() bool {
-	return p != nil && !p.ContentHashBlob.IsZero() && len(p.ChunkHashes) > 0
-}
-
-// CommittedInfo contains summary information about a committed checkpoint.
-type CommittedInfo struct {
-	// CheckpointID is the stable 12-hex-char identifier
-	CheckpointID id.CheckpointID
-
-	// SessionID is the session identifier (most recent session for multi-session checkpoints)
-	SessionID string
-
-	// CreatedAt is when the checkpoint was created
-	CreatedAt time.Time
-
-	// CheckpointsCount is the aggregate displayed "steps" count across sessions:
-	// the sum of per-session prompt-window counts. Despite the historical name,
-	// it is not a count of checkpoint records.
-	CheckpointsCount int
-
-	// FilesTouched are files modified during all sessions
-	FilesTouched []string
-
-	// Agent identifies the agent that created this checkpoint
-	Agent types.AgentType
-
-	// IsTask indicates if this is a task checkpoint
-	IsTask bool
-
-	// ToolUseID is the tool use ID for task checkpoints
-	ToolUseID string
-
-	// Multi-session support
-	SessionCount int      // Number of sessions (1 if single session)
-	SessionIDs   []string // All session IDs that contributed
-}
-
-// SessionContent contains the actual content for a session.
-// This is used when reading full session data (transcript, prompts, context)
-// as opposed to just the metadata/summary.
-type SessionContent struct {
-	// Metadata contains the session-specific metadata
-	Metadata CommittedMetadata
-
-	// Transcript is the session transcript content
-	Transcript []byte
-
-	// TranscriptBlobHashes are the stored raw transcript blob hashes in chunk
-	// order. Callers that rewrite the same transcript under a different path can
-	// reuse these content-addressed blobs instead of storing duplicate blobs.
-	TranscriptBlobHashes []plumbing.Hash
-
-	// Prompts contains user prompts from this session
-	Prompts string
-}
-
-// CommittedMetadata contains the metadata stored in metadata.json for each checkpoint.
-type CommittedMetadata struct {
-	CLIVersion       string          `json:"cli_version,omitempty"`
-	CheckpointID     id.CheckpointID `json:"checkpoint_id"`
-	SessionID        string          `json:"session_id"`
-	Strategy         string          `json:"strategy"`
-	CreatedAt        time.Time       `json:"created_at"`
-	Branch           string          `json:"branch,omitempty"` // Branch where checkpoint was created (empty if detached HEAD)
-	CheckpointsCount int             `json:"checkpoints_count"`
-	// SaveStepCount is the number of SaveStep-recorded steps for this session.
-	// Honest "real checkpoint work happened" signal (0 = commit-only/fallback
-	// session), kept separate from the displayed CheckpointsCount prompt count.
-	// Added after CheckpointsCount stopped being a reliable did-SaveStep-run signal.
-	SaveStepCount int      `json:"save_step_count,omitempty"`
-	FilesTouched  []string `json:"files_touched"`
-
-	// Agent identifies the agent that created this checkpoint (e.g., "Claude Code", "Cursor")
-	Agent types.AgentType `json:"agent,omitempty"`
-
-	// Model is the LLM model used during the session (e.g., "claude-sonnet-4-20250514").
-	// Always written to metadata (empty string when unknown) so consumers can rely on the field's presence.
-	Model string `json:"model"`
-
-	// TurnID correlates checkpoints from the same agent turn.
-	// When a turn's work spans multiple commits, each gets its own checkpoint
-	// but they share the same TurnID for future aggregation/deduplication.
-	TurnID string `json:"turn_id,omitempty"`
-
-	// Task checkpoint fields (only populated for task checkpoints)
-	IsTask    bool   `json:"is_task,omitempty"`
-	ToolUseID string `json:"tool_use_id,omitempty"`
-
-	// Transcript position at checkpoint start - tracks what was added during this checkpoint
-	TranscriptIdentifierAtStart string `json:"transcript_identifier_at_start,omitempty"` // Last identifier when checkpoint started (UUID for Claude, message ID for Gemini)
-	CheckpointTranscriptStart   int    `json:"checkpoint_transcript_start,omitempty"`    // Transcript line offset at start of this checkpoint's data
-
-	// Deprecated: Use CheckpointTranscriptStart instead. Written for backward compatibility with older CLI versions.
-	TranscriptLinesAtStart int `json:"transcript_lines_at_start,omitempty"`
-
-	// Token usage for this checkpoint
-	TokenUsage *types.TokenUsage `json:"token_usage,omitempty"`
-
-	// SkillEvents records explicit native skill signals observed in this session.
-	// Consumers use these anchors to collapse skill-related raw transcript events.
-	SkillEventsVersion int                `json:"skill_events_version,omitempty"`
-	SkillEvents        []types.SkillEvent `json:"skill_events,omitempty"`
-
-	// SessionMetrics contains hook-provided session metrics (duration, turns, context usage).
-	// Populated for agents that provide these metrics via hooks (e.g., Cursor).
-	SessionMetrics *SessionMetrics `json:"session_metrics,omitempty"`
-
-	// AI-generated summary of the checkpoint
-	Summary *Summary `json:"summary,omitempty"`
-
-	// InitialAttribution is line-level attribution calculated at commit time
-	InitialAttribution *InitialAttribution `json:"initial_attribution,omitempty"`
-
-	// PromptAttributions is the raw per-prompt attribution data used to compute InitialAttribution.
-	// Diagnostic field — shows which prompt recorded which "user" lines.
-	PromptAttributions json.RawMessage `json:"prompt_attributions,omitempty"`
-
-	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
-	Kind string `json:"kind,omitempty"`
-
-	// ReviewSkills lists the review skills that were run (only set when Kind is a review kind).
-	// May be empty when a review was attached post-hoc without declared skills.
-	ReviewSkills []string `json:"review_skills,omitempty"`
-
-	// ReviewPrompt is the actual text of the review request (composed prompt
-	// for spawn, first user prompt for attach). Only set when Kind is a
-	// review kind.
-	ReviewPrompt string `json:"review_prompt,omitempty"`
-
-	// InvestigateRunID is the 12-hex-char ID of the parent investigation
-	// run. Only set when Kind is an investigate kind.
-	InvestigateRunID string `json:"investigate_run_id,omitempty"`
-
-	// InvestigateTopic is the human-readable topic the investigation was
-	// asked to investigate. Only set when Kind is an investigate kind.
-	InvestigateTopic string `json:"investigate_topic,omitempty"`
-}
-
-// GetTranscriptStart returns the transcript line offset at which this checkpoint's data begins.
-// Returns 0 for new checkpoints (start from beginning). For data written by older CLI versions,
-// falls back to the deprecated TranscriptLinesAtStart field.
-func (m CommittedMetadata) GetTranscriptStart() int {
-	if m.CheckpointTranscriptStart > 0 {
-		return m.CheckpointTranscriptStart
-	}
-	return m.TranscriptLinesAtStart
-}
-
-// SessionFilePaths contains the absolute paths to session files from the git tree root.
-// Paths include the full checkpoint path prefix (e.g., "/a1/b2c3d4e5f6/1/metadata.json").
-// Used in CheckpointSummary.Sessions to map session IDs to their file locations.
-type SessionFilePaths struct {
-	Metadata string `json:"metadata"`
-	// Transcript points at the compact transcript.jsonl when one was
-	// generated, otherwise at the raw full.jsonl. Checkpoints written by
-	// older CLI versions always point at full.jsonl.
-	Transcript  string `json:"transcript,omitempty"`
-	ContentHash string `json:"content_hash,omitempty"`
-	Prompt      string `json:"prompt"`
-}
-
-// CheckpointSummary is the root-level metadata.json for a checkpoint.
-// It contains aggregated statistics from all sessions and a map of session IDs
-// to their file paths. Session-specific data (including initial_attribution)
-// is stored in the session's subdirectory metadata.json.
-//
-// Structure on entire/checkpoints/v1 branch:
-//
-//	<checkpoint-id[:2]>/<checkpoint-id[2:]>/
-//	├── metadata.json         # This CheckpointSummary
-//	├── 1/                    # First session
-//	│   ├── metadata.json     # Session-specific CommittedMetadata
-//	│   ├── full.jsonl        # Raw agent transcript
-//	│   ├── transcript.jsonl  # Compact transcript scoped to this checkpoint
-//	│   ├── prompt.txt
-//	│   └── content_hash.txt
-//	├── 2/                    # Second session
-//	└── 3/                    # Third session...
-//
-//nolint:revive // Named CheckpointSummary to avoid conflict with existing Summary struct
-type CheckpointSummary struct {
-	CLIVersion          string              `json:"cli_version,omitempty"`
-	CheckpointVersion   string              `json:"checkpoint_version,omitempty"`
-	CheckpointID        id.CheckpointID     `json:"checkpoint_id"`
-	Strategy            string              `json:"strategy"`
-	Branch              string              `json:"branch,omitempty"`
-	CheckpointsCount    int                 `json:"checkpoints_count"`
-	FilesTouched        []string            `json:"files_touched"`
-	Sessions            []SessionFilePaths  `json:"sessions"`
-	TokenUsage          *types.TokenUsage   `json:"token_usage,omitempty"`
-	CombinedAttribution *InitialAttribution `json:"combined_attribution,omitempty"`
-
-	// HasReview is the umbrella "any review happened" flag: true when at least
-	// one session in this checkpoint has a review-kind Kind (currently
-	// "agent_review"). When new review kinds are introduced they should also
-	// cause this flag to be set so callers can keep asking "was this reviewed
-	// in any way?" without caring about the variant.
-	HasReview bool `json:"has_review,omitempty"`
-
-	// HasInvestigation is the umbrella "any investigation happened" flag:
-	// true when at least one session in this checkpoint has an
-	// investigate-kind Kind (currently "agent_investigate"). When new
-	// investigate kinds are introduced they should also cause this flag to
-	// be set so callers can keep asking "was this investigated in any way?"
-	// without caring about the variant.
-	HasInvestigation bool `json:"has_investigation,omitempty"`
-}
-
-func normalizeCheckpointSummary(summary *CheckpointSummary) *CheckpointSummary {
-	if summary == nil {
-		return nil
-	}
-	if summary.CheckpointVersion == "" {
-		summary.CheckpointVersion = CheckpointVersionBranchV1
-	}
-	return summary
-}
-
-// SessionMetrics contains hook-provided session metrics from agents that report
-// them via lifecycle hooks (e.g., Cursor). These supplement transcript-derived
-// metrics for agents whose transcripts lack usage/timing data.
-type SessionMetrics struct {
-	DurationMs        int64 `json:"duration_ms,omitempty"`
-	TurnCount         int   `json:"turn_count,omitempty"`
-	ContextTokens     int   `json:"context_tokens,omitempty"`
-	ContextWindowSize int   `json:"context_window_size,omitempty"`
-}
-
-// Summary contains AI-generated summary of a checkpoint.
-type Summary struct {
-	Intent    string           `json:"intent"`     // What user wanted to accomplish
-	Outcome   string           `json:"outcome"`    // What was achieved
-	Learnings LearningsSummary `json:"learnings"`  // Categorized learnings
-	Friction  []string         `json:"friction"`   // Problems/annoyances encountered
-	OpenItems []string         `json:"open_items"` // Tech debt, unfinished work
-}
-
-// LearningsSummary contains learnings grouped by scope.
-type LearningsSummary struct {
-	Repo     []string       `json:"repo"`     // Codebase-specific patterns/conventions
-	Code     []CodeLearning `json:"code"`     // File/module specific findings
-	Workflow []string       `json:"workflow"` // General dev practices
-}
-
-// CodeLearning captures a learning tied to a specific code location.
-type CodeLearning struct {
-	Path    string `json:"path"`               // File path
-	Line    int    `json:"line,omitempty"`     // Start line number
-	EndLine int    `json:"end_line,omitempty"` // End line for ranges (optional)
-	Finding string `json:"finding"`            // What was learned
-}
-
-// InitialAttribution captures line-level attribution metrics at commit time.
-// This is a point-in-time snapshot comparing the checkpoint tree (agent work)
-// against the committed tree (may include human edits).
-//
-// Attribution Metrics:
-//   - TotalCommitted keeps the historical "net additions" view for compatibility
-//   - TotalLinesChanged measures total committed line changes (adds + modifies + removes)
-//   - AgentPercentage represents "of the lines changed in this commit, what percentage came from the agent"
-//   - AgentRemoved tracks committed deletions performed by the agent
-type InitialAttribution struct {
-	CalculatedAt      time.Time `json:"calculated_at"`
-	AgentLines        int       `json:"agent_lines"`              // Lines added by agent that remain in the commit
-	AgentRemoved      int       `json:"agent_removed"`            // Lines removed by agent that remain removed in the commit
-	HumanAdded        int       `json:"human_added"`              // Lines added by human (excluding modifications)
-	HumanModified     int       `json:"human_modified"`           // Lines modified by human (estimate: min(added, removed))
-	HumanRemoved      int       `json:"human_removed"`            // Lines removed by human (excluding modifications)
-	TotalCommitted    int       `json:"total_committed"`          // Net additions in commit (legacy additions-focused metric)
-	TotalLinesChanged int       `json:"total_lines_changed"`      // Total committed line changes (adds + modifies + removes)
-	AgentPercentage   float64   `json:"agent_percentage"`         // (agent_lines + agent_removed) / total_lines_changed * 100
-	MetricVersion     int       `json:"metric_version,omitempty"` // 0/absent = legacy (additions-only %), 2 = changed-lines %
 }
 
 // Info provides summary information for listing checkpoints.
@@ -668,10 +164,10 @@ type Info struct {
 	Message string
 }
 
-// WriteTemporaryTaskOptions contains options for writing a task checkpoint.
+// WriteEphemeralTaskOptions contains options for writing a task checkpoint.
 // Task checkpoints are created when a subagent completes and contain both
 // code changes and task-specific metadata.
-type WriteTemporaryTaskOptions struct {
+type WriteEphemeralTaskOptions struct {
 	// SessionID is the session identifier
 	SessionID string
 
@@ -728,9 +224,9 @@ type WriteTemporaryTaskOptions struct {
 	IncrementalData []byte
 }
 
-// TemporaryCheckpointInfo contains information about a single commit on a shadow branch.
-// Used by ListTemporaryCheckpoints to provide rewind point data.
-type TemporaryCheckpointInfo struct {
+// EphemeralCheckpointInfo contains information about a single commit on a shadow branch.
+// Used by ListCheckpoints to provide rewind point data.
+type EphemeralCheckpointInfo struct {
 	// CommitHash is the hash of the checkpoint commit
 	CommitHash plumbing.Hash
 

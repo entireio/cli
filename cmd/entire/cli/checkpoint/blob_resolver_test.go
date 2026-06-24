@@ -134,7 +134,7 @@ func TestCollectTranscriptBlobHashes_MultiSession(t *testing.T) {
 	repo, store, cpID := setupRepoForUpdate(t)
 
 	// Write a second session to the same checkpoint
-	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+	err := store.Write(context.Background(), Session{
 		CheckpointID: cpID,
 		SessionID:    "session-002",
 		Strategy:     "manual-commit",

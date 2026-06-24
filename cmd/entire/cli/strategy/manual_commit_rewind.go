@@ -30,7 +30,7 @@ import (
 )
 
 // GetRewindPoints returns available rewind points.
-// Uses checkpoint.TemporaryStore for reading from shadow branches.
+// Uses checkpoint.EphemeralStore for reading from shadow branches.
 func (s *ManualCommitStrategy) GetRewindPoints(ctx context.Context, limit int) ([]RewindPoint, error) {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -38,7 +38,7 @@ func (s *ManualCommitStrategy) GetRewindPoints(ctx context.Context, limit int) (
 	}
 	defer repo.Close()
 
-	store, err := s.getTemporaryStore(ctx, repo)
+	store, err := s.getEphemeralStore(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +63,7 @@ func (s *ManualCommitStrategy) GetRewindPoints(ctx context.Context, limit int) (
 	sessionPrompts := make(map[string]string)
 
 	for _, state := range sessions {
-		checkpoints, err := store.ListTemporaryCheckpoints(ctx, state.BaseCommit, state.WorktreeID, state.SessionID, limit)
+		checkpoints, err := store.ListCheckpoints(ctx, state.BaseCommit, state.WorktreeID, state.SessionID, limit)
 		if err != nil {
 			continue // Error reading checkpoints, skip this session
 		}
@@ -166,7 +166,7 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(ctx context.Context, limi
 	}
 
 	// Get committed metadata read tree for session prompts (best-effort, ignore errors)
-	readRef := cpkg.ResolveCommittedRefs(ctx).Read
+	readRef := cpkg.ResolveRefs(ctx).Read
 	metadataTree, _ := GetMetadataRefTree(repo, readRef) //nolint:errcheck // Best-effort for session prompts
 
 	head, err := repo.Head()
@@ -646,8 +646,8 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
-	store := stores.Primary
-	summary, err := cpkg.ReadCommittedCheckpoint(ctx, store, point.CheckpointID)
+	store := stores.Persistent
+	summary, err := cpkg.ReadCheckpoint(ctx, store, point.CheckpointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
@@ -699,7 +699,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 		}
 		// Checkpoint metadata comes from the shared entire/checkpoints/v1 branch
 		// and is attacker-influenceable. Reject path separators/absolute IDs before
-		// they reach ResolveSessionFile + WriteSession, which would otherwise let a
+		// they reach ResolveSessionFile + Session, which would otherwise let a
 		// crafted session ID overwrite files outside the agent session directory.
 		if err := validation.ValidateSessionID(sessionID); err != nil {
 			fmt.Fprintf(errW, "  Warning: session %d has unsafe session ID %q, skipping: %v\n", i, sessionID, err)
@@ -860,7 +860,7 @@ type SessionRestoreInfo struct {
 // about each session, including whether local logs have newer timestamps.
 // repoRoot is used to compute per-session agent directories.
 // Sessions without agent metadata are skipped (cannot determine target directory).
-func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, repoRoot string, store cpkg.CommittedReader, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary) []SessionRestoreInfo {
+func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, repoRoot string, store cpkg.SessionReader, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary) []SessionRestoreInfo {
 	var sessions []SessionRestoreInfo
 
 	totalSessions := len(summary.Sessions)

@@ -40,7 +40,7 @@ func TestWriteStandardCheckpointEntries_RefusesUnexpectedSessionZeroOverwrite(t 
 	}
 	basePath := checkpointID.Path() + "/"
 
-	oldMetadata := CommittedMetadata{
+	oldMetadata := Metadata{
 		CheckpointID: checkpointID,
 		SessionID:    "session-old",
 		Strategy:     "manual-commit",
@@ -64,7 +64,7 @@ func TestWriteStandardCheckpointEntries_RefusesUnexpectedSessionZeroOverwrite(t 
 		},
 	}
 
-	opts := WriteCommittedOptions{
+	opts := WriteOptions{
 		CheckpointID: checkpointID,
 		SessionID:    "session-new",
 		Strategy:     "manual-commit",
