@@ -25,6 +25,7 @@ const (
 	HookNamePreTask          = "pre-task"
 	HookNamePostTask         = "post-task"
 	HookNamePostTodo         = "post-todo"
+	HookNameStatusLine       = "statusline"
 )
 
 // ClaudeSettingsFileName is the settings file used by Claude Code.
@@ -265,6 +266,11 @@ func marshalHookType(rawHooks map[string]json.RawMessage, hookType string, match
 
 // UninstallHooks removes Entire hooks from Claude Code settings.
 func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
+	// Remove the Entire trail status line too (no-op if absent or foreign).
+	if err := c.UninstallStatusline(ctx); err != nil {
+		return err
+	}
+
 	// Use repo root to find .claude directory when run from a subdirectory
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {

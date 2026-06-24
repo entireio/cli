@@ -168,6 +168,12 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 // It uses the lifecycle dispatcher (ParseHookEvent → DispatchLifecycleEvent) as the primary path.
 // PostTodo is handled directly as it's Claude-specific and not part of the lifecycle dispatcher.
 func newAgentHookVerbCmdWithLogging(agentName types.AgentName, hookName string) *cobra.Command {
+	// The status line is polled several times per second and must stay fast, so
+	// it bypasses executeAgentHook (enabled checks, perf spans, per-invocation
+	// hook logging) entirely with its own dedicated command.
+	if agentName == agent.AgentNameClaudeCode && hookName == claudecode.HookNameStatusLine {
+		return newClaudeStatuslineCmd()
+	}
 	return &cobra.Command{
 		Use:    hookName,
 		Hidden: true,

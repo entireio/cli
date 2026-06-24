@@ -62,6 +62,7 @@ func (c *ClaudeCodeAgent) HookNames() []string {
 		HookNamePreTask,
 		HookNamePostTask,
 		HookNamePostTodo,
+		HookNameStatusLine,
 	}
 }
 

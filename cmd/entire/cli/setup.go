@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -45,6 +46,7 @@ const (
 	flagAbsoluteGitHookPath  = "absolute-git-hook-path"
 	flagForce                = "force"
 	flagLocalDev             = "local-dev"
+	flagClaudeStatusline     = "claude-statusline"
 	checkpointProviderGitHub = "github"
 )
 
@@ -70,6 +72,10 @@ type EnableOptions struct {
 	// presentation of the final state (commit, push, done).
 	SuppressDoneMessage bool
 	Yes                 bool
+	// ClaudeStatusline opts in to installing the Entire trail status line into
+	// Claude Code's settings.json. It never clobbers a user's existing
+	// statusLine unless ForceHooks is also set.
+	ClaudeStatusline bool
 }
 
 // applyStrategyOptions sets strategy_options on settings from CLI flags.
@@ -131,11 +137,11 @@ func enableUsesSetupFlow(cmd *cobra.Command, agentName string) bool {
 	if agentName != "" || hasStrategyFlags(cmd) {
 		return true
 	}
-	return hasGlobalSettingsFlags(cmd) || cmd.Flags().Changed("yes")
+	return hasGlobalSettingsFlags(cmd) || cmd.Flags().Changed("yes") || cmd.Flags().Changed(flagClaudeStatusline)
 }
 
 func enableNeedsAgentManagement(cmd *cobra.Command) bool {
-	return hasGlobalSettingsFlags(cmd) || cmd.Flags().Changed("yes")
+	return hasGlobalSettingsFlags(cmd) || cmd.Flags().Changed("yes") || cmd.Flags().Changed(flagClaudeStatusline)
 }
 
 // updateStrategyOptions applies strategy flags to settings without re-running agent setup.
@@ -576,7 +582,7 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 	}
 	var successfullyAddedAgents []agent.Agent
 	for _, ag := range addedAgents {
-		if _, err := setupAgentHooks(ctx, w, ag, opts.LocalDev, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooks(ctx, w, ag, opts.hookOptions()); err != nil {
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
 		} else {
 			successfullyAddedAgents = append(successfullyAddedAgents, ag)
@@ -585,7 +591,7 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 
 	var successfullyReinstalledAgents []agent.Agent
 	for _, ag := range reinstalledAgents {
-		if _, err := setupAgentHooks(ctx, w, ag, opts.LocalDev, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooks(ctx, w, ag, opts.hookOptions()); err != nil {
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
 		} else {
 			successfullyReinstalledAgents = append(successfullyReinstalledAgents, ag)
@@ -901,6 +907,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().BoolVar(&opts.UseProjectSettings, "project", false, "Write settings to .entire/settings.json even if it already exists")
 	cmd.Flags().StringVar(&agentName, agentFlagName, "", "Agent to set up hooks for (e.g., "+strings.Join(agent.StringList(), ", ")+"; external agents on $PATH are also available). Enables non-interactive mode.")
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
+	cmd.Flags().BoolVar(&opts.ClaudeStatusline, flagClaudeStatusline, false, "Install the Entire trail status line into Claude Code (skips if a statusLine already exists unless -f)")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
@@ -1059,7 +1066,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Setup agent hooks for all selected agents
 	for _, ag := range agents {
-		if _, err := setupAgentHooks(ctx, w, ag, opts.LocalDev, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooks(ctx, w, ag, opts.hookOptions()); err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
 		}
 	}
@@ -1345,13 +1352,13 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 
 // setupAgentHooks sets up hooks for a given agent.
 // Returns the number of hooks installed (0 if already installed).
-func setupAgentHooks(ctx context.Context, w io.Writer, ag agent.Agent, localDev, forceHooks bool) (int, error) {
+func setupAgentHooks(ctx context.Context, w io.Writer, ag agent.Agent, opts AgentHookOptions) (int, error) {
 	hookAgent, ok := agent.AsHookSupport(ag)
 	if !ok {
 		return 0, fmt.Errorf("agent %s does not support hooks", ag.Name())
 	}
 
-	count, err := hookAgent.InstallHooks(ctx, localDev, forceHooks)
+	count, err := hookAgent.InstallHooks(ctx, opts.LocalDev, opts.ForceHooks)
 	if err != nil {
 		return 0, fmt.Errorf("failed to install %s hooks: %w", ag.Name(), err)
 	}
@@ -1362,7 +1369,63 @@ func setupAgentHooks(ctx context.Context, w io.Writer, ag agent.Agent, localDev,
 	}
 	reportSearchSubagentScaffold(w, ag, scaffoldResult)
 
+	if opts.ClaudeStatusline {
+		if err := installClaudeStatusline(ctx, w, ag, opts.LocalDev, opts.ForceHooks); err != nil {
+			return 0, err
+		}
+	}
+
 	return count, nil
+}
+
+// AgentHookOptions carries the per-agent hook-installation choices into
+// setupAgentHooks without threading the full EnableOptions through.
+type AgentHookOptions struct {
+	LocalDev         bool
+	ForceHooks       bool
+	ClaudeStatusline bool
+}
+
+// hookOptions distills the hook-installation choices from EnableOptions.
+func (opts *EnableOptions) hookOptions() AgentHookOptions {
+	return AgentHookOptions{
+		LocalDev:         opts.LocalDev,
+		ForceHooks:       opts.ForceHooks,
+		ClaudeStatusline: opts.ClaudeStatusline,
+	}
+}
+
+// claudeStatuslineInstaller is implemented by the Claude Code agent. Declared
+// locally to avoid a generic agent-package interface for a single agent.
+type claudeStatuslineInstaller interface {
+	InstallStatusline(ctx context.Context, localDev, force bool) (bool, error)
+}
+
+// installClaudeStatusline opts the Claude Code status line in. It is a no-op for
+// other agents and never fails enable on a foreign statusLine: it prints a hint
+// and continues so the rest of setup proceeds.
+func installClaudeStatusline(ctx context.Context, w io.Writer, ag agent.Agent, localDev, force bool) error {
+	if ag.Name() != agent.AgentNameClaudeCode {
+		return nil // claude-code only; silently ignore for other agents
+	}
+	inst, ok := ag.(claudeStatuslineInstaller)
+	if !ok {
+		return nil
+	}
+	changed, err := inst.InstallStatusline(ctx, localDev, force)
+	if err != nil {
+		if errors.Is(err, claudecode.ErrStatuslineConflict) {
+			fmt.Fprintln(w, "  statusLine already configured; skipping — re-run with -f/--force to replace")
+			return nil
+		}
+		return fmt.Errorf("failed to install Claude Code status line: %w", err)
+	}
+	if changed {
+		fmt.Fprintln(w, "  ✓ Installed Claude Code trail status line")
+	} else {
+		fmt.Fprintln(w, "  Claude Code trail status line already installed")
+	}
+	return nil
 }
 
 // detectOrSelectAgent tries to auto-detect agents, or prompts the user to select.
@@ -1575,7 +1638,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	fmt.Fprintf(w, "  Agent: %s\n", ag.Type())
 
 	// Install agent hooks (agent hooks don't depend on settings)
-	installedHooks, err := setupAgentHooks(ctx, w, ag, opts.LocalDev, opts.ForceHooks)
+	installedHooks, err := setupAgentHooks(ctx, w, ag, opts.hookOptions())
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
 	}
