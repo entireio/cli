@@ -38,11 +38,22 @@ type outEdge struct {
 	label string
 }
 
-// linkRe matches a Mermaid link operator with an optional `|label|`. The
-// surrounding whitespace is consumed so the text between matches is exactly
-// the node tokens. Inline-label syntax (`A -- text --> B`) is intentionally
-// unsupported and causes a parse failure → raw fallback.
-var linkRe = regexp.MustCompile(`\s*(?:-->|---|==>|===|-\.->|-\.-)\s*(?:\|"?([^|"]*)"?\|)?\s*`)
+// linkRe matches a Mermaid link operator with an optional label. The
+// surrounding whitespace is consumed so the text between matches is exactly the
+// node tokens. Two label forms are captured: the inline form (`-- text -->`) in
+// group 1, and the pipe form (`-->|text|`) in group 2.
+//
+// Supported operators: arrows of any length (`-->`, `---->`), thick (`==>`) and
+// dotted (`-.->`, `-..->`) arrows, alternate arrowheads (`--x`, `--o`), an
+// optional reverse head (`<-->`), and open/invisible links (`---`, `===`,
+// `~~~`). A bare `--` (two dashes, no head) is not a link, so it stays as label
+// text. Multi-edge `&` shorthand is still rejected upstream.
+var linkRe = regexp.MustCompile(`\s*(?:` +
+	`(?:-{2,}|={2,}|-\.+)\s*([^|>\s][^>|]*?)\s*(?:-{2,}|={2,}|\.+-)[>xo]` + // inline label (spaces optional)
+	`|` +
+	`(?:<?(?:-{2,}|={2,}|-\.+-|~{2,})[>xo]|-{3,}|={3,}|-\.+-|~{3,})` + // headed or open link
+	`(?:\s*\|\s*"?([^|"]*?)"?\s*\|)?` + // optional pipe label
+	`)\s*`)
 
 // nodeRe matches a single node token: an id followed by an optional shape
 // wrapper. We extract the id and the inner label regardless of shape.
@@ -158,8 +169,11 @@ func parseLine(line string) ([]nodeDecl, []outEdgeWithFrom, bool) {
 		}
 		tokens = append(tokens, nodeDecl{id, label})
 		el := ""
-		if loc[2] >= 0 {
+		switch {
+		case loc[2] >= 0: // inline label: `-- text -->`
 			el = cleanEdgeLabel(line[loc[2]:loc[3]])
+		case len(loc) >= 6 && loc[4] >= 0: // pipe label: `-->|text|`
+			el = cleanEdgeLabel(line[loc[4]:loc[5]])
 		}
 		edgeLabels = append(edgeLabels, el)
 		prev = loc[1]

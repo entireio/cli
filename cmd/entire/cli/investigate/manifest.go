@@ -106,6 +106,18 @@ func NewLocalManifestStoreWithDir(dir string) *LocalManifestStore {
 	return &LocalManifestStore{dir: dir}
 }
 
+// RunDir returns the per-run investigation directory for runID — the sibling
+// of the manifests directory that holds findings.md / state.json:
+//
+//	<commonDir>/entire-investigations/<run-id>
+//
+// It is derived from the store's manifests dir
+// (<commonDir>/entire-investigations/manifests), so it stays correct without a
+// separate git lookup and works with the test constructor.
+func (s *LocalManifestStore) RunDir(runID string) string {
+	return filepath.Join(filepath.Dir(s.dir), runID)
+}
+
 // Write persists m to the manifests directory using a deterministic filename
 // derived from m.StartedAt and m.RunID. Existing files are overwritten — the
 // timestamp+run-id combination is unique by construction (each run has a fresh

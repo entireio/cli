@@ -95,6 +95,125 @@ func TestRender_RenderableTrees(t *testing.T) {
 	}
 }
 
+// Edge-syntax variants Mermaid accepts that must still render as boxes rather
+// than falling back to raw source.
+func TestRender_EdgeSyntaxVariants(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		src       string
+		wantOrder []string
+		wantSub   []string
+	}{
+		{
+			name:      "inline dashed label",
+			src:       "flowchart LR\n  A[Start] -- needs --> B[End]",
+			wantOrder: []string{"Start", "End"},
+			wantSub:   []string{"needs"},
+		},
+		{
+			name:      "inline thick label",
+			src:       "flowchart LR\n  A == build ==> B",
+			wantOrder: []string{"A", "B"},
+			wantSub:   []string{"build"},
+		},
+		{
+			name:      "inline dotted label",
+			src:       "flowchart LR\n  A -. maybe .-> B",
+			wantOrder: []string{"A", "B"},
+			wantSub:   []string{"maybe"},
+		},
+		{
+			name:      "long arrow",
+			src:       "flowchart LR\n  A ----> B",
+			wantOrder: []string{"A", "B"},
+		},
+		{
+			name:      "thick arrow",
+			src:       "flowchart LR\n  A ==> B",
+			wantOrder: []string{"A", "B"},
+		},
+		{
+			name:      "circle arrowhead",
+			src:       "flowchart LR\n  A --o B",
+			wantOrder: []string{"A", "B"},
+		},
+		{
+			name:      "cross arrowhead",
+			src:       "flowchart LR\n  A --x B",
+			wantOrder: []string{"A", "B"},
+		},
+		{
+			name:      "no spaces around arrow",
+			src:       "flowchart TD\n  A-->B-->C",
+			wantOrder: []string{"A", "B", "C"},
+		},
+		{
+			name:      "inline dotted label without spaces",
+			src:       "flowchart LR\n  A -.permanent: always 413.-> B",
+			wantOrder: []string{"A", "B"},
+			wantSub:   []string{"permanent: always 413"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			out, ok := Render(tc.src)
+			if !ok {
+				t.Fatalf("expected renderable, got ok=false for:\n%s", tc.src)
+			}
+			prev := -1
+			for _, label := range tc.wantOrder {
+				idx := strings.Index(out, label)
+				if idx < 0 {
+					t.Fatalf("label %q missing from output:\n%s", label, out)
+				}
+				if idx <= prev {
+					t.Errorf("label %q out of order:\n%s", label, out)
+				}
+				prev = idx
+			}
+			for _, sub := range tc.wantSub {
+				if !strings.Contains(out, sub) {
+					t.Errorf("expected %q in output:\n%s", sub, out)
+				}
+			}
+		})
+	}
+}
+
+// A real-world findings diagram: subgraph grouping, <br/> in labels, pipe
+// labels, a chained line, and a no-space inline dotted back-edge. Must render
+// as boxes, not fall back to raw source.
+func TestRender_RealFindingsDiagram(t *testing.T) {
+	t.Parallel()
+
+	src := "flowchart LR\n" +
+		"  subgraph nats[NATS JetStream]\n" +
+		"    Q[ref event msg]\n" +
+		"  end\n" +
+		"  Q --> W[consumer.worker<br/>consumer.go:102]\n" +
+		"  W --> PC[processCheckpoint<br/>handler.go:758]\n" +
+		"  PC -->|200 stream| OK[chunk + embed + upsert]\n" +
+		"  PC -->|413 oversized| ERR[APIError 413<br/>client.go:392-394]\n" +
+		"  ERR --> NA[IsAccessError=false<br/>access.go:14] --> RF[fetchFailed=true]\n" +
+		"  RF --> NAK[NakWithDelay, retry x7<br/>~17h backoff]\n" +
+		"  NAK -.permanent: always 413.-> W\n"
+
+	out, ok := Render(src)
+	if !ok {
+		t.Fatalf("expected renderable, got ok=false for real diagram")
+	}
+	for _, want := range []string{"ref event msg", "processCheckpoint", "200 stream", "permanent: always 413"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in rendered diagram:\n%s", want, out)
+		}
+	}
+}
+
 // A chain renders as boxes stacked top-down joined by ▼ arrows, one box per
 // node, in path order.
 func TestRender_VerticalFlow(t *testing.T) {

@@ -24,6 +24,9 @@ type ShowInput struct {
 	Out io.Writer
 	// ErrOut is the destination writer for user-facing error/help messages.
 	ErrOut io.Writer
+	// HTML renders the findings to a styled findings.html in the per-run
+	// directory and opens it in the browser, instead of printing to Out.
+	HTML bool
 }
 
 // ShowDeps collects what RunShow needs that's test-injectable.
@@ -57,9 +60,7 @@ func RunShow(ctx context.Context, in ShowInput, deps ShowDeps) error {
 		if !ok {
 			return fmt.Errorf("no investigation found with run id %q", runID)
 		}
-		printShowSummary(in.Out, m)
-		printShowFindings(in.Out, m)
-		return nil
+		return emitShow(ctx, in, deps, m)
 	}
 
 	manifests, err := deps.ManifestStore.List(ctx)
@@ -73,9 +74,7 @@ func RunShow(ctx context.Context, in ShowInput, deps ShowDeps) error {
 
 	if runID == "" {
 		if len(manifests) == 1 {
-			printShowSummary(in.Out, manifests[0])
-			printShowFindings(in.Out, manifests[0])
-			return nil
+			return emitShow(ctx, in, deps, manifests[0])
 		}
 		return ambiguousRunIDError(manifests, "")
 	}
@@ -84,8 +83,55 @@ func RunShow(ctx context.Context, in ShowInput, deps ShowDeps) error {
 	if err != nil {
 		return err
 	}
-	printShowSummary(in.Out, resolved[0])
-	printShowFindings(in.Out, resolved[0])
+	return emitShow(ctx, in, deps, resolved[0])
+}
+
+// emitShow renders a resolved manifest either to the terminal (default) or as
+// an HTML page (in.HTML).
+func emitShow(ctx context.Context, in ShowInput, deps ShowDeps, m LocalManifest) error {
+	if in.HTML {
+		return emitShowHTML(ctx, in, deps, m)
+	}
+	printShowSummary(in.Out, m)
+	printShowFindings(in.Out, m)
+	return nil
+}
+
+// emitShowHTML renders m to findings.html in the per-run directory, prints the
+// path, and opens it in the browser. A manifest with no findings body prints
+// the same soft notice as the terminal path and writes nothing. Browser-open
+// failures are non-fatal: the path is already printed for manual opening.
+func emitShowHTML(ctx context.Context, in ShowInput, deps ShowDeps, m LocalManifest) error {
+	doc, err := RenderFindingsHTML(m)
+	if errors.Is(err, errNoFindingsContent) {
+		fmt.Fprintf(in.Out, "No findings content available for run %s.\n", m.RunID)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("render findings html: %w", err)
+	}
+
+	dir := deps.ManifestStore.RunDir(m.RunID)
+	if mkErr := os.MkdirAll(dir, 0o750); mkErr != nil {
+		return fmt.Errorf("create investigation dir: %w", mkErr)
+	}
+	htmlPath := filepath.Join(dir, "findings.html")
+	// 0o600: findings embed the user-supplied prompt and findings body, matching
+	// the mode used for findings.md / state.json.
+	if writeErr := os.WriteFile(htmlPath, []byte(doc), 0o600); writeErr != nil {
+		return fmt.Errorf("write findings html: %w", writeErr)
+	}
+	// Print/open an absolute path: the git common dir resolves relative to cwd,
+	// and a relative path is fragile for the user to open and for the OS opener
+	// to resolve. Best-effort — fall back to the joined path on failure.
+	if abs, absErr := filepath.Abs(htmlPath); absErr == nil {
+		htmlPath = abs
+	}
+	fmt.Fprintf(in.Out, "Wrote %s\n", htmlPath)
+
+	// Non-fatal: a headless host (or a missing opener) just means the user opens
+	// the printed path themselves.
+	_ = openInBrowser(ctx, htmlPath) //nolint:errcheck // best-effort; path already printed
 	return nil
 }
 
@@ -130,24 +176,34 @@ func printShowSummary(w io.Writer, m LocalManifest) {
 // cancelled runs). Body is rendered through mdrender for terminal
 // output; raw markdown passes through for piped/NO_COLOR output.
 func printShowFindings(w io.Writer, m LocalManifest) {
-	body := ""
+	body := findingsBody(m)
+	if body == "" {
+		fmt.Fprintf(w, "No findings content available for run %s.\n", m.RunID)
+		return
+	}
+	// Reorder/filter sections to match the HTML view so both outputs agree.
+	writeRenderedFindings(w, orderedFindingsMarkdown(body))
+}
+
+// findingsBody returns the findings markdown for m, preferring the manifest's
+// embedded content (set on terminal outcomes) and falling back to the on-disk
+// findings file (still present for paused / cancelled runs). Returns "" when
+// neither source yields content. Shared by the terminal renderer and the HTML
+// renderer so both resolve findings identically.
+func findingsBody(m LocalManifest) string {
 	switch {
 	case m.FindingsContent != "":
-		body = m.FindingsContent
+		return m.FindingsContent
 	case m.FindingsDoc != "" && filepath.IsAbs(m.FindingsDoc):
 		// FindingsDoc is contractually absolute (see LocalManifest docs).
 		// Refuse to read relative paths: those would resolve against the
 		// current process cwd, which may differ from where the run wrote
 		// findings.md, and could surface unrelated content.
 		if data, err := os.ReadFile(m.FindingsDoc); err == nil {
-			body = string(data)
+			return string(data)
 		}
 	}
-	if body == "" {
-		fmt.Fprintf(w, "No findings content available for run %s.\n", m.RunID)
-		return
-	}
-	writeRenderedFindings(w, body)
+	return ""
 }
 
 // writeRenderedFindings renders findings markdown to w, ensuring a trailing

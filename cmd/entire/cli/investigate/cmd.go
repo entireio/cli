@@ -236,7 +236,8 @@ func newFixSubcommand(deps Deps) *cobra.Command {
 
 // newShowSubcommand wires `entire investigate show [run-id]` to RunShow.
 func newShowSubcommand(deps Deps) *cobra.Command {
-	return &cobra.Command{
+	var asHTML bool
+	cmd := &cobra.Command{
 		Use:   "show [run-id]",
 		Short: "Print a saved investigation's summary and findings",
 		Args: func(_ *cobra.Command, args []string) error {
@@ -264,9 +265,13 @@ func newShowSubcommand(deps Deps) *cobra.Command {
 				RunID:  runID,
 				Out:    cmd.OutOrStdout(),
 				ErrOut: cmd.ErrOrStderr(),
+				HTML:   asHTML,
 			}, ShowDeps{ManifestStore: store})
 		},
 	}
+	cmd.Flags().BoolVar(&asHTML, "html", false,
+		"render findings to a styled HTML page and open it in the browser")
+	return cmd
 }
 
 // newCleanSubcommand wires `entire investigate clean [run-id]` to RunClean.
