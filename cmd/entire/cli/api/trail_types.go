@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/trail"
@@ -48,10 +49,17 @@ type TrailResource struct {
 	BodyDocument *TrailBodyDocument `json:"body_document,omitempty"`
 }
 
-// TrailBodyDocument is the trail's description editor document. TextSnapshot is
-// the rendered plain text the CLI displays.
+// TrailBodyDocument is the trail's description editor document.
+//
+// TextSnapshot is a lossy, rendered plain-text projection of the document.
+// Markdown is the formatting-preserving serialization; prefer it over
+// TextSnapshot. It is a raw message to distinguish three server states: absent
+// (an old server predating the field — fall back to TextSnapshot), JSON null (a
+// new server that could not losslessly serialize this body — must NOT be edited
+// and re-saved as flattened text), and a string (the markdown to use).
 type TrailBodyDocument struct {
-	TextSnapshot string `json:"text_snapshot"`
+	TextSnapshot string          `json:"text_snapshot"`
+	Markdown     json.RawMessage `json:"markdown"`
 }
 
 // ToMetadata converts a TrailResource to a trail.Metadata for display.

@@ -1002,20 +1002,25 @@ func TestInteractiveBodySeed(t *testing.T) {
 	t.Parallel()
 
 	// Fetch error → omit the field so a transient failure can't blank the doc.
-	if seed, loaded := interactiveBodySeed("", false, errors.New("boom"), "list body"); loaded || seed != "" {
+	if seed, loaded := interactiveBodySeed(trailBody{}, errors.New("boom"), "list body"); loaded || seed != "" {
 		t.Fatalf("fetch error → (%q, %v), want (\"\", false)", seed, loaded)
 	}
-	// Document present → seed from the fetched snapshot verbatim.
-	if seed, loaded := interactiveBodySeed("doc body", true, nil, "list body"); !loaded || seed != "doc body" {
-		t.Fatalf("present doc → (%q, %v), want (\"doc body\", true)", seed, loaded)
+	// Editable document present → seed from the fetched body verbatim.
+	if seed, loaded := interactiveBodySeed(trailBody{text: "doc body", exists: true, editable: true}, nil, "list body"); !loaded || seed != "doc body" {
+		t.Fatalf("present editable doc → (%q, %v), want (\"doc body\", true)", seed, loaded)
 	}
 	// Document absent but a list body exists → fall back to it, do NOT show blank.
-	if seed, loaded := interactiveBodySeed("", false, nil, "list body"); !loaded || seed != "list body" {
+	if seed, loaded := interactiveBodySeed(trailBody{exists: false}, nil, "list body"); !loaded || seed != "list body" {
 		t.Fatalf("absent doc with list body → (%q, %v), want (\"list body\", true)", seed, loaded)
 	}
 	// Document absent and no list body → an empty, editable field is correct.
-	if seed, loaded := interactiveBodySeed("", false, nil, ""); !loaded || seed != "" {
+	if seed, loaded := interactiveBodySeed(trailBody{exists: false}, nil, ""); !loaded || seed != "" {
 		t.Fatalf("absent doc no list body → (%q, %v), want (\"\", true)", seed, loaded)
+	}
+	// Present but not editable (server returned markdown:null) → omit the field so
+	// the CLI can't flatten a body it can't losslessly round-trip.
+	if seed, loaded := interactiveBodySeed(trailBody{text: "flattened", exists: true, editable: false}, nil, "list body"); loaded || seed != "" {
+		t.Fatalf("non-editable doc → (%q, %v), want (\"\", false)", seed, loaded)
 	}
 }
 
@@ -1629,42 +1634,73 @@ func TestApplyTrailUpdateReportsPartialFailureWhenBodyPatchFails(t *testing.T) {
 	}
 }
 
-func TestFetchTrailBodyReturnsRawUntrimmedSnapshot(t *testing.T) {
-	t.Parallel()
+func trailBodyServer(t *testing.T, json string) *api.Client {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if _, err := io.WriteString(w, `{"trail":{"number":5,"body_document":{"text_snapshot":"  spaced body \n"}}}`); err != nil {
+		if _, err := io.WriteString(w, json); err != nil {
 			t.Errorf("write response: %v", err)
 		}
 	}))
-	defer srv.Close()
-	client := api.NewClientWithBaseURL("tok", srv.URL)
+	t.Cleanup(srv.Close)
+	return api.NewClientWithBaseURL("tok", srv.URL)
+}
 
-	// fetchTrailBody returns the snapshot verbatim, so an edited interactive save
-	// preserves the document's original surrounding whitespace.
-	raw, exists, err := fetchTrailBody(t.Context(), client, "gh", "acme", "repo", 5)
-	if err != nil || !exists || raw != "  spaced body \n" {
-		t.Fatalf("fetchTrailBody = (%q, %v, %v), want (%q, true, nil)", raw, exists, err, "  spaced body \n")
+func TestFetchTrailBodyPrefersMarkdown(t *testing.T) {
+	t.Parallel()
+	// A new server (PR #2574) returns markdown; the CLI must seed from it (not the
+	// flattened text_snapshot) so formatting survives an edit round-trip.
+	client := trailBodyServer(t, `{"trail":{"number":5,"body_document":{"text_snapshot":"H b","markdown":"# H\n\n**b**"}}}`)
+	body, err := fetchTrailBody(t.Context(), client, "gh", "acme", "repo", 5)
+	if err != nil || !body.exists || !body.editable || body.text != "# H\n\n**b**" {
+		t.Fatalf("fetchTrailBody = %+v (err %v), want text markdown, exists+editable", body, err)
+	}
+}
+
+func TestFetchTrailBodyFallsBackToSnapshotWhenMarkdownAbsent(t *testing.T) {
+	t.Parallel()
+	// An old server (pre-#2574) omits the markdown field entirely → fall back to the
+	// raw, untrimmed text_snapshot, still editable (its prior behavior).
+	client := trailBodyServer(t, `{"trail":{"number":5,"body_document":{"text_snapshot":"  spaced body \n"}}}`)
+	body, err := fetchTrailBody(t.Context(), client, "gh", "acme", "repo", 5)
+	if err != nil || !body.exists || !body.editable || body.text != "  spaced body \n" {
+		t.Fatalf("fetchTrailBody = %+v (err %v), want raw snapshot, exists+editable", body, err)
 	}
 
-	// fetchTrailDescription (used by `show`) still trims for display.
+	// fetchTrailDescription (used by `show`) trims for display.
 	desc, err := fetchTrailDescription(t.Context(), client, "gh", "acme", "repo", 5)
 	if err != nil || desc != "spaced body" {
 		t.Fatalf("fetchTrailDescription = (%q, %v), want (%q, nil)", desc, err, "spaced body")
 	}
 }
 
+func TestFetchTrailBodyRefusesNullMarkdown(t *testing.T) {
+	t.Parallel()
+	// A new server that could NOT losslessly serialize the body sends markdown:null.
+	// The body is marked non-editable so the CLI never flattens it on save; the
+	// text_snapshot is still carried for display-only use.
+	client := trailBodyServer(t, `{"trail":{"number":5,"body_document":{"text_snapshot":"flattened","markdown":null}}}`)
+	body, err := fetchTrailBody(t.Context(), client, "gh", "acme", "repo", 5)
+	if err != nil || !body.exists || body.editable || body.text != "flattened" {
+		t.Fatalf("fetchTrailBody = %+v (err %v), want exists, NOT editable, text=snapshot", body, err)
+	}
+}
+
+func TestFetchTrailBodyRendersMarkdownInShow(t *testing.T) {
+	t.Parallel()
+	// `show` renders the markdown (trimmed), not the flattened snapshot.
+	client := trailBodyServer(t, `{"trail":{"number":5,"body_document":{"text_snapshot":"H","markdown":"\n# H\n\n**b**\n"}}}`)
+	desc, err := fetchTrailDescription(t.Context(), client, "gh", "acme", "repo", 5)
+	if err != nil || desc != "# H\n\n**b**" {
+		t.Fatalf("fetchTrailDescription = (%q, %v), want trimmed markdown", desc, err)
+	}
+}
+
 func TestFetchTrailBodyReportsMissingDocument(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if _, err := io.WriteString(w, `{"trail":{"number":5}}`); err != nil {
-			t.Errorf("write response: %v", err)
-		}
-	}))
-	defer srv.Close()
-	client := api.NewClientWithBaseURL("tok", srv.URL)
-	raw, exists, err := fetchTrailBody(t.Context(), client, "gh", "acme", "repo", 5)
-	if err != nil || exists || raw != "" {
-		t.Fatalf("fetchTrailBody (no doc) = (%q, %v, %v), want (\"\", false, nil)", raw, exists, err)
+	client := trailBodyServer(t, `{"trail":{"number":5}}`)
+	body, err := fetchTrailBody(t.Context(), client, "gh", "acme", "repo", 5)
+	if err != nil || body.exists || body.text != "" {
+		t.Fatalf("fetchTrailBody (no doc) = %+v (err %v), want zero value", body, err)
 	}
 }
 

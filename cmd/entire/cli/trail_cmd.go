@@ -278,41 +278,70 @@ func trailWebURL(base, forge, owner, repo string, number int) string {
 	return strings.TrimRight(base, "/") + "/" + forge + "/" + owner + "/" + repo + "/trails/" + strconv.Itoa(number)
 }
 
-// fetchTrailBody fetches a trail's raw body text (`trail.body_document.
-// text_snapshot`, untrimmed), which the list endpoint omits, by integer number.
-// It returns the snapshot verbatim and whether a body document exists, so an
-// edited interactive save preserves the document's original whitespace. It
-// decodes only the fields it needs, so it is unaffected by the shape of sibling
-// fields like `checkpoints`/`thread`.
-func fetchTrailBody(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, bool, error) {
+// trailBody is the resolved body of a trail's editor document.
+//
+//   - text is the best available body text: the formatting-preserving markdown
+//     when the server provides it, else the legacy lossy text_snapshot.
+//   - exists is true when the trail has a body document at all.
+//   - editable is true when text is safe to seed into an editor and write back
+//     verbatim. It is false only when a new server returned markdown:null (it
+//     could not losslessly serialize the body); text then holds the flattened
+//     snapshot for display, and must never be saved back as the body.
+type trailBody struct {
+	text     string
+	exists   bool
+	editable bool
+}
+
+// fetchTrailBody fetches a trail's body (`trail.body_document`), which the list
+// endpoint omits, by integer number. It prefers the formatting-preserving
+// `markdown` field, falling back to the raw `text_snapshot` on older servers
+// that predate it. It decodes only the fields it needs, so it is unaffected by
+// the shape of sibling fields like `checkpoints`/`thread`.
+func fetchTrailBody(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (trailBody, error) {
 	resp, err := client.Get(ctx, trailNumberPath(forge, owner, repo, number))
 	if err != nil {
-		return "", false, fmt.Errorf("failed to fetch trail detail: %w", err)
+		return trailBody{}, fmt.Errorf("failed to fetch trail detail: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		return "", false, err
+		return trailBody{}, err
 	}
 	var detail struct {
 		Trail api.TrailResource `json:"trail"`
 	}
 	if err := api.DecodeJSON(resp, &detail); err != nil {
-		return "", false, fmt.Errorf("failed to decode trail detail: %w", err)
+		return trailBody{}, fmt.Errorf("failed to decode trail detail: %w", err)
 	}
-	if detail.Trail.BodyDocument == nil {
-		return "", false, nil
+	doc := detail.Trail.BodyDocument
+	if doc == nil {
+		return trailBody{}, nil
 	}
-	return detail.Trail.BodyDocument.TextSnapshot, true, nil
+	switch {
+	case len(doc.Markdown) == 0:
+		// Old server (field absent): the snapshot is the only body we have.
+		return trailBody{text: doc.TextSnapshot, exists: true, editable: true}, nil
+	case string(doc.Markdown) == "null":
+		// New server that could not serialize the body losslessly: keep the
+		// snapshot for display only; the body is not safe to edit and re-save.
+		return trailBody{text: doc.TextSnapshot, exists: true, editable: false}, nil
+	default:
+		var md string
+		if err := json.Unmarshal(doc.Markdown, &md); err != nil {
+			return trailBody{}, fmt.Errorf("failed to decode trail body markdown: %w", err)
+		}
+		return trailBody{text: md, exists: true, editable: true}, nil
+	}
 }
 
 // fetchTrailDescription returns the trail's body trimmed for display (used by
 // `trail show`). Editing paths use fetchTrailBody to keep the raw text.
 func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, error) {
-	body, _, err := fetchTrailBody(ctx, client, forge, owner, repo, number)
+	body, err := fetchTrailBody(ctx, client, forge, owner, repo, number)
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(body), nil
+	return strings.TrimSpace(body.text), nil
 }
 
 func newTrailListCmd() *cobra.Command {
@@ -1076,18 +1105,22 @@ func interactiveUpdateInputs(seed, edited trailUpdateEdits) trailUpdateInputs {
 }
 
 // interactiveBodySeed picks the seed for the interactive Body field from a
-// fetchTrailBody result and the list body. A fetch error omits the field
-// (loaded=false) so a transient failure can't blank the document; an absent
-// document falls back to the list body so a description that is present isn't
-// shown blank and silently overwritten.
-func interactiveBodySeed(fetched string, exists bool, fetchErr error, listBody string) (seed string, loaded bool) {
+// fetchTrailBody result and the list body, and whether the field should be
+// shown at all. A fetch error omits the field so a transient failure can't blank
+// the document; an absent document falls back to the list body so a present
+// description isn't shown blank and silently overwritten; a non-editable body
+// (server returned markdown:null) is omitted so the CLI can't save it back as
+// flattened text.
+func interactiveBodySeed(body trailBody, fetchErr error, listBody string) (seed string, loaded bool) {
 	switch {
 	case fetchErr != nil:
 		return "", false
-	case exists:
-		return fetched, true
-	default:
+	case !body.exists:
 		return listBody, true
+	case !body.editable:
+		return "", false
+	default:
+		return body.text, true
 	}
 }
 
@@ -1154,19 +1187,23 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, stdin io.Reader, ins
 				statusOptions = append(statusOptions, huh.NewOption(label, string(s)))
 			}
 			// Seed the body from the real collaborative document (body_document),
-			// using the raw snapshot so an edit preserves the document's whitespace.
-			// If the document is absent (an older/partial server that omits it), fall
-			// back to the list body so a description that IS present isn't shown blank
-			// and silently overwritten — the `show` path guards this same case. If the
-			// fetch fails outright, omit the body field so status/title stay editable
-			// and a transient error can't blank a document that merely failed to load.
+			// preferring its formatting-preserving markdown. If the document is absent
+			// (an older/partial server), fall back to the list body so a description
+			// that IS present isn't shown blank and silently overwritten — the `show`
+			// path guards this same case. If the fetch fails outright, or the server
+			// could not serialize the body to markdown (markdown:null), omit the body
+			// field so status/title stay editable and the CLI can't blank or flatten a
+			// document it can't safely round-trip.
 			seedStatus := string(metadata.Status)
 			seedTitle := metadata.Title
-			bt, exists, derr := fetchTrailBody(ctx, client, forge, owner, repoName, found.Number)
-			if derr != nil {
+			body0, derr := fetchTrailBody(ctx, client, forge, owner, repoName, found.Number)
+			switch {
+			case derr != nil:
 				fmt.Fprintf(errW, "Warning: could not load the current body to edit (%v); leaving it unchanged. Use --body or --body-file to set it.\n", derr)
+			case body0.exists && !body0.editable:
+				fmt.Fprintf(errW, "Warning: this trail's body has formatting the CLI can't edit losslessly; leaving it unchanged. Edit it in the web editor, or replace it with --body or --body-file.\n")
 			}
-			seedBody, bodyLoaded := interactiveBodySeed(bt, exists, derr, metadata.Body)
+			seedBody, bodyLoaded := interactiveBodySeed(body0, derr, metadata.Body)
 			body = seedBody
 			statusStr := seedStatus
 			title := seedTitle
