@@ -617,6 +617,7 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 		if err := hookAgent.UninstallHooks(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err))
 		} else {
+			uninstallAgentStatusLineBestEffort(ctx, ag)
 			uninstalledAgents = append(uninstalledAgents, ag)
 		}
 	}
@@ -1305,6 +1306,7 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 	if err := hookAgent.UninstallHooks(ctx); err != nil {
 		return fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err)
 	}
+	uninstallAgentStatusLineBestEffort(ctx, ag)
 
 	fmt.Fprintf(w, "Removed %s hooks.\n", ag.Type())
 	return nil
@@ -1359,6 +1361,7 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 		if err := hookAgent.UninstallHooks(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to uninstall %s hooks: %w", ag.Type(), err))
 		} else {
+			uninstallAgentStatusLineBestEffort(ctx, ag)
 			fmt.Fprintf(w, "Removed %s hooks\n", ag.Type())
 		}
 	}
@@ -1378,7 +1381,42 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, localDev, forceHooks b
 		return 0, fmt.Errorf("failed to install %s hooks: %w", ag.Name(), err)
 	}
 
+	// Best-effort: install the trail status line (Claude Code) and warm the
+	// trail-status cache so the first status-line poll / session-start banner
+	// renders immediately. Neither is essential to enabling the agent, so a
+	// failure is logged but does not fail setup.
+	installAgentStatusLineBestEffort(ctx, ag, localDev)
+	warmTrailStatusCacheBestEffort(ctx, false)
+
 	return count, nil
+}
+
+// installAgentStatusLineBestEffort installs Entire's trail status line for
+// agents that support one (e.g. Claude Code). It is a no-op for other agents,
+// which surface the trail through the session-start banner instead.
+func installAgentStatusLineBestEffort(ctx context.Context, ag agent.Agent, localDev bool) {
+	sl, ok := agent.AsStatusLineSupport(ag)
+	if !ok {
+		return
+	}
+	if _, err := sl.InstallStatusLine(ctx, localDev); err != nil {
+		logging.Warn(ctx, "failed to install trail status line",
+			"agent", string(ag.Name()), "error", err.Error())
+	}
+}
+
+// uninstallAgentStatusLineBestEffort removes Entire's trail status line for
+// agents that support one. It is idempotent and leaves a user-configured
+// status line untouched.
+func uninstallAgentStatusLineBestEffort(ctx context.Context, ag agent.Agent) {
+	sl, ok := agent.AsStatusLineSupport(ag)
+	if !ok {
+		return
+	}
+	if err := sl.UninstallStatusLine(ctx); err != nil {
+		logging.Warn(ctx, "failed to remove trail status line",
+			"agent", string(ag.Name()), "error", err.Error())
+	}
 }
 
 // detectOrSelectAgent tries to auto-detect agents, or prompts the user to select.
@@ -2189,8 +2227,11 @@ func removeAgentHooks(ctx context.Context, w io.Writer) error {
 		wasInstalled := hs.AreHooksInstalled(ctx)
 		if err := hs.UninstallHooks(ctx); err != nil {
 			errs = append(errs, err)
-		} else if wasInstalled {
-			fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
+		} else {
+			uninstallAgentStatusLineBestEffort(ctx, ag)
+			if wasInstalled {
+				fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
+			}
 		}
 	}
 	return errors.Join(errs...)

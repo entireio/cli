@@ -120,6 +120,30 @@ type HookSupport interface {
 	AreHooksInstalled(ctx context.Context) bool
 }
 
+// StatusLineSupport is implemented by agents that render a persistent status
+// line (e.g. Claude Code's statusLine). It lets Entire install a command that
+// shows the connected trail for the current branch and remove it again on
+// disable. Agents without a status line (Codex, Cursor, …) do not implement
+// this — the trail summary reaches them through the session-start banner.
+type StatusLineSupport interface {
+	Agent
+
+	// InstallStatusLine installs (or upgrades) Entire's trail status line in
+	// the agent's settings. It must not clobber a status line the user
+	// configured themselves: implementations install only when no status line
+	// exists or the existing one is Entire's. Returns true when a status line
+	// was written, false when it was intentionally left untouched.
+	// If localDev is true, the command points at the local development build.
+	InstallStatusLine(ctx context.Context, localDev bool) (bool, error)
+
+	// UninstallStatusLine removes Entire's status line, leaving a
+	// user-configured one untouched.
+	UninstallStatusLine(ctx context.Context) error
+
+	// IsStatusLineInstalled reports whether Entire's status line is installed.
+	IsStatusLineInstalled(ctx context.Context) bool
+}
+
 // FileWatcher is implemented by agents that use file-based detection.
 // Agents like Aider that don't support hooks can use file watching
 // to detect session activity.

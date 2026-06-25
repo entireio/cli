@@ -59,6 +59,7 @@ func newTrailCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newTrailShowCmd())
+	cmd.AddCommand(newTrailStatusCmd())
 	cmd.AddCommand(newTrailListCmd())
 	cmd.AddCommand(newTrailCreateCmd())
 	cmd.AddCommand(newTrailUpdateCmd())

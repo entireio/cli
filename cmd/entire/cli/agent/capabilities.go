@@ -29,6 +29,7 @@ type DeclaredCaps struct {
 	TextGenerator          bool `json:"text_generator"`
 	HookResponseWriter     bool `json:"hook_response_writer"`
 	SubagentAwareExtractor bool `json:"subagent_aware_extractor"`
+	StatusLine             bool `json:"status_line"`
 }
 
 // AsHookSupport returns the agent as HookSupport if it both implements the
@@ -45,6 +46,22 @@ func AsHookSupport(ag Agent) (HookSupport, bool) {
 		return hs, cd.DeclaredCapabilities().Hooks
 	}
 	return hs, true
+}
+
+// AsStatusLineSupport returns the agent as StatusLineSupport if it both
+// implements the interface and (for CapabilityDeclarer agents) has declared the capability.
+func AsStatusLineSupport(ag Agent) (StatusLineSupport, bool) {
+	if ag == nil {
+		return nil, false
+	}
+	sl, ok := ag.(StatusLineSupport)
+	if !ok {
+		return nil, false
+	}
+	if cd, ok := ag.(CapabilityDeclarer); ok {
+		return sl, cd.DeclaredCapabilities().StatusLine
+	}
+	return sl, true
 }
 
 // AsTranscriptAnalyzer returns the agent as TranscriptAnalyzer if it both

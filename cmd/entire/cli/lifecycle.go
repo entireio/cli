@@ -198,6 +198,17 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 		}
 	}
 
+	// Surface the connected trail for the current branch (cache-only, so it
+	// never slows session start). Agents that render Entire's status line show
+	// it there instead and return "" here.
+	if banner := sessionStartTrailBanner(ctx, ag); banner != "" {
+		if ag.Name() == agent.AgentNameCodex {
+			message += " " + banner
+		} else {
+			message += "\n  " + banner
+		}
+	}
+
 	// Output informational message if the agent supports hook responses.
 	// Claude Code reads JSON from stdout; agents that don't implement
 	// HookResponseWriter silently skip (avoids raw JSON in their terminal).
