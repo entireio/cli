@@ -75,22 +75,14 @@ func Sync(ctx context.Context, repo *git.Repository, target Target) (State, erro
 	}
 
 	if local.Hash.IsZero() {
-		if err := SetRef(repo, RefName, baseline.Hash); err != nil {
-			return State{}, err
-		}
-		baseline.Source = SourceRemote
-		return baseline, nil
+		return adoptRemoteBaseline(repo, baseline)
 	}
 	localAncestor, err := isAncestorOf(ctx, repo, local.Hash, baseline.Hash)
 	if err != nil {
 		return State{}, err
 	}
 	if localAncestor {
-		if err := SetRef(repo, RefName, baseline.Hash); err != nil {
-			return State{}, err
-		}
-		baseline.Source = SourceRemote
-		return baseline, nil
+		return adoptRemoteBaseline(repo, baseline)
 	}
 
 	baselineAncestor, err := isAncestorOf(ctx, repo, baseline.Hash, local.Hash)
@@ -105,6 +97,14 @@ func Sync(ctx context.Context, repo *git.Repository, target Target) (State, erro
 	local.Source = SourceLocalDiverged
 	local.RemoteHash = baseline.RemoteHash
 	return local, nil
+}
+
+func adoptRemoteBaseline(repo *git.Repository, baseline State) (State, error) {
+	if err := SetRef(repo, RefName, baseline.Hash); err != nil {
+		return State{}, err
+	}
+	baseline.Source = SourceRemote
+	return baseline, nil
 }
 
 func remoteBaseline(ctx context.Context, repo *git.Repository, target Target, local State) (State, bool, error) {
