@@ -1087,14 +1087,17 @@ func writeInvestigateFooter(w io.Writer, m LocalManifest) {
 		fmt.Fprintln(w)
 	}
 
-	// For terminal outcomes, suggest `fix` (which feeds findings into a
-	// coding agent). For paused/cancelled, `fix` would launch off stale
-	// partial findings; the resume hint above is the right next step
-	// instead.
+	// For terminal outcomes, point at the HTML view first (read the findings
+	// in a browser), then suggest `fix` (which feeds findings into a coding
+	// agent). For paused/cancelled, `fix` would launch off stale partial
+	// findings; the resume hint above is the right next step instead.
 	switch m.Outcome {
 	case string(OutcomePaused), string(OutcomeCancelled):
 		// Resume hint already emitted above.
 	default:
+		fmt.Fprintln(w, "To view these findings in your browser:")
+		fmt.Fprintf(w, "  entire investigate show %s --html\n", m.RunID)
+		fmt.Fprintln(w)
 		fmt.Fprintln(w, "To apply these findings:")
 		fmt.Fprintf(w, "  entire investigate fix %s\n", m.RunID)
 	}

@@ -265,6 +265,14 @@ func TestNewCommand_FreshRunWritesManifest(t *testing.T) {
 	if !strings.Contains(out.String(), "entire investigate fix") {
 		t.Errorf("expected fix hint in output, got:\n%s", out.String())
 	}
+	// ...and how to view the findings as HTML, shown before the fix hint.
+	htmlHint := "entire investigate show " + captured.RunID + " --html"
+	if !strings.Contains(out.String(), htmlHint) {
+		t.Errorf("expected HTML view hint %q in output, got:\n%s", htmlHint, out.String())
+	}
+	if strings.Index(out.String(), htmlHint) > strings.Index(out.String(), "entire investigate fix "+captured.RunID) {
+		t.Errorf("HTML view hint should appear before the fix hint, got:\n%s", out.String())
+	}
 	// Footer should embed the findings body (rendered via mdrender;
 	// out is a bytes.Buffer so mdrender falls back to raw markdown,
 	// and the scaffold's `# Investigation:` header is a stable anchor).
