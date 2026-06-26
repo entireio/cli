@@ -174,10 +174,10 @@ func newTrailFindingAddCmd(targetOpts *trailReviewTargetOptions) *cobra.Command 
 	cmd.Flags().StringVarP(&opts.Body, "body", "m", "", "Finding body")
 	cmd.Flags().StringVar(&opts.Severity, "severity", "", "Finding severity: high,medium,low")
 	cmd.Flags().Float64Var(&opts.Confidence, "confidence", -1, "Finding confidence from 0.0 to 1.0")
-	cmd.Flags().StringVar(&opts.FilePath, "file", "", "File path for the finding location")
-	cmd.Flags().IntVar(&opts.Line, "line", 0, "Line number for the finding location")
-	cmd.Flags().IntVar(&opts.StartLine, "start-line", 0, "Start line for the finding location")
-	cmd.Flags().IntVar(&opts.EndLine, "end-line", 0, "End line for the finding location")
+	cmd.Flags().StringVar(&opts.FilePath, "file", "", "File path or path:line[-end] for the finding location")
+	cmd.Flags().IntVar(&opts.Line, "line", 0, "Compatibility alias for --file path:line")
+	cmd.Flags().IntVar(&opts.StartLine, "start-line", 0, "Compatibility alias for --file path:start[-end]")
+	cmd.Flags().IntVar(&opts.EndLine, "end-line", 0, "Compatibility alias for --file path:start-end")
 	cmd.Flags().StringVar(&opts.ClientID, "client-id", "", "Client-provided idempotency key for this finding")
 	cmd.Flags().StringVar(&opts.Patch, "patch", "", "Unified-diff suggested change to attach")
 	cmd.Flags().StringVar(&opts.PatchFile, "patch-file", "", "Read unified-diff suggested change from file; use '-' for stdin")
@@ -793,8 +793,24 @@ func buildTrailReviewCommentConfidence(confidence float64) (float64, bool, error
 func buildTrailReviewCommentLocation(opts trailReviewCommentAddOptions) (api.TrailReviewLocationCreateRequest, error) {
 	filePath := strings.TrimSpace(opts.FilePath)
 	line := opts.Line
+	endLine := opts.EndLine
 	if line < 0 || opts.StartLine < 0 || opts.EndLine < 0 {
 		return api.TrailReviewLocationCreateRequest{}, errors.New("line numbers must be non-negative")
+	}
+	var lineRange *attributionLineRange
+	var err error
+	filePath, lineRange, err = splitTrailReviewFileLineSpec(filePath)
+	if err != nil {
+		return api.TrailReviewLocationCreateRequest{}, err
+	}
+	if lineRange != nil {
+		if line > 0 || opts.StartLine > 0 || endLine > 0 {
+			return api.TrailReviewLocationCreateRequest{}, errors.New("pass either --file path:line[-end] or --line/--start-line/--end-line, not both")
+		}
+		line = lineRange.Start
+		if lineRange.End != lineRange.Start {
+			endLine = lineRange.End
+		}
 	}
 	if opts.StartLine > 0 {
 		if line > 0 {
@@ -802,13 +818,13 @@ func buildTrailReviewCommentLocation(opts trailReviewCommentAddOptions) (api.Tra
 		}
 		line = opts.StartLine
 	}
-	if filePath == "" && (line > 0 || opts.EndLine > 0) {
+	if filePath == "" && (line > 0 || endLine > 0) {
 		return api.TrailReviewLocationCreateRequest{}, errors.New("--line/--start-line/--end-line require --file")
 	}
-	if opts.EndLine > 0 && line == 0 {
+	if endLine > 0 && line == 0 {
 		return api.TrailReviewLocationCreateRequest{}, errors.New("--end-line requires --line or --start-line")
 	}
-	if opts.EndLine > 0 && opts.EndLine < line {
+	if endLine > 0 && endLine < line {
 		return api.TrailReviewLocationCreateRequest{}, errors.New("--end-line must be greater than or equal to the start line")
 	}
 
@@ -821,14 +837,44 @@ func buildTrailReviewCommentLocation(opts trailReviewCommentAddOptions) (api.Tra
 	if line > 0 {
 		loc.Granularity = reviewTrailGranularityLine
 		loc.StartLine = &line
-		if opts.EndLine > 0 {
-			loc.EndLine = &opts.EndLine
-			if opts.EndLine != line {
+		if endLine > 0 {
+			loc.EndLine = &endLine
+			if endLine != line {
 				loc.Granularity = reviewTrailGranularityRange
 			}
 		}
 	}
 	return loc, nil
+}
+
+func splitTrailReviewFileLineSpec(input string) (string, *attributionLineRange, error) {
+	colon := strings.LastIndex(input, ":")
+	if colon == -1 || colon == len(input)-1 {
+		return input, nil, nil
+	}
+	if volume := filepath.VolumeName(input); volume != "" && colon < len(volume) {
+		return input, nil, nil
+	}
+	lineSpec := input[colon+1:]
+	if !trailReviewLineSpecCandidate(lineSpec) {
+		return input, nil, nil
+	}
+	filePath := strings.TrimSpace(input[:colon])
+	if filePath == "" {
+		return "", nil, fmt.Errorf("invalid --file location %q: missing file path before line", input)
+	}
+	lineRange, err := parseAttributionLineRange(lineSpec)
+	if err != nil {
+		return "", nil, fmt.Errorf("invalid --file location %q: use path:line or path:start-end", input)
+	}
+	return filePath, lineRange, nil
+}
+
+func trailReviewLineSpecCandidate(input string) bool {
+	if input == "" {
+		return false
+	}
+	return input[0] >= '0' && input[0] <= '9'
 }
 
 // createTrailReviewFinding posts a single finding through the current API flow:
@@ -1386,7 +1432,7 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Actions:")
 	fmt.Fprintln(w, "  entire trail finding show <finding-id>")
-	fmt.Fprintln(w, "  entire trail finding add -m \"finding body\" --file path --line 42")
+	fmt.Fprintln(w, "  entire trail finding add -m \"finding body\" --file path:42")
 	fmt.Fprintln(w, "  entire trail finding update <finding-id> -m \"updated body\"")
 	fmt.Fprintln(w, "  entire trail finding apply <finding-id> --resolve")
 	fmt.Fprintln(w, "  entire trail finding resolve <finding-id> -m \"fixed in <sha>\"")
