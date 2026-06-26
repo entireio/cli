@@ -69,6 +69,13 @@ var linkRe = regexp.MustCompile(`\s*(?:` +
 // wrapper. We extract the id and the inner label regardless of shape.
 var nodeRe = regexp.MustCompile(`^([A-Za-z0-9_]+)\s*(\[\[.*\]\]|\(\(.*\)\)|\[.*\]|\(.*\)|\{.*\}|>.*\])?$`)
 
+// classSuffixRe matches a trailing Mermaid `:::class` inline class assignment
+// (`A:::dead`, `A["label"]:::dead`). It is styling we render transparently, so
+// the suffix is stripped before a token is parsed. Anchored to the end and
+// limited to a bare class identifier, so a `:::` inside a quoted label
+// (`A["a:::b"]`) is left intact.
+var classSuffixRe = regexp.MustCompile(`:::[A-Za-z0-9_]+$`)
+
 // headerRe matches the `flowchart`/`graph` declaration line.
 var headerRe = regexp.MustCompile(`^(?:flowchart|graph)\b`)
 
@@ -206,6 +213,9 @@ func parseLine(line string) ([]nodeDecl, []outEdgeWithFrom, bool) {
 // isn't a lone node reference.
 func parseNodeToken(s string) (id, label string, ok bool) {
 	s = strings.TrimSpace(s)
+	// Drop a trailing `:::class` inline class assignment — Mermaid styling we
+	// render transparently, like the classDef/class/style directives.
+	s = strings.TrimSpace(classSuffixRe.ReplaceAllString(s, ""))
 	m := nodeRe.FindStringSubmatch(s)
 	if m == nil {
 		return "", "", false

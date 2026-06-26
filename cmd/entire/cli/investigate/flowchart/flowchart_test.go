@@ -150,6 +150,19 @@ func TestRender_EdgeSyntaxVariants(t *testing.T) {
 			wantOrder: []string{"A", "B", "C"},
 		},
 		{
+			// `:::class` inline class assignments are styling we render
+			// transparently — they must not force a raw fallback.
+			name:      "inline class assignment on a node",
+			src:       "flowchart LR\n  A[Start]:::dead --> B[End]\n  classDef dead stroke-dasharray: 5 5,color:#999;",
+			wantOrder: []string{"Start", "End"},
+		},
+		{
+			name:      "inline class assignment with a labelled edge and dotted arrow",
+			src:       "flowchart LR\n  A[\"x:::y kept\"]:::dead -.->|\"note\"| B[End]\n  classDef dead color:#999;",
+			wantOrder: []string{"x:::y kept", "End"},
+			wantSub:   []string{"note"},
+		},
+		{
 			// Regression: a node whose bracketed label contains ` -- ` must
 			// still render — the inline-label match must not reach inside the
 			// shape brackets and corrupt the node token.
