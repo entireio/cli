@@ -1004,8 +1004,10 @@ func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
 				fmt.Fprintln(w)
 			}
 		}
-		if line.CheckpointID != "" {
+		if line.CheckpointID != "" && !line.MetadataMissing {
 			fmt.Fprintf(w, "\n  %s %s\n\n", sty.render(sty.dim, "Full context:"), sty.render(sty.cyan, "entire checkpoint explain "+line.CheckpointID))
+		} else if line.CheckpointID != "" {
+			fmt.Fprintf(w, "\n  %s\n\n", sty.render(sty.dim, "Full checkpoint context is unavailable for this attribution."))
 		} else {
 			fmt.Fprintln(w)
 		}
