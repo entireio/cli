@@ -10,6 +10,7 @@ import (
 	"context"
 	"io"
 	"sync"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"golang.org/x/term"
@@ -43,6 +44,8 @@ type TUISink struct {
 
 // Compile-time interface check.
 var _ reviewtypes.Sink = (*TUISink)(nil)
+
+var tuiPostRunCompleteGrace = 2 * time.Second
 
 // NewTUISink creates a TUISink wired to cancel for Ctrl+C handling. agents is
 // the ordered list of agent names that will run; the dashboard pre-renders one
@@ -145,17 +148,11 @@ func (s *TUISink) AgentEvent(agent string, ev reviewtypes.Event) {
 	s.program.Send(agentEventMsg{agent: agent, ev: ev})
 }
 
-// RunFinished (Sink interface): mark the run complete and send the final
-// summary message. The TUI shows the dashboard one more frame with the
-// terminal statuses, then waits for the user to dismiss it. After a run
-// completes, dismissal requires an explicit exit key (q/Esc/Enter/Ctrl+C);
-// Ctrl+O still drills into agent buffers for post-mortem inspection. Other
-// keys are no-ops so users can navigate the completed run without
-// accidentally dismissing.
-//
-// IMPORTANT: RunFinished blocks until the user dismisses so that post-run
-// sinks (e.g. DumpSink) render their narrative AFTER the TUI has exited
-// and the terminal is back in normal mode.
+// RunFinished (Sink interface): mark reviewer execution complete and send the
+// final summary message. It does not block or exit the TUI: post-run sinks may
+// still run (for example the final judge), and they can update the dashboard via
+// FinalPhaseStarted/FinalPhaseFinished. A later PostRunComplete call exits the
+// TUI once buffered post-run output is ready to flush.
 func (s *TUISink) RunFinished(summary reviewtypes.RunSummary) {
 	s.mu.Lock()
 	if s.finished {
@@ -166,8 +163,65 @@ func (s *TUISink) RunFinished(summary reviewtypes.RunSummary) {
 	s.mu.Unlock()
 
 	s.program.Send(runFinishedMsg{summary: summary})
-	// Block until the Bubble Tea program exits — user pressed an explicit
-	// exit key (q/Esc/Enter/Ctrl+C) after seeing the final dashboard, or
-	// Ctrl+C was received during the run and the program already quit.
-	s.Wait()
+}
+
+// FinalPhaseStarted updates the TUI with a visible post-run phase such as the
+// profile judge consolidating reviewer reports.
+func (s *TUISink) FinalPhaseStarted(name string) {
+	s.mu.Lock()
+	ok := s.started
+	s.mu.Unlock()
+	if !ok {
+		return
+	}
+	s.program.Send(finalPhaseStartedMsg{name: name})
+}
+
+// FinalPhaseFinished marks the visible post-run phase complete.
+func (s *TUISink) FinalPhaseFinished(err error) {
+	s.mu.Lock()
+	ok := s.started
+	s.mu.Unlock()
+	if !ok {
+		return
+	}
+	msg := finalPhaseFinishedMsg{}
+	if err != nil {
+		msg.err = err.Error()
+	}
+	s.program.Send(msg)
+}
+
+// PostRunComplete exits the TUI and waits for the Bubble Tea program to finish.
+// Call after post-run sinks have produced any buffered output.
+func (s *TUISink) PostRunComplete() {
+	s.mu.Lock()
+	ok := s.started
+	s.mu.Unlock()
+	if !ok {
+		return
+	}
+
+	// Program.Send can block if Bubble Tea has not entered its event loop yet.
+	// Send from a goroutine and fall back to Kill so a lost post-run quit cannot
+	// leave the CLI stuck on "Finalizing output..." forever.
+	sent := make(chan struct{})
+	go func() {
+		s.program.Send(postRunCompleteMsg{})
+		close(sent)
+	}()
+
+	select {
+	case <-s.done:
+		return
+	case <-sent:
+	case <-time.After(tuiPostRunCompleteGrace):
+		s.program.Kill()
+	}
+
+	select {
+	case <-s.done:
+	case <-time.After(tuiPostRunCompleteGrace):
+		s.program.Kill()
+	}
 }

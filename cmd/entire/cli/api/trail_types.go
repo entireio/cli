@@ -69,9 +69,6 @@ func (r *TrailResource) ToMetadata() *trail.Metadata {
 		Author:    r.Author,
 		Assignees: r.Assignees,
 		Labels:    r.Labels,
-		Priority:  trail.Priority(r.Priority),
-		Type:      trail.Type(r.Type),
-		Reviewers: r.Reviewers,
 		CreatedAt: r.CreatedAt,
 		UpdatedAt: r.UpdatedAt,
 		MergedAt:  r.MergedAt,
@@ -104,30 +101,17 @@ type TrailCreateRequest struct {
 
 // TrailCreateResponse is the response from POST /api/v1/trails/:org/:repo.
 type TrailCreateResponse struct {
-	Trail         TrailResource `json:"trail"`
-	BranchCreated bool          `json:"branch_created"`
-}
-
-// TrailDetailResponse is the response from GET /api/v1/trails/:org/:repo/:trailId.
-type TrailDetailResponse struct {
-	Trail       TrailResource     `json:"trail"`
-	Discussion  trail.Discussion  `json:"discussion"`
-	Checkpoints trail.Checkpoints `json:"checkpoints"`
+	Trail TrailResource `json:"trail"`
 }
 
 // TrailUpdateRequest is the body for PATCH /api/v1/trails/:host/:owner/:repo/:trailId.
 // Pointer fields distinguish "not provided" (nil) from "set to value".
 // For slices, *[]string is used so nil means "no change" while &[]string{} means "clear".
 type TrailUpdateRequest struct {
-	Branch    *string   `json:"branch,omitempty"`
-	Base      *string   `json:"base,omitempty"`
-	Status    *string   `json:"status,omitempty"`
-	Title     *string   `json:"title,omitempty"`
-	Body      *string   `json:"body,omitempty"`
-	Assignees *[]string `json:"assignees,omitempty"`
-	Labels    *[]string `json:"labels,omitempty"`
-	Priority  *string   `json:"priority,omitempty"`
-	Type      *string   `json:"type,omitempty"`
+	Status *string   `json:"status,omitempty"`
+	Title  *string   `json:"title,omitempty"`
+	Body   *string   `json:"body,omitempty"`
+	Labels *[]string `json:"labels,omitempty"`
 }
 
 // TrailUpdateResponse is the response from PATCH /api/v1/trails/:org/:repo/:trailId.

@@ -71,6 +71,67 @@ func TestPostCommit_ActiveSession_CondensesImmediately(t *testing.T) {
 		"StepCount should be reset after immediate condensation")
 }
 
+// TestPostCommit_ReviewSession_PinnedToSingleCheckpoint verifies that a
+// read-only review session is marked terminal once it has been condensed into a
+// checkpoint, so PostCommit stops re-attaching it to every later commit in the
+// worktree. This is the regression guard for the bug where a single `entire
+// review` session leaked into many unrelated checkpoints' session lists (its
+// prompt then rendering once per checkpoint on the session page). Contrast with
+// TestPostCommit_ActiveSession_CondensesImmediately, where a normal ACTIVE
+// session is expected to stay ACTIVE.
+func TestPostCommit_ReviewSession_PinnedToSingleCheckpoint(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-postcommit-review"
+
+	// Give the review session real shadow-branch content so its first PostCommit
+	// actually condenses (handler.condensed == true).
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	// Tag it as an in-flight agent-review session.
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	now := time.Now()
+	state.Phase = session.PhaseActive
+	state.Kind = session.KindAgentReview
+	state.LastInteractionTime = &now
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// First commit: the review is condensed into this one checkpoint, then pinned.
+	commitWithCheckpointTrailer(t, repo, dir, "a1b2c3d4e5f6")
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, session.PhaseEnded, state.Phase,
+		"review session should be marked ENDED after its single condensation")
+	assert.True(t, state.FullyCondensed,
+		"review session should be FullyCondensed so PostCommit skips it on later commits")
+	require.NotNil(t, state.EndedAt, "review session should have EndedAt stamped")
+	firstCheckpoint := state.LastCheckpointID
+
+	// Second commit (with a genuinely new file so it isn't an empty commit): the
+	// pinned review session must NOT be re-condensed, i.e. it must not be
+	// attached to a second checkpoint.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "second.txt"), []byte("unrelated change"), 0o644))
+	commitFilesWithTrailer(t, repo, dir, "b2c3d4e5f6a1", "second.txt")
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, session.PhaseEnded, state.Phase, "review session should stay terminal")
+	assert.True(t, state.FullyCondensed, "review session should stay FullyCondensed")
+	assert.Equal(t, firstCheckpoint, state.LastCheckpointID,
+		"review session must not be condensed into a second checkpoint")
+}
+
 // TestPostCommit_IdleSession_Condenses verifies that PostCommit on an IDLE
 // session condenses session data and cleans up the shadow branch.
 func TestPostCommit_IdleSession_Condenses(t *testing.T) {

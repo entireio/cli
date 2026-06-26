@@ -4,218 +4,196 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
 func TestExplainSuspendedMirror(t *testing.T) {
 	t.Parallel()
 	const id = "01KS6KFJR2XS6PZ188MVYE07AN"
+	var buf bytes.Buffer
+	explainSuspendedMirror(&buf, id)
+	out := buf.String()
+	require.Contains(t, out, id, "message must name the mirror")
+	require.Contains(t, out, "suspended")
+	require.Contains(t, out, "Contact support", "must point at support, not an internal admin command")
+	require.NotContains(t, out, "entire-core", "must not leak internal terminology")
+}
 
-	t.Run("suspended mirror is explained with resume command", func(t *testing.T) {
-		t.Parallel()
-		// Wrap the sentinel the way RepoScopedToken/waitForMirrorClone do, to
-		// prove detection survives the wrapping chain.
-		err := fmt.Errorf("authorize clone probe: %w", fmt.Errorf("repo-scoped token exchange: %w", auth.ErrRepoTargetUnknown))
-		var buf bytes.Buffer
-		handled, serr := explainSuspendedMirror(&buf, id, false, err)
-		if !handled {
-			t.Fatal("expected handled=true for ErrRepoTargetUnknown")
-		}
-		var silent *SilentError
-		if !errors.As(serr, &silent) {
-			t.Errorf("expected a SilentError, got %T: %v", serr, serr)
-		}
-		out := buf.String()
-		if !strings.Contains(out, id) {
-			t.Errorf("message %q omits the mirror id", out)
-		}
-		if !strings.Contains(out, "entire-core admin mirrors resume "+id) {
-			t.Errorf("message %q omits the resume command", out)
-		}
+// fakeMirrorGetter feeds awaitMirrorReady a scripted sequence of statuses (the
+// last entry repeats) or a fixed error, standing in for *coreapi.Client.GetMirror.
+// errsBefore makes the first N calls return a transient error before the status
+// sequence begins, to exercise the poll's retry tolerance.
+type fakeMirrorGetter struct {
+	statuses   []coreapi.MirrorStatus
+	err        error
+	errsBefore int
+	calls      int
+}
+
+func (f *fakeMirrorGetter) GetMirror(_ context.Context, _ coreapi.GetMirrorParams) (*coreapi.Mirror, error) {
+	n := f.calls
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	if n < f.errsBefore {
+		return nil, errors.New("transient: connection reset")
+	}
+	i := n - f.errsBefore
+	if i >= len(f.statuses) {
+		i = len(f.statuses) - 1
+	}
+	m := &coreapi.Mirror{}
+	m.Status = coreapi.NewOptMirrorStatus(f.statuses[i])
+	return m, nil
+}
+
+// TestAwaitMirrorReady covers the clone-status poll that replaced the info/refs
+// probe: terminal statuses resolve, processing keeps polling, and an exhausted
+// deadline reports a timeout.
+//
+// Not parallel: shortens the package-level mirrorPollInterval.
+func TestAwaitMirrorReady(t *testing.T) {
+	prev := mirrorPollInterval
+	mirrorPollInterval = time.Millisecond
+	t.Cleanup(func() { mirrorPollInterval = prev })
+	ctx := t.Context()
+
+	t.Run("ready resolves with no error", func(t *testing.T) {
+		f := &fakeMirrorGetter{statuses: []coreapi.MirrorStatus{coreapi.MirrorStatusReady}}
+		status, err := awaitMirrorReady(ctx, f, "m", time.Second, nil)
+		require.NoError(t, err)
+		require.Equal(t, coreapi.MirrorStatusReady, status)
 	})
 
-	t.Run("fresh create passes invalid_target through as propagation lag", func(t *testing.T) {
-		t.Parallel()
-		// Same invalid_target signature, but on a just-created placement it's
-		// eventual-consistency lag, not suspension — don't misdirect to resume.
-		err := fmt.Errorf("authorize clone probe: %w", fmt.Errorf("repo-scoped token exchange: %w", auth.ErrRepoTargetUnknown))
-		var buf bytes.Buffer
-		handled, serr := explainSuspendedMirror(&buf, id, true, err)
-		if handled {
-			t.Error("expected handled=false for a fresh create")
-		}
-		if serr != nil {
-			t.Errorf("expected nil error, got %v", serr)
-		}
-		if buf.Len() != 0 {
-			t.Errorf("expected no output, got %q", buf.String())
-		}
+	t.Run("processing then ready keeps polling", func(t *testing.T) {
+		f := &fakeMirrorGetter{statuses: []coreapi.MirrorStatus{
+			coreapi.MirrorStatusProcessing, coreapi.MirrorStatusProcessing, coreapi.MirrorStatusReady,
+		}}
+		status, err := awaitMirrorReady(ctx, f, "m", time.Second, nil)
+		require.NoError(t, err)
+		require.Equal(t, coreapi.MirrorStatusReady, status)
+		require.GreaterOrEqual(t, f.calls, 3)
 	})
 
-	t.Run("unrelated error passes through untouched", func(t *testing.T) {
-		t.Parallel()
-		var buf bytes.Buffer
-		handled, serr := explainSuspendedMirror(&buf, id, false, errors.New("timed out waiting for initial clone"))
-		if handled {
-			t.Error("expected handled=false for an unrelated error")
-		}
-		if serr != nil {
-			t.Errorf("expected nil error, got %v", serr)
-		}
-		if buf.Len() != 0 {
-			t.Errorf("expected no output, got %q", buf.String())
-		}
+	t.Run("failed returns errMirrorCloneFailed", func(t *testing.T) {
+		f := &fakeMirrorGetter{statuses: []coreapi.MirrorStatus{coreapi.MirrorStatusFailed}}
+		status, err := awaitMirrorReady(ctx, f, "m", time.Second, nil)
+		require.ErrorIs(t, err, errMirrorCloneFailed)
+		require.Equal(t, coreapi.MirrorStatusFailed, status)
+	})
+
+	t.Run("suspended returns errMirrorSuspended", func(t *testing.T) {
+		f := &fakeMirrorGetter{statuses: []coreapi.MirrorStatus{coreapi.MirrorStatusSuspended}}
+		status, err := awaitMirrorReady(ctx, f, "m", time.Second, nil)
+		require.ErrorIs(t, err, errMirrorSuspended)
+		require.Equal(t, coreapi.MirrorStatusSuspended, status)
+	})
+
+	t.Run("never-ready times out", func(t *testing.T) {
+		f := &fakeMirrorGetter{statuses: []coreapi.MirrorStatus{coreapi.MirrorStatusProcessing}}
+		_, err := awaitMirrorReady(ctx, f, "m", 20*time.Millisecond, nil)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	})
+
+	t.Run("transient errors are tolerated, then ready", func(t *testing.T) {
+		// Fewer consecutive errors than the cap, so the poll rides them out.
+		f := &fakeMirrorGetter{errsBefore: maxConsecutivePollErrors - 1, statuses: []coreapi.MirrorStatus{coreapi.MirrorStatusReady}}
+		status, err := awaitMirrorReady(ctx, f, "m", time.Second, nil)
+		require.NoError(t, err)
+		require.Equal(t, coreapi.MirrorStatusReady, status)
+	})
+
+	t.Run("persistent errors give up after the cap", func(t *testing.T) {
+		f := &fakeMirrorGetter{err: errors.New("boom")}
+		_, err := awaitMirrorReady(ctx, f, "m", time.Second, nil)
+		require.ErrorContains(t, err, "poll mirror status")
+		require.Equal(t, maxConsecutivePollErrors, f.calls, "should stop at the cap, not spin to the deadline")
 	})
 }
 
-// TestFinishMirrorCreate exercises the post-create branching: when the
-// upstream is empty we must skip the HEAD-poll loop (an empty repo never
-// advertises a HEAD), yet an *existing* empty placement must still go through
-// the token exchange so a suspended mirror surfaces its resume guidance
-// instead of a success-style "nothing to clone" note.
-func TestFinishMirrorCreate(t *testing.T) {
+// TestReportOneShotMirror exercises the one-shot create's presentation across
+// the shared lifecycle outcomes — the branching finishMirrorCreate used to own,
+// now driven by mirrorCreateOutcome (and shared with the wizard).
+func TestReportOneShotMirror(t *testing.T) {
 	t.Parallel()
-
 	const id = "01KS6KFJR2XS6PZ188MVYE07AN"
 	const mirrorURL = "entire://eu-west-1.entire.io/gh/octocat/hello-world"
-	// The error shape RepoScopedToken/waitForMirrorClone produce for a
-	// suspended (non-servable) placement.
-	suspended := fmt.Errorf("repo-scoped token exchange: %w", auth.ErrRepoTargetUnknown)
+	mk := func(created, empty bool) *coreapi.CreatedMirror {
+		return &coreapi.CreatedMirror{Created: created, Empty: empty, MirrorId: id, MirrorUrl: mirrorURL}
+	}
 
-	// seen records whether each injected operation ran, so we can assert the
-	// empty path never polls and a fresh create never probes.
-	type call struct{ probed, waited bool }
-
-	t.Run("fresh empty create skips both probe and poll", func(t *testing.T) {
+	t.Run("create failure surfaces with nothing printed", func(t *testing.T) {
 		t.Parallel()
-		var seen call
 		var out, errW bytes.Buffer
-		created := &coreapi.CreatedMirror{Created: true, Empty: true, MirrorId: id, MirrorUrl: mirrorURL}
-		err := finishMirrorCreate(&out, &errW, created, false,
-			func() error { seen.probed = true; return nil },
-			func() error { seen.waited = true; return nil },
-		)
-		require.NoError(t, err)
-		require.False(t, seen.probed, "a fresh create can't be suspended; must not probe")
-		require.False(t, seen.waited, "empty upstream has nothing to clone; must not poll")
-		require.Contains(t, out.String(), "nothing to clone")
-		require.Empty(t, errW.String())
+		wantErr := errors.New("boom")
+		err := reportOneShotMirror(&out, &errW, mirrorCreateOutcome{}, wantErr)
+		require.ErrorIs(t, err, wantErr)
+		require.Empty(t, out.String())
 	})
 
-	t.Run("existing empty healthy probes but does not poll", func(t *testing.T) {
+	t.Run("empty upstream prints nothing-to-clone", func(t *testing.T) {
 		t.Parallel()
-		var seen call
 		var out, errW bytes.Buffer
-		created := &coreapi.CreatedMirror{Created: false, Empty: true, MirrorId: id, MirrorUrl: mirrorURL}
-		err := finishMirrorCreate(&out, &errW, created, false,
-			func() error { seen.probed = true; return nil },
-			func() error { seen.waited = true; return nil },
-		)
+		err := reportOneShotMirror(&out, &errW, mirrorCreateOutcome{created: mk(true, true)}, nil)
 		require.NoError(t, err)
-		require.True(t, seen.probed, "existing empty placement must probe for suspension")
-		require.False(t, seen.waited, "empty upstream has nothing to clone; must not poll")
+		require.Contains(t, out.String(), "Registered mirror "+id)
 		require.Contains(t, out.String(), "nothing to clone")
 	})
 
-	t.Run("existing empty suspended surfaces resume guidance", func(t *testing.T) {
-		t.Parallel()
-		var seen call
-		var out, errW bytes.Buffer
-		created := &coreapi.CreatedMirror{Created: false, Empty: true, MirrorId: id, MirrorUrl: mirrorURL}
-		err := finishMirrorCreate(&out, &errW, created, false,
-			func() error { seen.probed = true; return suspended },
-			func() error { seen.waited = true; return nil },
-		)
-		var silent *SilentError
-		require.ErrorAs(t, err, &silent, "suspended mirror must return a SilentError")
-		require.True(t, seen.probed)
-		require.False(t, seen.waited, "must not poll a suspended empty mirror")
-		require.Contains(t, errW.String(), "entire-core admin mirrors resume "+id)
-		require.NotContains(t, out.String(), "nothing to clone",
-			"a suspended mirror must not get the success-style empty note")
-	})
-
-	t.Run("existing empty transient probe error is non-fatal", func(t *testing.T) {
+	t.Run("no-wait prints in-progress hint", func(t *testing.T) {
 		t.Parallel()
 		var out, errW bytes.Buffer
-		created := &coreapi.CreatedMirror{Created: false, Empty: true, MirrorId: id, MirrorUrl: mirrorURL}
-		err := finishMirrorCreate(&out, &errW, created, false,
-			func() error { return errors.New("dial tcp: connection refused") },
-			func() error { t.Fatal("must not poll an empty mirror"); return nil },
-		)
-		require.NoError(t, err, "a non-suspension probe error must not fail a create whose placement exists")
-		require.Contains(t, out.String(), "nothing to clone")
-	})
-
-	t.Run("non-empty no-wait skips both probe and poll", func(t *testing.T) {
-		t.Parallel()
-		var seen call
-		var out, errW bytes.Buffer
-		created := &coreapi.CreatedMirror{Created: true, Empty: false, MirrorId: id, MirrorUrl: mirrorURL}
-		err := finishMirrorCreate(&out, &errW, created, true,
-			func() error { seen.probed = true; return nil },
-			func() error { seen.waited = true; return nil },
-		)
+		err := reportOneShotMirror(&out, &errW, mirrorCreateOutcome{created: mk(true, false)}, nil)
 		require.NoError(t, err)
-		require.False(t, seen.probed)
-		require.False(t, seen.waited, "--no-wait must not poll")
 		require.Contains(t, out.String(), "still be in progress")
 	})
 
-	t.Run("non-empty waits for clone then prints clone hint", func(t *testing.T) {
+	t.Run("ready prints clone hint", func(t *testing.T) {
 		t.Parallel()
-		var seen call
 		var out, errW bytes.Buffer
-		created := &coreapi.CreatedMirror{Created: true, Empty: false, MirrorId: id, MirrorUrl: mirrorURL}
-		err := finishMirrorCreate(&out, &errW, created, false,
-			func() error { seen.probed = true; return nil },
-			func() error { seen.waited = true; return nil },
-		)
+		outcome := mirrorCreateOutcome{created: mk(true, false), status: coreapi.MirrorStatusReady, polled: true}
+		err := reportOneShotMirror(&out, &errW, outcome, nil)
 		require.NoError(t, err)
-		require.False(t, seen.probed, "non-empty path detects suspension through waitClone, not a separate probe")
-		require.True(t, seen.waited)
 		require.Contains(t, out.String(), "git clone "+mirrorURL)
 	})
 
-	t.Run("non-empty existing suspended surfaces resume guidance", func(t *testing.T) {
+	t.Run("suspended surfaces support guidance as SilentError", func(t *testing.T) {
 		t.Parallel()
 		var out, errW bytes.Buffer
-		created := &coreapi.CreatedMirror{Created: false, Empty: false, MirrorId: id, MirrorUrl: mirrorURL}
-		err := finishMirrorCreate(&out, &errW, created, false,
-			func() error { return nil },
-			func() error { return suspended },
-		)
+		outcome := mirrorCreateOutcome{created: mk(false, false), status: coreapi.MirrorStatusSuspended, polled: true}
+		err := reportOneShotMirror(&out, &errW, outcome, errMirrorSuspended)
 		var silent *SilentError
 		require.ErrorAs(t, err, &silent)
-		require.Contains(t, errW.String(), "entire-core admin mirrors resume "+id)
+		require.Contains(t, errW.String(), "Contact support")
+		require.NotContains(t, errW.String(), "entire-core")
 		require.NotContains(t, out.String(), "git clone")
 	})
 
-	t.Run("non-empty wait error other than suspension propagates", func(t *testing.T) {
+	t.Run("failed returns an error naming the mirror", func(t *testing.T) {
 		t.Parallel()
 		var out, errW bytes.Buffer
-		created := &coreapi.CreatedMirror{Created: true, Empty: false, MirrorId: id, MirrorUrl: mirrorURL}
+		outcome := mirrorCreateOutcome{created: mk(true, false), status: coreapi.MirrorStatusFailed, polled: true}
+		err := reportOneShotMirror(&out, &errW, outcome, errMirrorCloneFailed)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), id)
+	})
+
+	t.Run("timeout propagates the wait error", func(t *testing.T) {
+		t.Parallel()
+		var out, errW bytes.Buffer
 		wantErr := errors.New("timed out waiting for initial clone")
-		err := finishMirrorCreate(&out, &errW, created, false,
-			func() error { return nil },
-			func() error { return wantErr },
-		)
+		outcome := mirrorCreateOutcome{created: mk(true, false), status: coreapi.MirrorStatusProcessing, polled: true}
+		err := reportOneShotMirror(&out, &errW, outcome, wantErr)
 		require.ErrorIs(t, err, wantErr)
-		require.Empty(t, errW.String())
 	})
 }
 
@@ -628,168 +606,4 @@ func TestValidateClusterHost(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestMirrorAdvertisesHead_ReusesConnection is the regression test for the
-// body drain in mirrorAdvertisesHead. The probe runs every 2s for up to 30m,
-// and probeClient keeps a small idle pool specifically to reuse the TLS
-// session across ticks — but Go only returns a connection to that pool when
-// the response body is read to EOF before Close. If the drain is removed (or
-// re-capped shorter than the body), the body is left partially read and the
-// transport closes the connection instead, so every probe pays a fresh
-// handshake.
-//
-// We serve a non-200 with a non-empty body: mirrorAdvertisesHead returns at
-// the status check without reading the body itself, so the deferred drain is
-// the *only* thing that consumes it. Counting StateNew transitions then
-// distinguishes "drained → one reused connection" from "not drained → a new
-// connection per call".
-func TestMirrorAdvertisesHead_ReusesConnection(t *testing.T) {
-	t.Parallel()
-
-	// Larger than any plausible "small cap" someone might reintroduce, so a
-	// capped drain would stop before EOF and fail this test too.
-	body := strings.Repeat("x", 64<<10)
-
-	var newConns atomic.Int64
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		// 503 = mirror reachable but not ready; the function returns at the
-		// status check below http.StatusOK without touching the body.
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(body)) //nolint:errcheck // test server write; failure surfaces as a client error
-	}))
-	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
-		if state == http.StateNew {
-			newConns.Add(1)
-		}
-	}
-	srv.Start()
-	defer srv.Close()
-
-	// Isolated client (not the package-global probeClient) so the idle pool
-	// is private to this test and the assertion stays deterministic under
-	// t.Parallel(). Keep-alives and idle pooling are on by default.
-	client := &http.Client{
-		Timeout:   15 * time.Second,
-		Transport: &http.Transport{MaxIdleConns: 2, MaxIdleConnsPerHost: 2, IdleConnTimeout: 90 * time.Second},
-	}
-
-	const probes = 5
-	for range probes {
-		ready, status := mirrorAdvertisesHead(context.Background(), client, srv.URL, "tok")
-		require.False(t, ready)
-		require.Equal(t, http.StatusServiceUnavailable, status)
-	}
-
-	require.Equal(t, int64(1), newConns.Load(),
-		"expected the drained body to let all %d probes share one connection; got %d new connections (body not drained to EOF?)",
-		probes, newConns.Load())
-}
-
-// pktLine encodes s as a git pkt-line (4-hex length prefix including the
-// prefix itself), mirroring what a smart-HTTP server writes.
-func pktLine(s string) string { return fmt.Sprintf("%04x%s", len(s)+4, s) }
-
-// uploadPackAdvertisement returns a minimal but valid git-upload-pack
-// info/refs body: the "# service" banner, a flush, a HEAD line carrying the
-// symref capability, a refs/heads/main line, and a trailing flush. It decodes
-// to an AdvRefs whose HEAD resolves to refs/heads/main.
-func uploadPackAdvertisement() string {
-	const sha = "d9a69831082341eab799c062e10ad28b3204c08a"
-	return pktLine("# service=git-upload-pack\n") +
-		"0000" +
-		pktLine(sha+" HEAD\x00symref=HEAD:refs/heads/main\n") +
-		pktLine(sha+" refs/heads/main\n") +
-		"0000"
-}
-
-// TestMirrorAdvertisesHead_FollowsNodeRedirect is the regression test for the
-// infinite cloning-dots bug. The cluster front door 307-redirects info/refs to
-// the node holding the mirror; git follows that to clone. The probe used to
-// refuse all redirects (http.ErrUseLastResponse), so it saw the 307 as "not
-// 200, not ready" and printed cloning-dots forever even after the clone had
-// landed. With checkProbeRedirect the probe follows same-host redirects and
-// reaches the advertisement, so it reports ready.
-func TestMirrorAdvertisesHead_FollowsNodeRedirect(t *testing.T) {
-	t.Parallel()
-
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/node/info/refs" {
-			w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
-			_, _ = w.Write([]byte(uploadPackAdvertisement())) //nolint:errcheck // test server write
-			return
-		}
-		// Front door: route to the backing node on the same host, the way the
-		// real cluster front door 307s to bishop.<cluster-host>.
-		http.Redirect(w, r, "/node/info/refs", http.StatusTemporaryRedirect)
-	}))
-	defer srv.Close()
-
-	// srv.Client() trusts the test cert; layer on the production redirect
-	// policy so we exercise the real follow path.
-	client := srv.Client()
-	client.CheckRedirect = checkProbeRedirect
-
-	ready, status := mirrorAdvertisesHead(context.Background(), client, srv.URL+"/info/refs", "tok")
-	require.True(t, ready, "probe should follow the node redirect and see HEAD")
-	require.Equal(t, http.StatusOK, status)
-}
-
-func TestCheckProbeRedirect(t *testing.T) {
-	t.Parallel()
-
-	orig := mustReq(t, "https://aws-us-east-2.entire.io/gh/o/r/info/refs")
-	tests := []struct {
-		name    string
-		target  string
-		via     int
-		wantErr bool
-	}{
-		{name: "same host", target: "https://aws-us-east-2.entire.io/node/info/refs", via: 1},
-		{name: "subdomain node", target: "https://bishop.aws-us-east-2.entire.io/gh/o/r/info/refs", via: 1},
-		{name: "cross host leaks token", target: "https://evil.example.com/info/refs", via: 1, wantErr: true},
-		{name: "sibling suffix trick", target: "https://aws-us-east-2.entire.io.evil.com/x", via: 1, wantErr: true},
-		{name: "non-https", target: "http://bishop.aws-us-east-2.entire.io/x", via: 1, wantErr: true},
-		{name: "too many hops", target: "https://bishop.aws-us-east-2.entire.io/x", via: maxProbeRedirects, wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			via := make([]*http.Request, tt.via)
-			via[0] = orig
-			err := checkProbeRedirect(mustReq(t, tt.target), via)
-			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-		})
-	}
-}
-
-func mustReq(t *testing.T, rawURL string) *http.Request {
-	t.Helper()
-	u, err := url.Parse(rawURL)
-	require.NoError(t, err)
-	return &http.Request{URL: u}
-}
-
-// TestWaitForMirrorClone_TimeoutBoundsAuthorization pins that --wait-timeout
-// covers the authorization phase, not just the probe loop: building the
-// token source spans cluster discovery and a possible login refresh, so a
-// hung auth path must be cut off by the user's wait budget.
-//
-// Not parallel: swaps the package-level newRepoTokenSource seam.
-func TestWaitForMirrorClone_TimeoutBoundsAuthorization(t *testing.T) {
-	prev := newRepoTokenSource
-	newRepoTokenSource = func(ctx context.Context, _ string) (repoTokenSource, error) {
-		<-ctx.Done() // hang until the wait deadline fires
-		return nil, ctx.Err()
-	}
-	t.Cleanup(func() { newRepoTokenSource = prev })
-
-	start := time.Now()
-	err := waitForMirrorClone(context.Background(), io.Discard, "cluster.example", "o", "r", 50*time.Millisecond)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Less(t, time.Since(start), 10*time.Second, "authorization must be bounded by the wait timeout")
 }

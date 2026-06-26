@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -42,17 +41,17 @@ func newTrailWatchCmd() *cobra.Command {
 		jsonOutput bool
 		showPings  bool
 		once       bool
-		number     int
 	)
 
 	cmd := &cobra.Command{
-		Use:   "watch [<number>]",
+		Use:   "watch [<trail>]",
 		Short: "Tail a trail's events live",
 		Long: `Subscribe to the trail-wide SSE stream and print events as they arrive.
 Reconnects automatically when the server caps the connection (~50s) and on
 transient network errors.
 
-If <number> is omitted, the trail for the current branch is used.
+<trail> may be a number, id, or branch name. If omitted, the trail for the
+current branch is used.
 
 This command resolves the trail's id internally and streams
 GET /api/v1/trails/<id>/events with Accept: text/event-stream.
@@ -65,14 +64,13 @@ Events emitted by the server:
   error              server-side error; treated as reconnect`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			selector := ""
 			if len(args) == 1 {
-				n, err := strconv.Atoi(args[0])
-				if err != nil || n <= 0 {
-					return fmt.Errorf("invalid trail number %q", args[0])
-				}
-				number = n
+				selector = args[0]
 			}
-			return runTrailWatch(cmd, number, jsonOutput, showPings, once)
+			// Delegates to the shared trail-review resolver so number/id/branch
+			// selectors and insecure-HTTP handling stay in one place.
+			return runTrailReviewWatch(cmd, selector, jsonOutput, showPings, once)
 		},
 	}
 
@@ -83,15 +81,13 @@ Events emitted by the server:
 	return cmd
 }
 
-func runTrailWatch(cmd *cobra.Command, number int, jsonOutput, showPings, once bool) error {
-	return runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), func(ctx context.Context, client *api.Client) error {
-		trailID, description, err := resolveTrailWatchTarget(ctx, client, number)
-		if err != nil {
-			return err
-		}
-		saveTrailsEnabledForRepoBestEffort(ctx, true)
-		return runTrailWatchResolved(cmd, client, trailID, description, jsonOutput, showPings, once)
-	})
+func runTrailReviewWatch(cmd *cobra.Command, selector string, jsonOutput, showPings, once bool) error {
+	client, target, err := authenticatedTrailReviewTarget(cmd, selector)
+	if err != nil {
+		return err
+	}
+	description := trailWatchDescription(target.Host, target.Owner, target.Repo, target.Trail.Number, target.Trail.ID)
+	return runTrailWatchResolved(cmd, client, target.Trail.ID, description, jsonOutput, showPings, once)
 }
 
 func runTrailWatchResolved(cmd *cobra.Command, client *api.Client, trailID, description string, jsonOutput, showPings, once bool) error {
@@ -166,50 +162,6 @@ func runTrailWatchResolved(cmd *cobra.Command, client *api.Client, trailID, desc
 			backoff = reconnectBackoffCap
 		}
 	}
-}
-
-func resolveTrailWatchTarget(ctx context.Context, client *api.Client, number int) (trailID, description string, err error) {
-	if number > 0 {
-		return resolveTrailWatchNumber(ctx, client, number)
-	}
-
-	forge, owner, repo, err := resolveTrailRemote(ctx)
-	if err != nil {
-		return "", "", err
-	}
-	branch, err := GetCurrentBranch(ctx)
-	if err != nil {
-		return "", "", fmt.Errorf("no trail number given and current branch is unknown: %w", err)
-	}
-	found, err := findTrailByBranch(ctx, client, forge, owner, repo, branch)
-	if err != nil {
-		return "", "", err
-	}
-	if found == nil {
-		return "", "", fmt.Errorf("no trail found for branch %q (pass an explicit trail number)", branch)
-	}
-	if found.ID == "" {
-		return "", "", fmt.Errorf("trail for branch %q has no id yet", branch)
-	}
-	return found.ID, trailWatchDescription(forge, owner, repo, found.Number, found.ID), nil
-}
-
-func resolveTrailWatchNumber(ctx context.Context, client *api.Client, number int) (trailID, description string, err error) {
-	forge, owner, repo, err := resolveTrailRemote(ctx)
-	if err != nil {
-		return "", "", err
-	}
-	found, err := findTrailByNumber(ctx, client, forge, owner, repo, number)
-	if err != nil {
-		return "", "", err
-	}
-	if found == nil {
-		return "", "", fmt.Errorf("no trail #%d found in %s/%s/%s", number, forge, owner, repo)
-	}
-	if found.ID == "" {
-		return "", "", fmt.Errorf("trail #%d has no id yet", number)
-	}
-	return found.ID, trailWatchDescription(forge, owner, repo, found.Number, found.ID), nil
 }
 
 func trailWatchDescription(forge, owner, repo string, number int, trailID string) string {

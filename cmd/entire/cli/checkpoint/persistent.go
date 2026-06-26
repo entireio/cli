@@ -500,6 +500,10 @@ func (s *GitStore) writeCheckpointSummary(opts WriteOptions, basePath string, en
 	checkpointVersion := CheckpointVersionBranchV1
 	hasReview := opts.HasReview
 	hasInvestigation := opts.HasInvestigation
+	// imported is the umbrella flag: true when any session in this checkpoint
+	// was imported (Kind == "imported"). Compared as a literal because the
+	// session package imports checkpoint, so we can't reference its constant.
+	imported := opts.Kind == "imported"
 	rootMetadataPath := basePath + paths.MetadataFileName
 	if entry, exists := entries[rootMetadataPath]; exists {
 		existingSummary, readErr := s.readSummaryFromBlob(entry.Hash)
@@ -513,6 +517,9 @@ func (s *GitStore) writeCheckpointSummary(opts WriteOptions, basePath string, en
 			}
 			if !hasInvestigation {
 				hasInvestigation = existingSummary.HasInvestigation
+			}
+			if !imported {
+				imported = existingSummary.Imported
 			}
 		}
 	}
@@ -530,6 +537,7 @@ func (s *GitStore) writeCheckpointSummary(opts WriteOptions, basePath string, en
 		CombinedAttribution: combinedAttribution,
 		HasReview:           hasReview,
 		HasInvestigation:    hasInvestigation,
+		Imported:            imported,
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")
@@ -1319,6 +1327,7 @@ func readCommittedInfoFromCheckpointTree(checkpointID id.CheckpointID, checkpoin
 	info.CheckpointsCount = summary.CheckpointsCount
 	info.FilesTouched = summary.FilesTouched
 	info.SessionCount = len(summary.Sessions)
+	info.Imported = summary.Imported
 
 	for i := range summary.Sessions {
 		sessionMetadata, ok := readCommittedMetadataFromCheckpointTree(checkpointTree, i)

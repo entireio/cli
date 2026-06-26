@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -50,8 +51,8 @@ type attachOptions struct {
 	// structured skills list. Ignored when Review=false.
 	ReviewSkillsOverride []string
 	// ReviewPromptOverride, when non-empty, is recorded instead of the
-	// transcript's first user prompt. Used by `entire review attach` when a
-	// pending-review marker has the exact prompt the user was asked to run.
+	// transcript's first user prompt. Set from a pending-review marker when
+	// `entire attach --review` adopts the prompt the user was asked to run.
 	ReviewPromptOverride string
 }
 
@@ -106,13 +107,39 @@ external_agents in settings. Run 'entire agent list' to see the full list.`,
 			// Discover external agents so --agent <external-name> is recognized
 			// and so auto-detection can find transcripts from external agents.
 			external.DiscoverAndRegister(cmd.Context())
-			agentName := types.AgentName(agentFlag)
 			opts := attachOptions{
 				Force:                force,
 				Review:               reviewFlag,
 				ReviewSkillsOverride: skillsFlag,
 			}
-			return runAttachSurfaceReviewErrors(cmd, args[0], agentName, opts)
+			// When tagging as a review, consume any pending-review marker left
+			// by `entire review` for an agent it could not launch itself: adopt
+			// its agent / skills / prompt so the manual attach matches what the
+			// user was asked to run, then clear it after a successful attach.
+			useMarker := false
+			if reviewFlag {
+				marker, ok, markerErr := matchingPendingReviewMarker(cmd.Context(), agentFlag, cmd.Flags().Changed("agent"))
+				if markerErr != nil {
+					return markerErr
+				}
+				useMarker = ok
+				if useMarker {
+					if !cmd.Flags().Changed("agent") && marker.AgentName != "" {
+						agentFlag = marker.AgentName
+					}
+					if !cmd.Flags().Changed("skills") {
+						opts.ReviewSkillsOverride = marker.Skills
+					}
+					opts.ReviewPromptOverride = marker.Prompt
+				}
+			}
+			err := runAttachSurfaceReviewErrors(cmd, args[0], types.AgentName(agentFlag), opts)
+			if err == nil && useMarker {
+				if clearErr := cliReview.ClearPendingReviewMarker(cmd.Context()); clearErr != nil {
+					logging.Debug(cmd.Context(), "clear pending review marker after attach", slog.String("error", clearErr.Error()))
+				}
+			}
+			return err
 		},
 	}
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation and amend the last commit with the checkpoint trailer")

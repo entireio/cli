@@ -74,7 +74,7 @@ func newRepoMirrorCollaboratorsAddCmd() *cobra.Command {
 			"(pull works without push-through). The cluster-host defaults to " +
 			defaultClusterHost + " when omitted.",
 		Example: "  entire repo mirror collaborators add github.com/acme/widget github:alice --role writer\n" +
-			"  entire repo mirror collaborators add github.com/acme/widget github:alice eu-west-1.entire.io --role reader",
+			"  entire repo mirror collaborators add github.com/acme/widget github:alice aws-us-east-2.entire.io --role reader",
 		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			owner, repo, err := parseGitHubURL(args[0])

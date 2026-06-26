@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -371,7 +372,7 @@ func runTrailReviewShow(cmd *cobra.Command, selector string, commentID string) e
 	if err != nil {
 		return err
 	}
-	if hydrated, hydrateErr := hydrateTrailReviewCommentSuggestions(cmd.Context(), client, target.Trail.ID, comment); hydrateErr == nil {
+	if hydrated, _, hydrateErr := hydrateTrailReviewCommentWithState(cmd.Context(), client, target.Trail.ID, comment); hydrateErr == nil {
 		comment = hydrated
 	}
 	printTrailReviewCommentDetail(cmd.OutOrStdout(), comment)
@@ -811,19 +812,19 @@ func buildTrailReviewCommentLocation(opts trailReviewCommentAddOptions) (api.Tra
 		return api.TrailReviewLocationCreateRequest{}, errors.New("--end-line must be greater than or equal to the start line")
 	}
 
-	loc := api.TrailReviewLocationCreateRequest{Granularity: "whole_change"}
+	loc := api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityWholeChange}
 	if filePath == "" {
 		return loc, nil
 	}
-	loc.Granularity = "file"
+	loc.Granularity = reviewTrailGranularityFile
 	loc.FilePath = stringPtr(filePath)
 	if line > 0 {
-		loc.Granularity = "line"
+		loc.Granularity = reviewTrailGranularityLine
 		loc.StartLine = &line
 		if opts.EndLine > 0 {
 			loc.EndLine = &opts.EndLine
 			if opts.EndLine != line {
-				loc.Granularity = "range"
+				loc.Granularity = reviewTrailGranularityRange
 			}
 		}
 	}
@@ -833,39 +834,166 @@ func buildTrailReviewCommentLocation(opts trailReviewCommentAddOptions) (api.Tra
 // createTrailReviewFinding posts a single finding through the current API flow:
 // start a review session, then submit a one-item comment batch under it. It
 // returns the created (or already-existing) finding.
+func prepareTrailReviewCommentInputsForCreate(worktreeRoot string, inputs []api.TrailReviewCommentInput) []api.TrailReviewCommentInput {
+	out := make([]api.TrailReviewCommentInput, len(inputs))
+	copy(out, inputs)
+	for i := range out {
+		out[i].Location = prepareTrailReviewLocationForCreate(worktreeRoot, out[i].Location)
+	}
+	return out
+}
+
+func prepareTrailReviewLocationForCreate(worktreeRoot string, loc api.TrailReviewLocationCreateRequest) api.TrailReviewLocationCreateRequest {
+	switch loc.Granularity {
+	case reviewTrailGranularityLine, reviewTrailGranularityRange:
+		if loc.SelectedText != nil && strings.TrimSpace(*loc.SelectedText) != "" {
+			return loc
+		}
+		filePath := ""
+		if loc.FilePath != nil {
+			filePath = strings.TrimSpace(*loc.FilePath)
+		}
+		startLine := 0
+		if loc.StartLine != nil {
+			startLine = *loc.StartLine
+		}
+		endLine := startLine
+		if loc.Granularity == reviewTrailGranularityRange && loc.EndLine != nil && *loc.EndLine > startLine {
+			endLine = *loc.EndLine
+		}
+		selected, fileOK, selectedOK := trailReviewSelectedTextFromWorktree(worktreeRoot, filePath, startLine, endLine)
+		if selectedOK {
+			loc.SelectedText = stringPtr(selected)
+			return loc
+		}
+		if fileOK {
+			return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityFile, FilePath: stringPtr(filePath)}
+		}
+		return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityWholeChange}
+	case reviewTrailGranularityFile:
+		if loc.FilePath != nil && strings.TrimSpace(*loc.FilePath) != "" {
+			return loc
+		}
+	}
+	return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityWholeChange}
+}
+
+func trailReviewSelectedTextFromWorktree(worktreeRoot, filePath string, startLine, endLine int) (selected string, fileOK bool, selectedOK bool) {
+	if strings.TrimSpace(worktreeRoot) == "" || strings.TrimSpace(filePath) == "" || startLine <= 0 || endLine < startLine {
+		return "", false, false
+	}
+	fullPath, ok := safeWorktreeFilePath(worktreeRoot, filePath)
+	if !ok {
+		return "", false, false
+	}
+	data, err := os.ReadFile(fullPath) //nolint:gosec // path is constrained to the current worktree root.
+	if err != nil {
+		return "", false, false
+	}
+	contents := strings.ReplaceAll(string(data), "\r\n", "\n")
+	lines := strings.Split(contents, "\n")
+	if startLine > len(lines) || endLine > len(lines) {
+		return "", true, false
+	}
+	text := strings.Join(lines[startLine-1:endLine], "\n")
+	if strings.TrimSpace(text) == "" {
+		return "", true, false
+	}
+	return text, true, true
+}
+
+func safeWorktreeFilePath(worktreeRoot, filePath string) (string, bool) {
+	if filepath.IsAbs(filePath) {
+		return "", false
+	}
+	root := filepath.Clean(worktreeRoot)
+	cleanRel := filepath.Clean(filepath.FromSlash(filePath))
+	if cleanRel == "." || cleanRel == "" || cleanRel == ".." || strings.HasPrefix(cleanRel, ".."+string(os.PathSeparator)) {
+		return "", false
+	}
+	fullPath := filepath.Join(root, cleanRel)
+	rel, err := filepath.Rel(root, fullPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return fullPath, true
+}
+
 func createTrailReviewFinding(ctx context.Context, client *api.Client, trailID string, input api.TrailReviewCommentInput) (api.TrailReviewComment, error) {
-	review, err := startTrailReview(ctx, client, trailID)
+	findings, err := createTrailReviewFindings(ctx, client, trailID, []api.TrailReviewCommentInput{input})
 	if err != nil {
 		return api.TrailReviewComment{}, err
 	}
-	resp, err := client.Post(ctx, trailReviewBatchCommentsPath(trailID, review.ReviewID), api.TrailReviewCommentBatchRequest{
-		Comments: []api.TrailReviewCommentInput{input},
-	})
+	if len(findings) == 0 {
+		return api.TrailReviewComment{}, errors.New("create finding: server returned no results")
+	}
+	return findings[0], nil
+}
+
+// createTrailReviewFindings posts findings through one trail review session,
+// chunking by the server-advertised batch limit when present.
+func createTrailReviewFindings(ctx context.Context, client *api.Client, trailID string, inputs []api.TrailReviewCommentInput) ([]api.TrailReviewComment, error) {
+	if len(inputs) == 0 {
+		return nil, errors.New("create finding: no findings to post")
+	}
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return api.TrailReviewComment{}, fmt.Errorf("create finding: %w", err)
+		worktreeRoot = ""
+	}
+	inputs = prepareTrailReviewCommentInputsForCreate(worktreeRoot, inputs)
+	review, err := startTrailReview(ctx, client, trailID)
+	if err != nil {
+		return nil, err
+	}
+	limit := review.Limits.MaxCommentsPerBatch
+	if limit <= 0 || limit > len(inputs) {
+		limit = len(inputs)
+	}
+	findings := make([]api.TrailReviewComment, 0, len(inputs))
+	for start := 0; start < len(inputs); start += limit {
+		end := start + limit
+		if end > len(inputs) {
+			end = len(inputs)
+		}
+		batchFindings, err := postTrailReviewFindingBatch(ctx, client, trailID, review.ReviewID, inputs[start:end])
+		if err != nil {
+			return nil, err
+		}
+		findings = append(findings, batchFindings...)
+	}
+	return findings, nil
+}
+
+func postTrailReviewFindingBatch(ctx context.Context, client *api.Client, trailID, reviewID string, inputs []api.TrailReviewCommentInput) ([]api.TrailReviewComment, error) {
+	resp, err := client.Post(ctx, trailReviewBatchCommentsPath(trailID, reviewID), api.TrailReviewCommentBatchRequest{Comments: inputs})
+	if err != nil {
+		return nil, fmt.Errorf("create finding: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		return api.TrailReviewComment{}, err
+		return nil, err
 	}
 	var batch api.TrailReviewCommentBatchResponse
 	if err := api.DecodeJSON(resp, &batch); err != nil {
-		return api.TrailReviewComment{}, fmt.Errorf("decode finding batch response: %w", err)
+		return nil, fmt.Errorf("decode finding batch response: %w", err)
 	}
 	if len(batch.Results) == 0 {
-		return api.TrailReviewComment{}, errors.New("create finding: server returned no results")
+		return nil, errors.New("create finding: server returned no results")
 	}
-	result := batch.Results[0]
-	if result.Status == trailReviewBatchResultError {
-		if result.Error != nil {
-			return api.TrailReviewComment{}, fmt.Errorf("create finding: %s: %s", result.Error.Code, result.Error.Message)
+	findings := make([]api.TrailReviewComment, 0, len(batch.Results))
+	for _, result := range batch.Results {
+		if result.Status == trailReviewBatchResultError {
+			if result.Error != nil {
+				return nil, fmt.Errorf("create finding: %s: %s", result.Error.Code, result.Error.Message)
+			}
+			return nil, errors.New("create finding: server reported an error")
 		}
-		return api.TrailReviewComment{}, errors.New("create finding: server reported an error")
+		if result.Comment == nil {
+			return nil, errors.New("create finding: server did not return the finding")
+		}
+		findings = append(findings, *result.Comment)
 	}
-	if result.Comment == nil {
-		return api.TrailReviewComment{}, errors.New("create finding: server did not return the finding")
-	}
-	return *result.Comment, nil
+	return findings, nil
 }
 
 // startTrailReview opens a review session for a trail. The body is left empty
@@ -943,11 +1071,6 @@ func resolveTrailReviewComment(ctx context.Context, client *api.Client, trailID,
 		sort.Strings(ids)
 		return api.TrailReviewComment{}, fmt.Errorf("ambiguous finding %q (matches: %s)", commentID, strings.Join(ids, ", "))
 	}
-}
-
-func hydrateTrailReviewCommentSuggestions(ctx context.Context, client *api.Client, trailID string, comment api.TrailReviewComment) (api.TrailReviewComment, error) {
-	hydrated, _, err := hydrateTrailReviewCommentWithState(ctx, client, trailID, comment)
-	return hydrated, err
 }
 
 func hydrateTrailReviewCommentWithState(ctx context.Context, client *api.Client, trailID string, comment api.TrailReviewComment) (api.TrailReviewComment, api.TrailReviewStateResponse, error) {

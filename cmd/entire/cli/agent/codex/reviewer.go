@@ -35,7 +35,9 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 func buildCodexReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	promptCfg := cfg
 	promptCfg.Skills = expandCodexBuiltinReview(cfg.Skills)
-	args := []string{codexExecCommand, "--skip-git-repo-check", "--json", "-"}
+	args := []string{codexExecCommand, "--skip-git-repo-check", "--json"}
+	args = review.AppendModelFlag(args, cfg.Model)
+	args = append(args, "-")
 	prompt := review.ComposeReviewPrompt(promptCfg)
 	cmd := exec.CommandContext(ctx, "codex", args...)
 	cmd.Stdin = strings.NewReader(prompt)
@@ -109,6 +111,7 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 		scanner.Buffer(make([]byte, min(1024*1024, maxBuf)), maxBuf)
 		var seenTurnComplete bool
 		var turnUsage codexUsage
+		var failureMsg string
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			if len(line) == 0 {
@@ -118,6 +121,14 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			if err := json.Unmarshal(line, &env); err != nil {
 				out <- reviewtypes.RunError{Err: fmt.Errorf("codex --json: %w", err)}
 				continue
+			}
+			// Codex reports failures as a stdout envelope carrying a message
+			// (type "error"/"turn.failed"/…) and exits non-zero with empty
+			// stderr. Capture the message so the reason surfaces instead of a
+			// bare "exit status 1". Only emitted below if the turn never
+			// completes, so a stray message on a successful run is ignored.
+			if msg := strings.TrimSpace(firstNonEmptyString(env.Error.Message, env.Message)); msg != "" {
+				failureMsg = msg
 			}
 			// Add cases here when codex's envelope or item types grow; the
 			// default arm logs unknown types at Debug so drift can be
@@ -149,6 +160,9 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			out <- reviewtypes.Finished{Success: false}
 			return
 		}
+		if !seenTurnComplete && failureMsg != "" {
+			out <- reviewtypes.RunError{Err: fmt.Errorf("codex: %s", failureMsg)}
+		}
 		if seenTurnComplete {
 			// codex reports cached_input_tokens as a subset of input_tokens
 			// and reasoning_output_tokens as a subset of output_tokens
@@ -173,9 +187,26 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 }
 
 type codexEnvelope struct {
-	Type  string     `json:"type"`
-	Item  codexItem  `json:"item"`
-	Usage codexUsage `json:"usage"`
+	Type    string          `json:"type"`
+	Item    codexItem       `json:"item"`
+	Usage   codexUsage      `json:"usage"`
+	Message string          `json:"message"`
+	Error   codexErrorField `json:"error"`
+}
+
+// codexErrorField captures the nested error message shape some codex envelopes
+// use ({"error":{"message":"..."}}); top-level "message" covers the flat shape.
+type codexErrorField struct {
+	Message string `json:"message"`
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 type codexItem struct {

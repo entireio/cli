@@ -14,6 +14,11 @@ func (e *SilentError) Unwrap() error {
 	return e.Err
 }
 
+// AlreadyPrinted reports that the user-facing message has already been written.
+func (e *SilentError) AlreadyPrinted() bool {
+	return true
+}
+
 // NewSilentError creates a SilentError wrapping the given error.
 // Use this when you've already printed a user-friendly error message
 // and don't want main.go to print the error again.

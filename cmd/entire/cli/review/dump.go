@@ -24,6 +24,10 @@ import (
 // DumpSink writes per-agent narrative blocks to W after the run completes.
 type DumpSink struct {
 	W io.Writer
+	// RenderWriter is the writer whose terminal capabilities should be used for
+	// markdown rendering. It defaults to W. TTY review runs use this when W is a
+	// post-run buffer that will later flush to the real terminal.
+	RenderWriter io.Writer
 }
 
 // Compile-time interface check.
@@ -92,11 +96,18 @@ func (s DumpSink) dumpAgent(run reviewtypes.AgentRun) {
 	// RenderForWriter is TTY-aware: returns raw markdown for non-TTY writers,
 	// glamour-styled output otherwise. Errors are best-effort — fall back to
 	// raw markdown so the user always gets the content.
-	rendered, err := mdrender.RenderForWriter(s.W, b.String())
+	rendered, err := mdrender.RenderForWriter(s.renderWriter(), b.String())
 	if err != nil {
 		rendered = b.String()
 	}
 	fmt.Fprint(s.W, rendered)
+}
+
+func (s DumpSink) renderWriter() io.Writer {
+	if s.RenderWriter != nil {
+		return s.RenderWriter
+	}
+	return s.W
 }
 
 func writeFailureHeader(b *strings.Builder, runErr error) {

@@ -1125,19 +1125,6 @@ func TestLoad_AppliesClonePreferencesBeforeLocalSettings(t *testing.T) {
 	}
 }
 
-func TestEntireSettings_ReviewConfigFor(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{Review: map[string]ReviewConfig{
-		"claude-code": {Skills: []string{"/pr-review-toolkit:review-pr"}},
-	}}
-	if cfg := s.ReviewConfigFor("claude-code"); len(cfg.Skills) != 1 {
-		t.Fatalf("expected 1 skill, got %v", cfg.Skills)
-	}
-	if cfg := s.ReviewConfigFor("codex"); !cfg.IsZero() {
-		t.Fatalf("expected zero config for unconfigured agent, got %+v", cfg)
-	}
-}
-
 func TestReviewConfig_IsZero(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1294,5 +1281,52 @@ func TestLoad_MergesInvestigateLocalOverride(t *testing.T) {
 	}
 	if cfg.AlwaysPrompt != "Be brief." {
 		t.Errorf("AlwaysPrompt = %q, want %q", cfg.AlwaysPrompt, "Be brief.")
+	}
+}
+
+func TestMergeReviewProfiles_PureAndPrecedence(t *testing.T) {
+	t.Parallel()
+	base := map[string]ReviewProfileConfig{
+		"general":  {Task: "base general"},
+		"security": {Task: "base security"},
+	}
+	src := map[string]ReviewProfileConfig{
+		"general": {Task: "override general"}, // overrides base
+		"scratch": {Task: "src scratch"},      // unique to src
+	}
+
+	out := mergeReviewProfiles(base, src)
+
+	// Merged result: src overrides same-named, both layers' unique profiles kept.
+	if out["general"].Task != "override general" {
+		t.Errorf("general = %q, want src override", out["general"].Task)
+	}
+	if out["security"].Task != "base security" {
+		t.Errorf("security = %q, want base preserved", out["security"].Task)
+	}
+	if out["scratch"].Task != "src scratch" {
+		t.Errorf("scratch = %q, want src-only profile kept", out["scratch"].Task)
+	}
+
+	// Inputs must not be mutated.
+	if _, leaked := base["scratch"]; leaked {
+		t.Error("base was mutated: src profile leaked into it")
+	}
+	if base["general"].Task != "base general" {
+		t.Errorf("base[general] mutated: %q", base["general"].Task)
+	}
+	if len(src) != 2 {
+		t.Errorf("src mutated: len = %d, want 2", len(src))
+	}
+
+	// The result is always a fresh, non-nil map, even when both inputs are
+	// empty/nil, so callers never receive nil from a non-nil input.
+	if got := mergeReviewProfiles(nil, nil); got == nil {
+		t.Error("merge(nil, nil) should return a non-nil empty map, got nil")
+	} else if len(got) != 0 {
+		t.Errorf("merge(nil, nil) = %v, want empty", got)
+	}
+	if got := mergeReviewProfiles(nil, map[string]ReviewProfileConfig{}); got == nil {
+		t.Error("merge(nil, emptyNonNil) should return a non-nil empty map, got nil")
 	}
 }

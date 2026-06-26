@@ -989,9 +989,9 @@ func TestReviewAttach_UsesPendingReviewMarkerDefaults(t *testing.T) {
 	errBuf := &bytes.Buffer{}
 	rootCmd.SetOut(outBuf)
 	rootCmd.SetErr(errBuf)
-	rootCmd.SetArgs([]string{"review", "attach", sessionID, "--force"})
+	rootCmd.SetArgs([]string{"attach", "--review", sessionID, "--force"})
 	if err := rootCmd.Execute(); err != nil {
-		t.Fatalf("review attach failed: %v\nstderr: %s", err, errBuf.String())
+		t.Fatalf("attach --review failed: %v\nstderr: %s", err, errBuf.String())
 	}
 
 	store, err := session.NewStateStore(context.Background())
@@ -1057,7 +1057,7 @@ func TestAttach_ReviewWithExistingCheckpointErrors(t *testing.T) {
 // checkpoint) must APPEND at the next-available index, not overwrite
 // session 0. In the wild this happens when a user runs a manual claude
 // session, commits (with the checkpoint trailer), then runs
-// `entire review attach <new-session-id>` to record a separate review.
+// `entire attach --review <new-session-id>` to record a separate review.
 // The expected result is two sessions on the same checkpoint.
 func TestAttach_ReviewAppendsAsAdditionalSessionWhenIDDiffers(t *testing.T) {
 	setupAttachTestRepo(t)
@@ -1333,8 +1333,8 @@ func TestAttachCmd_ReviewDoesNotInferSkillsFromConfig(t *testing.T) {
 	}
 }
 
-// TestReviewAttachCmd_TagsSession drives `entire review attach <id>`,
-// verifying the subcommand reaches runAttach with review options set.
+// TestReviewAttachCmd_TagsSession drives `entire attach --review <id> --skills`,
+// verifying the attach path reaches runAttach with review options set.
 func TestReviewAttachCmd_TagsSession(t *testing.T) {
 	setupAttachTestRepo(t)
 
@@ -1343,9 +1343,9 @@ func TestReviewAttachCmd_TagsSession(t *testing.T) {
 `)
 
 	rootCmd := NewRootCmd()
-	rootCmd.SetArgs([]string{"review", "attach", "--force", "--skills", "/custom-review", sessionID})
+	rootCmd.SetArgs([]string{"attach", "--review", "--force", "--skills", "/custom-review", sessionID})
 	if err := rootCmd.Execute(); err != nil {
-		t.Fatalf("review attach failed: %v", err)
+		t.Fatalf("attach --review failed: %v", err)
 	}
 
 	store, err := session.NewStateStore(context.Background())

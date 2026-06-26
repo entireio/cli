@@ -1339,6 +1339,26 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		state.FullyCondensed = true
 	}
 
+	// Pin a review session to the single checkpoint it was just condensed into.
+	// A review is a read-only one-shot: it touches no files, so it never accrues
+	// shadow-branch content and the FullyCondensed branch above never fires for
+	// it. Left active, it stays in this worktree's session set and gets
+	// re-condensed into every subsequent commit — which is how one review ends
+	// up attributed to many unrelated checkpoints (its prompt rendering once per
+	// checkpoint on the session page). Once condensed, its transcript is captured
+	// and it has nothing further to contribute, so mark it terminal here. Gated
+	// on handler.condensed so it only fires after the review actually landed in a
+	// checkpoint — a review skipped by the read-only gate is never written to a
+	// checkpoint and stays eligible to attach to a later one.
+	if state.Kind.IsReview() && handler.condensed {
+		if state.EndedAt == nil {
+			endedAt := time.Now().UTC()
+			state.EndedAt = &endedAt
+		}
+		state.Phase = session.PhaseEnded
+		state.FullyCondensed = true
+	}
+
 	// State is saved by the outer MutateSessionState in PostCommit.
 
 	// Only preserve shadow branch for active sessions that were NOT condensed.

@@ -42,8 +42,10 @@ their canonical paths are still runnable.
 - `configure`: bare prints help and a hint pointing at `entire agent`; flags
   manage non-agent settings (telemetry, git-hook installation mode, strategy
   options, summary provider). Agent CRUD lives under `entire agent`.
-- `auth`: `login`, `logout`, `status`, `contexts`, `use`. `logout` takes
-  `--everywhere` (revoke every session on the active core, not just the
+- `auth`: `login`, `logout`, `status`, `contexts`, `use`, plus the hidden
+  `token` (prints the active control-plane bearer to stdout for scripting/curl;
+  honors `ENTIRE_TOKEN`, else the refreshed active-context login JWT). `logout`
+  takes `--everywhere` (revoke every session on the active core, not just the
   current one) and `--all-contexts` (log out of every saved login)
 - `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
 
@@ -535,11 +537,9 @@ The phase state machine, metadata directory layout, sharded checkpoint format, m
 
 ### `entire review` Command
 
-`entire review` runs a set of configured review skills inside an agent session. The review session is an immutable fact attached to a checkpoint — no verdict, no status tracking, no empty commits. On the next `git commit`, the review session is condensed into the checkpoint metadata alongside normal sessions, permanently recording that the code was reviewed and which skills were run.
+`entire review` runs a configured review profile. Keep documentation brief and user-facing.
 
-Configured per-agent in `.entire/settings.json` (`EntireSettings.Review`); launchable agents (claude-code, codex, gemini-cli) receive `ENTIRE_REVIEW_*` env vars that the `UserPromptSubmit` hook reads to tag the session as `Kind = "agent_review"`. Multi-agent runs use a TUI dashboard + opt-in cross-agent synthesis.
-
-See [Review Command](docs/architecture/review-command.md) for the full command surface, settings schema, env-var handshake, multi-agent UI, anti-features (do NOT recreate), and key-file map.
+See [Review Command](docs/architecture/review-command.md) for usage, minimal profile config, and key files.
 
 # Important Notes
 
