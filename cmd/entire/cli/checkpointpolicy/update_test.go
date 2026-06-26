@@ -31,6 +31,23 @@ func TestUpdateRejectsDowngradeFromRemoteWithoutForce(t *testing.T) {
 	require.True(t, localState.Hash.IsZero())
 }
 
+func TestUpdateRejectsSemVerDowngradeWithoutForce(t *testing.T) {
+	remoteDir, remoteRepo, bareDir := initPolicyRemoteFixture(t)
+	_, err := checkpointpolicy.WriteLocal(t.Context(), remoteRepo, plumbing.ZeroHash, checkpointpolicy.Policy{
+		CheckpointVersion:    "branch-v1.2.3",
+		CheckpointMinVersion: checkpoint.CheckpointVersionBranchV1,
+	})
+	require.NoError(t, err)
+	pushPolicyRefWithGit(t, remoteDir, bareDir)
+
+	localDir, localRepo := initPolicyRepoWithDir(t)
+
+	_, err = checkpointpolicy.Update(t.Context(), localRepo, checkpointpolicy.Target{Remote: bareDir, Dir: localDir}, checkpointpolicy.UpdateOptions{
+		CheckpointVersion: "branch-v1.2.2",
+	})
+	require.ErrorContains(t, err, "would downgrade checkpoint_version")
+}
+
 func TestUpdateAllowsDowngradeWithForce(t *testing.T) {
 	remoteDir, remoteRepo, bareDir := initPolicyRemoteFixture(t)
 	remoteHash, err := checkpointpolicy.WriteLocal(t.Context(), remoteRepo, plumbing.ZeroHash, checkpointpolicy.Policy{
