@@ -48,8 +48,18 @@ type outEdge struct {
 // optional reverse head (`<-->`), and open/invisible links (`---`, `===`,
 // `~~~`). A bare `--` (two dashes, no head) is not a link, so it stays as label
 // text. Multi-edge `&` shorthand is still rejected upstream.
+//
+// Inline labels (`-- text -->`) are recognized only when the arrow ends in a
+// `>` head, and the label may not contain node-shape delimiters (`[](){}`).
+// Both constraints prevent over-matching: without the `>`-only rule a chain of
+// `--x`/`--o` arrows (`A --x B --x C`) would treat the second arrowhead as a
+// label closer and swallow the middle node; without the delimiter exclusion a
+// node label that itself contains ` -- ` (`A[fetch -- retry] --> B`) would be
+// mistaken for an inline edge label. Inline labels on `--x`/`--o` arrows are
+// therefore unsupported (they fall back to raw source, losslessly); bare
+// `--x`/`--o` arrows without a label still render via the headed branch.
 var linkRe = regexp.MustCompile(`\s*(?:` +
-	`(?:-{2,}|={2,}|-\.+)\s*([^|>\s][^>|]*?)\s*(?:-{2,}|={2,}|\.+-)[>xo]` + // inline label (spaces optional)
+	`(?:-{2,}|={2,}|-\.+)\s*([^|>\s(){}\[\]][^>|(){}\[\]]*?)\s*(?:-{2,}|={2,}|\.+-)>` + // inline label (spaces optional)
 	`|` +
 	`(?:<?(?:-{2,}|={2,}|-\.+-|~{2,})[>xo]|-{3,}|={3,}|-\.+-|~{3,})` + // headed or open link
 	`(?:\s*\|\s*"?([^|"]*?)"?\s*\|)?` + // optional pipe label

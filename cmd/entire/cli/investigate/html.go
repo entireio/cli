@@ -41,10 +41,11 @@ type pageDoc struct {
 // Findings, Conclusion, …). The renderer is template-aware: it splits the body
 // on the canonical section headings, folds the raw issue body and its noise
 // headings into a single section, drops sections that are empty (only authoring
-// comments), lifts the TLDR into the hero as a standfirst, and reorders so the
-// useful findings come first and process/context sections (Approach, Prior
-// work, the original issue) sink to the bottom. Findings with no recognizable
-// sections fall back to a straight markdown render.
+// comments), drops the TLDR and Question sections entirely (the hero shows the
+// prompt as the title, not the TLDR), and reorders so the useful findings come
+// first and process/context sections (Approach, Prior work, the original issue)
+// sink to the bottom. Findings with no recognizable sections fall back to a
+// straight markdown render.
 //
 // Markdown is converted with goldmark in default (safe) mode — raw HTML in
 // agent-authored findings is NOT passed through. Renderable Mermaid flowcharts
@@ -288,7 +289,12 @@ func parseSections(body string) []*section {
 		cur = s
 	}
 
-	var inFence, inUntrusted, inComment bool
+	// fenceMarker holds the marker that opened the current code fence ("```"
+	// or "~~~"); empty when not inside a fence. CommonMark accepts both, and a
+	// fence is closed only by its own marker, so a ``` line cannot close a ~~~
+	// block. While fenced, `##`-looking lines are code, not section headings.
+	var fenceMarker string
+	var inUntrusted, inComment bool
 	for _, line := range strings.Split(body, "\n") {
 		t := strings.TrimSpace(line)
 		switch {
@@ -303,18 +309,21 @@ func parseSections(body string) []*section {
 			} else {
 				cur.body.WriteString(line + "\n")
 			}
-		case inFence:
+		case fenceMarker != "":
 			cur.body.WriteString(line + "\n")
-			if strings.HasPrefix(t, "```") {
-				inFence = false
+			if strings.HasPrefix(t, fenceMarker) {
+				fenceMarker = ""
 			}
 		case strings.HasPrefix(t, "<untrusted"):
 			inUntrusted = true // drop the tag line itself
 		case strings.HasPrefix(t, "<!--") && !strings.Contains(t, "-->"):
 			inComment = true
 			cur.body.WriteString(line + "\n")
-		case strings.HasPrefix(t, "```"):
-			inFence = true
+		case strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~"):
+			fenceMarker = "```"
+			if strings.HasPrefix(t, "~~~") {
+				fenceMarker = "~~~"
+			}
 			cur.body.WriteString(line + "\n")
 		case sectionHeadingRe.MatchString(line):
 			start(sectionHeadingRe.FindStringSubmatch(line)[1])
@@ -882,22 +891,43 @@ const findingsJS = `
     h.appendChild(a);
   });
 
-  // Scroll-spy: highlight the TOC link for the section heading in view.
+  // Scroll-spy: highlight the TOC link for the heading nearest the top of the
+  // viewport. Computed from scroll position (rather than only reacting to
+  // intersection events) so the active link stays correct even when no heading
+  // sits in a thin observation band — deep inside a long section, or at the
+  // very top/bottom of the page. Hidden (filtered-out) headings are skipped.
   var links = {};
   document.querySelectorAll(".toc-link").forEach(function (a) { links[a.getAttribute("href").slice(1)] = a; });
-  if (window.IntersectionObserver && Object.keys(links).length) {
-    var active = null;
-    var obs = new IntersectionObserver(function (entries) {
-      entries.forEach(function (e) {
-        if (!e.isIntersecting) return;
-        var link = links[e.target.id];
-        if (!link) return;
-        if (active) active.classList.remove("active");
-        link.classList.add("active");
-        active = link;
-      });
-    }, { rootMargin: "-4.5rem 0px -70% 0px", threshold: 0 });
-    findings.querySelectorAll(".sec-h[id]").forEach(function (h) { obs.observe(h); });
+  var spyHeadings = Array.prototype.slice.call(findings.querySelectorAll(".sec-h[id]"));
+  if (spyHeadings.length && Object.keys(links).length) {
+    var activeLink = null;
+    function setActive(link) {
+      if (link === activeLink) return;
+      if (activeLink) activeLink.classList.remove("active");
+      if (link) link.classList.add("active");
+      activeLink = link;
+    }
+    function syncSpy() {
+      var threshold = 80; // just below the sticky top bar
+      var current = null, firstVisible = null;
+      for (var i = 0; i < spyHeadings.length; i++) {
+        var h = spyHeadings[i];
+        if (!h.getClientRects().length) continue; // skip hidden headings
+        if (!firstVisible) firstVisible = h;
+        if (h.getBoundingClientRect().top <= threshold) current = h;
+      }
+      if (!current) current = firstVisible; // above the first heading → highlight it
+      setActive(current ? (links[current.id] || null) : null);
+    }
+    var spyTicking = false;
+    function onSpyScroll() {
+      if (spyTicking) return;
+      spyTicking = true;
+      window.requestAnimationFrame(function () { syncSpy(); spyTicking = false; });
+    }
+    window.addEventListener("scroll", onSpyScroll, { passive: true });
+    window.addEventListener("resize", onSpyScroll);
+    syncSpy();
   }
 
   // Copy buttons on code blocks (skip rendered diagrams).

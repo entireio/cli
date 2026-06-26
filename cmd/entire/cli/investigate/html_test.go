@@ -465,6 +465,34 @@ func TestRenderFindingsHTML_RemovesQuestionSection(t *testing.T) {
 	}
 }
 
+func TestRenderFindingsHTML_TildeFenceIsNotASection(t *testing.T) {
+	t.Parallel()
+
+	// A `##`-looking line inside a ~~~ code fence (valid CommonMark) must not
+	// be treated as a section boundary — it is code, not a heading.
+	m := LocalManifest{
+		RunID:     "abcdef012345",
+		Topic:     "tilde fences",
+		StartedAt: time.Date(2026, 6, 23, 9, 0, 0, 0, time.UTC),
+		FindingsContent: "## Findings\n\nExample config:\n\n~~~\n" +
+			"## not-a-real-heading\nkey = value\n~~~\n\nReal prose after the fence.\n",
+	}
+
+	out, err := RenderFindingsHTML(m)
+	if err != nil {
+		t.Fatalf("RenderFindingsHTML: %v", err)
+	}
+	if strings.Contains(out, `id="not-a-real-heading"`) {
+		t.Errorf("a ## line inside a ~~~ fence must not become a section, got: %q", out)
+	}
+	if !strings.Contains(out, `id="findings"`) {
+		t.Errorf("expected the real Findings section, got: %q", out)
+	}
+	if !strings.Contains(out, "Real prose after the fence.") {
+		t.Errorf("expected post-fence prose to render inside Findings, got: %q", out)
+	}
+}
+
 func TestRenderFindingsHTML_EmptyBodyReturnsSentinel(t *testing.T) {
 	t.Parallel()
 

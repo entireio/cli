@@ -150,6 +150,14 @@ func TestRender_EdgeSyntaxVariants(t *testing.T) {
 			wantOrder: []string{"A", "B", "C"},
 		},
 		{
+			// Regression: a node whose bracketed label contains ` -- ` must
+			// still render — the inline-label match must not reach inside the
+			// shape brackets and corrupt the node token.
+			name:      "node label containing a double dash",
+			src:       "flowchart TD\n  A[fetch -- retry logic] --> B[done]",
+			wantOrder: []string{"fetch -- retry logic", "done"},
+		},
+		{
 			name:      "inline dotted label without spaces",
 			src:       "flowchart LR\n  A -.permanent: always 413.-> B",
 			wantOrder: []string{"A", "B"},
@@ -182,6 +190,30 @@ func TestRender_EdgeSyntaxVariants(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Regression: a chain of bare cross/circle arrowheads (`A --x B --x C`) must
+// render one box per node. The inline-label branch previously accepted the
+// second `--x` as its closing operator, swallowing the middle node B into a
+// bogus edge label and collapsing the chain to A → C.
+func TestRender_ChainedArrowheadsKeepEveryNode(t *testing.T) {
+	t.Parallel()
+
+	for _, src := range []string{
+		"flowchart LR\n  A --x B --x C",
+		"flowchart LR\n  A --o B --o C",
+	} {
+		out, ok := Render(src)
+		if !ok {
+			t.Fatalf("expected renderable, got ok=false for:\n%s", src)
+		}
+		if got := strings.Count(out, "┌"); got != 3 {
+			t.Errorf("expected 3 boxes (one per node) for %q, got %d:\n%s", src, got, out)
+		}
+		if got := strings.Count(out, "▼"); got != 2 {
+			t.Errorf("expected 2 arrows for a 3-node chain in %q, got %d:\n%s", src, got, out)
+		}
 	}
 }
 
