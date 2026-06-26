@@ -272,6 +272,26 @@ func ResolveByRunID(manifests []LocalManifest, runID string) ([]LocalManifest, e
 	}
 }
 
+// FilterByWorktree returns the subset of manifests recorded as having run in
+// the worktree at worktreeRoot, comparing the cleaned WorktreePath. Manifests
+// with no recorded WorktreePath are excluded — they cannot be attributed to a
+// worktree, so they surface only in the unscoped (--all) view. A blank
+// worktreeRoot disables scoping and returns manifests unchanged: when the
+// caller cannot determine the current worktree, it must not hide runs.
+func FilterByWorktree(manifests []LocalManifest, worktreeRoot string) []LocalManifest {
+	if strings.TrimSpace(worktreeRoot) == "" {
+		return manifests
+	}
+	want := filepath.Clean(worktreeRoot)
+	out := make([]LocalManifest, 0, len(manifests))
+	for _, m := range manifests {
+		if m.WorktreePath != "" && filepath.Clean(m.WorktreePath) == want {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // ambiguousRunIDError formats a list of candidate run ids for the user
 // to choose from. When runID is empty, the header asks the user to pass a
 // run id; otherwise it reports the ambiguous prefix.

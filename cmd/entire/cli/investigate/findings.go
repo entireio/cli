@@ -15,9 +15,11 @@ import (
 
 // runInvestigateFindings handles `entire investigate --findings`: prints
 // a plain list of saved investigations with `entire investigate fix
-// <run-id>` hints.
-func runInvestigateFindings(ctx context.Context, cmd *cobra.Command, silentErr func(error) error) error {
-	if _, err := paths.WorktreeRoot(ctx); err != nil {
+// <run-id>` hints. By default the list is scoped to the current worktree;
+// all=true (the `--all` flag) lists investigations from every worktree.
+func runInvestigateFindings(ctx context.Context, cmd *cobra.Command, silentErr func(error) error, all bool) error {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
 		cmd.SilenceUsage = true
 		fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Run `entire enable` first.")
 		return wrapSilent(silentErr, errors.New("not a git repository"))
@@ -34,9 +36,18 @@ func runInvestigateFindings(ctx context.Context, cmd *cobra.Command, silentErr f
 		fmt.Fprintln(cmd.OutOrStdout(), "No local investigations found.")
 		return nil
 	}
-	// Always print the full list — users reach for --findings to see all
-	// runs. The `fix:` hint per row gives them the next step.
-	printInvestigateFindingsList(cmd.OutOrStdout(), manifests)
+	// Default to this worktree's runs; `--all` widens to every worktree.
+	shown := manifests
+	if !all {
+		shown = FilterByWorktree(manifests, worktreeRoot)
+	}
+	if len(shown) == 0 {
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"No investigations found for this worktree (%d across the repository). "+
+				"Re-run with `entire investigate --findings --all` to list them.\n", len(manifests))
+		return nil
+	}
+	printInvestigateFindingsList(cmd.OutOrStdout(), shown)
 	return nil
 }
 

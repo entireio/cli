@@ -70,6 +70,7 @@ type runFlags struct {
 	cont               string
 	edit               bool
 	findings           bool
+	all                bool
 	allowUntrustedSeed bool
 }
 
@@ -104,7 +105,9 @@ Flags:
   --quorum N              approvals needed to terminate (0 = all agents)
   --continue <run-id>     resume an existing run
   --edit                  re-open the investigate config picker
-  --findings              browse local investigation manifests
+  --findings              browse local investigation manifests (this worktree;
+                          add --all for every worktree)
+  --all                   with --findings, list runs from every worktree
   --allow-untrusted-seed  required to run a non-interactive --issue-link
                           investigation (otherwise refused: the seed is
                           attacker-influenced GitHub content and agents run
@@ -114,6 +117,7 @@ Subcommands:
   fix [run-id]            launch a coding agent with the run's findings as
                           grounded context
   show [run-id]           print a saved investigation's summary + findings
+                          (no run-id: this worktree's run; --all for any)
   clean [run-id|--all]    delete saved investigation artifacts`,
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) > 1 {
@@ -137,6 +141,7 @@ Subcommands:
 	cmd.Flags().StringVar(&flags.cont, "continue", "", "resume an existing run by id")
 	cmd.Flags().BoolVar(&flags.edit, "edit", false, "re-open the investigate config picker")
 	cmd.Flags().BoolVar(&flags.findings, "findings", false, "browse local investigation manifests")
+	cmd.Flags().BoolVar(&flags.all, "all", false, "with --findings, list investigations from every worktree (default: this worktree only)")
 	cmd.Flags().BoolVar(&flags.allowUntrustedSeed, "allow-untrusted-seed", false,
 		"required to seed a non-interactive --issue-link run with attacker-influenced GitHub content")
 
@@ -236,7 +241,10 @@ func newFixSubcommand(deps Deps) *cobra.Command {
 
 // newShowSubcommand wires `entire investigate show [run-id]` to RunShow.
 func newShowSubcommand(deps Deps) *cobra.Command {
-	var asHTML bool
+	var (
+		asHTML  bool
+		showAll bool
+	)
 	cmd := &cobra.Command{
 		Use:   "show [run-id]",
 		Short: "Print a saved investigation's summary and findings",
@@ -248,7 +256,8 @@ func newShowSubcommand(deps Deps) *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			if _, err := paths.WorktreeRoot(ctx); err != nil {
+			worktreeRoot, err := paths.WorktreeRoot(ctx)
+			if err != nil {
 				cmd.SilenceUsage = true
 				fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Run `entire enable` first.")
 				return wrapSilent(deps.NewSilentError, errors.New("not a git repository"))
@@ -262,15 +271,19 @@ func newShowSubcommand(deps Deps) *cobra.Command {
 				runID = args[0]
 			}
 			return RunShow(ctx, ShowInput{
-				RunID:  runID,
-				Out:    cmd.OutOrStdout(),
-				ErrOut: cmd.ErrOrStderr(),
-				HTML:   asHTML,
+				RunID:           runID,
+				Out:             cmd.OutOrStdout(),
+				ErrOut:          cmd.ErrOrStderr(),
+				HTML:            asHTML,
+				All:             showAll,
+				CurrentWorktree: worktreeRoot,
 			}, ShowDeps{ManifestStore: store})
 		},
 	}
 	cmd.Flags().BoolVar(&asHTML, "html", false,
 		"render findings to a styled HTML page and open it in the browser")
+	cmd.Flags().BoolVar(&showAll, "all", false,
+		"with no run id, consider investigations from every worktree (default: this worktree only)")
 	return cmd
 }
 
@@ -379,7 +392,7 @@ func runInvestigate(ctx context.Context, cmd *cobra.Command, args []string, f ru
 		return runEdit(ctx, cmd, deps)
 	}
 	if f.findings {
-		return runInvestigateFindings(ctx, cmd, silentErr)
+		return runInvestigateFindings(ctx, cmd, silentErr, f.all)
 	}
 	if strings.TrimSpace(f.cont) != "" {
 		return runContinue(ctx, cmd, f, deps)

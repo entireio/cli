@@ -276,3 +276,116 @@ func TestRunShow_NoContentAvailable(t *testing.T) {
 		t.Errorf("expected soft no-content notice, got: %q", out.String())
 	}
 }
+
+// writeShowManifestInWorktree persists a minimal terminal-outcome manifest
+// tagged with worktreePath, for the worktree-scoping tests.
+func writeShowManifestInWorktree(t *testing.T, store *LocalManifestStore, runID, topic, worktreePath string, started time.Time) {
+	t.Helper()
+	m := LocalManifest{
+		RunID:           runID,
+		Topic:           topic,
+		Slug:            SlugifyTopic(topic),
+		WorktreePath:    worktreePath,
+		Outcome:         "quorum",
+		FindingsContent: "## Findings\n\n" + topic + " body\n",
+		Agents:          []string{"claude-code"},
+		StartedAt:       started,
+		EndedAt:         started.Add(time.Minute),
+	}
+	if err := store.Write(context.Background(), m); err != nil {
+		t.Fatalf("Write %s: %v", runID, err)
+	}
+}
+
+func TestRunShow_NoRunID_ScopesToCurrentWorktree(t *testing.T) {
+	t.Parallel()
+
+	store := NewLocalManifestStoreWithDir(t.TempDir())
+	t1 := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
+	writeShowManifestInWorktree(t, store, "aaaaaaaaaaaa", "here run", "/repos/here", t1)
+	writeShowManifestInWorktree(t, store, "bbbbbbbbbbbb", "there run", "/repos/there", t2)
+
+	// No run id, scoped to /repos/here → exactly one match → shows it directly.
+	var out bytes.Buffer
+	err := RunShow(context.Background(),
+		ShowInput{Out: &out, CurrentWorktree: "/repos/here"},
+		ShowDeps{ManifestStore: store},
+	)
+	if err != nil {
+		t.Fatalf("RunShow: %v", err)
+	}
+	if !strings.Contains(out.String(), "Investigation aaaaaaaaaaaa") {
+		t.Errorf("expected the current-worktree run to be shown, got: %q", out.String())
+	}
+	if strings.Contains(out.String(), "bbbbbbbbbbbb") {
+		t.Errorf("other worktree's run must not appear when scoped, got: %q", out.String())
+	}
+}
+
+func TestRunShow_NoRunID_NoneInWorktreeHintsAll(t *testing.T) {
+	t.Parallel()
+
+	store := NewLocalManifestStoreWithDir(t.TempDir())
+	t1 := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	writeShowManifestInWorktree(t, store, "aaaaaaaaaaaa", "elsewhere run", "/repos/elsewhere", t1)
+
+	var out bytes.Buffer
+	err := RunShow(context.Background(),
+		ShowInput{Out: &out, CurrentWorktree: "/repos/here"},
+		ShowDeps{ManifestStore: store},
+	)
+	if err != nil {
+		t.Fatalf("RunShow: %v", err)
+	}
+	if !strings.Contains(out.String(), "No investigations found for this worktree") {
+		t.Errorf("expected a worktree-scoped empty notice, got: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "--all") {
+		t.Errorf("expected an --all hint, got: %q", out.String())
+	}
+}
+
+func TestRunShow_NoRunID_AllWidensAcrossWorktrees(t *testing.T) {
+	t.Parallel()
+
+	store := NewLocalManifestStoreWithDir(t.TempDir())
+	t1 := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
+	writeShowManifestInWorktree(t, store, "aaaaaaaaaaaa", "here run", "/repos/here", t1)
+	writeShowManifestInWorktree(t, store, "bbbbbbbbbbbb", "there run", "/repos/there", t2)
+
+	// --all + multiple total → ambiguous listing across every worktree.
+	var out bytes.Buffer
+	err := RunShow(context.Background(),
+		ShowInput{Out: &out, CurrentWorktree: "/repos/here", All: true},
+		ShowDeps{ManifestStore: store},
+	)
+	if err == nil {
+		t.Fatal("expected ambiguity error with --all and multiple runs, got nil")
+	}
+	if !strings.Contains(err.Error(), "aaaaaaaaaaaa") || !strings.Contains(err.Error(), "bbbbbbbbbbbb") {
+		t.Errorf("expected both runs listed under --all, got: %v", err)
+	}
+}
+
+func TestRunShow_ExplicitRunID_NotScopedByWorktree(t *testing.T) {
+	t.Parallel()
+
+	store := NewLocalManifestStoreWithDir(t.TempDir())
+	t1 := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	writeShowManifestInWorktree(t, store, "bbbbbbbbbbbb", "there run", "/repos/there", t1)
+
+	// Targeting a specific run from a different worktree must still resolve.
+	var out bytes.Buffer
+	err := RunShow(context.Background(),
+		ShowInput{RunID: "bbbbbbbbbbbb", Out: &out, CurrentWorktree: "/repos/here"},
+		ShowDeps{ManifestStore: store},
+	)
+	if err != nil {
+		t.Fatalf("RunShow: %v", err)
+	}
+	if !strings.Contains(out.String(), "Investigation bbbbbbbbbbbb") {
+		t.Errorf("explicit run id should resolve regardless of worktree, got: %q", out.String())
+	}
+}

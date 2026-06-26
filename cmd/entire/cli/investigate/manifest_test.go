@@ -266,3 +266,37 @@ func TestResolveByRunID_IgnoresInvalidRunID(t *testing.T) {
 		t.Errorf("ResolveByRunID(valid) = %+v, want single abcdef012345", got)
 	}
 }
+
+func TestFilterByWorktree(t *testing.T) {
+	t.Parallel()
+
+	wtA := filepath.Join(string(filepath.Separator)+"repos", "a")
+	wtB := filepath.Join(string(filepath.Separator)+"repos", "b")
+	manifests := []LocalManifest{
+		{RunID: "aaaaaaaaaaaa", WorktreePath: wtA},
+		{RunID: "bbbbbbbbbbbb", WorktreePath: wtB},
+		{RunID: "cccccccccccc", WorktreePath: wtA + string(filepath.Separator)}, // trailing sep → same after Clean
+		{RunID: "dddddddddddd"},                                                 // no recorded worktree
+	}
+
+	// Scoped to worktree A: only the two A runs (one via Clean-normalized path).
+	got := FilterByWorktree(manifests, wtA)
+	gotIDs := map[string]bool{}
+	for _, m := range got {
+		gotIDs[m.RunID] = true
+	}
+	if len(got) != 2 || !gotIDs["aaaaaaaaaaaa"] || !gotIDs["cccccccccccc"] {
+		t.Errorf("expected the two worktree-A runs, got: %+v", got)
+	}
+	if gotIDs["bbbbbbbbbbbb"] {
+		t.Errorf("worktree-B run must not appear when scoped to A: %+v", got)
+	}
+	if gotIDs["dddddddddddd"] {
+		t.Errorf("run with no recorded worktree must be excluded from a scoped view: %+v", got)
+	}
+
+	// A blank worktree disables scoping — every manifest passes through.
+	if all := FilterByWorktree(manifests, ""); len(all) != len(manifests) {
+		t.Errorf("blank worktree must not scope; got %d, want %d", len(all), len(manifests))
+	}
+}

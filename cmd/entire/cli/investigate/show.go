@@ -27,6 +27,15 @@ type ShowInput struct {
 	// HTML renders the findings to a styled findings.html in the per-run
 	// directory and opens it in the browser, instead of printing to Out.
 	HTML bool
+	// All, when true, considers investigations from every worktree of the
+	// repository. When false (the default), the no-run-id picker is scoped to
+	// CurrentWorktree. An explicit run id (or prefix) is always resolved
+	// across the whole repository regardless of this flag.
+	All bool
+	// CurrentWorktree is the absolute path of the worktree the command is
+	// running in, used to scope the no-run-id picker when All is false. Blank
+	// disables scoping (every manifest is considered).
+	CurrentWorktree string
 }
 
 // ShowDeps collects what RunShow needs that's test-injectable.
@@ -73,10 +82,24 @@ func RunShow(ctx context.Context, in ShowInput, deps ShowDeps) error {
 	}
 
 	if runID == "" {
-		if len(manifests) == 1 {
-			return emitShow(ctx, in, deps, manifests[0])
+		// No run id: default to investigations from the current worktree.
+		// `--all` widens to every worktree. An explicit run id below is never
+		// scoped — targeting a specific run should work from anywhere.
+		scoped := manifests
+		if !in.All {
+			scoped = FilterByWorktree(manifests, in.CurrentWorktree)
 		}
-		return ambiguousRunIDError(manifests, "")
+		switch len(scoped) {
+		case 0:
+			fmt.Fprintf(in.Out,
+				"No investigations found for this worktree (%d across the repository). "+
+					"Re-run with --all to list them, or pass a run id.\n", len(manifests))
+			return nil
+		case 1:
+			return emitShow(ctx, in, deps, scoped[0])
+		default:
+			return ambiguousRunIDError(scoped, "")
+		}
 	}
 
 	resolved, err := ResolveByRunID(manifests, runID)
