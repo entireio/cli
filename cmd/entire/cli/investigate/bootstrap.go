@@ -249,7 +249,17 @@ test output, or direct quotes. -->
 
 ## Conclusion
 
-<!-- Filled in once consensus is reached. Stop here. Recommendations and
-action items belong in a plan, not an investigation. -->
+<!-- Filled in once consensus is reached. Structure it as three bold lead-ins:
+
+**Question:** restate the question in one sentence.
+
+**Answer:** the root cause / conclusion, with the key evidence cited inline
+(file:line). This is the full explanation a reader needs.
+
+**Decisive code evidence:** the single most load-bearing proof — the exact
+file:line (and production signal, if any) that settles it.
+
+Stop here. Recommendations and action items belong in a plan, not an
+investigation. -->
 `, topic, createdISODate, question)
 }

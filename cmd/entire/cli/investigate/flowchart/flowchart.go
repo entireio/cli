@@ -236,7 +236,11 @@ func parseNodeToken(s string) (id, label string, ok bool) {
 // the inner label text.
 func unwrapShape(shape string) string {
 	for _, pair := range []struct{ open, close string }{
-		{"[[", "]]"}, {"((", "))"}, {"[", "]"}, {"(", ")"}, {"{", "}"}, {">", "]"},
+		// Two-char wrappers first: subroutine [[ ]], circle (( )), cylinder
+		// [( )], and stadium ([ ]) must be matched before the single-char [ ]
+		// and ( ) pairs, or the inner bracket/paren leaks into the label.
+		{"[[", "]]"}, {"((", "))"}, {"[(", ")]"}, {"([", "])"},
+		{"[", "]"}, {"(", ")"}, {"{", "}"}, {">", "]"},
 	} {
 		if strings.HasPrefix(shape, pair.open) && strings.HasSuffix(shape, pair.close) {
 			return strings.TrimSuffix(strings.TrimPrefix(shape, pair.open), pair.close)

@@ -56,6 +56,11 @@ func TestRender_RenderableTrees(t *testing.T) {
 			wantOrder: []string{"Producer", "Decision"},
 		},
 		{
+			name:      "cylinder and stadium shapes",
+			src:       "flowchart LR\n  A[(prompt.txt)] --> B([status])",
+			wantOrder: []string{"prompt.txt", "status"},
+		},
+		{
 			name:      "single node only",
 			src:       "flowchart LR\n  A[Solo]",
 			wantOrder: []string{"Solo"},
@@ -226,6 +231,25 @@ func TestRender_ChainedArrowheadsKeepEveryNode(t *testing.T) {
 		}
 		if got := strings.Count(out, "▼"); got != 2 {
 			t.Errorf("expected 2 arrows for a 3-node chain in %q, got %d:\n%s", src, got, out)
+		}
+	}
+}
+
+// Cylinder (`[(text)]`) and stadium (`([text])`) shape wrappers must be fully
+// unwrapped — their nested delimiters must not leak into the rendered label.
+func TestRender_CylinderAndStadiumUnwrapCleanly(t *testing.T) {
+	t.Parallel()
+
+	out, ok := Render("flowchart LR\n  A[(prompt.txt)] --> B([status check])")
+	if !ok {
+		t.Fatalf("expected renderable, got ok=false")
+	}
+	if !strings.Contains(out, "prompt.txt") || !strings.Contains(out, "status check") {
+		t.Fatalf("expected unwrapped labels, got:\n%s", out)
+	}
+	for _, leak := range []string{"(prompt.txt", "prompt.txt)", "([status", "status check])"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("shape delimiter leaked into label (%q) in:\n%s", leak, out)
 		}
 	}
 }
