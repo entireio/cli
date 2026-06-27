@@ -1087,6 +1087,119 @@ func TestResumeSingleSession_UsesV1Transcript(t *testing.T) {
 	}
 }
 
+// TestResumeSingleSession_OverwritesWhenCheckpointNewer verifies the
+// single-session fallback path refreshes an existing local log (no --force) when
+// the checkpoint cleanly extends it (local is a prefix) — the cross-machine
+// "continued and pushed elsewhere" case.
+func TestResumeSingleSession_OverwritesWhenCheckpointNewer(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("abc123abc124")
+	sessionID := "resume-cp-newer-session"
+
+	// Checkpoint cleanly extends the local log: same first entry + a newer one.
+	firstEntry := `{"type":"user","timestamp":"2025-01-02T10:00:00Z","message":{"content":[{"type":"text","text":"first entry"}]}}` + "\n"
+	checkpointRaw := []byte(firstEntry + `{"type":"user","timestamp":"2025-06-01T10:00:00Z","message":{"content":[{"type":"text","text":"appended later"}]}}` + "\n")
+	v1Store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	if err := v1Store.Write(ctx, checkpoint.Session{
+		CheckpointID: cpID,
+		SessionID:    sessionID,
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted(checkpointRaw),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}); err != nil {
+		t.Fatalf("failed to write v1 checkpoint: %v", err)
+	}
+
+	sessionDir := filepath.Join(tmpDir, "sessions")
+	if err := os.MkdirAll(sessionDir, 0o750); err != nil {
+		t.Fatalf("failed to create session dir: %v", err)
+	}
+	localPath := filepath.Join(sessionDir, sessionID+".jsonl")
+	if err := os.WriteFile(localPath, []byte(firstEntry), 0o600); err != nil {
+		t.Fatalf("failed to write local log prefix: %v", err)
+	}
+
+	ag := &recordingResumeAgent{sessionDir: sessionDir}
+	var stdout, stderr bytes.Buffer
+	if err := resumeSingleSession(ctx, &stdout, &stderr, ag, sessionID, cpID, tmpDir, false); err != nil {
+		t.Fatalf("resumeSingleSession() error = %v (stderr: %s)", err, stderr.String())
+	}
+
+	if ag.writtenSession == nil {
+		t.Fatalf("expected checkpoint-newer log to be rewritten, got none (stdout: %s)", stdout.String())
+	}
+	if string(ag.writtenSession.NativeData) != string(checkpointRaw) {
+		t.Fatalf("rewritten transcript = %q, want %q", string(ag.writtenSession.NativeData), string(checkpointRaw))
+	}
+	if !strings.Contains(stdout.String(), "Checkpoint has newer entries") {
+		t.Fatalf("expected checkpoint-newer notice, got: %q", stdout.String())
+	}
+}
+
+// TestResumeSingleSession_DivergedKeptWithoutForce verifies the divergence guard
+// on the single-session fallback: when the checkpoint's last entry is newer but
+// the local log holds entries the checkpoint lacks, a no-force resume keeps the
+// local log (non-interactively) rather than clobbering local-only work.
+func TestResumeSingleSession_DivergedKeptWithoutForce(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("abc123abc125")
+	sessionID := "resume-diverged-session"
+
+	// Checkpoint diverges from local after a shared first entry; its last entry
+	// is still newer by timestamp, so timestamps alone would say "checkpoint newer".
+	sharedFirst := `{"type":"user","timestamp":"2025-01-02T10:00:00Z","message":{"content":[{"type":"text","text":"shared first"}]}}` + "\n"
+	checkpointRaw := []byte(sharedFirst + `{"type":"user","timestamp":"2025-06-01T10:00:00Z","message":{"content":[{"type":"text","text":"checkpoint branch"}]}}` + "\n")
+	v1Store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	if err := v1Store.Write(ctx, checkpoint.Session{
+		CheckpointID: cpID,
+		SessionID:    sessionID,
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted(checkpointRaw),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}); err != nil {
+		t.Fatalf("failed to write v1 checkpoint: %v", err)
+	}
+
+	sessionDir := filepath.Join(tmpDir, "sessions")
+	if err := os.MkdirAll(sessionDir, 0o750); err != nil {
+		t.Fatalf("failed to create session dir: %v", err)
+	}
+	localPath := filepath.Join(sessionDir, sessionID+".jsonl")
+	localRaw := []byte(sharedFirst + `{"type":"user","timestamp":"2025-03-01T10:00:00Z","message":{"content":[{"type":"text","text":"local-only work"}]}}` + "\n")
+	if err := os.WriteFile(localPath, localRaw, 0o600); err != nil {
+		t.Fatalf("failed to write diverged local log: %v", err)
+	}
+
+	ag := &recordingResumeAgent{sessionDir: sessionDir}
+	var stdout, stderr bytes.Buffer
+	if err := resumeSingleSession(ctx, &stdout, &stderr, ag, sessionID, cpID, tmpDir, false); err != nil {
+		t.Fatalf("resumeSingleSession() error = %v (stderr: %s)", err, stderr.String())
+	}
+
+	if ag.writtenSession != nil {
+		t.Fatalf("diverged local log must NOT be overwritten without --force, but a write occurred")
+	}
+	got, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("failed to read local log: %v", err)
+	}
+	if string(got) != string(localRaw) {
+		t.Fatalf("diverged local log should be kept as-is, got: %s", string(got))
+	}
+}
+
 func TestCheckRemoteMetadata_MetadataExistsOnRemote(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)

@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
@@ -546,6 +548,20 @@ func resolveCheckpointFetchTarget(ctx context.Context) string {
 func FetchBlobsByHash(ctx context.Context, hashes []plumbing.Hash) error {
 	if len(hashes) == 0 {
 		return nil
+	}
+
+	// On-demand blob fetches are the slow remote step when reading a checkpoint
+	// whose content isn't local yet (e.g. after a tree-only metadata fetch), so
+	// surface a spinner to stderr while it runs. FetchBlobsByHash is the global
+	// strategy's blob fetcher (see GetStrategy), so it also runs from git hooks
+	// and agent-invoked commands; gate the spinner on CanPromptInteractively so
+	// those stay silent even when stderr happens to be a pty (agent sentinels,
+	// CI, GIT_TERMINAL_PROMPT=0). startSpinner additionally no-ops the animation
+	// on non-terminal writers and only draws past its initial delay; stop(false)
+	// erases the transient line before the caller prints its own output.
+	if interactive.CanPromptInteractively() {
+		stop := startSpinner(os.Stderr, "Downloading checkpoint data from remote")
+		defer stop(false)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)

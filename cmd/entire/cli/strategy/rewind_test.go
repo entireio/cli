@@ -262,6 +262,110 @@ func TestRestoreLogsOnly_KeepsExistingLocalLog(t *testing.T) {
 	require.Equal(t, string(checkpointTranscript), string(got), "force restore must overwrite from the checkpoint")
 }
 
+// TestRestoreLogsOnly_OverwritesWhenCheckpointNewer covers the cross-machine
+// case: another machine continued the session and pushed a newer checkpoint that
+// cleanly extends the local log (local is a prefix of it). Resume must refresh
+// the local log from the checkpoint even without --force — it only appends, so
+// nothing local is lost.
+//
+//nolint:dupl // Mirrors TestRestoreLogsOnly_KeepsExistingLocalLog's setup intentionally; the timestamps and assertions differ.
+func TestRestoreLogsOnly_OverwritesWhenCheckpointNewer(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { repo.Close() })
+
+	agentName := types.AgentName("cp-newer-agent")
+	agentType := types.AgentType("Checkpoint Newer Agent")
+	sessionDir := filepath.Join(dir, "cp-newer-sessions")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o750))
+	agent.Register(agentName, func() agent.Agent {
+		return &restoreLogsOnlyAgent{name: agentName, agentType: agentType, sessionDir: sessionDir}
+	})
+
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("def222def222")
+	sessionID := "cp-newer-session"
+
+	// The checkpoint cleanly extends the local log: same first entry, plus a
+	// newer appended entry. This is the legitimate "continued elsewhere" shape.
+	firstEntry := `{"type":"user","timestamp":"2025-01-02T10:00:00Z","message":{"content":[{"type":"text","text":"first entry"}]}}` + "\n"
+	checkpointTranscript := []byte(firstEntry + `{"type":"user","timestamp":"2025-06-01T10:00:00Z","message":{"content":[{"type":"text","text":"appended later"}]}}` + "\n")
+	writeCommittedRewindCheckpoint(t, repo, cpID, sessionID, agentType, checkpointTranscript, time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC))
+
+	// Pre-existing local log holds only the first entry (an older prefix).
+	localPath := filepath.Join(sessionDir, sessionID+".jsonl")
+	require.NoError(t, os.WriteFile(localPath, []byte(firstEntry), 0o600))
+
+	point := RewindPoint{IsLogsOnly: true, CheckpointID: cpID}
+
+	// Non-force: checkpoint cleanly extends local, so the local log is updated.
+	var stdout, stderr bytes.Buffer
+	restored, err := NewManualCommitStrategy().RestoreLogsOnly(ctx, &stdout, &stderr, point, false)
+	require.NoError(t, err, "stderr: %s", stderr.String())
+	require.Len(t, restored, 1, "stdout: %s", stdout.String())
+	require.Contains(t, stdout.String(), "Checkpoint has newer entries", "stdout: %s", stdout.String())
+
+	got, err := os.ReadFile(localPath)
+	require.NoError(t, err)
+	require.Equal(t, string(checkpointTranscript), string(got), "checkpoint-newer restore must update the local log even without --force")
+}
+
+// TestRestoreLogsOnly_DivergedKeptWithoutForce covers the divergence guard: the
+// checkpoint's last entry is newer, but the local log holds entries the
+// checkpoint lacks (the two were continued independently). A timestamp-only rule
+// would clobber the local-only work; resume must instead treat it as a conflict
+// and — non-interactively — keep the local log rather than silently overwriting.
+//
+//nolint:dupl // Mirrors the sibling RestoreLogsOnly tests' setup intentionally; the content and assertions differ.
+func TestRestoreLogsOnly_DivergedKeptWithoutForce(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { repo.Close() })
+
+	agentName := types.AgentName("diverged-agent")
+	agentType := types.AgentType("Diverged Agent")
+	sessionDir := filepath.Join(dir, "diverged-sessions")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o750))
+	agent.Register(agentName, func() agent.Agent {
+		return &restoreLogsOnlyAgent{name: agentName, agentType: agentType, sessionDir: sessionDir}
+	})
+
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("d1d1d1d1d1d1")
+	sessionID := "diverged-session"
+
+	// Checkpoint has a newer last timestamp but a DIFFERENT body — not a clean
+	// extension of the local log (they diverged after the shared first entry).
+	sharedFirst := `{"type":"user","timestamp":"2025-01-02T10:00:00Z","message":{"content":[{"type":"text","text":"shared first"}]}}` + "\n"
+	checkpointTranscript := []byte(sharedFirst + `{"type":"user","timestamp":"2025-06-01T10:00:00Z","message":{"content":[{"type":"text","text":"checkpoint branch"}]}}` + "\n")
+	writeCommittedRewindCheckpoint(t, repo, cpID, sessionID, agentType, checkpointTranscript, time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC))
+
+	// Local log shares the first entry but then diverges with its own work, whose
+	// last entry is OLDER than the checkpoint's (so timestamps alone say "checkpoint newer").
+	localPath := filepath.Join(sessionDir, sessionID+".jsonl")
+	localTranscript := []byte(sharedFirst + `{"type":"user","timestamp":"2025-03-01T10:00:00Z","message":{"content":[{"type":"text","text":"local-only work"}]}}` + "\n")
+	require.NoError(t, os.WriteFile(localPath, localTranscript, 0o600))
+
+	point := RewindPoint{IsLogsOnly: true, CheckpointID: cpID}
+
+	// Non-force, non-interactive: the diverged local log is kept, not clobbered.
+	var stdout, stderr bytes.Buffer
+	_, err = NewManualCommitStrategy().RestoreLogsOnly(ctx, &stdout, &stderr, point, false)
+	require.NoError(t, err, "stderr: %s", stderr.String())
+
+	got, err := os.ReadFile(localPath)
+	require.NoError(t, err)
+	require.Equal(t, string(localTranscript), string(got), "diverged local log must be kept (not overwritten) without --force")
+}
+
 func TestResolveAgentForRewind(t *testing.T) {
 	t.Parallel()
 
