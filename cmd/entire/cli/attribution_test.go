@@ -387,7 +387,7 @@ func TestAttributionResolverUsesCheckpointReader(t *testing.T) {
 }
 
 func TestAttributionResolverMissingMetadataIncludesReason(t *testing.T) {
-	t.Parallel()
+	newAttributionRepo(t)
 
 	cpID := checkpointid.MustCheckpointID("cab2c3d4e5f6")
 	stubReader := &attributionCheckpointReaderStub{

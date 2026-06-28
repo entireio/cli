@@ -245,11 +245,6 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, jsonOutp
 	if selected == nil {
 		return fmt.Errorf("line %d is outside %s", line, result.File)
 	}
-	if selected.MetadataMissing && selected.CheckpointID != "" {
-		if err := enrichAttributionLineWithFetch(ctx, result.File, selected, result.Checkpoints); err != nil {
-			selected.MetadataMissingReason = metadataMissingReason(ctx, selected.CheckpointID, err)
-		}
-	}
 
 	if jsonOutput {
 		payload := struct {
@@ -416,11 +411,11 @@ func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file s
 	ctx := attributionCheckpointContext{CheckpointID: cpID.String()}
 	summary, err := readAttributionCheckpointSummary(r.ctx, r.store, cpID)
 	if err != nil && r.fetchOnMiss {
-		if fetched, fetchErr := r.fetchCheckpointContext(cpID, file); fetchErr == nil {
+		fetched, fetchErr := r.fetchCheckpointContext(cpID, file)
+		if fetchErr == nil {
 			return fetched
-		} else {
-			err = fmt.Errorf("%w (remote refresh failed: %v)", err, fetchErr)
 		}
+		err = fmt.Errorf("%w (remote refresh failed: %v)", err, fetchErr)
 	}
 	if err != nil {
 		ctx.MetadataMissing = true
@@ -518,35 +513,6 @@ func metadataMissingReason(ctx context.Context, checkpointID string, cause error
 		return fmt.Sprintf("%s. Run: %s.", reason, suggestCheckpointFetchCommand(ctx))
 	}
 	return fmt.Sprintf("%s. Run: %s. Then re-run entire checkpoint explain %s.", reason, suggestCheckpointFetchCommand(ctx), checkpointID)
-}
-
-func enrichAttributionLineWithFetch(ctx context.Context, file string, line *attributionLine, checkpoints map[string]attributionCheckpointContext) error {
-	if line == nil || len(line.Candidates) == 0 {
-		return nil
-	}
-	resolver, err := newAttributionResolver(ctx, true)
-	if err != nil {
-		return err
-	}
-	defer resolver.Close()
-
-	candidates := make([]attributionCandidate, 0, len(line.Candidates))
-	for _, candidate := range line.Candidates {
-		cpID, idErr := id.NewCheckpointID(candidate.CheckpointID)
-		if idErr != nil {
-			candidates = append(candidates, candidate)
-			continue
-		}
-		cpCtx := resolver.checkpointContext(cpID, file)
-		checkpoints[cpCtx.CheckpointID] = cpCtx
-		candidates = append(candidates, cpCtx)
-	}
-	preferred := preferredAttributionCandidate(candidates, file)
-	applyPreferredToLine(line, preferred)
-	line.Candidates = candidates
-	line.Authorship = authorshipForPreferred(preferred)
-	line.Tag = attributionTag(line.Authorship)
-	return nil
 }
 
 func (r *attributionResolver) fetchCheckpointContext(cpID id.CheckpointID, file string) (attributionCheckpointContext, error) {
