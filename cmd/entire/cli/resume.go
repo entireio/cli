@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -856,11 +857,14 @@ func refreshMetadataFromRemote(ctx context.Context, errW io.Writer) {
 	}
 
 	// Surface a spinner while the network fetch runs so resume doesn't appear to
-	// hang. startSpinner only animates once the fetch exceeds its initial delay
-	// (no flicker on warm runs) and prints nothing on non-terminal writers;
-	// stop(false) erases the transient line — the real resume output follows.
-	stop := startSpinner(errW, "Checking remote for newer checkpoints")
-	defer stop(false)
+	// hang. Gate it on CanPromptInteractively (consistent with FetchBlobsByHash)
+	// so agent/CI invocations stay silent even when stderr is a pty. startSpinner
+	// additionally no-ops the animation on non-terminal writers and only draws
+	// past its initial delay; stop(false) erases the transient line.
+	if interactive.CanPromptInteractively() {
+		stop := startSpinner(errW, "Checking remote for newer checkpoints")
+		defer stop(false)
+	}
 
 	// Prefer the checkpoint remote when configured — that's where checkpoints
 	// live, and they may not exist on origin at all.

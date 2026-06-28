@@ -366,6 +366,39 @@ func TestRestoreLogsOnly_DivergedKeptWithoutForce(t *testing.T) {
 	require.Equal(t, string(localTranscript), string(got), "diverged local log must be kept (not overwritten) without --force")
 }
 
+func TestTranscriptIsCleanContinuation(t *testing.T) {
+	t.Parallel()
+
+	line := func(s string) string {
+		return `{"type":"user","text":"` + s + `"}` + "\n"
+	}
+
+	tests := []struct {
+		name             string
+		local            string
+		checkpoint       string
+		wantContinuation bool
+	}{
+		{"identical", line("a") + line("b"), line("a") + line("b"), true},
+		{"checkpoint extends local", line("a"), line("a") + line("b"), true},
+		{"empty local", "", line("a"), true},
+		{"both empty", "", "", true},
+		{"checkpoint shorter than local", line("a") + line("b"), line("a"), false},
+		{"diverged after shared prefix", line("a") + line("x"), line("a") + line("y"), false},
+		{"checkpoint empty, local not", line("a"), "", false},
+		{"trailing newline ignored", line("a"), line("a") + "\n", true},
+		{"blank lines ignored", line("a") + "\n\n" + line("b"), line("a") + line("b") + line("c"), true},
+		{"completely different", line("x"), line("y") + line("z"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := TranscriptIsCleanContinuation([]byte(tt.local), []byte(tt.checkpoint))
+			require.Equal(t, tt.wantContinuation, got)
+		})
+	}
+}
+
 func TestResolveAgentForRewind(t *testing.T) {
 	t.Parallel()
 

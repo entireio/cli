@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1016,28 +1017,43 @@ func localIsCleanContinuation(localPath string, checkpoint []byte) bool {
 // two have diverged — the local log holds lines the checkpoint lacks — and
 // overwriting would drop local-only work. Blank lines are ignored so a trailing
 // newline on either side doesn't register as divergence.
+//
+// The transcripts are walked line-by-line in place (no full split/copy) since
+// session logs can be large.
 func TranscriptIsCleanContinuation(local, checkpoint []byte) bool {
-	localLines := nonBlankLines(local)
-	checkpointLines := nonBlankLines(checkpoint)
-	if len(localLines) > len(checkpointLines) {
-		return false
-	}
-	for i, line := range localLines {
-		if line != checkpointLines[i] {
+	var li, ci int
+	for {
+		localLine, ok := nextNonBlankLine(local, &li)
+		if !ok {
+			return true // local exhausted: every local line matched a checkpoint line
+		}
+		checkpointLine, ok := nextNonBlankLine(checkpoint, &ci)
+		if !ok {
+			return false // checkpoint ran out before local: local has extra lines
+		}
+		if !bytes.Equal(localLine, checkpointLine) {
 			return false
 		}
 	}
-	return true
 }
 
-func nonBlankLines(data []byte) []string {
-	var lines []string
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.TrimSpace(line) != "" {
-			lines = append(lines, line)
+// nextNonBlankLine returns the next non-blank line in data starting at *pos and
+// advances *pos past it. The returned slice aliases data (no allocation). ok is
+// false once the input is exhausted.
+func nextNonBlankLine(data []byte, pos *int) (line []byte, ok bool) {
+	for *pos < len(data) {
+		seg := data[*pos:]
+		if nl := bytes.IndexByte(seg, '\n'); nl >= 0 {
+			seg = seg[:nl]
+			*pos += nl + 1
+		} else {
+			*pos = len(data)
+		}
+		if len(bytes.TrimSpace(seg)) != 0 {
+			return seg, true
 		}
 	}
-	return lines
+	return nil, false
 }
 
 // StatusToText returns a human-readable status string.
@@ -1133,11 +1149,9 @@ func PromptOverwriteNewerLogs(errW io.Writer, sessions []SessionRestoreInfo) (bo
 func ConfirmOverwriteNewerLocalLogs(errW io.Writer, conflicts []SessionRestoreInfo) bool {
 	if !interactive.CanPromptInteractively() {
 		for _, info := range conflicts {
-			label := info.Prompt
-			if label == "" {
-				label = info.SessionID
-			}
-			fmt.Fprintf(errW, "Keeping local session log %q: it has entries the checkpoint doesn't (use --force to overwrite).\n", label)
+			// This message can land in CI logs / captured stderr, so identify the
+			// conflict by session ID only — never echo prompt text (user content).
+			fmt.Fprintf(errW, "Keeping local session log %s: it has entries the checkpoint doesn't (use --force to overwrite).\n", info.SessionID)
 		}
 		return false
 	}
