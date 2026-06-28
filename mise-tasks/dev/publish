@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #MISE description="Install binaries into ~/go/bin (or a target folder)"
-#USAGE arg "[target]" help="Target folder to install binaries into; defaults to \$GOPATH/bin or ~/go/bin"
+#USAGE arg "[target]" help="Target folder to install binaries into; defaults to $GOPATH/bin or ~/go/bin"
 
 set -eu
 
