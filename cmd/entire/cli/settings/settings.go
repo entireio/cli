@@ -497,13 +497,11 @@ func loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAb
 	}
 
 	// Apply local overrides if they exist
-	localData, err := os.ReadFile(localSettingsFileAbs) //nolint:gosec // path is from AbsPath or constant
+	localData, err := readSettingsFileIfExists(localSettingsFileAbs)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("reading local settings file: %w", err)
-		}
-		// Local file doesn't exist, continue without overrides
-	} else {
+		return nil, fmt.Errorf("reading local settings file: %w", err)
+	}
+	if localData != nil {
 		if err := mergeJSON(settings, localData); err != nil {
 			return nil, fmt.Errorf("merging local settings: %w", err)
 		}
@@ -1310,9 +1308,11 @@ func (s *EntireSettings) IsSummarizeEnabled() bool {
 
 // CheckpointRemoteConfig holds the structured checkpoint remote configuration.
 // Stored in strategy_options.checkpoint_remote as {"provider": "github", "repo": "org/repo"}.
+// JSON tags are present so the same type can be serialized directly under
+// the schema-v2 Settings.Checkpoints.Remote field.
 type CheckpointRemoteConfig struct {
-	Provider string // e.g., "github"
-	Repo     string // e.g., "org/checkpoints-repo"
+	Provider string `json:"provider"` // e.g., "github"
+	Repo     string `json:"repo"`     // e.g., "org/checkpoints-repo"
 }
 
 // Owner returns the owner portion of the repo field (before the slash).

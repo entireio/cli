@@ -1,0 +1,42 @@
+{
+  "schema": 2,
+  "enabled": true,
+  "logging": {
+    "level": "debug"
+  },
+  "checkpoints": {
+    "primary": {"type": "v2"},
+    "mirrors": [
+      {"type": "gmeta"}
+    ],
+    "git": {
+      "provider": "github",
+      "repo": "myorg/myrepo-checkpoints"
+    },
+    "full_transcript_retention_days": 90,
+    "sign_commits": true,
+    "filtered_fetches": true,
+    "push_sessions": true
+  },
+  "hooks": {
+    "commit_linking": "always"
+  },
+  "features": {
+    "summarize": true,
+    "external_agents": true
+  },
+  "redaction": {
+    "pii": {
+      "enabled": true,
+      "email": true,
+      "phone": true,
+      "address": false
+    }
+  },
+  "telemetry": true,
+  "summary_generation": {
+    "provider": "claude-code",
+    "model": "sonnet",
+    "timeout_seconds": 60
+  }
+}

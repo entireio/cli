@@ -169,7 +169,7 @@ func TestLoad_AcceptsValidKeys(t *testing.T) {
 	if settings.SummaryGeneration.Provider != "claude-code" {
 		t.Errorf("expected summary_generation.provider 'claude-code', got %q", settings.SummaryGeneration.Provider)
 	}
-	if settings.SummaryGeneration.Model != "sonnet" { //nolint:goconst // test literal
+	if settings.SummaryGeneration.Model != modelSonnet {
 		t.Errorf("expected summary_generation.model 'sonnet', got %q", settings.SummaryGeneration.Model)
 	}
 	if settings.Redaction == nil {
@@ -619,7 +619,7 @@ func TestLoadFromFile_AcceptsModelWithoutProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFromFile should accept model-only file, got error: %v", err)
 	}
-	if s.SummaryGeneration == nil || s.SummaryGeneration.Model != "sonnet" {
+	if s.SummaryGeneration == nil || s.SummaryGeneration.Model != modelSonnet {
 		t.Fatalf("expected model 'sonnet', got %+v", s.SummaryGeneration)
 	}
 }
@@ -633,8 +633,8 @@ func TestSummaryGenerationSettings_Validate(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "nil receiver is valid", s: nil, wantErr: false},
-		{name: "provider and model is valid", s: &SummaryGenerationSettings{Provider: "claude-code", Model: "sonnet"}, wantErr: false},
-		{name: "model without provider is invalid", s: &SummaryGenerationSettings{Model: "sonnet"}, wantErr: true},
+		{name: "provider and model is valid", s: &SummaryGenerationSettings{Provider: "claude-code", Model: modelSonnet}, wantErr: false},
+		{name: "model without provider is invalid", s: &SummaryGenerationSettings{Model: modelSonnet}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -696,7 +696,7 @@ func TestMergeJSON_SummaryGeneration_SameProviderPreservesModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if s.SummaryGeneration.Provider != "claude-code" || s.SummaryGeneration.Model != "sonnet" {
+	if s.SummaryGeneration.Provider != "claude-code" || s.SummaryGeneration.Model != modelSonnet {
 		t.Errorf("Provider/Model = %q/%q, want claude-code/sonnet", s.SummaryGeneration.Provider, s.SummaryGeneration.Model)
 	}
 }

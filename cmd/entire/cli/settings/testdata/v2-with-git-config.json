@@ -1,0 +1,10 @@
+{
+  "schema": 2,
+  "checkpoints": {
+    "primary": {"type": "v2"},
+    "git": {
+      "provider": "github",
+      "repo": "myorg/myrepo-checkpoints"
+    }
+  }
+}

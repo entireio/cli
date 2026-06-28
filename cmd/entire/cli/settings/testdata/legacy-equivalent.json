@@ -1,0 +1,33 @@
+{
+  "enabled": true,
+  "log_level": "debug",
+  "commit_linking": "always",
+  "external_agents": true,
+  "telemetry": true,
+  "sign_checkpoint_commits": true,
+  "summary_timeout_seconds": 60,
+  "summary_generation": {
+    "provider": "claude-code",
+    "model": "sonnet"
+  },
+  "redaction": {
+    "pii": {
+      "enabled": true,
+      "email": true,
+      "phone": true,
+      "address": false
+    }
+  },
+  "strategy_options": {
+    "checkpoints_version": 2,
+    "gmeta": true,
+    "checkpoint_remote": {
+      "provider": "github",
+      "repo": "myorg/myrepo-checkpoints"
+    },
+    "summarize": {"enabled": true},
+    "filtered_fetches": true,
+    "push_sessions": true,
+    "full_transcript_generation_retention_days": 90
+  }
+}
