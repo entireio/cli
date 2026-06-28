@@ -52,23 +52,24 @@ type rawBlameLine struct {
 }
 
 type attributionLine struct {
-	LineNumber      int                    `json:"line_number"`
-	Authorship      attributionAuthorship  `json:"authorship"`
-	Tag             string                 `json:"tag"`
-	CommitSHA       string                 `json:"commit_sha,omitempty"`
-	ShortCommitSHA  string                 `json:"short_commit_sha,omitempty"`
-	Author          string                 `json:"author,omitempty"`
-	AuthorTime      *time.Time             `json:"author_time,omitempty"`
-	CheckpointID    string                 `json:"checkpoint_id,omitempty"`
-	SessionID       string                 `json:"session_id,omitempty"`
-	Agent           string                 `json:"agent,omitempty"`
-	Model           string                 `json:"model,omitempty"`
-	Prompt          string                 `json:"prompt,omitempty"`
-	Intent          string                 `json:"intent,omitempty"`
-	MetadataMissing bool                   `json:"metadata_missing,omitempty"`
-	SessionFallback bool                   `json:"session_fallback,omitempty"`
-	Content         string                 `json:"content"`
-	Candidates      []attributionCandidate `json:"candidates,omitempty"`
+	LineNumber            int                    `json:"line_number"`
+	Authorship            attributionAuthorship  `json:"authorship"`
+	Tag                   string                 `json:"tag"`
+	CommitSHA             string                 `json:"commit_sha,omitempty"`
+	ShortCommitSHA        string                 `json:"short_commit_sha,omitempty"`
+	Author                string                 `json:"author,omitempty"`
+	AuthorTime            *time.Time             `json:"author_time,omitempty"`
+	CheckpointID          string                 `json:"checkpoint_id,omitempty"`
+	SessionID             string                 `json:"session_id,omitempty"`
+	Agent                 string                 `json:"agent,omitempty"`
+	Model                 string                 `json:"model,omitempty"`
+	Prompt                string                 `json:"prompt,omitempty"`
+	Intent                string                 `json:"intent,omitempty"`
+	MetadataMissing       bool                   `json:"metadata_missing,omitempty"`
+	MetadataMissingReason string                 `json:"metadata_missing_reason,omitempty"`
+	SessionFallback       bool                   `json:"session_fallback,omitempty"`
+	Content               string                 `json:"content"`
+	Candidates            []attributionCandidate `json:"candidates,omitempty"`
 }
 
 // attributionCheckpointContext is the resolved metadata for one checkpoint as
@@ -78,15 +79,16 @@ type attributionLine struct {
 // deduplicated per-file checkpoint map — so attributionCandidate aliases it
 // rather than duplicating the fields.
 type attributionCheckpointContext struct {
-	CheckpointID    string   `json:"checkpoint_id"`
-	SessionID       string   `json:"session_id,omitempty"`
-	Agent           string   `json:"agent,omitempty"`
-	Model           string   `json:"model,omitempty"`
-	Prompt          string   `json:"prompt,omitempty"`
-	Intent          string   `json:"intent,omitempty"`
-	FilesTouched    []string `json:"files_touched,omitempty"`
-	MetadataMissing bool     `json:"metadata_missing,omitempty"`
-	Mixed           bool     `json:"mixed,omitempty"`
+	CheckpointID          string   `json:"checkpoint_id"`
+	SessionID             string   `json:"session_id,omitempty"`
+	Agent                 string   `json:"agent,omitempty"`
+	Model                 string   `json:"model,omitempty"`
+	Prompt                string   `json:"prompt,omitempty"`
+	Intent                string   `json:"intent,omitempty"`
+	FilesTouched          []string `json:"files_touched,omitempty"`
+	MetadataMissing       bool     `json:"metadata_missing,omitempty"`
+	MetadataMissingReason string   `json:"metadata_missing_reason,omitempty"`
+	Mixed                 bool     `json:"mixed,omitempty"`
 	// SessionFallback is set when the file is not in any resolved session's
 	// recorded paths (e.g. it was renamed after the checkpoint) and the
 	// agent/prompt shown is a best-effort guess from the checkpoint's first
@@ -218,7 +220,9 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, jsonOutp
 		return err
 	}
 
-	result, err := resolveFileAttribution(ctx, file, false)
+	// entire why is explanation-focused: when local metadata is missing it
+	// should attempt the same remote enrichment path as checkpoint explain.
+	result, err := resolveFileAttribution(ctx, file, true)
 	if err != nil {
 		return err
 	}
@@ -243,9 +247,7 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, jsonOutp
 	}
 	if selected.MetadataMissing && selected.CheckpointID != "" {
 		if err := enrichAttributionLineWithFetch(ctx, result.File, selected, result.Checkpoints); err != nil {
-			// Remote metadata enrichment is best-effort; the trailer-level
-			// explanation is still useful and should remain available.
-			selected.MetadataMissing = true
+			selected.MetadataMissingReason = metadataMissingReason(ctx, selected.CheckpointID, err)
 		}
 	}
 
@@ -297,8 +299,9 @@ func resolveFileAttribution(ctx context.Context, file string, fetchOnMiss bool) 
 		for _, candidate := range line.Candidates {
 			if candidate.MetadataMissing {
 				result.Checkpoints[candidate.CheckpointID] = attributionCheckpointContext{
-					CheckpointID:    candidate.CheckpointID,
-					MetadataMissing: true,
+					CheckpointID:          candidate.CheckpointID,
+					MetadataMissing:       true,
+					MetadataMissingReason: candidate.MetadataMissingReason,
 				}
 				continue
 			}
@@ -415,10 +418,13 @@ func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file s
 	if err != nil && r.fetchOnMiss {
 		if fetched, fetchErr := r.fetchCheckpointContext(cpID, file); fetchErr == nil {
 			return fetched
+		} else {
+			err = fmt.Errorf("%w (remote refresh failed: %v)", err, fetchErr)
 		}
 	}
 	if err != nil {
 		ctx.MetadataMissing = true
+		ctx.MetadataMissingReason = metadataMissingReason(r.ctx, cpID.String(), err)
 		return ctx
 	}
 
@@ -501,6 +507,17 @@ func readAttributionCheckpointSummary(ctx context.Context, reader attributionChe
 		return nil, checkpoint.ErrCheckpointNotFound
 	}
 	return summary, nil
+}
+
+func metadataMissingReason(ctx context.Context, checkpointID string, cause error) string {
+	reason := "checkpoint metadata was not found locally"
+	if cause != nil {
+		reason = fmt.Sprintf("%s (%v)", reason, cause)
+	}
+	if checkpointID == "" {
+		return fmt.Sprintf("%s. Run: %s.", reason, suggestCheckpointFetchCommand(ctx))
+	}
+	return fmt.Sprintf("%s. Run: %s. Then re-run entire checkpoint explain %s.", reason, suggestCheckpointFetchCommand(ctx), checkpointID)
 }
 
 func enrichAttributionLineWithFetch(ctx context.Context, file string, line *attributionLine, checkpoints map[string]attributionCheckpointContext) error {
@@ -983,7 +1000,11 @@ func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
 			fmt.Fprintf(w, "  %s %q\n", sty.render(sty.bold, "Intent:"), stringutil.TruncateRunes(stringutil.CollapseWhitespace(line.Intent), 160, "..."))
 		}
 		if line.MetadataMissing {
-			fmt.Fprintf(w, "  %s\n", sty.render(sty.yellow, "Checkpoint metadata was not found locally; showing trailer-level attribution only."))
+			message := "Checkpoint metadata was not found locally; showing trailer-level attribution only."
+			if line.MetadataMissingReason != "" {
+				message = line.MetadataMissingReason
+			}
+			fmt.Fprintf(w, "  %s\n", sty.render(sty.yellow, message))
 		}
 		if line.SessionFallback {
 			fmt.Fprintf(w, "  %s\n", sty.render(sty.yellow, "This file is not in the checkpoint's recorded paths (it may have been renamed); the agent and prompt shown are from the checkpoint's first session."))
@@ -1046,6 +1067,13 @@ func renderAttributionFileWhy(w io.Writer, result *fileAttributionResult) {
 		}
 		if ctx.Prompt != "" {
 			fmt.Fprintf(w, " %s %q", sty.render(sty.dim, "·"), stringutil.TruncateRunes(stringutil.CollapseWhitespace(ctx.Prompt), 90, "..."))
+		}
+		if ctx.MetadataMissing {
+			message := "Checkpoint metadata was not found locally."
+			if ctx.MetadataMissingReason != "" {
+				message = ctx.MetadataMissingReason
+			}
+			fmt.Fprintf(w, "\n    %s %s", sty.render(sty.yellow, "metadata missing:"), message)
 		}
 		fmt.Fprintln(w)
 	}
@@ -1147,6 +1175,7 @@ func applyPreferredToLine(line *attributionLine, preferred *attributionCandidate
 	line.Prompt = preferred.Prompt
 	line.Intent = preferred.Intent
 	line.MetadataMissing = preferred.MetadataMissing
+	line.MetadataMissingReason = preferred.MetadataMissingReason
 	line.SessionFallback = preferred.SessionFallback
 }
 

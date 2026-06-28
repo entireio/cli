@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -385,12 +386,40 @@ func TestAttributionResolverUsesCheckpointReader(t *testing.T) {
 	require.Equal(t, "Explain the authentication change.", ctx.Prompt)
 }
 
+func TestAttributionResolverMissingMetadataIncludesReason(t *testing.T) {
+	t.Parallel()
+
+	cpID := checkpointid.MustCheckpointID("cab2c3d4e5f6")
+	stubReader := &attributionCheckpointReaderStub{
+		readErr: errors.New("checkpoint summary unavailable"),
+	}
+	resolver := &attributionResolver{
+		ctx:             context.Background(),
+		store:           stubReader,
+		fetchOnMiss:     true,
+		checkpointCache: make(map[string]attributionCheckpointContext),
+	}
+
+	ctx := resolver.readCheckpointContext(cpID, "auth.py")
+	require.True(t, ctx.MetadataMissing)
+	require.Contains(t, ctx.MetadataMissingReason, "checkpoint summary unavailable")
+	// "remote refresh failed" confirms fetch-on-miss was attempted.
+	require.Contains(t, ctx.MetadataMissingReason, "remote refresh failed")
+	require.Contains(t, ctx.MetadataMissingReason, "git fetch ")
+	require.Contains(t, ctx.MetadataMissingReason, "entire/checkpoints/v1:entire/checkpoints/v1")
+	require.Contains(t, ctx.MetadataMissingReason, "entire checkpoint explain cab2c3d4e5f6")
+}
+
 type attributionCheckpointReaderStub struct {
 	summary *checkpoint.CheckpointSummary
 	content *checkpoint.SessionContent
+	readErr error
 }
 
 func (s *attributionCheckpointReaderStub) Read(context.Context, checkpointid.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+	if s.readErr != nil {
+		return nil, s.readErr
+	}
 	return s.summary, nil
 }
 
@@ -517,6 +546,93 @@ func TestAttributionWhyPreservesLineIndentation(t *testing.T) {
 	})
 
 	require.Contains(t, out.String(), "      return True")
+}
+
+func TestAttributionWhyLineJSONShowsMissingMetadataReason(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nmissing_line = 2\n")
+	testutil.GitAdd(t, repoRoot, "auth.py")
+	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("missing metadata", checkpointid.MustCheckpointID("fab2c3d4e5f6")))
+
+	var out bytes.Buffer
+	require.NoError(t, runAttributionWhy(context.Background(), &out, "auth.py:2", true))
+
+	var payload struct {
+		File        string                                  `json:"file"`
+		Line        attributionLine                         `json:"line"`
+		Checkpoints map[string]attributionCheckpointContext `json:"checkpoints,omitempty"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &payload))
+	require.Equal(t, "auth.py", payload.File)
+	require.True(t, payload.Line.MetadataMissing)
+	require.Contains(t, payload.Line.MetadataMissingReason, "entire checkpoint explain fab2c3d4e5f6")
+	require.Contains(t, payload.Line.MetadataMissingReason, "git fetch ")
+	require.Contains(t, payload.Line.MetadataMissingReason, "entire/checkpoints/v1:entire/checkpoints/v1")
+	checkpointCtx := payload.Checkpoints["fab2c3d4e5f6"]
+	require.True(t, checkpointCtx.MetadataMissing)
+	require.Equal(t, payload.Line.MetadataMissingReason, checkpointCtx.MetadataMissingReason)
+}
+
+func TestAttributionWhyFileJSONShowsMissingMetadataReason(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nmissing_line = 2\n")
+	testutil.GitAdd(t, repoRoot, "auth.py")
+	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("missing metadata", checkpointid.MustCheckpointID("eab2c3d4e5f6")))
+
+	var out bytes.Buffer
+	require.NoError(t, runAttributionWhy(context.Background(), &out, "auth.py", true))
+
+	var payload fileAttributionResult
+	require.NoError(t, json.Unmarshal(out.Bytes(), &payload))
+	checkpointCtx := payload.Checkpoints["eab2c3d4e5f6"]
+	require.True(t, checkpointCtx.MetadataMissing)
+	require.Contains(t, checkpointCtx.MetadataMissingReason, "entire checkpoint explain eab2c3d4e5f6")
+}
+
+func TestAttributionWhyFileJSONLocalMetadataHasNoMissingReason(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	writeAttributionCheckpoint(t, repoRoot, "dab2c3d4e5f6", checkpoint.WriteOptions{
+		SessionID:        "session-why-file-12345678",
+		Prompts:          []string{"Add a line with local checkpoint metadata."},
+		FilesTouched:     []string{"auth.py"},
+		Agent:            agent.AgentTypeClaudeCode,
+		CheckpointsCount: 1,
+	})
+	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nwhy_line = 2\n")
+	testutil.GitAdd(t, repoRoot, "auth.py")
+	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("local metadata", checkpointid.MustCheckpointID("dab2c3d4e5f6")))
+
+	var out bytes.Buffer
+	require.NoError(t, runAttributionWhy(context.Background(), &out, "auth.py", true))
+
+	var payload fileAttributionResult
+	require.NoError(t, json.Unmarshal(out.Bytes(), &payload))
+	checkpointCtx := payload.Checkpoints["dab2c3d4e5f6"]
+	require.False(t, checkpointCtx.MetadataMissing)
+	require.Empty(t, checkpointCtx.MetadataMissingReason)
+}
+
+func TestAttributionWhySuccessiveCallsKeepCheckpointMapStable(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nmissing_line = 2\n")
+	testutil.GitAdd(t, repoRoot, "auth.py")
+	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("missing metadata", checkpointid.MustCheckpointID("bab2c3d4e5f6")))
+
+	var lineOut bytes.Buffer
+	require.NoError(t, runAttributionWhy(context.Background(), &lineOut, "auth.py:2", true))
+	require.Contains(t, lineOut.String(), "bab2c3d4e5f6")
+
+	var firstOut bytes.Buffer
+	require.NoError(t, runAttributionWhy(context.Background(), &firstOut, "auth.py", true))
+	var firstPayload fileAttributionResult
+	require.NoError(t, json.Unmarshal(firstOut.Bytes(), &firstPayload))
+
+	var secondOut bytes.Buffer
+	require.NoError(t, runAttributionWhy(context.Background(), &secondOut, "auth.py", true))
+	var secondPayload fileAttributionResult
+	require.NoError(t, json.Unmarshal(secondOut.Bytes(), &secondPayload))
+
+	require.Equal(t, firstPayload.Checkpoints, secondPayload.Checkpoints)
 }
 
 func newAttributionRepo(t *testing.T) string {
