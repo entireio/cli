@@ -146,7 +146,7 @@ func newBlameCmd() *cobra.Command {
 	var longFlag bool
 
 	cmd := &cobra.Command{
-		Use: "blame <file>[:line]",
+		Use: "blame <file>[:line[-line]]",
 		// Hidden from `entire help` while the feature is still maturing —
 		// advertised under `entire labs`, and `entire blame` / `entire blame
 		// --help` keep working normally.
@@ -1016,7 +1016,7 @@ func renderAttributionBlameLong(w io.Writer, result *fileAttributionResult, line
 		const checkpointColumnWidth = 21
 		fmt.Fprintf(w, "  %*s  Tag   %-12s  %-18s  %-16s  %-21s    Content\n",
 			lineWidth, "Line", "Agent", "Model", "Author", "Checkpoint/Session")
-		fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", lineWidth+94)))
+		fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", lineWidth+92)))
 
 		for _, line := range result.Lines {
 			fmt.Fprintf(w, "  %s  %s  %-12s  %-18s  %-16s  %-21s  %s %s\n",
@@ -1031,7 +1031,7 @@ func renderAttributionBlameLong(w io.Writer, result *fileAttributionResult, line
 			)
 		}
 
-		fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", lineWidth+94)))
+		fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", lineWidth+92)))
 	})
 }
 
