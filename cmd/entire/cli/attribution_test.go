@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -234,7 +235,7 @@ func TestAttributionWhyLineShowsPromptAndCheckpoint(t *testing.T) {
 	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("why update", checkpointid.MustCheckpointID("c1b2c3d4e5f6")))
 
 	var out bytes.Buffer
-	require.NoError(t, runAttributionWhy(context.Background(), &out, "auth.py:2", false))
+	require.NoError(t, runAttributionWhy(context.Background(), &out, "auth.py:2", attributionWhyOptions{}))
 	text := out.String()
 	require.Contains(t, text, "Prompt:")
 	require.Contains(t, text, "Create a line that can be explained.")
@@ -385,12 +386,40 @@ func TestAttributionResolverUsesCheckpointReader(t *testing.T) {
 	require.Equal(t, "Explain the authentication change.", ctx.Prompt)
 }
 
+func TestAttributionResolverMissingMetadataIncludesReason(t *testing.T) {
+	newAttributionRepo(t)
+
+	cpID := checkpointid.MustCheckpointID("cab2c3d4e5f6")
+	stubReader := &attributionCheckpointReaderStub{
+		readErr: errors.New("checkpoint summary unavailable"),
+	}
+	resolver := &attributionResolver{
+		ctx:             context.Background(),
+		store:           stubReader,
+		fetchOnMiss:     true,
+		checkpointCache: make(map[string]attributionCheckpointContext),
+	}
+
+	ctx := resolver.readCheckpointContext(cpID, "auth.py")
+	require.True(t, ctx.MetadataMissing)
+	require.Contains(t, ctx.MetadataMissingReason, "checkpoint summary unavailable")
+	// "remote refresh failed" confirms fetch-on-miss was attempted.
+	require.Contains(t, ctx.MetadataMissingReason, "remote refresh failed")
+	require.Contains(t, ctx.MetadataMissingReason, "git fetch ")
+	require.Contains(t, ctx.MetadataMissingReason, "entire/checkpoints/v1:entire/checkpoints/v1")
+	require.Contains(t, ctx.MetadataMissingReason, "entire checkpoint explain cab2c3d4e5f6")
+}
+
 type attributionCheckpointReaderStub struct {
 	summary *checkpoint.CheckpointSummary
 	content *checkpoint.SessionContent
+	readErr error
 }
 
 func (s *attributionCheckpointReaderStub) Read(context.Context, checkpointid.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+	if s.readErr != nil {
+		return nil, s.readErr
+	}
 	return s.summary, nil
 }
 
@@ -473,8 +502,83 @@ func TestAttributionFlagsSessionFallbackForUnmatchedFile(t *testing.T) {
 	require.True(t, payload.Lines[0].SessionFallback)
 
 	var whyOut bytes.Buffer
-	require.NoError(t, runAttributionWhy(context.Background(), &whyOut, "auth.py:2", false))
+	require.NoError(t, runAttributionWhy(context.Background(), &whyOut, "auth.py:2", attributionWhyOptions{}))
 	require.Contains(t, whyOut.String(), "may have been renamed")
+}
+
+func TestAttributionFlagsSessionFallbackForMultiSessionEmptyPaths(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	// Two sessions under one checkpoint, neither touching auth.py. The first
+	// (fallback) session recorded NO paths, so there is no rename evidence in its
+	// FilesTouched — yet it is still only one of several sessions, picked as a
+	// guess. The earlier `len(FilesTouched) > 0`-only rule left this uncaveated;
+	// the union rule flags it via sessionsRead > 1. (Soph's review feedback.)
+	writeAttributionCheckpoint(t, repoRoot, "bbc2c3d4e5f6", checkpoint.WriteOptions{
+		SessionID:        "session-empty-12345678",
+		Prompts:          []string{"Attach session with no recorded paths."},
+		Agent:            agent.AgentTypeClaudeCode,
+		CheckpointsCount: 1,
+	})
+	writeAttributionCheckpoint(t, repoRoot, "bbc2c3d4e5f6", checkpoint.WriteOptions{
+		SessionID:        "session-other-12345678",
+		Prompts:          []string{"Edit an unrelated file."},
+		FilesTouched:     []string{"other.py"},
+		Agent:            agent.AgentTypeClaudeCode,
+		CheckpointsCount: 1,
+	})
+	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nai_line = 2\n")
+	testutil.GitAdd(t, repoRoot, "auth.py")
+	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("multi session", checkpointid.MustCheckpointID("bbc2c3d4e5f6")))
+
+	var jsonOut bytes.Buffer
+	require.NoError(t, runAttributionBlame(context.Background(), &jsonOut, "auth.py", attributionBlameOptions{LineFlag: "2", JSON: true}))
+	var payload fileAttributionResult
+	require.NoError(t, json.Unmarshal(jsonOut.Bytes(), &payload))
+	require.Len(t, payload.Lines, 1)
+	require.True(t, payload.Lines[0].SessionFallback, "multi-session empty-paths fallback should be flagged as a guess")
+}
+
+func TestAttributionDoesNotFlagSingleSessionEmptyPaths(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	// A single session that recorded no paths is "unknown", not rename evidence,
+	// so it must NOT be caveated — the false positive the union rule still
+	// suppresses (neither sessionsRead > 1 nor len(FilesTouched) > 0 holds).
+	writeAttributionCheckpoint(t, repoRoot, "ccc2c3d4e5f6", checkpoint.WriteOptions{
+		SessionID:        "session-solo-12345678",
+		Prompts:          []string{"Single session, no recorded paths."},
+		Agent:            agent.AgentTypeClaudeCode,
+		CheckpointsCount: 1,
+	})
+	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nai_line = 2\n")
+	testutil.GitAdd(t, repoRoot, "auth.py")
+	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("single session", checkpointid.MustCheckpointID("ccc2c3d4e5f6")))
+
+	var jsonOut bytes.Buffer
+	require.NoError(t, runAttributionBlame(context.Background(), &jsonOut, "auth.py", attributionBlameOptions{LineFlag: "2", JSON: true}))
+	var payload fileAttributionResult
+	require.NoError(t, json.Unmarshal(jsonOut.Bytes(), &payload))
+	require.Len(t, payload.Lines, 1)
+	require.False(t, payload.Lines[0].SessionFallback, "single-session empty-paths must not be flagged")
+}
+
+func TestAttributionWhyHidesExplainHintWhenMetadataMissing(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	// A committed checkpoint trailer whose metadata was never written locally and
+	// cannot be fetched (no remote). `why` must not print the bare
+	// "Full context: entire checkpoint explain <id>" hint — that command fails
+	// the same way the why fetch just did (Karthik's reported bug). It surfaces
+	// the actionable fetch-then-explain remedy instead.
+	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nmissing_line = 2\n")
+	testutil.GitAdd(t, repoRoot, "auth.py")
+	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("missing metadata", checkpointid.MustCheckpointID("bfc2c1df9e4b")))
+
+	var out bytes.Buffer
+	require.NoError(t, runAttributionWhy(context.Background(), &out, "auth.py:2", attributionWhyOptions{}))
+	text := out.String()
+	require.Contains(t, text, "bfc2c1df9e4b")
+	require.NotContains(t, text, "Full context:")
+	require.Contains(t, text, "git fetch ")
+	require.Contains(t, text, "entire checkpoint explain bfc2c1df9e4b")
 }
 
 func TestSummarizeAttributionLinesPercentagesSumTo100(t *testing.T) {
@@ -517,6 +621,93 @@ func TestAttributionWhyPreservesLineIndentation(t *testing.T) {
 	})
 
 	require.Contains(t, out.String(), "      return True")
+}
+
+func TestAttributionWhyLineJSONShowsMissingMetadataReason(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nmissing_line = 2\n")
+	testutil.GitAdd(t, repoRoot, "auth.py")
+	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("missing metadata", checkpointid.MustCheckpointID("fab2c3d4e5f6")))
+
+	var out bytes.Buffer
+	require.NoError(t, runAttributionWhy(context.Background(), &out, "auth.py:2", attributionWhyOptions{JSON: true}))
+
+	var payload struct {
+		File        string                                  `json:"file"`
+		Line        attributionLine                         `json:"line"`
+		Checkpoints map[string]attributionCheckpointContext `json:"checkpoints,omitempty"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &payload))
+	require.Equal(t, "auth.py", payload.File)
+	require.True(t, payload.Line.MetadataMissing)
+	require.Contains(t, payload.Line.MetadataMissingReason, "entire checkpoint explain fab2c3d4e5f6")
+	require.Contains(t, payload.Line.MetadataMissingReason, "git fetch ")
+	require.Contains(t, payload.Line.MetadataMissingReason, "entire/checkpoints/v1:entire/checkpoints/v1")
+	checkpointCtx := payload.Checkpoints["fab2c3d4e5f6"]
+	require.True(t, checkpointCtx.MetadataMissing)
+	require.Equal(t, payload.Line.MetadataMissingReason, checkpointCtx.MetadataMissingReason)
+}
+
+func TestAttributionWhyFileJSONShowsMissingMetadataReason(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nmissing_line = 2\n")
+	testutil.GitAdd(t, repoRoot, "auth.py")
+	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("missing metadata", checkpointid.MustCheckpointID("eab2c3d4e5f6")))
+
+	var out bytes.Buffer
+	require.NoError(t, runAttributionWhy(context.Background(), &out, "auth.py", attributionWhyOptions{JSON: true}))
+
+	var payload fileAttributionResult
+	require.NoError(t, json.Unmarshal(out.Bytes(), &payload))
+	checkpointCtx := payload.Checkpoints["eab2c3d4e5f6"]
+	require.True(t, checkpointCtx.MetadataMissing)
+	require.Contains(t, checkpointCtx.MetadataMissingReason, "entire checkpoint explain eab2c3d4e5f6")
+}
+
+func TestAttributionWhyFileJSONLocalMetadataHasNoMissingReason(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	writeAttributionCheckpoint(t, repoRoot, "dab2c3d4e5f6", checkpoint.WriteOptions{
+		SessionID:        "session-why-file-12345678",
+		Prompts:          []string{"Add a line with local checkpoint metadata."},
+		FilesTouched:     []string{"auth.py"},
+		Agent:            agent.AgentTypeClaudeCode,
+		CheckpointsCount: 1,
+	})
+	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nwhy_line = 2\n")
+	testutil.GitAdd(t, repoRoot, "auth.py")
+	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("local metadata", checkpointid.MustCheckpointID("dab2c3d4e5f6")))
+
+	var out bytes.Buffer
+	require.NoError(t, runAttributionWhy(context.Background(), &out, "auth.py", attributionWhyOptions{JSON: true}))
+
+	var payload fileAttributionResult
+	require.NoError(t, json.Unmarshal(out.Bytes(), &payload))
+	checkpointCtx := payload.Checkpoints["dab2c3d4e5f6"]
+	require.False(t, checkpointCtx.MetadataMissing)
+	require.Empty(t, checkpointCtx.MetadataMissingReason)
+}
+
+func TestAttributionWhySuccessiveCallsKeepCheckpointMapStable(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nmissing_line = 2\n")
+	testutil.GitAdd(t, repoRoot, "auth.py")
+	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("missing metadata", checkpointid.MustCheckpointID("bab2c3d4e5f6")))
+
+	var lineOut bytes.Buffer
+	require.NoError(t, runAttributionWhy(context.Background(), &lineOut, "auth.py:2", attributionWhyOptions{JSON: true}))
+	require.Contains(t, lineOut.String(), "bab2c3d4e5f6")
+
+	var firstOut bytes.Buffer
+	require.NoError(t, runAttributionWhy(context.Background(), &firstOut, "auth.py", attributionWhyOptions{JSON: true}))
+	var firstPayload fileAttributionResult
+	require.NoError(t, json.Unmarshal(firstOut.Bytes(), &firstPayload))
+
+	var secondOut bytes.Buffer
+	require.NoError(t, runAttributionWhy(context.Background(), &secondOut, "auth.py", attributionWhyOptions{JSON: true}))
+	var secondPayload fileAttributionResult
+	require.NoError(t, json.Unmarshal(secondOut.Bytes(), &secondPayload))
+
+	require.Equal(t, firstPayload.Checkpoints, secondPayload.Checkpoints)
 }
 
 func newAttributionRepo(t *testing.T) string {
