@@ -200,6 +200,17 @@ type ErrorResponse struct {
 	Error any `json:"error"`
 }
 
+// Code extracts a stable machine-readable error code from the structured
+// envelope shape. Older string-only errors do not carry a code.
+func (e ErrorResponse) Code() string {
+	if v, ok := e.Error.(map[string]any); ok {
+		if code, ok := v["code"].(string); ok {
+			return strings.TrimSpace(code)
+		}
+	}
+	return ""
+}
+
 // Message extracts the human-readable error message from either envelope shape.
 func (e ErrorResponse) Message() string {
 	switch v := e.Error.(type) {
@@ -220,6 +231,7 @@ func (e ErrorResponse) Message() string {
 // errors.As to inspect the HTTP status, or IsHTTPErrorStatus for a quick check.
 type HTTPError struct {
 	StatusCode int
+	Code       string
 	Message    string
 }
 
@@ -253,6 +265,7 @@ func CheckResponse(resp *http.Response) error {
 
 	var parsed ErrorResponse
 	if err := json.Unmarshal(body, &parsed); err == nil {
+		apiError.Code = parsed.Code()
 		if message := parsed.Message(); message != "" {
 			apiError.Message = message
 			return apiError

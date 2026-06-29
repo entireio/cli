@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -17,12 +18,14 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/spf13/cobra"
 )
 
 const (
 	defaultExpertsLimit         = 10
 	defaultExpertsEvidenceLimit = 3
+	maxExpertsResponseBytes     = 16 << 20
 )
 
 type expertsRequest struct {
@@ -69,11 +72,12 @@ type expertEntry struct {
 }
 
 type expertsResponse struct {
-	Experts      []expertEntry `json:"experts"`
-	Scopes       []string      `json:"scopes"`
-	Query        *string       `json:"query"`
-	RepoFullName string        `json:"repo_full_name"`
-	Source       string        `json:"source"`
+	Experts      []expertEntry   `json:"experts"`
+	Scopes       []string        `json:"scopes"`
+	Query        *string         `json:"query"`
+	RepoFullName string          `json:"repo_full_name"`
+	Source       string          `json:"source"`
+	RawJSON      json.RawMessage `json:"-"`
 }
 
 func newExpertsCmd() *cobra.Command {
@@ -128,9 +132,7 @@ func runExpertsCommand(ctx context.Context, w, errW io.Writer, opts expertsComma
 			return err
 		}
 		if opts.JSON {
-			enc := json.NewEncoder(w)
-			enc.SetIndent("", "  ")
-			return enc.Encode(resp)
+			return writeExpertsJSON(w, resp)
 		}
 		if len(resp.Experts) == 0 {
 			fmt.Fprintf(w, "No expert evidence found for %s.\n", label)
@@ -182,6 +184,11 @@ func buildExpertsRequest(
 		if err != nil {
 			return req, "", err
 		}
+		if strings.TrimSpace(opts.RepoOverride) != "" {
+			if err := validateLocalExpertScopeRepo(ctx, owner, repo); err != nil {
+				return req, "", err
+			}
+		}
 		req.Scopes = []string{scope}
 		return req, scope, nil
 	}
@@ -209,20 +216,78 @@ func fetchExperts(ctx context.Context, client *api.Client, req expertsRequest) (
 	}
 	defer resp.Body.Close()
 	if err := api.CheckResponse(resp); err != nil {
+		if friendly := friendlyExpertsAPIError(err); friendly != nil {
+			return nil, friendly
+		}
 		return nil, fmt.Errorf("experts response: %w", err)
 	}
 
+	raw, err := readExpertsResponseBody(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read experts response: %w", err)
+	}
 	var result expertsResponse
-	if err := api.DecodeJSON(resp, &result); err != nil {
+	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, fmt.Errorf("decode experts: %w", err)
 	}
+	result.RawJSON = append(result.RawJSON[:0], raw...)
 	return &result, nil
+}
+
+func readExpertsResponseBody(r io.Reader) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(r, maxExpertsResponseBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read experts response body: %w", err)
+	}
+	if len(raw) > maxExpertsResponseBytes {
+		return nil, fmt.Errorf("response body exceeds %d bytes", maxExpertsResponseBytes)
+	}
+	return raw, nil
+}
+
+func writeExpertsJSON(w io.Writer, resp *expertsResponse) error {
+	if len(resp.RawJSON) > 0 {
+		if _, err := w.Write(resp.RawJSON); err != nil {
+			return fmt.Errorf("write experts JSON: %w", err)
+		}
+		return nil
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(resp); err != nil {
+		return fmt.Errorf("encode experts JSON: %w", err)
+	}
+	return nil
+}
+
+func friendlyExpertsAPIError(err error) error {
+	var httpErr *api.HTTPError
+	if !errors.As(err, &httpErr) {
+		return nil
+	}
+
+	code := strings.TrimSpace(httpErr.Code)
+	message := strings.TrimSpace(httpErr.Message)
+	if httpErr.StatusCode == http.StatusServiceUnavailable &&
+		(strings.EqualFold(code, "code-search-unavailable") ||
+			strings.EqualFold(message, "Code search is not configured") ||
+			strings.EqualFold(message, "code-search-unavailable")) {
+		return errors.New("code search is not configured")
+	}
+	if httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden {
+		if message == "" {
+			message = "Authentication failed"
+		}
+		return fmt.Errorf("%s; run 'entire login' to authenticate", strings.TrimRight(message, ". "))
+	}
+	return nil
 }
 
 func resolveExpertsRepo(ctx context.Context, override string) (string, string, error) {
 	override = strings.TrimSpace(override)
 	if override == "" {
-		_, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
+		owner, repo, err := resolveExpertsGitHubOrigin(ctx)
 		if err != nil {
 			return "", "", fmt.Errorf("resolve origin remote: %w", err)
 		}
@@ -230,11 +295,11 @@ func resolveExpertsRepo(ctx context.Context, override string) (string, string, e
 	}
 
 	if strings.Contains(override, "://") || strings.Contains(override, ":") {
-		info, err := gitremote.ParseURL(override)
+		owner, repo, err := search.ParseGitHubRemote(override)
 		if err != nil {
-			return "", "", fmt.Errorf("parse repository URL %q: %w", override, err)
+			return "", "", fmt.Errorf("parse repository URL %q: %w", gitremote.RedactURL(override), err)
 		}
-		return info.Owner, info.Repo, nil
+		return owner, repo, nil
 	}
 
 	parts := strings.Split(override, "/")
@@ -258,6 +323,29 @@ func normalizeExpertRepoParts(owner, repo, raw string) (string, string, error) {
 		return "", "", fmt.Errorf("invalid repository %q", raw)
 	}
 	return owner, repo, nil
+}
+
+func resolveExpertsGitHubOrigin(ctx context.Context) (string, string, error) {
+	remoteURL, err := gitremote.GetRemoteURL(ctx, "origin")
+	if err != nil {
+		return "", "", fmt.Errorf("get origin remote URL: %w", err)
+	}
+	owner, repo, err := search.ParseGitHubRemote(remoteURL)
+	if err != nil {
+		return "", "", fmt.Errorf("parse origin remote URL: %w", err)
+	}
+	return owner, repo, nil
+}
+
+func validateLocalExpertScopeRepo(ctx context.Context, owner, repo string) error {
+	localOwner, localRepo, err := resolveExpertsGitHubOrigin(ctx)
+	if err != nil {
+		return fmt.Errorf("--repo cannot be combined with a local path when origin cannot be verified: %w", err)
+	}
+	if strings.EqualFold(localOwner, owner) && strings.EqualFold(localRepo, repo) {
+		return nil
+	}
+	return fmt.Errorf("--repo %s/%s cannot be combined with a local path from %s/%s; run from the target checkout or pass a non-local topic query", owner, repo, localOwner, localRepo)
 }
 
 func localExpertScope(ctx context.Context, subject string) (string, bool, error) {

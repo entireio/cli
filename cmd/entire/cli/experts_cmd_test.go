@@ -3,11 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -109,6 +111,147 @@ func TestFetchExpertsPostsRequestShape(t *testing.T) {
 	require.Equal(t, "acme/widget", resp.RepoFullName)
 }
 
+func TestWriteExpertsJSONPreservesServerShape(t *testing.T) {
+	raw := []byte(`{"repo_full_name":"acme/widget","experts":[{"login":"maya","extra_nested":{"source":"server"}}],"source":"db","extra_top":true}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write(raw)
+		if err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	resp, err := fetchExperts(context.Background(), client, expertsRequest{
+		Owner: "acme",
+		Repo:  "widget",
+		Limit: 3,
+	})
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	require.NoError(t, writeExpertsJSON(&out, resp))
+	require.Equal(t, raw, out.Bytes())
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	require.Equal(t, true, got["extra_top"])
+	experts, ok := got["experts"].([]any)
+	require.True(t, ok)
+	first, ok := experts[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, map[string]any{"source": "server"}, first["extra_nested"])
+}
+
+func TestFetchExpertsRejectsOversizedSuccessResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"repo_full_name":"acme/widget","source":"db","padding":"` + strings.Repeat("x", maxExpertsResponseBytes) + `"}`))
+		if err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	_, err := fetchExperts(context.Background(), client, expertsRequest{
+		Owner: "acme",
+		Repo:  "widget",
+		Limit: 3,
+	})
+
+	require.ErrorContains(t, err, "response body exceeds")
+}
+
+func TestFetchExpertsFormatsCodeSearchUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, err := w.Write([]byte(`{"error":"Code search is not configured"}`))
+		if err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	_, err := fetchExperts(context.Background(), client, expertsRequest{
+		Owner: "acme",
+		Repo:  "widget",
+		Query: "stripe webhook retry logic",
+		Limit: 3,
+	})
+
+	require.EqualError(t, err, "code search is not configured")
+}
+
+func TestFetchExpertsFormatsStructuredCodeSearchUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, err := w.Write([]byte(`{"error":{"code":"code-search-unavailable","message":"Search backend unavailable"}}`))
+		if err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	_, err := fetchExperts(context.Background(), client, expertsRequest{
+		Owner: "acme",
+		Repo:  "widget",
+		Query: "stripe webhook retry logic",
+		Limit: 3,
+	})
+
+	require.EqualError(t, err, "code search is not configured")
+}
+
+func TestFetchExpertsFormatsUnauthorizedMessage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, err := w.Write([]byte(`{"error":"Not authenticated"}`))
+		if err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	_, err := fetchExperts(context.Background(), client, expertsRequest{
+		Owner:  "acme",
+		Repo:   "widget",
+		Scopes: []string{"src/foo.ts"},
+		Limit:  3,
+	})
+
+	require.EqualError(t, err, "Not authenticated; run 'entire login' to authenticate")
+}
+
+func TestFetchExpertsFormatsForbiddenMessage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, err := w.Write([]byte(`{"error":"Checkpoint repo access denied"}`))
+		if err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	_, err := fetchExperts(context.Background(), client, expertsRequest{
+		Owner:  "acme",
+		Repo:   "widget",
+		Scopes: []string{"src/foo.ts"},
+		Limit:  3,
+	})
+
+	require.EqualError(t, err, "Checkpoint repo access denied; run 'entire login' to authenticate")
+}
+
 func TestBuildExpertsRequestNormalizesLocalPathsToRepoRelative(t *testing.T) {
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
@@ -144,6 +287,65 @@ func TestBuildExpertsRequestNormalizesLocalPathsToRepoRelative(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"cmd/entire/cli/experts_cmd.go"}, req.Scopes)
 	require.Equal(t, "cmd/entire/cli/experts_cmd.go", label)
+}
+
+func TestBuildExpertsRequestAllowsRepoOverrideMatchingLocalOriginPath(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	runExpertsGit(t, repoDir, "remote", "add", "origin", "https://github.com/acme/widget.git")
+	testutil.WriteFile(t, repoDir, "cmd/entire/cli/experts_cmd.go", "package cli\n")
+
+	t.Chdir(repoDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	req, label, err := buildExpertsRequest(context.Background(), "acme", "widget", expertsCommandOptions{
+		RepoOverride: "gh/acme/widget",
+		Subject:      "cmd/entire/cli/experts_cmd.go",
+		Limit:        5,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"cmd/entire/cli/experts_cmd.go"}, req.Scopes)
+	require.Equal(t, "cmd/entire/cli/experts_cmd.go", label)
+}
+
+func TestBuildExpertsRequestRejectsRepoOverrideWithDifferentLocalPath(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	runExpertsGit(t, repoDir, "remote", "add", "origin", "https://github.com/acme/widget.git")
+	testutil.WriteFile(t, repoDir, "cmd/entire/cli/experts_cmd.go", "package cli\n")
+
+	t.Chdir(repoDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	_, _, err := buildExpertsRequest(context.Background(), "other", "project", expertsCommandOptions{
+		RepoOverride: "gh/other/project",
+		Subject:      "cmd/entire/cli/experts_cmd.go",
+		Limit:        5,
+	})
+
+	require.ErrorContains(t, err, "--repo other/project cannot be combined with a local path from acme/widget")
+}
+
+func TestBuildExpertsRequestRejectsRepoOverrideWithNonGitHubLocalPath(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	runExpertsGit(t, repoDir, "remote", "add", "origin", "https://gitlab.com/acme/widget.git")
+	testutil.WriteFile(t, repoDir, "cmd/entire/cli/experts_cmd.go", "package cli\n")
+
+	t.Chdir(repoDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	_, _, err := buildExpertsRequest(context.Background(), "acme", "widget", expertsCommandOptions{
+		RepoOverride: "gh/acme/widget",
+		Subject:      "cmd/entire/cli/experts_cmd.go",
+		Limit:        5,
+	})
+
+	require.ErrorContains(t, err, "not a GitHub repository")
 }
 
 func TestBuildExpertsRequestNormalizesLocalDirectoriesToRepoRelativePrefix(t *testing.T) {
@@ -221,6 +423,37 @@ func TestResolveExpertsRepoValidatesBareOverrides(t *testing.T) {
 
 	_, _, err = resolveExpertsRepo(context.Background(), "/widget")
 	require.ErrorContains(t, err, "invalid repository")
+
+	owner, repo, err = resolveExpertsRepo(context.Background(), "git@github.com:acme/widget.git")
+	require.NoError(t, err)
+	require.Equal(t, "acme", owner)
+	require.Equal(t, "widget", repo)
+
+	_, _, err = resolveExpertsRepo(context.Background(), "https://gitlab.com/acme/widget.git")
+	require.ErrorContains(t, err, "not a GitHub repository")
+
+	_, _, err = resolveExpertsRepo(context.Background(), "https://github.com/acme/widget/extra.git")
+	require.ErrorContains(t, err, "extra segments")
+}
+
+func TestResolveExpertsRepoValidatesOriginRemote(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	runExpertsGit(t, repoDir, "remote", "add", "origin", "https://github.com/acme/widget.git")
+
+	t.Chdir(repoDir)
+	owner, repo, err := resolveExpertsRepo(context.Background(), "")
+	require.NoError(t, err)
+	require.Equal(t, "acme", owner)
+	require.Equal(t, "widget", repo)
+
+	runExpertsGit(t, repoDir, "remote", "set-url", "origin", "https://gitlab.com/acme/widget.git")
+	_, _, err = resolveExpertsRepo(context.Background(), "")
+	require.ErrorContains(t, err, "not a GitHub repository")
+
+	runExpertsGit(t, repoDir, "remote", "set-url", "origin", "https://github.com/acme/widget/extra.git")
+	_, _, err = resolveExpertsRepo(context.Background(), "")
+	require.ErrorContains(t, err, "extra segments")
 }
 
 func TestStagedExpertScopesAreRepoRelativeWithDiffRelative(t *testing.T) {
