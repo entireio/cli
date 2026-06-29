@@ -1105,19 +1105,22 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	}
 	logging.Info(logCtx, "subagent completed", subagentEndAttrs...)
 
-	// Extract modified files from hook payload and/or subagent transcript
+	// Extract modified files from the hook payload and the subagent's OWN
+	// transcript. Only scan when we resolved an actual subagent transcript — never
+	// fall back to scanning event.SessionRef (the PARENT rollout) at offset 0, or
+	// the parent's entire file history would be mis-attributed to this one
+	// subagent checkpoint. When the subagent transcript can't be resolved, the
+	// pre-task git-status delta below still scopes real changes.
 	var modifiedFiles []string
 	modifiedFiles = append(modifiedFiles, event.ModifiedFiles...)
-	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
-		transcriptToScan := event.SessionRef
-		if subagentTranscriptPath != "" {
-			transcriptToScan = subagentTranscriptPath
-		}
-		if files, _, fileErr := analyzer.ExtractModifiedFilesFromOffset(transcriptToScan, 0); fileErr != nil {
-			logging.Warn(logCtx, "failed to extract modified files from subagent",
-				slog.String("error", fileErr.Error()))
-		} else {
-			modifiedFiles = mergeUnique(modifiedFiles, files)
+	if subagentTranscriptPath != "" {
+		if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
+			if files, _, fileErr := analyzer.ExtractModifiedFilesFromOffset(subagentTranscriptPath, 0); fileErr != nil {
+				logging.Warn(logCtx, "failed to extract modified files from subagent",
+					slog.String("error", fileErr.Error()))
+			} else {
+				modifiedFiles = mergeUnique(modifiedFiles, files)
+			}
 		}
 	}
 

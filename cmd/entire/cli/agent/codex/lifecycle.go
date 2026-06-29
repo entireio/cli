@@ -251,7 +251,12 @@ func (c *CodexAgent) ResolveSubagentTranscript(event *agent.Event) string {
 		return ""
 	}
 	if p := event.Metadata[metaKeyAgentTranscriptPath]; p != "" {
-		return p
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		// The hook-provided path is stale/moved/archived — fall through to globbing
+		// the sessions tree (incl. archived_sessions) by the subagent's agent_id
+		// rather than returning a dead path.
 	}
 	if event.SubagentID == "" {
 		return ""

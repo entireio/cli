@@ -15,7 +15,7 @@ import (
 const (
 	childID1 = "019e84ed-497d-7511-941f-7a01260d5136"
 	childID2 = "019e84f6-db7b-7380-8ab6-9fcb551901e3"
-	childID3 = "019e8502-0220-7c62-ad81-c967a8bc5526" // referenced but no rollout written
+	childID3 = "019e8502-0220-7c62-ad81-c967a8bc5526" // spawned but no rollout written
 )
 
 // rolloutLineJSON builds one rollout JSONL line: {"type":..,"payload":..}.
@@ -41,6 +41,23 @@ func functionCallLine(t *testing.T, name, arguments string) string {
 	return rolloutLineJSON(t, "response_item", map[string]any{
 		"type": "function_call", "name": name, "arguments": arguments, "call_id": "call_x",
 	})
+}
+
+// spawnAgentLines emits a spawn_agent function_call and its matching
+// function_call_output, mirroring real Codex rollouts: the output carries the
+// new child's agent_id ({"agent_id":"...","nickname":"..."}). This is how Codex
+// records a spawned subagent, and what discovery keys off.
+func spawnAgentLines(t *testing.T, callID, agentType, childID string) []string {
+	t.Helper()
+	call := rolloutLineJSON(t, "response_item", map[string]any{
+		"type": "function_call", "name": "spawn_agent",
+		"arguments": `{"agent_type":"` + agentType + `","message":"go"}`, "call_id": callID,
+	})
+	out := rolloutLineJSON(t, "response_item", map[string]any{
+		"type": "function_call_output", "call_id": callID,
+		"output": map[string]any{"agent_id": childID, "nickname": "n"},
+	})
+	return []string{call, out}
 }
 
 func tokenCountLine(t *testing.T, input, cached, output int) string {
@@ -116,9 +133,30 @@ func TestParseHookEvent_SubagentHooks_ErrorOnEmpty(t *testing.T) {
 // --- ResolveSubagentTranscript ---
 
 func TestResolveSubagentTranscript_PrefersHookPath(t *testing.T) {
+	dir := t.TempDir()
+	hookPath := filepath.Join(dir, "child.jsonl")
+	require.NoError(t, os.WriteFile(hookPath, []byte("{}\n"), 0o600))
+
 	ag := &CodexAgent{}
-	evt := &agent.Event{SubagentID: childID1, Metadata: map[string]string{metaKeyAgentTranscriptPath: "/tmp/from-hook.jsonl"}}
-	require.Equal(t, "/tmp/from-hook.jsonl", ag.ResolveSubagentTranscript(evt))
+	evt := &agent.Event{SubagentID: childID1, Metadata: map[string]string{metaKeyAgentTranscriptPath: hookPath}}
+	require.Equal(t, hookPath, ag.ResolveSubagentTranscript(evt))
+}
+
+// A stale/moved hook path must not shadow the glob fallback — resolution degrades
+// to globbing the sessions tree by agent_id rather than returning a dead path.
+func TestResolveSubagentTranscript_StaleHookPathFallsBackToGlob(t *testing.T) {
+	sessionsDir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", sessionsDir)
+	writeChildRollout(t, sessionsDir, childID1, sessionMetaLine(t, childID1))
+
+	ag := &CodexAgent{}
+	evt := &agent.Event{
+		SubagentID: childID1,
+		Metadata:   map[string]string{metaKeyAgentTranscriptPath: "/nonexistent/stale.jsonl"},
+	}
+	got := ag.ResolveSubagentTranscript(evt)
+	require.NotEmpty(t, got, "stale hook path should fall back to glob")
+	require.Contains(t, got, childID1)
 }
 
 func TestResolveSubagentTranscript_GlobsSessionsByAgentID(t *testing.T) {
@@ -140,41 +178,42 @@ func TestResolveSubagentTranscript_NilAndEmpty(t *testing.T) {
 
 // --- extractSpawnedAgentIDs ---
 
+// Discovery keys off spawn_agent OUTPUTS (which carry the new child id), not
+// wait/close/resume references — so a child merely referenced (not spawned) in
+// this range is excluded, preventing cross-turn re-attribution.
 func TestExtractSpawnedAgentIDs(t *testing.T) {
-	parent := strings.Join([]string{
-		sessionMetaLine(t, "parent"),
-		functionCallLine(t, "spawn_agent", `{"agent_type":"explorer","message":"go look"}`),
-		functionCallLine(t, "wait_agent", `{"targets":["`+childID1+`","`+childID2+`"],"timeout_ms":1000}`),
-		functionCallLine(t, "close_agent", `{"target":"`+childID1+`"}`),
-	}, "\n")
+	lines := []string{sessionMetaLine(t, "parent")}
+	lines = append(lines, spawnAgentLines(t, "call_1", "explorer", childID1)...)
+	lines = append(lines, spawnAgentLines(t, "call_2", "explorer", childID2)...)
+	// childID3 is referenced by wait_agent but never spawned here → must be excluded.
+	lines = append(lines, functionCallLine(t, "wait_agent", `{"targets":["`+childID3+`"]}`))
+	parent := strings.Join(lines, "\n")
 
 	ids := extractSpawnedAgentIDs([]byte(parent), 0)
 	require.ElementsMatch(t, []string{childID1, childID2}, ids)
 }
 
-// fromOffset scopes subagent discovery to the current checkpoint range. A
-// management call before the offset (a prior turn, since a Codex rollout grows
-// in one file) must NOT re-attribute its subagent's files or tokens — otherwise
-// every prior subagent is re-counted on every subsequent turn.
+// fromOffset scopes discovery to the current checkpoint range. A subagent
+// spawned in a prior range (its spawn output before the offset) must NOT be
+// re-attributed — otherwise its files/tokens are re-counted every later turn.
 func TestSubagentDiscovery_RespectsFromOffset(t *testing.T) {
 	sessionsDir := t.TempDir()
 	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", sessionsDir)
 	writeChildRollout(t, sessionsDir, childID1,
 		sessionMetaLine(t, childID1), applyPatchLine(t, "Add", "child1.go"), tokenCountLine(t, 100, 0, 50))
 
-	parent := strings.Join([]string{
-		sessionMetaLine(t, "parent"),                                      // line 1
-		functionCallLine(t, "wait_agent", `{"targets":["`+childID1+`"]}`), // line 2 (prior range)
-		applyPatchLine(t, "Update", "parent-late.go"),                     // line 3 (this range)
-	}, "\n")
+	lines := []string{sessionMetaLine(t, "parent")}                            // line 1
+	lines = append(lines, spawnAgentLines(t, "call_1", "worker", childID1)...) // lines 2-3 (spawn + output)
+	lines = append(lines, applyPatchLine(t, "Update", "parent-late.go"))       // line 4 (this range)
+	parent := strings.Join(lines, "\n")
 
 	ag := &CodexAgent{}
-	// Offset past the wait_agent line: childID1 belongs to a prior checkpoint.
-	files, err := ag.ExtractAllModifiedFiles([]byte(parent), 2, "")
+	// Offset 3 is past the spawn OUTPUT (line 3): childID1 belongs to a prior range.
+	files, err := ag.ExtractAllModifiedFiles([]byte(parent), 3, "")
 	require.NoError(t, err)
-	require.Equal(t, []string{"parent-late.go"}, files, "subagent files before the offset must not be re-attributed")
+	require.Equal(t, []string{"parent-late.go"}, files, "subagent spawned before the offset must not be re-attributed")
 
-	usage, err := ag.CalculateTotalTokenUsage([]byte(parent), 2, "")
+	usage, err := ag.CalculateTotalTokenUsage([]byte(parent), 3, "")
 	require.NoError(t, err)
 	if usage != nil {
 		require.Nil(t, usage.SubagentTokens, "subagent tokens before the offset must not be re-attributed")
@@ -194,13 +233,13 @@ func TestExtractAllModifiedFiles_IncludesSubagents(t *testing.T) {
 
 	writeChildRollout(t, sessionsDir, childID1, applyPatchLine(t, "Add", "child1.go"))
 	writeChildRollout(t, sessionsDir, childID2, applyPatchLine(t, "Update", "child2.go"))
-	// childID3 is referenced but has no rollout file → must be skipped gracefully.
+	// childID3 is spawned but has no rollout file → must be skipped gracefully.
 
-	parent := strings.Join([]string{
-		sessionMetaLine(t, "parent"),
-		applyPatchLine(t, "Update", "parent.go"),
-		functionCallLine(t, "wait_agent", `{"targets":["`+childID1+`","`+childID2+`","`+childID3+`"]}`),
-	}, "\n")
+	lines := []string{sessionMetaLine(t, "parent"), applyPatchLine(t, "Update", "parent.go")}
+	lines = append(lines, spawnAgentLines(t, "c1", "worker", childID1)...)
+	lines = append(lines, spawnAgentLines(t, "c2", "worker", childID2)...)
+	lines = append(lines, spawnAgentLines(t, "c3", "worker", childID3)...)
+	parent := strings.Join(lines, "\n")
 
 	ag := &CodexAgent{}
 	files, err := ag.ExtractAllModifiedFiles([]byte(parent), 0, "")
@@ -215,11 +254,10 @@ func TestCalculateTotalTokenUsage_AggregatesSubagents(t *testing.T) {
 	writeChildRollout(t, sessionsDir, childID1, sessionMetaLine(t, childID1), tokenCountLine(t, 100, 20, 50))
 	writeChildRollout(t, sessionsDir, childID2, sessionMetaLine(t, childID2), tokenCountLine(t, 200, 0, 40))
 
-	parent := strings.Join([]string{
-		sessionMetaLine(t, "parent"),
-		tokenCountLine(t, 10, 0, 5),
-		functionCallLine(t, "wait_agent", `{"targets":["`+childID1+`","`+childID2+`"]}`),
-	}, "\n")
+	lines := []string{sessionMetaLine(t, "parent"), tokenCountLine(t, 10, 0, 5)}
+	lines = append(lines, spawnAgentLines(t, "c1", "worker", childID1)...)
+	lines = append(lines, spawnAgentLines(t, "c2", "worker", childID2)...)
+	parent := strings.Join(lines, "\n")
 
 	ag := &CodexAgent{}
 	usage, err := ag.CalculateTotalTokenUsage([]byte(parent), 0, "")

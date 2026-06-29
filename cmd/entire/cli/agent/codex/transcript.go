@@ -26,10 +26,6 @@ var (
 	_ agent.SubagentAwareExtractor      = (*CodexAgent)(nil)
 )
 
-// agentThreadIDRegex matches a Codex subagent thread-id (UUID form) embedded in
-// agent-management tool-call arguments (wait_agent/close_agent/resume_agent).
-var agentThreadIDRegex = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
-
 // rolloutLine is the top-level JSONL line structure in Codex rollout files.
 type rolloutLine struct {
 	Timestamp string          `json:"timestamp"`
@@ -52,6 +48,8 @@ type responseItemPayload struct {
 	Name      string          `json:"name,omitempty"`
 	Input     string          `json:"input,omitempty"`     // apply_patch input (plain text, not JSON)
 	Arguments string          `json:"arguments,omitempty"` // function_call arguments (JSON-encoded string)
+	CallID    string          `json:"call_id,omitempty"`   // links a function_call to its function_call_output
+	Output    json.RawMessage `json:"output,omitempty"`    // function_call_output payload (string or object)
 	Content   json.RawMessage `json:"content,omitempty"`   // for messages
 }
 
@@ -465,17 +463,40 @@ func (c *CodexAgent) readSubagentRolloutsUncached(parent []byte, fromOffset int)
 	return out
 }
 
-// extractSpawnedAgentIDs returns the deduplicated subagent thread-ids referenced
-// by Codex agent-management tool calls (wait_agent / close_agent / resume_agent)
-// in a parent rollout, skipping the first fromOffset JSONL lines so only
-// subagents spawned in the current checkpoint range are returned. spawn_agent
-// does not echo the child id in its arguments, so the ids are recovered from the
-// management calls that target them.
+// extractSpawnedAgentIDs returns the deduplicated thread-ids of subagents
+// SPAWNED in the current checkpoint range (lines after fromOffset). Codex's
+// spawn_agent tool returns the new child id in its function_call_output
+// ({"agent_id":"...","nickname":"..."}), so discovery keys off spawn outputs —
+// not wait_agent/close_agent/resume_agent references. This attributes each child
+// exactly once, in the turn it was spawned: a child resumed or re-waited in a
+// later turn is not rediscovered, so its cumulative tokens/files are never
+// double-counted across turns.
 func extractSpawnedAgentIDs(data []byte, fromOffset int) []string {
+	lines := splitJSONL(data)
+
+	// First pass: collect call_ids of spawn_agent calls across the whole
+	// transcript, so a spawn call just before the offset still matches its output
+	// landing in range.
+	spawnCallIDs := make(map[string]struct{})
+	for _, lineData := range lines {
+		var line rolloutLine
+		if json.Unmarshal(lineData, &line) != nil || line.Type != rolloutLineTypeResponseItem {
+			continue
+		}
+		var payload responseItemPayload
+		if json.Unmarshal(line.Payload, &payload) != nil {
+			continue
+		}
+		if payload.Type == "function_call" && payload.Name == "spawn_agent" && payload.CallID != "" {
+			spawnCallIDs[payload.CallID] = struct{}{}
+		}
+	}
+
+	// Second pass: a spawn_agent OUTPUT in range carries the new child's agent_id.
 	seen := make(map[string]struct{})
 	var ids []string
 	lineNum := 0
-	for _, lineData := range splitJSONL(data) {
+	for _, lineData := range lines {
 		lineNum++
 		if lineNum <= fromOffset {
 			continue
@@ -485,26 +506,36 @@ func extractSpawnedAgentIDs(data []byte, fromOffset int) []string {
 			continue
 		}
 		var payload responseItemPayload
-		if json.Unmarshal(line.Payload, &payload) != nil || payload.Type != "function_call" {
+		if json.Unmarshal(line.Payload, &payload) != nil || payload.Type != "function_call_output" {
 			continue
 		}
-		switch payload.Name {
-		case "wait_agent", "close_agent", "resume_agent":
-		default:
+		if _, ok := spawnCallIDs[payload.CallID]; !ok {
 			continue
 		}
-		for _, id := range agentThreadIDRegex.FindAllString(payload.Arguments, -1) {
-			if validation.ValidateAgentSessionID(id) != nil {
-				continue
-			}
-			if _, ok := seen[id]; !ok {
-				seen[id] = struct{}{}
-				ids = append(ids, id)
-			}
+		id := agentIDFromSpawnOutput(payload.Output)
+		if id == "" || validation.ValidateAgentSessionID(id) != nil {
+			continue
+		}
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			ids = append(ids, id)
 		}
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// agentIDFromSpawnOutput extracts the spawned child's agent_id from a spawn_agent
+// function_call_output payload ({"agent_id":"...","nickname":"..."}). Returns ""
+// for non-object outputs (e.g. a shell tool's plain-string output).
+func agentIDFromSpawnOutput(raw json.RawMessage) string {
+	var o struct {
+		AgentID string `json:"agent_id"`
+	}
+	if json.Unmarshal(raw, &o) != nil {
+		return ""
+	}
+	return o.AgentID
 }
 
 // ExtractPrompts returns user prompts from the transcript starting at the given offset.
