@@ -48,6 +48,12 @@ func TestImportClaudeCode_EndToEnd(t *testing.T) {
 	explainOut := env.RunCLI("checkpoint", "explain", importedID)
 	require.Contains(t, explainOut, "first", "explain should show the imported turn's prompt; got: %s", explainOut)
 
+	// 4b. --generate on an imported checkpoint is refused (read-only history).
+	//     The guard runs on metadata alone, before any transcript content load.
+	genOut, genErr := env.RunCLIWithError("checkpoint", "explain", importedID, "--generate")
+	require.Error(t, genErr, "generate on imported checkpoint should fail")
+	require.Contains(t, genOut, "imported history is read-only", "got: %s", genOut)
+
 	// 5. Re-running import is idempotent.
 	out = env.RunCLI("import", "claude-code")
 	require.Contains(t, out, "(2 already imported)", "re-run should skip already-imported turns; got: %s", out)

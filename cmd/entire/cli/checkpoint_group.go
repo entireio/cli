@@ -66,7 +66,7 @@ Optionally filter by session ID with --session.`,
 			if checkDisabledGuard(cmd.Context(), cmd.OutOrStdout()) {
 				return nil
 			}
-			return runExplainBranchWithFilter(cmd.Context(), cmd.OutOrStdout(), noPagerFlag, sessionFlag)
+			return runExplainBranchWithFilter(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), noPagerFlag, sessionFlag)
 		},
 	}
 

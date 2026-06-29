@@ -32,7 +32,7 @@ jobs:
       # create inline feedback on GitHub's UI.  On local dev, the same issues should be surfaced by
       # mise-tasks/lint/go
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           version: 'v2.11.3'
           debug: 'clean'

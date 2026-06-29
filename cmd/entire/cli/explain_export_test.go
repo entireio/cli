@@ -822,6 +822,84 @@ func TestSessionMetadataToJSON_CopiesInvestigateFields(t *testing.T) {
 	require.Equal(t, "topic from metadata.json", got.InvestigateTopic)
 }
 
+// TestSessionMetadataToJSON_FullSummary pins that the export carries the whole
+// persisted summary — friction, open_items, and categorized learnings — not
+// just intent/outcome. The prose view already renders these; --json previously
+// dropped them, so scripts/dashboards couldn't see them.
+func TestSessionMetadataToJSON_FullSummary(t *testing.T) {
+	t.Parallel()
+
+	meta := &checkpoint.Metadata{
+		SessionID: "rich-summary",
+		Summary: &checkpoint.Summary{
+			Intent:    "add the thing",
+			Outcome:   "added the thing",
+			Friction:  []string{"flaky test", "slow build"},
+			OpenItems: []string{"document it"},
+			Learnings: checkpoint.LearningsSummary{
+				Repo:     []string{"settings go through the settings package"},
+				Workflow: []string{"run mise run check before commit"},
+				Code: []checkpoint.CodeLearning{
+					{Path: "explain_export.go", Line: 343, Finding: "summary struct lives here"},
+				},
+			},
+		},
+	}
+
+	got := sessionMetadataToJSON(0, meta)
+	require.NotNil(t, got.Summary)
+	require.Equal(t, "add the thing", got.Summary.Intent)
+	require.Equal(t, "added the thing", got.Summary.Outcome)
+	require.Equal(t, []string{"flaky test", "slow build"}, got.Summary.Friction)
+	require.Equal(t, []string{"document it"}, got.Summary.OpenItems)
+	require.NotNil(t, got.Summary.Learnings)
+	require.Equal(t, []string{"settings go through the settings package"}, got.Summary.Learnings.Repo)
+	require.Equal(t, []string{"run mise run check before commit"}, got.Summary.Learnings.Workflow)
+	require.Len(t, got.Summary.Learnings.Code, 1)
+	require.Equal(t, "explain_export.go", got.Summary.Learnings.Code[0].Path)
+
+	// Round-trip the wire format and assert the new keys serialize.
+	raw, err := json.Marshal(got.Summary)
+	require.NoError(t, err)
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	require.Contains(t, decoded, "friction")
+	require.Contains(t, decoded, "open_items")
+	require.Contains(t, decoded, "learnings")
+	learnings, ok := decoded["learnings"].(map[string]any)
+	require.True(t, ok)
+	require.Contains(t, learnings, "repo")
+	require.Contains(t, learnings, "workflow")
+	require.Contains(t, learnings, "code")
+}
+
+// TestSessionMetadataToJSON_EmptySummaryStaysClean pins that a summary with no
+// friction/open_items/learnings omits those keys (omitempty), so empty
+// summaries don't bloat the export with empty arrays or a stub learnings
+// object.
+func TestSessionMetadataToJSON_EmptySummaryStaysClean(t *testing.T) {
+	t.Parallel()
+
+	meta := &checkpoint.Metadata{
+		SessionID: "thin-summary",
+		Summary: &checkpoint.Summary{
+			Intent:  "just intent",
+			Outcome: "just outcome",
+		},
+	}
+
+	got := sessionMetadataToJSON(0, meta)
+	require.NotNil(t, got.Summary)
+	require.Nil(t, got.Summary.Learnings, "empty learnings must not allocate a nested object")
+
+	raw, err := json.Marshal(got.Summary)
+	require.NoError(t, err)
+	s := string(raw)
+	require.NotContains(t, s, "friction")
+	require.NotContains(t, s, "open_items")
+	require.NotContains(t, s, "learnings")
+}
+
 // TestBuildCheckpointJSONEnvelope_PropagatesHasInvestigation verifies the
 // summary-level has_investigation flag propagates from CheckpointSummary to
 // the export envelope. Mirrors how HasReview is sourced.

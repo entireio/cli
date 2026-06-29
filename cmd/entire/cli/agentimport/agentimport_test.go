@@ -46,6 +46,36 @@ func TestRegistry_HasClaude(t *testing.T) {
 	}
 }
 
+// TestRegistry_AllSupportedAgents asserts every supported importer is
+// registered with a distinct name and a non-empty agent type.
+func TestRegistry_AllSupportedAgents(t *testing.T) {
+	t.Parallel()
+	want := []string{
+		"claude-code", "cursor", "pi", "factoryai-droid", "codex", "copilot-cli", "gemini",
+	}
+	for _, name := range want {
+		imp, ok := Get(name)
+		if !ok {
+			t.Errorf("%s importer not registered", name)
+			continue
+		}
+		if imp.AgentType() == "" {
+			t.Errorf("%s importer has empty AgentType", name)
+		}
+	}
+
+	seen := make(map[string]bool)
+	for _, imp := range All() {
+		if seen[imp.Name()] {
+			t.Errorf("duplicate importer name %q", imp.Name())
+		}
+		seen[imp.Name()] = true
+	}
+	if len(All()) != len(want) {
+		t.Errorf("registered %d importers, want %d (%v)", len(All()), len(want), want)
+	}
+}
+
 func initRepoWithCommit(t *testing.T) (*git.Repository, string) {
 	t.Helper()
 	repoDir := t.TempDir()
@@ -173,6 +203,52 @@ func TestRun_AppliesConfiguredCustomRedaction(t *testing.T) {
 	}
 	if !strings.Contains(string(sc.Transcript), redact.RedactedPlaceholder) {
 		t.Fatalf("expected %q in redacted transcript, got: %s", redact.RedactedPlaceholder, sc.Transcript)
+	}
+}
+
+// TestRun_CursorImporterEndToEnd exercises the generic Run pipeline through a
+// non-Claude importer whose turns carry nil tokens and an empty model, proving
+// the checkpoint write tolerates those (the riskiest divergence from Claude).
+func TestRun_CursorImporterEndToEnd(t *testing.T) {
+	t.Parallel()
+	repo, repoDir := initRepoWithCommit(t)
+	cursorDir := t.TempDir()
+	content := strings.Join([]string{
+		`{"role":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"hello"}}`,
+		`{"role":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"hi"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(cursorDir, "sessC.jsonl"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := Options{RepoRoot: repoDir, OverridePath: cursorDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
+	res, err := Run(context.Background(), repo, cursorImporter{}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 1 {
+		t.Fatalf("want 1 imported, got %+v", res)
+	}
+
+	// Re-run is idempotent.
+	res2, err := Run(context.Background(), repo, cursorImporter{}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.TurnsImported != 0 || res2.TurnsSkipped != 1 {
+		t.Fatalf("re-run not idempotent: %+v", res2)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	infos, err := stores.Persistent.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 1 || !infos[0].Imported {
+		t.Fatalf("expected 1 imported cursor checkpoint, got %+v", infos)
 	}
 }
 

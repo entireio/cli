@@ -3,9 +3,7 @@ package agentimport
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -27,43 +25,11 @@ func (claudeImporter) AgentType() types.AgentType { return agent.AgentTypeClaude
 // dir; sessionFilter, when non-empty, keeps only matching session IDs (the
 // file stem).
 func (claudeImporter) Discover(repoRoot, overridePath string, now time.Time, sessionFilter []string) ([]SessionFile, error) {
-	dir := overridePath
-	if dir == "" {
-		ag := &claudecode.ClaudeCodeAgent{}
-		d, err := ag.GetSessionDir(repoRoot)
-		if err != nil {
-			return nil, fmt.Errorf("resolve claude session dir: %w", err)
-		}
-		dir = d
-	}
-	entries, err := os.ReadDir(dir)
+	dir, err := resolveDir(repoRoot, overridePath, "claude", (&claudecode.ClaudeCodeAgent{}).GetSessionDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil // no transcripts for this repo
-		}
-		return nil, fmt.Errorf("read claude session dir: %w", err)
+		return nil, err
 	}
-	cutoff := now.AddDate(0, 0, -LookbackDays)
-	var out []SessionFile
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		stem := strings.TrimSuffix(e.Name(), ".jsonl")
-		if len(sessionFilter) > 0 && !slices.Contains(sessionFilter, stem) {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().Before(cutoff) {
-			continue
-		}
-		out = append(out, SessionFile{Path: filepath.Join(dir, e.Name()), SessionID: stem})
-	}
-	slices.SortFunc(out, func(a, b SessionFile) int { return strings.Compare(a.Path, b.Path) })
-	return out, nil
+	return discoverSessionFiles(dir, now, sessionFilter, jsonlSessionResolver(".jsonl", identitySessionID))
 }
 
 // SplitTurns produces one Turn per user-prompt line. Token usage for each turn
@@ -72,58 +38,30 @@ func (claudeImporter) Discover(repoRoot, overridePath string, now time.Time, ses
 // start a turn.
 func (claudeImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
 	subagentsDir := filepath.Join(filepath.Dir(sf.Path), sf.SessionID, "subagents")
-	rawLines := splitRawLines(full)
-
-	// Identify user-prompt turn starts in raw-line space.
-	var starts []int
-	for i, raw := range rawLines {
-		if isUserPromptLine(raw) {
-			starts = append(starts, i)
-		}
-	}
-
 	ag := &claudecode.ClaudeCodeAgent{}
-	turns := make([]Turn, 0, len(starts))
-	for k, start := range starts {
-		end := len(rawLines)
-		if k+1 < len(starts) {
-			end = starts[k+1]
-		}
-
-		// Bound token usage to [start, end): truncate to the first `end` lines,
-		// then let the agent helper slice from `start`.
-		truncated := joinLines(rawLines[:end])
-		tokens, err := ag.CalculateTotalTokenUsage(truncated, start, subagentsDir)
-		if err != nil {
-			return nil, fmt.Errorf("token usage for turn %d: %w", k, err)
-		}
-
-		var rec struct {
-			UUID      string          `json:"uuid"`
-			Message   json.RawMessage `json:"message"`
-			Timestamp string          `json:"timestamp"`
-		}
-		if err := json.Unmarshal(rawLines[start], &rec); err != nil {
-			// Already validated as a user-prompt line in isUserPromptLine; skip
-			// defensively if it somehow fails to parse here.
-			continue
-		}
-		ts, parseErr := time.Parse(time.RFC3339, rec.Timestamp)
-		if parseErr != nil {
-			ts = time.Time{}
-		}
-
-		turns = append(turns, Turn{
-			LineStart: start,
-			LineEnd:   end,
-			UUID:      rec.UUID,
-			Prompt:    transcript.ExtractUserContent(rec.Message),
-			Model:     modelInRange(rawLines, start, end),
-			CreatedAt: ts,
-			Tokens:    tokens,
+	return splitLineTurns(splitRawLines(full), isUserPromptLine,
+		func(rawLines [][]byte, start, end int, truncated []byte) (*Turn, error) {
+			tokens, err := ag.CalculateTotalTokenUsage(truncated, start, subagentsDir)
+			if err != nil {
+				return nil, fmt.Errorf("token usage: %w", err)
+			}
+			var rec struct {
+				UUID      string          `json:"uuid"`
+				Message   json.RawMessage `json:"message"`
+				Timestamp string          `json:"timestamp"`
+			}
+			if err := json.Unmarshal(rawLines[start], &rec); err != nil {
+				//nolint:nilerr // skip defensively; the line already parsed in isUserPromptLine
+				return nil, nil
+			}
+			return &Turn{
+				UUID:      rec.UUID,
+				Prompt:    transcript.ExtractUserContent(rec.Message),
+				Model:     modelInRange(rawLines, start, end),
+				CreatedAt: parseTimestamp(rec.Timestamp),
+				Tokens:    tokens,
+			}, nil
 		})
-	}
-	return turns, nil
 }
 
 // claudeExtraFields are line fields not modeled by transcript.Line.

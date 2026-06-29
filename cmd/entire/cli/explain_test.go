@@ -1489,8 +1489,8 @@ func TestExplainDefault_ShowsBranchView(t *testing.T) {
 		t.Fatalf("failed to create .entire dir: %v", err)
 	}
 
-	var stdout bytes.Buffer
-	err = runExplainDefault(context.Background(), &stdout, true) // noPager=true for test
+	var stdout, stderr bytes.Buffer
+	err = runExplainDefault(context.Background(), &stdout, &stderr, true) // noPager=true for test
 
 	// Should NOT error - should show branch view
 	if err != nil {
@@ -1544,8 +1544,8 @@ func TestExplainDefault_NoCheckpoints_ShowsHelpfulMessage(t *testing.T) {
 		t.Fatalf("failed to create .entire dir: %v", err)
 	}
 
-	var stdout bytes.Buffer
-	err = runExplainDefault(context.Background(), &stdout, true) // noPager=true for test
+	var stdout, stderr bytes.Buffer
+	err = runExplainDefault(context.Background(), &stdout, &stderr, true) // noPager=true for test
 
 	// Should NOT error
 	if err != nil {
@@ -4028,7 +4028,7 @@ func TestGetBranchCheckpoints_ReadsPromptFromShadowBranch(t *testing.T) {
 	}
 
 	// Now call getBranchCheckpoints and verify the prompt is read
-	points, err := getBranchCheckpoints(context.Background(), repo, 10)
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 10)
 	if err != nil {
 		t.Fatalf("getBranchCheckpoints() error = %v", err)
 	}
@@ -4145,7 +4145,7 @@ func TestGetReachableTemporaryCheckpoints_FiltersByWorktree(t *testing.T) {
 	writeCheckpoints(sessionIDOther, "other-worktree") // Different worktree
 
 	// getBranchCheckpoints should only include local worktree's checkpoints
-	points, err := getBranchCheckpoints(context.Background(), repo, 20)
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 20)
 	if err != nil {
 		t.Fatalf("getBranchCheckpoints error: %v", err)
 	}
@@ -4209,8 +4209,8 @@ func TestRunExplainBranchDefault_DetachedHead(t *testing.T) {
 		t.Fatalf("failed to create .entire dir: %v", err)
 	}
 
-	var stdout bytes.Buffer
-	err = runExplainBranchDefault(context.Background(), &stdout, true)
+	var stdout, stderr bytes.Buffer
+	err = runExplainBranchDefault(context.Background(), &stdout, &stderr, true)
 
 	// Should NOT error
 	if err != nil {
@@ -4325,7 +4325,7 @@ func TestGetBranchCheckpoints_OnFeatureBranch(t *testing.T) {
 	}
 
 	// Get checkpoints (should be empty, but shouldn't error)
-	points, err := getBranchCheckpoints(context.Background(), repo, 20)
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 20)
 	if err != nil {
 		t.Fatalf("getBranchCheckpoints() error = %v", err)
 	}
@@ -4611,7 +4611,7 @@ func TestGetBranchCheckpoints_FiltersMainCommits(t *testing.T) {
 	// Get checkpoints - should only include feature branch commits, not main
 	// Note: Without actual checkpoint data in entire/checkpoints/v1, this returns empty
 	// but the important thing is it doesn't error and the filtering logic runs
-	points, err := getBranchCheckpoints(context.Background(), repo, 20)
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 20)
 	if err != nil {
 		t.Fatalf("getBranchCheckpoints() error = %v", err)
 	}
@@ -6080,7 +6080,7 @@ func TestGetBranchCheckpoints_DefaultBranchFindsMergedCheckpoints(t *testing.T) 
 	}
 
 	// getBranchCheckpoints on master should find the checkpoint from the merged feature branch
-	points, err := getBranchCheckpoints(context.Background(), repo, 100)
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 100)
 	if err != nil {
 		t.Fatalf("getBranchCheckpoints error: %v", err)
 	}
@@ -6163,7 +6163,7 @@ func TestGetBranchCheckpoints_ReadsPromptFromCommittedCheckpoint(t *testing.T) {
 	}
 
 	// Call getBranchCheckpoints and verify prompt is populated
-	points, err := getBranchCheckpoints(context.Background(), repo, 10)
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 10)
 	if err != nil {
 		t.Fatalf("getBranchCheckpoints() error = %v", err)
 	}
@@ -6228,7 +6228,7 @@ func TestGetBranchCheckpoints_PopulatesCommittedSessionIDs(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	points, err := getBranchCheckpoints(context.Background(), repo, 10)
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 10)
 	require.NoError(t, err)
 
 	var found *strategy.RewindPoint
@@ -6516,4 +6516,72 @@ func TestRenderExplainBody_NoColorReturnsRawMarkdown(t *testing.T) {
 	if got != "## Intent\n\nfoo\n" {
 		t.Errorf("expected raw markdown when no color\n got: %q", got)
 	}
+}
+
+// TestGetBranchCheckpoints_TruncationSignal covers the Spec 2 truncation
+// detection. The flag must reflect whether the scan budget was actually hit
+// (older checkpoints dropped) — it is the authoritative signal because the
+// budget is applied inside getBranchCheckpoints, where the live and imported
+// lists are capped independently. A naive len(points) > limit check on the
+// returned slice would over-trigger.
+func TestGetBranchCheckpoints_TruncationSignal(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	w, err := repo.Worktree()
+	require.NoError(t, err)
+
+	testFile := filepath.Join(tmpDir, "test.txt")
+	require.NoError(t, os.WriteFile(testFile, []byte("initial"), 0o644))
+	_, err = w.Add("test.txt")
+	require.NoError(t, err)
+	_, err = w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// Create 4 committed checkpoints, each its own commit carrying the trailer.
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	const total = 4
+	cpIDs := []string{"aa11aa11aa11", "bb22bb22bb22", "cc33cc33cc33", "dd44dd44dd44"}
+	for i := range total {
+		cpID := id.MustCheckpointID(cpIDs[i])
+		require.NoError(t, store.Write(context.Background(), checkpoint.Session{
+			CheckpointID: cpID,
+			SessionID:    fmt.Sprintf("session-%d", i),
+			Strategy:     "manual-commit",
+			Prompts:      []string{fmt.Sprintf("prompt %d", i)},
+		}))
+		require.NoError(t, os.WriteFile(testFile, []byte(fmt.Sprintf("change %d", i)), 0o644))
+		_, err = w.Add("test.txt")
+		require.NoError(t, err)
+		_, err = w.Commit(trailers.FormatCheckpoint(fmt.Sprintf("checkpoint %d", i), cpID), &git.CommitOptions{
+			Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(time.Duration(i) * time.Second)},
+		})
+		require.NoError(t, err)
+	}
+
+	t.Run("budget hit reports truncated and caps the slice", func(t *testing.T) {
+		points, truncated, err := getBranchCheckpoints(context.Background(), repo, total-1)
+		require.NoError(t, err)
+		require.True(t, truncated, "scan budget was hit; truncated must be true")
+		require.Len(t, points, total-1, "live points must be capped to the limit")
+	})
+
+	t.Run("budget exactly met reports no truncation", func(t *testing.T) {
+		points, truncated, err := getBranchCheckpoints(context.Background(), repo, total)
+		require.NoError(t, err)
+		require.False(t, truncated, "all checkpoints fit; truncated must be false")
+		require.Len(t, points, total)
+	})
+
+	t.Run("budget exceeds count reports no truncation", func(t *testing.T) {
+		_, truncated, err := getBranchCheckpoints(context.Background(), repo, total+10)
+		require.NoError(t, err)
+		require.False(t, truncated)
+	})
 }
