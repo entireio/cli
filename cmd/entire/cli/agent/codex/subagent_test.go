@@ -244,6 +244,31 @@ func TestSubagentDiscovery_RespectsFromOffset(t *testing.T) {
 	require.Contains(t, files0, "child1.go")
 }
 
+// A spawn whose CALL precedes the offset but whose OUTPUT lands in range must
+// still be discovered: extractSpawnedAgentIDs collects spawn call_ids across the
+// whole transcript (first pass) precisely so the output line — not the call line
+// — decides the checkpoint range. The converse (output at/before the offset) must
+// not be discovered.
+func TestSubagentDiscovery_SpawnOutputLineDecidesRange(t *testing.T) {
+	pair := spawnAgentLines(t, "call_1", "worker", childID1)
+	spawnCall, spawnOutput := pair[0], pair[1]
+	parent := strings.Join([]string{
+		sessionMetaLine(t, "parent"),          // line 1
+		spawnCall,                             // line 2 — spawn CALL (before offset)
+		applyPatchLine(t, "Update", "mid.go"), // line 3 — filler, separates call from output
+		spawnOutput,                           // line 4 — spawn OUTPUT (in range)
+	}, "\n")
+
+	// Offset 2 skips the call (line 2) but the output (line 4) is in range; the
+	// first pass still has call_1, so the child is discovered.
+	require.Equal(t, []string{childID1}, extractSpawnedAgentIDs([]byte(parent), 2),
+		"spawn output in range must be discovered even when the call precedes the offset")
+
+	// Offset 4 puts the output at/before the offset → not discovered.
+	require.Empty(t, extractSpawnedAgentIDs([]byte(parent), 4),
+		"a spawn whose output is at/before the offset must not be discovered")
+}
+
 // --- SubagentAwareExtractor: files + tokens ---
 
 func TestExtractAllModifiedFiles_IncludesSubagents(t *testing.T) {
