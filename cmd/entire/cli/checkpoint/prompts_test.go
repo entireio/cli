@@ -31,7 +31,7 @@ func TestSplitPromptContent_EmptyContent(t *testing.T) {
 // pipeline. OPF runs only in the pre-push rewrite path, never here.
 func TestRedactedJoinedPrompts_AppliesSafetyNet(t *testing.T) {
 	t.Parallel()
-	got := redactedJoinedPrompts([]string{"hello", "world"})
+	got := RedactedJoinedPrompts([]string{"hello", "world"})
 	assert.NotEmpty(t, got)
 	assert.Contains(t, got, PromptSeparator)
 }

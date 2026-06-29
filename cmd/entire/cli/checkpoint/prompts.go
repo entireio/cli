@@ -28,9 +28,10 @@ func SplitPromptContent(content string) []string {
 	return prompts
 }
 
-// redactedJoinedPrompts joins prompts and runs the 7-layer redaction
+// RedactedJoinedPrompts joins prompts and runs the 7-layer redaction
 // pipeline. OPF runs exclusively in the pre-push rewrite (not here),
-// so the writer's hot path stays predictable.
-func redactedJoinedPrompts(prompts []string) string {
+// so the writer's hot path stays predictable. Exported so alternate
+// persistent backends produce identically-redacted prompt blobs.
+func RedactedJoinedPrompts(prompts []string) string {
 	return redact.String(strings.Join(prompts, PromptSeparator))
 }

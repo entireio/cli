@@ -48,7 +48,9 @@ func TestClient_TrailsEnabled(t *testing.T) {
 		{"enabled empty (200)", http.StatusOK, `{"trails":[]}`, true, true},
 		{"not enabled (404)", http.StatusNotFound, `{"error":"not found"}`, false, true},
 		{"forbidden (403)", http.StatusForbidden, `{"error":"forbidden"}`, false, true},
-		{"server error (500)", http.StatusInternalServerError, `{"error":"boom"}`, false, true},
+		{"gone (410)", http.StatusGone, `{"error":"gone"}`, false, true},
+		{"unauthorized (401)", http.StatusUnauthorized, `{"error":"unauthorized"}`, false, false},
+		{"server error (500)", http.StatusInternalServerError, `{"error":"boom"}`, false, false},
 	}
 
 	for _, tt := range tests {

@@ -410,6 +410,13 @@ func updateCommand(currentVersion string) string {
 	return "curl -fsSL https://entire.io/install.sh | bash"
 }
 
+func UpdateCommandForCurrentBinary(currentVersion string) string {
+	if !canAutoInstall() {
+		return downloadsURL
+	}
+	return updateCommand(currentVersion)
+}
+
 // printNotification prints the version update notification to the user.
 func printNotification(w io.Writer, current, latest string) {
 	fmt.Fprintf(w, "\nUpdate available! %s -> %s\nRelease notes: %s\n",

@@ -1030,6 +1030,7 @@ func TestEnableUsesSetupFlow(t *testing.T) {
 		{name: "telemetry changed", args: []string{"--telemetry=false"}, want: true},
 		{name: "checkpoint remote", args: []string{"--checkpoint-remote", "github:org/repo"}, want: true},
 		{name: "skip push sessions", args: []string{"--skip-push-sessions"}, want: true},
+		{name: "search skill", args: []string{"--search-skill"}, want: true},
 		{name: "agent flag", args: []string{"--agent", "claude-code"}, agentName: "claude-code", want: true},
 		{name: "yes flag", args: []string{"--yes"}, want: true},
 		{name: "yes short flag", args: []string{"-y"}, want: true},

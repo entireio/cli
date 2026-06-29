@@ -175,7 +175,7 @@ func TestReviewCommandSmoke_IncludesCheckpointContextInPrompt(t *testing.T) {
 	var errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"review", "--agent", string(agent.AgentNameClaudeCode)})
+	cmd.SetArgs([]string{"review", "general", "--agent", string(agent.AgentNameClaudeCode)})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("entire review failed: %v\nstdout:\n%s\nstderr:\n%s", err, out.String(), errOut.String())
@@ -238,7 +238,7 @@ func TestReviewCommandSmoke_IncludesInProgressSessionContextInPrompt(t *testing.
 	var errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"review", "--agent", string(agent.AgentNameClaudeCode)})
+	cmd.SetArgs([]string{"review", "general", "--agent", string(agent.AgentNameClaudeCode)})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("entire review failed: %v\nstdout:\n%s\nstderr:\n%s", err, out.String(), errOut.String())
@@ -299,7 +299,7 @@ func TestReviewCommandSmoke_BaseFlagThreadsThroughToPromptAndBanner(t *testing.T
 	var errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"review", "--agent", string(agent.AgentNameClaudeCode), "--base", "feat/parent"})
+	cmd.SetArgs([]string{"review", "general", "--agent", string(agent.AgentNameClaudeCode), "--base", "feat/parent"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("entire review failed: %v\nstdout:\n%s\nstderr:\n%s", err, out.String(), errOut.String())
@@ -343,7 +343,7 @@ func TestReviewCommandSmoke_BadBaseRefErrorsBeforeAgentSpawn(t *testing.T) {
 	var errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"review", "--agent", string(agent.AgentNameClaudeCode), "--base", "no-such-ref"})
+	cmd.SetArgs([]string{"review", "general", "--agent", string(agent.AgentNameClaudeCode), "--base", "no-such-ref"})
 
 	err := cmd.Execute()
 	if err == nil {
@@ -434,7 +434,7 @@ func writeReviewContextSettings(t *testing.T, repoRoot string) {
 	if err := os.MkdirAll(entireDir, 0o750); err != nil {
 		t.Fatalf("create .entire dir: %v", err)
 	}
-	settingsJSON := `{"enabled":true,"review":{"claude-code":{"skills":["/review"]}}}` + "\n"
+	settingsJSON := `{"enabled":true,"review_default_profile":"general","review_profiles":{"general":{"task":"Test review task.","agents":{"claude-code":{"skills":["/review"]}},"judge":{"agent":"claude-code"}}}}` + "\n"
 	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(settingsJSON), 0o600); err != nil {
 		t.Fatalf("write review settings: %v", err)
 	}

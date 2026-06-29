@@ -118,8 +118,60 @@ func newAuthCmd() *cobra.Command {
 	cmd.AddCommand(newLoginCmd())
 	cmd.AddCommand(newLogoutCmd())
 	cmd.AddCommand(newAuthStatusCmd())
+	cmd.AddCommand(newAuthTokenCmd())
 	cmd.AddCommand(newAuthContextsCmd())
 	cmd.AddCommand(newAuthUseCmd())
+	return cmd
+}
+
+// --- token ------------------------------------------------------------------
+
+// newAuthTokenCmd prints the active control-plane bearer to stdout so scripts
+// (and ad-hoc curl) can authenticate against the core API without re-deriving
+// the keychain slot — e.g.
+//
+//	curl -H "Authorization: Bearer $(entire auth token)" "$CORE/api/v1/clusters"
+//
+// Hidden: it emits a live credential, so it's a deliberate scripting escape
+// hatch, not part of the everyday surface. It resolves the same bearer the API
+// client would — ENTIRE_TOKEN verbatim when set, otherwise the active context's
+// login JWT, refreshed if it's near expiry — and prints nothing but the token
+// (errors and the not-logged-in hint go to stderr) so command substitution
+// stays clean.
+func newAuthTokenCmd() *cobra.Command {
+	var insecureHTTPAuth bool
+	cmd := &cobra.Command{
+		Use:    "token",
+		Short:  "Print the active control-plane bearer token (for scripting)",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Refresh may exchange/refresh over the network; honor the
+			// plain-HTTP opt-in before resolving so local dev cores work.
+			insecure := applyInsecureHTTPAuth(insecureHTTPAuth)
+			target, err := resolveAuthStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
+			if err != nil {
+				return err
+			}
+			// Don't mint/print a bearer for an insecure core unless explicitly
+			// opted in — the token would otherwise be usable over plain HTTP.
+			// Mirrors `auth status`.
+			if !insecure && target.coreURL != "" {
+				if err := api.RequireSecureURL(target.coreURL); err != nil {
+					cmd.SilenceUsage = true
+					return fmt.Errorf("login server URL check: %w", err)
+				}
+			}
+			if target.token == "" {
+				cmd.SilenceUsage = true
+				fmt.Fprintln(cmd.ErrOrStderr(), "Not logged in. Run 'entire login' to authenticate.")
+				return NewSilentError(errors.New("not logged in"))
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), target.token)
+			return nil
+		},
+	}
+	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	return cmd
 }
 
@@ -156,6 +208,9 @@ type authProfile struct {
 	Email          string
 	Provider       string
 	ProviderUserID string
+	// Jurisdiction is the caller's home jurisdiction slug (e.g. "eu"), used to
+	// pick the default mirror cluster for that jurisdiction. May be empty.
+	Jurisdiction string
 }
 
 // profileFetcher fetches a user's profile via GET /me on coreURL, authenticated
@@ -276,6 +331,7 @@ func defaultFetchProfile(ctx context.Context, coreURL, token string) (*authProfi
 		ProviderUserID: me.Auth.ProviderUserId,
 	}
 	p.Handle, _ = me.Global.Handle.Get()
+	p.Jurisdiction, _ = me.Jurisdiction.Get()
 	if reg, ok := me.Regional.Get(); ok {
 		p.DisplayName, _ = reg.DisplayName.Get()
 		p.Email, _ = reg.Email.Get()

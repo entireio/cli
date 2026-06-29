@@ -172,8 +172,11 @@ func NewBenchRepo(b *testing.B, opts RepoOpts) *BenchRepo {
 	}
 
 	br := &BenchRepo{
-		Dir:       dir,
-		Repo:      repo,
+		Dir:  dir,
+		Repo: repo,
+		// Benchmark fixture: construct the git store directly rather than via
+		// checkpoint.Open. Benchmarks pin the v1 topology and never exercise
+		// settings-driven backend selection, so they deliberately bypass Open.
 		Store:     checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()),
 		Ephemeral: checkpoint.NewEphemeralStore(repo, checkpoint.DefaultV1Refs()),
 		HeadHash:  headHash.String(),

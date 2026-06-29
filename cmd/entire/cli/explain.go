@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -681,12 +682,16 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	}
 	// Handle summary generation — uses raw transcript.
 	if generate {
+		if summary != nil && summary.Imported {
+			stopLoad(false)
+			return fmt.Errorf("cannot generate a summary for imported checkpoint %s: imported history is read-only", fullCheckpointID)
+		}
 		stopLoad(false) // generation prints its own progress to w/errW
 		writeStores, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{})
 		if openErr != nil {
 			return fmt.Errorf("open checkpoint store: %w", openErr)
 		}
-		if err := generateCheckpointSummary(ctx, w, errW, writeStores.Persistent, fullCheckpointID, summary, content, force, summaryTimeoutSeconds); err != nil {
+		if err := generateCheckpointSummary(ctx, w, errW, lookup.repo, writeStores.Persistent, fullCheckpointID, summary, content, force, summaryTimeoutSeconds); err != nil {
 			return err
 		}
 		// Reload to get the updated summary.
@@ -753,6 +758,9 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read checkpoint: %w", err)
+	}
+	if err := checkpointpolicy.EnsureCanReadVersion(cpID.String(), summary.CheckpointVersion); err != nil {
+		return nil, nil, err
 	}
 
 	content, contentErr := checkpoint.ReadLatestSessionContent(ctx, store, cpID, summary)
@@ -895,7 +903,7 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 // summaryTimeoutSeconds is the per-invocation --summary-timeout-seconds flag
 // value (0 = unset). Effective precedence for the deadline: flag > settings >
 // package default. See resolveSummaryTimeout for the resolution.
-func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store checkpoint.Writer, checkpointID id.CheckpointID, cpSummary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, force bool, summaryTimeoutSeconds int) error {
+func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, repo *git.Repository, store checkpoint.Writer, checkpointID id.CheckpointID, cpSummary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, force bool, summaryTimeoutSeconds int) error {
 	// Check if summary already exists
 	if content.Metadata.Summary != nil && !force {
 		return renderExplainFailure(errW, "Summary already exists", []explainRow{
@@ -917,6 +925,9 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 		return renderExplainFailure(errW, "Checkpoint has no transcript content (scoped)", []explainRow{
 			{Label: "id", Value: checkpointID.String()},
 		}, fmt.Errorf("checkpoint %s has no transcript content for this checkpoint (scoped)", checkpointID))
+	}
+	if err := ensureCommittedCheckpointWritePolicy(ctx, repo); err != nil {
+		return err
 	}
 	provider, err := resolveCheckpointSummaryProvider(ctx, w)
 	if err != nil {
@@ -1659,6 +1670,11 @@ func formatCheckpointOutput(ctx context.Context, summary *checkpoint.CheckpointS
 		}
 
 		hint := fmt.Sprintf("Not generated yet. Run `entire explain --generate %s` to create an AI summary.", checkpointID)
+		if summary != nil && summary.Imported {
+			// Imported history is read-only; --generate is refused for it, so
+			// don't point users at a command that will error out.
+			hint = "No summary. Imported history is read-only, so summaries cannot be generated."
+		}
 		md := buildNoSummaryMarkdown(intent, files, hint)
 		sb.WriteString(renderExplainBody(w, md))
 	}
@@ -2146,17 +2162,67 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	tempPoints := getReachableTemporaryCheckpoints(ctx, repo, stores.Ephemeral(), head.Hash(), isOnDefault, limit)
 	points = append(points, tempPoints...)
 
-	// Sort by date, most recent first
+	// Sort live points (commit-linked + temporary) and apply the limit FIRST, so
+	// a large historical import can't evict recent commit-linked checkpoints.
 	sort.Slice(points, func(i, j int) bool {
 		return points[i].Date.After(points[j].Date)
 	})
-
-	// Apply limit
 	if len(points) > limit {
 		points = points[:limit]
 	}
 
+	// Append imported (read-only, commit-less) checkpoints after the live points,
+	// bounded by the same limit so a one-month import doesn't produce an
+	// unbounded list. They get their own budget and never displace live points.
+	imported := getImportedRewindPoints(ctx, repo)
+	sort.Slice(imported, func(i, j int) bool {
+		return imported[i].Date.After(imported[j].Date)
+	})
+	if len(imported) > limit {
+		imported = imported[:limit]
+	}
+	points = append(points, imported...)
+
 	return points, nil
+}
+
+// getImportedRewindPoints returns read-only imported checkpoints (Kind
+// "imported", flagged Imported) as RewindPoint entries. They live on the v1
+// metadata branch but carry no commit trailer, so the commit-driven branch
+// walk never surfaces them. Best-effort: returns nil on read failure.
+func getImportedRewindPoints(ctx context.Context, repo *git.Repository) []strategy.RewindPoint {
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	if err != nil {
+		return nil
+	}
+	infos, err := stores.Persistent.List(ctx)
+	if err != nil {
+		return nil
+	}
+	points := make([]strategy.RewindPoint, 0)
+	for _, info := range infos {
+		// Imported checkpoints live on v1 alongside normal ones but have no
+		// commit trailer, so the commit-driven walk above never surfaces them.
+		// Add only the imported ones here.
+		if !info.Imported {
+			continue
+		}
+		point := strategy.RewindPoint{
+			ID:           info.CheckpointID.String(),
+			Message:      readLatestCommittedSessionPrompt(ctx, stores.Persistent, info.CheckpointID, info.SessionCount),
+			Date:         info.CreatedAt,
+			IsLogsOnly:   true,
+			Imported:     true,
+			CheckpointID: info.CheckpointID,
+			SessionID:    info.SessionID,
+			SessionCount: info.SessionCount,
+			SessionIDs:   info.SessionIDs,
+			Agent:        info.Agent,
+		}
+		point.SessionPrompt = point.Message
+		points = append(points, point)
+	}
+	return points
 }
 
 func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.SessionReader, cpID id.CheckpointID, sessionCount int) string {
@@ -2630,6 +2696,7 @@ type checkpointGroup struct {
 	prompt       string
 	isTemporary  bool // true if any commit is not logs-only (can be rewound)
 	isTask       bool // true if this is a task checkpoint
+	imported     bool // true for read-only imported (commit-less) checkpoints
 	commits      []commitEntry
 }
 
@@ -2670,6 +2737,7 @@ func groupByCheckpointID(points []strategy.RewindPoint) []checkpointGroup {
 				prompt:       point.SessionPrompt,
 				isTemporary:  !point.IsLogsOnly,
 				isTask:       point.IsTaskCheckpoint,
+				imported:     point.Imported,
 			}
 			groupMap[cpID] = group
 			order = append(order, cpID)
@@ -2745,6 +2813,9 @@ func formatCheckpointGroup(sb *strings.Builder, group checkpointGroup, styles st
 	}
 	if group.isTemporary && cpID != "temporary" {
 		indicators = append(indicators, "[temporary]")
+	}
+	if group.imported {
+		indicators = append(indicators, "[imported]")
 	}
 
 	// Prompt cascade: SessionPrompt → latest commit message → dimmed placeholder.

@@ -520,10 +520,7 @@ func TestTUIModel_PostFinishIgnoresRandomKeys(t *testing.T) {
 	}
 }
 
-// TestTUIModel_PostFinishFooterUsesExplicitExitKeys pins the dashboard footer
-// switches from the old "Press any key to exit." prompt to an explicit-keys
-// hint that mentions Ctrl+O and the named exit keys.
-func TestTUIModel_PostFinishFooterUsesExplicitExitKeys(t *testing.T) {
+func TestTUIModel_PostFinishFooterShowsFinalizing(t *testing.T) {
 	t.Parallel()
 	m := newTestModel([]string{"agent-a"}, func() {})
 	m.termWidth = 120
@@ -531,14 +528,11 @@ func TestTUIModel_PostFinishFooterUsesExplicitExitKeys(t *testing.T) {
 	m = mustModel(t, updated)
 
 	out := m.dashboardView()
-	if strings.Contains(out, "Press any key to exit.") {
-		t.Errorf("post-finish footer must not show legacy 'Press any key to exit.' line:\n%s", out)
+	if !strings.Contains(out, "Finalizing output...") {
+		t.Errorf("post-finish footer should show finalizing output:\n%s", out)
 	}
-	if !strings.Contains(out, "Ctrl+O") {
-		t.Errorf("post-finish footer should mention Ctrl+O for drill-in:\n%s", out)
-	}
-	if !strings.Contains(out, "q/Esc/Enter") {
-		t.Errorf("post-finish footer should list q/Esc/Enter as exit keys:\n%s", out)
+	if strings.Contains(out, "q/Esc/Enter") {
+		t.Errorf("post-finish footer should not ask for a dismissal key:\n%s", out)
 	}
 }
 
@@ -1202,5 +1196,51 @@ func TestTUIModel_PostFinishInDetailMode_EscReturnsToDashboard(t *testing.T) {
 				t.Error("Esc post-finish in detail mode must NOT quit; it returns to dashboard")
 			}
 		}
+	}
+}
+
+func TestTUIModel_RunFinishedWaitsForPostRunComplete(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+	updated, cmd := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
+	if !mustModel(t, updated).finished {
+		t.Fatal("model should be finished after runFinishedMsg")
+	}
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Fatal("runFinishedMsg must not quit; the final judge may still be running")
+		}
+	}
+
+	_, cmd = mustModel(t, updated).Update(postRunCompleteMsg{})
+	if cmd == nil {
+		t.Fatal("postRunCompleteMsg should return a quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("postRunCompleteMsg command = %T, want tea.QuitMsg", cmd())
+	}
+}
+
+func TestTUIModel_FinalPhaseRow(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+	m.termWidth = 120
+	updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
+	m = mustModel(t, updated)
+	updated, _ = m.Update(finalPhaseStartedMsg{name: "judge: claude-code"})
+	m = mustModel(t, updated)
+
+	out := m.dashboardView()
+	if !strings.Contains(out, "judge: claude-code") || !strings.Contains(out, "judging") {
+		t.Fatalf("final phase should be visible while running:\n%s", out)
+	}
+	if !strings.Contains(out, "Final judge is consolidating") {
+		t.Fatalf("footer should describe final judge phase:\n%s", out)
+	}
+
+	updated, _ = m.Update(finalPhaseFinishedMsg{})
+	out = mustModel(t, updated).dashboardView()
+	if !strings.Contains(out, "✓ done") {
+		t.Fatalf("final phase should show done after completion:\n%s", out)
 	}
 }

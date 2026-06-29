@@ -12,8 +12,7 @@ import (
 )
 
 // TestSetupCodexHooks_AddsAllRequiredHooks is a smoke test verifying that
-// `entire enable --agent codex` adds all required hooks and scaffolds the
-// managed search subagent into the project.
+// `entire enable --agent codex` adds all required hooks.
 func TestSetupCodexHooks_AddsAllRequiredHooks(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
@@ -49,15 +48,36 @@ func TestSetupCodexHooks_AddsAllRequiredHooks(t *testing.T) {
 	}
 
 	searchAgentPath := filepath.Join(env.RepoDir, ".codex", "agents", "entire-search.toml")
+	if _, err := os.Stat(searchAgentPath); !os.IsNotExist(err) {
+		t.Fatalf("default enable should not create Codex search skill, stat err = %v", err)
+	}
+}
+
+func TestSetupCodexHooks_SearchSkillOptIn(t *testing.T) {
+	t.Parallel()
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.InitEntire()
+
+	env.WriteFile("README.md", "# Test")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+
+	output, err := env.RunCLIWithError("enable", "--agent", "codex", "--search-skill")
+	if err != nil {
+		t.Fatalf("enable codex --search-skill command failed: %v\nOutput: %s", err, output)
+	}
+
+	searchAgentPath := filepath.Join(env.RepoDir, ".codex", "agents", "entire-search.toml")
 	searchData, err := os.ReadFile(searchAgentPath)
 	if err != nil {
-		t.Fatalf("failed to read generated Codex search subagent: %v", err)
+		t.Fatalf("failed to read generated Codex search skill: %v", err)
 	}
 	searchContent := string(searchData)
-	if !strings.Contains(searchContent, "ENTIRE-MANAGED SEARCH SUBAGENT") {
-		t.Error("Codex search subagent should be marked as Entire-managed")
+	if !strings.Contains(searchContent, "ENTIRE-MANAGED SEARCH SKILL") {
+		t.Error("Codex search skill should be marked as Entire-managed")
 	}
 	if !strings.Contains(searchContent, "entire search --json") {
-		t.Error("Codex search subagent should instruct use of `entire search --json`")
+		t.Error("Codex search skill should instruct use of `entire search --json`")
 	}
 }

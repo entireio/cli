@@ -15,111 +15,168 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-const entireManagedSearchSubagentMarker = "ENTIRE-MANAGED SEARCH SUBAGENT v1"
-
-type searchSubagentScaffoldStatus string
-
 const (
-	searchSubagentUnsupported     searchSubagentScaffoldStatus = "unsupported"
-	searchSubagentCreated         searchSubagentScaffoldStatus = "created"
-	searchSubagentUpdated         searchSubagentScaffoldStatus = "updated"
-	searchSubagentUnchanged       searchSubagentScaffoldStatus = "unchanged"
-	searchSubagentSkippedConflict searchSubagentScaffoldStatus = "skipped_conflict"
+	entireManagedSearchSkillMarker          = "ENTIRE-MANAGED SEARCH SKILL v1"
+	legacyEntireManagedSearchSubagentMarker = "ENTIRE-MANAGED SEARCH SUBAGENT v1"
 )
 
-type searchSubagentScaffoldResult struct {
-	Status  searchSubagentScaffoldStatus
+type searchSkillScaffoldStatus string
+
+const (
+	searchSkillUnsupported     searchSkillScaffoldStatus = "unsupported"
+	searchSkillCreated         searchSkillScaffoldStatus = "created"
+	searchSkillUpdated         searchSkillScaffoldStatus = "updated"
+	searchSkillUnchanged       searchSkillScaffoldStatus = "unchanged"
+	searchSkillSkippedConflict searchSkillScaffoldStatus = "skipped_conflict"
+)
+
+type searchSkillScaffoldResult struct {
+	Status  searchSkillScaffoldStatus
 	RelPath string
 }
 
-func scaffoldSearchSubagent(ctx context.Context, ag agent.Agent) (searchSubagentScaffoldResult, error) {
-	relPath, content, ok := searchSubagentTemplate(ag.Name())
+func setupOptionalSearchSkill(ctx context.Context, w io.Writer, ag agent.Agent, opts EnableOptions) error {
+	if !opts.SearchSkill {
+		return nil
+	}
+	result, err := scaffoldSearchSkill(ctx, ag)
+	if err != nil {
+		return fmt.Errorf("failed to scaffold %s search skill: %w", ag.Name(), err)
+	}
+	reportSearchSkillScaffold(w, ag, result)
+	return nil
+}
+
+func setupOptionalSearchSkillForNames(ctx context.Context, w io.Writer, names []string, opts EnableOptions) error {
+	if !opts.SearchSkill {
+		return nil
+	}
+
+	var errs []error
+	seen := make(map[types.AgentName]struct{}, len(names))
+	for _, name := range names {
+		agentName := types.AgentName(name)
+		if _, ok := seen[agentName]; ok {
+			continue
+		}
+		seen[agentName] = struct{}{}
+
+		ag, err := agent.Get(agentName)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed to get agent %s: %w", name, err))
+			continue
+		}
+		if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func scaffoldSearchSkill(ctx context.Context, ag agent.Agent) (searchSkillScaffoldResult, error) {
+	relPath, content, ok := searchSkillTemplate(ag.Name())
 	if !ok {
-		return searchSubagentScaffoldResult{Status: searchSubagentUnsupported}, nil
+		return searchSkillScaffoldResult{Status: searchSkillUnsupported}, nil
 	}
 
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails in tests
 		if err != nil {
-			return searchSubagentScaffoldResult{}, fmt.Errorf("failed to get current directory: %w", err)
+			return searchSkillScaffoldResult{}, fmt.Errorf("failed to get current directory: %w", err)
 		}
 	}
 
 	targetPath := filepath.Join(repoRoot, relPath)
-	return writeManagedSearchSubagent(targetPath, relPath, content)
+	return writeManagedSearchSkill(targetPath, relPath, content)
 }
 
-func writeManagedSearchSubagent(targetPath, relPath string, content []byte) (searchSubagentScaffoldResult, error) {
+func writeManagedSearchSkill(targetPath, relPath string, content []byte) (searchSkillScaffoldResult, error) {
 	existingData, err := os.ReadFile(targetPath) //nolint:gosec // target path is derived from repo root + fixed relative path
 	if err == nil {
-		if !bytes.Contains(existingData, []byte(entireManagedSearchSubagentMarker)) {
-			return searchSubagentScaffoldResult{
-				Status:  searchSubagentSkippedConflict,
+		if !isManagedSearchSkill(existingData) {
+			return searchSkillScaffoldResult{
+				Status:  searchSkillSkippedConflict,
 				RelPath: relPath,
 			}, nil
 		}
 		if bytes.Equal(existingData, content) {
-			return searchSubagentScaffoldResult{
-				Status:  searchSubagentUnchanged,
+			return searchSkillScaffoldResult{
+				Status:  searchSkillUnchanged,
 				RelPath: relPath,
 			}, nil
 		}
 		if err := os.WriteFile(targetPath, content, 0o600); err != nil {
-			return searchSubagentScaffoldResult{}, fmt.Errorf("failed to update managed search subagent: %w", err)
+			return searchSkillScaffoldResult{}, fmt.Errorf("failed to update managed search skill: %w", err)
 		}
-		return searchSubagentScaffoldResult{
-			Status:  searchSubagentUpdated,
+		return searchSkillScaffoldResult{
+			Status:  searchSkillUpdated,
 			RelPath: relPath,
 		}, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		return searchSubagentScaffoldResult{}, fmt.Errorf("failed to read search subagent: %w", err)
+		return searchSkillScaffoldResult{}, fmt.Errorf("failed to read search skill: %w", err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o750); err != nil {
-		return searchSubagentScaffoldResult{}, fmt.Errorf("failed to create search subagent directory: %w", err)
+		return searchSkillScaffoldResult{}, fmt.Errorf("failed to create search skill directory: %w", err)
 	}
 	if err := os.WriteFile(targetPath, content, 0o600); err != nil {
-		return searchSubagentScaffoldResult{}, fmt.Errorf("failed to write search subagent: %w", err)
+		return searchSkillScaffoldResult{}, fmt.Errorf("failed to write search skill: %w", err)
 	}
 
-	return searchSubagentScaffoldResult{
-		Status:  searchSubagentCreated,
+	return searchSkillScaffoldResult{
+		Status:  searchSkillCreated,
 		RelPath: relPath,
 	}, nil
 }
 
-func reportSearchSubagentScaffold(w io.Writer, ag agent.Agent, result searchSubagentScaffoldResult) {
+func isManagedSearchSkill(data []byte) bool {
+	return bytes.Contains(data, []byte(entireManagedSearchSkillMarker)) ||
+		bytes.Contains(data, []byte(legacyEntireManagedSearchSubagentMarker))
+}
+
+func printSearchSkillNonInteractiveNoAgentsGuidance(w io.Writer) {
+	fmt.Fprintln(w, "Cannot install the search skill in non-interactive mode because no agents are enabled.")
+	fmt.Fprintln(w, "Install it for a specific agent with:")
+	fmt.Fprintln(w, "  entire enable --agent <name> --search-skill")
+	fmt.Fprintln(w, "or:")
+	fmt.Fprintln(w, "  entire agent add <name> --search-skill")
+}
+
+func reportSearchSkillScaffold(w io.Writer, ag agent.Agent, result searchSkillScaffoldResult) {
 	switch result.Status {
-	case searchSubagentCreated:
-		fmt.Fprintf(w, "  ✓ Installed %s search subagent\n", ag.Type())
+	case searchSkillCreated:
+		fmt.Fprintf(w, "  ✓ Installed %s search skill\n", ag.Type())
 		fmt.Fprintf(w, "    %s\n", result.RelPath)
-	case searchSubagentUpdated:
-		fmt.Fprintf(w, "  ✓ Updated %s search subagent\n", ag.Type())
+	case searchSkillUpdated:
+		fmt.Fprintf(w, "  ✓ Updated %s search skill\n", ag.Type())
 		fmt.Fprintf(w, "    %s\n", result.RelPath)
-	case searchSubagentSkippedConflict:
-		fmt.Fprintf(w, "  Skipped %s search subagent (unmanaged file exists)\n", ag.Type())
+	case searchSkillSkippedConflict:
+		fmt.Fprintf(w, "  Skipped %s search skill (unmanaged file exists)\n", ag.Type())
 		fmt.Fprintf(w, "    %s\n", result.RelPath)
-	case searchSubagentUnsupported, searchSubagentUnchanged:
-		// Nothing to report.
+	case searchSkillUnsupported:
+		fmt.Fprintf(w, "  Search skill is not supported for %s\n", ag.Type())
+	case searchSkillUnchanged:
+		fmt.Fprintf(w, "  Search skill already installed for %s\n", ag.Type())
+		fmt.Fprintf(w, "    %s\n", result.RelPath)
 	}
 }
 
-func searchSubagentTemplate(agentName types.AgentName) (string, []byte, bool) {
+func searchSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
 	switch agentName {
 	case agent.AgentNameClaudeCode:
-		return filepath.Join(".claude", "agents", "entire-search.md"), []byte(strings.TrimSpace(claudeSearchSubagentTemplate) + "\n"), true
+		return filepath.Join(".claude", "agents", "entire-search.md"), []byte(strings.TrimSpace(claudeSearchSkillTemplate) + "\n"), true
 	case agent.AgentNameCodex:
-		return filepath.Join(".codex", "agents", "entire-search.toml"), []byte(strings.TrimSpace(codexSearchSubagentTemplate) + "\n"), true
+		return filepath.Join(".codex", "agents", "entire-search.toml"), []byte(strings.TrimSpace(codexSearchSkillTemplate) + "\n"), true
 	case agent.AgentNameGemini:
-		return filepath.Join(".gemini", "agents", "entire-search.md"), []byte(strings.TrimSpace(geminiSearchSubagentTemplate) + "\n"), true
+		return filepath.Join(".gemini", "agents", "entire-search.md"), []byte(strings.TrimSpace(geminiSearchSkillTemplate) + "\n"), true
 	default:
 		return "", nil, false
 	}
 }
 
-const claudeSearchSubagentTemplate = `
+const claudeSearchSkillTemplate = `
 ---
 name: entire-search
 description: Search Entire checkpoint history and transcripts with ` + "`entire search --json`" + `. Use proactively when the user asks about previous work, commits, sessions, prompts, or historical context in this repository.
@@ -127,7 +184,7 @@ tools: Bash
 model: haiku
 ---
 
-<!-- ` + entireManagedSearchSubagentMarker + ` -->
+<!-- ` + entireManagedSearchSkillMarker + ` -->
 
 You are the Entire search specialist for this repository.
 
@@ -147,7 +204,7 @@ Workflow:
 Keep answers concise and evidence-based.
 `
 
-const geminiSearchSubagentTemplate = `
+const geminiSearchSkillTemplate = `
 ---
 name: entire-search
 description: Search Entire checkpoint history and transcripts with ` + "`entire search --json`" + `. Use proactively when the user asks about previous work, commits, sessions, prompts, or historical context in this repository.
@@ -158,7 +215,7 @@ max_turns: 6
 timeout_mins: 5
 ---
 
-<!-- ` + entireManagedSearchSubagentMarker + ` -->
+<!-- ` + entireManagedSearchSkillMarker + ` -->
 
 You are the Entire search specialist for this repository.
 
@@ -178,8 +235,8 @@ Workflow:
 Keep answers concise and evidence-based.
 `
 
-const codexSearchSubagentTemplate = `
-# ` + entireManagedSearchSubagentMarker + `
+const codexSearchSkillTemplate = `
+# ` + entireManagedSearchSkillMarker + `
 name = "entire-search"
 description = "Search Entire checkpoint history and transcripts with ` + "`entire search --json`" + `. Use when the user asks about previous work, commits, sessions, prompts, or historical context in this repository."
 sandbox_mode = "read-only"
@@ -187,7 +244,7 @@ model_reasoning_effort = "medium"
 developer_instructions = """
 You are the Entire search specialist for this repository.
 
-Your only history-search mechanism is the ` + "`entire search --json`" + ` command. Never run ` + "`entire search`" + ` without ` + "`--json`" + `; it opens an interactive TUI. Do not fall back to ` + "`rg`" + `, ` + "`grep`" + `, ` + "`find`" + `, ` + "`git log`" + `, or ad hoc codebase browsing when the task is asking for historical search across Entire checkpoints and transcripts.
+Your only history-search mechanism is the ` + "`entire search --json`" + ` command. Never run ` + "`entire search`" + ` without ` + "`--json`" + `; it opens an interactive TUI. Do not fall back to ` + "`rg`" + `, ` + "`grep`" + `, ` + "`find`" + `, or ` + "`git log`" + ` when the task is asking for historical search across Entire checkpoints and transcripts.
 
 If ` + "`entire search --json`" + ` cannot run because authentication is missing, the repository is not set up correctly, or the command fails, stop and return a short prerequisite message. Do not make repo changes.
 

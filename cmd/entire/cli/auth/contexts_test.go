@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +26,48 @@ func makeJWT(t *testing.T, payloadJSON string) string {
 	header := enc.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	payload := enc.EncodeToString([]byte(payloadJSON))
 	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
+}
+
+func TestLocalIdentityCacheKey_ActiveContext(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	t.Setenv(EnvTokenVar, "")
+
+	ctx := &contexts.Context{
+		Name:            "alice@core",
+		CoreURL:         "https://core.example.com/",
+		Handle:          "alice",
+		KeychainService: "entire-core:https://core.example.com",
+	}
+	if err := contexts.Save(cfgDir, &contexts.File{CurrentContext: ctx.Name, Contexts: []*contexts.Context{ctx}}); err != nil {
+		t.Fatalf("save contexts: %v", err)
+	}
+
+	got, err := LocalIdentityCacheKey()
+	if err != nil {
+		t.Fatalf("LocalIdentityCacheKey: %v", err)
+	}
+	want := "context|https://core.example.com|alice@core|alice|entire-core:https://core.example.com"
+	if got != want {
+		t.Fatalf("cache key = %q, want %q", got, want)
+	}
+}
+
+func TestLocalIdentityCacheKey_EnvToken(t *testing.T) {
+	token := makeJWT(t, `{"iss":"https://core.example.com/","sub":"svc-1","handle":"robot","aud":"https://api.example.com"}`)
+	t.Setenv(EnvTokenVar, token)
+
+	got, err := LocalIdentityCacheKey()
+	if err != nil {
+		t.Fatalf("LocalIdentityCacheKey: %v", err)
+	}
+	want := "env|https://core.example.com|svc-1|robot|https://api.example.com"
+	if got != want {
+		t.Fatalf("cache key = %q, want %q", got, want)
+	}
+	if strings.Contains(got, token) {
+		t.Fatalf("cache key appears to contain raw JWT material: %q", got)
+	}
 }
 
 // RecordLoginContext must persist the refresh token before the access token,

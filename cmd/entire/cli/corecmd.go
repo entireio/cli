@@ -8,10 +8,12 @@ import (
 	"io"
 	"strings"
 
+	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -43,6 +45,100 @@ func jsonRequested(cmd *cobra.Command) bool {
 func insecureHTTPRequested(cmd *cobra.Command) bool {
 	v, err := cmd.Flags().GetBool("insecure-http-auth")
 	return err == nil && v
+}
+
+// addForceFlag registers the standard confirmation bypass on a destructive
+// control-plane command: --force/-f, with --yes/-y as an alias. Either skips
+// the prompt. Read the combined value with forceRequested.
+func addForceFlag(cmd *cobra.Command) {
+	cmd.Flags().BoolP("force", "f", false, "Skip the confirmation prompt")
+	cmd.Flags().BoolP("yes", "y", false, "Skip the confirmation prompt (alias for --force)")
+}
+
+// forceRequested reports whether the delete should skip its confirmation
+// prompt, i.e. --force or its --yes alias was set.
+func forceRequested(cmd *cobra.Command) bool {
+	force, ferr := cmd.Flags().GetBool("force")
+	yes, yerr := cmd.Flags().GetBool("yes")
+	return (ferr == nil && force) || (yerr == nil && yes)
+}
+
+// runControlPlaneDelete is the shared body of the destructive `delete` verbs
+// (org/project/repo). It resolves the target ref to a ULID, gates on a
+// confirmation prompt (bypassed by --force/--yes), deletes, and reports the
+// resolved identifier. noun names the resource ("org"); ref is the user's
+// original argument, shown alongside the resolved ULID. resolve and del isolate
+// the per-resource API calls.
+func runControlPlaneDelete(
+	cmd *cobra.Command,
+	noun, ref string,
+	resolve func(context.Context, *coreapi.Client) (string, error),
+	del func(context.Context, *coreapi.Client, string) error,
+) error {
+	force := forceRequested(cmd)
+	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+		id, err := resolve(ctx, c)
+		if err != nil {
+			return err
+		}
+		label := noun + " " + resolvedRefLabel(ref, id)
+		proceed, err := confirmControlPlaneDeletion(ctx, cmd.OutOrStdout(), label, force, interactive.CanPromptInteractively())
+		if err != nil {
+			return err
+		}
+		if !proceed {
+			return nil
+		}
+		if err := del(ctx, c, id); err != nil {
+			// Idempotent delete: a resource that's already gone (a 404 from the
+			// delete call — e.g. a ULID passed straight through, or a concurrent
+			// delete) is the desired end state, not an error.
+			if isCoreNotFound(err) {
+				cmd.Printf("%s not found; nothing to delete\n", label)
+				return nil
+			}
+			return err
+		}
+		cmd.Printf("Deleted %s\n", label)
+		return nil
+	})
+}
+
+// confirmControlPlaneDeletion gates a destructive control-plane delete. With
+// force it proceeds silently. Otherwise it requires an interactive terminal:
+// with none it refuses (returns an error) rather than deleting unprompted; with
+// one it shows a confirmation form. canPrompt is passed in (not queried) so the
+// decision is unit-testable without a TTY. label is the human description of
+// the target, e.g. `org acme (01J…)`.
+func confirmControlPlaneDeletion(ctx context.Context, w io.Writer, label string, force, canPrompt bool) (bool, error) {
+	if force {
+		return true, nil
+	}
+	if !canPrompt {
+		return false, fmt.Errorf("refusing to delete %s without confirmation; pass --force", label)
+	}
+	// huh opens the TTY during form startup regardless of context state, so
+	// guard explicitly to honor an already-cancelled command context.
+	if ctx.Err() != nil {
+		return false, nil //nolint:nilerr // cancelled context is a clean skip, not an error
+	}
+	confirmed := false
+	form := NewAccessibleForm(
+		huh.NewGroup(huh.NewConfirm().Title(fmt.Sprintf("Delete %s?", label)).Value(&confirmed)),
+	)
+	if err := form.RunWithContext(ctx); err != nil {
+		// A user abort (Esc) or context cancel (Ctrl+C) is a clean cancel, not
+		// an error — mirror confirmTrailDeletion.
+		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
+			return false, nil
+		}
+		return false, fmt.Errorf("deletion prompt: %w", err)
+	}
+	if !confirmed {
+		fmt.Fprintln(w, "Deletion cancelled.")
+		return false, nil
+	}
+	return true, nil
 }
 
 // runCoreList fetches a slice via fn and renders it as an aligned table
@@ -79,6 +175,32 @@ func renderCoreList[T any](cmd *cobra.Command, headers []string, row func(T) []s
 			return nil
 		}
 		return printTable(cmd.OutOrStdout(), headers, items, row)
+	}
+}
+
+// fetchAllPages drives a keyset-paginated list endpoint to completion: it
+// calls fetch with an empty cursor, then re-calls it with each returned
+// nextPageToken until the cursor comes back empty, concatenating every page.
+// The control plane caps the page size (and may cap it further than a caller
+// requests), so a single call only returns one page — list commands must loop
+// or they silently truncate. The next==cursor guard turns a misbehaving server
+// that fails to advance the cursor into an error instead of an infinite loop.
+func fetchAllPages[T any](ctx context.Context, fetch func(ctx context.Context, cursor string) (items []T, next string, err error)) ([]T, error) {
+	var all []T
+	cursor := ""
+	for {
+		items, next, err := fetch(ctx, cursor)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, items...)
+		if next == "" {
+			return all, nil
+		}
+		if next == cursor {
+			return nil, fmt.Errorf("pagination did not advance (cursor %q repeated)", next)
+		}
+		cursor = next
 	}
 }
 

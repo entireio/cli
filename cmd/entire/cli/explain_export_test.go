@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/require"
 )
@@ -78,6 +79,44 @@ func writeCheckpointForExport(t *testing.T, repo *git.Repository, cpID id.Checkp
 	require.NoError(t, store.Write(context.Background(), checkpoint.Session(opts)))
 }
 
+func rewriteExportCheckpointVersionToRefsV1(t *testing.T, repo *git.Repository, cpID id.CheckpointID) {
+	t.Helper()
+	ctx := context.Background()
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	ref, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+
+	metadataPath := cpID.Path() + "/" + paths.MetadataFileName
+	metadataFile, err := tree.File(metadataPath)
+	require.NoError(t, err)
+	content, err := metadataFile.Contents()
+	require.NoError(t, err)
+	var summary checkpoint.CheckpointSummary
+	require.NoError(t, json.Unmarshal([]byte(content), &summary))
+	summary.CheckpointVersion = "refs-v1"
+	metadataJSON, err := json.Marshal(summary)
+	require.NoError(t, err)
+	metadataHash, err := checkpoint.CreateBlobFromContent(repo, metadataJSON)
+	require.NoError(t, err)
+
+	entries := make(map[string]object.TreeEntry)
+	require.NoError(t, tree.Files().ForEach(func(file *object.File) error {
+		entries[file.Name] = object.TreeEntry{Name: file.Name, Mode: file.Mode, Hash: file.Hash}
+		return nil
+	}))
+	entries[metadataPath] = object.TreeEntry{Name: metadataPath, Mode: metadataFile.Mode, Hash: metadataHash}
+
+	treeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, entries)
+	require.NoError(t, err)
+	commitHash, err := checkpoint.CreateCommit(ctx, repo, treeHash, ref.Hash(), "rewrite checkpoint summary\n", exportTestAuthorName, exportTestAuthorEmail)
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, commitHash)))
+}
+
 func TestRunExplainExport_JSONSingleCheckpoint(t *testing.T) {
 	repo := setupExportRepo(t)
 
@@ -103,6 +142,26 @@ func TestRunExplainExport_JSONSingleCheckpoint(t *testing.T) {
 	require.Len(t, envelope.Sessions, 1)
 	require.Equal(t, "session-json", envelope.Sessions[0].SessionID)
 	require.Equal(t, 0, envelope.Sessions[0].Index)
+}
+
+func TestRunExplainExportJSONRejectsUnsupportedCheckpointVersion(t *testing.T) {
+	repo := setupExportRepo(t)
+
+	cpID := id.MustCheckpointID("aaaabbbbcccc")
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
+		SessionID:  "session-json-unsupported",
+		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
+	})
+	rewriteExportCheckpointVersionToRefsV1(t, repo, cpID)
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       "aaaabbbb",
+		json:         true,
+		sessionIndex: -1,
+	})
+	require.ErrorContains(t, err, `checkpoint aaaabbbbcccc uses unsupported checkpoint_version "refs-v1"`)
+	require.Empty(t, stdout.String())
 }
 
 func TestRunExplainExport_JSONFetchesRemoteV1Metadata(t *testing.T) {
@@ -230,6 +289,33 @@ func TestRunExplainExport_TranscriptStreamsStoredBytes(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, raw, stdout.Bytes())
+}
+
+func TestRunExplainExportTranscriptRejectsUnsupportedCheckpointVersion(t *testing.T) {
+	tests := []struct {
+		name string
+		opts explainExportOptions
+	}{
+		{name: "transcript", opts: explainExportOptions{target: "abcd1111", transcript: true, sessionIndex: -1}},
+		{name: "raw transcript", opts: explainExportOptions{target: "abcd1111", rawTranscript: true, sessionIndex: -1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := setupExportRepo(t)
+			cpID := id.MustCheckpointID("abcd11112222")
+			raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"stored line"}]}}` + "\n")
+			writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
+				SessionID:  "session-unsupported-transcript",
+				Transcript: redact.AlreadyRedacted(raw),
+			})
+			rewriteExportCheckpointVersionToRefsV1(t, repo, cpID)
+
+			var stdout, stderr bytes.Buffer
+			err := runExplainExport(context.Background(), &stdout, &stderr, tt.opts)
+			require.ErrorContains(t, err, `checkpoint abcd11112222 uses unsupported checkpoint_version "refs-v1"`)
+			require.Empty(t, stdout.String())
+		})
+	}
 }
 
 func TestRunExplainExport_RawTranscriptStreamsRawBytes(t *testing.T) {

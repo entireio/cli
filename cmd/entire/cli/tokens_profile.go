@@ -113,8 +113,11 @@ func runTokensProfile(ctx context.Context, cmd *cobra.Command, jsonOutput bool, 
 	}
 	defer repo.Close()
 
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveRefs(ctx))
-	store.SetBlobFetcher(FetchBlobsByHash)
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash})
+	if err != nil {
+		return fmt.Errorf("failed to open checkpoint stores: %w", err)
+	}
+	store := stores.Persistent
 	infos, err := store.List(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list checkpoints: %w", err)
@@ -132,7 +135,7 @@ func runTokensProfile(ctx context.Context, cmd *cobra.Command, jsonOutput bool, 
 	return nil
 }
 
-func buildTokensProfileReport(ctx context.Context, store *checkpoint.GitStore, infos []checkpoint.CheckpointInfo, limit int) (tokensProfileReport, error) {
+func buildTokensProfileReport(ctx context.Context, store checkpoint.PersistentStore, infos []checkpoint.CheckpointInfo, limit int) (tokensProfileReport, error) {
 	checkpointsAvailable := len(infos)
 	infos = limitTokensProfileCheckpoints(infos, limit)
 	report := tokensProfileReport{
@@ -192,7 +195,7 @@ func limitTokensProfileCheckpoints(infos []checkpoint.CheckpointInfo, limit int)
 	return infos[:limit]
 }
 
-func tokensProfileCheckpointUsage(ctx context.Context, store *checkpoint.GitStore, checkpointID id.CheckpointID, summary *checkpoint.CheckpointSummary) (*agent.TokenUsage, bool, error) {
+func tokensProfileCheckpointUsage(ctx context.Context, store checkpoint.PersistentStore, checkpointID id.CheckpointID, summary *checkpoint.CheckpointSummary) (*agent.TokenUsage, bool, error) {
 	if summary == nil {
 		return nil, false, nil
 	}

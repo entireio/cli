@@ -382,7 +382,7 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 
 ## Telemetry
 
-The CLI captures anonymous usage analytics by default. Sent to PostHog with `DisableGeoIP` enabled. Captured per command: command name, selected agent, whether Entire is enabled in the repo, CLI version, OS/arch, and **names** of flags passed (never their values). The distinct ID is a hashed machine identifier (`machineid.ProtectedID`), not a user identity.
+The CLI captures anonymous usage analytics by default. Sent to PostHog with `DisableGeoIP` enabled. Captured per command: command name, selected agent, whether Entire is enabled in the repo, CLI version, OS/arch, installed git version (best-effort; omitted if git is absent or unparseable), and **names** of flags passed (never their values). The distinct ID is a hashed machine identifier (`machineid.ProtectedID`), not a user identity.
 
 Not captured: flag values, prompt text, transcripts, file paths, repository identifiers, GitHub usernames, source code.
 

@@ -3787,9 +3787,9 @@ func TestWriteCommitted_ModelFieldAlwaysPresent(t *testing.T) {
 
 func TestRedactSummary_Nil(t *testing.T) {
 	t.Parallel()
-	result := redactSummary(nil)
+	result := RedactSummary(nil)
 	if result != nil {
-		t.Error("redactSummary(nil) should return nil")
+		t.Error("RedactSummary(nil) should return nil")
 	}
 }
 
@@ -3823,7 +3823,7 @@ func TestRedactSummary_WithSecrets(t *testing.T) {
 		},
 	}
 
-	result := redactSummary(summary)
+	result := RedactSummary(summary)
 
 	// Verify secrets are removed from all text fields
 	if strings.Contains(result.Intent, highEntropySecret) {
@@ -3896,7 +3896,7 @@ func TestRedactSummary_NoSecrets(t *testing.T) {
 		},
 	}
 
-	result := redactSummary(summary)
+	result := RedactSummary(summary)
 
 	if result.Intent != "Fix a bug" {
 		t.Errorf("Intent should be unchanged, got %q", result.Intent)

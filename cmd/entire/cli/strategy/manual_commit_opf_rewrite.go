@@ -559,7 +559,7 @@ func isRedactableBlobName(name string) bool {
 // walker to find each blob's redacted bytes in the cached map.
 func collectTreeBlobs(repo *git.Repository, tree *object.Tree, pathPrefix string, blobs *[]redact.NamedBlob, paths *[]string) error {
 	for _, e := range tree.Entries {
-		switch e.Mode { //nolint:exhaustive // non-tree/blob modes are unreachable here
+		switch e.Mode {
 		case filemode.Dir:
 			subPath := e.Name
 			if pathPrefix != "" {
@@ -586,6 +586,8 @@ func collectTreeBlobs(repo *git.Repository, tree *object.Tree, pathPrefix string
 			}
 			*blobs = append(*blobs, redact.NamedBlob{Name: e.Name, Content: content})
 			*paths = append(*paths, fullPath)
+		case filemode.Empty, filemode.Deprecated, filemode.Symlink, filemode.Submodule:
+			// Non-blob/non-tree entries are not redactable blobs.
 		}
 	}
 	return nil
@@ -626,7 +628,7 @@ func rebuildTreeWithCachedRedaction(repo *git.Repository, tree *object.Tree, pat
 	var newFullJSONLHash plumbing.Hash
 
 	for _, e := range tree.Entries {
-		switch e.Mode { //nolint:exhaustive // non-tree/blob modes fall through to copy
+		switch e.Mode {
 		case filemode.Dir:
 			subPath := e.Name
 			if pathPrefix != "" {
@@ -672,7 +674,7 @@ func rebuildTreeWithCachedRedaction(repo *git.Repository, tree *object.Tree, pat
 					newFullJSONLHash = newHash
 				}
 			}
-		default:
+		case filemode.Empty, filemode.Deprecated, filemode.Symlink, filemode.Submodule:
 			entries = append(entries, e)
 		}
 	}

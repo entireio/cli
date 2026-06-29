@@ -52,23 +52,30 @@ type rawBlameLine struct {
 }
 
 type attributionLine struct {
-	LineNumber      int                    `json:"line_number"`
-	Authorship      attributionAuthorship  `json:"authorship"`
-	Tag             string                 `json:"tag"`
-	CommitSHA       string                 `json:"commit_sha,omitempty"`
-	ShortCommitSHA  string                 `json:"short_commit_sha,omitempty"`
-	Author          string                 `json:"author,omitempty"`
-	AuthorTime      *time.Time             `json:"author_time,omitempty"`
-	CheckpointID    string                 `json:"checkpoint_id,omitempty"`
-	SessionID       string                 `json:"session_id,omitempty"`
-	Agent           string                 `json:"agent,omitempty"`
-	Model           string                 `json:"model,omitempty"`
-	Prompt          string                 `json:"prompt,omitempty"`
-	Intent          string                 `json:"intent,omitempty"`
-	MetadataMissing bool                   `json:"metadata_missing,omitempty"`
-	SessionFallback bool                   `json:"session_fallback,omitempty"`
-	Content         string                 `json:"content"`
-	Candidates      []attributionCandidate `json:"candidates,omitempty"`
+	LineNumber            int                   `json:"line_number"`
+	Authorship            attributionAuthorship `json:"authorship"`
+	Tag                   string                `json:"tag"`
+	CommitSHA             string                `json:"commit_sha,omitempty"`
+	ShortCommitSHA        string                `json:"short_commit_sha,omitempty"`
+	Author                string                `json:"author,omitempty"`
+	AuthorTime            *time.Time            `json:"author_time,omitempty"`
+	CheckpointID          string                `json:"checkpoint_id,omitempty"`
+	SessionID             string                `json:"session_id,omitempty"`
+	Agent                 string                `json:"agent,omitempty"`
+	Model                 string                `json:"model,omitempty"`
+	Prompt                string                `json:"prompt,omitempty"`
+	Intent                string                `json:"intent,omitempty"`
+	MetadataMissing       bool                  `json:"metadata_missing,omitempty"`
+	MetadataMissingReason string                `json:"metadata_missing_reason,omitempty"`
+	SessionFallback       bool                  `json:"session_fallback,omitempty"`
+	// PromptSessionLevel is set when Prompt is the session's overall/seed prompt
+	// (e.g. an attach/trail ReviewPrompt) rather than a prompt recorded for this
+	// specific checkpoint. `why` labels these differently and points at
+	// `checkpoint explain`, since the prompt may not appear in this checkpoint's
+	// own transcript slice.
+	PromptSessionLevel bool                   `json:"prompt_session_level,omitempty"`
+	Content            string                 `json:"content"`
+	Candidates         []attributionCandidate `json:"candidates,omitempty"`
 }
 
 // attributionCheckpointContext is the resolved metadata for one checkpoint as
@@ -78,20 +85,24 @@ type attributionLine struct {
 // deduplicated per-file checkpoint map — so attributionCandidate aliases it
 // rather than duplicating the fields.
 type attributionCheckpointContext struct {
-	CheckpointID    string   `json:"checkpoint_id"`
-	SessionID       string   `json:"session_id,omitempty"`
-	Agent           string   `json:"agent,omitempty"`
-	Model           string   `json:"model,omitempty"`
-	Prompt          string   `json:"prompt,omitempty"`
-	Intent          string   `json:"intent,omitempty"`
-	FilesTouched    []string `json:"files_touched,omitempty"`
-	MetadataMissing bool     `json:"metadata_missing,omitempty"`
-	Mixed           bool     `json:"mixed,omitempty"`
+	CheckpointID          string   `json:"checkpoint_id"`
+	SessionID             string   `json:"session_id,omitempty"`
+	Agent                 string   `json:"agent,omitempty"`
+	Model                 string   `json:"model,omitempty"`
+	Prompt                string   `json:"prompt,omitempty"`
+	Intent                string   `json:"intent,omitempty"`
+	FilesTouched          []string `json:"files_touched,omitempty"`
+	MetadataMissing       bool     `json:"metadata_missing,omitempty"`
+	MetadataMissingReason string   `json:"metadata_missing_reason,omitempty"`
+	Mixed                 bool     `json:"mixed,omitempty"`
 	// SessionFallback is set when the file is not in any resolved session's
 	// recorded paths (e.g. it was renamed after the checkpoint) and the
 	// agent/prompt shown is a best-effort guess from the checkpoint's first
 	// session rather than the session that actually touched this file.
 	SessionFallback bool `json:"session_fallback,omitempty"`
+	// PromptSessionLevel is set when Prompt is the session's overall/seed prompt
+	// (ReviewPrompt) rather than a prompt recorded for this checkpoint.
+	PromptSessionLevel bool `json:"prompt_session_level,omitempty"`
 }
 
 type attributionCandidate = attributionCheckpointContext
@@ -135,13 +146,13 @@ func newBlameCmd() *cobra.Command {
 	var longFlag bool
 
 	cmd := &cobra.Command{
-		Use: "blame <file>",
+		Use: "blame <file>[:line[-line]]",
 		// Hidden from `entire help` while the feature is still maturing —
 		// advertised under `entire labs`, and `entire blame` / `entire blame
 		// --help` keep working normally.
 		Hidden: true,
 		Short:  "Show which lines came from Entire checkpoints",
-		Long:   "Show git-blame-style line attribution enriched with Entire checkpoint metadata.",
+		Long:   "Show git-blame-style line attribution enriched with Entire checkpoint metadata.\n\nLimit to a line or range with <file>:12, <file>:12-20, or the --line flag.",
 		Args:   cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAttributionBlame(cmd.Context(), cmd.OutOrStdout(), args[0], attributionBlameOptions{
@@ -160,21 +171,26 @@ func newBlameCmd() *cobra.Command {
 
 func newWhyCmd() *cobra.Command {
 	var jsonFlag bool
+	var lineFlag string
 
 	cmd := &cobra.Command{
-		Use: "why <file[:line]>",
+		Use: "why <file>[:line]",
 		// Hidden from `entire help` while the feature is still maturing —
 		// advertised under `entire labs`, and `entire why` / `entire why
 		// --help` keep working normally.
 		Hidden: true,
 		Short:  "Show why a line exists",
-		Long:   "Explain the commit, checkpoint, prompt, and session behind a file or line.",
+		Long:   "Explain the commit, checkpoint, prompt, and session behind a file or line.\n\nTarget a specific line with <file>:12 or the --line flag.",
 		Args:   cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAttributionWhy(cmd.Context(), cmd.OutOrStdout(), args[0], jsonFlag)
+			return runAttributionWhy(cmd.Context(), cmd.OutOrStdout(), args[0], attributionWhyOptions{
+				LineFlag: lineFlag,
+				JSON:     jsonFlag,
+			})
 		},
 	}
 
+	cmd.Flags().StringVar(&lineFlag, "line", "", "Explain a specific line, for example 12 (same as <file>:12)")
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output explanation as JSON")
 	return cmd
 }
@@ -185,7 +201,20 @@ type attributionBlameOptions struct {
 	Long     bool
 }
 
+type attributionWhyOptions struct {
+	LineFlag string
+	JSON     bool
+}
+
 func runAttributionBlame(ctx context.Context, w io.Writer, file string, opts attributionBlameOptions) error {
+	if f, spec := splitFileLineSpec(file); spec != "" {
+		if opts.LineFlag != "" {
+			return fmt.Errorf("specify the line with <file>:%s or --line %s, not both", spec, opts.LineFlag)
+		}
+		opts.LineFlag = spec
+		file = f
+	}
+
 	var lineRange *attributionLineRange
 	if opts.LineFlag != "" {
 		parsed, err := parseAttributionLineRange(opts.LineFlag)
@@ -212,19 +241,31 @@ func runAttributionBlame(ctx context.Context, w io.Writer, file string, opts att
 	return nil
 }
 
-func runAttributionWhy(ctx context.Context, w io.Writer, target string, jsonOutput bool) error {
+func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts attributionWhyOptions) error {
 	file, line, hasLine, err := parseAttributionWhyTarget(target)
 	if err != nil {
 		return err
 	}
+	if opts.LineFlag != "" {
+		if hasLine {
+			return errors.New("specify the line with <file>:line or --line, not both")
+		}
+		n, lineErr := parseSingleAttributionLine(opts.LineFlag)
+		if lineErr != nil {
+			return lineErr
+		}
+		line, hasLine = n, true
+	}
 
-	result, err := resolveFileAttribution(ctx, file, false)
+	// entire why is explanation-focused: when local metadata is missing it
+	// should attempt the same remote enrichment path as checkpoint explain.
+	result, err := resolveFileAttribution(ctx, file, true)
 	if err != nil {
 		return err
 	}
 
 	if !hasLine {
-		if jsonOutput {
+		if opts.JSON {
 			return writeJSON(w, result)
 		}
 		renderAttributionFileWhy(w, result)
@@ -241,15 +282,8 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, jsonOutp
 	if selected == nil {
 		return fmt.Errorf("line %d is outside %s", line, result.File)
 	}
-	if selected.MetadataMissing && selected.CheckpointID != "" {
-		if err := enrichAttributionLineWithFetch(ctx, result.File, selected, result.Checkpoints); err != nil {
-			// Remote metadata enrichment is best-effort; the trailer-level
-			// explanation is still useful and should remain available.
-			selected.MetadataMissing = true
-		}
-	}
 
-	if jsonOutput {
+	if opts.JSON {
 		payload := struct {
 			File        string                                  `json:"file"`
 			Line        attributionLine                         `json:"line"`
@@ -297,8 +331,9 @@ func resolveFileAttribution(ctx context.Context, file string, fetchOnMiss bool) 
 		for _, candidate := range line.Candidates {
 			if candidate.MetadataMissing {
 				result.Checkpoints[candidate.CheckpointID] = attributionCheckpointContext{
-					CheckpointID:    candidate.CheckpointID,
-					MetadataMissing: true,
+					CheckpointID:          candidate.CheckpointID,
+					MetadataMissing:       true,
+					MetadataMissingReason: candidate.MetadataMissingReason,
 				}
 				continue
 			}
@@ -413,12 +448,15 @@ func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file s
 	ctx := attributionCheckpointContext{CheckpointID: cpID.String()}
 	summary, err := readAttributionCheckpointSummary(r.ctx, r.store, cpID)
 	if err != nil && r.fetchOnMiss {
-		if fetched, fetchErr := r.fetchCheckpointContext(cpID, file); fetchErr == nil {
+		fetched, fetchErr := r.fetchCheckpointContext(cpID, file)
+		if fetchErr == nil {
 			return fetched
 		}
+		err = fmt.Errorf("%w (remote refresh failed: %w)", err, fetchErr)
 	}
 	if err != nil {
 		ctx.MetadataMissing = true
+		ctx.MetadataMissingReason = metadataMissingReason(r.ctx, cpID.String(), err)
 		return ctx
 	}
 
@@ -447,11 +485,23 @@ func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file s
 		selected = fallback
 	}
 
-	// We resolved a session, but the file is in none of the sessions' recorded
-	// paths, and there was more than one session to choose from — so the agent
-	// and prompt shown are a guess (the checkpoint's first session) rather than
-	// the session that actually produced this line. Flag the approximation.
-	if selected.SessionID != "" && !matchedFile && sessionsRead > 1 {
+	// We resolved a session, but the file is in none of the resolved sessions'
+	// recorded paths (e.g. it was renamed after the checkpoint) — so the agent
+	// and prompt shown are a best-effort guess rather than the session that
+	// actually produced this line. Flag the approximation in either case:
+	//
+	//   - sessionsRead > 1: a multi-session checkpoint where none matched, so the
+	//     chosen fallback is one of several sessions with no path evidence — still
+	//     a guess even when that session's own FilesTouched is empty.
+	//   - len(selected.FilesTouched) > 0: the chosen session recorded paths that
+	//     exclude this file (rename evidence), including the single-session case
+	//     where there is no other session to compare against.
+	//
+	// Still suppress the single-session + empty-FilesTouched case: empty paths
+	// mean "unknown", which is not evidence of a rename, so flagging it would
+	// print a misleading caveat (common for older metadata and attach/trail
+	// sessions that don't populate FilesTouched).
+	if selected.SessionID != "" && !matchedFile && (sessionsRead > 1 || len(selected.FilesTouched) > 0) {
 		ctx.SessionFallback = true
 	}
 
@@ -479,6 +529,7 @@ func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file s
 	ctx.Agent = selected.Agent
 	ctx.Model = selected.Model
 	ctx.Prompt = selected.Prompt
+	ctx.PromptSessionLevel = selected.PromptSessionLevel
 	ctx.Intent = selected.Intent
 	if len(selected.FilesTouched) > 0 {
 		ctx.FilesTouched = selected.FilesTouched
@@ -503,33 +554,15 @@ func readAttributionCheckpointSummary(ctx context.Context, reader attributionChe
 	return summary, nil
 }
 
-func enrichAttributionLineWithFetch(ctx context.Context, file string, line *attributionLine, checkpoints map[string]attributionCheckpointContext) error {
-	if line == nil || len(line.Candidates) == 0 {
-		return nil
+func metadataMissingReason(ctx context.Context, checkpointID string, cause error) string {
+	reason := "checkpoint metadata was not found locally"
+	if cause != nil {
+		reason = fmt.Sprintf("%s (%v)", reason, cause)
 	}
-	resolver, err := newAttributionResolver(ctx, true)
-	if err != nil {
-		return err
+	if checkpointID == "" {
+		return fmt.Sprintf("%s. Run: %s.", reason, suggestCheckpointFetchCommand(ctx))
 	}
-	defer resolver.Close()
-
-	candidates := make([]attributionCandidate, 0, len(line.Candidates))
-	for _, candidate := range line.Candidates {
-		cpID, idErr := id.NewCheckpointID(candidate.CheckpointID)
-		if idErr != nil {
-			candidates = append(candidates, candidate)
-			continue
-		}
-		cpCtx := resolver.checkpointContext(cpID, file)
-		checkpoints[cpCtx.CheckpointID] = cpCtx
-		candidates = append(candidates, cpCtx)
-	}
-	preferred := preferredAttributionCandidate(candidates, file)
-	applyPreferredToLine(line, preferred)
-	line.Candidates = candidates
-	line.Authorship = authorshipForPreferred(preferred)
-	line.Tag = attributionTag(line.Authorship)
-	return nil
+	return fmt.Sprintf("%s. Run: %s. Then re-run entire checkpoint explain %s.", reason, suggestCheckpointFetchCommand(ctx), checkpointID)
 }
 
 func (r *attributionResolver) fetchCheckpointContext(cpID id.CheckpointID, file string) (attributionCheckpointContext, error) {
@@ -558,13 +591,14 @@ func (r *attributionResolver) fetchCheckpointContext(cpID id.CheckpointID, file 
 }
 
 type checkpointSessionForFile struct {
-	SessionID    string
-	Agent        string
-	Model        string
-	Prompt       string
-	Intent       string
-	FilesTouched []string
-	Attribution  *checkpoint.Attribution
+	SessionID          string
+	Agent              string
+	Model              string
+	Prompt             string
+	PromptSessionLevel bool
+	Intent             string
+	FilesTouched       []string
+	Attribution        *checkpoint.Attribution
 }
 
 func (r *attributionResolver) readSessionForCheckpoint(cpID id.CheckpointID, index int) (checkpointSessionForFile, error) {
@@ -576,21 +610,35 @@ func (r *attributionResolver) readSessionForCheckpoint(cpID id.CheckpointID, ind
 	if meta.Summary != nil {
 		intent = strings.TrimSpace(meta.Summary.Intent)
 	}
+	// prompt.txt holds session-wide prompts (extracted from the transcript at
+	// offset 0; `checkpoint explain` re-derives a checkpoint-scoped prompt from
+	// the transcript slice and only falls back to these). So the prompt shown
+	// here is session-level — not necessarily this checkpoint's — whenever this
+	// is a later checkpoint (transcript start > 0). Flag that so `why` labels it
+	// "Session prompt:" and points at `checkpoint explain` instead of implying it
+	// is scoped to this checkpoint. The first checkpoint (start 0) is exact.
 	prompt := strings.TrimSpace(prompts)
-	if prompt == "" {
+	sessionLevel := false
+	switch {
+	case prompt != "":
+		sessionLevel = meta.GetTranscriptStart() > 0
+	case strings.TrimSpace(meta.ReviewPrompt) != "":
+		// Empty prompt.txt (e.g. an attach/trail session) → the seed ReviewPrompt,
+		// which is always a session-level value, not this checkpoint's prompt.
 		prompt = strings.TrimSpace(meta.ReviewPrompt)
-	}
-	if prompt == "" {
+		sessionLevel = true
+	default:
 		prompt = intent
 	}
 	return checkpointSessionForFile{
-		SessionID:    meta.SessionID,
-		Agent:        string(meta.Agent),
-		Model:        meta.Model,
-		Prompt:       prompt,
-		Intent:       intent,
-		FilesTouched: normalizePathSlice(meta.FilesTouched),
-		Attribution:  meta.Attribution,
+		SessionID:          meta.SessionID,
+		Agent:              string(meta.Agent),
+		Model:              meta.Model,
+		Prompt:             prompt,
+		PromptSessionLevel: sessionLevel,
+		Intent:             intent,
+		FilesTouched:       normalizePathSlice(meta.FilesTouched),
+		Attribution:        meta.Attribution,
 	}, nil
 }
 
@@ -676,20 +724,59 @@ func parseAttributionLineRange(input string) (*attributionLineRange, error) {
 	return &attributionLineRange{Start: start, End: end}, nil
 }
 
+// splitFileLineSpec splits a positional argument of the form "<file>", "<file>:N"
+// or "<file>:N-M" into the file path and the trailing line spec ("" when there is
+// none). It only treats the suffix after the last colon as a line spec when it
+// looks like a line or range (digits, optionally "-digits"), so file names that
+// merely contain a colon are left intact. A Windows volume name (e.g. "C:") in
+// the first path component is never treated as a line spec.
+func splitFileLineSpec(arg string) (file string, spec string) {
+	colon := strings.LastIndex(arg, ":")
+	if colon == -1 || colon == len(arg)-1 {
+		return arg, ""
+	}
+	if volume := filepath.VolumeName(arg); volume != "" && colon < len(volume) {
+		return arg, ""
+	}
+	candidate := arg[colon+1:]
+	if !attributionLineSpecRe.MatchString(candidate) {
+		return arg, ""
+	}
+	return arg[:colon], candidate
+}
+
+// attributionLineSpecRe matches a single line ("12") or a range ("12-20").
+var attributionLineSpecRe = regexp.MustCompile(`^\d+(-\d+)?$`)
+
+// parseSingleAttributionLine parses a single positive line number for `why`,
+// rejecting ranges (which only `blame` supports) with an actionable message.
+func parseSingleAttributionLine(input string) (int, error) {
+	input = strings.TrimSpace(input)
+	if strings.Contains(input, "-") {
+		return 0, fmt.Errorf("invalid line %q: why explains a single line; use entire blame for a range", input)
+	}
+	n, err := strconv.Atoi(input)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("invalid line %q: must be a positive integer", input)
+	}
+	return n, nil
+}
+
+// parseAttributionWhyTarget splits a `why` positional argument into a file and
+// an optional single line. It shares splitFileLineSpec with `blame`, so a
+// colon-then-non-numeric suffix is treated as part of the filename (not an
+// error) and ranges get a friendly pointer at `blame`. When no line spec is
+// present the caller may still supply one via --line.
 func parseAttributionWhyTarget(input string) (file string, line int, hasLine bool, err error) {
-	colon := strings.LastIndex(input, ":")
-	if colon == -1 || colon == len(input)-1 {
+	f, spec := splitFileLineSpec(input)
+	if spec == "" {
 		return input, 0, false, nil
 	}
-	if volume := filepath.VolumeName(input); volume != "" && colon < len(volume) {
-		return input, 0, false, nil
+	n, parseErr := parseSingleAttributionLine(spec)
+	if parseErr != nil {
+		return "", 0, false, parseErr
 	}
-	linePart := input[colon+1:]
-	parsed, parseErr := strconv.Atoi(linePart)
-	if parseErr != nil || parsed < 1 {
-		return "", 0, false, fmt.Errorf("invalid line target %q: use file:line", input)
-	}
-	return input[:colon], parsed, true, nil
+	return f, n, true, nil
 }
 
 func normalizeAttributionPath(repoRoot, file string) (string, error) {
@@ -818,6 +905,48 @@ func largestRemainderPercent(counts []int, total int) []int {
 	return pct
 }
 
+// attributionLineMarker returns a one-character flag for the blame tables:
+// "~" when the agent/checkpoint shown is a best-effort guess (the file is not in
+// the checkpoint session's recorded paths, or only trailer-level metadata was
+// found), "?" when more than one checkpoint is a candidate for the line, and a
+// space otherwise. `entire why` surfaces the same information in prose; this
+// closes the gap where the blame table looked equally confident on every line.
+func attributionLineMarker(line attributionLine) string {
+	switch {
+	case line.SessionFallback || line.MetadataMissing:
+		return "~"
+	case len(line.Candidates) > 1:
+		return "?"
+	default:
+		return " "
+	}
+}
+
+// renderAttributionMarkerLegend prints a one-line legend explaining the blame
+// markers, but only for the markers actually present in the table.
+func renderAttributionMarkerLegend(w io.Writer, sty statusStyles, lines []attributionLine) {
+	approximate, ambiguous := false, false
+	for _, line := range lines {
+		switch attributionLineMarker(line) {
+		case "~":
+			approximate = true
+		case "?":
+			ambiguous = true
+		}
+	}
+	if !approximate && !ambiguous {
+		return
+	}
+	var parts []string
+	if approximate {
+		parts = append(parts, "~ best-effort attribution (file not in the checkpoint's recorded paths)")
+	}
+	if ambiguous {
+		parts = append(parts, "? multiple candidate checkpoints — see entire why <file>:<line>")
+	}
+	fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Join(parts, "   ")))
+}
+
 func renderAttributionBlame(w io.Writer, result *fileAttributionResult, lineFlag string, longOutput bool) {
 	if longOutput {
 		renderAttributionBlameLong(w, result, lineFlag)
@@ -839,6 +968,7 @@ func renderAttributionBlameTable(w io.Writer, result *fileAttributionResult, lin
 	}
 
 	body(sty)
+	renderAttributionMarkerLegend(w, sty, result.Lines)
 	renderAttributionSummary(w, sty, result.Summary, lineFlag)
 }
 
@@ -849,18 +979,22 @@ func renderAttributionBlameCompact(w io.Writer, result *fileAttributionResult, l
 		const authorWidth = 6
 		const checkpointWidth = 12
 		const minContentWidth = 12
-		fixedWidth := 2 + lineWidth + 2 + len("[AI]") + 2 + agentWidth + 2 + authorWidth + 2 + checkpointWidth + 2
+		// The trailing "+ 1 + 1" reserves a one-character marker column (plus its
+		// separator) between Checkpoint and Content. Placing it after the last
+		// fixed column means only Content shifts — the Tag/Agent/Author/Checkpoint
+		// positions stay put.
+		fixedWidth := 2 + lineWidth + 2 + len("[AI]") + 2 + agentWidth + 2 + authorWidth + 2 + checkpointWidth + 2 + 1 + 1
 		contentWidth := sty.width - fixedWidth
 		if contentWidth < minContentWidth {
 			contentWidth = minContentWidth
 		}
 		tableWidth := fixedWidth + contentWidth - 2
 
-		fmt.Fprintf(w, "  %*s  Tag   %-*s  %-*s  %-*s  Content\n", lineWidth, "Line", agentWidth, "Agent", authorWidth, "Author", checkpointWidth, "Checkpoint")
+		fmt.Fprintf(w, "  %*s  Tag   %-*s  %-*s  %-*s    Content\n", lineWidth, "Line", agentWidth, "Agent", authorWidth, "Author", checkpointWidth, "Checkpoint")
 		fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", tableWidth)))
 
 		for _, line := range result.Lines {
-			fmt.Fprintf(w, "  %s  %s  %-*s  %-*s  %-*s  %s\n",
+			fmt.Fprintf(w, "  %s  %s  %-*s  %-*s  %-*s  %s %s\n",
 				sty.render(sty.dim, fmt.Sprintf("%*d", lineWidth, line.LineNumber)),
 				renderAttributionTag(sty, line.Authorship),
 				agentWidth,
@@ -869,6 +1003,7 @@ func renderAttributionBlameCompact(w io.Writer, result *fileAttributionResult, l
 				stringutil.TruncateRunes(shortAuthorName(line.Author), authorWidth, ""),
 				checkpointWidth,
 				stringutil.TruncateRunes(compactAttributionCheckpoint(line), checkpointWidth, ""),
+				sty.render(sty.dim, attributionLineMarker(line)),
 				renderAttributionContentCompact(sty, line, contentWidth),
 			)
 		}
@@ -879,18 +1014,19 @@ func renderAttributionBlameLong(w io.Writer, result *fileAttributionResult, line
 	renderAttributionBlameTable(w, result, lineFlag, func(sty statusStyles) {
 		lineWidth := attributionLineColumnWidth(result.Lines)
 		const checkpointColumnWidth = 21
-		fmt.Fprintf(w, "  %*s  Tag   %-12s  %-18s  %-16s  %-21s  Content\n",
+		fmt.Fprintf(w, "  %*s  Tag   %-12s  %-18s  %-16s  %-21s    Content\n",
 			lineWidth, "Line", "Agent", "Model", "Author", "Checkpoint/Session")
 		fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", lineWidth+92)))
 
 		for _, line := range result.Lines {
-			fmt.Fprintf(w, "  %s  %s  %-12s  %-18s  %-16s  %-21s  %s\n",
+			fmt.Fprintf(w, "  %s  %s  %-12s  %-18s  %-16s  %-21s  %s %s\n",
 				sty.render(sty.dim, fmt.Sprintf("%*d", lineWidth, line.LineNumber)),
 				renderAttributionTag(sty, line.Authorship),
 				stringutil.TruncateRunes(line.Agent, 12, ""),
 				stringutil.TruncateRunes(line.Model, 18, ""),
 				stringutil.TruncateRunes(shortAuthorName(line.Author), 16, ""),
 				stringutil.TruncateRunes(shortCheckpointSession(line), checkpointColumnWidth, ""),
+				sty.render(sty.dim, attributionLineMarker(line)),
 				renderAttributionContent(sty, line),
 			)
 		}
@@ -977,16 +1113,27 @@ func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
 		}
 		fmt.Fprintln(w)
 		if line.Prompt != "" {
-			fmt.Fprintf(w, "  %s %q\n", sty.render(sty.bold, "Prompt:"), stringutil.TruncateRunes(stringutil.CollapseWhitespace(line.Prompt), 160, "..."))
+			promptLabel := "Prompt:"
+			if line.PromptSessionLevel {
+				promptLabel = "Session prompt:"
+			}
+			fmt.Fprintf(w, "  %s %q\n", sty.render(sty.bold, promptLabel), stringutil.TruncateRunes(stringutil.CollapseWhitespace(line.Prompt), 160, "..."))
+			if line.PromptSessionLevel {
+				fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, "(session-level prompt — may not appear in this checkpoint's transcript; see the checkpoint explain command below for what drove this checkpoint)"))
+			}
 		}
 		if line.Intent != "" && line.Intent != line.Prompt {
 			fmt.Fprintf(w, "  %s %q\n", sty.render(sty.bold, "Intent:"), stringutil.TruncateRunes(stringutil.CollapseWhitespace(line.Intent), 160, "..."))
 		}
 		if line.MetadataMissing {
-			fmt.Fprintf(w, "  %s\n", sty.render(sty.yellow, "Checkpoint metadata was not found locally; showing trailer-level attribution only."))
+			message := "Checkpoint metadata was not found locally; showing trailer-level attribution only."
+			if line.MetadataMissingReason != "" {
+				message = line.MetadataMissingReason
+			}
+			fmt.Fprintf(w, "  %s\n", sty.render(sty.yellow, message))
 		}
 		if line.SessionFallback {
-			fmt.Fprintf(w, "  %s\n", sty.render(sty.yellow, "This file is not in the checkpoint's recorded paths (it may have been renamed); the agent and prompt shown are from the checkpoint's first session."))
+			fmt.Fprintf(w, "  %s\n", sty.render(sty.yellow, "This file is not in the checkpoint session's recorded paths (it may have been renamed); the agent and prompt shown are a best-effort guess, not necessarily the session that produced this line."))
 		}
 		if len(line.Candidates) > 1 {
 			fmt.Fprintf(w, "\n  %s\n", sty.render(sty.bold, "Candidate checkpoints:"))
@@ -1004,7 +1151,13 @@ func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
 				fmt.Fprintln(w)
 			}
 		}
-		if line.CheckpointID != "" {
+		// The "Full context" hint suggests `entire checkpoint explain <id>`. Only
+		// show it when the metadata is actually present: when it is missing, the
+		// remote fetch `why` already attempted has failed, so explain would fail
+		// the same way (the reported bug — a hint that resolves to a command that
+		// immediately errors). In that case the MetadataMissingReason printed
+		// above already gives the actionable fetch-then-explain sequence.
+		if line.CheckpointID != "" && !line.MetadataMissing {
 			fmt.Fprintf(w, "\n  %s %s\n\n", sty.render(sty.dim, "Full context:"), sty.render(sty.cyan, "entire checkpoint explain "+line.CheckpointID))
 		} else {
 			fmt.Fprintln(w)
@@ -1046,6 +1199,13 @@ func renderAttributionFileWhy(w io.Writer, result *fileAttributionResult) {
 		}
 		if ctx.Prompt != "" {
 			fmt.Fprintf(w, " %s %q", sty.render(sty.dim, "·"), stringutil.TruncateRunes(stringutil.CollapseWhitespace(ctx.Prompt), 90, "..."))
+		}
+		if ctx.MetadataMissing {
+			message := "Checkpoint metadata was not found locally."
+			if ctx.MetadataMissingReason != "" {
+				message = ctx.MetadataMissingReason
+			}
+			fmt.Fprintf(w, "\n    %s %s", sty.render(sty.yellow, "metadata missing:"), message)
 		}
 		fmt.Fprintln(w)
 	}
@@ -1147,7 +1307,9 @@ func applyPreferredToLine(line *attributionLine, preferred *attributionCandidate
 	line.Prompt = preferred.Prompt
 	line.Intent = preferred.Intent
 	line.MetadataMissing = preferred.MetadataMissing
+	line.MetadataMissingReason = preferred.MetadataMissingReason
 	line.SessionFallback = preferred.SessionFallback
+	line.PromptSessionLevel = preferred.PromptSessionLevel
 }
 
 // authorshipForPreferred maps the preferred candidate to a line's authorship.

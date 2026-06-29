@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,8 +24,6 @@ type DeepCheckpointValidation struct {
 	ExpectedPrompts           []string
 	ExpectedTranscriptContent []string
 }
-
-var hexIDPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
 // AssertFileExists asserts that at least one file matches the glob pattern
 // relative to dir.
@@ -161,11 +159,14 @@ func AssertCheckpointNotAdvanced(t *testing.T, s *RepoState) {
 	assert.Equal(t, s.CheckpointBefore, after, "checkpoint branch advanced unexpectedly")
 }
 
-// AssertCheckpointIDFormat asserts the checkpoint ID is 12 lowercase hex chars.
+// AssertCheckpointIDFormat asserts the checkpoint ID is a valid checkpoint ID:
+// either 12 lowercase hex chars or a canonical 26-char ULID. It calls the
+// production validator (not a loose regex) so the test rejects exactly what
+// production rejects — e.g. a ULID-shaped but timestamp-overflowing string.
 func AssertCheckpointIDFormat(t *testing.T, checkpointID string) {
 	t.Helper()
-	assert.Regexp(t, hexIDPattern, checkpointID,
-		"checkpoint ID %q should be 12 lowercase hex chars", checkpointID)
+	assert.NoErrorf(t, checkpointid.Validate(checkpointID),
+		"checkpoint ID %q should be a valid checkpoint ID (12-hex or ULID)", checkpointID)
 }
 
 // AssertHasCheckpointTrailer asserts the commit has an Entire-Checkpoint trailer,

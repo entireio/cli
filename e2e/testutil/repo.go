@@ -2,8 +2,6 @@ package testutil
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -217,43 +215,6 @@ func setupGeminiTestHome(t *testing.T, repoDir string) {
 	config := `{"security":{"auth":{"selectedType":"gemini-api-key"}}}`
 	if err := os.WriteFile(filepath.Join(geminiDir, "settings.json"), []byte(config), 0o644); err != nil {
 		t.Fatalf("write gemini settings: %v", err)
-	}
-
-	agentFile := filepath.Join(repoDir, ".gemini", "agents", "entire-search.md")
-	content, err := os.ReadFile(agentFile)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return
-		}
-		t.Fatalf("read gemini agent file: %v", err)
-	}
-
-	sum := sha256.Sum256(content)
-	hash := hex.EncodeToString(sum[:])
-
-	ackPath := filepath.Join(geminiDir, "acknowledgments", "agents.json")
-	acks := map[string]map[string]string{}
-	if data, readErr := os.ReadFile(ackPath); readErr == nil {
-		if err := json.Unmarshal(data, &acks); err != nil {
-			t.Fatalf("parse gemini acknowledgments: %v", err)
-		}
-	} else if !errors.Is(readErr, os.ErrNotExist) {
-		t.Fatalf("read gemini acknowledgments: %v", readErr)
-	}
-
-	if acks[repoDir] == nil {
-		acks[repoDir] = map[string]string{}
-	}
-	acks[repoDir]["entire-search"] = hash
-
-	out, err := json.MarshalIndent(acks, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal gemini acknowledgments: %v", err)
-	}
-	out = append(out, '\n')
-
-	if err := os.WriteFile(ackPath, out, 0o644); err != nil {
-		t.Fatalf("write gemini acknowledgments: %v", err)
 	}
 }
 

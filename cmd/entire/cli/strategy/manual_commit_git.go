@@ -121,6 +121,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		}
 		if step.TokenUsage != nil {
 			state.TokenUsage = accumulateTokenUsage(state.TokenUsage, step.TokenUsage)
+			state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)
 		}
 
 		if !branchExisted {

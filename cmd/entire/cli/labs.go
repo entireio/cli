@@ -18,12 +18,17 @@ var experimentalCommands = []experimentalCommandInfo{
 	{
 		CommandPath: []string{"review"},
 		Invocation:  "entire review",
-		Summary:     "Run configured review skills against the current branch",
+		Summary:     "Run a multi-agent review against the current branch",
 	},
 	{
 		CommandPath: []string{"investigate"},
 		Invocation:  "entire investigate",
 		Summary:     "Run a multi-agent investigation against a topic, issue, or seed doc",
+	},
+	{
+		CommandPath: []string{"import", "claude-code"},
+		Invocation:  "entire import claude-code",
+		Summary:     "Import existing Claude Code transcripts as local, read-only history",
 	},
 	{
 		CommandPath: []string{"tokens"},

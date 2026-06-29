@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -65,6 +66,39 @@ func TestAttach_TranscriptNotFound(t *testing.T) {
 	err := runAttach(context.Background(), &out, "nonexistent-session-id", agent.AgentNameClaudeCode, attachOptions{Force: true})
 	if err == nil {
 		t.Fatal("expected error for missing transcript")
+	}
+}
+
+func TestAttachRejectsUnsupportedCheckpointWritePolicy(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	repoRoot := mustGetwd(t)
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := checkpointpolicy.WriteLocal(context.Background(), repo, plumbing.ZeroHash, checkpointpolicy.Policy{
+		CheckpointVersion:    "refs-v1",
+		CheckpointMinVersion: "branch-v1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionID := "test-attach-policy-unsupported"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"create a file"},"uuid":"uuid-1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done"}]},"uuid":"uuid-2"}
+`)
+
+	var out bytes.Buffer
+	err = runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
+	if err == nil {
+		t.Fatal("expected unsupported checkpoint policy error")
+	}
+	if !strings.Contains(err.Error(), `checkpoint_version "refs-v1"`) {
+		t.Fatalf("error = %v, want checkpoint policy version", err)
+	}
+	if _, refErr := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true); refErr == nil {
+		t.Fatal("metadata branch exists after rejected attach")
 	}
 }
 
@@ -293,10 +327,12 @@ func TestAttach_OutputContainsCheckpointID(t *testing.T) {
 
 	output := out.String()
 
-	// Must contain Entire-Checkpoint trailer with 12-hex-char ID
-	re := regexp.MustCompile(`Entire-Checkpoint: [0-9a-f]{12}`)
+	// Must contain an Entire-Checkpoint trailer with a checkpoint ID in either
+	// supported format (legacy hex or ULID) — reuse the canonical pattern instead
+	// of re-hardcoding the hex-only shape.
+	re := regexp.MustCompile(`Entire-Checkpoint: ` + id.CheckpointPattern)
 	if !re.MatchString(output) {
-		t.Errorf("expected 'Entire-Checkpoint: <12-hex-id>' in output, got:\n%s", output)
+		t.Errorf("expected 'Entire-Checkpoint: <checkpoint-id>' in output, got:\n%s", output)
 	}
 }
 
@@ -989,9 +1025,9 @@ func TestReviewAttach_UsesPendingReviewMarkerDefaults(t *testing.T) {
 	errBuf := &bytes.Buffer{}
 	rootCmd.SetOut(outBuf)
 	rootCmd.SetErr(errBuf)
-	rootCmd.SetArgs([]string{"review", "attach", sessionID, "--force"})
+	rootCmd.SetArgs([]string{"attach", "--review", sessionID, "--force"})
 	if err := rootCmd.Execute(); err != nil {
-		t.Fatalf("review attach failed: %v\nstderr: %s", err, errBuf.String())
+		t.Fatalf("attach --review failed: %v\nstderr: %s", err, errBuf.String())
 	}
 
 	store, err := session.NewStateStore(context.Background())
@@ -1057,7 +1093,7 @@ func TestAttach_ReviewWithExistingCheckpointErrors(t *testing.T) {
 // checkpoint) must APPEND at the next-available index, not overwrite
 // session 0. In the wild this happens when a user runs a manual claude
 // session, commits (with the checkpoint trailer), then runs
-// `entire review attach <new-session-id>` to record a separate review.
+// `entire attach --review <new-session-id>` to record a separate review.
 // The expected result is two sessions on the same checkpoint.
 func TestAttach_ReviewAppendsAsAdditionalSessionWhenIDDiffers(t *testing.T) {
 	setupAttachTestRepo(t)
@@ -1333,8 +1369,8 @@ func TestAttachCmd_ReviewDoesNotInferSkillsFromConfig(t *testing.T) {
 	}
 }
 
-// TestReviewAttachCmd_TagsSession drives `entire review attach <id>`,
-// verifying the subcommand reaches runAttach with review options set.
+// TestReviewAttachCmd_TagsSession drives `entire attach --review <id> --skills`,
+// verifying the attach path reaches runAttach with review options set.
 func TestReviewAttachCmd_TagsSession(t *testing.T) {
 	setupAttachTestRepo(t)
 
@@ -1343,9 +1379,9 @@ func TestReviewAttachCmd_TagsSession(t *testing.T) {
 `)
 
 	rootCmd := NewRootCmd()
-	rootCmd.SetArgs([]string{"review", "attach", "--force", "--skills", "/custom-review", sessionID})
+	rootCmd.SetArgs([]string{"attach", "--review", "--force", "--skills", "/custom-review", sessionID})
 	if err := rootCmd.Execute(); err != nil {
-		t.Fatalf("review attach failed: %v", err)
+		t.Fatalf("attach --review failed: %v", err)
 	}
 
 	store, err := session.NewStateStore(context.Background())

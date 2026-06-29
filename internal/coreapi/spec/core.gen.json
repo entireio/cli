@@ -1659,6 +1659,16 @@
           "repo": {
             "type": "string"
           },
+          "status": {
+            "description": "Clone lifecycle: processing (cloning), ready (clonable), failed (initial clone failed), or suspended.",
+            "enum": [
+              "processing",
+              "ready",
+              "failed",
+              "suspended"
+            ],
+            "type": "string"
+          },
           "suspendedAt": {
             "format": "date-time",
             "type": "string"

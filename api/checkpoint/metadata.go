@@ -262,6 +262,10 @@ type CheckpointInfo struct {
 	// Multi-session support
 	SessionCount int      // Number of sessions (1 if single session)
 	SessionIDs   []string // All session IDs that contributed
+
+	// Imported is true when this checkpoint was imported from pre-existing
+	// agent history (Kind == "imported"): read-only and commit-less.
+	Imported bool
 }
 
 // SessionContent contains the actual content for a session.
@@ -380,12 +384,15 @@ func (m Metadata) GetTranscriptStart() int {
 // Used in CheckpointSummary.Sessions to map session IDs to their file locations.
 type SessionFilePaths struct {
 	Metadata string `json:"metadata"`
-	// Transcript points at the compact transcript.jsonl when one was
-	// generated, otherwise at the raw full.jsonl. Checkpoints written by
-	// older CLI versions always point at full.jsonl.
-	Transcript  string `json:"transcript,omitempty"`
-	ContentHash string `json:"content_hash,omitempty"`
-	Prompt      string `json:"prompt"`
+	// Transcript points at the raw full.jsonl, which CLI read paths
+	// (rewind/resume/explain) resolve by filename.
+	Transcript string `json:"transcript,omitempty"`
+	// CompactTranscript points at the compact transcript.jsonl when one was
+	// generated alongside full.jsonl. Omitted otherwise (non-compactable,
+	// empty, or oversized transcripts, and older CLI versions).
+	CompactTranscript string `json:"compact_transcript,omitempty"`
+	ContentHash       string `json:"content_hash,omitempty"`
+	Prompt            string `json:"prompt"`
 }
 
 // CheckpointSummary is the root-level metadata.json for a checkpoint.
@@ -433,6 +440,11 @@ type CheckpointSummary struct {
 	// be set so callers can keep asking "was this investigated in any way?"
 	// without caring about the variant.
 	HasInvestigation bool `json:"has_investigation,omitempty"`
+
+	// Imported is true when this checkpoint was imported from pre-existing
+	// agent history (a session with Kind == "imported"): read-only and
+	// commit-less.
+	Imported bool `json:"imported,omitempty"`
 }
 
 // SessionMetrics contains hook-provided session metrics from agents that report

@@ -113,14 +113,43 @@ func (c *CursorAgent) parseTurnEnd(ctx context.Context, stdin io.Reader) (*agent
 	if err != nil {
 		return nil, err
 	}
-	return &agent.Event{
+	event := &agent.Event{
 		Type:       agent.TurnEnd,
 		SessionID:  raw.ConversationID,
 		SessionRef: c.resolveTranscriptRef(ctx, raw.ConversationID, raw.TranscriptPath),
 		Model:      raw.Model,
 		TurnCount:  int(intFromJSON(raw.LoopCount)),
 		Timestamp:  time.Now(),
-	}, nil
+	}
+	event.TokenUsage = tokenUsageFromStop(raw)
+	return event, nil
+}
+
+// tokenUsageFromStop converts the per-turn token fields in Cursor's stop hook
+// payload into the framework-wide TokenUsage struct. Cursor reports
+// input_tokens as the *total* input (cache_read + cache_write + fresh), so we
+// derive the fresh-input portion here. Returns nil when no usable token fields
+// are present (some Cursor versions / hook variants omit them entirely),
+// signaling "no data" rather than "all zeros".
+func tokenUsageFromStop(raw *stopHookInputRaw) *agent.TokenUsage {
+	totalInput := int(intFromJSON(raw.InputTokens))
+	output := int(intFromJSON(raw.OutputTokens))
+	if totalInput == 0 && output == 0 {
+		return nil
+	}
+	cacheRead := int(intFromJSON(raw.CacheReadTokens))
+	cacheWrite := int(intFromJSON(raw.CacheWriteTokens))
+	freshInput := totalInput - cacheRead - cacheWrite
+	if freshInput < 0 {
+		freshInput = 0
+	}
+	return &agent.TokenUsage{
+		InputTokens:         freshInput,
+		CacheCreationTokens: cacheWrite,
+		CacheReadTokens:     cacheRead,
+		OutputTokens:        output,
+		APICallCount:        1,
+	}
 }
 
 func (c *CursorAgent) parseSessionEnd(ctx context.Context, stdin io.Reader) (*agent.Event, error) {

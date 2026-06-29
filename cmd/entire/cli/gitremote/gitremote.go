@@ -56,6 +56,15 @@ var forgeToHost = func() map[string]string {
 	return m
 }()
 
+// IsSupportedForge reports whether forge is a known short forge id (e.g. "gh")
+// understood by the trails API. It rejects forge hostnames ("github.com") and
+// any other unrecognized value, so callers parsing a bare forge/owner/repo
+// triple can fail clearly instead of forwarding a malformed forge to the API.
+func IsSupportedForge(forge string) bool {
+	_, ok := forgeToHost[forge]
+	return ok
+}
+
 // CanonicalHost returns the canonical public host of the upstream forge.
 //
 // For direct git URLs this is just Host. For entire:// remotes — whose Host is

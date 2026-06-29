@@ -20,6 +20,8 @@ func newOrgCmd() *cobra.Command {
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newOrgCreateCmd())
 	cmd.AddCommand(newOrgListCmd())
+	cmd.AddCommand(newOrgGetCmd())
+	cmd.AddCommand(newOrgDeleteCmd())
 	return cmd
 }
 
@@ -58,12 +60,54 @@ func newOrgListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runCoreList(cmd, orgColumns, orgRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Org, error) {
-				out, err := c.ListOrgs(ctx, coreapi.ListOrgsParams{})
-				if err != nil {
-					return nil, err
-				}
-				return out.Orgs, nil
+				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Org, string, error) {
+					params := coreapi.ListOrgsParams{}
+					if cursor != "" {
+						params.PageToken = coreapi.NewOptString(cursor)
+					}
+					out, err := c.ListOrgs(ctx, params)
+					if err != nil {
+						return nil, "", err
+					}
+					return out.Orgs, out.NextPageToken.Or(""), nil
+				})
 			})
 		},
 	}
+}
+
+func newOrgGetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "get <org>",
+		Short: "Show an organization by name or ULID",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runCoreObject(cmd, orgColumns, orgRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Org, error) {
+				orgID, err := resolveOrgRef(ctx, c, args[0])
+				if err != nil {
+					return nil, err
+				}
+				return c.GetOrg(ctx, coreapi.GetOrgParams{OrgId: orgID})
+			})
+		},
+	}
+}
+
+func newOrgDeleteCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "delete <org>",
+		Short: "Delete an organization by name or ULID",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runControlPlaneDelete(cmd, "org", args[0],
+				func(ctx context.Context, c *coreapi.Client) (string, error) {
+					return resolveOrgRef(ctx, c, args[0])
+				},
+				func(ctx context.Context, c *coreapi.Client, id string) error {
+					return c.DeleteOrg(ctx, coreapi.DeleteOrgParams{OrgId: id})
+				})
+		},
+	}
+	addForceFlag(cmd)
+	return cmd
 }

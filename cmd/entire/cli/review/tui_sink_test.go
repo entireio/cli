@@ -6,34 +6,24 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
 
 func finishAndDismissTUI(t *testing.T, sink *TUISink, summary reviewtypes.RunSummary) {
 	t.Helper()
+	sink.RunFinished(summary)
 
 	done := make(chan struct{})
 	go func() {
-		sink.RunFinished(summary)
+		sink.PostRunComplete()
 		close(done)
 	}()
 
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
-	timeout := time.After(10 * time.Second)
-	for {
-		select {
-		case <-done:
-			return
-		case <-ticker.C:
-			// 'q' is an explicit post-finish exit key. (Any-key-quits was
-			// removed so the user can still Ctrl+O into completed output.)
-			sink.program.Send(tea.KeyPressMsg(tea.Key{Code: 'q', Text: "q"}))
-		case <-timeout:
-			t.Fatal("RunFinished() did not return within 10 seconds")
-		}
+	select {
+	case <-done:
+		return
+	case <-time.After(10 * time.Second):
+		t.Fatal("PostRunComplete() did not return within 10 seconds")
 	}
 }
 
@@ -48,7 +38,7 @@ func TestTUISink_StartIsIdempotent(t *testing.T) {
 	sink.Start()
 	sink.Start()
 
-	// Clean up: send RunFinished so the program exits, then Wait.
+	// Clean up: send RunFinished and then the explicit post-run completion signal.
 	finishAndDismissTUI(t, sink, reviewtypes.RunSummary{})
 
 	// Wait with a timeout to avoid hanging the test suite on failure.
@@ -68,6 +58,56 @@ func TestTUISink_StartIsIdempotent(t *testing.T) {
 
 // TestTUISink_WaitBeforeStart_IsNoOp verifies that calling Wait before Start
 // returns immediately without blocking.
+func TestTUIPostRunCompleteSinkFlushesAfterExit(t *testing.T) {
+	t.Parallel()
+	var tuiOut bytes.Buffer
+	sink := NewTUISink([]string{"agent-a"}, func() {}, &tuiOut, bytes.NewReader(nil))
+	sink.Start()
+	sink.RunFinished(reviewtypes.RunSummary{})
+
+	var postRunOut bytes.Buffer
+	postRunBuf := bytes.NewBufferString("final verdict\n")
+	done := make(chan struct{})
+	go func() {
+		tuiPostRunCompleteSink{tui: sink, buf: postRunBuf, out: &postRunOut}.RunFinished(reviewtypes.RunSummary{})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("post-run finalizer did not exit the TUI and flush output")
+	}
+	if got := postRunOut.String(); got != "final verdict\n" {
+		t.Fatalf("flushed output = %q, want final verdict", got)
+	}
+}
+
+func TestTUISink_PostRunCompleteDoesNotHangWhenProgramNeverConsumesQuit(t *testing.T) {
+	oldGrace := tuiPostRunCompleteGrace
+	tuiPostRunCompleteGrace = 10 * time.Millisecond
+	t.Cleanup(func() { tuiPostRunCompleteGrace = oldGrace })
+
+	var buf bytes.Buffer
+	sink := &TUISink{
+		program: tea.NewProgram(newReviewTUIModel([]string{"agent-a"}, func() {}), tea.WithOutput(&buf), tea.WithInput(bytes.NewReader(nil))),
+		started: true,
+		done:    make(chan struct{}), // deliberately never closed: models a stuck Bubble Tea shutdown.
+	}
+
+	done := make(chan struct{})
+	go func() {
+		sink.PostRunComplete()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("PostRunComplete hung when the TUI did not consume postRunCompleteMsg")
+	}
+}
+
 func TestTUISink_WaitBeforeStart_IsNoOp(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer

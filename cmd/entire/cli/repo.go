@@ -13,9 +13,10 @@ import (
 )
 
 // newRepoCmd is the hidden `entire repo` command group: control-plane
-// repository lifecycle (create, list within a project, get, delete) on the
-// Entire control plane. Git content operations (clone, log, diff, …) are
-// intentionally out of scope here. Surfaced via `entire labs`.
+// repository lifecycle (create, list within a project, get, delete) plus the
+// `clone` convenience that resolves a mirror and shells out to `git clone`.
+// Other git content operations (log, diff, …) remain intentionally out of scope
+// here. Surfaced via `entire labs`.
 func newRepoCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "repo",
@@ -27,6 +28,7 @@ func newRepoCmd() *cobra.Command {
 	cmd.AddCommand(newRepoListCmd())
 	cmd.AddCommand(newRepoGetCmd())
 	cmd.AddCommand(newRepoDeleteCmd())
+	cmd.AddCommand(newRepoCloneCmd())
 	cmd.AddCommand(newRepoMirrorCmd())
 	return cmd
 }
@@ -103,9 +105,13 @@ func newRepoCreateCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
+				projID, err := resolveProjectRef(ctx, c, projectID)
+				if err != nil {
+					return nil, err
+				}
 				body := &coreapi.CreateRepoInputBody{
 					Name:      args[0],
-					ProjectId: projectID,
+					ProjectId: projID,
 				}
 				if clusterHost != "" {
 					body.ClusterHost = coreapi.NewOptString(clusterHost)
@@ -118,7 +124,7 @@ func newRepoCreateCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&projectID, "project", "", "owning project ULID (required)")
+	cmd.Flags().StringVar(&projectID, "project", "", "owning project (name or ULID) (required)")
 	cmd.Flags().StringVar(&clusterHost, "cluster-host", "", "public host of the cluster to pin the repo to (defaults to the jurisdiction default)")
 	markRequired(cmd, "project")
 	return cmd
@@ -128,49 +134,74 @@ func newRepoListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list <project>",
 		Short: "List repositories in a project",
+		Long:  "List repositories in a project, addressed by name or ULID.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreList(cmd, repoColumns, repoRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Repo, error) {
-				out, err := c.ListProjectRepos(ctx, coreapi.ListProjectReposParams{ProjectId: args[0]})
+				projID, err := resolveProjectRef(ctx, c, args[0])
 				if err != nil {
 					return nil, err
 				}
-				return out.Repos, nil
+				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Repo, string, error) {
+					params := coreapi.ListProjectReposParams{ProjectId: projID}
+					if cursor != "" {
+						params.PageToken = coreapi.NewOptString(cursor)
+					}
+					out, err := c.ListProjectRepos(ctx, params)
+					if err != nil {
+						return nil, "", err
+					}
+					return out.Repos, out.NextPageToken.Or(""), nil
+				})
 			})
 		},
 	}
 }
 
 func newRepoGetCmd() *cobra.Command {
-	return &cobra.Command{
+	var project string
+	cmd := &cobra.Command{
 		Use:   "get <repo>",
-		Short: "Show a repository by ULID",
+		Short: "Show a repository by name or ULID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreObject(cmd, repoColumns, repoRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Repo, error) {
-				sc, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: args[0]})
+				repoID, err := resolveRepoRef(ctx, c, args[0], project)
 				if err != nil {
 					return nil, err
 				}
-				return sc, nil
+				return c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
 			})
 		},
 	}
+	bindRepoProjectFlag(cmd, &project)
+	return cmd
 }
 
 func newRepoDeleteCmd() *cobra.Command {
-	return &cobra.Command{
+	var project string
+	cmd := &cobra.Command{
 		Use:   "delete <repo>",
-		Short: "Delete a repository by ULID",
+		Short: "Delete a repository by name or ULID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-				if err := c.DeleteRepo(ctx, coreapi.DeleteRepoParams{RepoId: args[0]}); err != nil {
-					return err
-				}
-				cmd.Printf("Deleted repo %s\n", args[0])
-				return nil
-			})
+			return runControlPlaneDelete(cmd, "repo", args[0],
+				func(ctx context.Context, c *coreapi.Client) (string, error) {
+					return resolveRepoRef(ctx, c, args[0], project)
+				},
+				func(ctx context.Context, c *coreapi.Client, id string) error {
+					return c.DeleteRepo(ctx, coreapi.DeleteRepoParams{RepoId: id})
+				})
 		},
 	}
+	bindRepoProjectFlag(cmd, &project)
+	addForceFlag(cmd)
+	return cmd
+}
+
+// bindRepoProjectFlag wires the shared --project scope used to resolve a repo
+// addressed by name (a repo name is unique only within its project). Ignored
+// when the repo arg is already a ULID.
+func bindRepoProjectFlag(cmd *cobra.Command, project *string) {
+	cmd.Flags().StringVar(project, "project", "", "owning project (name or ULID); required when <repo> is a name")
 }

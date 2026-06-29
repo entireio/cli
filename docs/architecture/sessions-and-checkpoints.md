@@ -213,9 +213,11 @@ cumulative session transcript, scoped at read time via
 `checkpoint_transcript_start`), `transcript.jsonl` is pre-sliced to the
 checkpoint's own portion (`compact.Compact` is called with
 `StartLine = checkpoint_transcript_start`), so it needs no offset to consume.
-It is written into the checkpoint tree and pushed alongside `full.jsonl`, but
-the root `metadata.json` `sessions[].transcript` pointer still targets
-`full.jsonl`; pointing it at `transcript.jsonl` is deferred to a later change.
+It is written into the checkpoint tree and pushed alongside `full.jsonl`. The
+root `metadata.json` `sessions[].transcript` pointer keeps targeting
+`full.jsonl`; when a compact transcript was generated the session entry also
+carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted
+otherwise) so external readers can find it next to `full.jsonl`.
 CLI read paths (rewind/resume/explain) read `full.jsonl` by filename. Compact
 generation is best-effort: failures are logged but never fail the checkpoint
 write, and during finalization a failed regeneration keeps the previous
@@ -234,7 +236,8 @@ write, and during finalization a failed regeneration keeps the previous
   "sessions": [
     {
       "metadata": "/ab/c123def456/0/metadata.json",
-      "transcript": "/ab/c123def456/0/transcript.jsonl",
+      "transcript": "/ab/c123def456/0/full.jsonl",
+      "compact_transcript": "/ab/c123def456/0/transcript.jsonl",
       "content_hash": "/ab/c123def456/0/content_hash.txt",
       "prompt": "/ab/c123def456/0/prompt.txt"
     }
@@ -273,6 +276,41 @@ When condensing multiple concurrent sessions:
 - New `session_id` values are appended at the next index, so higher-numbered folders correspond to more recently introduced sessions, not necessarily the chronologically latest activity
 - `sessions` array in `CheckpointSummary` maps each session to its file paths
 - `files_touched` is merged from all sessions
+
+### Checkpoint Policy
+
+Repo-wide checkpoint policy lives at `refs/entire/policies/checkpoint`. The ref
+points at a commit whose tree contains `policy.json`:
+
+```json
+{
+  "checkpoint_version": "branch-v1",
+  "checkpoint_min_version": "branch-v1"
+}
+```
+
+`checkpoint_version` is the checkpoint format new writes should use.
+`checkpoint_min_version` is the oldest checkpoint format clients must be able
+to read for this repo. Missing policy fields default to `branch-v1`.
+
+Policy follows the configured checkpoint remote. `entire policy checkpoint`
+fetches the latest remote policy before validating requested changes, updates
+the local policy ref, and pushes only `refs/entire/policies/checkpoint`.
+Policy commits use the same signing settings as checkpoint commits.
+
+Hooks that run while ordinary git operations must keep working offline:
+post-commit and agent lifecycle hooks read only the local policy ref. If the
+local policy requires checkpoint writes this CLI does not support, they skip
+writing checkpoint data and warn only when running in an interactive terminal.
+The pre-push hook is the regular online sync point: it compares the remote
+policy ref with the local ref, fetches updated policy when needed, and evaluates
+the refreshed policy before pushing `entire/checkpoints/v1`. If policy refresh
+fails, the hook warns or logs the failure and lets the normal push continue.
+
+User-driven commands warn when the local policy indicates the CLI should be
+upgraded. Commands that need to decode checkpoint contents, such as
+`entire checkpoint explain` and `entire session resume`, fail when the target
+checkpoint uses an unsupported `checkpoint_version`.
 
 ### Checkpoint ID Linking
 

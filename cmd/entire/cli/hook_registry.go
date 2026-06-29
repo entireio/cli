@@ -152,6 +152,18 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	}
 
 	if event != nil {
+		// Cross-agent guard: when Cursor IDE invokes a hook configured under
+		// .claude/settings.json (because .cursor/hooks.json is missing), the
+		// hook payload's transcript_path proves the session belongs to Cursor.
+		// Skip dispatch so the session isn't claimed for the wrong agent (#1262).
+		if shouldSkipForwardedHook(ctx, ag, event) {
+			logging.Debug(ctx, "skipping forwarded hook: transcript belongs to another agent",
+				slog.String("hook", hookName),
+				slog.String("firing_agent", string(agentName)),
+				slog.String("session_ref", event.SessionRef),
+			)
+			return nil
+		}
 		// Lifecycle event — use the generic dispatcher
 		hookErr = DispatchLifecycleEvent(ctx, ag, event)
 	} else if agentName == agent.AgentNameClaudeCode && hookName == claudecode.HookNamePostTodo {

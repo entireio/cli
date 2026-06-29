@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -145,6 +146,38 @@ func pickContextName(f *contexts.File, coreURL, handle string) string {
 // sameIssuer compares two core URLs ignoring a trailing slash.
 func sameIssuer(a, b string) bool {
 	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
+}
+
+// LocalIdentityCacheKey returns a non-secret local auth identity key.
+func LocalIdentityCacheKey() (string, error) {
+	if raw := strings.TrimSpace(os.Getenv(EnvTokenVar)); raw != "" {
+		claims, err := tokens.ParseClaims(raw)
+		if err != nil {
+			return "", fmt.Errorf("parse %s claims: %w", EnvTokenVar, err)
+		}
+		return strings.Join([]string{
+			"env",
+			strings.TrimRight(claims.Issuer, "/"),
+			claims.Subject,
+			claims.Handle,
+			strings.Join(claims.Audience, ","),
+		}, "|"), nil
+	}
+
+	c, ok, err := activeContext()
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", nil
+	}
+	return strings.Join([]string{
+		"context",
+		strings.TrimRight(c.CoreURL, "/"),
+		c.Name,
+		c.Handle,
+		c.KeychainService,
+	}, "|"), nil
 }
 
 // LoginTokenForContext returns the login JWT stored for c, read from the

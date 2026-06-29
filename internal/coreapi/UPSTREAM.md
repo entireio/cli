@@ -37,4 +37,3 @@ upstream retires it.
     two-call lookup→delete with a single delete-by-coords route
     (`DELETE /mirrors?provider&owner&repo&clusterHost`); `mirror remove`
     now calls it directly and surfaces the new 404/403/503 contract. -->
-
