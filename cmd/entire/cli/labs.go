@@ -70,6 +70,11 @@ var experimentalCommands = []experimentalCommandInfo{
 		Invocation:  "entire why",
 		Summary:     "Show why a line exists (commit, checkpoint, prompt, session)",
 	},
+	{
+		CommandPath: []string{"experts"},
+		Invocation:  "entire experts",
+		Summary:     "Find people with prior session evidence for code",
+	},
 }
 
 func newLabsCmd() *cobra.Command {
@@ -120,6 +125,7 @@ Try:
   entire grant --help
   entire blame --help
   entire why --help
+  entire experts --help
 `
 }
 
