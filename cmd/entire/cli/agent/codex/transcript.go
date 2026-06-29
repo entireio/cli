@@ -526,16 +526,27 @@ func extractSpawnedAgentIDs(data []byte, fromOffset int) []string {
 }
 
 // agentIDFromSpawnOutput extracts the spawned child's agent_id from a spawn_agent
-// function_call_output payload ({"agent_id":"...","nickname":"..."}). Returns ""
-// for non-object outputs (e.g. a shell tool's plain-string output).
+// function_call_output payload. Codex's wire format puts the output in the
+// `output` field as a JSON *string* whose contents are JSON
+// (`"output":"{\"agent_id\":\"…\",\"nickname\":\"…\"}"`), so the string form is
+// the real case; the object form is also accepted defensively. Returns "" for
+// anything without an agent_id (e.g. a shell tool's plain-text output).
 func agentIDFromSpawnOutput(raw json.RawMessage) string {
 	var o struct {
 		AgentID string `json:"agent_id"`
 	}
-	if json.Unmarshal(raw, &o) != nil {
-		return ""
+	// Object form: "output":{"agent_id":...}
+	if json.Unmarshal(raw, &o) == nil && o.AgentID != "" {
+		return o.AgentID
 	}
-	return o.AgentID
+	// String form (real Codex): "output":"{\"agent_id\":...}"
+	var s string
+	if json.Unmarshal(raw, &s) == nil && s != "" {
+		if json.Unmarshal([]byte(s), &o) == nil {
+			return o.AgentID
+		}
+	}
+	return ""
 }
 
 // ExtractPrompts returns user prompts from the transcript starting at the given offset.

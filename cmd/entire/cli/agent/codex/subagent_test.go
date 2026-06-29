@@ -44,9 +44,9 @@ func functionCallLine(t *testing.T, name, arguments string) string {
 }
 
 // spawnAgentLines emits a spawn_agent function_call and its matching
-// function_call_output, mirroring real Codex rollouts: the output carries the
-// new child's agent_id ({"agent_id":"...","nickname":"..."}). This is how Codex
-// records a spawned subagent, and what discovery keys off.
+// function_call_output, mirroring real Codex rollouts. The output field is a JSON
+// *string* whose contents are JSON ("output":"{\"agent_id\":...}") — the real
+// Codex wire format — carrying the new child's agent_id, which discovery keys off.
 func spawnAgentLines(t *testing.T, callID, agentType, childID string) []string {
 	t.Helper()
 	call := rolloutLineJSON(t, "response_item", map[string]any{
@@ -55,9 +55,28 @@ func spawnAgentLines(t *testing.T, callID, agentType, childID string) []string {
 	})
 	out := rolloutLineJSON(t, "response_item", map[string]any{
 		"type": "function_call_output", "call_id": callID,
-		"output": map[string]any{"agent_id": childID, "nickname": "n"},
+		"output": `{"agent_id":"` + childID + `","nickname":"n"}`, // STRING, matching real Codex
 	})
 	return []string{call, out}
+}
+
+// agentIDFromSpawnOutput must handle the real Codex string form, the object form,
+// and reject non-agent outputs.
+func TestAgentIDFromSpawnOutput(t *testing.T) {
+	// Real Codex: output is a JSON string containing JSON.
+	stringForm, err := json.Marshal(`{"agent_id":"` + childID1 + `","nickname":"Raman"}`)
+	require.NoError(t, err)
+	require.Equal(t, childID1, agentIDFromSpawnOutput(stringForm))
+
+	// Defensive: object form.
+	objForm, err := json.Marshal(map[string]any{"agent_id": childID2, "nickname": "Bohr"})
+	require.NoError(t, err)
+	require.Equal(t, childID2, agentIDFromSpawnOutput(objForm))
+
+	// A shell tool's plain-text string output yields no id.
+	shellForm, err := json.Marshal("Command: cat > hello.txt\nDone")
+	require.NoError(t, err)
+	require.Empty(t, agentIDFromSpawnOutput(shellForm))
 }
 
 func tokenCountLine(t *testing.T, input, cached, output int) string {
