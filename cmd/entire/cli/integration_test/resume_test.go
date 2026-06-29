@@ -11,8 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/redact"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 )
@@ -701,11 +705,14 @@ func TestResume_LocalLogNewerTimestamp_ForceOverwrites(t *testing.T) {
 	}
 }
 
-// TestResume_ExistingLocalLog_KeptEvenWhenCheckpointNewer verifies that an
-// existing local log is kept without --force even when the checkpoint transcript
-// is newer than the local copy. "There is a local log" is what matters, not which
-// side is newer; --force is the only way to overwrite it.
-func TestResume_ExistingLocalLog_KeptEvenWhenCheckpointNewer(t *testing.T) {
+// TestResume_DivergedLocalLog_KeptWithoutForce verifies the divergence guard: a
+// local log whose content diverges from the checkpoint is kept (not overwritten)
+// without --force, even though the checkpoint's last entry is newer by timestamp.
+// A newer timestamp alone doesn't prove the checkpoint is a clean extension — the
+// local log here holds entries the checkpoint lacks, so overwriting would lose
+// local-only work. (The clean-extension refresh path is covered end-to-end by
+// TestResume_RefreshesUpdatedCheckpointFromRemote.)
+func TestResume_DivergedLocalLog_KeptWithoutForce(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 
@@ -731,37 +738,40 @@ func TestResume_ExistingLocalLog_KeptEvenWhenCheckpointNewer(t *testing.T) {
 
 	featureBranch := env.GetCurrentBranch()
 
-	// Create a local log with an OLDER timestamp than the checkpoint
+	// Local log diverges from the checkpoint (entirely different content) and has
+	// an OLDER last timestamp — so timestamps alone would say "checkpoint newer".
 	if err := os.MkdirAll(env.ClaudeProjectDir, 0o755); err != nil {
 		t.Fatalf("failed to create Claude project dir: %v", err)
 	}
 	existingLog := filepath.Join(env.ClaudeProjectDir, session.ID+".jsonl")
-	// Use a timestamp far in the past
 	pastTimestamp := time.Now().Add(-7 * 24 * time.Hour).UTC().Format(time.RFC3339)
-	olderContent := fmt.Sprintf(`{"type":"human","timestamp":"%s","message":{"content":"older local work"}}`, pastTimestamp)
-	if err := os.WriteFile(existingLog, []byte(olderContent), 0o644); err != nil {
+	divergentContent := fmt.Sprintf(`{"type":"human","timestamp":"%s","message":{"content":"local-only work"}}`, pastTimestamp)
+	if err := os.WriteFile(existingLog, []byte(divergentContent), 0o644); err != nil {
 		t.Fatalf("failed to write existing log: %v", err)
 	}
 
 	// Switch to main
 	env.GitCheckoutBranch(masterBranch)
 
-	// Resume WITHOUT --force should succeed and keep the existing local log.
+	// Resume WITHOUT --force should succeed and KEEP the divergent local log.
 	output, err := env.RunResume(featureBranch)
 	if err != nil {
-		t.Fatalf("resume failed (should succeed and keep existing log): %v\nOutput: %s", err, output)
+		t.Fatalf("resume failed (should succeed and keep the divergent log): %v\nOutput: %s", err, output)
 	}
-	if !strings.Contains(output, "Keeping existing") {
-		t.Errorf("output should indicate the existing log was kept, got: %s", output)
+	if !strings.Contains(output, "Keeping") {
+		t.Errorf("output should indicate the divergent log was kept, got: %s", output)
 	}
 
-	// Verify local log was NOT overwritten (kept as-is, even though checkpoint is newer).
+	// Verify the divergent local log was NOT overwritten.
 	data, err := os.ReadFile(existingLog)
 	if err != nil {
 		t.Fatalf("failed to read log: %v", err)
 	}
-	if !strings.Contains(string(data), "older local work") {
-		t.Errorf("local log should have been kept without --force, but content changed to: %s", string(data))
+	if !strings.Contains(string(data), "local-only work") {
+		t.Errorf("divergent local log should have been kept, but content changed to: %s", string(data))
+	}
+	if strings.Contains(string(data), "Create hello method") {
+		t.Errorf("divergent local log must not be overwritten by the checkpoint without --force, got: %s", string(data))
 	}
 }
 
@@ -1151,5 +1161,108 @@ func TestResume_RelocatedRepo(t *testing.T) {
 	// Verify output contains session info
 	if !strings.Contains(output, "Restored session") {
 		t.Errorf("output should contain 'Restored session', got: %s", output)
+	}
+}
+
+// TestResume_RefreshesUpdatedCheckpointFromRemote reproduces the cross-machine
+// scenario: a session is continued and re-pushed from another machine, updating
+// the checkpoint's content on the remote WITHOUT a new code commit on the branch.
+// Because the checkpoint ID is already resolvable from the local (stale) v1, a
+// resume that only reads local data would keep the outdated log. Resume must
+// first refresh the metadata branch from the remote, then (via the newer-side
+// comparison) update the local log from the freshly fetched checkpoint.
+func TestResume_RefreshesUpdatedCheckpointFromRemote(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	// Machine A: create a session and commit it. Real condensation produces a
+	// checkpoint on the branch trailer plus the entire/checkpoints/v1 branch.
+	session := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	content := "def hello; end"
+	env.WriteFile("hello.rb", content)
+	session.CreateTranscript(
+		"Create hello method",
+		[]FileChange{{Path: "hello.rb", Content: content}},
+	)
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+	env.GitCommitWithShadowHooks("Create hello method", "hello.rb")
+	featureBranch := env.GetCurrentBranch()
+	cpID := env.GetLatestCheckpointID()
+
+	// Publish the branch (via SetupBareRemote's HEAD push) and the checkpoint
+	// metadata branch (via the pre-push hook) to a bare origin.
+	bare := env.SetupBareRemote()
+	env.RunPrePush("origin")
+
+	// Machine B: clone and resume once. This restores the original transcript and
+	// leaves the clone holding a now-stale local copy of v1.
+	clone := env.CloneFrom(bare)
+	out1, err := clone.RunResume(featureBranch)
+	if err != nil {
+		t.Fatalf("first resume on clone failed: %v\nOutput: %s", err, out1)
+	}
+	cloneLog := filepath.Join(clone.ClaudeProjectDir, session.ID+".jsonl")
+	data1, err := os.ReadFile(cloneLog)
+	if err != nil {
+		t.Fatalf("clone session log not restored on first resume: %v", err)
+	}
+	if !strings.Contains(string(data1), "Create hello method") {
+		t.Fatalf("first resume should restore the original transcript, got: %s", string(data1))
+	}
+
+	// Machine A: the session is continued and re-pushed, updating the SAME
+	// checkpoint's transcript to a newer version without a new code commit on the
+	// branch. The continuation cleanly EXTENDS the existing transcript (appends a
+	// newer entry to what the clone already restored), so resume treats it as a
+	// safe refresh rather than a divergence. Overwrite the checkpoint/session in
+	// A's v1 store (findSessionIndex reuses the slot for a matching session ID),
+	// then push v1 to origin.
+	repo, err := git.PlainOpen(env.RepoDir)
+	if err != nil {
+		t.Fatalf("failed to open machine-A repo: %v", err)
+	}
+	defer repo.Close()
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	newerTranscript := data1
+	if len(newerTranscript) > 0 && newerTranscript[len(newerTranscript)-1] != '\n' {
+		newerTranscript = append(newerTranscript, '\n')
+	}
+	newerTranscript = append(newerTranscript, []byte(`{"type":"user","timestamp":"2099-01-01T00:00:00Z","message":{"content":[{"type":"text","text":"continued on machine A"}]}}`+"\n")...)
+	if err := store.Write(env.T.Context(), checkpoint.Session{
+		CheckpointID: id.MustCheckpointID(cpID),
+		SessionID:    session.ID,
+		Strategy:     "manual-commit",
+		Agent:        agent.AgentTypeClaudeCode,
+		Transcript:   redact.AlreadyRedacted(newerTranscript),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+		CreatedAt:    time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("failed to overwrite checkpoint transcript: %v", err)
+	}
+	env.GitPush("origin", "entire/checkpoints/v1")
+
+	// Machine B: resume again. The checkpoint ID is already resolvable from the
+	// clone's local v1, so without the remote refresh resume would keep the stale
+	// log. With the refresh it fetches the updated v1, sees the checkpoint is newer
+	// than the local log, and refreshes it.
+	out2, err := clone.RunResume(featureBranch)
+	if err != nil {
+		t.Fatalf("second resume on clone failed: %v\nOutput: %s", err, out2)
+	}
+	if !strings.Contains(out2, "Checkpoint has newer entries") {
+		t.Errorf("second resume should refresh from the updated remote checkpoint, got: %s", out2)
+	}
+	data2, err := os.ReadFile(cloneLog)
+	if err != nil {
+		t.Fatalf("failed to read clone session log after second resume: %v", err)
+	}
+	if !strings.Contains(string(data2), "continued on machine A") {
+		t.Errorf("clone log should have been refreshed from the updated remote checkpoint, got: %s", string(data2))
 	}
 }

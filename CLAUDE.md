@@ -33,8 +33,17 @@ their canonical paths are still runnable.
   `resume` with a branch arg switches to it and resumes its session; with no arg
   it opens an interactive picker of stopped sessions (across all worktrees),
   resolving each to its branch and pointing at the owning worktree when the
-  branch is checked out elsewhere. Resume keeps an existing local session log
-  as-is by default (`--force` overwrites it from the checkpoint).
+  branch is checked out elsewhere. By default resume keeps an existing local
+  session log as-is, except when the checkpoint cleanly extends it — i.e. the
+  local log is a prefix of the checkpoint (e.g. the session was continued and
+  pushed from another machine) — in which case it refreshes the local log from
+  the checkpoint since only appended entries are added. If the local log is
+  *newer* than the checkpoint, or the two have *diverged* (the checkpoint's last
+  entry is newer but the local log holds entries the checkpoint lacks), resume
+  prompts before overwriting and keeps the local log when non-interactive.
+  `--force` overwrites unconditionally from the checkpoint. Before reading, resume
+  fetches the checkpoint metadata branch from the remote so a remotely-updated
+  checkpoint is picked up even when its ID already resolves locally.
 - `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`, plus
   the deprecated `rewind` (functional, prints a cobra deprecation message, will
   be removed in a future release)

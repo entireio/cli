@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -662,19 +663,12 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 		return nil, fmt.Errorf("failed to get worktree root: %w", err)
 	}
 
-	// By default (no --force), never overwrite a session log that already exists
-	// locally: the on-disk transcript is the live session being resumed, so we
-	// keep it and only restore logs that are missing. The write loop below skips
-	// any session whose ID is in skipExisting but still reports it so the caller
-	// prints its resume command. --force overwrites everything from the checkpoint.
-	skipExisting := map[string]bool{}
-	if !force {
-		for _, sess := range s.classifySessionsForRestore(ctx, repoRoot, store, point.CheckpointID, summary) {
-			if sess.Status != StatusNew {
-				skipExisting[sess.SessionID] = true
-			}
-		}
-	}
+	// Decide per session whether to keep the existing local log or refresh it
+	// from the checkpoint. The write loop reads each decision: StatusUnchanged is
+	// kept (still reported so the caller prints its resume command),
+	// StatusCheckpointNewer is overwritten with an explanatory note, everything
+	// else is written silently.
+	decision := s.decideRestoreActions(ctx, repoRoot, store, point.CheckpointID, summary, errW, force)
 
 	// Count sessions to restore
 	totalSessions := len(summary.Sessions)
@@ -742,7 +736,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 
 		// Local log already present and not forcing: keep it untouched, but still
 		// report the session so the caller can print its resume command.
-		if skipExisting[sessionID] {
+		if decision[sessionID] == StatusUnchanged {
 			if totalSessions > 1 {
 				fmt.Fprintf(w, "  Session %d: keeping existing local log\n", i+1)
 			} else {
@@ -755,6 +749,16 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 				CreatedAt: content.Metadata.CreatedAt,
 			})
 			continue
+		}
+
+		// Tell the user why an existing local log is being overwritten when the
+		// checkpoint is the newer side (the common cross-machine case).
+		if decision[sessionID] == StatusCheckpointNewer {
+			if totalSessions > 1 {
+				fmt.Fprintf(w, "  Session %d: checkpoint has newer entries, updating local log\n", i+1)
+			} else {
+				fmt.Fprintf(w, "Checkpoint has newer entries than the local log; updating it.\n")
+			}
 		}
 
 		if totalSessions > 1 {
@@ -847,8 +851,9 @@ type SessionRestoreStatus int
 const (
 	StatusNew             SessionRestoreStatus = iota // Local file doesn't exist
 	StatusUnchanged                                   // Local and checkpoint are the same
-	StatusCheckpointNewer                             // Checkpoint has newer entries
-	StatusLocalNewer                                  // Local has newer entries (conflict)
+	StatusCheckpointNewer                             // Checkpoint cleanly extends the local log (safe to overwrite)
+	StatusLocalNewer                                  // Local has a newer last entry than the checkpoint (conflict)
+	StatusDiverged                                    // Checkpoint's last entry is newer, but the logs diverged: the local log has entries the checkpoint lacks (conflict)
 )
 
 // SessionRestoreInfo contains information about a session being restored.
@@ -858,6 +863,47 @@ type SessionRestoreInfo struct {
 	Status         SessionRestoreStatus // Status of this session
 	LocalTime      time.Time
 	CheckpointTime time.Time
+}
+
+// decideRestoreActions classifies every session in the checkpoint and returns
+// the per-session restore decision under the default (non-force) resume policy,
+// keyed by session ID, based on which side has the newer last entry:
+//   - StatusNew             → restore (no local file yet).
+//   - StatusUnchanged       → keep local (identical; restoring is a no-op).
+//   - StatusCheckpointNewer → restore: the checkpoint cleanly extends the local
+//     log (local is a prefix of it), e.g. another machine continued the session
+//     and pushed. It only appends, so nothing local is lost.
+//   - StatusLocalNewer      → conflict: the local log has a newer last entry than
+//     the checkpoint.
+//   - StatusDiverged        → conflict: the checkpoint's last entry is newer but
+//     the logs diverged (the local log holds entries the checkpoint lacks), so a
+//     plain overwrite would drop local-only work.
+//
+// Both conflict statuses prompt before overwriting; on decline (or when we can't
+// prompt) the decision is demoted to StatusUnchanged so live local work is kept
+// rather than silently clobbered.
+//
+// With force the map is empty, so every session restores unconditionally.
+func (s *ManualCommitStrategy) decideRestoreActions(ctx context.Context, repoRoot string, store cpkg.SessionReader, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary, errW io.Writer, force bool) map[string]SessionRestoreStatus {
+	decision := map[string]SessionRestoreStatus{}
+	if force {
+		return decision
+	}
+
+	var conflicts []SessionRestoreInfo
+	for _, sess := range s.classifySessionsForRestore(ctx, repoRoot, store, checkpointID, summary) {
+		decision[sess.SessionID] = sess.Status
+		if sess.Status == StatusLocalNewer || sess.Status == StatusDiverged {
+			conflicts = append(conflicts, sess)
+		}
+	}
+	if len(conflicts) > 0 && !ConfirmOverwriteNewerLocalLogs(errW, conflicts) {
+		// Declined (or non-interactive): keep the local logs as-is.
+		for _, sess := range conflicts {
+			decision[sess.SessionID] = StatusUnchanged
+		}
+	}
+	return decision
 }
 
 // classifySessionsForRestore checks all sessions in a checkpoint and returns info
@@ -908,6 +954,14 @@ func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, r
 				status = StatusUnchanged
 			}
 		}
+		// A newer checkpoint timestamp alone doesn't prove the checkpoint is a
+		// clean forward extension of the local log: two machines could have
+		// continued the same session independently. Only treat it as a safe
+		// overwrite when the local log is a prefix of the checkpoint; otherwise
+		// it's a divergence conflict that must be confirmed, not silently lost.
+		if status == StatusCheckpointNewer && !localIsCleanContinuation(localPath, content.Transcript) {
+			status = StatusDiverged
+		}
 
 		sessions = append(sessions, SessionRestoreInfo{
 			SessionID:      sessionID,
@@ -943,6 +997,65 @@ func ClassifyTimestamps(localTime, checkpointTime time.Time) SessionRestoreStatu
 	return StatusUnchanged
 }
 
+// localIsCleanContinuation reports whether the checkpoint transcript is a clean
+// forward extension of the on-disk local log. A missing/unreadable local file is
+// treated as NOT a clean continuation (conservative: prefer confirming the
+// overwrite over silently clobbering whatever is there).
+func localIsCleanContinuation(localPath string, checkpoint []byte) bool {
+	local, err := os.ReadFile(localPath) //nolint:gosec // path is derived from the agent's session dir
+	if err != nil {
+		return false
+	}
+	return TranscriptIsCleanContinuation(local, checkpoint)
+}
+
+// TranscriptIsCleanContinuation reports whether checkpoint is a clean forward
+// extension of local: every line of local equals the corresponding line of
+// checkpoint, and checkpoint has at least as many lines. Transcripts are
+// append-only JSONL, so a clean continuation means the checkpoint only appended
+// entries and overwriting the local log with it loses nothing. When false the
+// two have diverged — the local log holds lines the checkpoint lacks — and
+// overwriting would drop local-only work. Blank lines are ignored so a trailing
+// newline on either side doesn't register as divergence.
+//
+// The transcripts are walked line-by-line in place (no full split/copy) since
+// session logs can be large.
+func TranscriptIsCleanContinuation(local, checkpoint []byte) bool {
+	var li, ci int
+	for {
+		localLine, ok := nextNonBlankLine(local, &li)
+		if !ok {
+			return true // local exhausted: every local line matched a checkpoint line
+		}
+		checkpointLine, ok := nextNonBlankLine(checkpoint, &ci)
+		if !ok {
+			return false // checkpoint ran out before local: local has extra lines
+		}
+		if !bytes.Equal(localLine, checkpointLine) {
+			return false
+		}
+	}
+}
+
+// nextNonBlankLine returns the next non-blank line in data starting at *pos and
+// advances *pos past it. The returned slice aliases data (no allocation). ok is
+// false once the input is exhausted.
+func nextNonBlankLine(data []byte, pos *int) (line []byte, ok bool) {
+	for *pos < len(data) {
+		seg := data[*pos:]
+		if nl := bytes.IndexByte(seg, '\n'); nl >= 0 {
+			seg = seg[:nl]
+			*pos += nl + 1
+		} else {
+			*pos = len(data)
+		}
+		if len(bytes.TrimSpace(seg)) != 0 {
+			return seg, true
+		}
+	}
+	return nil, false
+}
+
 // StatusToText returns a human-readable status string.
 func StatusToText(status SessionRestoreStatus) string {
 	switch status {
@@ -954,6 +1067,8 @@ func StatusToText(status SessionRestoreStatus) string {
 		return "(checkpoint is newer)"
 	case StatusLocalNewer:
 		return "(local is newer)" // shouldn't appear in non-conflict list
+	case StatusDiverged:
+		return "(diverged)" // shouldn't appear in non-conflict list
 	default:
 		return ""
 	}
@@ -969,14 +1084,14 @@ func PromptOverwriteNewerLogs(errW io.Writer, sessions []SessionRestoreInfo) (bo
 	// Separate conflicting and non-conflicting sessions
 	var conflicting, nonConflicting []SessionRestoreInfo
 	for _, s := range sessions {
-		if s.Status == StatusLocalNewer {
+		if s.Status == StatusLocalNewer || s.Status == StatusDiverged {
 			conflicting = append(conflicting, s)
 		} else {
 			nonConflicting = append(nonConflicting, s)
 		}
 	}
 
-	fmt.Fprintf(errW, "\nWarning: Local session log(s) have newer entries than the checkpoint:\n")
+	fmt.Fprintf(errW, "\nWarning: overwriting would lose local session log entries the checkpoint doesn't have:\n")
 	for _, info := range conflicting {
 		// Show prompt if available, otherwise fall back to session ID
 		if info.Prompt != "" {
@@ -1023,4 +1138,27 @@ func PromptOverwriteNewerLogs(errW io.Writer, sessions []SessionRestoreInfo) (bo
 	}
 
 	return confirmed, nil
+}
+
+// ConfirmOverwriteNewerLocalLogs reports whether local logs that are newer than
+// the checkpoint should be overwritten. It prompts interactively; when we can't
+// prompt (non-TTY/CI), it never silently clobbers newer local work — it keeps
+// the local logs and tells the user to rerun with --force. Errors from the
+// prompt are treated as "keep" so a resume is never aborted by a single
+// conflicting session.
+func ConfirmOverwriteNewerLocalLogs(errW io.Writer, conflicts []SessionRestoreInfo) bool {
+	if !interactive.CanPromptInteractively() {
+		for _, info := range conflicts {
+			// This message can land in CI logs / captured stderr, so identify the
+			// conflict by session ID only — never echo prompt text (user content).
+			fmt.Fprintf(errW, "Keeping local session log %s: it has entries the checkpoint doesn't (use --force to overwrite).\n", info.SessionID)
+		}
+		return false
+	}
+	overwrite, err := PromptOverwriteNewerLogs(errW, conflicts)
+	if err != nil {
+		fmt.Fprintf(errW, "Keeping local session log(s): %v\n", err)
+		return false
+	}
+	return overwrite
 }

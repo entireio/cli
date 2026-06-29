@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -197,6 +198,12 @@ func resumeByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID i
 		return errors.New("no checkpoint to resume")
 	}
 
+	// Refresh the checkpoint metadata branch from the remote first so we read the
+	// latest checkpoint content even when this checkpoint ID is already resolvable
+	// locally (e.g. the session was continued and re-pushed elsewhere, updating
+	// the v1 branch content without a new code commit on this branch).
+	refreshMetadataFromRemote(ctx, errW)
+
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
@@ -230,6 +237,12 @@ func resumeByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID i
 
 func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName string, force bool) error {
 	logCtx := logging.WithComponent(ctx, "resume")
+
+	// Refresh the checkpoint metadata branch from the remote before reading, so a
+	// checkpoint whose content was updated remotely (without a new code commit on
+	// this branch) is picked up even though its ID is already resolvable locally.
+	// This runs before opening the repo so the fresh handle sees the fetched refs.
+	refreshMetadataFromRemote(ctx, errW)
 
 	repo, err := openRepository(ctx)
 	if err != nil {
@@ -827,6 +840,53 @@ func checkRemoteMetadata(
 	return nil
 }
 
+// refreshMetadataFromRemote best-effort fetches the latest checkpoint metadata
+// branch from the checkpoint remote (or origin) and advances the local primary
+// ref to match. Resume otherwise reads checkpoint content straight from the local
+// store and never notices that the remote has a newer version of the *same*
+// checkpoint ID — the case where a session was continued and re-pushed from
+// another machine, updating the v1 branch content without a new code commit on
+// the working branch. The fetch helpers advance the local primary ref (via
+// SafelyAdvanceLocalRef, which never drops local-only commits), so a subsequently
+// opened repo reads the fresh content. Failures (offline, no remote, branch not
+// on origin yet) are logged and ignored so resume still works from local data.
+func refreshMetadataFromRemote(ctx context.Context, errW io.Writer) {
+	refs := checkpoint.ResolveRefs(ctx)
+	if !refs.ReadBootstrappableFromOrigin() {
+		return
+	}
+
+	// Surface a spinner while the network fetch runs so resume doesn't appear to
+	// hang. Gate it on CanPromptInteractively (consistent with FetchBlobsByHash)
+	// so agent/CI invocations stay silent even when stderr is a pty. startSpinner
+	// additionally no-ops the animation on non-terminal writers and only draws
+	// past its initial delay; stop(false) erases the transient line.
+	if interactive.CanPromptInteractively() {
+		stop := startSpinner(errW, "Checking remote for newer checkpoints")
+		defer stop(false)
+	}
+
+	// Prefer the checkpoint remote when configured — that's where checkpoints
+	// live, and they may not exist on origin at all.
+	if remote.Configured(ctx) {
+		err := FetchMetadataFromCheckpointRemote(ctx)
+		if err == nil {
+			return
+		}
+		logging.Debug(ctx, "resume: checkpoint-remote metadata refresh failed, trying origin",
+			slog.String("error", err.Error()),
+		)
+	}
+
+	// Tree-only fetch from origin is cheap (blobs are pulled on demand by the
+	// checkpoint store's BlobFetcher) and incremental after the first fetch.
+	if err := FetchMetadataTreeOnly(ctx); err != nil {
+		logging.Debug(ctx, "resume: metadata refresh from origin failed, using local checkpoint data",
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
 // promoteRemoteTrackingPrimary advances the local primary ref to match origin's
 // remote-tracking ref. Without this, callers reading checkpoint metadata via
 // the local ref miss checkpoints already fetched into refs/remotes/origin/...:
@@ -942,10 +1002,15 @@ func displayRestoredSessions(w io.Writer, sessions []strategy.RestoredSession) e
 // By default it never overwrites an existing local session log — if one is present it is
 // kept and only the resume command is printed; --force overwrites it from the checkpoint.
 // A missing local log is always restored from the checkpoint.
-func resumeSingleSession(ctx context.Context, w, _ io.Writer, ag agent.Agent, sessionID string, checkpointID id.CheckpointID, repoRoot string, force bool) error {
+func resumeSingleSession(ctx context.Context, w, errW io.Writer, ag agent.Agent, sessionID string, checkpointID id.CheckpointID, repoRoot string, force bool) error {
 	sessionLogPath, err := resolveTranscriptPath(ctx, sessionID, ag)
 	if err != nil {
 		return fmt.Errorf("failed to resolve transcript path: %w", err)
+	}
+
+	printResumeCmd := func() {
+		fmt.Fprintf(w, "\nTo continue this session:\n")
+		fmt.Fprintf(w, "  %s\n", ag.FormatResumeCommand(sessionID))
 	}
 
 	if checkpointID.IsEmpty() {
@@ -953,8 +1018,7 @@ func resumeSingleSession(ctx context.Context, w, _ io.Writer, ag agent.Agent, se
 			slog.String("checkpoint_id", checkpointID.String()),
 		)
 		fmt.Fprintf(w, "Session '%s' found in commit trailer but session log not available\n", sessionID)
-		fmt.Fprintf(w, "\nTo continue this session:\n")
-		fmt.Fprintf(w, "  %s\n", ag.FormatResumeCommand(sessionID))
+		printResumeCmd()
 		return nil
 	}
 
@@ -982,8 +1046,7 @@ func resumeSingleSession(ctx context.Context, w, _ io.Writer, ag agent.Agent, se
 				slog.String("session_id", sessionID),
 			)
 			fmt.Fprintf(w, "Session '%s' found in commit trailer but session log not available\n", sessionID)
-			fmt.Fprintf(w, "\nTo continue this session:\n")
-			fmt.Fprintf(w, "  %s\n", ag.FormatResumeCommand(sessionID))
+			printResumeCmd()
 			return nil
 		}
 		logging.Error(ctx, "resume session failed",
@@ -994,15 +1057,50 @@ func resumeSingleSession(ctx context.Context, w, _ io.Writer, ag agent.Agent, se
 		return fmt.Errorf("failed to get session log: %w", err)
 	}
 
-	// By default, never overwrite a session log that already exists locally: the
-	// on-disk transcript is the live session the user is resuming, so we keep it
-	// and just print the resume command. --force overwrites it from the checkpoint.
+	// By default (no --force), decide based on how the local log relates to the
+	// checkpoint rather than blindly keeping any existing local log. Mirrors the
+	// multi-session policy in strategy.RestoreLogsOnly:
+	//   - checkpoint cleanly extends local → overwrite (only appends; nothing lost).
+	//   - local newer, or diverged (checkpoint newer but not a clean extension)
+	//     → conflict: prompt before overwriting; keep on decline.
+	//   - unchanged/no checkpoint timestamp → keep the local log.
+	// --force always overwrites.
 	if !force {
 		if _, statErr := os.Stat(sessionLogPath); statErr == nil {
-			fmt.Fprintf(w, "Keeping existing local session log for '%s' (use --force to overwrite from checkpoint).\n", sessionID)
-			fmt.Fprintf(w, "\nTo continue this session:\n")
-			fmt.Fprintf(w, "  %s\n", ag.FormatResumeCommand(sessionID))
-			return nil
+			localTime := paths.GetLastTimestampFromFile(sessionLogPath)
+			checkpointTime := paths.GetLastTimestampFromBytes(logContent)
+			status := strategy.ClassifyTimestamps(localTime, checkpointTime)
+			// A newer checkpoint timestamp only makes overwriting safe if the
+			// checkpoint is a clean forward extension of the local log; otherwise
+			// the logs diverged and we must confirm before dropping local entries.
+			if status == strategy.StatusCheckpointNewer {
+				localBytes, readErr := os.ReadFile(sessionLogPath) //nolint:gosec // sessionLogPath is validated by resolveTranscriptPath
+				if readErr != nil || !strategy.TranscriptIsCleanContinuation(localBytes, logContent) {
+					status = strategy.StatusDiverged
+				}
+			}
+			switch status {
+			case strategy.StatusCheckpointNewer:
+				fmt.Fprintf(w, "Checkpoint has newer entries than the local log for '%s'; updating it.\n", sessionID)
+				// fall through to the write below
+			case strategy.StatusLocalNewer, strategy.StatusDiverged:
+				conflict := []strategy.SessionRestoreInfo{{
+					SessionID:      sessionID,
+					Status:         status,
+					LocalTime:      localTime,
+					CheckpointTime: checkpointTime,
+				}}
+				if !strategy.ConfirmOverwriteNewerLocalLogs(errW, conflict) {
+					printResumeCmd()
+					return nil
+				}
+				// fall through to the write below
+			case strategy.StatusNew, strategy.StatusUnchanged:
+				// File present but identical (or no parseable timestamp): keep it.
+				fmt.Fprintf(w, "Keeping existing local session log for '%s' (use --force to overwrite from checkpoint).\n", sessionID)
+				printResumeCmd()
+				return nil
+			}
 		}
 	}
 
@@ -1036,8 +1134,7 @@ func resumeSingleSession(ctx context.Context, w, _ io.Writer, ag agent.Agent, se
 
 	fmt.Fprintf(w, "✓ Session restored to: %s\n", sessionLogPath)
 	fmt.Fprintf(w, "  Session: %s\n", sessionID)
-	fmt.Fprintf(w, "\nTo continue this session:\n")
-	fmt.Fprintf(w, "  %s\n", ag.FormatResumeCommand(sessionID))
+	printResumeCmd()
 
 	return nil
 }
