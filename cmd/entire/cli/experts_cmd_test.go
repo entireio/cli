@@ -78,10 +78,17 @@ func TestFetchExpertsPostsRequestShape(t *testing.T) {
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		body, _ := io.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
 		gotBody = string(body)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"repo_full_name":"acme/widget","scopes":["src/foo.ts"],"query":null,"experts":[],"source":"db"}`))
+		_, err = w.Write([]byte(`{"repo_full_name":"acme/widget","scopes":["src/foo.ts"],"query":null,"experts":[],"source":"db"}`))
+		if err != nil {
+			t.Errorf("write response: %v", err)
+		}
 	}))
 	t.Cleanup(srv.Close)
 
@@ -120,6 +127,15 @@ func TestBuildExpertsRequestNormalizesLocalPathsToRepoRelative(t *testing.T) {
 	require.Equal(t, "cmd/entire/cli/experts_cmd.go", label)
 
 	req, label, err = buildExpertsRequest(context.Background(), "acme", "widget", expertsCommandOptions{
+		Subject: "cmd/entire/cli/experts_cmd.go",
+		Limit:   5,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"cmd/entire/cli/experts_cmd.go"}, req.Scopes)
+	require.Equal(t, "cmd/entire/cli/experts_cmd.go", label)
+
+	req, label, err = buildExpertsRequest(context.Background(), "acme", "widget", expertsCommandOptions{
 		Subject: filepath.Join(repoDir, "cmd", "entire", "cli", "experts_cmd.go"),
 		Limit:   5,
 	})
@@ -146,4 +162,49 @@ func TestBuildExpertsRequestNormalizesLocalDirectoriesToRepoRelativePrefix(t *te
 	require.NoError(t, err)
 	require.Equal(t, []string{"billing/webhooks/"}, req.Scopes)
 	require.Equal(t, "billing/webhooks/", label)
+}
+
+func TestBuildExpertsRequestRejectsStagedWithRepoOverride(t *testing.T) {
+	req, label, err := buildExpertsRequest(context.Background(), "acme", "widget", expertsCommandOptions{
+		RepoOverride: "gh/acme/widget",
+		Staged:       true,
+		Limit:        5,
+	})
+
+	require.ErrorContains(t, err, "--staged cannot be combined with --repo")
+	require.Empty(t, label)
+	require.Empty(t, req.Scopes)
+}
+
+func TestBuildExpertsRequestRejectsRepoRootScope(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	t.Chdir(repoDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	_, _, err := buildExpertsRequest(context.Background(), "acme", "widget", expertsCommandOptions{
+		Subject: ".",
+		Limit:   5,
+	})
+
+	require.ErrorContains(t, err, "repo root scope is not supported")
+}
+
+func TestBuildExpertsRequestAllowsQueryOutsideLocalWorktree(t *testing.T) {
+	t.Chdir(t.TempDir())
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	req, label, err := buildExpertsRequest(context.Background(), "acme", "widget", expertsCommandOptions{
+		RepoOverride: "gh/acme/widget",
+		Subject:      "stripe webhook retry logic",
+		Limit:        5,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "stripe webhook retry logic", req.Query)
+	require.Empty(t, req.Scopes)
+	require.Equal(t, "stripe webhook retry logic", label)
 }

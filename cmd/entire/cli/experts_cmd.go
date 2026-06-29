@@ -160,6 +160,9 @@ func buildExpertsRequest(
 	}
 
 	if opts.Staged {
+		if strings.TrimSpace(opts.RepoOverride) != "" {
+			return req, "", errors.New("--staged cannot be combined with --repo; staged files come from the local checkout")
+		}
 		scopes, err := stagedExpertScopes(ctx)
 		if err != nil {
 			return req, "", err
@@ -221,7 +224,7 @@ func resolveExpertsRepo(ctx context.Context, override string) (string, string, e
 	if override == "" {
 		_, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
 		if err != nil {
-			return "", "", err
+			return "", "", fmt.Errorf("resolve origin remote: %w", err)
 		}
 		return owner, repo, nil
 	}
@@ -229,7 +232,7 @@ func resolveExpertsRepo(ctx context.Context, override string) (string, string, e
 	if strings.Contains(override, "://") || strings.Contains(override, ":") {
 		info, err := gitremote.ParseURL(override)
 		if err != nil {
-			return "", "", err
+			return "", "", fmt.Errorf("parse repository URL %q: %w", override, err)
 		}
 		return info.Owner, info.Repo, nil
 	}
@@ -249,13 +252,13 @@ func resolveExpertsRepo(ctx context.Context, override string) (string, string, e
 }
 
 func localExpertScope(ctx context.Context, subject string) (string, bool, error) {
-	info, err := os.Stat(subject)
-	if err != nil {
-		return "", false, nil
-	}
+	cwdInfo, cwdExists := localExpertScopeInfo(subject)
 
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
+		if !cwdExists {
+			return "", false, nil
+		}
 		return "", true, fmt.Errorf("resolve git worktree root for %q: %w", subject, err)
 	}
 	rootAbs, err := filepath.Abs(root)
@@ -265,9 +268,22 @@ func localExpertScope(ctx context.Context, subject string) (string, bool, error)
 	if resolved, err := filepath.EvalSymlinks(rootAbs); err == nil {
 		rootAbs = resolved
 	}
-	subjectAbs, err := filepath.Abs(subject)
+
+	info := cwdInfo
+	subjectPath := subject
+	if !cwdExists {
+		rootRelative := filepath.Join(rootAbs, subject)
+		rootInfo, rootExists := localExpertScopeInfo(rootRelative)
+		if !rootExists {
+			return "", false, nil
+		}
+		info = rootInfo
+		subjectPath = rootRelative
+	}
+
+	subjectAbs, err := filepath.Abs(subjectPath)
 	if err != nil {
-		return "", true, fmt.Errorf("resolve path %q: %w", subject, err)
+		return "", true, fmt.Errorf("resolve path %q: %w", subjectPath, err)
 	}
 	if resolved, err := filepath.EvalSymlinks(subjectAbs); err == nil {
 		subjectAbs = resolved
@@ -279,6 +295,9 @@ func localExpertScope(ctx context.Context, subject string) (string, bool, error)
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
 		return "", true, fmt.Errorf("path %q is outside git worktree %q", subject, root)
 	}
+	if rel == "." {
+		return "", true, errors.New("repo root scope is not supported; pass a file or directory below the repo root")
+	}
 
 	scope := filepath.ToSlash(filepath.Clean(rel))
 	scope = strings.TrimPrefix(scope, "./")
@@ -286,6 +305,14 @@ func localExpertScope(ctx context.Context, subject string) (string, bool, error)
 		scope += "/"
 	}
 	return scope, true, nil
+}
+
+func localExpertScopeInfo(subject string) (os.FileInfo, bool) {
+	info, err := os.Stat(subject)
+	if err == nil {
+		return info, true
+	}
+	return nil, false
 }
 
 func stagedExpertScopes(ctx context.Context) ([]string, error) {
