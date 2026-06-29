@@ -301,19 +301,16 @@ func TestTUIModel_DashboardUsesAltScreen(t *testing.T) {
 	}
 }
 
-func TestTUIModel_FinishedStopsTickRedraws(t *testing.T) {
+// The dashboard must keep ticking through finalize so the footer animates.
+func TestTUIModel_FinishedKeepsTicking(t *testing.T) {
 	t.Parallel()
 	m := newTestModel([]string{"agent-a"}, func() {})
 	updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
 	m = mustModel(t, updated)
 
 	_, tickCmd := m.Update(tickMsg(time.Now()))
-	if tickCmd != nil {
-		t.Fatal("finished dashboard should not schedule duration ticks")
-	}
-	_, spinnerCmd := m.Update(m.spinner.Tick())
-	if spinnerCmd != nil {
-		t.Fatal("finished dashboard should not schedule spinner ticks")
+	if tickCmd == nil {
+		t.Fatal("finalizing dashboard should keep scheduling duration ticks")
 	}
 }
 
@@ -425,6 +422,51 @@ func TestTUIModel_RunFinishedMsg_MarksFinished(t *testing.T) {
 	m2 := mustModel(t, updated)
 	if !m2.finished {
 		t.Error("model should be finished after runFinishedMsg")
+	}
+}
+
+// A summary Failed must override an optimistic stream Succeeded so the row and
+// the counts line agree.
+func TestTUIModel_RunFinishedMsg_SummaryFailedOverridesStreamSucceeded(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+
+	updated, _ := m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.Finished{Success: true}})
+	m = mustModel(t, updated)
+	if m.rows[0].status != reviewtypes.AgentStatusSucceeded {
+		t.Fatalf("setup: want stream Succeeded, got %v", m.rows[0].status)
+	}
+
+	summary := reviewtypes.RunSummary{AgentRuns: []reviewtypes.AgentRun{
+		{Name: "agent-a", Status: reviewtypes.AgentStatusFailed},
+	}}
+	updated, _ = m.Update(runFinishedMsg{summary: summary})
+	m = mustModel(t, updated)
+
+	if m.rows[0].status != reviewtypes.AgentStatusFailed {
+		t.Errorf("row should downgrade to failed to match summary, got %v", m.rows[0].status)
+	}
+	if got := m.countsLine(); !strings.Contains(got, "1 failed") {
+		t.Errorf("counts line should report 1 failed, got %q", got)
+	}
+}
+
+// Stream Failed (a real RunError) must not be downgraded to a blanket Cancelled.
+func TestTUIModel_RunFinishedMsg_StreamFailedStickyOverCancel(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+
+	updated, _ := m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.RunError{Err: errors.New("boom")}})
+	m = mustModel(t, updated)
+
+	summary := reviewtypes.RunSummary{AgentRuns: []reviewtypes.AgentRun{
+		{Name: "agent-a", Status: reviewtypes.AgentStatusCancelled},
+	}}
+	updated, _ = m.Update(runFinishedMsg{summary: summary})
+	m = mustModel(t, updated)
+
+	if m.rows[0].status != reviewtypes.AgentStatusFailed {
+		t.Errorf("stream Failed should stay sticky over summary Cancelled, got %v", m.rows[0].status)
 	}
 }
 

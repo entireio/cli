@@ -28,6 +28,10 @@ import (
 // is available. Matches the cap used by status_style.getTerminalWidth.
 const DefaultTerminalWidth = 80
 
+// MaxRenderBytes caps glamour input: its render cost is super-linear (~6s at
+// 2MB, minutes beyond), so above this we return raw markdown unchanged.
+const MaxRenderBytes = 256 * 1024
+
 // Render produces a glamour-styled string from markdown using the entire
 // CLI palette. width is the word-wrap target; darkBackground selects the
 // dark or light palette variant.
@@ -37,6 +41,10 @@ const DefaultTerminalWidth = 80
 // than a runtime condition. Renderer panics are recovered and returned as
 // errors so callers can fall back to raw markdown instead of crashing.
 func Render(markdown string, width int, darkBackground bool) (rendered string, err error) {
+	if len(markdown) > MaxRenderBytes {
+		return markdown, nil
+	}
+
 	defer func() {
 		if r := recover(); r != nil {
 			rendered = ""

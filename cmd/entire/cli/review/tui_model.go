@@ -93,7 +93,9 @@ type reviewTUIModel struct {
 	termHeight int
 
 	finished bool
-	summary  reviewtypes.RunSummary
+	// finishedAt drives the finalize footer's elapsed timer.
+	finishedAt time.Time
+	summary    reviewtypes.RunSummary
 
 	finalPhaseName    string
 	finalPhaseRunning bool
@@ -163,6 +165,7 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case runFinishedMsg:
 		m.finished = true
+		m.finishedAt = time.Now()
 		m.summary = msg.summary
 		// Sync each row's status from the orchestrator's summary. The
 		// in-stream events (Finished / RunError) update status as they
@@ -173,17 +176,22 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// emitted) or Failed (process exit non-zero, no Finished emitted)
 		// would still render as "running" in the final frame.
 		//
-		// Preserve any already-set status from the event stream — if the
-		// stream said Failed (RunError), the summary may say Succeeded
-		// (process exit 0); RunError stickiness wins. Only overwrite when
-		// the row is still in AgentStatusUnknown.
+		// The summary is authoritative: let it downgrade an optimistic stream
+		// Succeeded to Failed/Cancelled so rows match the counts line. Stream
+		// Failed (a real RunError) still wins over a blanket Cancelled.
 		now := time.Now()
 		for i, run := range msg.summary.AgentRuns {
 			if i >= len(m.rows) {
 				break
 			}
-			if m.rows[i].status == reviewtypes.AgentStatusUnknown {
+			switch {
+			case m.rows[i].status == reviewtypes.AgentStatusUnknown:
 				m.rows[i].status = run.Status
+			case run.Status == reviewtypes.AgentStatusFailed:
+				m.rows[i].status = reviewtypes.AgentStatusFailed
+			case run.Status == reviewtypes.AgentStatusCancelled &&
+				m.rows[i].status != reviewtypes.AgentStatusFailed:
+				m.rows[i].status = reviewtypes.AgentStatusCancelled
 			}
 			if run.Tokens.In > 0 || run.Tokens.Out > 0 {
 				m.rows[i].tokens = run.Tokens
@@ -214,17 +222,13 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case tickMsg:
-		if m.finished && !m.finalPhaseRunning {
-			return m, nil
-		}
+		// Keep ticking through finalize so the footer spinner/timer animate
+		// instead of looking frozen; PostRunComplete bounds the loop.
 		var spinCmd tea.Cmd
 		m.spinner, spinCmd = m.spinner.Update(msg)
 		return m, tea.Batch(spinCmd, tickCmd())
 
 	case spinner.TickMsg:
-		if m.finished && !m.finalPhaseRunning {
-			return m, nil
-		}
 		var spinCmd tea.Cmd
 		m.spinner, spinCmd = m.spinner.Update(msg)
 		return m, spinCmd
@@ -530,16 +534,24 @@ func (m reviewTUIModel) dashboardView() string {
 	switch {
 	case m.finished && m.finalPhaseRunning:
 		m.writeDashboardLine(&b, m.countsLine())
-		m.writeDashboardLine(&b, "Final judge is consolidating...")
+		m.writeDashboardLine(&b, m.spinner.View()+" Final judge is consolidating..."+m.finalizeElapsedSuffix())
 	case m.finished:
 		m.writeDashboardLine(&b, m.countsLine())
-		m.writeDashboardLine(&b, "Finalizing output...")
+		m.writeDashboardLine(&b, m.spinner.View()+" Finalizing output..."+m.finalizeElapsedSuffix())
 	case m.cancelling:
 		m.writeDashboardLine(&b, "Cancelling agents... · Ctrl+C again: force quit")
 	default:
 		m.writeDashboardLine(&b, "Ctrl+O: drill in · Ctrl+C: cancel")
 	}
 	return b.String()
+}
+
+// finalizeElapsedSuffix returns a " (Xs)" elapsed suffix once finalize begins.
+func (m reviewTUIModel) finalizeElapsedSuffix() string {
+	if m.finishedAt.IsZero() {
+		return ""
+	}
+	return " (" + formatDuration(time.Since(m.finishedAt)) + ")"
 }
 
 func (m reviewTUIModel) writeDashboardLine(b *strings.Builder, line string) {

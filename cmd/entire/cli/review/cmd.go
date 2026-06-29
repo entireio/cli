@@ -1287,7 +1287,7 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 		sinks = append(sinks, tui)
 		if in.synthesisProvider != nil {
 			postRunOut := &bytes.Buffer{}
-			sinks = append(sinks, DumpSink{W: postRunOut, RenderWriter: in.out})
+			sinks = append(sinks, DumpSink{W: postRunOut})
 			sinks = append(sinks, SynthesisSink{
 				Provider:     in.synthesisProvider,
 				Writer:       postRunOut,
@@ -1443,6 +1443,12 @@ func writePostReviewManifest(
 	if summary.Cancelled || len(summary.AgentRuns) == 0 {
 		return
 	}
+
+	// Detach from the run context: a Ctrl+C during a slow finalize cancels ctx
+	// after the workers finished, and must not discard their findings.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+
 	manifest, states, err := localReviewManifestFromCurrentState(ctx, worktreeRoot, headSHA, summary, aggregateOutput)
 	if err != nil {
 		logging.Debug(ctx, "review manifest not written", slog.String("error", err.Error()))
@@ -1543,7 +1549,7 @@ func composeSingleAgentSinks(in singleAgentSinkInputs) []reviewtypes.Sink {
 	postRunOut := &bytes.Buffer{}
 	return []reviewtypes.Sink{
 		tui,
-		DumpSink{W: postRunOut, RenderWriter: in.out},
+		DumpSink{W: postRunOut},
 		tuiPostRunCompleteSink{tui: tui, buf: postRunOut, out: in.out},
 	}
 }

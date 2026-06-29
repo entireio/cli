@@ -1007,12 +1007,8 @@ func TestComposeSinks_TUIWritersRunBeforePostRunWriters(t *testing.T) {
 	if _, ok := multi[0].(*review.TUISink); !ok {
 		t.Fatalf("multi sink[0] = %T, want *TUISink", multi[0])
 	}
-	multiDump, ok := multi[1].(review.DumpSink)
-	if !ok {
+	if _, ok := multi[1].(review.DumpSink); !ok {
 		t.Fatalf("multi sink[1] = %T, want buffered DumpSink", multi[1])
-	}
-	if multiDump.RenderWriter != multiOut {
-		t.Fatalf("multi DumpSink RenderWriter = %T, want output writer", multiDump.RenderWriter)
 	}
 	multiSynth, ok := multi[2].(review.SynthesisSink)
 	if !ok {
@@ -1036,12 +1032,8 @@ func TestComposeSinks_TUIWritersRunBeforePostRunWriters(t *testing.T) {
 	if _, ok := single[0].(*review.TUISink); !ok {
 		t.Fatalf("single sink[0] = %T, want *TUISink", single[0])
 	}
-	singleDump, ok := single[1].(review.DumpSink)
-	if !ok {
+	if _, ok := single[1].(review.DumpSink); !ok {
 		t.Fatalf("single sink[1] = %T, want buffered DumpSink", single[1])
-	}
-	if singleDump.RenderWriter != singleOut {
-		t.Fatalf("single DumpSink RenderWriter = %T, want output writer", singleDump.RenderWriter)
 	}
 	if !review.ExposedIsTUIPostRunCompleteSink(single[2]) {
 		t.Fatalf("single sink[2] = %T, want TUI post-run finalizer", single[2])

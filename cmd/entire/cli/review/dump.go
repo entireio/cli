@@ -5,10 +5,10 @@
 // AgentEvent is a no-op; events are read from RunSummary.AgentRuns[].Buffer
 // in RunFinished.
 //
-// Output format: each agent's block is composed as markdown (`# claude-code
-// review`, with failure context in blockquotes/bold) and rendered through
-// mdrender for terminal writers. Non-TTY writers receive raw markdown so
-// pipelines can grep / pipe / save without ANSI escape codes.
+// Each agent's block is plain markdown written as-is — NOT glamour-rendered.
+// Worker narratives are raw material (the final report is styled, and drill-in
+// shows the buffer); styling multi-MB output here wedged the finalize phase on
+// glamour's super-linear cost.
 package review
 
 import (
@@ -17,17 +17,12 @@ import (
 	"io"
 	"strings"
 
-	"github.com/entireio/cli/cmd/entire/cli/mdrender"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
 
 // DumpSink writes per-agent narrative blocks to W after the run completes.
 type DumpSink struct {
 	W io.Writer
-	// RenderWriter is the writer whose terminal capabilities should be used for
-	// markdown rendering. It defaults to W. TTY review runs use this when W is a
-	// post-run buffer that will later flush to the real terminal.
-	RenderWriter io.Writer
 }
 
 // Compile-time interface check.
@@ -45,10 +40,7 @@ func (s DumpSink) RunFinished(summary reviewtypes.RunSummary) {
 	s.dumpCounts(summary)
 }
 
-// dumpAgent composes one agent's section as markdown and writes it through
-// mdrender. The counts line at the end of the run is intentionally NOT
-// rendered through markdown — it's a terse status summary that benefits
-// from staying on a single uncolored line for grep-ability.
+// dumpAgent writes one agent's section as plain markdown directly to W.
 //
 // Markdown structure per agent:
 //
@@ -93,21 +85,7 @@ func (s DumpSink) dumpAgent(run reviewtypes.AgentRun) {
 		}
 	}
 
-	// RenderForWriter is TTY-aware: returns raw markdown for non-TTY writers,
-	// glamour-styled output otherwise. Errors are best-effort — fall back to
-	// raw markdown so the user always gets the content.
-	rendered, err := mdrender.RenderForWriter(s.renderWriter(), b.String())
-	if err != nil {
-		rendered = b.String()
-	}
-	fmt.Fprint(s.W, rendered)
-}
-
-func (s DumpSink) renderWriter() io.Writer {
-	if s.RenderWriter != nil {
-		return s.RenderWriter
-	}
-	return s.W
+	fmt.Fprint(s.W, b.String())
 }
 
 func writeFailureHeader(b *strings.Builder, runErr error) {
