@@ -919,7 +919,14 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// to include subagent tokens.
 	tokenUsage := event.TokenUsage
 	if tokenUsage == nil {
-		tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
+		// Use the resolved offset (same as file extraction at the top of this
+		// handler), not the raw preState offset. Without the CheckpointTranscriptStart
+		// fallback, token scoping would diverge from file scoping when pre-prompt
+		// state is absent (e.g. exec/non-interactive runs): subagent token discovery
+		// would run from 0 and re-attribute every historically-spawned subagent's
+		// cumulative tokens to this turn. resolveTranscriptOffset == transcriptLinesAtStart
+		// whenever preState carries a positive offset, so the common path is unchanged.
+		tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptOffset, subagentsDir)
 	}
 
 	// Build fully-populated step context and delegate to strategy

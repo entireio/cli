@@ -198,18 +198,25 @@ func TestResolveSubagentTranscript_NilAndEmpty(t *testing.T) {
 // --- extractSpawnedAgentIDs ---
 
 // Discovery keys off spawn_agent OUTPUTS (which carry the new child id), not
-// wait/close/resume references — so a child merely referenced (not spawned) in
-// this range is excluded, preventing cross-turn re-attribution.
+// other agent-tool calls — so a child surfaced only by a non-spawn tool is
+// excluded, preventing the resume_agent cross-turn double-count.
 func TestExtractSpawnedAgentIDs(t *testing.T) {
 	lines := []string{sessionMetaLine(t, "parent")}
 	lines = append(lines, spawnAgentLines(t, "call_1", "explorer", childID1)...)
 	lines = append(lines, spawnAgentLines(t, "call_2", "explorer", childID2)...)
-	// childID3 is referenced by wait_agent but never spawned here → must be excluded.
-	lines = append(lines, functionCallLine(t, "wait_agent", `{"targets":["`+childID3+`"]}`))
+	// A resume_agent call + its OUTPUT that (worst case) carries an agent_id for
+	// childID3. Its call_id is NOT a spawn_agent call, so the spawn-call_id gate
+	// must exclude childID3 — this is the live guard against the resume double-count.
+	lines = append(lines, functionCallLine(t, "resume_agent", `{"id":"`+childID3+`"}`)) // call_id "call_x"
+	lines = append(lines, rolloutLineJSON(t, "response_item", map[string]any{
+		"type": "function_call_output", "call_id": "call_x",
+		"output": `{"agent_id":"` + childID3 + `","previous_status":"completed"}`,
+	}))
 	parent := strings.Join(lines, "\n")
 
 	ids := extractSpawnedAgentIDs([]byte(parent), 0)
-	require.ElementsMatch(t, []string{childID1, childID2}, ids)
+	require.ElementsMatch(t, []string{childID1, childID2}, ids,
+		"only spawn_agent outputs are discovered; a resumed child's output must be excluded")
 }
 
 // fromOffset scopes discovery to the current checkpoint range. A subagent
