@@ -56,7 +56,7 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 	}
 
 	// Parse event types we manage
-	var sessionStart, userPromptSubmit, stop, postToolUse []MatcherGroup
+	var sessionStart, userPromptSubmit, stop, postToolUse, subagentStart, subagentStop []MatcherGroup
 	if err := parseHookType(rawHooks, "SessionStart", &sessionStart); err != nil {
 		return 0, err
 	}
@@ -69,12 +69,20 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 	if err := parseHookType(rawHooks, "PostToolUse", &postToolUse); err != nil {
 		return 0, err
 	}
+	if err := parseHookType(rawHooks, "SubagentStart", &subagentStart); err != nil {
+		return 0, err
+	}
+	if err := parseHookType(rawHooks, "SubagentStop", &subagentStop); err != nil {
+		return 0, err
+	}
 
 	if force {
 		sessionStart = removeEntireHooks(sessionStart)
 		userPromptSubmit = removeEntireHooks(userPromptSubmit)
 		stop = removeEntireHooks(stop)
 		postToolUse = removeEntireHooks(postToolUse)
+		subagentStart = removeEntireHooks(subagentStart)
+		subagentStop = removeEntireHooks(subagentStop)
 	}
 
 	// Build hook commands
@@ -92,10 +100,14 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 	userPromptSubmitCmd := cmdPrefix + "user-prompt-submit"
 	stopCmd := cmdPrefix + "stop"
 	postToolUseCmd := cmdPrefix + "post-tool-use"
+	subagentStartCmd := cmdPrefix + "subagent-start"
+	subagentStopCmd := cmdPrefix + "subagent-stop"
 	if !localDev {
 		userPromptSubmitCmd = agent.WrapProductionSilentHookCommandForOS(userPromptSubmitCmd, useWindowsProductionHooks)
 		stopCmd = agent.WrapProductionSilentHookCommandForOS(stopCmd, useWindowsProductionHooks)
 		postToolUseCmd = agent.WrapProductionSilentHookCommandForOS(postToolUseCmd, useWindowsProductionHooks)
+		subagentStartCmd = agent.WrapProductionSilentHookCommandForOS(subagentStartCmd, useWindowsProductionHooks)
+		subagentStopCmd = agent.WrapProductionSilentHookCommandForOS(subagentStopCmd, useWindowsProductionHooks)
 	}
 
 	count := 0
@@ -116,6 +128,14 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 		postToolUse = updated
 		count++
 	}
+	if updated, changed := syncHookCommand(subagentStart, subagentStartCmd); changed {
+		subagentStart = updated
+		count++
+	}
+	if updated, changed := syncHookCommand(subagentStop, subagentStopCmd); changed {
+		subagentStop = updated
+		count++
+	}
 
 	if count == 0 {
 		// Still ensure the feature flag is configured even if hooks
@@ -131,6 +151,8 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
 	marshalHookType(rawHooks, "Stop", stop)
 	marshalHookType(rawHooks, "PostToolUse", postToolUse)
+	marshalHookType(rawHooks, "SubagentStart", subagentStart)
+	marshalHookType(rawHooks, "SubagentStop", subagentStop)
 
 	// Preserve existing top-level keys (e.g., $schema) by reusing the parsed file
 	topLevel := make(map[string]json.RawMessage)
@@ -195,7 +217,7 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 		return nil
 	}
 
-	var sessionStart, userPromptSubmit, stop, postToolUse []MatcherGroup
+	var sessionStart, userPromptSubmit, stop, postToolUse, subagentStart, subagentStop []MatcherGroup
 	if err := parseHookType(rawHooks, "SessionStart", &sessionStart); err != nil {
 		return err
 	}
@@ -208,16 +230,26 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	if err := parseHookType(rawHooks, "PostToolUse", &postToolUse); err != nil {
 		return err
 	}
+	if err := parseHookType(rawHooks, "SubagentStart", &subagentStart); err != nil {
+		return err
+	}
+	if err := parseHookType(rawHooks, "SubagentStop", &subagentStop); err != nil {
+		return err
+	}
 
 	sessionStart = removeEntireHooks(sessionStart)
 	userPromptSubmit = removeEntireHooks(userPromptSubmit)
 	stop = removeEntireHooks(stop)
 	postToolUse = removeEntireHooks(postToolUse)
+	subagentStart = removeEntireHooks(subagentStart)
+	subagentStop = removeEntireHooks(subagentStop)
 
 	marshalHookType(rawHooks, "SessionStart", sessionStart)
 	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
 	marshalHookType(rawHooks, "Stop", stop)
 	marshalHookType(rawHooks, "PostToolUse", postToolUse)
+	marshalHookType(rawHooks, "SubagentStart", subagentStart)
+	marshalHookType(rawHooks, "SubagentStop", subagentStop)
 
 	if len(rawHooks) > 0 {
 		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)

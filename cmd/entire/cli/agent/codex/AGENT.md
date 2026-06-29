@@ -2,7 +2,7 @@
 
 ## Verdict: COMPATIBLE
 
-Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` config files with JSON stdin/stdout transport. The hook mechanism closely mirrors Claude Code's architecture (matcher-based hook groups, JSON on stdin, structured JSON output on stdout). Four hook events are available: SessionStart, UserPromptSubmit, Stop, and PreToolUse (shell/Bash only).
+Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` config files with JSON stdin/stdout transport. The hook mechanism closely mirrors Claude Code's architecture (matcher-based hook groups, JSON on stdin, structured JSON output on stdout). Entire consumes SessionStart, UserPromptSubmit, Stop, PostToolUse (apply_patch file mutations), and the native subagent hooks SubagentStart / SubagentStop (see [Subagents](#subagents) below). Hooks reached general availability in Codex 0.139.x; this integration is verified against `codex-cli 0.139.0`.
 
 ## Static Checks
 
@@ -10,7 +10,7 @@ Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` conf
 |-------|--------|-------|
 | Binary present | PASS | `codex` found on PATH |
 | Help available | PASS | `codex --help` shows full subcommand list |
-| Version info | PASS | `codex-cli 0.116.0` |
+| Version info | PASS | `codex-cli 0.139.0` |
 | Hook keywords | PASS | Hook system via `hooks.json` config files |
 | Session keywords | PASS | `resume`, `fork` subcommands; session stored as threads in SQLite + JSONL rollout files |
 | Config directory | PASS | `~/.codex/` (overridable via `CODEX_HOME`) |
@@ -19,7 +19,7 @@ Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` conf
 ## Binary
 
 - Name: `codex`
-- Version: `codex-cli 0.116.0`
+- Version: `codex-cli 0.139.0`
 - Install: `npm install -g @openai/codex` or build from source
 
 ## Hook Mechanism
@@ -72,6 +72,9 @@ Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` conf
 | `UserPromptSubmit` | User submits a prompt | `TurnStart` | Includes `prompt` text |
 | `Stop` | Agent finishes a turn | `TurnEnd` | Includes `last_assistant_message` |
 | `PreToolUse` | Before tool execution | *(pass-through)* | Shell/Bash only for now; no lifecycle action needed |
+| `PostToolUse` | After a tool runs | `ToolUse` (apply_patch only) | File mutations parsed from the apply_patch envelope; other tools pass through |
+| `SubagentStart` | A subagent (`spawn_agent`) starts | `SubagentStart` | Matcher filters by `agent_type`; payload carries `agent_id` + `agent_type` |
+| `SubagentStop` | A subagent finishes | `SubagentEnd` | Adds `agent_transcript_path` (the child rollout) for per-subagent file/token attribution |
 
 ### Hook Input (stdin JSON)
 
@@ -197,8 +200,18 @@ The `systemMessage` field can be used to display messages to the user via the ag
 - **No SessionEnd hook:** Codex does not fire a hook when a session is completely terminated. The `Stop` hook fires at end-of-turn, not end-of-session. This is similar to some other agents — the framework handles this gracefully.
 - **PreToolUse is shell-only:** Currently only fires for `Bash` tool (direct shell execution). MCP tools, stdin streaming, and other tool types are not yet hooked. PostToolUse is in review.
 - **Transcript may be null:** In `--ephemeral` mode, `transcript_path` is null. The integration should handle this gracefully.
-- **No subagent hooks:** No PreTask/PostTask equivalent for subagent spawning.
+- **Subagents:** Supported via native `SubagentStart`/`SubagentStop` hooks (GA 0.139.x) — see [Subagents](#subagents).
 - **Hook response protocol differs from Claude Code:** Codex uses `systemMessage` (same field name) but also supports `hookSpecificOutput` with `additionalContext` for injecting context into the model. For Entire's purposes, `systemMessage` is sufficient.
+
+## Subagents
+
+Codex spawns parallel subagents (custom agents defined as TOML in `~/.codex/agents/` or `.codex/agents/`; `agents.max_depth` defaults to 1, `agents.max_threads` to 6). Entire tracks them with full parity to Claude Code:
+
+- **Lifecycle hooks** — `SubagentStart` and `SubagentStop` (matcher on `agent_type`) map to Entire's `SubagentStart` / `SubagentEnd` events, which drive per-task checkpoints via the agent-agnostic `SaveTaskStep` path. Codex has no per-task `tool_use_id`, so the subagent's `agent_id` (a path-safe UUID) doubles as the task key; `agent_type` becomes the subagent type.
+- **Child transcripts** — each subagent runs as its own thread with its own rollout at `CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<agent_id>.jsonl`. `SubagentStop` provides `agent_transcript_path` directly; Codex implements `SubagentTranscriptResolver` to return it (falling back to globbing the sessions tree by `agent_id`). This differs from Claude Code's sibling-file (`agent-<id>.jsonl`) layout.
+- **File + token attribution** — Codex implements `SubagentAwareExtractor`. At turn end it enumerates spawned subagent thread-ids from the parent rollout's agent-management tool calls (`wait_agent` / `close_agent` / `resume_agent` arguments — `spawn_agent` itself doesn't echo the child id), reads each child rollout, and merges their `apply_patch` files and `token_count` usage (into `TokenUsage.SubagentTokens`).
+
+**Limitation:** because subagents run in parallel, the git-status diff between a subagent's start and stop can over-attribute concurrently-changed files across siblings. Per-subagent *modified* files come from each child's own rollout (exact); the git-status diff only supplements new/deleted detection.
 
 ## Captured Payloads
 

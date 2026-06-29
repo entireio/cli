@@ -1077,14 +1077,18 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		event.SubagentType, event.TaskDescription = ParseSubagentTypeAndDescription(event.ToolInput)
 	}
 
-	// Determine subagent transcript path
-	transcriptDir := filepath.Dir(event.SessionRef)
+	// Determine subagent transcript path. Agents whose subagent transcripts don't
+	// live next to the main transcript (e.g. Codex) implement
+	// SubagentTranscriptResolver; otherwise fall back to the sibling-file
+	// convention (AgentTranscriptPath).
 	var subagentTranscriptPath string
-	if event.SubagentID != "" {
-		subagentTranscriptPath = AgentTranscriptPath(transcriptDir, event.SubagentID)
-		if !fileExists(subagentTranscriptPath) {
-			subagentTranscriptPath = ""
-		}
+	if resolver, ok := agent.AsSubagentTranscriptResolver(ag); ok {
+		subagentTranscriptPath = resolver.ResolveSubagentTranscript(event)
+	} else if event.SubagentID != "" {
+		subagentTranscriptPath = AgentTranscriptPath(filepath.Dir(event.SessionRef), event.SubagentID)
+	}
+	if subagentTranscriptPath != "" && !fileExists(subagentTranscriptPath) {
+		subagentTranscriptPath = ""
 	}
 
 	// Log context

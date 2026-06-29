@@ -122,7 +122,7 @@ func TestMissingEntireHooks_FlagsStaleFile(t *testing.T) {
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]}]
 	}}`
 	repoRoot, _ := writeTrustFixture(t, hooksJSON)
-	require.Equal(t, []string{"post_tool_use"}, MissingEntireHooks(repoRoot))
+	require.Equal(t, []string{"post_tool_use", "subagent_start", "subagent_stop"}, MissingEntireHooks(repoRoot))
 }
 
 // TestMissingEntireHooks_NilWhenAllPresent returns nil when every
@@ -134,7 +134,9 @@ func TestMissingEntireHooks_NilWhenAllPresent(t *testing.T) {
 		"UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]},
 		        {"matcher":null,"hooks":[{"type":"command","command":"my-custom-tool","timeout":30}]}],
-		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}]
+		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}],
+		"SubagentStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-start","timeout":30}]}],
+		"SubagentStop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-stop","timeout":30}]}]
 	}}`
 	repoRoot, _ := writeTrustFixture(t, hooksJSON)
 	require.Empty(t, MissingEntireHooks(repoRoot))
@@ -159,7 +161,26 @@ func TestMissingEntireHooks_IgnoresNonEntireCommands(t *testing.T) {
 		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}]
 	}}`
 	repoRoot, _ := writeTrustFixture(t, hooksJSON)
-	require.Equal(t, []string{"session_start"}, MissingEntireHooks(repoRoot))
+	require.Equal(t, []string{"session_start", "subagent_start", "subagent_stop"}, MissingEntireHooks(repoRoot))
+}
+
+// TestHookTrustGaps_FlagsUntrustedSubagentHooks — once Codex's subagent hooks
+// are installed, they must participate in trust-gap detection so the
+// SessionStart banner prompts the user to /hooks-trust them.
+func TestHookTrustGaps_FlagsUntrustedSubagentHooks(t *testing.T) {
+	hooksJSON := `{"hooks":{
+		"SubagentStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-start","timeout":30}]}],
+		"SubagentStop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-stop","timeout":30}]}]
+	}}`
+	repoRoot, hooksPath := writeTrustFixture(t, hooksJSON)
+
+	// Trust only subagent_start; subagent_stop remains a gap.
+	configTOML := `[hooks.state."` + hooksPath + `:subagent_start:0:0"]
+trusted_hash = "sha256:aaa"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte(configTOML), 0o600))
+
+	require.Equal(t, []string{"subagent_stop"}, HookTrustGaps(repoRoot))
 }
 
 // TestHookTrustGaps_HandlesNonzeroHandlerIndex — the state-key prefix

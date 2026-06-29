@@ -432,7 +432,9 @@ func canonicalCodexHooksJSON() string {
 		"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-start","timeout":30}]}],
 		"UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]}],
-		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}]
+		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}],
+		"SubagentStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-start","timeout":30}]}],
+		"SubagentStop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-stop","timeout":30}]}]
 	}}`
 }
 
@@ -460,6 +462,12 @@ trusted_hash = "sha256:ccc"
 
 [hooks.state."` + hooksPath + `:post_tool_use:0:0"]
 trusted_hash = "sha256:ddd"
+
+[hooks.state."` + hooksPath + `:subagent_start:0:0"]
+trusted_hash = "sha256:eee"
+
+[hooks.state."` + hooksPath + `:subagent_stop:0:0"]
+trusted_hash = "sha256:fff"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(configTOML), 0o600))
 	t.Setenv("CODEX_HOME", codexHome)
@@ -483,7 +491,7 @@ func TestCheckCodexHookTrust_ListsMissingEvents(t *testing.T) {
 	hooksPath := resolvedHooksPath(t, dir)
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
 	require.NoError(t, os.MkdirAll(codexHome, 0o750))
-	// Trust three of four — PostToolUse is the gap.
+	// Trust five of six — PostToolUse is the gap.
 	configTOML := `[hooks.state."` + hooksPath + `:session_start:0:0"]
 trusted_hash = "sha256:aaa"
 
@@ -492,6 +500,12 @@ trusted_hash = "sha256:bbb"
 
 [hooks.state."` + hooksPath + `:stop:0:0"]
 trusted_hash = "sha256:ccc"
+
+[hooks.state."` + hooksPath + `:subagent_start:0:0"]
+trusted_hash = "sha256:eee"
+
+[hooks.state."` + hooksPath + `:subagent_stop:0:0"]
+trusted_hash = "sha256:fff"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(configTOML), 0o600))
 	t.Setenv("CODEX_HOME", codexHome)

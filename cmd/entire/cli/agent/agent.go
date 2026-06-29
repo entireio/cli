@@ -364,3 +364,17 @@ type SubagentAwareExtractor interface {
 	// The subagentsDir parameter specifies where subagent transcripts are stored.
 	CalculateTotalTokenUsage(transcriptData []byte, fromOffset int, subagentsDir string) (*TokenUsage, error)
 }
+
+// SubagentTranscriptResolver resolves the filesystem path to a spawned
+// subagent's transcript. The default lifecycle convention assumes a sibling file
+// next to the main transcript (AgentTranscriptPath); agents whose subagent
+// transcripts live elsewhere (e.g. Codex stores child rollouts under
+// CODEX_HOME/sessions/...) implement this so the lifecycle layer can locate
+// them. Returns "" when the path can't be resolved.
+type SubagentTranscriptResolver interface {
+	Agent
+
+	// ResolveSubagentTranscript returns the child transcript path for a
+	// SubagentEnd event, or "" if it can't be determined.
+	ResolveSubagentTranscript(event *Event) string
+}

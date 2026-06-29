@@ -13,10 +13,16 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ agent.HookSupport        = (*CodexAgent)(nil)
-	_ agent.HookResponseWriter = (*CodexAgent)(nil)
-	_ agent.ContextInjector    = (*CodexAgent)(nil)
+	_ agent.HookSupport                = (*CodexAgent)(nil)
+	_ agent.HookResponseWriter         = (*CodexAgent)(nil)
+	_ agent.ContextInjector            = (*CodexAgent)(nil)
+	_ agent.SubagentTranscriptResolver = (*CodexAgent)(nil)
 )
+
+// metaKeyAgentTranscriptPath carries the SubagentStop hook's agent_transcript_path
+// (the child rollout path) on the Event so ResolveSubagentTranscript can return
+// it without globbing the sessions tree.
+const metaKeyAgentTranscriptPath = "agent_transcript_path"
 
 // WriteHookResponse outputs a JSON hook response to stdout.
 // Codex reads the systemMessage field and displays it to the user.
@@ -52,6 +58,8 @@ const (
 	HookNameStop             = "stop"
 	HookNamePreToolUse       = "pre-tool-use"
 	HookNamePostToolUse      = "post-tool-use"
+	HookNameSubagentStart    = "subagent-start"
+	HookNameSubagentStop     = "subagent-stop"
 )
 
 // HookNames returns the hook verbs Codex supports.
@@ -62,6 +70,8 @@ func (c *CodexAgent) HookNames() []string {
 		HookNameStop,
 		HookNamePreToolUse,
 		HookNamePostToolUse,
+		HookNameSubagentStart,
+		HookNameSubagentStop,
 	}
 }
 
@@ -80,6 +90,10 @@ func (c *CodexAgent) ParseHookEvent(_ context.Context, hookName string, stdin io
 		return nil, nil //nolint:nilnil // nil event = no lifecycle action
 	case HookNamePostToolUse:
 		return c.parsePostToolUse(stdin)
+	case HookNameSubagentStart:
+		return c.parseSubagentStart(stdin)
+	case HookNameSubagentStop:
+		return c.parseSubagentStop(stdin)
 	default:
 		return nil, nil //nolint:nilnil // Unknown hooks have no lifecycle action
 	}
@@ -182,4 +196,69 @@ func (c *CodexAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
 		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
+}
+
+// parseSubagentStart maps Codex's SubagentStart hook to a SubagentStart event.
+// Codex has no per-task tool_use_id, so the subagent's agent_id (a path-safe
+// UUID) doubles as the ToolUseID that keys the task's pre-state and checkpoint.
+func (c *CodexAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[subagentStartRaw](stdin)
+	if err != nil {
+		return nil, err
+	}
+	return &agent.Event{
+		Type:         agent.SubagentStart,
+		SessionID:    raw.SessionID,
+		SessionRef:   derefString(raw.TranscriptPath),
+		Model:        raw.Model,
+		ToolUseID:    raw.AgentID,
+		SubagentID:   raw.AgentID,
+		SubagentType: raw.AgentType,
+		Timestamp:    time.Now(),
+	}, nil
+}
+
+// parseSubagentStop maps Codex's SubagentStop hook to a SubagentEnd event. The
+// hook supplies agent_transcript_path (the child rollout) directly; it is
+// stashed in Metadata so ResolveSubagentTranscript can return it.
+func (c *CodexAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[subagentStopRaw](stdin)
+	if err != nil {
+		return nil, err
+	}
+	evt := &agent.Event{
+		Type:         agent.SubagentEnd,
+		SessionID:    raw.SessionID,
+		SessionRef:   derefString(raw.TranscriptPath),
+		Model:        raw.Model,
+		ToolUseID:    raw.AgentID,
+		SubagentID:   raw.AgentID,
+		SubagentType: raw.AgentType,
+		Timestamp:    time.Now(),
+	}
+	if p := derefString(raw.AgentTranscriptPath); p != "" {
+		evt.Metadata = map[string]string{metaKeyAgentTranscriptPath: p}
+	}
+	return evt, nil
+}
+
+// ResolveSubagentTranscript returns the child rollout path for a Codex subagent.
+// Codex child rollouts live under CODEX_HOME/sessions/... (not next to the main
+// transcript), so the SubagentStop hook's agent_transcript_path is preferred;
+// otherwise the sessions tree is globbed by the subagent's agent_id.
+func (c *CodexAgent) ResolveSubagentTranscript(event *agent.Event) string {
+	if event == nil {
+		return ""
+	}
+	if p := event.Metadata[metaKeyAgentTranscriptPath]; p != "" {
+		return p
+	}
+	if event.SubagentID == "" {
+		return ""
+	}
+	sessionDir, err := c.GetSessionDir("")
+	if err != nil {
+		return ""
+	}
+	return findRolloutBySessionID(sessionDir, event.SubagentID)
 }

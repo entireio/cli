@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // Compile-time interface assertions.
@@ -22,7 +23,12 @@ var (
 	_ agent.TokenCalculator             = (*CodexAgent)(nil)
 	_ agent.PromptExtractor             = (*CodexAgent)(nil)
 	_ agent.RestoredSessionPathResolver = (*CodexAgent)(nil)
+	_ agent.SubagentAwareExtractor      = (*CodexAgent)(nil)
 )
+
+// agentThreadIDRegex matches a Codex subagent thread-id (UUID form) embedded in
+// agent-management tool-call arguments (wait_agent/close_agent/resume_agent).
+var agentThreadIDRegex = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
 
 // rolloutLine is the top-level JSONL line structure in Codex rollout files.
 type rolloutLine struct {
@@ -41,11 +47,12 @@ type sessionMetaPayload struct {
 
 // responseItemPayload is the payload for type="response_item" lines.
 type responseItemPayload struct {
-	Type    string          `json:"type"` // "message", "custom_tool_call", "custom_tool_call_output", "local_shell_call", "function_call", etc.
-	Role    string          `json:"role,omitempty"`
-	Name    string          `json:"name,omitempty"`
-	Input   string          `json:"input,omitempty"`   // apply_patch input (plain text, not JSON)
-	Content json.RawMessage `json:"content,omitempty"` // for messages
+	Type      string          `json:"type"` // "message", "custom_tool_call", "custom_tool_call_output", "local_shell_call", "function_call", etc.
+	Role      string          `json:"role,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     string          `json:"input,omitempty"`     // apply_patch input (plain text, not JSON)
+	Arguments string          `json:"arguments,omitempty"` // function_call arguments (JSON-encoded string)
+	Content   json.RawMessage `json:"content,omitempty"`   // for messages
 }
 
 // contentItem is a single content block in a message.
@@ -327,6 +334,143 @@ func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) 
 		OutputTokens:    outputTokens,
 		APICallCount:    apiCalls,
 	}, nil
+}
+
+// ExtractAllModifiedFiles returns the deduplicated set of files modified by the
+// main session (from fromOffset) plus every spawned subagent. Codex subagents
+// have their own rollout files, discovered from the parent's agent-management
+// tool calls; each child's apply_patch edits are merged in. subagentsDir (the
+// framework's sibling-file hint) is ignored — Codex self-resolves child rollouts
+// from CODEX_HOME/sessions.
+func (c *CodexAgent) ExtractAllModifiedFiles(transcriptData []byte, fromOffset int, _ string) ([]string, error) {
+	seen := make(map[string]struct{})
+	var files []string
+	add := func(fs []string) {
+		for _, f := range fs {
+			if _, ok := seen[f]; !ok {
+				seen[f] = struct{}{}
+				files = append(files, f)
+			}
+		}
+	}
+
+	add(extractFilesFromBytes(transcriptData, fromOffset))
+	for _, childData := range c.readSubagentRollouts(transcriptData) {
+		add(extractFilesFromBytes(childData, 0))
+	}
+	return files, nil
+}
+
+// CalculateTotalTokenUsage returns the main session's token usage (from
+// fromOffset) with each spawned subagent's usage aggregated into SubagentTokens.
+func (c *CodexAgent) CalculateTotalTokenUsage(transcriptData []byte, fromOffset int, _ string) (*agent.TokenUsage, error) {
+	mainUsage, err := c.CalculateTokenUsage(transcriptData, fromOffset)
+	if err != nil {
+		return nil, err
+	}
+	if mainUsage == nil {
+		mainUsage = &agent.TokenUsage{}
+	}
+
+	sub := &agent.TokenUsage{}
+	for _, childData := range c.readSubagentRollouts(transcriptData) {
+		u, uerr := c.CalculateTokenUsage(childData, 0)
+		if uerr != nil || u == nil {
+			continue
+		}
+		sub.InputTokens += u.InputTokens
+		sub.CacheReadTokens += u.CacheReadTokens
+		sub.CacheCreationTokens += u.CacheCreationTokens
+		sub.OutputTokens += u.OutputTokens
+		sub.APICallCount += u.APICallCount
+	}
+	if sub.APICallCount > 0 {
+		mainUsage.SubagentTokens = sub
+	}
+	return mainUsage, nil
+}
+
+// extractFilesFromBytes returns modified file paths from rollout JSONL bytes,
+// skipping the first fromOffset lines.
+func extractFilesFromBytes(data []byte, fromOffset int) []string {
+	seen := make(map[string]struct{})
+	var files []string
+	lineNum := 0
+	for _, lineData := range splitJSONL(data) {
+		lineNum++
+		if lineNum <= fromOffset {
+			continue
+		}
+		for _, f := range extractFilesFromLine(lineData) {
+			if _, ok := seen[f]; !ok {
+				seen[f] = struct{}{}
+				files = append(files, f)
+			}
+		}
+	}
+	return files
+}
+
+// readSubagentRollouts returns the raw bytes of every spawned subagent's rollout
+// file referenced by the parent transcript. Best-effort: children whose rollout
+// can't be resolved or read are skipped (e.g. archived/cleaned up).
+func (c *CodexAgent) readSubagentRollouts(parent []byte) [][]byte {
+	ids := extractSpawnedAgentIDs(parent)
+	if len(ids) == 0 {
+		return nil
+	}
+	sessionDir, err := c.GetSessionDir("")
+	if err != nil || sessionDir == "" {
+		return nil
+	}
+	var out [][]byte
+	for _, id := range ids {
+		path := findRolloutBySessionID(sessionDir, id)
+		if path == "" {
+			continue
+		}
+		data, rerr := os.ReadFile(path) //nolint:gosec // path resolved from codex sessions dir keyed by a validated agent id
+		if rerr != nil {
+			continue
+		}
+		out = append(out, data)
+	}
+	return out
+}
+
+// extractSpawnedAgentIDs returns the deduplicated subagent thread-ids referenced
+// by Codex agent-management tool calls (wait_agent / close_agent / resume_agent)
+// in a parent rollout. spawn_agent does not echo the child id in its arguments,
+// so the ids are recovered from the management calls that target them.
+func extractSpawnedAgentIDs(data []byte) []string {
+	seen := make(map[string]struct{})
+	var ids []string
+	for _, lineData := range splitJSONL(data) {
+		var line rolloutLine
+		if json.Unmarshal(lineData, &line) != nil || line.Type != rolloutLineTypeResponseItem {
+			continue
+		}
+		var payload responseItemPayload
+		if json.Unmarshal(line.Payload, &payload) != nil || payload.Type != "function_call" {
+			continue
+		}
+		switch payload.Name {
+		case "wait_agent", "close_agent", "resume_agent":
+		default:
+			continue
+		}
+		for _, id := range agentThreadIDRegex.FindAllString(payload.Arguments, -1) {
+			if validation.ValidateAgentSessionID(id) != nil {
+				continue
+			}
+			if _, ok := seen[id]; !ok {
+				seen[id] = struct{}{}
+				ids = append(ids, id)
+			}
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // ExtractPrompts returns user prompts from the transcript starting at the given offset.

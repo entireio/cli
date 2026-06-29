@@ -90,12 +90,15 @@ func declaredCodexEvents(hooksJSONPath string) ([]string, bool) {
 	add("stop", file.Hooks.Stop)
 	add("pre_tool_use", file.Hooks.PreToolUse)
 	add("post_tool_use", file.Hooks.PostToolUse)
+	add("subagent_start", file.Hooks.SubagentStart)
+	add("subagent_stop", file.Hooks.SubagentStop)
 	return events, true
 }
 
 // MissingEntireHooks returns the snake_case event labels the CLI's
 // canonical install ships today (SessionStart, UserPromptSubmit, Stop,
-// PostToolUse) that aren't backed by an Entire-managed hook command in
+// PostToolUse, SubagentStart, SubagentStop) that aren't backed by an
+// Entire-managed hook command in
 // <repoRoot>/.codex/hooks.json. Surfaces drift when the user enabled
 // Codex on an older release and the install set has since grown.
 //
@@ -121,6 +124,8 @@ func MissingEntireHooks(repoRoot string) []string {
 	check("user_prompt_submit", file.Hooks.UserPromptSubmit)
 	check("stop", file.Hooks.Stop)
 	check("post_tool_use", file.Hooks.PostToolUse)
+	check("subagent_start", file.Hooks.SubagentStart)
+	check("subagent_stop", file.Hooks.SubagentStop)
 	return missing
 }
 

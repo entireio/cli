@@ -437,6 +437,8 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 | `SubagentStart` | Captures pre-task state (git status snapshot) | `pre-task` (PreToolUse[Task]) | *(not used)* | `subagent-start` | *(not used)* | `pre-tool-use` (config-level `matcher: Task`) | *(not used)* |
 | `SubagentEnd` | Extracts subagent modified files, detects changes, saves task checkpoint | `post-task` (PostToolUse[Task]) | *(not used)* | `subagent-stop` | *(not used)* | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` |
 
+> **Codex** is not a column above (its integration postdates this table). Codex maps: `session-start`→`SessionStart`, `user-prompt-submit`→`TurnStart`, `stop`→`TurnEnd`, `post-tool-use`→`ToolUse` (apply_patch only), and the native `subagent-start`→`SubagentStart` / `subagent-stop`→`SubagentEnd` hooks. Unlike Claude Code's sibling `agent-<id>.jsonl` transcripts, Codex child rollouts live under `CODEX_HOME/sessions/...`, so it implements `SubagentTranscriptResolver`. See `cmd/entire/cli/agent/codex/AGENT.md`.
+
 ### Event Field Requirements
 
 | Event Type | Required Fields | Optional Fields |
