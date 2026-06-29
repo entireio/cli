@@ -200,6 +200,31 @@ func TestUninstallHooks(t *testing.T) {
 	require.False(t, ag.AreHooksInstalled(context.Background()))
 }
 
+// AreHooksInstalled must require the subagent hooks too. Otherwise a stale
+// install (the 4 legacy hooks, no SubagentStart/SubagentStop) reports complete,
+// and re-install — which setup.go gates on this — never adds the subagent hooks.
+func TestAreHooksInstalled_RequiresSubagentHooks(t *testing.T) {
+	tempDir := setupTestEnv(t)
+	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(hooksPath), 0o750))
+	legacy := `{"hooks":{
+		"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-start","timeout":30}]}],
+		"UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
+		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]}],
+		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}]
+	}}`
+	require.NoError(t, os.WriteFile(hooksPath, []byte(legacy), 0o600))
+
+	ag := &CodexAgent{}
+	require.False(t, ag.AreHooksInstalled(context.Background()),
+		"a stale 4-hook install must report incomplete so re-install adds the subagent hooks")
+
+	// Re-install adds the two missing subagent hooks → now complete.
+	_, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+	require.True(t, ag.AreHooksInstalled(context.Background()))
+}
+
 func TestUninstallHooks_PreservesUserHookContainingEntireSubstring(t *testing.T) {
 	tempDir := setupTestEnv(t)
 

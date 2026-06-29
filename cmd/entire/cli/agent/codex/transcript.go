@@ -355,7 +355,7 @@ func (c *CodexAgent) ExtractAllModifiedFiles(transcriptData []byte, fromOffset i
 	}
 
 	add(extractFilesFromBytes(transcriptData, fromOffset))
-	for _, childData := range c.readSubagentRollouts(transcriptData) {
+	for _, childData := range c.readSubagentRollouts(transcriptData, fromOffset) {
 		add(extractFilesFromBytes(childData, 0))
 	}
 	return files, nil
@@ -368,12 +368,9 @@ func (c *CodexAgent) CalculateTotalTokenUsage(transcriptData []byte, fromOffset 
 	if err != nil {
 		return nil, err
 	}
-	if mainUsage == nil {
-		mainUsage = &agent.TokenUsage{}
-	}
 
 	sub := &agent.TokenUsage{}
-	for _, childData := range c.readSubagentRollouts(transcriptData) {
+	for _, childData := range c.readSubagentRollouts(transcriptData, fromOffset) {
 		u, uerr := c.CalculateTokenUsage(childData, 0)
 		if uerr != nil || u == nil {
 			continue
@@ -384,9 +381,16 @@ func (c *CodexAgent) CalculateTotalTokenUsage(transcriptData []byte, fromOffset 
 		sub.OutputTokens += u.OutputTokens
 		sub.APICallCount += u.APICallCount
 	}
-	if sub.APICallCount > 0 {
-		mainUsage.SubagentTokens = sub
+	// No subagents spawned in this checkpoint range: preserve CalculateTokenUsage's
+	// semantics exactly, including its nil "no token data" return — don't
+	// materialize an empty &TokenUsage{} where the base method returned nil.
+	if sub.APICallCount == 0 {
+		return mainUsage, nil
 	}
+	if mainUsage == nil {
+		mainUsage = &agent.TokenUsage{}
+	}
+	mainUsage.SubagentTokens = sub
 	return mainUsage, nil
 }
 
@@ -411,11 +415,34 @@ func extractFilesFromBytes(data []byte, fromOffset int) []string {
 	return files
 }
 
-// readSubagentRollouts returns the raw bytes of every spawned subagent's rollout
-// file referenced by the parent transcript. Best-effort: children whose rollout
-// can't be resolved or read are skipped (e.g. archived/cleaned up).
-func (c *CodexAgent) readSubagentRollouts(parent []byte) [][]byte {
-	ids := extractSpawnedAgentIDs(parent)
+// readSubagentRollouts returns the raw bytes of every subagent rollout spawned
+// in the parent transcript AT OR AFTER fromOffset. Scoping discovery to
+// fromOffset is essential: a Codex rollout grows across turns within one file,
+// so without it every subagent ever spawned would be re-attributed to every
+// later checkpoint. Best-effort: children whose rollout can't be resolved or
+// read are skipped (e.g. archived/cleaned up).
+//
+// Results are memoized per (fromOffset, len(parent)) because the turn-end path
+// calls this from both ExtractAllModifiedFiles and CalculateTotalTokenUsage on
+// the same agent instance (created per hook invocation, used sequentially), so
+// the memo is single-invocation-scoped and needs no synchronization. The len
+// component keys distinct turns apart, so a reused instance never gets a stale
+// hit.
+func (c *CodexAgent) readSubagentRollouts(parent []byte, fromOffset int) [][]byte {
+	key := fmt.Sprintf("%d:%d", fromOffset, len(parent))
+	if cached, ok := c.subagentRollouts[key]; ok {
+		return cached
+	}
+	out := c.readSubagentRolloutsUncached(parent, fromOffset)
+	if c.subagentRollouts == nil {
+		c.subagentRollouts = make(map[string][][]byte, 1)
+	}
+	c.subagentRollouts[key] = out
+	return out
+}
+
+func (c *CodexAgent) readSubagentRolloutsUncached(parent []byte, fromOffset int) [][]byte {
+	ids := extractSpawnedAgentIDs(parent, fromOffset)
 	if len(ids) == 0 {
 		return nil
 	}
@@ -440,12 +467,19 @@ func (c *CodexAgent) readSubagentRollouts(parent []byte) [][]byte {
 
 // extractSpawnedAgentIDs returns the deduplicated subagent thread-ids referenced
 // by Codex agent-management tool calls (wait_agent / close_agent / resume_agent)
-// in a parent rollout. spawn_agent does not echo the child id in its arguments,
-// so the ids are recovered from the management calls that target them.
-func extractSpawnedAgentIDs(data []byte) []string {
+// in a parent rollout, skipping the first fromOffset JSONL lines so only
+// subagents spawned in the current checkpoint range are returned. spawn_agent
+// does not echo the child id in its arguments, so the ids are recovered from the
+// management calls that target them.
+func extractSpawnedAgentIDs(data []byte, fromOffset int) []string {
 	seen := make(map[string]struct{})
 	var ids []string
+	lineNum := 0
 	for _, lineData := range splitJSONL(data) {
+		lineNum++
+		if lineNum <= fromOffset {
+			continue
+		}
 		var line rolloutLine
 		if json.Unmarshal(lineData, &line) != nil || line.Type != rolloutLineTypeResponseItem {
 			continue

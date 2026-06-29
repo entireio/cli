@@ -26,6 +26,13 @@ func init() {
 //nolint:revive // CodexAgent is clearer than Agent in this context
 type CodexAgent struct {
 	CommandRunner agent.TextCommandRunner
+
+	// subagentRollouts memoizes readSubagentRollouts within a single hook
+	// invocation (the turn-end path reads child rollouts from both the
+	// file-extraction and token-usage methods on the same instance). Keyed by
+	// "<fromOffset>:<len(parent)>"; the agent is created per invocation and used
+	// sequentially, so this is single-invocation-scoped and not synchronized.
+	subagentRollouts map[string][][]byte
 }
 
 // NewCodexAgent creates a new Codex agent instance.

@@ -559,7 +559,10 @@ trusted_hash = "sha256:ccc"
 
 	out := stdout.String()
 	require.Contains(t, out, "Codex hooks: OUT OF DATE")
+	require.Contains(t, out, "3 hook(s)") // post_tool_use + the two subagent hooks
 	require.Contains(t, out, "- post_tool_use")
+	require.Contains(t, out, "- subagent_start")
+	require.Contains(t, out, "- subagent_stop")
 	require.Contains(t, out, "entire enable")
 	require.NotContains(t, out, "Codex hook trust: REVIEW NEEDED")
 }

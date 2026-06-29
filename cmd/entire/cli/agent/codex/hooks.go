@@ -292,7 +292,9 @@ func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 	return hasEntireHook(hooksFile.Hooks.SessionStart) &&
 		hasEntireHook(hooksFile.Hooks.UserPromptSubmit) &&
 		hasEntireHook(hooksFile.Hooks.Stop) &&
-		hasEntireHook(hooksFile.Hooks.PostToolUse)
+		hasEntireHook(hooksFile.Hooks.PostToolUse) &&
+		hasEntireHook(hooksFile.Hooks.SubagentStart) &&
+		hasEntireHook(hooksFile.Hooks.SubagentStop)
 }
 
 // --- Helpers ---

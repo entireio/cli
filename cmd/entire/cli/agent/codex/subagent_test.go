@@ -148,8 +148,42 @@ func TestExtractSpawnedAgentIDs(t *testing.T) {
 		functionCallLine(t, "close_agent", `{"target":"`+childID1+`"}`),
 	}, "\n")
 
-	ids := extractSpawnedAgentIDs([]byte(parent))
+	ids := extractSpawnedAgentIDs([]byte(parent), 0)
 	require.ElementsMatch(t, []string{childID1, childID2}, ids)
+}
+
+// fromOffset scopes subagent discovery to the current checkpoint range. A
+// management call before the offset (a prior turn, since a Codex rollout grows
+// in one file) must NOT re-attribute its subagent's files or tokens — otherwise
+// every prior subagent is re-counted on every subsequent turn.
+func TestSubagentDiscovery_RespectsFromOffset(t *testing.T) {
+	sessionsDir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", sessionsDir)
+	writeChildRollout(t, sessionsDir, childID1,
+		sessionMetaLine(t, childID1), applyPatchLine(t, "Add", "child1.go"), tokenCountLine(t, 100, 0, 50))
+
+	parent := strings.Join([]string{
+		sessionMetaLine(t, "parent"),                                      // line 1
+		functionCallLine(t, "wait_agent", `{"targets":["`+childID1+`"]}`), // line 2 (prior range)
+		applyPatchLine(t, "Update", "parent-late.go"),                     // line 3 (this range)
+	}, "\n")
+
+	ag := &CodexAgent{}
+	// Offset past the wait_agent line: childID1 belongs to a prior checkpoint.
+	files, err := ag.ExtractAllModifiedFiles([]byte(parent), 2, "")
+	require.NoError(t, err)
+	require.Equal(t, []string{"parent-late.go"}, files, "subagent files before the offset must not be re-attributed")
+
+	usage, err := ag.CalculateTotalTokenUsage([]byte(parent), 2, "")
+	require.NoError(t, err)
+	if usage != nil {
+		require.Nil(t, usage.SubagentTokens, "subagent tokens before the offset must not be re-attributed")
+	}
+
+	// Sanity: with offset 0 the subagent IS attributed.
+	files0, err := (&CodexAgent{}).ExtractAllModifiedFiles([]byte(parent), 0, "")
+	require.NoError(t, err)
+	require.Contains(t, files0, "child1.go")
 }
 
 // --- SubagentAwareExtractor: files + tokens ---
