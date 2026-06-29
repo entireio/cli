@@ -873,6 +873,7 @@ func closedServerURL() string {
 }
 
 func TestColdPathFailoverWhenRedirectTargetUnreachable(t *testing.T) {
+	t.Parallel()
 	dead := closedServerURL()
 
 	var aliveURL string
