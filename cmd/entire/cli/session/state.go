@@ -58,6 +58,12 @@ const (
 	// to Kind.IsInvestigate so the checkpoint's HasInvestigation umbrella
 	// flag keeps covering them.
 	KindAgentInvestigate Kind = "agent_investigate"
+
+	// KindImported tags a checkpoint created by `entire import` from a
+	// pre-existing agent transcript. Imported checkpoints are read-only and
+	// commit-less; they live on the v1 metadata branch and push like any other
+	// checkpoint.
+	KindImported Kind = "imported"
 )
 
 // IsReview reports whether this Kind counts as "a review happened" for the
@@ -252,6 +258,10 @@ type State struct {
 
 	// Token usage tracking (accumulated across all checkpoints in this session)
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
+
+	// CheckpointTokenUsage tracks hook-provided token usage since the last condensation.
+	// This is checkpoint-scoped; TokenUsage remains the session-wide total.
+	CheckpointTokenUsage *agent.TokenUsage `json:"checkpoint_token_usage,omitempty"`
 
 	// SkillEvents records explicit native skill signals observed during this session.
 	// Stored as sidecar metadata so consumers can collapse skill-related transcript events

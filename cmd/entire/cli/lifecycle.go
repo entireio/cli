@@ -146,6 +146,23 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 			slog.String("error", hintErr.Error()))
 	}
 
+	// Resolve scope before the TurnStart prompt path.
+	refreshCtx, refreshCancel := context.WithTimeout(ctx, trailEnablementSessionStartRefreshTimeout)
+	if scope, scopeErr := currentTrailEnablementScope(refreshCtx); scopeErr != nil {
+		logging.Debug(logCtx, "trails enablement refresh skipped",
+			slog.String("error", scopeErr.Error()))
+	} else {
+		if hintErr := saveTrailEnablementScopeHint(ctx, event.SessionID, scope); hintErr != nil {
+			logging.Debug(logCtx, "failed to cache trails scope hint",
+				slog.String("error", hintErr.Error()))
+		}
+		if refreshErr := refreshTrailsEnabledCacheIfStaleForScope(refreshCtx, scope); refreshErr != nil {
+			logging.Debug(logCtx, "trails enablement refresh skipped",
+				slog.String("error", refreshErr.Error()))
+		}
+	}
+	refreshCancel()
+
 	// Build informational message — warn early if repo has no commits yet,
 	// since checkpoints require at least one commit to work.
 	message := sessionStartMessage(ag.Name(), false)
@@ -384,12 +401,14 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	}
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 
-	// Decide once per session, recorded on the session state itself (not a
-	// separate marker file). Winning the check-and-set means this turn owns the
-	// decision. trailsEnabledForRepo only reads clone-local cached enablement;
-	// the API refresh happens earlier on `entire enable`, outside the prompt path.
-	// Marking "decided" before checking the cache means a missing/stale false
-	// cache fails closed (no hint for this session) rather than retrying/spamming.
+	// Unknown cache leaves the session retryable.
+	scope, scopeOK, scopeErr := loadTrailEnablementScopeHint(ctx, event.SessionID)
+	if scopeErr != nil {
+		logging.Warn(logCtx, "failed to load trails scope hint",
+			slog.String("error", scopeErr.Error()))
+		return
+	}
+	decision := trailEnablementCacheUnknown
 	mutated := false
 	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
 		if state.ContextInjectionDecided {
@@ -399,6 +418,13 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 		// trail pointer; skip without marking decided so normal sessions keep the
 		// usual first-turn behavior.
 		if state.Kind != "" {
+			return strategy.ErrMutationSkip
+		}
+		if !scopeOK {
+			return strategy.ErrMutationSkip
+		}
+		decision = cachedTrailsEnablementForScope(ctx, scope, time.Now())
+		if decision == trailEnablementCacheUnknown {
 			return strategy.ErrMutationSkip
 		}
 		state.ContextInjectionDecided = true
@@ -414,12 +440,7 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	// state failed, mutErr was non-nil above and we returned without injecting,
 	// leaving a later turn free to retry safely.
 	won := mutErr == nil && mutated
-	if !won {
-		return // already decided for this session, skipped kind, or no session state yet
-	}
-
-	// Only advertise trails when they're literally enabled for this repo on the API.
-	if !trailsEnabledForRepo(ctx) {
+	if !won || decision != trailEnablementCacheEnabled {
 		return
 	}
 
@@ -836,8 +857,15 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		transcriptLinesAtStart = preState.TranscriptOffset
 	}
 
-	// Calculate token usage - prefer SubagentAwareExtractor to include subagent tokens
-	tokenUsage := agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
+	// Resolve token usage. Hook-provided counts (e.g., Cursor's stop hook,
+	// which is the only authoritative source for Cursor sessions because the
+	// JSONL transcript has no usage fields) take precedence; otherwise fall
+	// back to transcript-based computation, preferring SubagentAwareExtractor
+	// to include subagent tokens.
+	tokenUsage := event.TokenUsage
+	if tokenUsage == nil {
+		tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
+	}
 
 	// Build fully-populated step context and delegate to strategy
 	stepCtx := strategy.StepContext{

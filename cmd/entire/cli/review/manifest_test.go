@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -150,133 +151,7 @@ func TestReviewSummaryTokenEnricher_LoadsCurrentSessionState(t *testing.T) {
 	}
 }
 
-func TestLocalReviewManifest_ResolveByAnySessionID(t *testing.T) {
-	repoRoot := t.TempDir()
-	testutil.InitRepo(t, repoRoot)
-	t.Chdir(repoRoot)
-
-	manifest := LocalReviewManifest{
-		Version:      1,
-		WorktreePath: repoRoot,
-		CreatedAt:    time.Date(2026, 5, 7, 10, 0, 0, 0, time.UTC),
-		StartingSHA:  "abc123",
-		Sources: []ManifestSource{
-			{
-				SessionID: "claude-session",
-				Agent:     "claude-code",
-				Label:     "Claude Code",
-				Output:    "H1. Claude finding",
-			},
-			{
-				SessionID: "codex-session",
-				Agent:     manifestTestCodexAgent,
-				Label:     "Codex",
-				Output:    "M1. Codex finding",
-			},
-		},
-		AggregateOutput: "Combined summary",
-	}
-
-	if err := writeLocalReviewManifest(context.Background(), manifest); err != nil {
-		t.Fatalf("writeLocalReviewManifest: %v", err)
-	}
-
-	got, matched, err := resolveLocalReviewManifestBySessionID(context.Background(), repoRoot, "codex-session")
-	if err != nil {
-		t.Fatalf("resolveLocalReviewManifestBySessionID: %v", err)
-	}
-	if matched.SessionID != "codex-session" {
-		t.Fatalf("matched session = %q, want codex-session", matched.SessionID)
-	}
-	if len(got.Sources) != 2 {
-		t.Fatalf("sources = %d, want 2", len(got.Sources))
-	}
-	if got.AggregateOutput != "Combined summary" {
-		t.Fatalf("aggregate output = %q", got.AggregateOutput)
-	}
-}
-
-func TestLocalReviewManifest_PrefixMatchWithinSameManifestDoesNotAmbiguate(t *testing.T) {
-	repoRoot := t.TempDir()
-	testutil.InitRepo(t, repoRoot)
-	t.Chdir(repoRoot)
-
-	manifest := LocalReviewManifest{
-		Version:      1,
-		WorktreePath: repoRoot,
-		CreatedAt:    time.Date(2026, 5, 7, 10, 0, 0, 0, time.UTC),
-		StartingSHA:  "abc123",
-		Sources: []ManifestSource{
-			{
-				SessionID: "review-session-claude",
-				Agent:     "claude-code",
-				Label:     "Claude Code",
-				Output:    "H1. Claude finding",
-			},
-			{
-				SessionID: "review-session-codex",
-				Agent:     manifestTestCodexAgent,
-				Label:     "Codex",
-				Output:    "M1. Codex finding",
-			},
-		},
-	}
-
-	if err := writeLocalReviewManifest(context.Background(), manifest); err != nil {
-		t.Fatalf("writeLocalReviewManifest: %v", err)
-	}
-
-	got, _, err := resolveLocalReviewManifestBySessionID(context.Background(), repoRoot, "review-session")
-	if err != nil {
-		t.Fatalf("resolveLocalReviewManifestBySessionID: %v", err)
-	}
-	if len(got.Sources) != 2 {
-		t.Fatalf("sources = %d, want 2", len(got.Sources))
-	}
-}
-
-func TestComposeReviewFixPrompt_UsesSelectedSources(t *testing.T) {
-	manifest := LocalReviewManifest{
-		WorktreePath: "/repo",
-		Sources: []ManifestSource{
-			{
-				SessionID: "claude-session",
-				Agent:     "claude-code",
-				Label:     "Claude Code",
-				Output:    "H1. Claude finding",
-			},
-			{
-				SessionID: "codex-session",
-				Agent:     manifestTestCodexAgent,
-				Label:     "Codex",
-				Output:    "M1. Codex finding",
-			},
-		},
-		AggregateOutput: "Aggregate finding",
-	}
-
-	prompt := composeReviewFixPrompt(manifest, []reviewFixSource{
-		{Kind: reviewFixSourceAgent, Label: "Codex", Output: "M1. Codex finding"},
-		{Kind: reviewFixSourceAggregate, Label: "Aggregate summary", Output: "Aggregate finding"},
-	})
-
-	for _, want := range []string{
-		"Fix only the selected review findings.",
-		"Codex",
-		"M1. Codex finding",
-		"Aggregate summary",
-		"Aggregate finding",
-	} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt missing %q:\n%s", want, prompt)
-		}
-	}
-	if strings.Contains(prompt, "H1. Claude finding") {
-		t.Fatalf("prompt should not include unselected Claude output:\n%s", prompt)
-	}
-}
-
-func TestWriteReviewCompletionFooter_PrintsExactFixCommands(t *testing.T) {
+func TestWriteReviewCompletionFooter_PointsToFindings(t *testing.T) {
 	manifest := LocalReviewManifest{
 		Sources: []ManifestSource{{SessionID: "claude-session", Label: "Claude Code"}},
 	}
@@ -285,18 +160,17 @@ func TestWriteReviewCompletionFooter_PrintsExactFixCommands(t *testing.T) {
 	writeReviewCompletionFooter(&b, manifest)
 
 	got := b.String()
-	for _, want := range []string{
-		"Review complete.",
-		"entire review --fix claude-session --all",
-		"entire review --fix claude-session",
-	} {
+	for _, want := range []string{"Review complete.", "entire review --findings"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("footer missing %q:\n%s", want, got)
 		}
 	}
+	if strings.Contains(got, "--fix") {
+		t.Fatalf("footer should not reference removed --fix:\n%s", got)
+	}
 }
 
-func TestPrintReviewFindingsList_PrintsProductionCommandName(t *testing.T) {
+func TestPrintReviewFindingsList_ListsSessionsWithoutLocalPath(t *testing.T) {
 	oldArgs := os.Args
 	t.Cleanup(func() { os.Args = oldArgs })
 	os.Args = []string{"/tmp/local-build/entire"}
@@ -317,45 +191,8 @@ func TestPrintReviewFindingsList_PrintsProductionCommandName(t *testing.T) {
 	if strings.Contains(got, "/tmp/local-build/entire") {
 		t.Fatalf("findings list should not print local binary path:\n%s", got)
 	}
-	if !strings.Contains(got, "entire review --fix claude-session --all") {
-		t.Fatalf("findings list missing production command:\n%s", got)
-	}
-}
-
-func TestReviewFixSourcesForManifest_AddsAggregateFallbackForMultipleAgents(t *testing.T) {
-	manifest := LocalReviewManifest{
-		Sources: []ManifestSource{
-			{
-				SessionID: "claude-session",
-				Agent:     "claude-code",
-				Label:     "Claude Code",
-				Output:    "H1. Claude finding",
-			},
-			{
-				SessionID: "codex-session",
-				Agent:     manifestTestCodexAgent,
-				Label:     "Codex",
-				Output:    "M1. Codex finding",
-			},
-		},
-	}
-
-	sources := reviewFixSourcesForManifest(manifest)
-
-	if len(sources) != 3 {
-		t.Fatalf("sources = %d, want 3: %#v", len(sources), sources)
-	}
-	aggregate := sources[2]
-	if aggregate.Kind != reviewFixSourceAggregate {
-		t.Fatalf("aggregate kind = %q, want %q", aggregate.Kind, reviewFixSourceAggregate)
-	}
-	if aggregate.Label != "Aggregate findings" {
-		t.Fatalf("aggregate label = %q", aggregate.Label)
-	}
-	for _, want := range []string{"Claude Code findings", "H1. Claude finding", "Codex findings", "M1. Codex finding"} {
-		if !strings.Contains(aggregate.Output, want) {
-			t.Fatalf("aggregate output missing %q:\n%s", want, aggregate.Output)
-		}
+	if !strings.Contains(got, "claude-session") {
+		t.Fatalf("findings list missing session handle:\n%s", got)
 	}
 }
 
@@ -367,67 +204,13 @@ func TestReviewPickerHeight_ShowsAllSmallOptionSets(t *testing.T) {
 	}
 }
 
-func TestReviewFixSourcePickerTitle_IncludesSessionHandle(t *testing.T) {
-	manifest := LocalReviewManifest{
-		Sources: []ManifestSource{{SessionID: "073be48b-2a68-473e-b783-9fa7b78a85aa"}},
-	}
-
-	got := reviewFixSourcePickerTitle(manifest)
-
-	if !strings.Contains(got, "073be48b-2a68-473e-b783-9fa7b78a85aa") {
-		t.Fatalf("title = %q, want session id", got)
-	}
-}
-
-func TestReviewFixAgentFromSelectedSources_UsesSingleAgentSource(t *testing.T) {
-	got, ok := reviewFixAgentFromSelectedSources([]reviewFixSource{
-		{Kind: reviewFixSourceAgent, Agent: manifestTestCodexAgent, Label: "Codex findings"},
-	})
-
-	if !ok {
-		t.Fatal("expected single-source agent inference")
-	}
-	if got != manifestTestCodexAgent {
-		t.Fatalf("agent = %q, want codex", got)
-	}
-}
-
-func TestReviewFixAgentFromSelectedSources_DoesNotInferForAggregateOrMultiple(t *testing.T) {
-	tests := []struct {
-		name    string
-		sources []reviewFixSource
-	}{
-		{
-			name: "aggregate",
-			sources: []reviewFixSource{
-				{Kind: reviewFixSourceAggregate, Label: "Aggregate summary"},
-			},
-		},
-		{
-			name: "multiple agents",
-			sources: []reviewFixSource{
-				{Kind: reviewFixSourceAgent, Agent: "claude-code"},
-				{Kind: reviewFixSourceAgent, Agent: manifestTestCodexAgent},
-			},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, ok := reviewFixAgentFromSelectedSources(tc.sources)
-			if ok {
-				t.Fatalf("agent = %q, want no inference", got)
-			}
-		})
-	}
-}
-
-func TestSavedReviewFixAgentPick_UsesSavedWhenAvailable(t *testing.T) {
+func TestSavedAgentPick_UsesSavedWhenAvailable(t *testing.T) {
 	choices := []AgentChoice{
 		{Name: "claude-code", Label: "Claude Code"},
 		{Name: manifestTestCodexAgent, Label: "Codex"},
 	}
 
-	got, ok := savedReviewFixAgentPick(choices, manifestTestCodexAgent)
+	got, ok := savedAgentPick(choices, manifestTestCodexAgent)
 
 	if !ok {
 		t.Fatal("expected saved agent match")
@@ -437,25 +220,13 @@ func TestSavedReviewFixAgentPick_UsesSavedWhenAvailable(t *testing.T) {
 	}
 }
 
-func TestSavedReviewFixAgentPick_RejectsUnknownSavedAgent(t *testing.T) {
+func TestSavedAgentPick_RejectsUnknownSavedAgent(t *testing.T) {
 	choices := []AgentChoice{{Name: "claude-code", Label: "Claude Code"}}
 
-	got, ok := savedReviewFixAgentPick(choices, manifestTestCodexAgent)
+	got, ok := savedAgentPick(choices, manifestTestCodexAgent)
 
 	if ok {
 		t.Fatalf("saved pick = %q, want no match", got)
-	}
-}
-
-func TestPickReviewFixAgentPreference_PreservesCurrentWhenNoChoices(t *testing.T) {
-	t.Parallel()
-
-	got, err := pickReviewFixAgentPreference(context.Background(), nil, manifestTestCodexAgent)
-	if err != nil {
-		t.Fatalf("pickReviewFixAgentPreference: %v", err)
-	}
-	if got != manifestTestCodexAgent {
-		t.Fatalf("fix agent = %q, want codex", got)
 	}
 }
 
@@ -524,7 +295,7 @@ func TestWarnManifestNotWritten_PrintsReasonAndDiagnosticHints(t *testing.T) {
 	for _, want := range []string{
 		"Note: review skills ran but findings were not persisted.",
 		"Reason: test reason text",
-		"`entire review --findings` and `entire review --fix` will not see this run.",
+		"`entire review --findings` will not see this run.",
 		"`ENTIRE_LOG_LEVEL=debug`",
 	} {
 		if !strings.Contains(got, want) {
@@ -975,4 +746,443 @@ func (manifestTokenTestAgent) CalculateTokenUsage(content []byte, _ int) (*agent
 		CacheReadTokens: 50,
 		OutputTokens:    50,
 	}, nil
+}
+
+func TestReviewRunModelMatches(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		want string
+		got  string
+		ok   bool
+	}{
+		{"exact", "gpt-4", "gpt-4", true},
+		{"empty want matches anything", "", "claude-sonnet-4-5", true},
+		{"empty got matches anything", "sonnet", "", true},
+		{"alias matches resolved", "sonnet", "claude-sonnet-4-20250514", true},
+		{"family matches resolved", "claude-sonnet", "claude-sonnet-4-5", true},
+		{"provider prefix and thinking suffix stripped", "anthropic/claude-sonnet:high", "claude-sonnet-4-5", true},
+		{"separator-insensitive", "claude_sonnet", "claude-sonnet-4-5", true},
+		{"numeric version suffix matches", "gpt-4o", "gpt-4o-2024-08-06", true},
+		{"minor version suffix matches", "claude-sonnet-4", "claude-sonnet-4-5", true},
+		// Partial component must not match.
+		{"gpt-4 must NOT match gpt-4o-mini", "gpt-4", "gpt-4o-mini", false},
+		// Variant suffix (a word, not a version) must not match.
+		{"gpt-4o must NOT match gpt-4o-mini", "gpt-4o", "gpt-4o-mini", false},
+		{"gpt-4 must NOT match gpt-4-turbo", "gpt-4", "gpt-4-turbo", false},
+		// Bare version fragments must not match a model that merely ends in them.
+		{"version fragment does not match", "4-5", "claude-sonnet-4-5", false},
+		{"different families do not match", "gpt-4o-mini", "claude-sonnet-4-5", false},
+		{"opus does not match sonnet", "opus", "claude-sonnet-4-5", false},
+		// Identical ids match regardless of component count (via the want==got
+		// short-circuit), but two distinct equal-length ids must not.
+		{"identical multi-component ids match", "claude-sonnet-4-5", "claude-sonnet-4-5", true},
+		{"identical two-component ids match", "claude-sonnet", "claude-sonnet", true},
+		{"slash provider prefix stripped then identical", "anthropic/claude-sonnet", "claude-sonnet", true},
+		{"family matches across a provider component at offset", "claude-sonnet", "anthropic-claude-sonnet-4-5", true},
+		{"match where the next component is the last element", "sonnet-4", "claude-sonnet-4-5", true},
+		// Suffix-only spans are intentionally rejected (no version boundary to
+		// confirm the same model); this is what also keeps bare fragments and
+		// variant words from matching. Realistic configured models still match via
+		// the trailing version (see the alias/family cases above).
+		{"family+version suffix is intentionally not matched", "sonnet-4", "claude-sonnet-4", false},
+		{"variant-word suffix must not match", "mini", "gpt-4o-mini", false},
+		{"bare version suffix must not match", "4-5", "claude-sonnet-4", false},
+		{"thinking-suffix-only difference matches", "claude-sonnet:high", "claude-sonnet:low", true},
+		{"equal-length different family does not match", "claude-sonnet", "claude-opus", false},
+		{"equal-length different version does not match", "claude-sonnet-4", "claude-sonnet-5", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := reviewRunModelMatches(c.want, c.got); got != c.ok {
+				t.Errorf("reviewRunModelMatches(%q, %q) = %v, want %v", c.want, c.got, got, c.ok)
+			}
+		})
+	}
+}
+
+func TestModelComponentsMatchLastComponentBoundary(t *testing.T) {
+	t.Parallel()
+	long := []string{"anthropic", "claude", "sonnet", "4"}
+
+	if !modelComponentsMatch([]string{"claude", "sonnet"}, long) {
+		t.Fatal("span followed by long's last component should match when that component is numeric")
+	}
+	if modelComponentsMatch([]string{"sonnet", "4"}, long) {
+		t.Fatal("suffix span should not match because it has no following boundary component")
+	}
+	if modelComponentsMatch([]string{"claude", "sonnet"}, []string{"anthropic", "claude", "sonnet", "mini"}) {
+		t.Fatal("last-component boundary should not match when the following component is non-numeric")
+	}
+}
+
+// TestBuildLocalReviewManifestFromSummary_DisambiguatesSameModelDifferentThinking
+// pins the used-session tracking: two reviewers on the same agent whose models
+// normalize identically (claude-sonnet:high / :low -> claude-sonnet), with
+// sessions that start in the same second, must still link to distinct sessions
+// rather than both grabbing the most recent match.
+func TestComponentsEqualAtBoundsChecks(t *testing.T) {
+	t.Parallel()
+	long := []string{"claude", "sonnet"}
+	short := []string{"sonnet", "4"}
+
+	if componentsEqualAt(long, short, -1) {
+		t.Fatal("negative offset should not match")
+	}
+	if componentsEqualAt(long, short, 1) {
+		t.Fatal("span that overruns long should not match")
+	}
+	if !componentsEqualAt(long, []string{"sonnet"}, 1) {
+		t.Fatal("in-bounds span should match")
+	}
+}
+
+func TestHydrateReviewAgentRunTokensFromStatesWithUsedDisambiguatesDuplicateSlots(t *testing.T) {
+	t.Parallel()
+	started := time.Date(2026, 5, 7, 10, 0, 0, 0, time.UTC)
+	run := reviewtypes.AgentRun{
+		Name:      "claude-code",
+		AgentName: "claude-code",
+		Model:     "opus",
+		StartedAt: started,
+	}
+	states := []*session.State{
+		{
+			SessionID:    "sess-older",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+			ModelName:    "claude-opus-4-1",
+			TokenUsage:   &agent.TokenUsage{InputTokens: 20, OutputTokens: 2},
+		},
+		{
+			SessionID:    "sess-newer",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(2 * time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+			ModelName:    "claude-opus-4-1",
+			TokenUsage:   &agent.TokenUsage{InputTokens: 10, OutputTokens: 1},
+		},
+	}
+
+	freshA := hydrateReviewAgentRunTokensFromStates(context.Background(), "/repo", "abc123", run, states, nil)
+	freshB := hydrateReviewAgentRunTokensFromStates(context.Background(), "/repo", "abc123", run, states, nil)
+	if freshA.Tokens.In != 10 || freshB.Tokens.In != 10 {
+		t.Fatalf("fresh-map setup changed: tokens = %d/%d, want both newest session token count 10", freshA.Tokens.In, freshB.Tokens.In)
+	}
+
+	used := map[string]bool{}
+	first := hydrateReviewAgentRunTokensFromStatesWithUsed(context.Background(), "/repo", "abc123", run, states, nil, used)
+	second := hydrateReviewAgentRunTokensFromStatesWithUsed(context.Background(), "/repo", "abc123", run, states, nil, used)
+	if first.Tokens.In != 10 || first.Tokens.Out != 1 {
+		t.Fatalf("first tokens = %+v, want newer session tokens 10/1", first.Tokens)
+	}
+	if second.Tokens.In != 20 || second.Tokens.Out != 2 {
+		t.Fatalf("second tokens = %+v, want older distinct session tokens 20/2", second.Tokens)
+	}
+	if !used["sess-newer"] || !used["sess-older"] || len(used) != 2 {
+		t.Fatalf("used sessions = %#v, want both sessions claimed", used)
+	}
+}
+
+func TestHydrateReviewAgentRunTokensFromStatesWithPlanClaimsExplicitBeforeDefault(t *testing.T) {
+	t.Parallel()
+	const (
+		sessDefault = "sess-default"
+		sessOpus    = "sess-opus"
+	)
+	started := time.Date(2026, 5, 7, 10, 0, 0, 0, time.UTC)
+	defaultRun := reviewtypes.AgentRun{
+		Name:      "claude-code",
+		AgentName: "claude-code",
+		StartedAt: started,
+	}
+	opusRun := reviewtypes.AgentRun{
+		Name:      "claude-code",
+		AgentName: "claude-code",
+		Model:     "opus",
+		StartedAt: started,
+	}
+	planned := []reviewtypes.AgentRun{defaultRun, opusRun}
+	states := []*session.State{
+		{
+			SessionID:    sessDefault,
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+			ModelName:    "claude-sonnet-4-5",
+			TokenUsage:   &agent.TokenUsage{InputTokens: 20, OutputTokens: 2},
+		},
+		{
+			SessionID:    sessOpus,
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(2 * time.Second), // newer: a naive default match would grab this
+			AgentType:    agenttypes.AgentType("Claude Code"),
+			ModelName:    "claude-opus-4-1",
+			TokenUsage:   &agent.TokenUsage{InputTokens: 10, OutputTokens: 1},
+		},
+	}
+
+	claimed := make([]bool, len(planned))
+	defaultFirst, ok, sessionID := hydrateReviewAgentRunTokensFromStatesWithPlan(context.Background(), "/repo", "abc123", defaultRun, states, nil, planned, started, claimed)
+	if !ok {
+		t.Fatal("default run did not claim a planned slot")
+	}
+	if sessionID != sessDefault || defaultFirst.Tokens.In != 20 || defaultFirst.Tokens.Out != 2 {
+		t.Fatalf("default run matched session %q tokens %+v, want %s tokens 20/2", sessionID, defaultFirst.Tokens, sessDefault)
+	}
+
+	opusSecond, ok, sessionID := hydrateReviewAgentRunTokensFromStatesWithPlan(context.Background(), "/repo", "abc123", opusRun, states, nil, planned, started, claimed)
+	if !ok {
+		t.Fatal("opus run did not claim a planned slot")
+	}
+	if sessionID != sessOpus || opusSecond.Tokens.In != 10 || opusSecond.Tokens.Out != 1 {
+		t.Fatalf("opus run matched session %q tokens %+v, want %s tokens 10/1", sessionID, opusSecond.Tokens, sessOpus)
+	}
+}
+
+func TestBuildLocalReviewManifestFromSummary_DisambiguatesSameModelDifferentThinking(t *testing.T) {
+	started := time.Date(2026, 5, 7, 10, 0, 0, 0, time.UTC)
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{
+			{
+				Name:      "claude-code",
+				AgentName: "claude-code",
+				Model:     "claude-sonnet:high",
+				Status:    reviewtypes.AgentStatusSucceeded,
+				Buffer:    []reviewtypes.Event{reviewtypes.AssistantText{Text: "high finding"}},
+			},
+			{
+				Name:      "claude-code",
+				AgentName: "claude-code",
+				Model:     "claude-sonnet:low",
+				Status:    reviewtypes.AgentStatusSucceeded,
+				Buffer:    []reviewtypes.Event{reviewtypes.AssistantText{Text: "low finding"}},
+			},
+		},
+	}
+	// Both sessions resolve to the same model and start in the same second, so
+	// only used-session tracking can keep the two workers on distinct sessions.
+	sameStart := started.Add(time.Second)
+	states := []*session.State{
+		{
+			SessionID:    "sess-1",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    sameStart,
+			AgentType:    agenttypes.AgentType("Claude Code"),
+			ModelName:    "claude-sonnet-4-5",
+		},
+		{
+			SessionID:    "sess-2",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    sameStart,
+			AgentType:    agenttypes.AgentType("Claude Code"),
+			ModelName:    "claude-sonnet-4-5",
+		},
+	}
+
+	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "")
+
+	if len(manifest.Sources) != 2 {
+		t.Fatalf("sources = %d, want 2 (each reviewer linked to a session)", len(manifest.Sources))
+	}
+	a, b := manifest.Sources[0].SessionID, manifest.Sources[1].SessionID
+	if a == b {
+		t.Fatalf("both reviewers linked to the same session %q; used-session tracking must keep them distinct", a)
+	}
+	valid := map[string]bool{"sess-1": true, "sess-2": true}
+	if !valid[a] || !valid[b] {
+		t.Errorf("sessions = {%q, %q}, want the two distinct sessions sess-1 and sess-2", a, b)
+	}
+}
+
+// TestBuildLocalReviewManifestFromSummary_ExplicitModelClaimedBeforeDefault
+// pins the two-pass matching: a default-model reviewer (empty model, which
+// matches any recorded model) must not grab an explicit-model reviewer's
+// session, even when it appears first and the explicit session is more recent.
+func TestBuildLocalReviewManifestFromSummary_ExplicitModelClaimedBeforeDefault(t *testing.T) {
+	started := time.Date(2026, 5, 7, 10, 0, 0, 0, time.UTC)
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{
+			{ // default-model reviewer, listed first
+				Name:      "claude-code",
+				AgentName: "claude-code",
+				Model:     "",
+				Status:    reviewtypes.AgentStatusSucceeded,
+				Buffer:    []reviewtypes.Event{reviewtypes.AssistantText{Text: "default finding"}},
+			},
+			{ // explicit opus reviewer
+				Name:      "claude-code",
+				AgentName: "claude-code",
+				Model:     "opus",
+				Status:    reviewtypes.AgentStatusSucceeded,
+				Buffer:    []reviewtypes.Event{reviewtypes.AssistantText{Text: "opus finding"}},
+			},
+		},
+	}
+	states := []*session.State{
+		{
+			SessionID:    "sess-default",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(1 * time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+			ModelName:    "claude-sonnet-4-5",
+		},
+		{
+			SessionID:    "sess-opus",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(2 * time.Second), // more recent: a naive default match would grab this
+			AgentType:    agenttypes.AgentType("Claude Code"),
+			ModelName:    "claude-opus-4-1",
+		},
+	}
+
+	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "")
+
+	if len(manifest.Sources) != 2 {
+		t.Fatalf("sources = %d, want 2", len(manifest.Sources))
+	}
+	// Sources keep original run order: [default, opus].
+	if manifest.Sources[0].SessionID != "sess-default" {
+		t.Errorf("default reviewer linked to %q, want sess-default", manifest.Sources[0].SessionID)
+	}
+	if manifest.Sources[1].SessionID != "sess-opus" {
+		t.Errorf("opus reviewer linked to %q, want sess-opus", manifest.Sources[1].SessionID)
+	}
+}
+
+// TestBuildLocalReviewManifestFromSummary_ExplicitModelWithoutMatchingSession
+// verifies that an explicit-model reviewer with no matching session is left
+// unlinked (not force-attributed to the default-model session), and that the
+// matched slice stays index-aligned so the default reviewer still links.
+func TestBuildLocalReviewManifestFromSummary_ExplicitModelWithoutMatchingSession(t *testing.T) {
+	started := time.Date(2026, 5, 7, 10, 0, 0, 0, time.UTC)
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{
+			{ // explicit opus reviewer, but only a sonnet session exists
+				Name:      "claude-code",
+				AgentName: "claude-code",
+				Model:     "opus",
+				Status:    reviewtypes.AgentStatusSucceeded,
+				Buffer:    []reviewtypes.Event{reviewtypes.AssistantText{Text: "opus finding"}},
+			},
+			{ // default reviewer
+				Name:      "claude-code",
+				AgentName: "claude-code",
+				Model:     "",
+				Status:    reviewtypes.AgentStatusSucceeded,
+				Buffer:    []reviewtypes.Event{reviewtypes.AssistantText{Text: "default finding"}},
+			},
+		},
+	}
+	states := []*session.State{
+		{
+			SessionID:    "sess-default",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+			ModelName:    "claude-sonnet-4-5",
+		},
+	}
+
+	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "")
+
+	if len(manifest.Sources) != 1 {
+		t.Fatalf("sources = %d, want 1 (opus reviewer unmatched, not misattributed)", len(manifest.Sources))
+	}
+	if manifest.Sources[0].SessionID != "sess-default" || manifest.Sources[0].Output != "default finding" {
+		t.Errorf("source = %#v, want sess-default / 'default finding'", manifest.Sources[0])
+	}
+}
+
+// TestBuildLocalReviewManifestFromSummary_ExplicitEmptyModelIsDefault proves
+// that a JSON value of "model": "" is indistinguishable from an omitted model
+// once decoded into AgentRun.Model, and is therefore treated as a default-model
+// reviewer (not as an explicit-model reviewer) by matchSessionsToRuns.
+func TestBuildLocalReviewManifestFromSummary_ExplicitEmptyModelIsDefault(t *testing.T) {
+	const (
+		sessDefault = "sess-default"
+		sessOpus    = "sess-opus"
+	)
+	started := time.Date(2026, 5, 7, 10, 0, 0, 0, time.UTC)
+	type encodedRun struct {
+		Name      string                  `json:"name"`
+		AgentName string                  `json:"agent_name"`
+		Model     string                  `json:"model"`
+		Status    reviewtypes.AgentStatus `json:"status"`
+	}
+	var encoded []encodedRun
+	if err := json.Unmarshal([]byte(`[
+		{"name":"claude-code","agent_name":"claude-code","model":"","status":1},
+		{"name":"claude-code","agent_name":"claude-code","model":"opus","status":1}
+	]`), &encoded); err != nil {
+		t.Fatalf("unmarshal runs: %v", err)
+	}
+	runs := make([]reviewtypes.AgentRun, len(encoded))
+	for i, run := range encoded {
+		runs[i] = reviewtypes.AgentRun{
+			Name:      run.Name,
+			AgentName: run.AgentName,
+			Model:     run.Model,
+			Status:    run.Status,
+		}
+	}
+	if runs[0].Model != "" {
+		t.Fatalf("explicit empty JSON model decoded as %q, want empty string", runs[0].Model)
+	}
+	summary := reviewtypes.RunSummary{StartedAt: started, AgentRuns: runs}
+	states := []*session.State{
+		{
+			SessionID:    sessDefault,
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+			ModelName:    "claude-sonnet-4-5",
+		},
+		{
+			SessionID:    sessOpus,
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(2 * time.Second), // more recent, so a single-pass default match would steal it
+			AgentType:    agenttypes.AgentType("Claude Code"),
+			ModelName:    "claude-opus-4-1",
+		},
+	}
+
+	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "")
+
+	if len(manifest.Sources) != 2 {
+		t.Fatalf("sources = %d, want 2", len(manifest.Sources))
+	}
+	if manifest.Sources[0].SessionID != sessDefault {
+		t.Errorf("explicit-empty/default reviewer linked to %q, want %s", manifest.Sources[0].SessionID, sessDefault)
+	}
+	if manifest.Sources[1].SessionID != sessOpus {
+		t.Errorf("opus reviewer linked to %q, want %s", manifest.Sources[1].SessionID, sessOpus)
+	}
 }

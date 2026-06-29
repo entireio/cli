@@ -44,15 +44,11 @@ func (s *contextWaitingSynthesisProvider) Synthesize(ctx context.Context, prompt
 func buildSink(
 	provider review.SynthesisProvider,
 	w *bytes.Buffer,
-	inputTTY bool,
-	promptYN func(ctx context.Context, question string, def bool) (bool, error),
 	perRunPrompt string,
 ) review.SynthesisSink {
 	return review.SynthesisSink{
 		Provider:     provider,
 		Writer:       w,
-		InputTTY:     inputTTY,
-		PromptYN:     promptYN,
 		PerRunPrompt: perRunPrompt,
 	}
 }
@@ -91,7 +87,7 @@ func TestSynthesisSink_AgentEventIsNoOp(t *testing.T) {
 	t.Parallel()
 	w := &bytes.Buffer{}
 	stub := &stubSynthesisProvider{response: "verdict"}
-	sink := buildSink(stub, w, true, nil, "")
+	sink := buildSink(stub, w, "")
 
 	sink.AgentEvent("agent-a", reviewtypes.AssistantText{Text: "hello"})
 	sink.AgentEvent("agent-b", reviewtypes.ToolCall{Name: "Bash", Args: "ls"})
@@ -110,48 +106,17 @@ func TestSynthesisSink_SkipsWhenCancelled(t *testing.T) {
 	t.Parallel()
 	w := &bytes.Buffer{}
 	stub := &stubSynthesisProvider{response: "verdict"}
-	promptCalled := false
-	promptFn := func(_ context.Context, _ string, _ bool) (bool, error) {
-		promptCalled = true
-		return true, nil
-	}
-	sink := buildSink(stub, w, true, promptFn, "")
+	sink := buildSink(stub, w, "")
 
 	summary := makeTwoAgentSummary()
 	summary.Cancelled = true
 	sink.RunFinished(summary)
 
-	if promptCalled {
-		t.Error("prompt should not be shown when run was cancelled")
-	}
 	if stub.capturedPrompt != "" {
 		t.Error("provider should not be called when run was cancelled")
 	}
 	if w.Len() > 0 {
 		t.Errorf("no output expected for cancelled run, got: %q", w.String())
-	}
-}
-
-// TestSynthesisSink_SkipsWhenNonTTY verifies RunFinished is a no-op when
-// InputTTY is false (CI, piped output).
-func TestSynthesisSink_SkipsWhenNonTTY(t *testing.T) {
-	t.Parallel()
-	w := &bytes.Buffer{}
-	stub := &stubSynthesisProvider{response: "verdict"}
-	promptCalled := false
-	promptFn := func(_ context.Context, _ string, _ bool) (bool, error) {
-		promptCalled = true
-		return true, nil
-	}
-	sink := buildSink(stub, w, false, promptFn, "")
-
-	sink.RunFinished(makeTwoAgentSummary())
-
-	if promptCalled {
-		t.Error("prompt should not be shown in non-TTY mode")
-	}
-	if stub.capturedPrompt != "" {
-		t.Error("provider should not be called in non-TTY mode")
 	}
 }
 
@@ -211,17 +176,9 @@ func TestSynthesisSink_SkipsWhenFewerThanTwoUsableAgents(t *testing.T) {
 			t.Parallel()
 			w := &bytes.Buffer{}
 			stub := &stubSynthesisProvider{response: "verdict"}
-			promptCalled := false
-			promptFn := func(_ context.Context, _ string, _ bool) (bool, error) {
-				promptCalled = true
-				return true, nil
-			}
-			sink := buildSink(stub, w, true, promptFn, "")
+			sink := buildSink(stub, w, "")
 			sink.RunFinished(tc.summary)
 
-			if promptCalled {
-				t.Errorf("[%s] prompt should not be shown with <2 usable agents", tc.name)
-			}
 			if stub.capturedPrompt != "" {
 				t.Errorf("[%s] provider should not be called with <2 usable agents", tc.name)
 			}
@@ -229,45 +186,21 @@ func TestSynthesisSink_SkipsWhenFewerThanTwoUsableAgents(t *testing.T) {
 	}
 }
 
-// TestSynthesisSink_UserPicksNo verifies that when the user picks N, the
-// provider is not called and nothing is written.
-func TestSynthesisSink_UserPicksNo(t *testing.T) {
-	t.Parallel()
-	w := &bytes.Buffer{}
-	stub := &stubSynthesisProvider{response: "verdict"}
-	promptFn := func(_ context.Context, _ string, _ bool) (bool, error) {
-		return false, nil // user picks N
-	}
-	sink := buildSink(stub, w, true, promptFn, "")
-
-	sink.RunFinished(makeTwoAgentSummary())
-
-	if stub.capturedPrompt != "" {
-		t.Error("provider should not be called when user picks N")
-	}
-	if w.Len() > 0 {
-		t.Errorf("no output expected when user picks N, got: %q", w.String())
-	}
-}
-
-// TestSynthesisSink_UserPicksYes verifies that when the user picks Y, the
-// provider is called and its response is written to the writer.
-func TestSynthesisSink_UserPicksYes(t *testing.T) {
+// TestSynthesisSink_WritesFinalReport verifies that with 2+ usable agents the
+// provider is called unconditionally and its response is written to the writer.
+func TestSynthesisSink_WritesFinalReport(t *testing.T) {
 	t.Parallel()
 	w := &bytes.Buffer{}
 	stub := &stubSynthesisProvider{response: "Unified verdict: looks good."}
-	promptFn := func(_ context.Context, _ string, _ bool) (bool, error) {
-		return true, nil // user picks Y
-	}
-	sink := buildSink(stub, w, true, promptFn, "")
+	sink := buildSink(stub, w, "")
 
 	sink.RunFinished(makeTwoAgentSummary())
 
 	if stub.capturedPrompt == "" {
-		t.Fatal("provider should have been called when user picks Y")
+		t.Fatal("provider should have been called")
 	}
 	out := w.String()
-	if !strings.Contains(out, "Generating summary...") {
+	if !strings.Contains(out, "Generating final report...") {
 		t.Errorf("writer should show progress before provider response, got: %q", out)
 	}
 	if !strings.Contains(out, "Unified verdict: looks good.") {
@@ -279,11 +212,8 @@ func TestSynthesisSink_OnResultReceivesSummary(t *testing.T) {
 	t.Parallel()
 	w := &bytes.Buffer{}
 	stub := &stubSynthesisProvider{response: "Unified verdict: fix H1."}
-	promptFn := func(_ context.Context, _ string, _ bool) (bool, error) {
-		return true, nil
-	}
 	var captured string
-	sink := buildSink(stub, w, true, promptFn, "")
+	sink := buildSink(stub, w, "")
 	sink.OnResult = func(result string) {
 		captured = result
 	}
@@ -301,12 +231,9 @@ func TestSynthesisSink_ProviderUsesRunContext(t *testing.T) {
 	t.Parallel()
 	w := &bytes.Buffer{}
 	provider := &contextWaitingSynthesisProvider{}
-	promptFn := func(_ context.Context, _ string, _ bool) (bool, error) {
-		return true, nil
-	}
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	cancelRun()
-	sink := buildSink(provider, w, true, promptFn, "")
+	sink := buildSink(provider, w, "")
 	sink.RunContext = runCtx
 
 	sink.RunFinished(makeTwoAgentSummary())
@@ -325,10 +252,7 @@ func TestSynthesisSink_ProviderTimeout(t *testing.T) {
 	t.Parallel()
 	w := &bytes.Buffer{}
 	provider := &contextWaitingSynthesisProvider{}
-	promptFn := func(_ context.Context, _ string, _ bool) (bool, error) {
-		return true, nil
-	}
-	sink := buildSink(provider, w, true, promptFn, "")
+	sink := buildSink(provider, w, "")
 	sink.ProviderTimeout = time.Nanosecond
 
 	sink.RunFinished(makeTwoAgentSummary())
@@ -342,7 +266,7 @@ func TestSynthesisSink_ProviderTimeout(t *testing.T) {
 }
 
 // TestSynthesisSink_ProviderErrorDegradeGracefully verifies that a provider
-// error results in a "synthesis unavailable" message rather than a panic or
+// error results in a "final report unavailable" message rather than a panic or
 // swallowed error.
 func TestSynthesisSink_ProviderErrorDegradeGracefully(t *testing.T) {
 	t.Parallel()
@@ -350,17 +274,14 @@ func TestSynthesisSink_ProviderErrorDegradeGracefully(t *testing.T) {
 	stub := &stubSynthesisProvider{
 		err: errors.New("API quota exceeded"),
 	}
-	promptFn := func(_ context.Context, _ string, _ bool) (bool, error) {
-		return true, nil // user picks Y
-	}
-	sink := buildSink(stub, w, true, promptFn, "")
+	sink := buildSink(stub, w, "")
 
 	// Must not panic.
 	sink.RunFinished(makeTwoAgentSummary())
 
 	out := w.String()
-	if !strings.Contains(out, "synthesis unavailable") {
-		t.Errorf("expected 'synthesis unavailable' in output, got: %q", out)
+	if !strings.Contains(out, "final report unavailable") {
+		t.Errorf("expected 'final report unavailable' in output, got: %q", out)
 	}
 	if !strings.Contains(out, "API quota exceeded") {
 		t.Errorf("expected error message in output, got: %q", out)
@@ -373,35 +294,12 @@ func TestSynthesisSink_PerRunPromptThreaded(t *testing.T) {
 	t.Parallel()
 	w := &bytes.Buffer{}
 	stub := &stubSynthesisProvider{response: "verdict"}
-	promptFn := func(_ context.Context, _ string, _ bool) (bool, error) {
-		return true, nil
-	}
 	perRunPrompt := "Focus specifically on security vulnerabilities."
-	sink := buildSink(stub, w, true, promptFn, perRunPrompt)
+	sink := buildSink(stub, w, perRunPrompt)
 
 	sink.RunFinished(makeTwoAgentSummary())
 
 	if !strings.Contains(stub.capturedPrompt, perRunPrompt) {
 		t.Errorf("per-run prompt %q not found in provider prompt:\n%s", perRunPrompt, stub.capturedPrompt)
-	}
-}
-
-// TestSynthesisSink_PromptDefaultIsNo verifies the default value passed to
-// the PromptYN function is false (N), so pressing Enter accepts the default N.
-func TestSynthesisSink_PromptDefaultIsNo(t *testing.T) {
-	t.Parallel()
-	w := &bytes.Buffer{}
-	stub := &stubSynthesisProvider{response: "verdict"}
-	var capturedDefault bool
-	promptFn := func(_ context.Context, _ string, def bool) (bool, error) {
-		capturedDefault = def
-		return false, nil // user picks N
-	}
-	sink := buildSink(stub, w, true, promptFn, "")
-
-	sink.RunFinished(makeTwoAgentSummary())
-
-	if capturedDefault {
-		t.Error("default for synthesis prompt should be false (N), got true")
 	}
 }

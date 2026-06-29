@@ -21,6 +21,7 @@ import (
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trail"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
@@ -790,6 +791,12 @@ func TestResolveTrailRemote_RejectsUnsupportedForge(t *testing.T) {
 func TestTrailsEnabledForRepo_ReadsClonePreference(t *testing.T) {
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
+	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@github.com:acme/repo.git")
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git remote add: %v", err)
+	}
 	t.Chdir(repoDir)
 	ctx := context.Background()
 
@@ -807,6 +814,45 @@ func TestTrailsEnabledForRepo_ReadsClonePreference(t *testing.T) {
 	}
 	if !trailsEnabledForRepo(ctx) {
 		t.Fatal("expected trails enabled when cache is true")
+	}
+
+	prefs, err := settings.LoadClonePreferences(ctx)
+	if err != nil {
+		t.Fatalf("load prefs: %v", err)
+	}
+	if prefs.TrailsEnabledRepoKey != "gh/acme/repo" {
+		t.Fatalf("repo key = %q, want gh/acme/repo", prefs.TrailsEnabledRepoKey)
+	}
+
+	currentAuthKey := prefs.TrailsEnabledAuthKey
+	prefs.TrailsEnabledAuthKey = currentAuthKey + "-other"
+	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+		t.Fatalf("save auth-mismatched prefs: %v", err)
+	}
+	if trailsEnabledForRepo(ctx) {
+		t.Fatal("expected trails disabled for mismatched auth cache scope")
+	}
+	prefs.TrailsEnabledAuthKey = currentAuthKey
+	fresh := time.Now()
+	prefs.TrailsEnabledCheckedAt = &fresh
+	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+		t.Fatalf("restore auth-matched prefs: %v", err)
+	}
+
+	stale := time.Now().Add(-trailEnablementCacheTTL - time.Minute)
+	prefs.TrailsEnabledCheckedAt = &stale
+	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+		t.Fatalf("save stale prefs: %v", err)
+	}
+	if trailsEnabledForRepo(ctx) {
+		t.Fatal("expected trails disabled when cache is stale")
+	}
+
+	if err := saveTrailsEnabledForRemote(ctx, "gh", "other", "repo", true); err != nil {
+		t.Fatalf("save mismatched cache: %v", err)
+	}
+	if trailsEnabledForRepo(ctx) {
+		t.Fatal("expected trails disabled for mismatched cache scope")
 	}
 }
 

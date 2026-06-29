@@ -163,6 +163,40 @@ func TestResolve_CoresCachedAcrossCalls(t *testing.T) {
 	assert.Equal(t, []string{"https://eu.auth.entire.io"}, urls)
 }
 
+// TestResolve_ClusterHostCaseInsensitive: a mixed-case cluster host resolves
+// the same context as its lowercase form and caches under the canonical
+// (lowercased) key, since DNS hosts are case-insensitive.
+func TestResolve_ClusterHostCaseInsensitive(t *testing.T) {
+	t.Parallel()
+	var calls int32
+	srv := httptest.NewServer(coresHandler(t, &calls, "https://eu.auth.entire.io"))
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	cacheDir := t.TempDir()
+	require.NoError(t, contexts.Save(configDir, &contexts.File{
+		CurrentContext: "prod-eu",
+		Contexts: []*contexts.Context{
+			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
+		},
+	}))
+
+	c, err := ResolveContextForCluster(t.Context(), configDir, cacheDir, "AWS-EU-Central-1.Entire.IO", hostPinningClient(t, srv), t.Logf)
+	require.NoError(t, err)
+	assert.Equal(t, "prod-eu", c.Name)
+
+	// Cached under the canonical lowercase host, so the lowercase form is a hit.
+	cache, err := discovery.LoadClusterCores(cacheDir)
+	require.NoError(t, err)
+	_, _, ok := cache.Get("aws-eu-central-1.entire.io")
+	assert.True(t, ok, "cores cached under the lowercased host key")
+
+	c2, err := ResolveContextForCluster(t.Context(), configDir, cacheDir, "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.NoError(t, err)
+	assert.Equal(t, "prod-eu", c2.Name)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "lowercase form hits the cache the mixed-case call populated")
+}
+
 // TestResolve_StaleCacheFallbackOnDiscoveryFailure: an expired cache entry
 // is used when the live re-fetch fails, so a brief cluster outage doesn't
 // break an operation whose cores we already knew.

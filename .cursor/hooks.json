@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "beforeSubmitPrompt": [
+      {
+        "command": "go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks cursor before-submit-prompt"
+      }
+    ],
+    "preCompact": [
+      {
+        "command": "go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks cursor pre-compact"
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks cursor session-end"
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks cursor session-start"
+      }
+    ],
+    "stop": [
+      {
+        "command": "go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks cursor stop"
+      }
+    ],
+    "subagentStart": [
+      {
+        "command": "go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks cursor subagent-start"
+      }
+    ],
+    "subagentStop": [
+      {
+        "command": "go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks cursor subagent-stop"
+      }
+    ]
+  },
+  "version": 1
+}

@@ -40,7 +40,7 @@ func fakeSSEServer(t *testing.T, frames []string) (*httptest.Server, *string) {
 
 func TestReviewEventsPath(t *testing.T) {
 	got := reviewEventsPath("trail id/with slash")
-	want := "/api/v1/trails/trail%20id%2Fwith%20slash/reviews/events"
+	want := "/api/v1/trails/trail%20id%2Fwith%20slash/events"
 	if got != want {
 		t.Fatalf("reviewEventsPath = %q, want %q", got, want)
 	}

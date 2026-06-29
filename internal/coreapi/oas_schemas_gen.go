@@ -4669,17 +4669,20 @@ type Mirror struct {
 	// Physical cell the mirror's cluster runs in, e.g. aws-us-east-2.
 	Cell OptString `json:"cell"`
 	// Public host of the cluster serving this mirror.
-	ClusterHost     string      `json:"clusterHost"`
-	CreatedAt       time.Time   `json:"createdAt"`
-	InstallationId  OptInt64    `json:"installationId"`
-	IsArchived      OptBool     `json:"isArchived"`
-	IsPrivate       OptBool     `json:"isPrivate"`
-	Jurisdiction    OptString   `json:"jurisdiction"`
-	MirrorId        string      `json:"mirrorId"`
-	Owner           string      `json:"owner"`
-	Provider        string      `json:"provider"`
-	Repo            string      `json:"repo"`
-	SuspendedAt     OptDateTime `json:"suspendedAt"`
+	ClusterHost    string    `json:"clusterHost"`
+	CreatedAt      time.Time `json:"createdAt"`
+	InstallationId OptInt64  `json:"installationId"`
+	IsArchived     OptBool   `json:"isArchived"`
+	IsPrivate      OptBool   `json:"isPrivate"`
+	Jurisdiction   OptString `json:"jurisdiction"`
+	MirrorId       string    `json:"mirrorId"`
+	Owner          string    `json:"owner"`
+	Provider       string    `json:"provider"`
+	Repo           string    `json:"repo"`
+	// Clone lifecycle: processing (cloning), ready (clonable), failed (initial clone failed), or
+	// suspended.
+	Status          OptMirrorStatus `json:"status"`
+	SuspendedAt     OptDateTime     `json:"suspendedAt"`
 	AdditionalProps MirrorAdditional
 }
 
@@ -4741,6 +4744,11 @@ func (s *Mirror) GetProvider() string {
 // GetRepo returns the value of Repo.
 func (s *Mirror) GetRepo() string {
 	return s.Repo
+}
+
+// GetStatus returns the value of Status.
+func (s *Mirror) GetStatus() OptMirrorStatus {
+	return s.Status
 }
 
 // GetSuspendedAt returns the value of SuspendedAt.
@@ -4811,6 +4819,11 @@ func (s *Mirror) SetProvider(val string) {
 // SetRepo sets the value of Repo.
 func (s *Mirror) SetRepo(val string) {
 	s.Repo = val
+}
+
+// SetStatus sets the value of Status.
+func (s *Mirror) SetStatus(val OptMirrorStatus) {
+	s.Status = val
 }
 
 // SetSuspendedAt sets the value of SuspendedAt.
@@ -4893,6 +4906,63 @@ func (s *MirrorCollaboratorAdditional) init() MirrorCollaboratorAdditional {
 		*s = m
 	}
 	return m
+}
+
+// Clone lifecycle: processing (cloning), ready (clonable), failed (initial clone failed), or
+// suspended.
+type MirrorStatus string
+
+const (
+	MirrorStatusProcessing MirrorStatus = "processing"
+	MirrorStatusReady      MirrorStatus = "ready"
+	MirrorStatusFailed     MirrorStatus = "failed"
+	MirrorStatusSuspended  MirrorStatus = "suspended"
+)
+
+// AllValues returns all MirrorStatus values.
+func (MirrorStatus) AllValues() []MirrorStatus {
+	return []MirrorStatus{
+		MirrorStatusProcessing,
+		MirrorStatusReady,
+		MirrorStatusFailed,
+		MirrorStatusSuspended,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s MirrorStatus) MarshalText() ([]byte, error) {
+	switch s {
+	case MirrorStatusProcessing:
+		return []byte(s), nil
+	case MirrorStatusReady:
+		return []byte(s), nil
+	case MirrorStatusFailed:
+		return []byte(s), nil
+	case MirrorStatusSuspended:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *MirrorStatus) UnmarshalText(data []byte) error {
+	switch MirrorStatus(data) {
+	case MirrorStatusProcessing:
+		*s = MirrorStatusProcessing
+		return nil
+	case MirrorStatusReady:
+		*s = MirrorStatusReady
+		return nil
+	case MirrorStatusFailed:
+		*s = MirrorStatusFailed
+		return nil
+	case MirrorStatusSuspended:
+		*s = MirrorStatusSuspended
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // Ref: #/components/schemas/OIDCProvider
@@ -5649,6 +5719,52 @@ func (o OptMeRegionalUnavailable) Get() (v MeRegionalUnavailable, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptMeRegionalUnavailable) Or(d MeRegionalUnavailable) MeRegionalUnavailable {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptMirrorStatus returns new OptMirrorStatus with value set to v.
+func NewOptMirrorStatus(v MirrorStatus) OptMirrorStatus {
+	return OptMirrorStatus{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptMirrorStatus is optional MirrorStatus.
+type OptMirrorStatus struct {
+	Value MirrorStatus
+	Set   bool
+}
+
+// IsSet returns true if OptMirrorStatus was set.
+func (o OptMirrorStatus) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptMirrorStatus) Reset() {
+	var v MirrorStatus
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptMirrorStatus) SetTo(v MirrorStatus) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptMirrorStatus) Get() (v MirrorStatus, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptMirrorStatus) Or(d MirrorStatus) MirrorStatus {
 	if v, ok := o.Get(); ok {
 		return v
 	}

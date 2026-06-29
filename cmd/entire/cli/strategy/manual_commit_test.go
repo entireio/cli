@@ -1330,6 +1330,13 @@ func TestSessionState_TokenUsagePersistence(t *testing.T) {
 			OutputTokens:        500,
 			APICallCount:        5,
 		},
+		CheckpointTokenUsage: &agent.TokenUsage{
+			InputTokens:         100,
+			CacheCreationTokens: 20,
+			CacheReadTokens:     30,
+			OutputTokens:        50,
+			APICallCount:        1,
+		},
 	}
 
 	// Save state
@@ -1373,6 +1380,26 @@ func TestSessionState_TokenUsagePersistence(t *testing.T) {
 	}
 	if loaded.TokenUsage.APICallCount != state.TokenUsage.APICallCount {
 		t.Errorf("TokenUsage.APICallCount = %d, want %d", loaded.TokenUsage.APICallCount, state.TokenUsage.APICallCount)
+	}
+
+	// Verify CheckpointTokenUsage
+	if loaded.CheckpointTokenUsage == nil {
+		t.Fatal("CheckpointTokenUsage should be persisted, got nil")
+	}
+	if loaded.CheckpointTokenUsage.InputTokens != state.CheckpointTokenUsage.InputTokens {
+		t.Errorf("CheckpointTokenUsage.InputTokens = %d, want %d", loaded.CheckpointTokenUsage.InputTokens, state.CheckpointTokenUsage.InputTokens)
+	}
+	if loaded.CheckpointTokenUsage.CacheCreationTokens != state.CheckpointTokenUsage.CacheCreationTokens {
+		t.Errorf("CheckpointTokenUsage.CacheCreationTokens = %d, want %d", loaded.CheckpointTokenUsage.CacheCreationTokens, state.CheckpointTokenUsage.CacheCreationTokens)
+	}
+	if loaded.CheckpointTokenUsage.CacheReadTokens != state.CheckpointTokenUsage.CacheReadTokens {
+		t.Errorf("CheckpointTokenUsage.CacheReadTokens = %d, want %d", loaded.CheckpointTokenUsage.CacheReadTokens, state.CheckpointTokenUsage.CacheReadTokens)
+	}
+	if loaded.CheckpointTokenUsage.OutputTokens != state.CheckpointTokenUsage.OutputTokens {
+		t.Errorf("CheckpointTokenUsage.OutputTokens = %d, want %d", loaded.CheckpointTokenUsage.OutputTokens, state.CheckpointTokenUsage.OutputTokens)
+	}
+	if loaded.CheckpointTokenUsage.APICallCount != state.CheckpointTokenUsage.APICallCount {
+		t.Errorf("CheckpointTokenUsage.APICallCount = %d, want %d", loaded.CheckpointTokenUsage.APICallCount, state.CheckpointTokenUsage.APICallCount)
 	}
 }
 

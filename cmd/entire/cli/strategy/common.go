@@ -330,6 +330,7 @@ func checkpointInfosFromCommitted(committed []checkpoint.CheckpointInfo) []Check
 			ToolUseID:        c.ToolUseID,
 			SessionCount:     c.SessionCount,
 			SessionIDs:       c.SessionIDs,
+			Imported:         c.Imported,
 		})
 	}
 	sort.Slice(result, func(i, j int) bool {

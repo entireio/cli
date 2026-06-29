@@ -43,12 +43,14 @@ With Entire, you can:
 ## Quick Start
 
 ```bash
-# Install stable via Homebrew
+# To use Homebrew, first tap:
 brew tap entireio/tap
+brew trust entireio/tap
+
+# Install stable via Homebrew
 brew install --cask entire
 
 # Or install nightly via Homebrew
-brew tap entireio/tap
 brew install --cask entire@nightly
 
 # Or install stable via install.sh
@@ -85,6 +87,7 @@ Entire currently ships two release channels:
 
 How to use each channel:
 
+- Homebrew (one-time setup): `brew tap entireio/tap && brew trust entireio/tap`
 - Homebrew stable: `brew install --cask entire`
 - Homebrew nightly: `brew install --cask entire@nightly`
 - `install.sh` stable: `curl -fsSL https://entire.io/install.sh | bash`
@@ -445,7 +448,7 @@ Local settings override project settings field-by-field. When you run `entire st
 
 ### Agent-Specific Steps & Limitations
 
-- When enabling Entire for Codex, the command will also create or update `.codex/config.toml` with `codex_hooks = true` to enable Codex hooks. If you configure Codex manually, make sure this flag is set in your `.codex/config.toml`. Or select Codex from the interactive agent picker when running `entire enable`.
+- When enabling Entire for Codex, the command will also create or update `.codex/config.toml` with `hooks = true` to enable Codex hooks. If you configure Codex manually, make sure this flag is set in your `.codex/config.toml`. Or select Codex from the interactive agent picker when running `entire enable`.
 - Entire supports Cursor IDE and Cursor Agent CLI tool, but `entire rewind` is not available at this time. Other commands (`doctor`, `status` etc.) work the same as all other agents.
 - Entire supports Copilot CLI, but not Copilot in VS Code, in other IDEs, or on github.com.
 - Entire supports Pi coding agent (Preview). Pi uses a TypeScript extension instead of a JSON hook config. Subagent capture is not currently available.

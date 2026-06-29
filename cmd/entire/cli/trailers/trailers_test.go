@@ -365,6 +365,11 @@ func TestParseAllCheckpoints(t *testing.T) {
 			message: "Merge\n\nEntire-Checkpoint: a1b2c3d4e5f6\nEntire-Session: session-1\nEntire-Checkpoint: b2c3d4e5f6a1\n",
 			want:    []string{"a1b2c3d4e5f6", "b2c3d4e5f6a1"},
 		},
+		{
+			name:    "mixed hex and ULID checkpoint trailers",
+			message: "Squash (#3)\n\n* legacy\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n* new\n\nEntire-Checkpoint: 01KVBJCWYA4YW6J5M9GP655HZN\n",
+			want:    []string{"a1b2c3d4e5f6", "01KVBJCWYA4YW6J5M9GP655HZN"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -398,6 +403,12 @@ func TestParseCheckpoint(t *testing.T) {
 			name:      "valid checkpoint trailer",
 			message:   "Add feature\n\nEntire-Checkpoint: a1b2c3d4e5f6\n",
 			wantID:    "a1b2c3d4e5f6",
+			wantFound: true,
+		},
+		{
+			name:      "valid ULID checkpoint trailer",
+			message:   "Add feature\n\nEntire-Checkpoint: 01KVBJCWYA4YW6J5M9GP655HZN\n",
+			wantID:    "01KVBJCWYA4YW6J5M9GP655HZN",
 			wantFound: true,
 		},
 		{

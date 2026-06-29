@@ -53,6 +53,11 @@ func ResolveContextForCluster(ctx context.Context, configDir, cacheDir, clusterH
 	if debugf == nil {
 		debugf = func(string, ...any) {}
 	}
+	// DNS hostnames are case-insensitive, so fold case before the host drives any
+	// lookup: the cache key, the /.well-known fetch, and the cores→context match.
+	// Without this, `aws-US-east-2.entire.io` and `aws-us-east-2.entire.io`
+	// resolve as different hosts and a context determination can fail spuriously.
+	clusterHost = normalizeClusterHost(clusterHost)
 	f, err := contexts.Load(configDir)
 	if err != nil {
 		return nil, fmt.Errorf("load contexts: %w", err)
@@ -77,7 +82,15 @@ func ResolveClusterCores(ctx context.Context, cacheDir, clusterHost string, http
 	if debugf == nil {
 		debugf = func(string, ...any) {}
 	}
-	return resolveClusterCores(ctx, cacheDir, clusterHost, httpClient, debugf)
+	return resolveClusterCores(ctx, cacheDir, normalizeClusterHost(clusterHost), httpClient, debugf)
+}
+
+// normalizeClusterHost folds a cluster host to its canonical form for use as a
+// lookup key. DNS is case-insensitive, so two hosts differing only in case (or
+// surrounding whitespace) name the same cluster and must resolve identically —
+// for the host→cores cache, /.well-known discovery, and context determination.
+func normalizeClusterHost(clusterHost string) string {
+	return strings.ToLower(strings.TrimSpace(clusterHost))
 }
 
 // resolveCachedCores is the shared cache-then-/.well-known resolution behind

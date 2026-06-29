@@ -112,10 +112,17 @@ func TestReviewCommand_PassesReviewEnvToSpawnedAgentHook(t *testing.T) {
 	env := NewFeatureBranchEnv(t)
 	enableReviewAgent(t, env, "claude-code")
 	env.WriteSettings(map[string]any{
-		"enabled": true,
-		"review": map[string]any{
-			"claude-code": map[string]any{
-				"skills": []string{"/review"},
+		"enabled":                true,
+		"review_default_profile": "general",
+		"review_profiles": map[string]any{
+			"general": map[string]any{
+				"task": "Test review task.",
+				"agents": map[string]any{
+					"claude-code": map[string]any{
+						"skills": []string{"/review"},
+					},
+				},
+				"judge": map[string]any{"agent": "claude-code"},
 			},
 		},
 	})
@@ -132,7 +139,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
 		t.Fatalf("write fake claude: %v", err)
 	}
 
-	cmd := execx.NonInteractive(context.Background(), getTestBinary(), "review")
+	// Bare `entire review` requires an explicit profile in non-interactive mode,
+	// so name the configured profile.
+	cmd := execx.NonInteractive(context.Background(), getTestBinary(), "review", "general")
 	cmd.Dir = env.RepoDir
 	cmd.Env = envWithOverrides(env.cliEnv(),
 		"PATH="+fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"),
@@ -175,7 +184,7 @@ func TestReviewAttach_TagsAttachedSessionAsReview(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	output := env.RunCLI("review", "attach", sessionID, "--force", "--agent", "claude-code", "--skills", "/pr-review-toolkit:review-pr")
+	output := env.RunCLI("attach", "--review", sessionID, "--force", "--agent", "claude-code", "--skills", "/pr-review-toolkit:review-pr")
 	if !strings.Contains(output, "Attached session") {
 		t.Fatalf("expected attached session output, got:\n%s", output)
 	}
@@ -229,14 +238,23 @@ func TestReview_MissingSkillAtSpawn_ErrorsCleanly(t *testing.T) {
 	enableReviewAgent(t, env, "claude-code")
 
 	env.WriteSettings(map[string]any{
-		"review": map[string]any{
-			"claude-code": map[string]any{
-				"skills": []string{"/nonexistent:skill-xyz"},
+		"review_default_profile": "general",
+		"review_profiles": map[string]any{
+			"general": map[string]any{
+				"task": "Test review task.",
+				"agents": map[string]any{
+					"claude-code": map[string]any{
+						"skills": []string{"/nonexistent:skill-xyz"},
+					},
+				},
+				"judge": map[string]any{"agent": "claude-code"},
 			},
 		},
 	})
 
-	output, exitErr := env.RunCLIWithError("review")
+	// Bare `entire review` requires an explicit profile in non-interactive mode,
+	// so name the configured profile to reach the skill-verification guard.
+	output, exitErr := env.RunCLIWithError("review", "general")
 	if exitErr == nil {
 		t.Fatalf("expected non-zero exit; output:\n%s", output)
 	}

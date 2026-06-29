@@ -76,18 +76,6 @@ func TestSetupClaudeHooks_AddsAllRequiredHooks(t *testing.T) {
 		t.Error("PostToolUse[TodoWrite] hook should exist")
 	}
 
-	searchAgentPath := filepath.Join(env.RepoDir, ".claude", "agents", "entire-search.md")
-	data, err := os.ReadFile(searchAgentPath)
-	if err != nil {
-		t.Fatalf("failed to read generated Claude search subagent: %v", err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "ENTIRE-MANAGED SEARCH SUBAGENT") {
-		t.Error("Claude search subagent should be marked as Entire-managed")
-	}
-	if !strings.Contains(content, "entire search --json") {
-		t.Error("Claude search subagent should instruct use of `entire search --json`")
-	}
 }
 
 // TestSetupClaudeHooks_PreservesExistingSettings is a smoke test verifying that

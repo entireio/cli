@@ -262,6 +262,10 @@ type CheckpointInfo struct {
 	// Multi-session support
 	SessionCount int      // Number of sessions (1 if single session)
 	SessionIDs   []string // All session IDs that contributed
+
+	// Imported is true when this checkpoint was imported from pre-existing
+	// agent history (Kind == "imported"): read-only and commit-less.
+	Imported bool
 }
 
 // SessionContent contains the actual content for a session.
@@ -436,6 +440,11 @@ type CheckpointSummary struct {
 	// be set so callers can keep asking "was this investigated in any way?"
 	// without caring about the variant.
 	HasInvestigation bool `json:"has_investigation,omitempty"`
+
+	// Imported is true when this checkpoint was imported from pre-existing
+	// agent history (a session with Kind == "imported"): read-only and
+	// commit-less.
+	Imported bool `json:"imported,omitempty"`
 }
 
 // SessionMetrics contains hook-provided session metrics from agents that report

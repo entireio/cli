@@ -12549,6 +12549,12 @@ func (s *Mirror) encodeFields(e *jx.Encoder) {
 		e.Str(s.Repo)
 	}
 	{
+		if s.Status.Set {
+			e.FieldStart("status")
+			s.Status.Encode(e)
+		}
+	}
+	{
 		if s.SuspendedAt.Set {
 			e.FieldStart("suspendedAt")
 			s.SuspendedAt.Encode(e, json.EncodeDateTime)
@@ -12563,7 +12569,7 @@ func (s *Mirror) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfMirror = [13]string{
+var jsonFieldsNameOfMirror = [14]string{
 	0:  "$schema",
 	1:  "cell",
 	2:  "clusterHost",
@@ -12576,7 +12582,8 @@ var jsonFieldsNameOfMirror = [13]string{
 	9:  "owner",
 	10: "provider",
 	11: "repo",
-	12: "suspendedAt",
+	12: "status",
+	13: "suspendedAt",
 }
 
 // Decode decodes Mirror from json.
@@ -12720,6 +12727,16 @@ func (s *Mirror) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"repo\"")
+			}
+		case "status":
+			if err := func() error {
+				s.Status.Reset()
+				if err := s.Status.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"status\"")
 			}
 		case "suspendedAt":
 			if err := func() error {
@@ -13060,6 +13077,50 @@ func (s MirrorCollaboratorAdditional) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *MirrorCollaboratorAdditional) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes MirrorStatus as json.
+func (s MirrorStatus) Encode(e *jx.Encoder) {
+	e.Str(string(s))
+}
+
+// Decode decodes MirrorStatus from json.
+func (s *MirrorStatus) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode MirrorStatus to nil")
+	}
+	v, err := d.StrBytes()
+	if err != nil {
+		return err
+	}
+	// Try to use constant string.
+	switch MirrorStatus(v) {
+	case MirrorStatusProcessing:
+		*s = MirrorStatusProcessing
+	case MirrorStatusReady:
+		*s = MirrorStatusReady
+	case MirrorStatusFailed:
+		*s = MirrorStatusFailed
+	case MirrorStatusSuspended:
+		*s = MirrorStatusSuspended
+	default:
+		*s = MirrorStatus(v)
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s MirrorStatus) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *MirrorStatus) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }
@@ -13754,6 +13815,39 @@ func (s OptMeRegionalUnavailable) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *OptMeRegionalUnavailable) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes MirrorStatus as json.
+func (o OptMirrorStatus) Encode(e *jx.Encoder) {
+	if !o.Set {
+		return
+	}
+	e.Str(string(o.Value))
+}
+
+// Decode decodes MirrorStatus from json.
+func (o *OptMirrorStatus) Decode(d *jx.Decoder) error {
+	if o == nil {
+		return errors.New("invalid: unable to decode OptMirrorStatus to nil")
+	}
+	o.Set = true
+	if err := o.Value.Decode(d); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s OptMirrorStatus) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *OptMirrorStatus) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }

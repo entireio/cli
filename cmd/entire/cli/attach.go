@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -55,8 +56,8 @@ type attachOptions struct {
 	// structured skills list. Ignored when Review=false.
 	ReviewSkillsOverride []string
 	// ReviewPromptOverride, when non-empty, is recorded instead of the
-	// transcript's first user prompt. Used by `entire review attach` when a
-	// pending-review marker has the exact prompt the user was asked to run.
+	// transcript's first user prompt. Set from a pending-review marker when
+	// `entire attach --review` adopts the prompt the user was asked to run.
 	ReviewPromptOverride string
 }
 
@@ -112,14 +113,40 @@ external_agents in settings. Run 'entire agent list' to see the full list.`,
 			// Discover external agents so --agent <external-name> is recognized
 			// and so auto-detection can find transcripts from external agents.
 			external.DiscoverAndRegister(cmd.Context())
-			agentName := types.AgentName(agentFlag)
 			opts := attachOptions{
 				Force:                force,
 				AllowCrossWorktree:   allowCrossWorktree,
 				Review:               reviewFlag,
 				ReviewSkillsOverride: skillsFlag,
 			}
-			return runAttachSurfaceReviewErrors(cmd, args[0], agentName, opts)
+			// When tagging as a review, consume any pending-review marker left
+			// by `entire review` for an agent it could not launch itself: adopt
+			// its agent / skills / prompt so the manual attach matches what the
+			// user was asked to run, then clear it after a successful attach.
+			useMarker := false
+			if reviewFlag {
+				marker, ok, markerErr := matchingPendingReviewMarker(cmd.Context(), agentFlag, cmd.Flags().Changed("agent"))
+				if markerErr != nil {
+					return markerErr
+				}
+				useMarker = ok
+				if useMarker {
+					if !cmd.Flags().Changed("agent") && marker.AgentName != "" {
+						agentFlag = marker.AgentName
+					}
+					if !cmd.Flags().Changed("skills") {
+						opts.ReviewSkillsOverride = marker.Skills
+					}
+					opts.ReviewPromptOverride = marker.Prompt
+				}
+			}
+			err := runAttachSurfaceReviewErrors(cmd, args[0], types.AgentName(agentFlag), opts)
+			if err == nil && useMarker {
+				if clearErr := cliReview.ClearPendingReviewMarker(cmd.Context()); clearErr != nil {
+					logging.Debug(cmd.Context(), "clear pending review marker after attach", slog.String("error", clearErr.Error()))
+				}
+			}
+			return err
 		},
 	}
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation and amend the last commit with the checkpoint trailer")
@@ -179,6 +206,30 @@ func attachPrompts(meta transcriptMetadata) []string {
 	return []string{meta.FirstPrompt}
 }
 
+func handleExistingAttachCheckpoint(logCtx context.Context, w io.Writer, headCommit *object.Commit, sessionID string, existingState *session.State, opts attachOptions) (bool, error) {
+	if existingState == nil || existingState.LastCheckpointID.IsEmpty() {
+		return false, nil
+	}
+	// Review-upgrade isn't supported yet: the existing checkpoint's
+	// metadata tree would need to be rewritten with Kind/ReviewSkills/
+	// ReviewPrompt set, and a new commit pushed onto entire/checkpoints/v1.
+	// Error out with a concrete message rather than silently linking the
+	// checkpoint without the review metadata.
+	if opts.Review {
+		return true, fmt.Errorf(
+			"session %s already has checkpoint %s; rewriting an existing checkpoint as a review is not supported yet",
+			sessionID, existingState.LastCheckpointID.String(),
+		)
+	}
+	cpID := existingState.LastCheckpointID.String()
+	fmt.Fprintf(w, "Session %s already has checkpoint %s\n", sessionID, cpID)
+	if err := promptAmendCommit(logCtx, w, headCommit, cpID, opts.Force); err != nil {
+		logging.Warn(logCtx, "failed to amend commit", "error", err)
+		fmt.Fprintf(w, "\nCopy to your commit message to attach:\n\n  Entire-Checkpoint: %s\n", cpID)
+	}
+	return true, nil
+}
+
 func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName types.AgentName, opts attachOptions) error {
 	// Initialize structured logger so logging.Warn/Info write to .entire/logs/ not stderr.
 	if err := logging.Init(ctx, sessionID); err != nil {
@@ -218,25 +269,13 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 	}
 
 	// If session already has a checkpoint, just offer to link it.
-	if existingState != nil && !existingState.LastCheckpointID.IsEmpty() {
-		// Review-upgrade isn't supported yet: the existing checkpoint's
-		// metadata tree would need to be rewritten with Kind/ReviewSkills/
-		// ReviewPrompt set, and a new commit pushed onto entire/checkpoints/v1.
-		// Error out with a concrete message rather than silently linking the
-		// checkpoint without the review metadata.
-		if opts.Review {
-			return fmt.Errorf(
-				"session %s already has checkpoint %s; rewriting an existing checkpoint as a review is not supported yet",
-				sessionID, existingState.LastCheckpointID.String(),
-			)
-		}
-		cpID := existingState.LastCheckpointID.String()
-		fmt.Fprintf(w, "Session %s already has checkpoint %s\n", sessionID, cpID)
-		if err := promptAmendCommit(logCtx, w, headCommit, cpID, opts.Force); err != nil {
-			logging.Warn(logCtx, "failed to amend commit", "error", err)
-			fmt.Fprintf(w, "\nCopy to your commit message to attach:\n\n  Entire-Checkpoint: %s\n", cpID)
-		}
-		return nil
+	handled, err := handleExistingAttachCheckpoint(logCtx, w, headCommit, sessionID, existingState, opts)
+	if handled || err != nil {
+		return err
+	}
+
+	if err := ensureCommittedCheckpointWritePolicy(ctx, repo); err != nil {
+		return err
 	}
 
 	// Resolve agent and transcript path.
