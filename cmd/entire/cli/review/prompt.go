@@ -74,4 +74,5 @@ const reviewerOutputFormatInstructions = `Output format:
 - Then list actionable findings only. Each finding MUST be a separate top-level Markdown bullet starting with [high], [medium], or [low].
 - Include an exact file:line pointer in each finding when possible, plus the bug, impact, and fix in one concise paragraph.
 - Do not combine multiple defects in one bullet or paragraph. Do not emit severity-heading paragraphs like "**[HIGH] ...**" without a leading bullet.
-- If there are no actionable findings, output only the verdict line.`
+- If there are no actionable findings, output only the verdict line.
+- Keep the report compact: quote only the minimal relevant snippet (a few lines) per finding. Never paste whole files, full diffs, or large logs, and skip decorative formatting like tables or ASCII art — it wastes effort and is not rendered.`
