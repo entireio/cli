@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -207,4 +208,43 @@ func TestBuildExpertsRequestAllowsQueryOutsideLocalWorktree(t *testing.T) {
 	require.Equal(t, "stripe webhook retry logic", req.Query)
 	require.Empty(t, req.Scopes)
 	require.Equal(t, "stripe webhook retry logic", label)
+}
+
+func TestResolveExpertsRepoValidatesBareOverrides(t *testing.T) {
+	owner, repo, err := resolveExpertsRepo(context.Background(), "gh/acme/widget.git")
+	require.NoError(t, err)
+	require.Equal(t, "acme", owner)
+	require.Equal(t, "widget", repo)
+
+	_, _, err = resolveExpertsRepo(context.Background(), "gh/acme/")
+	require.ErrorContains(t, err, "invalid repository")
+
+	_, _, err = resolveExpertsRepo(context.Background(), "/widget")
+	require.ErrorContains(t, err, "invalid repository")
+}
+
+func TestStagedExpertScopesAreRepoRelativeWithDiffRelative(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, "root.txt", "root\n")
+	testutil.WriteFile(t, repoDir, "nested/inside.txt", "inside\n")
+
+	runExpertsGit(t, repoDir, "config", "diff.relative", "true")
+	runExpertsGit(t, repoDir, "add", "root.txt", "nested/inside.txt")
+
+	t.Chdir(filepath.Join(repoDir, "nested"))
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	scopes, err := stagedExpertScopes(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []string{"nested/inside.txt", "root.txt"}, scopes)
+}
+
+func runExpertsGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.CommandContext(context.Background(), "git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "git %v failed: %s", args, out)
 }

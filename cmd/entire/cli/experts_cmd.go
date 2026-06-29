@@ -240,15 +240,24 @@ func resolveExpertsRepo(ctx context.Context, override string) (string, string, e
 	parts := strings.Split(override, "/")
 	switch len(parts) {
 	case 2:
-		return parts[0], parts[1], nil
+		return normalizeExpertRepoParts(parts[0], parts[1], override)
 	case 3:
 		if !gitremote.IsSupportedForge(parts[0]) {
 			return "", "", fmt.Errorf("unsupported forge %q", parts[0])
 		}
-		return parts[1], parts[2], nil
+		return normalizeExpertRepoParts(parts[1], parts[2], override)
 	default:
 		return "", "", fmt.Errorf("invalid repository %q", override)
 	}
+}
+
+func normalizeExpertRepoParts(owner, repo, raw string) (string, string, error) {
+	owner = strings.TrimSpace(owner)
+	repo = strings.TrimSuffix(strings.TrimSpace(repo), ".git")
+	if owner == "" || repo == "" {
+		return "", "", fmt.Errorf("invalid repository %q", raw)
+	}
+	return owner, repo, nil
 }
 
 func localExpertScope(ctx context.Context, subject string) (string, bool, error) {
@@ -316,15 +325,30 @@ func localExpertScopeInfo(subject string) (os.FileInfo, bool) {
 }
 
 func stagedExpertScopes(ctx context.Context) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "--diff-filter=ACMR")
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve git worktree root: %w", err)
+	}
+	cmd := exec.CommandContext(
+		ctx,
+		"git",
+		"-C",
+		root,
+		"diff",
+		"--no-relative",
+		"--cached",
+		"--name-only",
+		"-z",
+		"--diff-filter=ACMR",
+	)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("read staged files: %w", err)
 	}
 	seen := map[string]struct{}{}
 	var scopes []string
-	for _, line := range strings.Split(string(out), "\n") {
-		scope := strings.TrimSpace(filepath.ToSlash(line))
+	for _, line := range strings.Split(string(out), "\x00") {
+		scope := filepath.ToSlash(line)
 		if scope == "" {
 			continue
 		}
