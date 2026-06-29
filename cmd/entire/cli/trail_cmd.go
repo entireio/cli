@@ -40,6 +40,7 @@ const (
 
 func newTrailCmd() *cobra.Command {
 	var insecureHTTPAuth bool
+	var repoOverride string
 
 	cmd := &cobra.Command{
 		Use:    "trail",
@@ -57,6 +58,13 @@ func newTrailCmd() *cobra.Command {
 	if err := cmd.PersistentFlags().MarkHidden("insecure-http-auth"); err != nil {
 		panic(fmt.Sprintf("hide insecure-http-auth flag: %v", err))
 	}
+
+	// Target an explicit repository instead of the origin remote, so the trail
+	// commands can drive a repo the caller is not checked out in (e.g. a GUI
+	// backend). Commands that mutate the local clone (create, checkout, finding
+	// apply) reject it via ensureNoTrailRepoOverride.
+	cmd.PersistentFlags().StringVar(&repoOverride, "repo", "",
+		"Target repository as forge/owner/repo (e.g. gh/acme/app) or a clone URL; defaults to the origin remote")
 
 	cmd.AddCommand(newTrailShowCmd())
 	cmd.AddCommand(newTrailListCmd())
@@ -76,6 +84,42 @@ func trailInsecureHTTP(cmd *cobra.Command) bool {
 	return v
 }
 
+// trailRepoFlag reads the persistent --repo flag from the trail command tree.
+// It is always registered on the trail root, so a missing flag (empty string)
+// just means "derive from origin".
+func trailRepoFlag(cmd *cobra.Command) string {
+	v, _ := cmd.Flags().GetString("repo") //nolint:errcheck // flag is always registered on the trail root
+	return strings.TrimSpace(v)
+}
+
+// trailBranchFlag reads an optional --branch flag. Only some subcommands
+// register it; on the rest GetString errors and we treat it as unset.
+func trailBranchFlag(cmd *cobra.Command) string {
+	v, _ := cmd.Flags().GetString("branch") //nolint:errcheck // absent on commands that don't register --branch
+	return strings.TrimSpace(v)
+}
+
+// ensureNoTrailRepoOverride rejects --repo for commands that operate on the
+// local clone and so cannot target an arbitrary repository.
+func ensureNoTrailRepoOverride(cmd *cobra.Command, op string) error {
+	if trailRepoFlag(cmd) != "" {
+		return fmt.Errorf("--repo is not supported for %q because it operates on the local clone", op)
+	}
+	return nil
+}
+
+// ensureTrailRepoHasTarget requires an explicit branch or trail selector when
+// --repo targets a repository other than the local clone. Without one, the
+// branch-defaulting commands fall back to the local checkout's current branch,
+// which would silently resolve the wrong trail (a shared branch name) in the
+// overridden repo. hint names the acceptable targets for the command.
+func ensureTrailRepoHasTarget(cmd *cobra.Command, hasTarget bool, hint string) error {
+	if trailRepoFlag(cmd) != "" && !hasTarget {
+		return fmt.Errorf("--repo requires an explicit target: %s", hint)
+	}
+	return nil
+}
+
 // trailListOptions are the inputs to runTrailListAll. Keeping them on a
 // struct avoids a long positional argument list at the two call sites.
 type trailListOptions struct {
@@ -84,6 +128,9 @@ type trailListOptions struct {
 	JSON         bool
 	Limit        int
 	InsecureHTTP bool
+	// Repo is an optional --repo override (forge/owner/repo or a clone URL);
+	// empty means derive the repo from the origin remote.
+	Repo string
 }
 
 func defaultTrailListOptions(insecureHTTP bool) trailListOptions {
@@ -95,34 +142,42 @@ func defaultTrailListOptions(insecureHTTP bool) trailListOptions {
 }
 
 func newTrailShowCmd() *cobra.Command {
+	var branch string
 	cmd := &cobra.Command{
 		Use:   "show [<trail>]",
 		Short: "Show a trail",
 		Long: `Show a trail.
 
-If <trail> is omitted, shows the trail for the current branch. Otherwise,
-<trail> may be a trail number, id, or branch in the current repo.`,
+If <trail> is omitted, shows the trail for the current branch (or --branch).
+Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			selector := ""
 			if len(args) == 1 {
 				selector = args[0]
 			}
-			return runTrailShow(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), selector)
+			if selector != "" && trailBranchFlag(cmd) != "" {
+				return errors.New("pass a trail selector or --branch, not both")
+			}
+			if err := ensureTrailRepoHasTarget(cmd, selector != "" || trailBranchFlag(cmd) != "", "pass a trail selector or --branch"); err != nil {
+				return err
+			}
+			return runTrailShow(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), selector, trailRepoFlag(cmd), trailBranchFlag(cmd))
 		},
 	}
+	cmd.Flags().StringVar(&branch, "branch", "", "Show the trail for this branch instead of the current branch; cannot be combined with a trail selector")
 	return cmd
 }
 
 // runTrailShow shows one trail, defaulting to the current branch's trail.
-func runTrailShow(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector string) error {
-	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, func(ctx context.Context, client *api.Client) error {
-		forge, owner, repo, err := resolveTrailRemote(ctx)
+func runTrailShow(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector, repoOverride, branchOverride string) error {
+	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client) error {
+		forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
 		if err != nil {
 			return err
 		}
 
-		found, err := resolveTrailBySelector(ctx, client, forge, owner, repo, selector)
+		found, err := resolveTrailBySelector(ctx, client, forge, owner, repo, selector, branchOverride)
 		if err != nil {
 			return err
 		}
@@ -165,10 +220,10 @@ func runTrailShow(ctx context.Context, w, errW io.Writer, insecureHTTP bool, sel
 // number, id, or branch). An empty selector falls back to the current branch's
 // trail. It returns an actionable error (never a nil trail with a nil error)
 // when nothing matches, so callers can rely on a non-nil result.
-func resolveTrailBySelector(ctx context.Context, client *api.Client, forge, owner, repo, selector string) (*api.TrailResource, error) {
+func resolveTrailBySelector(ctx context.Context, client *api.Client, forge, owner, repo, selector, branchOverride string) (*api.TrailResource, error) {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
-		branch, err := GetCurrentBranch(ctx)
+		branch, err := resolveTrailBranch(ctx, branchOverride)
 		if err != nil {
 			return nil, fmt.Errorf("no trail selector given and current branch is unknown: %w\nhint: run 'entire trail list --status any' or pass a trail number, id, or branch", err)
 		}
@@ -311,6 +366,7 @@ func newTrailListCmd() *cobra.Command {
 		Short: "List recent trails",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			opts.InsecureHTTP = trailInsecureHTTP(cmd)
+			opts.Repo = trailRepoFlag(cmd)
 			return runTrailListAll(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), opts)
 		},
 	}
@@ -330,7 +386,7 @@ func runTrailListAll(ctx context.Context, w, errW io.Writer, opts trailListOptio
 	if err != nil {
 		return err
 	}
-	return runAuthenticatedTrailAPI(ctx, errW, opts.InsecureHTTP, func(ctx context.Context, client *api.Client) error {
+	return runAuthenticatedTrailAPI(ctx, errW, opts.InsecureHTTP, opts.Repo, func(ctx context.Context, client *api.Client) error {
 		return runTrailListAllWithClient(ctx, w, client, opts, statusFilters)
 	})
 }
@@ -362,7 +418,7 @@ func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Cli
 		authorFilter = login
 	}
 
-	forge, owner, repo, err := resolveTrailRemote(ctx)
+	forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, opts.Repo)
 	if err != nil {
 		return err
 	}
@@ -694,6 +750,9 @@ func newTrailCreateCmd() *cobra.Command {
 		Short: "Create a trail for the current, a new, or no branch",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := ensureNoTrailRepoOverride(cmd, "trail create"); err != nil {
+				return err
+			}
 			return runTrailCreate(cmd, title, body, base, branch, status, checkout, noBranch)
 		},
 	}
@@ -954,6 +1013,9 @@ func newTrailUpdateCmd() *cobra.Command {
 		Short: "Update trail metadata",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := ensureTrailRepoHasTarget(cmd, strings.TrimSpace(branch) != "", "pass --branch"); err != nil {
+				return err
+			}
 			return runTrailUpdate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailUpdateInputs{
 				Status:        statusStr,
 				StatusChanged: cmd.Flags().Changed("status"),
@@ -962,6 +1024,7 @@ func newTrailUpdateCmd() *cobra.Command {
 				Body:          body,
 				BodyChanged:   cmd.Flags().Changed("body"),
 				Branch:        branch,
+				Repo:          trailRepoFlag(cmd),
 				LabelAdd:      labelAdd,
 				LabelRemove:   labelRemove,
 			})
@@ -986,13 +1049,14 @@ type trailUpdateInputs struct {
 	Body          string
 	BodyChanged   bool
 	Branch        string
+	Repo          string
 	LabelAdd      []string
 	LabelRemove   []string
 }
 
 func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, inputs trailUpdateInputs) error {
-	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, func(ctx context.Context, client *api.Client) error {
-		forge, owner, repoName, err := resolveTrailRemote(ctx)
+	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, inputs.Repo, func(ctx context.Context, client *api.Client) error {
+		forge, owner, repoName, err := resolveTrailRepoOrRemote(ctx, inputs.Repo)
 		if err != nil {
 			return err
 		}
@@ -1188,6 +1252,9 @@ trail is looked up against that repository's origin remote.`,
 				}
 				selector = args[0]
 			}
+			if err := ensureNoTrailRepoOverride(cmd, "trail checkout"); err != nil {
+				return err
+			}
 			return runTrailCheckout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), selector, force)
 		},
 	}
@@ -1199,13 +1266,15 @@ trail is looked up against that repository's origin remote.`,
 }
 
 func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector string, force bool) error {
-	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, func(ctx context.Context, client *api.Client) error {
+	// checkout rejects --repo (it operates on the local clone), so the enablement
+	// cache always tracks the local origin here.
+	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, "", func(ctx context.Context, client *api.Client) error {
 		forge, owner, repo, err := resolveTrailRemote(ctx)
 		if err != nil {
 			return err
 		}
 
-		found, err := resolveTrailBySelector(ctx, client, forge, owner, repo, selector)
+		found, err := resolveTrailBySelector(ctx, client, forge, owner, repo, selector, "")
 		if err != nil {
 			return err
 		}
@@ -1290,6 +1359,9 @@ Deletion is permanent; you are prompted to confirm unless --force is passed.`,
 			if number > 0 && cmd.Flags().Changed("branch") {
 				return errors.New("cannot combine a trail <number> with --branch")
 			}
+			if err := ensureTrailRepoHasTarget(cmd, number > 0 || strings.TrimSpace(branch) != "", "pass a trail number or --branch"); err != nil {
+				return err
+			}
 			return runTrailDelete(cmd, number, branch, force)
 		},
 	}
@@ -1304,8 +1376,8 @@ func runTrailDelete(cmd *cobra.Command, number int, branch string, force bool) e
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
-	return runAuthenticatedTrailAPI(ctx, cmd.ErrOrStderr(), trailInsecureHTTP(cmd), func(ctx context.Context, client *api.Client) error {
-		forge, owner, repo, err := resolveTrailRemote(ctx)
+	return runAuthenticatedTrailAPI(ctx, cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailRepoFlag(cmd), func(ctx context.Context, client *api.Client) error {
+		forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, trailRepoFlag(cmd))
 		if err != nil {
 			return err
 		}
@@ -1639,6 +1711,59 @@ func resolveTrailRemote(ctx context.Context) (forge, owner, repo string, err err
 		return "", "", "", errors.New("origin remote is not on a forge supported by Entire trails (supported: github.com)")
 	}
 	return forge, owner, repo, nil
+}
+
+// resolveTrailRepoOrRemote resolves the forge/owner/repo triple used to build
+// trail API paths. An explicit --repo override (repoOverride) wins; otherwise
+// it derives the triple from the origin remote of the current clone.
+func resolveTrailRepoOrRemote(ctx context.Context, repoOverride string) (forge, owner, repo string, err error) {
+	if repoOverride != "" {
+		return parseTrailRepoArg(repoOverride)
+	}
+	return resolveTrailRemote(ctx)
+}
+
+// resolveTrailBranch returns the branch a trail lookup should use: an explicit
+// --branch override (branchOverride) when given, otherwise the current branch.
+func resolveTrailBranch(ctx context.Context, branchOverride string) (string, error) {
+	if branchOverride != "" {
+		return branchOverride, nil
+	}
+	return GetCurrentBranch(ctx)
+}
+
+// parseTrailRepoArg parses an explicit --repo value into the forge/owner/repo
+// triple. It accepts the canonical "forge/owner/repo" form (e.g. gh/acme/app)
+// as well as a full clone URL (https://, git@, or entire://) that gitremote
+// can parse. A trailing ".git" on the repo is stripped.
+func parseTrailRepoArg(raw string) (forge, owner, repo string, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", "", errors.New("empty --repo value")
+	}
+	// Bare path form: forge/owner/repo. URLs (with a scheme or an SCP "@")
+	// fall through to the URL parser, which understands hosts and schemes.
+	if !strings.Contains(raw, "://") && !strings.Contains(raw, "@") {
+		parts := strings.Split(strings.Trim(raw, "/"), "/")
+		if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+			return "", "", "", fmt.Errorf("invalid --repo %q: expected forge/owner/repo (e.g. gh/acme/app) or a clone URL", raw)
+		}
+		// parts[0] must be a short forge id ("gh"), not a hostname. A host-like
+		// value (github.com/acme/app) would otherwise be forwarded verbatim and
+		// the server would reject the malformed path with an opaque error.
+		if !gitremote.IsSupportedForge(parts[0]) {
+			return "", "", "", fmt.Errorf("invalid --repo %q: %q is not a supported forge id (use a forge id like \"gh\", or pass a clone URL such as https://github.com/%s/%s)", raw, parts[0], parts[1], parts[2])
+		}
+		return parts[0], parts[1], strings.TrimSuffix(parts[2], ".git"), nil
+	}
+	info, perr := gitremote.ParseURL(raw)
+	if perr != nil {
+		return "", "", "", fmt.Errorf("invalid --repo %q: %w", raw, perr)
+	}
+	if info.Forge == "" {
+		return "", "", "", fmt.Errorf("invalid --repo %q: unsupported forge host (supported: github.com)", raw)
+	}
+	return info.Forge, info.Owner, info.Repo, nil
 }
 
 // checkTrailResponse checks the API response and returns user-friendly errors.

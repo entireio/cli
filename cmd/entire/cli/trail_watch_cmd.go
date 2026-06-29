@@ -41,6 +41,7 @@ func newTrailWatchCmd() *cobra.Command {
 		jsonOutput bool
 		showPings  bool
 		once       bool
+		branch     string
 	)
 
 	cmd := &cobra.Command{
@@ -77,6 +78,7 @@ Events emitted by the server:
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print each event as a single JSON line")
 	cmd.Flags().BoolVar(&showPings, "show-pings", false, "Print SSE keepalive pings (otherwise suppressed)")
 	cmd.Flags().BoolVar(&once, "once", false, "Open one SSE connection then exit instead of reconnecting")
+	cmd.Flags().StringVar(&branch, "branch", "", "Watch the trail for this branch instead of the current branch; cannot be combined with a trail selector")
 
 	return cmd
 }

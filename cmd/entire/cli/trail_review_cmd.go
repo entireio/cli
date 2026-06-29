@@ -58,6 +58,7 @@ type trailReviewListOptions struct {
 
 type trailReviewTargetOptions struct {
 	Selector string
+	Branch   string
 }
 
 type trailReviewTarget struct {
@@ -91,6 +92,7 @@ discover a trail selector first.`,
 		},
 	}
 	cmd.PersistentFlags().StringVar(&targetOpts.Selector, "trail", "", "Trail selector (number, id, or branch); defaults to the current branch's trail")
+	cmd.PersistentFlags().StringVar(&targetOpts.Branch, "branch", "", "Resolve the trail for this branch instead of the current branch; cannot be combined with a trail selector")
 	addTrailReviewListFlags(cmd, &opts)
 
 	cmd.AddCommand(newTrailFindingListCmd(&targetOpts))
@@ -252,6 +254,9 @@ By default this only changes files. Pass --resolve to update the finding's
 lifecycle status after the patch applies successfully.`,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := ensureNoTrailRepoOverride(cmd, "trail finding apply"); err != nil {
+				return err
+			}
 			selector, commentID, err := parseTrailSelectorAndCommentID(args, targetOpts.Selector)
 			if err != nil {
 				return err
@@ -293,7 +298,7 @@ func runTrailReviewDashboard(cmd *cobra.Command, selector string, opts trailRevi
 		if strings.TrimSpace(selector) == "" && errors.Is(err, errTrailReviewDefaultTargetNotFound) {
 			fmt.Fprintln(cmd.OutOrStdout(), "No trail found for the current branch; showing trails in this repo.")
 			fmt.Fprintln(cmd.OutOrStdout())
-			return runTrailListAll(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailListOptions{Status: trailListStatusAny, Limit: defaultTrailListLimit, InsecureHTTP: trailInsecureHTTP(cmd)})
+			return runTrailListAll(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailListOptions{Status: trailListStatusAny, Limit: defaultTrailListLimit, InsecureHTTP: trailInsecureHTTP(cmd), Repo: trailRepoFlag(cmd)})
 		}
 		return err
 	}
@@ -465,12 +470,20 @@ func runTrailReviewSetStatus(cmd *cobra.Command, selector string, commentID, sta
 }
 
 func authenticatedTrailReviewTarget(cmd *cobra.Command, selector string) (*api.Client, trailReviewTarget, error) {
+	repoOverride := trailRepoFlag(cmd)
+	branchOverride := trailBranchFlag(cmd)
+	if selector != "" && branchOverride != "" {
+		return nil, trailReviewTarget{}, errors.New("pass a trail selector or --branch, not both")
+	}
+	if repoOverride != "" && selector == "" && branchOverride == "" {
+		return nil, trailReviewTarget{}, errors.New("--repo requires an explicit target: pass a trail selector or --branch")
+	}
 	var target trailReviewTarget
 	var resolvedClient *api.Client
-	err := runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), func(ctx context.Context, client *api.Client) error {
+	err := runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), repoOverride, func(ctx context.Context, client *api.Client) error {
 		var err error
 		resolvedClient = client
-		target, err = resolveTrailReviewTarget(ctx, client, selector)
+		target, err = resolveTrailReviewTarget(ctx, client, selector, repoOverride, branchOverride)
 		return err
 	})
 	if err != nil {
@@ -479,8 +492,8 @@ func authenticatedTrailReviewTarget(cmd *cobra.Command, selector string) (*api.C
 	return resolvedClient, target, nil
 }
 
-func resolveTrailReviewTarget(ctx context.Context, client *api.Client, selector string) (trailReviewTarget, error) {
-	host, owner, repo, err := resolveTrailRemote(ctx)
+func resolveTrailReviewTarget(ctx context.Context, client *api.Client, selector, repoOverride, branchOverride string) (trailReviewTarget, error) {
+	host, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
 	if err != nil {
 		return trailReviewTarget{}, err
 	}
@@ -496,7 +509,7 @@ func resolveTrailReviewTarget(ctx context.Context, client *api.Client, selector 
 			return trailReviewTarget{}, fmt.Errorf("no trail %q found in %s/%s/%s (run 'entire trail list --status any')", selector, host, owner, repo)
 		}
 	} else {
-		branch, branchErr := GetCurrentBranch(ctx)
+		branch, branchErr := resolveTrailBranch(ctx, branchOverride)
 		if branchErr != nil {
 			return trailReviewTarget{}, fmt.Errorf("%w: no trail selector given and current branch is unknown: %w\nhint: run 'entire trail list --status any' or pass --trail <number|id|branch>", errTrailReviewDefaultTargetNotFound, branchErr)
 		}
@@ -505,7 +518,7 @@ func resolveTrailReviewTarget(ctx context.Context, client *api.Client, selector 
 			return trailReviewTarget{}, err
 		}
 		if found == nil {
-			return trailReviewTarget{}, fmt.Errorf("%w: no trail found for current branch %q\nhint: run 'entire trail create', 'entire trail list --status any', or pass --trail <number|id|branch>", errTrailReviewDefaultTargetNotFound, branch)
+			return trailReviewTarget{}, fmt.Errorf("%w: no trail found for branch %q\nhint: run 'entire trail create', 'entire trail list --status any', or pass --trail <number|id|branch>", errTrailReviewDefaultTargetNotFound, branch)
 		}
 	}
 	if found.ID == "" {

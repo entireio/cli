@@ -83,7 +83,7 @@ func TestResolveTrailReviewTargetRejectsUnsupportedForge(t *testing.T) {
 	}
 	t.Chdir(repoDir)
 
-	_, err := resolveTrailReviewTarget(context.Background(), api.NewClient("tok"), "")
+	_, err := resolveTrailReviewTarget(context.Background(), api.NewClient("tok"), "", "", "")
 	if err == nil {
 		t.Fatal("expected error for gitlab.com origin, got nil")
 	}

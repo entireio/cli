@@ -61,7 +61,7 @@ func postReviewToTrail(ctx context.Context, out io.Writer, profileName, verdict 
 		return nil
 	}
 	return runAuthenticatedDataAPI(ctx, out, false, func(ctx context.Context, client *api.Client) error {
-		target, err := resolveTrailReviewTarget(ctx, client, "")
+		target, err := resolveTrailReviewTarget(ctx, client, "", "", "")
 		if err != nil {
 			return err
 		}

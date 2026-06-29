@@ -276,10 +276,17 @@ func noteTrailCommandEnablement(ctx context.Context, client *api.Client, command
 	refreshTrailsEnabledCacheBestEffort(ctx, client)
 }
 
-func runAuthenticatedTrailAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, fn func(context.Context, *api.Client) error) error {
+// runAuthenticatedTrailAPI runs fn against the data API as the current user.
+// repoOverride is the raw --repo flag: when non-empty the trails-enablement
+// cache is skipped, because that cache is keyed to the local clone's origin and
+// a cross-repo query says nothing about the local clone (recording it would
+// mis-attribute enablement to the wrong repo).
+func runAuthenticatedTrailAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, repoOverride string, fn func(context.Context, *api.Client) error) error {
 	return runAuthenticatedDataAPI(ctx, errW, insecureHTTP, func(ctx context.Context, client *api.Client) error {
 		err := fn(ctx, client)
-		noteTrailCommandEnablement(ctx, client, err)
+		if repoOverride == "" {
+			noteTrailCommandEnablement(ctx, client, err)
+		}
 		return err
 	})
 }

@@ -42,7 +42,7 @@ func TestResolveTrailBySelector_FindsBySelector(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			found, err := resolveTrailBySelector(context.Background(), client, "gh", "acme", "repo", tc.selector)
+			found, err := resolveTrailBySelector(context.Background(), client, "gh", "acme", "repo", tc.selector, "")
 			if err != nil {
 				t.Fatalf("resolveTrailBySelector: %v", err)
 			}
@@ -64,7 +64,7 @@ func TestResolveTrailBySelector_NotFoundIsAnError(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	found, err := resolveTrailBySelector(context.Background(), client, "gh", "acme", "repo", "does-not-exist")
+	found, err := resolveTrailBySelector(context.Background(), client, "gh", "acme", "repo", "does-not-exist", "")
 	if err == nil {
 		t.Fatalf("expected error for missing trail, got found = %#v", found)
 	}

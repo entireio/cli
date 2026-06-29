@@ -424,7 +424,7 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteOpt
 	// Write prompts via the 7-layer pipeline. OPF runs only in the
 	// pre-push rewrite path (manual_commit_opf_rewrite.go).
 	if len(opts.Prompts) > 0 {
-		promptContent := redactedJoinedPrompts(opts.Prompts)
+		promptContent := RedactedJoinedPrompts(opts.Prompts)
 		blobHash, err := CreateBlobFromContent(s.repo, []byte(promptContent))
 		if err != nil {
 			return filePaths, err
@@ -461,7 +461,7 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteOpt
 		SessionMetrics:              opts.SessionMetrics,
 		Attribution:                 opts.Attribution,
 		PromptAttributions:          opts.PromptAttributionsJSON,
-		Summary:                     redactSummary(opts.Summary),
+		Summary:                     RedactSummary(opts.Summary),
 		CLIVersion:                  versioninfo.Version,
 		Kind:                        opts.Kind,
 		ReviewSkills:                opts.ReviewSkills,
@@ -932,11 +932,12 @@ func mergeFilesTouched(existing, additional []string) []string {
 	return result
 }
 
-// redactSummary returns a copy of the summary with text fields redacted.
-// Structural fields (Path, Line, EndLine) are preserved.
+// RedactSummary returns a copy of the summary with text fields redacted.
+// Structural fields (Path, Line, EndLine) are preserved. Exported so alternate
+// persistent backends redact summaries the same way the git store does.
 // NOTE: When adding new text fields to Summary, LearningsSummary, or CodeLearning,
 // update this function to include them in redaction.
-func redactSummary(s *Summary) *Summary {
+func RedactSummary(s *Summary) *Summary {
 	if s == nil {
 		return nil
 	}
@@ -1465,7 +1466,7 @@ func (s *GitStore) backfillSummary(ctx context.Context, checkpointID id.Checkpoi
 	}
 
 	// Update the summary
-	existingMetadata.Summary = redactSummary(summary)
+	existingMetadata.Summary = RedactSummary(summary)
 
 	// Write updated session metadata
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(existingMetadata, "", "  ")
@@ -1619,7 +1620,7 @@ func (s *GitStore) backfillTranscript(ctx context.Context, opts UpdateOptions) e
 
 	// Replace prompts with 7-layer-redacted content.
 	if len(opts.Prompts) > 0 {
-		promptContent := redactedJoinedPrompts(opts.Prompts)
+		promptContent := RedactedJoinedPrompts(opts.Prompts)
 		blobHash, err := CreateBlobFromContent(s.repo, []byte(promptContent))
 		if err != nil {
 			return fmt.Errorf("failed to create prompt blob: %w", err)
