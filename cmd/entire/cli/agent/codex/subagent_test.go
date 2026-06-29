@@ -224,6 +224,7 @@ func TestSubagentDiscovery_RespectsFromOffset(t *testing.T) {
 	lines := []string{sessionMetaLine(t, "parent")}                            // line 1
 	lines = append(lines, spawnAgentLines(t, "call_1", "worker", childID1)...) // lines 2-3 (spawn + output)
 	lines = append(lines, applyPatchLine(t, "Update", "parent-late.go"))       // line 4 (this range)
+	lines = append(lines, tokenCountLine(t, 10, 0, 5))                         // line 5 (this range): keeps usage non-nil
 	parent := strings.Join(lines, "\n")
 
 	ag := &CodexAgent{}
@@ -234,9 +235,8 @@ func TestSubagentDiscovery_RespectsFromOffset(t *testing.T) {
 
 	usage, err := ag.CalculateTotalTokenUsage([]byte(parent), 3, "")
 	require.NoError(t, err)
-	if usage != nil {
-		require.Nil(t, usage.SubagentTokens, "subagent tokens before the offset must not be re-attributed")
-	}
+	require.NotNil(t, usage)
+	require.Nil(t, usage.SubagentTokens, "subagent tokens before the offset must not be re-attributed")
 
 	// Sanity: with offset 0 the subagent IS attributed.
 	files0, err := (&CodexAgent{}).ExtractAllModifiedFiles([]byte(parent), 0, "")
