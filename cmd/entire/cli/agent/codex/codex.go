@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
@@ -53,7 +54,24 @@ func (c *CodexAgent) IsPreview() bool { return true }
 
 // DetectPresence checks if Codex is configured in the repository.
 func (c *CodexAgent) DetectPresence(ctx context.Context) (bool, error) {
-	return c.AreHooksInstalled(ctx), nil
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		repoRoot = "."
+	}
+
+	codexDir := filepath.Join(repoRoot, ".codex")
+	configPath := filepath.Join(codexDir, configFileName)
+	hooksPath := filepath.Join(codexDir, HooksFileName)
+	if _, err := os.Stat(configPath); err == nil {
+		return true, nil
+	}
+	if _, err := os.Stat(hooksPath); err == nil {
+		return true, nil
+	}
+	if _, err := os.Stat(codexDir); err == nil {
+		return true, nil
+	}
+	return false, nil
 }
 
 // GetSessionID extracts the session ID from hook input.

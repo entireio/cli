@@ -14,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -1482,6 +1483,60 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_NoTTY_UsesAll(t *testing.T) {
 	// With no TTY and multiple detected, should return all detected agents
 	if len(agents) != 2 {
 		t.Errorf("detectOrSelectAgent() returned %d agents, want 2", len(agents))
+	}
+}
+
+func TestDetectOrSelectAgent_ClaudeAndCodexDetected_PromptsUser(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+
+	if err := os.MkdirAll(".claude", 0o755); err != nil {
+		t.Fatalf("Failed to create .claude directory: %v", err)
+	}
+	if err := os.MkdirAll(".codex", 0o755); err != nil {
+		t.Fatalf("Failed to create .codex directory: %v", err)
+	}
+
+	var receivedAvailable []string
+	selectFn := func(available []string) ([]string, error) {
+		receivedAvailable = available
+		return []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameCodex)}, nil
+	}
+
+	var buf bytes.Buffer
+	agents, err := detectOrSelectAgent(context.Background(), &buf, selectFn)
+	if err != nil {
+		t.Fatalf("detectOrSelectAgent() error = %v", err)
+	}
+
+	if !slices.Contains(receivedAvailable, string(agent.AgentNameClaudeCode)) {
+		t.Fatalf("expected Claude Code in selector options, got %v", receivedAvailable)
+	}
+	if !slices.Contains(receivedAvailable, string(agent.AgentNameCodex)) {
+		t.Fatalf("expected Codex in selector options, got %v", receivedAvailable)
+	}
+
+	got := make(map[types.AgentName]struct{}, len(agents))
+	for _, ag := range agents {
+		got[ag.Name()] = struct{}{}
+	}
+	if _, ok := got[agent.AgentNameClaudeCode]; !ok {
+		t.Fatalf("expected Claude Code to be selected, got %v", got)
+	}
+	if _, ok := got[agent.AgentNameCodex]; !ok {
+		t.Fatalf("expected Codex to be selected, got %v", got)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Detected multiple agents:") {
+		t.Errorf("Expected output to contain 'Detected multiple agents:', got: %s", output)
+	}
+	if !strings.Contains(output, "Claude Code") || !strings.Contains(output, "Codex") {
+		t.Errorf("Expected output to mention Claude Code and Codex, got: %s", output)
+	}
+	if !strings.Contains(output, "Selected agents:") {
+		t.Errorf("Expected output to contain 'Selected agents:', got: %s", output)
 	}
 }
 
