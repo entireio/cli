@@ -118,10 +118,18 @@ func (c *CodexAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) {
 	if err != nil {
 		return nil, err
 	}
+	ref := derefString(raw.TranscriptPath)
+	// A subagent's own turn fires UserPromptSubmit tagged with the PARENT
+	// session_id but the CHILD transcript. Skip it: the subagent is tracked via
+	// SubagentStart/SubagentEnd, and handling it as a parent TurnStart would churn
+	// the parent's phase and overwrite its prompt with the worker's task.
+	if isCodexSubagentRollout(ref) {
+		return nil, nil //nolint:nilnil // subagent turn = no parent lifecycle action
+	}
 	return &agent.Event{
 		Type:       agent.TurnStart,
 		SessionID:  raw.SessionID,
-		SessionRef: derefString(raw.TranscriptPath),
+		SessionRef: ref,
 		Prompt:     raw.Prompt,
 		Model:      raw.Model,
 		Timestamp:  time.Now(),
@@ -189,10 +197,17 @@ func (c *CodexAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
 	if err != nil {
 		return nil, err
 	}
+	ref := derefString(raw.TranscriptPath)
+	// As with parseTurnStart: a subagent's own Stop is tagged with the parent
+	// session_id but the child transcript. The subagent end is handled by
+	// SubagentEnd, so skip it here to avoid a spurious parent TurnEnd checkpoint.
+	if isCodexSubagentRollout(ref) {
+		return nil, nil //nolint:nilnil // subagent turn = no parent lifecycle action
+	}
 	return &agent.Event{
 		Type:       agent.TurnEnd,
 		SessionID:  raw.SessionID,
-		SessionRef: derefString(raw.TranscriptPath),
+		SessionRef: ref,
 		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil

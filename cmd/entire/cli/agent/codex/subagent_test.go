@@ -101,6 +101,61 @@ func sessionMetaLine(t *testing.T, id string) string {
 	})
 }
 
+// sessionMetaLineWithSource builds a session_meta line with an explicit
+// thread_source ("user" or "subagent").
+func sessionMetaLineWithSource(t *testing.T, id, threadSource string) string {
+	t.Helper()
+	return rolloutLineJSON(t, "session_meta", map[string]any{
+		"id": id, "timestamp": "2026-06-29T12:00:00.000Z", "thread_source": threadSource,
+	})
+}
+
+// A subagent's own turn fires UserPromptSubmit/Stop tagged with the PARENT
+// session_id but the CHILD (thread_source="subagent") transcript. Those must NOT
+// become parent TurnStart/TurnEnd events — otherwise the subagent's task prompt
+// overwrites the parent's prompt in `entire status` and churns its phase. A
+// real user session (thread_source="user") still produces the events.
+func TestParseHookEvent_SkipsSubagentOwnTurns(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, threadSource, prompt string) string {
+		p := filepath.Join(dir, name)
+		lines := []string{
+			sessionMetaLineWithSource(t, "id-"+name, threadSource),
+			rolloutLineJSON(t, "response_item", map[string]any{
+				"type": "message", "role": "user",
+				"content": []map[string]string{{"type": "input_text", "text": prompt}},
+			}),
+		}
+		require.NoError(t, os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
+		return p
+	}
+	childPath := write("child.jsonl", "subagent", "Working directory: /x Task: create the file")
+	parentPath := write("parent.jsonl", "user", "Refactor the auth module")
+
+	ag := &CodexAgent{}
+	hook := func(transcript string) string {
+		return `{"session_id":"019f1664-4db6-71d2-9092-a3436b96fb4d","transcript_path":"` + transcript + `","prompt":"p"}`
+	}
+
+	// Subagent transcript → both turn hooks are skipped (nil event).
+	for _, h := range []string{HookNameUserPromptSubmit, HookNameStop} {
+		evt, err := ag.ParseHookEvent(t.Context(), h, strings.NewReader(hook(childPath)))
+		require.NoError(t, err)
+		require.Nil(t, evt, "subagent-transcript turn must be skipped for hook %s", h)
+	}
+
+	// Parent (user) transcript → normal TurnStart / TurnEnd.
+	start, err := ag.ParseHookEvent(t.Context(), HookNameUserPromptSubmit, strings.NewReader(hook(parentPath)))
+	require.NoError(t, err)
+	require.NotNil(t, start)
+	require.Equal(t, agent.TurnStart, start.Type)
+
+	end, err := ag.ParseHookEvent(t.Context(), HookNameStop, strings.NewReader(hook(parentPath)))
+	require.NoError(t, err)
+	require.NotNil(t, end)
+	require.Equal(t, agent.TurnEnd, end.Type)
+}
+
 // writeChildRollout writes a flat child rollout file discoverable by
 // findRolloutBySessionID under the test sessions dir.
 func writeChildRollout(t *testing.T, sessionsDir, id string, lines ...string) {

@@ -40,6 +40,11 @@ const rolloutLineTypeResponseItem = "response_item"
 type sessionMetaPayload struct {
 	ID        string `json:"id"`
 	Timestamp string `json:"timestamp"`
+	// ThreadSource is "user" for a user-initiated session and "subagent" for a
+	// spawned subagent's thread. Codex fires a subagent's own UserPromptSubmit/Stop
+	// hooks tagged with the PARENT session_id but the CHILD transcript, so this
+	// marker lets the turn handlers skip them.
+	ThreadSource string `json:"thread_source"`
 }
 
 // responseItemPayload is the payload for type="response_item" lines.
@@ -748,6 +753,39 @@ func splitJSONL(data []byte) [][]byte {
 		}
 	}
 	return lines
+}
+
+// isCodexSubagentRollout reports whether the rollout at path is a spawned
+// subagent's thread (session_meta.thread_source == "subagent") rather than a
+// user-initiated session. Codex fires a subagent's own UserPromptSubmit/Stop
+// hooks tagged with the PARENT session_id but the CHILD transcript; those must
+// not drive the parent's TurnStart/TurnEnd (the subagent's lifecycle is tracked
+// via SubagentStart/SubagentEnd). Best-effort: reads only the first line and
+// returns false if the marker can't be determined, preserving normal turn
+// handling for user sessions and older rollouts without thread_source.
+func isCodexSubagentRollout(path string) bool {
+	if path == "" {
+		return false
+	}
+	f, err := os.Open(path) //nolint:gosec // path comes from agent hook input
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	line, err := bufio.NewReader(f).ReadBytes('\n')
+	if len(line) == 0 && err != nil {
+		return false
+	}
+	var rl rolloutLine
+	if json.Unmarshal(line, &rl) != nil || rl.Type != "session_meta" {
+		return false
+	}
+	var meta sessionMetaPayload
+	if json.Unmarshal(rl.Payload, &meta) != nil {
+		return false
+	}
+	return meta.ThreadSource == "subagent"
 }
 
 func parseSessionStartTime(data []byte) (time.Time, error) {
