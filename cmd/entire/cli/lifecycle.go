@@ -904,12 +904,13 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	strat := GetStrategy(ctx)
 	agentType := ag.Type()
 
-	// Get transcript position/identifier from pre-prompt state
+	// Get transcript identifier from pre-prompt state. The transcript line offset
+	// uses the resolved transcriptOffset (above), not the raw preState value, so
+	// the step's token/file/transcript anchors stay consistent in exec/no-preState
+	// mode.
 	var transcriptIdentifierAtStart string
-	var transcriptLinesAtStart int
 	if preState != nil {
 		transcriptIdentifierAtStart = preState.LastTranscriptIdentifier
-		transcriptLinesAtStart = preState.TranscriptOffset
 	}
 
 	// Resolve token usage. Hook-provided counts (e.g., Cursor's stop hook,
@@ -943,8 +944,14 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		AuthorEmail:              author.Email,
 		AgentType:                agentType,
 		StepTranscriptIdentifier: transcriptIdentifierAtStart,
-		StepTranscriptStart:      transcriptLinesAtStart,
-		TokenUsage:               tokenUsage,
+		// Use the same resolved offset as token/file extraction above (not the raw
+		// preState offset), so this never diverges from the rest of the step in
+		// exec/no-preState mode. resolveTranscriptOffset == transcriptLinesAtStart
+		// whenever preState carries a positive offset, so the common path is
+		// unchanged. (StepContext.StepTranscriptStart is currently unconsumed by the
+		// strategy; this keeps it correct for any future consumer.)
+		StepTranscriptStart: transcriptOffset,
+		TokenUsage:          tokenUsage,
 	}
 
 	if err := strat.SaveStep(ctx, stepCtx); err != nil {
@@ -1172,9 +1179,15 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		return nil
 	}
 
-	// Find checkpoint UUID from main transcript (best-effort)
+	// Find checkpoint UUID from the main transcript (best-effort). This anchors
+	// transcript truncation on task rewind and is Claude-format-specific: it matches
+	// a tool_result block keyed by ToolUseID. Codex rollouts use function_call_output
+	// (not Claude tool_result) and have no such UUID, so this resolves to "" for
+	// Codex — handled gracefully downstream: rewinding to a Codex task checkpoint
+	// restores files via the shadow tree but does not truncate the transcript (the
+	// truncation restore path, TruncateTranscriptAtUUID, is also Claude-format-only).
+	// Codex-aware task-rewind truncation is a deferred follow-up; see codex/AGENT.md.
 	var checkpointUUID string
-	// Use the existing CLI-level checkpoint UUID finder
 	mainLines, _ := parseTranscriptForCheckpointUUID(event.SessionRef) //nolint:errcheck // best-effort
 	if mainLines != nil {
 		checkpointUUID, _ = FindCheckpointUUID(mainLines, event.ToolUseID)

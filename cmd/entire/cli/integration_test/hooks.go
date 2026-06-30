@@ -613,6 +613,55 @@ func (r *CodexHookRunner) SimulateCodexPostToolUseApplyPatch(sessionID, cwd, pat
 	return r.runCodexHook("post-tool-use", inputJSON)
 }
 
+// SimulateCodexSubagentStart simulates Codex's SubagentStart hook, which Codex
+// tags with the PARENT session_id and the PARENT transcript plus the child's
+// agent_id/agent_type. Drives handleLifecycleSubagentStart (pre-task state).
+func (r *CodexHookRunner) SimulateCodexSubagentStart(parentSessionID, parentTranscript, agentID, agentType string) error {
+	r.T.Helper()
+	input := map[string]any{
+		"session_id":      parentSessionID,
+		"transcript_path": parentTranscript,
+		"cwd":             r.RepoDir,
+		"hook_event_name": "SubagentStart",
+		"model":           "gpt-5",
+		"permission_mode": "default",
+		"turn_id":         "test-turn",
+		"agent_id":        agentID,
+		"agent_type":      agentType,
+	}
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("marshal hook input: %w", err)
+	}
+	return r.runCodexHook("subagent-start", inputJSON)
+}
+
+// SimulateCodexSubagentStop simulates Codex's SubagentStop hook. agentTranscriptPath
+// is the child rollout (Codex supplies it on SubagentStop). Drives
+// handleLifecycleSubagentEnd, which must source the subagent's modified files from
+// the CHILD transcript — never the parent.
+func (r *CodexHookRunner) SimulateCodexSubagentStop(parentSessionID, parentTranscript, agentID, agentType, agentTranscriptPath string) error {
+	r.T.Helper()
+	input := map[string]any{
+		"session_id":             parentSessionID,
+		"transcript_path":        parentTranscript,
+		"cwd":                    r.RepoDir,
+		"hook_event_name":        "SubagentStop",
+		"model":                  "gpt-5",
+		"permission_mode":        "default",
+		"turn_id":                "test-turn",
+		"agent_id":               agentID,
+		"agent_type":             agentType,
+		"agent_transcript_path":  agentTranscriptPath,
+		"last_assistant_message": "done",
+	}
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("marshal hook input: %w", err)
+	}
+	return r.runCodexHook("subagent-stop", inputJSON)
+}
+
 // GeminiHookRunner executes Gemini CLI hooks in the test environment.
 type GeminiHookRunner struct {
 	RepoDir          string

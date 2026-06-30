@@ -63,6 +63,7 @@ func spawnAgentLines(t *testing.T, callID, agentType, childID string) []string {
 // agentIDFromSpawnOutput must handle the real Codex string form, the object form,
 // and reject non-agent outputs.
 func TestAgentIDFromSpawnOutput(t *testing.T) {
+	t.Parallel()
 	// Real Codex: output is a JSON string containing JSON.
 	stringForm, err := json.Marshal(`{"agent_id":"` + childID1 + `","nickname":"Raman"}`)
 	require.NoError(t, err)
@@ -116,6 +117,7 @@ func sessionMetaLineWithSource(t *testing.T, id, threadSource string) string {
 // overwrites the parent's prompt in `entire status` and churns its phase. A
 // real user session (thread_source="user") still produces the events.
 func TestParseHookEvent_SkipsSubagentOwnTurns(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	write := func(name, threadSource, prompt string) string {
 		p := filepath.Join(dir, name)
@@ -167,6 +169,7 @@ func writeChildRollout(t *testing.T, sessionsDir, id string, lines ...string) {
 // --- ParseHookEvent: subagent hooks ---
 
 func TestParseHookEvent_SubagentStart(t *testing.T) {
+	t.Parallel()
 	ag := &CodexAgent{}
 	in := `{"session_id":"parent-sess","transcript_path":"/tmp/parent.jsonl","agent_id":"` + childID1 +
 		`","agent_type":"explorer","turn_id":"turn-1","model":"gpt-5.5"}`
@@ -183,6 +186,7 @@ func TestParseHookEvent_SubagentStart(t *testing.T) {
 }
 
 func TestParseHookEvent_SubagentStop(t *testing.T) {
+	t.Parallel()
 	ag := &CodexAgent{}
 	in := `{"session_id":"parent-sess","transcript_path":"/tmp/parent.jsonl","agent_id":"` + childID1 +
 		`","agent_type":"explorer","agent_transcript_path":"/tmp/child.jsonl","last_assistant_message":"done"}`
@@ -197,6 +201,7 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 }
 
 func TestParseHookEvent_SubagentHooks_ErrorOnEmpty(t *testing.T) {
+	t.Parallel()
 	ag := &CodexAgent{}
 	for _, hook := range []string{HookNameSubagentStart, HookNameSubagentStop} {
 		_, err := ag.ParseHookEvent(t.Context(), hook, strings.NewReader(""))
@@ -207,6 +212,7 @@ func TestParseHookEvent_SubagentHooks_ErrorOnEmpty(t *testing.T) {
 // --- ResolveSubagentTranscript ---
 
 func TestResolveSubagentTranscript_PrefersHookPath(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	hookPath := filepath.Join(dir, "child.jsonl")
 	require.NoError(t, os.WriteFile(hookPath, []byte("{}\n"), 0o600))
@@ -245,6 +251,7 @@ func TestResolveSubagentTranscript_GlobsSessionsByAgentID(t *testing.T) {
 }
 
 func TestResolveSubagentTranscript_NilAndEmpty(t *testing.T) {
+	t.Parallel()
 	ag := &CodexAgent{}
 	require.Empty(t, ag.ResolveSubagentTranscript(nil))
 	require.Empty(t, ag.ResolveSubagentTranscript(&agent.Event{}))
@@ -256,6 +263,7 @@ func TestResolveSubagentTranscript_NilAndEmpty(t *testing.T) {
 // other agent-tool calls — so a child surfaced only by a non-spawn tool is
 // excluded, preventing the resume_agent cross-turn double-count.
 func TestExtractSpawnedAgentIDs(t *testing.T) {
+	t.Parallel()
 	lines := []string{sessionMetaLine(t, "parent")}
 	lines = append(lines, spawnAgentLines(t, "call_1", "explorer", childID1)...)
 	lines = append(lines, spawnAgentLines(t, "call_2", "explorer", childID2)...)
@@ -312,6 +320,7 @@ func TestSubagentDiscovery_RespectsFromOffset(t *testing.T) {
 // — decides the checkpoint range. The converse (output at/before the offset) must
 // not be discovered.
 func TestSubagentDiscovery_SpawnOutputLineDecidesRange(t *testing.T) {
+	t.Parallel()
 	pair := spawnAgentLines(t, "call_1", "worker", childID1)
 	spawnCall, spawnOutput := pair[0], pair[1]
 	parent := strings.Join([]string{
@@ -397,4 +406,76 @@ func TestCalculateTotalTokenUsage_NoSubagents(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, usage)
 	require.Nil(t, usage.SubagentTokens, "no SubagentTokens when no subagents were spawned")
+}
+
+// #3 regression: when the main transcript has NO token data but a spawned
+// subagent does, CalculateTotalTokenUsage must return the subagent totals without
+// dereferencing the nil mainUsage. A revert of the `if mainUsage == nil` guard
+// would panic here.
+func TestCalculateTotalTokenUsage_NilMainWithSubagentTokens(t *testing.T) {
+	sessionsDir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", sessionsDir)
+
+	writeChildRollout(t, sessionsDir, childID1, sessionMetaLine(t, childID1), tokenCountLine(t, 100, 0, 50))
+
+	// Parent has a spawn output for the child but NO token_count line → mainUsage nil.
+	lines := []string{sessionMetaLine(t, "parent")}
+	lines = append(lines, spawnAgentLines(t, "c1", "worker", childID1)...)
+	parent := strings.Join(lines, "\n")
+
+	usage, err := (&CodexAgent{}).CalculateTotalTokenUsage([]byte(parent), 0, "")
+	require.NoError(t, err)
+	require.NotNil(t, usage, "should materialize a usage carrying SubagentTokens even when main has none")
+	require.NotNil(t, usage.SubagentTokens)
+	require.Equal(t, 100, usage.SubagentTokens.InputTokens)
+	require.Equal(t, 50, usage.SubagentTokens.OutputTokens)
+	require.Equal(t, 1, usage.SubagentTokens.APICallCount)
+}
+
+// #5 backward-compat: isCodexSubagentRollout detects subagents by thread_source,
+// and falls back to the nested source.subagent marker for older rollouts. A
+// rollout with neither marker (older Codex / async race) is treated as a normal
+// (parent) turn — documented degradation.
+func TestIsCodexSubagentRollout(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	write := func(name string, metaLine string) string {
+		p := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(p, []byte(metaLine+"\n"), 0o600))
+		return p
+	}
+
+	// thread_source == "subagent" → true
+	sub := write("sub.jsonl", sessionMetaLineWithSource(t, "id-sub", "subagent"))
+	require.True(t, isCodexSubagentRollout(sub))
+
+	// thread_source == "user" → false
+	usr := write("user.jsonl", sessionMetaLineWithSource(t, "id-user", "user"))
+	require.False(t, isCodexSubagentRollout(usr))
+
+	// No thread_source, but source = {"subagent":{...}} → true (fallback)
+	nestedMeta := rolloutLineJSON(t, "session_meta", map[string]any{
+		"id": "id-nested", "timestamp": "2026-06-29T12:00:00.000Z",
+		"source": map[string]any{"subagent": map[string]any{"thread_spawn": map[string]any{"parent_thread_id": "p"}}},
+	})
+	nested := write("nested.jsonl", nestedMeta)
+	require.True(t, isCodexSubagentRollout(nested))
+
+	// No thread_source, source is a plain string ("startup") → false
+	strMeta := rolloutLineJSON(t, "session_meta", map[string]any{
+		"id": "id-str", "timestamp": "2026-06-29T12:00:00.000Z", "source": "startup",
+	})
+	str := write("str.jsonl", strMeta)
+	require.False(t, isCodexSubagentRollout(str))
+
+	// Neither marker (older Codex / async race) → false (treated as parent turn)
+	bareMeta := rolloutLineJSON(t, "session_meta", map[string]any{
+		"id": "id-bare", "timestamp": "2026-06-29T12:00:00.000Z",
+	})
+	bare := write("bare.jsonl", bareMeta)
+	require.False(t, isCodexSubagentRollout(bare))
+
+	// Empty path + nonexistent path → false (graceful)
+	require.False(t, isCodexSubagentRollout(""))
+	require.False(t, isCodexSubagentRollout(filepath.Join(dir, "nope.jsonl")))
 }

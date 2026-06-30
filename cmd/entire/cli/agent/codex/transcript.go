@@ -3,10 +3,12 @@ package codex
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"regexp"
 	"sort"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -45,6 +48,10 @@ type sessionMetaPayload struct {
 	// hooks tagged with the PARENT session_id but the CHILD transcript, so this
 	// marker lets the turn handlers skip them.
 	ThreadSource string `json:"thread_source"`
+	// Source is "startup"/"cli"/... (a string) for user sessions, or an object
+	// {"subagent":{"thread_spawn":{...}}} for spawned subagents. Used as a fallback
+	// subagent signal on older rollouts that predate thread_source.
+	Source json.RawMessage `json:"source,omitempty"`
 }
 
 // responseItemPayload is the payload for type="response_item" lines.
@@ -374,16 +381,25 @@ func (c *CodexAgent) CalculateTotalTokenUsage(transcriptData []byte, fromOffset 
 	}
 
 	sub := &agent.TokenUsage{}
-	for _, childData := range c.readSubagentRollouts(transcriptData, fromOffset) {
+	children := c.readSubagentRollouts(transcriptData, fromOffset)
+	counted := 0
+	for _, childData := range children {
 		u, uerr := c.CalculateTokenUsage(childData, 0)
 		if uerr != nil || u == nil {
 			continue
 		}
+		counted++
 		sub.InputTokens += u.InputTokens
 		sub.CacheReadTokens += u.CacheReadTokens
 		sub.CacheCreationTokens += u.CacheCreationTokens
 		sub.OutputTokens += u.OutputTokens
 		sub.APICallCount += u.APICallCount
+	}
+	// Breadcrumb so a silent zero-attribution (e.g. Codex wire-format drift) is
+	// visible: how many child rollouts were read vs how many yielded token data.
+	if len(children) > 0 {
+		logging.Debug(context.Background(), "codex subagent token aggregation",
+			slog.Int("rollouts_read", len(children)), slog.Int("with_token_data", counted))
 	}
 	// No subagents spawned in this checkpoint range: preserve CalculateTokenUsage's
 	// semantics exactly, including its nil "no token data" return — don't
@@ -458,13 +474,21 @@ func (c *CodexAgent) readSubagentRolloutsUncached(parent []byte, fromOffset int)
 	for _, id := range ids {
 		path := findRolloutBySessionID(sessionDir, id)
 		if path == "" {
+			logging.Debug(context.Background(), "codex subagent rollout not found",
+				slog.String("agent_id", id))
 			continue
 		}
 		data, rerr := os.ReadFile(path) //nolint:gosec // path resolved from codex sessions dir keyed by a validated agent id
 		if rerr != nil {
+			logging.Debug(context.Background(), "codex subagent rollout read failed",
+				slog.String("agent_id", id), slog.String("error", rerr.Error()))
 			continue
 		}
 		out = append(out, data)
+	}
+	if len(ids) != len(out) {
+		logging.Debug(context.Background(), "codex subagent rollouts: some unresolved",
+			slog.Int("discovered", len(ids)), slog.Int("resolved", len(out)))
 	}
 	return out
 }
@@ -477,6 +501,15 @@ func (c *CodexAgent) readSubagentRolloutsUncached(parent []byte, fromOffset int)
 // exactly once, in the turn it was spawned: a child resumed or re-waited in a
 // later turn is not rediscovered, so its cumulative tokens/files are never
 // double-counted across turns.
+//
+// Deliberate trade-off: a child spawned in a PRIOR range and resumed in this one
+// is therefore NOT re-attributed here, so any NEW work it does during the resumed
+// range is under-counted. We accept this over the alternative (cross-turn
+// double-counting, the worse and previously-shipped bug) because: the child's
+// work is still captured as its own task checkpoint, resume across checkpoint
+// boundaries is uncommon, and exact resume accounting would need per-child
+// cross-turn offset state. logResumedOutOfRangeChildren surfaces the case so the
+// under-count is observable rather than silent. See AGENT.md.
 func extractSpawnedAgentIDs(data []byte, fromOffset int) []string {
 	lines := splitJSONL(data)
 
@@ -520,6 +553,11 @@ func extractSpawnedAgentIDs(data []byte, fromOffset int) []string {
 		}
 		id := agentIDFromSpawnOutput(payload.Output)
 		if id == "" || validation.ValidateAgentSessionID(id) != nil {
+			// A confirmed spawn_agent output that yields no usable agent_id is a
+			// wire-format drift signal (Codex changed the output shape) — surface it
+			// rather than silently dropping the child's attribution.
+			logging.Debug(context.Background(), "codex spawn_agent output yielded no usable agent_id",
+				slog.String("call_id", payload.CallID))
 			continue
 		}
 		if _, ok := seen[id]; !ok {
@@ -528,7 +566,47 @@ func extractSpawnedAgentIDs(data []byte, fromOffset int) []string {
 		}
 	}
 	sort.Strings(ids)
+	logResumedOutOfRangeChildren(lines, fromOffset, seen)
 	return ids
+}
+
+// logResumedOutOfRangeChildren emits a debug breadcrumb when a resume_agent call
+// in range targets a child that was NOT spawned in range (so it is intentionally
+// not re-attributed this turn — the documented resume under-count trade-off).
+func logResumedOutOfRangeChildren(lines [][]byte, fromOffset int, spawnedInRange map[string]struct{}) {
+	lineNum := 0
+	for _, lineData := range lines {
+		lineNum++
+		if lineNum <= fromOffset {
+			continue
+		}
+		var line rolloutLine
+		if json.Unmarshal(lineData, &line) != nil || line.Type != rolloutLineTypeResponseItem {
+			continue
+		}
+		var payload responseItemPayload
+		if json.Unmarshal(line.Payload, &payload) != nil || payload.Type != "function_call" || payload.Name != "resume_agent" {
+			continue
+		}
+		var args struct {
+			ID     string `json:"id"`
+			Target string `json:"target"`
+		}
+		if json.Unmarshal([]byte(payload.Arguments), &args) != nil {
+			continue
+		}
+		target := args.ID
+		if target == "" {
+			target = args.Target
+		}
+		if target == "" || validation.ValidateAgentSessionID(target) != nil {
+			continue
+		}
+		if _, ok := spawnedInRange[target]; !ok {
+			logging.Debug(context.Background(), "codex resumed subagent from a prior range; new work under-counted this turn (known trade-off, see AGENT.md)",
+				slog.String("agent_id", target))
+		}
+	}
 }
 
 // agentIDFromSpawnOutput extracts the spawned child's agent_id from a spawn_agent
@@ -785,7 +863,29 @@ func isCodexSubagentRollout(path string) bool {
 	if json.Unmarshal(rl.Payload, &meta) != nil {
 		return false
 	}
-	return meta.ThreadSource == "subagent"
+	if meta.ThreadSource == "subagent" {
+		return true
+	}
+	// Fallback for rollouts without thread_source (older Codex, or an async-write
+	// race where thread_source isn't flushed yet): a spawned thread's session_meta
+	// carries source = {"subagent":{"thread_spawn":{...}}}. A user session's source
+	// is a plain string ("startup"/"cli"/...), which fails this object unmarshal.
+	return metaSourceIsSubagent(meta.Source)
+}
+
+// metaSourceIsSubagent reports whether a session_meta `source` value is the
+// nested subagent form ({"subagent":{...}}) rather than a plain string.
+func metaSourceIsSubagent(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var s struct {
+		Subagent json.RawMessage `json:"subagent"`
+	}
+	if json.Unmarshal(raw, &s) != nil {
+		return false
+	}
+	return len(s.Subagent) > 0
 }
 
 func parseSessionStartTime(data []byte) (time.Time, error) {
