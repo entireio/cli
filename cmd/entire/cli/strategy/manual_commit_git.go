@@ -246,6 +246,11 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 
 		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
 
+		// Note: the explicit parent->child subagent link is recorded separately in
+		// handleLifecycleSubagentEnd (via strategy.RecordSubagentLink) BEFORE the
+		// no-file-change early-return, so every completed subagent is listed — not
+		// just those that produce a task checkpoint here.
+
 		if !branchExisted {
 			logging.Info(logging.WithComponent(ctx, "checkpoint"), "created shadow branch and committed task checkpoint",
 				slog.String("shadow_branch", shadowBranchName))

@@ -178,6 +178,10 @@ type WriteOptions struct {
 	// (e.g. via session.Kind.IsInvestigate) because checkpoint can't import
 	// session — the session package imports checkpoint, creating a cycle.
 	HasInvestigation bool
+
+	// Subagents is the parent->child subagent link list carried from the
+	// session state into the checkpoint metadata (see Metadata.Subagents).
+	Subagents []SubagentLink
 }
 
 // UpdateOptions contains options for updating an existing persistent checkpoint.
@@ -225,6 +229,12 @@ type UpdateOptions struct {
 	// reuses these hashes. Used by finalizeAllTurnCheckpoints to avoid
 	// re-compressing identical content N times.
 	PrecomputedBlobs *PrecomputedTranscriptBlobs
+
+	// Subagents, when non-empty, replaces the session metadata subagents list.
+	// finalizeAllTurnCheckpoints sets this to the full session.State.Subagents so
+	// subagents recorded after the last condensation (e.g. a trailing read-only
+	// subagent) are still published to the turn's checkpoints. See Metadata.Subagents.
+	Subagents []SubagentLink
 }
 
 // PrecomputedTranscriptBlobs holds blob hashes for a transcript that was
@@ -312,6 +322,23 @@ type SessionContent struct {
 
 	// Prompts contains user prompts from this session
 	Prompts string
+}
+
+// SubagentLink records one completed subagent (Task tool invocation) spawned by
+// a parent session. It is accumulated on the parent's Metadata so the UI can
+// render an explicit parent->child tree without reconstructing it from the
+// individual per-task checkpoints. AgentID is the explicit child link.
+//
+// A transcript path is intentionally NOT carried here: the child's redacted
+// transcript is currently written only to the local shadow branch, not the
+// pushed v1 branch, so publishing a pointer would dangle. The UI can locate it
+// from AgentID/ToolUseID once transcript promotion to v1 lands.
+type SubagentLink struct {
+	ToolUseID    string `json:"tool_use_id"`             // stable key for the Task invocation
+	AgentID      string `json:"agent_id,omitempty"`      // child subagent id (the explicit parent->child link)
+	SubagentType string `json:"subagent_type,omitempty"` // e.g. "dev", "reviewer"
+	Description  string `json:"description,omitempty"`   // task description given to the subagent
+	FileCount    int    `json:"file_count,omitempty"`    // count of unique files the subagent modified/created/deleted
 }
 
 // Metadata contains the metadata stored in metadata.json for each checkpoint.
@@ -409,6 +436,17 @@ type Metadata struct {
 	// InvestigateTopic is the human-readable topic the investigation was
 	// asked to investigate. Only set when Kind is an investigate kind.
 	InvestigateTopic string `json:"investigate_topic,omitempty"`
+
+	// Subagents is the explicit parent->child link list: one entry per
+	// subagent (Task tool invocation) spawned by this session, so the UI can
+	// render the parent->children tree directly. It is a session-level list
+	// (deduped by ToolUseID/AgentID) that grows as subagents complete — distinct
+	// from the per-checkpoint-window FilesTouched. Each condensation and the
+	// turn-end finalize (see UpdateOptions.Subagents) snapshots the full list, so
+	// the latest checkpoint of any turn that produced one carries every subagent
+	// recorded up to that point; the UI should still union by ToolUseID/AgentID
+	// across a session's checkpoints. Empty for sessions that spawned no subagents.
+	Subagents []SubagentLink `json:"subagents,omitempty"`
 }
 
 // GetTranscriptStart returns the transcript line offset at which this checkpoint's data begins.

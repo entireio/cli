@@ -50,8 +50,8 @@ type WriteRequest interface {
 // materializing the checkpoint on its first session. (session-level)
 type Session WriteOptions
 
-// SessionTranscript replaces a session's transcript, prompts, and skill events
-// at stop time without clobbering sibling fields. (session-level)
+// SessionTranscript replaces a session's transcript, prompts, skill events, and
+// subagents at stop time without clobbering sibling fields. (session-level)
 type SessionTranscript UpdateOptions
 
 // SessionSummary rewrites only the summary of the checkpoint's latest session.

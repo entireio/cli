@@ -24,6 +24,7 @@ type (
 	SessionFilePaths = apicheckpoint.SessionFilePaths
 	TranscriptAsset  = apicheckpoint.TranscriptAsset
 	SessionMetrics   = apicheckpoint.SessionMetrics
+	SubagentLink     = apicheckpoint.SubagentLink
 	Summary          = apicheckpoint.Summary
 	LearningsSummary = apicheckpoint.LearningsSummary
 	CodeLearning     = apicheckpoint.CodeLearning

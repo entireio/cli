@@ -2931,6 +2931,9 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			Agent:                   state.AgentType,
 			SkillEvents:             skillEvents,
 			PrecomputedBlobs:        precomputed,
+			// Re-snapshot the full subagent roster so subagents recorded after the
+			// last condensation are still published to this turn's checkpoints.
+			Subagents: state.Subagents,
 		}
 
 		updateErr := store.Write(ctx, checkpoint.SessionTranscript(updateOpts))

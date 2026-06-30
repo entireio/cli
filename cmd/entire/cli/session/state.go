@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	cp "github.com/entireio/cli/api/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -226,6 +227,15 @@ type State struct {
 
 	// FilesTouched tracks files modified/created/deleted during this session
 	FilesTouched []string `json:"files_touched,omitempty"`
+
+	// Subagents is the explicit parent->child link list: one entry per subagent
+	// (Task tool invocation) this session spawned, accumulated (deduped by
+	// ToolUseID/AgentID) as they complete in handleLifecycleSubagentEnd (via
+	// strategy.RecordSubagentLink) and carried into the checkpoint Metadata at
+	// condensation and turn-end finalize so the UI can render the parent->children
+	// tree. Unlike FilesTouched it is a session-level log, not a
+	// per-checkpoint-window accumulator — it is NOT reset on carry-forward.
+	Subagents []cp.SubagentLink `json:"subagents,omitempty"`
 
 	// LastCheckpointID is the checkpoint ID from the most recent condensation.
 	// Used to restore the Entire-Checkpoint trailer on amend and to identify

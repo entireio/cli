@@ -1172,6 +1172,14 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
 	}
 
+	// Record the explicit parent->child link for EVERY completed subagent — even
+	// one that changed no files (and thus skips the task checkpoint below) — so the
+	// parent's checkpoint metadata carries the complete subagent tree for the UI.
+	if recErr := strategy.RecordSubagentLink(ctx, event.SessionID, event.ToolUseID, event.SubagentID,
+		event.SubagentType, event.TaskDescription, relModifiedFiles, relNewFiles, relDeletedFiles); recErr != nil {
+		logging.Warn(logCtx, "failed to record subagent link", slog.String("error", recErr.Error()))
+	}
+
 	// If no changes, skip
 	if len(relModifiedFiles) == 0 && len(relNewFiles) == 0 && len(relDeletedFiles) == 0 {
 		logging.Info(logCtx, "no file changes detected, skipping task checkpoint")

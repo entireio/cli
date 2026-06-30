@@ -173,6 +173,9 @@ func (s *Store) backfillTranscript(opts cp.UpdateOptions) error {
 	if len(opts.SkillEvents) > 0 {
 		sc.Sessions[idx].Metadata.SkillEvents = opts.SkillEvents
 	}
+	if len(opts.Subagents) > 0 {
+		sc.Sessions[idx].Metadata.Subagents = opts.Subagents
+	}
 	return s.save(sc)
 }
 
@@ -338,6 +341,7 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		ReviewPrompt:                opts.ReviewPrompt,
 		InvestigateRunID:            opts.InvestigateRunID,
 		InvestigateTopic:            opts.InvestigateTopic,
+		Subagents:                   opts.Subagents,
 	}
 }
 

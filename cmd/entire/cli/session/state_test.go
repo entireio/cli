@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	cp "github.com/entireio/cli/api/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -749,5 +750,68 @@ func TestState_InvestigateRoundTrip(t *testing.T) {
 		if strings.Contains(zs, `"`+key+`"`) {
 			t.Errorf("expected zero-value State to omit %q, got %s", key, zs)
 		}
+	}
+}
+
+func TestState_SubagentsRoundTrip(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	s := State{
+		SessionID:  "2026-04-20-uuid",
+		BaseCommit: "abc",
+		StartedAt:  now,
+		Subagents: []cp.SubagentLink{
+			{ToolUseID: "t1", AgentID: "a1", SubagentType: "dev", Description: "build", FileCount: 3},
+		},
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Inspect raw JSON to pin the on-disk keys (catches a tag rename/drift).
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	subs, ok := raw["subagents"].([]any)
+	if !ok || len(subs) != 1 {
+		t.Fatalf("subagents = %v, want one-element array", raw["subagents"])
+	}
+	first, ok := subs[0].(map[string]any)
+	if !ok {
+		t.Fatalf("subagents[0] = %v", subs[0])
+	}
+	for key, want := range map[string]string{
+		"tool_use_id":   "t1",
+		"agent_id":      "a1",
+		"subagent_type": "dev",
+		"description":   "build",
+	} {
+		if got, ok := first[key].(string); !ok || got != want {
+			t.Errorf("subagents[0].%s = %v, want %q", key, first[key], want)
+		}
+	}
+	if got, ok := first["file_count"].(float64); !ok || int(got) != 3 {
+		t.Errorf("subagents[0].file_count = %v, want 3", first["file_count"])
+	}
+
+	// Round-trip back into a State and verify the link survives.
+	var got State
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Subagents) != 1 || got.Subagents[0].ToolUseID != "t1" || got.Subagents[0].FileCount != 3 {
+		t.Errorf("Subagents round-trip = %+v", got.Subagents)
+	}
+
+	// Zero-value: omitempty must keep the key out for a session with no subagents.
+	zero := State{SessionID: "x", BaseCommit: "y", StartedAt: now}
+	zb, err := json.Marshal(zero)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(zb), `"subagents"`) {
+		t.Errorf("expected zero-value State to omit subagents, got %s", zb)
 	}
 }
