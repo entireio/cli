@@ -11,8 +11,10 @@ func TestIsCodexSyntheticContent(t *testing.T) {
 		"<permissions>read</permissions>",
 		"<collaboration_mode>",
 		"<skills_instructions>",
-		"# AGENTS.md\nProject rules",
-		"   \n<environment_context>", // leading whitespace still matches
+		"# AGENTS.md\nProject rules",   // injected form: heading + newline + body
+		"# AGENTS.md\r\nProject rules", // CRLF variant
+		"# AGENTS.md",                  // exact heading alone
+		"   \n<environment_context>",   // leading whitespace still matches
 	}
 	for _, s := range synthetic {
 		if !IsCodexSyntheticContent(s) {
@@ -24,6 +26,7 @@ func TestIsCodexSyntheticContent(t *testing.T) {
 		"Fix the login bug",
 		"prompt it to spawn a subagent that edits a file",
 		"please update <environment_context> handling in the parser", // mentions tag mid-text
+		"# AGENTS.md needs a testing section",                        // real prompt: heading words + same-line text (NOT the injected form)
 		"",
 	}
 	for _, s := range userAuthored {
