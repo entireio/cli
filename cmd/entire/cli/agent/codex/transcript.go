@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
@@ -586,16 +587,23 @@ func (c *CodexAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string
 			continue
 		}
 
-		// Extract text from content items
+		// Extract text from content items, skipping Codex's system-injected
+		// content blocks (environment_context, AGENTS.md, subagent_notification,
+		// turn_aborted, ...) — those are not user-authored prompts and would
+		// otherwise surface as the "prompt" in `entire status` and commit messages.
 		var items []contentItem
 		if json.Unmarshal(payload.Content, &items) != nil {
 			continue
 		}
 		for _, item := range items {
-			text := strings.TrimSpace(item.Text)
-			if text != "" && item.Type == "input_text" {
-				prompts = append(prompts, text)
+			if item.Type != "input_text" {
+				continue
 			}
+			text := strings.TrimSpace(item.Text)
+			if text == "" || textutil.IsCodexSyntheticContent(text) {
+				continue
+			}
+			prompts = append(prompts, text)
 		}
 	}
 

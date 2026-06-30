@@ -1,8 +1,10 @@
 package codex
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -166,6 +168,43 @@ func TestExtractPrompts_NonexistentFile(t *testing.T) {
 	prompts, err := ag.ExtractPrompts("/nonexistent/file.jsonl", 0)
 	require.NoError(t, err)
 	require.Nil(t, prompts)
+}
+
+// Codex injects system content (environment_context, AGENTS.md, and — once
+// subagents are involved — subagent_notification) as user-role messages. These
+// must NOT surface as prompts, otherwise `entire status` shows a worker
+// notification instead of the user's actual prompt.
+func TestExtractPrompts_SkipsSyntheticContent(t *testing.T) {
+	t.Parallel()
+	line := func(typ string, content []map[string]string) string {
+		c, err := json.Marshal(content)
+		require.NoError(t, err)
+		pl, err := json.Marshal(map[string]any{"type": "message", "role": "user", "content": json.RawMessage(c)})
+		require.NoError(t, err)
+		l, err := json.Marshal(map[string]any{"type": "response_item", "payload": json.RawMessage(pl)})
+		require.NoError(t, err)
+		_ = typ
+		return string(l)
+	}
+	txt := func(s string) []map[string]string { return []map[string]string{{"type": "input_text", "text": s}} }
+
+	rollout := strings.Join([]string{
+		`{"type":"session_meta","payload":{"id":"s","timestamp":"2026-06-29T12:00:00.000Z"}}`,
+		line("", txt("<environment_context>\n<cwd>/repo</cwd>\n</environment_context>")),
+		line("", txt("Fix the login bug")), // the only real prompt
+		line("", txt("<subagent_notification>\n{\"agent_path\":\"019e0000-1111-7222-8333-444455556666\"}")),
+		line("", txt("# AGENTS.md\nProject rules")),
+		line("", txt("<turn_aborted>")),
+	}, "\n")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(rollout+"\n"), 0o600))
+
+	prompts, err := (&CodexAgent{}).ExtractPrompts(path, 0)
+	require.NoError(t, err)
+	require.Equal(t, []string{"Fix the login bug"}, prompts,
+		"only the user-authored prompt should be returned; all synthetic blocks filtered")
 }
 
 func TestExtractFilesFromApplyPatch(t *testing.T) {

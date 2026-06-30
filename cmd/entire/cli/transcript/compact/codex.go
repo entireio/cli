@@ -275,22 +275,10 @@ func codexUserText(raw json.RawMessage) string {
 }
 
 // isCodexSystemContent returns true for content blocks that are system-injected
-// rather than user-authored.
+// rather than user-authored. Delegates to textutil so the marker set is shared
+// with Codex prompt extraction (agent/codex ExtractPrompts) and can't drift.
 func isCodexSystemContent(text string) bool {
-	prefixes := []string{
-		"<permissions",
-		"<collaboration_mode>",
-		"<skills_instructions>",
-		"<environment_context>",
-		"<turn_aborted>",
-		"# AGENTS.md",
-	}
-	for _, p := range prefixes {
-		if len(text) >= len(p) && text[:len(p)] == p {
-			return true
-		}
-	}
-	return false
+	return textutil.IsCodexSyntheticContent(text)
 }
 
 // codexAssistantText extracts text from a Codex assistant message content array.
