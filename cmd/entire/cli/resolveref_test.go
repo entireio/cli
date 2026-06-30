@@ -204,8 +204,13 @@ func TestResolveRepoRef(t *testing.T) {
 		var gotName string
 		c, calls := resolveTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 			gotName = r.URL.Query().Get("name")
-			if err := writeJSON(w, &coreapi.ListProjectReposOutputBody{Repos: []coreapi.Repo{{ID: ulidRepoWeb, Name: "web"}}}); err != nil {
-				t.Errorf("encode repos: %v", err)
+			// A name-filtered list returns the single match under the singular
+			// `repo` field (like org/project) — NOT the plural `repos` array,
+			// which is only populated for an unfiltered page. Reading `repos`
+			// here was the COR-699 bug, so the fixture must mirror the real
+			// server's singular field to keep that regression covered.
+			if err := writeJSON(w, &coreapi.ListProjectReposOutputBody{Repo: coreapi.NewOptRepo(coreapi.Repo{ID: ulidRepoWeb, Name: "web"})}); err != nil {
+				t.Errorf("encode repo: %v", err)
 			}
 		})
 		// Project passed as a ULID so resolveProjectRef short-circuits (no call);
@@ -302,6 +307,73 @@ func TestResolveAccountRef(t *testing.T) {
 		}
 		if n := calls.Load(); n != 0 {
 			t.Errorf("invalid handle made %d HTTP calls, want 0", n)
+		}
+	})
+}
+
+func TestResolveGranteeProvider(t *testing.T) {
+	t.Parallel()
+
+	t.Run("handle resolves to the provider user id in one call", func(t *testing.T) {
+		t.Parallel()
+		c, calls := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			if err := writeJSON(w, &coreapi.ResolvedIdentity{AccountId: ulidResolvedAcct, Provider: providerGitHub, Handle: "alice", ProviderUserId: "12345"}); err != nil {
+				t.Errorf("encode identity: %v", err)
+			}
+		})
+		provider, puid, err := resolveGranteeProvider(context.Background(), c, "github:alice")
+		if err != nil {
+			t.Fatalf("resolveGranteeProvider: %v", err)
+		}
+		if provider != providerGitHub || puid != "12345" {
+			t.Errorf("resolveGranteeProvider = (%q, %q), want (github, 12345)", provider, puid)
+		}
+		if n := calls.Load(); n != 1 {
+			t.Errorf("handle ref made %d HTTP calls, want 1", n)
+		}
+	})
+
+	t.Run("non-qualified handle fails before any network call", func(t *testing.T) {
+		t.Parallel()
+		c, calls := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			t.Error("unexpected HTTP call for an invalid handle")
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		if _, _, err := resolveGranteeProvider(context.Background(), c, "alice"); err == nil {
+			t.Error("resolveGranteeProvider expected error for non-qualified handle")
+		}
+		if n := calls.Load(); n != 0 {
+			t.Errorf("invalid handle made %d HTTP calls, want 0", n)
+		}
+	})
+
+	t.Run("account ULID is rejected before any network call", func(t *testing.T) {
+		t.Parallel()
+		c, calls := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			t.Error("unexpected HTTP call for a ULID grantee")
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		_, _, err := resolveGranteeProvider(context.Background(), c, wiringGranteeULID)
+		if err == nil {
+			t.Fatal("resolveGranteeProvider expected error for a ULID grantee")
+		}
+		if !strings.Contains(err.Error(), "provider-qualified handle") {
+			t.Errorf("error %q should point at the provider-qualified handle form", err)
+		}
+		if n := calls.Load(); n != 0 {
+			t.Errorf("ULID grantee made %d HTTP calls, want 0", n)
+		}
+	})
+
+	t.Run("empty provider user id is an error", func(t *testing.T) {
+		t.Parallel()
+		c, _ := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			if err := writeJSON(w, &coreapi.ResolvedIdentity{AccountId: ulidResolvedAcct, Provider: providerGitHub, Handle: "alice", ProviderUserId: ""}); err != nil {
+				t.Errorf("encode identity: %v", err)
+			}
+		})
+		if _, _, err := resolveGranteeProvider(context.Background(), c, "github:alice"); err == nil {
+			t.Error("resolveGranteeProvider expected error for empty provider user id")
 		}
 	})
 }

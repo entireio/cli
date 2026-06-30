@@ -1,0 +1,170 @@
+name: E2E Checkpoint Store
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent:
+        description: "Agent to run"
+        required: true
+        default: "vogon"
+        type: choice
+        options:
+          - vogon
+          - claude-code
+          - opencode
+          - gemini-cli
+          - factoryai-droid
+          - cursor-cli
+          - copilot-cli
+          - roger-roger
+          - codex
+      checkpoint_store:
+        description: "Checkpoint storage backend to run the suite against"
+        required: true
+        default: "git-refs"
+        type: choice
+        options:
+          - git-branch
+          - git-refs
+
+jobs:
+  e2e-checkpoint-store:
+    if: inputs.agent != 'copilot-cli'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnome-keyring tmux
+          echo 'somecredstorepass' | gnome-keyring-daemon --unlock
+
+      - name: Setup mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+
+      - name: Build entire CLI
+        run: go build -o /usr/local/bin/entire ./cmd/entire
+
+      - name: Build vogon binary
+        if: inputs.agent == 'vogon'
+        run: go build -o /usr/local/bin/vogon ./e2e/vogon
+
+      - name: Install agent CLI
+        if: inputs.agent != 'vogon'
+        run: |
+          case "${{ inputs.agent }}" in
+            claude-code) curl -fsSL https://claude.ai/install.sh | bash ;;
+            opencode)    curl -fsSL https://opencode.ai/install | bash ;;
+            gemini-cli)  npm install -g @google/gemini-cli ;;
+            codex)       npm install -g @openai/codex ;;
+            cursor-cli)  curl https://cursor.com/install -fsS | bash ;;
+            factoryai-droid) curl -fsSL https://app.factory.ai/cli | sh ;;
+            copilot-cli)  npm install -g @github/copilot  ;;
+            roger-roger) ;; # installed by mise (see mise.toml)
+          esac
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Verify roger-roger agent
+        if: inputs.agent == 'roger-roger'
+        run: |
+          set -euo pipefail
+          echo "Verifying roger-roger binaries on PATH..."
+          command -v roger-roger
+          command -v entire-agent-roger-roger
+
+      - name: Bootstrap agent
+        if: inputs.agent != 'roger-roger' && inputs.agent != 'vogon'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+        run: go run ./e2e/bootstrap ${{ inputs.agent }}
+
+      - name: E2E Checkpoint Store
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          E2E_CODEX_MODEL: ${{ inputs.agent == 'codex' && 'gpt-5.1-codex-mini' || '' }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
+          E2E_ENTIRE_BIN: /usr/local/bin/entire
+          E2E_CHECKPOINT_STORE: ${{ inputs.checkpoint_store }}
+        run: |
+          mkdir -p "$E2E_ARTIFACT_DIR"
+          mise run test:e2e --agent ${{ inputs.agent }}
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: e2e-checkpoint-store-${{ inputs.agent }}-${{ inputs.checkpoint_store }}
+          path: e2e-artifacts/
+          retention-days: 7
+
+  e2e-checkpoint-store-copilot:
+    if: inputs.agent == 'copilot-cli'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      actions: read
+      contents: read
+      copilot-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnome-keyring tmux
+          echo 'somecredstorepass' | gnome-keyring-daemon --unlock
+
+      - name: Setup mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+
+      - name: Build entire CLI
+        run: go build -o /usr/local/bin/entire ./cmd/entire
+
+      - name: Install agent CLI
+        run: |
+          npm install -g @github/copilot
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Bootstrap agent
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+        run: go run ./e2e/bootstrap ${{ inputs.agent }}
+
+      - name: E2E Checkpoint Store
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+          E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
+          E2E_ENTIRE_BIN: /usr/local/bin/entire
+          E2E_CHECKPOINT_STORE: ${{ inputs.checkpoint_store }}
+        run: |
+          mkdir -p "$E2E_ARTIFACT_DIR"
+          mise run test:e2e --agent ${{ inputs.agent }}
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: e2e-checkpoint-store-${{ inputs.agent }}-${{ inputs.checkpoint_store }}
+          path: e2e-artifacts/
+          retention-days: 7

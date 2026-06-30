@@ -41,6 +41,7 @@ var operationRolesBearerAuth = map[string][]string{
 	GetPermissionsOperation:                {},
 	GetProjectOperation:                    {},
 	GetRepoOperation:                       {},
+	GetRepoVisibilityOperation:             {},
 	GetServiceAccountOperation:             {},
 	GrantMirrorCollaboratorOperation:       {},
 	GrantProjectAccessOperation:            {},
@@ -71,6 +72,7 @@ var operationRolesBearerAuth = map[string][]string{
 	RevokeRepoAccessOperation:              {},
 	RevokeRepoAccessByProviderOperation:    {},
 	RevokeServiceAccountAccessOperation:    {},
+	SetRepoVisibilityOperation:             {},
 	UpdateMeOperation:                      {},
 }
 
@@ -117,6 +119,7 @@ var operationRolesSessionAuth = map[string][]string{
 	GetPermissionsOperation:                {},
 	GetProjectOperation:                    {},
 	GetRepoOperation:                       {},
+	GetRepoVisibilityOperation:             {},
 	GetServiceAccountOperation:             {},
 	GrantMirrorCollaboratorOperation:       {},
 	GrantProjectAccessOperation:            {},
@@ -147,6 +150,7 @@ var operationRolesSessionAuth = map[string][]string{
 	RevokeRepoAccessOperation:              {},
 	RevokeRepoAccessByProviderOperation:    {},
 	RevokeServiceAccountAccessOperation:    {},
+	SetRepoVisibilityOperation:             {},
 	UpdateMeOperation:                      {},
 }
 

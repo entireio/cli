@@ -361,19 +361,99 @@ func newRepoMirrorListCmd() *cobra.Command {
 
 func newRepoMirrorGetCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "get <mirror-id>",
-		Short: "Show a mirror by ULID",
-		Args:  cobra.ExactArgs(1),
+		Use:   "get <mirror>",
+		Short: "Show a mirror by ULID or clone URL",
+		Long: "Show a mirror. <mirror> is either a mirror ULID or an entire:// clone " +
+			"URL\n(entire://<cluster>/gh/<owner>/<repo>) — the form `mirror list` " +
+			"prints and `git clone` accepts.",
+		Example: "  entire repo mirror get 01KS6KFJR2XS6PZ188MVYE07AN\n" +
+			"  entire repo mirror get entire://aws-us-east-2.entire.io/gh/octocat/hello-world",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreObject(cmd, mirrorColumns, mirrorRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Mirror, error) {
-				sc, err := c.GetMirror(ctx, coreapi.GetMirrorParams{MirrorId: args[0]})
+				mirrorID, err := resolveMirrorRef(ctx, c, args[0])
 				if err != nil {
 					return nil, err
 				}
-				return sc, nil
+				return c.GetMirror(ctx, coreapi.GetMirrorParams{MirrorId: mirrorID})
 			})
 		},
 	}
+}
+
+// resolveMirrorRef turns a mirror reference into its ULID. A ULID passes
+// through unchanged. Otherwise the ref is parsed as an entire:// clone URL and
+// resolved by listing the caller-visible mirrors for that (cluster, provider,
+// owner) and matching the repo — there is no get-by-coords endpoint, only
+// GetMirror(ULID). The clone URL carries the cluster, so the match is
+// unambiguous even when the same upstream is mirrored on several clusters.
+func resolveMirrorRef(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
+	if looksLikeULID(ref) {
+		return ref, nil
+	}
+	clusterHost, provider, owner, repo, err := parseMirrorCloneURL(ref)
+	if err != nil {
+		return "", fmt.Errorf("%w; pass a mirror ULID or a clone URL (entire://<cluster>/gh/<owner>/<repo>)", err)
+	}
+	mirrors, err := fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Mirror, string, error) {
+		params := coreapi.ListMirrorsParams{
+			Cluster:  coreapi.NewOptString(clusterHost),
+			Provider: coreapi.NewOptString(provider),
+			Owner:    coreapi.NewOptString(owner),
+		}
+		if cursor != "" {
+			params.PageToken = coreapi.NewOptString(cursor)
+		}
+		out, lerr := c.ListMirrors(ctx, params)
+		if lerr != nil {
+			return nil, "", lerr
+		}
+		return out.Mirrors, out.NextPageToken.Or(""), nil
+	})
+	if err != nil {
+		return "", err
+	}
+	// ListMirrors has no repo filter, so the owner-scoped page is matched on
+	// repo client-side. Owner/repo are stored lowercase; EqualFold guards
+	// against a differently-cased clone URL.
+	for _, m := range mirrors {
+		if strings.EqualFold(m.Repo, repo) {
+			return m.MirrorId, nil
+		}
+	}
+	return "", noMirrorErr(ref)
+}
+
+// parseMirrorCloneURL decomposes an entire:// mirror clone URL into its
+// coordinates:
+//
+//	entire://<clusterHost>/gh/<owner>/<repo>
+//
+// Only the github ("gh") provider path is recognized — the only provider
+// mirrors support today. The cluster host is validated the same way the
+// create/remove verbs validate it, so a host carrying URL metacharacters is
+// rejected at the boundary rather than flowing into the list filter.
+func parseMirrorCloneURL(raw string) (clusterHost, provider, owner, repo string, err error) {
+	u, perr := url.Parse(raw)
+	if perr != nil || u.Scheme != "entire" {
+		return "", "", "", "", fmt.Errorf("%q is not an entire:// clone URL", raw)
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) != 3 || parts[0] != "gh" {
+		return "", "", "", "", fmt.Errorf("%q must be entire://<cluster>/gh/<owner>/<repo>", raw)
+	}
+	if verr := validateClusterHost(u.Host); verr != nil {
+		return "", "", "", "", verr
+	}
+	// Trim a trailing .git so a URL pasted from `git remote -v` resolves the
+	// same as the bare clone URL (matching gitremote.ParseURL). GitHub repo
+	// names can contain dots, so only the suffix is trimmed, not all dots.
+	repo = strings.ToLower(strings.TrimSuffix(parts[2], ".git"))
+	return u.Host, string(coreapi.CreateMirrorInputBodyProviderGithub), strings.ToLower(parts[1]), repo, nil
+}
+
+func noMirrorErr(ref string) error {
+	return fmt.Errorf("no mirror matching %q (run `entire repo mirror list` to see clone URLs, or pass a ULID)", ref)
 }
 
 func newRepoMirrorRemoveCmd() *cobra.Command {

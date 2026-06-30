@@ -61,6 +61,74 @@ func TestRepoRemoteURL(t *testing.T) {
 	}
 }
 
+func TestParseVisibility(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in      string
+		want    coreapi.SetRepoVisibilityInputBodyVisibility
+		wantErr bool
+	}{
+		{in: "public", want: coreapi.SetRepoVisibilityInputBodyVisibilityPublic},
+		{in: "private", want: coreapi.SetRepoVisibilityInputBodyVisibilityPrivate},
+		{in: "Public", wantErr: true}, // case-sensitive; the wire enum is lowercase
+		{in: "", wantErr: true},
+		{in: "world-readable", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseVisibility(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseVisibility(%q) = %q, want error", tt.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseVisibility(%q) error = %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseVisibility(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRepoDetailRow(t *testing.T) {
+	t.Parallel()
+
+	t.Run("includes the entire:// remote", func(t *testing.T) {
+		t.Parallel()
+		row := repoDetailRow(coreapi.Repo{
+			ID:              "01KS6KFJR2XS6PZ188MVYE07AN",
+			Name:            "web",
+			OwningProjectId: "01KS6KFJR2XS6PZ188MVYE07AP",
+			ClusterHost:     coreapi.NewOptString("aws-us-east-2.entire.io"),
+			Path:            coreapi.NewOptString("acme/web"),
+			State:           coreapi.NewOptRepoState(coreapi.RepoStateActive),
+		})
+		if len(row) != len(repoDetailColumns) {
+			t.Fatalf("row has %d cells, want %d (one per column)", len(row), len(repoDetailColumns))
+		}
+		if want := "entire://aws-us-east-2.entire.io/acme/web"; row[len(row)-1] != want {
+			t.Errorf("REMOTE cell = %q, want %q", row[len(row)-1], want)
+		}
+	})
+
+	t.Run("shows - when the remote is not yet resolvable", func(t *testing.T) {
+		t.Parallel()
+		row := repoDetailRow(coreapi.Repo{
+			ID:              "01KS6KFJR2XS6PZ188MVYE07AN",
+			Name:            "web",
+			OwningProjectId: "01KS6KFJR2XS6PZ188MVYE07AP",
+			ClusterHost:     coreapi.NewOptString("aws-us-east-2.entire.io"),
+		})
+		if row[len(row)-1] != "-" {
+			t.Errorf("REMOTE cell = %q, want %q", row[len(row)-1], "-")
+		}
+	})
+}
+
 func TestRepoCreateOutput_StampsRemote(t *testing.T) {
 	t.Parallel()
 	repo := &coreapi.Repo{

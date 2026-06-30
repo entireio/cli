@@ -72,7 +72,7 @@ func TestWriteStandardCheckpointEntries_RefusesUnexpectedSessionZeroOverwrite(t 
 		Prompts:      []string{"hi"},
 	}
 
-	err = store.writeStandardCheckpointEntries(context.Background(), opts, basePath, entries)
+	err = store.writeStandardCheckpointEntries(context.Background(), opts, basePath, entries, CheckpointVersionBranchV1)
 	if err == nil {
 		t.Fatal("expected writeStandardCheckpointEntries to refuse, got nil error")
 	}

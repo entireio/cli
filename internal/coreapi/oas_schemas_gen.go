@@ -652,11 +652,17 @@ func (s *BindingAdditional) init() BindingAdditional {
 
 // Ref: #/components/schemas/Cluster
 type Cluster struct {
-	IsDefault       bool   `json:"isDefault"`
-	Jurisdiction    string `json:"jurisdiction"`
-	PublicUrl       string `json:"publicUrl"`
-	Slug            string `json:"slug"`
+	ApiUrl          OptString `json:"apiUrl"`
+	IsDefault       bool      `json:"isDefault"`
+	Jurisdiction    string    `json:"jurisdiction"`
+	PublicUrl       string    `json:"publicUrl"`
+	Slug            string    `json:"slug"`
 	AdditionalProps ClusterAdditional
+}
+
+// GetApiUrl returns the value of ApiUrl.
+func (s *Cluster) GetApiUrl() OptString {
+	return s.ApiUrl
 }
 
 // GetIsDefault returns the value of IsDefault.
@@ -682,6 +688,11 @@ func (s *Cluster) GetSlug() string {
 // GetAdditionalProps returns the value of AdditionalProps.
 func (s *Cluster) GetAdditionalProps() ClusterAdditional {
 	return s.AdditionalProps
+}
+
+// SetApiUrl sets the value of ApiUrl.
+func (s *Cluster) SetApiUrl(val OptString) {
+	s.ApiUrl = val
 }
 
 // SetIsDefault sets the value of IsDefault.
@@ -1859,6 +1870,96 @@ func (s *GetPermissionsOutputBodyExplain) init() GetPermissionsOutputBodyExplain
 		*s = m
 	}
 	return m
+}
+
+// Ref: #/components/schemas/GetRepoVisibilityOutputBody
+type GetRepoVisibilityOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI                                `json:"$schema"`
+	Visibility      GetRepoVisibilityOutputBodyVisibility `json:"visibility"`
+	AdditionalProps GetRepoVisibilityOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *GetRepoVisibilityOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetVisibility returns the value of Visibility.
+func (s *GetRepoVisibilityOutputBody) GetVisibility() GetRepoVisibilityOutputBodyVisibility {
+	return s.Visibility
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GetRepoVisibilityOutputBody) GetAdditionalProps() GetRepoVisibilityOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *GetRepoVisibilityOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetVisibility sets the value of Visibility.
+func (s *GetRepoVisibilityOutputBody) SetVisibility(val GetRepoVisibilityOutputBodyVisibility) {
+	s.Visibility = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GetRepoVisibilityOutputBody) SetAdditionalProps(val GetRepoVisibilityOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GetRepoVisibilityOutputBodyAdditional map[string]jx.Raw
+
+func (s *GetRepoVisibilityOutputBodyAdditional) init() GetRepoVisibilityOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type GetRepoVisibilityOutputBodyVisibility string
+
+const (
+	GetRepoVisibilityOutputBodyVisibilityPublic  GetRepoVisibilityOutputBodyVisibility = "public"
+	GetRepoVisibilityOutputBodyVisibilityPrivate GetRepoVisibilityOutputBodyVisibility = "private"
+)
+
+// AllValues returns all GetRepoVisibilityOutputBodyVisibility values.
+func (GetRepoVisibilityOutputBodyVisibility) AllValues() []GetRepoVisibilityOutputBodyVisibility {
+	return []GetRepoVisibilityOutputBodyVisibility{
+		GetRepoVisibilityOutputBodyVisibilityPublic,
+		GetRepoVisibilityOutputBodyVisibilityPrivate,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GetRepoVisibilityOutputBodyVisibility) MarshalText() ([]byte, error) {
+	switch s {
+	case GetRepoVisibilityOutputBodyVisibilityPublic:
+		return []byte(s), nil
+	case GetRepoVisibilityOutputBodyVisibilityPrivate:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GetRepoVisibilityOutputBodyVisibility) UnmarshalText(data []byte) error {
+	switch GetRepoVisibilityOutputBodyVisibility(data) {
+	case GetRepoVisibilityOutputBodyVisibilityPublic:
+		*s = GetRepoVisibilityOutputBodyVisibilityPublic
+		return nil
+	case GetRepoVisibilityOutputBodyVisibilityPrivate:
+		*s = GetRepoVisibilityOutputBodyVisibilityPrivate
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // Ref: #/components/schemas/GetVersionOutputBody
@@ -6001,6 +6102,52 @@ func (o OptRepoState) Or(d RepoState) RepoState {
 	return d
 }
 
+// NewOptRepoVisibility returns new OptRepoVisibility with value set to v.
+func NewOptRepoVisibility(v RepoVisibility) OptRepoVisibility {
+	return OptRepoVisibility{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptRepoVisibility is optional RepoVisibility.
+type OptRepoVisibility struct {
+	Value RepoVisibility
+	Set   bool
+}
+
+// IsSet returns true if OptRepoVisibility was set.
+func (o OptRepoVisibility) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptRepoVisibility) Reset() {
+	var v RepoVisibility
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptRepoVisibility) SetTo(v RepoVisibility) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptRepoVisibility) Get() (v RepoVisibility, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptRepoVisibility) Or(d RepoVisibility) RepoVisibility {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptString returns new OptString with value set to v.
 func NewOptString(v string) OptString {
 	return OptString{
@@ -6292,15 +6439,22 @@ func (s *ProjectAdditional) init() ProjectAdditional {
 
 // Ref: #/components/schemas/ProjectGrant
 type ProjectGrant struct {
-	GranteeId       string `json:"granteeId"`
-	GranteeType     string `json:"granteeType"`
-	Role            string `json:"role"`
+	GranteeId       string    `json:"granteeId"`
+	GranteeName     OptString `json:"granteeName"`
+	GranteeType     string    `json:"granteeType"`
+	Role            string    `json:"role"`
+	Source          string    `json:"source"`
 	AdditionalProps ProjectGrantAdditional
 }
 
 // GetGranteeId returns the value of GranteeId.
 func (s *ProjectGrant) GetGranteeId() string {
 	return s.GranteeId
+}
+
+// GetGranteeName returns the value of GranteeName.
+func (s *ProjectGrant) GetGranteeName() OptString {
+	return s.GranteeName
 }
 
 // GetGranteeType returns the value of GranteeType.
@@ -6313,6 +6467,11 @@ func (s *ProjectGrant) GetRole() string {
 	return s.Role
 }
 
+// GetSource returns the value of Source.
+func (s *ProjectGrant) GetSource() string {
+	return s.Source
+}
+
 // GetAdditionalProps returns the value of AdditionalProps.
 func (s *ProjectGrant) GetAdditionalProps() ProjectGrantAdditional {
 	return s.AdditionalProps
@@ -6323,6 +6482,11 @@ func (s *ProjectGrant) SetGranteeId(val string) {
 	s.GranteeId = val
 }
 
+// SetGranteeName sets the value of GranteeName.
+func (s *ProjectGrant) SetGranteeName(val OptString) {
+	s.GranteeName = val
+}
+
 // SetGranteeType sets the value of GranteeType.
 func (s *ProjectGrant) SetGranteeType(val string) {
 	s.GranteeType = val
@@ -6331,6 +6495,11 @@ func (s *ProjectGrant) SetGranteeType(val string) {
 // SetRole sets the value of Role.
 func (s *ProjectGrant) SetRole(val string) {
 	s.Role = val
+}
+
+// SetSource sets the value of Source.
+func (s *ProjectGrant) SetSource(val string) {
+	s.Source = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -6409,6 +6578,7 @@ type Repo struct {
 	ProvisionAttempts OptInt64            `json:"provisionAttempts"`
 	ProvisionReason   OptString           `json:"provisionReason"`
 	State             OptRepoState        `json:"state"`
+	Visibility        OptRepoVisibility   `json:"visibility"`
 	AdditionalProps   RepoAdditional
 }
 
@@ -6475,6 +6645,11 @@ func (s *Repo) GetProvisionReason() OptString {
 // GetState returns the value of State.
 func (s *Repo) GetState() OptRepoState {
 	return s.State
+}
+
+// GetVisibility returns the value of Visibility.
+func (s *Repo) GetVisibility() OptRepoVisibility {
+	return s.Visibility
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -6547,6 +6722,11 @@ func (s *Repo) SetState(val OptRepoState) {
 	s.State = val
 }
 
+// SetVisibility sets the value of Visibility.
+func (s *Repo) SetVisibility(val OptRepoVisibility) {
+	s.Visibility = val
+}
+
 // SetAdditionalProps sets the value of AdditionalProps.
 func (s *Repo) SetAdditionalProps(val RepoAdditional) {
 	s.AdditionalProps = val
@@ -6565,15 +6745,22 @@ func (s *RepoAdditional) init() RepoAdditional {
 
 // Ref: #/components/schemas/RepoGrant
 type RepoGrant struct {
-	GranteeId       string `json:"granteeId"`
-	GranteeType     string `json:"granteeType"`
-	Role            string `json:"role"`
+	GranteeId       string    `json:"granteeId"`
+	GranteeName     OptString `json:"granteeName"`
+	GranteeType     string    `json:"granteeType"`
+	Role            string    `json:"role"`
+	Source          string    `json:"source"`
 	AdditionalProps RepoGrantAdditional
 }
 
 // GetGranteeId returns the value of GranteeId.
 func (s *RepoGrant) GetGranteeId() string {
 	return s.GranteeId
+}
+
+// GetGranteeName returns the value of GranteeName.
+func (s *RepoGrant) GetGranteeName() OptString {
+	return s.GranteeName
 }
 
 // GetGranteeType returns the value of GranteeType.
@@ -6586,6 +6773,11 @@ func (s *RepoGrant) GetRole() string {
 	return s.Role
 }
 
+// GetSource returns the value of Source.
+func (s *RepoGrant) GetSource() string {
+	return s.Source
+}
+
 // GetAdditionalProps returns the value of AdditionalProps.
 func (s *RepoGrant) GetAdditionalProps() RepoGrantAdditional {
 	return s.AdditionalProps
@@ -6596,6 +6788,11 @@ func (s *RepoGrant) SetGranteeId(val string) {
 	s.GranteeId = val
 }
 
+// SetGranteeName sets the value of GranteeName.
+func (s *RepoGrant) SetGranteeName(val OptString) {
+	s.GranteeName = val
+}
+
 // SetGranteeType sets the value of GranteeType.
 func (s *RepoGrant) SetGranteeType(val string) {
 	s.GranteeType = val
@@ -6604,6 +6801,11 @@ func (s *RepoGrant) SetGranteeType(val string) {
 // SetRole sets the value of Role.
 func (s *RepoGrant) SetRole(val string) {
 	s.Role = val
+}
+
+// SetSource sets the value of Source.
+func (s *RepoGrant) SetSource(val string) {
+	s.Source = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -6705,6 +6907,47 @@ func (s *RepoState) UnmarshalText(data []byte) error {
 		return nil
 	case RepoStateFailed:
 		*s = RepoStateFailed
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type RepoVisibility string
+
+const (
+	RepoVisibilityPublic  RepoVisibility = "public"
+	RepoVisibilityPrivate RepoVisibility = "private"
+)
+
+// AllValues returns all RepoVisibility values.
+func (RepoVisibility) AllValues() []RepoVisibility {
+	return []RepoVisibility{
+		RepoVisibilityPublic,
+		RepoVisibilityPrivate,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s RepoVisibility) MarshalText() ([]byte, error) {
+	switch s {
+	case RepoVisibilityPublic:
+		return []byte(s), nil
+	case RepoVisibilityPrivate:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *RepoVisibility) UnmarshalText(data []byte) error {
+	switch RepoVisibility(data) {
+	case RepoVisibilityPublic:
+		*s = RepoVisibilityPublic
+		return nil
+	case RepoVisibilityPrivate:
+		*s = RepoVisibilityPrivate
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -7234,6 +7477,186 @@ func (s *SessionAuth) SetAPIKey(val string) {
 // SetRoles sets the value of Roles.
 func (s *SessionAuth) SetRoles(val []string) {
 	s.Roles = val
+}
+
+// Ref: #/components/schemas/SetRepoVisibilityInputBody
+type SetRepoVisibilityInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI                               `json:"$schema"`
+	Visibility      SetRepoVisibilityInputBodyVisibility `json:"visibility"`
+	AdditionalProps SetRepoVisibilityInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *SetRepoVisibilityInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetVisibility returns the value of Visibility.
+func (s *SetRepoVisibilityInputBody) GetVisibility() SetRepoVisibilityInputBodyVisibility {
+	return s.Visibility
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *SetRepoVisibilityInputBody) GetAdditionalProps() SetRepoVisibilityInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *SetRepoVisibilityInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetVisibility sets the value of Visibility.
+func (s *SetRepoVisibilityInputBody) SetVisibility(val SetRepoVisibilityInputBodyVisibility) {
+	s.Visibility = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *SetRepoVisibilityInputBody) SetAdditionalProps(val SetRepoVisibilityInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type SetRepoVisibilityInputBodyAdditional map[string]jx.Raw
+
+func (s *SetRepoVisibilityInputBodyAdditional) init() SetRepoVisibilityInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type SetRepoVisibilityInputBodyVisibility string
+
+const (
+	SetRepoVisibilityInputBodyVisibilityPublic  SetRepoVisibilityInputBodyVisibility = "public"
+	SetRepoVisibilityInputBodyVisibilityPrivate SetRepoVisibilityInputBodyVisibility = "private"
+)
+
+// AllValues returns all SetRepoVisibilityInputBodyVisibility values.
+func (SetRepoVisibilityInputBodyVisibility) AllValues() []SetRepoVisibilityInputBodyVisibility {
+	return []SetRepoVisibilityInputBodyVisibility{
+		SetRepoVisibilityInputBodyVisibilityPublic,
+		SetRepoVisibilityInputBodyVisibilityPrivate,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s SetRepoVisibilityInputBodyVisibility) MarshalText() ([]byte, error) {
+	switch s {
+	case SetRepoVisibilityInputBodyVisibilityPublic:
+		return []byte(s), nil
+	case SetRepoVisibilityInputBodyVisibilityPrivate:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *SetRepoVisibilityInputBodyVisibility) UnmarshalText(data []byte) error {
+	switch SetRepoVisibilityInputBodyVisibility(data) {
+	case SetRepoVisibilityInputBodyVisibilityPublic:
+		*s = SetRepoVisibilityInputBodyVisibilityPublic
+		return nil
+	case SetRepoVisibilityInputBodyVisibilityPrivate:
+		*s = SetRepoVisibilityInputBodyVisibilityPrivate
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Ref: #/components/schemas/SetRepoVisibilityOutputBody
+type SetRepoVisibilityOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI                                `json:"$schema"`
+	Visibility      SetRepoVisibilityOutputBodyVisibility `json:"visibility"`
+	AdditionalProps SetRepoVisibilityOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *SetRepoVisibilityOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetVisibility returns the value of Visibility.
+func (s *SetRepoVisibilityOutputBody) GetVisibility() SetRepoVisibilityOutputBodyVisibility {
+	return s.Visibility
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *SetRepoVisibilityOutputBody) GetAdditionalProps() SetRepoVisibilityOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *SetRepoVisibilityOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetVisibility sets the value of Visibility.
+func (s *SetRepoVisibilityOutputBody) SetVisibility(val SetRepoVisibilityOutputBodyVisibility) {
+	s.Visibility = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *SetRepoVisibilityOutputBody) SetAdditionalProps(val SetRepoVisibilityOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type SetRepoVisibilityOutputBodyAdditional map[string]jx.Raw
+
+func (s *SetRepoVisibilityOutputBodyAdditional) init() SetRepoVisibilityOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type SetRepoVisibilityOutputBodyVisibility string
+
+const (
+	SetRepoVisibilityOutputBodyVisibilityPublic  SetRepoVisibilityOutputBodyVisibility = "public"
+	SetRepoVisibilityOutputBodyVisibilityPrivate SetRepoVisibilityOutputBodyVisibility = "private"
+)
+
+// AllValues returns all SetRepoVisibilityOutputBodyVisibility values.
+func (SetRepoVisibilityOutputBodyVisibility) AllValues() []SetRepoVisibilityOutputBodyVisibility {
+	return []SetRepoVisibilityOutputBodyVisibility{
+		SetRepoVisibilityOutputBodyVisibilityPublic,
+		SetRepoVisibilityOutputBodyVisibilityPrivate,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s SetRepoVisibilityOutputBodyVisibility) MarshalText() ([]byte, error) {
+	switch s {
+	case SetRepoVisibilityOutputBodyVisibilityPublic:
+		return []byte(s), nil
+	case SetRepoVisibilityOutputBodyVisibilityPrivate:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *SetRepoVisibilityOutputBodyVisibility) UnmarshalText(data []byte) error {
+	switch SetRepoVisibilityOutputBodyVisibility(data) {
+	case SetRepoVisibilityOutputBodyVisibilityPublic:
+		*s = SetRepoVisibilityOutputBodyVisibilityPublic
+		return nil
+	case SetRepoVisibilityOutputBodyVisibilityPrivate:
+		*s = SetRepoVisibilityOutputBodyVisibilityPrivate
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // Ref: #/components/schemas/UpdateMeInputBody

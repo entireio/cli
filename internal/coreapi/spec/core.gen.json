@@ -202,6 +202,9 @@
       "Cluster": {
         "additionalProperties": true,
         "properties": {
+          "apiUrl": {
+            "type": "string"
+          },
           "isDefault": {
             "type": "boolean"
           },
@@ -612,6 +615,31 @@
         "required": [
           "resourceType",
           "resourceId"
+        ],
+        "type": "object"
+      },
+      "GetRepoVisibilityOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/GetRepoVisibilityOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "public",
+              "private"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "visibility"
         ],
         "type": "object"
       },
@@ -1816,17 +1844,24 @@
           "granteeId": {
             "type": "string"
           },
+          "granteeName": {
+            "type": "string"
+          },
           "granteeType": {
             "type": "string"
           },
           "role": {
+            "type": "string"
+          },
+          "source": {
             "type": "string"
           }
         },
         "required": [
           "granteeType",
           "granteeId",
-          "role"
+          "role",
+          "source"
         ],
         "type": "object"
       },
@@ -1887,6 +1922,13 @@
               "failed"
             ],
             "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "public",
+              "private"
+            ],
+            "type": "string"
           }
         },
         "required": [
@@ -1902,17 +1944,24 @@
           "granteeId": {
             "type": "string"
           },
+          "granteeName": {
+            "type": "string"
+          },
           "granteeType": {
             "type": "string"
           },
           "role": {
+            "type": "string"
+          },
+          "source": {
             "type": "string"
           }
         },
         "required": [
           "granteeType",
           "granteeId",
-          "role"
+          "role",
+          "source"
         ],
         "type": "object"
       },
@@ -2070,6 +2119,56 @@
           "status",
           "systemManaged",
           "createdAt"
+        ],
+        "type": "object"
+      },
+      "SetRepoVisibilityInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetRepoVisibilityInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "public",
+              "private"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "visibility"
+        ],
+        "type": "object"
+      },
+      "SetRepoVisibilityOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetRepoVisibilityOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "public",
+              "private"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "visibility"
         ],
         "type": "object"
       },
@@ -2701,32 +2800,32 @@
             }
           },
           {
-            "description": "Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to).",
+            "description": "Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to). Case-sensitive exact match.",
             "explode": false,
             "in": "query",
             "name": "cluster",
             "schema": {
-              "description": "Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to).",
+              "description": "Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to). Case-sensitive exact match.",
               "type": "string"
             }
           },
           {
-            "description": "Optional: restrict to mirrors of this upstream provider (e.g. \"github\").",
+            "description": "Optional: restrict to mirrors of this upstream provider, case-insensitive (e.g. \"github\").",
             "explode": false,
             "in": "query",
             "name": "provider",
             "schema": {
-              "description": "Optional: restrict to mirrors of this upstream provider (e.g. \"github\").",
+              "description": "Optional: restrict to mirrors of this upstream provider, case-insensitive (e.g. \"github\").",
               "type": "string"
             }
           },
           {
-            "description": "Optional: restrict to mirrors with this upstream owner login.",
+            "description": "Optional: restrict to mirrors with this upstream owner login (case-insensitive).",
             "explode": false,
             "in": "query",
             "name": "owner",
             "schema": {
-              "description": "Optional: restrict to mirrors with this upstream owner login.",
+              "description": "Optional: restrict to mirrors with this upstream owner login (case-insensitive).",
               "type": "string"
             }
           }
@@ -2819,12 +2918,12 @@
         "operationId": "listAvailableMirrors",
         "parameters": [
           {
-            "description": "Optional: restrict to repos with this owner login.",
+            "description": "Optional: restrict to repos with this owner login (case-insensitive).",
             "explode": false,
             "in": "query",
             "name": "owner",
             "schema": {
-              "description": "Optional: restrict to repos with this owner login.",
+              "description": "Optional: restrict to repos with this owner login (case-insensitive).",
               "type": "string"
             }
           }
@@ -3227,12 +3326,12 @@
             }
           },
           {
-            "description": "Optional: exact-match org name.",
+            "description": "Optional: exact-match org name (case-insensitive).",
             "explode": false,
             "in": "query",
             "name": "name",
             "schema": {
-              "description": "Optional: exact-match org name.",
+              "description": "Optional: exact-match org name (case-insensitive).",
               "type": "string"
             }
           }
@@ -3714,12 +3813,12 @@
             }
           },
           {
-            "description": "Optional: exact-match project name.",
+            "description": "Optional: exact-match project name (case-insensitive).",
             "explode": false,
             "in": "query",
             "name": "name",
             "schema": {
-              "description": "Optional: exact-match project name.",
+              "description": "Optional: exact-match project name (case-insensitive).",
               "type": "string"
             }
           }
@@ -4190,12 +4289,12 @@
             }
           },
           {
-            "description": "Optional: exact-match repo name.",
+            "description": "Optional: exact-match repo name (case-insensitive).",
             "explode": false,
             "in": "query",
             "name": "name",
             "schema": {
-              "description": "Optional: exact-match repo name.",
+              "description": "Optional: exact-match repo name (case-insensitive).",
               "type": "string"
             }
           }
@@ -4624,6 +4723,114 @@
           }
         ],
         "summary": "Revoke repo access by grantee id",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/visibility": {
+      "get": {
+        "operationId": "getRepoVisibility",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetRepoVisibilityOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get repository visibility",
+        "tags": [
+          "repos"
+        ]
+      },
+      "put": {
+        "operationId": "setRepoVisibility",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetRepoVisibilityInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetRepoVisibilityOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Set repository visibility",
         "tags": [
           "repos"
         ]

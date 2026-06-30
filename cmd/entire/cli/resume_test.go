@@ -1036,7 +1036,7 @@ func TestResumeSingleSession_RejectsPathTraversalSessionID(t *testing.T) {
 	}
 }
 
-func TestResumeSingleSession_UsesV1Transcript(t *testing.T) {
+func TestRestoreSingleSession_UsesV1TranscriptAndReturnsRestoredSession(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
@@ -1071,19 +1071,66 @@ func TestResumeSingleSession_UsesV1Transcript(t *testing.T) {
 	}
 
 	ag := &recordingResumeAgent{sessionDir: filepath.Join(tmpDir, "sessions")}
-	var stdout, stderr bytes.Buffer
-	if err := resumeSingleSession(ctx, &stdout, &stderr, ag, sessionID, cpID, tmpDir, true); err != nil {
-		t.Fatalf("resumeSingleSession() error = %v", err)
+	var stdout bytes.Buffer
+	restored, ok, err := restoreSingleSession(ctx, &stdout, ag, sessionID, cpID, tmpDir, true)
+	if err != nil {
+		t.Fatalf("restoreSingleSession() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("restoreSingleSession() ok = false, want true")
+	}
+	if restored.SessionID != sessionID {
+		t.Fatalf("restored SessionID = %q, want %q", restored.SessionID, sessionID)
+	}
+	if restored.Agent != ag.Type() {
+		t.Fatalf("restored Agent = %q, want %q", restored.Agent, ag.Type())
+	}
+	if restored.CheckpointID != cpID.String() {
+		t.Fatalf("restored CheckpointID = %q, want %q", restored.CheckpointID, cpID.String())
 	}
 
 	if ag.writtenSession == nil {
-		t.Fatal("resumeSingleSession() did not restore a session")
+		t.Fatal("restoreSingleSession() did not restore a session")
 	}
 	if string(ag.writtenSession.NativeData) != string(raw) {
 		t.Fatalf("restored transcript = %q, want %q", string(ag.writtenSession.NativeData), string(raw))
 	}
 	if strings.Contains(stdout.String(), "session log not available") {
-		t.Fatalf("resumeSingleSession() reported missing log: %q", stdout.String())
+		t.Fatalf("restoreSingleSession() reported missing log: %q", stdout.String())
+	}
+}
+
+func TestRestoreSingleSession_NoTranscriptDoesNotReportRestored(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	setupResumeTestRepo(t, tmpDir, false)
+
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("abc123abc123")
+	sessionID := "resume-missing-transcript-session"
+
+	ag := &recordingResumeAgent{sessionDir: filepath.Join(tmpDir, "sessions")}
+	var stdout bytes.Buffer
+	_, ok, err := restoreSingleSession(ctx, &stdout, ag, sessionID, cpID, tmpDir, false)
+	if err != nil {
+		t.Fatalf("restoreSingleSession() error = %v", err)
+	}
+	if ok {
+		t.Fatal("restoreSingleSession() ok = true, want false")
+	}
+	if ag.writtenSession != nil {
+		t.Fatalf("restoreSingleSession() wrote a session despite missing transcript: %#v", ag.writtenSession)
+	}
+	if !strings.Contains(stdout.String(), "session log not available") {
+		t.Fatalf("restoreSingleSession() output = %q, want missing log message", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "\nTo continue this session:\n") {
+		t.Fatalf("restoreSingleSession() output = %q, want continuation header", stdout.String())
+	}
+	wantCommand := "  " + ag.FormatResumeCommand(sessionID) + "\n"
+	if !strings.Contains(stdout.String(), wantCommand) {
+		t.Fatalf("restoreSingleSession() output = %q, want command %q", stdout.String(), wantCommand)
 	}
 }
 
@@ -1125,7 +1172,7 @@ func TestCheckRemoteMetadata_MetadataExistsOnRemote(t *testing.T) {
 
 	// Call checkRemoteMetadata - should find metadata on the remote tree and
 	// attempt to resume, but fail because the test checkpoint has no agent field.
-	err = checkRemoteMetadata(context.Background(), os.Stdout, os.Stderr, checkpointID, checkpoint.DefaultV1Refs())
+	_, err = checkRemoteMetadata(context.Background(), os.Stdout, os.Stderr, checkpointID, checkpoint.DefaultV1Refs())
 	if err == nil {
 		t.Error("checkRemoteMetadata() should return error when agent is missing from metadata")
 	} else if !strings.Contains(err.Error(), "failed to resolve agent") {
@@ -1166,7 +1213,7 @@ func TestCheckRemoteMetadata_ReturnsUnsupportedVersionFromRemote(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err = checkRemoteMetadata(context.Background(), &stdout, &stderr, checkpointID, checkpoint.DefaultV1Refs())
+	_, err = checkRemoteMetadata(context.Background(), &stdout, &stderr, checkpointID, checkpoint.DefaultV1Refs())
 	if err == nil {
 		t.Fatal("checkRemoteMetadata() error = nil, want unsupported checkpoint version")
 	}
@@ -1189,7 +1236,7 @@ func TestCheckRemoteMetadata_NoRemoteMetadataBranch(t *testing.T) {
 	// Don't create any remote ref - simulating no remote entire/checkpoints/v1
 
 	// Call checkRemoteMetadata - should handle gracefully (no remote branch)
-	err := checkRemoteMetadata(
+	_, err := checkRemoteMetadata(
 		context.Background(),
 		os.Stdout,
 		os.Stderr,
@@ -1236,7 +1283,7 @@ func TestCheckRemoteMetadata_CheckpointNotOnRemote(t *testing.T) {
 	}
 
 	// Call checkRemoteMetadata with a DIFFERENT checkpoint ID (not on remote)
-	err = checkRemoteMetadata(
+	_, err = checkRemoteMetadata(
 		context.Background(),
 		os.Stdout,
 		os.Stderr,

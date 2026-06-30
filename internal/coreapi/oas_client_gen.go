@@ -141,6 +141,12 @@ type Invoker interface {
 	//
 	// GET /repos/{repoId}
 	GetRepo(ctx context.Context, params GetRepoParams) (*Repo, error)
+	// GetRepoVisibility invokes getRepoVisibility operation.
+	//
+	// Get repository visibility.
+	//
+	// GET /repos/{repoId}/visibility
+	GetRepoVisibility(ctx context.Context, params GetRepoVisibilityParams) (*GetRepoVisibilityOutputBody, error)
 	// GetServiceAccount invokes getServiceAccount operation.
 	//
 	// Get service account.
@@ -327,6 +333,12 @@ type Invoker interface {
 	//
 	// DELETE /service-accounts/{accountId}/grants/{resourceType}/{resourceId}
 	RevokeServiceAccountAccess(ctx context.Context, params RevokeServiceAccountAccessParams) error
+	// SetRepoVisibility invokes setRepoVisibility operation.
+	//
+	// Set repository visibility.
+	//
+	// PUT /repos/{repoId}/visibility
+	SetRepoVisibility(ctx context.Context, request *SetRepoVisibilityInputBody, params SetRepoVisibilityParams) (*SetRepoVisibilityOutputBody, error)
 	// UpdateMe invokes updateMe operation.
 	//
 	// Update the calling account's contact email.
@@ -2368,6 +2380,107 @@ func (c *Client) sendGetRepo(ctx context.Context, params GetRepoParams) (res *Re
 	defer body.Close()
 
 	result, err := decodeGetRepoResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// GetRepoVisibility invokes getRepoVisibility operation.
+//
+// Get repository visibility.
+//
+// GET /repos/{repoId}/visibility
+func (c *Client) GetRepoVisibility(ctx context.Context, params GetRepoVisibilityParams) (*GetRepoVisibilityOutputBody, error) {
+	res, err := c.sendGetRepoVisibility(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendGetRepoVisibility(ctx context.Context, params GetRepoVisibilityParams) (res *GetRepoVisibilityOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/visibility"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, GetRepoVisibilityOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, GetRepoVisibilityOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeGetRepoVisibilityResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -6296,6 +6409,110 @@ func (c *Client) sendRevokeServiceAccountAccess(ctx context.Context, params Revo
 	defer body.Close()
 
 	result, err := decodeRevokeServiceAccountAccessResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// SetRepoVisibility invokes setRepoVisibility operation.
+//
+// Set repository visibility.
+//
+// PUT /repos/{repoId}/visibility
+func (c *Client) SetRepoVisibility(ctx context.Context, request *SetRepoVisibilityInputBody, params SetRepoVisibilityParams) (*SetRepoVisibilityOutputBody, error) {
+	res, err := c.sendSetRepoVisibility(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendSetRepoVisibility(ctx context.Context, request *SetRepoVisibilityInputBody, params SetRepoVisibilityParams) (res *SetRepoVisibilityOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/visibility"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "PUT", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeSetRepoVisibilityRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, SetRepoVisibilityOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, SetRepoVisibilityOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeSetRepoVisibilityResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

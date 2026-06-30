@@ -26,6 +26,7 @@ const (
 	GetPermissionsOperation                OperationName = "GetPermissions"
 	GetProjectOperation                    OperationName = "GetProject"
 	GetRepoOperation                       OperationName = "GetRepo"
+	GetRepoVisibilityOperation             OperationName = "GetRepoVisibility"
 	GetServiceAccountOperation             OperationName = "GetServiceAccount"
 	GetVersionOperation                    OperationName = "GetVersion"
 	GrantMirrorCollaboratorOperation       OperationName = "GrantMirrorCollaborator"
@@ -57,5 +58,6 @@ const (
 	RevokeRepoAccessOperation              OperationName = "RevokeRepoAccess"
 	RevokeRepoAccessByProviderOperation    OperationName = "RevokeRepoAccessByProvider"
 	RevokeServiceAccountAccessOperation    OperationName = "RevokeServiceAccountAccess"
+	SetRepoVisibilityOperation             OperationName = "SetRepoVisibility"
 	UpdateMeOperation                      OperationName = "UpdateMe"
 )

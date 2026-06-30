@@ -737,8 +737,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 			}
 		}
 
-		// Get first prompt for display
-		promptPreview := ExtractFirstPrompt(content.Prompts)
+		promptPreview := restoredPromptPreview(sessionAgent, content.Prompts, content.Transcript, content.Metadata.ReviewPrompt)
 
 		// Local log already present and not forcing: keep it untouched, but still
 		// report the session so the caller can print its resume command.
@@ -749,10 +748,13 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 				fmt.Fprintf(w, "Keeping existing local session log\n")
 			}
 			restored = append(restored, RestoredSession{
-				SessionID: sessionID,
-				Agent:     sessionAgent.Type(),
-				Prompt:    promptPreview,
-				CreatedAt: content.Metadata.CreatedAt,
+				SessionID:    sessionID,
+				CheckpointID: point.CheckpointID.String(),
+				Agent:        sessionAgent.Type(),
+				Prompt:       promptPreview,
+				CreatedAt:    content.Metadata.CreatedAt,
+				Kind:         content.Metadata.Kind,
+				ReviewPrompt: content.Metadata.ReviewPrompt,
 			})
 			continue
 		}
@@ -793,14 +795,75 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 		}
 
 		restored = append(restored, RestoredSession{
-			SessionID: sessionID,
-			Agent:     sessionAgent.Type(),
-			Prompt:    promptPreview,
-			CreatedAt: content.Metadata.CreatedAt,
+			SessionID:    sessionID,
+			CheckpointID: point.CheckpointID.String(),
+			Agent:        sessionAgent.Type(),
+			Prompt:       promptPreview,
+			CreatedAt:    content.Metadata.CreatedAt,
+			Kind:         content.Metadata.Kind,
+			ReviewPrompt: content.Metadata.ReviewPrompt,
 		})
 	}
 
 	return restored, nil
+}
+
+func restoredPromptPreview(sessionAgent agent.Agent, promptContent string, transcript []byte, reviewPrompt string) string {
+	if prompt := ExtractFirstPrompt(promptContent); prompt != "" {
+		return prompt
+	}
+	if prompt := strings.TrimSpace(reviewPrompt); prompt != "" {
+		return prompt
+	}
+	extractor, ok := sessionAgent.(agent.PromptExtractor)
+	if !ok || len(transcript) == 0 {
+		return ""
+	}
+	prompts, err := extractPromptsFromTranscriptBytes(extractor, transcript)
+	if err != nil || len(prompts) == 0 {
+		return ""
+	}
+	return firstRestoredDisplayPrompt(prompts)
+}
+
+func firstRestoredDisplayPrompt(prompts []string) string {
+	for _, prompt := range prompts {
+		cleaned := strings.TrimSpace(prompt)
+		if cleaned == "" || isOnlySeparators(cleaned) || isInjectedInstructionPrompt(cleaned) {
+			continue
+		}
+		return TruncateDescription(cleaned, MaxDescriptionLength)
+	}
+	return ""
+}
+
+func isInjectedInstructionPrompt(prompt string) bool {
+	trimmed := strings.TrimSpace(prompt)
+	return strings.HasPrefix(trimmed, "# AGENTS.md instructions for ") ||
+		strings.HasPrefix(trimmed, "<environment_context>") ||
+		(strings.Contains(trimmed, "<INSTRUCTIONS>") && strings.Contains(trimmed, "AGENTS.md instructions"))
+}
+
+func extractPromptsFromTranscriptBytes(extractor agent.PromptExtractor, transcript []byte) ([]string, error) {
+	tmp, err := os.CreateTemp("", "entire-restored-transcript-*.jsonl")
+	if err != nil {
+		return nil, fmt.Errorf("create temporary transcript: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmp.Write(transcript); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("write temporary transcript: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("close temporary transcript: %w", err)
+	}
+	prompts, err := extractor.ExtractPrompts(tmpPath, 0)
+	if err != nil {
+		return nil, fmt.Errorf("extract prompts from temporary transcript: %w", err)
+	}
+	return prompts, nil
 }
 
 // ResolveAgentForRewind resolves the agent from checkpoint metadata.

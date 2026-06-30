@@ -41,6 +41,13 @@ func TestValidateSessionID(t *testing.T) {
 			wantErr:   true,
 			errMsg:    "session ID cannot be empty",
 		},
+		// Leading dash (security-critical - option injection prevention)
+		{
+			name:      "leading dash",
+			sessionID: "--dangerously-skip-permissions",
+			wantErr:   true,
+			errMsg:    "starts with dash",
+		},
 		// Path separators (security-critical - path traversal prevention)
 		{
 			name:      "session ID with forward slash",
@@ -270,6 +277,8 @@ func TestValidateAgentSessionID(t *testing.T) {
 		{name: "test session id", id: "test-session-1", wantErr: false},
 		{name: "alphanumeric", id: "session123", wantErr: false},
 		{name: "with underscores", id: "test_session_1", wantErr: false},
+		// Invalid - option injection
+		{name: "leading dash", id: "--dangerously-skip-permissions", wantErr: true},
 		// Invalid - empty (required field)
 		{name: "empty rejected", id: "", wantErr: true},
 		// Invalid - path traversal

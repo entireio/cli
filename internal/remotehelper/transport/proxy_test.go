@@ -893,38 +893,35 @@ func TestColdPathFailoverWhenRedirectTargetUnreachable(t *testing.T) {
 	}))
 	defer entry.Close()
 
-	const iterations = 8
-	deadFailoverObserved := false
+	var failed []string
+	p := New(Config{
+		Nodes: replicas.NodeConfig{
+			EntryURL:    entry.URL,
+			ClusterHost: "127.0.0.1",
+		},
+		Path:         "/et/alice/repo",
+		OnNodeFailed: func(node string) { failed = append(failed, node) },
+	})
+	// doWithFailover starts at a random offset for load-spreading, so with two
+	// adopted replicas [dead, alive] the dead one is only attempted ~half the
+	// time — the old loop-8-and-hope made that a ~1/256 flake. Pin the sticky
+	// node to dead so it is always tried first: that deterministically exercises
+	// the failure → OnNodeFailed → failover-to-alive path this test is about.
+	p.stickyNode = dead
 
-	for i := range iterations {
-		var failed []string
-		p := New(Config{
-			Nodes: replicas.NodeConfig{
-				EntryURL:    entry.URL,
-				ClusterHost: "127.0.0.1",
-			},
-			Path:         "/et/alice/repo",
-			OnNodeFailed: func(node string) { failed = append(failed, node) },
-		})
+	body, err := p.InfoRefs(context.Background(), "git-upload-pack")
+	require.NoError(t, err, "failover must succeed")
 
-		body, err := p.InfoRefs(context.Background(), "git-upload-pack")
-		require.NoErrorf(t, err, "iteration %d: failover must succeed", i)
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	_ = body.Close()
+	assert.Equal(t, "refs from alive", string(got), "response must come from alive replica")
 
-		got, err := io.ReadAll(body)
-		require.NoError(t, err)
-		_ = body.Close()
-		assert.Equal(t, "refs from alive", string(got), "iteration %d: response must come from alive replica", i)
-
-		if !slices.Equal(p.nodes, []string{aliveURL}) {
-			t.Errorf("iteration %d: nodes after failover = %v, want [%s]", i, p.nodes, aliveURL)
-		}
-		if slices.Contains(failed, dead) {
-			deadFailoverObserved = true
-		}
+	if !slices.Equal(p.nodes, []string{aliveURL}) {
+		t.Errorf("nodes after failover = %v, want [%s]", p.nodes, aliveURL)
 	}
-
-	if !deadFailoverObserved {
-		t.Errorf("dead replica never marked failed across %d iterations — failover path may not be exercised", iterations)
+	if !slices.Contains(failed, dead) {
+		t.Errorf("dead replica %s was not marked failed; failover path not exercised (failed=%v)", dead, failed)
 	}
 }
 

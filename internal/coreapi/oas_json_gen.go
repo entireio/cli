@@ -1604,6 +1604,12 @@ func (s *Cluster) Encode(e *jx.Encoder) {
 // encodeFields encodes fields.
 func (s *Cluster) encodeFields(e *jx.Encoder) {
 	{
+		if s.ApiUrl.Set {
+			e.FieldStart("apiUrl")
+			s.ApiUrl.Encode(e)
+		}
+	}
+	{
 		e.FieldStart("isDefault")
 		e.Bool(s.IsDefault)
 	}
@@ -1628,11 +1634,12 @@ func (s *Cluster) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfCluster = [4]string{
-	0: "isDefault",
-	1: "jurisdiction",
-	2: "publicUrl",
-	3: "slug",
+var jsonFieldsNameOfCluster = [5]string{
+	0: "apiUrl",
+	1: "isDefault",
+	2: "jurisdiction",
+	3: "publicUrl",
+	4: "slug",
 }
 
 // Decode decodes Cluster from json.
@@ -1645,8 +1652,18 @@ func (s *Cluster) Decode(d *jx.Decoder) error {
 
 	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
 		switch string(k) {
+		case "apiUrl":
+			if err := func() error {
+				s.ApiUrl.Reset()
+				if err := s.ApiUrl.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"apiUrl\"")
+			}
 		case "isDefault":
-			requiredBitSet[0] |= 1 << 0
+			requiredBitSet[0] |= 1 << 1
 			if err := func() error {
 				v, err := d.Bool()
 				s.IsDefault = bool(v)
@@ -1658,7 +1675,7 @@ func (s *Cluster) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"isDefault\"")
 			}
 		case "jurisdiction":
-			requiredBitSet[0] |= 1 << 1
+			requiredBitSet[0] |= 1 << 2
 			if err := func() error {
 				v, err := d.Str()
 				s.Jurisdiction = string(v)
@@ -1670,7 +1687,7 @@ func (s *Cluster) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"jurisdiction\"")
 			}
 		case "publicUrl":
-			requiredBitSet[0] |= 1 << 2
+			requiredBitSet[0] |= 1 << 3
 			if err := func() error {
 				v, err := d.Str()
 				s.PublicUrl = string(v)
@@ -1682,7 +1699,7 @@ func (s *Cluster) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"publicUrl\"")
 			}
 		case "slug":
-			requiredBitSet[0] |= 1 << 3
+			requiredBitSet[0] |= 1 << 4
 			if err := func() error {
 				v, err := d.Str()
 				s.Slug = string(v)
@@ -1714,7 +1731,7 @@ func (s *Cluster) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00001111,
+		0b00011110,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -4585,6 +4602,234 @@ func (s GetPermissionsOutputBodyExplain) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *GetPermissionsOutputBodyExplain) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
+func (s *GetRepoVisibilityOutputBody) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *GetRepoVisibilityOutputBody) encodeFields(e *jx.Encoder) {
+	{
+		if s.Schema.Set {
+			e.FieldStart("$schema")
+			s.Schema.Encode(e)
+		}
+	}
+	{
+		e.FieldStart("visibility")
+		s.Visibility.Encode(e)
+	}
+	for k, elem := range s.AdditionalProps {
+		e.FieldStart(k)
+
+		if len(elem) != 0 {
+			e.Raw(elem)
+		}
+	}
+}
+
+var jsonFieldsNameOfGetRepoVisibilityOutputBody = [2]string{
+	0: "$schema",
+	1: "visibility",
+}
+
+// Decode decodes GetRepoVisibilityOutputBody from json.
+func (s *GetRepoVisibilityOutputBody) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode GetRepoVisibilityOutputBody to nil")
+	}
+	var requiredBitSet [1]uint8
+	s.AdditionalProps = map[string]jx.Raw{}
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "$schema":
+			if err := func() error {
+				s.Schema.Reset()
+				if err := s.Schema.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"$schema\"")
+			}
+		case "visibility":
+			requiredBitSet[0] |= 1 << 1
+			if err := func() error {
+				if err := s.Visibility.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"visibility\"")
+			}
+		default:
+			var elem jx.Raw
+			if err := func() error {
+				v, err := d.RawAppend(nil)
+				elem = jx.Raw(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrapf(err, "decode field %q", k)
+			}
+			s.AdditionalProps[string(k)] = elem
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode GetRepoVisibilityOutputBody")
+	}
+	// Validate required fields.
+	var failures []validate.FieldError
+	for i, mask := range [1]uint8{
+		0b00000010,
+	} {
+		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
+			// Mask only required fields and check equality to mask using XOR.
+			//
+			// If XOR result is not zero, result is not equal to expected, so some fields are missed.
+			// Bits of fields which would be set are actually bits of missed fields.
+			missed := bits.OnesCount8(result)
+			for bitN := 0; bitN < missed; bitN++ {
+				bitIdx := bits.TrailingZeros8(result)
+				fieldIdx := i*8 + bitIdx
+				var name string
+				if fieldIdx < len(jsonFieldsNameOfGetRepoVisibilityOutputBody) {
+					name = jsonFieldsNameOfGetRepoVisibilityOutputBody[fieldIdx]
+				} else {
+					name = strconv.Itoa(fieldIdx)
+				}
+				failures = append(failures, validate.FieldError{
+					Name:  name,
+					Error: validate.ErrFieldRequired,
+				})
+				// Reset bit.
+				result &^= 1 << bitIdx
+			}
+		}
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *GetRepoVisibilityOutputBody) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *GetRepoVisibilityOutputBody) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
+func (s GetRepoVisibilityOutputBodyAdditional) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields implements json.Marshaler.
+func (s GetRepoVisibilityOutputBodyAdditional) encodeFields(e *jx.Encoder) {
+	for k, elem := range s {
+		e.FieldStart(k)
+
+		if len(elem) != 0 {
+			e.Raw(elem)
+		}
+	}
+}
+
+// Decode decodes GetRepoVisibilityOutputBodyAdditional from json.
+func (s *GetRepoVisibilityOutputBodyAdditional) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode GetRepoVisibilityOutputBodyAdditional to nil")
+	}
+	m := s.init()
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		var elem jx.Raw
+		if err := func() error {
+			v, err := d.RawAppend(nil)
+			elem = jx.Raw(v)
+			if err != nil {
+				return err
+			}
+			return nil
+		}(); err != nil {
+			return errors.Wrapf(err, "decode field %q", k)
+		}
+		m[string(k)] = elem
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode GetRepoVisibilityOutputBodyAdditional")
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s GetRepoVisibilityOutputBodyAdditional) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *GetRepoVisibilityOutputBodyAdditional) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes GetRepoVisibilityOutputBodyVisibility as json.
+func (s GetRepoVisibilityOutputBodyVisibility) Encode(e *jx.Encoder) {
+	e.Str(string(s))
+}
+
+// Decode decodes GetRepoVisibilityOutputBodyVisibility from json.
+func (s *GetRepoVisibilityOutputBodyVisibility) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode GetRepoVisibilityOutputBodyVisibility to nil")
+	}
+	v, err := d.StrBytes()
+	if err != nil {
+		return err
+	}
+	// Try to use constant string.
+	switch GetRepoVisibilityOutputBodyVisibility(v) {
+	case GetRepoVisibilityOutputBodyVisibilityPublic:
+		*s = GetRepoVisibilityOutputBodyVisibilityPublic
+	case GetRepoVisibilityOutputBodyVisibilityPrivate:
+		*s = GetRepoVisibilityOutputBodyVisibilityPrivate
+	default:
+		*s = GetRepoVisibilityOutputBodyVisibility(v)
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s GetRepoVisibilityOutputBodyVisibility) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *GetRepoVisibilityOutputBodyVisibility) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }
@@ -14017,6 +14262,39 @@ func (s *OptRepoState) UnmarshalJSON(data []byte) error {
 	return s.Decode(d)
 }
 
+// Encode encodes RepoVisibility as json.
+func (o OptRepoVisibility) Encode(e *jx.Encoder) {
+	if !o.Set {
+		return
+	}
+	e.Str(string(o.Value))
+}
+
+// Decode decodes RepoVisibility from json.
+func (o *OptRepoVisibility) Decode(d *jx.Decoder) error {
+	if o == nil {
+		return errors.New("invalid: unable to decode OptRepoVisibility to nil")
+	}
+	o.Set = true
+	if err := o.Value.Decode(d); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s OptRepoVisibility) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *OptRepoVisibility) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
 // Encode encodes string as json.
 func (o OptString) Encode(e *jx.Encoder) {
 	if !o.Set {
@@ -14632,12 +14910,22 @@ func (s *ProjectGrant) encodeFields(e *jx.Encoder) {
 		e.Str(s.GranteeId)
 	}
 	{
+		if s.GranteeName.Set {
+			e.FieldStart("granteeName")
+			s.GranteeName.Encode(e)
+		}
+	}
+	{
 		e.FieldStart("granteeType")
 		e.Str(s.GranteeType)
 	}
 	{
 		e.FieldStart("role")
 		e.Str(s.Role)
+	}
+	{
+		e.FieldStart("source")
+		e.Str(s.Source)
 	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
@@ -14648,10 +14936,12 @@ func (s *ProjectGrant) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfProjectGrant = [3]string{
+var jsonFieldsNameOfProjectGrant = [5]string{
 	0: "granteeId",
-	1: "granteeType",
-	2: "role",
+	1: "granteeName",
+	2: "granteeType",
+	3: "role",
+	4: "source",
 }
 
 // Decode decodes ProjectGrant from json.
@@ -14676,8 +14966,18 @@ func (s *ProjectGrant) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"granteeId\"")
 			}
+		case "granteeName":
+			if err := func() error {
+				s.GranteeName.Reset()
+				if err := s.GranteeName.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"granteeName\"")
+			}
 		case "granteeType":
-			requiredBitSet[0] |= 1 << 1
+			requiredBitSet[0] |= 1 << 2
 			if err := func() error {
 				v, err := d.Str()
 				s.GranteeType = string(v)
@@ -14689,7 +14989,7 @@ func (s *ProjectGrant) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"granteeType\"")
 			}
 		case "role":
-			requiredBitSet[0] |= 1 << 2
+			requiredBitSet[0] |= 1 << 3
 			if err := func() error {
 				v, err := d.Str()
 				s.Role = string(v)
@@ -14699,6 +14999,18 @@ func (s *ProjectGrant) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"role\"")
+			}
+		case "source":
+			requiredBitSet[0] |= 1 << 4
+			if err := func() error {
+				v, err := d.Str()
+				s.Source = string(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"source\"")
 			}
 		default:
 			var elem jx.Raw
@@ -14721,7 +15033,7 @@ func (s *ProjectGrant) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00000111,
+		0b00011101,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -14946,6 +15258,12 @@ func (s *Repo) encodeFields(e *jx.Encoder) {
 			s.State.Encode(e)
 		}
 	}
+	{
+		if s.Visibility.Set {
+			e.FieldStart("visibility")
+			s.Visibility.Encode(e)
+		}
+	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
 
@@ -14955,7 +15273,7 @@ func (s *Repo) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfRepo = [13]string{
+var jsonFieldsNameOfRepo = [14]string{
 	0:  "$schema",
 	1:  "clusterHost",
 	2:  "foreign",
@@ -14969,6 +15287,7 @@ var jsonFieldsNameOfRepo = [13]string{
 	10: "provisionAttempts",
 	11: "provisionReason",
 	12: "state",
+	13: "visibility",
 }
 
 // Decode decodes Repo from json.
@@ -15117,6 +15436,16 @@ func (s *Repo) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"state\"")
 			}
+		case "visibility":
+			if err := func() error {
+				s.Visibility.Reset()
+				if err := s.Visibility.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"visibility\"")
+			}
 		default:
 			var elem jx.Raw
 			if err := func() error {
@@ -15257,12 +15586,22 @@ func (s *RepoGrant) encodeFields(e *jx.Encoder) {
 		e.Str(s.GranteeId)
 	}
 	{
+		if s.GranteeName.Set {
+			e.FieldStart("granteeName")
+			s.GranteeName.Encode(e)
+		}
+	}
+	{
 		e.FieldStart("granteeType")
 		e.Str(s.GranteeType)
 	}
 	{
 		e.FieldStart("role")
 		e.Str(s.Role)
+	}
+	{
+		e.FieldStart("source")
+		e.Str(s.Source)
 	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
@@ -15273,10 +15612,12 @@ func (s *RepoGrant) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfRepoGrant = [3]string{
+var jsonFieldsNameOfRepoGrant = [5]string{
 	0: "granteeId",
-	1: "granteeType",
-	2: "role",
+	1: "granteeName",
+	2: "granteeType",
+	3: "role",
+	4: "source",
 }
 
 // Decode decodes RepoGrant from json.
@@ -15301,8 +15642,18 @@ func (s *RepoGrant) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"granteeId\"")
 			}
+		case "granteeName":
+			if err := func() error {
+				s.GranteeName.Reset()
+				if err := s.GranteeName.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"granteeName\"")
+			}
 		case "granteeType":
-			requiredBitSet[0] |= 1 << 1
+			requiredBitSet[0] |= 1 << 2
 			if err := func() error {
 				v, err := d.Str()
 				s.GranteeType = string(v)
@@ -15314,7 +15665,7 @@ func (s *RepoGrant) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"granteeType\"")
 			}
 		case "role":
-			requiredBitSet[0] |= 1 << 2
+			requiredBitSet[0] |= 1 << 3
 			if err := func() error {
 				v, err := d.Str()
 				s.Role = string(v)
@@ -15324,6 +15675,18 @@ func (s *RepoGrant) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"role\"")
+			}
+		case "source":
+			requiredBitSet[0] |= 1 << 4
+			if err := func() error {
+				v, err := d.Str()
+				s.Source = string(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"source\"")
 			}
 		default:
 			var elem jx.Raw
@@ -15346,7 +15709,7 @@ func (s *RepoGrant) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00000111,
+		0b00011101,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -15528,6 +15891,46 @@ func (s RepoState) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *RepoState) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes RepoVisibility as json.
+func (s RepoVisibility) Encode(e *jx.Encoder) {
+	e.Str(string(s))
+}
+
+// Decode decodes RepoVisibility from json.
+func (s *RepoVisibility) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode RepoVisibility to nil")
+	}
+	v, err := d.StrBytes()
+	if err != nil {
+		return err
+	}
+	// Try to use constant string.
+	switch RepoVisibility(v) {
+	case RepoVisibilityPublic:
+		*s = RepoVisibilityPublic
+	case RepoVisibilityPrivate:
+		*s = RepoVisibilityPrivate
+	default:
+		*s = RepoVisibility(v)
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s RepoVisibility) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *RepoVisibility) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }
@@ -16757,6 +17160,462 @@ func (s ServiceAccountWithGrantsAdditional) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *ServiceAccountWithGrantsAdditional) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
+func (s *SetRepoVisibilityInputBody) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *SetRepoVisibilityInputBody) encodeFields(e *jx.Encoder) {
+	{
+		if s.Schema.Set {
+			e.FieldStart("$schema")
+			s.Schema.Encode(e)
+		}
+	}
+	{
+		e.FieldStart("visibility")
+		s.Visibility.Encode(e)
+	}
+	for k, elem := range s.AdditionalProps {
+		e.FieldStart(k)
+
+		if len(elem) != 0 {
+			e.Raw(elem)
+		}
+	}
+}
+
+var jsonFieldsNameOfSetRepoVisibilityInputBody = [2]string{
+	0: "$schema",
+	1: "visibility",
+}
+
+// Decode decodes SetRepoVisibilityInputBody from json.
+func (s *SetRepoVisibilityInputBody) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode SetRepoVisibilityInputBody to nil")
+	}
+	var requiredBitSet [1]uint8
+	s.AdditionalProps = map[string]jx.Raw{}
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "$schema":
+			if err := func() error {
+				s.Schema.Reset()
+				if err := s.Schema.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"$schema\"")
+			}
+		case "visibility":
+			requiredBitSet[0] |= 1 << 1
+			if err := func() error {
+				if err := s.Visibility.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"visibility\"")
+			}
+		default:
+			var elem jx.Raw
+			if err := func() error {
+				v, err := d.RawAppend(nil)
+				elem = jx.Raw(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrapf(err, "decode field %q", k)
+			}
+			s.AdditionalProps[string(k)] = elem
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode SetRepoVisibilityInputBody")
+	}
+	// Validate required fields.
+	var failures []validate.FieldError
+	for i, mask := range [1]uint8{
+		0b00000010,
+	} {
+		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
+			// Mask only required fields and check equality to mask using XOR.
+			//
+			// If XOR result is not zero, result is not equal to expected, so some fields are missed.
+			// Bits of fields which would be set are actually bits of missed fields.
+			missed := bits.OnesCount8(result)
+			for bitN := 0; bitN < missed; bitN++ {
+				bitIdx := bits.TrailingZeros8(result)
+				fieldIdx := i*8 + bitIdx
+				var name string
+				if fieldIdx < len(jsonFieldsNameOfSetRepoVisibilityInputBody) {
+					name = jsonFieldsNameOfSetRepoVisibilityInputBody[fieldIdx]
+				} else {
+					name = strconv.Itoa(fieldIdx)
+				}
+				failures = append(failures, validate.FieldError{
+					Name:  name,
+					Error: validate.ErrFieldRequired,
+				})
+				// Reset bit.
+				result &^= 1 << bitIdx
+			}
+		}
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *SetRepoVisibilityInputBody) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *SetRepoVisibilityInputBody) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
+func (s SetRepoVisibilityInputBodyAdditional) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields implements json.Marshaler.
+func (s SetRepoVisibilityInputBodyAdditional) encodeFields(e *jx.Encoder) {
+	for k, elem := range s {
+		e.FieldStart(k)
+
+		if len(elem) != 0 {
+			e.Raw(elem)
+		}
+	}
+}
+
+// Decode decodes SetRepoVisibilityInputBodyAdditional from json.
+func (s *SetRepoVisibilityInputBodyAdditional) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode SetRepoVisibilityInputBodyAdditional to nil")
+	}
+	m := s.init()
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		var elem jx.Raw
+		if err := func() error {
+			v, err := d.RawAppend(nil)
+			elem = jx.Raw(v)
+			if err != nil {
+				return err
+			}
+			return nil
+		}(); err != nil {
+			return errors.Wrapf(err, "decode field %q", k)
+		}
+		m[string(k)] = elem
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode SetRepoVisibilityInputBodyAdditional")
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s SetRepoVisibilityInputBodyAdditional) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *SetRepoVisibilityInputBodyAdditional) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes SetRepoVisibilityInputBodyVisibility as json.
+func (s SetRepoVisibilityInputBodyVisibility) Encode(e *jx.Encoder) {
+	e.Str(string(s))
+}
+
+// Decode decodes SetRepoVisibilityInputBodyVisibility from json.
+func (s *SetRepoVisibilityInputBodyVisibility) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode SetRepoVisibilityInputBodyVisibility to nil")
+	}
+	v, err := d.StrBytes()
+	if err != nil {
+		return err
+	}
+	// Try to use constant string.
+	switch SetRepoVisibilityInputBodyVisibility(v) {
+	case SetRepoVisibilityInputBodyVisibilityPublic:
+		*s = SetRepoVisibilityInputBodyVisibilityPublic
+	case SetRepoVisibilityInputBodyVisibilityPrivate:
+		*s = SetRepoVisibilityInputBodyVisibilityPrivate
+	default:
+		*s = SetRepoVisibilityInputBodyVisibility(v)
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s SetRepoVisibilityInputBodyVisibility) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *SetRepoVisibilityInputBodyVisibility) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
+func (s *SetRepoVisibilityOutputBody) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *SetRepoVisibilityOutputBody) encodeFields(e *jx.Encoder) {
+	{
+		if s.Schema.Set {
+			e.FieldStart("$schema")
+			s.Schema.Encode(e)
+		}
+	}
+	{
+		e.FieldStart("visibility")
+		s.Visibility.Encode(e)
+	}
+	for k, elem := range s.AdditionalProps {
+		e.FieldStart(k)
+
+		if len(elem) != 0 {
+			e.Raw(elem)
+		}
+	}
+}
+
+var jsonFieldsNameOfSetRepoVisibilityOutputBody = [2]string{
+	0: "$schema",
+	1: "visibility",
+}
+
+// Decode decodes SetRepoVisibilityOutputBody from json.
+func (s *SetRepoVisibilityOutputBody) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode SetRepoVisibilityOutputBody to nil")
+	}
+	var requiredBitSet [1]uint8
+	s.AdditionalProps = map[string]jx.Raw{}
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "$schema":
+			if err := func() error {
+				s.Schema.Reset()
+				if err := s.Schema.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"$schema\"")
+			}
+		case "visibility":
+			requiredBitSet[0] |= 1 << 1
+			if err := func() error {
+				if err := s.Visibility.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"visibility\"")
+			}
+		default:
+			var elem jx.Raw
+			if err := func() error {
+				v, err := d.RawAppend(nil)
+				elem = jx.Raw(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrapf(err, "decode field %q", k)
+			}
+			s.AdditionalProps[string(k)] = elem
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode SetRepoVisibilityOutputBody")
+	}
+	// Validate required fields.
+	var failures []validate.FieldError
+	for i, mask := range [1]uint8{
+		0b00000010,
+	} {
+		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
+			// Mask only required fields and check equality to mask using XOR.
+			//
+			// If XOR result is not zero, result is not equal to expected, so some fields are missed.
+			// Bits of fields which would be set are actually bits of missed fields.
+			missed := bits.OnesCount8(result)
+			for bitN := 0; bitN < missed; bitN++ {
+				bitIdx := bits.TrailingZeros8(result)
+				fieldIdx := i*8 + bitIdx
+				var name string
+				if fieldIdx < len(jsonFieldsNameOfSetRepoVisibilityOutputBody) {
+					name = jsonFieldsNameOfSetRepoVisibilityOutputBody[fieldIdx]
+				} else {
+					name = strconv.Itoa(fieldIdx)
+				}
+				failures = append(failures, validate.FieldError{
+					Name:  name,
+					Error: validate.ErrFieldRequired,
+				})
+				// Reset bit.
+				result &^= 1 << bitIdx
+			}
+		}
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *SetRepoVisibilityOutputBody) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *SetRepoVisibilityOutputBody) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
+func (s SetRepoVisibilityOutputBodyAdditional) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields implements json.Marshaler.
+func (s SetRepoVisibilityOutputBodyAdditional) encodeFields(e *jx.Encoder) {
+	for k, elem := range s {
+		e.FieldStart(k)
+
+		if len(elem) != 0 {
+			e.Raw(elem)
+		}
+	}
+}
+
+// Decode decodes SetRepoVisibilityOutputBodyAdditional from json.
+func (s *SetRepoVisibilityOutputBodyAdditional) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode SetRepoVisibilityOutputBodyAdditional to nil")
+	}
+	m := s.init()
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		var elem jx.Raw
+		if err := func() error {
+			v, err := d.RawAppend(nil)
+			elem = jx.Raw(v)
+			if err != nil {
+				return err
+			}
+			return nil
+		}(); err != nil {
+			return errors.Wrapf(err, "decode field %q", k)
+		}
+		m[string(k)] = elem
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode SetRepoVisibilityOutputBodyAdditional")
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s SetRepoVisibilityOutputBodyAdditional) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *SetRepoVisibilityOutputBodyAdditional) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode encodes SetRepoVisibilityOutputBodyVisibility as json.
+func (s SetRepoVisibilityOutputBodyVisibility) Encode(e *jx.Encoder) {
+	e.Str(string(s))
+}
+
+// Decode decodes SetRepoVisibilityOutputBodyVisibility from json.
+func (s *SetRepoVisibilityOutputBodyVisibility) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode SetRepoVisibilityOutputBodyVisibility to nil")
+	}
+	v, err := d.StrBytes()
+	if err != nil {
+		return err
+	}
+	// Try to use constant string.
+	switch SetRepoVisibilityOutputBodyVisibility(v) {
+	case SetRepoVisibilityOutputBodyVisibilityPublic:
+		*s = SetRepoVisibilityOutputBodyVisibilityPublic
+	case SetRepoVisibilityOutputBodyVisibilityPrivate:
+		*s = SetRepoVisibilityOutputBodyVisibilityPrivate
+	default:
+		*s = SetRepoVisibilityOutputBodyVisibility(v)
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s SetRepoVisibilityOutputBodyVisibility) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *SetRepoVisibilityOutputBodyVisibility) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }

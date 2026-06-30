@@ -262,6 +262,28 @@ func TestRestoreLogsOnly_KeepsExistingLocalLog(t *testing.T) {
 	require.Equal(t, string(checkpointTranscript), string(got), "force restore must overwrite from the checkpoint")
 }
 
+func TestRestoredPromptPreviewFallsBackInOrder(t *testing.T) {
+	t.Parallel()
+
+	ag := &restoreLogsOnlyAgent{
+		extractedPrompts: []string{
+			"# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nskip me\n</INSTRUCTIONS>",
+			"<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>",
+			"prompt from transcript",
+		},
+	}
+
+	if got := restoredPromptPreview(ag, "prompt sidecar", []byte("transcript"), "review prompt"); got != "prompt sidecar" {
+		t.Fatalf("sidecar prompt = %q, want prompt sidecar", got)
+	}
+	if got := restoredPromptPreview(ag, "", []byte("transcript"), "review prompt"); got != "review prompt" {
+		t.Fatalf("review prompt = %q, want review prompt", got)
+	}
+	if got := restoredPromptPreview(ag, "", []byte("transcript"), ""); got != "prompt from transcript" {
+		t.Fatalf("transcript prompt = %q, want prompt from transcript", got)
+	}
+}
+
 func TestResolveAgentForRewind(t *testing.T) {
 	t.Parallel()
 
@@ -631,9 +653,10 @@ func writeCommittedRewindCheckpoint(
 }
 
 type restoreLogsOnlyAgent struct {
-	name       types.AgentName
-	agentType  types.AgentType
-	sessionDir string
+	name             types.AgentName
+	agentType        types.AgentType
+	sessionDir       string
+	extractedPrompts []string
 }
 
 var _ agent.Agent = (*restoreLogsOnlyAgent)(nil)
@@ -671,6 +694,11 @@ func (a *restoreLogsOnlyAgent) WriteSession(_ context.Context, session *agent.Ag
 }
 func (a *restoreLogsOnlyAgent) FormatResumeCommand(sessionID string) string {
 	return "restore-logs " + sessionID
+}
+
+//nolint:unparam // error is always nil in this test helper; satisfies PromptExtractor.
+func (a *restoreLogsOnlyAgent) ExtractPrompts(string, int) ([]string, error) {
+	return a.extractedPrompts, nil
 }
 
 // fakeExternalAgent is a minimal Agent implementation for testing dynamic registration.

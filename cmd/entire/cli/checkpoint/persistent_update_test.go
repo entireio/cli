@@ -77,9 +77,13 @@ func rewriteRootSummary(t *testing.T, store *GitStore, cpID id.CheckpointID, mut
 	}
 
 	basePath := cpID.Path() + "/"
-	entries, err := store.flattenCheckpointEntries(rootTreeHash, cpID.Path())
+	existing, err := store.subtreeObjAt(rootTreeHash, cpID.Path())
 	if err != nil {
-		t.Fatalf("flattenCheckpointEntries(): %v", err)
+		t.Fatalf("subtreeObjAt(): %v", err)
+	}
+	entries, err := store.flattenExisting(existing, basePath)
+	if err != nil {
+		t.Fatalf("flattenExisting(): %v", err)
 	}
 
 	summary := readSummaryFromBranch(t, store.repo, cpID)
@@ -101,7 +105,11 @@ func rewriteRootSummary(t *testing.T, store *GitStore, cpID id.CheckpointID, mut
 		Hash: metadataHash,
 	}
 
-	newTreeHash, err := store.spliceCheckpointSubtree(ctx, rootTreeHash, cpID, basePath, entries)
+	checkpointSubtree, err := store.buildCheckpointSubtree(ctx, entries, basePath)
+	if err != nil {
+		t.Fatalf("buildCheckpointSubtree(): %v", err)
+	}
+	newTreeHash, err := store.spliceCheckpointSubtree(rootTreeHash, cpID, checkpointSubtree)
 	if err != nil {
 		t.Fatalf("spliceCheckpointSubtree(): %v", err)
 	}

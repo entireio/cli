@@ -34,16 +34,13 @@ func TestDeriveCheckpointID_StableAndDistinct(t *testing.T) {
 
 func TestRegistry_HasClaude(t *testing.T) {
 	t.Parallel()
-	imp, ok := Get("claude-code")
-	if !ok {
-		t.Fatal("claude-code importer not registered")
+
+	for _, imp := range All() {
+		if imp.Name() == "claude-code" {
+			return
+		}
 	}
-	if imp.Name() != "claude-code" {
-		t.Fatalf("unexpected name %q", imp.Name())
-	}
-	if len(All()) == 0 {
-		t.Fatal("All() returned no importers")
-	}
+	t.Fatal("claude-code importer not registered")
 }
 
 // TestRegistry_AllSupportedAgents asserts every supported importer is

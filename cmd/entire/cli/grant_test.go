@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/entireio/cli/internal/coreapi"
@@ -20,39 +21,68 @@ func TestValidateGrantRole(t *testing.T) {
 	}
 }
 
-func TestParseGranteeMode(t *testing.T) {
+func TestGranteeName(t *testing.T) {
 	t.Parallel()
+	const ulid = "01HZX0000000000000000000AB"
 	tests := []struct {
-		name                                 string
-		provider, providerUserID, gType, gID string
-		want                                 granteeMode
-		wantErr                              bool
+		name string
+		in   coreapi.OptString
+		id   string
+		want string
 	}{
-		{name: "provider mode", provider: "github", providerUserID: "123", want: granteeModeProvider},
-		{name: "id mode", gType: "org", gID: "01J0", want: granteeModeID},
-		{name: "both modes rejected", provider: "github", providerUserID: "123", gType: "org", gID: "01J0", wantErr: true},
-		{name: "partial provider", provider: "github", wantErr: true},
-		{name: "partial id", gType: "org", wantErr: true},
-		{name: "nothing", wantErr: true},
+		{name: "friendly name wins", in: coreapi.NewOptString("github:alice"), id: ulid, want: "github:alice"},
+		{name: "unset falls back to ULID", in: coreapi.OptString{}, id: ulid, want: ulid},
+		{name: "empty string falls back to ULID", in: coreapi.NewOptString(""), id: ulid, want: ulid},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := parseGranteeMode(tt.provider, tt.providerUserID, tt.gType, tt.gID)
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("parseGranteeMode(%q,%q,%q,%q) expected error", tt.provider, tt.providerUserID, tt.gType, tt.gID)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseGranteeMode: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("got mode %d, want %d", got, tt.want)
+			if got := granteeName(tt.in, tt.id); got != tt.want {
+				t.Errorf("granteeName(%v, %q) = %q, want %q", tt.in, tt.id, got, tt.want)
 			}
 		})
 	}
+}
+
+func TestGrantRows(t *testing.T) {
+	t.Parallel()
+	const ulid = "01HZX0000000000000000000AB"
+
+	// grantColumns and the row builders must stay in lockstep — same width,
+	// same column order — or the table header and cells misalign.
+	if got, want := len(grantColumns), 5; got != want {
+		t.Fatalf("grantColumns has %d columns, want %d", got, want)
+	}
+
+	t.Run("project resolved name", func(t *testing.T) {
+		t.Parallel()
+		row := projectGrantRow(coreapi.ProjectGrant{
+			GranteeId:   ulid,
+			GranteeName: coreapi.NewOptString("github:alice"),
+			GranteeType: "account",
+			Role:        "writer",
+			Source:      "direct",
+		})
+		want := []string{"account", "github:alice", ulid, "writer", "direct"}
+		if !slices.Equal(row, want) {
+			t.Errorf("projectGrantRow = %v, want %v", row, want)
+		}
+	})
+
+	t.Run("repo unresolved name falls back to ULID", func(t *testing.T) {
+		t.Parallel()
+		row := repoGrantRow(coreapi.RepoGrant{
+			GranteeId:   ulid,
+			GranteeName: coreapi.OptString{},
+			GranteeType: "team",
+			Role:        "reader",
+			Source:      "inherited",
+		})
+		want := []string{"team", ulid, ulid, "reader", "inherited"}
+		if !slices.Equal(row, want) {
+			t.Errorf("repoGrantRow = %v, want %v", row, want)
+		}
+	})
 }
 
 func TestParseOrgRole(t *testing.T) {

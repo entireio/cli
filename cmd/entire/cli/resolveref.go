@@ -20,6 +20,13 @@ import (
 // under the response's singular `org`/`project` field, or 404) — the CLI never
 // lists everything and filters client-side.
 
+// providerGitHub is the identity-provider slug for GitHub-backed accounts, the
+// provider half of a qualified grantee handle like "github:alice". GitHub is the
+// only provider with backing accounts today; other slugs resolve once they exist
+// server-side. (Distinct from setup.go's checkpointProviderGitHub, which names
+// the checkpoint hosting provider — same string, unrelated concern.)
+const providerGitHub = "github"
+
 // looksLikeULID reports whether s has the shape of a ULID: 26 characters drawn
 // from Crockford base32 (digits plus uppercase letters, excluding I, L, O, U).
 // The check is shape-only and case-insensitive on the alphabet; it never hits
@@ -95,6 +102,46 @@ func resolveAccountRef(ctx context.Context, c *coreapi.Client, ref string) (stri
 	return id.AccountId, nil
 }
 
+// resolveGranteeProvider turns a grantee reference into the (provider,
+// providerUserId) pair the grant/membership "by provider" routes key on. The
+// reference is a provider-qualified handle (e.g. "github:alice"); it is
+// resolved through the control plane to the provider's stable numeric user id.
+// The friendly handle alone is not what the grant routes accept — passing it as
+// --provider-user-id was the COR-699 footgun ("provider identity not found") —
+// so the CLI always resolves it first. A bare account ULID is rejected here:
+// the by-provider routes can't be addressed by ULID, and there is no reverse
+// account→provider-id lookup; callers that accept a ULID grantee (project/repo
+// remove) handle it via the typed-id route before reaching this helper.
+func resolveGranteeProvider(ctx context.Context, c *coreapi.Client, ref string) (provider, providerUserID string, err error) {
+	// A ULID is a tempting paste from `grant … list` (which prints the grantee
+	// ID), but the by-provider routes can't be addressed by ULID. Reject it with
+	// a message that points at the form this command actually wants, rather than
+	// letting parseQualifiedHandle dangle a "(or a ULID)" hint that doesn't apply.
+	if looksLikeULID(ref) {
+		return "", "", fmt.Errorf("grantee %q is an account ULID; this command needs a provider-qualified handle like \"github:alice\"", ref)
+	}
+	p, handle, err := parseQualifiedHandle(ref)
+	if err != nil {
+		return "", "", err
+	}
+	id, err := c.ResolveHandle(ctx, coreapi.ResolveHandleParams{Provider: p, Handle: handle})
+	if err != nil {
+		if isCoreNotFound(err) {
+			return "", "", fmt.Errorf("no %s identity for handle %q", p, handle)
+		}
+		return "", "", err
+	}
+	if id.ProviderUserId == "" {
+		return "", "", fmt.Errorf("handle %q resolved to no provider user id", ref)
+	}
+	// Prefer the server-normalized provider over the raw prefix, falling back to
+	// the input when the response omits it.
+	if id.Provider != "" {
+		p = id.Provider
+	}
+	return p, id.ProviderUserId, nil
+}
+
 // parseQualifiedHandle splits a provider-qualified handle like "github:alice"
 // into its provider ("github") and handle ("alice"). Accounts are addressed by
 // this friendly form; a value with no "provider:" prefix is rejected so the
@@ -132,9 +179,10 @@ func resolveProjectRef(ctx context.Context, c *coreapi.Client, ref string) (stri
 // resolveRepoRef turns a repo reference into its ULID. A ULID passes through.
 // A name requires a project scope (projectRef, itself a name or ULID) because
 // repo names are unique only within a project: the repo is resolved via the
-// server's case-insensitive by-name lookup, scoped to that project. Unlike the
-// org/project endpoints, the repo list response has no singular field, so a
-// name-filtered query returns the single match (or none) under `repos`.
+// server's case-insensitive by-name lookup, scoped to that project. Like the
+// org/project endpoints, a name-filtered list returns the single match under the
+// response's singular `repo` field (the plural `repos` is only populated for an
+// unfiltered page) — reading `repos` here was the COR-699 bug.
 func resolveRepoRef(ctx context.Context, c *coreapi.Client, ref, projectRef string) (string, error) {
 	if looksLikeULID(ref) {
 		return ref, nil
@@ -153,10 +201,11 @@ func resolveRepoRef(ctx context.Context, c *coreapi.Client, ref, projectRef stri
 		}
 		return "", err
 	}
-	if len(out.Repos) == 0 {
+	repo, ok := out.Repo.Get()
+	if !ok {
 		return "", noRepoNamedErr(ref)
 	}
-	return out.Repos[0].ID, nil
+	return repo.ID, nil
 }
 
 func noOrgNamedErr(name string) error {

@@ -723,6 +723,40 @@ func (s GetMeOutputBodyMode) Validate() error {
 	}
 }
 
+func (s *GetRepoVisibilityOutputBody) Validate() error {
+	if s == nil {
+		return validate.ErrNilPointer
+	}
+
+	var failures []validate.FieldError
+	if err := func() error {
+		if err := s.Visibility.Validate(); err != nil {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "visibility",
+			Error: err,
+		})
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+	return nil
+}
+
+func (s GetRepoVisibilityOutputBodyVisibility) Validate() error {
+	switch s {
+	case "public":
+		return nil
+	case "private":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
 func (s *GetVersionOutputBody) Validate() error {
 	if s == nil {
 		return validate.ErrNilPointer
@@ -2024,6 +2058,24 @@ func (s *Repo) Validate() error {
 			Error: err,
 		})
 	}
+	if err := func() error {
+		if value, ok := s.Visibility.Get(); ok {
+			if err := func() error {
+				if err := value.Validate(); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "visibility",
+			Error: err,
+		})
+	}
 	if len(failures) > 0 {
 		return &validate.Error{Fields: failures}
 	}
@@ -2048,6 +2100,17 @@ func (s RepoState) Validate() error {
 	case "active":
 		return nil
 	case "failed":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
+func (s RepoVisibility) Validate() error {
+	switch s {
+	case "public":
+		return nil
+	case "private":
 		return nil
 	default:
 		return errors.Errorf("invalid value: %v", s)
@@ -2118,6 +2181,74 @@ func (s *ServiceAccountWithGrants) Validate() error {
 		return &validate.Error{Fields: failures}
 	}
 	return nil
+}
+
+func (s *SetRepoVisibilityInputBody) Validate() error {
+	if s == nil {
+		return validate.ErrNilPointer
+	}
+
+	var failures []validate.FieldError
+	if err := func() error {
+		if err := s.Visibility.Validate(); err != nil {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "visibility",
+			Error: err,
+		})
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+	return nil
+}
+
+func (s SetRepoVisibilityInputBodyVisibility) Validate() error {
+	switch s {
+	case "public":
+		return nil
+	case "private":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
+func (s *SetRepoVisibilityOutputBody) Validate() error {
+	if s == nil {
+		return validate.ErrNilPointer
+	}
+
+	var failures []validate.FieldError
+	if err := func() error {
+		if err := s.Visibility.Validate(); err != nil {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "visibility",
+			Error: err,
+		})
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+	return nil
+}
+
+func (s SetRepoVisibilityOutputBodyVisibility) Validate() error {
+	switch s {
+	case "public":
+		return nil
+	case "private":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
 }
 
 func (s *UpdateMeInputBody) Validate() error {
