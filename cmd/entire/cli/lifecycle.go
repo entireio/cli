@@ -617,7 +617,8 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Single load serves both prompt retrieval and backfill.
 	_, commitMsgSpan := perf.Start(ctx, "generate_commit_message")
 	lastPrompt := ""
-	if sessionState, stateErr := strategy.LoadSessionState(ctx, sessionID); stateErr == nil && sessionState != nil {
+	sessionState, stateErr := strategy.LoadSessionState(ctx, sessionID)
+	if stateErr == nil && sessionState != nil {
 		lastPrompt = sessionState.LastPrompt
 	}
 	// Backfill LastPrompt so `entire status` shows the prompt even when no
@@ -691,6 +692,15 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
 	if totalChanges == 0 {
 		logging.Info(logCtx, "no files modified during session, skipping checkpoint")
+		transitionSessionTurnEnd(ctx, sessionID, event)
+		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
+			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
+				slog.String("error", cleanupErr.Error()))
+		}
+		return nil
+	}
+	if shouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit(ag, sessionState) {
+		logging.Info(logCtx, "mid-turn commit already condensed all tracked files, skipping stop checkpoint")
 		transitionSessionTurnEnd(ctx, sessionID, event)
 		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
@@ -1074,6 +1084,17 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string)
 		return fmt.Errorf("failed to save session state: %w", mutErr)
 	}
 	return nil
+}
+
+// shouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit handles Antigravity's
+// Stop-after-commit ordering. PostCommit has already condensed the checkpoint and
+// cleared FilesTouched, so Stop should only finalize the transcript instead of
+// creating a fresh shadow checkpoint on the new HEAD.
+func shouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit(ag agent.Agent, state *strategy.SessionState) bool {
+	if ag == nil || ag.Name() != agent.AgentNameAntigravity || state == nil {
+		return false
+	}
+	return len(state.TurnCheckpointIDs) > 0 && len(state.FilesTouched) == 0
 }
 
 // logFileChanges logs the files modified, created, and deleted during a session.

@@ -106,7 +106,7 @@ func parsePreInvocation(stdin io.Reader) (*agent.Event, error) {
 // parsePostInvocation handles the PostInvocation hook.
 //
 // Returning nil instead of a TurnEnd event is deliberate: Antigravity writes
-// its transcript file (~/.gemini/antigravity-cli/brain/<conv-id>/.system_generated/logs/transcript.jsonl)
+// its transcript file (~/.gemini/antigravity-cli/brain/<conv-id>/.system_generated/logs/transcript_full.jsonl)
 // AFTER the Stop hook fires, not before PostInvocation. Emitting TurnEnd here
 // would route the event through handleLifecycleTurnEnd, which requires the
 // transcript file to exist (cli/lifecycle.go fileExists check) and would

@@ -768,6 +768,34 @@ func TestHandleLifecycleTurnEnd_EmptyRepository(t *testing.T) {
 	}
 }
 
+func TestShouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit(t *testing.T) {
+	t.Parallel()
+
+	ag := newMockAgent()
+	ag.name = agent.AgentNameAntigravity
+
+	if !shouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit(ag, &strategy.SessionState{
+		TurnCheckpointIDs: []string{"abc123def456"},
+		FilesTouched:      nil,
+	}) {
+		t.Fatal("expected Antigravity stop after fully-condensed mid-turn commit to skip SaveStep")
+	}
+
+	if shouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit(ag, &strategy.SessionState{
+		TurnCheckpointIDs: []string{"abc123def456"},
+		FilesTouched:      []string{"still-uncommitted.go"},
+	}) {
+		t.Fatal("must not skip when Antigravity still has tracked files to checkpoint")
+	}
+
+	other := newMockAgent()
+	if shouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit(other, &strategy.SessionState{
+		TurnCheckpointIDs: []string{"abc123def456"},
+	}) {
+		t.Fatal("must not apply Antigravity stop workaround to other agents")
+	}
+}
+
 // --- handleLifecycleCompaction tests ---
 
 func TestHandleLifecycleCompaction_PreservesTranscriptOffset(t *testing.T) {
