@@ -7,14 +7,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestUnsupportedWrite(t *testing.T) {
+func TestHasUnsupportedCheckpointVersion(t *testing.T) {
 	t.Parallel()
 
-	require.False(t, checkpointpolicy.UnsupportedWrite(checkpointpolicy.DefaultPolicy()))
-	require.True(t, checkpointpolicy.UnsupportedWrite(checkpointpolicy.Policy{
+	require.False(t, checkpointpolicy.HasUnsupportedCheckpointVersion(checkpointpolicy.DefaultPolicy()))
+	require.True(t, checkpointpolicy.HasUnsupportedCheckpointVersion(checkpointpolicy.Policy{
 		CheckpointVersion: unsupportedCheckpointVersionExpr,
 	}))
-	require.True(t, checkpointpolicy.UnsupportedWrite(checkpointpolicy.Policy{
+	require.True(t, checkpointpolicy.HasUnsupportedCheckpointVersion(checkpointpolicy.Policy{
 		CheckpointVersion: "branch-v1",
 	}))
 }
@@ -38,7 +38,7 @@ func TestUnsupportedPolicyMessageIncludesSettingDetails(t *testing.T) {
 
 	require.Contains(t, got, "[entire] This repository requires checkpoint support newer than this Entire CLI.")
 	require.Contains(t, got, "[entire]   brew upgrade entire")
-	require.Contains(t, got, `checkpoint_version "`+unsupportedCheckpointVersionExpr+`" is not writable by this Entire CLI`)
+	require.Contains(t, got, `checkpoint_version "`+unsupportedCheckpointVersionExpr+`" is not supported by this Entire CLI`)
 }
 
 func TestUnsupportedPolicyMessageEmptyForSatisfiedPolicy(t *testing.T) {

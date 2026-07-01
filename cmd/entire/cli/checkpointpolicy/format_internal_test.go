@@ -41,5 +41,5 @@ func TestResolveCheckpointVersionSelectorReportsUnsupportedSelector(t *testing.T
 	t.Parallel()
 
 	_, err := resolveCheckpointVersionSelector("3", []supportedCheckpointVersion{{version: mustSemver("1.0.0")}})
-	require.ErrorContains(t, err, `checkpoint_version "3" is not writable by this Entire CLI`)
+	require.ErrorContains(t, err, `checkpoint_version "3" is not supported by this Entire CLI`)
 }

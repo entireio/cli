@@ -23,17 +23,17 @@ func Normalize(policy Policy) Policy {
 	return policy
 }
 
-func ResolvedWriteVersion(policy Policy) (string, error) {
+func EffectiveCheckpointVersion(policy Policy) (string, error) {
 	policy = Normalize(policy)
 	return ResolveCheckpointVersionSelector(policy.CheckpointVersion)
 }
 
-func ResolvedMetadataVersion(policy Policy) (string, error) {
-	version, err := ResolvedWriteVersion(policy)
+func EffectiveCheckpointMetadataVersion(policy Policy) (string, error) {
+	version, err := EffectiveCheckpointVersion(policy)
 	if err != nil {
 		return "", err
 	}
-	return MetadataVersionForWriteVersion(version)
+	return MetadataVersionForCheckpointVersion(version)
 }
 
 func ValidatePolicy(policy Policy) error {
@@ -43,8 +43,8 @@ func ValidatePolicy(policy Policy) error {
 	return err
 }
 
-func UnsupportedWrite(policy Policy) bool {
-	_, err := ResolvedWriteVersion(policy)
+func HasUnsupportedCheckpointVersion(policy Policy) bool {
+	_, err := EffectiveCheckpointVersion(policy)
 	return err != nil
 }
 

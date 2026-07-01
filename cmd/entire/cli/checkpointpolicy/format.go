@@ -75,14 +75,14 @@ func LogicalVersionForCheckpointMetadata(raw string) (string, error) {
 	return version.String(), nil
 }
 
-func MetadataVersionForWriteVersion(raw string) (string, error) {
+func MetadataVersionForCheckpointVersion(raw string) (string, error) {
 	version, err := semver.StrictNewVersion(raw)
 	if err == nil {
 		if candidate, ok := findSupportedCheckpointVersion(version); ok {
 			return candidate.metadataVersion, nil
 		}
 	}
-	return "", fmt.Errorf("checkpoint_version %q is not writable by this Entire CLI", raw)
+	return "", fmt.Errorf("checkpoint_version %q is not supported by this Entire CLI", raw)
 }
 
 func resolveCheckpointVersionSelector(raw string, candidates []supportedCheckpointVersion) (supportedCheckpointVersion, error) {
@@ -104,7 +104,7 @@ func resolveCheckpointVersionSelector(raw string, candidates []supportedCheckpoi
 	if found {
 		return best, nil
 	}
-	return supportedCheckpointVersion{}, fmt.Errorf("checkpoint_version %q is not writable by this Entire CLI", raw)
+	return supportedCheckpointVersion{}, fmt.Errorf("checkpoint_version %q is not supported by this Entire CLI", raw)
 }
 
 func mustSemver(raw string) *semver.Version {

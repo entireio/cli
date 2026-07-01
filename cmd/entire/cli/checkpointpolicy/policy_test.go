@@ -62,7 +62,7 @@ func TestValidatePolicy(t *testing.T) {
 		{name: "caret version range", policy: checkpointpolicy.Policy{CheckpointVersion: "^1.0.0"}},
 		{name: "comparator version range", policy: checkpointpolicy.Policy{CheckpointVersion: ">=1.0.0"}},
 		{name: "legacy checkpoint version rejected", policy: checkpointpolicy.Policy{CheckpointVersion: "branch-v1"}, wantErr: `checkpoint_version "branch-v1" is not a valid SemVer constraint`},
-		{name: "unsupported write selector", policy: checkpointpolicy.Policy{CheckpointVersion: unsupportedCheckpointVersionExpr}, wantErr: `checkpoint_version "` + unsupportedCheckpointVersionExpr + `" is not writable by this Entire CLI`},
+		{name: "unsupported checkpoint version", policy: checkpointpolicy.Policy{CheckpointVersion: unsupportedCheckpointVersionExpr}, wantErr: `checkpoint_version "` + unsupportedCheckpointVersionExpr + `" is not supported by this Entire CLI`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

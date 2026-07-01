@@ -98,7 +98,7 @@ func formatCheckpointPolicyValue(configured, effective string) string {
 }
 
 func formatCheckpointVersionPolicyValue(configured, effective string) string {
-	if configured != "" && checkpointpolicy.UnsupportedWrite(checkpointpolicy.Policy{
+	if configured != "" && checkpointpolicy.HasUnsupportedCheckpointVersion(checkpointpolicy.Policy{
 		CheckpointVersion: configured,
 	}) {
 		return configured + " (unsupported)"

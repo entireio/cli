@@ -156,7 +156,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		warnIfCheckpointPolicyNeedsUpgrade(logCtx, policy)
 		return nil, errors.New("checkpoint policy cannot be satisfied by this Entire CLI")
 	}
-	checkpointVersion, err := checkpointpolicy.ResolvedMetadataVersion(policy)
+	checkpointVersion, err := checkpointpolicy.EffectiveCheckpointMetadataVersion(policy)
 	if err != nil {
 		return nil, err
 	}
