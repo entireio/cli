@@ -145,6 +145,15 @@ type Event struct {
 	// Metadata holds agent-specific state that the framework stores and makes available
 	// on subsequent events. Examples: Pi's activeLeafId, Cursor's is_background_agent.
 	Metadata map[string]string
+
+	// SuppressIfSessionActive marks a TurnStart the dispatcher should drop when
+	// an active (mid-turn) session already exists for SessionID. It exists for
+	// agents whose per-invocation hooks can't distinguish a follow-up model call
+	// from the first call of a resumed turn (e.g. Antigravity's PreInvocation,
+	// which fires per model invocation): the parser emits a conditional TurnStart
+	// and the dispatcher resolves it against session state (which agent packages
+	// may not read directly).
+	SuppressIfSessionActive bool
 }
 
 // ReadAndParseHookInput reads all bytes from stdin and unmarshals JSON into the given type.

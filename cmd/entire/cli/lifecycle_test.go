@@ -768,6 +768,31 @@ func TestHandleLifecycleTurnEnd_EmptyRepository(t *testing.T) {
 	}
 }
 
+func TestShouldSuppressConditionalTurnStart(t *testing.T) {
+	t.Parallel()
+
+	active := &strategy.SessionState{Phase: session.PhaseActive}
+	idle := &strategy.SessionState{Phase: session.PhaseIdle}
+
+	// Conditional TurnStart (agy invocationNum>0) with an active mid-turn
+	// session is a follow-up model call — suppress so the baseline isn't clobbered.
+	if !shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, active) {
+		t.Error("conditional TurnStart with an ACTIVE session must be suppressed (follow-up invocation)")
+	}
+	// Idle session => the prior turn finished; a new/resumed turn must fire.
+	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, idle) {
+		t.Error("conditional TurnStart with an IDLE session must fire (new/resumed turn)")
+	}
+	// No session (condensed away / fresh) => resume must fire.
+	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, nil) {
+		t.Error("conditional TurnStart with no session must fire (resume after condensation)")
+	}
+	// Unconditional TurnStart (invocationNum==0) must never be suppressed.
+	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: false}, active) {
+		t.Error("unconditional TurnStart must never be suppressed")
+	}
+}
+
 func TestShouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit(t *testing.T) {
 	t.Parallel()
 
