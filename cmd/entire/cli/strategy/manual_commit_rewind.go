@@ -652,7 +652,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
-	if err := checkpointpolicy.EnsureCanReadVersion(point.CheckpointID.String(), summary.CheckpointVersion); err != nil {
+	if err := checkpointpolicy.ValidateCheckpointMetadataVersion(point.CheckpointID.String(), summary.CheckpointVersion); err != nil {
 		return nil, err
 	}
 

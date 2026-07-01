@@ -659,12 +659,12 @@ func TestResolveLatestCheckpointReturnsUnsupportedWhenAnyCheckpointIsUnsupported
 	if found {
 		t.Fatal("resolveLatestCheckpoint() found = true")
 	}
-	if !checkpointpolicy.IsUnsupportedVersion(err) {
+	if !checkpointpolicy.IsUnsupportedCheckpointVersionError(err) {
 		t.Fatalf("resolveLatestCheckpoint() error = %v, want unsupported version", err)
 	}
 }
 
-func TestResolveLatestCheckpointReturnsUnsupportedWhenNoReadableCheckpointExists(t *testing.T) {
+func TestResolveLatestCheckpointReturnsUnsupportedWhenNoSupportedCheckpointExists(t *testing.T) {
 	t.Parallel()
 
 	unsupportedID := id.MustCheckpointID("aaa111bbb222")
@@ -681,7 +681,7 @@ func TestResolveLatestCheckpointReturnsUnsupportedWhenNoReadableCheckpointExists
 	if found {
 		t.Fatal("resolveLatestCheckpoint() found = true")
 	}
-	if !checkpointpolicy.IsUnsupportedVersion(err) {
+	if !checkpointpolicy.IsUnsupportedCheckpointVersionError(err) {
 		t.Fatalf("resolveLatestCheckpoint() error = %v, want unsupported version", err)
 	}
 }
@@ -1217,7 +1217,7 @@ func TestCheckRemoteMetadata_ReturnsUnsupportedVersionFromRemote(t *testing.T) {
 	if err == nil {
 		t.Fatal("checkRemoteMetadata() error = nil, want unsupported checkpoint version")
 	}
-	if !checkpointpolicy.IsUnsupportedVersion(err) {
+	if !checkpointpolicy.IsUnsupportedCheckpointVersionError(err) {
 		t.Fatalf("checkRemoteMetadata() error = %v, want unsupported checkpoint version", err)
 	}
 }

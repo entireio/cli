@@ -49,8 +49,22 @@ func TestParseCheckpointVersionSelector(t *testing.T) {
 func TestSupportedLogicalVersions(t *testing.T) {
 	t.Parallel()
 
-	require.True(t, checkpointpolicy.CanReadVersion(checkpointpolicy.LogicalCheckpointVersionV1))
-	require.False(t, checkpointpolicy.CanReadVersion("2.0.0"))
+	require.True(t, checkpointpolicy.IsSupportedCheckpointVersion(checkpointpolicy.LogicalCheckpointVersionV1))
+	require.False(t, checkpointpolicy.IsSupportedCheckpointVersion("2.0.0"))
+}
+
+func TestValidateCheckpointMetadataVersion(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, checkpointpolicy.ValidateCheckpointMetadataVersion("abc123", checkpoint.CheckpointVersionBranchV1))
+
+	err := checkpointpolicy.ValidateCheckpointMetadataVersion("abc123", "2.0.0")
+	require.ErrorContains(t, err, `checkpoint abc123 uses unsupported checkpoint_version "2.0.0"`)
+	require.True(t, checkpointpolicy.IsUnsupportedCheckpointVersionError(err))
+
+	err = checkpointpolicy.ValidateCheckpointMetadataVersion("abc123", "refs-v1")
+	require.ErrorContains(t, err, `checkpoint abc123 has invalid checkpoint_version "refs-v1"`)
+	require.False(t, checkpointpolicy.IsUnsupportedCheckpointVersionError(err))
 }
 
 func TestMetadataVersionMapping(t *testing.T) {

@@ -335,7 +335,7 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 		if err == nil {
 			sessionID = returnedSessionID
 			restored = true
-		} else if checkpointpolicy.IsUnsupportedVersion(err) {
+		} else if checkpointpolicy.IsUnsupportedCheckpointVersionError(err) {
 			return err
 		}
 	}
@@ -580,7 +580,7 @@ func runRewindToInternal(ctx context.Context, w, errW io.Writer, commitID string
 		if err == nil {
 			sessionID = returnedSessionID
 			restored = true
-		} else if checkpointpolicy.IsUnsupportedVersion(err) {
+		} else if checkpointpolicy.IsUnsupportedCheckpointVersionError(err) {
 			return err
 		}
 	}
@@ -772,7 +772,7 @@ func restoreSessionTranscriptFromStrategy(ctx context.Context, cpID id.Checkpoin
 	if err != nil {
 		return "", fmt.Errorf("failed to read checkpoint: %w", err)
 	}
-	if err := checkpointpolicy.EnsureCanReadVersion(cpID.String(), summary.CheckpointVersion); err != nil {
+	if err := checkpointpolicy.ValidateCheckpointMetadataVersion(cpID.String(), summary.CheckpointVersion); err != nil {
 		return "", err
 	}
 

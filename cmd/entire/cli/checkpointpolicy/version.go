@@ -5,19 +5,21 @@ import (
 	"fmt"
 )
 
-var errUnsupportedVersion = errors.New("not read-supported by this Entire CLI")
+var errUnsupportedCheckpointVersion = errors.New("not supported by this Entire CLI")
 
-func IsUnsupportedVersion(err error) bool {
-	return errors.Is(err, errUnsupportedVersion)
+// IsUnsupportedCheckpointVersionError reports whether err means checkpoint metadata uses an unsupported version.
+func IsUnsupportedCheckpointVersionError(err error) bool {
+	return errors.Is(err, errUnsupportedCheckpointVersion)
 }
 
-func EnsureCanReadVersion(checkpointID, version string) error {
+// ValidateCheckpointMetadataVersion rejects checkpoint metadata versions this CLI does not support.
+func ValidateCheckpointMetadataVersion(checkpointID, version string) error {
 	logicalVersion, err := LogicalVersionForCheckpointMetadata(version)
 	if err != nil {
 		return fmt.Errorf("checkpoint %s has invalid checkpoint_version %q: %w", checkpointID, version, err)
 	}
-	if !CanReadVersion(logicalVersion) {
-		return unsupportedVersionError{
+	if !IsSupportedCheckpointVersion(logicalVersion) {
+		return unsupportedCheckpointVersionError{
 			CheckpointID: checkpointID,
 			Version:      version,
 		}
@@ -25,15 +27,15 @@ func EnsureCanReadVersion(checkpointID, version string) error {
 	return nil
 }
 
-type unsupportedVersionError struct {
+type unsupportedCheckpointVersionError struct {
 	CheckpointID string
 	Version      string
 }
 
-func (e unsupportedVersionError) Error() string {
-	return fmt.Sprintf("checkpoint %s uses unsupported checkpoint_version %q: %v", e.CheckpointID, e.Version, errUnsupportedVersion)
+func (e unsupportedCheckpointVersionError) Error() string {
+	return fmt.Sprintf("checkpoint %s uses unsupported checkpoint_version %q: %v", e.CheckpointID, e.Version, errUnsupportedCheckpointVersion)
 }
 
-func (e unsupportedVersionError) Unwrap() error {
-	return errUnsupportedVersion
+func (e unsupportedCheckpointVersionError) Unwrap() error {
+	return errUnsupportedCheckpointVersion
 }

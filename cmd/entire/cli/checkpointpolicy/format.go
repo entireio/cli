@@ -52,7 +52,8 @@ func ResolveCheckpointVersionSelector(raw string) (string, error) {
 	return version.version.String(), nil
 }
 
-func CanReadVersion(raw string) bool {
+// IsSupportedCheckpointVersion reports whether raw is a logical checkpoint version this CLI supports.
+func IsSupportedCheckpointVersion(raw string) bool {
 	version, err := semver.StrictNewVersion(raw)
 	if err != nil {
 		return false

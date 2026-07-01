@@ -266,7 +266,7 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 	if err != nil {
 		return fmt.Errorf("failed to read checkpoint: %w", err)
 	}
-	if err := checkpointpolicy.EnsureCanReadVersion(cpID.String(), summary.CheckpointVersion); err != nil {
+	if err := checkpointpolicy.ValidateCheckpointMetadataVersion(cpID.String(), summary.CheckpointVersion); err != nil {
 		return err
 	}
 
@@ -376,7 +376,7 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 	if err != nil {
 		return fmt.Errorf("failed to read checkpoint: %w", err)
 	}
-	if err := checkpointpolicy.EnsureCanReadVersion(cpID.String(), summary.CheckpointVersion); err != nil {
+	if err := checkpointpolicy.ValidateCheckpointMetadataVersion(cpID.String(), summary.CheckpointVersion); err != nil {
 		return err
 	}
 
