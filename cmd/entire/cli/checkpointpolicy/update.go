@@ -90,29 +90,46 @@ func rejectDowngrades(before, after Policy, opts UpdateOptions) error {
 		return nil
 	}
 	if opts.CheckpointVersionSet {
-		if err := rejectFieldDowngrade("checkpoint_version", before.CheckpointVersion, after.CheckpointVersion); err != nil {
+		if err := rejectCheckpointVersionDowngrade(before.CheckpointVersion, after.CheckpointVersion); err != nil {
 			return err
 		}
 	}
 	if opts.CheckpointMinVersionSet {
-		if err := rejectFieldDowngrade("checkpoint_min_version", before.CheckpointMinVersion, after.CheckpointMinVersion); err != nil {
+		if err := rejectCheckpointMinVersionDowngrade(before, after.CheckpointMinVersion); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func rejectFieldDowngrade(field, beforeRaw, afterRaw string) error {
-	before, err := ParseFormat(beforeRaw)
+func rejectCheckpointVersionDowngrade(beforeRaw, afterRaw string) error {
+	before, err := ResolveCheckpointVersionSelector(beforeRaw)
 	if err != nil {
-		return fmt.Errorf("%s existing value %q: %w", field, beforeRaw, err)
+		return fmt.Errorf("checkpoint_version existing value %q: %w; pass --force to replace it", beforeRaw, err)
 	}
-	after, err := ParseFormat(afterRaw)
+	after, err := ResolveCheckpointVersionSelector(afterRaw)
 	if err != nil {
-		return fmt.Errorf("%s: %w", field, err)
+		return fmt.Errorf("checkpoint_version: %w", err)
 	}
-	if Compare(after, before) < 0 {
-		return fmt.Errorf("would downgrade %s from %q to %q; pass --force to allow this", field, beforeRaw, afterRaw)
+	beforeVersion := mustSemver(before)
+	afterVersion := mustSemver(after)
+	if afterVersion.LessThan(beforeVersion) {
+		return fmt.Errorf("would downgrade checkpoint_version from %q to %q; pass --force to allow this", beforeRaw, afterRaw)
+	}
+	return nil
+}
+
+func rejectCheckpointMinVersionDowngrade(before Policy, afterRaw string) error {
+	beforeWriteVersion, err := ResolvedWriteVersion(before)
+	if err != nil {
+		return fmt.Errorf("checkpoint_min_version existing checkpoint_version %q: %w; pass --force to replace it", before.CheckpointVersion, err)
+	}
+	constraint, err := CheckpointMinVersionConstraint(afterRaw)
+	if err != nil {
+		return fmt.Errorf("checkpoint_min_version: %w", err)
+	}
+	if !constraint.Check(mustSemver(beforeWriteVersion)) {
+		return fmt.Errorf("would raise checkpoint_min_version from %q to %q; pass --force to allow this", before.CheckpointMinVersion, afterRaw)
 	}
 	return nil
 }

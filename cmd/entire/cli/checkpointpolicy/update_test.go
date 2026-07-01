@@ -3,7 +3,6 @@ package checkpointpolicy_test
 import (
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/require"
@@ -12,8 +11,8 @@ import (
 func TestUpdateRejectsDowngradeFromRemoteWithoutForce(t *testing.T) {
 	remoteDir, remoteRepo, bareDir := initPolicyRemoteFixture(t)
 	_, err := checkpointpolicy.WriteLocal(t.Context(), remoteRepo, plumbing.ZeroHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "refs-v1",
+		CheckpointVersion:    "2",
+		CheckpointMinVersion: ">=2.0.0",
 	})
 	require.NoError(t, err)
 	pushPolicyRefWithGit(t, remoteDir, bareDir)
@@ -21,12 +20,13 @@ func TestUpdateRejectsDowngradeFromRemoteWithoutForce(t *testing.T) {
 	localDir, localRepo := initPolicyRepoWithDir(t)
 
 	_, err = checkpointpolicy.Update(t.Context(), localRepo, checkpointpolicy.Target{Remote: bareDir, Dir: localDir}, checkpointpolicy.UpdateOptions{
-		CheckpointVersion:       checkpoint.CheckpointVersionBranchV1,
+		CheckpointVersion:       checkpointpolicy.DefaultCheckpointVersionSelector,
 		CheckpointVersionSet:    true,
-		CheckpointMinVersion:    checkpoint.CheckpointVersionBranchV1,
+		CheckpointMinVersion:    checkpointpolicy.DefaultCheckpointMinVersionRange,
 		CheckpointMinVersionSet: true,
 	})
-	require.ErrorContains(t, err, "would downgrade checkpoint_version")
+	require.ErrorContains(t, err, `checkpoint_version existing value "2"`)
+	require.ErrorContains(t, err, "pass --force")
 
 	localState, err := checkpointpolicy.ReadLocal(t.Context(), localRepo)
 	require.NoError(t, err)
@@ -36,25 +36,25 @@ func TestUpdateRejectsDowngradeFromRemoteWithoutForce(t *testing.T) {
 func TestUpdateAllowsDowngradeWithForce(t *testing.T) {
 	remoteDir, remoteRepo, bareDir := initPolicyRemoteFixture(t)
 	remoteHash, err := checkpointpolicy.WriteLocal(t.Context(), remoteRepo, plumbing.ZeroHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "refs-v1",
+		CheckpointVersion:    "2",
+		CheckpointMinVersion: ">=2.0.0",
 	})
 	require.NoError(t, err)
 	pushPolicyRefWithGit(t, remoteDir, bareDir)
 
 	localDir, localRepo := initPolicyRepoWithDir(t)
 	got, err := checkpointpolicy.Update(t.Context(), localRepo, checkpointpolicy.Target{Remote: bareDir, Dir: localDir}, checkpointpolicy.UpdateOptions{
-		CheckpointVersion:       checkpoint.CheckpointVersionBranchV1,
+		CheckpointVersion:       checkpointpolicy.DefaultCheckpointVersionSelector,
 		CheckpointVersionSet:    true,
-		CheckpointMinVersion:    checkpoint.CheckpointVersionBranchV1,
+		CheckpointMinVersion:    checkpointpolicy.DefaultCheckpointMinVersionRange,
 		CheckpointMinVersionSet: true,
 		Force:                   true,
 	})
 	require.NoError(t, err)
 	require.Equal(t, checkpointpolicy.SourceLocal, got.Source)
 	require.Equal(t, checkpointpolicy.Policy{
-		CheckpointVersion:    checkpoint.CheckpointVersionBranchV1,
-		CheckpointMinVersion: checkpoint.CheckpointVersionBranchV1,
+		CheckpointVersion:    checkpointpolicy.DefaultCheckpointVersionSelector,
+		CheckpointMinVersion: checkpointpolicy.DefaultCheckpointMinVersionRange,
 	}, got.Policy)
 
 	commit, err := localRepo.CommitObject(got.Hash)
@@ -93,7 +93,7 @@ func TestUpdateUnsetsOnlyProvidedPolicyField(t *testing.T) {
 		CheckpointVersionSet: true,
 	})
 	require.NoError(t, err)
-	require.Equal(t, checkpointpolicy.Policy{CheckpointMinVersion: checkpoint.CheckpointVersionBranchV1}, got.Policy)
+	require.Equal(t, checkpointpolicy.Policy{CheckpointMinVersion: checkpointpolicy.DefaultCheckpointMinVersionRange}, got.Policy)
 
 	commit, err := localRepo.CommitObject(got.Hash)
 	require.NoError(t, err)
@@ -113,9 +113,9 @@ func TestUpdatePreservesLocalPolicyAheadOfRemote(t *testing.T) {
 	require.NoError(t, err)
 
 	got, err := checkpointpolicy.Update(t.Context(), localRepo, checkpointpolicy.Target{Remote: bareDir, Dir: localDir}, checkpointpolicy.UpdateOptions{
-		CheckpointVersion:       checkpoint.CheckpointVersionBranchV1,
+		CheckpointVersion:       checkpointpolicy.DefaultCheckpointVersionSelector,
 		CheckpointVersionSet:    true,
-		CheckpointMinVersion:    checkpoint.CheckpointVersionBranchV1,
+		CheckpointMinVersion:    checkpointpolicy.DefaultCheckpointMinVersionRange,
 		CheckpointMinVersionSet: true,
 	})
 	require.NoError(t, err)
@@ -139,16 +139,16 @@ func TestUpdateRejectsDivergedLocalPolicy(t *testing.T) {
 	require.NoError(t, err)
 
 	remoteHash, err := checkpointpolicy.WriteLocal(t.Context(), remoteRepo, baseHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "refs-v1",
+		CheckpointVersion:    "2",
+		CheckpointMinVersion: ">=2.0.0",
 	})
 	require.NoError(t, err)
 	pushPolicyRefWithGit(t, remoteDir, bareDir)
 
 	_, err = checkpointpolicy.Update(t.Context(), localRepo, checkpointpolicy.Target{Remote: bareDir, Dir: localDir}, checkpointpolicy.UpdateOptions{
-		CheckpointVersion:       checkpoint.CheckpointVersionBranchV1,
+		CheckpointVersion:       checkpointpolicy.DefaultCheckpointVersionSelector,
 		CheckpointVersionSet:    true,
-		CheckpointMinVersion:    checkpoint.CheckpointVersionBranchV1,
+		CheckpointMinVersion:    checkpointpolicy.DefaultCheckpointMinVersionRange,
 		CheckpointMinVersionSet: true,
 	})
 	require.ErrorContains(t, err, "local checkpoint policy")
