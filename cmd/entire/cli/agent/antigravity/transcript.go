@@ -1,17 +1,13 @@
 package antigravity
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
 )
 
 // Antigravity 2.0 (agy) writes JSONL transcripts at
@@ -26,17 +22,11 @@ import (
 //     "content":     string (optional — user request / model text),
 //     "tool_calls":  [ { "name": string, "args": object } ] (optional)
 //   }
-// v1 ships JSONL chunk/reassemble passthrough plus prompt extraction. Token
-// counting and file-change replay are deferred to a follow-up plan. See
-// testdata/transcript_sample.jsonl for a captured fixture.
-
-var _ agent.PromptExtractor = (*AntigravityAgent)(nil)
-
-type antigravityTranscriptStep struct {
-	Source  string `json:"source"`
-	Type    string `json:"type"`
-	Content string `json:"content"`
-}
+// This file ships the JSONL chunk/reassemble passthrough plus PrepareTranscript
+// (agy's asynchronous transcript write). Field-aware decoding — prompt
+// extraction, transcript-position tracking, and file-change replay — lives in
+// the transcript-decode work (PR #1381) so there is a single owner of that
+// surface. See testdata/transcript_sample.jsonl for a captured fixture.
 
 func (a *AntigravityAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 	data, err := os.ReadFile(sessionRef) //nolint:gosec // path supplied by agent hook stdin
@@ -56,74 +46,6 @@ func (a *AntigravityAgent) ChunkTranscript(_ context.Context, content []byte, ma
 
 func (a *AntigravityAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 	return agent.ReassembleJSONL(chunks), nil
-}
-
-func (a *AntigravityAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, error) {
-	data, err := os.ReadFile(sessionRef) //nolint:gosec // Path comes from agent hook input
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("antigravity: read transcript: %w", err)
-	}
-
-	var prompts []string
-	lineNum := 0
-	for _, lineData := range splitAntigravityJSONL(data) {
-		lineNum++
-		if lineNum <= fromOffset {
-			continue
-		}
-
-		var step antigravityTranscriptStep
-		if json.Unmarshal(lineData, &step) != nil {
-			continue
-		}
-		if step.Type != "USER_INPUT" {
-			continue
-		}
-		if prompt := cleanAntigravityPrompt(step.Content); prompt != "" {
-			prompts = append(prompts, prompt)
-		}
-	}
-
-	return prompts, nil
-}
-
-func splitAntigravityJSONL(data []byte) [][]byte {
-	var lines [][]byte
-	for _, line := range bytes.Split(data, []byte("\n")) {
-		line = bytes.TrimSpace(line)
-		if len(line) > 0 {
-			lines = append(lines, line)
-		}
-	}
-	return lines
-}
-
-func cleanAntigravityPrompt(content string) string {
-	content = strings.TrimSpace(content)
-	if content == "" {
-		return ""
-	}
-
-	if start := strings.Index(content, "<USER_REQUEST>"); start >= 0 {
-		content = content[start+len("<USER_REQUEST>"):]
-		if end := strings.Index(content, "</USER_REQUEST>"); end >= 0 {
-			content = content[:end]
-		}
-	}
-	if metadata := strings.Index(content, "<ADDITIONAL_METADATA>"); metadata >= 0 {
-		content = content[:metadata]
-	}
-	content = strings.TrimSpace(content)
-
-	const requestMarker = "Request:\n"
-	if idx := strings.Index(content, requestMarker); idx >= 0 {
-		content = content[idx+len(requestMarker):]
-	}
-
-	return textutil.StripIDEContextTags(content)
 }
 
 // PrepareTranscript implements the optional TranscriptPreparer interface. The

@@ -3,10 +3,8 @@ package antigravity
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 	"time"
 )
@@ -115,109 +113,4 @@ func TestPrepareTranscript_EmptyRefIsNoOp(t *testing.T) {
 	if err := a.PrepareTranscript(context.Background(), ""); err != nil {
 		t.Errorf("PrepareTranscript(\"\") should not error, got %v", err)
 	}
-}
-
-func TestExtractPrompts_UnwrapsAntigravityUserInput(t *testing.T) {
-	t.Parallel()
-	path := writeAntigravityTranscript(t, map[string]string{
-		"source": "USER_EXPLICIT",
-		"type":   "USER_INPUT",
-		"content": "<USER_REQUEST>\n" +
-			"Use the workspace at /tmp/repo.\n\n" +
-			"Request:\n" +
-			"create a file at docs/feature.md with feature module notes\n" +
-			"</USER_REQUEST>\n" +
-			"<ADDITIONAL_METADATA>\nignored metadata\n</ADDITIONAL_METADATA>",
-	})
-
-	prompts, err := (&AntigravityAgent{}).ExtractPrompts(path, 0)
-	if err != nil {
-		t.Fatalf("ExtractPrompts: %v", err)
-	}
-	want := []string{"create a file at docs/feature.md with feature module notes"}
-	if !reflect.DeepEqual(prompts, want) {
-		t.Fatalf("ExtractPrompts() = %#v, want %#v", prompts, want)
-	}
-}
-
-func TestExtractPrompts_FromOffset(t *testing.T) {
-	t.Parallel()
-	path := writeAntigravityTranscript(t,
-		map[string]string{
-			"source":  "USER_EXPLICIT",
-			"type":    "USER_INPUT",
-			"content": "old prompt",
-		},
-		map[string]string{
-			"source":  "MODEL",
-			"type":    "PLANNER_RESPONSE",
-			"content": "model output",
-		},
-		map[string]string{
-			"source":  "USER_EXPLICIT",
-			"type":    "USER_INPUT",
-			"content": "<USER_REQUEST>\nRequest:\nnew prompt\n</USER_REQUEST>",
-		},
-	)
-
-	prompts, err := (&AntigravityAgent{}).ExtractPrompts(path, 2)
-	if err != nil {
-		t.Fatalf("ExtractPrompts: %v", err)
-	}
-	want := []string{"new prompt"}
-	if !reflect.DeepEqual(prompts, want) {
-		t.Fatalf("ExtractPrompts() = %#v, want %#v", prompts, want)
-	}
-}
-
-func TestExtractPrompts_IgnoresMalformedAndNonUserInput(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "transcript_full.jsonl")
-	data := []byte("not json\n" +
-		`{"source":"MODEL","type":"PLANNER_RESPONSE","content":"assistant text"}` + "\n" +
-		`{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"keep me"}` + "\n" +
-		`{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"   "}` + "\n")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	prompts, err := (&AntigravityAgent{}).ExtractPrompts(path, 0)
-	if err != nil {
-		t.Fatalf("ExtractPrompts: %v", err)
-	}
-	want := []string{"keep me"}
-	if !reflect.DeepEqual(prompts, want) {
-		t.Fatalf("ExtractPrompts() = %#v, want %#v", prompts, want)
-	}
-}
-
-func TestExtractPrompts_MissingFileReturnsNoPrompts(t *testing.T) {
-	t.Parallel()
-	prompts, err := (&AntigravityAgent{}).ExtractPrompts(filepath.Join(t.TempDir(), "missing.jsonl"), 0)
-	if err != nil {
-		t.Fatalf("ExtractPrompts: %v", err)
-	}
-	if len(prompts) != 0 {
-		t.Fatalf("ExtractPrompts() = %#v, want no prompts", prompts)
-	}
-}
-
-func writeAntigravityTranscript(t *testing.T, entries ...map[string]string) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "transcript_full.jsonl")
-	var data []byte
-	for _, entry := range entries {
-		line, err := json.Marshal(entry)
-		if err != nil {
-			t.Fatal(err)
-		}
-		data = append(data, line...)
-		data = append(data, '\n')
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
 }
