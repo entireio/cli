@@ -411,9 +411,10 @@ func TestAttributionResolverMissingMetadataIncludesReason(t *testing.T) {
 }
 
 type attributionCheckpointReaderStub struct {
-	summary *checkpoint.CheckpointSummary
-	content *checkpoint.SessionContent
-	readErr error
+	summary    *checkpoint.CheckpointSummary
+	content    *checkpoint.SessionContent
+	readErr    error
+	sessionErr error // returned by ReadSessionMetadataAndPrompts when set
 }
 
 func (s *attributionCheckpointReaderStub) Read(context.Context, checkpointid.CheckpointID) (*checkpoint.CheckpointSummary, error) {
@@ -424,6 +425,9 @@ func (s *attributionCheckpointReaderStub) Read(context.Context, checkpointid.Che
 }
 
 func (s *attributionCheckpointReaderStub) ReadSessionMetadataAndPrompts(context.Context, checkpointid.CheckpointID, int) (*checkpoint.Metadata, string, error) {
+	if s.sessionErr != nil {
+		return nil, "", s.sessionErr
+	}
 	if s.content == nil {
 		return nil, "", nil
 	}
