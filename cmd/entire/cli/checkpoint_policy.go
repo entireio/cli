@@ -66,9 +66,8 @@ func runCheckpointPolicy(cmd *cobra.Command, opts checkpointPolicyOptions) error
 	checkpointVersionSet := cmd.Flags().Changed(checkpointVersionFlag)
 	if checkpointVersionSet {
 		state, err = checkpointpolicy.Update(ctx, repo, target, checkpointpolicy.UpdateOptions{
-			CheckpointVersion:    opts.version,
-			CheckpointVersionSet: checkpointVersionSet,
-			Force:                opts.force,
+			CheckpointVersion: opts.version,
+			Force:             opts.force,
 		})
 		if err != nil {
 			return checkpointPolicyError("update checkpoint policy", err)
@@ -90,20 +89,14 @@ func runCheckpointPolicy(cmd *cobra.Command, opts checkpointPolicyOptions) error
 	return nil
 }
 
-func formatCheckpointPolicyValue(configured, effective string) string {
+func formatCheckpointVersionPolicyValue(configured, effective string) string {
 	if configured == "" {
 		return effective + " (default)"
 	}
-	return configured
-}
-
-func formatCheckpointVersionPolicyValue(configured, effective string) string {
-	if configured != "" && checkpointpolicy.HasUnsupportedCheckpointVersion(checkpointpolicy.Policy{
-		CheckpointVersion: configured,
-	}) {
+	if err := checkpointpolicy.ValidateCheckpointVersionSelector(configured); err != nil {
 		return configured + " (unsupported)"
 	}
-	return formatCheckpointPolicyValue(configured, effective)
+	return configured
 }
 
 func checkpointPolicyError(message string, err error) error {

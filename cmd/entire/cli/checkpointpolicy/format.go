@@ -2,7 +2,6 @@ package checkpointpolicy
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 
 	semver "github.com/Masterminds/semver/v3"
@@ -44,12 +43,10 @@ func ParseCheckpointVersionSelector(raw string) (*semver.Constraints, error) {
 	return constraint, nil
 }
 
-func ResolveCheckpointVersionSelector(raw string) (string, error) {
-	version, err := resolveCheckpointVersionSelector(raw, supportedCheckpointVersions)
-	if err != nil {
-		return "", err
-	}
-	return version.version.String(), nil
+// ValidateCheckpointVersionSelector reports whether raw is a selector this CLI can satisfy.
+func ValidateCheckpointVersionSelector(raw string) error {
+	_, err := resolveCheckpointVersionSelector(raw, supportedCheckpointVersions)
+	return err
 }
 
 // IsSupportedCheckpointVersion reports whether raw is a logical checkpoint version this CLI supports.
@@ -58,9 +55,8 @@ func IsSupportedCheckpointVersion(raw string) bool {
 	if err != nil {
 		return false
 	}
-	return slices.ContainsFunc(supportedCheckpointVersions, func(candidate supportedCheckpointVersion) bool {
-		return candidate.version.Equal(version)
-	})
+	_, ok := findSupportedCheckpointVersion(version)
+	return ok
 }
 
 func LogicalVersionForCheckpointMetadata(raw string) (string, error) {
@@ -73,16 +69,6 @@ func LogicalVersionForCheckpointMetadata(raw string) (string, error) {
 		return "", fmt.Errorf("invalid checkpoint_version %q", raw)
 	}
 	return version.String(), nil
-}
-
-func MetadataVersionForCheckpointVersion(raw string) (string, error) {
-	version, err := semver.StrictNewVersion(raw)
-	if err == nil {
-		if candidate, ok := findSupportedCheckpointVersion(version); ok {
-			return candidate.metadataVersion, nil
-		}
-	}
-	return "", fmt.Errorf("checkpoint_version %q is not supported by this Entire CLI", raw)
 }
 
 func resolveCheckpointVersionSelector(raw string, candidates []supportedCheckpointVersion) (supportedCheckpointVersion, error) {

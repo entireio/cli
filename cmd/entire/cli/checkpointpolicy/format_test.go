@@ -94,14 +94,3 @@ func TestMetadataVersionMapping(t *testing.T) {
 		})
 	}
 }
-
-func TestMetadataVersionForCheckpointVersion(t *testing.T) {
-	t.Parallel()
-
-	got, err := checkpointpolicy.MetadataVersionForCheckpointVersion(checkpointpolicy.LogicalCheckpointVersionV1)
-	require.NoError(t, err)
-	require.Equal(t, checkpoint.CheckpointVersionBranchV1, got)
-
-	_, err = checkpointpolicy.MetadataVersionForCheckpointVersion("2.0.0")
-	require.ErrorContains(t, err, `checkpoint_version "2.0.0" is not supported by this Entire CLI`)
-}

@@ -20,10 +20,11 @@ func checkpointVersionForNewCheckpoint(ctx context.Context, repo *git.Repository
 	if err != nil {
 		return "", err
 	}
-	if !checkpointpolicy.CanSatisfyPolicy(policy) {
+	version, err := checkpointpolicy.EffectiveCheckpointMetadataVersion(policy)
+	if err != nil {
 		return "", unsupportedCheckpointPolicyError(policy)
 	}
-	return checkpointpolicy.EffectiveCheckpointMetadataVersion(policy)
+	return version, nil
 }
 
 func ensureCheckpointPolicyAllowsCheckpointData(ctx context.Context, repo *git.Repository) error {

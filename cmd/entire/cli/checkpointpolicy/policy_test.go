@@ -3,6 +3,7 @@ package checkpointpolicy_test
 import (
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/stretchr/testify/require"
 )
@@ -75,6 +76,19 @@ func TestValidatePolicy(t *testing.T) {
 			require.ErrorContains(t, err, tt.wantErr)
 		})
 	}
+}
+
+func TestEffectiveCheckpointMetadataVersion(t *testing.T) {
+	t.Parallel()
+
+	got, err := checkpointpolicy.EffectiveCheckpointMetadataVersion(checkpointpolicy.DefaultPolicy())
+	require.NoError(t, err)
+	require.Equal(t, checkpoint.CheckpointVersionBranchV1, got)
+
+	_, err = checkpointpolicy.EffectiveCheckpointMetadataVersion(checkpointpolicy.Policy{
+		CheckpointVersion: unsupportedCheckpointVersionExpr,
+	})
+	require.ErrorContains(t, err, `checkpoint_version "`+unsupportedCheckpointVersionExpr+`" is not supported by this Entire CLI`)
 }
 
 func TestPolicyEnablesFeature(t *testing.T) {

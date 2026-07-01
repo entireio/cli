@@ -7,18 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestHasUnsupportedCheckpointVersion(t *testing.T) {
-	t.Parallel()
-
-	require.False(t, checkpointpolicy.HasUnsupportedCheckpointVersion(checkpointpolicy.DefaultPolicy()))
-	require.True(t, checkpointpolicy.HasUnsupportedCheckpointVersion(checkpointpolicy.Policy{
-		CheckpointVersion: unsupportedCheckpointVersionExpr,
-	}))
-	require.True(t, checkpointpolicy.HasUnsupportedCheckpointVersion(checkpointpolicy.Policy{
-		CheckpointVersion: "branch-v1",
-	}))
-}
-
 func TestCanSatisfyPolicy(t *testing.T) {
 	t.Parallel()
 
@@ -26,6 +14,9 @@ func TestCanSatisfyPolicy(t *testing.T) {
 	require.True(t, checkpointpolicy.CanSatisfyPolicy(checkpointpolicy.Policy{}))
 	require.False(t, checkpointpolicy.CanSatisfyPolicy(checkpointpolicy.Policy{
 		CheckpointVersion: unsupportedCheckpointVersionExpr,
+	}))
+	require.False(t, checkpointpolicy.CanSatisfyPolicy(checkpointpolicy.Policy{
+		CheckpointVersion: "branch-v1",
 	}))
 }
 

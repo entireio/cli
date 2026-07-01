@@ -152,13 +152,10 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	if err != nil {
 		return nil, fmt.Errorf("checkpoint policy could not be read: %w", err)
 	}
-	if !checkpointpolicy.CanSatisfyPolicy(policy) {
-		warnIfCheckpointPolicyNeedsUpgrade(logCtx, policy)
-		return nil, errors.New("checkpoint policy cannot be satisfied by this Entire CLI")
-	}
 	checkpointVersion, err := checkpointpolicy.EffectiveCheckpointMetadataVersion(policy)
 	if err != nil {
-		return nil, err
+		warnIfCheckpointPolicyNeedsUpgrade(logCtx, policy)
+		return nil, errors.New("checkpoint policy cannot be satisfied by this Entire CLI")
 	}
 
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)

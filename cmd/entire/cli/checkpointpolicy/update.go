@@ -8,9 +8,8 @@ import (
 )
 
 type UpdateOptions struct {
-	CheckpointVersion    string
-	CheckpointVersionSet bool
-	Force                bool
+	CheckpointVersion string
+	Force             bool
 }
 
 func Update(ctx context.Context, repo *git.Repository, target Target, opts UpdateOptions) (State, error) {
@@ -20,9 +19,7 @@ func Update(ctx context.Context, repo *git.Repository, target Target, opts Updat
 	}
 
 	policy := baseline.Policy
-	if opts.CheckpointVersionSet {
-		policy.CheckpointVersion = opts.CheckpointVersion
-	}
+	policy.CheckpointVersion = opts.CheckpointVersion
 
 	if err := rejectDowngrades(baseline.Policy, policy, opts); err != nil {
 		return State{}, err
@@ -78,32 +75,22 @@ func updateBaseline(ctx context.Context, repo *git.Repository, target Target) (S
 }
 
 func rejectDowngrades(before, after Policy, opts UpdateOptions) error {
-	before = Normalize(before)
-	after = Normalize(after)
-
 	if opts.Force {
 		return nil
 	}
-	if opts.CheckpointVersionSet {
-		if err := rejectCheckpointVersionDowngrade(before.CheckpointVersion, after.CheckpointVersion); err != nil {
-			return err
-		}
-	}
-	return nil
+	return rejectCheckpointVersionDowngrade(Normalize(before).CheckpointVersion, Normalize(after).CheckpointVersion)
 }
 
 func rejectCheckpointVersionDowngrade(beforeRaw, afterRaw string) error {
-	before, err := ResolveCheckpointVersionSelector(beforeRaw)
+	before, err := resolveCheckpointVersionSelector(beforeRaw, supportedCheckpointVersions)
 	if err != nil {
 		return fmt.Errorf("checkpoint_version existing value %q: %w; pass --force to replace it", beforeRaw, err)
 	}
-	after, err := ResolveCheckpointVersionSelector(afterRaw)
+	after, err := resolveCheckpointVersionSelector(afterRaw, supportedCheckpointVersions)
 	if err != nil {
 		return fmt.Errorf("checkpoint_version: %w", err)
 	}
-	beforeVersion := mustSemver(before)
-	afterVersion := mustSemver(after)
-	if afterVersion.LessThan(beforeVersion) {
+	if after.version.LessThan(before.version) {
 		return fmt.Errorf("would downgrade checkpoint_version from %q to %q; pass --force to allow this", beforeRaw, afterRaw)
 	}
 	return nil

@@ -19,8 +19,7 @@ func TestUpdateRejectsDowngradeFromRemoteWithoutForce(t *testing.T) {
 	localDir, localRepo := initPolicyRepoWithDir(t)
 
 	_, err = checkpointpolicy.Update(t.Context(), localRepo, checkpointpolicy.Target{Remote: bareDir, Dir: localDir}, checkpointpolicy.UpdateOptions{
-		CheckpointVersion:    checkpointpolicy.DefaultCheckpointVersionSelector,
-		CheckpointVersionSet: true,
+		CheckpointVersion: checkpointpolicy.DefaultCheckpointVersionSelector,
 	})
 	require.ErrorContains(t, err, `checkpoint_version existing value "`+unsupportedCheckpointVersionExpr+`"`)
 	require.ErrorContains(t, err, "pass --force")
@@ -40,9 +39,8 @@ func TestUpdateAllowsDowngradeWithForce(t *testing.T) {
 
 	localDir, localRepo := initPolicyRepoWithDir(t)
 	got, err := checkpointpolicy.Update(t.Context(), localRepo, checkpointpolicy.Target{Remote: bareDir, Dir: localDir}, checkpointpolicy.UpdateOptions{
-		CheckpointVersion:    checkpointpolicy.DefaultCheckpointVersionSelector,
-		CheckpointVersionSet: true,
-		Force:                true,
+		CheckpointVersion: checkpointpolicy.DefaultCheckpointVersionSelector,
+		Force:             true,
 	})
 	require.NoError(t, err)
 	require.Equal(t, checkpointpolicy.SourceLocal, got.Source)
@@ -62,9 +60,7 @@ func TestUpdateUnsetsPolicyFields(t *testing.T) {
 	pushPolicyRefWithGit(t, remoteDir, bareDir)
 
 	localDir, localRepo := initPolicyRepoWithDir(t)
-	got, err := checkpointpolicy.Update(t.Context(), localRepo, checkpointpolicy.Target{Remote: bareDir, Dir: localDir}, checkpointpolicy.UpdateOptions{
-		CheckpointVersionSet: true,
-	})
+	got, err := checkpointpolicy.Update(t.Context(), localRepo, checkpointpolicy.Target{Remote: bareDir, Dir: localDir}, checkpointpolicy.UpdateOptions{})
 	require.NoError(t, err)
 	require.Empty(t, got.Policy)
 	require.Equal(t, checkpointpolicy.DefaultPolicy(), checkpointpolicy.Normalize(got.Policy))
@@ -87,8 +83,7 @@ func TestUpdatePreservesLocalPolicyAheadOfRemote(t *testing.T) {
 	require.NoError(t, err)
 
 	got, err := checkpointpolicy.Update(t.Context(), localRepo, checkpointpolicy.Target{Remote: bareDir, Dir: localDir}, checkpointpolicy.UpdateOptions{
-		CheckpointVersion:    checkpointpolicy.DefaultCheckpointVersionSelector,
-		CheckpointVersionSet: true,
+		CheckpointVersion: checkpointpolicy.DefaultCheckpointVersionSelector,
 	})
 	require.NoError(t, err)
 	require.Equal(t, baseHash, got.RemoteHash)
@@ -117,8 +112,7 @@ func TestUpdateRejectsDivergedLocalPolicy(t *testing.T) {
 	pushPolicyRefWithGit(t, remoteDir, bareDir)
 
 	_, err = checkpointpolicy.Update(t.Context(), localRepo, checkpointpolicy.Target{Remote: bareDir, Dir: localDir}, checkpointpolicy.UpdateOptions{
-		CheckpointVersion:    checkpointpolicy.DefaultCheckpointVersionSelector,
-		CheckpointVersionSet: true,
+		CheckpointVersion: checkpointpolicy.DefaultCheckpointVersionSelector,
 	})
 	require.ErrorContains(t, err, "local checkpoint policy")
 	require.ErrorContains(t, err, "diverges from remote")

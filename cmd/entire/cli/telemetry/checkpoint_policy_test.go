@@ -3,10 +3,8 @@ package telemetry
 import "testing"
 
 const (
-	checkpointPolicyTestCLIVersion                = "1.2.3"
-	checkpointPolicyTestUnsupportedVersion        = ">=2.0.0"
-	checkpointPolicyTestCLIVersionProperty        = "cli_version"
-	checkpointPolicyTestCheckpointVersionProperty = "checkpoint_version"
+	checkpointPolicyTestCLIVersion         = "1.2.3"
+	checkpointPolicyTestUnsupportedVersion = ">=2.0.0"
 )
 
 func TestBuildCheckpointPolicyBlockedPayload_Unsupported(t *testing.T) {
@@ -29,12 +27,12 @@ func TestBuildCheckpointPolicyBlockedPayload_Unsupported(t *testing.T) {
 		t.Error("DistinctID must be set to the machine ID")
 	}
 	checks := map[string]any{
-		"hook":      "post-commit",
-		"hook_type": "git",
-		"reason":    "policy_unsupported",
-		"outcome":   "skipped",
-		checkpointPolicyTestCheckpointVersionProperty: checkpointPolicyTestUnsupportedVersion,
-		checkpointPolicyTestCLIVersionProperty:        checkpointPolicyTestCLIVersion,
+		"hook":               "post-commit",
+		"hook_type":          "git",
+		"reason":             "policy_unsupported",
+		"outcome":            "skipped",
+		"checkpoint_version": checkpointPolicyTestUnsupportedVersion,
+		"cli_version":        checkpointPolicyTestCLIVersion,
 	}
 	for k, want := range checks {
 		if got := payload.Properties[k]; got != want {
@@ -62,7 +60,7 @@ func TestBuildCheckpointPolicyBlockedPayload_UnreadableOmitsVersions(t *testing.
 	if got := payload.Properties["agent"]; got != "claude-code" {
 		t.Errorf("Properties[agent] = %v, want %q", got, "claude-code")
 	}
-	if _, ok := payload.Properties[checkpointPolicyTestCheckpointVersionProperty]; ok {
+	if _, ok := payload.Properties["checkpoint_version"]; ok {
 		t.Error("unreadable payload must omit 'checkpoint_version'")
 	}
 	if got := payload.Properties["outcome"]; got != "skipped" {
