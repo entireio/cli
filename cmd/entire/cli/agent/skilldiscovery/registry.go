@@ -69,6 +69,15 @@ var installHints = map[string][]InstallHint{
 			ProvidesAny: nil,
 		},
 	},
+	// Antigravity has no built-in review command and no predictable plugin
+	// skill names, so the hint is always shown (ProvidesAny nil). Users add
+	// review skills as ~/.gemini/skills/<name>/SKILL.md.
+	"antigravity": {
+		{
+			Message:     "Add a review skill under `~/.gemini/skills/<name>/SKILL.md` (e.g. via `npx antigravity-awesome-skills --agy`)",
+			ProvidesAny: nil,
+		},
+	},
 }
 
 // CuratedBuiltinsFor returns the curated built-in list for agentName, or
