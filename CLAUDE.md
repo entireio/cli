@@ -564,6 +564,56 @@ The phase state machine, metadata directory layout, sharded checkpoint format, m
 
 See [Review Command](docs/architecture/review-command.md) for usage, minimal profile config, and key files.
 
+### Agent-Safe CLI Fallbacks
+
+When building CLI features, do not make useful output available only through a
+TUI, picker, wizard, terminal selection menu, confirmation dialog, or stdin
+question. Agents must be able to complete the same read-only workflow from a
+non-interactive terminal.
+
+Plain text output is acceptable when it contains the full information needed for
+the workflow. JSON is preferred for structured data, following existing patterns
+such as `--json` on `status`, `agent-help`, `sessions`, `search`, and trail
+finding commands. Long human-readable output may use a pager in TTY mode, but
+must provide a bypass like the existing `--no-pager` pattern on `explain`.
+
+For interactive browsing flows, provide one of these non-interactive shapes:
+
+- a list command that prints stable identifiers, plus a show/detail command that
+  accepts an identifier
+- a flag or positional argument that selects the item directly
+- a complete text or JSON fallback when stdout is not a terminal, like existing
+  static/text fallbacks for TUI-backed commands
+
+When reviewing CLI changes, inspect terminal-gated paths such as
+`IsTerminalWriter`, `CanPromptInteractively`, Bubble Tea, `huh`, direct stdin
+reads, terminal selection menus, confirmation dialogs, and wizard flows. Flag
+the change if a non-interactive agent can only see a menu, preview, truncated
+summary, or cannot select the item whose details matter.
+
+Tests for interactive CLI features should cover the non-interactive path. See
+the "Spawning subprocesses in tests (TTY detection)" section above for the
+`execx.NonInteractive` pattern when testing a real `entire` command.
+
+Existing good patterns:
+
+- `entire investigate --findings` prints a complete plain-text list and includes
+  `view: entire investigate show <run-id>` hints.
+- `entire investigate show <run-id>` prints the saved investigation summary and
+  findings without needing a TUI.
+- `entire repo clone /gh/...` prompts only when several clusters are possible;
+  without a TTY it asks for `--cluster`.
+- `entire experts --tui` is safe because the TUI is opt-in and non-TTY output
+  falls back to deterministic plain text.
+- `entire explain --no-pager` is the local pattern for avoiding pager-only long
+  text output.
+- `entire status --json`, `entire agent-help --json`, `entire sessions list --json`,
+  and trail finding commands show the local `--json` convention.
+
+Do not require JSON everywhere. Human-readable text is fine if it contains the
+complete information an agent needs. The failure mode is requiring an
+interactive terminal to select something or reveal details.
+
 # Important Notes
 
 - **Before committing:** Follow the "Before Every Commit (REQUIRED)" checklist above - CI will fail without it
