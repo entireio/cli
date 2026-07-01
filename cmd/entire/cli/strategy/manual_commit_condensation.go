@@ -848,6 +848,12 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 		if len(data.Prompts) == 0 {
 			data.Prompts = readPromptsFromFilesystem(ctx, sessionID)
 		}
+		// Late-flush fallback: re-extract from the populated live transcript when
+		// prompt.txt is still empty (e.g. Antigravity writes the transcript after
+		// the Stop hook, so the TurnEnd prompt backfill saw an empty file).
+		if len(data.Prompts) == 0 {
+			data.Prompts = resolvePromptsFromLateFlushedTranscript(ctx, ag, liveTranscriptPath, checkpointTranscriptStart)
+		}
 	}
 
 	// Use tracked files from session state (not all files in tree)
@@ -887,6 +893,11 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	data.Transcript = liveData
 	data.FullTranscriptLines = countTranscriptItems(state.AgentType, fullTranscript)
 	data.Prompts = readPromptsFromFilesystem(ctx, state.SessionID)
+	// Late-flush fallback: re-extract from the live transcript when prompt.txt is
+	// still empty (e.g. Antigravity writes the transcript after the Stop hook).
+	if len(data.Prompts) == 0 {
+		data.Prompts = resolvePromptsFromLateFlushedTranscript(ctx, ag, transcriptPath, state.CheckpointTranscriptStart)
+	}
 
 	// Resolve files touched: prefers hook-populated state, falls back to transcript extraction
 	data.FilesTouched = s.resolveFilesTouched(ctx, state)
@@ -897,6 +908,29 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	}
 
 	return data, nil
+}
+
+// resolvePromptsFromLateFlushedTranscript re-extracts user prompts directly
+// from a populated transcript at condensation time. Agents like Antigravity
+// write their transcript AFTER the Stop hook, so the TurnEnd prompt backfill
+// (lifecycle.go) saw an empty transcript and prompt.txt is empty. By
+// condensation the live transcript is populated. General — any PromptExtractor
+// benefits; callers only invoke this when prompts are otherwise empty.
+func resolvePromptsFromLateFlushedTranscript(ctx context.Context, ag agent.Agent, transcriptPath string, offset int) []string {
+	if transcriptPath == "" {
+		return nil
+	}
+	extractor, ok := agent.AsPromptExtractor(ag)
+	if !ok {
+		return nil
+	}
+	prompts, err := extractor.ExtractPrompts(transcriptPath, offset)
+	if err != nil {
+		logging.Warn(ctx, "condensation prompt extraction failed",
+			slog.String("error", err.Error()))
+		return nil
+	}
+	return prompts
 }
 
 // countTranscriptItems counts lines (JSONL) or messages (JSON) in a transcript.
