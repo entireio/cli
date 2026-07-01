@@ -2,6 +2,7 @@ package checkpointpolicy
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -53,6 +54,15 @@ func UnsupportedWrite(policy Policy) bool {
 
 func CanSatisfyPolicy(policy Policy) bool {
 	return ValidatePolicy(policy) == nil
+}
+
+func PolicyEnablesFeature(policy Policy, feature CheckpointFeature) bool {
+	policy = Normalize(policy)
+	version, err := resolveCheckpointVersionSelector(policy.CheckpointVersion, supportedCheckpointVersions)
+	if err != nil {
+		return false
+	}
+	return slices.Contains(version.features, feature)
 }
 
 func UnsupportedPolicyMessage(policy Policy, updateCommand string) string {

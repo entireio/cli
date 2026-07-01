@@ -340,6 +340,12 @@ metadata value remains `branch-v1` for now; policy settings use SemVer and treat
 that legacy metadata alias as logical version `1.0.0` only when reading
 checkpoint metadata.
 
+Checkpoint version capabilities are defined centrally in the `checkpointpolicy`
+package. Code that needs to gate checkpoint behavior on a storage capability
+should ask whether the policy enables a named checkpoint feature instead of
+comparing checkpoint version strings at the call site. Unknown feature names
+evaluate to disabled.
+
 Policy follows the configured checkpoint remote. `entire checkpoint policy`
 fetches the latest remote policy before validating requested changes, updates
 the local policy ref, and pushes only `refs/entire/policies/checkpoint`.

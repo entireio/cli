@@ -3,17 +3,16 @@ package checkpointpolicy
 import (
 	"testing"
 
-	semver "github.com/Masterminds/semver/v3"
 	"github.com/stretchr/testify/require"
 )
 
 func TestResolveCheckpointVersionSelectorWithCandidates(t *testing.T) {
 	t.Parallel()
-	candidates := []*semver.Version{
-		mustSemver("1.0.0"),
-		mustSemver("1.0.4"),
-		mustSemver("1.1.2"),
-		mustSemver("2.0.0"),
+	candidates := []supportedCheckpointVersion{
+		{version: mustSemver("1.0.0")},
+		{version: mustSemver("1.0.4")},
+		{version: mustSemver("1.1.2")},
+		{version: mustSemver("2.0.0")},
 	}
 
 	tests := []struct {
@@ -33,7 +32,7 @@ func TestResolveCheckpointVersionSelectorWithCandidates(t *testing.T) {
 			t.Parallel()
 			got, err := resolveCheckpointVersionSelector(tt.selector, candidates)
 			require.NoError(t, err)
-			require.Equal(t, tt.want, got.String())
+			require.Equal(t, tt.want, got.version.String())
 		})
 	}
 }
@@ -41,6 +40,6 @@ func TestResolveCheckpointVersionSelectorWithCandidates(t *testing.T) {
 func TestResolveCheckpointVersionSelectorReportsUnsupportedSelector(t *testing.T) {
 	t.Parallel()
 
-	_, err := resolveCheckpointVersionSelector("3", []*semver.Version{mustSemver("1.0.0")})
+	_, err := resolveCheckpointVersionSelector("3", []supportedCheckpointVersion{{version: mustSemver("1.0.0")}})
 	require.ErrorContains(t, err, `checkpoint_version "3" is not writable by this Entire CLI`)
 }

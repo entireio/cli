@@ -76,3 +76,11 @@ func TestValidatePolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestPolicyEnablesFeature(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, checkpointpolicy.PolicyEnablesFeature(checkpointpolicy.DefaultPolicy(), checkpointpolicy.FeatureBranchMetadata))
+	require.False(t, checkpointpolicy.PolicyEnablesFeature(checkpointpolicy.DefaultPolicy(), checkpointpolicy.CheckpointFeature("future_feature")))
+	require.False(t, checkpointpolicy.PolicyEnablesFeature(checkpointpolicy.Policy{CheckpointVersion: unsupportedCheckpointVersionExpr}, checkpointpolicy.FeatureBranchMetadata))
+}

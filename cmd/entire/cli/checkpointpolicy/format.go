@@ -15,6 +15,24 @@ const (
 	DefaultCheckpointVersionSelector = LogicalCheckpointVersionV1
 )
 
+type CheckpointFeature string
+
+const FeatureBranchMetadata CheckpointFeature = "branch_metadata"
+
+type supportedCheckpointVersion struct {
+	version         *semver.Version
+	metadataVersion string
+	features        []CheckpointFeature
+}
+
+var supportedCheckpointVersions = []supportedCheckpointVersion{
+	{
+		version:         mustSemver(LogicalCheckpointVersionV1),
+		metadataVersion: checkpoint.CheckpointVersionBranchV1,
+		features:        []CheckpointFeature{FeatureBranchMetadata},
+	},
+}
+
 func ParseCheckpointVersionSelector(raw string) (*semver.Constraints, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, fmt.Errorf("checkpoint_version %q is not a valid SemVer constraint", raw)
@@ -31,7 +49,7 @@ func ResolveCheckpointVersionSelector(raw string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return version.String(), nil
+	return version.version.String(), nil
 }
 
 func CanReadVersion(raw string) bool {
@@ -39,7 +57,9 @@ func CanReadVersion(raw string) bool {
 	if err != nil {
 		return false
 	}
-	return slices.ContainsFunc(supportedCheckpointVersions, version.Equal)
+	return slices.ContainsFunc(supportedCheckpointVersions, func(candidate supportedCheckpointVersion) bool {
+		return candidate.version.Equal(version)
+	})
 }
 
 func LogicalVersionForCheckpointMetadata(raw string) (string, error) {
@@ -55,32 +75,35 @@ func LogicalVersionForCheckpointMetadata(raw string) (string, error) {
 }
 
 func MetadataVersionForWriteVersion(raw string) (string, error) {
-	switch raw {
-	case LogicalCheckpointVersionV1:
-		return checkpoint.CheckpointVersionBranchV1, nil
-	default:
-		return "", fmt.Errorf("checkpoint_version %q is not writable by this Entire CLI", raw)
+	version, err := semver.StrictNewVersion(raw)
+	if err == nil {
+		if candidate, ok := findSupportedCheckpointVersion(version); ok {
+			return candidate.metadataVersion, nil
+		}
 	}
+	return "", fmt.Errorf("checkpoint_version %q is not writable by this Entire CLI", raw)
 }
 
-func resolveCheckpointVersionSelector(raw string, candidates []*semver.Version) (*semver.Version, error) {
+func resolveCheckpointVersionSelector(raw string, candidates []supportedCheckpointVersion) (supportedCheckpointVersion, error) {
 	constraint, err := ParseCheckpointVersionSelector(raw)
 	if err != nil {
-		return nil, err
+		return supportedCheckpointVersion{}, err
 	}
-	var best *semver.Version
+	var best supportedCheckpointVersion
+	var found bool
 	for _, candidate := range candidates {
-		if !constraint.Check(candidate) {
+		if !constraint.Check(candidate.version) {
 			continue
 		}
-		if best == nil || best.LessThan(candidate) {
+		if !found || best.version.LessThan(candidate.version) {
 			best = candidate
+			found = true
 		}
 	}
-	if best == nil {
-		return nil, fmt.Errorf("checkpoint_version %q is not writable by this Entire CLI", raw)
+	if found {
+		return best, nil
 	}
-	return best, nil
+	return supportedCheckpointVersion{}, fmt.Errorf("checkpoint_version %q is not writable by this Entire CLI", raw)
 }
 
 func mustSemver(raw string) *semver.Version {
@@ -91,6 +114,11 @@ func mustSemver(raw string) *semver.Version {
 	return version
 }
 
-var supportedCheckpointVersions = []*semver.Version{
-	mustSemver(LogicalCheckpointVersionV1),
+func findSupportedCheckpointVersion(version *semver.Version) (supportedCheckpointVersion, bool) {
+	for _, candidate := range supportedCheckpointVersions {
+		if candidate.version.Equal(version) {
+			return candidate, true
+		}
+	}
+	return supportedCheckpointVersion{}, false
 }
