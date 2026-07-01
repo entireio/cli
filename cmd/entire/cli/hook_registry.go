@@ -241,13 +241,12 @@ func shouldSkipSessionStartForPolicy(ctx context.Context, errW io.Writer, agentN
 	}
 	if shouldSkipAgentHookForPolicy(policy) {
 		emitCheckpointPolicyBlocked(ctx, telemetry.CheckpointPolicyBlockedEvent{
-			Hook:                 "session-start",
-			HookType:             telemetry.PolicyBlockedHookTypeAgent,
-			Reason:               telemetry.PolicyBlockedReasonUnsupported,
-			Outcome:              telemetry.PolicyBlockedOutcomeSkipped,
-			Agent:                string(agentName),
-			CheckpointVersion:    policy.CheckpointVersion,
-			CheckpointMinVersion: policy.CheckpointMinVersion,
+			Hook:              "session-start",
+			HookType:          telemetry.PolicyBlockedHookTypeAgent,
+			Reason:            telemetry.PolicyBlockedReasonUnsupported,
+			Outcome:           telemetry.PolicyBlockedOutcomeSkipped,
+			Agent:             string(agentName),
+			CheckpointVersion: policy.CheckpointVersion,
 		})
 		// Let the agent start; the warning explains that checkpoint capture is
 		// disabled until the CLI is upgraded.
@@ -273,13 +272,12 @@ func rejectUnsupportedCheckpointWritePolicy(ctx context.Context, errW io.Writer,
 	}
 	if shouldSkipAgentHookForPolicy(policy) {
 		emitCheckpointPolicyBlocked(ctx, telemetry.CheckpointPolicyBlockedEvent{
-			Hook:                 hook,
-			HookType:             telemetry.PolicyBlockedHookTypeAgent,
-			Reason:               telemetry.PolicyBlockedReasonUnsupported,
-			Outcome:              telemetry.PolicyBlockedOutcomeBlocked,
-			Agent:                string(agentName),
-			CheckpointVersion:    policy.CheckpointVersion,
-			CheckpointMinVersion: policy.CheckpointMinVersion,
+			Hook:              hook,
+			HookType:          telemetry.PolicyBlockedHookTypeAgent,
+			Reason:            telemetry.PolicyBlockedReasonUnsupported,
+			Outcome:           telemetry.PolicyBlockedOutcomeBlocked,
+			Agent:             string(agentName),
+			CheckpointVersion: policy.CheckpointVersion,
 		})
 		fmt.Fprint(errW, agentCheckpointCaptureDisabledMessage(policy))
 		return NewSilentError(errUnsupportedCheckpointPolicy)

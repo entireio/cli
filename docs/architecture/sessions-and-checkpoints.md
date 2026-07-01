@@ -308,40 +308,37 @@ points at a commit whose tree contains `policy.json`:
 
 ```json
 {
-  "checkpoint_version": "branch-v1",
-  "checkpoint_min_version": "branch-v1"
+  "checkpoint_version": "1.0.0"
 }
 ```
 
-Either field may be omitted. An empty policy file means both fields inherit the
-CLI defaults:
+The field may be omitted. An empty policy file means the field inherits the CLI
+default:
 
 ```json
 {}
 ```
 
-`checkpoint_version` selects the checkpoint format for new writes. If no policy
-is configured, a policy omits `checkpoint_version`, or the field was set to an
+`checkpoint_version` is a SemVer constraint expression that selects the
+checkpoint format for new writes. The CLI resolves it to the newest locally
+supported checkpoint version matching the expression. If no policy is
+configured, a policy omits `checkpoint_version`, or the field was set to an
 empty string with `entire checkpoint policy --checkpoint-version ""`, the CLI
-writes its default checkpoint version. The quotes are required so the shell
-passes an empty value instead of omitting the flag value. If another client
-configures a `checkpoint_version` this CLI cannot write, explicit
+uses its default expression. The quotes are required so the shell passes an
+empty value instead of omitting the flag value. If another client configures a
+`checkpoint_version` expression this CLI cannot satisfy, explicit
 checkpoint-data writers fail until the CLI is upgraded.
 
-`checkpoint_min_version` is an upgrade nudge and checkpoint-data write guard.
-Clients that cannot read that version warn users to upgrade. Explicit
-checkpoint-data writers fail until the CLI is upgraded. If no policy is
-configured, a policy omits `checkpoint_min_version`, or the field was set to an
-empty string with `entire checkpoint policy --checkpoint-min-version ""`, the
-CLI uses its default minimum checkpoint version for policy decisions.
+Unsetting `checkpoint_version` is still evaluated against the normal downgrade
+guard. If the current effective version is newer than the default inherited
+after unsetting, `entire checkpoint policy` rejects the change unless `--force`
+is passed.
 
-Unsetting a field is still evaluated against the normal downgrade guard. If the
-field's current effective version is newer than the default inherited after
-unsetting, `entire checkpoint policy` rejects the change unless `--force` is
-passed.
-
-`entire checkpoint policy` validates requested policy values against the
-current CLI, so it rejects setting unsupported checkpoint versions.
+`entire checkpoint policy` validates requested policy values against the current
+CLI, so it rejects setting unsupported checkpoint versions. The v1 checkpoint
+metadata value remains `branch-v1` for now; policy settings use SemVer and treat
+that legacy metadata alias as logical version `1.0.0` only when reading
+checkpoint metadata.
 
 Policy follows the configured checkpoint remote. `entire checkpoint policy`
 fetches the latest remote policy before validating requested changes, updates

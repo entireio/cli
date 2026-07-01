@@ -1002,14 +1002,14 @@ func TestLoadCheckpointForExplainRejectsUnsupportedCheckpointVersion(t *testing.
 		SessionID:  "session-explain-unsupported",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
 	})
-	rewriteExportCheckpointVersionToRefsV1(t, repo, cpID)
+	rewriteExportCheckpointVersionTo2(t, repo, cpID)
 
 	lookup, err := newExplainCheckpointLookup(context.Background())
 	require.NoError(t, err)
 	defer lookup.Close()
 
 	_, _, err = loadCheckpointForExplain(context.Background(), lookup, cpID)
-	require.ErrorContains(t, err, `checkpoint bbbbccccdddd uses unsupported checkpoint_version "refs-v1"`)
+	require.ErrorContains(t, err, `checkpoint bbbbccccdddd uses unsupported checkpoint_version "`+unsupportedCheckpointMetadataVersion+`"`)
 }
 
 // Not parallel: uses t.Chdir() and package-level var stubs.

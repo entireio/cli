@@ -6,14 +6,12 @@ import (
 )
 
 type Policy struct {
-	CheckpointVersion    string `json:"checkpoint_version,omitempty"`
-	CheckpointMinVersion string `json:"checkpoint_min_version,omitempty"`
+	CheckpointVersion string `json:"checkpoint_version,omitempty"`
 }
 
 func DefaultPolicy() Policy {
 	return Policy{
-		CheckpointVersion:    DefaultCheckpointVersionSelector,
-		CheckpointMinVersion: DefaultCheckpointMinVersionRange,
+		CheckpointVersion: DefaultCheckpointVersionSelector,
 	}
 }
 
@@ -24,9 +22,6 @@ func DefaultCheckpointVersion() string {
 func Normalize(policy Policy) Policy {
 	if policy.CheckpointVersion == "" {
 		policy.CheckpointVersion = DefaultCheckpointVersionSelector
-	}
-	if policy.CheckpointMinVersion == "" {
-		policy.CheckpointMinVersion = DefaultCheckpointMinVersionRange
 	}
 	return policy
 }
@@ -47,37 +42,8 @@ func ResolvedMetadataVersion(policy Policy) (string, error) {
 func ValidatePolicy(policy Policy) error {
 	policy = Normalize(policy)
 
-	writeVersion, err := ResolveCheckpointVersionSelector(policy.CheckpointVersion)
-	if err != nil {
-		return err
-	}
-
-	constraint, err := CheckpointMinVersionConstraint(policy.CheckpointMinVersion)
-	if err != nil {
-		return err
-	}
-	if !readableVersionSatisfies(constraint) {
-		return fmt.Errorf("checkpoint_min_version %q is not readable by this Entire CLI", policy.CheckpointMinVersion)
-	}
-	if !constraint.Check(mustSemver(writeVersion)) {
-		return fmt.Errorf(
-			"checkpoint_version %q resolves to %q, which does not satisfy checkpoint_min_version %q",
-			policy.CheckpointVersion,
-			writeVersion,
-			policy.CheckpointMinVersion,
-		)
-	}
-
-	return nil
-}
-
-func RequiresUpgrade(policy Policy) bool {
-	policy = Normalize(policy)
-	constraint, err := CheckpointMinVersionConstraint(policy.CheckpointMinVersion)
-	if err != nil {
-		return true
-	}
-	return !readableVersionSatisfies(constraint)
+	_, err := ResolveCheckpointVersionSelector(policy.CheckpointVersion)
+	return err
 }
 
 func UnsupportedWrite(policy Policy) bool {
@@ -111,18 +77,9 @@ func unsupportedPolicyDetails(policy Policy) []string {
 	policy = Normalize(policy)
 	var details []string
 
-	writeVersion, err := ResolveCheckpointVersionSelector(policy.CheckpointVersion)
+	_, err := ResolveCheckpointVersionSelector(policy.CheckpointVersion)
 	if err != nil {
 		details = append(details, err.Error()+".")
-	}
-
-	constraint, err := CheckpointMinVersionConstraint(policy.CheckpointMinVersion)
-	if err != nil {
-		details = append(details, err.Error()+".")
-	} else if !readableVersionSatisfies(constraint) {
-		details = append(details, fmt.Sprintf("checkpoint_min_version %q is not readable by this Entire CLI; this CLI can read %q.", policy.CheckpointMinVersion, LogicalCheckpointVersionV1))
-	} else if writeVersion != "" && !constraint.Check(mustSemver(writeVersion)) {
-		details = append(details, fmt.Sprintf("checkpoint_version %q resolves to %q, which does not satisfy checkpoint_min_version %q.", policy.CheckpointVersion, writeVersion, policy.CheckpointMinVersion))
 	}
 
 	return details

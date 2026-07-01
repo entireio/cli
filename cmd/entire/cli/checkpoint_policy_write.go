@@ -23,7 +23,7 @@ func checkpointVersionForNewCheckpoint(ctx context.Context, repo *git.Repository
 	if !checkpointpolicy.CanSatisfyPolicy(policy) {
 		return "", unsupportedCheckpointPolicyError(policy)
 	}
-	return checkpointpolicy.Normalize(policy).CheckpointVersion, nil
+	return checkpointpolicy.ResolvedMetadataVersion(policy)
 }
 
 func ensureCheckpointPolicyAllowsCheckpointData(ctx context.Context, repo *git.Repository) error {

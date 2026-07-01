@@ -32,8 +32,7 @@ func TestWriteAndReadLocalPolicy(t *testing.T) {
 	t.Parallel()
 	repo := initPolicyRepo(t)
 	policy := checkpointpolicy.Policy{
-		CheckpointVersion:    checkpoint.CheckpointVersionBranchV1,
-		CheckpointMinVersion: checkpoint.CheckpointVersionBranchV1,
+		CheckpointVersion: checkpoint.CheckpointVersionBranchV1,
 	}
 	hash, err := checkpointpolicy.WriteLocal(t.Context(), repo, plumbing.ZeroHash, policy)
 	require.NoError(t, err)
@@ -77,7 +76,7 @@ func TestReadLocalPolicyRejectsMalformedJSON(t *testing.T) {
 func TestReadLocalPolicyRejectsOversizedJSON(t *testing.T) {
 	t.Parallel()
 	repo := initPolicyRepo(t)
-	data := []byte(`{"checkpoint_version":"branch-v1","checkpoint_min_version":"` + strings.Repeat("a", 70*1024) + `"}`)
+	data := []byte(`{"checkpoint_version":"` + strings.Repeat("a", 70*1024) + `"}`)
 	writeRawPolicyCommit(t, repo, data, plumbing.ZeroHash)
 
 	_, err := checkpointpolicy.ReadLocal(t.Context(), repo)
@@ -88,8 +87,7 @@ func TestReadLocalPolicyAllowsUnsupportedPolicy(t *testing.T) {
 	t.Parallel()
 	repo := initPolicyRepo(t)
 	policy := checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "refs-v1",
+		CheckpointVersion: unsupportedCheckpointVersionExpr,
 	}
 	data, err := json.Marshal(policy)
 	require.NoError(t, err)

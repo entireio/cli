@@ -24,6 +24,9 @@ func TestResolveCheckpointVersionSelectorWithCandidates(t *testing.T) {
 		{name: "major selects newest matching major", selector: "1", want: "1.1.2"},
 		{name: "major minor selects newest patch", selector: "1.0", want: "1.0.4"},
 		{name: "full version selects exact patch", selector: "1.0.0", want: "1.0.0"},
+		{name: "caret selects newest compatible version", selector: "^1.0.0", want: "1.1.2"},
+		{name: "comparator selects newest matching version", selector: ">=1.0.0 <2.0.0", want: "1.1.2"},
+		{name: "wildcard selects newest version", selector: "*", want: "2.0.0"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

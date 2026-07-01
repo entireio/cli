@@ -23,6 +23,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const unsupportedCheckpointPolicyExpr = ">=2.0.0"
+
 func TestCondenseSessionRejectsUnsupportedPolicy(t *testing.T) {
 	workDir := setupGitRepo(t)
 	t.Chdir(workDir)
@@ -170,8 +172,7 @@ func TestPrePushWarnsAndSkipsCheckpointPushWhenPolicyUnsupported(t *testing.T) {
 		_ = repo.Close()
 	})
 	_, err = checkpointpolicy.WriteLocal(t.Context(), repo, plumbing.ZeroHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "branch-v1",
+		CheckpointVersion: unsupportedCheckpointPolicyExpr,
 	})
 	require.NoError(t, err)
 
@@ -210,8 +211,7 @@ func TestPrePushWarnsAndPushesWhenPolicyDiverged(t *testing.T) {
 	localHash, err := checkpointpolicy.WriteLocal(t.Context(), repo, baseHash, checkpointpolicy.DefaultPolicy())
 	require.NoError(t, err)
 	_, err = checkpointpolicy.WriteLocal(t.Context(), repo, baseHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "branch-v1",
+		CheckpointVersion: unsupportedCheckpointPolicyExpr,
 	})
 	require.NoError(t, err)
 	runCheckpointPolicyGit(t, workDir, "push", bareDir, checkpointpolicy.RefName.String()+":"+checkpointpolicy.RefName.String())
@@ -251,8 +251,7 @@ func TestSyncCheckpointPolicyForPrePushUsesPushTarget(t *testing.T) {
 	})
 
 	_, err = checkpointpolicy.WriteLocal(t.Context(), repo, plumbing.ZeroHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "branch-v1",
+		CheckpointVersion: unsupportedCheckpointPolicyExpr,
 	})
 	require.NoError(t, err)
 	runCheckpointPolicyGit(t, workDir, "push", originBareDir, checkpointpolicy.RefName.String()+":"+checkpointpolicy.RefName.String())
@@ -277,8 +276,7 @@ func TestSyncCheckpointPolicyForPrePushUsesPushTarget(t *testing.T) {
 func writeUnsupportedCheckpointPolicy(t *testing.T, repo *git.Repository) {
 	t.Helper()
 	_, err := checkpointpolicy.WriteLocal(t.Context(), repo, plumbing.ZeroHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "branch-v1",
+		CheckpointVersion: unsupportedCheckpointPolicyExpr,
 	})
 	require.NoError(t, err)
 }

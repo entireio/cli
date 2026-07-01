@@ -22,16 +22,15 @@ const (
 )
 
 // CheckpointPolicyBlockedEvent carries the gate-derived fields for a
-// checkpoint_policy_blocked telemetry event. Agent, CheckpointVersion, and
-// CheckpointMinVersion are optional and omitted from the payload when empty.
+// checkpoint_policy_blocked telemetry event. Agent and CheckpointVersion are
+// optional and omitted from the payload when empty.
 type CheckpointPolicyBlockedEvent struct {
-	Hook                 string
-	HookType             string
-	Reason               string
-	Outcome              string
-	Agent                string
-	CheckpointVersion    string
-	CheckpointMinVersion string
+	Hook              string
+	HookType          string
+	Reason            string
+	Outcome           string
+	Agent             string
+	CheckpointVersion string
 }
 
 // BuildCheckpointPolicyBlockedPayload constructs the event payload. Exported for
@@ -56,9 +55,6 @@ func BuildCheckpointPolicyBlockedPayload(event CheckpointPolicyBlockedEvent, ver
 	}
 	if event.CheckpointVersion != "" {
 		properties["checkpoint_version"] = event.CheckpointVersion
-	}
-	if event.CheckpointMinVersion != "" {
-		properties["checkpoint_min_version"] = event.CheckpointMinVersion
 	}
 
 	return &EventPayload{

@@ -126,7 +126,7 @@ func TestWriteCommittedUsesExplicitCheckpointVersion(t *testing.T) {
 	store := NewGitStore(repo, DefaultV1Refs())
 	ctx := context.Background()
 	cpID := id.MustCheckpointID("c1c2c3d4e5f6")
-	const configuredVersion = "refs-v1"
+	const configuredVersion = "2.0.0"
 
 	if err := store.Write(ctx, Session{
 		CheckpointID:      cpID,

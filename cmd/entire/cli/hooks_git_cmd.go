@@ -86,8 +86,7 @@ func (g *gitHookContext) skipUnsupportedCheckpointPolicy() bool {
 	}
 
 	logging.Warn(g.ctx, "checkpoint policy unsupported; skipping git hook",
-		slog.String("checkpoint_version", policy.CheckpointVersion),
-		slog.String("checkpoint_min_version", policy.CheckpointMinVersion))
+		slog.String("checkpoint_version", policy.CheckpointVersion))
 	if interactive.CanPromptInteractively() {
 		fmt.Fprint(os.Stderr, checkpointpolicy.UnsupportedPolicyMessage(
 			policy,
@@ -95,12 +94,11 @@ func (g *gitHookContext) skipUnsupportedCheckpointPolicy() bool {
 		))
 	}
 	emitCheckpointPolicyBlocked(g.ctx, telemetry.CheckpointPolicyBlockedEvent{
-		Hook:                 g.hookName,
-		HookType:             telemetry.PolicyBlockedHookTypeGit,
-		Reason:               telemetry.PolicyBlockedReasonUnsupported,
-		Outcome:              telemetry.PolicyBlockedOutcomeSkipped,
-		CheckpointVersion:    policy.CheckpointVersion,
-		CheckpointMinVersion: policy.CheckpointMinVersion,
+		Hook:              g.hookName,
+		HookType:          telemetry.PolicyBlockedHookTypeGit,
+		Reason:            telemetry.PolicyBlockedReasonUnsupported,
+		Outcome:           telemetry.PolicyBlockedOutcomeSkipped,
+		CheckpointVersion: policy.CheckpointVersion,
 	})
 	return true
 }

@@ -2,16 +2,22 @@ package telemetry
 
 import "testing"
 
+const (
+	checkpointPolicyTestCLIVersion                = "1.2.3"
+	checkpointPolicyTestUnsupportedVersion        = ">=2.0.0"
+	checkpointPolicyTestCLIVersionProperty        = "cli_version"
+	checkpointPolicyTestCheckpointVersionProperty = "checkpoint_version"
+)
+
 func TestBuildCheckpointPolicyBlockedPayload_Unsupported(t *testing.T) {
 	t.Parallel()
 	payload := BuildCheckpointPolicyBlockedPayload(CheckpointPolicyBlockedEvent{
-		Hook:                 "post-commit",
-		HookType:             PolicyBlockedHookTypeGit,
-		Reason:               PolicyBlockedReasonUnsupported,
-		Outcome:              PolicyBlockedOutcomeSkipped,
-		CheckpointVersion:    "v2",
-		CheckpointMinVersion: "v2",
-	}, "1.2.3")
+		Hook:              "post-commit",
+		HookType:          PolicyBlockedHookTypeGit,
+		Reason:            PolicyBlockedReasonUnsupported,
+		Outcome:           PolicyBlockedOutcomeSkipped,
+		CheckpointVersion: checkpointPolicyTestUnsupportedVersion,
+	}, checkpointPolicyTestCLIVersion)
 	if payload == nil {
 		t.Fatal("BuildCheckpointPolicyBlockedPayload returned nil")
 		return
@@ -23,13 +29,12 @@ func TestBuildCheckpointPolicyBlockedPayload_Unsupported(t *testing.T) {
 		t.Error("DistinctID must be set to the machine ID")
 	}
 	checks := map[string]any{
-		"hook":                   "post-commit",
-		"hook_type":              "git",
-		"reason":                 "policy_unsupported",
-		"outcome":                "skipped",
-		"checkpoint_version":     "v2",
-		"checkpoint_min_version": "v2",
-		"cli_version":            "1.2.3",
+		"hook":      "post-commit",
+		"hook_type": "git",
+		"reason":    "policy_unsupported",
+		"outcome":   "skipped",
+		checkpointPolicyTestCheckpointVersionProperty: checkpointPolicyTestUnsupportedVersion,
+		checkpointPolicyTestCLIVersionProperty:        checkpointPolicyTestCLIVersion,
 	}
 	for k, want := range checks {
 		if got := payload.Properties[k]; got != want {
@@ -49,7 +54,7 @@ func TestBuildCheckpointPolicyBlockedPayload_UnreadableOmitsVersions(t *testing.
 		Reason:   PolicyBlockedReasonUnreadable,
 		Outcome:  PolicyBlockedOutcomeSkipped,
 		Agent:    "claude-code",
-	}, "1.2.3")
+	}, checkpointPolicyTestCLIVersion)
 	if payload == nil {
 		t.Fatal("BuildCheckpointPolicyBlockedPayload returned nil")
 		return
@@ -57,11 +62,8 @@ func TestBuildCheckpointPolicyBlockedPayload_UnreadableOmitsVersions(t *testing.
 	if got := payload.Properties["agent"]; got != "claude-code" {
 		t.Errorf("Properties[agent] = %v, want %q", got, "claude-code")
 	}
-	if _, ok := payload.Properties["checkpoint_version"]; ok {
+	if _, ok := payload.Properties[checkpointPolicyTestCheckpointVersionProperty]; ok {
 		t.Error("unreadable payload must omit 'checkpoint_version'")
-	}
-	if _, ok := payload.Properties["checkpoint_min_version"]; ok {
-		t.Error("unreadable payload must omit 'checkpoint_min_version'")
 	}
 	if got := payload.Properties["outcome"]; got != "skipped" {
 		t.Errorf("Properties[outcome] = %v, want %q", got, "skipped")

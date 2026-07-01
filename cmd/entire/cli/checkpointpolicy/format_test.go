@@ -21,11 +21,11 @@ func TestParseCheckpointVersionSelector(t *testing.T) {
 		{name: "major", input: "1", matches: []string{"1.0.0", "1.4.2"}, rejects: []string{"2.0.0"}},
 		{name: "major minor", input: "1.0", matches: []string{"1.0.0", "1.0.4"}, rejects: []string{"1.1.0"}},
 		{name: "major minor patch", input: "1.0.0", matches: []string{"1.0.0"}, rejects: []string{"1.0.1"}},
-		{name: "legacy metadata alias rejected", input: checkpoint.CheckpointVersionBranchV1, wantError: "not a valid SemVer selector"},
-		{name: "constraint rejected", input: "^1.0.0", wantError: "not a valid SemVer selector"},
-		{name: "comparator rejected", input: ">=1.0.0", wantError: "not a valid SemVer selector"},
-		{name: "prerelease rejected", input: "1.0.0-beta.1", wantError: "not a valid SemVer selector"},
-		{name: "empty rejected", input: "", wantError: "not a valid SemVer selector"},
+		{name: "caret", input: "^1.0.0", matches: []string{"1.0.0", "1.4.2"}, rejects: []string{"2.0.0"}},
+		{name: "comparator", input: ">=1.0.0", matches: []string{"1.0.0", "2.0.0"}, rejects: []string{"0.9.9"}},
+		{name: "wildcard", input: "*", matches: []string{"1.0.0", "2.0.0"}},
+		{name: "legacy metadata alias rejected", input: checkpoint.CheckpointVersionBranchV1, wantError: "not a valid SemVer constraint"},
+		{name: "empty rejected", input: "", wantError: "not a valid SemVer constraint"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -50,9 +50,7 @@ func TestSupportedLogicalVersions(t *testing.T) {
 	t.Parallel()
 
 	require.True(t, checkpointpolicy.CanReadVersion(checkpointpolicy.LogicalCheckpointVersionV1))
-	require.True(t, checkpointpolicy.CanWriteVersion(checkpointpolicy.LogicalCheckpointVersionV1))
 	require.False(t, checkpointpolicy.CanReadVersion("2.0.0"))
-	require.False(t, checkpointpolicy.CanWriteVersion("2.0.0"))
 }
 
 func TestMetadataVersionMapping(t *testing.T) {

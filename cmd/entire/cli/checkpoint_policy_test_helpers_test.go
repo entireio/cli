@@ -13,6 +13,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	unsupportedCheckpointMetadataVersion = "2.0.0"
+	unsupportedCheckpointPolicyExpr      = ">=2.0.0"
+)
+
 func writeMalformedCheckpointPolicyForCLITest(t *testing.T, repo *git.Repository) {
 	t.Helper()
 	blobHash, err := checkpoint.CreateBlobFromContent(repo, []byte(`{"checkpoint_version":`))
@@ -29,8 +34,7 @@ func writeMalformedCheckpointPolicyForCLITest(t *testing.T, repo *git.Repository
 func writeUnsupportedCheckpointPolicyForCLITest(t *testing.T, repo *git.Repository) {
 	t.Helper()
 	_, err := checkpointpolicy.WriteLocal(t.Context(), repo, plumbing.ZeroHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "branch-v1",
+		CheckpointVersion: unsupportedCheckpointPolicyExpr,
 	})
 	require.NoError(t, err)
 }

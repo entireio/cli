@@ -641,7 +641,7 @@ func TestResolveLatestCheckpointReturnsUnsupportedWhenAnyCheckpointIsUnsupported
 	newID := id.MustCheckpointID("ccc333ddd444")
 	reader := &resumeCheckpointInfoReaderStub{
 		summaries: map[id.CheckpointID]*checkpoint.CheckpointSummary{
-			unsupportedID: {CheckpointVersion: "refs-v1"},
+			unsupportedID: {CheckpointVersion: unsupportedCheckpointMetadataVersion},
 			newID:         {Sessions: []checkpoint.SessionFilePaths{{Metadata: "new"}}},
 		},
 		metadata: map[id.CheckpointID][]checkpoint.Metadata{
@@ -670,7 +670,7 @@ func TestResolveLatestCheckpointReturnsUnsupportedWhenNoReadableCheckpointExists
 	unsupportedID := id.MustCheckpointID("aaa111bbb222")
 	reader := &resumeCheckpointInfoReaderStub{
 		summaries: map[id.CheckpointID]*checkpoint.CheckpointSummary{
-			unsupportedID: {CheckpointVersion: "refs-v1"},
+			unsupportedID: {CheckpointVersion: unsupportedCheckpointMetadataVersion},
 		},
 	}
 
@@ -1195,7 +1195,7 @@ func TestCheckRemoteMetadata_ReturnsUnsupportedVersionFromRemote(t *testing.T) {
 		time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 		agent.AgentTypeClaudeCode,
 	)
-	rewriteExportCheckpointVersionToRefsV1(t, repo, checkpointID)
+	rewriteExportCheckpointVersionTo2(t, repo, checkpointID)
 
 	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {

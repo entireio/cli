@@ -16,11 +16,11 @@ func TestReadCheckpointInfoFromStoreRejectsUnsupportedCheckpointVersion(t *testi
 	_, err := readCheckpointInfoFromStore(context.Background(), checkpointInfoPolicyStub{
 		summary: &checkpoint.CheckpointSummary{
 			CheckpointID:      cpID,
-			CheckpointVersion: "refs-v1",
+			CheckpointVersion: unsupportedCheckpointMetadataVersion,
 		},
 	}, cpID)
 
-	require.EqualError(t, err, `checkpoint 111111111111 uses unsupported checkpoint_version "refs-v1": not read-supported by this Entire CLI`)
+	require.EqualError(t, err, `checkpoint 111111111111 uses unsupported checkpoint_version "`+unsupportedCheckpointMetadataVersion+`": not read-supported by this Entire CLI`)
 }
 
 type checkpointInfoPolicyStub struct {

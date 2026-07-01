@@ -79,7 +79,7 @@ func writeCheckpointForExport(t *testing.T, repo *git.Repository, cpID id.Checkp
 	require.NoError(t, store.Write(context.Background(), checkpoint.Session(opts)))
 }
 
-func rewriteExportCheckpointVersionToRefsV1(t *testing.T, repo *git.Repository, cpID id.CheckpointID) {
+func rewriteExportCheckpointVersionTo2(t *testing.T, repo *git.Repository, cpID id.CheckpointID) {
 	t.Helper()
 	ctx := context.Background()
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
@@ -97,7 +97,7 @@ func rewriteExportCheckpointVersionToRefsV1(t *testing.T, repo *git.Repository, 
 	require.NoError(t, err)
 	var summary checkpoint.CheckpointSummary
 	require.NoError(t, json.Unmarshal([]byte(content), &summary))
-	summary.CheckpointVersion = "refs-v1"
+	summary.CheckpointVersion = unsupportedCheckpointMetadataVersion
 	metadataJSON, err := json.Marshal(summary)
 	require.NoError(t, err)
 	metadataHash, err := checkpoint.CreateBlobFromContent(repo, metadataJSON)
@@ -152,7 +152,7 @@ func TestRunExplainExportJSONRejectsUnsupportedCheckpointVersion(t *testing.T) {
 		SessionID:  "session-json-unsupported",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
 	})
-	rewriteExportCheckpointVersionToRefsV1(t, repo, cpID)
+	rewriteExportCheckpointVersionTo2(t, repo, cpID)
 
 	var stdout, stderr bytes.Buffer
 	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
@@ -160,7 +160,7 @@ func TestRunExplainExportJSONRejectsUnsupportedCheckpointVersion(t *testing.T) {
 		json:         true,
 		sessionIndex: -1,
 	})
-	require.ErrorContains(t, err, `checkpoint aaaabbbbcccc uses unsupported checkpoint_version "refs-v1"`)
+	require.ErrorContains(t, err, `checkpoint aaaabbbbcccc uses unsupported checkpoint_version "`+unsupportedCheckpointMetadataVersion+`"`)
 	require.Empty(t, stdout.String())
 }
 
@@ -308,11 +308,11 @@ func TestRunExplainExportTranscriptRejectsUnsupportedCheckpointVersion(t *testin
 				SessionID:  "session-unsupported-transcript",
 				Transcript: redact.AlreadyRedacted(raw),
 			})
-			rewriteExportCheckpointVersionToRefsV1(t, repo, cpID)
+			rewriteExportCheckpointVersionTo2(t, repo, cpID)
 
 			var stdout, stderr bytes.Buffer
 			err := runExplainExport(context.Background(), &stdout, &stderr, tt.opts)
-			require.ErrorContains(t, err, `checkpoint abcd11112222 uses unsupported checkpoint_version "refs-v1"`)
+			require.ErrorContains(t, err, `checkpoint abcd11112222 uses unsupported checkpoint_version "`+unsupportedCheckpointMetadataVersion+`"`)
 			require.Empty(t, stdout.String())
 		})
 	}

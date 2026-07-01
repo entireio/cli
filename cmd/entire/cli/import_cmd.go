@@ -39,8 +39,7 @@ read-only checkpoints. Imported history is searchable and explainable but is
 not rewindable.
 
 Import honors checkpoint policy before scanning transcripts. If the configured
-checkpoint_version or checkpoint_min_version is unsupported by this CLI, import
-fails even with --dry-run.`, imp.AgentType()),
+checkpoint_version is unsupported by this CLI, import fails even with --dry-run.`, imp.AgentType()),
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			ctx := c.Context()

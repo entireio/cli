@@ -106,6 +106,5 @@ func warnOrLogCheckpointPolicyUpgrade(ctx context.Context, policy checkpointpoli
 	}
 	logging.Warn(ctx, "checkpoint policy requires newer CLI",
 		slog.String("checkpoint_version", policy.CheckpointVersion),
-		slog.String("checkpoint_min_version", policy.CheckpointMinVersion),
 	)
 }

@@ -72,8 +72,7 @@ func TestSyncRemotePolicyKeepsDivergedLocalRef(t *testing.T) {
 	require.NoError(t, err)
 
 	remoteHash, err := checkpointpolicy.WriteLocal(t.Context(), remoteRepo, baseHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "refs-v1",
+		CheckpointVersion: unsupportedCheckpointVersionExpr,
 	})
 	require.NoError(t, err)
 	pushPolicyRefWithGit(t, remoteDir, bareDir)
@@ -133,8 +132,7 @@ func TestPushPolicyRejectsNonFastForward(t *testing.T) {
 
 	secondDir, secondRepo := initPolicyRepoWithDir(t)
 	_, err = checkpointpolicy.WriteLocal(t.Context(), secondRepo, plumbing.ZeroHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "refs-v1",
+		CheckpointVersion: unsupportedCheckpointVersionExpr,
 	})
 	require.NoError(t, err)
 

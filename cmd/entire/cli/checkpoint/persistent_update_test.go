@@ -457,7 +457,7 @@ func TestUpdateCheckpointSummaryBackfillsLegacyCheckpointVersion(t *testing.T) {
 func TestUpdateCheckpointSummaryPreservesExplicitCheckpointVersion(t *testing.T) {
 	t.Parallel()
 	_, store, cpID := setupRepoForUpdate(t)
-	const futureVersion = "refs-v1"
+	const futureVersion = "2.0.0"
 
 	rewriteRootSummary(t, store, cpID, func(summary *CheckpointSummary) {
 		summary.CheckpointVersion = futureVersion
@@ -479,7 +479,7 @@ func TestUpdateCheckpointSummaryPreservesExplicitCheckpointVersion(t *testing.T)
 func TestWriteCommittedPreservesExplicitCheckpointVersion(t *testing.T) {
 	t.Parallel()
 	_, store, cpID := setupRepoForUpdate(t)
-	const futureVersion = "refs-v1"
+	const futureVersion = "2.0.0"
 
 	rewriteRootSummary(t, store, cpID, func(summary *CheckpointSummary) {
 		summary.CheckpointVersion = futureVersion

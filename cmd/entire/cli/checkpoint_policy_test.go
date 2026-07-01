@@ -22,8 +22,7 @@ func TestCheckpointPolicyCmd_PrintsDefaults(t *testing.T) {
 
 	stdout, err := executeCheckpointPolicyCmd(t)
 	require.NoError(t, err)
-	require.Contains(t, stdout, "checkpoint_version: branch-v1 (default)")
-	require.Contains(t, stdout, "checkpoint_min_version: branch-v1 (default)")
+	require.Contains(t, stdout, "checkpoint_version: 1.0.0 (default)")
 	require.Contains(t, stdout, "source: defaults")
 }
 
@@ -40,60 +39,44 @@ func TestCheckpointPolicyCmd_HelpDocumentsEnforcementBehavior(t *testing.T) {
 
 	help := stdout.String()
 	require.Contains(t, help, "checkpoint_version selects the checkpoint metadata format used for new writes")
-	require.Contains(t, help, `If another client configures a checkpoint_version this CLI cannot write`)
+	require.Contains(t, help, `If another client configures a checkpoint_version expression this CLI cannot satisfy`)
 	require.Contains(t, help, "commands that create checkpoint data fail until the CLI is upgraded")
-	require.Contains(t, help, "checkpoint_min_version is an upgrade nudge")
 	require.Contains(t, help, `Set checkpoint_version to "" to inherit the CLI default`)
-	require.Contains(t, help, `Set checkpoint_min_version to "" to inherit the CLI default`)
-	require.Contains(t, help, "Unsetting a field still uses the normal downgrade guard")
+	require.Contains(t, help, "Unsetting checkpoint_version still uses the normal downgrade guard")
 	require.NotContains(t, help, "unset-checkpoint-version")
+	require.NotContains(t, help, "checkpoint_min_version")
 }
 
 func TestCheckpointPolicyCmd_RejectsUnsupportedVersion(t *testing.T) {
-	tests := []struct {
-		name    string
-		args    []string
-		wantErr string
-	}{
-		{name: "checkpoint version", args: []string{"--checkpoint-version", "branch-v2342"}, wantErr: `checkpoint_version "branch-v2342" is not supported by this Entire CLI`},
-		{name: "minimum version", args: []string{"--checkpoint-min-version", "refs-v1"}, wantErr: `checkpoint_min_version "refs-v1" is not supported by this Entire CLI`},
-	}
+	_, _ = setupCheckpointPolicyRepo(t)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, _ = setupCheckpointPolicyRepo(t)
-
-			_, err := executeCheckpointPolicyCmd(t, tt.args...)
-			require.ErrorContains(t, err, tt.wantErr)
-		})
-	}
+	_, err := executeCheckpointPolicyCmd(t, "--checkpoint-version", "branch-v2342")
+	require.ErrorContains(t, err, `checkpoint_version "branch-v2342" is not a valid SemVer constraint`)
 }
 
 func TestCheckpointPolicyCmd_PrintsUnsupportedConfiguredVersion(t *testing.T) {
 	dir, bareDir := setupCheckpointPolicyRepo(t)
 	seedCheckpointPolicyForCommand(t, dir, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "branch-v1",
+		CheckpointVersion: unsupportedCheckpointPolicyExpr,
 	})
 	pushCheckpointPolicyRefForCommandTest(t, dir, bareDir)
 
 	stdout, err := executeCheckpointPolicyCmd(t)
 	require.NoError(t, err)
-	require.Contains(t, stdout, "checkpoint_version: refs-v1 (unsupported)")
+	require.Contains(t, stdout, "checkpoint_version: "+unsupportedCheckpointPolicyExpr+" (unsupported)")
 	require.NotContains(t, stdout, "writing branch-v1")
-	require.Contains(t, stdout, "checkpoint_min_version: branch-v1")
+	require.NotContains(t, stdout, "checkpoint_min_version")
 }
 
 func TestCheckpointPolicyCmd_RejectsDowngradeWithoutForce(t *testing.T) {
 	dir, bareDir := setupCheckpointPolicyRepo(t)
 	seedCheckpointPolicyForCommand(t, dir, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "refs-v1",
+		CheckpointVersion: unsupportedCheckpointPolicyExpr,
 	})
 	pushCheckpointPolicyRefForCommandTest(t, dir, bareDir)
 
-	_, err := executeCheckpointPolicyCmd(t, "--checkpoint-version", "branch-v1", "--checkpoint-min-version", "branch-v1")
-	require.ErrorContains(t, err, "would downgrade checkpoint_version")
+	_, err := executeCheckpointPolicyCmd(t, "--checkpoint-version", "1.0.0")
+	require.ErrorContains(t, err, `checkpoint_version existing value "`+unsupportedCheckpointPolicyExpr+`"`)
 }
 
 func TestCheckpointPolicyCmd_UpdatesAndPushesOnlyPolicyRef(t *testing.T) {
@@ -102,10 +85,9 @@ func TestCheckpointPolicyCmd_UpdatesAndPushesOnlyPolicyRef(t *testing.T) {
 	testutil.GitAdd(t, dir, "README.md")
 	testutil.GitCommit(t, dir, "init")
 
-	stdout, err := executeCheckpointPolicyCmd(t, "--checkpoint-version", "branch-v1", "--checkpoint-min-version", "branch-v1")
+	stdout, err := executeCheckpointPolicyCmd(t, "--checkpoint-version", "^1.0.0")
 	require.NoError(t, err)
-	require.Contains(t, stdout, "checkpoint_version: branch-v1")
-	require.Contains(t, stdout, "checkpoint_min_version: branch-v1")
+	require.Contains(t, stdout, "checkpoint_version: ^1.0.0")
 	require.Contains(t, stdout, "source: remote")
 
 	remoteHash := checkpointPolicyRemoteHashForCommandTest(t, dir, bareDir)
@@ -125,10 +107,9 @@ func TestCheckpointPolicyCmd_UnsetsPolicyFields(t *testing.T) {
 	seedCheckpointPolicyForCommand(t, dir, checkpointpolicy.DefaultPolicy())
 	pushCheckpointPolicyRefForCommandTest(t, dir, bareDir)
 
-	stdout, err := executeCheckpointPolicyCmd(t, "--checkpoint-version", "", "--checkpoint-min-version", "")
+	stdout, err := executeCheckpointPolicyCmd(t, "--checkpoint-version", "")
 	require.NoError(t, err)
-	require.Contains(t, stdout, "checkpoint_version: branch-v1 (default)")
-	require.Contains(t, stdout, "checkpoint_min_version: branch-v1 (default)")
+	require.Contains(t, stdout, "checkpoint_version: 1.0.0 (default)")
 
 	repo := openCheckpointPolicyRepoForCommandTest(t, dir)
 	localState, err := checkpointpolicy.ReadLocal(t.Context(), repo)

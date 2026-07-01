@@ -8,11 +8,9 @@ import (
 )
 
 type UpdateOptions struct {
-	CheckpointVersion       string
-	CheckpointVersionSet    bool
-	CheckpointMinVersion    string
-	CheckpointMinVersionSet bool
-	Force                   bool
+	CheckpointVersion    string
+	CheckpointVersionSet bool
+	Force                bool
 }
 
 func Update(ctx context.Context, repo *git.Repository, target Target, opts UpdateOptions) (State, error) {
@@ -24,9 +22,6 @@ func Update(ctx context.Context, repo *git.Repository, target Target, opts Updat
 	policy := baseline.Policy
 	if opts.CheckpointVersionSet {
 		policy.CheckpointVersion = opts.CheckpointVersion
-	}
-	if opts.CheckpointMinVersionSet {
-		policy.CheckpointMinVersion = opts.CheckpointMinVersion
 	}
 
 	if err := rejectDowngrades(baseline.Policy, policy, opts); err != nil {
@@ -94,11 +89,6 @@ func rejectDowngrades(before, after Policy, opts UpdateOptions) error {
 			return err
 		}
 	}
-	if opts.CheckpointMinVersionSet {
-		if err := rejectCheckpointMinVersionDowngrade(before, after.CheckpointMinVersion); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -115,21 +105,6 @@ func rejectCheckpointVersionDowngrade(beforeRaw, afterRaw string) error {
 	afterVersion := mustSemver(after)
 	if afterVersion.LessThan(beforeVersion) {
 		return fmt.Errorf("would downgrade checkpoint_version from %q to %q; pass --force to allow this", beforeRaw, afterRaw)
-	}
-	return nil
-}
-
-func rejectCheckpointMinVersionDowngrade(before Policy, afterRaw string) error {
-	beforeWriteVersion, err := ResolvedWriteVersion(before)
-	if err != nil {
-		return fmt.Errorf("checkpoint_min_version existing checkpoint_version %q: %w; pass --force to replace it", before.CheckpointVersion, err)
-	}
-	constraint, err := CheckpointMinVersionConstraint(afterRaw)
-	if err != nil {
-		return fmt.Errorf("checkpoint_min_version: %w", err)
-	}
-	if !constraint.Check(mustSemver(beforeWriteVersion)) {
-		return fmt.Errorf("would raise checkpoint_min_version from %q to %q; pass --force to allow this", before.CheckpointMinVersion, afterRaw)
 	}
 	return nil
 }
