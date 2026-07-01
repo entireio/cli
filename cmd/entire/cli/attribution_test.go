@@ -410,11 +410,22 @@ func TestAttributionResolverMissingMetadataIncludesReason(t *testing.T) {
 	require.Contains(t, ctx.MetadataMissingReason, "entire checkpoint explain cab2c3d4e5f6")
 }
 
+// attributionSessionStub is one per-index session result for
+// attributionCheckpointReaderStub.sessions.
+type attributionSessionStub struct {
+	meta    *checkpoint.Metadata
+	prompts string
+	err     error
+}
+
 type attributionCheckpointReaderStub struct {
 	summary    *checkpoint.CheckpointSummary
 	content    *checkpoint.SessionContent
 	readErr    error
 	sessionErr error // returned by ReadSessionMetadataAndPrompts when set
+	// sessions, when non-nil, answers ReadSessionMetadataAndPrompts by index —
+	// for multi-session checkpoints where only some records are readable.
+	sessions []attributionSessionStub
 }
 
 func (s *attributionCheckpointReaderStub) Read(context.Context, checkpointid.CheckpointID) (*checkpoint.CheckpointSummary, error) {
@@ -424,7 +435,17 @@ func (s *attributionCheckpointReaderStub) Read(context.Context, checkpointid.Che
 	return s.summary, nil
 }
 
-func (s *attributionCheckpointReaderStub) ReadSessionMetadataAndPrompts(context.Context, checkpointid.CheckpointID, int) (*checkpoint.Metadata, string, error) {
+func (s *attributionCheckpointReaderStub) ReadSessionMetadataAndPrompts(_ context.Context, _ checkpointid.CheckpointID, index int) (*checkpoint.Metadata, string, error) {
+	if s.sessions != nil {
+		if index < 0 || index >= len(s.sessions) {
+			return nil, "", errors.New("session index out of range")
+		}
+		entry := s.sessions[index]
+		if entry.err != nil {
+			return nil, "", entry.err
+		}
+		return entry.meta, entry.prompts, nil
+	}
 	if s.sessionErr != nil {
 		return nil, "", s.sessionErr
 	}

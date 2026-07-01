@@ -174,8 +174,10 @@ func TestReadCheckpointContextKeepsLocalWhenRefreshReadsWorse(t *testing.T) {
 	require.Contains(t, ctx.MetadataMissingReason, "session record")
 }
 
-// Two resolver runs against the same stores must produce identical contexts for
-// the same checkpoint — the determinism contract of #1551 at the unit level.
+// The determinism contract of #1551 at the unit level: two "clones" with
+// DIFFERENT local damage (one can't read the summary, the other can't read the
+// session records) must converge on the identical complete context once both
+// refresh from the same remote.
 func TestReadCheckpointContextDeterministicAcrossResolvers(t *testing.T) {
 	cpID := checkpointid.MustCheckpointID("abb2c3d4e5f6")
 	overrideAttributionRefresh(t,
@@ -184,12 +186,144 @@ func TestReadCheckpointContextDeterministicAcrossResolvers(t *testing.T) {
 			return fullyReadableStub("session-same"), nil, nil
 		})
 
-	makeCtx := func() attributionCheckpointContext {
-		resolver := newStubAttributionResolver(&attributionCheckpointReaderStub{readErr: errors.New("object not found")})
-		resolver.fetchOnMiss = true
-		return resolver.readCheckpointContext(cpID, "auth.py")
+	cloneA := newStubAttributionResolver(&attributionCheckpointReaderStub{readErr: errors.New("object not found")})
+	cloneA.fetchOnMiss = true
+	cloneB := newStubAttributionResolver(&attributionCheckpointReaderStub{
+		summary: &checkpoint.CheckpointSummary{
+			Sessions: []checkpoint.SessionFilePaths{{Metadata: "metadata.json"}},
+		},
+		sessionErr: errors.New("object not found"),
+	})
+	cloneB.fetchOnMiss = true
+
+	first := cloneA.readCheckpointContext(cpID, "auth.py")
+	second := cloneB.readCheckpointContext(cpID, "auth.py")
+	require.False(t, first.MetadataMissing)
+	require.Equal(t, first, second, "differently-damaged clones must converge on the remote's answer")
+}
+
+// A multi-session checkpoint with only SOME session records readable locally is
+// incomplete: the fallback session would otherwise depend on which blobs a
+// clone happens to have. The refresh must run and the retry must resolve the
+// file-matching session.
+func TestReadCheckpointContextPartialSessionsTriggerRefresh(t *testing.T) {
+	cpID := checkpointid.MustCheckpointID("adb2c3d4e5f6")
+	twoSessions := []checkpoint.SessionFilePaths{{Metadata: "0/metadata.json"}, {Metadata: "1/metadata.json"}}
+	matching := &checkpoint.Metadata{
+		SessionID:    "session-matching",
+		FilesTouched: []string{"auth.py"},
+		Agent:        agent.AgentTypeClaudeCode,
 	}
-	first := makeCtx()
-	second := makeCtx()
-	require.Equal(t, first, second)
+	other := &checkpoint.Metadata{
+		SessionID:    "session-other",
+		FilesTouched: []string{"unrelated.go"},
+		Agent:        agent.AgentTypeClaudeCode,
+	}
+	// Locally the file-matching session's record is unreadable; only the
+	// non-matching one reads, so a no-refresh resolver would silently pick it.
+	local := &attributionCheckpointReaderStub{
+		summary: &checkpoint.CheckpointSummary{Sessions: twoSessions},
+		sessions: []attributionSessionStub{
+			{err: errors.New("object not found")},
+			{meta: other, prompts: "Refactor helpers."},
+		},
+	}
+	remote := &attributionCheckpointReaderStub{
+		summary: &checkpoint.CheckpointSummary{Sessions: twoSessions},
+		sessions: []attributionSessionStub{
+			{meta: matching, prompts: "Fix the authentication bug."},
+			{meta: other, prompts: "Refactor helpers."},
+		},
+	}
+	overrideAttributionRefresh(t,
+		func(context.Context) error { return nil },
+		func(context.Context) (attributionCheckpointReader, *git.Repository, error) {
+			return remote, nil, nil
+		})
+
+	resolver := newStubAttributionResolver(local)
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(cpID, "auth.py")
+
+	require.False(t, ctx.MetadataMissing)
+	require.Equal(t, "session-matching", ctx.SessionID, "the refresh must restore the file-matching session")
+	require.False(t, ctx.SessionFallback, "a matched file must not be flagged as a fallback guess")
+}
+
+// A successful refresh must also run at most once: two different missing
+// checkpoints share one fetch and one store reopen.
+func TestRefreshMetadataStoreSuccessRunsAtMostOnce(t *testing.T) {
+	fetchCalls, openCalls := 0, 0
+	overrideAttributionRefresh(t,
+		func(context.Context) error { fetchCalls++; return nil },
+		func(context.Context) (attributionCheckpointReader, *git.Repository, error) {
+			openCalls++
+			return fullyReadableStub("session-once"), nil, nil
+		})
+
+	resolver := newStubAttributionResolver(&attributionCheckpointReaderStub{readErr: errors.New("object not found")})
+	resolver.fetchOnMiss = true
+	first := resolver.readCheckpointContext(checkpointid.MustCheckpointID("aeb2c3d4e5f6"), "auth.py")
+	second := resolver.readCheckpointContext(checkpointid.MustCheckpointID("afb2c3d4e5f6"), "auth.py")
+
+	require.Equal(t, 1, fetchCalls)
+	require.Equal(t, 1, openCalls)
+	require.False(t, first.MetadataMissing)
+	require.False(t, second.MetadataMissing)
+}
+
+// Sessions unreadable even after a successful refresh: the reason must say the
+// records are unavailable — not claim the checkpoint "may not have been pushed"
+// or "predates checkpointing", both of which the just-read summary disproves.
+func TestReadCheckpointContextSessionsUnreadableAfterRefreshWording(t *testing.T) {
+	cpID := checkpointid.MustCheckpointID("bcb2c3d4e5f6")
+	broken := &attributionCheckpointReaderStub{
+		summary: &checkpoint.CheckpointSummary{
+			Sessions: []checkpoint.SessionFilePaths{{Metadata: "metadata.json"}},
+		},
+		sessionErr: errors.New("object not found"),
+	}
+	overrideAttributionRefresh(t,
+		func(context.Context) error { return nil },
+		func(context.Context) (attributionCheckpointReader, *git.Repository, error) {
+			return broken, nil, nil // remote is equally damaged
+		})
+
+	resolver := newStubAttributionResolver(broken)
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(cpID, "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.Contains(t, ctx.MetadataMissingReason, "still unavailable after refreshing")
+	require.NotContains(t, ctx.MetadataMissingReason, "may not have been pushed",
+		"the summary resolved, so the checkpoint IS on the metadata branch")
+	require.NotContains(t, ctx.MetadataMissingReason, "predates checkpointing")
+}
+
+// Regression pin for the unsound-refresh bug: in a repo with a LOCAL metadata
+// branch but no reachable remote, the refresh must report failure (surfacing
+// the fetch error and the git fetch suggestion) — not silently fall back to the
+// stale local branch and then claim the checkpoint "may not have been pushed".
+// Uses the real fetchAttributionMetadata seam.
+func TestRefreshWithLocalBranchButNoRemoteReportsFetchFailure(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	// A local entire/checkpoints/v1 exists (the old getMetadataTree fallback
+	// would "succeed" from it); the queried checkpoint is not in it.
+	writeAttributionCheckpoint(t, repoRoot, "99b2c3d4e5f6", checkpoint.WriteOptions{
+		SessionID:    "session-local-only",
+		Prompts:      []string{"unrelated"},
+		FilesTouched: []string{"auth.py"},
+		Agent:        agent.AgentTypeClaudeCode,
+	})
+
+	resolver := newStubAttributionResolver(&attributionCheckpointReaderStub{readErr: errors.New("object not found")})
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(checkpointid.MustCheckpointID("cdb2c3d4e5f6"), "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.Contains(t, ctx.MetadataMissingReason, "remote refresh failed",
+		"no remote is configured, so the refresh must report failure, not local-fallback success")
+	require.Contains(t, ctx.MetadataMissingReason, "git fetch ")
+	require.NotContains(t, ctx.MetadataMissingReason, "may not have been pushed",
+		"we never reached a remote, so nothing is known about what it contains")
 }
