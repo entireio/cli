@@ -2,7 +2,6 @@ package claudecode
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -42,33 +41,14 @@ func (c *ClaudeCodeAgent) DiscoverReviewSkills(ctx context.Context) ([]agent.Dis
 
 	var found []agent.DiscoveredSkill
 	found = append(found, scanPluginCache(ctx, filepath.Join(home, ".claude", "plugins", "cache"))...)
-	found = append(found, scanUserSkills(ctx, filepath.Join(home, ".claude", "skills"))...)
+	found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(home, ".claude", "skills"), "")...)
 	found = append(found, scanFlatMarkdownDir(ctx, filepath.Join(home, ".claude", "commands"), "")...)
 	found = append(found, scanFlatMarkdownDir(ctx, filepath.Join(home, ".claude", "agents"), "")...)
-	found = dedupeByInvocation(found)
+	found = skilldiscovery.Dedupe(found)
 	if len(found) == 0 {
 		return nil, nil
 	}
 	return found, nil
-}
-
-// dedupeByInvocation collapses entries sharing an invocation name. Plugins
-// can ship a skill and a same-named command wrapper that forwards to it;
-// scan order keeps the skill over its wrapper.
-func dedupeByInvocation(in []agent.DiscoveredSkill) []agent.DiscoveredSkill {
-	if len(in) < 2 {
-		return in
-	}
-	seen := make(map[string]struct{}, len(in))
-	out := make([]agent.DiscoveredSkill, 0, len(in))
-	for _, s := range in {
-		if _, dup := seen[s.Name]; dup {
-			continue
-		}
-		seen[s.Name] = struct{}{}
-		out = append(out, s)
-	}
-	return out
 }
 
 // scanPluginCache walks <root>/<marketplace>/<plugin>/<version>/{skills,commands,agents}/
@@ -111,7 +91,7 @@ func scanPluginCache(ctx context.Context, root string) []agent.DiscoveredSkill {
 				continue
 			}
 			versionRoot := filepath.Join(pluginRoot, versionDir)
-			found = append(found, readSkillsDir(ctx, filepath.Join(versionRoot, "skills"), pluginName)...)
+			found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(versionRoot, "skills"), pluginName)...)
 			found = append(found, scanFlatMarkdownDir(ctx, filepath.Join(versionRoot, "commands"), pluginName)...)
 			found = append(found, scanFlatMarkdownDir(ctx, filepath.Join(versionRoot, "agents"), pluginName)...)
 		}
@@ -165,51 +145,6 @@ func semverWithV(s string) string {
 	return "v" + s
 }
 
-// scanUserSkills walks ~/.claude/skills/<skill>/SKILL.md.
-func scanUserSkills(ctx context.Context, root string) []agent.DiscoveredSkill {
-	return readSkillsDir(ctx, root, "" /* no plugin prefix */)
-}
-
-// readSkillsDir reads each skill subdirectory's SKILL.md, parses frontmatter,
-// and emits a DiscoveredSkill if Matches() returns true.
-func readSkillsDir(ctx context.Context, dir, pluginName string) []agent.DiscoveredSkill {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var found []agent.DiscoveredSkill
-	for _, skillEntry := range entries {
-		if !skillEntry.IsDir() {
-			continue
-		}
-		skillDir := filepath.Join(dir, skillEntry.Name())
-		skillFile := filepath.Join(skillDir, "SKILL.md")
-		data, err := os.ReadFile(skillFile) //nolint:gosec // G304: skillFile is constructed from a ReadDir walk under HOME, not user input
-		if err != nil {
-			continue
-		}
-		name, description, parseErr := parseSkillFrontmatter(data)
-		if parseErr != nil {
-			logging.Debug(ctx, "claude-code discovery: skipping malformed SKILL.md",
-				slog.String("path", skillFile), slog.String("error", parseErr.Error()))
-			continue
-		}
-		if name == "" {
-			name = skillEntry.Name()
-		}
-		invocation := invocationName(name, pluginName)
-		if !skilldiscovery.Matches(invocation, description) {
-			continue
-		}
-		found = append(found, agent.DiscoveredSkill{
-			Name:        invocation,
-			Description: description,
-			SourcePath:  skillFile,
-		})
-	}
-	return found
-}
-
 // scanFlatMarkdownDir reads *.md files directly under dir (no nesting), parses
 // their YAML frontmatter for `description:`, and derives the invocation name
 // from the filename (stripping the .md suffix). Used for both plugin
@@ -236,13 +171,13 @@ func scanFlatMarkdownDir(ctx context.Context, dir, pluginName string) []agent.Di
 		if err != nil {
 			continue
 		}
-		_, description, parseErr := parseSkillFrontmatter(data)
+		_, description, parseErr := skilldiscovery.ParseFrontmatter(data)
 		if parseErr != nil {
 			logging.Debug(ctx, "claude-code discovery: skipping malformed command/agent",
 				slog.String("path", filePath), slog.String("error", parseErr.Error()))
 			continue
 		}
-		invocation := invocationName(baseName, pluginName)
+		invocation := skilldiscovery.InvocationName(baseName, pluginName)
 		if !skilldiscovery.Matches(invocation, description) {
 			continue
 		}
@@ -253,42 +188,4 @@ func scanFlatMarkdownDir(ctx context.Context, dir, pluginName string) []agent.Di
 		})
 	}
 	return found
-}
-
-// invocationName builds the slash-prefixed invocation form. Plugin-prefixed
-// names use "/plugin:name"; bare names use "/name".
-func invocationName(name, pluginName string) string {
-	if pluginName == "" {
-		return "/" + name
-	}
-	return "/" + pluginName + ":" + name
-}
-
-// parseSkillFrontmatter extracts `name:` and `description:` from a minimal
-// YAML frontmatter block. Purpose-built for the tiny subset of YAML these
-// SKILL.md / command / agent files actually use.
-//
-// Trims surrounding double-quotes from values so `description: "foo bar"`
-// is returned as `foo bar` — the command/agent frontmatter quotes values;
-// SKILL.md files usually don't.
-func parseSkillFrontmatter(data []byte) (name, description string, err error) {
-	s := string(data)
-	if !strings.HasPrefix(s, "---\n") && !strings.HasPrefix(s, "---\r\n") {
-		return "", "", errors.New("no frontmatter delimiter")
-	}
-	body := strings.TrimPrefix(strings.TrimPrefix(s, "---\r\n"), "---\n")
-	end := strings.Index(body, "\n---")
-	if end < 0 {
-		return "", "", errors.New("no closing frontmatter delimiter")
-	}
-	for _, line := range strings.Split(body[:end], "\n") {
-		line = strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(line, "name:"):
-			name = strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "name:")), `"`)
-		case strings.HasPrefix(line, "description:"):
-			description = strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "description:")), `"`)
-		}
-	}
-	return name, description, nil
 }

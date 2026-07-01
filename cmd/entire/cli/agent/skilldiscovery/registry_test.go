@@ -58,6 +58,21 @@ func TestActiveInstallHintsFor_GeminiAlwaysShownRegardlessOfDiscovery(t *testing
 	}
 }
 
+func TestActiveInstallHintsFor_AntigravityAlwaysShownRegardlessOfDiscovery(t *testing.T) {
+	t.Parallel()
+	hints := skilldiscovery.ActiveInstallHintsFor("antigravity", map[string]struct{}{"/code-review": {}})
+	if len(hints) == 0 {
+		t.Error("antigravity hint with nil ProvidesAny should always show")
+	}
+}
+
+func TestIsEligible_IncludesAntigravity(t *testing.T) {
+	t.Parallel()
+	if !skilldiscovery.IsEligible("antigravity") {
+		t.Error("antigravity should be eligible via install hint")
+	}
+}
+
 func TestIsEligible_IncludesAgentWithOnlyInstallHint(t *testing.T) {
 	t.Parallel()
 	if !skilldiscovery.IsEligible("gemini") {
