@@ -16,10 +16,6 @@ func DefaultPolicy() Policy {
 	}
 }
 
-func DefaultCheckpointVersion() string {
-	return DefaultCheckpointVersionSelector
-}
-
 func Normalize(policy Policy) Policy {
 	if policy.CheckpointVersion == "" {
 		policy.CheckpointVersion = DefaultCheckpointVersionSelector

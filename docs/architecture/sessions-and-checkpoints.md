@@ -346,6 +346,12 @@ should ask whether the policy enables a named checkpoint feature instead of
 comparing checkpoint version strings at the call site. Unknown feature names
 evaluate to disabled.
 
+To introduce a checkpoint feature, add a `CheckpointFeature` constant when
+production code needs to check it, add the feature to each supported checkpoint
+version that provides it, then gate the behavior with `PolicyEnablesFeature`.
+Add tests for the feature lookup, selector resolution, and metadata
+compatibility for the new version.
+
 Policy follows the configured checkpoint remote. `entire checkpoint policy`
 fetches the latest remote policy before validating requested changes, updates
 the local policy ref, and pushes only `refs/entire/policies/checkpoint`.
