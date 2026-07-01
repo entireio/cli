@@ -305,6 +305,42 @@ func TestAntigravityIsTransientErrorRecognizesErrorText(t *testing.T) {
 	}
 }
 
+func TestAntigravityQuotaExhaustedIsFatalNotTransient(t *testing.T) {
+	t.Parallel()
+
+	// agy wraps the hard quota wall in "overloaded" + "429" + "RESOURCE_EXHAUSTED",
+	// all of which the transient patterns would otherwise match. The quota-reached
+	// marker must win so the harness fails fast instead of restarting for ~53h.
+	out := Output{Stderr: "The model API is currently overloaded: RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 53h35m43s."}
+	if (&Antigravity{}).IsTransientError(out, stringError(out.Stderr)) {
+		t.Fatal("Individual quota reached must be fatal (non-retryable), not a transient restart")
+	}
+}
+
+func TestAntigravityEntitlementWallsAreFatal(t *testing.T) {
+	t.Parallel()
+
+	for _, msg := range []string{
+		"PERMISSION_DENIED (code 403): Cloud Code Private API ... reason: SERVICE_DISABLED",
+		"AUTH_PERMISSION_DENIED subject: 110002",
+		"error getting token source: You are not logged into Antigravity.",
+	} {
+		if (&Antigravity{}).IsTransientError(Output{Stderr: msg}, stringError(msg)) {
+			t.Errorf("config/entitlement wall must be fatal, not transient: %q", msg)
+		}
+	}
+}
+
+func TestAntigravityGenuineOverloadStillRetries(t *testing.T) {
+	t.Parallel()
+
+	// A real transient overload with no quota/entitlement marker must still retry.
+	out := Output{Stderr: "The model API is currently overloaded and may experience intermittent errors. (503 UNAVAILABLE)"}
+	if !(&Antigravity{}).IsTransientError(out, stringError(out.Stderr)) {
+		t.Fatal("genuine transient overload (no quota/auth marker) should still retry")
+	}
+}
+
 func TestAntigravityMissingCommitIsNotTransient(t *testing.T) {
 	t.Parallel()
 

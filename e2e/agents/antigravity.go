@@ -85,14 +85,37 @@ func antigravityTruthyEnv(env []string, key string) bool {
 }
 
 func (a *Antigravity) IsTransientError(out Output, err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
 	combined := out.Stdout + out.Stderr
 	if err != nil {
 		combined += "\n" + err.Error()
 	}
+	// Fatal configuration/entitlement walls win over every transient signal:
+	// agy wraps an exhausted individual quota in "overloaded"/"429", which the
+	// transient patterns would otherwise match, sending the harness into a
+	// futile scenario-restart loop against a wall that won't clear for days.
+	if _, fatal := antigravityFatalError(combined); fatal {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
 	return antigravityContainsTransient(combined) || antigravityRawToolCallOutput(combined)
+}
+
+// antigravityFatalError detects non-retryable walls that no scenario restart
+// will clear: an exhausted individual quota (multi-day reset), a gated/disabled
+// Code Assist backend, or a missing agy login. Returns a human-actionable
+// message and true when one is present. See reference_antigravity_auth_entitlement.
+func antigravityFatalError(content string) (string, bool) {
+	switch {
+	case strings.Contains(content, "Individual quota reached"):
+		return "agy individual quota exhausted (consumer tier resets on a multi-day window) — use an entitled account/ADC or wait for the reset shown in the error", true
+	case strings.Contains(content, "SERVICE_DISABLED"), strings.Contains(content, "AUTH_PERMISSION_DENIED"):
+		return "agy backend not provisioned for this project/identity (cloudcode-pa is gated) — needs a Gemini Code Assist subscription + seat, not just an enabled API", true
+	case strings.Contains(content, "not logged into Antigravity"):
+		return "agy is not logged in — authenticate with `agy` interactively or provide ADC credentials", true
+	}
+	return "", false
 }
 
 func antigravityContainsTransient(content string) bool {
@@ -146,6 +169,16 @@ func (a *Antigravity) RunPrompt(ctx context.Context, dir string, prompt string, 
 			err = errors.New(msg)
 		} else {
 			err = fmt.Errorf("%w: %s", err, msg)
+		}
+	}
+
+	// Surface fatal config/entitlement walls as a clear, actionable error so the
+	// test fails fast with a legible reason instead of a generic timeout/restart.
+	if msg, fatal := antigravityFatalError(out.Stdout + out.Stderr); fatal {
+		if err == nil {
+			err = errors.New(msg)
+		} else {
+			err = fmt.Errorf("%s (%w)", msg, err)
 		}
 	}
 
