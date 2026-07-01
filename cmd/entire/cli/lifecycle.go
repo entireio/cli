@@ -9,6 +9,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -732,6 +733,25 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	// Calculate token usage - prefer SubagentAwareExtractor to include subagent tokens
 	tokenUsage := agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
+
+	// Out-of-band fallback: Antigravity exposes token usage only via its
+	// title/statusline pipe (captured by the title-tee shim), never in the
+	// transcript. Delta = current cumulative totals minus the TurnStart
+	// baseline stored in PrePromptState.
+	if tokenUsage == nil {
+		if src, ok := agent.AsOutOfBandTokenSource(ag); ok {
+			var baseline json.RawMessage
+			if preState != nil {
+				baseline = preState.TokenBaseline
+			}
+			oobUsage, oobErr := src.CalculateTokenUsageSince(ctx, sessionID, baseline)
+			if oobErr != nil {
+				logging.Warn(logCtx, "failed to compute out-of-band token usage", slog.String("error", oobErr.Error()))
+			} else {
+				tokenUsage = oobUsage
+			}
+		}
+	}
 
 	// Build fully-populated step context and delegate to strategy
 	stepCtx := strategy.StepContext{

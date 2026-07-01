@@ -549,3 +549,66 @@ trusted_hash = "sha256:ccc"
 	require.Contains(t, out, "entire enable")
 	require.NotContains(t, out, "Codex hook trust: REVIEW NEEDED")
 }
+
+// antigravityHooksJSON returns a minimal .agents/hooks.json declaring the
+// Entire PreInvocation hook, enough for AreHooksInstalled to report true.
+func antigravityHooksJSON() string {
+	return `{"entire":{"PreInvocation":[{"type":"command","command":"entire hooks antigravity pre-invocation"}]}}`
+}
+
+// TestCheckAntigravityTitleTee_SilentWhenHooksNotInstalled stays quiet when
+// the repo has no Antigravity hooks — nothing to check.
+func TestCheckAntigravityTitleTee_SilentWhenHooksNotInstalled(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", filepath.Join(t.TempDir(), "agy"))
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityTitleTee(cmd)
+	require.NotContains(t, stdout.String(), "Antigravity title-tee")
+}
+
+// TestCheckAntigravityTitleTee_OKWhenConfigured reports OK when hooks are
+// installed and agy's title slot routes through the title-tee shim.
+func TestCheckAntigravityTitleTee_OKWhenConfigured(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	agentsDir := filepath.Join(dir, ".agents")
+	require.NoError(t, os.MkdirAll(agentsDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(agentsDir, "hooks.json"),
+		[]byte(antigravityHooksJSON()), 0o600))
+
+	cfgDir := filepath.Join(t.TempDir(), "agy")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"),
+		[]byte(`{"title":{"type":"command","command":"entire hooks antigravity title-tee"}}`), 0o600))
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", cfgDir)
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityTitleTee(cmd)
+	require.Contains(t, stdout.String(), "✓ Antigravity title-tee: OK")
+}
+
+// TestCheckAntigravityTitleTee_WarnsWhenNotConfigured surfaces the missing
+// token-usage surface when hooks are installed but the title slot is unclaimed.
+func TestCheckAntigravityTitleTee_WarnsWhenNotConfigured(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	agentsDir := filepath.Join(dir, ".agents")
+	require.NoError(t, os.MkdirAll(agentsDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(agentsDir, "hooks.json"),
+		[]byte(antigravityHooksJSON()), 0o600))
+
+	// Empty agy config dir — no title slot claimed.
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", filepath.Join(t.TempDir(), "agy"))
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityTitleTee(cmd)
+
+	out := stdout.String()
+	require.Contains(t, out, "Antigravity title-tee: NOT CONFIGURED")
+	require.Contains(t, out, "token counts")
+	require.Contains(t, out, "entire agent add")
+}

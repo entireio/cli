@@ -68,7 +68,13 @@ func newHooksCmd() *cobra.Command {
 			continue
 		}
 		if handler, ok := agent.AsHookSupport(ag); ok {
-			cmd.AddCommand(newAgentHooksCmd(agentName, handler))
+			sub := newAgentHooksCmd(agentName, handler)
+			// title-tee is not a lifecycle verb: it runs globally (outside
+			// git repos, without the enabled check) and owns its stdout.
+			if agentName == agent.AgentNameAntigravity {
+				sub.AddCommand(newAntigravityTitleTeeCmd())
+			}
+			cmd.AddCommand(sub)
 		}
 	}
 

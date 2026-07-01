@@ -5,6 +5,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os/exec"
 
@@ -186,6 +187,31 @@ type TokenCalculator interface {
 
 	// CalculateTokenUsage computes token usage from the transcript starting at the given offset.
 	CalculateTokenUsage(transcriptData []byte, fromOffset int) (*TokenUsage, error)
+}
+
+// OutOfBandTokenSource provides token usage from a source other than the
+// transcript. Antigravity is the only agent that needs this: agy never writes
+// token data into its transcript or hook payloads — its title/statusline pipe
+// is the only surface, captured to disk by `entire hooks antigravity
+// title-tee` (see agent/antigravity/statusline.go).
+//
+// Flow: the lifecycle calls SnapshotTokenBaseline at TurnStart and stores the
+// opaque baseline in PrePromptState; at TurnEnd (when transcript-based
+// calculation yields nothing) it calls CalculateTokenUsageSince to get the
+// checkpoint-scoped delta — the same cumulative-totals-minus-baseline pattern
+// Codex uses, sourced out-of-band.
+type OutOfBandTokenSource interface {
+	Agent
+
+	// SnapshotTokenBaseline returns an opaque, agent-defined marker of the
+	// current cumulative token position for the session. A nil baseline with
+	// nil error means "no usage observed yet" (delta will count from zero).
+	SnapshotTokenBaseline(ctx context.Context, sessionID string) (json.RawMessage, error)
+
+	// CalculateTokenUsageSince computes usage between the baseline and now.
+	// A nil result with nil error means no data is available (degrade to no
+	// token counts, never to an error).
+	CalculateTokenUsageSince(ctx context.Context, sessionID string, baseline json.RawMessage) (*TokenUsage, error)
 }
 
 // TextGenerator is an optional interface for agents whose CLI supports

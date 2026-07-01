@@ -12,6 +12,7 @@ import (
 func TestInstallHooks_FreshRepo(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv(configDirEnv, t.TempDir())
 
 	a := &AntigravityAgent{}
 	n, err := a.InstallHooks(context.Background(), false, false)
@@ -49,6 +50,7 @@ func TestInstallHooks_FreshRepo(t *testing.T) {
 func TestInstallHooks_Idempotent(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv(configDirEnv, t.TempDir())
 
 	a := &AntigravityAgent{}
 
@@ -74,6 +76,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 func TestInstallHooks_PreservesForeignHooks(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv(configDirEnv, t.TempDir())
 
 	// Pre-seed .agents/hooks.json with a foreign entry
 	agentsDir := filepath.Join(tmpDir, ".agents")
@@ -127,6 +130,7 @@ func TestInstallHooks_PreservesForeignHooks(t *testing.T) {
 func TestUninstallHooks_LeavesForeignHooks(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv(configDirEnv, t.TempDir())
 
 	a := &AntigravityAgent{}
 
@@ -187,6 +191,7 @@ func TestUninstallHooks_LeavesForeignHooks(t *testing.T) {
 func TestInstallHooks_LocalDevWritesQuotedSubshell(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv(configDirEnv, t.TempDir())
 
 	a := &AntigravityAgent{}
 	if _, err := a.InstallHooks(context.Background(), true, false); err != nil {
@@ -211,6 +216,7 @@ func TestInstallHooks_LocalDevWritesQuotedSubshell(t *testing.T) {
 func TestAreHooksInstalled(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv(configDirEnv, t.TempDir())
 
 	a := &AntigravityAgent{}
 
@@ -224,5 +230,42 @@ func TestAreHooksInstalled(t *testing.T) {
 
 	if !a.AreHooksInstalled(context.Background()) {
 		t.Error("AreHooksInstalled() = false after install, want true")
+	}
+}
+
+// TestInstallHooks_IdempotentStillRepairsTitleTee guards the regression where
+// the repo-hooks idempotency early-return skipped the global title-tee install,
+// leaving Antigravity checkpoints without token counts after an upgrade or a
+// failed first title install (and making the doctor's "re-run setup" hint a
+// no-op). Re-running InstallHooks must repair the missing global slot even when
+// the repo's .agents/hooks.json already matches.
+func TestInstallHooks_IdempotentStillRepairsTitleTee(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv(configDirEnv, t.TempDir())
+
+	a := &AntigravityAgent{}
+	if _, err := a.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("first InstallHooks: %v", err)
+	}
+	if !TitleTeeInstalled() {
+		t.Fatal("title tee should be installed after the first InstallHooks")
+	}
+
+	// Simulate a missing/stale global slot while repo hooks remain correct.
+	if err := UninstallTitleTee(); err != nil {
+		t.Fatalf("UninstallTitleTee: %v", err)
+	}
+	if TitleTeeInstalled() {
+		t.Fatal("precondition: title tee should be gone before the idempotent re-install")
+	}
+
+	// Second install hits the repo-hooks idempotency early-return, but must
+	// still re-install the missing global title tee.
+	if _, err := a.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("second InstallHooks: %v", err)
+	}
+	if !TitleTeeInstalled() {
+		t.Error("idempotent InstallHooks must repair the missing title tee")
 	}
 }

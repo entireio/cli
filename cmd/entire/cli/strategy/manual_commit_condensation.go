@@ -144,6 +144,18 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	extractSessionDataSpan.End()
 	extractDuration := time.Since(extractStart)
 
+	// Out-of-band token fallback: OutOfBandTokenSource agents (e.g. Antigravity)
+	// have their token usage captured out-of-band and accumulated into
+	// SessionState.TokenUsage at SaveStep time; the transcript recompute yields
+	// nil for them. Gate on the purpose-built capability so only those agents
+	// inherit the accumulated state value — transcript-based agents keep their
+	// recomputed, checkpoint-scoped values.
+	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.TokenUsage) {
+		if _, ok := agent.AsOutOfBandTokenSource(ag); ok {
+			sessionData.TokenUsage = state.TokenUsage
+		}
+	}
+
 	// Backfill session state token usage from the freshly-extracted transcript.
 	// Copilot CLI writes session.shutdown after the hooks return, so by condensation
 	// time we can recover the authoritative full-session total from the transcript

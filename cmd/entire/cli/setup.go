@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
@@ -1187,6 +1188,16 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 
 	if err := hookAgent.UninstallHooks(ctx); err != nil {
 		return fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err)
+	}
+
+	// Antigravity's title tee lives in agy's GLOBAL settings.json, not in
+	// this repo — only remove it when the user removes the agent itself,
+	// never on per-repo disable.
+	if ag.Name() == agent.AgentNameAntigravity {
+		if err := antigravity.UninstallTitleTee(); err != nil {
+			logging.Warn(ctx, "failed to uninstall antigravity title tee",
+				"error", err.Error())
+		}
 	}
 
 	fmt.Fprintf(w, "Removed %s hooks.\n", ag.Type())
