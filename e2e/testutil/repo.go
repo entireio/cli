@@ -513,7 +513,7 @@ func (s *RepoState) RunPrompt(t *testing.T, ctx context.Context, prompt string, 
 	s.logPromptResult(out)
 
 	if err != nil && s.Agent.IsTransientError(out, err) {
-		errMsg := fmt.Sprintf("transient API error (stderr: %s)", strings.TrimSpace(out.Stderr))
+		errMsg := fmt.Sprintf("transient API error: %v (stderr: %s)", err, strings.TrimSpace(out.Stderr))
 		t.Logf("%s — restarting scenario", errMsg)
 		fmt.Fprintf(s.ConsoleLog, "> [transient] %s — restarting scenario\n", errMsg)
 		panic(errScenarioRestart{msg: errMsg})
