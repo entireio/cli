@@ -172,14 +172,36 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 			}
 			return runCoreForCluster(cmd, clusterHost, func(ctx context.Context, c *coreapi.Client) error {
 				errW := cmd.ErrOrStderr()
-				stop := startSpinner(errW, fmt.Sprintf("Cloning %s/%s into %s", owner, repo, clusterHost))
-				// nil onStatus: the one-shot's single spinner shows liveness; the
+				// Two-phase progress: a "Placing" spinner covers the fast
+				// CreateMirror call (placement, <15s), then a separate "Cloning"
+				// spinner covers the clone-readiness poll. An already-ready mirror
+				// completes the first poll faster than the spinner's initial delay,
+				// so the Cloning line never paints and we go straight to the clone
+				// instructions.
+				placing := startSpinner(errW, fmt.Sprintf("Placing mirror %s/%s into %s", owner, repo, clusterHost))
+				placed := false
+				var cloning func(success bool)
+				// nil onStatus: the one-shot's spinners show liveness; the
 				// per-mirror progress lines are the wizard's concern.
-				outcome, err := createAndAwaitMirror(ctx, c, owner, repo, clusterHost, noWait, waitTimeout, nil)
-				// Only a confirmed-ready clone earns the ✓; everything else
-				// (empty, --no-wait, suspended, failed, timeout) erases the line
-				// and lets reportOneShotMirror print the specific outcome.
-				stop(err == nil && outcome.polled && outcome.status == coreapi.MirrorStatusReady)
+				outcome, err := createAndAwaitMirror(ctx, c, owner, repo, clusterHost, noWait, waitTimeout,
+					func(created *coreapi.CreatedMirror) {
+						placing(true)
+						placed = true
+						// Only start a Cloning spinner when there's a clone to await.
+						if !noWait && !created.Empty {
+							cloning = startSpinner(errW, fmt.Sprintf("Cloning %s/%s into %s", owner, repo, clusterHost))
+						}
+					}, nil)
+				if !placed {
+					// CreateMirror failed before onCreated fired — erase the line.
+					placing(false)
+				}
+				if cloning != nil {
+					// Only a confirmed-ready clone earns the ✓; everything else
+					// (suspended, failed, timeout) erases the line and lets
+					// reportOneShotMirror print the specific outcome.
+					cloning(err == nil && outcome.polled && outcome.status == coreapi.MirrorStatusReady)
+				}
 				return reportOneShotMirror(cmd.OutOrStdout(), errW, outcome, err)
 			})
 		},
@@ -206,7 +228,11 @@ type mirrorCreateOutcome struct {
 // status. The returned error is the create error (when outcome.created is nil)
 // or the wait error — a status sentinel (errMirrorCloneFailed /
 // errMirrorSuspended) or a timeout; callers read outcome.status for the state.
-func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, clusterHost string, noWait bool, timeout time.Duration, onStatus func(coreapi.MirrorStatus)) (mirrorCreateOutcome, error) {
+//
+// onCreated (may be nil) fires once the placement is registered, before any
+// clone polling — it separates the fast "placing" phase from the slow "cloning"
+// wait so callers can render them as distinct steps.
+func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, clusterHost string, noWait bool, timeout time.Duration, onCreated func(*coreapi.CreatedMirror), onStatus func(coreapi.MirrorStatus)) (mirrorCreateOutcome, error) {
 	created, err := c.CreateMirror(ctx, &coreapi.CreateMirrorInputBody{
 		Provider:    coreapi.CreateMirrorInputBodyProviderGithub,
 		Owner:       owner,
@@ -215,6 +241,9 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 	})
 	if err != nil {
 		return mirrorCreateOutcome{}, err
+	}
+	if onCreated != nil {
+		onCreated(created)
 	}
 	outcome := mirrorCreateOutcome{created: created}
 	if created.Empty {
@@ -254,9 +283,9 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 		return err
 	}
 	if created.Created {
-		fmt.Fprintf(out, "Registered mirror %s\n", created.MirrorId)
+		fmt.Fprintf(out, "\nRegistered mirror %s\n", created.MirrorId)
 	} else {
-		fmt.Fprintf(out, "Mirror already exists (%s)\n", created.MirrorId)
+		fmt.Fprintf(out, "\nMirror exists (%s)\n", created.MirrorId)
 	}
 	fmt.Fprintf(out, "  %s\n", created.MirrorUrl)
 

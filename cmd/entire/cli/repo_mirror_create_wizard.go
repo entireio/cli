@@ -506,7 +506,7 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 	// Same create-then-wait path as the one-shot `repo mirror create <url>`
 	// (createAndAwaitMirror), so both report identical lifecycle states. The
 	// per-poll status drives this mirror's progress line.
-	outcome, err := createAndAwaitMirror(ctx, c, t.owner, t.repo, t.region.host, noWait, waitTimeout,
+	outcome, err := createAndAwaitMirror(ctx, c, t.owner, t.repo, t.region.host, noWait, waitTimeout, nil,
 		func(s coreapi.MirrorStatus) { report(string(s), false, false) })
 	if outcome.created == nil {
 		res.status, res.err = mirrorStatusError, renderCoreError(err)

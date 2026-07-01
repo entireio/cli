@@ -166,11 +166,18 @@ func newRepoCloneCmd() *cobra.Command {
 	return cmd
 }
 
+// mirrorLister is the subset of the control-plane client listMirrorsForRepo
+// needs. Narrowing to an interface lets callers (e.g. the experts cell-target
+// resolver) inject a fake control plane in tests; *coreapi.Client satisfies it.
+type mirrorLister interface {
+	ListMirrors(ctx context.Context, params coreapi.ListMirrorsParams) (*coreapi.ListMirrorsOutputBody, error)
+}
+
 // listMirrorsForRepo returns every mirror placement of one upstream repo across
 // clusters. The list API filters by provider+owner server-side but has no repo
 // filter, so the repo match is applied client-side (owner is already lowercased
 // to match what the server persists).
-func listMirrorsForRepo(ctx context.Context, c *coreapi.Client, provider, owner, repo string) ([]coreapi.Mirror, error) {
+func listMirrorsForRepo(ctx context.Context, c mirrorLister, provider, owner, repo string) ([]coreapi.Mirror, error) {
 	all, err := fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Mirror, string, error) {
 		params := coreapi.ListMirrorsParams{
 			Provider: coreapi.NewOptString(provider),
@@ -181,7 +188,7 @@ func listMirrorsForRepo(ctx context.Context, c *coreapi.Client, provider, owner,
 		}
 		out, err := c.ListMirrors(ctx, params)
 		if err != nil {
-			return nil, "", err
+			return nil, "", fmt.Errorf("list mirrors: %w", err)
 		}
 		return out.Mirrors, out.NextPageToken.Or(""), nil
 	})

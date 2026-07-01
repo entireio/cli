@@ -70,7 +70,7 @@ func ResolveDataAPIToken(ctx context.Context, dataBaseURL string) (string, error
 
 	dctx, cancel := context.WithTimeout(ctx, dataAPIDiscoveryTimeout)
 	defer cancel()
-	httpClient := &http.Client{Timeout: dataAPIDiscoveryTimeout}
+	httpClient := dataAPIDiscoveryClient(dataOrigin)
 
 	selected, err := resolveContextForAPI(dctx, userdirs.Config(), userdirs.Cache(), host, httpClient, nil)
 	if errors.Is(err, clusterdiscovery.ErrDiscoveryUnavailable) {
@@ -88,6 +88,43 @@ func ResolveDataAPIToken(ctx context.Context, dataBaseURL string) (string, error
 		return "", err
 	}
 	return provider(ctx)
+}
+
+type dataAPIHTTPDiscoveryTransport struct {
+	base http.RoundTripper
+}
+
+func (t dataAPIHTTPDiscoveryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.URL.Scheme = schemeHTTP
+	resp, err := t.base.RoundTrip(clone)
+	if err != nil {
+		return nil, fmt.Errorf("plain HTTP data API discovery: %w", err)
+	}
+	return resp, nil
+}
+
+func dataAPIDiscoveryClient(dataOrigin string) *http.Client {
+	client := &http.Client{Timeout: dataAPIDiscoveryTimeout}
+	if !shouldUsePlainHTTPDiscovery(dataOrigin) {
+		return client
+	}
+
+	var base http.RoundTripper
+	base = http.DefaultTransport
+	if client.Transport != nil {
+		base = client.Transport
+	}
+	client.Transport = dataAPIHTTPDiscoveryTransport{base: base}
+	return client
+}
+
+func shouldUsePlainHTTPDiscovery(dataOrigin string) bool {
+	u, err := url.Parse(dataOrigin)
+	if err != nil || u.Scheme != schemeHTTP {
+		return false
+	}
+	return insecureHTTPEnabled() || isLoopbackHTTP(dataOrigin)
 }
 
 // hostOf returns the host[:port] of an origin URL, ok=false when it can't be

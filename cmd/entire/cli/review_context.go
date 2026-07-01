@@ -379,10 +379,7 @@ func truncateReviewContextText(value string) string {
 }
 
 func reviewContextCheckpointNoun(count int) string {
-	if count == 1 {
-		return "checkpoint"
-	}
-	return "checkpoints"
+	return pluralize("checkpoint", count)
 }
 
 func reviewContextCommitMessages(ctx context.Context, repoRoot string, scopeBaseRef string, maxCommits int) ([]string, bool, error) {
