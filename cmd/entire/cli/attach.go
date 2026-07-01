@@ -96,7 +96,10 @@ Pass --skills to declare which skills were actually run; omit to
 attach a review without a declared skills list.
 
 Works with any registered agent, including external agents enabled via
-external_agents in settings. Run 'entire agent list' to see the full list.`,
+external_agents in settings. Run 'entire agent list' to see the full list.
+
+If --agent doesn't locate a transcript, Entire auto-detects the agent from
+the transcript and prints the detected agent name.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return cmd.Help()
@@ -142,7 +145,7 @@ external_agents in settings. Run 'entire agent list' to see the full list.`,
 			return err
 		},
 	}
-	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation and amend the last commit with the checkpoint trailer")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation and amend the last commit with the checkpoint trailer (best-effort; if the amend fails the checkpoint is still created and the trailer is printed for manual paste)")
 	cmd.Flags().StringVarP(&agentFlag, "agent", "a", string(agent.DefaultAgentName), "Agent that created the session (see 'entire agent list' for registered agents, including external)")
 	cmd.Flags().BoolVar(&reviewFlag, "review", false, "Tag the attached session as an agent review")
 	cmd.Flags().StringSliceVar(&skillsFlag, "skills", nil, "Optional: declare which review skills were run in this session. Only used with --review")
@@ -170,7 +173,7 @@ func resolveReviewSkills(flagSkills []string) []string {
 // the user as clear stderr messages rather than generic cobra error output.
 // The non-review path preserves the existing runAttach return-err behavior.
 func runAttachSurfaceReviewErrors(cmd *cobra.Command, sessionID string, agentName types.AgentName, opts attachOptions) error {
-	err := runAttach(cmd.Context(), cmd.OutOrStdout(), sessionID, agentName, opts)
+	err := runAttach(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), sessionID, agentName, opts)
 	if err != nil && opts.Review {
 		cmd.SilenceUsage = true
 		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
@@ -198,7 +201,7 @@ func attachPrompts(meta transcriptMetadata) []string {
 	return []string{meta.FirstPrompt}
 }
 
-func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName types.AgentName, opts attachOptions) error {
+func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentName types.AgentName, opts attachOptions) error {
 	// Initialize structured logger so logging.Warn/Info write to .entire/logs/ not stderr.
 	if err := logging.Init(ctx, sessionID); err != nil {
 		// Init failed — logging will use stderr fallback, non-fatal.
@@ -248,10 +251,7 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 		}
 		cpID := existingState.LastCheckpointID.String()
 		fmt.Fprintf(w, "Session %s already has checkpoint %s\n", sessionID, cpID)
-		if err := promptAmendCommit(logCtx, w, headCommit, cpID, opts.Force); err != nil {
-			logging.Warn(logCtx, "failed to amend commit", "error", err)
-			fmt.Fprintf(w, "\nCopy to your commit message to attach:\n\n  Entire-Checkpoint: %s\n", cpID)
-		}
+		amendOrPrintTrailer(logCtx, w, errW, headCommit, cpID, opts.Force)
 		return nil
 	}
 
@@ -287,6 +287,7 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 	}
 
 	meta := extractTranscriptMetadata(transcriptData)
+	warnEmptyTranscriptMetadata(errW, ag.Name(), meta, opts)
 
 	// Determine checkpoint ID: reuse from HEAD if one exists, otherwise generate new.
 	checkpointID, isExistingCheckpoint := resolveCheckpointID(headCommit)
@@ -380,19 +381,80 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 	}
 
 	fmt.Fprintf(w, "Attached session %s\n", sessionID)
+	printAttachFooter(w, meta, tokenUsage)
 	if isExistingCheckpoint {
 		fmt.Fprintf(w, "  Added to existing checkpoint %s\n", checkpointID)
 		return nil
 	}
 
 	fmt.Fprintf(w, "  Created checkpoint %s\n", checkpointID)
-	cpIDStr := checkpointID.String()
-	if err := promptAmendCommit(logCtx, w, headCommit, cpIDStr, opts.Force); err != nil {
-		logging.Warn(logCtx, "failed to amend commit", "error", err)
-		fmt.Fprintf(w, "\nCopy to your commit message to attach:\n\n  Entire-Checkpoint: %s\n", cpIDStr)
-	}
+	amendOrPrintTrailer(logCtx, w, errW, headCommit, checkpointID.String(), opts.Force)
 
 	return nil
+}
+
+// amendOrPrintTrailer amends HEAD with the checkpoint trailer (best-effort).
+// If the amend fails, it logs the full error, prints a brief reason to stderr
+// so the user knows the amend was attempted, and falls back to printing the
+// trailer for manual paste. The recovery path is non-fatal: attach still
+// succeeds.
+func amendOrPrintTrailer(logCtx context.Context, w, errW io.Writer, headCommit *object.Commit, checkpointIDStr string, force bool) {
+	if err := promptAmendCommit(logCtx, w, headCommit, checkpointIDStr, force); err != nil {
+		logging.Warn(logCtx, "failed to amend commit", "error", err)
+		// promptAmendCommit wraps the full multi-line `git commit --amend`
+		// output into the error; keep the stderr note to the first line so it
+		// stays brief. The full error is preserved in the debug log above.
+		fmt.Fprintf(errW, "Could not amend the commit automatically (%s).\n", firstLine(err.Error()))
+		fmt.Fprintf(w, "\nCopy to your commit message to attach:\n\n  Entire-Checkpoint: %s\n", checkpointIDStr)
+	}
+}
+
+// warnEmptyTranscriptMetadata warns (without failing) when nothing parsed out
+// of the transcript: the checkpoint is still written and useful (code + token
+// usage), but it carries no prompt or title. extractTranscriptMetadata only
+// understands generic JSONL + Gemini JSON, so agents with other user-content
+// shapes (codex/copilot/pi/factory) can legitimately yield empty meta from a
+// valid transcript — a hard error would regress attach for them.
+func warnEmptyTranscriptMetadata(errW io.Writer, agentName types.AgentName, meta transcriptMetadata, opts attachOptions) {
+	if meta.FirstPrompt != "" || meta.TurnCount != 0 {
+		return
+	}
+	fmt.Fprintf(errW, "warning: no user prompts were parsed from this transcript; the checkpoint will have no recorded prompt. Verify the --agent value (got %q) and session ID.\n", agentName)
+	// Only warn about an empty review prompt when nothing will supply one. A
+	// pending-review marker's ReviewPromptOverride is still recorded as the
+	// review prompt via reviewPromptForAttach even with no parsed transcript prompt.
+	if opts.Review && opts.ReviewPromptOverride == "" {
+		fmt.Fprintln(errW, "warning: --review was set, but with no parsed prompt the review prompt will be empty.")
+	}
+}
+
+// printAttachFooter writes the post-attach "Captured: …" footer when there is
+// anything to report. Skipped silently when nothing is known.
+func printAttachFooter(w io.Writer, meta transcriptMetadata, tokenUsage *agent.TokenUsage) {
+	if summary := attachSummaryLine(meta, tokenUsage); summary != "" {
+		fmt.Fprintf(w, "  Captured: %s\n", summary)
+	}
+}
+
+// attachSummaryLine builds the post-attach "Captured: …" footer from data
+// already in scope. Each segment is omitted when its value is absent so the
+// line never renders an empty or zero field.
+func attachSummaryLine(meta transcriptMetadata, tokenUsage *agent.TokenUsage) string {
+	var parts []string
+	if meta.TurnCount > 0 {
+		noun := "turns"
+		if meta.TurnCount == 1 {
+			noun = "turn"
+		}
+		parts = append(parts, fmt.Sprintf("%d %s", meta.TurnCount, noun))
+	}
+	if meta.Model != "" {
+		parts = append(parts, meta.Model)
+	}
+	if total := totalTokens(tokenUsage); total > 0 {
+		parts = append(parts, formatTokenCount(total)+" tokens")
+	}
+	return strings.Join(parts, " · ")
 }
 
 // checkpointHasSessionMetadata reports whether sessionID has existing metadata

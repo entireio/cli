@@ -62,7 +62,7 @@ func TestAttach_TranscriptNotFound(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, "nonexistent-session-id", agent.AgentNameClaudeCode, attachOptions{Force: true})
+	err := runAttach(context.Background(), &out, &out, "nonexistent-session-id", agent.AgentNameClaudeCode, attachOptions{Force: true})
 	if err == nil {
 		t.Fatal("expected error for missing transcript")
 	}
@@ -85,7 +85,7 @@ func TestAttachBlocksWhenPolicyWriteUnsupported(t *testing.T) {
 `)
 
 	var out bytes.Buffer
-	err = runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
+	err = runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
 	if err == nil || !strings.Contains(err.Error(), "checkpoint policy cannot be satisfied by this Entire CLI") {
 		t.Fatalf("runAttach error = %v, want unsupported checkpoint policy", err)
 	}
@@ -113,7 +113,7 @@ func TestAttach_Success(t *testing.T) {
 `)
 
 	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
 	if err != nil {
 		t.Fatalf("runAttach failed: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
 		t.Fatalf("runAttach failed: %v", err)
 	}
 
@@ -250,7 +250,7 @@ func TestAttach_PreservesActivePhase(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
 		t.Fatalf("runAttach failed: %v", err)
 	}
 
@@ -290,7 +290,7 @@ func TestAttach_SessionAlreadyTracked_NoCheckpoint(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err = runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
+	err = runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
 	if err != nil {
 		t.Fatalf("expected attach to handle already-tracked session, got error: %v", err)
 	}
@@ -320,7 +320,7 @@ func TestAttach_OutputContainsCheckpointID(t *testing.T) {
 `)
 
 	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
 	if err != nil {
 		t.Fatalf("runAttach failed: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestAttach_AppendsAsAdditionalSessionWhenIDDiffers(t *testing.T) {
 	setupClaudeTranscript(t, firstSessionID, `{"type":"user","message":{"role":"user","content":"first"},"uuid":"u1"}
 `)
 	var out bytes.Buffer
-	if err := runAttach(context.Background(), &out, firstSessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+	if err := runAttach(context.Background(), &out, &out, firstSessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
 		t.Fatalf("first attach failed: %v", err)
 	}
 
@@ -370,7 +370,7 @@ func TestAttach_AppendsAsAdditionalSessionWhenIDDiffers(t *testing.T) {
 	setupClaudeTranscript(t, secondSessionID, `{"type":"user","message":{"role":"user","content":"second"},"uuid":"u1"}
 `)
 	out.Reset()
-	if err := runAttach(context.Background(), &out, secondSessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+	if err := runAttach(context.Background(), &out, &out, secondSessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
 		t.Fatalf("second attach failed: %v", err)
 	}
 
@@ -417,7 +417,7 @@ func TestAttach_RefusesWhenCheckpointMissingFromLocalBranch(t *testing.T) {
 `)
 
 	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
 	if err == nil {
 		t.Fatal("expected error: checkpoint referenced by HEAD is missing locally and attach should refuse")
 	}
@@ -496,7 +496,7 @@ func TestAttach_RefusesWhenCheckpointOnlyInRemoteTrackingRef(t *testing.T) {
 `)
 
 	var out bytes.Buffer
-	err = runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
+	err = runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
 	if err == nil {
 		t.Fatal("expected attach to refuse when checkpoint is only in the remote-tracking ref")
 	}
@@ -529,7 +529,7 @@ func TestAttach_PopulatesTokenUsage(t *testing.T) {
 `)
 
 	var out bytes.Buffer
-	if err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
 		t.Fatalf("runAttach failed: %v", err)
 	}
 
@@ -560,7 +560,7 @@ func TestAttach_SetsSessionTurnCount(t *testing.T) {
 `)
 
 	var out bytes.Buffer
-	if err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
 		t.Fatalf("runAttach failed: %v", err)
 	}
 
@@ -702,7 +702,7 @@ func TestAttach_GeminiSubdirectorySession(t *testing.T) {
 	t.Setenv("ENTIRE_TEST_GEMINI_PROJECT_DIR", emptyProjectDir)
 
 	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameGemini, attachOptions{Force: true})
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameGemini, attachOptions{Force: true})
 	if err != nil {
 		t.Fatalf("runAttach failed: %v", err)
 	}
@@ -747,7 +747,7 @@ func TestAttach_GeminiSuccess(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameGemini, attachOptions{Force: true})
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameGemini, attachOptions{Force: true})
 	if err != nil {
 		t.Fatalf("runAttach failed: %v", err)
 	}
@@ -795,7 +795,7 @@ func TestAttach_CursorSuccess(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameCursor, attachOptions{Force: true})
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameCursor, attachOptions{Force: true})
 	if err != nil {
 		t.Fatalf("runAttach failed: %v", err)
 	}
@@ -844,7 +844,7 @@ func TestAttach_CodexSuccess(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameCodex, attachOptions{Force: true})
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameCodex, attachOptions{Force: true})
 	if err != nil {
 		t.Fatalf("runAttach failed: %v", err)
 	}
@@ -893,7 +893,7 @@ func TestAttach_FactoryAIDroidSuccess(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameFactoryAIDroid, attachOptions{Force: true})
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameFactoryAIDroid, attachOptions{Force: true})
 	if err != nil {
 		t.Fatalf("runAttach failed: %v", err)
 	}
@@ -941,7 +941,7 @@ func TestAttach_CursorNestedLayout(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameCursor, attachOptions{Force: true})
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameCursor, attachOptions{Force: true})
 	if err != nil {
 		t.Fatalf("runAttach failed: %v", err)
 	}
@@ -964,7 +964,7 @@ func TestAttach_WithReviewFlag(t *testing.T) {
 `)
 
 	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
 		Force:                true,
 		Review:               true,
 		ReviewSkillsOverride: []string{"/pr-review-toolkit:review-pr", "/test-auditor"},
@@ -1068,14 +1068,14 @@ func TestAttach_ReviewWithExistingCheckpointErrors(t *testing.T) {
 
 	// First attach (non-review) creates a checkpoint.
 	var out bytes.Buffer
-	if err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
 		t.Fatalf("first attach failed: %v", err)
 	}
 
 	// Second attach with --review should error rather than silently
 	// linking the existing checkpoint.
 	out.Reset()
-	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
 		Force:                true,
 		Review:               true,
 		ReviewSkillsOverride: []string{"/pr-review-toolkit:review-pr"},
@@ -1105,7 +1105,7 @@ func TestAttach_ReviewAppendsAsAdditionalSessionWhenIDDiffers(t *testing.T) {
 	setupClaudeTranscript(t, firstSessionID, `{"type":"user","message":{"role":"user","content":"first"},"uuid":"u1"}
 `)
 	var out bytes.Buffer
-	if err := runAttach(context.Background(), &out, firstSessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+	if err := runAttach(context.Background(), &out, &out, firstSessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
 		t.Fatalf("first attach failed: %v", err)
 	}
 
@@ -1134,7 +1134,7 @@ func TestAttach_ReviewAppendsAsAdditionalSessionWhenIDDiffers(t *testing.T) {
 	setupClaudeTranscript(t, secondSessionID, `{"type":"user","message":{"role":"user","content":"please review"},"uuid":"u1"}
 `)
 	out.Reset()
-	if err := runAttach(context.Background(), &out, secondSessionID, agent.AgentNameClaudeCode, attachOptions{
+	if err := runAttach(context.Background(), &out, &out, secondSessionID, agent.AgentNameClaudeCode, attachOptions{
 		Force:                true,
 		Review:               true,
 		ReviewSkillsOverride: []string{"/review"},
@@ -1202,7 +1202,7 @@ func TestAttach_ReviewRefusesWhenCheckpointMissingFromLocalBranch(t *testing.T) 
 `)
 
 	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
 		Force:                true,
 		Review:               true,
 		ReviewSkillsOverride: []string{"/review"},
@@ -1252,7 +1252,7 @@ func TestAttach_ReviewWithExistingCheckpointErrorsEvenWithoutSessionState(t *tes
 
 	// First attach (non-review) creates a checkpoint and writes session state.
 	var out bytes.Buffer
-	if err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
 		t.Fatalf("first attach failed: %v", err)
 	}
 
@@ -1270,7 +1270,7 @@ func TestAttach_ReviewWithExistingCheckpointErrorsEvenWithoutSessionState(t *tes
 	// guard, this call would silently overwrite the existing session's
 	// metadata in the checkpoint with review-flavored metadata.
 	out.Reset()
-	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
 		Force:                true,
 		Review:               true,
 		ReviewSkillsOverride: []string{"/pr-review-toolkit:review-pr"},
@@ -1313,7 +1313,7 @@ func TestAttach_ReviewWithExistingMetadataOnlyCheckpointErrorsEvenWithoutSession
 `)
 
 	var out bytes.Buffer
-	err = runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
+	err = runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
 		Force:                true,
 		Review:               true,
 		ReviewSkillsOverride: []string{"/pr-review-toolkit:review-pr"},
@@ -1491,6 +1491,168 @@ func TestAttachCmd_ReviewAutoDetectsAgent(t *testing.T) {
 	}
 	if state.AgentType != agent.AgentTypeGemini {
 		t.Errorf("AgentType = %q, want %q (auto-detect should have found Gemini)", state.AgentType, agent.AgentTypeGemini)
+	}
+}
+
+// TestAttach_WarnsOnEmptyTranscriptMetadata: a transcript that parses to no
+// user prompts and no model must still produce a checkpoint (warn, don't
+// fail), with a warning written to stderr — never to stdout, where it would
+// interleave with the success lines.
+func TestAttach_WarnsOnEmptyTranscriptMetadata(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	sessionID := "test-attach-empty-meta"
+	// Valid JSONL, but no user content and no model field: TurnCount and
+	// FirstPrompt both stay zero/empty.
+	setupClaudeTranscript(t, sessionID, `{"type":"assistant","message":{"role":"assistant","content":"hi"},"uuid":"a1"}
+`)
+
+	var out, errOut bytes.Buffer
+	if err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+		t.Fatalf("runAttach should warn, not fail, on empty transcript metadata: %v", err)
+	}
+
+	if !strings.Contains(errOut.String(), "no user prompts were parsed") {
+		t.Errorf("expected empty-transcript warning on stderr, got: %q", errOut.String())
+	}
+	// The warning must not leak onto stdout.
+	if strings.Contains(out.String(), "no user prompts were parsed") {
+		t.Errorf("warning leaked onto stdout: %q", out.String())
+	}
+
+	// The checkpoint must still be written.
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.LastCheckpointID.IsEmpty() {
+		t.Fatalf("expected checkpoint to be written despite empty metadata; state=%+v", state)
+	}
+}
+
+// TestAttach_WarnsOnEmptyTranscriptMetadata_Review: with --review and an
+// empty transcript, the warning additionally calls out that the review
+// prompt will be empty — the review prompt is the point of --review.
+func TestAttach_WarnsOnEmptyTranscriptMetadata_Review(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	sessionID := "test-attach-empty-meta-review"
+	setupClaudeTranscript(t, sessionID, `{"type":"assistant","message":{"role":"assistant","content":"hi"},"uuid":"a1"}
+`)
+
+	var out, errOut bytes.Buffer
+	if err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{
+		Force:  true,
+		Review: true,
+	}); err != nil {
+		t.Fatalf("runAttach --review should warn, not fail, on empty transcript metadata: %v", err)
+	}
+
+	if !strings.Contains(errOut.String(), "no user prompts were parsed") {
+		t.Errorf("expected empty-transcript warning on stderr, got: %q", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "review prompt will be empty") {
+		t.Errorf("expected review-specific warning on stderr, got: %q", errOut.String())
+	}
+}
+
+// TestAttach_EmptyMetadataReviewWithOverride_NoEmptyPromptWarning: when a
+// pending-review marker supplies ReviewPromptOverride, the review prompt is
+// NOT empty even with an unparseable transcript, so the review-specific
+// warning must be suppressed (the general "no prompts parsed" warning still
+// fires).
+func TestAttach_EmptyMetadataReviewWithOverride_NoEmptyPromptWarning(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	sessionID := "test-attach-empty-meta-review-override"
+	setupClaudeTranscript(t, sessionID, `{"type":"assistant","message":{"role":"assistant","content":"hi"},"uuid":"a1"}
+`)
+
+	var out, errOut bytes.Buffer
+	if err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{
+		Force:                true,
+		Review:               true,
+		ReviewPromptOverride: "review the auth module for security issues",
+	}); err != nil {
+		t.Fatalf("runAttach --review with override should not fail: %v", err)
+	}
+
+	if !strings.Contains(errOut.String(), "no user prompts were parsed") {
+		t.Errorf("expected general empty-transcript warning on stderr, got: %q", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "review prompt will be empty") {
+		t.Errorf("review-empty warning must be suppressed when an override prompt is set, got: %q", errOut.String())
+	}
+
+	// The override must be recorded as the review prompt.
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.ReviewPrompt != "review the auth module for security issues" {
+		t.Errorf("expected override recorded as review prompt; got state=%+v", state)
+	}
+}
+
+// TestAttachSummaryLine covers the post-attach "Captured: …" footer builder:
+// every field present, the token segment omitted when usage is nil or zero,
+// and the empty result when nothing is known.
+func TestAttachSummaryLine(t *testing.T) {
+	t.Parallel()
+
+	tu := &agent.TokenUsage{InputTokens: 1000, OutputTokens: 300}
+	if got, want := attachSummaryLine(transcriptMetadata{TurnCount: 12, Model: "claude-opus-4-8"}, tu),
+		"12 turns · claude-opus-4-8 · 1.3k tokens"; got != want {
+		t.Errorf("attachSummaryLine() = %q, want %q", got, want)
+	}
+
+	// nil token usage: token segment omitted; single turn is singular.
+	if got, want := attachSummaryLine(transcriptMetadata{TurnCount: 1, Model: "m"}, nil),
+		"1 turn · m"; got != want {
+		t.Errorf("attachSummaryLine(nil tokens) = %q, want %q", got, want)
+	}
+
+	// non-nil but all-zero token usage: token segment still omitted (never
+	// render "0 tokens").
+	if got, want := attachSummaryLine(transcriptMetadata{TurnCount: 2, Model: "m"}, &agent.TokenUsage{}),
+		"2 turns · m"; got != want {
+		t.Errorf("attachSummaryLine(zero tokens) = %q, want %q", got, want)
+	}
+
+	// Nothing known: empty string (caller skips the line entirely).
+	if got := attachSummaryLine(transcriptMetadata{}, nil); got != "" {
+		t.Errorf("attachSummaryLine(empty) = %q, want empty", got)
+	}
+}
+
+// TestAttach_NonInteractivePrintsTrailerForManualPaste: with --force unset and
+// no TTY (the test default), attach cannot prompt to amend, so it prints the
+// Entire-Checkpoint trailer for manual paste instead of failing.
+func TestAttach_NonInteractivePrintsTrailerForManualPaste(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	sessionID := "test-attach-noninteractive"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
+{"type":"assistant","message":{"role":"assistant","content":"hi"},"uuid":"a1"}
+`)
+
+	var out, errOut bytes.Buffer
+	// Force:false — exercise the non-interactive fallback branch.
+	if err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{}); err != nil {
+		t.Fatalf("runAttach failed: %v", err)
+	}
+
+	re := regexp.MustCompile(`Entire-Checkpoint: ` + id.CheckpointPattern)
+	if !re.MatchString(out.String()) {
+		t.Errorf("expected Entire-Checkpoint trailer for manual paste, got:\n%s", out.String())
 	}
 }
 
