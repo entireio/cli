@@ -3,60 +3,93 @@ package checkpointpolicy_test
 import (
 	"testing"
 
+	semver "github.com/Masterminds/semver/v3"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/stretchr/testify/require"
 )
 
-func TestParseFormat(t *testing.T) {
+func TestParseCheckpointVersionSelector(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		input   string
-		want    checkpointpolicy.CheckpointFormat
-		wantErr string
+		name      string
+		input     string
+		matches   []string
+		rejects   []string
+		wantError string
 	}{
-		{name: "branch v1", input: "branch-v1", want: checkpointpolicy.CheckpointFormat{Family: checkpointpolicy.CheckpointFamilyBranch, Major: 1}},
-		{name: "refs v2", input: "refs-v2", want: checkpointpolicy.CheckpointFormat{Family: checkpointpolicy.CheckpointFamilyRefs, Major: 2}},
-		{name: "unknown family parses", input: "unknown-v1", want: checkpointpolicy.CheckpointFormat{Family: "unknown", Major: 1}},
-		{name: "missing v", input: "branch-1", wantErr: "invalid checkpoint format"},
-		{name: "zero major", input: "branch-v0", wantErr: "invalid checkpoint major"},
-		{name: "non numeric major", input: "branch-vx", wantErr: "invalid checkpoint major"},
+		{name: "major", input: "1", matches: []string{"1.0.0", "1.4.2"}, rejects: []string{"2.0.0"}},
+		{name: "major minor", input: "1.0", matches: []string{"1.0.0", "1.0.4"}, rejects: []string{"1.1.0"}},
+		{name: "major minor patch", input: "1.0.0", matches: []string{"1.0.0"}, rejects: []string{"1.0.1"}},
+		{name: "legacy metadata alias rejected", input: checkpoint.CheckpointVersionBranchV1, wantError: "not a valid SemVer selector"},
+		{name: "constraint rejected", input: "^1.0.0", wantError: "not a valid SemVer selector"},
+		{name: "comparator rejected", input: ">=1.0.0", wantError: "not a valid SemVer selector"},
+		{name: "prerelease rejected", input: "1.0.0-beta.1", wantError: "not a valid SemVer selector"},
+		{name: "empty rejected", input: "", wantError: "not a valid SemVer selector"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := checkpointpolicy.ParseFormat(tt.input)
-			if tt.wantErr != "" {
-				require.ErrorContains(t, err, tt.wantErr)
+			got, err := checkpointpolicy.ParseCheckpointVersionSelector(tt.input)
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, tt.want, got)
-			require.Equal(t, tt.input, got.String())
+			for _, version := range tt.matches {
+				require.True(t, got.Check(semver.MustParse(version)), "expected %q to match %q", tt.input, version)
+			}
+			for _, version := range tt.rejects {
+				require.False(t, got.Check(semver.MustParse(version)), "expected %q to reject %q", tt.input, version)
+			}
 		})
 	}
 }
 
-func TestSupportedFormats(t *testing.T) {
+func TestSupportedLogicalVersions(t *testing.T) {
 	t.Parallel()
 
-	branchV1, err := checkpointpolicy.ParseFormat(checkpoint.CheckpointVersionBranchV1)
-	require.NoError(t, err)
-	refsV1, err := checkpointpolicy.ParseFormat("refs-v1")
-	require.NoError(t, err)
-	unknownV1, err := checkpointpolicy.ParseFormat("unknown-v1")
-	require.NoError(t, err)
+	require.True(t, checkpointpolicy.CanReadVersion(checkpointpolicy.LogicalCheckpointVersionV1))
+	require.True(t, checkpointpolicy.CanWriteVersion(checkpointpolicy.LogicalCheckpointVersionV1))
+	require.False(t, checkpointpolicy.CanReadVersion("2.0.0"))
+	require.False(t, checkpointpolicy.CanWriteVersion("2.0.0"))
+}
 
-	require.True(t, checkpointpolicy.CanRead(branchV1))
-	require.True(t, checkpointpolicy.CanWrite(branchV1))
-	require.Equal(t, checkpoint.CheckpointVersionBranchV1, branchV1.String())
+func TestMetadataVersionMapping(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr string
+	}{
+		{name: "legacy empty", input: "", want: checkpointpolicy.LogicalCheckpointVersionV1},
+		{name: "legacy branch v1", input: checkpoint.CheckpointVersionBranchV1, want: checkpointpolicy.LogicalCheckpointVersionV1},
+		{name: "logical v1", input: checkpointpolicy.LogicalCheckpointVersionV1, want: checkpointpolicy.LogicalCheckpointVersionV1},
+		{name: "future semver", input: "2.0.0", want: "2.0.0"},
+		{name: "old refs family invalid", input: "refs-v1", wantErr: "invalid checkpoint_version"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := checkpointpolicy.LogicalVersionForCheckpointMetadata(tt.input)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				require.Equal(t, tt.want, got)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
 
-	require.False(t, checkpointpolicy.CanRead(refsV1))
-	require.False(t, checkpointpolicy.CanWrite(refsV1))
-	require.Negative(t, checkpointpolicy.Compare(branchV1, refsV1))
+func TestMetadataVersionForWriteVersion(t *testing.T) {
+	t.Parallel()
 
-	require.False(t, checkpointpolicy.CanRead(unknownV1))
-	require.False(t, checkpointpolicy.CanWrite(unknownV1))
-	require.Negative(t, checkpointpolicy.Compare(refsV1, unknownV1))
+	got, err := checkpointpolicy.MetadataVersionForWriteVersion(checkpointpolicy.LogicalCheckpointVersionV1)
+	require.NoError(t, err)
+	require.Equal(t, checkpoint.CheckpointVersionBranchV1, got)
+
+	_, err = checkpointpolicy.MetadataVersionForWriteVersion("2.0.0")
+	require.ErrorContains(t, err, `checkpoint_version "2.0.0" is not writable by this Entire CLI`)
 }
