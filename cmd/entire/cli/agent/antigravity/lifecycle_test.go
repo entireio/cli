@@ -72,19 +72,22 @@ func TestParseHookEvent_PreInvocation_FirstInvocationEmitsTurnStart(t *testing.T
 	}
 }
 
-// TestParseHookEvent_PreInvocation_FollowUpReturnsNil verifies that agy's
-// per-model-call PreInvocations (invocationNum > 0) do NOT re-fire TurnStart.
-// This is the bug that produced "no files modified during session, skipping
-// checkpoint" in real-agy testing: each PreInvocation that emits TurnStart
-// causes the framework to re-capture pre-prompt state, clobbering the
-// baseline used by TurnEnd's file-diff.
+// TestParseHookEvent_PreInvocation_FollowUpEmitsConditionalTurnStart verifies
+// that agy's per-model-call PreInvocations (invocationNum > 0) emit a TurnStart
+// flagged SuppressIfSessionActive rather than nil.
 //
-// agy 1.0.0 ships invocationNum **0-indexed** (the first call is 0, the
-// second is 1, etc.) — captured from real stdin, not from the docs which
-// describe invocationNum ambiguously. The fixture
-// testdata/hook_stdin_pre_invocation.json carries invocationNum=1 for this
-// reason — that's a follow-up under the real-agy numbering.
-func TestParseHookEvent_PreInvocation_FollowUpReturnsNil(t *testing.T) {
+// invocationNum>0 is ambiguous: it is EITHER a mid-turn follow-up model call
+// (which must NOT re-fire TurnStart — re-capturing pre-prompt state clobbers
+// the baseline TurnEnd diffs against, producing "no files modified, skipping
+// checkpoint") OR the first call of a resumed conversation (agy --continue /
+// --conversation), which starts at invocationNum>0 and MUST be tracked. The
+// parser can't tell them apart without session state, so it defers the decision
+// to the cli dispatcher via SuppressIfSessionActive: fire only when no active
+// session exists.
+//
+// agy 1.0.0 ships invocationNum **0-indexed**; the fixture
+// testdata/hook_stdin_pre_invocation.json carries invocationNum=1 (a follow-up).
+func TestParseHookEvent_PreInvocation_FollowUpEmitsConditionalTurnStart(t *testing.T) {
 	t.Parallel()
 	data, err := os.ReadFile("testdata/hook_stdin_pre_invocation.json")
 	if err != nil {
@@ -95,8 +98,11 @@ func TestParseHookEvent_PreInvocation_FollowUpReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseHookEvent: %v", err)
 	}
-	if ev != nil {
-		t.Errorf("expected nil event for invocationNum>1 pre-invocation, got %+v", ev)
+	if ev == nil || ev.Type != agent.TurnStart {
+		t.Fatalf("expected a conditional TurnStart for invocationNum>0, got %+v", ev)
+	}
+	if !ev.SuppressIfSessionActive {
+		t.Error("follow-up/resume TurnStart must set SuppressIfSessionActive so the dispatcher gates on session state")
 	}
 }
 

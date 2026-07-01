@@ -78,10 +78,12 @@ func (a *AntigravityAgent) ParseHookEvent(_ context.Context, hookName string, st
 // (initialNumSteps is not a usable "first?" signal — agy inserts the user
 // prompt as a step before the first model call, so it's already 1.)
 //
-// Limitation: agy resumes (agy --continue / --conversation) start with
-// invocationNum > 0, so they won't fire TurnStart. If the prior session state
-// was already cleaned up (FullyCondensed), the resumed turn won't be tracked
-// until the user starts a fresh conversation. Tracked in deferred work.
+// Resumes (agy --continue / --conversation) start with invocationNum > 0, so
+// invocationNum alone can't distinguish them from a mid-turn follow-up. We emit
+// a TurnStart with SuppressIfSessionActive for every invocationNum > 0; the cli
+// dispatcher fires it only when no active session state exists — so a resumed
+// turn (state condensed/idle/absent) is tracked, while a genuine follow-up
+// (state active mid-turn) is dropped without clobbering the baseline.
 //
 // Antigravity has no SessionStart hook surface, so there is no path to display
 // a "tracked by entire" banner in the agy UI for v1. AntigravityAgent
@@ -92,14 +94,19 @@ func parsePreInvocation(stdin io.Reader) (*agent.Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	if raw.InvocationNum != 0 {
-		return nil, nil //nolint:nilnil // follow-up model invocation, not a new turn
-	}
+	// invocationNum>0 is ambiguous: a mid-turn follow-up model call (must NOT
+	// re-fire TurnStart, or the pre-prompt baseline is clobbered) OR the first
+	// call of a resumed conversation (agy --continue / --conversation), which
+	// starts at invocationNum>0 and MUST be tracked. We can't read session state
+	// here (agent packages must not import strategy), so emit a conditional
+	// TurnStart and let the dispatcher fire it only when no active session
+	// exists.
 	return &agent.Event{
-		Type:       agent.TurnStart,
-		SessionID:  raw.ConversationID,
-		SessionRef: raw.TranscriptPath,
-		Timestamp:  time.Now(),
+		Type:                    agent.TurnStart,
+		SessionID:               raw.ConversationID,
+		SessionRef:              raw.TranscriptPath,
+		Timestamp:               time.Now(),
+		SuppressIfSessionActive: raw.InvocationNum != 0,
 	}, nil
 }
 

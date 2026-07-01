@@ -70,6 +70,20 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 
+	// Conditional TurnStart (e.g. Antigravity's per-invocation PreInvocation):
+	// drop it when a turn is already active so a mid-turn follow-up model call
+	// doesn't clobber the pre-prompt baseline. A resumed turn (session idle,
+	// ended, condensed, or absent) falls through and is tracked.
+	if event.Type == agent.TurnStart && event.SuppressIfSessionActive {
+		state, _ := strategy.LoadSessionState(ctx, event.SessionID) //nolint:errcheck // a load failure means treat as no active session and let TurnStart proceed
+		if shouldSuppressConditionalTurnStart(event, state) {
+			logging.Info(logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name()),
+				"dropping conditional TurnStart for active session (follow-up invocation)",
+				slog.String("session_id", event.SessionID))
+			return nil
+		}
+	}
+
 	switch event.Type {
 	case agent.SessionStart:
 		return handleLifecycleSessionStart(ctx, ag, event)
@@ -1084,6 +1098,15 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string)
 		return fmt.Errorf("failed to save session state: %w", mutErr)
 	}
 	return nil
+}
+
+// shouldSuppressConditionalTurnStart reports whether a conditional TurnStart
+// (Event.SuppressIfSessionActive, set by agents whose per-invocation hooks
+// can't tell a follow-up model call from a resumed turn) must be dropped. Only
+// an ACTIVE-phase session suppresses it — an idle/ended/condensed/absent session
+// means the prior turn finished, so a new or resumed turn should be tracked.
+func shouldSuppressConditionalTurnStart(event *agent.Event, state *strategy.SessionState) bool {
+	return event.SuppressIfSessionActive && state != nil && state.Phase.IsActive()
 }
 
 // shouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit handles Antigravity's
