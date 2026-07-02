@@ -12,6 +12,11 @@ const (
 	testWorkspacePath  = "/workspace/project"
 )
 
+// The payload structs decode only the fields the integration consumes; the
+// fixtures carry agy's full documented payloads, so these tests also pin that
+// unknown fields (workspacePaths, stepIdx, initialNumSteps, executionNum,
+// terminationReason, error, artifactDirectoryPath) are tolerated.
+
 func TestParsePreToolUsePayload(t *testing.T) {
 	t.Parallel()
 	data, err := os.ReadFile("testdata/hook_stdin_pre_tool_use.json")
@@ -27,36 +32,6 @@ func TestParsePreToolUsePayload(t *testing.T) {
 	}
 	if p.ToolCall.Name != "run_command" {
 		t.Errorf("ToolCall.Name = %q", p.ToolCall.Name)
-	}
-	if p.StepIdx != 19 {
-		t.Errorf("StepIdx = %d", p.StepIdx)
-	}
-	if p.TranscriptPath != testTranscriptPath {
-		t.Errorf("TranscriptPath = %q", p.TranscriptPath)
-	}
-	if len(p.WorkspacePaths) != 1 || p.WorkspacePaths[0] != testWorkspacePath {
-		t.Errorf("WorkspacePaths = %v", p.WorkspacePaths)
-	}
-}
-
-func TestParsePostToolUsePayload(t *testing.T) {
-	t.Parallel()
-	data, err := os.ReadFile("testdata/hook_stdin_post_tool_use.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var p PostToolUsePayload
-	if err := json.Unmarshal(data, &p); err != nil {
-		t.Fatalf("unmarshal PostToolUsePayload: %v", err)
-	}
-	if p.ConversationID != testConversationID {
-		t.Errorf("ConversationID = %q", p.ConversationID)
-	}
-	if p.StepIdx != 5 {
-		t.Errorf("StepIdx = %d", p.StepIdx)
-	}
-	if p.Error != "exit status 1" {
-		t.Errorf("Error = %q", p.Error)
 	}
 	if p.TranscriptPath != testTranscriptPath {
 		t.Errorf("TranscriptPath = %q", p.TranscriptPath)
@@ -77,38 +52,12 @@ func TestParsePreInvocationPayload(t *testing.T) {
 		t.Errorf("ConversationID = %q", p.ConversationID)
 	}
 	// Fixture mirrors a real agy 1.0.0 follow-up PreInvocation: invocationNum=1
-	// (0-indexed in agy's wire format despite docs reading like 1-based) and
-	// initialNumSteps=5 (the user prompt as step 0 plus four steps added by
-	// the first model invocation). See parsePreInvocation comment block.
+	// (0-indexed in agy's wire format). See parsePreInvocation comment block.
 	if p.InvocationNum != 1 {
 		t.Errorf("InvocationNum = %d", p.InvocationNum)
 	}
-	if p.InitialNumSteps != 5 {
-		t.Errorf("InitialNumSteps = %d", p.InitialNumSteps)
-	}
 	if p.TranscriptPath != testTranscriptPath {
 		t.Errorf("TranscriptPath = %q", p.TranscriptPath)
-	}
-}
-
-func TestParsePostInvocationPayload(t *testing.T) {
-	t.Parallel()
-	data, err := os.ReadFile("testdata/hook_stdin_post_invocation.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var p PostInvocationPayload
-	if err := json.Unmarshal(data, &p); err != nil {
-		t.Fatalf("unmarshal PostInvocationPayload: %v", err)
-	}
-	if p.ConversationID != testConversationID {
-		t.Errorf("ConversationID = %q", p.ConversationID)
-	}
-	if p.InvocationNum != 4 {
-		t.Errorf("InvocationNum = %d", p.InvocationNum)
-	}
-	if p.InitialNumSteps != 12 {
-		t.Errorf("InitialNumSteps = %d", p.InitialNumSteps)
 	}
 }
 
@@ -125,17 +74,8 @@ func TestParseStopPayload(t *testing.T) {
 	if p.ConversationID != testConversationID {
 		t.Errorf("ConversationID = %q", p.ConversationID)
 	}
-	if p.ExecutionNum != 1 {
-		t.Errorf("ExecutionNum = %d", p.ExecutionNum)
-	}
-	if p.TerminationReason != "model_stop" {
-		t.Errorf("TerminationReason = %q", p.TerminationReason)
-	}
 	if !p.FullyIdle {
 		t.Error("FullyIdle should be true")
-	}
-	if p.Error != "" {
-		t.Errorf("Error = %q, want empty", p.Error)
 	}
 	if p.TranscriptPath != testTranscriptPath {
 		t.Errorf("TranscriptPath = %q", p.TranscriptPath)

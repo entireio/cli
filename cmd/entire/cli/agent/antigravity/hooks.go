@@ -100,8 +100,8 @@ func (a *AntigravityAgent) InstallHooks(ctx context.Context, localDev bool, forc
 		return 0, err
 	}
 
-	// 5 hooks: pre-tool-use, post-tool-use, pre-invocation, post-invocation, stop
-	return 5, nil
+	// 3 hooks: pre-tool-use, pre-invocation, stop
+	return 3, nil
 }
 
 // UninstallHooks removes the Entire hook entry from .agents/hooks.json.
@@ -168,6 +168,11 @@ func buildEntireHookConfig(cmdPrefix string, localDev bool) HookConfig {
 		return cmd
 	}
 
+	// PostToolUse and PostInvocation are deliberately NOT installed: neither
+	// maps to a lifecycle event, and installing them spawns a no-op `entire`
+	// subprocess on every completed tool call / model invocation. The struct
+	// fields stay in HookConfig so the idempotency comparison detects (and
+	// replaces) stale installs that still carry them.
 	return HookConfig{
 		PreToolUse: []ToolHandler{
 			{
@@ -175,32 +180,32 @@ func buildEntireHookConfig(cmdPrefix string, localDev bool) HookConfig {
 				Hooks:   []HookCommand{{Type: "command", Command: makeCmd("pre-tool-use")}},
 			},
 		},
-		PostToolUse: []ToolHandler{
-			{
-				Matcher: "*",
-				Hooks:   []HookCommand{{Type: "command", Command: makeCmd("post-tool-use")}},
-			},
-		},
-		PreInvocation:  []SimpleHandler{{Type: "command", Command: makeCmd("pre-invocation")}},
-		PostInvocation: []SimpleHandler{{Type: "command", Command: makeCmd("post-invocation")}},
-		Stop:           []SimpleHandler{{Type: "command", Command: makeCmd("stop")}},
+		PreInvocation: []SimpleHandler{{Type: "command", Command: makeCmd("pre-invocation")}},
+		Stop:          []SimpleHandler{{Type: "command", Command: makeCmd("stop")}},
 	}
 }
 
 // writeHooksFile marshals rawFile and writes it to hooksPath, creating
 // parent directories as needed.
 func writeHooksFile(rawFile map[string]json.RawMessage, hooksPath string) error {
-	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o750); err != nil {
-		return fmt.Errorf("failed to create .agents directory: %w", err)
+	return writeJSONMapFile(rawFile, hooksPath, "hooks.json")
+}
+
+// writeJSONMapFile marshals a raw JSON map with indentation and writes it to
+// path, creating parent directories as needed. Shared by the repo-level
+// hooks.json writer and the global agy settings.json writer.
+func writeJSONMapFile(rawFile map[string]json.RawMessage, path, what string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("failed to create directory for %s: %w", what, err)
 	}
 
 	output, err := jsonutil.MarshalIndentWithNewline(rawFile, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal hooks.json: %w", err)
+		return fmt.Errorf("failed to marshal %s: %w", what, err)
 	}
 
-	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write hooks.json: %w", err)
+	if err := os.WriteFile(path, output, 0o600); err != nil {
+		return fmt.Errorf("failed to write %s: %w", what, err)
 	}
 	return nil
 }

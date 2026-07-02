@@ -17,9 +17,7 @@ func TestHookNames(t *testing.T) {
 	names := a.HookNames()
 	want := []string{
 		HookNamePreToolUse,
-		HookNamePostToolUse,
 		HookNamePreInvocation,
-		HookNamePostInvocation,
 		HookNameStop,
 	}
 	if len(names) != len(want) {
@@ -44,10 +42,8 @@ func TestParseHookEvent_PreInvocation_FirstInvocationEmitsTurnStart(t *testing.T
 		CommonPayload: CommonPayload{
 			ConversationID: testConversationID,
 			TranscriptPath: testTranscriptPath,
-			WorkspacePaths: []string{testWorkspacePath},
 		},
-		InvocationNum:   0,
-		InitialNumSteps: 1,
+		InvocationNum: 0,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -106,27 +102,6 @@ func TestParseHookEvent_PreInvocation_FollowUpEmitsConditionalTurnStart(t *testi
 	}
 }
 
-func TestParseHookEvent_PostInvocationReturnsNil(t *testing.T) {
-	t.Parallel()
-	// Antigravity writes its transcript AFTER Stop fires, not before
-	// PostInvocation. Emitting TurnEnd here would trigger a transcript-read
-	// in handleLifecycleTurnEnd and fail with "transcript file not found",
-	// terminating agy's agent turn. parsePostInvocation must return nil so
-	// the framework treats it as a no-op.
-	data, err := os.ReadFile("testdata/hook_stdin_post_invocation.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	a := &AntigravityAgent{}
-	ev, err := a.ParseHookEvent(context.Background(), HookNamePostInvocation, bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("ParseHookEvent: %v", err)
-	}
-	if ev != nil {
-		t.Errorf("expected nil event for post-invocation, got %+v", ev)
-	}
-}
-
 func TestParseHookEvent_Stop_FullyIdleTrueEmitsTurnEnd(t *testing.T) {
 	t.Parallel()
 	// Stop with fullyIdle=true must emit TurnEnd (not SessionEnd) so the
@@ -163,11 +138,8 @@ func TestParseHookEvent_Stop_FullyIdleFalseReturnsNil(t *testing.T) {
 		CommonPayload: CommonPayload{
 			ConversationID: testConversationID,
 			TranscriptPath: testTranscriptPath,
-			WorkspacePaths: []string{testWorkspacePath},
 		},
-		ExecutionNum:      1,
-		TerminationReason: "background_tasks",
-		FullyIdle:         false,
+		FullyIdle: false,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -198,13 +170,11 @@ func TestParseHookEvent_PreToolUse_WriteToFileExtractsModifiedFiles(t *testing.T
 		CommonPayload: CommonPayload{
 			ConversationID: testConversationID,
 			TranscriptPath: testTranscriptPath,
-			WorkspacePaths: []string{testWorkspacePath},
 		},
 		ToolCall: ToolCall{
 			Name: "write_to_file",
 			Args: json.RawMessage(argsJSON),
 		},
-		StepIdx: 1,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -244,13 +214,11 @@ func TestParseHookEvent_PreToolUse_WriteToFileNewFile(t *testing.T) {
 		CommonPayload: CommonPayload{
 			ConversationID: testConversationID,
 			TranscriptPath: testTranscriptPath,
-			WorkspacePaths: []string{testWorkspacePath},
 		},
 		ToolCall: ToolCall{
 			Name: "write_to_file",
 			Args: json.RawMessage(argsJSON),
 		},
-		StepIdx: 2,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -427,10 +395,8 @@ func TestParseHookEvent_PreToolUse_AgyDoubleEncodedArgs(t *testing.T) {
 		CommonPayload: CommonPayload{
 			ConversationID: testConversationID,
 			TranscriptPath: testTranscriptPath,
-			WorkspacePaths: []string{testWorkspacePath},
 		},
 		ToolCall: ToolCall{Name: "write_to_file", Args: json.RawMessage(argsRaw)},
-		StepIdx:  1,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -456,18 +422,20 @@ func TestParseHookEvent_PreToolUse_AgyDoubleEncodedArgs(t *testing.T) {
 	}
 }
 
-func TestParseHookEvent_PostToolUseReturnsNil(t *testing.T) {
+// TestParseHookEvent_UnknownHookReturnsNil pins the default case: hook names
+// we don't handle (including agy's PostToolUse/PostInvocation, which are no
+// longer installed) parse to a nil event rather than an error, so a stale
+// hooks.json entry can never fail an agy turn.
+func TestParseHookEvent_UnknownHookReturnsNil(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("testdata/hook_stdin_post_tool_use.json")
-	if err != nil {
-		t.Fatal(err)
-	}
 	a := &AntigravityAgent{}
-	ev, err := a.ParseHookEvent(context.Background(), HookNamePostToolUse, bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("ParseHookEvent: %v", err)
-	}
-	if ev != nil {
-		t.Errorf("expected nil event for post-tool-use, got %+v", ev)
+	for _, name := range []string{"post-tool-use", "post-invocation", "does-not-exist"} {
+		ev, err := a.ParseHookEvent(context.Background(), name, bytes.NewReader([]byte(`{}`)))
+		if err != nil {
+			t.Fatalf("ParseHookEvent(%q): %v", name, err)
+		}
+		if ev != nil {
+			t.Errorf("expected nil event for unhandled hook %q, got %+v", name, ev)
+		}
 	}
 }

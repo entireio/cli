@@ -21,7 +21,7 @@ var (
 )
 
 // Antigravity 2.0 (agy) writes JSONL transcripts at
-//   ~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/transcript.jsonl
+//   ~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/transcript_full.jsonl (the hook payload sends transcript_full; agy also writes a truncated transcript.jsonl alongside it)
 // The on-disk schema is a sequence of "step" objects:
 //   {
 //     "step_index":  int,

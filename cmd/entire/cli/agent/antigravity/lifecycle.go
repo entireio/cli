@@ -11,12 +11,17 @@ import (
 )
 
 // Antigravity hook name constants — these become subcommands under `entire hooks antigravity`.
+//
+// Only the hooks with lifecycle significance are installed. agy also offers
+// PostToolUse and PostInvocation, but neither maps to an Entire lifecycle
+// event (PostInvocation fires before the transcript is written; PostToolUse
+// duplicates what PreToolUse already captures) — installing them would spawn
+// a no-op `entire` subprocess on every completed tool call and model
+// invocation.
 const (
-	HookNamePreToolUse     = "pre-tool-use"
-	HookNamePostToolUse    = "post-tool-use"
-	HookNamePreInvocation  = "pre-invocation"
-	HookNamePostInvocation = "post-invocation"
-	HookNameStop           = "stop"
+	HookNamePreToolUse    = "pre-tool-use"
+	HookNamePreInvocation = "pre-invocation"
+	HookNameStop          = "stop"
 )
 
 // HookNames returns the hook verbs Antigravity supports.
@@ -24,28 +29,21 @@ const (
 func (a *AntigravityAgent) HookNames() []string {
 	return []string{
 		HookNamePreToolUse,
-		HookNamePostToolUse,
 		HookNamePreInvocation,
-		HookNamePostInvocation,
 		HookNameStop,
 	}
 }
 
 // ParseHookEvent translates an Antigravity hook into a normalized lifecycle Event.
-// Returns nil if the hook has no lifecycle significance (e.g., post-tool-use).
+// Returns nil if the hook has no lifecycle significance.
 func (a *AntigravityAgent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNamePreInvocation:
 		return parsePreInvocation(stdin)
-	case HookNamePostInvocation:
-		return parsePostInvocation(stdin)
 	case HookNameStop:
 		return parseStop(stdin)
 	case HookNamePreToolUse:
 		return parsePreToolUse(stdin)
-	case HookNamePostToolUse:
-		// PostToolUse has no lifecycle significance in v1
-		return nil, nil //nolint:nilnil // nil event = no lifecycle action
 	default:
 		return nil, nil //nolint:nilnil // Unknown hooks have no lifecycle action
 	}
@@ -67,9 +65,8 @@ func (a *AntigravityAgent) ParseHookEvent(_ context.Context, hookName string, st
 // skipping checkpoint"). Confirmed by agy traces showing two PreInvocations
 // per single-prompt conversation.
 //
-// agy wire-format quirk: invocationNum is **0-indexed** despite the docs
-// describing it as "the sequence number of the current model invocation"
-// (which most CLI tools interpret as 1-based). Real captured stdin from
+// agy wire format: invocationNum is **0-indexed** (the docs now state this
+// explicitly: "the first invocation is 0"). Real captured stdin from
 // agy 1.0.0:
 //
 //	PreInvocation #1: {"invocationNum":0,"initialNumSteps":1,...}  ← turn start
@@ -108,27 +105,6 @@ func parsePreInvocation(stdin io.Reader) (*agent.Event, error) {
 		Timestamp:               time.Now(),
 		SuppressIfSessionActive: raw.InvocationNum != 0,
 	}, nil
-}
-
-// parsePostInvocation handles the PostInvocation hook.
-//
-// Returning nil instead of a TurnEnd event is deliberate: Antigravity writes
-// its transcript file (~/.gemini/antigravity-cli/brain/<conv-id>/.system_generated/logs/transcript_full.jsonl)
-// AFTER the Stop hook fires, not before PostInvocation. Emitting TurnEnd here
-// would route the event through handleLifecycleTurnEnd, which requires the
-// transcript file to exist (cli/lifecycle.go fileExists check) and would
-// return exit 1 — terminating agy's agent turn.
-//
-// SessionEnd processing on Stop (with fullyIdle=true) already handles the
-// session-finalization work safely, so PostInvocation as a no-op loses
-// nothing material in v1.
-func parsePostInvocation(stdin io.Reader) (*agent.Event, error) {
-	// Decode and discard — we still validate the payload shape, just don't
-	// surface a lifecycle event.
-	if _, err := agent.ReadAndParseHookInput[InvocationPayload](stdin); err != nil {
-		return nil, err
-	}
-	return nil, nil //nolint:nilnil // PostInvocation has no lifecycle action in v1 (see comment above)
 }
 
 // parseStop handles the Stop hook.

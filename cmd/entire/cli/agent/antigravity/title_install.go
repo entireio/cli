@@ -267,17 +267,5 @@ func readAgySettings(settingsPath string) (map[string]json.RawMessage, error) {
 // writeAgySettings marshals rawFile and writes it to settingsPath, creating
 // parent directories as needed.
 func writeAgySettings(rawFile map[string]json.RawMessage, settingsPath string) error {
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
-		return fmt.Errorf("failed to create agy config directory: %w", err)
-	}
-
-	output, err := jsonutil.MarshalIndentWithNewline(rawFile, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal agy settings: %w", err)
-	}
-
-	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write agy settings: %w", err)
-	}
-	return nil
+	return writeJSONMapFile(rawFile, settingsPath, "agy settings")
 }

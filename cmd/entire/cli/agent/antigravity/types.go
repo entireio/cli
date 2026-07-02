@@ -6,7 +6,11 @@ import "encoding/json"
 // The top-level key is the hook name (user-defined, e.g. "my-linter-hook").
 type HooksFile = map[string]HookConfig
 
-// HookConfig defines the event handlers for a named hook entry.
+// HookConfig defines the event handlers for a named hook entry. It mirrors
+// agy's hooks.json schema (https://antigravity.google/docs — Hooks), including
+// event keys we don't install (PostToolUse/PostInvocation) so round-tripping a
+// user's file never drops data and the install idempotency comparison detects
+// stale Entire entries that still carry them.
 type HookConfig struct {
 	Enabled        *bool           `json:"enabled,omitempty"`
 	PreToolUse     []ToolHandler   `json:"PreToolUse,omitempty"`
@@ -36,12 +40,16 @@ type HookCommand struct {
 	Timeout int    `json:"timeout,omitempty"`
 }
 
-// CommonPayload contains system metadata fields present in all hook payloads.
+// Payload structs below decode only the fields the integration consumes.
+// agy sends more (workspacePaths, artifactDirectoryPath, stepIdx,
+// initialNumSteps, executionNum, terminationReason, error) — see the agy hooks
+// docs for the full schema; add fields here only when something reads them.
+
+// CommonPayload contains the system metadata fields the integration consumes
+// from every hook payload.
 type CommonPayload struct {
-	ConversationID        string   `json:"conversationId"`
-	WorkspacePaths        []string `json:"workspacePaths"`
-	TranscriptPath        string   `json:"transcriptPath"`
-	ArtifactDirectoryPath string   `json:"artifactDirectoryPath"`
+	ConversationID string `json:"conversationId"`
+	TranscriptPath string `json:"transcriptPath"`
 }
 
 // ToolCall represents a proposed or completed tool invocation.
@@ -55,61 +63,23 @@ type PreToolUsePayload struct {
 	CommonPayload
 
 	ToolCall ToolCall `json:"toolCall"`
-	StepIdx  int      `json:"stepIdx"`
 }
 
-// PreToolUseOutput is the stdout response for the PreToolUse hook.
-type PreToolUseOutput struct {
-	Decision            string   `json:"decision"` // Required: "allow", "deny", "ask", "force_ask"
-	Reason              string   `json:"reason,omitempty"`
-	PermissionOverrides []string `json:"permissionOverrides,omitempty"`
-}
-
-// PostToolUsePayload is the stdin payload for the PostToolUse hook.
-type PostToolUsePayload struct {
-	CommonPayload
-
-	StepIdx int    `json:"stepIdx"`
-	Error   string `json:"error,omitempty"`
-}
-
-// InvocationPayload is the stdin payload for PreInvocation and PostInvocation hooks.
+// InvocationPayload is the stdin payload for the PreInvocation hook.
+//
+// invocationNum is 0-indexed (the first model invocation of a conversation is
+// 0). initialNumSteps is deliberately not decoded: agy inserts the user prompt
+// as a step before the first model call, so it is already 1 on the first
+// invocation and unusable as a "first?" signal.
 type InvocationPayload struct {
 	CommonPayload
 
-	InvocationNum   int `json:"invocationNum"`
-	InitialNumSteps int `json:"initialNumSteps"`
-}
-
-// PostInvocationPayload is an alias for InvocationPayload; both events share the same input shape.
-type PostInvocationPayload = InvocationPayload
-
-// InvocationOutput is the stdout response for PreInvocation and PostInvocation hooks.
-type InvocationOutput struct {
-	InjectSteps         []InjectStep `json:"injectSteps,omitempty"`
-	TerminationBehavior string       `json:"terminationBehavior,omitempty"` // PostInvocation only
-}
-
-// InjectStep is a step injected into the conversation trajectory.
-// Exactly one of ToolCall, UserMessage, or EphemeralMessage should be set.
-type InjectStep struct {
-	ToolCall         *ToolCall `json:"toolCall,omitempty"`
-	UserMessage      string    `json:"userMessage,omitempty"`
-	EphemeralMessage string    `json:"ephemeralMessage,omitempty"`
+	InvocationNum int `json:"invocationNum"`
 }
 
 // StopPayload is the stdin payload for the Stop hook.
 type StopPayload struct {
 	CommonPayload
 
-	ExecutionNum      int    `json:"executionNum"`
-	TerminationReason string `json:"terminationReason"`
-	Error             string `json:"error,omitempty"`
-	FullyIdle         bool   `json:"fullyIdle"` // Required
-}
-
-// StopOutput is the stdout response for the Stop hook.
-type StopOutput struct {
-	Decision string `json:"decision"` // Required: "continue" to re-enter the loop; any other value allows stop
-	Reason   string `json:"reason,omitempty"`
+	FullyIdle bool `json:"fullyIdle"` // Required
 }

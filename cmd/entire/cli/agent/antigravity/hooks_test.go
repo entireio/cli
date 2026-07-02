@@ -19,8 +19,8 @@ func TestInstallHooks_FreshRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallHooks: %v", err)
 	}
-	if n != 5 {
-		t.Errorf("installed %d hooks, want 5", n)
+	if n != 3 {
+		t.Errorf("installed %d hooks, want 3", n)
 	}
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, ".agents", "hooks.json"))
@@ -35,15 +35,16 @@ func TestInstallHooks_FreshRepo(t *testing.T) {
 	if !ok {
 		t.Fatal("missing 'entire' hook entry")
 	}
-	if len(cfg.PreToolUse) != 1 || len(cfg.PostToolUse) != 1 ||
-		len(cfg.PreInvocation) != 1 || len(cfg.PostInvocation) != 1 || len(cfg.Stop) != 1 {
+	if len(cfg.PreToolUse) != 1 || len(cfg.PreInvocation) != 1 || len(cfg.Stop) != 1 {
 		t.Errorf("event coverage incomplete: %+v", cfg)
+	}
+	// PostToolUse/PostInvocation are deliberately not installed: they have no
+	// lifecycle mapping and would spawn a no-op subprocess per tool call.
+	if len(cfg.PostToolUse) != 0 || len(cfg.PostInvocation) != 0 {
+		t.Errorf("no-op post hooks must not be installed: %+v", cfg)
 	}
 	if cfg.PreToolUse[0].Matcher != "*" {
 		t.Errorf("PreToolUse matcher = %q, want %q", cfg.PreToolUse[0].Matcher, "*")
-	}
-	if cfg.PostToolUse[0].Matcher != "*" {
-		t.Errorf("PostToolUse matcher = %q, want %q", cfg.PostToolUse[0].Matcher, "*")
 	}
 }
 
@@ -59,8 +60,8 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first InstallHooks: %v", err)
 	}
-	if n != 5 {
-		t.Errorf("first install: installed %d hooks, want 5", n)
+	if n != 3 {
+		t.Errorf("first install: installed %d hooks, want 3", n)
 	}
 
 	// Second install — idempotent, should return 0
@@ -103,8 +104,8 @@ func TestInstallHooks_PreservesForeignHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallHooks: %v", err)
 	}
-	if n != 5 {
-		t.Errorf("installed %d hooks, want 5", n)
+	if n != 3 {
+		t.Errorf("installed %d hooks, want 3", n)
 	}
 
 	data, err := os.ReadFile(filepath.Join(agentsDir, "hooks.json"))

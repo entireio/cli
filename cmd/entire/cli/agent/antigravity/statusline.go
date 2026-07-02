@@ -92,18 +92,16 @@ func AppendStatusSnapshot(payload []byte) error {
 		return nil // missing required fields — silently skip
 	}
 
-	dir, err := statusDir()
+	filePath, err := statusFilePath(p.ConversationID)
 	if err != nil {
 		return err
 	}
 	isNew := false
-	filePath := filepath.Join(dir, filepath.Base(p.ConversationID)+".jsonl")
-
 	if _, statErr := os.Stat(filePath); os.IsNotExist(statErr) {
 		isNew = true
 	}
 
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o750); err != nil {
 		return fmt.Errorf("antigravity status: mkdir: %w", err)
 	}
 
@@ -151,7 +149,7 @@ func AppendStatusSnapshot(payload []byte) error {
 	// Best-effort prune of stale files for other conversations when we first
 	// create the active file (avoids per-append overhead).
 	if isNew {
-		pruneStaleStatusFiles(dir, p.ConversationID)
+		pruneStaleStatusFiles(filepath.Dir(filePath), p.ConversationID)
 	}
 
 	return nil

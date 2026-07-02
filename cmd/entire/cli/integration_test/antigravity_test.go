@@ -24,12 +24,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestAntigravity_FullEventFlow drives the five Antigravity hooks
-// (pre-invocation, pre-tool-use, post-tool-use, post-invocation, stop) against
-// a real git repo via `entire hooks antigravity <verb>` subprocesses and
-// verifies the lifecycle wiring: session state lazy-initializes on the first
-// PreInvocation, file changes from a write_to_file PreToolUse land in
-// state.FilesTouched, and a Stop with fullyIdle=true records SessionEnd.
+// TestAntigravity_FullEventFlow drives the three installed Antigravity hooks
+// (pre-invocation, pre-tool-use, stop) against a real git repo via
+// `entire hooks antigravity <verb>` subprocesses and verifies the lifecycle
+// wiring: session state lazy-initializes on the first PreInvocation, file
+// changes from a write_to_file PreToolUse land in state.FilesTouched, and a
+// Stop with fullyIdle=true records SessionEnd. (PostToolUse/PostInvocation
+// are deliberately not installed — no lifecycle mapping.)
 func TestAntigravity_FullEventFlow(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
@@ -76,17 +77,6 @@ func TestAntigravity_FullEventFlow(t *testing.T) {
 	})
 	require.NoError(t, runAntigravityHook(t, env.RepoDir, "pre-tool-use", preTU),
 		"pre-tool-use hook should record the new file in state.FilesTouched")
-
-	postTU := mergeMaps(common, map[string]any{"stepIdx": 1})
-	require.NoError(t, runAntigravityHook(t, env.RepoDir, "post-tool-use", postTU),
-		"post-tool-use hook should be a no-op")
-
-	postInv := mergeMaps(common, map[string]any{
-		"invocationNum":   1,
-		"initialNumSteps": 2,
-	})
-	require.NoError(t, runAntigravityHook(t, env.RepoDir, "post-invocation", postInv),
-		"post-invocation hook should be a no-op (Antigravity writes its transcript after Stop, so emitting TurnEnd here would fail with transcript-not-found)")
 
 	stopBackgroundActive := mergeMaps(common, map[string]any{
 		"executionNum":      1,
