@@ -630,29 +630,23 @@ func buildSessionMetrics(state *SessionState) *cpkg.SessionMetrics {
 // condensed checkpoint metadata (sessionData.TokenUsage) and backfills the
 // session-state total, applying the per-source fallbacks in priority order:
 //
-//  1. Out-of-band fallback: OutOfBandTokenSource agents (e.g. Antigravity)
-//     have their usage captured out-of-band and accumulated into
-//     SessionState.TokenUsage at SaveStep time; the transcript recompute
-//     yields nil for them, so inherit the accumulated state value. Gate on
-//     the purpose-built capability so transcript-based agents keep their
-//     recomputed, checkpoint-scoped values.
-//     Known limitation (mid-turn commits): state.TokenUsage is only populated
-//     by SaveStep at TurnEnd and the OOB baseline only re-snapshots at
-//     TurnStart, so a mid-turn commit condenses with zero tokens and the
-//     whole turn's delta lands on the post-Stop checkpoint. Totals across
-//     the turn remain correct; only per-checkpoint scoping is coarse.
-//  2. Session-state backfill from the freshly-extracted transcript: Copilot
+//  1. Session-state backfill from the freshly-extracted transcript: Copilot
 //     CLI writes session.shutdown after the hooks return, so by condensation
 //     time the authoritative full-session total is recoverable while
 //     checkpoint metadata stays scoped to CheckpointTranscriptStart.
-//  3. Accumulated per-checkpoint usage as the last resort.
+//  2. Accumulated per-checkpoint usage (state.CheckpointTokenUsage, reset at
+//     every condensation). This is what carries out-of-band token counts
+//     (e.g. Antigravity, whose transcript has no token data — SaveStep
+//     accumulates the title-tee delta here). Deliberately NOT
+//     state.TokenUsage: that is the session-cumulative total, which is never
+//     reset at condensation and would double-count earlier turns on every
+//     checkpoint after the first.
+//     Known limitation (mid-turn commits): the out-of-band baseline only
+//     re-snapshots at TurnStart, so a mid-turn commit condenses with zero
+//     tokens and the whole turn's delta lands on the next condensation.
+//     Totals across the turn remain correct; only per-checkpoint scoping is
+//     coarse.
 func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, sessionData *ExtractedSessionData) {
-	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.TokenUsage) {
-		if _, ok := agent.AsOutOfBandTokenSource(ag); ok {
-			sessionData.TokenUsage = state.TokenUsage
-		}
-	}
-
 	if backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, sessionData.Transcript, sessionData.TokenUsage); backfillUsage != nil {
 		state.TokenUsage = backfillUsage
 	}
@@ -993,15 +987,20 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 		return nil, fmt.Errorf("failed to read live transcript: %w", err)
 	}
 
-	// An empty live transcript must degrade, not fail: late-flushing agents
-	// (Antigravity writes its transcript AFTER the Stop hook) can condense a
-	// first-turn mid-turn commit while the transcript is still an empty
-	// placeholder. Erroring here happens after prepare-commit-msg already
-	// stamped the Entire-Checkpoint trailer, leaving the commit pointing at a
-	// checkpoint that never gets written. Mirror the shadow-branch path:
-	// condense with hook-captured FilesTouched + filesystem prompts and an
-	// empty transcript.
+	// An empty live transcript degrades for Antigravity but errors for other
+	// agents. agy writes its transcript AFTER the Stop hook, so a first-turn
+	// mid-turn commit legitimately condenses while the transcript is still an
+	// empty placeholder — and erroring happens after prepare-commit-msg
+	// already stamped the Entire-Checkpoint trailer, leaving the commit
+	// pointing at a checkpoint that never gets written. For every other agent
+	// an empty live transcript is a transient race (the file exists but the
+	// write hasn't landed), and erroring preserves the retry invariant: the
+	// failed condensation leaves session state untouched so the next commit
+	// re-condenses with the populated transcript.
 	if len(liveData) == 0 {
+		if state.AgentType != agent.AgentTypeAntigravity {
+			return nil, errors.New("live transcript is empty")
+		}
 		logging.Warn(logging.WithComponent(ctx, "checkpoint"),
 			"live transcript is empty at condensation, degrading to files/prompt-only checkpoint",
 			slog.String("session_id", state.SessionID))

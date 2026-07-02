@@ -894,18 +894,32 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Stop right after the commit produces an empty duplicate checkpoint
 	// (observed with Antigravity, whose Stop fires after its own git commit).
 	// A file is "committed" if it exists in HEAD with the same content as the
-	// working tree; a deletion is "committed" if the file is absent from HEAD.
-	// Anything genuinely uncommitted (e.g. files the agent created via shell
-	// after the mid-turn commit) survives the filter and gets checkpointed.
+	// working tree. Only relModifiedFiles needs this: it merges
+	// transcript-extracted files, which can include already-committed ones.
+	// relNewFiles (untracked ⇒ never in HEAD) and relDeletedFiles (git status
+	// cannot report a committed deletion) are uncommitted by construction —
+	// filtering them against HEAD would wrongly drop deletions of files
+	// created-then-deleted within the session (absent from HEAD) and make
+	// checkpoint rewind resurrect them.
 	relModifiedFiles = filterToUncommittedFiles(ctx, relModifiedFiles, repoRoot)
-	relNewFiles = filterToUncommittedFiles(ctx, relNewFiles, repoRoot)
-	relDeletedFiles = filterToUncommittedDeletions(ctx, relDeletedFiles)
 	normalizeSpan.End()
 
 	// Check if there are any changes
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
 	if totalChanges == 0 {
 		logging.Info(logCtx, "no files modified during session, skipping checkpoint")
+		// SaveStep is skipped, but out-of-band token usage must still be
+		// recorded: an Antigravity turn that commits ALL its work mid-turn
+		// (its normal flow) ends with a clean tree, and the mid-turn
+		// condensation ran with a zero delta (the baseline only re-snapshots
+		// at TurnStart). Without this, CleanupPrePromptState deletes the
+		// baseline and the turn's tokens are lost permanently.
+		if oobUsage := computeOutOfBandTokenUsage(ctx, ag, sessionID, preState); oobUsage != nil {
+			if accErr := strategy.AccumulateSessionTokenUsage(ctx, sessionID, oobUsage); accErr != nil {
+				logging.Warn(logCtx, "failed to record out-of-band token usage for checkpoint-less turn",
+					slog.String("error", accErr.Error()))
+			}
+		}
 		transitionSessionTurnEnd(ctx, sessionID, event)
 		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
@@ -950,18 +964,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// transcript. Delta = current cumulative totals minus the TurnStart
 	// baseline stored in PrePromptState.
 	if tokenUsage == nil {
-		if src, ok := agent.AsOutOfBandTokenSource(ag); ok {
-			var baseline json.RawMessage
-			if preState != nil {
-				baseline = preState.TokenBaseline
-			}
-			oobUsage, oobErr := src.CalculateTokenUsageSince(ctx, sessionID, baseline)
-			if oobErr != nil {
-				logging.Warn(logCtx, "failed to compute out-of-band token usage", slog.String("error", oobErr.Error()))
-			} else {
-				tokenUsage = oobUsage
-			}
-		}
+		tokenUsage = computeOutOfBandTokenUsage(ctx, ag, sessionID, preState)
 	}
 
 	// Build fully-populated step context and delegate to strategy
@@ -1339,6 +1342,29 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 		return false, fmt.Errorf("failed to save session state: %w", mutErr)
 	}
 	return ended, nil
+}
+
+// computeOutOfBandTokenUsage returns the turn's token delta for
+// OutOfBandTokenSource agents (e.g. Antigravity, whose only token surface is
+// the title/statusline pipe captured by the title-tee shim): current
+// cumulative totals minus the TurnStart baseline stored in PrePromptState.
+// Returns nil for other agents, on error (logged), or when no data exists.
+func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID string, preState *PrePromptState) *agent.TokenUsage {
+	src, ok := agent.AsOutOfBandTokenSource(ag)
+	if !ok {
+		return nil
+	}
+	var baseline json.RawMessage
+	if preState != nil {
+		baseline = preState.TokenBaseline
+	}
+	oobUsage, oobErr := src.CalculateTokenUsageSince(ctx, sessionID, baseline)
+	if oobErr != nil {
+		logging.Warn(logging.WithComponent(ctx, "lifecycle"), "failed to compute out-of-band token usage",
+			slog.String("error", oobErr.Error()))
+		return nil
+	}
+	return oobUsage
 }
 
 // shouldSuppressConditionalTurnStart reports whether a conditional TurnStart

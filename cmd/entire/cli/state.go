@@ -400,46 +400,6 @@ func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot stri
 	return result
 }
 
-// filterToUncommittedDeletions is the deletion-side counterpart of
-// filterToUncommittedFiles: a deletion is "committed" when the file is absent
-// from the HEAD tree (a mid-turn commit already recorded it, and PostCommit
-// condensed it), so it is dropped. A working-tree-only deletion (file still in
-// HEAD) is kept for SaveStep. Fails open like its counterpart.
-func filterToUncommittedDeletions(ctx context.Context, files []string) []string {
-	if len(files) == 0 {
-		return files
-	}
-
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return files // fail open
-	}
-	defer repo.Close()
-
-	head, err := repo.Head()
-	if err != nil {
-		return files // fail open
-	}
-	commit, err := repo.CommitObject(head.Hash())
-	if err != nil {
-		return files // fail open
-	}
-	headTree, err := commit.Tree()
-	if err != nil {
-		return files // fail open
-	}
-
-	var result []string
-	for _, relPath := range files {
-		if _, err := headTree.File(relPath); err == nil {
-			// Still in HEAD — the deletion is uncommitted, keep it.
-			result = append(result, relPath)
-		}
-		// else: absent from HEAD — deletion already committed, skip.
-	}
-	return result
-}
-
 // FilterAndNormalizePaths converts absolute paths to relative and filters out
 // infrastructure paths and paths outside the repo.
 func FilterAndNormalizePaths(files []string, cwd string) []string {

@@ -742,3 +742,22 @@ func ClearSessionState(ctx context.Context, sessionID string) error {
 	// harmless. Bulk cleanup happens via RemoveAll on uninstall.
 	return nil
 }
+
+// AccumulateSessionTokenUsage adds a token-usage delta to both the
+// session-cumulative total and the checkpoint-scoped accumulator, mirroring
+// SaveStep's accounting (manual_commit_git.go). It exists for turns that end
+// with no uncommitted changes — e.g. Antigravity committing all its work
+// mid-turn, its normal flow — where the TurnEnd handler skips SaveStep
+// entirely but the turn's out-of-band token delta must still be recorded so
+// the next condensation (or `entire status`) attributes it. A nil or empty
+// delta is a no-op.
+func AccumulateSessionTokenUsage(ctx context.Context, sessionID string, delta *agent.TokenUsage) error {
+	if delta == nil {
+		return nil
+	}
+	return MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		state.TokenUsage = accumulateTokenUsage(state.TokenUsage, delta)
+		state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, delta)
+		return nil
+	})
+}

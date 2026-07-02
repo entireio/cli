@@ -40,3 +40,27 @@ func TestExtractSessionDataFromLiveTranscript_EmptyTranscriptDegrades(t *testing
 	require.Equal(t, []string{"docs/blue.md"}, data.FilesTouched, "hook-captured files must survive an empty transcript")
 	require.Empty(t, data.Transcript)
 }
+
+// TestExtractSessionDataFromLiveTranscript_EmptyTranscriptErrorsForOtherAgents
+// pins the inverse: for agents that do NOT write their transcript after the
+// Stop hook, an empty live transcript is a transient race and must error so
+// the failed condensation leaves session state untouched and the next commit
+// retries with the populated transcript.
+func TestExtractSessionDataFromLiveTranscript_EmptyTranscriptErrorsForOtherAgents(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, nil, 0o600))
+
+	s := &ManualCommitStrategy{}
+	state := &SessionState{
+		SessionID:      "claude-empty-live-test",
+		AgentType:      agent.AgentTypeClaudeCode,
+		TranscriptPath: transcriptPath,
+		FilesTouched:   []string{"a.txt"},
+	}
+
+	_, err := s.extractSessionDataFromLiveTranscript(context.Background(), state)
+	require.Error(t, err, "non-late-flush agents must keep the error/retry invariant on an empty live transcript")
+}

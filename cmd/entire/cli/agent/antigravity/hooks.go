@@ -20,10 +20,13 @@ var _ agent.HookSupport = (*AntigravityAgent)(nil)
 // AgentsHooksFileName is the hooks file used by Antigravity.
 const AgentsHooksFileName = "hooks.json"
 
-// entireHookPrefixes are command prefixes that identify Entire hooks.
+// entireHookPrefixes are command prefixes that identify Entire hooks. The
+// localDev prefix is the full canonical form (matching cursor/claudecode) —
+// a bare "go run " prefix would misclassify any user-authored go-run command
+// under the "entire" hooks key as Entire-managed.
 var entireHookPrefixes = []string{
 	"entire hooks antigravity ",
-	"go run ",
+	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
 }
 
 // InstallHooks installs Antigravity hooks in .agents/hooks.json.

@@ -321,3 +321,69 @@ func TestTitleTeeInstalled(t *testing.T) {
 		}
 	})
 }
+
+// TestUninstallTitleTee_LocalDevFromOtherWorktree pins the cross-worktree
+// uninstall: a localDev bare tee installed from worktree A embeds A's absolute
+// main.go path, and `entire agent remove antigravity` may run from worktree B
+// or outside a repo. The bare-command check must match by SHAPE (go run …
+// hooks antigravity title-tee), not by re-resolving the local path at
+// uninstall time — otherwise the global title entry is silently orphaned and
+// agy spawns a failing `go run` on every state change after A is deleted.
+func TestUninstallTitleTee_LocalDevFromOtherWorktree(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv(configDirEnv, cfgDir)
+	// Run from a non-repo CWD so localDevMainPath() cannot resolve the
+	// original worktree's path.
+	t.Chdir(t.TempDir())
+
+	settings := `{"title":{"type":"command","command":"go run '/deleted/worktree-a/cmd/entire/main.go' hooks antigravity title-tee"}}`
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := UninstallTitleTee(); err != nil {
+		t.Fatalf("UninstallTitleTee: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(cfgDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["title"]; ok {
+		t.Errorf("localDev bare tee from another worktree must be removed on uninstall, got %s", data)
+	}
+}
+
+// TestUninstallTitleTee_UserWrapperLeftAlone pins the safety property the
+// shape check must preserve: a user-authored wrapper that merely CONTAINS the
+// tee command is not ours and must not be deleted.
+func TestUninstallTitleTee_UserWrapperLeftAlone(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv(configDirEnv, cfgDir)
+	t.Chdir(t.TempDir())
+
+	settings := `{"title":{"type":"command","command":"my-wrapper.sh 'entire hooks antigravity title-tee'"}}`
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := UninstallTitleTee(); err != nil {
+		t.Fatalf("UninstallTitleTee: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(cfgDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["title"]; !ok {
+		t.Error("user-authored wrapper containing the tee marker must be left untouched")
+	}
+}

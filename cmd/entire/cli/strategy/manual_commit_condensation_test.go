@@ -605,15 +605,28 @@ func TestCondenseSession_OutOfBandTokenFallback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, agent.AgentTypeAntigravity, state.AgentType, "session must be tagged as Antigravity")
 
-	// Simulate the lifecycle accumulating an out-of-band token delta into
-	// SessionState.TokenUsage (what SaveStep does with StepContext.TokenUsage
-	// for OutOfBandTokenSource agents).
-	state.TokenUsage = &agent.TokenUsage{
+	// Simulate the lifecycle accumulating an out-of-band token delta:
+	// SaveStep accumulates StepContext.TokenUsage into BOTH the
+	// checkpoint-scoped CheckpointTokenUsage (reset at every condensation)
+	// and the session-cumulative TokenUsage (never reset). The checkpoint
+	// metadata must take the checkpoint-scoped value. Make the cumulative
+	// total deliberately LARGER (as after an earlier condensed turn) so this
+	// test fails if condensation ever inherits the cumulative total again —
+	// that bug double-counted earlier turns on every checkpoint after the
+	// first.
+	state.CheckpointTokenUsage = &agent.TokenUsage{
 		InputTokens:         3500,
 		OutputTokens:        300,
 		CacheCreationTokens: 50,
 		CacheReadTokens:     3400,
 		APICallCount:        2,
+	}
+	state.TokenUsage = &agent.TokenUsage{
+		InputTokens:         9999,
+		OutputTokens:        888,
+		CacheCreationTokens: 77,
+		CacheReadTokens:     6666,
+		APICallCount:        5,
 	}
 	require.NoError(t, SaveSessionState(context.Background(), state))
 
@@ -645,8 +658,8 @@ func TestCondenseSession_OutOfBandTokenFallback(t *testing.T) {
 	var meta checkpoint.Metadata
 	require.NoError(t, json.Unmarshal([]byte(sessionBytes), &meta))
 
-	require.NotNil(t, meta.TokenUsage, "per-session token_usage must be populated from the out-of-band fallback")
-	require.Equal(t, 3500, meta.TokenUsage.InputTokens, "InputTokens")
+	require.NotNil(t, meta.TokenUsage, "per-session token_usage must be populated from the checkpoint-scoped accumulator")
+	require.Equal(t, 3500, meta.TokenUsage.InputTokens, "InputTokens must be the checkpoint-scoped delta, not the session-cumulative total")
 	require.Equal(t, 300, meta.TokenUsage.OutputTokens, "OutputTokens")
 	require.Equal(t, 50, meta.TokenUsage.CacheCreationTokens, "CacheCreationTokens")
 	require.Equal(t, 3400, meta.TokenUsage.CacheReadTokens, "CacheReadTokens")
@@ -654,13 +667,12 @@ func TestCondenseSession_OutOfBandTokenFallback(t *testing.T) {
 }
 
 // TestCondenseSession_NonOOBAgentDoesNotInheritStateTokens is the negative
-// branch of the out-of-band fallback: a non-OutOfBandTokenSource agent (Cursor)
-// must NOT inherit SessionState.TokenUsage when the transcript recompute yields
-// nil. The fallback gate (agent.AsOutOfBandTokenSource) is what excludes such
-// agents — without it, the populated state value would leak into per-session
-// CommittedMetadata.token_usage. This test must FAIL if the gate is reverted to
-// the old "not a TokenCalculator" form (Cursor is not a TokenCalculator, so the
-// old gate would copy the value).
+// branch of the token resolution: NO agent may inherit the session-cumulative
+// SessionState.TokenUsage into per-checkpoint metadata (it is never reset at
+// condensation, so it double-counts earlier turns). Checkpoint metadata comes
+// only from the transcript recompute or the checkpoint-scoped
+// state.CheckpointTokenUsage. Cursor with a populated state total and a nil
+// recompute must therefore produce empty checkpoint token_usage.
 //
 // Tests in this file use t.Chdir for CWD-based git resolution, so this
 // cannot be a parallel test.

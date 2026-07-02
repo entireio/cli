@@ -311,6 +311,14 @@ func (s *antigravityInteractiveSession) WaitFor(pattern string, timeout time.Dur
 		}
 		return content, nil
 	}
+	// Retries exhausted. If the final response is still raw tool-call output,
+	// returning it with a nil error would report a malformed turn as success
+	// (and the test would fail later on an unrelated assertion). Surface it as
+	// a failure — IsTransientError recognizes this message and restarts the
+	// scenario.
+	if antigravityRawToolCallOutput(content) {
+		return content, errors.New("antigravity emitted raw tool call output after retries")
+	}
 	return content, err
 }
 

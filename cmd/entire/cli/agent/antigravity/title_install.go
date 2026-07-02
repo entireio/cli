@@ -213,20 +213,34 @@ func UninstallTitleTee() error {
 		}
 		rawFile["title"] = restoredBytes
 	} else {
-		// Only delete the key when it is exactly one of the canonical bare-tee
-		// strings we would have written ourselves. Anything else containing the
-		// marker is either a user-authored wrapper (e.g. "my-wrapper.sh 'entire
-		// hooks antigravity title-tee'") or a corrupted command — leaving it
-		// alone is always safer than deleting the user's config.
-		bare := existing.Command == titleTeeCommand(false, "") ||
-			existing.Command == titleTeeCommand(true, "")
-		if !bare {
+		// Only delete the key when the command has the shape of a bare tee we
+		// would have written ourselves. Anything else containing the marker is
+		// a user-authored wrapper (e.g. "my-wrapper.sh 'entire hooks
+		// antigravity title-tee'") or a corrupted command — leaving it alone
+		// is always safer than deleting the user's config.
+		if !isBareTitleTeeCommand(existing.Command) {
 			return nil
 		}
 		delete(rawFile, "title")
 	}
 
 	return writeAgySettings(rawFile, settingsPath)
+}
+
+// isBareTitleTeeCommand reports whether command is one of the bare (no --wrap)
+// tee commands any Entire install could have written: the production form, or
+// a localDev form `go run '<repo>/cmd/entire/main.go' hooks antigravity
+// title-tee` from ANY repo/worktree. Matched by SHAPE, not by re-resolving
+// localDevMainPath at uninstall time — uninstall may run from a different
+// worktree (or outside a repo) than install did, and an exact-path comparison
+// would silently orphan the global entry, leaving agy to spawn a failing
+// `go run` on every state change after the original worktree is deleted.
+func isBareTitleTeeCommand(command string) bool {
+	if command == titleTeeCommand(false, "") {
+		return true
+	}
+	return strings.HasPrefix(command, "go run ") &&
+		strings.HasSuffix(command, " hooks antigravity title-tee")
 }
 
 // extractWrappedCommand parses the --wrap '<original>' portion of a title-tee
