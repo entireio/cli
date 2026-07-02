@@ -100,7 +100,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newProjectCmd())                                // hidden during maturation; control-plane project management
 	cmd.AddCommand(newRepoCmd())                                   // hidden during maturation; control-plane repo lifecycle
 	cmd.AddCommand(newGrantCmd())                                  // hidden during maturation; control-plane access grants
-	cmd.AddCommand(ticket.NewCommand())                            // hidden during maturation; link work to external tickets
+	cmd.AddCommand(ticket.NewCommand(buildTicketDeps()))           // hidden during maturation; link work to external tickets
 	cmd.AddCommand(newCleanCmd())
 	cmd.AddCommand(newSetupCmd()) // 'configure' — non-agent settings; agent CRUD lives under 'agent'
 	cmd.AddCommand(newEnableCmd())

@@ -8,6 +8,7 @@
 package ticket
 
 import (
+	"context"
 	"errors"
 
 	"github.com/spf13/cobra"
@@ -16,9 +17,18 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
+// Deps collects runtime-injectable hooks NewCommand needs from the cli package
+// (wired by buildTicketDeps). Keeping them here avoids an import cycle between
+// this package and the per-agent packages.
+type Deps struct {
+	// LaunchFix launches a coding agent with the given prompt. Production wires
+	// this to agentlaunch.LaunchFixAgent.
+	LaunchFix func(ctx context.Context, agentName, prompt string) error
+}
+
 // NewCommand returns the `entire ticket` cobra group. It is hidden from
 // `entire help` while the feature matures; direct invocation still works.
-func NewCommand() *cobra.Command {
+func NewCommand(deps Deps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ticket",
 		Short: "Link work to tickets on Linear, Jira, and other platforms",
@@ -50,6 +60,7 @@ Linear or Jira, so agents and reviews carry the ticket as grounding context.`,
 	cmd.AddCommand(newSetupCmd())
 	cmd.AddCommand(newLinkCmd())
 	cmd.AddCommand(newUnlinkCmd())
+	cmd.AddCommand(newStartCmd(deps))
 
 	return cmd
 }
