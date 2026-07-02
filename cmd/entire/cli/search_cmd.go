@@ -7,10 +7,12 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/codesearch"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/search"
@@ -21,6 +23,8 @@ import (
 func newSearchCmd() *cobra.Command { //nolint:maintidx // command wiring is inherently complex
 	var (
 		jsonOutput       bool
+		codeFlag         bool
+		caseSensitive    bool
 		limitFlag        int
 		pageFlag         int
 		authorFlag       string
@@ -52,6 +56,27 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			query := strings.Join(args, " ")
+
+			if caseSensitive && !codeFlag {
+				return errors.New("--case-sensitive can only be used with --code")
+			}
+
+			if codeFlag {
+				if allReposFlag {
+					return errors.New("--all-repos cannot be used with --code")
+				}
+				if cmd.Flags().Changed("page") {
+					return errors.New("--page cannot be used with --code")
+				}
+				return runCodeSearch(ctx, cmd, codeSearchOpts{
+					query:         query,
+					repoFilter:    repoFlag,
+					limit:         limitFlag,
+					caseSensitive: caseSensitive,
+					jsonOutput:    jsonOutput,
+					insecureHTTP:  insecureHTTPAuth,
+				})
+			}
 
 			// Extract inline filters (author:, date:, branch:, repo:) from query args
 			parsed := search.ParseSearchInput(query)
@@ -203,6 +228,8 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	}
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
+	cmd.Flags().BoolVar(&codeFlag, "code", false, "Search code content via peregrine (requires ENTIRE_CODE_SEARCH=1)")
+	cmd.Flags().BoolVar(&caseSensitive, "case-sensitive", false, "Case-sensitive code search (only with --code)")
 	cmd.Flags().IntVar(&limitFlag, "limit", resultsPerPage, "Maximum number of results per page")
 	cmd.Flags().IntVar(&pageFlag, "page", 1, "Page number (1-based)")
 	cmd.Flags().StringVar(&authorFlag, "author", "", "Filter by author name")
@@ -263,6 +290,110 @@ func completeRepoFlag(cmd *cobra.Command, _ []string, _ string) ([]string, cobra
 		suggestions = append(suggestions, r.FullName)
 	}
 	return suggestions, cobra.ShellCompDirectiveNoFileComp
+}
+
+// codeSearchEnabled reports whether the code search feature is gated on.
+func codeSearchEnabled() bool {
+	return os.Getenv("ENTIRE_CODE_SEARCH") == "1"
+}
+
+type codeSearchOpts struct {
+	query         string
+	repoFilter    string
+	limit         int
+	caseSensitive bool
+	jsonOutput    bool
+	insecureHTTP  bool
+}
+
+// runCodeSearch handles the --code flag path: search code content via peregrine.
+func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts) error {
+	if !codeSearchEnabled() {
+		return errors.New("code search is not yet available. Set ENTIRE_CODE_SEARCH=1 to enable the preview")
+	}
+
+	if opts.query == "" {
+		return errors.New("query required for code search. Usage: entire search --code <query>")
+	}
+
+	w := cmd.OutOrStdout()
+
+	// Resolve auth separately so the search timeout only covers the API call.
+	client, err := auth.NewEntireAPICellClient(ctx, opts.insecureHTTP, nil)
+	if err != nil {
+		if errors.Is(err, auth.ErrNotLoggedIn) {
+			return errors.New("not authenticated. Run 'entire login' to authenticate")
+		}
+		return fmt.Errorf("resolving cell client: %w", err)
+	}
+
+	if opts.repoFilter != "" {
+		if err := search.ValidateRepoFilters([]string{opts.repoFilter}); err != nil {
+			return fmt.Errorf("validating repo filter: %w", err)
+		}
+	}
+
+	req := codesearch.SearchRequest{
+		Query:         opts.query,
+		CaseSensitive: opts.caseSensitive,
+	}
+	if opts.limit > 0 {
+		req.MaxResults = opts.limit
+	}
+	if opts.repoFilter != "" {
+		req.Repos = []string{opts.repoFilter}
+	}
+
+	searchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	resp, err := codesearch.Search(searchCtx, client, req)
+	if err != nil {
+		return fmt.Errorf("code search failed: %w", err)
+	}
+
+	isTerminal := interactive.IsTerminalWriter(w)
+	if opts.jsonOutput || !isTerminal {
+		return writeCodeSearchJSON(w, resp)
+	}
+
+	writeCodeSearchText(w, resp)
+	return nil
+}
+
+// writeCodeSearchJSON writes code search results as JSON.
+func writeCodeSearchJSON(w io.Writer, resp *codesearch.SearchResponse) error {
+	out := struct {
+		Results []codesearch.Result `json:"results"`
+		Total   int                 `json:"total"`
+		Stats   codesearch.Stats    `json:"stats"`
+	}{
+		Results: resp.Results,
+		Total:   resp.Stats.TotalMatches,
+		Stats:   resp.Stats,
+	}
+	if out.Results == nil {
+		out.Results = []codesearch.Result{}
+	}
+	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling code search results: %w", err)
+	}
+	fmt.Fprint(w, string(data))
+	return nil
+}
+
+// writeCodeSearchText renders code search results in grep-style format.
+func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse) {
+	if len(resp.Results) == 0 {
+		fmt.Fprintln(w, "No code search results found.")
+		return
+	}
+	for _, r := range resp.Results {
+		fmt.Fprintf(w, "%s:%s:%d: %s\n", r.Repo, r.Path, r.Line, r.ContextLine)
+	}
+	fmt.Fprintf(w, "\n%d matches across %d files in %d repos (%.0fms)\n",
+		resp.Stats.TotalMatches, resp.Stats.TotalFiles, resp.Stats.ReposSearched, resp.Stats.DurationMs)
 }
 
 // writeSearchJSON writes client-side paginated search results as JSON.
