@@ -297,6 +297,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		HasInvestigation:            state.Kind.IsInvestigate(),
 		InvestigateRunID:            state.InvestigateRunID,
 		InvestigateTopic:            state.InvestigateTopic,
+		Ticket:                      ticketRefForBranch(ctx, branchName),
 	}
 
 	writeV1Start := time.Now()

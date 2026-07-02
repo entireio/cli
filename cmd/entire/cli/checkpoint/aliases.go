@@ -27,6 +27,7 @@ type (
 	LearningsSummary = apicheckpoint.LearningsSummary
 	CodeLearning     = apicheckpoint.CodeLearning
 	Attribution      = apicheckpoint.Attribution
+	TicketRef        = apicheckpoint.TicketRef
 
 	// Operation option types.
 	WriteOptions               = apicheckpoint.WriteOptions

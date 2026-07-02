@@ -165,6 +165,10 @@ type WriteOptions struct {
 	// (e.g. via session.Kind.IsInvestigate) because checkpoint can't import
 	// session — the session package imports checkpoint, creating a cycle.
 	HasInvestigation bool
+
+	// Ticket is the external tracker ticket linked to the branch at condense
+	// time, captured for durable provenance. Nil when nothing is linked.
+	Ticket *TicketRef
 }
 
 // UpdateOptions contains options for updating an existing persistent checkpoint.
@@ -382,6 +386,11 @@ type Metadata struct {
 	// InvestigateTopic is the human-readable topic the investigation was
 	// asked to investigate. Only set when Kind is an investigate kind.
 	InvestigateTopic string `json:"investigate_topic,omitempty"`
+
+	// Ticket is the external tracker ticket (Linear, …) linked to this branch
+	// when the checkpoint was condensed — durable provenance of the intent the
+	// work was grounded in. Omitted when no ticket was linked.
+	Ticket *TicketRef `json:"ticket,omitempty"`
 }
 
 // GetTranscriptStart returns the transcript line offset at which this checkpoint's data begins.
@@ -404,6 +413,21 @@ func (m Metadata) GetCompactTranscriptStart() (offset int, ok bool) {
 		return 0, false
 	}
 	return *m.CompactTranscriptStart, true
+}
+
+// TicketRef is a snapshot of the external tracker ticket linked to a branch when
+// a checkpoint was condensed. It is captured for durable provenance so the
+// checkpoint history carries the intent the work was grounded in. Kept as plain
+// data (no dependency on the ticket package) so api/checkpoint stays a leaf; the
+// strategy layer maps ticket.Link → TicketRef at condense time.
+type TicketRef struct {
+	Platform  string `json:"platform,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Title     string `json:"title,omitempty"`
+	State     string `json:"state,omitempty"`
+	URL       string `json:"url,omitempty"`
+	Digest    string `json:"digest,omitempty"`
+	FetchedAt string `json:"fetched_at,omitempty"`
 }
 
 // SessionFilePaths contains the absolute paths to session files from the git tree root.

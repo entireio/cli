@@ -169,6 +169,21 @@ func CurrentLink(ctx context.Context) (Link, bool, error) {
 	return store.get(branch)
 }
 
+// LinkForBranch returns the ticket linked to the given branch, if any. When
+// branch is empty it falls back to the current branch. Used by the checkpoint
+// strategy to capture ticket provenance at condense time (by the branch the
+// session recorded), independent of where HEAD currently points.
+func LinkForBranch(ctx context.Context, branch string) (Link, bool, error) {
+	if strings.TrimSpace(branch) == "" {
+		return CurrentLink(ctx)
+	}
+	store, err := newLinkStore(ctx)
+	if err != nil {
+		return Link{}, false, err
+	}
+	return store.get(branch)
+}
+
 // currentBranch resolves the current git branch name, erroring on a detached
 // HEAD.
 func currentBranch(ctx context.Context) (string, error) {

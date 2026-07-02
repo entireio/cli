@@ -704,6 +704,61 @@ func TestShadow_TranscriptCondensation(t *testing.T) {
 	}
 }
 
+// TestShadow_TicketProvenance verifies that a ticket linked to the branch is
+// captured into the committed checkpoint metadata — durable provenance of the
+// intent on entire/checkpoints/v1.
+func TestShadow_TicketProvenance(t *testing.T) {
+	t.Parallel()
+	env := NewTestEnv(t)
+	defer env.Cleanup()
+
+	env.InitRepo()
+	env.WriteFile("README.md", "# Test Repository")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+	env.GitCheckoutNewBranch("feature/ticketed")
+	env.InitEntire()
+
+	// Configure a tracker and link a ticket to this branch. Neither command
+	// hits the network; the link + snapshot persist in the git common dir.
+	env.RunCLI("ticket", "setup", "--platform", "linear", "--team", "MOH", "--token", "test-token")
+	env.RunCLI("ticket", "link", "MOH-57")
+
+	// Run a session that produces a checkpoint.
+	session := env.NewSession()
+	if err := env.SimulateUserPromptSubmitWithPrompt(session.ID, "Fix the greeting trim bug"); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
+	}
+	content := "package main\n\nfunc main() { println(\"hi\") }\n"
+	env.WriteFile("main.go", content)
+	session.CreateTranscript("Fix the greeting trim bug", []FileChange{{Path: "main.go", Content: content}})
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+
+	// Commit triggers condensation, which captures the linked ticket.
+	env.GitCommitWithShadowHooks("Add main.go", "main.go")
+
+	checkpointID := env.GetLatestCheckpointID()
+	sessionMetadataPath := SessionFilePath(checkpointID, paths.MetadataFileName)
+	metadataContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, sessionMetadataPath)
+	if !found {
+		t.Fatal("session metadata.json should be readable")
+	}
+	var md checkpoint.Metadata
+	if err := json.Unmarshal([]byte(metadataContent), &md); err != nil {
+		t.Fatalf("failed to parse session metadata.json: %v", err)
+	}
+	if md.Ticket == nil {
+		t.Fatal("expected committed metadata to carry the linked ticket, got nil")
+	}
+	if md.Ticket.Platform != "linear" || md.Ticket.ID != "MOH-57" {
+		t.Errorf("ticket = %+v, want platform=linear id=MOH-57", md.Ticket)
+	} else {
+		t.Logf("✓ ticket captured into checkpoint provenance: %s %s", md.Ticket.Platform, md.Ticket.ID)
+	}
+}
+
 // TestShadow_FullTranscriptContext verifies that each checkpoint includes
 // only the prompts from its checkpoint portion, not the entire session.
 //
