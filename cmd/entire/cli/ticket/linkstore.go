@@ -25,6 +25,9 @@ const (
 type Link struct {
 	Platform string `json:"platform"`
 	ID       string `json:"id"`
+	// Snapshot is the last-seen ticket state, refreshed on each fetch so drift
+	// can be detected. Nil until the ticket has been fetched at least once.
+	Snapshot *Snapshot `json:"snapshot,omitempty"`
 }
 
 // linkStore persists branch → Link mappings as a single JSON file in the git

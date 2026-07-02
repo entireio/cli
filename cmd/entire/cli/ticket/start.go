@@ -109,6 +109,12 @@ func runStart(ctx context.Context, out io.Writer, deps Deps, opts startOptions) 
 		return err
 	}
 
+	// Refresh the stored snapshot to the latest ticket and note any drift since
+	// it was last seen (best-effort).
+	if changes, cerr := refreshSnapshot(ctx, branch, task); cerr == nil && len(changes) > 0 {
+		fmt.Fprintf(out, "⚠️  Ticket %s changed since last sync: %s\n", link.ID, strings.Join(changes, "; "))
+	}
+
 	// Launching the coding agent is temporarily disabled — spinning up an agent
 	// per start is expensive. start prepares the branch, link, and prompt; the
 	// launcher (deps.LaunchFix, verified above) stays wired for when launch is

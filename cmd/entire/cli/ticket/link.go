@@ -118,6 +118,11 @@ func storeLink(ctx context.Context, branch string, link Link, force bool) error 
 	if ok && !force && (existing.ID != link.ID || existing.Platform != link.Platform) {
 		return fmt.Errorf("branch %q is already linked to %s (%s); pass --force to overwrite", branch, existing.ID, existing.Platform)
 	}
+	// Preserve an existing snapshot when re-linking the same ticket without a
+	// fresh one, so start/status can still detect drift.
+	if link.Snapshot == nil && ok && existing.ID == link.ID && existing.Platform == link.Platform {
+		link.Snapshot = existing.Snapshot
+	}
 	logging.Debug(ctx, "ticket linked",
 		slog.String("platform", link.Platform),
 		slog.String("ticket", link.ID),
