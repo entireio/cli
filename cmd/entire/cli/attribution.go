@@ -733,15 +733,22 @@ var fetchAttributionMetadata = func(ctx context.Context) error {
 			return errors.New("checkpoint remote fetch failed: checkpoint_remote is configured but its URL could not be derived (resolution fell back to origin)")
 		}
 		if err := strategy.FetchMetadataBranch(ctx, url); err != nil {
-			return fmt.Errorf("checkpoint remote fetch failed: %w", err)
+			return fmt.Errorf("checkpoint remote fetch failed: %w: %w", errAttributionBranchFetch, err)
 		}
 		return nil
 	}
 	if err := FetchMetadataBranch(ctx); err != nil {
-		return fmt.Errorf("origin fetch failed: %w", err)
+		return fmt.Errorf("origin fetch failed: %w: %w", errAttributionBranchFetch, err)
 	}
 	return nil
 }
+
+// errAttributionBranchFetch marks a failure of the ACTUAL v1-branch fetch step
+// (as opposed to settings-read, URL-derivation, or authority-guard failures,
+// which must stay hard). Only this class is softened on a refs-primary repo:
+// the branch is not that backend's primary mechanism, but an unreadable config
+// or an unverifiable checkpoint remote is a real failure on any backend.
+var errAttributionBranchFetch = errors.New("v1 branch fetch failed")
 
 // openAttributionStore opens a fresh checkpoint store over a freshly-opened
 // repo. After a fetch, the resolver's original repo handle can't see the new
@@ -805,7 +812,12 @@ func (r *attributionResolver) refreshMetadataStore() error {
 		// per-checkpoint RefFetcher does the real work. Deciding via the same
 		// memoized gate missReason uses keeps the soften decision and the
 		// evidence wording on ONE config resolution (no TOCTOU between them).
-		if isRefs, known := r.primaryBackendIsRefs(); known && isRefs {
+		// ONLY the genuine branch-fetch step is softened: settings-read,
+		// URL-derivation, and authority-guard failures stay hard on every
+		// backend (softening them would mask real config/policy failures
+		// behind a false "the v1 branch could not be fetched" description).
+		isRefs, known := r.primaryBackendIsRefs()
+		if errors.Is(err, errAttributionBranchFetch) && known && isRefs {
 			r.refreshSoft = true
 			logging.Debug(logCtx, "v1 branch fetch failed on a git-refs-primary repo; proceeding (per-checkpoint refs are fetched on demand)",
 				slog.String("error", err.Error()))
@@ -887,8 +899,8 @@ func (r *attributionResolver) missReason(checkpointID, base string, cause error,
 		return stringutil.CollapseWhitespace(reason + ". They are still unavailable after refreshing from the remote — the metadata branch may have been pushed without them; attribution stays trailer-level.")
 	case r.refreshAttempted:
 		// git-refs primary or unknown backend: no speculation about the v1
-		// branch's contents.
-		return stringutil.CollapseWhitespace(reason + ". They are still unavailable after refreshing; attribution stays trailer-level.")
+		// branch's contents; refreshDescription keeps a soft refresh honest.
+		return stringutil.CollapseWhitespace(fmt.Sprintf("%s. %s, but they are still unavailable; attribution stays trailer-level.", reason, r.refreshDescription()))
 	}
 
 	suggestion, isCommand := suggestCheckpointFetchCommand(r.ctx)

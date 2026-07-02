@@ -191,9 +191,68 @@ func TestReadCheckpointContextRefsBackendWorseRetryStaysNeutral(t *testing.T) {
 	ctx := resolver.readCheckpointContext(checkpointid.MustCheckpointID("fbb2c3d4e5f6"), "auth.py")
 
 	require.True(t, ctx.MetadataMissing)
-	require.Contains(t, ctx.MetadataMissingReason, "still unavailable after refreshing")
+	require.Contains(t, ctx.MetadataMissingReason, "still unavailable")
 	require.NotContains(t, ctx.MetadataMissingReason, "not on the remote",
 		"the branch refresh cannot prove per-checkpoint-ref absence")
+}
+
+// Refs-primary must NOT soften non-fetch failures: an authority-guard failure
+// (checkpoint_remote URL underivable) is a real policy failure on every
+// backend — softening it would mask it behind a false "the v1 branch could not
+// be fetched" description while per-checkpoint refs quietly fetch from origin.
+func TestRefsPrimaryDoesNotSoftenAuthorityGuardFailure(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	runAttributionGit(t, repoRoot, "remote", "add", "origin", "git@github.com:org/app.git")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".entire", "settings.json"),
+		[]byte(`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"bitbucket","repo":"org/checkpoints"}}}`), 0o644))
+	t.Setenv(remote.CheckpointTokenEnvVar, "test-token")
+	t.Setenv(settings.EnvCheckpointsPrimary, "git-refs")
+
+	resolver := newStubAttributionResolver(&attributionCheckpointReaderStub{readErr: errors.New("object not found")})
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(checkpointid.MustCheckpointID("ddb2c3d4e5f1"), "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.Contains(t, ctx.MetadataMissingReason, "remote refresh failed",
+		"authority-guard failures must stay hard even on refs-primary")
+	require.Contains(t, ctx.MetadataMissingReason, "fell back to origin")
+	require.NotContains(t, ctx.MetadataMissingReason, "refresh was attempted",
+		"must not describe a policy failure as a soft branch-fetch miss")
+}
+
+// A soft refresh (v1 fetch genuinely failed on refs-primary) must stay honest
+// in the sessions-miss catch-all too: "refresh was attempted", never "after
+// refreshing".
+func TestRefsPrimarySoftSessionsMissStaysHonest(t *testing.T) {
+	newAttributionRepo(t)
+	t.Setenv(remote.CheckpointTokenEnvVar, "")
+	t.Setenv(settings.EnvCheckpointsPrimary, "git-refs")
+
+	// Summary readable, sessions unreadable — on BOTH stores.
+	broken := &attributionCheckpointReaderStub{
+		summary: &checkpoint.CheckpointSummary{
+			Sessions: []checkpoint.SessionFilePaths{{Metadata: "metadata.json"}},
+		},
+		sessionErr: errors.New("object not found"),
+	}
+	// Real fetch seam (no origin -> genuine branch-fetch failure -> soft);
+	// override only the reopen.
+	oldOpen := openAttributionStore
+	openAttributionStore = func(context.Context) (attributionCheckpointReader, *git.Repository, error) {
+		return broken, nil, nil
+	}
+	t.Cleanup(func() { openAttributionStore = oldOpen })
+
+	resolver := newStubAttributionResolver(broken)
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(checkpointid.MustCheckpointID("deb2c3d4e5f1"), "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.Contains(t, ctx.MetadataMissingReason, "refresh was attempted",
+		"the v1 fetch failed; the wording must say attempted")
+	require.NotContains(t, ctx.MetadataMissingReason, "was refreshed")
+	require.NotContains(t, ctx.MetadataMissingReason, "after refreshing")
 }
 
 // refs-primary + failing v1-branch fetch: the branch is not that backend's
