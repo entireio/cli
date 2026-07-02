@@ -832,10 +832,14 @@ func (r *attributionResolver) missReason(checkpointID, base string, cause error,
 		return stringutil.CollapseWhitespace(reason + ". They are still unavailable after refreshing from the remote — the metadata branch may have been pushed without them; attribution stays trailer-level.")
 	}
 
-	if checkpointID == "" || !summaryMissing {
-		return stringutil.CollapseWhitespace(fmt.Sprintf("%s. Run: %s.", reason, suggestCheckpointFetchCommand(r.ctx)))
+	suggestion, isCommand := suggestCheckpointFetchCommand(r.ctx)
+	if isCommand {
+		suggestion = "Run: " + suggestion
 	}
-	return stringutil.CollapseWhitespace(fmt.Sprintf("%s. Run: %s. Then re-run entire checkpoint explain %s.", reason, suggestCheckpointFetchCommand(r.ctx), checkpointID))
+	if checkpointID == "" || !summaryMissing {
+		return stringutil.CollapseWhitespace(fmt.Sprintf("%s. %s.", reason, suggestion))
+	}
+	return stringutil.CollapseWhitespace(fmt.Sprintf("%s. %s. Then re-run entire checkpoint explain %s.", reason, suggestion, checkpointID))
 }
 
 type checkpointSessionForFile struct {

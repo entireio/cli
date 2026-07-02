@@ -69,7 +69,9 @@ func fullyReadableStub(sessionID string) *attributionCheckpointReaderStub {
 // reason and never attempted a remote refresh — the reason must now be present
 // even on the no-fetch (blame) path.
 func TestReadCheckpointContextSessionsUnreadableGetsReason(t *testing.T) {
-	t.Parallel()
+	// Hermetic repo: the appended fetch suggestion resolves settings + git
+	// remotes from CWD, which must not be the developer's real checkout.
+	newAttributionRepo(t)
 	cpID := checkpointid.MustCheckpointID("aab2c3d4e5f6")
 	reader := &attributionCheckpointReaderStub{
 		summary: &checkpoint.CheckpointSummary{
@@ -162,6 +164,7 @@ func TestReadCheckpointContextRefreshedNonAbsenceErrorMakesNoRemoteClaim(t *test
 // Multi-line fetch errors (git output embeds newlines) must not break the
 // one-line reason rendering.
 func TestMissReasonCollapsesMultilineErrors(t *testing.T) {
+	newAttributionRepo(t) // hermetic CWD for the appended fetch suggestion
 	overrideAttributionRefresh(t,
 		func(context.Context) error {
 			return errors.New("fatal: could not read\nUsername for 'https://github.com'")

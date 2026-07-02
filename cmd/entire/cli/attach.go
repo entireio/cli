@@ -543,9 +543,18 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 	}
 
 	branchDescription := "entire/checkpoints/v1 branch"
+	suggestion, isCommand := suggestCheckpointFetchCommand(logCtx)
+	if isCommand {
+		return repo, fmt.Errorf(
+			"checkpoint %s referenced by HEAD is missing from the local %s after a refresh attempt. Creating a fresh checkpoint here would overwrite the original session data on push. Run:\n\n    %s\n\nthen re-run attach. If the colleague who made this commit hasn't pushed their checkpoint metadata yet, ask them to do so first",
+			checkpointID.String(), branchDescription, suggestion,
+		)
+	}
+	// Prose guidance (unreadable settings / underivable checkpoint remote URL):
+	// no command block — rendering prose as a pasteable command would mislead.
 	return repo, fmt.Errorf(
-		"checkpoint %s referenced by HEAD is missing from the local %s after a refresh attempt. Creating a fresh checkpoint here would overwrite the original session data on push. Run:\n\n    %s\n\nthen re-run attach. If the colleague who made this commit hasn't pushed their checkpoint metadata yet, ask them to do so first",
-		checkpointID.String(), branchDescription, suggestCheckpointFetchCommand(logCtx),
+		"checkpoint %s referenced by HEAD is missing from the local %s after a refresh attempt. Creating a fresh checkpoint here would overwrite the original session data on push. %s — then re-run attach. If the colleague who made this commit hasn't pushed their checkpoint metadata yet, ask them to do so first",
+		checkpointID.String(), branchDescription, suggestion,
 	)
 }
 
@@ -576,29 +585,33 @@ func checkpointPresentLocally(ctx context.Context, repo *git.Repository, refs cp
 	return summary != nil, nil
 }
 
-// suggestCheckpointFetchCommand returns a git fetch command the user can
-// paste to pull the missing v1 metadata branch. When a checkpoint remote is
-// configured but its URL cannot be derived (FetchURL would silently fall back
-// to origin), the suggestion points at the configuration instead: telling the
-// user to fetch from origin would contradict the authoritative-remote policy
-// and fetch from a remote that may not carry the metadata branch at all. The
-// same applies when settings can't be read — a checkpoint remote may be
-// configured in the unreadable file, so "fetch origin" is not safe guidance
-// (remote.Configured would collapse that case to "not configured").
-func suggestCheckpointFetchCommand(ctx context.Context) string {
+// suggestCheckpointFetchCommand returns recovery guidance for a missing v1
+// metadata branch. isCommand reports whether the suggestion is a pasteable git
+// command; when false it is prose and callers must not render it with a
+// "Run:" prefix or inside a command block.
+//
+// When a checkpoint remote is configured but its URL cannot be derived
+// (FetchURL would silently fall back to origin), the suggestion points at the
+// configuration instead: telling the user to fetch from origin would
+// contradict the authoritative-remote policy and fetch from a remote that may
+// not carry the metadata branch at all. The same applies when settings can't
+// be read — a checkpoint remote may be configured in the unreadable file, so
+// "fetch origin" is not safe guidance (remote.Configured would collapse that
+// case to "not configured").
+func suggestCheckpointFetchCommand(ctx context.Context) (suggestion string, isCommand bool) {
 	ref := "entire/checkpoints/v1:entire/checkpoints/v1"
 	s, err := settings.Load(ctx)
 	if err != nil {
-		return "fix .entire/settings.json (it could not be read), then re-run; the correct fetch remote depends on its checkpoint_remote setting"
+		return ".entire/settings.json could not be read — fix it first; the correct fetch remote depends on its checkpoint_remote setting", false
 	}
 	if s.GetCheckpointRemote() != nil {
 		url, usedCheckpointRemote, err := remote.FetchURLWithSource(ctx)
 		if err == nil && usedCheckpointRemote && url != "" {
-			return fmt.Sprintf("git fetch %s %s", url, ref)
+			return fmt.Sprintf("git fetch %s %s", url, ref), true
 		}
-		return "review the checkpoint_remote setting in .entire/settings.json (its URL could not be derived), then: git fetch <checkpoint-remote-url> " + ref
+		return "review the checkpoint_remote setting in .entire/settings.json (its URL could not be derived), then run: git fetch <checkpoint-remote-url> " + ref, false
 	}
-	return "git fetch origin " + ref
+	return "git fetch origin " + ref, true
 }
 
 func resolveCheckpointID(headCommit *object.Commit) (id.CheckpointID, bool) {
