@@ -15,7 +15,7 @@ With Entire, you can:
 - **Understand why code changed, not just what** — Transcripts, prompts, files touched, token usage, tool calls, and more are captured alongside every commit.
 - **Rewind and resume from any checkpoint** — Go back to any previous agent session and pick up exactly where you or a coworker left off.
 - **Full context preserved and searchable** — A versioned record of every AI interaction tied to your git history, with nothing lost.
-- **Zero context switching** — Git-native, two-step setup, works with Claude Code, Codex, Gemini, Pi, and more.
+- **Zero context switching** — Git-native, two-step setup, works with Claude Code, Codex, Gemini, Antigravity, Pi, and more.
 
 ## Table of Contents
 
@@ -268,7 +268,7 @@ table.
 
 | Flag                                        | Description                                                                                                       |
 | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `--agent <name>`                            | AI agent to install hooks for: `claude-code`, `codex`, `gemini`, `opencode`, `cursor`, `factoryai-droid`, or `copilot-cli` |
+| `--agent <name>`                            | AI agent to install hooks for: `claude-code`, `codex`, `gemini`, `antigravity`, `opencode`, `cursor`, `factoryai-droid`, or `copilot-cli` |
 | `--force`, `-f`                             | Force reinstall hooks (removes existing Entire hooks first)                                                       |
 | `--local`                                   | Write settings to `settings.local.json` instead of `settings.json`                                                |
 | `--project`                                 | Write settings to `settings.json` even if it already exists                                                       |
@@ -367,6 +367,7 @@ Each agent stores its hook configuration in its own directory. When you run `ent
 
 | Agent            | Hook Location                 | Format            |
 | ---------------- | ----------------------------- | ----------------- |
+| Antigravity      | `.agents/hooks.json`          | JSON hooks config |
 | Claude Code      | `.claude/settings.json`       | JSON hooks config |
 | Codex            | `.codex/hooks.json`           | JSON hooks config |
 | Copilot CLI      | `.github/hooks/entire.json`   | JSON hooks config |
