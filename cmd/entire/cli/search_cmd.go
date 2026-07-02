@@ -62,15 +62,19 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			}
 
 			if codeFlag {
-				if allReposFlag {
-					return errors.New("--all-repos cannot be used with --code")
+				// Parse inline repo: filters from the query for --code too.
+				parsed := search.ParseSearchInput(query)
+				codeRepo := repoFlag
+				if codeRepo == "" && len(parsed.Repos) > 0 {
+					codeRepo = parsed.Repos[0]
 				}
-				if cmd.Flags().Changed("page") {
-					return errors.New("--page cannot be used with --code")
+				// repo:* means "all repos" — treat as no filter for code search.
+				if codeRepo == search.AllReposFilter || allReposFlag {
+					codeRepo = ""
 				}
 				return runCodeSearch(ctx, cmd, codeSearchOpts{
-					query:         query,
-					repoFilter:    repoFlag,
+					query:         parsed.Query,
+					repoFilter:    codeRepo,
 					limit:         limitFlag,
 					caseSensitive: caseSensitive,
 					jsonOutput:    jsonOutput,
@@ -230,7 +234,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
 	cmd.Flags().BoolVar(&codeFlag, "code", false, "Search code content via peregrine (requires ENTIRE_CODE_SEARCH=1)")
 	cmd.Flags().BoolVar(&caseSensitive, "case-sensitive", false, "Case-sensitive code search (only with --code)")
-	cmd.Flags().IntVar(&limitFlag, "limit", resultsPerPage, "Maximum number of results per page")
+	cmd.Flags().IntVar(&limitFlag, "limit", resultsPerPage, "Maximum number of results (per page for checkpoint search, total for --code)")
 	cmd.Flags().IntVar(&pageFlag, "page", 1, "Page number (1-based)")
 	cmd.Flags().StringVar(&authorFlag, "author", "", "Filter by author name")
 	cmd.Flags().StringVar(&dateFlag, "date", "", "Filter by time period (week or month)")

@@ -128,32 +128,6 @@ func TestSearchCmd_CodeFlagRequiresQuery(t *testing.T) {
 	}
 }
 
-func TestSearchCmd_CodeRejectsAllRepos(t *testing.T) {
-	t.Setenv("ENTIRE_CODE_SEARCH", "1")
-	root := NewRootCmd()
-	root.SetArgs([]string{"search", "--code", "--all-repos", "test"})
-	err := root.Execute()
-	if err == nil {
-		t.Fatal("expected error when --all-repos used with --code")
-	}
-	if !strings.Contains(err.Error(), "--all-repos cannot be used with --code") {
-		t.Errorf("error = %q", err.Error())
-	}
-}
-
-func TestSearchCmd_CodeRejectsPage(t *testing.T) {
-	t.Setenv("ENTIRE_CODE_SEARCH", "1")
-	root := NewRootCmd()
-	root.SetArgs([]string{"search", "--code", "--page", "2", "test"})
-	err := root.Execute()
-	if err == nil {
-		t.Fatal("expected error when --page used with --code")
-	}
-	if !strings.Contains(err.Error(), "--page cannot be used with --code") {
-		t.Errorf("error = %q", err.Error())
-	}
-}
-
 func TestSearchCmd_CaseSensitiveWithoutCode(t *testing.T) {
 	root := NewRootCmd()
 	root.SetArgs([]string{"search", "--case-sensitive", "--json", "test"})

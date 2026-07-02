@@ -3,6 +3,7 @@ package codesearch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -99,8 +100,12 @@ func TestSearch_APIError(t *testing.T) {
 	if err == nil {
 		t.Fatal("Search() expected error, got nil")
 	}
-	if want := "code search error (403): insufficient permissions"; err.Error() != want {
-		t.Errorf("error = %q, want %q", err.Error(), want)
+	if !strings.Contains(err.Error(), "insufficient permissions") {
+		t.Errorf("error = %q, want containing 'insufficient permissions'", err.Error())
+	}
+	var httpErr *api.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusForbidden {
+		t.Errorf("expected HTTPError with status 403, got %v", err)
 	}
 }
 

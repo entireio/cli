@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 )
@@ -74,14 +73,18 @@ func Search(ctx context.Context, client *api.Client, req SearchRequest) (*Search
 		return nil, fmt.Errorf("code search response exceeds %d bytes", maxResponseBytes)
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		var errResp struct {
-			Error string `json:"error"`
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		apiErr := &api.HTTPError{StatusCode: resp.StatusCode}
+		var parsed api.ErrorResponse
+		if json.Unmarshal(body, &parsed) == nil {
+			if msg := parsed.Message(); msg != "" {
+				apiErr.Message = msg
+			}
 		}
-		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("code search error (%d): %s", resp.StatusCode, errResp.Error)
+		if apiErr.Message == "" && len(body) > 0 {
+			apiErr.Message = string(body)
 		}
-		return nil, fmt.Errorf("code search returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("code search: %w", apiErr)
 	}
 
 	var result SearchResponse
