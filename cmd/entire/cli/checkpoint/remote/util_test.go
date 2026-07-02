@@ -102,6 +102,84 @@ func TestFetchURL(t *testing.T) {
 	}
 }
 
+// TestFetchURLWithSource pins the explicit source signal: true only when the
+// URL was derived from the configured checkpoint_remote, false for every
+// origin fallback. Callers that assert facts about the checkpoint remote's
+// contents (attribution's "not pushed" evidence) depend on this bool being
+// sound where URL-string comparison is not: a token rewrite changes origin's
+// shape, and a checkpoint_remote naming the origin repo derives an identical
+// URL legitimately.
+func TestFetchURLWithSource(t *testing.T) {
+	tests := []struct {
+		name         string
+		originURL    string
+		settingsJSON string
+		token        string
+		wantURL      string
+		wantUsed     bool
+	}{
+		{
+			name:         "derived checkpoint url reports checkpoint remote",
+			originURL:    "git@github.com:acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "git@github.com:acme/checkpoints.git",
+			wantUsed:     true,
+		},
+		{
+			name:         "checkpoint remote naming the origin repo is a genuine derivation despite equal urls",
+			originURL:    "git@github.com:acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/app"}}}`,
+			wantURL:      "git@github.com:acme/app.git",
+			wantUsed:     true,
+		},
+		{
+			name:         "token path with unknown provider falls back to origin and says so",
+			originURL:    "git@github.com:acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"bitbucket","repo":"acme/checkpoints"}}}`,
+			token:        "secret-token",
+			wantURL:      "https://github.com/acme/app.git", // token-rewritten origin, NOT the checkpoint remote
+			wantUsed:     false,
+		},
+		{
+			name:         "no checkpoint remote is an origin fallback",
+			originURL:    "https://github.com/acme/app.git",
+			settingsJSON: `{"enabled":true}`,
+			wantURL:      "https://github.com/acme/app.git",
+			wantUsed:     false,
+		},
+		{
+			name:         "token path with known provider derives checkpoint url",
+			originURL:    "git@github.com:acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			token:        "secret-token",
+			wantURL:      "https://github.com/acme/checkpoints.git",
+			wantUsed:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			testutil.InitRepo(t, repoDir)
+			runGit(t, repoDir, "remote", "add", "origin", tt.originURL)
+			writeSettings(t, repoDir, tt.settingsJSON)
+			t.Chdir(repoDir)
+			t.Setenv(CheckpointTokenEnvVar, tt.token)
+
+			got, used, err := FetchURLWithSource(context.Background())
+			if err != nil {
+				t.Fatalf("FetchURLWithSource() error = %v", err)
+			}
+			if got != tt.wantURL {
+				t.Fatalf("FetchURLWithSource() url = %q, want %q", got, tt.wantURL)
+			}
+			if used != tt.wantUsed {
+				t.Fatalf("FetchURLWithSource() usedCheckpointRemote = %v, want %v", used, tt.wantUsed)
+			}
+		})
+	}
+}
+
 func TestFetchURL_ErrorsWhenOriginMissing(t *testing.T) {
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)

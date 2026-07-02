@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/require"
 )
@@ -23,6 +25,16 @@ import (
 //
 // These override the package-level fetch/reopen seams, so they must not run in
 // parallel with each other.
+
+// runAttributionGit runs a git command in dir with the isolated test env.
+func runAttributionGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.CommandContext(context.Background(), "git", args...)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "git %v: %s", args, out)
+}
 
 // overrideAttributionRefresh swaps the refresh seams for the duration of a test.
 func overrideAttributionRefresh(t *testing.T, fetch func(context.Context) error, open func(context.Context) (attributionCheckpointReader, *git.Repository, error)) {
@@ -379,6 +391,33 @@ func TestRefreshConfiguredCheckpointRemoteFailureIsAuthoritative(t *testing.T) {
 	require.Contains(t, ctx.MetadataMissingReason, "remote refresh failed")
 	require.Contains(t, ctx.MetadataMissingReason, "checkpoint remote fetch failed",
 		"the configured checkpoint remote's failure must be the surfaced outcome, not masked by an origin fallback")
+	require.NotContains(t, ctx.MetadataMissingReason, "may not have been pushed",
+		"we never reached the checkpoint remote, so nothing is known about what it contains")
+}
+
+// The token-path evasion, pinned on the real seam: with ENTIRE_CHECKPOINT_TOKEN
+// set and a checkpoint_remote whose provider can't be resolved, FetchURL falls
+// back to a token-rewritten origin URL that no string comparison would catch.
+// The explicit source signal must treat that as a refresh failure — never a
+// "successful" refresh that would fabricate not-pushed evidence about a
+// checkpoint remote that was never contacted. Hermetic: the guard rejects
+// before any fetch runs.
+func TestRefreshTokenPathOriginFallbackIsNotSuccess(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	runAttributionGit(t, repoRoot, "remote", "add", "origin", "git@github.com:org/app.git")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".entire", "settings.json"),
+		[]byte(`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"bitbucket","repo":"org/checkpoints"}}}`), 0o644))
+	t.Setenv(remote.CheckpointTokenEnvVar, "test-token")
+
+	resolver := newStubAttributionResolver(&attributionCheckpointReaderStub{readErr: errors.New("object not found")})
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(checkpointid.MustCheckpointID("ecb2c3d4e5f6"), "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.Contains(t, ctx.MetadataMissingReason, "remote refresh failed")
+	require.Contains(t, ctx.MetadataMissingReason, "fell back to origin",
+		"the token-path origin fallback must surface as a failure, not fake a checkpoint-remote fetch")
 	require.NotContains(t, ctx.MetadataMissingReason, "may not have been pushed",
 		"we never reached the checkpoint remote, so nothing is known about what it contains")
 }

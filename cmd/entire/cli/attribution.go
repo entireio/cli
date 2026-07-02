@@ -688,16 +688,19 @@ var fetchAttributionMetadata = func(ctx context.Context) error {
 	// stale copy (or no metadata branch at all) — a later miss would then
 	// claim "not pushed" about a remote we never reached.
 	if remote.Configured(ctx) {
-		// remote.FetchURL itself silently falls back to the origin URL when
-		// the checkpoint URL cannot be derived (unparseable origin, unknown
-		// provider). A "successful" fetch that actually hit origin would fake
-		// the evidence the not-pushed wording relies on — treat that
-		// resolution fallback as a failure here.
-		url, err := remote.FetchURL(ctx)
+		// remote.FetchURL silently falls back to the origin URL when the
+		// checkpoint URL cannot be derived (unparseable origin, unknown
+		// provider, token-path short-circuit). A "successful" fetch that
+		// actually hit origin would fake the evidence the not-pushed wording
+		// relies on — require the explicit source signal, never a URL-string
+		// comparison (token rewrites change origin's shape, and a
+		// checkpoint_remote pointing at the origin repo derives an identical
+		// URL legitimately).
+		_, usedCheckpointRemote, err := remote.FetchURLWithSource(ctx)
 		if err != nil {
 			return fmt.Errorf("checkpoint remote fetch failed: %w", err)
 		}
-		if originURL, oErr := remote.GetRemoteURL(ctx, "origin"); oErr == nil && originURL == url {
+		if !usedCheckpointRemote {
 			return errors.New("checkpoint remote fetch failed: checkpoint_remote is configured but its URL could not be derived (resolution fell back to origin)")
 		}
 		if err := FetchMetadataFromCheckpointRemote(ctx); err != nil {
