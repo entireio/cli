@@ -706,13 +706,13 @@ var fetchAttributionMetadata = func(ctx context.Context) error {
 	// data: do not mask its failure with an origin fallback that may hold a
 	// stale copy (or no metadata branch at all) — a later miss would then
 	// claim "not pushed" about a remote we never reached.
-	// Resolve the authority exactly once, then fetch the URL that was
-	// verified. Independently re-resolving inside the fetch helper (which
-	// re-reads settings and git remotes) opened a TOCTOU window where a
-	// transient divergence could route the fetch to origin while attribution
-	// recorded an authoritative checkpoint-remote refresh. A settings-load
-	// failure is likewise a refresh failure — not "no checkpoint remote",
-	// which would silently promote origin to the evidence source.
+	// Resolve the authority up front, then fetch the URL that was verified.
+	// (FetchURLWithSource internally re-reads settings; a divergence between
+	// the two loads fails closed — the explicit source bool below rejects any
+	// resolution that did not come from the configured checkpoint remote.)
+	// A settings-load failure is likewise a refresh failure — not "no
+	// checkpoint remote", which would silently promote origin to the evidence
+	// source.
 	s, err := settings.Load(ctx)
 	if err != nil {
 		return fmt.Errorf("checkpoint remote fetch failed: read settings: %w", err)
@@ -805,6 +805,7 @@ func (r *attributionResolver) refreshMetadataStore() error {
 	r.refreshAttempted = true
 	logCtx := logging.WithComponent(r.ctx, "attribution")
 
+	var softFetchErr error
 	if err := fetchAttributionMetadata(r.ctx); err != nil {
 		// On a KNOWN git-refs-primary repo a failing v1-branch fetch is a soft
 		// outcome: the branch is not that backend's primary mechanism (a
@@ -819,6 +820,7 @@ func (r *attributionResolver) refreshMetadataStore() error {
 		isRefs, known := r.primaryBackendIsRefs()
 		if errors.Is(err, errAttributionBranchFetch) && known && isRefs {
 			r.refreshSoft = true
+			softFetchErr = err
 			logging.Debug(logCtx, "v1 branch fetch failed on a git-refs-primary repo; proceeding (per-checkpoint refs are fetched on demand)",
 				slog.String("error", err.Error()))
 		} else {
@@ -830,6 +832,11 @@ func (r *attributionResolver) refreshMetadataStore() error {
 	}
 	store, repo, err := openAttributionStore(r.ctx)
 	if err != nil {
+		// A soft refresh's swallowed fetch error is still diagnostic context
+		// when the reopen ALSO fails — keep both.
+		if softFetchErr != nil {
+			err = fmt.Errorf("%w (v1 branch fetch had also failed: %w)", err, softFetchErr)
+		}
 		r.refreshErr = err
 		logging.Debug(logCtx, "checkpoint store reopen after refresh failed",
 			slog.String("error", err.Error()))
@@ -838,7 +845,11 @@ func (r *attributionResolver) refreshMetadataStore() error {
 	r.freshRepo = repo
 	r.store = store
 	r.storeGeneration++
-	logging.Debug(logCtx, "checkpoint metadata refreshed from remote")
+	if r.refreshSoft {
+		logging.Debug(logCtx, "checkpoint store reopened after soft refresh (v1 branch not fetched; per-checkpoint refs fetch on demand)")
+	} else {
+		logging.Debug(logCtx, "checkpoint metadata refreshed from remote")
+	}
 	return nil
 }
 
@@ -885,7 +896,7 @@ func (r *attributionResolver) missReason(checkpointID, base string, cause error,
 		// store failed for a non-absence reason: the refreshed store was never
 		// successfully consulted, so make no remote claim — surface the retry
 		// error instead.
-		return stringutil.CollapseWhitespace(fmt.Sprintf("%s. %s, but re-reading the checkpoint from the refreshed store failed (%v); attribution stays trailer-level.", reason, r.refreshDescription(), retryReadErr))
+		return stringutil.CollapseWhitespace(fmt.Sprintf("%s. %s, but re-reading the checkpoint after the refresh attempt failed (%v); attribution stays trailer-level.", reason, r.refreshDescription(), retryReadErr))
 	case r.refreshAttempted && remoteLacksCheckpoint && missBackendIsBranch(r):
 		// The summary read locally, but a successful refresh proved the
 		// remote lacks the checkpoint entirely: this is an unpushed
@@ -903,7 +914,13 @@ func (r *attributionResolver) missReason(checkpointID, base string, cause error,
 		return stringutil.CollapseWhitespace(fmt.Sprintf("%s. %s, but they are still unavailable; attribution stays trailer-level.", reason, r.refreshDescription()))
 	}
 
-	suggestion, isCommand := suggestCheckpointFetchCommand(r.ctx)
+	refspec := checkpointBranchRefspec
+	if isRefs, known := r.primaryBackendIsRefs(); known && isRefs {
+		// A v1-branch fetch cannot heal a refs-backend miss — suggest the
+		// per-checkpoint refs fetch instead.
+		refspec = checkpointRefsRefspec
+	}
+	suggestion, isCommand := suggestCheckpointFetchCommandForRefspec(r.ctx, refspec)
 	if isCommand {
 		suggestion = "Run: " + suggestion
 	}

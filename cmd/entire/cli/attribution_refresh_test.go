@@ -82,7 +82,14 @@ func TestReadCheckpointContextSessionsUnreadableGetsReason(t *testing.T) {
 	}
 
 	// fetchOnMiss=false (the blame path): no refresh, but the reason must still
-	// name the cause and the recovery command.
+	// name the cause and the recovery command. The seam trap makes the
+	// no-refresh contract non-vacuous.
+	overrideAttributionRefresh(t,
+		func(context.Context) error { t.Fatal("blame path must not fetch"); return nil },
+		func(context.Context) (attributionCheckpointReader, *git.Repository, error) {
+			t.Fatal("blame path must not reopen the store")
+			return nil, nil, nil
+		})
 	ctx := newStubAttributionResolver(reader).readCheckpointContext(cpID, "auth.py")
 	require.True(t, ctx.MetadataMissing)
 	require.Contains(t, ctx.MetadataMissingReason, "session record")
@@ -253,6 +260,67 @@ func TestRefsPrimarySoftSessionsMissStaysHonest(t *testing.T) {
 		"the v1 fetch failed; the wording must say attempted")
 	require.NotContains(t, ctx.MetadataMissingReason, "was refreshed")
 	require.NotContains(t, ctx.MetadataMissingReason, "after refreshing")
+	require.NotContains(t, ctx.MetadataMissingReason, "refreshed store",
+		"a soft refresh reopened the store; it did not refresh it")
+}
+
+// H: the suggestion tuple, pinned directly for all four outcomes.
+func TestSuggestCheckpointFetchCommandOutcomes(t *testing.T) {
+	t.Run("derivable checkpoint remote is a command", func(t *testing.T) {
+		repoRoot := newAttributionRepo(t)
+		t.Setenv(remote.CheckpointTokenEnvVar, "")
+		runAttributionGit(t, repoRoot, "remote", "add", "origin", "git@github.com:org/app.git")
+		require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".entire"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".entire", "settings.json"),
+			[]byte(`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`), 0o644))
+		suggestion, isCommand := suggestCheckpointFetchCommand(t.Context())
+		require.True(t, isCommand)
+		require.Equal(t, "git fetch git@github.com:org/checkpoints.git entire/checkpoints/v1:entire/checkpoints/v1", suggestion)
+	})
+	t.Run("no checkpoint remote is the origin command", func(t *testing.T) {
+		newAttributionRepo(t)
+		t.Setenv(remote.CheckpointTokenEnvVar, "")
+		suggestion, isCommand := suggestCheckpointFetchCommand(t.Context())
+		require.True(t, isCommand)
+		require.Equal(t, "git fetch origin entire/checkpoints/v1:entire/checkpoints/v1", suggestion)
+	})
+	t.Run("unreadable settings is prose", func(t *testing.T) {
+		repoRoot := newAttributionRepo(t)
+		require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".entire"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".entire", "settings.json"),
+			[]byte(`{not valid json`), 0o644))
+		suggestion, isCommand := suggestCheckpointFetchCommand(t.Context())
+		require.False(t, isCommand)
+		require.Contains(t, suggestion, "settings.json")
+	})
+	t.Run("underivable checkpoint remote URL is prose", func(t *testing.T) {
+		repoRoot := newAttributionRepo(t)
+		t.Setenv(remote.CheckpointTokenEnvVar, "")
+		// checkpoint_remote configured, but no origin to derive protocol from.
+		require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".entire"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".entire", "settings.json"),
+			[]byte(`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`), 0o644))
+		suggestion, isCommand := suggestCheckpointFetchCommand(t.Context())
+		require.False(t, isCommand)
+		require.Contains(t, suggestion, "checkpoint_remote")
+	})
+}
+
+// F pin: a refs-primary no-refresh miss (blame path) must suggest the
+// per-checkpoint refs fetch, not the v1 branch that cannot heal it.
+func TestRefsPrimaryNoRefreshSuggestionUsesRefsRefspec(t *testing.T) {
+	newAttributionRepo(t)
+	t.Setenv(remote.CheckpointTokenEnvVar, "")
+	t.Setenv(settings.EnvCheckpointsPrimary, "git-refs")
+
+	reader := &attributionCheckpointReaderStub{readErr: errors.New("object not found")}
+	ctx := newStubAttributionResolver(reader).readCheckpointContext(checkpointid.MustCheckpointID("dfb2c3d4e5f1"), "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.Contains(t, ctx.MetadataMissingReason, "refs/entire/checkpoints/*",
+		"refs-backend recovery must fetch the per-checkpoint refs namespace")
+	require.NotContains(t, ctx.MetadataMissingReason, "entire/checkpoints/v1:entire/checkpoints/v1",
+		"a v1-branch fetch cannot heal a refs-backend miss")
 }
 
 // refs-primary + failing v1-branch fetch: the branch is not that backend's
@@ -432,7 +500,8 @@ func TestReadCheckpointContextKeepsLocalWhenRefreshReadsWorse(t *testing.T) {
 // neutral and surface the retry's error rather than speculating the metadata
 // branch "may have been pushed without" the session records.
 func TestReadCheckpointContextRejectedRetryNonAbsenceStaysNeutral(t *testing.T) {
-	// Pin the backend so the retryReadErr branch (not the refs branch) fires.
+	// Backend pinned for hermeticity only — the retryReadErr case fires
+	// before any backend gate.
 	t.Setenv(settings.EnvCheckpointsPrimary, "git-branch")
 	cpID := checkpointid.MustCheckpointID("fdb2c3d4e5f6")
 	local := &attributionCheckpointReaderStub{
@@ -682,8 +751,11 @@ func TestRefreshCorruptSettingsSuggestionDoesNotSayFetchOrigin(t *testing.T) {
 func TestRefreshWithLocalBranchButNoRemoteReportsFetchFailure(t *testing.T) {
 	repoRoot := newAttributionRepo(t)
 	// Hermeticity: ensure a developer/CI ENTIRE_CHECKPOINT_TOKEN can't turn
-	// this into a network-dependent test.
+	// this into a network-dependent test, and pin the backend — the asserted
+	// hard-failure wording is the git-branch outcome (a refs-primary env
+	// would soften this exact fetch failure).
 	t.Setenv(remote.CheckpointTokenEnvVar, "")
+	t.Setenv(settings.EnvCheckpointsPrimary, "git-branch")
 	// A local entire/checkpoints/v1 exists (the old getMetadataTree fallback
 	// would "succeed" from it); the queried checkpoint is not in it.
 	writeAttributionCheckpoint(t, repoRoot, "99b2c3d4e5f6", checkpoint.WriteOptions{

@@ -599,7 +599,20 @@ func checkpointPresentLocally(ctx context.Context, repo *git.Repository, refs cp
 // "fetch origin" is not safe guidance (remote.Configured would collapse that
 // case to "not configured").
 func suggestCheckpointFetchCommand(ctx context.Context) (suggestion string, isCommand bool) {
-	ref := "entire/checkpoints/v1:entire/checkpoints/v1"
+	return suggestCheckpointFetchCommandForRefspec(ctx, checkpointBranchRefspec)
+}
+
+// Refspecs for the two checkpoint storage topologies: the v1 metadata branch
+// (git-branch backend, and what attach/resume consume) and the per-checkpoint
+// refs namespace (git-refs backend, where a v1-branch fetch cannot heal a miss).
+const (
+	checkpointBranchRefspec = "entire/checkpoints/v1:entire/checkpoints/v1"
+	checkpointRefsRefspec   = "'+refs/entire/checkpoints/*:refs/entire/checkpoints/*'"
+)
+
+// suggestCheckpointFetchCommandForRefspec is suggestCheckpointFetchCommand with
+// the refspec chosen by the caller (branch vs per-checkpoint refs).
+func suggestCheckpointFetchCommandForRefspec(ctx context.Context, ref string) (suggestion string, isCommand bool) {
 	s, err := settings.Load(ctx)
 	if err != nil {
 		return ".entire/settings.json could not be read — fix it first; the correct fetch remote depends on its checkpoint_remote setting", false

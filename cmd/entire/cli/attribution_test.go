@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
@@ -740,6 +741,12 @@ func newAttributionRepo(t *testing.T) string {
 	repoRoot := t.TempDir()
 	testutil.InitRepo(t, repoRoot)
 	t.Chdir(repoRoot)
+	// Default every attribution test to the git-branch backend: these repos
+	// write checkpoints through the git-branch store, so an ambient
+	// ENTIRE_CHECKPOINTS_PRIMARY=git-refs would read them through the wrong
+	// backend. Tests that WANT git-refs override this after the call (their
+	// later t.Setenv wins).
+	t.Setenv(settings.EnvCheckpointsPrimary, "git-branch")
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
