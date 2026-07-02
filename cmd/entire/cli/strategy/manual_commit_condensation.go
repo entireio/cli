@@ -181,35 +181,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	extractSessionDataSpan.End()
 	extractDuration := time.Since(extractStart)
 
-	// Out-of-band token fallback: OutOfBandTokenSource agents (e.g. Antigravity)
-	// have their token usage captured out-of-band and accumulated into
-	// SessionState.TokenUsage at SaveStep time; the transcript recompute yields
-	// nil for them. Gate on the purpose-built capability so only those agents
-	// inherit the accumulated state value — transcript-based agents keep their
-	// recomputed, checkpoint-scoped values.
-	//
-	// Known limitation (mid-turn commits): state.TokenUsage is only populated
-	// by SaveStep at TurnEnd, and the OOB baseline is only re-snapshotted at
-	// TurnStart. A mid-turn commit therefore condenses with zero tokens and
-	// the whole turn's delta lands on the post-Stop checkpoint. Totals across
-	// the turn remain correct; only per-checkpoint scoping is coarse.
-	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.TokenUsage) {
-		if _, ok := agent.AsOutOfBandTokenSource(ag); ok {
-			sessionData.TokenUsage = state.TokenUsage
-		}
-	}
-
-	// Backfill session state token usage from the freshly-extracted transcript.
-	// Copilot CLI writes session.shutdown after the hooks return, so by condensation
-	// time we can recover the authoritative full-session total from the transcript
-	// while keeping checkpoint metadata scoped to CheckpointTranscriptStart.
-	if backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, sessionData.Transcript, sessionData.TokenUsage); backfillUsage != nil {
-		state.TokenUsage = backfillUsage
-	}
-
-	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.CheckpointTokenUsage) {
-		sessionData.TokenUsage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
-	}
+	resolveCondensedTokenUsage(ctx, ag, state, sessionData)
 
 	// Backfill the model from the transcript for agents that don't report it via
 	// hooks (e.g., Pi records message.model but its hook events carry no model
@@ -651,6 +623,42 @@ func buildSessionMetrics(state *SessionState) *cpkg.SessionMetrics {
 		TurnCount:         state.SessionTurnCount,
 		ContextTokens:     state.ContextTokens,
 		ContextWindowSize: state.ContextWindowSize,
+	}
+}
+
+// resolveCondensedTokenUsage settles the token usage that goes into the
+// condensed checkpoint metadata (sessionData.TokenUsage) and backfills the
+// session-state total, applying the per-source fallbacks in priority order:
+//
+//  1. Out-of-band fallback: OutOfBandTokenSource agents (e.g. Antigravity)
+//     have their usage captured out-of-band and accumulated into
+//     SessionState.TokenUsage at SaveStep time; the transcript recompute
+//     yields nil for them, so inherit the accumulated state value. Gate on
+//     the purpose-built capability so transcript-based agents keep their
+//     recomputed, checkpoint-scoped values.
+//     Known limitation (mid-turn commits): state.TokenUsage is only populated
+//     by SaveStep at TurnEnd and the OOB baseline only re-snapshots at
+//     TurnStart, so a mid-turn commit condenses with zero tokens and the
+//     whole turn's delta lands on the post-Stop checkpoint. Totals across
+//     the turn remain correct; only per-checkpoint scoping is coarse.
+//  2. Session-state backfill from the freshly-extracted transcript: Copilot
+//     CLI writes session.shutdown after the hooks return, so by condensation
+//     time the authoritative full-session total is recoverable while
+//     checkpoint metadata stays scoped to CheckpointTranscriptStart.
+//  3. Accumulated per-checkpoint usage as the last resort.
+func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, sessionData *ExtractedSessionData) {
+	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.TokenUsage) {
+		if _, ok := agent.AsOutOfBandTokenSource(ag); ok {
+			sessionData.TokenUsage = state.TokenUsage
+		}
+	}
+
+	if backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, sessionData.Transcript, sessionData.TokenUsage); backfillUsage != nil {
+		state.TokenUsage = backfillUsage
+	}
+
+	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.CheckpointTokenUsage) {
+		sessionData.TokenUsage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
 	}
 }
 

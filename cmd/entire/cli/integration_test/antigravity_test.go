@@ -170,7 +170,7 @@ func TestAntigravity_MidTurnCommitWithUnwrittenTranscriptStillCondenses(t *testi
 	metadataContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, metadataPath)
 	require.True(t, found,
 		"checkpoint metadata must exist at %s — an empty/unwritten transcript must degrade, not strand the trailer", metadataPath)
-	var metadata checkpoint.CommittedMetadata
+	var metadata checkpoint.Metadata
 	require.NoError(t, json.Unmarshal([]byte(metadataContent), &metadata))
 	require.Equal(t, conversationID, metadata.SessionID)
 	require.Contains(t, metadata.FilesTouched, "docs/blue.md",
@@ -439,7 +439,7 @@ func TestAntigravity_TokenUsageInCheckpointMetadata(t *testing.T) {
 
 	sessionMeta, found := env.ReadFileFromBranch(paths.MetadataBranchName, SessionMetadataPath(checkpointID))
 	require.True(t, found, "per-session metadata.json should exist on the metadata branch")
-	var sessionMetadata checkpoint.CommittedMetadata
+	var sessionMetadata checkpoint.Metadata
 	require.NoError(t, json.Unmarshal([]byte(sessionMeta), &sessionMetadata))
 	require.NotNil(t, sessionMetadata.TokenUsage, "committed per-session metadata should carry token_usage")
 	assert.Equal(t, 3500, sessionMetadata.TokenUsage.InputTokens, "committed per-session input tokens")
@@ -570,7 +570,7 @@ func TestAntigravity_PromptInCheckpointMetadata(t *testing.T) {
 	metadataPath := SessionMetadataPath(checkpointID.String())
 	metadataContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, metadataPath)
 	require.True(t, found, "session metadata.json should exist at %s", metadataPath)
-	var metadata checkpoint.CommittedMetadata
+	var metadata checkpoint.Metadata
 	require.NoError(t, json.Unmarshal([]byte(metadataContent), &metadata),
 		"session metadata.json should parse")
 	require.Equal(t, conversationID, metadata.SessionID,

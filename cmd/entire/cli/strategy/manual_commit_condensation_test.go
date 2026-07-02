@@ -642,7 +642,7 @@ func TestCondenseSession_OutOfBandTokenFallback(t *testing.T) {
 	}
 	sessionBytes, err := sessionMeta.Contents()
 	require.NoError(t, err)
-	var meta checkpoint.CommittedMetadata
+	var meta checkpoint.Metadata
 	require.NoError(t, json.Unmarshal([]byte(sessionBytes), &meta))
 
 	require.NotNil(t, meta.TokenUsage, "per-session token_usage must be populated from the out-of-band fallback")
@@ -739,7 +739,7 @@ func TestCondenseSession_NonOOBAgentDoesNotInheritStateTokens(t *testing.T) {
 	}
 	sessionBytes, err := sessionMeta.Contents()
 	require.NoError(t, err)
-	var meta checkpoint.CommittedMetadata
+	var meta checkpoint.Metadata
 	require.NoError(t, json.Unmarshal([]byte(sessionBytes), &meta))
 
 	require.Nil(t, meta.TokenUsage, "non-OOB agent must NOT inherit SessionState.TokenUsage; per-session token_usage must be nil")
