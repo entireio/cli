@@ -1,6 +1,6 @@
 # E2E Tests
 
-End-to-end tests for the `entire` CLI against real agents (Claude Code, Gemini CLI, OpenCode, Codex, Cursor, Factory AI Droid, Copilot CLI).
+End-to-end tests for the `entire` CLI against real agents (Claude Code, Gemini CLI, Antigravity, OpenCode, Codex, Cursor, Factory AI Droid, Copilot CLI).
 
 ## Commands
 
@@ -8,6 +8,7 @@ End-to-end tests for the `entire` CLI against real agents (Claude Code, Gemini C
 mise run test:e2e [filter]                          # run filtered (or omit filter for all agents)
 mise run test:e2e --agent claude-code [filter]       # Claude Code only
 mise run test:e2e --agent gemini-cli [filter]        # Gemini CLI only
+mise run test:e2e --agent antigravity [filter]       # Antigravity only
 mise run test:e2e --agent opencode [filter]          # OpenCode only
 mise run test:e2e --agent codex [filter]             # Codex only
 mise run test:e2e --agent cursor [filter]            # Cursor only
@@ -50,15 +51,32 @@ e2e/
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `E2E_AGENT` | Agent to test (`claude-code`, `gemini-cli`, `opencode`, `codex`, `cursor`, `factoryai-droid`, `copilot-cli`) | all registered |
+| `E2E_AGENT` | Agent to test (`claude-code`, `gemini-cli`, `antigravity`, `opencode`, `codex`, `cursor`, `factoryai-droid`, `copilot-cli`) | all registered |
 | `E2E_ENTIRE_BIN` | Path to a pre-built `entire` binary | builds from source |
 | `E2E_TIMEOUT` | Timeout per prompt | `2m` |
+| `E2E_ANTIGRAVITY_MODEL` | Optional Antigravity model override | `Gemini 3.5 Flash (Low)` |
 | `E2E_KEEP_REPOS` | Set to `1` to preserve temp repos after test | unset |
 | `E2E_ARTIFACT_DIR` | Override artifact output directory | `e2e/artifacts/<timestamp>` |
 | `ANTHROPIC_API_KEY` | Required for Claude Code | — |
 | `GEMINI_API_KEY` | Required for Gemini CLI | — |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Required for Antigravity in CI; optional locally if using existing `agy` OAuth | — |
+| `GOOGLE_CLOUD_PROJECT` | Optional Antigravity ADC project override | ADC JSON `project_id` |
+| `E2E_ANTIGRAVITY_PROJECT` | Optional Antigravity E2E project override; takes precedence over `GOOGLE_CLOUD_PROJECT` | ADC JSON `project_id` |
 | `OPENAI_API_KEY` | Required for Codex | — |
 | `COPILOT_GITHUB_TOKEN` | Required for Copilot CLI (or `gh auth login`) | — |
+
+### Antigravity credentials
+
+Antigravity E2E uses Google ADC. In GitHub Actions, set the repository or organization secret `ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON` to the service-account JSON. The E2E workflows write that secret to `$RUNNER_TEMP/antigravity-google-credentials.json` and export `GOOGLE_APPLICATION_CREDENTIALS` for bootstrap and test steps. The harness passes `agy --project` from `E2E_ANTIGRAVITY_PROJECT`, `GOOGLE_CLOUD_PROJECT`, or the ADC JSON `project_id`.
+
+> **Entitlement caveat:** agy has no API-key auth. Its backend (`cloudcode-pa.googleapis.com`) is a gated private API that cannot be enabled with `gcloud services enable` (fails with `AUTH_PERMISSION_DENIED`, subject 110002) — project Owner is not sufficient. The ADC path only works once a Gemini Code Assist Standard/Enterprise subscription is provisioned on the project (its onboarding binds the backend server-side); Code Assist licenses attach to user identities, so plain service accounts are not entitled. Until then, agy E2E runs are consumer-OAuth only (small rolling quota) and the harness fails fast on `Individual quota reached` / `SERVICE_DISABLED` instead of retrying. This is also why antigravity is a dispatch-only option in the CI workflows rather than part of the default matrix.
+
+For local runs, either authenticate `agy` with OAuth or set ADC explicitly:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/google-credentials.json
+mise run test:e2e --agent antigravity TestSingleSessionManualCommit
+```
 
 ## Debugging Failures
 
@@ -86,7 +104,7 @@ To diagnose: read `console.log` in the failing test's artifact directory. Compar
 
 ## CI Workflows
 
-- **`.github/workflows/e2e.yml`** — Runs full suite on push to main. Matrix: `[claude-code, opencode, gemini-cli, codex, cursor-cli, factoryai-droid, copilot-cli]`.
+- **`.github/workflows/e2e.yml`** — Runs full suite on push to main. Matrix: `[claude-code, opencode, gemini-cli, antigravity, codex, cursor-cli, factoryai-droid, copilot-cli]`.
 - **`.github/workflows/e2e-isolated.yml`** — Manual dispatch for debugging a single test. Inputs: agent + test name filter.
 
 Both workflows run `go run ./e2e/bootstrap` before tests to handle agent-specific CI setup (auth config, warmup).

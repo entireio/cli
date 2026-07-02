@@ -904,6 +904,16 @@ absPath := filepath.Join(repoRoot, file)
 
 Some agents write transcripts asynchronously. If `ReadTranscript` is called before the write completes, the transcript will be incomplete. Implement `TranscriptPreparer` if your agent has this behavior. Claude Code solves this by writing a sentinel entry and polling for it (see `waitForTranscriptFlush` in `claudecode/lifecycle.go`).
 
+### Antigravity (agy) Wire-Format Quirks
+
+Captured from real agy stdin (1.0.x); all enforced by tests in `agent/antigravity/`:
+
+- **`invocationNum` is 0-indexed** — the first model invocation of a conversation is `0`. PreInvocation fires per *model invocation*, not per user prompt, so only `invocationNum == 0` maps directly to TurnStart; `invocationNum > 0` emits a TurnStart with `Event.SuppressIfSessionActive` and the dispatcher drops it when a turn is genuinely mid-flight (resumes via `agy --conversation` start at `> 0` and must still be tracked).
+- **Transcript is written AFTER the Stop hook** — `PrepareTranscript` briefly waits, then materialises an empty placeholder; condensation degrades to a files/prompt-only checkpoint and re-extracts prompts late (`resolvePromptsFromLateFlushedTranscript`). The hook payload's `transcriptPath` points at `transcript_full.jsonl` under `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/`.
+- **Tool args can be double-encoded** — `toolCall.args` values sometimes arrive as JSON strings containing JSON; see `decodeAgyString`/`decodeAgyBool`.
+- **Token usage has exactly one surface** — the statusline/title JSON payload (`context_window`). The integration tees it to disk via the global settings.json `title` slot (`entire hooks antigravity title-tee`) and implements `OutOfBandTokenSource`.
+- **No SessionStart hook surface** — there is no way to show a "tracked by entire" banner; agy tracks silently like Cursor/OpenCode/Copilot/Pi. Only PreToolUse, PreInvocation, and Stop are installed — agy's PostToolUse/PostInvocation have no lifecycle mapping and are deliberately not installed.
+
 ### Nil Event Return Pattern
 
 `ParseHookEvent` returning `(nil, nil)` is **not an error** - it means the hook has no lifecycle significance. The framework (in `hook_registry.go`) checks:
@@ -920,8 +930,8 @@ Use `//nolint:nilnil` to suppress the linter warning on intentional nil returns.
 
 ### Agent Name vs Agent Type
 
-- `AgentName` is the **registry key** used in code (`"claude-code"`, `"gemini"`, `"opencode"`, `"cursor"`, `"factoryai-droid"`, `"copilot-cli"`). It appears in CLI commands: `entire hooks cursor stop`.
-- `AgentType` is the **display name** stored in metadata and commit trailers (`"Claude Code"`, `"Gemini CLI"`, `"OpenCode"`, `"Cursor"`, `"Factory AI Droid"`, `"Copilot CLI"`). It's what users see.
+- `AgentName` is the **registry key** used in code (`"claude-code"`, `"gemini"`, `"opencode"`, `"cursor"`, `"factoryai-droid"`, `"copilot-cli"`, `"antigravity"`). It appears in CLI commands: `entire hooks cursor stop`.
+- `AgentType` is the **display name** stored in metadata and commit trailers (`"Claude Code"`, `"Gemini CLI"`, `"OpenCode"`, `"Cursor"`, `"Factory AI Droid"`, `"Copilot CLI"`, `"Antigravity"`). It's what users see.
 
 Register constants for both in `cmd/entire/cli/agent/registry.go` when adding a new agent.
 

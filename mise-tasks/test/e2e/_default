@@ -1,7 +1,7 @@
 #!/bin/sh
 #MISE description="Run E2E tests: mise run test:e2e --agent claude-code [filter]"
 #MISE quiet=true
-#USAGE flag "--agent <agent>" help="Agent (claude-code, gemini-cli, opencode, cursor-cli, copilot-cli)" default="" env="E2E_AGENT"
+#USAGE flag "--agent <agent>" help="Agent (claude-code, gemini-cli, antigravity, opencode, cursor-cli, copilot-cli)" default="" env="E2E_AGENT"
 #USAGE arg "[filter]" help="Test name filter (regex)" default=""
 
 set -eu
@@ -26,13 +26,17 @@ mkdir -p "$E2E_ARTIFACT_DIR"
 echo "artifacts: $E2E_ARTIFACT_DIR"
 
 filter="${usage_filter:-}"
+go_timeout="${E2E_GO_TEST_TIMEOUT:-30m}"
+if [ "$E2E_AGENT" = "antigravity" ] && [ -z "$filter" ] && [ -z "${E2E_GO_TEST_TIMEOUT:-}" ]; then
+  go_timeout="90m"
+fi
 
 # Use an explicit package path without the "..." wildcard. The wildcard
 # triggers a Go toolchain panic on Windows ARM64 in modload/search.go
 # (slice bounds out of range) and a GetFileInformationByHandleEx error
 # with relative paths.
 gotestsum --format dots --jsonfile "$E2E_ARTIFACT_DIR/test-events.json" -- \
-  -tags=e2e -count=1 -timeout=30m \
+  -tags=e2e -count=1 -timeout="$go_timeout" \
   ${filter:+-run "$filter"} \
   ./e2e/tests || rc=$?
 

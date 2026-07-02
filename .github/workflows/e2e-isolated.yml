@@ -8,7 +8,7 @@ on:
         required: true
         default: "gemini-cli"
         type: choice
-        options: [claude-code, opencode, gemini-cli, cursor-cli, factoryai-droid, copilot-cli, roger-roger, codex]
+        options: [claude-code, opencode, gemini-cli, antigravity, cursor-cli, factoryai-droid, copilot-cli, roger-roger, codex]
       test:
         description: "Test name filter (regex)"
         required: true
@@ -38,6 +38,15 @@ jobs:
             claude-code) curl -fsSL https://claude.ai/install.sh | bash ;;
             opencode)    curl -fsSL https://opencode.ai/install | bash ;;
             gemini-cli)  npm install -g @google/gemini-cli ;;
+            antigravity)
+              mkdir -p "$HOME/.local/bin"
+              tmp="$(mktemp -d)"
+              curl -fsSL https://github.com/google-antigravity/antigravity-cli/releases/latest/download/agy_cli_linux_x64.tar.gz -o "$tmp/agy.tar.gz"
+              tar -xzf "$tmp/agy.tar.gz" -C "$tmp"
+              agy_bin="$(find "$tmp" -type f -name agy | head -n 1)"
+              test -n "$agy_bin"
+              install -m 0755 "$agy_bin" "$HOME/.local/bin/agy"
+              ;;
             codex)       npm install -g @openai/codex ;;
             cursor-cli)  curl https://cursor.com/install -fsS | bash ;;
             factoryai-droid) curl -fsSL https://app.factory.ai/cli | sh ;;
@@ -53,6 +62,21 @@ jobs:
           echo "Verifying roger-roger binaries on PATH..."
           command -v roger-roger
           command -v entire-agent-roger-roger
+
+      - name: Configure Antigravity ADC
+        if: inputs.agent == 'antigravity'
+        env:
+          ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON:-}" ]; then
+            echo "::error::ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON secret is required for Antigravity E2E"
+            exit 1
+          fi
+          creds="$RUNNER_TEMP/antigravity-google-credentials.json"
+          printf '%s' "$ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON" > "$creds"
+          chmod 600 "$creds"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$creds" >> "$GITHUB_ENV"
 
       - name: Bootstrap agent
         if: inputs.agent != 'roger-roger'
