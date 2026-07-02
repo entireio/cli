@@ -157,6 +157,10 @@ type attributionResolver struct {
 	refreshErr       error
 	freshRepo        *git.Repository // owned by the resolver; closed in Close
 	storeGeneration  int             // bumped when a refresh swaps r.store
+
+	// Memoized backend topology (see primaryBackendIsRefs).
+	refsPrimaryKnown bool
+	refsPrimary      bool
 }
 
 func newBlameCmd() *cobra.Command {
@@ -735,20 +739,41 @@ var fetchAttributionMetadata = func(ctx context.Context) error {
 // openAttributionStore opens a fresh checkpoint store over a freshly-opened
 // repo. After a fetch, the resolver's original repo handle can't see the new
 // packfiles (go-git's storer caches), so post-refresh reads need a new handle.
-// The BlobFetcher is deliberately kept (matching the initial store): after a
-// genuine refresh it can heal individual straggler blobs the branch fetch
-// missed. Injectable for tests.
+// The BlobFetcher AND RefFetcher are deliberately kept identical to the initial
+// store (newAttributionResolver): after a genuine refresh they heal individual
+// straggler blobs / per-checkpoint refs the branch fetch missed — dropping
+// either would make the retry read strictly worse than the first pass on a
+// git-refs-backend repo. Injectable for tests.
 var openAttributionStore = func(ctx context.Context) (attributionCheckpointReader, *git.Repository, error) {
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reopen repository after metadata refresh: %w", err)
 	}
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
 	if err != nil {
 		_ = repo.Close()
 		return nil, nil, fmt.Errorf("reopen checkpoint store after metadata refresh: %w", err)
 	}
 	return stores.Persistent, repo, nil
+}
+
+// primaryBackendIsRefs reports (memoized) whether the repo's primary checkpoint
+// backend is the git-refs per-checkpoint store. The v1-branch refresh proves
+// nothing about per-checkpoint refs, so the strong "the remote's
+// entire/checkpoints/v1 does not contain it / not on the remote" evidence is
+// only sound for the git-branch backend; refs-backend misses use neutral
+// wording. A config load error counts as the default git-branch backend.
+func (r *attributionResolver) primaryBackendIsRefs() bool {
+	if r.refsPrimaryKnown {
+		return r.refsPrimary
+	}
+	r.refsPrimaryKnown = true
+	cfg, err := settings.LoadCheckpointsConfig(r.ctx)
+	if err != nil {
+		return false
+	}
+	r.refsPrimary = checkpoint.PrimaryIsRefs(cfg)
+	return r.refsPrimary
 }
 
 // refreshMetadataStore fetches the metadata branch from the remote AT MOST ONCE
@@ -803,6 +828,10 @@ func (r *attributionResolver) missReason(checkpointID, base string, cause error,
 	switch {
 	case r.refreshAttempted && r.refreshErr != nil:
 		reason = fmt.Sprintf("%s (remote refresh failed: %v)", reason, r.refreshErr)
+	case r.refreshAttempted && summaryMissing && errors.Is(cause, checkpoint.ErrCheckpointNotFound) && r.primaryBackendIsRefs():
+		// git-refs primary: the v1-branch refresh proves nothing about
+		// per-checkpoint refs, so make no claim about what the remote holds.
+		return stringutil.CollapseWhitespace(reason + ". The metadata branch was refreshed, but this repo's primary checkpoint backend stores per-checkpoint refs, which that refresh may not cover — the checkpoint may not have been pushed yet, or its ref could not be fetched; attribution stays trailer-level.")
 	case r.refreshAttempted && summaryMissing && errors.Is(cause, checkpoint.ErrCheckpointNotFound):
 		// Refresh succeeded and the refreshed store reports not-found: the
 		// remote's metadata branch genuinely doesn't have it.
@@ -819,11 +848,14 @@ func (r *attributionResolver) missReason(checkpointID, base string, cause error,
 		// successfully consulted, so make no remote claim — surface the retry
 		// error instead.
 		return stringutil.CollapseWhitespace(fmt.Sprintf("%s. The metadata branch was refreshed from the remote, but re-reading the checkpoint from the refreshed store failed (%v); attribution stays trailer-level.", reason, retryReadErr))
-	case r.refreshAttempted && remoteLacksCheckpoint:
+	case r.refreshAttempted && remoteLacksCheckpoint && !r.primaryBackendIsRefs():
 		// The summary read locally, but a successful refresh proved the
 		// remote lacks the checkpoint entirely: this is an unpushed
 		// local-only checkpoint with damaged local session records.
 		return stringutil.CollapseWhitespace(reason + ". This checkpoint is not on the remote's entire/checkpoints/v1 (it may not have been pushed yet), and the local session records are unreadable; attribution stays trailer-level.")
+	case r.refreshAttempted && r.primaryBackendIsRefs():
+		// git-refs primary: no speculation about the v1 branch's contents.
+		return stringutil.CollapseWhitespace(reason + ". They are still unavailable after refreshing; attribution stays trailer-level.")
 	case r.refreshAttempted:
 		// The checkpoint resolved but its session records are still unreadable
 		// after a successful refresh: the metadata branch was pushed without

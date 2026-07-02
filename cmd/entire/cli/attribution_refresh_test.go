@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/require"
@@ -139,6 +140,31 @@ func TestReadCheckpointContextRefreshedButAbsentSaysNotPushed(t *testing.T) {
 	require.NotContains(t, ctx.MetadataMissingReason, "git fetch", "fetching again cannot help when the remote lacks the checkpoint")
 }
 
+// git-refs primary backend: the v1-branch refresh proves nothing about
+// per-checkpoint refs, so even a refreshed-store not-found must NOT claim
+// "the remote's entire/checkpoints/v1 does not contain it".
+func TestReadCheckpointContextRefsBackendMakesNoBranchClaim(t *testing.T) {
+	newAttributionRepo(t)
+	t.Setenv(settings.EnvCheckpointsPrimary, "git-refs")
+
+	missing := &attributionCheckpointReaderStub{} // sentinel not-found
+	overrideAttributionRefresh(t,
+		func(context.Context) error { return nil },
+		func(context.Context) (attributionCheckpointReader, *git.Repository, error) {
+			return missing, nil, nil
+		})
+
+	resolver := newStubAttributionResolver(missing)
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(checkpointid.MustCheckpointID("fab2c3d4e5f6"), "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.NotContains(t, ctx.MetadataMissingReason, "does not contain it",
+		"the branch refresh cannot prove anything about per-checkpoint refs")
+	require.Contains(t, ctx.MetadataMissingReason, "per-checkpoint refs",
+		"the reason should say why the evidence is weaker on this backend")
+}
+
 // A refresh that succeeds while the summary read keeps failing for a
 // NON-absence reason (storage error, cancellation) proves nothing about the
 // remote: the reason must not claim "not pushed".
@@ -187,6 +213,7 @@ func TestMissReasonCollapsesMultilineErrors(t *testing.T) {
 // miss: a file whose lines reference many unfetched checkpoints must not pay
 // one network attempt per checkpoint.
 func TestRefreshMetadataStoreRunsAtMostOnce(t *testing.T) {
+	newAttributionRepo(t) // hermetic CWD for the appended fetch suggestion
 	fetchCalls := 0
 	overrideAttributionRefresh(t,
 		func(context.Context) error { fetchCalls++; return errors.New("network unreachable") },
