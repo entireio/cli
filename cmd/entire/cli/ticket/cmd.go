@@ -47,5 +47,7 @@ Linear or Jira, so agents and reviews carry the ticket as grounding context.`,
 		},
 	}
 
+	cmd.AddCommand(newSetupCmd())
+
 	return cmd
 }
