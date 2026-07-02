@@ -130,7 +130,7 @@ func runStart(ctx context.Context, out io.Writer, deps Deps, opts startOptions) 
 func resolveStartID(ctx context.Context, id string) (string, error) {
 	id = strings.TrimSpace(id)
 	if id != "" {
-		return id, nil
+		return canonicalID(ctx, id), nil
 	}
 	cur, err := currentBranch(ctx)
 	if err != nil {
@@ -144,7 +144,7 @@ func resolveStartID(ctx context.Context, id string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("could not infer a ticket ID from branch %q; specify one, e.g. `entire ticket start ENG-142`", cur)
 	}
-	return det, nil
+	return canonicalID(ctx, det), nil
 }
 
 // startBranch resolves the branch name (flag, prompt, or default) and switches

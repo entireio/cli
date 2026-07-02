@@ -9,11 +9,8 @@ import (
 )
 
 // activeProvider builds the Provider for the repository's configured platform,
-// loading its stored credential. Returns an error when nothing is configured,
-// the credential is missing, or no concrete provider is implemented yet for the
-// platform. Concrete providers are wired in by their own files (see linear.go).
-//
-//nolint:unparam // result is always nil until a concrete provider lands (see linear.go); wired now so link/status can resolve it.
+// loading its stored credential. Returns an error when nothing is configured or
+// the credential is missing.
 func activeProvider(ctx context.Context) (Provider, error) {
 	s, err := settings.Load(ctx)
 	if err != nil {
@@ -27,8 +24,47 @@ func activeProvider(ctx context.Context) (Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := LoadToken(platform); err != nil {
+	token, err := LoadToken(platform)
+	if err != nil {
 		return nil, err
 	}
-	return nil, fmt.Errorf("no provider implemented for platform %q", platform)
+	return buildProvider(platform, token, tc.Team)
+}
+
+// buildProvider constructs the Provider implementation for a platform.
+func buildProvider(platform Platform, token, team string) (Provider, error) {
+	switch platform {
+	case PlatformLinear:
+		return newLinearProvider(token, team), nil
+	default:
+		return nil, fmt.Errorf("no provider implemented for platform %q", platform)
+	}
+}
+
+// canonicalID best-effort normalizes a user-supplied ticket identifier (a full
+// URL or a differently-cased id) into the configured provider's canonical form
+// (e.g. "MOH-57"). Normalization is pure string parsing, so it works without a
+// stored credential; it returns id unchanged when no platform is configured or
+// the id cannot be parsed, keeping link/start usable offline.
+func canonicalID(ctx context.Context, id string) string {
+	s, err := settings.Load(ctx)
+	if err != nil {
+		return id
+	}
+	tc := s.TicketConfig()
+	if tc.IsZero() {
+		return id
+	}
+	platform, err := ParsePlatform(tc.Platform)
+	if err != nil {
+		return id
+	}
+	prov, err := buildProvider(platform, "", tc.Team)
+	if err != nil {
+		return id
+	}
+	if canonical, ok := prov.CanonicalID(id); ok {
+		return canonical
+	}
+	return id
 }

@@ -97,6 +97,10 @@ func linkCurrentBranch(ctx context.Context, id string, force bool) (Link, string
 		id = detected
 	}
 
+	// Normalize a pasted URL or differently-cased id to its canonical form
+	// (e.g. "MOH-57") so status/prompt render it cleanly. Best-effort.
+	id = canonicalID(ctx, id)
+
 	link := Link{Platform: tc.Platform, ID: id}
 	if err := storeLink(ctx, branch, link, force); err != nil {
 		return Link{}, "", err
