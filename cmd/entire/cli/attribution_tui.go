@@ -27,12 +27,14 @@ const (
 )
 
 // whyMarkerLegend is the one-line explanation of the attribution tags shown in
-// the footer and in the plain-text views. Wording is deliberate: [AI] means the
-// commit's checkpointed work was fully agent-authored; [MX] means agent work
-// with human edits mixed in at commit; [HU] means no agent checkpoint recorded.
-// Kept within the blame table's 80-column budget (with its 2-space indent); the
-// full sentences live in the why detail views.
-const whyMarkerLegend = "[AI] all agent · [MX] agent+human mixed · [HU] no agent · [??] uncommitted"
+// the footer and in the plain-text views. Wording is deliberate — the tags are
+// a PER-COMMIT inference, not a per-line truth: [AI] means the commit's
+// checkpointed work was fully agent-authored; [MX] means the commit mixed
+// agent work with human edits (so any given line may be either); [HU] means no
+// agent checkpoint is recorded for the commit. Kept within the blame table's
+// 80-column budget (with its 2-space indent); full sentences live in the why
+// detail views, and [??]/~/? markers are explained by their own legend line.
+const whyMarkerLegend = "per commit: [AI] all agent · [MX] mixed — line may be either · [HU] no agent"
 
 // whyTUIStyles holds the interactive viewer's palette. Empty styles render as
 // plain text when color is off, which also keeps tests assertable.

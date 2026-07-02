@@ -1288,7 +1288,7 @@ func renderAttributionMarkerLegend(w io.Writer, sty statusStyles, lines []attrib
 	// with human edits mixed in at commit, [HU] means no agent checkpoint.
 	fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, whyMarkerLegend))
 
-	approximate, ambiguous := false, false
+	approximate, ambiguous, uncommitted := false, false, false
 	for _, line := range lines {
 		switch attributionLineMarker(line) {
 		case "~":
@@ -1296,11 +1296,17 @@ func renderAttributionMarkerLegend(w io.Writer, sty statusStyles, lines []attrib
 		case "?":
 			ambiguous = true
 		}
+		if line.Authorship == attributionUncommitted {
+			uncommitted = true
+		}
 	}
-	if !approximate && !ambiguous {
+	if !approximate && !ambiguous && !uncommitted {
 		return
 	}
 	var parts []string
+	if uncommitted {
+		parts = append(parts, "[??] uncommitted (no commit yet)")
+	}
 	if approximate {
 		parts = append(parts, "~ best-effort attribution (file not in the checkpoint's recorded paths)")
 	}
