@@ -23,6 +23,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
@@ -687,23 +689,33 @@ var fetchAttributionMetadata = func(ctx context.Context) error {
 	// data: do not mask its failure with an origin fallback that may hold a
 	// stale copy (or no metadata branch at all) — a later miss would then
 	// claim "not pushed" about a remote we never reached.
-	if remote.Configured(ctx) {
-		// remote.FetchURL silently falls back to the origin URL when the
-		// checkpoint URL cannot be derived (unparseable origin, unknown
-		// provider, token-path short-circuit). A "successful" fetch that
-		// actually hit origin would fake the evidence the not-pushed wording
-		// relies on — require the explicit source signal, never a URL-string
-		// comparison (token rewrites change origin's shape, and a
+	// Resolve the authority exactly once, then fetch the URL that was
+	// verified. Independently re-resolving inside the fetch helper (which
+	// re-reads settings and git remotes) opened a TOCTOU window where a
+	// transient divergence could route the fetch to origin while attribution
+	// recorded an authoritative checkpoint-remote refresh. A settings-load
+	// failure is likewise a refresh failure — not "no checkpoint remote",
+	// which would silently promote origin to the evidence source.
+	s, err := settings.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("checkpoint remote fetch failed: read settings: %w", err)
+	}
+	if s.GetCheckpointRemote() != nil {
+		// remote.FetchURLWithSource reports whether the URL was genuinely
+		// derived from the configured checkpoint_remote. A "successful" fetch
+		// that actually hit origin would fake the evidence the not-pushed
+		// wording relies on — require the explicit source signal, never a
+		// URL-string comparison (token rewrites change origin's shape, and a
 		// checkpoint_remote pointing at the origin repo derives an identical
 		// URL legitimately).
-		_, usedCheckpointRemote, err := remote.FetchURLWithSource(ctx)
+		url, usedCheckpointRemote, err := remote.FetchURLWithSource(ctx)
 		if err != nil {
 			return fmt.Errorf("checkpoint remote fetch failed: %w", err)
 		}
 		if !usedCheckpointRemote {
 			return errors.New("checkpoint remote fetch failed: checkpoint_remote is configured but its URL could not be derived (resolution fell back to origin)")
 		}
-		if err := FetchMetadataFromCheckpointRemote(ctx); err != nil {
+		if err := strategy.FetchMetadataBranch(ctx, url); err != nil {
 			return fmt.Errorf("checkpoint remote fetch failed: %w", err)
 		}
 		return nil
@@ -1377,10 +1389,11 @@ func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
 		}
 		// The "Full context" hint suggests `entire checkpoint explain <id>`. Only
 		// show it when the metadata is actually present: when it is missing, the
-		// remote fetch `why` already attempted has failed, so explain would fail
-		// the same way (the reported bug — a hint that resolves to a command that
+		// remote refresh `why` already attempted did not produce it (it failed,
+		// or the remote genuinely lacks the data), so explain would fail the
+		// same way (the reported bug — a hint that resolves to a command that
 		// immediately errors). In that case the MetadataMissingReason printed
-		// above already gives the actionable fetch-then-explain sequence.
+		// above already carries the appropriate recovery guidance.
 		if line.CheckpointID != "" && !line.MetadataMissing {
 			fmt.Fprintf(w, "\n  %s %s\n\n", sty.render(sty.dim, "Full context:"), sty.render(sty.cyan, "entire checkpoint explain "+line.CheckpointID))
 		} else {
