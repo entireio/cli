@@ -1288,10 +1288,12 @@ type CreatedMirror struct {
 	// True on fresh creation; false when an existing mirror was returned.
 	Created bool `json:"created"`
 	// True when the upstream has no refs to clone.
-	Empty           bool   `json:"empty"`
-	MirrorId        string `json:"mirrorId"`
-	MirrorUrl       string `json:"mirrorUrl"`
-	PublicUrl       string `json:"publicUrl"`
+	Empty     bool   `json:"empty"`
+	MirrorId  string `json:"mirrorId"`
+	MirrorUrl string `json:"mirrorUrl"`
+	PublicUrl string `json:"publicUrl"`
+	// True when an existing placement was returned that an admin suspended.
+	Suspended       bool `json:"suspended"`
 	AdditionalProps CreatedMirrorAdditional
 }
 
@@ -1323,6 +1325,11 @@ func (s *CreatedMirror) GetMirrorUrl() string {
 // GetPublicUrl returns the value of PublicUrl.
 func (s *CreatedMirror) GetPublicUrl() string {
 	return s.PublicUrl
+}
+
+// GetSuspended returns the value of Suspended.
+func (s *CreatedMirror) GetSuspended() bool {
+	return s.Suspended
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -1358,6 +1365,11 @@ func (s *CreatedMirror) SetMirrorUrl(val string) {
 // SetPublicUrl sets the value of PublicUrl.
 func (s *CreatedMirror) SetPublicUrl(val string) {
 	s.PublicUrl = val
+}
+
+// SetSuspended sets the value of Suspended.
+func (s *CreatedMirror) SetSuspended(val bool) {
+	s.Suspended = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.

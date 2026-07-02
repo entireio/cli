@@ -3329,6 +3329,10 @@ func (s *CreatedMirror) encodeFields(e *jx.Encoder) {
 		e.FieldStart("publicUrl")
 		e.Str(s.PublicUrl)
 	}
+	{
+		e.FieldStart("suspended")
+		e.Bool(s.Suspended)
+	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
 
@@ -3338,13 +3342,14 @@ func (s *CreatedMirror) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfCreatedMirror = [6]string{
+var jsonFieldsNameOfCreatedMirror = [7]string{
 	0: "$schema",
 	1: "created",
 	2: "empty",
 	3: "mirrorId",
 	4: "mirrorUrl",
 	5: "publicUrl",
+	6: "suspended",
 }
 
 // Decode decodes CreatedMirror from json.
@@ -3427,6 +3432,18 @@ func (s *CreatedMirror) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"publicUrl\"")
 			}
+		case "suspended":
+			requiredBitSet[0] |= 1 << 6
+			if err := func() error {
+				v, err := d.Bool()
+				s.Suspended = bool(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"suspended\"")
+			}
 		default:
 			var elem jx.Raw
 			if err := func() error {
@@ -3448,7 +3465,7 @@ func (s *CreatedMirror) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00111110,
+		0b01111110,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.

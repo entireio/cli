@@ -452,6 +452,10 @@
           },
           "publicUrl": {
             "type": "string"
+          },
+          "suspended": {
+            "description": "true when an existing placement was returned that an admin suspended.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -459,7 +463,8 @@
           "mirrorUrl",
           "publicUrl",
           "created",
-          "empty"
+          "empty",
+          "suspended"
         ],
         "type": "object"
       },

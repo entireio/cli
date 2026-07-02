@@ -214,6 +214,18 @@ func TestCreateAndAwaitMirror_OnCreated(t *testing.T) {
 		require.Equal(t, 1, fired)
 		require.Equal(t, []string{mirrorsAPIPath}, *paths, "no-wait must not poll GetMirror")
 	})
+
+	t.Run("suspended placement short-circuits without polling or error", func(t *testing.T) {
+		suspended := &coreapi.CreatedMirror{MirrorId: "m1", MirrorUrl: "entire://c/gh/o/r", Suspended: true}
+		c, paths := serveMirrorCreate(t, suspended, false)
+		fired := 0
+		outcome, err := createAndAwaitMirror(ctx, c, "o", "r", "c", false, time.Second,
+			func(*coreapi.CreatedMirror) { fired++ }, nil)
+		require.NoError(t, err, "an admin-suspended placement is non-fatal")
+		require.Equal(t, 1, fired, "onCreated still fires for a suspended placement")
+		require.False(t, outcome.polled, "a suspended placement is never polled for readiness")
+		require.Equal(t, []string{mirrorsAPIPath}, *paths, "suspended must not poll GetMirror")
+	})
 }
 
 func countEq(xs []string, want string) int {
@@ -282,6 +294,18 @@ func TestReportOneShotMirror(t *testing.T) {
 		require.Contains(t, errW.String(), "Contact support")
 		require.NotContains(t, errW.String(), "entire-core")
 		require.NotContains(t, out.String(), "git clone")
+	})
+
+	t.Run("suspended placement warns after the placement and succeeds", func(t *testing.T) {
+		t.Parallel()
+		var out, errW bytes.Buffer
+		created := &coreapi.CreatedMirror{Created: false, MirrorId: id, MirrorUrl: mirrorURL, Suspended: true}
+		err := reportOneShotMirror(&out, &errW, mirrorCreateOutcome{created: created}, nil)
+		require.NoError(t, err, "a suspended re-create is a non-fatal warning")
+		require.Contains(t, out.String(), "Mirror exists ("+id, "the placement is still echoed")
+		require.Contains(t, errW.String(), "WARNING: this mirror has been suspended by an admin and won't be usable.")
+		require.NotContains(t, out.String(), "git clone")
+		require.NotContains(t, out.String(), "still be in progress")
 	})
 
 	t.Run("failed returns an error naming the mirror", func(t *testing.T) {

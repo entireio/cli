@@ -515,6 +515,15 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 	}
 	res.cloneURL = outcome.created.MirrorUrl
 
+	if outcome.created.Suspended {
+		// An admin suspended this existing placement, so it won't be served.
+		// Surface it as a distinct status rather than a bare "registered"; it is
+		// non-fatal (no res.err), matching the one-shot's warning semantics.
+		res.status = mirrorStatusSuspended
+		report(mirrorStatusSuspended, true, false)
+		return res
+	}
+
 	if !outcome.polled {
 		if outcome.created.Empty {
 			res.status = mirrorStatusEmpty
