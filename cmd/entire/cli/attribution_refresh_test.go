@@ -121,6 +121,8 @@ func TestReadCheckpointContextRefreshRestoresUnreadableSessions(t *testing.T) {
 // the remote genuinely doesn't have it: the reason must say "not pushed", and
 // must NOT suggest a git fetch (the user just did the equivalent).
 func TestReadCheckpointContextRefreshedButAbsentSaysNotPushed(t *testing.T) {
+	// Pin the backend: the asserted wording is the git-branch evidence branch.
+	t.Setenv(settings.EnvCheckpointsPrimary, "git-branch")
 	cpID := checkpointid.MustCheckpointID("ccb2c3d4e5f6")
 	// summary nil + readErr nil → Read returns (nil, nil) → the store reports
 	// the genuine-absence sentinel (checkpoint.ErrCheckpointNotFound).
@@ -163,6 +165,35 @@ func TestReadCheckpointContextRefsBackendMakesNoBranchClaim(t *testing.T) {
 		"the branch refresh cannot prove anything about per-checkpoint refs")
 	require.Contains(t, ctx.MetadataMissingReason, "per-checkpoint refs",
 		"the reason should say why the evidence is weaker on this backend")
+}
+
+// refs-backend twin of KeepsLocalWhenRefreshReadsWorse: even when the retry
+// proves the refreshed store lacks the checkpoint, the git-refs backend gets
+// neutral wording (the branch refresh cannot support a "not on the remote"
+// claim about per-checkpoint refs).
+func TestReadCheckpointContextRefsBackendWorseRetryStaysNeutral(t *testing.T) {
+	newAttributionRepo(t)
+	t.Setenv(settings.EnvCheckpointsPrimary, "git-refs")
+	local := &attributionCheckpointReaderStub{
+		summary: &checkpoint.CheckpointSummary{
+			Sessions: []checkpoint.SessionFilePaths{{Metadata: "metadata.json"}},
+		},
+		sessionErr: errors.New("object not found"),
+	}
+	overrideAttributionRefresh(t,
+		func(context.Context) error { return nil },
+		func(context.Context) (attributionCheckpointReader, *git.Repository, error) {
+			return &attributionCheckpointReaderStub{}, nil, nil // sentinel not-found
+		})
+
+	resolver := newStubAttributionResolver(local)
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(checkpointid.MustCheckpointID("fbb2c3d4e5f6"), "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.Contains(t, ctx.MetadataMissingReason, "still unavailable after refreshing")
+	require.NotContains(t, ctx.MetadataMissingReason, "not on the remote",
+		"the branch refresh cannot prove per-checkpoint-ref absence")
 }
 
 // A refresh that succeeds while the summary read keeps failing for a
@@ -243,6 +274,8 @@ func TestRefreshMetadataStoreRunsAtMostOnce(t *testing.T) {
 // must not speculate that "the metadata branch may have been pushed without"
 // the session records.
 func TestReadCheckpointContextKeepsLocalWhenRefreshReadsWorse(t *testing.T) {
+	// Pin the backend: the asserted wording is the git-branch evidence branch.
+	t.Setenv(settings.EnvCheckpointsPrimary, "git-branch")
 	cpID := checkpointid.MustCheckpointID("ffb2c3d4e5f6")
 	// Local: summary readable, sessions unreadable (partial). Remote: reports
 	// genuine absence (nil,nil stub → checkpoint.ErrCheckpointNotFound).
@@ -276,6 +309,8 @@ func TestReadCheckpointContextKeepsLocalWhenRefreshReadsWorse(t *testing.T) {
 // neutral and surface the retry's error rather than speculating the metadata
 // branch "may have been pushed without" the session records.
 func TestReadCheckpointContextRejectedRetryNonAbsenceStaysNeutral(t *testing.T) {
+	// Pin the backend so the retryReadErr branch (not the refs branch) fires.
+	t.Setenv(settings.EnvCheckpointsPrimary, "git-branch")
 	cpID := checkpointid.MustCheckpointID("fdb2c3d4e5f6")
 	local := &attributionCheckpointReaderStub{
 		summary: &checkpoint.CheckpointSummary{
@@ -405,6 +440,8 @@ func TestRefreshMetadataStoreSuccessRunsAtMostOnce(t *testing.T) {
 // records are unavailable — not claim the checkpoint "may not have been pushed"
 // or "predates checkpointing", both of which the just-read summary disproves.
 func TestReadCheckpointContextSessionsUnreadableAfterRefreshWording(t *testing.T) {
+	// Pin the backend: the asserted wording is the git-branch branch.
+	t.Setenv(settings.EnvCheckpointsPrimary, "git-branch")
 	cpID := checkpointid.MustCheckpointID("bcb2c3d4e5f6")
 	broken := &attributionCheckpointReaderStub{
 		summary: &checkpoint.CheckpointSummary{
