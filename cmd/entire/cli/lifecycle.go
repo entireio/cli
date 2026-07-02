@@ -696,26 +696,24 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
 	}
 
-	// Filter transcript-extracted files to exclude files already committed to HEAD.
-	// When an agent commits files mid-turn, those files are condensed by PostCommit
-	// and should not be re-added to FilesTouched by SaveStep. A file is "committed"
-	// if it exists in HEAD with the same content as the working tree.
+	// Filter detected changes to exclude state already committed to HEAD.
+	// When an agent commits files mid-turn, those changes are condensed by
+	// PostCommit and must not be re-checkpointed by SaveStep — otherwise a
+	// Stop right after the commit produces an empty duplicate checkpoint
+	// (observed with Antigravity, whose Stop fires after its own git commit).
+	// A file is "committed" if it exists in HEAD with the same content as the
+	// working tree; a deletion is "committed" if the file is absent from HEAD.
+	// Anything genuinely uncommitted (e.g. files the agent created via shell
+	// after the mid-turn commit) survives the filter and gets checkpointed.
 	relModifiedFiles = filterToUncommittedFiles(ctx, relModifiedFiles, repoRoot)
+	relNewFiles = filterToUncommittedFiles(ctx, relNewFiles, repoRoot)
+	relDeletedFiles = filterToUncommittedDeletions(ctx, relDeletedFiles)
 	normalizeSpan.End()
 
 	// Check if there are any changes
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
 	if totalChanges == 0 {
 		logging.Info(logCtx, "no files modified during session, skipping checkpoint")
-		transitionSessionTurnEnd(ctx, sessionID, event)
-		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
-			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
-				slog.String("error", cleanupErr.Error()))
-		}
-		return nil
-	}
-	if shouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit(ag, sessionState) {
-		logging.Info(logCtx, "mid-turn commit already condensed all tracked files, skipping stop checkpoint")
 		transitionSessionTurnEnd(ctx, sessionID, event)
 		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
@@ -1123,21 +1121,14 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string)
 // shouldSuppressConditionalTurnStart reports whether a conditional TurnStart
 // (Event.SuppressIfSessionActive, set by agents whose per-invocation hooks
 // can't tell a follow-up model call from a resumed turn) must be dropped. Only
-// an ACTIVE-phase session suppresses it — an idle/ended/condensed/absent session
-// means the prior turn finished, so a new or resumed turn should be tracked.
+// a genuinely mid-turn session suppresses it — an idle/ended/condensed/absent
+// session means the prior turn finished, so a new or resumed turn should be
+// tracked. A stuck-ACTIVE session (crashed/killed before its Stop hook fired,
+// no interaction beyond session.StuckActiveThreshold) must NOT suppress:
+// otherwise every resume of a crashed conversation would run untracked and
+// uninitialized.
 func shouldSuppressConditionalTurnStart(event *agent.Event, state *strategy.SessionState) bool {
-	return event.SuppressIfSessionActive && state != nil && state.Phase.IsActive()
-}
-
-// shouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit handles Antigravity's
-// Stop-after-commit ordering. PostCommit has already condensed the checkpoint and
-// cleared FilesTouched, so Stop should only finalize the transcript instead of
-// creating a fresh shadow checkpoint on the new HEAD.
-func shouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit(ag agent.Agent, state *strategy.SessionState) bool {
-	if ag == nil || ag.Name() != agent.AgentNameAntigravity || state == nil {
-		return false
-	}
-	return len(state.TurnCheckpointIDs) > 0 && len(state.FilesTouched) == 0
+	return event.SuppressIfSessionActive && state != nil && state.Phase.IsActive() && !state.IsStuckActive()
 }
 
 // logFileChanges logs the files modified, created, and deleted during a session.

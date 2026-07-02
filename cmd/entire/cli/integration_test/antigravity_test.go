@@ -126,6 +126,130 @@ func TestAntigravity_FullEventFlow(t *testing.T) {
 		"PreToolUse(write_to_file foo.txt) should have populated files_touched; got %v", got)
 }
 
+// TestAntigravity_MidTurnCommitWithUnwrittenTranscriptStillCondenses pins the
+// dangling-trailer fix: agy writes its transcript AFTER the Stop hook, so a
+// first-turn mid-turn commit condenses while the transcript file doesn't exist
+// yet (PrepareTranscript materialises an empty placeholder). Condensation must
+// degrade to a files/prompt-only checkpoint — NOT error — because
+// prepare-commit-msg already stamped the Entire-Checkpoint trailer; an error
+// here leaves the commit permanently referencing a checkpoint that was never
+// written to entire/checkpoints/v1.
+func TestAntigravity_MidTurnCommitWithUnwrittenTranscriptStillCondenses(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	conversationID := "antigravity-it-unwritten-transcript"
+	// Deliberately do NOT create the transcript file: real agy has not written
+	// it yet when a mid-turn commit fires.
+	transcriptPath := filepath.Join(env.RepoDir, ".gemini", "antigravity-cli",
+		"brain", conversationID, ".system_generated", "logs", "transcript_full.jsonl")
+
+	common := map[string]any{
+		"conversationId":        conversationID,
+		"workspacePaths":        []string{env.RepoDir},
+		"transcriptPath":        transcriptPath,
+		"artifactDirectoryPath": filepath.Join(env.RepoDir, ".gemini", "antigravity-cli", "artifacts"),
+	}
+
+	require.NoError(t, runAntigravityHook(t, env.RepoDir, "pre-invocation", mergeMaps(common, map[string]any{
+		"invocationNum":   0,
+		"initialNumSteps": 1,
+	})))
+	require.NoError(t, runAntigravityHook(t, env.RepoDir, "pre-tool-use", mergeMaps(common, map[string]any{
+		"toolCall": map[string]any{
+			"name": "write_to_file",
+			"args": map[string]any{"TargetFile": "docs/blue.md", "Overwrite": false},
+		},
+		"stepIdx": 1,
+	})))
+
+	env.WriteFile("docs/blue.md", "Blue is a calm colour.\n")
+	gitCLICommitWithEntireHooks(t, env, "Add blue docs", "docs/blue.md")
+
+	// The commit must carry the trailer AND the checkpoint it references must
+	// actually exist on entire/checkpoints/v1.
+	headHash := env.GetHeadHash()
+	repo, err := git.PlainOpen(env.RepoDir)
+	require.NoError(t, err)
+	commitObj, err := repo.CommitObject(plumbing.NewHash(headHash))
+	require.NoError(t, err)
+	checkpointID, found := trailers.ParseCheckpoint(commitObj.Message)
+	require.True(t, found, "user commit should carry an Entire-Checkpoint trailer")
+
+	metadataPath := SessionMetadataPath(checkpointID.String())
+	metadataContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, metadataPath)
+	require.True(t, found,
+		"checkpoint metadata must exist at %s — an empty/unwritten transcript must degrade, not strand the trailer", metadataPath)
+	var metadata checkpoint.CommittedMetadata
+	require.NoError(t, json.Unmarshal([]byte(metadataContent), &metadata))
+	require.Equal(t, conversationID, metadata.SessionID)
+	require.Contains(t, metadata.FilesTouched, "docs/blue.md",
+		"hook-captured files must survive the empty transcript")
+}
+
+// TestAntigravity_StopAfterMidTurnCommitCheckpointsLateShellFiles pins the
+// uncommitted-late-work fix: after a mid-turn commit condenses everything
+// tracked, agy can still create files via run_command (shell), which the
+// PreToolUse extractor cannot see. Stop must checkpoint those uncommitted
+// files (SaveStep → shadow branch) instead of skipping — the committed-state
+// filters drop only the already-condensed changes, not the late ones.
+func TestAntigravity_StopAfterMidTurnCommitCheckpointsLateShellFiles(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	conversationID := "antigravity-it-late-shell-file"
+	transcriptPath := filepath.Join(env.RepoDir, ".gemini", "antigravity-cli",
+		"brain", conversationID, ".system_generated", "logs", "transcript_full.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(transcriptPath), 0o750))
+	require.NoError(t, os.WriteFile(transcriptPath,
+		[]byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"create docs/blue.md, commit it, then create docs/late.md"}`+"\n"),
+		0o600))
+
+	common := map[string]any{
+		"conversationId":        conversationID,
+		"workspacePaths":        []string{env.RepoDir},
+		"transcriptPath":        transcriptPath,
+		"artifactDirectoryPath": filepath.Join(env.RepoDir, ".gemini", "antigravity-cli", "artifacts"),
+	}
+
+	require.NoError(t, runAntigravityHook(t, env.RepoDir, "pre-invocation", mergeMaps(common, map[string]any{
+		"invocationNum":   0,
+		"initialNumSteps": 1,
+	})))
+	require.NoError(t, runAntigravityHook(t, env.RepoDir, "pre-tool-use", mergeMaps(common, map[string]any{
+		"toolCall": map[string]any{
+			"name": "write_to_file",
+			"args": map[string]any{"TargetFile": "docs/blue.md", "Overwrite": false},
+		},
+		"stepIdx": 1,
+	})))
+
+	env.WriteFile("docs/blue.md", "Blue is a calm colour.\n")
+	gitCLICommitWithEntireHooks(t, env, "Add blue docs", "docs/blue.md")
+
+	// agy now creates a file via run_command (shell) — no PreToolUse fires for
+	// it, so it never enters FilesTouched. It stays uncommitted at Stop.
+	env.WriteFile("docs/late.md", "Written after the mid-turn commit.\n")
+
+	require.NoError(t, runAntigravityHook(t, env.RepoDir, "stop", mergeMaps(common, map[string]any{
+		"executionNum":      1,
+		"terminationReason": "model_stop",
+		"error":             "",
+		"fullyIdle":         true,
+	})))
+
+	// The uncommitted late file must have produced a shadow-branch checkpoint.
+	var shadowBranches []string
+	for _, branch := range env.ListBranchesWithPrefix("entire/") {
+		if branch == paths.MetadataBranchName || branch == paths.TrailsBranchName {
+			continue
+		}
+		shadowBranches = append(shadowBranches, branch)
+	}
+	require.NotEmpty(t, shadowBranches,
+		"Stop after a mid-turn commit must checkpoint uncommitted late files (docs/late.md), not skip SaveStep")
+}
+
 func TestAntigravity_StopAfterAgentCommitDoesNotCreateNewShadowBranch(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)

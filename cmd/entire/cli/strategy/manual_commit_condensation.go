@@ -150,6 +150,12 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// nil for them. Gate on the purpose-built capability so only those agents
 	// inherit the accumulated state value — transcript-based agents keep their
 	// recomputed, checkpoint-scoped values.
+	//
+	// Known limitation (mid-turn commits): state.TokenUsage is only populated
+	// by SaveStep at TurnEnd, and the OOB baseline is only re-snapshotted at
+	// TurnStart. A mid-turn commit therefore condenses with zero tokens and
+	// the whole turn's delta lands on the post-Stop checkpoint. Totals across
+	// the turn remain correct; only per-checkpoint scoping is coarse.
 	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.TokenUsage) {
 		if _, ok := agent.AsOutOfBandTokenSource(ag); ok {
 			sessionData.TokenUsage = state.TokenUsage
@@ -465,7 +471,12 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 				slog.String("error", sliceErr.Error()))
 		}
 		scopedTranscript = scoped
-	case agent.AgentTypeCodex, agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeUnknown:
+	case agent.AgentTypeCodex, agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeAntigravity, agent.AgentTypeUnknown:
+		// Antigravity is JSONL like Claude/Codex, so line slicing applies.
+		// (agy offsets count non-blank lines; SliceFromLine slices raw lines —
+		// exact only when the transcript has no interior blank lines, which
+		// matches every captured agy transcript. Worst case the summary scope
+		// shifts by a line; prompts/positions are unaffected.)
 		scopedTranscript = transcript.SliceFromLine(transcriptBytes, state.CheckpointTranscriptStart)
 	}
 
@@ -885,8 +896,18 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 		return nil, fmt.Errorf("failed to read live transcript: %w", err)
 	}
 
+	// An empty live transcript must degrade, not fail: late-flushing agents
+	// (Antigravity writes its transcript AFTER the Stop hook) can condense a
+	// first-turn mid-turn commit while the transcript is still an empty
+	// placeholder. Erroring here happens after prepare-commit-msg already
+	// stamped the Entire-Checkpoint trailer, leaving the commit pointing at a
+	// checkpoint that never gets written. Mirror the shadow-branch path:
+	// condense with hook-captured FilesTouched + filesystem prompts and an
+	// empty transcript.
 	if len(liveData) == 0 {
-		return nil, errors.New("live transcript is empty")
+		logging.Warn(logging.WithComponent(ctx, "checkpoint"),
+			"live transcript is empty at condensation, degrading to files/prompt-only checkpoint",
+			slog.String("session_id", state.SessionID))
 	}
 
 	fullTranscript := string(liveData)
@@ -962,6 +983,22 @@ func countTranscriptItems(agentType types.AgentType, content string) int {
 			return 0
 		}
 		// Otherwise fall through to JSONL parsing for Unknown type
+	}
+
+	// Antigravity: count non-blank lines only, matching the agent's own
+	// readers (ExtractPrompts and GetTranscriptPosition skip blank lines
+	// before counting, the codex splitJSONL convention). This value is stored
+	// in CheckpointTranscriptStart and later fed back to those readers as an
+	// offset — the writer and readers must agree on the metric or an interior
+	// blank line silently shifts prompt extraction for the next checkpoint.
+	if agentType == agent.AgentTypeAntigravity {
+		count := 0
+		for _, line := range strings.Split(content, "\n") {
+			if strings.TrimSpace(line) != "" {
+				count++
+			}
+		}
+		return count
 	}
 
 	// Claude Code and other JSONL-based agents

@@ -771,13 +771,21 @@ func TestHandleLifecycleTurnEnd_EmptyRepository(t *testing.T) {
 func TestShouldSuppressConditionalTurnStart(t *testing.T) {
 	t.Parallel()
 
-	active := &strategy.SessionState{Phase: session.PhaseActive}
-	idle := &strategy.SessionState{Phase: session.PhaseIdle}
+	now := time.Now()
+	stuckAt := now.Add(-2 * session.StuckActiveThreshold)
+	active := &strategy.SessionState{Phase: session.PhaseActive, StartedAt: now, LastInteractionTime: &now}
+	stuckActive := &strategy.SessionState{Phase: session.PhaseActive, StartedAt: stuckAt, LastInteractionTime: &stuckAt}
+	idle := &strategy.SessionState{Phase: session.PhaseIdle, StartedAt: now, LastInteractionTime: &now}
 
 	// Conditional TurnStart (agy invocationNum>0) with an active mid-turn
 	// session is a follow-up model call — suppress so the baseline isn't clobbered.
 	if !shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, active) {
-		t.Error("conditional TurnStart with an ACTIVE session must be suppressed (follow-up invocation)")
+		t.Error("conditional TurnStart with a recently-active session must be suppressed (follow-up invocation)")
+	}
+	// Stuck-ACTIVE (crashed session whose Stop never fired) => a resume must
+	// fire, or the crashed conversation is untracked forever.
+	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, stuckActive) {
+		t.Error("conditional TurnStart with a stuck-ACTIVE session must fire (resume after crash)")
 	}
 	// Idle session => the prior turn finished; a new/resumed turn must fire.
 	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, idle) {
@@ -790,34 +798,6 @@ func TestShouldSuppressConditionalTurnStart(t *testing.T) {
 	// Unconditional TurnStart (invocationNum==0) must never be suppressed.
 	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: false}, active) {
 		t.Error("unconditional TurnStart must never be suppressed")
-	}
-}
-
-func TestShouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit(t *testing.T) {
-	t.Parallel()
-
-	ag := newMockAgent()
-	ag.name = agent.AgentNameAntigravity
-
-	if !shouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit(ag, &strategy.SessionState{
-		TurnCheckpointIDs: []string{"abc123def456"},
-		FilesTouched:      nil,
-	}) {
-		t.Fatal("expected Antigravity stop after fully-condensed mid-turn commit to skip SaveStep")
-	}
-
-	if shouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit(ag, &strategy.SessionState{
-		TurnCheckpointIDs: []string{"abc123def456"},
-		FilesTouched:      []string{"still-uncommitted.go"},
-	}) {
-		t.Fatal("must not skip when Antigravity still has tracked files to checkpoint")
-	}
-
-	other := newMockAgent()
-	if shouldSkipTurnEndCheckpointAfterCondensedMidTurnCommit(other, &strategy.SessionState{
-		TurnCheckpointIDs: []string{"abc123def456"},
-	}) {
-		t.Fatal("must not apply Antigravity stop workaround to other agents")
 	}
 }
 
