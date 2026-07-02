@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -3171,5 +3172,61 @@ func TestCleanRemoteURLForReport(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Bare `entire enable` on an already-enabled repo is the resume path for
+// interrupted onboarding: it must run the setup ladder, not just print
+// "already enabled".
+func TestEnableCmd_AlreadyEnabled_RunsOnboardingLadder(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeClaudeHooksFixture(t)
+
+	ladderRan := false
+	prev := runEnableOnboarding
+	runEnableOnboarding = func(context.Context, io.Writer, bool) { ladderRan = true }
+	t.Cleanup(func() { runEnableOnboarding = prev })
+
+	cmd := newEnableCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Entire is already enabled.") {
+		t.Fatalf("expected lightweight re-enable message, got: %s", stdout.String())
+	}
+	if !ladderRan {
+		t.Error("already-enabled enable must run the onboarding ladder (resume path)")
+	}
+}
+
+// Re-enabling a disabled repo also converges setup.
+func TestEnableCmd_ReenableDisabledRepo_RunsOnboardingLadder(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsDisabled)
+	writeClaudeHooksFixture(t)
+
+	ladderRan := false
+	prev := runEnableOnboarding
+	runEnableOnboarding = func(context.Context, io.Writer, bool) { ladderRan = true }
+	t.Cleanup(func() { runEnableOnboarding = prev })
+
+	cmd := newEnableCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable error = %v", err)
+	}
+	if !ladderRan {
+		t.Error("re-enable must run the onboarding ladder")
 	}
 }

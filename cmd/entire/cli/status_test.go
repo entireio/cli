@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/onboarding"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
@@ -2027,5 +2028,106 @@ func TestRunStatus_PrintsBothReviewAndInvestigation(t *testing.T) {
 	}
 	if !strings.Contains(out, "Investigation") || !strings.Contains(out, "investigated") {
 		t.Errorf("expected 'Investigation' / 'investigated' line in status output; got:\n%s", out)
+	}
+}
+
+func stubOnboardingResults(t *testing.T, results []onboarding.Result) {
+	t.Helper()
+	prev := onboardingStatusResults
+	onboardingStatusResults = func(context.Context) []onboarding.Result { return results }
+	t.Cleanup(func() { onboardingStatusResults = prev })
+}
+
+// Mid-setup repos get the rung checklist plus a pointer back at `entire
+// enable`, which is the resume path for interrupted onboarding.
+func TestRunStatus_ShowsSetupChecklistWhenIncomplete(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	stubOnboardingResults(t, []onboarding.Result{
+		{Rung: onboarding.Rung{Key: onboarding.KeyHooks, Title: "Agent hooks"}, Check: onboarding.Check{State: onboarding.StateDone, Detail: "Claude Code"}},
+		{Rung: onboarding.Rung{Key: onboarding.KeyAuth, Title: "Logged in"}, Check: onboarding.Check{State: onboarding.StateMissing, Hint: "entire auth login"}},
+	})
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Setup 1/2 complete") {
+		t.Errorf("expected setup counter in status output, got: %s", out)
+	}
+	if !strings.Contains(out, "Run `entire enable` to finish setup") {
+		t.Errorf("expected enable resume hint, got: %s", out)
+	}
+}
+
+// Fully connected collapses to a single quiet line.
+func TestRunStatus_CollapsedChecklistWhenConnected(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	stubOnboardingResults(t, []onboarding.Result{
+		{Rung: onboarding.Rung{Key: onboarding.KeyHooks, Title: "Agent hooks"}, Check: onboarding.Check{State: onboarding.StateDone, Detail: "Claude Code"}},
+		{Rung: onboarding.Rung{Key: onboarding.KeyAuth, Title: "Logged in"}, Check: onboarding.Check{State: onboarding.StateDone, Detail: "peyton"}},
+		{Rung: onboarding.Rung{Key: onboarding.KeyMirror, Title: "Repo mirrored"}, Check: onboarding.Check{State: onboarding.StateDone, Detail: "github.com/acme/api"}},
+	})
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Connected: peyton · mirrored to github.com/acme/api") {
+		t.Errorf("expected collapsed connected line, got: %s", out)
+	}
+	if strings.Contains(out, "Setup") {
+		t.Errorf("connected status should not show setup counter, got: %s", out)
+	}
+}
+
+// Disabled repos don't get pushed through onboarding.
+func TestRunStatus_NoChecklistWhenDisabled(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsDisabled)
+	stubOnboardingResults(t, []onboarding.Result{
+		{Rung: onboarding.Rung{Key: onboarding.KeyAuth, Title: "Logged in"}, Check: onboarding.Check{State: onboarding.StateMissing}},
+	})
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if strings.Contains(stdout.String(), "Setup") {
+		t.Errorf("disabled status should not show setup checklist, got: %s", stdout.String())
+	}
+}
+
+func TestRunStatusJSON_IncludesSetupStates(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	stubOnboardingResults(t, []onboarding.Result{
+		{Rung: onboarding.Rung{Key: onboarding.KeyHooks, Title: "Agent hooks"}, Check: onboarding.Check{State: onboarding.StateDone}},
+		{Rung: onboarding.Rung{Key: onboarding.KeyAuth, Title: "Logged in"}, Check: onboarding.Check{State: onboarding.StateMissing}},
+		{Rung: onboarding.Rung{Key: onboarding.KeyMirror, Title: "Repo mirrored"}, Check: onboarding.Check{State: onboarding.StateBlocked}},
+	})
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var parsed struct {
+		Setup map[string]string `json:"setup"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
+		t.Fatalf("unmarshal status JSON: %v\noutput: %s", err, stdout.String())
+	}
+	want := map[string]string{"hooks": "done", "auth": "missing", "mirror": "blocked"}
+	for key, state := range want {
+		if parsed.Setup[key] != state {
+			t.Errorf("setup[%q] = %q, want %q", key, parsed.Setup[key], state)
+		}
 	}
 }

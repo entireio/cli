@@ -911,9 +911,16 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 						fmt.Fprintln(w, "Entire is already enabled.")
 					}
 					printEnabledStatus(ctx, w)
+					// Re-running enable is the resume path for interrupted
+					// onboarding: offer whichever connect rungs are still missing.
+					runEnableOnboarding(ctx, w, opts.Yes)
 					return nil
 				}
-				return runEnable(ctx, cmd.OutOrStdout(), opts.UseProjectSettings)
+				if err := runEnable(ctx, cmd.OutOrStdout(), opts.UseProjectSettings); err != nil {
+					return err
+				}
+				runEnableOnboarding(ctx, cmd.OutOrStdout(), opts.Yes)
+				return nil
 			}
 
 			// Fresh repo — run full setup flow
@@ -1206,6 +1213,11 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		// making the initial commit and pushing.
 		return nil
 	}
+
+	// Connect rungs (login, mirror): one consent prompt covering whatever is
+	// missing, then the setup checklist. Also the resume path — re-running
+	// enable re-offers only rungs that are still missing.
+	runEnableOnboarding(ctx, w, opts.Yes)
 
 	fmt.Fprintln(w, "\nReady.")
 
@@ -1690,6 +1702,10 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		// Bootstrap finalize will print its own completion summary.
 		return nil
 	}
+
+	// Connect rungs (login, mirror) — same ladder as interactive enable; the
+	// --agent path can still be a TTY, and --yes/no-TTY prints hints only.
+	runEnableOnboarding(ctx, w, opts.Yes)
 
 	fmt.Fprintln(w, "\nReady.")
 

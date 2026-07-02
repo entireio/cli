@@ -103,6 +103,9 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
+		if results := onboardingStatusResults(ctx); len(results) > 0 {
+			fmt.Fprint(w, renderOnboardingChecklist(results, sty))
+		}
 	}
 	writeAgentHelpHint(w, sty)
 
@@ -599,7 +602,11 @@ type statusJSON struct {
 	// `entire status --json` instead of the human footer. Set only on the
 	// success path (mirrors writeAgentHelpHint, which only renders when set up).
 	AgentHelp string `json:"agent_help,omitempty"`
-	Error     string `json:"error,omitempty"`
+	// Setup maps each onboarding rung (hooks, auth, mirror, import) to its
+	// state: done, missing, blocked, unknown, or not_applicable. Present only
+	// when enabled — same gate as the human checklist.
+	Setup map[string]string `json:"setup,omitempty"`
+	Error string            `json:"error,omitempty"`
 }
 
 type sessionBriefJSON struct {
@@ -654,6 +661,13 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 	if s.Enabled {
 		if names := InstalledAgentDisplayNames(ctx); len(names) > 0 {
 			result.Agents = names
+		}
+
+		if results := onboardingStatusResults(ctx); len(results) > 0 {
+			result.Setup = make(map[string]string, len(results))
+			for _, r := range results {
+				result.Setup[r.Rung.Key] = r.Check.State.String()
+			}
 		}
 
 		if store, err := session.NewStateStore(ctx); err == nil {
