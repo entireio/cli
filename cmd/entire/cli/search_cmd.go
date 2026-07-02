@@ -322,19 +322,28 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 
 	w := cmd.OutOrStdout()
 
+	if opts.repoFilter != "" {
+		if err := search.ValidateRepoFilters([]string{opts.repoFilter}); err != nil {
+			return fmt.Errorf("validating repo filter: %w", err)
+		}
+	}
+
 	// Resolve auth separately so the search timeout only covers the API call.
-	client, err := auth.NewEntireAPICellClient(ctx, opts.insecureHTTP, nil)
+	// When a repo filter is specified, route to the repo's owning cell so
+	// cross-region searches land in the right jurisdiction. Without a filter
+	// (all-repos), fall back to home-jurisdiction routing.
+	var client *api.Client
+	var err error
+	if opts.repoFilter != "" {
+		client, err = NewAuthenticatedEntireAPICellClient(ctx, opts.insecureHTTP, opts.repoFilter, "")
+	} else {
+		client, err = auth.NewEntireAPICellClient(ctx, opts.insecureHTTP, nil)
+	}
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {
 			return errors.New("not authenticated. Run 'entire login' to authenticate")
 		}
 		return fmt.Errorf("resolving cell client: %w", err)
-	}
-
-	if opts.repoFilter != "" {
-		if err := search.ValidateRepoFilters([]string{opts.repoFilter}); err != nil {
-			return fmt.Errorf("validating repo filter: %w", err)
-		}
 	}
 
 	req := codesearch.SearchRequest{
