@@ -20,6 +20,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
@@ -142,10 +143,10 @@ type attributionResolver struct {
 	checkpointCache map[string]attributionCheckpointContext
 
 	// Memoized remote metadata refresh. The refresh runs AT MOST ONCE per
-	// resolver, no matter how many checkpoints miss: getMetadataTree durably
-	// fetches entire/checkpoints/v1, so one refresh serves every subsequent
-	// read, and a failure is not retried per checkpoint (a file with many
-	// missing checkpoints must not pay one network timeout per checkpoint).
+	// resolver, no matter how many checkpoints miss: fetchAttributionMetadata
+	// durably fetches entire/checkpoints/v1, so one refresh serves every
+	// subsequent read, and a failure is not retried per checkpoint (a file with
+	// many missing checkpoints must not pay one network timeout per checkpoint).
 	// This also makes a single run internally consistent: every miss in the
 	// run sees the same refresh outcome.
 	refreshAttempted bool
@@ -506,6 +507,7 @@ func (l localCheckpointRead) worseThan(prev localCheckpointRead) bool {
 func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file string) attributionCheckpointContext {
 	logCtx := logging.WithComponent(r.ctx, "attribution")
 	read := r.readCheckpointContextOnce(cpID, file)
+	remoteLacksCheckpoint := false
 	if read.incomplete() {
 		logging.Debug(logCtx, "checkpoint metadata incomplete locally",
 			slog.String("checkpoint_id", cpID.String()),
@@ -519,7 +521,14 @@ func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file s
 		genBefore := r.storeGeneration
 		if r.fetchOnMiss && r.refreshMetadataStore() == nil && r.storeGeneration != genBefore {
 			retry := r.readCheckpointContextOnce(cpID, file)
-			if !retry.worseThan(read) {
+			if retry.worseThan(read) {
+				// Keep the local data, but don't discard what the retry
+				// proved: a refreshed store that reports not-found means the
+				// remote's metadata branch lacks this checkpoint entirely
+				// (an unpushed local-only checkpoint) — the reason must say
+				// that instead of speculating about missing session records.
+				remoteLacksCheckpoint = errors.Is(retry.summaryErr, checkpoint.ErrCheckpointNotFound)
+			} else {
 				read = retry
 			}
 		}
@@ -528,7 +537,7 @@ func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file s
 	if read.summaryErr != nil {
 		read.ctx.MetadataMissing = true
 		read.ctx.MetadataMissingReason = r.missReason(cpID.String(),
-			"checkpoint metadata was not found locally", read.summaryErr, true)
+			"checkpoint metadata was not found locally", read.summaryErr, true, false)
 		return read.ctx
 	}
 	if read.ctx.MetadataMissing {
@@ -537,7 +546,7 @@ func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file s
 		// unavailable even though the checkpoint itself resolves.
 		read.ctx.MetadataMissingReason = r.missReason(cpID.String(),
 			fmt.Sprintf("checkpoint found, but none of its %d session record(s) could be read locally", read.sessionsTotal),
-			read.sessionErr, false)
+			read.sessionErr, false, remoteLacksCheckpoint)
 	}
 	return read.ctx
 }
@@ -663,15 +672,20 @@ func readAttributionCheckpointSummary(ctx context.Context, reader attributionChe
 // per-session blobs, so the tree-only probe used elsewhere is not enough.
 // Injectable for tests.
 var fetchAttributionMetadata = func(ctx context.Context) error {
-	crErr := FetchMetadataFromCheckpointRemote(ctx)
-	if crErr == nil {
+	// A configured checkpoint remote is the source of truth for checkpoint
+	// data: do not mask its failure with an origin fallback that may hold a
+	// stale copy (or no metadata branch at all) — a later miss would then
+	// claim "not pushed" about a remote we never reached.
+	if remote.Configured(ctx) {
+		if err := FetchMetadataFromCheckpointRemote(ctx); err != nil {
+			return fmt.Errorf("checkpoint remote fetch failed: %w", err)
+		}
 		return nil
 	}
-	originErr := FetchMetadataBranch(ctx)
-	if originErr == nil {
-		return nil
+	if err := FetchMetadataBranch(ctx); err != nil {
+		return fmt.Errorf("origin fetch failed: %w", err)
 	}
-	return fmt.Errorf("checkpoint remote: %w; origin: %w", crErr, originErr)
+	return nil
 }
 
 // openAttributionStore opens a fresh checkpoint store over a freshly-opened
@@ -724,16 +738,17 @@ func (r *attributionResolver) refreshMetadataStore() error {
 }
 
 // missReason builds the deterministic, actionable MetadataMissingReason. The
-// message distinguishes the three recovery situations the issue reporters
-// couldn't tell apart: no fetch was attempted (run it yourself), the fetch
-// failed (here's the error), and the fetch succeeded but the data is still
-// absent (fetching again won't help). summaryMissing selects the wording for
-// that last case — a whole-checkpoint miss means the remote lacks the
-// checkpoint (ask its author to push); a session-records-only miss must not
-// claim that, since the summary just resolved. The explain hint is only useful
-// for the whole-checkpoint miss (explain re-reads the same session records a
-// fetch would restore).
-func (r *attributionResolver) missReason(checkpointID, base string, cause error, summaryMissing bool) string {
+// message distinguishes the recovery situations the issue reporters couldn't
+// tell apart: no fetch was attempted (run it yourself), the fetch failed
+// (here's the error), and the fetch succeeded but the data is still absent
+// (fetching again won't help). For that last case the wording is only as
+// strong as the evidence: "not pushed" requires the refreshed store to report
+// not-found (a transient read error proves nothing about the remote), and
+// remoteLacksCheckpoint carries the same proof for the session-records case
+// (an unpushed local-only checkpoint). The explain hint is only useful for the
+// whole-checkpoint miss; the reason is collapsed to one line because git fetch
+// errors embed multi-line output. Renderers print it verbatim.
+func (r *attributionResolver) missReason(checkpointID, base string, cause error, summaryMissing, remoteLacksCheckpoint bool) string {
 	reason := base
 	if cause != nil {
 		reason = fmt.Sprintf("%s (%v)", base, cause)
@@ -742,22 +757,32 @@ func (r *attributionResolver) missReason(checkpointID, base string, cause error,
 	switch {
 	case r.refreshAttempted && r.refreshErr != nil:
 		reason = fmt.Sprintf("%s (remote refresh failed: %v)", reason, r.refreshErr)
+	case r.refreshAttempted && summaryMissing && errors.Is(cause, checkpoint.ErrCheckpointNotFound):
+		// Refresh succeeded and the refreshed store reports not-found: the
+		// remote's metadata branch genuinely doesn't have it.
+		return stringutil.CollapseWhitespace(reason + ". The remote's entire/checkpoints/v1 does not contain it — the checkpoint may not have been pushed yet (its author can run: git push <remote> entire/checkpoints/v1), or it predates checkpointing.")
 	case r.refreshAttempted && summaryMissing:
-		// Refresh succeeded and the checkpoint is still absent: fetching again
-		// won't help — the remote's metadata branch doesn't have it.
-		return reason + ". The remote's entire/checkpoints/v1 does not contain it — the checkpoint may not have been pushed yet (its author can run: git push <remote> entire/checkpoints/v1), or it predates checkpointing."
+		// Refresh succeeded but the summary read failed for a reason other
+		// than absence (storage error, cancellation): make no claim about
+		// what the remote contains.
+		return stringutil.CollapseWhitespace(reason + ". The metadata branch was refreshed from the remote, but reading the checkpoint still failed — see .entire/logs for details.")
+	case r.refreshAttempted && remoteLacksCheckpoint:
+		// The summary read locally, but a successful refresh proved the
+		// remote lacks the checkpoint entirely: this is an unpushed
+		// local-only checkpoint with damaged local session records.
+		return stringutil.CollapseWhitespace(reason + ". This checkpoint is not on the remote's entire/checkpoints/v1 (it may not have been pushed yet), and the local session records are unreadable; attribution stays trailer-level.")
 	case r.refreshAttempted:
 		// The checkpoint resolved but its session records are still unreadable
 		// after a successful refresh: the metadata branch was pushed without
 		// them or the objects are unavailable — do not claim the checkpoint
 		// itself is missing, and don't suggest the fetch that just ran.
-		return reason + ". They are still unavailable after refreshing from the remote — the metadata branch may have been pushed without them; attribution stays trailer-level."
+		return stringutil.CollapseWhitespace(reason + ". They are still unavailable after refreshing from the remote — the metadata branch may have been pushed without them; attribution stays trailer-level.")
 	}
 
 	if checkpointID == "" || !summaryMissing {
-		return fmt.Sprintf("%s. Run: %s.", reason, suggestCheckpointFetchCommand(r.ctx))
+		return stringutil.CollapseWhitespace(fmt.Sprintf("%s. Run: %s.", reason, suggestCheckpointFetchCommand(r.ctx)))
 	}
-	return fmt.Sprintf("%s. Run: %s. Then re-run entire checkpoint explain %s.", reason, suggestCheckpointFetchCommand(r.ctx), checkpointID)
+	return stringutil.CollapseWhitespace(fmt.Sprintf("%s. Run: %s. Then re-run entire checkpoint explain %s.", reason, suggestCheckpointFetchCommand(r.ctx), checkpointID))
 }
 
 type checkpointSessionForFile struct {

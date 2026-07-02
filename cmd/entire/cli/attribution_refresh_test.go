@@ -99,12 +99,14 @@ func TestReadCheckpointContextRefreshRestoresUnreadableSessions(t *testing.T) {
 	require.Equal(t, "Claude Code", ctx.Agent)
 }
 
-// A refresh that succeeds but still lacks the checkpoint means the remote
-// genuinely doesn't have it: the reason must say "not pushed", and must NOT
-// suggest a git fetch (the user just did the equivalent).
+// A refresh that succeeds but still reports the checkpoint as NOT FOUND means
+// the remote genuinely doesn't have it: the reason must say "not pushed", and
+// must NOT suggest a git fetch (the user just did the equivalent).
 func TestReadCheckpointContextRefreshedButAbsentSaysNotPushed(t *testing.T) {
 	cpID := checkpointid.MustCheckpointID("ccb2c3d4e5f6")
-	missing := &attributionCheckpointReaderStub{readErr: errors.New("object not found")}
+	// summary nil + readErr nil → Read returns (nil, nil) → the store reports
+	// the genuine-absence sentinel (checkpoint.ErrCheckpointNotFound).
+	missing := &attributionCheckpointReaderStub{}
 	overrideAttributionRefresh(t,
 		func(context.Context) error { return nil },
 		func(context.Context) (attributionCheckpointReader, *git.Repository, error) {
@@ -118,6 +120,49 @@ func TestReadCheckpointContextRefreshedButAbsentSaysNotPushed(t *testing.T) {
 	require.True(t, ctx.MetadataMissing)
 	require.Contains(t, ctx.MetadataMissingReason, "may not have been pushed")
 	require.NotContains(t, ctx.MetadataMissingReason, "git fetch", "fetching again cannot help when the remote lacks the checkpoint")
+}
+
+// A refresh that succeeds while the summary read keeps failing for a
+// NON-absence reason (storage error, cancellation) proves nothing about the
+// remote: the reason must not claim "not pushed".
+func TestReadCheckpointContextRefreshedNonAbsenceErrorMakesNoRemoteClaim(t *testing.T) {
+	cpID := checkpointid.MustCheckpointID("ceb2c3d4e5f6")
+	broken := &attributionCheckpointReaderStub{readErr: errors.New("packfile corrupt")}
+	overrideAttributionRefresh(t,
+		func(context.Context) error { return nil },
+		func(context.Context) (attributionCheckpointReader, *git.Repository, error) {
+			return broken, nil, nil
+		})
+
+	resolver := newStubAttributionResolver(broken)
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(cpID, "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.Contains(t, ctx.MetadataMissingReason, "packfile corrupt")
+	require.NotContains(t, ctx.MetadataMissingReason, "may not have been pushed",
+		"a read error is not evidence the remote lacks the checkpoint")
+}
+
+// Multi-line fetch errors (git output embeds newlines) must not break the
+// one-line reason rendering.
+func TestMissReasonCollapsesMultilineErrors(t *testing.T) {
+	overrideAttributionRefresh(t,
+		func(context.Context) error {
+			return errors.New("fatal: could not read\nUsername for 'https://github.com'")
+		},
+		func(context.Context) (attributionCheckpointReader, *git.Repository, error) {
+			t.Fatal("open must not run when the fetch fails")
+			return nil, nil, nil
+		})
+
+	resolver := newStubAttributionResolver(&attributionCheckpointReaderStub{readErr: errors.New("object not found")})
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(checkpointid.MustCheckpointID("cfb2c3d4e5f6"), "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.Contains(t, ctx.MetadataMissingReason, "could not read")
+	require.NotContains(t, ctx.MetadataMissingReason, "\n", "reason must render as a single line")
 }
 
 // The refresh must run at most once per resolver, however many checkpoints
@@ -148,10 +193,14 @@ func TestRefreshMetadataStoreRunsAtMostOnce(t *testing.T) {
 
 // A checkpoint that reads (partially) from the LOCAL store but is absent from
 // the refreshed store — the author's own unpushed checkpoint — must keep the
-// local data rather than adopting the emptier remote view.
+// local data rather than adopting the emptier remote view, AND the reason must
+// use what the retry proved: the remote lacks the checkpoint entirely, so it
+// must not speculate that "the metadata branch may have been pushed without"
+// the session records.
 func TestReadCheckpointContextKeepsLocalWhenRefreshReadsWorse(t *testing.T) {
 	cpID := checkpointid.MustCheckpointID("ffb2c3d4e5f6")
-	// Local: summary readable, sessions unreadable (partial). Remote: nothing.
+	// Local: summary readable, sessions unreadable (partial). Remote: reports
+	// genuine absence (nil,nil stub → checkpoint.ErrCheckpointNotFound).
 	local := &attributionCheckpointReaderStub{
 		summary: &checkpoint.CheckpointSummary{
 			FilesTouched: []string{"auth.py"},
@@ -162,7 +211,7 @@ func TestReadCheckpointContextKeepsLocalWhenRefreshReadsWorse(t *testing.T) {
 	overrideAttributionRefresh(t,
 		func(context.Context) error { return nil },
 		func(context.Context) (attributionCheckpointReader, *git.Repository, error) {
-			return &attributionCheckpointReaderStub{readErr: errors.New("not on remote")}, nil, nil
+			return &attributionCheckpointReaderStub{}, nil, nil
 		})
 
 	resolver := newStubAttributionResolver(local)
@@ -171,7 +220,10 @@ func TestReadCheckpointContextKeepsLocalWhenRefreshReadsWorse(t *testing.T) {
 
 	require.True(t, ctx.MetadataMissing, "session records are still unreadable")
 	require.Equal(t, []string{"auth.py"}, ctx.FilesTouched, "local summary data must survive a worse remote read")
-	require.Contains(t, ctx.MetadataMissingReason, "session record")
+	require.Contains(t, ctx.MetadataMissingReason, "not on the remote",
+		"the retry proved the remote lacks the checkpoint — say so")
+	require.NotContains(t, ctx.MetadataMissingReason, "pushed without them",
+		"must not speculate about remote-side truncation the retry disproved")
 }
 
 // The determinism contract of #1551 at the unit level: two "clones" with
