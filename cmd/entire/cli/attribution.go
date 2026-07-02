@@ -145,10 +145,12 @@ type attributionResolver struct {
 	// Memoized remote metadata refresh. The refresh runs AT MOST ONCE per
 	// resolver, no matter how many checkpoints miss: fetchAttributionMetadata
 	// durably fetches entire/checkpoints/v1, so one refresh serves every
-	// subsequent read, and a failure is not retried per checkpoint (a file with
-	// many missing checkpoints must not pay one network timeout per checkpoint).
-	// This also makes a single run internally consistent: every miss in the
-	// run sees the same refresh outcome.
+	// subsequent read, and a failure is not retried per checkpoint. This also
+	// makes a single run internally consistent: every miss in the run sees the
+	// same refresh outcome. Note the bound covers the REFRESH path only — the
+	// underlying store is opened with an on-demand BlobFetcher (pre-existing
+	// behavior, shared with blame), which may still attempt per-blob fetches
+	// for individually missing objects during reads.
 	refreshAttempted bool
 	refreshErr       error
 	freshRepo        *git.Repository // owned by the resolver; closed in Close
@@ -521,6 +523,13 @@ func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file s
 		genBefore := r.storeGeneration
 		if r.fetchOnMiss && r.refreshMetadataStore() == nil && r.storeGeneration != genBefore {
 			retry := r.readCheckpointContextOnce(cpID, file)
+			if retry.incomplete() {
+				logging.Debug(logCtx, "checkpoint metadata still incomplete after refresh",
+					slog.String("checkpoint_id", cpID.String()),
+					slog.Bool("summary_missing", retry.summaryErr != nil),
+					slog.Int("sessions_read", retry.sessionsRead),
+					slog.Int("sessions_total", retry.sessionsTotal))
+			}
 			if retry.worseThan(read) {
 				// Keep the local data, but don't discard what the retry
 				// proved: a refreshed store that reports not-found means the
@@ -551,10 +560,12 @@ func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file s
 	return read.ctx
 }
 
-// readCheckpointContextOnce is a single, side-effect-free pass over the
-// resolver's current store. It never fetches; refresh policy lives in
-// readCheckpointContext. MetadataMissingReason is left empty — the caller
-// attaches it with refresh-outcome context.
+// readCheckpointContextOnce is a single pass over the resolver's current
+// store. It never triggers the metadata-branch refresh — that policy lives in
+// readCheckpointContext — though the store itself may attempt on-demand
+// per-blob fetches for individually missing objects (its BlobFetcher,
+// pre-existing behavior shared with blame). MetadataMissingReason is left
+// empty — the caller attaches it with refresh-outcome context.
 func (r *attributionResolver) readCheckpointContextOnce(cpID id.CheckpointID, file string) localCheckpointRead {
 	read := localCheckpointRead{ctx: attributionCheckpointContext{CheckpointID: cpID.String()}}
 	summary, err := readAttributionCheckpointSummary(r.ctx, r.store, cpID)
@@ -691,7 +702,9 @@ var fetchAttributionMetadata = func(ctx context.Context) error {
 // openAttributionStore opens a fresh checkpoint store over a freshly-opened
 // repo. After a fetch, the resolver's original repo handle can't see the new
 // packfiles (go-git's storer caches), so post-refresh reads need a new handle.
-// Injectable for tests.
+// The BlobFetcher is deliberately kept (matching the initial store): after a
+// genuine refresh it can heal individual straggler blobs the branch fetch
+// missed. Injectable for tests.
 var openAttributionStore = func(ctx context.Context) (attributionCheckpointReader, *git.Repository, error) {
 	repo, err := openRepository(ctx)
 	if err != nil {
@@ -764,8 +777,9 @@ func (r *attributionResolver) missReason(checkpointID, base string, cause error,
 	case r.refreshAttempted && summaryMissing:
 		// Refresh succeeded but the summary read failed for a reason other
 		// than absence (storage error, cancellation): make no claim about
-		// what the remote contains.
-		return stringutil.CollapseWhitespace(reason + ". The metadata branch was refreshed from the remote, but reading the checkpoint still failed — see .entire/logs for details.")
+		// what the remote contains. The cause is already embedded above; no
+		// log pointer — this path only emits debug-level entries.
+		return stringutil.CollapseWhitespace(reason + ". The metadata branch was refreshed from the remote, but reading the checkpoint still failed.")
 	case r.refreshAttempted && remoteLacksCheckpoint:
 		// The summary read locally, but a successful refresh proved the
 		// remote lacks the checkpoint entirely: this is an unpushed

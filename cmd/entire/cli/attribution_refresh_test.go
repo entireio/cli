@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -350,6 +352,30 @@ func TestReadCheckpointContextSessionsUnreadableAfterRefreshWording(t *testing.T
 	require.NotContains(t, ctx.MetadataMissingReason, "may not have been pushed",
 		"the summary resolved, so the checkpoint IS on the metadata branch")
 	require.NotContains(t, ctx.MetadataMissingReason, "predates checkpointing")
+}
+
+// The authoritative-remote rule, pinned on the real seam: when a checkpoint
+// remote IS configured, its fetch failure must surface as the refresh outcome —
+// wrapped as a checkpoint-remote failure, with no origin fallback masking it
+// and no "may not have been pushed" claim about a remote never reached.
+func TestRefreshConfiguredCheckpointRemoteFailureIsAuthoritative(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	// A configured checkpoint remote in a repo with no origin: URL resolution
+	// fails fast (no network), exercising the authoritative-failure path.
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".entire", "settings.json"),
+		[]byte(`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`), 0o644))
+
+	resolver := newStubAttributionResolver(&attributionCheckpointReaderStub{readErr: errors.New("object not found")})
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(checkpointid.MustCheckpointID("dcb2c3d4e5f6"), "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.Contains(t, ctx.MetadataMissingReason, "remote refresh failed")
+	require.Contains(t, ctx.MetadataMissingReason, "checkpoint remote fetch failed",
+		"the configured checkpoint remote's failure must be the surfaced outcome, not masked by an origin fallback")
+	require.NotContains(t, ctx.MetadataMissingReason, "may not have been pushed",
+		"we never reached the checkpoint remote, so nothing is known about what it contains")
 }
 
 // Regression pin for the unsound-refresh bug: in a repo with a LOCAL metadata
