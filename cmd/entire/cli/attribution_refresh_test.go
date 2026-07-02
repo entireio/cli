@@ -222,6 +222,10 @@ func TestRefsPrimarySoftensFailingBranchFetch(t *testing.T) {
 	require.NotContains(t, ctx.MetadataMissingReason, "remote refresh failed",
 		"a failing v1 fetch must be soft on a refs-primary repo")
 	require.Contains(t, ctx.MetadataMissingReason, "per-checkpoint refs")
+	// Honesty: the branch fetch FAILED, so the wording must say the refresh
+	// was attempted — not claim the branch was refreshed.
+	require.NotContains(t, ctx.MetadataMissingReason, "was refreshed")
+	require.Contains(t, ctx.MetadataMissingReason, "refresh was attempted")
 }
 
 // Unreadable checkpoints config: neither backend's claim is supported, so a
