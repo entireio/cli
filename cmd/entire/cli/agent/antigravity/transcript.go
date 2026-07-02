@@ -64,6 +64,30 @@ func extractUserRequest(content string) string {
 	return strings.TrimSpace(content)
 }
 
+// forEachNonBlankLine iterates data's non-blank JSONL lines, counting them
+// with the codex splitJSONL convention (blank lines skipped BEFORE counting),
+// and calls fn for each line past fromOffset. Returns the total non-blank
+// line count.
+//
+// This is the single owner of agy's transcript-offset metric: the position
+// one method stores (GetTranscriptPosition → CheckpointTranscriptStart) is
+// consumed as fromOffset by the others (ExtractPrompts,
+// ExtractModifiedFilesFromOffset), so the counting MUST stay byte-identical
+// across all of them — hence one iterator instead of three hand-synced loops.
+func forEachNonBlankLine(data []byte, fromOffset int, fn func(raw []byte)) int {
+	lineNum := 0
+	for _, raw := range bytes.Split(data, []byte("\n")) {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+		lineNum++
+		if fn != nil && lineNum > fromOffset {
+			fn(raw)
+		}
+	}
+	return lineNum
+}
+
 // ExtractPrompts implements agent.PromptExtractor. agy's PreInvocation hook
 // carries no prompt, so the user prompt is recovered from the transcript's
 // USER_INPUT steps. fromOffset is a count of non-blank lines already consumed.
@@ -76,26 +100,18 @@ func (a *AntigravityAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]
 		return nil, fmt.Errorf("antigravity: read transcript for prompts: %w", err)
 	}
 	var prompts []string
-	lineNum := 0
-	for _, raw := range bytes.Split(data, []byte("\n")) {
-		if len(bytes.TrimSpace(raw)) == 0 {
-			continue // skip blank lines BEFORE counting (matches codex splitJSONL)
-		}
-		lineNum++
-		if lineNum <= fromOffset {
-			continue
-		}
+	forEachNonBlankLine(data, fromOffset, func(raw []byte) {
 		var step agyStep
 		if json.Unmarshal(raw, &step) != nil {
-			continue
+			return
 		}
 		if step.Type != "USER_INPUT" {
-			continue
+			return
 		}
 		if text := extractUserRequest(step.Content); text != "" {
 			prompts = append(prompts, text)
 		}
-	}
+	})
 	return prompts, nil
 }
 
@@ -115,13 +131,7 @@ func (a *AntigravityAgent) GetTranscriptPosition(path string) (int, error) {
 		}
 		return 0, fmt.Errorf("antigravity: transcript position: %w", err)
 	}
-	count := 0
-	for _, line := range bytes.Split(data, []byte("\n")) {
-		if len(bytes.TrimSpace(line)) > 0 {
-			count++
-		}
-	}
-	return count, nil
+	return forEachNonBlankLine(data, 0, nil), nil
 }
 
 // ExtractModifiedFilesFromOffset implements agent.TranscriptAnalyzer. It scans
@@ -151,18 +161,10 @@ func (a *AntigravityAgent) ExtractModifiedFilesFromOffset(path string, startOffs
 		return nil, 0, fmt.Errorf("antigravity: extract modified files: %w", readErr)
 	}
 	seen := map[string]bool{}
-	lineNum := 0
-	for _, raw := range bytes.Split(data, []byte("\n")) {
-		if len(bytes.TrimSpace(raw)) == 0 {
-			continue // skip blank lines BEFORE counting (matches ExtractPrompts)
-		}
-		lineNum++
-		if lineNum <= startOffset {
-			continue
-		}
+	lineNum := forEachNonBlankLine(data, startOffset, func(raw []byte) {
 		var step agyStep
 		if json.Unmarshal(raw, &step) != nil {
-			continue
+			return
 		}
 		for _, tc := range step.ToolCalls {
 			switch tc.Name {
@@ -174,7 +176,7 @@ func (a *AntigravityAgent) ExtractModifiedFilesFromOffset(path string, startOffs
 				}
 			}
 		}
-	}
+	})
 	return files, lineNum, nil
 }
 

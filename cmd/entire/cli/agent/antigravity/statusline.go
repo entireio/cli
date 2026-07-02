@@ -106,7 +106,7 @@ func AppendStatusSnapshot(payload []byte) error {
 	}
 
 	// Dedup: compare compact JSON of the new context_window against the last
-	// persisted line's context_window. readLastContextWindow streams the file
+	// persisted line's context_window. readLastStatusSnapshot streams the file
 	// keeping only the final line (O(1) memory); the file stays small because
 	// this very dedup suppresses unchanged snapshots.
 	newCWBytes, err := json.Marshal(p.ContextWindow)
@@ -115,9 +115,9 @@ func AppendStatusSnapshot(payload []byte) error {
 	}
 
 	if !isNew {
-		lastCW, readErr := readLastContextWindow(filePath)
-		if readErr == nil && lastCW != nil {
-			lastCWBytes, marshalErr := json.Marshal(lastCW)
+		lastSnap, readErr := readLastStatusSnapshot(filePath)
+		if readErr == nil && lastSnap != nil {
+			lastCWBytes, marshalErr := json.Marshal(lastSnap.ContextWindow)
 			if marshalErr == nil && bytes.Equal(newCWBytes, lastCWBytes) {
 				return nil // duplicate — skip
 			}
@@ -161,11 +161,15 @@ func AppendStatusSnapshot(payload []byte) error {
 // hasn't written a snapshot before the first TurnStart will over-count the
 // prior cumulative total on that first tracked turn.
 func (a *AntigravityAgent) SnapshotTokenBaseline(_ context.Context, sessionID string) (json.RawMessage, error) {
-	snaps, err := readStatusSnapshots(sessionID)
-	if err != nil || len(snaps) == 0 {
+	filePath, err := statusFilePath(sessionID)
+	if err != nil {
 		return nil, nil //nolint:nilerr // degrade to "no baseline"; never block the turn
 	}
-	raw, err := json.Marshal(snaps[len(snaps)-1])
+	snap, err := readLastStatusSnapshot(filePath)
+	if err != nil || snap == nil {
+		return nil, nil //nolint:nilerr // ditto (missing file, no lines, malformed)
+	}
+	raw, err := json.Marshal(snap)
 	if err != nil {
 		return nil, nil //nolint:nilerr // ditto
 	}
@@ -222,14 +226,17 @@ func (a *AntigravityAgent) CalculateTokenUsageSince(_ context.Context, sessionID
 	return usage, nil
 }
 
-// readLastContextWindow streams the JSONL file line-by-line and returns the
-// context_window of the final non-empty line (O(1) memory, O(n) I/O), or nil
-// if the file has no usable line. Used for dedup comparison.
-func readLastContextWindow(filePath string) (*statusContextWindow, error) {
+// readLastStatusSnapshot streams the JSONL file line-by-line and returns the
+// snapshot on the final non-empty line (O(1) memory, single JSON decode), or
+// nil if the file has no usable line. Shared by the dedup comparison and
+// SnapshotTokenBaseline — the latter runs on every TurnStart, so decoding the
+// whole history just to keep the last line would grow linearly with
+// conversation length.
+func readLastStatusSnapshot(filePath string) (*statusSnapshot, error) {
 	//nolint:gosec // filePath is derived from filepath.Base(conversationID)
 	f, err := os.Open(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("antigravity status: open for dedup: %w", err)
+		return nil, fmt.Errorf("antigravity status: open: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -243,7 +250,7 @@ func readLastContextWindow(filePath string) (*statusContextWindow, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("antigravity status: scan for dedup: %w", err)
+		return nil, fmt.Errorf("antigravity status: scan: %w", err)
 	}
 	if lastLine == "" {
 		return nil, nil //nolint:nilnil // no lines yet — caller handles nil gracefully
@@ -253,7 +260,7 @@ func readLastContextWindow(filePath string) (*statusContextWindow, error) {
 	if err := json.Unmarshal([]byte(lastLine), &snap); err != nil {
 		return nil, nil //nolint:nilnil // malformed last line — treat as no prior snapshot
 	}
-	return &snap.ContextWindow, nil
+	return &snap, nil
 }
 
 // readStatusSnapshots reads all valid snapshot lines from the JSONL file for
