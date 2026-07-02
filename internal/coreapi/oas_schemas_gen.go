@@ -796,7 +796,7 @@ func (s *CreateBindingInputBodyAdditional) init() CreateBindingInputBodyAddition
 type CreateMirrorInputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema OptURI `json:"$schema"`
-	// DNS host of the destination cluster.
+	// Destination cluster, as either a bare DNS host or the publicUrl returned by GET /api/v1/clusters.
 	ClusterHost     string                        `json:"clusterHost"`
 	Owner           string                        `json:"owner"`
 	Provider        CreateMirrorInputBodyProvider `json:"provider"`
@@ -1390,6 +1390,9 @@ func (s *CreatedMirrorAdditional) init() CreatedMirrorAdditional {
 
 // DeleteBindingNoContent is response for DeleteBinding operation.
 type DeleteBindingNoContent struct{}
+
+// DeleteMeNoContent is response for DeleteMe operation.
+type DeleteMeNoContent struct{}
 
 // DeleteMirrorNoContent is response for DeleteMirror operation.
 type DeleteMirrorNoContent struct{}
@@ -2085,189 +2088,6 @@ func (s *GetVersionOutputBodyMode) UnmarshalText(data []byte) error {
 	}
 }
 
-// Ref: #/components/schemas/GrantMirrorCollaboratorInputBody
-type GrantMirrorCollaboratorInputBody struct {
-	// A URL to the JSON Schema for this object.
-	Schema OptURI `json:"$schema"`
-	// Public host of the cluster serving the mirror.
-	ClusterHost string `json:"clusterHost"`
-	// Qualified grantee handle, e.g. github:alice.
-	Handle   string                                   `json:"handle"`
-	Owner    string                                   `json:"owner"`
-	Provider GrantMirrorCollaboratorInputBodyProvider `json:"provider"`
-	Repo     string                                   `json:"repo"`
-	// Grant level: reader (pull) or writer (pull+push).
-	Role            GrantMirrorCollaboratorInputBodyRole `json:"role"`
-	AdditionalProps GrantMirrorCollaboratorInputBodyAdditional
-}
-
-// GetSchema returns the value of Schema.
-func (s *GrantMirrorCollaboratorInputBody) GetSchema() OptURI {
-	return s.Schema
-}
-
-// GetClusterHost returns the value of ClusterHost.
-func (s *GrantMirrorCollaboratorInputBody) GetClusterHost() string {
-	return s.ClusterHost
-}
-
-// GetHandle returns the value of Handle.
-func (s *GrantMirrorCollaboratorInputBody) GetHandle() string {
-	return s.Handle
-}
-
-// GetOwner returns the value of Owner.
-func (s *GrantMirrorCollaboratorInputBody) GetOwner() string {
-	return s.Owner
-}
-
-// GetProvider returns the value of Provider.
-func (s *GrantMirrorCollaboratorInputBody) GetProvider() GrantMirrorCollaboratorInputBodyProvider {
-	return s.Provider
-}
-
-// GetRepo returns the value of Repo.
-func (s *GrantMirrorCollaboratorInputBody) GetRepo() string {
-	return s.Repo
-}
-
-// GetRole returns the value of Role.
-func (s *GrantMirrorCollaboratorInputBody) GetRole() GrantMirrorCollaboratorInputBodyRole {
-	return s.Role
-}
-
-// GetAdditionalProps returns the value of AdditionalProps.
-func (s *GrantMirrorCollaboratorInputBody) GetAdditionalProps() GrantMirrorCollaboratorInputBodyAdditional {
-	return s.AdditionalProps
-}
-
-// SetSchema sets the value of Schema.
-func (s *GrantMirrorCollaboratorInputBody) SetSchema(val OptURI) {
-	s.Schema = val
-}
-
-// SetClusterHost sets the value of ClusterHost.
-func (s *GrantMirrorCollaboratorInputBody) SetClusterHost(val string) {
-	s.ClusterHost = val
-}
-
-// SetHandle sets the value of Handle.
-func (s *GrantMirrorCollaboratorInputBody) SetHandle(val string) {
-	s.Handle = val
-}
-
-// SetOwner sets the value of Owner.
-func (s *GrantMirrorCollaboratorInputBody) SetOwner(val string) {
-	s.Owner = val
-}
-
-// SetProvider sets the value of Provider.
-func (s *GrantMirrorCollaboratorInputBody) SetProvider(val GrantMirrorCollaboratorInputBodyProvider) {
-	s.Provider = val
-}
-
-// SetRepo sets the value of Repo.
-func (s *GrantMirrorCollaboratorInputBody) SetRepo(val string) {
-	s.Repo = val
-}
-
-// SetRole sets the value of Role.
-func (s *GrantMirrorCollaboratorInputBody) SetRole(val GrantMirrorCollaboratorInputBodyRole) {
-	s.Role = val
-}
-
-// SetAdditionalProps sets the value of AdditionalProps.
-func (s *GrantMirrorCollaboratorInputBody) SetAdditionalProps(val GrantMirrorCollaboratorInputBodyAdditional) {
-	s.AdditionalProps = val
-}
-
-type GrantMirrorCollaboratorInputBodyAdditional map[string]jx.Raw
-
-func (s *GrantMirrorCollaboratorInputBodyAdditional) init() GrantMirrorCollaboratorInputBodyAdditional {
-	m := *s
-	if m == nil {
-		m = map[string]jx.Raw{}
-		*s = m
-	}
-	return m
-}
-
-type GrantMirrorCollaboratorInputBodyProvider string
-
-const (
-	GrantMirrorCollaboratorInputBodyProviderGithub GrantMirrorCollaboratorInputBodyProvider = "github"
-)
-
-// AllValues returns all GrantMirrorCollaboratorInputBodyProvider values.
-func (GrantMirrorCollaboratorInputBodyProvider) AllValues() []GrantMirrorCollaboratorInputBodyProvider {
-	return []GrantMirrorCollaboratorInputBodyProvider{
-		GrantMirrorCollaboratorInputBodyProviderGithub,
-	}
-}
-
-// MarshalText implements encoding.TextMarshaler.
-func (s GrantMirrorCollaboratorInputBodyProvider) MarshalText() ([]byte, error) {
-	switch s {
-	case GrantMirrorCollaboratorInputBodyProviderGithub:
-		return []byte(s), nil
-	default:
-		return nil, errors.Errorf("invalid value: %q", s)
-	}
-}
-
-// UnmarshalText implements encoding.TextUnmarshaler.
-func (s *GrantMirrorCollaboratorInputBodyProvider) UnmarshalText(data []byte) error {
-	switch GrantMirrorCollaboratorInputBodyProvider(data) {
-	case GrantMirrorCollaboratorInputBodyProviderGithub:
-		*s = GrantMirrorCollaboratorInputBodyProviderGithub
-		return nil
-	default:
-		return errors.Errorf("invalid value: %q", data)
-	}
-}
-
-// Grant level: reader (pull) or writer (pull+push).
-type GrantMirrorCollaboratorInputBodyRole string
-
-const (
-	GrantMirrorCollaboratorInputBodyRoleReader GrantMirrorCollaboratorInputBodyRole = "reader"
-	GrantMirrorCollaboratorInputBodyRoleWriter GrantMirrorCollaboratorInputBodyRole = "writer"
-)
-
-// AllValues returns all GrantMirrorCollaboratorInputBodyRole values.
-func (GrantMirrorCollaboratorInputBodyRole) AllValues() []GrantMirrorCollaboratorInputBodyRole {
-	return []GrantMirrorCollaboratorInputBodyRole{
-		GrantMirrorCollaboratorInputBodyRoleReader,
-		GrantMirrorCollaboratorInputBodyRoleWriter,
-	}
-}
-
-// MarshalText implements encoding.TextMarshaler.
-func (s GrantMirrorCollaboratorInputBodyRole) MarshalText() ([]byte, error) {
-	switch s {
-	case GrantMirrorCollaboratorInputBodyRoleReader:
-		return []byte(s), nil
-	case GrantMirrorCollaboratorInputBodyRoleWriter:
-		return []byte(s), nil
-	default:
-		return nil, errors.Errorf("invalid value: %q", s)
-	}
-}
-
-// UnmarshalText implements encoding.TextUnmarshaler.
-func (s *GrantMirrorCollaboratorInputBodyRole) UnmarshalText(data []byte) error {
-	switch GrantMirrorCollaboratorInputBodyRole(data) {
-	case GrantMirrorCollaboratorInputBodyRoleReader:
-		*s = GrantMirrorCollaboratorInputBodyRoleReader
-		return nil
-	case GrantMirrorCollaboratorInputBodyRoleWriter:
-		*s = GrantMirrorCollaboratorInputBodyRoleWriter
-		return nil
-	default:
-		return errors.Errorf("invalid value: %q", data)
-	}
-}
-
 // Ref: #/components/schemas/GrantProjectAccessInputBody
 type GrantProjectAccessInputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -2895,67 +2715,6 @@ func (s *GrantServiceAccountAccessOutputBody) SetAdditionalProps(val GrantServic
 type GrantServiceAccountAccessOutputBodyAdditional map[string]jx.Raw
 
 func (s *GrantServiceAccountAccessOutputBodyAdditional) init() GrantServiceAccountAccessOutputBodyAdditional {
-	m := *s
-	if m == nil {
-		m = map[string]jx.Raw{}
-		*s = m
-	}
-	return m
-}
-
-// Ref: #/components/schemas/GrantedMirrorCollaborator
-type GrantedMirrorCollaborator struct {
-	// A URL to the JSON Schema for this object.
-	Schema OptURI `json:"$schema"`
-	// Entire account the grant was written for.
-	AccountId       string `json:"accountId"`
-	Role            string `json:"role"`
-	AdditionalProps GrantedMirrorCollaboratorAdditional
-}
-
-// GetSchema returns the value of Schema.
-func (s *GrantedMirrorCollaborator) GetSchema() OptURI {
-	return s.Schema
-}
-
-// GetAccountId returns the value of AccountId.
-func (s *GrantedMirrorCollaborator) GetAccountId() string {
-	return s.AccountId
-}
-
-// GetRole returns the value of Role.
-func (s *GrantedMirrorCollaborator) GetRole() string {
-	return s.Role
-}
-
-// GetAdditionalProps returns the value of AdditionalProps.
-func (s *GrantedMirrorCollaborator) GetAdditionalProps() GrantedMirrorCollaboratorAdditional {
-	return s.AdditionalProps
-}
-
-// SetSchema sets the value of Schema.
-func (s *GrantedMirrorCollaborator) SetSchema(val OptURI) {
-	s.Schema = val
-}
-
-// SetAccountId sets the value of AccountId.
-func (s *GrantedMirrorCollaborator) SetAccountId(val string) {
-	s.AccountId = val
-}
-
-// SetRole sets the value of Role.
-func (s *GrantedMirrorCollaborator) SetRole(val string) {
-	s.Role = val
-}
-
-// SetAdditionalProps sets the value of AdditionalProps.
-func (s *GrantedMirrorCollaborator) SetAdditionalProps(val GrantedMirrorCollaboratorAdditional) {
-	s.AdditionalProps = val
-}
-
-type GrantedMirrorCollaboratorAdditional map[string]jx.Raw
-
-func (s *GrantedMirrorCollaboratorAdditional) init() GrantedMirrorCollaboratorAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}
@@ -3860,6 +3619,66 @@ func (s *ListRepoGrantsOutputBodyAdditional) init() ListRepoGrantsOutputBodyAddi
 	return m
 }
 
+// Ref: #/components/schemas/ListReposOutputBody
+type ListReposOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI           `json:"$schema"`
+	Repos           []RepoIndexEntry `json:"repos"`
+	Truncated       bool             `json:"truncated"`
+	AdditionalProps ListReposOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListReposOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetRepos returns the value of Repos.
+func (s *ListReposOutputBody) GetRepos() []RepoIndexEntry {
+	return s.Repos
+}
+
+// GetTruncated returns the value of Truncated.
+func (s *ListReposOutputBody) GetTruncated() bool {
+	return s.Truncated
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListReposOutputBody) GetAdditionalProps() ListReposOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListReposOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetRepos sets the value of Repos.
+func (s *ListReposOutputBody) SetRepos(val []RepoIndexEntry) {
+	s.Repos = val
+}
+
+// SetTruncated sets the value of Truncated.
+func (s *ListReposOutputBody) SetTruncated(val bool) {
+	s.Truncated = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListReposOutputBody) SetAdditionalProps(val ListReposOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListReposOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListReposOutputBodyAdditional) init() ListReposOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListServiceAccountGrantsOutputBody
 type ListServiceAccountGrantsOutputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -3974,6 +3793,99 @@ func (s *ListServiceAccountsOutputBody) SetAdditionalProps(val ListServiceAccoun
 type ListServiceAccountsOutputBodyAdditional map[string]jx.Raw
 
 func (s *ListServiceAccountsOutputBodyAdditional) init() ListServiceAccountsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/LookupBySlugOutputBody
+type LookupBySlugOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI `json:"$schema"`
+	Cell            string `json:"cell"`
+	Jurisdiction    string `json:"jurisdiction"`
+	Owner           string `json:"owner"`
+	Repo            string `json:"repo"`
+	RepoId          string `json:"repoId"`
+	AdditionalProps LookupBySlugOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *LookupBySlugOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetCell returns the value of Cell.
+func (s *LookupBySlugOutputBody) GetCell() string {
+	return s.Cell
+}
+
+// GetJurisdiction returns the value of Jurisdiction.
+func (s *LookupBySlugOutputBody) GetJurisdiction() string {
+	return s.Jurisdiction
+}
+
+// GetOwner returns the value of Owner.
+func (s *LookupBySlugOutputBody) GetOwner() string {
+	return s.Owner
+}
+
+// GetRepo returns the value of Repo.
+func (s *LookupBySlugOutputBody) GetRepo() string {
+	return s.Repo
+}
+
+// GetRepoId returns the value of RepoId.
+func (s *LookupBySlugOutputBody) GetRepoId() string {
+	return s.RepoId
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *LookupBySlugOutputBody) GetAdditionalProps() LookupBySlugOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *LookupBySlugOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetCell sets the value of Cell.
+func (s *LookupBySlugOutputBody) SetCell(val string) {
+	s.Cell = val
+}
+
+// SetJurisdiction sets the value of Jurisdiction.
+func (s *LookupBySlugOutputBody) SetJurisdiction(val string) {
+	s.Jurisdiction = val
+}
+
+// SetOwner sets the value of Owner.
+func (s *LookupBySlugOutputBody) SetOwner(val string) {
+	s.Owner = val
+}
+
+// SetRepo sets the value of Repo.
+func (s *LookupBySlugOutputBody) SetRepo(val string) {
+	s.Repo = val
+}
+
+// SetRepoId sets the value of RepoId.
+func (s *LookupBySlugOutputBody) SetRepoId(val string) {
+	s.RepoId = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *LookupBySlugOutputBody) SetAdditionalProps(val LookupBySlugOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type LookupBySlugOutputBodyAdditional map[string]jx.Raw
+
+func (s *LookupBySlugOutputBodyAdditional) init() LookupBySlugOutputBodyAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}
@@ -6836,6 +6748,120 @@ func (s *RepoGrantAdditional) init() RepoGrantAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/RepoIndexEntry
+type RepoIndexEntry struct {
+	Cell            string          `json:"cell"`
+	ClusterSlug     string          `json:"clusterSlug"`
+	FullName        string          `json:"full_name"`
+	ID              string          `json:"id"`
+	Jurisdiction    string          `json:"jurisdiction"`
+	Name            string          `json:"name"`
+	Placements      []RepoPlacement `json:"placements"`
+	Visibility      string          `json:"visibility"`
+	AdditionalProps RepoIndexEntryAdditional
+}
+
+// GetCell returns the value of Cell.
+func (s *RepoIndexEntry) GetCell() string {
+	return s.Cell
+}
+
+// GetClusterSlug returns the value of ClusterSlug.
+func (s *RepoIndexEntry) GetClusterSlug() string {
+	return s.ClusterSlug
+}
+
+// GetFullName returns the value of FullName.
+func (s *RepoIndexEntry) GetFullName() string {
+	return s.FullName
+}
+
+// GetID returns the value of ID.
+func (s *RepoIndexEntry) GetID() string {
+	return s.ID
+}
+
+// GetJurisdiction returns the value of Jurisdiction.
+func (s *RepoIndexEntry) GetJurisdiction() string {
+	return s.Jurisdiction
+}
+
+// GetName returns the value of Name.
+func (s *RepoIndexEntry) GetName() string {
+	return s.Name
+}
+
+// GetPlacements returns the value of Placements.
+func (s *RepoIndexEntry) GetPlacements() []RepoPlacement {
+	return s.Placements
+}
+
+// GetVisibility returns the value of Visibility.
+func (s *RepoIndexEntry) GetVisibility() string {
+	return s.Visibility
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *RepoIndexEntry) GetAdditionalProps() RepoIndexEntryAdditional {
+	return s.AdditionalProps
+}
+
+// SetCell sets the value of Cell.
+func (s *RepoIndexEntry) SetCell(val string) {
+	s.Cell = val
+}
+
+// SetClusterSlug sets the value of ClusterSlug.
+func (s *RepoIndexEntry) SetClusterSlug(val string) {
+	s.ClusterSlug = val
+}
+
+// SetFullName sets the value of FullName.
+func (s *RepoIndexEntry) SetFullName(val string) {
+	s.FullName = val
+}
+
+// SetID sets the value of ID.
+func (s *RepoIndexEntry) SetID(val string) {
+	s.ID = val
+}
+
+// SetJurisdiction sets the value of Jurisdiction.
+func (s *RepoIndexEntry) SetJurisdiction(val string) {
+	s.Jurisdiction = val
+}
+
+// SetName sets the value of Name.
+func (s *RepoIndexEntry) SetName(val string) {
+	s.Name = val
+}
+
+// SetPlacements sets the value of Placements.
+func (s *RepoIndexEntry) SetPlacements(val []RepoPlacement) {
+	s.Placements = val
+}
+
+// SetVisibility sets the value of Visibility.
+func (s *RepoIndexEntry) SetVisibility(val string) {
+	s.Visibility = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *RepoIndexEntry) SetAdditionalProps(val RepoIndexEntryAdditional) {
+	s.AdditionalProps = val
+}
+
+type RepoIndexEntryAdditional map[string]jx.Raw
+
+func (s *RepoIndexEntryAdditional) init() RepoIndexEntryAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 type RepoObjectFormat string
 
 const (
@@ -6875,6 +6901,76 @@ func (s *RepoObjectFormat) UnmarshalText(data []byte) error {
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
+}
+
+// Ref: #/components/schemas/RepoPlacement
+type RepoPlacement struct {
+	Cell            string `json:"cell"`
+	ID              string `json:"id"`
+	Jurisdiction    string `json:"jurisdiction"`
+	Mirror          bool   `json:"mirror"`
+	AdditionalProps RepoPlacementAdditional
+}
+
+// GetCell returns the value of Cell.
+func (s *RepoPlacement) GetCell() string {
+	return s.Cell
+}
+
+// GetID returns the value of ID.
+func (s *RepoPlacement) GetID() string {
+	return s.ID
+}
+
+// GetJurisdiction returns the value of Jurisdiction.
+func (s *RepoPlacement) GetJurisdiction() string {
+	return s.Jurisdiction
+}
+
+// GetMirror returns the value of Mirror.
+func (s *RepoPlacement) GetMirror() bool {
+	return s.Mirror
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *RepoPlacement) GetAdditionalProps() RepoPlacementAdditional {
+	return s.AdditionalProps
+}
+
+// SetCell sets the value of Cell.
+func (s *RepoPlacement) SetCell(val string) {
+	s.Cell = val
+}
+
+// SetID sets the value of ID.
+func (s *RepoPlacement) SetID(val string) {
+	s.ID = val
+}
+
+// SetJurisdiction sets the value of Jurisdiction.
+func (s *RepoPlacement) SetJurisdiction(val string) {
+	s.Jurisdiction = val
+}
+
+// SetMirror sets the value of Mirror.
+func (s *RepoPlacement) SetMirror(val bool) {
+	s.Mirror = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *RepoPlacement) SetAdditionalProps(val RepoPlacementAdditional) {
+	s.AdditionalProps = val
+}
+
+type RepoPlacementAdditional map[string]jx.Raw
+
+func (s *RepoPlacementAdditional) init() RepoPlacementAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 type RepoState string
@@ -7094,43 +7190,6 @@ func (s *ResourceAccessAdditional) init() ResourceAccessAdditional {
 		*s = m
 	}
 	return m
-}
-
-// RevokeMirrorCollaboratorNoContent is response for RevokeMirrorCollaborator operation.
-type RevokeMirrorCollaboratorNoContent struct{}
-
-type RevokeMirrorCollaboratorProvider string
-
-const (
-	RevokeMirrorCollaboratorProviderGithub RevokeMirrorCollaboratorProvider = "github"
-)
-
-// AllValues returns all RevokeMirrorCollaboratorProvider values.
-func (RevokeMirrorCollaboratorProvider) AllValues() []RevokeMirrorCollaboratorProvider {
-	return []RevokeMirrorCollaboratorProvider{
-		RevokeMirrorCollaboratorProviderGithub,
-	}
-}
-
-// MarshalText implements encoding.TextMarshaler.
-func (s RevokeMirrorCollaboratorProvider) MarshalText() ([]byte, error) {
-	switch s {
-	case RevokeMirrorCollaboratorProviderGithub:
-		return []byte(s), nil
-	default:
-		return nil, errors.Errorf("invalid value: %q", s)
-	}
-}
-
-// UnmarshalText implements encoding.TextUnmarshaler.
-func (s *RevokeMirrorCollaboratorProvider) UnmarshalText(data []byte) error {
-	switch RevokeMirrorCollaboratorProvider(data) {
-	case RevokeMirrorCollaboratorProviderGithub:
-		*s = RevokeMirrorCollaboratorProviderGithub
-		return nil
-	default:
-		return errors.Errorf("invalid value: %q", data)
-	}
 }
 
 // RevokeProjectAccessByProviderNoContent is response for RevokeProjectAccessByProvider operation.

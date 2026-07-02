@@ -242,6 +242,12 @@ type ListServiceAccountsParams struct {
 	OrgId     string
 }
 
+// LookupRepoBySlugParams is parameters of lookupRepoBySlug operation.
+type LookupRepoBySlugParams struct {
+	// Provider-scoped slug, e.g. gh/acme/oss-lib or et/my-project/my-repo.
+	Slug string
+}
+
 // LookupResourcesParams is parameters of lookupResources operation.
 type LookupResourcesParams struct {
 	// Maximum entries to return; server may cap further.
@@ -267,17 +273,6 @@ type ResolveHandleParams struct {
 	// IdP slug (e.g. "github").
 	Provider string
 	// User-visible handle at the provider.
-	Handle string
-}
-
-// RevokeMirrorCollaboratorParams is parameters of revokeMirrorCollaborator operation.
-type RevokeMirrorCollaboratorParams struct {
-	Provider RevokeMirrorCollaboratorProvider
-	Owner    string
-	Repo     string
-	// Public host of the cluster serving the mirror.
-	ClusterHost string
-	// Qualified grantee handle, e.g. github:alice.
 	Handle string
 }
 

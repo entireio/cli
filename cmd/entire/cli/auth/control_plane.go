@@ -56,7 +56,7 @@ func ResolveControlPlaneTarget() (ControlPlaneTarget, error) {
 
 // ResolveControlPlaneTargetForCluster chooses which core a *resource-provider*
 // control-plane command should dial — one whose subject is a mirror on a
-// specific cluster (mirror create/remove, mirror collaborators add/remove/list)
+// specific cluster (mirror create/remove, mirror collaborators list)
 // rather than the caller's own account.
 //
 // Unlike ResolveControlPlaneTarget, the core is NOT taken from the active

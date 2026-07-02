@@ -45,7 +45,7 @@ func New() (*Client, error) {
 
 // NewForCluster returns a *Client for a resource-provider control-plane command
 // whose subject is a mirror on clusterHost (mirror create/remove, mirror
-// collaborators add/remove/list).
+// collaborators list).
 //
 // Unlike New — which dials the active context — the core is discovered from the
 // cluster's /.well-known/entire-cluster.json and the matching local context
