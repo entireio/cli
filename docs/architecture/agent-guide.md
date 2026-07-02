@@ -920,6 +920,31 @@ Captured from real agy stdin (1.0.x); all enforced by tests in `agent/antigravit
 - **Token usage has exactly one surface** — the statusline/title JSON payload (`context_window`). The integration tees it to disk via the global settings.json `title` slot (`entire hooks antigravity title-tee`) and implements `OutOfBandTokenSource`.
 - **No SessionStart hook surface** — there is no way to show a "tracked by entire" banner; agy tracks silently like Cursor/OpenCode/Copilot/Pi. Only PreToolUse, PreInvocation, and Stop are installed — agy's PostToolUse/PostInvocation have no lifecycle mapping and are deliberately not installed.
 
+#### Antigravity status: Preview
+
+The integration is marked `IsPreview() == true` — the "(Preview)" label shows in
+the agent selector, `entire agent list`, and the hook-install message. Known
+limitations while in preview:
+
+- **No in-agy banner**: tracking is silent inside the agy UI (no SessionStart
+  hook surface). `entire status` is the visibility surface.
+- **Mid-turn commit token scoping is coarse**: a checkpoint created by a
+  mid-turn agy commit records zero tokens; the turn's delta lands on the next
+  condensation. Session totals stay correct.
+- **First-turn mid-turn commits may checkpoint without transcript content**
+  (files + prompt only): agy writes its transcript after the Stop hook, so the
+  condensation can run against the empty placeholder. Prompts are recovered on
+  the next condensation via the late-flush fallback.
+- **Token capture depends on the global title slot**: `entire hooks antigravity
+  title-tee` must own (or wrap) agy's `title` command in the global
+  settings.json. `entire doctor` checks this and setup repairs it.
+- **Live E2E / CI is quota- and entitlement-gated**: agy has no API-key auth;
+  see the entitlement caveat in `e2e/README.md`. The CI e2e leg is
+  workflow_dispatch-only.
+- **Wire format pinned to agy 1.0.14/1.0.15**: hook payloads and the
+  statusline/title schema were verified against those releases; agy is
+  fast-moving and future releases may change the contract.
+
 ### Nil Event Return Pattern
 
 `ParseHookEvent` returning `(nil, nil)` is **not an error** - it means the hook has no lifecycle significance. The framework (in `hook_registry.go`) checks:

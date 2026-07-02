@@ -28,6 +28,10 @@ import (
 	"github.com/spf13/pflag"
 )
 
+// previewLabel marks agent integrations whose IsPreview() is true wherever an
+// agent is presented to the user (selector options, install messages).
+const previewLabel = " (Preview)"
+
 // Config path display strings
 const (
 	configDisplayProject = ".entire/settings.json"
@@ -480,7 +484,11 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
 			continue
 		}
-		opt := huh.NewOption(string(ag.Type()), string(name))
+		label := string(ag.Type())
+		if ag.IsPreview() {
+			label += previewLabel
+		}
+		opt := huh.NewOption(label, string(name))
 		if _, installed := installedSet[name]; installed {
 			opt = opt.Selected(true)
 		}
@@ -1509,7 +1517,11 @@ func detectOrSelectAgent(ctx context.Context, w io.Writer, selectFn func(availab
 		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
 			continue
 		}
-		opt := huh.NewOption(string(ag.Type()), string(name))
+		label := string(ag.Type())
+		if ag.IsPreview() {
+			label += previewLabel
+		}
+		opt := huh.NewOption(label, string(name))
 		if _, isPreSelected := preSelectedSet[name]; isPreSelected {
 			opt = opt.Selected(true)
 		}
@@ -1675,13 +1687,13 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	if installedHooks == 0 {
 		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
 		if ag.IsPreview() {
-			msg += " (Preview)"
+			msg += previewLabel
 		}
 		fmt.Fprintf(w, "  %s\n", msg)
 	} else {
 		msg := fmt.Sprintf("Installed %d hooks for %s", installedHooks, ag.Description())
 		if ag.IsPreview() {
-			msg += " (Preview)"
+			msg += previewLabel
 		}
 		fmt.Fprintf(w, "  %s\n", msg)
 	}

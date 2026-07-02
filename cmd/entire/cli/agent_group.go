@@ -80,7 +80,11 @@ func runAgentList(ctx context.Context, w io.Writer) error {
 		if _, ok := installedSet[types.AgentName(name)]; ok {
 			marker = "✓ "
 		}
-		fmt.Fprintf(w, "  %s%s\n", marker, name)
+		suffix := ""
+		if ag, err := agent.Get(types.AgentName(name)); err == nil && ag.IsPreview() {
+			suffix = " (preview)"
+		}
+		fmt.Fprintf(w, "  %s%s%s\n", marker, name, suffix)
 	}
 	if len(installed) == 0 {
 		fmt.Fprintln(w, "\nNo agents installed. Use 'entire agent add <name>' to install hooks.")
