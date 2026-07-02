@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -159,8 +160,9 @@ type attributionResolver struct {
 	storeGeneration  int             // bumped when a refresh swaps r.store
 
 	// Memoized backend topology (see primaryBackendIsRefs).
-	refsPrimaryKnown bool
-	refsPrimary      bool
+	refsPrimaryKnown   bool
+	refsPrimary        bool
+	refsPrimaryUnknown bool // config unreadable: no backend claim is supported
 }
 
 func newBlameCmd() *cobra.Command {
@@ -195,6 +197,7 @@ func newBlameCmd() *cobra.Command {
 func newWhyCmd() *cobra.Command {
 	var jsonFlag bool
 	var lineFlag string
+	var tuiFlag bool
 
 	cmd := &cobra.Command{
 		Use: "why <file>[:line]",
@@ -203,18 +206,20 @@ func newWhyCmd() *cobra.Command {
 		// --help` keep working normally.
 		Hidden: true,
 		Short:  "Show why a line exists",
-		Long:   "Explain the commit, checkpoint, prompt, and session behind a file or line.\n\nTarget a specific line with <file>:12 or the --line flag.",
+		Long:   "Explain the commit, checkpoint, prompt, and session behind a file or line.\n\nTarget a specific line with <file>:12 or the --line flag.\n\nUse --tui to browse the file interactively (TTY only; non-interactive runs fall back to the plain output).",
 		Args:   cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAttributionWhy(cmd.Context(), cmd.OutOrStdout(), args[0], attributionWhyOptions{
 				LineFlag: lineFlag,
 				JSON:     jsonFlag,
+				TUI:      tuiFlag,
 			})
 		},
 	}
 
 	cmd.Flags().StringVar(&lineFlag, "line", "", "Explain a specific line, for example 12 (same as <file>:12)")
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output explanation as JSON")
+	cmd.Flags().BoolVar(&tuiFlag, "tui", false, "Browse line attribution in an interactive viewer (TTY only)")
 	return cmd
 }
 
@@ -227,6 +232,7 @@ type attributionBlameOptions struct {
 type attributionWhyOptions struct {
 	LineFlag string
 	JSON     bool
+	TUI      bool
 }
 
 func runAttributionBlame(ctx context.Context, w io.Writer, file string, opts attributionBlameOptions) error {
@@ -285,6 +291,18 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts att
 	result, err := resolveFileAttribution(ctx, file, true)
 	if err != nil {
 		return err
+	}
+
+	// Interactive browsing is strictly opt-in AND TTY-gated (agent-safe CLI
+	// fallbacks): a non-interactive run with --tui falls through to the same
+	// deterministic plain/JSON output below, which carries the full
+	// information. --json wins over --tui so scripted callers never block.
+	if opts.TUI && !opts.JSON && interactive.IsTerminalWriter(w) && !IsAccessibleMode() {
+		startLine := 0
+		if hasLine {
+			startLine = line
+		}
+		return runWhyTUI(result, attributionRepoFullName(ctx), shouldUseColor(w), startLine)
 	}
 
 	if !hasLine {
@@ -726,14 +744,38 @@ var fetchAttributionMetadata = func(ctx context.Context) error {
 			return errors.New("checkpoint remote fetch failed: checkpoint_remote is configured but its URL could not be derived (resolution fell back to origin)")
 		}
 		if err := strategy.FetchMetadataBranch(ctx, url); err != nil {
+			if attributionRefsPrimarySoftensBranchFetch(ctx, err) {
+				return nil
+			}
 			return fmt.Errorf("checkpoint remote fetch failed: %w", err)
 		}
 		return nil
 	}
 	if err := FetchMetadataBranch(ctx); err != nil {
+		if attributionRefsPrimarySoftensBranchFetch(ctx, err) {
+			return nil
+		}
 		return fmt.Errorf("origin fetch failed: %w", err)
 	}
 	return nil
+}
+
+// attributionRefsPrimarySoftensBranchFetch reports whether a failed v1-branch
+// fetch should be treated as a soft outcome: on a git-refs-primary repo the
+// branch is not the backend's primary mechanism (a refs-only remote may not
+// carry it at all), and the reopened store's per-checkpoint RefFetcher does the
+// real work — surfacing the branch failure would pin every miss in the run to
+// "remote refresh failed: … entire/checkpoints/v1 …" plus a suggestion that
+// cannot succeed. Only a KNOWN refs-primary topology softens the failure.
+func attributionRefsPrimarySoftensBranchFetch(ctx context.Context, fetchErr error) bool {
+	cfg, cfgErr := settings.LoadCheckpointsConfig(ctx)
+	if cfgErr != nil || !checkpoint.PrimaryIsRefs(cfg) {
+		return false
+	}
+	logging.Debug(logging.WithComponent(ctx, "attribution"),
+		"v1 branch fetch failed on a git-refs-primary repo; treating as soft (per-checkpoint refs are fetched on demand)",
+		slog.String("error", fetchErr.Error()))
+	return true
 }
 
 // openAttributionStore opens a fresh checkpoint store over a freshly-opened
@@ -762,18 +804,21 @@ var openAttributionStore = func(ctx context.Context) (attributionCheckpointReade
 // nothing about per-checkpoint refs, so the strong "the remote's
 // entire/checkpoints/v1 does not contain it / not on the remote" evidence is
 // only sound for the git-branch backend; refs-backend misses use neutral
-// wording. A config load error counts as the default git-branch backend.
-func (r *attributionResolver) primaryBackendIsRefs() bool {
+// wording. known=false means the config could not be read: neither backend's
+// claim is then supported, so callers must fall back to generic neutral
+// wording — an unreadable config must never select the strongest claims.
+func (r *attributionResolver) primaryBackendIsRefs() (isRefs, known bool) {
 	if r.refsPrimaryKnown {
-		return r.refsPrimary
+		return r.refsPrimary, !r.refsPrimaryUnknown
 	}
 	r.refsPrimaryKnown = true
 	cfg, err := settings.LoadCheckpointsConfig(r.ctx)
 	if err != nil {
-		return false
+		r.refsPrimaryUnknown = true
+		return false, false
 	}
 	r.refsPrimary = checkpoint.PrimaryIsRefs(cfg)
-	return r.refsPrimary
+	return r.refsPrimary, true
 }
 
 // refreshMetadataStore fetches the metadata branch from the remote AT MOST ONCE
@@ -828,14 +873,18 @@ func (r *attributionResolver) missReason(checkpointID, base string, cause error,
 	switch {
 	case r.refreshAttempted && r.refreshErr != nil:
 		reason = fmt.Sprintf("%s (remote refresh failed: %v)", reason, r.refreshErr)
-	case r.refreshAttempted && summaryMissing && errors.Is(cause, checkpoint.ErrCheckpointNotFound) && r.primaryBackendIsRefs():
+	case r.refreshAttempted && summaryMissing && errors.Is(cause, checkpoint.ErrCheckpointNotFound) && missBackendIsRefs(r):
 		// git-refs primary: the v1-branch refresh proves nothing about
 		// per-checkpoint refs, so make no claim about what the remote holds.
 		return stringutil.CollapseWhitespace(reason + ". The metadata branch was refreshed, but this repo's primary checkpoint backend stores per-checkpoint refs, which that refresh may not cover — the checkpoint may not have been pushed yet, or its ref could not be fetched; attribution stays trailer-level.")
-	case r.refreshAttempted && summaryMissing && errors.Is(cause, checkpoint.ErrCheckpointNotFound):
+	case r.refreshAttempted && summaryMissing && errors.Is(cause, checkpoint.ErrCheckpointNotFound) && missBackendIsBranch(r):
 		// Refresh succeeded and the refreshed store reports not-found: the
 		// remote's metadata branch genuinely doesn't have it.
 		return stringutil.CollapseWhitespace(reason + ". The remote's entire/checkpoints/v1 does not contain it — the checkpoint may not have been pushed yet (its author can run: git push <remote> entire/checkpoints/v1), or it predates checkpointing.")
+	case r.refreshAttempted && summaryMissing && errors.Is(cause, checkpoint.ErrCheckpointNotFound):
+		// Backend unknown (config unreadable): neither the branch claim nor
+		// the refs wording is supported — generic neutral text.
+		return stringutil.CollapseWhitespace(reason + ". The metadata branch was refreshed from the remote, but the checkpoint is still unavailable; attribution stays trailer-level.")
 	case r.refreshAttempted && summaryMissing:
 		// Refresh succeeded but the summary read failed for a reason other
 		// than absence (storage error, cancellation): make no claim about
@@ -848,20 +897,21 @@ func (r *attributionResolver) missReason(checkpointID, base string, cause error,
 		// successfully consulted, so make no remote claim — surface the retry
 		// error instead.
 		return stringutil.CollapseWhitespace(fmt.Sprintf("%s. The metadata branch was refreshed from the remote, but re-reading the checkpoint from the refreshed store failed (%v); attribution stays trailer-level.", reason, retryReadErr))
-	case r.refreshAttempted && remoteLacksCheckpoint && !r.primaryBackendIsRefs():
+	case r.refreshAttempted && remoteLacksCheckpoint && missBackendIsBranch(r):
 		// The summary read locally, but a successful refresh proved the
 		// remote lacks the checkpoint entirely: this is an unpushed
 		// local-only checkpoint with damaged local session records.
 		return stringutil.CollapseWhitespace(reason + ". This checkpoint is not on the remote's entire/checkpoints/v1 (it may not have been pushed yet), and the local session records are unreadable; attribution stays trailer-level.")
-	case r.refreshAttempted && r.primaryBackendIsRefs():
-		// git-refs primary: no speculation about the v1 branch's contents.
-		return stringutil.CollapseWhitespace(reason + ". They are still unavailable after refreshing; attribution stays trailer-level.")
-	case r.refreshAttempted:
+	case r.refreshAttempted && missBackendIsBranch(r):
 		// The checkpoint resolved but its session records are still unreadable
 		// after a successful refresh: the metadata branch was pushed without
 		// them or the objects are unavailable — do not claim the checkpoint
 		// itself is missing, and don't suggest the fetch that just ran.
 		return stringutil.CollapseWhitespace(reason + ". They are still unavailable after refreshing from the remote — the metadata branch may have been pushed without them; attribution stays trailer-level.")
+	case r.refreshAttempted:
+		// git-refs primary or unknown backend: no speculation about the v1
+		// branch's contents.
+		return stringutil.CollapseWhitespace(reason + ". They are still unavailable after refreshing; attribution stays trailer-level.")
 	}
 
 	suggestion, isCommand := suggestCheckpointFetchCommand(r.ctx)
@@ -1209,6 +1259,12 @@ func attributionLineMarker(line attributionLine) string {
 // renderAttributionMarkerLegend prints a one-line legend explaining the blame
 // markers, but only for the markers actually present in the table.
 func renderAttributionMarkerLegend(w io.Writer, sty statusStyles, lines []attributionLine) {
+	// Always explain the authorship tags — insiders found [MX] and [HU]
+	// confusing without it. Wording is deliberate (see whyMarkerLegend):
+	// [AI] means fully agent-authored checkpoint work, [MX] means agent work
+	// with human edits mixed in at commit, [HU] means no agent checkpoint.
+	fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, whyMarkerLegend))
+
 	approximate, ambiguous := false, false
 	for _, line := range lines {
 		switch attributionLineMarker(line) {
@@ -1667,6 +1723,21 @@ func shortCheckpointSession(line attributionLine) string {
 	return line.CheckpointID + "/" + shortSessionID(line.SessionID)
 }
 
+// attributionRepoFullName derives "owner/repo" from the origin remote for
+// entire.io hyperlinks in the why TUI. Best-effort decoration: any failure
+// (no origin, unparseable URL) returns "" and links are simply omitted.
+func attributionRepoFullName(ctx context.Context) string {
+	originURL, err := remote.GetRemoteURL(ctx, "origin")
+	if err != nil || originURL == "" {
+		return ""
+	}
+	info, err := remote.ParseURL(originURL)
+	if err != nil || info.Owner == "" || info.Repo == "" {
+		return ""
+	}
+	return info.Owner + "/" + info.Repo
+}
+
 func shortSessionID(sessionID string) string {
 	if len(sessionID) <= 8 {
 		return sessionID
@@ -1719,4 +1790,18 @@ func writeJSON(w io.Writer, value any) error {
 		return fmt.Errorf("encode json: %w", err)
 	}
 	return nil
+}
+
+// missBackendIsBranch / missBackendIsRefs are the evidence gates for
+// missReason: strong git-branch claims require a KNOWN git-branch backend, and
+// refs-specific wording requires a KNOWN git-refs backend. An unreadable
+// config supports neither, routing the miss to generic neutral wording.
+func missBackendIsBranch(r *attributionResolver) bool {
+	isRefs, known := r.primaryBackendIsRefs()
+	return known && !isRefs
+}
+
+func missBackendIsRefs(r *attributionResolver) bool {
+	isRefs, known := r.primaryBackendIsRefs()
+	return known && isRefs
 }

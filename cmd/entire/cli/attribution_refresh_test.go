@@ -196,6 +196,66 @@ func TestReadCheckpointContextRefsBackendWorseRetryStaysNeutral(t *testing.T) {
 		"the branch refresh cannot prove per-checkpoint-ref absence")
 }
 
+// refs-primary + failing v1-branch fetch: the branch is not that backend's
+// primary mechanism, so the failure is soft — the refresh proceeds (reopened
+// store's RefFetcher does the real work) and misses get the refs wording, not
+// a sticky "remote refresh failed: … entire/checkpoints/v1 …" plus a
+// suggestion that cannot succeed. Uses the real fetch seam (hermetic repo has
+// no origin, so the v1 fetch genuinely fails).
+func TestRefsPrimarySoftensFailingBranchFetch(t *testing.T) {
+	newAttributionRepo(t)
+	t.Setenv(remote.CheckpointTokenEnvVar, "")
+	t.Setenv(settings.EnvCheckpointsPrimary, "git-refs")
+
+	missing := &attributionCheckpointReaderStub{} // sentinel not-found
+	oldOpen := openAttributionStore
+	openAttributionStore = func(context.Context) (attributionCheckpointReader, *git.Repository, error) {
+		return missing, nil, nil
+	}
+	t.Cleanup(func() { openAttributionStore = oldOpen })
+
+	resolver := newStubAttributionResolver(missing)
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(checkpointid.MustCheckpointID("cab2c3d4e5f0"), "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.NotContains(t, ctx.MetadataMissingReason, "remote refresh failed",
+		"a failing v1 fetch must be soft on a refs-primary repo")
+	require.Contains(t, ctx.MetadataMissingReason, "per-checkpoint refs")
+}
+
+// Unreadable checkpoints config: neither backend's claim is supported, so a
+// sentinel miss after a successful refresh gets generic neutral wording — not
+// the strong git-branch claim (the failure direction must never overclaim) and
+// not the refs-specific sentence.
+func TestUnknownBackendConfigFailsToNeutralWording(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	t.Setenv(settings.EnvCheckpointsPrimary, "")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".entire"), 0o755))
+	// Present-but-invalid checkpoints block (missing required primary.type):
+	// LoadCheckpointsConfig errors, leaving the backend unknown.
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".entire", "settings.json"),
+		[]byte(`{"enabled":true,"checkpoints":{"primary":{}}}`), 0o644))
+
+	missing := &attributionCheckpointReaderStub{} // sentinel not-found
+	overrideAttributionRefresh(t,
+		func(context.Context) error { return nil },
+		func(context.Context) (attributionCheckpointReader, *git.Repository, error) {
+			return missing, nil, nil
+		})
+
+	resolver := newStubAttributionResolver(missing)
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(checkpointid.MustCheckpointID("cbb2c3d4e5f0"), "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.NotContains(t, ctx.MetadataMissingReason, "does not contain it",
+		"an unreadable config must not select the strongest claim")
+	require.NotContains(t, ctx.MetadataMissingReason, "per-checkpoint refs",
+		"an unreadable config supports the refs wording no better")
+	require.Contains(t, ctx.MetadataMissingReason, "still unavailable")
+}
+
 // A refresh that succeeds while the summary read keeps failing for a
 // NON-absence reason (storage error, cancellation) proves nothing about the
 // remote: the reason must not claim "not pushed".
