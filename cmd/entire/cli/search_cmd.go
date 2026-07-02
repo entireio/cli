@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -15,8 +16,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/codesearch"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/internal/coreapi"
 	"github.com/spf13/cobra"
 )
 
@@ -310,7 +313,15 @@ type codeSearchOpts struct {
 	insecureHTTP  bool
 }
 
+// codeSearchCellTimeout bounds each per-cell search call (token exchange + API).
+const codeSearchCellTimeout = 30 * time.Second
+
 // runCodeSearch handles the --code flag path: search code content via peregrine.
+//
+// When a repo filter is specified, it routes to that repo's owning cell.
+// Without a filter, it fans out across all cells that host the user's repos
+// (mirroring the BFF's /api/v1/stream endpoint): list repos from the control
+// plane, group by cell/jurisdiction, search each cell in parallel, merge.
 func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts) error {
 	if !codeSearchEnabled() {
 		return errors.New("code search is not yet available. Set ENTIRE_CODE_SEARCH=1 to enable the preview")
@@ -320,42 +331,24 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 		return errors.New("query required for code search. Usage: entire search --code <query>")
 	}
 
-	w := cmd.OutOrStdout()
-
 	if opts.repoFilter != "" {
 		if err := search.ValidateRepoFilters([]string{opts.repoFilter}); err != nil {
 			return fmt.Errorf("validating repo filter: %w", err)
 		}
 	}
 
-	// Resolve auth separately so the search timeout only covers the API call.
-	// When a repo filter is specified, the cell resolver routes to the repo's
-	// owning cell; otherwise it falls back to home-jurisdiction routing.
-	client, err := NewAuthenticatedEntireAPICellClient(ctx, opts.insecureHTTP, opts.repoFilter, "")
-	if err != nil {
-		if errors.Is(err, auth.ErrNotLoggedIn) {
-			return errors.New("not authenticated. Run 'entire login' to authenticate")
-		}
-		return fmt.Errorf("resolving cell client: %w", err)
-	}
+	w := cmd.OutOrStdout()
 
-	req := codesearch.SearchRequest{
-		Query:         opts.query,
-		CaseSensitive: opts.caseSensitive,
-	}
-	if opts.limit > 0 {
-		req.MaxResults = opts.limit
-	}
+	var resp *codesearch.SearchResponse
+	var err error
+
 	if opts.repoFilter != "" {
-		req.Repos = []string{opts.repoFilter}
+		resp, err = searchSingleCell(ctx, opts)
+	} else {
+		resp, err = searchAllCells(ctx, opts)
 	}
-
-	searchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	resp, err := codesearch.Search(searchCtx, client, req)
 	if err != nil {
-		return fmt.Errorf("code search failed: %w", err)
+		return err
 	}
 
 	isTerminal := interactive.IsTerminalWriter(w)
@@ -365,6 +358,179 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 
 	writeCodeSearchText(w, resp)
 	return nil
+}
+
+// searchSingleCell searches a single cell, routing to the repo's owning cell.
+func searchSingleCell(ctx context.Context, opts codeSearchOpts) (*codesearch.SearchResponse, error) {
+	client, err := NewAuthenticatedEntireAPICellClient(ctx, opts.insecureHTTP, opts.repoFilter, "")
+	if err != nil {
+		if errors.Is(err, auth.ErrNotLoggedIn) {
+			return nil, errors.New("not authenticated. Run 'entire login' to authenticate")
+		}
+		return nil, fmt.Errorf("resolving cell client: %w", err)
+	}
+
+	req := codesearch.SearchRequest{
+		Query:         opts.query,
+		Repos:         []string{opts.repoFilter},
+		CaseSensitive: opts.caseSensitive,
+	}
+	if opts.limit > 0 {
+		req.MaxResults = opts.limit
+	}
+
+	searchCtx, cancel := context.WithTimeout(ctx, codeSearchCellTimeout)
+	defer cancel()
+
+	resp, err := codesearch.Search(searchCtx, client, req)
+	if err != nil {
+		return nil, fmt.Errorf("code search failed: %w", err)
+	}
+	return resp, nil
+}
+
+// cellGroup groups repos by their cell for fan-out.
+type cellGroup struct {
+	cell         string
+	jurisdiction string
+}
+
+// searchAllCells fans out code search across all cells that host the user's
+// repos, mirroring the BFF's multi-region search pattern:
+//  1. List repos from the control plane (entire-core) to get cell/jurisdiction
+//  2. Deduplicate by cell
+//  3. Create a cell client per jurisdiction (token exchange)
+//  4. Search each cell in parallel with per-cell timeouts
+//  5. Merge results
+func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.SearchResponse, error) {
+	// Step 1: Get repos index from the control plane.
+	coreClient, err := coreapi.New()
+	if err != nil {
+		if errors.Is(err, auth.ErrNotLoggedIn) {
+			return nil, errors.New("not authenticated. Run 'entire login' to authenticate")
+		}
+		return nil, fmt.Errorf("resolving control-plane client: %w", err)
+	}
+
+	reposCtx, reposCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer reposCancel()
+
+	repoIndex, err := coreClient.ListRepos(reposCtx)
+	if err != nil {
+		return nil, fmt.Errorf("listing repos for cell discovery: %w", err)
+	}
+
+	// Step 2: Group repos by cell (deduplicate).
+	cells := groupReposByCell(repoIndex.Repos)
+	if len(cells) == 0 {
+		return &codesearch.SearchResponse{}, nil
+	}
+
+	// Single cell — skip fan-out overhead.
+	if len(cells) == 1 {
+		return searchCell(ctx, opts, cells[0])
+	}
+
+	// Step 3–5: Fan out across cells in parallel.
+	results := make([]codeSearchCellResult, len(cells))
+	var wg sync.WaitGroup
+	for i, cg := range cells {
+		wg.Add(1)
+		go func(idx int, cg cellGroup) {
+			defer wg.Done()
+			resp, err := searchCell(ctx, opts, cg)
+			results[idx] = codeSearchCellResult{resp: resp, err: err}
+		}(i, cg)
+	}
+	wg.Wait()
+
+	return mergeSearchResults(ctx, cells, results), nil
+}
+
+// groupReposByCell deduplicates repos by cell, returning one entry per cell
+// with its jurisdiction.
+func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
+	seen := make(map[string]string) // cell → jurisdiction
+	for _, r := range repos {
+		cell := strings.TrimSpace(r.Cell)
+		if cell == "" {
+			continue
+		}
+		if _, ok := seen[cell]; !ok {
+			seen[cell] = strings.ToLower(strings.TrimSpace(r.Jurisdiction))
+		}
+	}
+	groups := make([]cellGroup, 0, len(seen))
+	for cell, jurisdiction := range seen {
+		groups = append(groups, cellGroup{cell: cell, jurisdiction: jurisdiction})
+	}
+	return groups
+}
+
+// searchCell searches a single cell identified by jurisdiction, using
+// auth.NewEntireAPICellClient with an explicit CellTarget.
+func searchCell(ctx context.Context, opts codeSearchOpts, cg cellGroup) (*codesearch.SearchResponse, error) {
+	cellCtx, cancel := context.WithTimeout(ctx, codeSearchCellTimeout)
+	defer cancel()
+
+	client, err := auth.NewEntireAPICellClient(cellCtx, opts.insecureHTTP, &auth.CellTarget{
+		Jurisdiction: cg.jurisdiction,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolving cell client for %s: %w", cg.jurisdiction, err)
+	}
+
+	req := codesearch.SearchRequest{
+		Query:         opts.query,
+		CaseSensitive: opts.caseSensitive,
+	}
+	if opts.limit > 0 {
+		// Divide limit across cells — same as BFF's perCellMax.
+		req.MaxResults = opts.limit
+	}
+
+	resp, err := codesearch.Search(cellCtx, client, req)
+	if err != nil {
+		return nil, fmt.Errorf("code search on cell %s: %w", cg.cell, err)
+	}
+	return resp, nil
+}
+
+// codeSearchCellResult holds the outcome of a single-cell search.
+type codeSearchCellResult struct {
+	resp *codesearch.SearchResponse
+	err  error
+}
+
+// mergeSearchResults merges responses from multiple cells into one, combining
+// results, stats, and repo_stats. Cell errors are logged but don't fail the
+// overall search — one bad cell never sinks the page.
+func mergeSearchResults(ctx context.Context, cells []cellGroup, results []codeSearchCellResult) *codesearch.SearchResponse {
+	merged := &codesearch.SearchResponse{}
+	for i, r := range results {
+		if r.err != nil {
+			logging.Debug(ctx, "code search cell failed, skipping",
+				"cell", cells[i].cell,
+				"jurisdiction", cells[i].jurisdiction,
+				"error", r.err.Error())
+			continue
+		}
+		if r.resp == nil {
+			continue
+		}
+		merged.Results = append(merged.Results, r.resp.Results...)
+		merged.RepoStats = append(merged.RepoStats, r.resp.RepoStats...)
+		merged.Stats.TotalMatches += r.resp.Stats.TotalMatches
+		merged.Stats.TotalFiles += r.resp.Stats.TotalFiles
+		merged.Stats.ReposSearched += r.resp.Stats.ReposSearched
+		if r.resp.Stats.DurationMs > merged.Stats.DurationMs {
+			merged.Stats.DurationMs = r.resp.Stats.DurationMs // wall-clock = slowest cell
+		}
+		if merged.Query == "" {
+			merged.Query = r.resp.Query
+		}
+	}
+	return merged
 }
 
 // writeCodeSearchJSON writes code search results as JSON.

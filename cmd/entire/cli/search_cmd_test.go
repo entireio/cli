@@ -2,11 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/codesearch"
 	"github.com/entireio/cli/cmd/entire/cli/search"
+	"github.com/entireio/cli/internal/coreapi"
 )
 
 // TestSearchCmd_AccessibleModeRequiresQuery verifies that accessible mode
@@ -206,5 +209,128 @@ func TestWriteCodeSearchText_Empty(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "No code search results found") {
 		t.Errorf("expected empty results message, got:\n%s", buf.String())
+	}
+}
+
+func TestGroupReposByCell(t *testing.T) {
+	t.Parallel()
+
+	repos := []coreapi.RepoIndexEntry{
+		{Cell: "aws-us-east-2", Jurisdiction: "us", FullName: "acme/web"},
+		{Cell: "aws-us-east-2", Jurisdiction: "us", FullName: "acme/api"},
+		{Cell: "aws-eu-west-1", Jurisdiction: "eu", FullName: "acme/docs"},
+		{Cell: "", Jurisdiction: "us", FullName: "acme/empty-cell"},
+	}
+
+	groups := groupReposByCell(repos)
+
+	if len(groups) != 2 {
+		t.Fatalf("groupReposByCell returned %d groups, want 2", len(groups))
+	}
+
+	byCell := make(map[string]string)
+	for _, g := range groups {
+		byCell[g.cell] = g.jurisdiction
+	}
+
+	if j, ok := byCell["aws-us-east-2"]; !ok || j != "us" {
+		t.Errorf("missing or wrong jurisdiction for aws-us-east-2: got %q", j)
+	}
+	if j, ok := byCell["aws-eu-west-1"]; !ok || j != "eu" {
+		t.Errorf("missing or wrong jurisdiction for aws-eu-west-1: got %q", j)
+	}
+}
+
+func TestGroupReposByCell_Empty(t *testing.T) {
+	t.Parallel()
+
+	groups := groupReposByCell(nil)
+	if len(groups) != 0 {
+		t.Fatalf("groupReposByCell(nil) returned %d groups, want 0", len(groups))
+	}
+}
+
+func TestMergeSearchResults(t *testing.T) {
+	t.Parallel()
+
+	cells := []cellGroup{
+		{cell: "aws-us-east-2", jurisdiction: "us"},
+		{cell: "aws-eu-west-1", jurisdiction: "eu"},
+	}
+
+	results := []codeSearchCellResult{
+		{
+			resp: &codesearch.SearchResponse{
+				Query: "handleRequest",
+				Stats: codesearch.Stats{TotalMatches: 3, TotalFiles: 2, ReposSearched: 1, DurationMs: 10},
+				Results: []codesearch.Result{
+					{Repo: "acme/web", Path: "main.go", Line: 1},
+				},
+				RepoStats: []codesearch.RepoStats{{Repo: "acme/web", MatchCount: 3}},
+			},
+		},
+		{
+			resp: &codesearch.SearchResponse{
+				Query: "handleRequest",
+				Stats: codesearch.Stats{TotalMatches: 1, TotalFiles: 1, ReposSearched: 1, DurationMs: 20},
+				Results: []codesearch.Result{
+					{Repo: "acme/docs", Path: "handler.go", Line: 5},
+				},
+				RepoStats: []codesearch.RepoStats{{Repo: "acme/docs", MatchCount: 1}},
+			},
+		},
+	}
+
+	merged := mergeSearchResults(context.Background(), cells, results)
+
+	if merged.Stats.TotalMatches != 4 {
+		t.Errorf("TotalMatches = %d, want 4", merged.Stats.TotalMatches)
+	}
+	if merged.Stats.TotalFiles != 3 {
+		t.Errorf("TotalFiles = %d, want 3", merged.Stats.TotalFiles)
+	}
+	if merged.Stats.ReposSearched != 2 {
+		t.Errorf("ReposSearched = %d, want 2", merged.Stats.ReposSearched)
+	}
+	if merged.Stats.DurationMs != 20 {
+		t.Errorf("DurationMs = %v, want 20 (slowest cell)", merged.Stats.DurationMs)
+	}
+	if len(merged.Results) != 2 {
+		t.Fatalf("len(Results) = %d, want 2", len(merged.Results))
+	}
+	if len(merged.RepoStats) != 2 {
+		t.Fatalf("len(RepoStats) = %d, want 2", len(merged.RepoStats))
+	}
+}
+
+func TestMergeSearchResults_CellError(t *testing.T) {
+	t.Parallel()
+
+	cells := []cellGroup{
+		{cell: "aws-us-east-2", jurisdiction: "us"},
+		{cell: "aws-eu-west-1", jurisdiction: "eu"},
+	}
+
+	results := []codeSearchCellResult{
+		{
+			resp: &codesearch.SearchResponse{
+				Query:   "test",
+				Stats:   codesearch.Stats{TotalMatches: 2, TotalFiles: 1, ReposSearched: 1, DurationMs: 5},
+				Results: []codesearch.Result{{Repo: "acme/web", Path: "f.go", Line: 1}},
+			},
+		},
+		{
+			err: errors.New("cell timed out"),
+		},
+	}
+
+	merged := mergeSearchResults(context.Background(), cells, results)
+
+	// The failed cell is skipped; results from the successful cell are preserved.
+	if merged.Stats.TotalMatches != 2 {
+		t.Errorf("TotalMatches = %d, want 2 (failed cell skipped)", merged.Stats.TotalMatches)
+	}
+	if len(merged.Results) != 1 {
+		t.Fatalf("len(Results) = %d, want 1 (failed cell skipped)", len(merged.Results))
 	}
 }
