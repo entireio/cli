@@ -36,6 +36,12 @@ const (
 // detail views, and [??]/~/? markers are explained by their own legend line.
 const whyMarkerLegend = "per commit: [AI] all agent · [MX] mixed — line may be either · [HU] no agent"
 
+// whyMarkerLegendNote spells out the inference rule people don't guess (a
+// single human edit anywhere in a commit turns EVERY line of it [MX] — [AI]
+// appears only for fully agent-authored commits). Rendered as a second dim
+// line under the legend in the plain-text views.
+const whyMarkerLegendNote = "note: [AI] requires a fully agent commit; one human edit turns all lines [MX]"
+
 // whyTUIStyles holds the interactive viewer's palette. Empty styles render as
 // plain text when color is off, which also keeps tests assertable.
 type whyTUIStyles struct {

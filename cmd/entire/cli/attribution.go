@@ -1287,6 +1287,7 @@ func renderAttributionMarkerLegend(w io.Writer, sty statusStyles, lines []attrib
 	// [AI] means fully agent-authored checkpoint work, [MX] means agent work
 	// with human edits mixed in at commit, [HU] means no agent checkpoint.
 	fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, whyMarkerLegend))
+	fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, whyMarkerLegendNote))
 
 	approximate, ambiguous, uncommitted := false, false, false
 	for _, line := range lines {
