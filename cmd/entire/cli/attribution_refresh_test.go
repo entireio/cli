@@ -460,6 +460,30 @@ func TestRefreshTokenPathOriginFallbackIsNotSuccess(t *testing.T) {
 		"the recovery guidance should point at the configuration that failed to resolve")
 }
 
+// Corrupt settings: the refresh refuses to promote origin to the evidence
+// source, so the appended recovery suggestion must not contradict that by
+// telling the user to `git fetch origin` — a checkpoint remote may well be
+// configured in the unreadable file. Real seams throughout.
+func TestRefreshCorruptSettingsSuggestionDoesNotSayFetchOrigin(t *testing.T) {
+	repoRoot := newAttributionRepo(t)
+	t.Setenv(remote.CheckpointTokenEnvVar, "")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".entire", "settings.json"),
+		[]byte(`{not valid json`), 0o644))
+
+	resolver := newStubAttributionResolver(&attributionCheckpointReaderStub{readErr: errors.New("object not found")})
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(checkpointid.MustCheckpointID("edb2c3d4e5f6"), "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.Contains(t, ctx.MetadataMissingReason, "remote refresh failed")
+	require.Contains(t, ctx.MetadataMissingReason, "read settings")
+	require.NotContains(t, ctx.MetadataMissingReason, "git fetch origin",
+		"cannot recommend origin when the settings that name the authoritative remote are unreadable")
+	require.Contains(t, ctx.MetadataMissingReason, "settings.json",
+		"guidance should point at the unreadable settings file")
+}
+
 // Regression pin for the unsound-refresh bug: in a repo with a LOCAL metadata
 // branch but no reachable remote, the refresh must report failure (surfacing
 // the fetch error and the git fetch suggestion) — not silently fall back to the

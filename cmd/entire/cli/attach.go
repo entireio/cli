@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
@@ -580,10 +581,17 @@ func checkpointPresentLocally(ctx context.Context, repo *git.Repository, refs cp
 // configured but its URL cannot be derived (FetchURL would silently fall back
 // to origin), the suggestion points at the configuration instead: telling the
 // user to fetch from origin would contradict the authoritative-remote policy
-// and fetch from a remote that may not carry the metadata branch at all.
+// and fetch from a remote that may not carry the metadata branch at all. The
+// same applies when settings can't be read — a checkpoint remote may be
+// configured in the unreadable file, so "fetch origin" is not safe guidance
+// (remote.Configured would collapse that case to "not configured").
 func suggestCheckpointFetchCommand(ctx context.Context) string {
 	ref := "entire/checkpoints/v1:entire/checkpoints/v1"
-	if remote.Configured(ctx) {
+	s, err := settings.Load(ctx)
+	if err != nil {
+		return "fix .entire/settings.json (it could not be read), then re-run; the correct fetch remote depends on its checkpoint_remote setting"
+	}
+	if s.GetCheckpointRemote() != nil {
 		url, usedCheckpointRemote, err := remote.FetchURLWithSource(ctx)
 		if err == nil && usedCheckpointRemote && url != "" {
 			return fmt.Sprintf("git fetch %s %s", url, ref)
