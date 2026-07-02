@@ -12,23 +12,61 @@ import { execFile } from "node:child_process";
 
 export default function (pi: ExtensionAPI) {
   const ENTIRE_CMD = "__ENTIRE_CMD__";
+  let pendingSkillEvents: Array<{ skill_name: string; invocation: string; timestamp: string }> = [];
 
-  function fireHook(hookName: string, data: Record<string, unknown>): Promise<void> {
+  // fireHook pipes data to `entire hooks pi <hookName>` and resolves with the
+  // hook's stdout (empty string on any failure). Most hooks ignore the return;
+  // before_agent_start uses it to apply a model-context injection.
+  function fireHook(hookName: string, data: Record<string, unknown>): Promise<string> {
     return new Promise((resolve) => {
       try {
         const child = execFile(
           "sh",
           ["-c", `${ENTIRE_CMD} hooks pi ${hookName}`],
-          { timeout: 10000, windowsHide: true },
-          () => resolve(),
+          { timeout: 10000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+          (_err, stdout) => resolve(typeof stdout === "string" ? stdout : ""),
         );
         child.stdin?.end(JSON.stringify(data));
       } catch {
         // best effort — never block the agent on a hook failure
-        resolve();
+        resolve("");
       }
     });
   }
+
+  // parseInjectedContext scans a hook's stdout for Entire's injection envelope
+  // ({"inject_context":"..."}) and returns the text to inject, or null.
+  function parseInjectedContext(stdout: string): string | null {
+    if (!stdout) return null;
+    for (const line of stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("{")) continue;
+      try {
+        const parsed = JSON.parse(trimmed) as { inject_context?: unknown };
+        if (typeof parsed.inject_context === "string" && parsed.inject_context.length > 0) {
+          return parsed.inject_context;
+        }
+      } catch {
+        // not our envelope — ignore
+      }
+    }
+    return null;
+  }
+
+  function parseSkillInvocation(text: string): { skill_name: string; invocation: string } | null {
+    const match = text.trimStart().match(/^\/skill:([a-z0-9][a-z0-9-]{0,63})(?:\s|$)/);
+    if (!match) return null;
+    const invocation = text.trimStart().split(/\s+/, 1)[0] ?? `/skill:${match[1]}`;
+    return { skill_name: match[1], invocation };
+  }
+
+  pi.on("input", async (event) => {
+    const skill = parseSkillInvocation(event.text);
+    if (skill) {
+      pendingSkillEvents.push({ ...skill, timestamp: new Date().toISOString() });
+    }
+    return { action: "continue" };
+  });
 
   // Agent-driven bash subprocesses inherit a real TTY but cannot answer
   // hook prompts. Disable git/Entire terminal prompts for bash calls so
@@ -51,12 +89,28 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
-    await fireHook("before_agent_start", {
+    const skillEvents = pendingSkillEvents;
+    pendingSkillEvents = [];
+    const stdout = await fireHook("before_agent_start", {
       type: "before_agent_start",
       cwd: ctx.cwd,
       session_file: ctx.sessionManager.getSessionFile(),
       prompt: event.prompt,
+      skill_events: skillEvents,
     });
+    const injected = parseInjectedContext(stdout);
+    if (injected) {
+      // Inject a hidden, persistent message so the model learns about Entire.
+      // display:false keeps it out of the user-facing transcript while still
+      // sending it to the LLM. Entire emits this at most once per session.
+      return {
+        message: {
+          customType: "entire-context",
+          content: injected,
+          display: false,
+        },
+      };
+    }
   });
 
   pi.on("agent_end", async (_event, ctx) => {

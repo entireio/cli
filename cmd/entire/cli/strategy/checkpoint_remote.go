@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -50,7 +50,7 @@ func (ps *pushSettings) hasCheckpointURL() bool {
 //   - Skips if the push remote owner differs from the checkpoint repo owner (fork detection)
 //   - If a checkpoint branch doesn't exist locally, attempts to fetch it from the URL
 //
-// The push itself handles failures gracefully (doPushBranch warns and continues),
+// The push itself handles failures gracefully (doPushRef warns and continues),
 // so no reachability check is needed here.
 func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSettings {
 	s, err := settings.Load(ctx)
@@ -103,26 +103,22 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 // The fetch is unfiltered (NoFilter: true) because resume needs blob content
 // (transcripts, metadata JSON) — not just tree objects.
 func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
-	branchName := paths.MetadataBranchName
+	refs := checkpoint.ResolveRefs(ctx)
+	if !refs.Primary.IsBranch() {
+		return fmt.Errorf("primary metadata ref %s is not a branch", refs.Primary)
+	}
+	branchName := refs.Primary.Short()
 	tmpRef := FetchTmpRefPrefix + branchName
-	srcRef := "refs/heads/" + branchName
+	srcRef := refs.Primary.String()
 
-	if err := fetchURLIntoTmpRef(ctx, remoteURL, srcRef, tmpRef, "metadata branch", true); err != nil {
+	if err := fetchURLIntoTmpRef(ctx, "", remoteURL, srcRef, tmpRef, "metadata branch", true); err != nil {
 		return err
 	}
-	return PromoteTmpRefSafely(ctx, plumbing.ReferenceName(tmpRef), plumbing.NewBranchReferenceName(branchName), branchName)
-}
-
-// FetchV2MainFromURL fetches the v2 /main ref from a remote URL and advances
-// the local ref only when doing so cannot rewind locally-ahead commits.
-// Uses explicit refspec since v2 refs are under refs/entire/, not refs/heads/.
-//
-// The fetch is unfiltered (NoFilter: true) because resume needs full metadata.
-func FetchV2MainFromURL(ctx context.Context, remoteURL string) error {
-	if err := fetchURLIntoTmpRef(ctx, remoteURL, paths.V2MainRefName, V2MainFetchTmpRef, "v2 /main", true); err != nil {
+	if err := PromoteTmpRefSafely(ctx, plumbing.ReferenceName(tmpRef), refs.Primary, branchName); err != nil {
 		return err
 	}
-	return PromoteTmpRefSafely(ctx, V2MainFetchTmpRef, paths.V2MainRefName, "v2 /main")
+
+	return nil
 }
 
 // fetchURLIntoTmpRef runs `git fetch <remoteURL> +<srcRef>:<tmpRef>` via the
@@ -135,7 +131,7 @@ func FetchV2MainFromURL(ctx context.Context, remoteURL string) error {
 // fetches are globally enabled. Use noFilter for operations that need blob
 // content (resume, explain) as opposed to sync operations (push recovery)
 // that only need tree structure.
-func fetchURLIntoTmpRef(ctx context.Context, remoteURL, srcRef, tmpRef, label string, noFilter bool) error {
+func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool) error {
 	fetchCtx, cancel := context.WithTimeout(ctx, checkpointRemoteFetchTimeout)
 	defer cancel()
 
@@ -145,6 +141,7 @@ func fetchURLIntoTmpRef(ctx context.Context, remoteURL, srcRef, tmpRef, label st
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
 		NoFilter: noFilter,
+		Dir:      dir,
 	})
 	if fetchErr == nil {
 		return nil
@@ -158,7 +155,7 @@ func fetchURLIntoTmpRef(ctx context.Context, remoteURL, srcRef, tmpRef, label st
 	return fmt.Errorf("fetch %s from %s failed: %w", label, redactedURL, fetchErr)
 }
 
-// fetchMetadataBranchIfMissing fetches the metadata branch from a URL only if it doesn't exist locally.
+// fetchMetadataBranchIfMissing fetches the primary metadata ref from a URL only if it doesn't exist locally.
 // This avoids network calls on every push — once the branch exists locally, this is a no-op.
 // Fetch failures are silently swallowed (returns nil): the push will handle creating the
 // branch on the remote. Only fatal errors (opening repo, creating local branch) are returned.
@@ -170,8 +167,8 @@ func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) error {
 	defer repo.Close()
 
 	// Check if branch already exists locally - if so, nothing to do
-	branchRef := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	if _, err := repo.Reference(branchRef, true); err == nil {
+	refs := checkpoint.ResolveRefs(ctx)
+	if _, err := repo.Reference(refs.Primary, true); err == nil {
 		return nil // Branch exists locally, skip fetch
 	}
 

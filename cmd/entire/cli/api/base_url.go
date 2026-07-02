@@ -15,19 +15,32 @@ const (
 	// DefaultBaseURL is the production Entire API origin.
 	DefaultBaseURL = "https://entire.io"
 
+	// DefaultAuthBaseURL is the production Entire login server — the
+	// default for `entire login --server`.
+	DefaultAuthBaseURL = "https://us.auth.entire.io"
+
 	// BaseURLEnvVar overrides the Entire API origin for local development.
 	BaseURLEnvVar = "ENTIRE_API_BASE_URL"
 
-	// AuthBaseURLEnvVar overrides only the auth/login origin (device flow,
-	// auth-tokens management, keyring key). Falls back to BaseURLEnvVar when
-	// unset, which is the right behavior for single-host deployments. Split
-	// hosts (e.g. auth on us.console.partial.to, data on partial.to) set
-	// both.
+	// AuthBaseURLEnvVar is the retired auth-origin override. Nothing reads
+	// its value — RejectRemovedAuthEnv fails every command when it is set,
+	// pointing at `entire login --server`.
 	AuthBaseURLEnvVar = "ENTIRE_AUTH_BASE_URL"
 
 	schemeHTTP  = "http"
 	schemeHTTPS = "https"
 )
+
+// RejectRemovedAuthEnv returns an error when ENTIRE_AUTH_BASE_URL is set
+// at all (even empty). The variable is retired in favour of
+// `entire login --server`; failing loudly beats silently ignoring an
+// override the operator believes is in effect.
+func RejectRemovedAuthEnv() error {
+	if _, ok := os.LookupEnv(AuthBaseURLEnvVar); ok {
+		return fmt.Errorf("%s is no longer supported; unset it, and use `entire login --server <url>` to log in to a non-default login server", AuthBaseURLEnvVar)
+	}
+	return nil
+}
 
 // BaseURL returns the effective Entire API base URL.
 // ENTIRE_API_BASE_URL takes precedence over the production default.
@@ -37,27 +50,6 @@ func BaseURL() string {
 	}
 
 	return DefaultBaseURL
-}
-
-// AuthBaseURL returns the origin used for the device-flow login, auth-token
-// management endpoints, and the keyring key under which the bearer token is
-// stored. ENTIRE_AUTH_BASE_URL takes precedence; otherwise it falls back to
-// BaseURL() so single-host deployments keep working unchanged.
-//
-// The result is canonicalised — lowercased scheme/host, default port stripped,
-// path/query/fragment dropped, trailing slash collapsed — so the value that
-// flows into store.SaveToken keys matches what tokenmanager.New emits after
-// its own NormalizeOriginURL pass. Without this, a user setting
-// ENTIRE_AUTH_BASE_URL=https://AUTH.example.com:443/ would log in successfully
-// (saved under the raw form) but every subsequent data-API command would
-// resolve "not logged in" because the manager probes under the normalised
-// "https://auth.example.com".
-func AuthBaseURL() string {
-	raw := strings.TrimSpace(os.Getenv(AuthBaseURLEnvVar))
-	if raw == "" {
-		raw = BaseURL()
-	}
-	return NormalizeOriginURL(raw)
 }
 
 // ResolveURL joins an API-relative path against the effective base URL.
@@ -112,7 +104,9 @@ func normalizeBaseURL(raw string) string {
 //
 // Mirrors auth-go's internal/oauthhttp.NormalizeOriginURL so the value the
 // CLI hands to the manager as Issuer survives the manager's own normalisation
-// pass byte-for-byte — see AuthBaseURL.
+// pass byte-for-byte; a cosmetically-different origin (uppercase host,
+// explicit :443, trailing slash) would otherwise be keyed under a different
+// keyring slot than the manager later reads.
 func NormalizeOriginURL(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	u, err := url.Parse(trimmed)

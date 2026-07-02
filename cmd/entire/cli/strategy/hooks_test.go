@@ -5,12 +5,40 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
+
+// readEntireDevScript returns the contents of the committed scripts/entire-dev
+// launcher, located relative to this test file's position in the source tree.
+func readEntireDevScript(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	// cmd/entire/cli/strategy/hooks_test.go -> repo root is four levels up.
+	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..", "..", "..")
+	data, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "entire-dev"))
+	if err != nil {
+		t.Fatalf("failed to read scripts/entire-dev: %v", err)
+	}
+	return string(data)
+}
+
+// goBinDir returns the directory containing the go binary.
+func goBinDir(t *testing.T) string {
+	t.Helper()
+	goPath, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go not available")
+	}
+	return filepath.Dir(goPath)
+}
 
 // clearGlobalHooksPath overrides any global core.hooksPath setting so that
 // test repos use their default .git/hooks directory. Setting the local value
@@ -608,8 +636,8 @@ func TestInstallGitHook_LocalDevCommandPrefix(t *testing.T) {
 			t.Fatalf("hook %s should exist: %v", hook, err)
 		}
 		content := string(data)
-		if !strings.Contains(content, "go run ./cmd/entire/main.go") {
-			t.Errorf("hook %s should use 'go run' prefix when localDev=true, got:\n%s", hook, content)
+		if !strings.Contains(content, localDevHookCmdPrefix+" hooks git") {
+			t.Errorf("hook %s should delegate to %s when localDev=true, got:\n%s", hook, localDevHookCmdPrefix, content)
 		}
 		if strings.Contains(content, "\nentire ") {
 			t.Errorf("hook %s should not use bare 'entire' prefix when localDev=true", hook)
@@ -631,12 +659,93 @@ func TestInstallGitHook_LocalDevCommandPrefix(t *testing.T) {
 			t.Fatalf("hook %s should exist: %v", hook, err)
 		}
 		content := string(data)
-		if strings.Contains(content, "go run") {
-			t.Errorf("hook %s should not use 'go run' prefix when localDev=false, got:\n%s", hook, content)
+		if strings.Contains(content, "scripts/entire-dev") {
+			t.Errorf("hook %s should not reference the local-dev script when localDev=false, got:\n%s", hook, content)
 		}
 		if !strings.Contains(content, "entire hooks git") {
 			t.Errorf("hook %s should use bare 'entire' prefix when localDev=false", hook)
 		}
+	}
+}
+
+func TestGitHookCommand_LocalDevDelegatesToScript(t *testing.T) {
+	t.Parallel()
+
+	command := gitHookCommand(localDevHookCmdPrefix, `prepare-commit-msg "$1" "$2" 2>/dev/null || true`, false)
+
+	want := localDevHookCmdPrefix + ` hooks git prepare-commit-msg "$1" "$2" 2>/dev/null || true`
+	if command != want {
+		t.Fatalf("local-dev git hook should delegate to the script verbatim:\ngot:  %s\nwant: %s", command, want)
+	}
+	if strings.Contains(command, "go build") || strings.Contains(command, "elif") {
+		t.Fatalf("build-probe/fallback logic must live in the script, not the hook command: %s", command)
+	}
+}
+
+func TestEntireDevScript_FallsBackToBinaryWhenBuildFails(t *testing.T) {
+	t.Parallel()
+
+	shPath := requireShell(t)
+
+	// A repo layout where cmd/entire/main.go is absent, so the script's build
+	// probe fails and it must fall back to the entire binary on PATH.
+	root := t.TempDir()
+	scriptPath := filepath.Join(root, "scripts", "entire-dev")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatalf("failed to create scripts dir: %v", err)
+	}
+	if err := os.WriteFile(scriptPath, []byte(readEntireDevScript(t)), 0o755); err != nil {
+		t.Fatalf("failed to write script: %v", err)
+	}
+
+	binDir := t.TempDir()
+	markerFile := filepath.Join(root, "entire-ran")
+	fakeEntire := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + shellQuote(markerFile) + "\n"
+	if err := os.WriteFile(filepath.Join(binDir, "entire"), []byte(fakeEntire), 0o755); err != nil {
+		t.Fatalf("failed to write fake entire: %v", err)
+	}
+
+	cmd := exec.CommandContext(context.Background(), shPath, scriptPath, "hooks", "git", "post-commit")
+	cmd.Env = envWithPath(binDir + string(os.PathListSeparator) + goBinDir(t))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("script should exit 0 when the build is broken: %v\n%s", err, output)
+	}
+
+	got, err := os.ReadFile(markerFile)
+	if err != nil {
+		t.Fatalf("expected fallback to the entire binary on PATH, marker missing: %v\noutput:\n%s", err, output)
+	}
+	if strings.TrimSpace(string(got)) != "hooks git post-commit" {
+		t.Fatalf("fallback should forward args verbatim, got %q", got)
+	}
+	if !strings.Contains(string(output), "falling back to the entire binary on PATH") {
+		t.Fatalf("script should log the fallback to stderr, got:\n%s", output)
+	}
+}
+
+func TestEntireDevScript_ExitsZeroWhenNothingAvailable(t *testing.T) {
+	t.Parallel()
+
+	shPath := requireShell(t)
+
+	root := t.TempDir() // no cmd/entire/main.go, no entire on PATH
+	scriptPath := filepath.Join(root, "scripts", "entire-dev")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatalf("failed to create scripts dir: %v", err)
+	}
+	if err := os.WriteFile(scriptPath, []byte(readEntireDevScript(t)), 0o755); err != nil {
+		t.Fatalf("failed to write script: %v", err)
+	}
+
+	cmd := exec.CommandContext(context.Background(), shPath, scriptPath, "hooks", "git", "post-commit")
+	cmd.Env = envWithPath(t.TempDir()) // empty PATH: no go, no entire
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("script should exit 0 when neither a buildable tree nor entire is available: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "no entire binary on PATH") {
+		t.Fatalf("script should log that it is skipping, got:\n%s", output)
 	}
 }
 

@@ -40,7 +40,7 @@ func fakeSSEServer(t *testing.T, frames []string) (*httptest.Server, *string) {
 
 func TestReviewEventsPath(t *testing.T) {
 	got := reviewEventsPath("trail id/with slash")
-	want := "/api/v1/trails/trail%20id%2Fwith%20slash/reviews/events"
+	want := "/api/v1/trails/trail%20id%2Fwith%20slash/events"
 	if got != want {
 		t.Fatalf("reviewEventsPath = %q, want %q", got, want)
 	}
@@ -75,7 +75,7 @@ func TestStreamOnce_PrintsReadyAndReviewEvents(t *testing.T) {
 		t.Errorf("lastID = %q, want %q", lastID, "3")
 	}
 	out := stdout.String()
-	for _, want := range []string{"trail trl_1", "session started", "comment created", "src/foo.ts", "session ended"} {
+	for _, want := range []string{"trail trl_1", "session started", "finding created", "src/foo.ts", "session ended"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected %q in output, got: %q", want, out)
 		}
@@ -128,9 +128,12 @@ func TestStreamOnce_ShowPingsTrimsSSECommentWhitespace(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, _, err := streamOnce(ctx, client, "/stream", "", false, true, &stdout, &stderr)
-	if err == nil {
-		t.Errorf("expected EOF after fixed test stream")
+	reason, _, err := streamOnce(ctx, client, "/stream", "", false, true, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("streamOnce error: %v", err)
+	}
+	if reason != streamCloseTransport {
+		t.Errorf("reason = %d, want streamCloseTransport", reason)
 	}
 	if got := stderr.String(); !strings.Contains(got, "ping: ping 123\n") {
 		t.Errorf("stderr = %q, want trimmed ping output", got)

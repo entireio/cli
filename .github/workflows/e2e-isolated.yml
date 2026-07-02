@@ -21,10 +21,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup mise
-        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux
@@ -86,7 +86,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          # Only copilot-cli gets the token; other agents must not receive it.
+          COPILOT_GITHUB_TOKEN: ${{ inputs.agent == 'copilot-cli' && secrets.COPILOT_GITHUB_TOKEN || '' }}
         run: go run ./e2e/bootstrap
 
       - name: Run isolated test
@@ -97,7 +98,8 @@ jobs:
           E2E_CODEX_MODEL: ${{ inputs.agent == 'codex' && 'gpt-5.4-mini' || '' }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          # Only copilot-cli gets the token; other agents must not receive it.
+          COPILOT_GITHUB_TOKEN: ${{ inputs.agent == 'copilot-cli' && secrets.COPILOT_GITHUB_TOKEN || '' }}
           E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
           E2E_ENTIRE_BIN: /usr/local/bin/entire
         run: |

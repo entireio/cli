@@ -19,6 +19,29 @@ import (
 
 var runOpenCodeExportToFileFn = runOpenCodeExportToFile
 
+// Compile-time assertion that OpenCode can inject context into the model.
+var _ agent.ContextInjector = (*OpenCodeAgent)(nil)
+
+// InjectionEvent reports that OpenCode injects model context at TurnStart. The
+// embedded plugin reads the turn-start hook's stdout and applies the injection
+// via experimental.chat.system.transform.
+func (a *OpenCodeAgent) InjectionEvent() agent.EventType { return agent.TurnStart }
+
+// RenderContextInjection emits a {"inject_context":"..."} envelope on stdout for
+// the plugin to apply. Returns (nil, nil) for empty text.
+func (a *OpenCodeAgent) RenderContextInjection(inj agent.ContextInjection) ([]byte, error) {
+	if strings.TrimSpace(inj.Text) == "" {
+		return nil, nil
+	}
+	b, err := json.Marshal(struct {
+		InjectContext string `json:"inject_context"`
+	}{InjectContext: inj.Text})
+	if err != nil {
+		return nil, fmt.Errorf("marshal opencode context injection: %w", err)
+	}
+	return append(b, '\n'), nil
+}
+
 // Hook name constants — these become CLI subcommands under `entire hooks opencode`.
 const (
 	HookNameSessionStart = "session-start"

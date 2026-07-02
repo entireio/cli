@@ -27,7 +27,34 @@ func (fs *alternatesFilesystem) Create(filename string) (billy.File, error) {
 }
 
 func (fs *alternatesFilesystem) Open(filename string) (billy.File, error) {
-	return fs.root.Open(fs.resolve(filename))
+	resolved := fs.resolve(filename)
+	if isAlternatesObjectsPath(resolved) {
+		if content, ok := fs.rewrittenNestedAlternates(resolved); ok {
+			return inMemoryFile(content)
+		}
+	}
+	return fs.root.Open(resolved)
+}
+
+// rewrittenNestedAlternates reads an alternates file from an alternate
+// repository (located at <objects-dir>/info/alternates) and returns a copy
+// of its contents with relative entries resolved against that objects
+// directory. Returns ok=false when the file is unreadable or no entry
+// needed rewriting, in which case the caller should serve the original
+// file.
+func (fs *alternatesFilesystem) rewrittenNestedAlternates(resolved string) (string, bool) {
+	f, err := fs.root.Open(resolved)
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = f.Close() }()
+
+	content, ok := readAlternatesContent(f)
+	if !ok {
+		return "", false
+	}
+	objectsBase := filepath.Dir(filepath.Dir(resolved))
+	return rewriteRelativeAlternates(content, objectsBase)
 }
 
 func (fs *alternatesFilesystem) OpenFile(filename string, flag int, perm gofs.FileMode) (billy.File, error) {

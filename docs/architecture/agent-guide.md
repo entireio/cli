@@ -51,6 +51,7 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | `TokenCalculator` | `CalculateTokenUsage` | Agent's transcript contains token usage data |
 | `SubagentAwareExtractor` | `ExtractAllModifiedFiles`, `CalculateTotalTokenUsage` | Agent spawns subagents (like Claude Code's Task tool) |
 | `HookResponseWriter` | `WriteHookResponse` | Agent can display messages from hook responses (e.g., session start banner). Claude Code uses JSON `systemMessage` on stdout; Factory AI Droid uses plain text on stdout. |
+| `ContextInjector` | `InjectionEvent`, `RenderContextInjection` | Agent can inject text into the **model's** context window (distinct from `HookResponseWriter`, which targets the *user*). The agent declares which lifecycle event it injects at and renders a native stdout payload. The dispatcher (`emitContextInjection`) emits it once per normal session via `session.State.ContextInjectionDecided`, skipping review/investigate sessions, and only when fresh clone-local preferences say trails are enabled for the current repo/API/auth target. The API check happens before the prompt path (`entire enable`, successful `entire trail ...` commands, and stale/missing cache refresh on SessionStart all refresh `ClonePreferences.TrailsEnabled` using `api.Client.TrailsEnabled`); TurnStart performs no auth/network work and leaves unknown/stale caches undecided so a later refresh can still inject. Claude Code / Codex / Gemini inject at `TurnStart` using `hookSpecificOutput.additionalContext` (UserPromptSubmit / BeforeAgent); Pi and OpenCode emit a `{"inject_context":...}` envelope that their embedded extension applies (Pi via a `before_agent_start` message, OpenCode via `experimental.chat.system.transform`). |
 | `FileWatcher` | `GetWatchPaths`, `OnFileChange` | Agent doesn't support hooks; uses file-based detection instead |
 
 ## Step-by-Step Implementation Guide
@@ -384,14 +385,17 @@ func (a *YourAgent) InstallHooks(localDev bool, force bool) (int, error) {
     // ... read and parse ...
 
     // 3. Build hook commands
-    // localDev mode uses $(git rev-parse --show-toplevel) to resolve the repo
-    // root at runtime via shell command substitution. This works regardless of
-    // where the repo is checked out on disk.
-    // Note: Only Claude Code provides a PROJECT_DIR env var (CLAUDE_PROJECT_DIR).
-    // Other agents should use the git rev-parse approach instead.
+    // localDev mode delegates to scripts/entire-dev (agent.LocalDevHookScript),
+    // which compiles the CLI on demand and falls back to the entire binary on
+    // PATH when the tree does not build. It uses $(git rev-parse --show-toplevel)
+    // to resolve the repo root at runtime, so it works regardless of where the
+    // repo is checked out on disk.
+    // Note: Only Claude Code provides a PROJECT_DIR env var (CLAUDE_PROJECT_DIR);
+    // its prefix uses ${CLAUDE_PROJECT_DIR}/scripts/entire-dev instead. Other
+    // agents should use agent.LocalDevHookScript as shown here.
     var cmdPrefix string
     if localDev {
-        cmdPrefix = `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks your-agent `
+        cmdPrefix = agent.LocalDevHookScript + " hooks your-agent "
     } else {
         cmdPrefix = "entire hooks your-agent "
     }
@@ -577,9 +581,11 @@ Pi uses JSONL (one JSON object per line) with a tree-shaped entry model. Every e
 {"type":"message","id":"def456","parentId":"abc123","timestamp":"...","message":{"role":"assistant","content":[...],"usage":{"input":100,"output":200,"cacheRead":0,"cacheWrite":50}}}
 ```
 
-User `content` can be a plain string or an array of content blocks (text, toolCall, toolResult). `usage` carries `input`, `output`, `cacheRead`, and `cacheWrite` token counts on assistant messages.
+User `content` can be a plain string or an array of content blocks (text, toolCall, toolResult). `usage` carries `input`, `output`, `cacheRead`, and `cacheWrite` token counts on assistant messages. Assistant messages also carry `model` (e.g. `"gpt-5.5"`) and `provider` (e.g. `"openai-codex"`).
 
-**Active branch resolution**: Because Pi sessions form a tree, the transcript accumulates entries from both active and abandoned branches. Entire's `pijsonl.ResolveActiveBranch()` walks the `parentId` chain from the last message to the root. Only entries on the active branch contribute to token counts, file lists, and extracted prompts.
+**Model backfill**: Pi's hook events (`session_start`, `before_agent_start`, `agent_end`) carry no model field, so the model never reaches `Event.Model` and `state.ModelName` would otherwise stay empty. Pi instead implements the optional `agent.ModelExtractor` interface (`ExtractModel`), which reads `message.model` from the most recent active-branch assistant message. Condensation calls `sessionStateBackfillModel` to fill `state.ModelName` when it's empty, so checkpoint metadata records the model just like token usage is backfilled from the transcript.
+
+**Active branch resolution**: Because Pi sessions form a tree, the transcript accumulates entries from both active and abandoned branches. Entire's `pijsonl.ResolveActiveBranch()` walks the `parentId` chain from the last message to the root. Only entries on the active branch contribute to token counts, file lists, extracted prompts, and the extracted model.
 
 **Chunking:** Use `agent.ChunkJSONL(content, maxSize)` — splits at newline boundaries.
 **Reassembly:** Use `agent.ReassembleJSONL(chunks)` — concatenates with newlines.

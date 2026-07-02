@@ -15,42 +15,83 @@ This repo contains the CLI for Entire.
 - `entire/cli/commands`: actual command implementations
 - `entire/cli/agent`: agent implementations (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi, Antigravity) - see [Agent Integration Checklist](docs/architecture/agent-integration-checklist.md) and [Agent Implementation Guide](docs/architecture/agent-guide.md)
 - `entire/cli/strategy`: strategy implementation (manual-commit) - see section below
-- `entire/cli/checkpoint`: checkpoint storage abstractions (temporary and committed)
+- `entire/cli/checkpoint`: checkpoint storage abstractions (ephemeral and persistent)
 - `entire/cli/session`: session state management
 - `entire/cli/integration_test`: integration tests (simulated hooks)
 - `e2e/`: E2E tests with real agent calls (see [e2e/README.md](e2e/README.md))
 
 ### Command Layout
 
-The CLI is organized around five noun groups plus a small set of top-level
-verbs. The groups are the canonical home for each verb; legacy top-level
-shortcuts remain functional but hidden, and emit a deprecation hint pointing
-at the canonical group form.
+The visible CLI is organized around five noun groups plus a small set of
+top-level verbs. The groups are the canonical home for each verb; legacy
+top-level shortcuts remain functional but hidden, and emit a deprecation hint
+pointing at the canonical group form. Newer experimental command families are
+discoverable through `entire labs` and may remain hidden from root help while
+their canonical paths are still runnable.
 
-- `session` (alias: `sessions`): `list`, `info`, `stop`, `attach`, `resume`, `current`
-- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `rewind`, `search`
+- `session` (alias: `sessions`): `list`, `info`, `tokens`, `stop`, `attach`, `adopt`, `resume`, `current`.
+  `resume` with a branch arg switches to it and resumes its session; with no arg
+  it opens an interactive picker of stopped sessions (across all worktrees),
+  resolving each to its branch and pointing at the owning worktree when the
+  branch is checked out elsewhere. Resume keeps an existing local session log
+  as-is by default (`--force` overwrites it from the checkpoint).
+  `adopt` moves an active session from another repo or worktree into the current
+  worktree and resets target-local checkpoint bookkeeping so future commits link
+  to the adopted session from the new location.
+- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`, plus
+  the deprecated `rewind` (functional, prints a cobra deprecation message, will
+  be removed in a future release)
 - `agent`: bare opens the interactive agent selector, plus `list`, `add`, `remove`
 - `configure`: bare prints help and a hint pointing at `entire agent`; flags
   manage non-agent settings (telemetry, git-hook installation mode, strategy
   options, summary provider). Agent CRUD lives under `entire agent`.
-- `auth`: `login`, `logout`, `status`, `list`, `revoke`
+- `auth`: `login`, `logout`, `status`, `contexts`, `use`, plus the hidden
+  `token` (prints the active control-plane bearer to stdout for scripting/curl;
+  honors `ENTIRE_TOKEN`, else the refreshed active-context login JWT). `logout`
+  takes `--everywhere` (revoke every session on the active core, not just the
+  current one) and `--all-contexts` (log out of every saved login)
 - `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+
+Experimental command families advertised through `entire labs`:
+
+- `tokens`: `profile` (hidden from root help while token diagnostics mature)
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
-`configure`.
+`configure`, `agent-help`.
+
+`agent-help` renders machine-readable, agent-facing usage live from the Cobra
+command tree (so it always matches the installed binary): bare prints a
+"when to use entire / which subcommand" map; `agent-help <command>` drills into
+one command's current flags; `--json` emits structured output. It is the single
+source of truth the first-turn context injection and the `--agent-help-skill`
+skill point agents at, instead of enumerating a surface that goes stale.
+Hidden commands opt into being advertised here by setting
+`Annotations[agentHelpAnnotation] = "true"` (e.g. `trail`).
+No-channel agents (Cursor, Copilot CLI, Factory Droid, MCP hosts — no
+context-injection channel and no agent-help skill template) reach it without an
+active push. All of them can discover it passively: it is visible in `entire
+help`, the `entire status` footer points at it, and `entire status --json`
+exposes it as the `agent_help` field. On top of that, Factory AI Droid (which is
+banner-only) gets the pointer appended to its SessionStart hook banner, and
+MCP-host agents can launch the hidden `entire mcp` stdio server, which exposes
+`agent_help` and `entire_status` as MCP tools using the same live rendering.
+Enabling a no-channel agent with `--agent-help-skill` reports the skill
+unsupported and points the agent at this passive path instead.
 
 Hidden top-level shortcuts (functional, emit a one-line deprecation hint):
-`rewind` → `checkpoint rewind`, `resume` → `session resume`, `attach` →
-`session attach`, `explain` → `checkpoint explain`, `trace` → `doctor trace`.
+`resume` → `session resume`, `attach` → `session attach`, `explain` →
+`checkpoint explain`, `trace` → `doctor trace`.
 Cobra-native aliases (no hint): `sessions` → `session`, `cp`/`checkpoints` →
 `checkpoint`. The `search` top-level remains hidden without a hint.
 
-Deprecated top-level alias (functional, prints cobra deprecation message):
-`reset` → `clean`.
+Deprecated top-level commands (functional, print a cobra deprecation message):
+`reset` → `clean`, and `rewind` (no replacement, announces removal — same
+deprecation as `checkpoint rewind`).
 
-Hidden infrastructure commands: `hooks`, `migrate`, `trail`,
-`curl-bash-post-install`, `__send_analytics`.
+Hidden infrastructure commands: `hooks`, `trail`,
+`curl-bash-post-install`, `__send_analytics`, `mcp` (MCP stdio server for
+MCP-host agents).
 
 The `hideAsAlias(cmd, canonical)` helper in `cmd/entire/cli/aliascmd.go`
 marks a command Hidden and sets cobra's `Deprecated` field so the hint
@@ -89,7 +130,7 @@ This runs unit tests, integration tests, and the E2E canary (Vogon agent) in seq
 
 ### Running E2E Canary Tests (Vogon Agent)
 
-The Vogon agent is a deterministic fake agent that exercises the full E2E test suite without making any API calls. Named after the Vogons from The Hitchhiker's Guide to the Galaxy — bureaucratic, procedural, and deterministic to a fault.
+The Vogon agent is a deterministic fake agent that exercises the full E2E test suite without making any API calls.
 
 ```bash
 mise run test:e2e:canary           # Run all E2E tests with the Vogon agent
@@ -109,14 +150,7 @@ mise run test:e2e:canary TestFoo   # Run a specific test
 
 ```bash
 mise run test:e2e [filter]                          # All agents, filtered
-mise run test:e2e --agent claude-code [filter]       # Claude Code only
-mise run test:e2e --agent gemini-cli [filter]        # Gemini CLI only
-mise run test:e2e --agent opencode [filter]          # OpenCode only
-mise run test:e2e --agent cursor [filter]            # Cursor only
-mise run test:e2e --agent factoryai-droid [filter]   # Factory AI Droid only
-mise run test:e2e --agent copilot-cli [filter]       # Copilot CLI only
-mise run test:e2e --agent pi [filter]                # Pi only
-mise run test:e2e --agent antigravity [filter]       # Antigravity (agy) only
+mise run test:e2e --agent claude-code [filter]       # Claude Code only as an example here, replace `claude-code` with other agents (e.g. `antigravity`) to run tests for those agents
 ```
 
 E2E tests:
@@ -176,6 +210,35 @@ t.Chdir(tmpDir)                                 // redirect CWD-based git resolu
 **Prefer `testutil.InitRepo()` over direct `git.PlainInit()` in tests.** When a test in this repo needs an initialized repository, use `testutil.InitRepo(t, dir)` unless the test specifically needs lower-level initialization behavior that the helper cannot provide. Do not call `git.PlainInit()` directly and then create commits or run CLI git operations without also reproducing the helper's repo-local config.
 
 **Do NOT** shell out to `git init`/`git commit` directly without setting user config and `--no-gpg-sign`, and **do NOT** run lifecycle/strategy handlers from the real repo CWD in tests.
+
+### Config/Cache/Keyring Isolation in Tests
+
+Tests must never read or write the developer's real `~/.config/entire`
+(contexts.json, version_check.json), `~/.cache/entire` (nodes.json,
+cluster_cores.json, api_discovery.json), or OS keychain. The developer may be
+using `entire` for real while tests run.
+
+- **Single resolver**: `internal/entireclient/userdirs` is the only place
+  that resolves the per-user config dir (`userdirs.Config()`:
+  `$ENTIRE_CONFIG_DIR` else `~/.config/entire`) and cache dir
+  (`userdirs.Cache()`: `$XDG_CACHE_HOME/entire` else `~/.cache/entire`).
+  Never derive these paths anywhere else.
+- **In-process safety net**: `userdirs` and the `tokenstore` default backend
+  detect `go test` (via `internal/testdirs`) and fall back to a throwaway
+  per-process temp directory when their env override is unset. The fallback
+  is shared across tests in one process — for per-test isolation still set
+  `t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())` and
+  `tokenstore.UseFileBackendForTesting(...)`.
+- **Spawned binaries are NOT covered**: `testing.Testing()` is false in a
+  subprocess. The integration and e2e TestMains set `ENTIRE_CONFIG_DIR`,
+  `XDG_CACHE_HOME`, `ENTIRE_TOKEN_STORE=file`, `ENTIRE_TOKEN_STORE_PATH`, and
+  `ENTIRE_TEST_AUTH_STORE_FILE` process-wide so every spawned `entire` (and
+  every agent-invoked hook) inherits isolation. Any new harness that spawns
+  the real binary must do the same.
+- **Legacy auth store**: `auth.NewStore()` talks straight to the zalando
+  keyring; packages whose tests can reach it need `keyring.MockInit()` in
+  `TestMain` (see `cmd/entire/cli/global_test.go`) — the `testdirs` fallback
+  does not cover it in-process.
 
 ### Spawning subprocesses in tests (TTY detection)
 
@@ -290,7 +353,7 @@ if _, err := paths.WorktreeRoot(); err != nil {
 ```
 
 **When NOT to use `SilentError`:**
-For normal errors where the default error message is sufficient, just return the error directly. main.go will print it:
+For normal errors where the default error message is sufficient, return the error directly. main.go will print it:
 
 ```go
 // Normal error - main.go will print "unknown strategy: foo"
@@ -344,7 +407,7 @@ if settings.IsSummarizeEnabled() {
 ### Logging vs User Output
 
 - **Internal/debug logging**: Use `logging.Debug/Info/Warn/Error(ctx, msg, attrs...)` from `cmd/entire/cli/logging/`. Writes to `.entire/logs/`.
-- **Enabling debug/perf logs locally**: Prefer adding `"log_level": "DEBUG"` to `.entire/settings.local.json` when you need detailed hook/perf logs. This file is gitignored, so it is a low-risk local-only change. `ENTIRE_LOG_LEVEL=debug` also works and takes precedence.
+- **Enabling debug/perf logs locally**: Prefer adding `"log_level": "DEBUG"` to `.entire/settings.local.json` when you need detailed hook/perf logs. This file is gitignored. `ENTIRE_LOG_LEVEL=debug` also works and takes precedence.
 - **User-facing output**: Use `fmt.Fprint*(cmd.OutOrStdout(), ...)` or `cmd.ErrOrStderr()`.
 
 Don't use `fmt.Print*` for operational messages (checkpoint saves, hook invocations, strategy decisions) - those should use the `logging` package.
@@ -412,6 +475,30 @@ relPath := paths.ToRelativePath("/repo/api/file.ts", repoRoot)  // returns "api/
 
 Test case in `state_test.go`: `TestFilterAndNormalizePaths_SiblingDirectories` documents this bug pattern.
 
+### Control-Plane Core Resolution (which core am I talking to?)
+
+Control-plane commands dial one of three cores: the active context's
+(`coreapi.New`), a specific cluster's (`coreapi.NewForCluster`), or — when
+`ENTIRE_TOKEN` is set — the env token's `aud` (the bypass inside `New`/
+`NewForCluster`). This precedence lives **only** inside `coreapi`; nothing else
+re-derives it.
+
+**To display which core a request uses, ask the client: `client.CoreOrigin()`.**
+It returns whatever was actually wired in, so the shown core can never diverge
+from where the request goes. **Do NOT** re-resolve with
+`auth.ResolveControlPlaneTarget()` for display — it only knows the active
+context and silently ignores both `ENTIRE_TOKEN` and the cluster case, so it can
+name a core the request never touches (this was a real bug in the `mirror list`
+banner; see `repo_mirror.go` and `coreapi.Client.CoreOrigin`).
+
+When a command resolves auth *outside* a `coreapi.Client` (e.g. `entire auth
+status`, which builds its own `/me` client), it must apply the same
+env-token-first precedence itself — see `resolveAuthStatusTarget` /
+`resolveEnvTokenStatusTarget` in `auth.go`, which branch on
+`auth.EnvTokenVar` before falling back to the active context. `logout` is the
+deliberate exception: it manages a *stored* login session, which an ephemeral
+env token has none of, so it stays on the active context.
+
 ### Session Strategy (`cmd/entire/cli/strategy/`)
 
 The CLI uses a manual-commit strategy for managing session data and checkpoints. The strategy implements the `Strategy` interface defined in `strategy.go`.
@@ -424,7 +511,6 @@ The `Strategy` interface provides:
 - `SaveTaskStep()` - Save subagent task step checkpoint
 - `GetRewindPoints()` / `Rewind()` - List and restore to checkpoints
 - `GetSessionLog()` / `GetSessionInfo()` - Retrieve session data
-- `ListSessions()` / `GetSession()` - Session discovery
 
 #### How It Works
 
@@ -434,351 +520,99 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - **Worktree-specific branches** - each git worktree gets its own shadow branch namespace, preventing conflicts
 - **Supports multiple concurrent sessions** - checkpoints from different sessions in the same directory interleave on the same shadow branch
 - Condenses session logs to permanent `entire/checkpoints/v1` branch on user commits
+- Each committed session stores the raw transcript (`full.jsonl`, read by CLI rewind/resume/explain) plus a best-effort compact transcript (`transcript.jsonl`, generated via `transcript/compact`). Like `full.jsonl`, `transcript.jsonl` stores the **full compacted session** on every checkpoint (via `compact.FullWithBoundary`), so each checkpoint is self-contained and the session survives a mid-history checkpoint being lost/reverted/rebased. This checkpoint's slice begins at the session metadata's `compact_transcript_start` (a line offset in compact-output coordinates, distinct from `checkpoint_transcript_start` which indexes raw `full.jsonl` lines); a nil/absent marker means a legacy delta-only `transcript.jsonl` (read from line 0). The marker rounds toward inclusion when a streaming message straddles the boundary, so the slice never drops this checkpoint's content but may repeat ≤1 merged line at its head. Compact generation is best-effort and is skipped when the compacted output exceeds the 50MB blob cap (unlike `full.jsonl`, `transcript.jsonl` is not chunked — `full.jsonl` stays authoritative and the compact is regenerable); in the OPF finalize rewrite a failed/skipped regeneration drops the prior `transcript.jsonl` and clears the marker rather than shipping a stale, less-redacted compact. Both files are pushed with the v1 branch. The root `metadata.json` `sessions[].transcript` pointer keeps targeting `full.jsonl`; when the compact transcript was generated the session entry also carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted otherwise) so external readers can locate it next to `full.jsonl`.
 - Uses the `post-rewrite` Git hook to keep local session linkage aligned after amend/rebase rewrites
 - Builds git trees in-memory using go-git plumbing APIs
 - Rewind restores files from shadow branch commit tree (does not use `git reset`)
 - **Location-independent transcript resolution** - transcript paths are always computed dynamically from the current repo location (via `agent.GetSessionDir` + `agent.ResolveSessionFile`), never stored in checkpoint metadata. This ensures restore/rewind works after repo relocation or across machines.
-- **Copilot token scoping** - Copilot CLI `session.shutdown` contains session-wide token aggregates. Checkpoint metadata must stay scoped to `CheckpointTranscriptStart`; condensation may separately backfill full-session Copilot totals into session state for `entire status`.
+- **Token usage scoping** - `SessionState.TokenUsage` is the session-wide total used by `entire status`; `SessionState.CheckpointTokenUsage` is the pending checkpoint delta since the last condensation. Checkpoint metadata must stay scoped to `CheckpointTranscriptStart` or the pending checkpoint delta. Cursor tokens come only from stop-hook payloads, while Copilot CLI can also backfill full-session totals from `session.shutdown`.
 - Tracks session state in `.git/entire-sessions/` (shared across worktrees)
 - **Shadow branch migration** - if user does stash/pull/rebase (HEAD changes without commit), shadow branch is automatically moved to new base commit
 - **Orphaned branch cleanup** - if a shadow branch exists without a corresponding session state file, it is automatically reset when a new session starts
 - PrePush hook can push `entire/checkpoints/v1` branch alongside user pushes
+- **OPF (OpenAI Privacy Filter) runs at pre-push, not post-commit**: when `redaction.openai_privacy_filter.enabled` is true, the PrePush hook re-redacts unpushed `entire/checkpoints/v1` commits with the OPF 8th layer, builds new commits carrying an `Entire-OPF-Applied: true` trailer, and atomically updates the local v1 ref before pushing. Per-commit condensation stays on the fast 7-layer pipeline. See `strategy/manual_commit_opf_rewrite.go` and `docs/security-and-privacy.md` for the full flow, including divergence detection, bootstrap caps, and CAS-on-conflict semantics.
 - Safe to use on main/master since it never modifies commit history
 
 #### Key Files
 
 - `strategy.go` - Interface definition and context structs (`StepContext`, `TaskStepContext`, `RewindPoint`, etc.)
 - `common.go` - Helpers for metadata extraction, tree building, rewind validation, `ListCheckpoints()`
-- `session.go` - Session/checkpoint data structures
-- `push_common.go` - PrePush logic for pushing `entire/checkpoints/v1` branch
-- `manual_commit.go` - Manual-commit strategy main implementation
-- `manual_commit_types.go` - Type definitions: `SessionState`, `CheckpointInfo`, `CondenseResult`
-- `manual_commit_session.go` - Session state management (load/save/list session states)
-- `manual_commit_condensation.go` - Condense logic for copying logs to `entire/checkpoints/v1`
-- `manual_commit_rewind.go` - Rewind implementation: file restoration from checkpoint trees
-- `manual_commit_git.go` - Git operations: checkpoint commits, tree building
-- `manual_commit_logs.go` - Session log retrieval and session listing
-- `manual_commit_hooks.go` - Git hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push)
-- `manual_commit_reset.go` - Shadow branch reset/cleanup functionality
+- `manual_commit*.go` - Manual-commit strategy: main impl, types, session state, condensation, rewind, git ops, logs, hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push), reset
+- `manual_commit_opf_rewrite.go` - Pre-push OPF re-redaction: walks unpushed v1 commits, runs OPF over their blobs, rebuilds commits with `Entire-OPF-Applied: true` trailer, CAS-updates the local ref. Sentinel error types (use `errors.As`): `V1DivergedError`, `BootstrapTooLargeError`, `V1RefMovedError`, `OPFRuntimeFailedError`.
 - `cleanup.go` - Cleanup discovery/deletion for shadow branches, session states, and checkpoint metadata
-- `session_state.go` - Package-level session state functions (`LoadSessionState`, `SaveSessionState`, `ListSessionStates`, `FindMostRecentSession`)
+- `session_state.go` - Package-level session state functions
 - `hooks.go` - Git hook installation
 
-#### Checkpoint Package (`cmd/entire/cli/checkpoint/`)
+Note: `checkpoint/configloader.go` overrides go-git's default config loader with a symlink-following `billy.Basic` (`osSymlinkFS`) — go-git's default reads config via `os.Root`, which rejects absolute symlinks in any path component (e.g. a `~/.config` managed by a dotfile tool), silently dropping global config so author identity fell back to "Unknown" and signing was skipped.
 
-- `checkpoint.go` - Data types (`Checkpoint`, `TemporaryCheckpoint`, `CommittedCheckpoint`)
-- `store.go` - `GitStore` struct wrapping git repository
-- `temporary.go` - Shadow branch operations (`WriteTemporary`, `ReadTemporary`, `ListTemporary`)
-- `committed.go` - Metadata branch operations (`WriteCommitted`, `ReadCommitted`, `ListCommitted`)
-- `configloader.go` - Overrides go-git's default global/system config loader with a symlink-following `billy.Basic` (`osSymlinkFS`). go-git's default reads config via `os.Root`, which rejects absolute symlinks in any path component (e.g. a `~/.config` managed by a dotfile tool) with "path escapes from parent" — silently dropping global config so commit author identity fell back to "Unknown", signing was skipped, and the push hook spammed a warning per commit.
+#### Deep-Dive Reference
 
-#### Session Package (`cmd/entire/cli/session/`)
+The phase state machine, metadata directory layout, sharded checkpoint format, multi-session metadata, checkpoint ID linking, commit trailers, and concurrent-session / shadow-branch-migration behavior are documented in:
 
-- `session.go` - Session data types and interfaces
-- `state.go` - `StateStore` for managing `.git/entire-sessions/` files
-- `phase.go` - Session phase state machine (phases, events, transitions, actions)
-
-#### Session Phase State Machine
-
-Sessions track their lifecycle through phases managed by a state machine in `session/phase.go`:
-
-**Phases:** `ACTIVE`, `IDLE`, `ENDED`
-
-**Events:**
-
-- `TurnStart` - Agent begins a turn (UserPromptSubmit hook)
-- `TurnEnd` - Agent finishes a turn (Stop hook)
-- `GitCommit` - A git commit was made (PostCommit hook)
-- `SessionStart` - New session started
-- `SessionStop` - Session explicitly stopped
-
-**Key transitions:**
-
-- `IDLE + TurnStart → ACTIVE` - Agent starts working
-- `ACTIVE + TurnEnd → IDLE` - Agent finishes turn
-- `ACTIVE + GitCommit → ACTIVE` - User commits while agent is working (condense immediately)
-- `IDLE + GitCommit → IDLE` - User commits between turns (condense immediately)
-- `ENDED + GitCommit → ENDED` - Post-session commit (condense if files touched)
-
-The state machine emits **actions** (e.g., `ActionCondense`, `ActionUpdateLastInteraction`) that hook handlers dispatch to strategy-specific implementations.
-
-#### Metadata Structure
-
-**Shadow branches** (`entire/<commit-hash[:7]>-<worktreeHash[:6]>`):
-
-```
-.entire/metadata/<session-id>/
-├── full.jsonl               # Session transcript
-├── prompt.txt               # Checkpoint-scoped user prompts
-└── tasks/<tool-use-id>/     # Task checkpoints
-    ├── checkpoint.json      # UUID mapping for rewind
-    └── agent-<id>.jsonl     # Subagent transcript
-```
-
-**Metadata branch** (`entire/checkpoints/v1`) - sharded checkpoint format:
-
-```
-<checkpoint-id[:2]>/<checkpoint-id[2:]>/
-├── metadata.json            # CheckpointSummary (aggregated stats)
-├── 0/                       # First session (0-based indexing)
-│   ├── metadata.json        # Session-specific metadata
-│   ├── full.jsonl           # Session transcript
-│   ├── prompt.txt           # Checkpoint-scoped user prompts
-│   ├── content_hash.txt     # SHA256 of transcript
-│   └── tasks/<tool-use-id>/ # Task checkpoints (if applicable)
-│       ├── checkpoint.json  # UUID mapping
-│       └── agent-<id>.jsonl # Subagent transcript
-├── 1/                       # Second session (if multiple sessions)
-│   ├── metadata.json
-│   ├── full.jsonl
-│   └── ...
-└── ...
-```
-
-**Multi-session metadata.json format:**
-
-```json
-{
-  "checkpoint_id": "abc123def456",
-  "session_id": "2026-01-13-uuid", // Current/latest session
-  "session_ids": ["2026-01-13-uuid1", "2026-01-13-uuid2"], // All sessions
-  "session_count": 2, // Number of sessions in this checkpoint
-  "strategy": "manual-commit",
-  "created_at": "2026-01-13T12:00:00Z",
-  "files_touched": ["file1.txt", "file2.txt"] // Merged from all sessions
-}
-```
-
-When multiple sessions are condensed to the same checkpoint (same base commit):
-
-- Sessions are stored in numbered subfolders using 0-based indexing (`0/`, `1/`, `2/`, etc.)
-- Latest session is always in the highest-numbered folder
-- `session_ids` array tracks all sessions, `session_count` increments
-
-**Session State** (filesystem, `.git/entire-sessions/`):
-
-```
-<session-id>.json            # Active session state (base_commit, checkpoint_count, etc.)
-```
-
-#### Checkpoint ID Linking
-
-The strategy uses a **12-hex-char random checkpoint ID** (e.g., `a3b2c4d5e6f7`) as the stable identifier linking user commits to metadata.
-
-**How checkpoint IDs work:**
-
-1. **Generated once per checkpoint**: When condensing session metadata to the metadata branch
-
-2. **Added to user commits** via `Entire-Checkpoint` trailer:
-   - **Manual-commit**: Added via `prepare-commit-msg` hook (user can remove it before committing)
-
-3. **Used for directory sharding** on `entire/checkpoints/v1` branch:
-   - Path format: `<id[:2]>/<id[2:]>/`
-   - Example: `a3b2c4d5e6f7` → `a3/b2c4d5e6f7/`
-   - Creates 256 shards to avoid directory bloat
-
-4. **Appears in commit subject** on `entire/checkpoints/v1` commits:
-   - Format: `Checkpoint: a3b2c4d5e6f7`
-   - Makes `git log entire/checkpoints/v1` readable and searchable
-
-**Bidirectional linking:**
-
-```
-User commit → Metadata:
-  Extract "Entire-Checkpoint: a3b2c4d5e6f7" trailer
-  → Read a3/b2c4d5e6f7/ directory from entire/checkpoints/v1 tree at HEAD
-
-Metadata → User commits:
-  Given checkpoint ID a3b2c4d5e6f7
-  → Search user branch history for commits with "Entire-Checkpoint: a3b2c4d5e6f7" trailer
-```
-
-Note: Commit subjects on `entire/checkpoints/v1` (e.g., `Checkpoint: a3b2c4d5e6f7`) are
-for human readability in `git log` only. The CLI always reads from the tree at HEAD.
-
-**Example:**
-
-```
-User's commit (on main branch):
-  "Implement login feature
-
-  Entire-Checkpoint: a3b2c4d5e6f7"
-       ↓ ↑
-       Linked via checkpoint ID
-       ↓ ↑
-entire/checkpoints/v1 commit:
-  Subject: "Checkpoint: a3b2c4d5e6f7"
-
-  Tree: a3/b2c4d5e6f7/
-    ├── metadata.json (checkpoint_id: "a3b2c4d5e6f7")
-    ├── full.jsonl (session transcript)
-    └── prompt.txt
-```
-
-#### Commit Trailers
-
-**On user's active branch commits:**
-
-- `Entire-Checkpoint: <checkpoint-id>` - 12-hex-char ID linking to metadata on `entire/checkpoints/v1`
-  - Added via `prepare-commit-msg` hook; user can remove it before committing to skip linking
-
-**On shadow branch commits (`entire/<commit-hash[:7]>-<worktreeHash[:6]>`):**
-
-- `Entire-Session: <session-id>` - Session identifier
-- `Entire-Metadata: <path>` - Path to metadata directory within the tree
-- `Entire-Task-Metadata: <path>` - Path to task metadata directory (for task checkpoints)
-- `Entire-Strategy: manual-commit` - Strategy that created the commit
-
-**On metadata branch commits (`entire/checkpoints/v1`):**
-
-Commit subject: `Checkpoint: <checkpoint-id>` (or custom subject for task checkpoints)
-
-Trailers:
-
-- `Entire-Session: <session-id>` - Session identifier
-- `Entire-Strategy: <strategy>` - Strategy name (manual-commit)
-- `Entire-Agent: <agent-name>` - Agent name (optional, e.g., "Claude Code")
-- `Ephemeral-branch: <branch>` - Shadow branch name (optional)
-- `Entire-Metadata-Task: <path>` - Task metadata path (optional, for task checkpoints)
-
-**Note:** The strategy keeps active branch history clean - the only addition to user commits is the single `Entire-Checkpoint` trailer. It never creates commits on the active branch (the user creates them manually). All detailed session data (transcripts, prompts, context) is stored on the `entire/checkpoints/v1` orphan branch or shadow branches.
-
-#### Multi-Session Behavior
-
-**Concurrent Sessions:**
-
-- When a second session starts in the same directory while another has uncommitted checkpoints, a warning is shown
-- Both sessions can proceed - their checkpoints interleave on the same shadow branch
-- Each session's `RewindPoint` includes `SessionID` and `SessionPrompt` to help identify which checkpoint belongs to which session
-- On commit, all sessions are condensed together with archived sessions in numbered subfolders
-- Note: Different git worktrees have separate shadow branches (worktree-specific naming), so concurrent sessions in different worktrees do not conflict
-
-**Orphaned Shadow Branches:**
-
-- A shadow branch is "orphaned" if it exists but has no corresponding session state file
-- This can happen if the state file is manually deleted or lost
-- When a new session starts with an orphaned branch, the branch is automatically reset
-- If the existing session DOES have a state file (concurrent session in same directory), a `SessionIDConflictError` is returned
-
-**Shadow Branch Migration (Pull/Rebase):**
-
-- If user does stash → pull → apply (or rebase), HEAD changes but work isn't committed
-- The shadow branch would be orphaned at the old commit
-- Detection: base commit changed AND old shadow branch still exists (would be deleted if user committed)
-- Action: shadow branch is renamed from `entire/<old-hash>-<worktreeHash>` to `entire/<new-hash>-<worktreeHash>`
-- Session continues seamlessly with checkpoints preserved
+- [Sessions and Checkpoints](docs/architecture/sessions-and-checkpoints.md) - domain model, storage layout, checkpoint ID linking, commit trailers, package structure
+- [Checkpoint Scenarios](docs/architecture/checkpoint-scenarios.md) - phase state machine and worked condensation scenarios
 
 #### When Modifying the Strategy
 
 - The strategy must implement the full `Strategy` interface
 - Test with `mise run test` - strategy tests are in `*_test.go` files
-- **Update both CLAUDE.md and AGENTS.md** when modifying the strategy to keep documentation current
+- Keep this file and `docs/architecture/sessions-and-checkpoints.md` current when changing strategy behavior (`AGENTS.md` is a symlink to this file)
 
 ### `entire review` Command
 
-`entire review` runs a set of configured review skills inside an agent session. The review session is an immutable fact attached to a checkpoint — no verdict, no status tracking, no empty commits. On the next `git commit`, the review session is condensed into the checkpoint metadata alongside normal sessions, permanently recording that the code was reviewed and which skills were run.
+`entire review` runs a configured review profile. Keep documentation brief and user-facing.
 
-#### Command Surface
+See [Review Command](docs/architecture/review-command.md) for usage, minimal profile config, and key files.
 
-```
-entire review                          # Normal run: load config, run configured agent(s)
-entire review --edit                   # Re-open the skills picker before running
-entire review --agent <name>           # Force a specific configured agent (skips multi-picker)
-entire review attach <session-id>      # Tag an existing agent session as a review (post-hoc)
-entire review attach --force           # Skip confirmation
-entire review attach --agent <name>    # Agent that created the session
-entire review attach --skills <s,...>  # Declare which skills were run
-```
+### Agent-Safe CLI Fallbacks
 
-When two or more launchable agents are configured and `--agent` is not set, a multi-select picker appears with an optional per-run prompt field (e.g. "focus on security"). Selecting one agent or passing `--agent` runs the single-agent path; selecting two or more runs the N-agent path.
+When building CLI features, do not make useful output available only through a
+TUI, picker, wizard, terminal selection menu, confirmation dialog, or stdin
+question. Agents must be able to complete the same read-only workflow from a
+non-interactive terminal.
 
-#### Settings Schema
+Plain text output is acceptable when it contains the full information needed for
+the workflow. JSON is preferred for structured data, following existing patterns
+such as `--json` on `status`, `agent-help`, `sessions`, `search`, and trail
+finding commands. Long human-readable output may use a pager in TTY mode, but
+must provide a bypass like the existing `--no-pager` pattern on `explain`.
 
-Review skills are configured per-agent in `.entire/settings.json`:
+For interactive browsing flows, provide one of these non-interactive shapes:
 
-```json
-{
-  "review": {
-    "claude-code": {"skills": ["/pr-review-toolkit:review-pr"], "prompt": "Be thorough."},
-    "codex": {"skills": ["/codex:adversarial-review"]}
-  }
-}
-```
+- a list command that prints stable identifiers, plus a show/detail command that
+  accepts an identifier
+- a flag or positional argument that selects the item directly
+- a complete text or JSON fallback when stdout is not a terminal, like existing
+  static/text fallbacks for TUI-backed commands
 
-The key is the agent name. The value is a `ReviewConfig` with `skills` (skill invocations passed verbatim to the agent) and optional `prompt` (an always-prompt appended to the composed prompt). Settings field: `EntireSettings.Review` in `cmd/entire/cli/settings/settings.go`.
+When reviewing CLI changes, inspect terminal-gated paths such as
+`IsTerminalWriter`, `CanPromptInteractively`, Bubble Tea, `huh`, direct stdin
+reads, terminal selection menus, confirmation dialogs, and wizard flows. Flag
+the change if a non-interactive agent can only see a menu, preview, truncated
+summary, or cannot select the item whose details matter.
 
-#### How It Works (env-var handshake)
+Tests for interactive CLI features should cover the non-interactive path. See
+the "Spawning subprocesses in tests (TTY detection)" section above for the
+`execx.NonInteractive` pattern when testing a real `entire` command.
 
-1. `entire review` selects the configured agent (override → alphabetically first → prompt if multiple), composes the review prompt via `review.ComposeReviewPrompt`, and computes scope (mainline base ref via `review.ComputeScopeStats`, overridable with `--base`).
-2. **For launchable agents** (claude-code, codex, gemini-cli): the spawned agent process is given env vars `ENTIRE_REVIEW_{SESSION,AGENT,SKILLS,PROMPT,STARTING_SHA}` that the agent's `UserPromptSubmit` lifecycle hook reads to tag the session as `Kind = "agent_review"` with the configured skills/prompt. Each spawned process has its own env, so multiple worktrees and multi-agent runs are correct by construction (no shared marker file, no race).
-3. **For non-launchable agents** (cursor, opencode, factoryai-droid): `RunMarkerFallback` writes a `PendingReviewMarker` file and prints guidance — the user opens the agent themselves and runs the skills. Single shared file (`review/marker_fallback.go`); adding new non-launchable agents is a registry entry, not a new file.
-4. The agent runs the review skills; the session ends naturally.
-5. On the next `git commit`, the PostCommit hook condenses the review session into the checkpoint on `entire/checkpoints/v1`, with `Kind` and `ReviewSkills` recorded in `CommittedMetadata`.
-6. The `CheckpointSummary` sets `HasReview = true` for O(1) lookup. `HasReview` is an umbrella "any review happened" flag — future review kinds (e.g. manual review) should also set it.
-7. `entire status` and the re-run guard read `HasReview` from the checkpoint metadata (no commit history walking).
+Existing good patterns:
 
-#### Checkpoint Metadata
+- `entire investigate --findings` prints a complete plain-text list and includes
+  `view: entire investigate show <run-id>` hints.
+- `entire investigate show <run-id>` prints the saved investigation summary and
+  findings without needing a TUI.
+- `entire repo clone /gh/...` prompts only when several clusters are possible;
+  without a TTY it asks for `--cluster`.
+- `entire experts --tui` is safe because the TUI is opt-in and non-TTY output
+  falls back to deterministic plain text.
+- `entire explain --no-pager` is the local pattern for avoiding pager-only long
+  text output.
+- `entire status --json`, `entire agent-help --json`, `entire sessions list --json`,
+  and trail finding commands show the local `--json` convention.
 
-Review metadata is stored at two levels on `entire/checkpoints/v1`:
-
-- **`CommittedMetadata` (per-session)**: `kind: "agent_review"`, `review_skills: ["/skill1", "/skill2"]`, `review_prompt: "..."`
-- **`CheckpointSummary` (per-checkpoint)**: `has_review: true` (umbrella; set when any session in the checkpoint has a review-kind `Kind`)
-
-#### Architecture
-
-- **`AgentReviewer` interface** (`cmd/entire/cli/review/types/reviewer.go`): per-agent contract with `Name() string` and `Start(ctx, RunConfig) (Process, error)`. Each launchable agent implements this in its own package.
-- **`ReviewerTemplate`** (`cmd/entire/cli/review/types/template.go`): shared scaffolding (Spawn → pipe stdout → run parser → forward events → close). Each agent supplies only its `BuildCmd` (argv/env) and `Parser` (stdout-to-Event stream).
-- **`Sink` interface**: consumers of the event stream. Production sinks: `DumpSink` (post-run per-agent narrative), `TUISink` (Bubble Tea live dashboard with Ctrl+O drill-in), `SynthesisSink` (opt-in y/N cross-agent verdict). Sinks are composed by `composeMultiAgentSinks` based on TTY detection.
-- **`Run(ctx, reviewer, cfg, sinks)`** (`cmd/entire/cli/review/run.go`): single-agent orchestrator. Forwards events to all sinks via `AgentEvent`, calls `RunFinished` once at end with a populated `RunSummary`. Sink dispatch is serialized; sinks need not internally synchronize.
-- **`RunMulti(ctx, reviewers, cfg, sinks)`** (`cmd/entire/cli/review/run_multi.go`): N-agent orchestrator. Each agent runs concurrently in its own goroutine; events fan into a single dispatch loop so the serial-dispatch contract is preserved. Per-agent skills/prompts are injected via `perAgentConfiguredReviewer` adapter (each reviewer sees its own `RunConfig` despite the shared API surface).
-- **Env-var contract** (`cmd/entire/cli/review/env.go`): single source of truth for `ENTIRE_REVIEW_*` constants used by spawn-side and lifecycle adoption.
-- **Scope detection** (`cmd/entire/cli/review/scope.go`): `detectScopeBaseRef` returns the first existing ref from the fallback chain `origin/HEAD → origin/main → origin/master → main → master`. Overridable per-invocation via `--base <ref>` (validated through go-git's `ResolveRevision`). Banner output: "Reviewing feat/X vs main: 3 commits, 7 files changed, 2 uncommitted".
-
-#### Multi-Agent UI
-
-When `RunMulti` is dispatched in a TTY, the sink slice is `[TUISink, DumpSink, SynthesisSink?]`:
-
-- **`TUISink` / `reviewTUIModel`** (`cmd/entire/cli/review/tui_sink.go`, `tui_model.go`, `tui_detail.go`): live dashboard with one row per agent (name, status, tokens, last assistant preview, duration). `Ctrl+O` enters drill-in mode on the alt screen showing the full event buffer for the selected agent; `Esc` returns to the dashboard. `Ctrl+C` cancels the run via the shared `CancelFunc`. The model uses `tea.WithoutSignalHandler` so the cobra root retains SIGINT routing. After all agents finish, the user dismisses with any key — `RunFinished` blocks on dismissal so `DumpSink` renders below the TUI rather than overlapping it.
-- **`SynthesisSink`** (`cmd/entire/cli/review/synthesis_sink.go`): opt-in y/N prompt offered after the dump. On "y", composes a synthesis prompt covering all agent narratives + per-run user prompt, calls the configured summary provider, and prints the unified verdict. Skipped silently when stdin can't prompt, the run was cancelled, or fewer than 2 agents produced usable output. Provider failures degrade gracefully ("synthesis unavailable: <err>") so the user can still commit.
-- **Sink composition** (`composeMultiAgentSinks` in `cmd/entire/cli/review/cmd.go`): pure helper taking explicit `isTTY`/`canPrompt` so tests don't depend on real TTY detection. `findTUISink` picks the TUI out of the slice for `Start`/`Wait` lifecycle hooks.
-
-#### Skill Discovery (Claude Code)
-
-`DiscoverReviewSkills` (`cmd/entire/cli/agent/claudecode/discovery.go`) walks three roots: plugin cache (`~/.claude/plugins/cache/<market>/<plugin>/<version>/{skills,commands,agents}`), user skills (`~/.claude/skills`), user commands/agents (`~/.claude/commands`, `~/.claude/agents`).
-
-For the plugin cache, `pickLatestVersion` picks ONE version directory per plugin: highest valid semver wins; if no entries parse as semver, the lexicographic max is picked (handles the `unknown` sentinel some plugins ship). Without this, multiple installed versions of a plugin produced duplicate skill entries in the picker and prompt.
-
-#### Anti-Features (do NOT recreate)
-
-The redesign eliminated several constructs from the prior implementation. None should be reintroduced without explicit design:
-
-- `PendingReviewMarker` for launchable agents (env-var handshake makes it unnecessary)
-- `WorktreePath` field + worktree-scoping logic (env per process eliminates the multi-tenant problem)
-- `AgentEntries` map on the marker (each agent has its own env)
-- Marker overwrite tripwire / refuse-attach guard (the bug classes they defended against don't exist)
-- `--track-only` flag (intentionally removed by #1009)
-- `--postreview` / `--finalize` / empty review commits / `/entire-review:finish` skill installer
-- `Launcher` + `HeadlessLauncher` as separate interfaces (single `AgentReviewer`)
-- Codex chrome-line filtering or any agent-specific stdout post-processing in shared multi-agent code (per-agent parsers own their format; shared code only sees `Event` variants)
-- `sync.Once`-guarded onCancel + parallel `signal.Notify` goroutine (single cancel from start)
-
-#### Key Files
-
-- `cmd/entire/cli/review/cmd.go` — `NewCommand()`, `runReview` dispatch fork, `composeMultiAgentSinks`
-- `cmd/entire/cli/review/picker.go` / `multipicker.go` — config-edit picker, first-run setup, single- and multi-agent selection
-- `cmd/entire/cli/review/attach.go` + `cli/review_helpers.go:newReviewAttachCmd` — `entire review attach` subcommand
-- `cmd/entire/cli/review/marker_fallback.go` — non-launchable agent flow (single shared file)
-- `cmd/entire/cli/review/prompt.go` / `scope.go` / `run.go` / `dump.go` / `run_multi.go` — core machinery (single-agent + N-agent fan-in)
-- `cmd/entire/cli/review/tui_sink.go` / `tui_model.go` / `tui_detail.go` — Bubble Tea TUI sink
-- `cmd/entire/cli/review/synthesis_sink.go` / `synthesis_prompt.go` — opt-in cross-agent verdict
-- `cmd/entire/cli/review/types/{reviewer,sink,template}.go` — interface contracts (CU2 + CU4 + CU5b)
-- `cmd/entire/cli/review/env.go` — `ENTIRE_REVIEW_*` constants + `EncodeSkills`/`DecodeSkills` + `AppendReviewEnv`
-- `cmd/entire/cli/agent/{claudecode,codex,geminicli}/reviewer.go` — per-agent `AgentReviewer` implementations (claude-code, codex, gemini-cli)
-- `cmd/entire/cli/agent/claudecode/discovery.go` — skill discovery + `pickLatestVersion` plugin-cache dedupe
-- `cmd/entire/cli/lifecycle.go` — `adoptReviewEnv` reads `ENTIRE_REVIEW_*` from process env; replaces marker-file adoption
-- `cmd/entire/cli/review_bridge.go` / `review_helpers.go` — bridge code in `cli` package for cycle-bound functions (`headHasReviewCheckpoint`, `launchableReviewerFor`, `newReviewAttachCmd`, `lazySynthesisProvider`)
-- `cmd/entire/cli/checkpoint/checkpoint.go` — `Kind`, `ReviewSkills`, `ReviewPrompt` on `CommittedMetadata`; `HasReview` on `CheckpointSummary`
-- `cmd/entire/cli/settings/settings.go` — `EntireSettings.Review` field
+Do not require JSON everywhere. Human-readable text is fine if it contains the
+complete information an agent needs. The failure mode is requiring an
+interactive terminal to select something or reveal details.
 
 # Important Notes
 

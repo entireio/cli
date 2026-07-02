@@ -301,19 +301,16 @@ func TestTUIModel_DashboardUsesAltScreen(t *testing.T) {
 	}
 }
 
-func TestTUIModel_FinishedStopsTickRedraws(t *testing.T) {
+// The dashboard must keep ticking through finalize so the footer animates.
+func TestTUIModel_FinishedKeepsTicking(t *testing.T) {
 	t.Parallel()
 	m := newTestModel([]string{"agent-a"}, func() {})
 	updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
 	m = mustModel(t, updated)
 
 	_, tickCmd := m.Update(tickMsg(time.Now()))
-	if tickCmd != nil {
-		t.Fatal("finished dashboard should not schedule duration ticks")
-	}
-	_, spinnerCmd := m.Update(m.spinner.Tick())
-	if spinnerCmd != nil {
-		t.Fatal("finished dashboard should not schedule spinner ticks")
+	if tickCmd == nil {
+		t.Fatal("finalizing dashboard should keep scheduling duration ticks")
 	}
 }
 
@@ -355,61 +352,44 @@ func TestTUIModel_InitializesDetailViewport(t *testing.T) {
 	}
 }
 
-// TestTUIModel_DelegatesMouseWheelToViewport pins that mouse-wheel events in
-// detail mode reach the viewport's MouseWheelMsg handler. The bug this guards
-// against: setting View.MouseMode = MouseModeCellMotion on entry to detail
-// mode caused the Program to receive mouse events, but the Update switch
-// only routed tea.KeyPressMsg — mouse events fell through unhandled and the
-// viewport never got a chance to scroll.
-func TestTUIModel_DelegatesMouseWheelToViewport(t *testing.T) {
+// TestTUIModel_DelegatesScrollInputToViewport pins that scroll input (mouse
+// wheel and PgDn) in detail mode reaches the viewport and advances YOffset
+// instead of being swallowed by the model's Update switch.
+func TestTUIModel_DelegatesScrollInputToViewport(t *testing.T) {
 	t.Parallel()
-	m := newTestModel([]string{"agent-a"}, func() {})
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
-	m = mustModel(t, updated)
-	long := strings.Repeat("paragraph of text ", 20)
-	for range 5 {
-		updated, _ = m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: long}})
-		m = mustModel(t, updated)
-	}
-	updated, _ = m.Update(testCtrlKey('o'))
-	m = mustModel(t, updated)
-	m.detail.GotoTop()
-	startOffset := m.detail.YOffset()
 
-	updated, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
-	m = mustModel(t, updated)
-	if m.detail.YOffset() <= startOffset {
-		t.Errorf("expected mouse-wheel-down to advance viewport YOffset beyond %d; got %d", startOffset, m.detail.YOffset())
+	tests := []struct {
+		name  string
+		input tea.Msg
+	}{
+		{"mouse-wheel-down", tea.MouseWheelMsg{Button: tea.MouseWheelDown}},
+		{"pgdn", tea.KeyPressMsg{Code: tea.KeyPgDown}},
 	}
-}
 
-// TestTUIModel_DelegatesScrollKeysToViewport pins that pager keys (PgDn) in
-// detail mode reach the viewport's internal keymap and advance YOffset rather
-// than being swallowed by the model's switch.
-func TestTUIModel_DelegatesScrollKeysToViewport(t *testing.T) {
-	t.Parallel()
-	m := newTestModel([]string{"agent-a"}, func() {})
-	// Size the window so the viewport has a sensible height.
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
-	m = mustModel(t, updated)
-	// Populate enough content to scroll. AssistantText with long text wraps
-	// to many viewport lines.
-	long := strings.Repeat("paragraph of text ", 20)
-	for range 5 {
-		updated, _ = m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: long}})
-		m = mustModel(t, updated)
-	}
-	// Enter detail mode (auto-tails to bottom).
-	updated, _ = m.Update(testCtrlKey('o'))
-	m = mustModel(t, updated)
-	// Jump to top so PgDn has somewhere to scroll into.
-	m.detail.GotoTop()
-	startOffset := m.detail.YOffset()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestModel([]string{"agent-a"}, func() {})
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+			m = mustModel(t, updated)
+			// Fill the viewport with enough wrapped lines to scroll.
+			long := strings.Repeat("paragraph of text ", 20)
+			for range 5 {
+				updated, _ = m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: long}})
+				m = mustModel(t, updated)
+			}
+			// Enter detail mode, then jump to top so the input can scroll down.
+			updated, _ = m.Update(testCtrlKey('o'))
+			m = mustModel(t, updated)
+			m.detail.GotoTop()
+			startOffset := m.detail.YOffset()
 
-	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
-	m = mustModel(t, updated)
-	if m.detail.YOffset() <= startOffset {
-		t.Errorf("expected PgDn to advance viewport YOffset beyond %d; got %d", startOffset, m.detail.YOffset())
+			updated, _ = m.Update(tt.input)
+			m = mustModel(t, updated)
+			if m.detail.YOffset() <= startOffset {
+				t.Errorf("expected %s to advance viewport YOffset beyond %d; got %d", tt.name, startOffset, m.detail.YOffset())
+			}
+		})
 	}
 }
 
@@ -442,6 +422,51 @@ func TestTUIModel_RunFinishedMsg_MarksFinished(t *testing.T) {
 	m2 := mustModel(t, updated)
 	if !m2.finished {
 		t.Error("model should be finished after runFinishedMsg")
+	}
+}
+
+// A summary Failed must override an optimistic stream Succeeded so the row and
+// the counts line agree.
+func TestTUIModel_RunFinishedMsg_SummaryFailedOverridesStreamSucceeded(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+
+	updated, _ := m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.Finished{Success: true}})
+	m = mustModel(t, updated)
+	if m.rows[0].status != reviewtypes.AgentStatusSucceeded {
+		t.Fatalf("setup: want stream Succeeded, got %v", m.rows[0].status)
+	}
+
+	summary := reviewtypes.RunSummary{AgentRuns: []reviewtypes.AgentRun{
+		{Name: "agent-a", Status: reviewtypes.AgentStatusFailed},
+	}}
+	updated, _ = m.Update(runFinishedMsg{summary: summary})
+	m = mustModel(t, updated)
+
+	if m.rows[0].status != reviewtypes.AgentStatusFailed {
+		t.Errorf("row should downgrade to failed to match summary, got %v", m.rows[0].status)
+	}
+	if got := m.countsLine(); !strings.Contains(got, "1 failed") {
+		t.Errorf("counts line should report 1 failed, got %q", got)
+	}
+}
+
+// Stream Failed (a real RunError) must not be downgraded to a blanket Cancelled.
+func TestTUIModel_RunFinishedMsg_StreamFailedStickyOverCancel(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+
+	updated, _ := m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.RunError{Err: errors.New("boom")}})
+	m = mustModel(t, updated)
+
+	summary := reviewtypes.RunSummary{AgentRuns: []reviewtypes.AgentRun{
+		{Name: "agent-a", Status: reviewtypes.AgentStatusCancelled},
+	}}
+	updated, _ = m.Update(runFinishedMsg{summary: summary})
+	m = mustModel(t, updated)
+
+	if m.rows[0].status != reviewtypes.AgentStatusFailed {
+		t.Errorf("stream Failed should stay sticky over summary Cancelled, got %v", m.rows[0].status)
 	}
 }
 
@@ -537,10 +562,7 @@ func TestTUIModel_PostFinishIgnoresRandomKeys(t *testing.T) {
 	}
 }
 
-// TestTUIModel_PostFinishFooterUsesExplicitExitKeys pins the dashboard footer
-// switches from the old "Press any key to exit." prompt to an explicit-keys
-// hint that mentions Ctrl+O and the named exit keys.
-func TestTUIModel_PostFinishFooterUsesExplicitExitKeys(t *testing.T) {
+func TestTUIModel_PostFinishFooterShowsFinalizing(t *testing.T) {
 	t.Parallel()
 	m := newTestModel([]string{"agent-a"}, func() {})
 	m.termWidth = 120
@@ -548,14 +570,11 @@ func TestTUIModel_PostFinishFooterUsesExplicitExitKeys(t *testing.T) {
 	m = mustModel(t, updated)
 
 	out := m.dashboardView()
-	if strings.Contains(out, "Press any key to exit.") {
-		t.Errorf("post-finish footer must not show legacy 'Press any key to exit.' line:\n%s", out)
+	if !strings.Contains(out, "Finalizing output...") {
+		t.Errorf("post-finish footer should show finalizing output:\n%s", out)
 	}
-	if !strings.Contains(out, "Ctrl+O") {
-		t.Errorf("post-finish footer should mention Ctrl+O for drill-in:\n%s", out)
-	}
-	if !strings.Contains(out, "q/Esc/Enter") {
-		t.Errorf("post-finish footer should list q/Esc/Enter as exit keys:\n%s", out)
+	if strings.Contains(out, "q/Esc/Enter") {
+		t.Errorf("post-finish footer should not ask for a dismissal key:\n%s", out)
 	}
 }
 
@@ -1219,5 +1238,51 @@ func TestTUIModel_PostFinishInDetailMode_EscReturnsToDashboard(t *testing.T) {
 				t.Error("Esc post-finish in detail mode must NOT quit; it returns to dashboard")
 			}
 		}
+	}
+}
+
+func TestTUIModel_RunFinishedWaitsForPostRunComplete(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+	updated, cmd := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
+	if !mustModel(t, updated).finished {
+		t.Fatal("model should be finished after runFinishedMsg")
+	}
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Fatal("runFinishedMsg must not quit; the final judge may still be running")
+		}
+	}
+
+	_, cmd = mustModel(t, updated).Update(postRunCompleteMsg{})
+	if cmd == nil {
+		t.Fatal("postRunCompleteMsg should return a quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("postRunCompleteMsg command = %T, want tea.QuitMsg", cmd())
+	}
+}
+
+func TestTUIModel_FinalPhaseRow(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+	m.termWidth = 120
+	updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
+	m = mustModel(t, updated)
+	updated, _ = m.Update(finalPhaseStartedMsg{name: "judge: claude-code"})
+	m = mustModel(t, updated)
+
+	out := m.dashboardView()
+	if !strings.Contains(out, "judge: claude-code") || !strings.Contains(out, "judging") {
+		t.Fatalf("final phase should be visible while running:\n%s", out)
+	}
+	if !strings.Contains(out, "Final judge is consolidating") {
+		t.Fatalf("footer should describe final judge phase:\n%s", out)
+	}
+
+	updated, _ = m.Update(finalPhaseFinishedMsg{})
+	out = mustModel(t, updated).dashboardView()
+	if !strings.Contains(out, "✓ done") {
+		t.Fatalf("final phase should show done after completion:\n%s", out)
 	}
 }

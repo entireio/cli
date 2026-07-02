@@ -36,9 +36,12 @@ const (
 // GeminiSettingsFileName is the settings file used by Gemini CLI.
 const GeminiSettingsFileName = "settings.json"
 
-// entireHookPrefixes are command prefixes that identify Entire hooks
+// entireHookPrefixes are command prefixes that identify Entire hooks. The
+// "go run" prefix is retained so hooks installed by older versions are still
+// recognized.
 var entireHookPrefixes = []string{
 	"entire ",
+	agent.LocalDevHookScript + " ",
 	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
 }
 
@@ -102,7 +105,7 @@ func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, localDev bool, force 
 	// Define hook commands based on localDev mode
 	var cmdPrefix string
 	if localDev {
-		cmdPrefix = `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks gemini `
+		cmdPrefix = agent.LocalDevHookScript + " hooks gemini "
 	} else {
 		cmdPrefix = "entire hooks gemini "
 	}

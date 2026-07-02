@@ -17,6 +17,12 @@ import (
 // BlobFetchFunc fetches missing blob objects by hash from a remote.
 type BlobFetchFunc func(ctx context.Context, hashes []plumbing.Hash) error
 
+// RefFetchFunc fetches a single checkpoint ref from the remote into the local
+// ref of the same name. The git-refs store uses it to resolve a checkpoint ref
+// that is not present locally (e.g. written on another machine). The checkpoint
+// package cannot resolve the remote target itself, so the CLI layer injects it.
+type RefFetchFunc func(ctx context.Context, ref plumbing.ReferenceName) error
+
 // FetchingTree wraps a git tree to automatically fetch missing blobs on demand.
 // After a treeless fetch (--filter=blob:none), tree objects are available locally
 // but blob objects are not. Each File() call checks whether the target blob

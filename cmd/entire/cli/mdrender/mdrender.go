@@ -28,6 +28,10 @@ import (
 // is available. Matches the cap used by status_style.getTerminalWidth.
 const DefaultTerminalWidth = 80
 
+// MaxRenderBytes caps glamour input: its render cost is super-linear (~6s at
+// 2MB, minutes beyond), so above this we return raw markdown unchanged.
+const MaxRenderBytes = 256 * 1024
+
 // Render produces a glamour-styled string from markdown using the entire
 // CLI palette. width is the word-wrap target; darkBackground selects the
 // dark or light palette variant.
@@ -37,6 +41,10 @@ const DefaultTerminalWidth = 80
 // than a runtime condition. Renderer panics are recovered and returned as
 // errors so callers can fall back to raw markdown instead of crashing.
 func Render(markdown string, width int, darkBackground bool) (rendered string, err error) {
+	if len(markdown) > MaxRenderBytes {
+		return markdown, nil
+	}
+
 	defer func() {
 		if r := recover(); r != nil {
 			rendered = ""
@@ -73,12 +81,11 @@ func RenderForWriter(w io.Writer, markdown string) (string, error) {
 	return Render(markdown, terminalWidth(w), termenv.HasDarkBackground())
 }
 
-// shouldRender returns true if w is a terminal writer and NO_COLOR is unset.
+// shouldRender returns true when styled output is appropriate for w
+// (terminal writer, NO_COLOR unset, no legacy console) — see
+// interactive.ShouldStyle.
 func shouldRender(w io.Writer) bool {
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	return interactive.IsTerminalWriter(w)
+	return interactive.ShouldStyle(w)
 }
 
 // terminalWidth returns the writer's terminal width capped at 80.

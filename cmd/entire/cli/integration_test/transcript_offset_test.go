@@ -104,7 +104,7 @@ func TestCheckpointTranscriptStart_IncludesUncondensedTurns(t *testing.T) {
 	content, found := env.ReadFileFromBranch(paths.MetadataBranchName, metadataPath)
 	require.True(t, found, "Session metadata should exist for checkpoint %s", checkpointID2)
 
-	var metadata checkpoint.CommittedMetadata
+	var metadata checkpoint.Metadata
 	require.NoError(t, json.Unmarshal([]byte(content), &metadata))
 
 	t.Logf("Checkpoint 2: checkpoint_transcript_start=%d (commit 1 offset was %d)",

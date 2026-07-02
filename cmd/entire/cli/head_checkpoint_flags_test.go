@@ -8,6 +8,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 	"github.com/go-git/go-git/v6"
@@ -21,8 +22,7 @@ const (
 
 // setupHeadFlagsRepo creates a git repo with an initial commit, switches the
 // process CWD to it (cannot t.Parallel — t.Chdir conflicts), and returns the
-// opened *git.Repository. Settings have v2 enabled so the v2 store also
-// resolves the checkpoint summary.
+// opened *git.Repository.
 func setupHeadFlagsRepo(t *testing.T) *git.Repository {
 	t.Helper()
 	tmpDir := t.TempDir()
@@ -31,13 +31,7 @@ func setupHeadFlagsRepo(t *testing.T) *git.Repository {
 	testutil.GitAdd(t, tmpDir, "init.txt")
 	testutil.GitCommit(t, tmpDir, "init")
 	t.Chdir(tmpDir)
-
-	require.NoError(t, os.MkdirAll(".entire", 0o750))
-	require.NoError(t, os.WriteFile(
-		".entire/settings.json",
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`),
-		0o600,
-	))
+	paths.ClearWorktreeRootCache()
 
 	repo, err := git.PlainOpen(tmpDir)
 	require.NoError(t, err)
@@ -51,8 +45,8 @@ func setupHeadFlagsRepo(t *testing.T) *git.Repository {
 func writeHeadCheckpointWithFlags(t *testing.T, repo *git.Repository, hasReview, hasInvestigation bool) id.CheckpointID {
 	t.Helper()
 	cpID := id.MustCheckpointID("aabbccdd1122")
-	store := checkpoint.NewGitStore(repo)
-	require.NoError(t, store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	require.NoError(t, store.Write(context.Background(), checkpoint.Session{
 		CheckpointID:     cpID,
 		SessionID:        "head-flags-session",
 		Strategy:         "manual-commit",

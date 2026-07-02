@@ -43,10 +43,15 @@ Files:
    explanation.
 
    The doc has a "## System under investigation" section. Fill it with a
-   small diagram (ASCII or mermaid) the first turn the system is
-   identified, and refine it as understanding grows. For queue/worker
-   shapes, the diagram should show producer → input → consumer → retries
-   → cost amplification. Two boxes and an arrow beats a paragraph.
+   small diagram the first turn the system is identified, and refine it as
+   understanding grows. Use a Mermaid diagram (a fenced ```mermaid
+   block) — NOT ASCII art, which renders poorly. Prefer `flowchart LR`
+   for producer/consumer or data-flow shapes; it may fork to show
+   success/failure paths. For queue/worker shapes, the diagram should show
+   producer → input → consumer → retries → cost amplification. Keep node and
+   edge labels to a few words (file:line refs are fine) — paragraph-length
+   labels make the rendered diagram hard to read. Two boxes and an arrow
+   beats a paragraph.
 
    Do NOT add a "## Recommendations" or "## Action items" section.
    Investigations end at the Conclusion. Once consensus is reached, the

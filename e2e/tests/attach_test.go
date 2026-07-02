@@ -68,7 +68,7 @@ func TestAttachSessionAddsToExistingCheckpoint(t *testing.T) {
 		require.NoError(t, err, "agent failed")
 
 		checkpointBefore := ""
-		if _, refErr := testutil.GitOutputErr(s.Dir, "rev-parse", "--verify", testutil.CheckpointVerifyRef()); refErr == nil {
+		if testutil.CheckpointsPresent(s.Dir) {
 			checkpointBefore = testutil.CurrentCheckpointRef(t, s.Dir)
 		}
 

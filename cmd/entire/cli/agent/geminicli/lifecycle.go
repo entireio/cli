@@ -16,6 +16,7 @@ var (
 	_ agent.TranscriptAnalyzer = (*GeminiCLIAgent)(nil)
 	_ agent.TokenCalculator    = (*GeminiCLIAgent)(nil)
 	_ agent.HookResponseWriter = (*GeminiCLIAgent)(nil)
+	_ agent.ContextInjector    = (*GeminiCLIAgent)(nil)
 )
 
 // WriteHookResponse outputs a hook response message as plain text to stdout.
@@ -35,6 +36,23 @@ func (g *GeminiCLIAgent) WriteHookResponse(message string) error {
 		return fmt.Errorf("failed to write hook response: %w", err)
 	}
 	return nil
+}
+
+// InjectionEvent reports that Gemini injects model context at TurnStart (its
+// BeforeAgent hook). Gemini CLI's hook runner merges
+// hookSpecificOutput.additionalContext into the model context (the plain-text
+// path in WriteHookResponse is only a systemMessage double-display workaround,
+// which does not apply to additionalContext).
+func (g *GeminiCLIAgent) InjectionEvent() agent.EventType { return agent.TurnStart }
+
+// RenderContextInjection renders the BeforeAgent additionalContext payload
+// Gemini injects into the model context.
+func (g *GeminiCLIAgent) RenderContextInjection(inj agent.ContextInjection) ([]byte, error) {
+	out, err := agent.RenderAdditionalContextHookOutput("BeforeAgent", inj.Text)
+	if err != nil {
+		return nil, fmt.Errorf("render gemini context injection: %w", err)
+	}
+	return out, nil
 }
 
 // HookNames returns the hook verbs Gemini CLI supports.

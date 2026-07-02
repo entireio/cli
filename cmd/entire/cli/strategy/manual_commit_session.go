@@ -82,6 +82,12 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 	var states []*SessionState
 	for _, sessionState := range sessionStates {
 		state := sessionState
+		// Adopted-away source records are tombstones: keep them until normal stale
+		// expiry so old source hooks cannot recreate a second live state.
+		if state.AdoptedIntoWorktreePath != "" {
+			states = append(states, state)
+			continue
+		}
 
 		// Skip and cleanup orphaned sessions whose shadow branch no longer exists.
 		// Keep active sessions (shadow branch may not be created yet) and sessions

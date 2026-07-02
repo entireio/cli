@@ -1,0 +1,34 @@
+{
+  "id": "trail-confidence",
+  "display_name": "Confidence Eval",
+  "enabled": true,
+  "scope": "trail",
+  "runtime": {
+    "kind": "prompt_runner",
+    "agent": "claude",
+    "timeout_ms": 300000,
+    "sandbox": {
+      "base_template": "claude",
+      "repo_token": "read"
+    }
+  },
+  "automation": {
+    "kind": "trail_prompt"
+  },
+  "prompt": {
+    "template": "You are a confidence evaluator for the Entire CLI, a Go codebase (cobra/huh). Analyze branch \"{{branch}}\" vs \"{{base_branch}}\".\n\nGather context:\n1. git diff origin/{{base_branch}}...HEAD --stat\n2. git diff origin/{{base_branch}}...HEAD\n3. Look for tests next to the changed code (*_test.go, integration tests under cmd/entire/cli/integration_test/, e2e under e2e/).\n4. Look at CI config (.github/workflows/) and the mise tasks it runs (check, lint, test:ci).\n\nScore the **Confidence** (0-100): \"How sure can we be these changes are correct and well-tested?\"\n\nWeigh:\n1. **Test coverage on changed lines** — do unit/table tests exercise the changed paths, and do new features/branches get new tests? Strategy, hook, and git-mutating changes especially need coverage (including the integration suite and the Vogon e2e canary).\n2. **Test quality** — do the tests assert real behavior and cover edge cases (error paths, concurrent sessions, cross-platform), or are they shallow? Note tests that use the real repo/CWD or global config instead of isolated temp repos — that weakens confidence.\n3. **Gate compliance** — would `mise run check` (gofmt, golangci-lint, test:ci) plausibly pass? Are errors handled explicitly rather than ignored?\n4. **Correctness signals** — TODOs, commented-out code, ignored errors, or obviously untested risky logic in the diff.\n\nScore from 0 to 100 (higher = more confidence):\n- 0-20: No tests for the change, gates likely failing\n- 21-40: Minimal or shallow coverage\n- 41-60: Moderate coverage, gaps on critical/git-mutating paths\n- 61-80: Good coverage, gates would catch most issues\n- 81-100: Thorough coverage (unit + integration/canary where relevant), gates clean\n\nAfter your analysis, output ONLY this JSON object as the very last line of your response:\n\n{\"value\": <number 0-100>, \"rationale\": \"<1-2 sentence explanation>\"}"
+  },
+  "select": {
+    "trigger_types": ["api", "push"]
+  },
+  "output": {
+    "adapter": "last_json_line",
+    "result_type": "trail_monitor",
+    "trail_monitor": {
+      "key": "confidence",
+      "label": "Confidence",
+      "value_type": "percent",
+      "polarity": "higher_is_better"
+    }
+  }
+}

@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -154,23 +155,6 @@ func (env *TestEnv) RunCLIWithError(args ...string) (string, error) {
 
 	output, err := cmd.CombinedOutput()
 	return string(output), err
-}
-
-// RunCLIWithStdin runs the CLI with stdin input.
-func (env *TestEnv) RunCLIWithStdin(stdin string, args ...string) string {
-	env.T.Helper()
-
-	// Run CLI with stdin using the shared binary, detached from controlling TTY.
-	cmd := execx.NonInteractive(context.Background(), getTestBinary(), args...)
-	cmd.Dir = env.RepoDir
-	cmd.Env = env.cliEnv()
-	cmd.Stdin = strings.NewReader(stdin)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		env.T.Fatalf("CLI command failed: %v\nArgs: %v\nOutput: %s", err, args, output)
-	}
-	return string(output)
 }
 
 // NewRepoEnv creates a TestEnv with an initialized git repo and Entire.
@@ -339,12 +323,6 @@ func (env *TestEnv) InitEntireWithAgent(_ types.AgentName) {
 	env.initEntireInternal(nil)
 }
 
-// InitEntireWithAgentAndOptions initializes Entire with the specified strategy, agent, and options.
-func (env *TestEnv) InitEntireWithAgentAndOptions(_ types.AgentName, strategyOptions map[string]any) {
-	env.T.Helper()
-	env.initEntireInternal(strategyOptions)
-}
-
 // initEntireInternal is the common implementation for InitEntire variants.
 func (env *TestEnv) initEntireInternal(strategyOptions map[string]any) {
 	env.T.Helper()
@@ -487,37 +465,6 @@ func (env *TestEnv) GitCommit(message string) {
 	}
 }
 
-// GitCommitWithMetadata creates a commit with Entire-Metadata trailer.
-// This simulates commits created by the commit strategy.
-func (env *TestEnv) GitCommitWithMetadata(message, metadataDir string) {
-	env.T.Helper()
-
-	// Format message with metadata trailer
-	fullMessage := message + "\n\nEntire-Metadata: " + metadataDir + "\n"
-
-	repo, err := gitrepo.OpenPath(env.RepoDir)
-	if err != nil {
-		env.T.Fatalf("failed to open git repo: %v", err)
-	}
-	defer repo.Close()
-
-	worktree, err := repo.Worktree()
-	if err != nil {
-		env.T.Fatalf("failed to get worktree: %v", err)
-	}
-
-	_, err = worktree.Commit(fullMessage, &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
-			When:  time.Now(),
-		},
-	})
-	if err != nil {
-		env.T.Fatalf("failed to commit: %v", err)
-	}
-}
-
 // GitCommitWithCheckpointID creates a commit with Entire-Checkpoint trailer.
 // This simulates commits.
 func (env *TestEnv) GitCommitWithCheckpointID(message, checkpointID string) {
@@ -525,42 +472,6 @@ func (env *TestEnv) GitCommitWithCheckpointID(message, checkpointID string) {
 
 	// Format message with checkpoint trailer
 	fullMessage := message + "\n\nEntire-Checkpoint: " + checkpointID + "\n"
-
-	repo, err := gitrepo.OpenPath(env.RepoDir)
-	if err != nil {
-		env.T.Fatalf("failed to open git repo: %v", err)
-	}
-	defer repo.Close()
-
-	worktree, err := repo.Worktree()
-	if err != nil {
-		env.T.Fatalf("failed to get worktree: %v", err)
-	}
-
-	_, err = worktree.Commit(fullMessage, &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
-			When:  time.Now(),
-		},
-	})
-	if err != nil {
-		env.T.Fatalf("failed to commit: %v", err)
-	}
-}
-
-// GitCommitWithMultipleSessions creates a commit with multiple Entire-Session trailers.
-// This simulates merge commits that combine work from multiple sessions.
-func (env *TestEnv) GitCommitWithMultipleSessions(message string, sessionIDs []string) {
-	env.T.Helper()
-
-	// Format message with multiple session trailers
-	fullMessage := message + "\n\n"
-	var fullMessageSb404 strings.Builder
-	for _, sessionID := range sessionIDs {
-		fullMessageSb404.WriteString("Entire-Session: " + sessionID + "\n")
-	}
-	fullMessage += fullMessageSb404.String()
 
 	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
@@ -782,14 +693,17 @@ type RewindPoint struct {
 func (env *TestEnv) GetRewindPoints() []RewindPoint {
 	env.T.Helper()
 
-	// Run rewind --list using the shared binary
+	// Run rewind --list using the shared binary. Parse stdout only — the
+	// deprecated command prints a notice on stderr that would break the JSON.
 	cmd := exec.Command(getTestBinary(), "checkpoint", "rewind", "--list")
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
 
-	output, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
 	if err != nil {
-		env.T.Fatalf("rewind --list failed: %v\nOutput: %s", err, output)
+		env.T.Fatalf("rewind --list failed: %v\nOutput: %s\nStderr: %s", err, output, stderr.String())
 	}
 
 	// Parse JSON output
@@ -1000,47 +914,6 @@ func (env *TestEnv) ReadFileFromBranch(branchName, filePath string) (string, boo
 	return content, true
 }
 
-// ReadFileFromRef reads a file's content from a specific ref's tree.
-// Unlike ReadFileFromBranch, this takes a full ref name (e.g., "refs/entire/checkpoints/v2/main")
-// and does not prepend "refs/heads/".
-// Returns the content and true if found, empty string and false if not found.
-func (env *TestEnv) ReadFileFromRef(refName, filePath string) (string, bool) {
-	env.T.Helper()
-
-	repo, err := gitrepo.OpenPath(env.RepoDir)
-	if err != nil {
-		env.T.Fatalf("failed to open git repo: %v", err)
-	}
-	defer repo.Close()
-
-	ref, err := repo.Reference(plumbing.ReferenceName(refName), true)
-	if err != nil {
-		return "", false
-	}
-
-	commit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return "", false
-	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return "", false
-	}
-
-	file, err := tree.File(filePath)
-	if err != nil {
-		return "", false
-	}
-
-	content, err := file.Contents()
-	if err != nil {
-		return "", false
-	}
-
-	return content, true
-}
-
 // AssertCheckpointContainsSession verifies that the checkpoint summary includes
 // a session with the given session ID by reading per-session metadata from the
 // metadata branch.
@@ -1075,25 +948,11 @@ func (env *TestEnv) sessionMetadataMatchesID(metadataPath, sessionID string) boo
 	if !found {
 		return false
 	}
-	var meta checkpoint.CommittedMetadata
+	var meta checkpoint.Metadata
 	if err := json.Unmarshal([]byte(content), &meta); err != nil {
 		return false
 	}
 	return meta.SessionID == sessionID
-}
-
-// RefExists checks if a ref exists in the repository.
-func (env *TestEnv) RefExists(refName string) bool {
-	env.T.Helper()
-
-	repo, err := gitrepo.OpenPath(env.RepoDir)
-	if err != nil {
-		env.T.Fatalf("failed to open git repo: %v", err)
-	}
-	defer repo.Close()
-
-	_, err = repo.Reference(plumbing.ReferenceName(refName), true)
-	return err == nil
 }
 
 // GetLatestCommitMessageOnBranch returns the commit message of the latest commit on the given branch.
@@ -1682,7 +1541,7 @@ type CheckpointValidation struct {
 // ValidateCheckpoint performs comprehensive validation of a checkpoint on the metadata branch.
 // It validates:
 // - Root metadata.json (CheckpointSummary) structure and expected fields
-// - Session metadata.json (CommittedMetadata) structure and expected fields
+// - Session metadata.json (Metadata) structure and expected fields
 // - Transcript file (full.jsonl) is valid JSONL and contains expected content
 // - Content hash file (content_hash.txt) matches SHA256 of transcript
 // - Prompt file (prompt.txt) contains expected prompts
@@ -1692,7 +1551,7 @@ func (env *TestEnv) ValidateCheckpoint(v CheckpointValidation) {
 	// Validate root metadata.json (CheckpointSummary)
 	env.validateCheckpointSummary(v)
 
-	// Validate session metadata.json (CommittedMetadata)
+	// Validate session metadata.json (Metadata)
 	env.validateSessionMetadata(v)
 
 	// Validate transcript is valid JSONL
@@ -1756,7 +1615,7 @@ func (env *TestEnv) validateCheckpointSummary(v CheckpointValidation) {
 	}
 }
 
-// validateSessionMetadata validates the session-level metadata.json (CommittedMetadata).
+// validateSessionMetadata validates the session-level metadata.json (Metadata).
 func (env *TestEnv) validateSessionMetadata(v CheckpointValidation) {
 	env.T.Helper()
 
@@ -1766,29 +1625,29 @@ func (env *TestEnv) validateSessionMetadata(v CheckpointValidation) {
 		env.T.Fatalf("Session metadata not found at %s", metadataPath)
 	}
 
-	var metadata checkpoint.CommittedMetadata
+	var metadata checkpoint.Metadata
 	if err := json.Unmarshal([]byte(content), &metadata); err != nil {
-		env.T.Fatalf("Failed to parse CommittedMetadata: %v\nContent: %s", err, content)
+		env.T.Fatalf("Failed to parse Metadata: %v\nContent: %s", err, content)
 	}
 
 	// Validate checkpoint_id
 	if metadata.CheckpointID.String() != v.CheckpointID {
-		env.T.Errorf("CommittedMetadata.CheckpointID = %q, want %q", metadata.CheckpointID, v.CheckpointID)
+		env.T.Errorf("Metadata.CheckpointID = %q, want %q", metadata.CheckpointID, v.CheckpointID)
 	}
 
 	// Validate session_id
 	if v.SessionID != "" && metadata.SessionID != v.SessionID {
-		env.T.Errorf("CommittedMetadata.SessionID = %q, want %q", metadata.SessionID, v.SessionID)
+		env.T.Errorf("Metadata.SessionID = %q, want %q", metadata.SessionID, v.SessionID)
 	}
 
 	// Validate strategy
 	if v.Strategy != "" && metadata.Strategy != v.Strategy {
-		env.T.Errorf("CommittedMetadata.Strategy = %q, want %q", metadata.Strategy, v.Strategy)
+		env.T.Errorf("Metadata.Strategy = %q, want %q", metadata.Strategy, v.Strategy)
 	}
 
 	// Validate created_at is not zero
 	if metadata.CreatedAt.IsZero() {
-		env.T.Error("CommittedMetadata.CreatedAt should not be zero")
+		env.T.Error("Metadata.CreatedAt should not be zero")
 	}
 
 	// Validate files_touched
@@ -1799,14 +1658,14 @@ func (env *TestEnv) validateSessionMetadata(v CheckpointValidation) {
 		}
 		for _, expected := range v.FilesTouched {
 			if !touchedSet[expected] {
-				env.T.Errorf("CommittedMetadata.FilesTouched missing %q, got %v", expected, metadata.FilesTouched)
+				env.T.Errorf("Metadata.FilesTouched missing %q, got %v", expected, metadata.FilesTouched)
 			}
 		}
 	}
 
 	// Validate checkpoints_count
 	if v.CheckpointsCount > 0 && metadata.CheckpointsCount != v.CheckpointsCount {
-		env.T.Errorf("CommittedMetadata.CheckpointsCount = %d, want %d", metadata.CheckpointsCount, v.CheckpointsCount)
+		env.T.Errorf("Metadata.CheckpointsCount = %d, want %d", metadata.CheckpointsCount, v.CheckpointsCount)
 	}
 }
 

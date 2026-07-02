@@ -41,6 +41,13 @@ func TestValidateSessionID(t *testing.T) {
 			wantErr:   true,
 			errMsg:    "session ID cannot be empty",
 		},
+		// Leading dash (security-critical - option injection prevention)
+		{
+			name:      "leading dash",
+			sessionID: "--dangerously-skip-permissions",
+			wantErr:   true,
+			errMsg:    "starts with dash",
+		},
 		// Path separators (security-critical - path traversal prevention)
 		{
 			name:      "session ID with forward slash",
@@ -71,6 +78,50 @@ func TestValidateSessionID(t *testing.T) {
 			sessionID: "C:\\Windows\\System32",
 			wantErr:   true,
 			errMsg:    "contains path separators",
+		},
+		// Bare path segments (separator-free but still traverse as a path component)
+		{
+			name:      "single dot",
+			sessionID: ".",
+			wantErr:   true,
+			errMsg:    "reserved path segment",
+		},
+		{
+			name:      "double dot",
+			sessionID: "..",
+			wantErr:   true,
+			errMsg:    "reserved path segment",
+		},
+		{
+			name:      "dot in the middle is allowed",
+			sessionID: "a..b",
+			wantErr:   false,
+		},
+		// Windows drive-relative path (separator-free, not reported absolute)
+		{
+			name:      "windows drive-relative path",
+			sessionID: "C:foo",
+			wantErr:   true,
+			errMsg:    "volume separator",
+		},
+		// Glob metacharacters (would match unrelated files when used in a pattern)
+		{
+			name:      "glob star",
+			sessionID: "*",
+			wantErr:   true,
+			errMsg:    "glob metacharacters",
+		},
+		{
+			name:      "glob question mark",
+			sessionID: "sess?on",
+			wantErr:   true,
+			errMsg:    "glob metacharacters",
+		},
+		{
+			name:      "glob bracket",
+			sessionID: "a[bc]d",
+			wantErr:   true,
+			errMsg:    "glob metacharacters",
 		},
 	}
 
@@ -226,6 +277,8 @@ func TestValidateAgentSessionID(t *testing.T) {
 		{name: "test session id", id: "test-session-1", wantErr: false},
 		{name: "alphanumeric", id: "session123", wantErr: false},
 		{name: "with underscores", id: "test_session_1", wantErr: false},
+		// Invalid - option injection
+		{name: "leading dash", id: "--dangerously-skip-permissions", wantErr: true},
 		// Invalid - empty (required field)
 		{name: "empty rejected", id: "", wantErr: true},
 		// Invalid - path traversal

@@ -172,7 +172,7 @@ func TestPrePush_PushDisabledSkipsCheckpoints(t *testing.T) {
 // can be selectively pushed to a separate remote.
 //
 // This is a data routing verification test. It validates that when the production
-// code's pushBranchIfNeeded is called with different targets for checkpoints,
+// code's pushRefIfNeeded is called with different targets for checkpoints,
 // the branches land on the correct remotes with correct data.
 //
 // Why not test through PrePush directly: resolvePushSettings derives the checkpoint
@@ -181,8 +181,8 @@ func TestPrePush_PushDisabledSkipsCheckpoints(t *testing.T) {
 // origin. The URL derivation logic is unit-tested in checkpoint_remote_test.go
 // (TestDeriveCheckpointURL, TestResolvePushSettings_WithCheckpointRemote_*).
 //
-// The pushBranchIfNeeded function (which PrePush calls with the resolved target)
-// is exercised in push_common_test.go:TestPushBranchIfNeeded_LocalBareRepo_PushesSuccessfully,
+// The pushRefIfNeeded function (which PrePush calls with the resolved target)
+// is exercised in push_common_test.go:TestPushRefIfNeeded_LocalBareRepo_PushesSuccessfully,
 // verifying it works with local bare repo paths.
 func TestPrePush_CheckpointRemoteRoutesToSeparateRemote(t *testing.T) {
 	t.Parallel()
@@ -529,10 +529,10 @@ func TestConcurrentPush_SecondPusherRebasesAndRetries(t *testing.T) {
 // origin. Trails are always pushed to origin regardless of checkpoint_remote config.
 //
 // This test exercises the PrePush -> resolvePushSettings -> fallback code path.
-// The actual doPushBranch graceful degradation (push to unreachable URL returns nil,
+// The actual doPushRef graceful degradation (push to unreachable URL returns nil,
 // not an error) is tested in push_common_test.go:
-//   - TestDoPushBranch_UnreachableTarget_ReturnsNil
-//   - TestPushBranchIfNeeded_UnreachableTarget_ReturnsNil
+//   - TestDoPushRef_UnreachableTarget_ReturnsNil
+//   - TestPushRefIfNeeded_UnreachableTarget_ReturnsNil
 func TestGracefulDegradation_UnreachableCheckpointRemotePushContinues(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)

@@ -89,10 +89,3 @@ func AppendReviewEnv(base []string, agentName string, cfg reviewtypes.RunConfig,
 		EnvStartingSHA+"="+cfg.StartingSHA,
 	)
 }
-
-// IsReviewEnvEntry reports whether kv is a "KEY=VALUE" entry whose key is
-// one of the ENTIRE_REVIEW_* contract variables. Exported for symmetry
-// with investigate.IsInvestigateEnvEntry.
-func IsReviewEnvEntry(kv string) bool {
-	return provenance.IsReviewEntry(kv)
-}

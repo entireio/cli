@@ -1,0 +1,30 @@
+{
+  "id": "trail-summary",
+  "display_name": "Trail Summary",
+  "enabled": true,
+  "scope": "trail",
+  "runtime": {
+    "kind": "prompt_runner",
+    "agent": "claude",
+    "model": "haiku",
+    "timeout_ms": 300000,
+    "sandbox": {
+      "base_template": "claude",
+      "repo_token": "read"
+    }
+  },
+  "automation": {
+    "kind": "trail_prompt"
+  },
+  "prompt": {
+    "template": "You summarize code changes for reviewers. Analyze branch \"{{branch}}\" compared to \"{{base_branch}}\".\n\nRun these commands to gather context (do not narrate that you are running them):\n\n1. git log origin/{{base_branch}}..HEAD --oneline\n2. git diff origin/{{base_branch}}...HEAD --stat\n3. git diff origin/{{base_branch}}...HEAD\n\nWrite a short Problem → Solution summary in plain language as Markdown.\n\nRules:\n- Your entire response is the summary itself — it is displayed verbatim to reviewers, so do not address the reader or describe your process\n- Start immediately with the `**Problem:**` line; no preamble, greeting, or sentences like \"I'll analyze the changes\" or \"Here is the summary\"\n- Include `**Problem:**` and `**Solution:**` lines\n- Stay factual; only mention what the diff supports\n- Use simple words; avoid jargon and file-by-file changelogs\n- Stay to the point\n\nReturn Markdown only. Do not include a top-level title, JSON, or code fences."
+  },
+  "select": {
+    "trigger_types": ["api", "push"]
+  },
+  "output": {
+    "adapter": "markdown",
+    "result_type": "trail_summary",
+    "trail_field": "body"
+  }
+}

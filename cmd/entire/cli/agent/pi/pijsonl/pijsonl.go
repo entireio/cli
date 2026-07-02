@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // EntryTypeMessage is the JSONL `type` value for conversational entries.
@@ -81,6 +82,7 @@ type Message struct {
 	Role       string          `json:"role"`
 	Content    json.RawMessage `json:"content"`
 	Usage      *Usage          `json:"usage,omitempty"`
+	Model      string          `json:"model,omitempty"`
 	StopReason string          `json:"stopReason,omitempty"`
 	ToolCallID string          `json:"toolCallId,omitempty"`
 	ToolName   string          `json:"toolName,omitempty"`
@@ -102,6 +104,42 @@ type ContentItem struct {
 	Name      string          `json:"name,omitempty"`
 	ID        string          `json:"id,omitempty"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+// ForEachActiveMessage invokes fn for every message entry on the active
+// conversation branch, starting at line fromOffset.
+//
+// It owns the parsing skeleton shared by all Pi transcript analysis: active-
+// branch resolution runs on the FULL data (so parentId chains stay intact) while
+// iteration starts at fromOffset, lines that fail to unmarshal or are off the
+// active branch are skipped, and only entries with type=="message" reach fn.
+// Callers apply their own role filter inside fn. Empty data is a no-op.
+func ForEachActiveMessage(data []byte, fromOffset int, fn func(Entry)) error {
+	if len(data) == 0 {
+		return nil
+	}
+
+	active := ResolveActiveBranch(data)
+	content := SkipLines(data, fromOffset)
+
+	scanner := NewScanner(content)
+	for scanner.Scan() {
+		var entry Entry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+		if entry.Type != EntryTypeMessage {
+			continue
+		}
+		if active != nil && !active[entry.ID] {
+			continue
+		}
+		fn(entry)
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan transcript: %w", err)
+	}
+	return nil
 }
 
 // ResolveActiveBranch walks a Pi transcript tree and returns the set of entry

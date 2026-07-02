@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	gogit "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
@@ -18,7 +19,7 @@ import (
 // tree hashes to the old FlattenTree+BuildTreeFromEntries approach.
 func TestBuildTreeWithChanges_EquivalenceWithFlattenRebuild(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
 	repo, dir := setupTestRepo(t)
-	store := NewGitStore(repo)
+	store := newEphemeralStore(repo, DefaultV1Refs())
 
 	// Get the base tree hash from HEAD
 	head, err := repo.Head()
@@ -76,7 +77,7 @@ func TestAddTaskMetadataToTree_EquivalenceWithFlattenRebuild(t *testing.T) {
 	t.Parallel()
 
 	repo, _ := setupTestRepo(t)
-	store := NewGitStore(repo)
+	store := newEphemeralStore(repo, DefaultV1Refs())
 
 	head, err := repo.Head()
 	if err != nil {
@@ -90,7 +91,7 @@ func TestAddTaskMetadataToTree_EquivalenceWithFlattenRebuild(t *testing.T) {
 
 	// Test without transcripts — the tree structure equivalence is what matters.
 	// Transcript processing (chunking, redaction) is covered by integration tests.
-	opts := WriteTemporaryTaskOptions{
+	opts := WriteEphemeralTaskOptions{
 		SessionID:      "sess-001",
 		ToolUseID:      "tool-001",
 		AgentID:        "agent-001",
@@ -119,7 +120,7 @@ func TestAddTaskMetadataToTree_IncrementalPath(t *testing.T) {
 	t.Parallel()
 
 	repo, _ := setupTestRepo(t)
-	store := NewGitStore(repo)
+	store := newEphemeralStore(repo, DefaultV1Refs())
 
 	head, err := repo.Head()
 	if err != nil {
@@ -130,7 +131,7 @@ func TestAddTaskMetadataToTree_IncrementalPath(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	opts := WriteTemporaryTaskOptions{
+	opts := WriteEphemeralTaskOptions{
 		SessionID:           "sess-002",
 		ToolUseID:           "tool-002",
 		IsIncremental:       true,
@@ -184,9 +185,10 @@ func setupTestRepo(t *testing.T) (*gogit.Repository, string) {
 		dir = resolved
 	}
 
-	repo, err := gogit.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := gogit.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("git init: %v", err)
+		t.Fatalf("git open: %v", err)
 	}
 
 	wt, err := repo.Worktree()
@@ -267,7 +269,7 @@ func flattenRebuildTree(
 	}
 
 	if metadataDir != "" && metadataDirAbs != "" {
-		if err := addDirectoryToEntriesWithAbsPath(repo, metadataDirAbs, metadataDir, entries); err != nil {
+		if err := addDirectoryToEntriesWithAbsPath(context.Background(), repo, metadataDirAbs, metadataDir, entries); err != nil {
 			t.Fatalf("add metadata: %v", err)
 		}
 	}
@@ -284,7 +286,7 @@ func flattenRebuildTree(
 func flattenRebuildTaskMetadata(
 	t *testing.T, repo *gogit.Repository,
 	baseTreeHash plumbing.Hash,
-	opts WriteTemporaryTaskOptions,
+	opts WriteEphemeralTaskOptions,
 ) plumbing.Hash {
 	t.Helper()
 

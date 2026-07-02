@@ -276,6 +276,31 @@ func TestRenderRepoChart_LimitsToFive(t *testing.T) {
 	}
 }
 
+func TestRenderRepoChart_UnicodeNameSafeTruncation(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	sty := activityStyles{width: 60}
+	// A repo name long enough to force truncation and full of multi-byte
+	// runes, so a byte-based slice would split a rune and emit invalid UTF-8.
+	repos := []repoContribution{
+		{
+			Repo:   strings.Repeat("é", 40),
+			Total:  3,
+			Agents: map[string]int{activityTestAgentClaude: 3},
+		},
+	}
+
+	renderRepoChart(&buf, sty, repos)
+	out := buf.String()
+
+	if !utf8.ValidString(out) {
+		t.Fatal("rendered repo chart contains invalid UTF-8")
+	}
+	if !strings.Contains(out, "…") {
+		t.Error("expected the long repo name to be truncated with an ellipsis")
+	}
+}
+
 func TestPadOrTruncate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

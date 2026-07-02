@@ -392,10 +392,10 @@ func TestHookManagerWarning_LocalDev(t *testing.T) {
 		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true},
 	}
 
-	warning := hookManagerWarning(managers, "go run ./cmd/entire/main.go")
+	warning := hookManagerWarning(managers, localDevHookCmdPrefix)
 
 	// Should use the local dev prefix in command lines
-	if !strings.Contains(warning, "go run ./cmd/entire/main.go hooks git") {
+	if !strings.Contains(warning, localDevHookCmdPrefix+" hooks git") {
 		t.Error("warning should use local dev command prefix")
 	}
 }

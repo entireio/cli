@@ -59,6 +59,57 @@ func TestResolveActiveBranch_CycleProtection(t *testing.T) {
 	}
 }
 
+func TestForEachActiveMessage(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"type":"session","id":"s1"}
+{"type":"message","id":"m1","parentId":null,"message":{"role":"user"}}
+{"type":"message","id":"m2","parentId":"m1","message":{"role":"assistant"}}
+`)
+	var got []string
+	if err := ForEachActiveMessage(data, 0, func(e Entry) {
+		got = append(got, e.ID+":"+e.Message.Role)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The session header (type != "message") is filtered out.
+	want := []string{"m1:user", "m2:assistant"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestForEachActiveMessage_SkipsAbandonedBranchAndHonoursOffset(t *testing.T) {
+	t.Parallel()
+	// Two branches off m1: m2 (abandoned) and m3 (active, last). Offset 1 skips
+	// the session header line; active-branch resolution still runs on full data.
+	data := []byte(`{"type":"session","id":"s1"}
+{"type":"message","id":"m1","parentId":null,"message":{"role":"user"}}
+{"type":"message","id":"m2","parentId":"m1","message":{"role":"assistant"}}
+{"type":"message","id":"m3","parentId":"m1","message":{"role":"assistant"}}
+`)
+	var got []string
+	if err := ForEachActiveMessage(data, 1, func(e Entry) {
+		got = append(got, e.ID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"m1", "m3"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("got %v, want %v (m2 abandoned, header skipped by offset)", got, want)
+	}
+}
+
+func TestForEachActiveMessage_EmptyIsNoOp(t *testing.T) {
+	t.Parallel()
+	called := false
+	if err := ForEachActiveMessage(nil, 0, func(Entry) { called = true }); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Error("fn should not be called for empty data")
+	}
+}
+
 func TestSkipLines(t *testing.T) {
 	t.Parallel()
 	data := []byte("a\nb\nc\nd\n")

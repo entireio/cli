@@ -2,6 +2,8 @@ package api
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -53,35 +55,6 @@ func TestRequireSecureURL_RejectsHTTP(t *testing.T) {
 	}
 }
 
-func TestAuthBaseURL_FallsBackToBaseURL(t *testing.T) {
-	t.Setenv(BaseURLEnvVar, "https://example.test")
-	t.Setenv(AuthBaseURLEnvVar, "")
-
-	if got := AuthBaseURL(); got != "https://example.test" {
-		t.Fatalf("AuthBaseURL() = %q, want fallback to BaseURL", got)
-	}
-}
-
-func TestAuthBaseURL_OverrideTakesPrecedence(t *testing.T) {
-	t.Setenv(BaseURLEnvVar, "https://data.example.test")
-	t.Setenv(AuthBaseURLEnvVar, " https://auth.example.test/ ")
-
-	if got := AuthBaseURL(); got != "https://auth.example.test" {
-		t.Fatalf("AuthBaseURL() = %q, want trimmed/normalized override", got)
-	}
-}
-
-func TestAuthBaseURL_CanonicalisesScheme_HostCase_DefaultPort(t *testing.T) {
-	// Same canonicalisation tokenmanager.New applies internally — must match
-	// or the keyring key login wrote diverges from the one the manager later
-	// reads, producing spurious "not logged in" errors on every data-API call.
-	t.Setenv(AuthBaseURLEnvVar, "HTTPS://AUTH.example.com:443/")
-
-	if got := AuthBaseURL(); got != "https://auth.example.com" {
-		t.Fatalf("AuthBaseURL() = %q, want canonicalised origin", got)
-	}
-}
-
 func TestNormalizeOriginURL(t *testing.T) {
 	t.Parallel()
 
@@ -117,4 +90,32 @@ func TestResolveURL(t *testing.T) {
 	if got != "http://localhost:8787/oauth/device/code" {
 		t.Fatalf("ResolveURL() = %q, want %q", got, "http://localhost:8787/oauth/device/code")
 	}
+}
+
+// TestRejectRemovedAuthEnv pins the retired-env gate: any set value — even
+// empty — errors with the --server replacement hint; unset passes.
+func TestRejectRemovedAuthEnv(t *testing.T) {
+	t.Run("unset passes", func(t *testing.T) {
+		// LookupEnv, not Getenv: the gate rejects a present-but-empty var
+		// too, so an empty export in the parent shell must also skip.
+		if _, ok := os.LookupEnv(AuthBaseURLEnvVar); ok {
+			t.Skipf("%s set in test environment", AuthBaseURLEnvVar)
+		}
+		if err := RejectRemovedAuthEnv(); err != nil {
+			t.Fatalf("RejectRemovedAuthEnv() with unset var: %v", err)
+		}
+	})
+	t.Run("set errors", func(t *testing.T) {
+		t.Setenv(AuthBaseURLEnvVar, "https://custom.example")
+		err := RejectRemovedAuthEnv()
+		if err == nil || !strings.Contains(err.Error(), "entire login --server") {
+			t.Fatalf("err = %v, want --server hint", err)
+		}
+	})
+	t.Run("set-but-empty errors", func(t *testing.T) {
+		t.Setenv(AuthBaseURLEnvVar, "")
+		if err := RejectRemovedAuthEnv(); err == nil {
+			t.Fatal("RejectRemovedAuthEnv() with empty-but-set var: want error")
+		}
+	})
 }

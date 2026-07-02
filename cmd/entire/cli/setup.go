@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -44,6 +46,8 @@ const (
 	flagAbsoluteGitHookPath  = "absolute-git-hook-path"
 	flagForce                = "force"
 	flagLocalDev             = "local-dev"
+	flagSearchSkill          = "search-skill"
+	flagAgentHelpSkill       = "agent-help-skill"
 	checkpointProviderGitHub = "github"
 )
 
@@ -69,6 +73,8 @@ type EnableOptions struct {
 	// presentation of the final state (commit, push, done).
 	SuppressDoneMessage bool
 	Yes                 bool
+	SearchSkill         bool
+	AgentHelpSkill      bool
 }
 
 // applyStrategyOptions sets strategy_options on settings from CLI flags.
@@ -127,14 +133,14 @@ func hasConfigureSettingsFlags(cmd *cobra.Command) bool {
 // Bare `enable` and `enable --local/--project` remain state-toggle operations;
 // any other setup-mutating flag should share configure's behavior.
 func enableUsesSetupFlow(cmd *cobra.Command, agentName string) bool {
-	if agentName != "" || hasStrategyFlags(cmd) {
+	if agentName != "" || hasStrategyFlags(cmd) || cmd.Flags().Changed(flagSearchSkill) || cmd.Flags().Changed(flagAgentHelpSkill) {
 		return true
 	}
 	return hasGlobalSettingsFlags(cmd) || cmd.Flags().Changed("yes")
 }
 
 func enableNeedsAgentManagement(cmd *cobra.Command) bool {
-	return hasGlobalSettingsFlags(cmd) || cmd.Flags().Changed("yes")
+	return hasGlobalSettingsFlags(cmd) || cmd.Flags().Changed("yes") || cmd.Flags().Changed(flagSearchSkill) || cmd.Flags().Changed(flagAgentHelpSkill)
 }
 
 // updateStrategyOptions applies strategy flags to settings without re-running agent setup.
@@ -326,13 +332,13 @@ func settingsTargetFile(ctx context.Context, useLocal, useProject bool) (string,
 	// Check project file first, then local.
 	projectAbs, err := paths.AbsPath(ctx, settings.EntireSettingsFile)
 	if err == nil {
-		if _, statErr := os.Stat(projectAbs); statErr == nil {
+		if _, statErr := os.Lstat(projectAbs); statErr == nil {
 			return settings.EntireSettingsFile, configDisplayProject
 		}
 	}
 	localAbs, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
 	if err == nil {
-		if _, statErr := os.Stat(localAbs); statErr == nil {
+		if _, statErr := os.Lstat(localAbs); statErr == nil {
 			return settings.EntireSettingsLocalFile, configDisplayLocal
 		}
 	}
@@ -433,6 +439,23 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 	// When no selectFn is provided, check if we can prompt interactively.
 	// A selectFn (e.g. from --yes) bypasses the interactive prompt entirely.
 	if selectFn == nil && !interactive.CanPromptInteractively() {
+		if opts.SearchSkill || opts.AgentHelpSkill {
+			if len(installedNames) > 0 {
+				external.DiscoverAndRegisterAlways(ctx)
+				selectedAgentNames := make([]string, 0, len(installedNames))
+				for _, name := range installedNames {
+					selectedAgentNames = append(selectedAgentNames, string(name))
+				}
+				return applyAgentChanges(ctx, w, selectedAgentNames, installedNames, opts)
+			}
+			if opts.SearchSkill {
+				printSkillNonInteractiveNoAgentsGuidance(w, "search skill", flagSearchSkill)
+			}
+			if opts.AgentHelpSkill {
+				printSkillNonInteractiveNoAgentsGuidance(w, "agent-help skill", flagAgentHelpSkill)
+			}
+			return NewSilentError(errors.New("skill install requires an agent in non-interactive mode"))
+		}
 		fmt.Fprintln(w, "Cannot show agent selection in non-interactive mode.")
 		fmt.Fprintln(w, "Use: entire agent add <name>")
 		return nil
@@ -562,7 +585,7 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 		removedAgents = append(removedAgents, ag)
 	}
 
-	if len(addedAgents) == 0 && len(reinstalledAgents) == 0 && len(removedAgents) == 0 && len(errs) == 0 {
+	if len(addedAgents) == 0 && len(reinstalledAgents) == 0 && len(removedAgents) == 0 && len(errs) == 0 && !opts.SearchSkill && !opts.AgentHelpSkill {
 		targetFile, _ := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
 		changed, err := maybePromptVercelDeploymentDisable(ctx, w, targetFile, nil)
 		if err != nil {
@@ -575,7 +598,7 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 	}
 	var successfullyAddedAgents []agent.Agent
 	for _, ag := range addedAgents {
-		if _, err := setupAgentHooks(ctx, w, ag, opts.LocalDev, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooks(ctx, ag, opts.LocalDev, opts.ForceHooks); err != nil {
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
 		} else {
 			successfullyAddedAgents = append(successfullyAddedAgents, ag)
@@ -584,7 +607,7 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 
 	var successfullyReinstalledAgents []agent.Agent
 	for _, ag := range reinstalledAgents {
-		if _, err := setupAgentHooks(ctx, w, ag, opts.LocalDev, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooks(ctx, ag, opts.LocalDev, opts.ForceHooks); err != nil {
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
 		} else {
 			successfullyReinstalledAgents = append(successfullyReinstalledAgents, ag)
@@ -604,6 +627,13 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 		} else {
 			uninstalledAgents = append(uninstalledAgents, ag)
 		}
+	}
+
+	if err := setupOptionalSearchSkillForNames(ctx, w, selectedAgentNames, opts); err != nil {
+		errs = append(errs, err)
+	}
+	if err := setupOptionalAgentHelpSkillForNames(ctx, w, selectedAgentNames, opts); err != nil {
+		errs = append(errs, err)
 	}
 
 	// Auto-enable external_agents setting if any new agent is external.
@@ -740,7 +770,7 @@ Examples:
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Reinstall the Entire git hook")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, cursor, copilot-cli)")
+	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, pi, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears (falls back to 5m default).")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
@@ -754,6 +784,7 @@ func newEnableCmd() *cobra.Command {
 	var ignoreUntracked bool
 	var agentName string
 	var bootstrapOpts GitHubBootstrapOptions
+	var insecureHTTPAuth bool
 
 	cmd := &cobra.Command{
 		Use:   "enable",
@@ -767,6 +798,17 @@ If the current directory is not a git repository, Entire can initialize one
 for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 		RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
 			ctx := cmd.Context()
+			// Best-effort: after a successful enable, tell the backend which repo
+			// was enabled so the web onboarding reflects it (and we can warn when
+			// the GitHub App can't reach it). Registered first so it runs LAST
+			// (defers are LIFO) — after any bootstrap finalize that creates the
+			// GitHub repo and pushes, by which point an origin remote exists.
+			defer func() {
+				if runErr != nil {
+					return
+				}
+				reportRepoEnabled(ctx, insecureHTTPAuth)
+			}()
 			// Check if we're in a git repository first. If not, offer to
 			// bootstrap one (git init + optional GitHub repo). If the user
 			// declines, fall back to the legacy prerequisite error.
@@ -892,7 +934,10 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
+	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
+	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
 	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit; then enable all agents and accept telemetry)")
+	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
 	// Bootstrap flags for non-git-repo folders.
 	cmd.Flags().BoolVar(&bootstrapOpts.InitRepo, "init-repo", false, "If not a git repo, initialize one non-interactively")
@@ -918,6 +963,86 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	})
 
 	return cmd
+}
+
+// reportRepoEnabled records the `entire enable` against the backend so the web
+// onboarding can reflect it. It is strictly best-effort and fully silent:
+// enabling works offline, and every outcome (no origin remote, not logged in,
+// network error, App-can't-reach-repo) is swallowed — the web onboarding
+// surfaces the "install the GitHub App" nudge, so the CLI stays quiet.
+func reportRepoEnabled(ctx context.Context, insecureHTTPAuth bool) {
+	// This runs synchronously on the enable success path, so bound it: a backend
+	// that accepts the connection but never responds must not hang the command
+	// after it has already printed success.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	rawURL, err := gitremote.GetRemoteURL(ctx, "origin")
+	if err != nil || strings.TrimSpace(rawURL) == "" {
+		// Local-only repo with no origin yet — nothing to report.
+		return
+	}
+
+	info, err := gitremote.ParseURL(rawURL)
+	if err != nil {
+		logging.Debug(ctx, "skipping enable report: unparseable origin remote", "error", err)
+		return
+	}
+	if info.Forge == "" {
+		// Trails are only available for remotes that map to a supported forge.
+		// Persist the negative locally even if auth is unavailable so a stale true
+		// cache from a previous origin does not inject on the prompt path. No API
+		// report is useful for non-forge remotes.
+		if err := saveTrailsEnabledForRemote(ctx, info.Forge, info.Owner, info.Repo, false); err != nil {
+			logging.Debug(ctx, "failed to cache trails enablement", "error", err)
+		}
+		return
+	}
+
+	cleanURL, err := cleanRemoteURLForReport(rawURL)
+	if err != nil {
+		logging.Debug(ctx, "skipping enable report: unparseable origin remote", "error", err)
+		return
+	}
+
+	client, err := NewAuthenticatedAPIClient(ctx, insecureHTTPAuth)
+	if err != nil {
+		// Not logged in / token unavailable — enable already succeeded locally.
+		logging.Debug(ctx, "skipping enable report", "error", err)
+		return
+	}
+
+	if _, err := client.ReportEnable(ctx, cleanURL); err != nil {
+		// The enable report is best-effort and independent from the trails cache:
+		// still try the trails probe so a reporting failure doesn't leave the
+		// prompt-path cache stale or unknown.
+		logging.Debug(ctx, "enable report failed", "error", err)
+	}
+
+	enabled, err := client.TrailsEnabled(ctx, info.Forge, info.Owner, info.Repo)
+	if err != nil {
+		logging.Debug(ctx, "trails enablement probe failed", "error", err)
+		return
+	}
+	if err := saveTrailsEnabledForRemote(ctx, info.Forge, info.Owner, info.Repo, enabled); err != nil {
+		logging.Debug(ctx, "failed to cache trails enablement", "error", err)
+	}
+}
+
+// cleanRemoteURLForReport turns a raw git remote URL into a clean,
+// credential-free HTTPS URL safe to send to the backend. The raw remote can
+// carry embedded credentials (https://token@host/...) or query params, so we
+// never forward it verbatim: parse it and rebuild from host/owner/repo alone.
+// Returns an error if the URL can't be parsed (the caller skips reporting).
+func cleanRemoteURLForReport(rawURL string) (string, error) {
+	info, err := gitremote.ParseURL(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("parse remote URL: %w", err)
+	}
+	// Use CanonicalHost, not Host: an entire://cluster/gh/owner/repo origin (an
+	// already-mirrored repo) carries the Entire cluster as Host, so reporting
+	// Host verbatim would point the backend at the cluster instead of github.com.
+	return fmt.Sprintf("https://%s/%s/%s.git", info.CanonicalHost(), info.Owner, info.Repo), nil
 }
 
 func newDisableCmd() *cobra.Command {
@@ -965,8 +1090,14 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Setup agent hooks for all selected agents
 	for _, ag := range agents {
-		if _, err := setupAgentHooks(ctx, w, ag, opts.LocalDev, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooks(ctx, ag, opts.LocalDev, opts.ForceHooks); err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
+		}
+		if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
+			return err
+		}
+		if err := setupOptionalAgentHelpSkill(ctx, w, ag, opts); err != nil {
+			return err
 		}
 	}
 
@@ -1164,7 +1295,7 @@ func localExists(ctx context.Context) bool {
 	if abs, err := paths.AbsPath(ctx, localFile); err == nil {
 		localFile = abs
 	}
-	_, err := os.Stat(localFile)
+	_, err := os.Lstat(localFile)
 	return err == nil
 }
 
@@ -1261,7 +1392,7 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 
 // setupAgentHooks sets up hooks for a given agent.
 // Returns the number of hooks installed (0 if already installed).
-func setupAgentHooks(ctx context.Context, w io.Writer, ag agent.Agent, localDev, forceHooks bool) (int, error) {
+func setupAgentHooks(ctx context.Context, ag agent.Agent, localDev, forceHooks bool) (int, error) {
 	hookAgent, ok := agent.AsHookSupport(ag)
 	if !ok {
 		return 0, fmt.Errorf("agent %s does not support hooks", ag.Name())
@@ -1271,12 +1402,6 @@ func setupAgentHooks(ctx context.Context, w io.Writer, ag agent.Agent, localDev,
 	if err != nil {
 		return 0, fmt.Errorf("failed to install %s hooks: %w", ag.Name(), err)
 	}
-
-	scaffoldResult, err := scaffoldSearchSubagent(ctx, ag)
-	if err != nil {
-		return 0, fmt.Errorf("failed to scaffold %s search subagent: %w", ag.Name(), err)
-	}
-	reportSearchSubagentScaffold(w, ag, scaffoldResult)
 
 	return count, nil
 }
@@ -1491,9 +1616,15 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	fmt.Fprintf(w, "  Agent: %s\n", ag.Type())
 
 	// Install agent hooks (agent hooks don't depend on settings)
-	installedHooks, err := setupAgentHooks(ctx, w, ag, opts.LocalDev, opts.ForceHooks)
+	installedHooks, err := setupAgentHooks(ctx, ag, opts.LocalDev, opts.ForceHooks)
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
+	}
+	if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
+		return err
+	}
+	if err := setupOptionalAgentHelpSkill(ctx, w, ag, opts); err != nil {
+		return err
 	}
 
 	// Setup .entire directory
@@ -1610,7 +1741,7 @@ func determineSettingsTarget(entireDir string, useLocal, useProject bool) (bool,
 
 	// No flags specified - check if settings file exists
 	settingsPath := filepath.Join(entireDir, paths.SettingsFileName)
-	if _, err := os.Stat(settingsPath); err == nil {
+	if _, err := os.Lstat(settingsPath); err == nil {
 		// Settings file exists - auto-redirect to local with notification
 		return true, true
 	}
@@ -1630,7 +1761,7 @@ func setupEntireDirectory(ctx context.Context) (bool, error) { //nolint:unparam 
 
 	// Check if directory already exists
 	created := false
-	if _, err := os.Stat(entireDirAbs); os.IsNotExist(err) {
+	if _, err := os.Lstat(entireDirAbs); os.IsNotExist(err) {
 		created = true
 	}
 
@@ -2067,7 +2198,7 @@ func checkEntireDirExists(ctx context.Context) bool {
 	if err != nil {
 		entireDirAbs = paths.EntireDir
 	}
-	_, err = os.Stat(entireDirAbs)
+	_, err = os.Lstat(entireDirAbs)
 	return err == nil
 }
 

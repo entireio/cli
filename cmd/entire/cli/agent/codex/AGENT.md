@@ -193,7 +193,7 @@ The `systemMessage` field can be used to display messages to the user via the ag
 
 ## Gaps & Limitations
 
-- **Hooks require feature flag:** The `codex_hooks` feature is `default_enabled: false` (stage: UnderDevelopment). It must be enabled via `--enable codex_hooks` CLI flag, or `features.codex_hooks = true` in `config.toml`, or `-c features.codex_hooks=true`. Without this, hooks.json is ignored entirely.
+- **Hooks require feature flag:** The `hooks` feature is `default_enabled: false` (stage: UnderDevelopment). It must be enabled via `--enable hooks` CLI flag, or `features.hooks = true` in `config.toml`, or `-c features.hooks=true`. Without this, hooks.json is ignored entirely.
 - **No SessionEnd hook:** Codex does not fire a hook when a session is completely terminated. The `Stop` hook fires at end-of-turn, not end-of-session. This is similar to some other agents — the framework handles this gracefully.
 - **PreToolUse is shell-only:** Currently only fires for `Bash` tool (direct shell execution). MCP tools, stdin streaming, and other tool types are not yet hooked. PostToolUse is in review.
 - **Transcript may be null:** In `--ephemeral` mode, `transcript_path` is null. The integration should handle this gracefully.

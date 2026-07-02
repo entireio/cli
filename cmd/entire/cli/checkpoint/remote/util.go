@@ -286,11 +286,6 @@ func DeriveCheckpointURL(pushRemoteURL string, config *settings.CheckpointRemote
 	return deriveCheckpointURLFromInfo(info, config)
 }
 
-// ExtractOwnerFromRemoteURL extracts the owner component from a git remote URL.
-func ExtractOwnerFromRemoteURL(rawURL string) string {
-	return gitremote.ExtractOwnerFromRemoteURL(rawURL)
-}
-
 // isDerivableProtocol reports whether deriveCheckpointURLFromInfo can map the
 // protocol to a checkpoint URL (i.e. it's a real git transport, not a remote
 // helper scheme like entire:// or a local file://).

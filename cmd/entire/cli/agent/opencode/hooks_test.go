@@ -96,8 +96,8 @@ func TestInstallHooks_LocalDev(t *testing.T) {
 	}
 
 	content := string(data)
-	if !strings.Contains(content, `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go`) {
-		t.Error("local dev mode: plugin file should use git rev-parse for go run path")
+	if !strings.Contains(content, `"$(git rev-parse --show-toplevel)"/scripts/entire-dev`) {
+		t.Error("local dev mode: plugin file should delegate to the entire-dev launcher via git rev-parse")
 	}
 }
 
@@ -154,11 +154,46 @@ func TestInstallHooks_TurnStartUsesSyncHook(t *testing.T) {
 	}
 
 	content := string(data)
-	if !strings.Contains(content, `callHookSync("turn-start", {`) {
-		t.Fatal("plugin file should dispatch turn-start via callHookSync")
+	// turn-start is dispatched via fireTurnStart, which fires synchronously
+	// (Bun.spawnSync) so session state is ready before any mid-turn commit, and
+	// also captures the hook's stdout to apply Entire's one-time context injection.
+	if !strings.Contains(content, `fireTurnStart({`) {
+		t.Fatal("plugin file should dispatch turn-start via fireTurnStart")
+	}
+	if !strings.Contains(content, `const proc = Bun.spawnSync(hookCmd("turn-start"), {`) {
+		t.Fatal("fireTurnStart should dispatch turn-start synchronously via Bun.spawnSync")
 	}
 	if strings.Contains(content, `await callHook("turn-start", {`) {
 		t.Fatal("plugin file should not dispatch turn-start via async callHook")
+	}
+}
+
+func TestInstallHooks_AppliesContextInjection(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ag := &OpenCodeAgent{}
+
+	if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	pluginPath := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	data, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("plugin file not created: %v", err)
+	}
+
+	content := string(data)
+	// The plugin must read the injection envelope from the turn-start hook's
+	// stdout and apply it to the system prompt via the chat system transform.
+	if !strings.Contains(content, `inject_context`) {
+		t.Fatal("plugin file should parse the inject_context envelope")
+	}
+	if !strings.Contains(content, `"experimental.chat.system.transform"`) {
+		t.Fatal("plugin file should apply injection via experimental.chat.system.transform")
+	}
+	if !strings.Contains(content, `output.system.push(pendingInjection)`) {
+		t.Fatal("plugin file should push the injection onto the system prompt")
 	}
 }
 
@@ -252,8 +287,8 @@ func TestInstallHooks_RewritesWhenContentDiffers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read plugin file: %v", err)
 	}
-	if !strings.Contains(string(before), "go run") {
-		t.Fatal("expected localDev content with 'go run'")
+	if !strings.Contains(string(before), "scripts/entire-dev") {
+		t.Fatal("expected localDev content to delegate to scripts/entire-dev")
 	}
 
 	// Reinstall with localDev=false (content differs) — should rewrite
@@ -269,8 +304,8 @@ func TestInstallHooks_RewritesWhenContentDiffers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read plugin file after rewrite: %v", err)
 	}
-	if strings.Contains(string(after), "go run") {
-		t.Error("expected production content after rewrite, but still contains 'go run'")
+	if strings.Contains(string(after), "scripts/entire-dev") {
+		t.Error("expected production content after rewrite, but still references scripts/entire-dev")
 	}
 	if !strings.Contains(string(after), `const ENTIRE_CMD = 'entire'`) {
 		t.Error("expected production command constant after rewrite")

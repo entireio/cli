@@ -20,7 +20,7 @@ Getting Started:
   To get started with Entire CLI, run 'entire enable' to enable
   session tracking in your repository, then 'entire agent add <name>'
   to install hooks for a specific agent. For more information, visit:
-  https://docs.entire.io/introduction
+  https://docs.entire.io/overview
 
 `
 
@@ -84,44 +84,58 @@ func NewRootCmd() *cobra.Command {
 	// Noun groups (canonical homes for subcommands).
 	cmd.AddCommand(newSessionsCmd())        // 'session' (with 'sessions' as Cobra alias)
 	cmd.AddCommand(newCheckpointGroupCmd()) // 'checkpoint' / 'cp' / 'checkpoints'
+	cmd.AddCommand(newTokensGroupCmd())     // 'tokens'
 	cmd.AddCommand(newAgentGroupCmd())      // 'agent'
 	cmd.AddCommand(newAuthCmd())            // 'auth'
 	cmd.AddCommand(newDoctorCmd())          // 'doctor' (group: trace/logs/bundle)
 	cmd.AddCommand(newLabsCmd())            // 'labs' (experimental workflow discovery)
 	cmd.AddCommand(newPluginGroupCmd())     // 'plugin' (managed install/list/remove)
+	cmd.AddCommand(newImportCmd())          // 'import' (hidden; import pre-existing agent history)
 
 	// Top-level lifecycle and standalone commands.
-	cmd.AddCommand(cliReview.NewCommand(buildReviewDeps(newReviewAttachCmd()))) // hidden during maturation; runs configured review skills
-	cmd.AddCommand(investigate.NewCommand(buildInvestigateDeps()))              // hidden during maturation; runs a multi-agent investigation
+	cmd.AddCommand(cliReview.NewCommand(buildReviewDeps()))        // `review`; hidden during maturation
+	cmd.AddCommand(investigate.NewCommand(buildInvestigateDeps())) // hidden during maturation; runs a multi-agent investigation
+	cmd.AddCommand(newOrgCmd())                                    // hidden during maturation; control-plane org management
+	cmd.AddCommand(newProjectCmd())                                // hidden during maturation; control-plane project management
+	cmd.AddCommand(newRepoCmd())                                   // hidden during maturation; control-plane repo lifecycle
+	cmd.AddCommand(newGrantCmd())                                  // hidden during maturation; control-plane access grants
 	cmd.AddCommand(newCleanCmd())
 	cmd.AddCommand(newSetupCmd()) // 'configure' — non-agent settings; agent CRUD lives under 'agent'
 	cmd.AddCommand(newEnableCmd())
 	cmd.AddCommand(newDisableCmd())
 	cmd.AddCommand(newStatusCmd())
+	cmd.AddCommand(newBlameCmd())
+	cmd.AddCommand(newWhyCmd())
 	cmd.AddCommand(newLoginCmd())
 	cmd.AddCommand(newLogoutCmd())
 	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newDispatchCmd())
 	cmd.AddCommand(newActivityCmd())
 	cmd.AddCommand(newRecapCmd())
+	cmd.AddCommand(newAgentHelpCmd(cmd)) // visible: agents on transports without context injection discover it via `entire help`
 
 	// Hidden top-level shortcuts. Functional but print a deprecation hint.
-	cmd.AddCommand(hideAsAlias(newRewindCmd(), "entire checkpoint rewind"))
 	cmd.AddCommand(hideAsAlias(newResumeCmd(), "entire session resume"))
 	cmd.AddCommand(hideAsAlias(newAttachCmd(), "entire session attach"))
 	cmd.AddCommand(hideAsAlias(newExplainCmd(), "entire checkpoint explain"))
 	cmd.AddCommand(hideAsAlias(newTraceCmd(), "entire doctor trace"))
 	cmd.AddCommand(newSearchCmd()) // 'entire search' = 'checkpoint search' (hidden, no hint)
 
-	// Deprecated top-level alias (functional; reset.go marks it Deprecated).
+	// Hidden labs commands (listed via `entire labs`; not deprecation shortcuts).
+	cmd.AddCommand(newExpertsCmd()) // agent/workflow provenance
+
+	// Deprecated top-level commands (functional; the constructors mark them
+	// Deprecated, which also excludes them from help and completion).
 	cmd.AddCommand(newResetCmd())
+	cmd.AddCommand(newRewindCmd())
 
 	// Hidden infrastructure.
+	cmd.AddCommand(newMCPCmd(cmd)) // MCP stdio server for MCP-host agents
 	cmd.AddCommand(newHooksCmd())
 	cmd.AddCommand(newTrailCmd())
+	cmd.AddCommand(newRunnerCmd()) // 'runner' (setup/tune runners); hidden during maturation
 	cmd.AddCommand(newSendAnalyticsCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
-	cmd.AddCommand(newMigrateCmd())
 
 	cmd.SetVersionTemplate(versionString())
 

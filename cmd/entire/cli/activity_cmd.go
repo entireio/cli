@@ -56,18 +56,14 @@ func newActivityCmd() *cobra.Command {
 }
 
 func runActivity(ctx context.Context, w, errW io.Writer) error {
-	client, err := NewAuthenticatedAPIClient(ctx, false)
-	if err != nil {
-		fmt.Fprintln(errW, "Not logged in. Run 'entire login' to authenticate.")
-		return NewSilentError(err)
-	}
+	return runAuthenticatedDataAPI(ctx, errW, false, func(ctx context.Context, client *api.Client) error {
+		// Non-interactive fallback: piped output or accessibility mode
+		if !interactive.IsTerminalWriter(w) || IsAccessibleMode() {
+			return runActivityStatic(ctx, w, client)
+		}
 
-	// Non-interactive fallback: piped output or accessibility mode
-	if !interactive.IsTerminalWriter(w) || IsAccessibleMode() {
-		return runActivityStatic(ctx, w, client)
-	}
-
-	return runActivityTUI(ctx, client)
+		return runActivityTUI(ctx, client)
+	})
 }
 
 func runActivityStatic(ctx context.Context, w io.Writer, client *api.Client) error {

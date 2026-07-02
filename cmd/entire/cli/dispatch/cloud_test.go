@@ -13,6 +13,20 @@ import (
 	"time"
 )
 
+func newTestCloudClient(t *testing.T, baseURL, token string) *CloudClient {
+	t.Helper()
+	transport := &http.Transport{DisableKeepAlives: true}
+	t.Cleanup(transport.CloseIdleConnections)
+	return NewCloudClient(CloudConfig{
+		BaseURL: baseURL,
+		Token:   token,
+		HTTP: &http.Client{
+			Transport: transport,
+			Timeout:   defaultCloudHTTPTimeout,
+		},
+	})
+}
+
 func TestCloudClient_CreateDispatch_Happy(t *testing.T) {
 	t.Parallel()
 
@@ -51,7 +65,7 @@ func TestCloudClient_CreateDispatch_Happy(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewCloudClient(CloudConfig{BaseURL: srv.URL, Token: "t"})
+	client := newTestCloudClient(t, srv.URL, "t")
 	got, err := client.CreateDispatch(ctx, CreateDispatchRequest{
 		Repos:    []string{testRepoFullName},
 		Since:    "2026-04-09T00:00:00Z",
@@ -88,7 +102,7 @@ func TestCloudClient_CreateDispatch_OmitsBranchesAndOrgsFromPayload(t *testing.T
 	}))
 	defer srv.Close()
 
-	client := NewCloudClient(CloudConfig{BaseURL: srv.URL, Token: "t"})
+	client := newTestCloudClient(t, srv.URL, "t")
 	_, err := client.CreateDispatch(ctx, CreateDispatchRequest{
 		Repos:    []string{"entireio/cli"},
 		Since:    "2026-04-09T00:00:00Z",
@@ -109,7 +123,7 @@ func TestCloudClient_CreateDispatch_Unauthorized(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewCloudClient(CloudConfig{BaseURL: srv.URL, Token: ""})
+	client := newTestCloudClient(t, srv.URL, "")
 	_, err := client.CreateDispatch(ctx, CreateDispatchRequest{Repos: []string{"x/y"}})
 	if err == nil || !strings.Contains(err.Error(), "entire login") {
 		t.Fatalf("expected auth error, got %v", err)
@@ -157,7 +171,7 @@ func TestCloudClient_CreateDispatch_EscapesErrorBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewCloudClient(CloudConfig{BaseURL: srv.URL, Token: "t"})
+	client := newTestCloudClient(t, srv.URL, "t")
 	_, err := client.CreateDispatch(ctx, CreateDispatchRequest{Repos: []string{"x/y"}})
 	if err == nil {
 		t.Fatal("expected error")
@@ -184,7 +198,7 @@ func TestCloudClient_CreateDispatch_IgnoresUnknownResponseFields(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewCloudClient(CloudConfig{BaseURL: srv.URL, Token: "t"})
+	client := newTestCloudClient(t, srv.URL, "t")
 	got, err := client.CreateDispatch(ctx, CreateDispatchRequest{
 		Repos:    []string{"entireio/cli"},
 		Since:    "2026-04-09T00:00:00Z",

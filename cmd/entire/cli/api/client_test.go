@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
 const testBearerHeader = "Bearer tok"
@@ -47,8 +49,8 @@ func TestBearerTransport_InjectsAuthHeader(t *testing.T) {
 	if gotAuth != "Bearer test-token-123" {
 		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer test-token-123")
 	}
-	if gotUA != "entire-cli" {
-		t.Errorf("User-Agent = %q, want %q", gotUA, "entire-cli")
+	if want := versioninfo.UserAgent(); gotUA != want {
+		t.Errorf("User-Agent = %q, want %q", gotUA, want)
 	}
 	if gotAccept != "application/json" {
 		t.Errorf("Accept = %q, want %q", gotAccept, "application/json")
@@ -87,8 +89,8 @@ func TestBearerTransport_EmptyTokenOmitsAuthHeader(t *testing.T) {
 	if gotAuth != "" {
 		t.Errorf("Authorization = %q, want empty", gotAuth)
 	}
-	if gotUA != "entire-cli" {
-		t.Errorf("User-Agent = %q, want entire-cli", gotUA)
+	if want := versioninfo.UserAgent(); gotUA != want {
+		t.Errorf("User-Agent = %q, want %q", gotUA, want)
 	}
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401 (server should have decided, not the transport)", resp.StatusCode)

@@ -31,9 +31,12 @@ const (
 // HooksFileName is the hooks file used by Cursor.
 const HooksFileName = "hooks.json"
 
-// entireHookPrefixes are command prefixes that identify Entire hooks
+// entireHookPrefixes are command prefixes that identify Entire hooks. The
+// "go run" prefix is retained so hooks installed by older versions are still
+// recognized.
 var entireHookPrefixes = []string{
 	"entire ",
+	agent.LocalDevHookScript + " ",
 	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
 }
 
@@ -114,7 +117,7 @@ func (c *CursorAgent) InstallHooks(ctx context.Context, localDev bool, force boo
 	// Define hook commands
 	var cmdPrefix string
 	if localDev {
-		cmdPrefix = `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks cursor `
+		cmdPrefix = agent.LocalDevHookScript + " hooks cursor "
 	} else {
 		cmdPrefix = "entire hooks cursor "
 	}

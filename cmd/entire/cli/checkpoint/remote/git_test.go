@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -145,7 +146,7 @@ func TestResolvePushCommandTarget(t *testing.T) {
 		{
 			// Without checkpoint_remote configured the push should use the
 			// remote name so git updates refs/remotes/origin/<branch> and
-			// subsequent hasUnpushedSessionsCommon checks can short-circuit.
+			// subsequent hasUnpushedBranchRef checks can short-circuit.
 			name:         "no checkpoint remote keeps remote name",
 			originURL:    "git@github.com:acme/app.git",
 			settingsJSON: `{"enabled":true}`,
@@ -322,6 +323,72 @@ func TestFetch_Shallow(t *testing.T) {
 
 	assert.True(t, isShallowRepository(ctx, cloneDir),
 		"Shallow=true should request --depth=1 and leave the repo shallow")
+}
+
+// TestFetch_Depth verifies that Depth is ref-scoped: it fully fetches (heals)
+// the named branch while leaving an independently-shallow branch shallow —
+// unlike Unshallow, which is repo-global.
+func TestFetch_Depth(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "bare.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	runIsolatedGit(ctx, t, "", "init", "--bare", bareDir)
+
+	testutil.InitRepo(t, seedDir)
+	runIsolatedGit(ctx, t, seedDir, "remote", "add", "origin", bareDir)
+	for _, c := range []string{"m1", "m2", "m3"} { // main: 3 commits
+		testutil.WriteFile(t, seedDir, "f.txt", c)
+		testutil.GitAdd(t, seedDir, "f.txt")
+		testutil.GitCommit(t, seedDir, c)
+	}
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, seedDir, "checkout", "--orphan", "meta")
+	runIsolatedGit(ctx, t, seedDir, "rm", "-rf", ".")
+	for _, c := range []string{"c1", "c2"} { // meta: 2 commits
+		testutil.WriteFile(t, seedDir, "g.txt", c)
+		testutil.GitAdd(t, seedDir, "g.txt")
+		testutil.GitCommit(t, seedDir, c)
+	}
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/meta")
+
+	// Shallow clone of main + shallow fetch of meta → both branches shallow.
+	cloneDir := filepath.Join(tmpDir, "clone")
+	runIsolatedGit(ctx, t, "", "clone", "--depth=1", "--single-branch", "--branch", "main", "file://"+bareDir, cloneDir)
+	runIsolatedGit(ctx, t, cloneDir, "fetch", "--depth=1", "origin", "+refs/heads/meta:refs/remotes/origin/meta")
+	require.True(t, isShallowRepository(ctx, cloneDir))
+	require.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/meta"))
+	require.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/main"))
+
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   "file://" + bareDir,
+		RefSpecs: []string{"+refs/heads/meta:refs/remotes/origin/meta"},
+		NoTags:   true,
+		Depth:    1_000_000_000,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	assert.Equal(t, 2, revListCount(ctx, t, cloneDir, "refs/remotes/origin/meta"),
+		"Depth should fully fetch (heal) the named branch")
+	assert.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/main"),
+		"Depth is ref-scoped: an independently-shallow branch must stay shallow")
+	assert.True(t, isShallowRepository(ctx, cloneDir),
+		"repo stays shallow because main is still bounded")
+}
+
+func revListCount(ctx context.Context, t *testing.T, dir, ref string) int {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", "rev-list", "--count", ref)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	require.NoError(t, err)
+	return n
 }
 
 // setupShallowClone creates a bare origin, a seed repo with one commit pushed

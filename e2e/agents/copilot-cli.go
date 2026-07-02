@@ -286,6 +286,25 @@ func isAutocompleteMenu(content string) bool {
 	return false
 }
 
+// isStartupDialog reports whether the captured pane is showing a Copilot
+// startup dialog (e.g. "Confirm folder trust") rather than the interactive
+// prompt. The dialog renders its selected option with the same "❯" cursor as
+// the input prompt, so presence of "❯" alone cannot distinguish them — we must
+// key off the dialog chrome.
+//
+// Matching is case-insensitive and keyed off both the dialog title and its
+// footer: Copilot v1.0.63 lowercased the footer to "enter to select", which
+// silently broke the previous exact "Enter to select" match and caused the
+// harness to mistake the trust dialog's "❯ 1. Yes" cursor for the prompt —
+// breaking out of the dismissal loop without dismissing the dialog, so the
+// first real prompt was swallowed by the still-open dialog.
+func isStartupDialog(content string) bool {
+	lower := strings.ToLower(content)
+	return strings.Contains(lower, "confirm folder trust") ||
+		strings.Contains(lower, "do you trust") ||
+		strings.Contains(lower, "enter to select")
+}
+
 func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, error) {
 	bin, err := exec.LookPath(c.Binary())
 	if err != nil {
@@ -317,12 +336,12 @@ func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, err
 	// new directories. "Yes" is pre-selected, so Enter dismisses it.
 	foundPrompt := false
 	for range 5 {
-		content, err := s.WaitFor(`(❯|Enter to select)`, 30*time.Second)
+		content, err := s.WaitFor(`(❯|(?i:enter to select))`, 30*time.Second)
 		if err != nil {
 			_ = s.Close()
 			return nil, fmt.Errorf("waiting for startup prompt: %w", err)
 		}
-		if strings.Contains(content, "❯") && !strings.Contains(content, "Enter to select") {
+		if strings.Contains(content, "❯") && !isStartupDialog(content) {
 			foundPrompt = true
 			break
 		}

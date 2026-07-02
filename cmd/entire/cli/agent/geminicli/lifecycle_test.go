@@ -520,3 +520,14 @@ func TestWriteHookResponse_EmptyMessage_WritesNothing(t *testing.T) {
 	})
 	require.Empty(t, out, "empty message should produce no output")
 }
+
+func TestGeminiCLIAgent_ContextInjector(t *testing.T) {
+	t.Parallel()
+	g := &GeminiCLIAgent{}
+	require.Equal(t, agent.TurnStart, g.InjectionEvent())
+	out, err := g.RenderContextInjection(agent.ContextInjection{Text: "use entire trail"})
+	require.NoError(t, err)
+	// Gemini's BeforeAgent hook is its prompt-submit equivalent.
+	require.Contains(t, string(out), `"hookEventName":"BeforeAgent"`)
+	require.Contains(t, string(out), `"additionalContext":"use entire trail"`)
+}

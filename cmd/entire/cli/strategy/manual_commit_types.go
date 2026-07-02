@@ -44,6 +44,7 @@ type CheckpointInfo struct {
 	ToolUseID        string          `json:"tool_use_id,omitempty"`
 	SessionCount     int             `json:"session_count,omitempty"` // Number of sessions (1 if omitted)
 	SessionIDs       []string        `json:"session_ids,omitempty"`   // All session IDs in this checkpoint
+	Imported         bool            `json:"imported,omitempty"`      // True for read-only imported (commit-less) checkpoints
 }
 
 // CondenseResult contains the result of a session condensation operation.
@@ -64,5 +65,6 @@ type ExtractedSessionData struct {
 	FullTranscriptLines int      // Total line count in full transcript
 	Prompts             []string // User prompts from the current checkpoint portion
 	FilesTouched        []string
-	TokenUsage          *agent.TokenUsage // Token usage calculated from transcript (since CheckpointTranscriptStart)
+	TokenUsage          *agent.TokenUsage  // Token usage calculated from transcript (since CheckpointTranscriptStart)
+	SkillEvents         []agent.SkillEvent // Skill events detected from transcript data
 }

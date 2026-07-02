@@ -20,6 +20,13 @@ const backupSuffix = ".pre-entire"
 const chainComment = "# Chain: run pre-existing hook"
 const missingEntireGitHookWarning = "[entire] Entire CLI is enabled but not installed or not on PATH. Skipping Entire Git hook; continuing. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
 
+// localDevHookCmdPrefix is the command prefix used for git hooks in local
+// development mode. It points at scripts/entire-dev, which compiles the CLI on
+// demand and falls back to the entire binary on PATH when the tree does not
+// build. The path is relative to the repository root, which is git's working
+// directory when it runs hooks.
+const localDevHookCmdPrefix = "./scripts/entire-dev"
+
 // gitHookNames are the git hooks managed by Entire CLI
 var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite", "pre-push"}
 
@@ -171,7 +178,25 @@ func buildHookSpecs(cmdPrefix string) []hookSpec {
 	commitMsgCmd := gitHookCommand(cmdPrefix, `commit-msg "$1" || true`, true)
 	postCommitCmd := gitHookCommand(cmdPrefix, `post-commit 2>/dev/null || true`, false)
 	postRewriteCmd := gitHookCommand(cmdPrefix, `post-rewrite "$1" 2>/dev/null || true`, false)
-	prePushCmd := gitHookCommand(cmdPrefix, `pre-push "$1" || true`, false)
+	// pre-push intentionally does NOT swallow exit codes — the OPF
+	// rewrite returns errors when it detects a privacy-critical
+	// condition (diverged remote, oversized bootstrap, CAS conflict,
+	// OPF runtime failure) and the user's git push must abort.
+	// Transient checkpoint-push failures (e.g. the
+	// entire/checkpoints/v1 push itself failing) are NOT returned
+	// from PrePush — they're logged and swallowed at the CLI level
+	// so they never reach this point as non-zero exits.
+	//
+	// Trade-off: an unrelated `entire` crash (segfault, panic in
+	// non-OPF code) ALSO aborts the user's push. This is the safer
+	// failure mode — we cannot distinguish from the shell's point of
+	// view whether a non-zero exit means "OPF declined to redact" or
+	// "entire crashed mid-rewrite", and silently letting potentially-
+	// unredacted content reach the remote would violate the contract
+	// the user opted into by enabling OPF. Users hit by unrelated
+	// bugs can `ENTIRE_OPF=no git push` for a one-off bypass while
+	// the bug is fixed.
+	prePushCmd := gitHookCommand(cmdPrefix, `pre-push "$1"`, false)
 
 	return []hookSpec{
 		{
@@ -423,13 +448,13 @@ fi
 }
 
 // hookCmdPrefix returns the command prefix for hook scripts and warning messages.
-// Returns "go run ./cmd/entire/main.go" when local_dev is enabled.
+// Returns the scripts/entire-dev launcher when local_dev is enabled.
 // When absolutePath is true, resolves the full binary path via os.Executable()
 // and returns an error if resolution fails. This is needed for GUI git clients
 // (Xcode, Tower, etc.) that don't source shell profiles.
 func hookCmdPrefix(localDev, absolutePath bool) (string, error) {
 	if localDev {
-		return "go run ./cmd/entire/main.go", nil
+		return localDevHookCmdPrefix, nil
 	}
 	if absolutePath {
 		exe, err := os.Executable()

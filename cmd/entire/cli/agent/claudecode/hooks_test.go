@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
@@ -416,6 +417,52 @@ func TestUninstallHooks_PreservesUserDenyRules(t *testing.T) {
 	// Verify entire deny rule is removed
 	if containsRule(perms.Deny, metadataDenyRuleTest) {
 		t.Errorf("entire deny rule should be removed, got: %v", perms.Deny)
+	}
+}
+
+func TestInstallHooks_LocalDevFallsBackToPath(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	agent := &ClaudeCodeAgent{}
+	if _, err := agent.InstallHooks(context.Background(), true, false); err != nil {
+		t.Fatalf("InstallHooks(localDev=true) error = %v", err)
+	}
+
+	settings := readClaudeSettings(t, tempDir)
+	if len(settings.Hooks.Stop) == 0 || len(settings.Hooks.Stop[0].Hooks) == 0 {
+		t.Fatal("expected a Stop hook to be installed")
+	}
+	cmd := settings.Hooks.Stop[0].Hooks[0].Command
+
+	want := "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code stop"
+	if cmd != want {
+		t.Errorf("local-dev Stop hook should delegate to the script:\ngot:  %s\nwant: %s", cmd, want)
+	}
+	if strings.Contains(cmd, "go build") || strings.Contains(cmd, "sh -c") {
+		t.Errorf("build-probe/fallback logic must live in the script, not the hook command: %s", cmd)
+	}
+	if !isEntireHook(cmd) {
+		t.Errorf("local-dev Stop hook should be recognized as an Entire hook, got:\n%s", cmd)
+	}
+}
+
+func TestUninstallHooks_RemovesLocalDevHooks(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	agent := &ClaudeCodeAgent{}
+	if _, err := agent.InstallHooks(context.Background(), true, false); err != nil {
+		t.Fatalf("InstallHooks(localDev=true) error = %v", err)
+	}
+	if !agent.AreHooksInstalled(context.Background()) {
+		t.Fatal("local-dev hooks should be detected as installed")
+	}
+	if err := agent.UninstallHooks(context.Background()); err != nil {
+		t.Fatalf("UninstallHooks() error = %v", err)
+	}
+	if agent.AreHooksInstalled(context.Background()) {
+		t.Fatal("local-dev hooks should be removed after uninstall")
 	}
 }
 

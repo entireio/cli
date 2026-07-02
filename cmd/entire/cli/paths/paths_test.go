@@ -19,6 +19,7 @@ func TestIsSubpath(t *testing.T) {
 		{name: "equal paths", parent: "/a/b", child: "/a/b", want: true},
 		{name: "child outside parent", parent: "/a/b", child: "/a/c", want: false},
 		{name: "parent prefix but not subpath", parent: "/a/b", child: "/a/bc", want: false},
+		{name: "dot-dot prefixed child inside parent", parent: "/a/b", child: "/a/b/..generated/schema.json", want: true},
 
 		// Traversal attacks
 		{name: "dot-dot escape", parent: "/a/b", child: "/a/b/../../../etc/passwd", want: false},
@@ -41,6 +42,35 @@ func TestIsSubpath(t *testing.T) {
 			got := IsSubpath(tt.parent, tt.child)
 			if got != tt.want {
 				t.Errorf("IsSubpath(%q, %q) = %v, want %v", tt.parent, tt.child, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsRelativeTraversal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		rel  string
+		want bool
+	}{
+		{name: "exact dot-dot", rel: "..", want: true},
+		{name: "dot-dot child", rel: filepath.Join("..", "outside.txt"), want: true},
+		{name: "slash dot-dot child", rel: "../outside.txt", want: true},
+		{name: "backslash dot-dot child", rel: `..\outside.txt`, want: true},
+		{name: "dot-dot prefixed name", rel: filepath.Join("..generated", "schema.json"), want: false},
+		{name: "slash dot-dot prefixed name", rel: "../generated/schema.json", want: true},
+		{name: "backslash dot-dot prefixed name", rel: `..\generated\schema.json`, want: true},
+		{name: "ordinary child", rel: filepath.Join("dir", "file.txt"), want: false},
+		{name: "current dir", rel: ".", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := IsRelativeTraversal(tt.rel)
+			if got != tt.want {
+				t.Errorf("IsRelativeTraversal(%q) = %v, want %v", tt.rel, got, tt.want)
 			}
 		})
 	}
@@ -162,6 +192,29 @@ func TestToRelativePath_MSYSPaths(t *testing.T) {
 				t.Errorf("ToRelativePath(%q, %q) = %q, want %q", tt.absPath, tt.cwd, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestToRelativePath_AllowsDotDotPrefixedRepoPath(t *testing.T) {
+	t.Parallel()
+	cwd := t.TempDir()
+	absPath := filepath.Join(cwd, "..generated", "schema.json")
+	want := filepath.Join("..generated", "schema.json")
+
+	got := ToRelativePath(absPath, cwd)
+	if got != want {
+		t.Errorf("ToRelativePath(%q, %q) = %q, want %q", absPath, cwd, got, want)
+	}
+}
+
+func TestToRelativePath_RejectsDotDotTraversal(t *testing.T) {
+	t.Parallel()
+	cwd := t.TempDir()
+	absPath := filepath.Join(filepath.Dir(cwd), "..generated", "schema.json")
+
+	got := ToRelativePath(absPath, cwd)
+	if got != "" {
+		t.Errorf("ToRelativePath(%q, %q) = %q, want empty string", absPath, cwd, got)
 	}
 }
 

@@ -388,6 +388,46 @@ func TestParseCodexOutput_GarbledLineEmitsRunErrorAndContinues(t *testing.T) {
 	}
 }
 
+// TestParseCodexOutput_SurfacesErrorEnvelope verifies that a codex failure
+// reported as a stdout error envelope (with empty stderr + non-zero exit) is
+// surfaced as a RunError carrying the message, instead of being dropped.
+func TestParseCodexOutput_SurfacesErrorEnvelope(t *testing.T) {
+	t.Parallel()
+	stream := `{"type":"thread.started"}
+{"type":"error","message":"model gpt-5-codex not found"}`
+	events := collectCodexEvents(parseCodexOutput(strings.NewReader(stream)))
+
+	var gotMsg string
+	for _, ev := range events {
+		if re, ok := ev.(reviewtypes.RunError); ok && re.Err != nil {
+			gotMsg = re.Err.Error()
+		}
+	}
+	if !strings.Contains(gotMsg, "model gpt-5-codex not found") {
+		t.Fatalf("expected RunError to carry codex message, got %q (events: %v)", gotMsg, events)
+	}
+	last := events[len(events)-1]
+	if fin, ok := last.(reviewtypes.Finished); !ok || fin.Success {
+		t.Fatalf("expected final Finished{Success:false}, got %#v", last)
+	}
+}
+
+// TestParseCodexOutput_NestedErrorMessage covers the {"error":{"message":...}} shape.
+func TestParseCodexOutput_NestedErrorMessage(t *testing.T) {
+	t.Parallel()
+	stream := `{"type":"turn.failed","error":{"message":"401 unauthorized"}}`
+	events := collectCodexEvents(parseCodexOutput(strings.NewReader(stream)))
+	var gotMsg string
+	for _, ev := range events {
+		if re, ok := ev.(reviewtypes.RunError); ok && re.Err != nil {
+			gotMsg = re.Err.Error()
+		}
+	}
+	if !strings.Contains(gotMsg, "401 unauthorized") {
+		t.Fatalf("expected nested error message surfaced, got %q", gotMsg)
+	}
+}
+
 func collectCodexEvents(ch <-chan reviewtypes.Event) []reviewtypes.Event {
 	var events []reviewtypes.Event
 	for ev := range ch {

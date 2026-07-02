@@ -124,6 +124,10 @@ func writeDoctorBundle(ctx context.Context, repoRoot, outPath string, raw bool) 
 		return err
 	}
 
+	if err := addStringToZip(zw, "entire-refs.txt", entireRefsReport(ctx, repoRoot), raw); err != nil {
+		return err
+	}
+
 	if err := addStringToZip(zw, "version.txt", versionInfoString(), raw); err != nil {
 		return err
 	}
@@ -139,6 +143,25 @@ func writeDoctorBundle(ctx context.Context, repoRoot, outPath string, raw bool) 
 	fileClosed = true
 
 	return nil
+}
+
+// entireRefsReport captures entire-related git refs.
+// Best-effort: failures are recorded in the report, not returned.
+func entireRefsReport(ctx context.Context, repoRoot string) string {
+	var sb strings.Builder
+
+	// Broad globs on purpose: refs/heads/entire catches shadow/trails branches,
+	// and refs/entire captures custom or legacy Entire refs.
+	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(refname) %(objectname)",
+		"refs/heads/entire", "refs/entire", "refs/remotes/origin/entire")
+	cmd.Dir = repoRoot
+	out, err := cmd.CombinedOutput()
+	sb.Write(out)
+	if err != nil {
+		fmt.Fprintf(&sb, "[error: %v]\n", err)
+	}
+
+	return sb.String()
 }
 
 func versionInfoString() string {

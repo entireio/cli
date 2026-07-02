@@ -170,53 +170,35 @@ func TestExplain_CommitWithCheckpointTrailer(t *testing.T) {
 	}
 }
 
-// TestExplain_BranchListingShowsCheckpointsAndPrompts runs the same scenario
-// with v2 disabled and enabled, verifying that `entire explain` (branch listing)
-// finds committed checkpoints and displays their prompts in both modes.
+// TestExplain_BranchListingShowsCheckpointsAndPrompts verifies that `entire
+// explain` branch listing finds committed checkpoints and displays prompts.
 func TestExplain_BranchListingShowsCheckpointsAndPrompts(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		name string
-		v2   bool
-	}{
-		{"v1_only", false},
-		{"v2_enabled", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			env := NewFeatureBranchEnv(t)
+	env := NewFeatureBranchEnv(t)
 
-			if tc.v2 {
-				env.PatchSettings(map[string]any{
-					"strategy_options": map[string]any{"checkpoints_v2": true},
-				})
-			}
+	session := env.NewSession()
+	err := env.SimulateUserPromptSubmitWithPrompt(session.ID, "Implement user authentication")
+	require.NoError(t, err)
 
-			session := env.NewSession()
-			err := env.SimulateUserPromptSubmitWithPrompt(session.ID, "Implement user authentication")
-			require.NoError(t, err)
+	env.WriteFile("auth.go", "package auth\nfunc Login() {}\n")
+	session.CreateTranscript(
+		"Implement user authentication",
+		[]FileChange{{Path: "auth.go", Content: "package auth\nfunc Login() {}\n"}},
+	)
+	err = env.SimulateStop(session.ID, session.TranscriptPath)
+	require.NoError(t, err)
 
-			env.WriteFile("auth.go", "package auth\nfunc Login() {}\n")
-			session.CreateTranscript(
-				"Implement user authentication",
-				[]FileChange{{Path: "auth.go", Content: "package auth\nfunc Login() {}\n"}},
-			)
-			err = env.SimulateStop(session.ID, session.TranscriptPath)
-			require.NoError(t, err)
+	env.GitCommitWithShadowHooks("Implement user authentication", "auth.go")
 
-			env.GitCommitWithShadowHooks("Implement user authentication", "auth.go")
+	// `entire explain` (no flags) should show the branch listing with the checkpoint.
+	output, err := env.RunCLIWithError("checkpoint", "explain")
+	require.NoError(t, err, "explain should succeed: %s", output)
 
-			// `entire explain` (no flags) should show the branch listing with the checkpoint.
-			output, err := env.RunCLIWithError("checkpoint", "explain")
-			require.NoError(t, err, "explain should succeed: %s", output)
-
-			require.Contains(t, output, "branch  ")
-			require.Contains(t, output, "checkpoints  1")
-			require.Contains(t, output, "Implement user authentication",
-				"branch listing should show the commit message or prompt")
-		})
-	}
+	require.Contains(t, output, "branch  ")
+	require.Contains(t, output, "checkpoints  1")
+	require.Contains(t, output, "Implement user authentication",
+		"branch listing should show the commit message or prompt")
 }
 
 // TestExplain_CheckpointFetchesFromRemoteWhenMissingLocally verifies that
@@ -348,11 +330,6 @@ func TestExplain_CheckpointFetchDoesNotRewindLocalAheadBranch(t *testing.T) {
 		"locally-committed checkpoint must remain discoverable after fetch-on-miss")
 }
 
-// TestExplain_CheckpointV2FetchDoesNotRewindLocalAheadRefs verifies that
-// running explain --checkpoint with a non-matching prefix does NOT rewind a
-// locally-ahead v2 ref (refs/entire/v2/main). v2 uses a direct-write refspec
-// (`+refs/entire/v2/main:refs/entire/v2/main`), so a naive fetch force-rewinds
-// the local ref, orphaning locally-committed-but-unpushed v2 checkpoint data.
 func TestExplain_CheckpointSucceedsAfterTreelessFetch(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
@@ -361,17 +338,13 @@ func TestExplain_CheckpointSucceedsAfterTreelessFetch(t *testing.T) {
 	checkpointID := createAndPushCheckpoint(t, env, "treeless_v1.go", "Treeless v1 prompt")
 
 	cloneDir := setupTreelessClone(t, bareURL, "+refs/heads/"+paths.MetadataBranchName+":refs/heads/"+paths.MetadataBranchName)
-	requireBlobMissing(t, cloneDir, checkpointID, false /* v1 */)
+	requireBlobMissing(t, cloneDir, checkpointID)
 
 	output := runExplainInDir(t, cloneDir, checkpointID)
 	require.Contains(t, output, "Treeless v1 prompt",
 		"explain should succeed and surface the prompt despite blobs being absent locally")
 }
 
-// TestExplain_CheckpointV2SucceedsAfterTreelessFetch is the v2 mirror —
-// guards V2GitStore's read path against the same blob-missing regression.
-// Required because v2 will be enabled by default soon and reaches the
-// same Tree.File() trap as v1.
 func createAndPushCheckpoint(t *testing.T, env *TestEnv, fileName, prompt string) string {
 	t.Helper()
 	session := env.NewSession()
@@ -488,17 +461,12 @@ func runExplainInDir(t *testing.T, dir, checkpointID string) string {
 // treeless-clone setup actually reproduces the bug-triggering state — if
 // every blob were locally available, the test would pass without
 // exercising the fix.
-func requireBlobMissing(t *testing.T, dir, checkpointID string, isV2 bool) {
+func requireBlobMissing(t *testing.T, dir, checkpointID string) {
 	t.Helper()
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	var ref *plumbing.Reference
-	if isV2 {
-		ref, err = repo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true)
-	} else {
-		ref, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	}
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, err, "metadata ref should exist after treeless fetch")
 
 	commit, err := repo.CommitObject(ref.Hash())
@@ -516,5 +484,5 @@ func requireBlobMissing(t *testing.T, dir, checkpointID string, isV2 bool) {
 			return // confirmed: at least one blob is missing
 		}
 	}
-	t.Fatalf("expected at least one metadata blob to be missing in fresh treeless clone (cp=%s, v2=%v)", checkpointID, isV2)
+	t.Fatalf("expected at least one metadata blob to be missing in fresh treeless clone (cp=%s)", checkpointID)
 }

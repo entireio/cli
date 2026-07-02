@@ -37,6 +37,39 @@ done < "$ALLOWED_LICENSES_FILE"
 echo "Allowed licenses: ${ALLOWED_LICENSES[*]}"
 echo ""
 
+# Load per-package license overrides (module-path -> SPDX). go-licenses
+# can't classify some modules' LICENSE files and reports "Unknown"; an
+# override records the real (allowed) license for the module and anything
+# under it. See .license-overrides for the rationale per entry.
+# Parallel indexed arrays (not an associative array — keeps this portable
+# to bash 3.2 on stock macOS).
+OVERRIDES_FILE=".license-overrides"
+OVERRIDE_KEYS=()
+OVERRIDE_VALS=()
+if [ -f "$OVERRIDES_FILE" ]; then
+    while IFS= read -r line; do
+        if [[ ! "$line" =~ ^[[:space:]]*# ]] && [[ -n "$line" ]]; then
+            # shellcheck disable=SC2206
+            parts=($line)
+            OVERRIDE_KEYS+=("${parts[0]}")
+            OVERRIDE_VALS+=("${parts[1]}")
+        fi
+    done < "$OVERRIDES_FILE"
+fi
+
+# overrideLicense echoes the override SPDX for a package when the package
+# matches an override module path (exact or as a path prefix), else "".
+overrideLicense() {
+    local pkg="$1" i
+    for i in "${!OVERRIDE_KEYS[@]}"; do
+        local key="${OVERRIDE_KEYS[$i]}"
+        if [[ "$pkg" == "$key" || "$pkg" == "$key/"* ]]; then
+            echo "${OVERRIDE_VALS[$i]}"
+            return
+        fi
+    done
+}
+
 # Get licenses from dependencies
 TEMP_FILE=$(mktemp)
 # shellcheck disable=SC2312
@@ -48,6 +81,11 @@ while IFS=',' read -r package _url license; do
     # Skip internal packages
     if [[ "$package" == entire.io/* ]]; then
         continue
+    fi
+
+    # Apply a per-package override when go-licenses couldn't classify it.
+    if override=$(overrideLicense "$package") && [ -n "$override" ]; then
+        license="$override"
     fi
 
     # Check if license is allowed

@@ -52,6 +52,86 @@ func TestInstallHooks_CreatesConfig(t *testing.T) {
 	require.Contains(t, string(projectData), "[features]")
 }
 
+func TestInstallHooks_WindowsWrapperProbeSuccessKeepsWrappedCommands(t *testing.T) {
+	tempDir := setupTestEnv(t)
+	withCodexHookEnvironment(t, "windows", true)
+
+	ag := &CodexAgent{}
+	count, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+	require.Equal(t, 4, count)
+
+	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
+	data, err := os.ReadFile(hooksPath)
+	require.NoError(t, err)
+
+	var hooksFile HooksFile
+	require.NoError(t, json.Unmarshal(data, &hooksFile))
+
+	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
+	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapProductionSilentHookCommand("entire hooks codex stop"), "Stop")
+	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
+}
+
+func TestInstallHooks_WindowsWrapperProbeFailureUsesWindowsCommands(t *testing.T) {
+	tempDir := setupTestEnv(t)
+	withCodexHookEnvironment(t, "windows", false)
+
+	ag := &CodexAgent{}
+	count, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+	require.Equal(t, 4, count)
+
+	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
+	data, err := os.ReadFile(hooksPath)
+	require.NoError(t, err)
+
+	var hooksFile HooksFile
+	require.NoError(t, json.Unmarshal(data, &hooksFile))
+
+	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
+	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex stop"), "Stop")
+	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
+	require.NotContains(t, string(data), "sh -c")
+	require.NotContains(t, string(data), "command -v entire")
+	require.Contains(t, string(data), "where.exe entire")
+}
+
+func TestInstallHooks_WindowsWrapperProbeFailureMigratesToWindowsCommands(t *testing.T) {
+	tempDir := setupTestEnv(t)
+	wrapperWorks := true
+	withCodexHookEnvironmentFunc(t, "windows", func(context.Context, string) bool {
+		return wrapperWorks
+	})
+
+	ag := &CodexAgent{}
+	count, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+	require.Equal(t, 4, count)
+
+	wrapperWorks = false
+	count, err = ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+	require.Equal(t, 4, count)
+
+	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
+	data, err := os.ReadFile(hooksPath)
+	require.NoError(t, err)
+
+	var hooksFile HooksFile
+	require.NoError(t, json.Unmarshal(data, &hooksFile))
+
+	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
+	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex stop"), "Stop")
+	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
+	require.NotContains(t, string(data), "sh -c")
+	require.NotContains(t, string(data), "command -v entire")
+	require.Contains(t, string(data), "where.exe entire")
+}
+
 func TestInstallHooks_Idempotent(t *testing.T) {
 	setupTestEnv(t)
 
@@ -77,8 +157,8 @@ func TestInstallHooks_LocalDev(t *testing.T) {
 	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
 	data, err := os.ReadFile(hooksPath)
 	require.NoError(t, err)
-	require.Contains(t, string(data), `go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks codex session-start`)
-	require.Contains(t, string(data), `go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks codex post-tool-use`)
+	require.Contains(t, string(data), `\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks codex session-start`)
+	require.Contains(t, string(data), `\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks codex post-tool-use`)
 }
 
 func TestInstallHooks_Force(t *testing.T) {
@@ -319,4 +399,16 @@ func assertHookCommand(t *testing.T, groups []MatcherGroup, expectedCmd, label s
 		}
 	}
 	t.Errorf("%s: expected hook command not found: %s", label, expectedCmd)
+}
+
+func withCodexHookEnvironment(t *testing.T, goos string, wrapperWorks bool) {
+	t.Helper()
+	withCodexHookEnvironmentFunc(t, goos, func(context.Context, string) bool {
+		return wrapperWorks
+	})
+}
+
+func withCodexHookEnvironmentFunc(t *testing.T, goos string, wrapperWorks func(context.Context, string) bool) {
+	t.Helper()
+	t.Cleanup(agentpkg.SetWindowsHookProbeForTesting(goos, wrapperWorks))
 }

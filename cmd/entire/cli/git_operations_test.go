@@ -36,6 +36,12 @@ func initOpenedTestRepo(t *testing.T, dir string) *git.Repository {
 	return repo
 }
 
+func TestValidateBranchNameRejectsLeadingDash(t *testing.T) {
+	err := ValidateBranchName(context.Background(), "--all")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid branch name")
+}
+
 func TestGetCurrentBranch(t *testing.T) {
 	// Create temp directory for test repo
 	tmpDir := t.TempDir()

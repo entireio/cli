@@ -29,10 +29,7 @@ func TestResolveWorktreeBranch_RegularRepo(t *testing.T) {
 		dir = resolved
 	}
 
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("git init: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	// Read the default branch name directly from HEAD to avoid hard-coding it
 	headData, err := os.ReadFile(filepath.Join(dir, ".git", "HEAD"))
@@ -53,9 +50,10 @@ func TestResolveWorktreeBranch_DetachedHEAD(t *testing.T) {
 		dir = resolved
 	}
 
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("git init: %v", err)
+		t.Fatalf("git open: %v", err)
 	}
 
 	// Create a commit so we can detach HEAD
@@ -212,6 +210,47 @@ func TestRunStatus_Enabled(t *testing.T) {
 	}
 }
 
+// `entire status` surfaces the agent-help pointer for agents on transports
+// without context injection (Cursor / Copilot / Droid), but only once entire is
+// set up — not for not-set-up or not-a-git-repo states.
+func TestRunStatus_ShowsAgentHelpHintWhenSetUp(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), agentHelpCommand) {
+		t.Errorf("expected agent-help hint in status output, got: %s", stdout.String())
+	}
+}
+
+func TestRunStatus_NoAgentHelpHintWhenNotSetUp(t *testing.T) {
+	setupTestRepo(t)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if strings.Contains(stdout.String(), agentHelpCommand) {
+		t.Errorf("agent-help hint should not appear when not set up, got: %s", stdout.String())
+	}
+}
+
+// agentHelpCommand is user-facing — docs, the installed skills, and agents key
+// off the exact string — so pin its value here. Every other assertion uses the
+// const; this guards against it silently drifting.
+func TestAgentHelpCommandValue(t *testing.T) {
+	t.Parallel()
+	const want = "entire agent-help"
+	if agentHelpCommand != want {
+		t.Errorf("agentHelpCommand = %q, want %q", agentHelpCommand, want)
+	}
+}
+
 func TestRunStatus_Disabled(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsDisabled)
@@ -223,6 +262,10 @@ func TestRunStatus_Disabled(t *testing.T) {
 
 	if !strings.Contains(stdout.String(), "Disabled") {
 		t.Errorf("Expected output to show 'Disabled', got: %s", stdout.String())
+	}
+	// The agent-help footer renders whenever entire is set up, including disabled.
+	if !strings.Contains(stdout.String(), agentHelpCommand) {
+		t.Errorf("Expected agent-help hint in disabled (but set-up) status, got: %s", stdout.String())
 	}
 }
 
@@ -890,6 +933,21 @@ func TestTotalTokens_DeepSubagentNesting(t *testing.T) {
 	// 100+50 + 200+100 + 50+25 = 525
 	if got := totalTokens(tu); got != 525 {
 		t.Errorf("totalTokens() = %d, want 525 (deep nesting)", got)
+	}
+}
+
+func TestTotalTokens_SaturatesOverflow(t *testing.T) {
+	t.Parallel()
+
+	maxInt := int(^uint(0) >> 1)
+	tu := &agent.TokenUsage{
+		InputTokens: maxInt,
+		SubagentTokens: &agent.TokenUsage{
+			OutputTokens: 1,
+		},
+	}
+	if got := totalTokens(tu); got != maxInt {
+		t.Errorf("totalTokens() = %d, want %d", got, maxInt)
 	}
 }
 
@@ -1687,6 +1745,11 @@ func TestRunStatusJSON_Enabled(t *testing.T) {
 	if result.Error != "" {
 		t.Errorf("Expected no error, got %q", result.Error)
 	}
+	// No-channel agents (Cursor/Copilot/Droid/MCP) parse --json, not the text
+	// footer, so the agent-help pointer must be present once entire is set up.
+	if result.AgentHelp != agentHelpCommand {
+		t.Errorf("Expected agent_help='entire agent-help', got %q", result.AgentHelp)
+	}
 }
 
 func TestRunStatusJSON_Disabled(t *testing.T) {
@@ -1705,6 +1768,11 @@ func TestRunStatusJSON_Disabled(t *testing.T) {
 
 	if result.Enabled {
 		t.Error("Expected enabled=false")
+	}
+	// Disabled-but-set-up still advertises the passive agent-help pointer (the
+	// hint is gated on "set up", not on "enabled") — matches the text footer.
+	if result.AgentHelp != agentHelpCommand {
+		t.Errorf("Expected agent_help='entire agent-help' when disabled-but-set-up, got %q", result.AgentHelp)
 	}
 }
 
@@ -1727,6 +1795,10 @@ func TestRunStatusJSON_NotSetUp(t *testing.T) {
 	if result.Error != "not set up" {
 		t.Errorf("Expected error='not set up', got %q", result.Error)
 	}
+	// Mirrors the text footer: no agent-help pointer until entire is set up.
+	if result.AgentHelp != "" {
+		t.Errorf("agent_help should be empty when not set up, got %q", result.AgentHelp)
+	}
 }
 
 func TestRunStatusJSON_NotGitRepo(t *testing.T) {
@@ -1747,6 +1819,9 @@ func TestRunStatusJSON_NotGitRepo(t *testing.T) {
 	}
 	if result.Error != "not a git repository" {
 		t.Errorf("Expected error='not a git repository', got %q", result.Error)
+	}
+	if result.AgentHelp != "" {
+		t.Errorf("agent_help should be empty when not a git repo, got %q", result.AgentHelp)
 	}
 }
 
@@ -1794,6 +1869,9 @@ func TestRunStatusJSON_WithActiveSessions(t *testing.T) {
 	}
 	if s.Status != "active" {
 		t.Errorf("Expected status='active', got %q", s.Status)
+	}
+	if result.AgentHelp != agentHelpCommand {
+		t.Errorf("Expected agent_help='entire agent-help' with active sessions, got %q", result.AgentHelp)
 	}
 }
 
@@ -1862,7 +1940,7 @@ func TestRunStatusJSON_DeduplicatesSessions(t *testing.T) {
 	}
 }
 
-// writeStatusHeadCheckpoint writes a v2 checkpoint with the requested
+// writeStatusHeadCheckpoint writes a v1 checkpoint with the requested
 // review/investigation flags, then amends HEAD to carry the
 // Entire-Checkpoint trailer. Mirrors the helper used in
 // head_checkpoint_flags_test.go but inlined to keep status_test.go
@@ -1890,8 +1968,8 @@ func writeStatusHeadCheckpoint(t *testing.T, hasReview, hasInvestigation bool) {
 		cpHex = "abcdef013333"
 	}
 	cpID := id.MustCheckpointID(cpHex)
-	store := checkpoint.NewGitStore(repo)
-	if err := store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	if err := store.Write(context.Background(), checkpoint.Session{
 		CheckpointID:     cpID,
 		SessionID:        "status-test-session",
 		Strategy:         "manual-commit",
@@ -1913,7 +1991,7 @@ func TestRunStatus_PrintsInvestigationLine(t *testing.T) {
 	testutil.WriteFile(t, ".", "init.txt", "init")
 	testutil.GitAdd(t, ".", "init.txt")
 	testutil.GitCommit(t, ".", "init")
-	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`)
+	writeSettings(t, `{"enabled": true}`)
 	writeStatusHeadCheckpoint(t, false, true)
 
 	var stdout bytes.Buffer
@@ -1935,7 +2013,7 @@ func TestRunStatus_PrintsBothReviewAndInvestigation(t *testing.T) {
 	testutil.WriteFile(t, ".", "init.txt", "init")
 	testutil.GitAdd(t, ".", "init.txt")
 	testutil.GitCommit(t, ".", "init")
-	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`)
+	writeSettings(t, `{"enabled": true}`)
 	writeStatusHeadCheckpoint(t, true, true)
 
 	var stdout bytes.Buffer

@@ -63,7 +63,7 @@ func detectHookManagers(repoRoot string) []hookManager {
 }
 
 // hookManagerWarning builds a warning string for detected hook managers.
-// cmdPrefix is the CLI command prefix (e.g., "entire" or "go run ./cmd/entire/main.go").
+// cmdPrefix is the CLI command prefix (e.g., "entire" or "./scripts/entire-dev").
 func hookManagerWarning(managers []hookManager, cmdPrefix string) string {
 	if len(managers) == 0 {
 		return ""

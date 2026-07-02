@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
 
@@ -248,8 +249,8 @@ func TestFetchLatestVersion(t *testing.T) {
 		if r.Header.Get("Accept") != "application/vnd.github+json" {
 			t.Errorf("Accept header = %q, want application/vnd.github+json", r.Header.Get("Accept"))
 		}
-		if r.Header.Get("User-Agent") != "entire-cli" {
-			t.Errorf("User-Agent header = %q, want entire-cli", r.Header.Get("User-Agent"))
+		if want := versioninfo.UserAgent(); r.Header.Get("User-Agent") != want {
+			t.Errorf("User-Agent header = %q, want %q", r.Header.Get("User-Agent"), want)
 		}
 
 		release := GitHubRelease{
@@ -345,6 +346,8 @@ func TestParseGitHubRelease(t *testing.T) {
 // it without tripping goconst on repeated string literals.
 const brewUpgradeCmd = "brew upgrade entire"
 
+const scoopExecutablePath = `C:\Users\test\scoop\apps\cli\current\entire.exe`
+
 func TestUpdateCommand(t *testing.T) {
 	const plainBinPath = "/usr/local/bin/entire"
 	tests := []struct {
@@ -386,7 +389,7 @@ func TestUpdateCommand(t *testing.T) {
 		{
 			name:           "scoop path",
 			currentVersion: "1.0.0",
-			execPath:       func() (string, error) { return `C:\Users\test\scoop\apps\cli\current\entire.exe`, nil },
+			execPath:       func() (string, error) { return scoopExecutablePath, nil },
 			want:           "scoop update entire/cli",
 		},
 		{
@@ -422,13 +425,61 @@ func TestUpdateCommand(t *testing.T) {
 	}
 }
 
-// setupCheckAndNotifyTest sets HOME to a temp dir and overrides githubAPIURL.
-// Returns a cobra.Command with captured stdout and a cleanup function.
+func TestUpdateCommandForCurrentBinary(t *testing.T) {
+	tests := []struct {
+		name           string
+		currentVersion string
+		goos           string
+		execPath       func() (string, error)
+		want           string
+	}{
+		{
+			name:           "known installer returns command",
+			currentVersion: "1.2.3",
+			goos:           goosWindows,
+			execPath:       func() (string, error) { return scoopExecutablePath, nil },
+			want:           "scoop update entire/cli",
+		},
+		{
+			name:           "windows unknown installer returns releases URL",
+			currentVersion: "1.2.3",
+			goos:           goosWindows,
+			execPath:       func() (string, error) { return `C:\Program Files\Entire\entire.exe`, nil },
+			want:           downloadsURL,
+		},
+		{
+			name:           "non-windows unknown installer returns curl command",
+			currentVersion: "1.2.3",
+			goos:           "linux",
+			execPath:       func() (string, error) { return "/usr/local/bin/entire", nil },
+			want:           "curl -fsSL https://entire.io/install.sh | bash",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originalExecPath := executablePath
+			executablePath = tt.execPath
+			t.Cleanup(func() { executablePath = originalExecPath })
+
+			originalGOOS := goos
+			goos = tt.goos
+			t.Cleanup(func() { goos = originalGOOS })
+
+			if got := UpdateCommandForCurrentBinary(tt.currentVersion); got != tt.want {
+				t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// setupCheckAndNotifyTest points the global config dir at a per-test temp
+// dir and overrides githubAPIURL. Returns a cobra.Command with captured
+// stdout and a cleanup function.
 func setupCheckAndNotifyTest(t *testing.T, serverURL string) (*cobra.Command, *bytes.Buffer) {
 	t.Helper()
 
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 
 	origURL := githubAPIURL
 	githubAPIURL = serverURL
@@ -505,10 +556,7 @@ func TestCheckAndNotify_SkipsWhenCacheIsFresh(t *testing.T) {
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
 
 	// Pre-seed the cache with a recent check time
-	configDir, err := globalConfigDirPath()
-	if err != nil {
-		t.Fatalf("globalConfigDirPath() error = %v", err)
-	}
+	configDir := globalConfigDirPath()
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}

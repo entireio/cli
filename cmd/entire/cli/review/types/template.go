@@ -4,7 +4,7 @@
 // AgentReviewer using two caller-supplied functions: BuildCmd (per-agent
 // argv/env construction) and Parser (per-agent stdout-to-Event stream).
 //
-// All three currently-supported agents (claude-code, codex, gemini)
+// Current adapter-backed review agents (claude-code, codex, gemini, pi)
 // share the Start/Process/Wait/Events scaffolding. Only the build-cmd
 // step and the stdout parser genuinely differ. The template owns the
 // shared lifecycle (spawn → pipe stdout → run parser → forward events
@@ -18,6 +18,8 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/procutil"
 )
 
 const maxProcessStderrBytes = 64 * 1024
@@ -69,6 +71,10 @@ func (t *ReviewerTemplate) Start(ctx context.Context, cfg RunConfig) (Process, e
 	if cmd == nil {
 		return nil, fmt.Errorf("ReviewerTemplate.Start: %w (BuildCmd returned nil for agent %q)", ErrTemplateMisconfigured, t.AgentName)
 	}
+	// Without this, a cancelled review hangs: the agent's grandchildren keep the
+	// stdout pipe open after the agent is killed, so reading Events to EOF blocks
+	// forever (Ctrl+C never completes).
+	procutil.TerminateOnCancel(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("%s: stdout pipe: %w", t.AgentName, err)

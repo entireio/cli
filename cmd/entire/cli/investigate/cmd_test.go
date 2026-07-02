@@ -725,7 +725,7 @@ func TestNewCommand_ContinueWithMissingState(t *testing.T) {
 // --- helpers ---------------------------------------------------------------
 
 // saveInvestigateSettings writes an InvestigateConfig into the CWD's
-// .entire/settings.json. Mirrors review.SaveReviewConfig.
+// .entire/settings.json.
 func saveInvestigateSettings(cfg *settings.InvestigateConfig) error {
 	ctx := context.Background()
 	s, err := settings.Load(ctx)

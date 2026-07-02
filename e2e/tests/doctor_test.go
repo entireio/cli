@@ -39,9 +39,5 @@ func TestDoctorNoIssues(t *testing.T) {
 
 		assert.Contains(t, out, "Metadata branches: OK", "doctor should report healthy metadata state")
 		assert.Contains(t, out, "No stuck sessions found.", "doctor should report no stuck sessions")
-		assert.NotContains(t, out, "v2 refs", "doctor should not run v2 doctor checks")
-		assert.NotContains(t, out, "v2 checkpoint counts", "doctor should not run v2 count checks")
-		assert.NotContains(t, out, "v2 generations", "doctor should not run v2 generation checks")
-		assert.NotContains(t, out, "v2 /main ref", "doctor should not run v2 connectivity checks")
 	})
 }

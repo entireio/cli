@@ -7,20 +7,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/redact"
 )
 
 const (
@@ -30,10 +33,6 @@ const (
 	EntireSettingsLocalFile = ".entire/settings.local.json"
 	// ClonePreferencesFile is the path inside the git common dir for clone-local preferences.
 	ClonePreferencesFile = "entire/preferences.json"
-)
-
-var (
-	checkpointsVersionWarningOnce sync.Once
 )
 
 type worktreeRootContextKey struct{}
@@ -90,12 +89,26 @@ type EntireSettings struct {
 	// Redaction configures PII redaction behavior for transcripts and metadata.
 	Redaction *RedactionSettings `json:"redaction,omitempty"`
 
-	// Review maps agent name (e.g. "claude-code") to the review config for
-	// that agent. When empty, `entire review` triggers the first-run picker.
+	// ReviewProfiles maps profile names (e.g. "general", "security") to
+	// named review setups. `entire review` runs one profile: its canonical task
+	// is fanned out to the configured agents, then an optional master agent
+	// consolidates the worker reports.
+	ReviewProfiles map[string]ReviewProfileConfig `json:"review_profiles,omitempty"`
+
+	// ReviewDefaultProfile is the profile used by `entire review` when no
+	// profile is supplied. If empty, `general` is used when present, otherwise
+	// the single configured profile is used.
+	ReviewDefaultProfile string `json:"review_default_profile,omitempty"`
+
+	// Deprecated: legacy pre-profile review settings. Kept so old config files
+	// still parse. `entire review` reads this only as a compatibility fallback
+	// when no review_profiles are configured, exposing it as the general profile.
 	Review map[string]ReviewConfig `json:"review,omitempty"`
 
-	// ReviewFixAgent is the default agent used when applying aggregate or
-	// multi-agent review findings with `entire review --fix`.
+	// ReviewFixAgent is a legacy saved fix-agent preference. The `entire review
+	// --fix` flow has been removed; this field is retained only so older
+	// settings/preferences files still parse. It is no longer read by
+	// `entire review`.
 	ReviewFixAgent string `json:"review_fix_agent,omitempty"`
 
 	// Investigate holds configuration for `entire investigate`. Empty means
@@ -131,6 +144,12 @@ type EntireSettings struct {
 	// nil/true = sign (default), false = skip signing.
 	SignCheckpointCommits *bool `json:"sign_checkpoint_commits,omitempty"`
 
+	// Checkpoints selects checkpoint storage backends (a primary plus optional
+	// write-only mirrors). checkpoint.Open consumes it via the lenient
+	// LoadCheckpointsConfig loader; the field also lives here so the strict
+	// settings loader (DisallowUnknownFields) accepts a "checkpoints" key.
+	Checkpoints *CheckpointsConfig `json:"checkpoints,omitempty"`
+
 	// Deprecated: no longer used. Exists to tolerate old settings files
 	// that still contain "strategy": "auto-commit" or similar.
 	Strategy string `json:"strategy,omitempty"`
@@ -143,6 +162,12 @@ type EntireSettings struct {
 // same clone see the same preferences. Not committed because the file lives
 // inside .git/.
 type ClonePreferences struct {
+	ReviewProfiles       map[string]ReviewProfileConfig `json:"review_profiles,omitempty"`
+	ReviewDefaultProfile string                         `json:"review_default_profile,omitempty"`
+
+	// Deprecated: legacy pre-profile review settings. Kept so old preference
+	// files parse. New review setup writes ReviewProfiles instead, while
+	// `entire review` may read Review as a fallback when profiles are absent.
 	Review         map[string]ReviewConfig `json:"review,omitempty"`
 	ReviewFixAgent string                  `json:"review_fix_agent,omitempty"`
 
@@ -151,13 +176,25 @@ type ClonePreferences struct {
 	// Once true, `entire review` stops prompting on every invocation; the
 	// user can re-enable by editing this file or deleting the key.
 	ReviewMigrationDismissed bool `json:"review_migration_dismissed,omitempty"`
+
+	// TrailsEnabled caches whether trails are enabled for this repository on the
+	// API. Pointer shape distinguishes "unknown/not refreshed yet" (nil) from a
+	// definitive false. This is clone-local and not committed so hook-time agent
+	// context injection can avoid network/auth work on the prompt path.
+	TrailsEnabled *bool `json:"trails_enabled,omitempty"`
+
+	// Freshness and scope for TrailsEnabled.
+	TrailsEnabledCheckedAt *time.Time `json:"trails_enabled_checked_at,omitempty"`
+	TrailsEnabledRepoKey   string     `json:"trails_enabled_repo_key,omitempty"`
+	TrailsEnabledAPIBase   string     `json:"trails_enabled_api_base,omitempty"`
+	TrailsEnabledAuthKey   string     `json:"trails_enabled_auth_key,omitempty"`
 }
 
 // SummaryGenerationSettings configures provider selection for on-demand
 // checkpoint summaries generated by explain --generate.
 type SummaryGenerationSettings struct {
 	// Provider is the selected summary provider agent name
-	// (for example "claude-code", "codex", or "gemini").
+	// (for example "claude-code", "codex", "gemini", or "pi").
 	Provider string `json:"provider,omitempty"`
 
 	// Model is an optional model hint passed to the selected provider.
@@ -210,6 +247,10 @@ type RedactionSettings struct {
 	// "[REDACTED_<LABEL>]" token used by PII. Failed regex compilations are
 	// logged via slog.Warn and the rule is skipped.
 	CustomRedactions map[string]string `json:"custom_redactions,omitempty"`
+
+	// OpenAIPrivacyFilter is the optional 8th redaction layer (opt-in).
+	// See docs/security-and-privacy.md.
+	OpenAIPrivacyFilter *OPFSettings `json:"openai_privacy_filter,omitempty"`
 }
 
 // PIISettings configures PII detection categories.
@@ -221,6 +262,35 @@ type PIISettings struct {
 	Address        *bool             `json:"address,omitempty"`
 	CustomPatterns map[string]string `json:"custom_patterns,omitempty"`
 }
+
+// OPFSettings configures the optional OpenAI Privacy Filter detection layer.
+// Disabled by default. Runs only at condensation/export boundaries — see
+// docs/security-and-privacy.md.
+//
+// There is intentionally no "on_failure" field: warn-only is the only mode
+// the runtime currently supports, and DisallowUnknownFields will reject any
+// future user who tries to set it. Adding the field again should land in
+// lockstep with the runtime enforcement.
+type OPFSettings struct {
+	Enabled        bool            `json:"enabled,omitempty"`
+	Categories     map[string]bool `json:"categories,omitempty"`
+	Command        string          `json:"command,omitempty"`
+	TimeoutSeconds int             `json:"timeout_seconds,omitempty"`
+
+	// PromptDefault controls whether the pre-push hook asks the user
+	// before running OPF. "" (default) and "ask" both surface the
+	// interactive prompt; "never" skips OPF and pushes 7-layer content;
+	// "always" runs without asking. ENTIRE_OPF=yes|no on the push
+	// invocation overrides this setting per-push.
+	PromptDefault string `json:"prompt_default,omitempty"`
+}
+
+// Valid PromptDefault values. Empty == OPFPromptAsk.
+const (
+	OPFPromptAsk    = "ask"
+	OPFPromptNever  = "never"
+	OPFPromptAlways = "always"
+)
 
 // GetCommitLinking returns the effective commit linking mode.
 // Returns the explicit value if set, otherwise defaults to "prompt"
@@ -242,43 +312,81 @@ func (s *EntireSettings) SummaryTimeoutValue() time.Duration {
 	return time.Duration(s.SummaryTimeoutSeconds) * time.Second
 }
 
-// ReviewConfig holds the per-agent review configuration. Both fields are
-// optional; together they describe what `entire review` should ask the
-// agent to do.
+// ReviewProfileConfig is a named review setup. The profile-level Task is the
+// canonical task every reviewer agent is asked to run; per-agent ReviewConfig
+// entries adapt that task to agent-specific mechanics such as slash commands
+// or additional instructions. Judge names the single agent that consolidates
+// the reviewers' reports into the final verdict in a closing round.
 //
-// Precedence when composing the review prompt sent to the agent:
-//   - If Prompt is non-empty, it is used verbatim.
-//   - Otherwise, Skills are composed into a default template
-//     ("Please run these review skills in order: 1. /X 2. /Y").
+// Example:
 //
-// Skills are always recorded on the checkpoint metadata regardless of
-// which path composed the prompt — they're the structured, queryable
-// tag alongside ReviewPrompt (which is the ground truth).
+//	"review_profiles": {
+//	  "security": {
+//	    "task": "Review this change for auth, injection, secrets, and privilege-boundary bugs.",
+//	    "agents": {
+//	      "claude-sonnet": {"agent": "claude-code", "model": "sonnet", "skills": ["/security-review"]},
+//	      "codex": {"model": "gpt-5-codex", "skills": ["/review"], "prompt": "Focus on security."}
+//	    },
+//	    "judge": {"agent": "claude-code", "model": "opus"}
+//	  }
+//	}
+//
+// ReviewProfileConfig is intentionally small: the review package owns built-in
+// default task text for conventional profile names like "general".
+type ReviewProfileConfig struct {
+	Task   string                  `json:"task,omitempty"`
+	Agents map[string]ReviewConfig `json:"agents,omitempty"`
+	// Judge is the single agent (plus optional model) that consolidates the
+	// reviewers' reports into the final verdict. It is optional: a
+	// one-reviewer profile needs no judge (the lone report is the result),
+	// and a multi-reviewer profile with no judge set falls back to an
+	// auto-selected reviewer that can write a verdict.
+	Judge *ReviewConfig `json:"judge,omitempty"`
+	// Output selects where the final review verdict is delivered: "local"
+	// (printed and saved to the local review manifest — the default) or
+	// "trail" (additionally posted to the branch's trail as a finding via
+	// the data API). Empty means local.
+	Output string `json:"output,omitempty"`
+}
+
+// IsZero reports whether the profile is effectively unset.
+func (c ReviewProfileConfig) IsZero() bool {
+	return c.Task == "" && len(c.Agents) == 0 && (c.Judge == nil || c.Judge.IsZero())
+}
+
+// ReviewConfig holds one worker's configuration within a review profile.
+// The profile's agents map is keyed by worker id. For simple configs the worker
+// id is also the agent registry name (for example "claude-code"). To run the
+// same agent more than once with different models, use stable worker ids and set
+// Agent to the underlying registry name.
+//
+// Skills are agent-specific invocations passed before the task. Prompt is
+// additional agent-specific instruction appended after the profile task; it is
+// no longer a verbatim replacement for the whole review prompt.
 type ReviewConfig struct {
+	// Agent is the underlying agent registry key for this worker. Empty means
+	// the profile map key is the agent name. Set this when the map key is an
+	// alias such as "claude-sonnet" or "claude-opus".
+	Agent string `json:"agent,omitempty"`
+
+	// Model is an optional model hint passed to the agent CLI for this worker.
+	// Empty means use the agent's own default.
+	Model string `json:"model,omitempty"`
+
 	// Skills is the list of slash-prefixed skill invocations configured
-	// for this agent. May be empty when Prompt carries the full request.
+	// for this agent. May be empty for prompt/model-driven workers (e.g. Pi),
+	// in which case the profile task plus Prompt drive the review.
 	Skills []string `json:"skills,omitempty"`
 
-	// Prompt, when non-empty, carries saved review instructions. When
-	// Skills is non-empty it is appended after the selected skills; when
-	// Skills is empty it is the full prompt for prompt-only review configs.
+	// Prompt, when non-empty, carries saved agent-specific instructions. It is
+	// appended after the profile task (and after any Skills); it is not a
+	// verbatim replacement for the whole review prompt.
 	Prompt string `json:"prompt,omitempty"`
 }
 
 // IsZero reports whether the config is effectively unset.
 func (c ReviewConfig) IsZero() bool {
-	return len(c.Skills) == 0 && c.Prompt == ""
-}
-
-// ReviewConfigFor returns the configured review config for the given agent.
-// Returns a zero-value config when the agent has no entry; callers should
-// check IsZero (or the individual fields) to decide whether configuration
-// is present.
-func (s *EntireSettings) ReviewConfigFor(agentName string) ReviewConfig {
-	if s == nil {
-		return ReviewConfig{}
-	}
-	return s.Review[agentName]
+	return c.Agent == "" && c.Model == "" && len(c.Skills) == 0 && c.Prompt == ""
 }
 
 // InvestigateConfig holds the configuration for `entire investigate`.
@@ -330,11 +438,7 @@ func Load(ctx context.Context) (*EntireSettings, error) {
 		return loadForWorktreeRoot(ctx, worktreeRoot)
 	}
 
-	// Get absolute paths for settings files
-	settingsFileAbs, err := paths.AbsPath(ctx, EntireSettingsFile)
-	if err != nil {
-		settingsFileAbs = EntireSettingsFile // Fallback to relative
-	}
+	settingsFileAbs, localSettingsFileAbs := settingsAbsPaths(ctx)
 	preferencesFileAbs := ""
 	if path, prefErr := ClonePreferencesPath(ctx); prefErr == nil {
 		preferencesFileAbs = path
@@ -347,16 +451,33 @@ func Load(ctx context.Context) (*EntireSettings, error) {
 		logging.Debug(ctx, "clone preferences path unresolved; skipping preferences layer",
 			slog.String("error", prefErr.Error()))
 	}
-	localSettingsFileAbs, err := paths.AbsPath(ctx, EntireSettingsLocalFile)
-	if err != nil {
-		localSettingsFileAbs = EntireSettingsLocalFile // Fallback to relative
-	}
 
 	return loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAbs)
 }
 
+// settingsAbsPaths resolves the base and local settings file paths relative to
+// the current working directory, falling back to the relative path when
+// absolute resolution fails.
+func settingsAbsPaths(ctx context.Context) (base, local string) {
+	base, err := paths.AbsPath(ctx, EntireSettingsFile)
+	if err != nil {
+		base = EntireSettingsFile // Fallback to relative
+	}
+	local, err = paths.AbsPath(ctx, EntireSettingsLocalFile)
+	if err != nil {
+		local = EntireSettingsLocalFile // Fallback to relative
+	}
+	return base, local
+}
+
+// worktreeSettingsPaths resolves the base and local settings file paths under
+// an explicit worktree root.
+func worktreeSettingsPaths(worktreeRoot string) (base, local string) {
+	return filepath.Join(worktreeRoot, EntireSettingsFile), filepath.Join(worktreeRoot, EntireSettingsLocalFile)
+}
+
 func loadForWorktreeRoot(ctx context.Context, worktreeRoot string) (*EntireSettings, error) {
-	settingsFileAbs := filepath.Join(worktreeRoot, EntireSettingsFile)
+	settingsFileAbs, localSettingsFileAbs := worktreeSettingsPaths(worktreeRoot)
 	preferencesFileAbs := ""
 	if path, prefErr := clonePreferencesPathForWorktreeRoot(ctx, worktreeRoot); prefErr == nil {
 		preferencesFileAbs = path
@@ -364,7 +485,6 @@ func loadForWorktreeRoot(ctx context.Context, worktreeRoot string) (*EntireSetti
 		logging.Debug(ctx, "clone preferences path unresolved; skipping preferences layer",
 			slog.String("error", prefErr.Error()))
 	}
-	localSettingsFileAbs := filepath.Join(worktreeRoot, EntireSettingsLocalFile)
 	return loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAbs)
 }
 
@@ -398,9 +518,9 @@ func loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAb
 	}
 
 	// Apply local overrides if they exist
-	localData, err := os.ReadFile(localSettingsFileAbs) //nolint:gosec // path is from AbsPath or constant
+	localData, err := readConfined(localSettingsFileAbs)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("reading local settings file: %w", err)
 		}
 		// Local file doesn't exist, continue without overrides
@@ -438,18 +558,18 @@ func LoadFromFile(filePath string) (*EntireSettings, error) {
 //   - exists: false when the file does not exist (raw is empty); true otherwise.
 //   - err: parse error or read error other than ENOENT.
 //
-// Pair with SaveProjectRaw for read-modify-write flows like the review-key
-// migration. Owning the path resolution and raw IO here keeps callers from
-// duplicating settings parsing in violation of the "Settings access must go
-// through the settings package" rule in CLAUDE.md.
+// Pair with SaveProjectRaw for read-modify-write flows that need to preserve
+// unrelated keys. Owning the path resolution and raw IO here keeps callers
+// from duplicating settings parsing in violation of the "Settings access must
+// go through the settings package" rule in CLAUDE.md.
 func LoadProjectRaw(ctx context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error) {
 	path, err = paths.AbsPath(ctx, EntireSettingsFile)
 	if err != nil {
 		path = EntireSettingsFile
 	}
-	data, readErr := os.ReadFile(path) //nolint:gosec // path is from AbsPath or a project-relative constant
+	data, readErr := readConfined(path)
 	if readErr != nil {
-		if os.IsNotExist(readErr) {
+		if errors.Is(readErr, fs.ErrNotExist) {
 			return path, map[string]json.RawMessage{}, false, nil
 		}
 		return path, nil, false, fmt.Errorf("reading project settings: %w", readErr)
@@ -466,17 +586,16 @@ func LoadProjectRaw(ctx context.Context) (path string, raw map[string]json.RawMe
 // exists=false (and an empty raw map) when the file does not exist — the
 // common case for users who haven't created the local override file.
 //
-// Pair with the migration flow: callers can use this to detect when local
-// overrides would mask a freshly-migrated setting, then warn the user
-// before performing the migration.
+// Pair with SaveProjectRaw for read-modify-write flows that need to preserve
+// unrelated keys in the per-developer override file.
 func LoadLocalRaw(ctx context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error) {
 	path, err = paths.AbsPath(ctx, EntireSettingsLocalFile)
 	if err != nil {
 		path = EntireSettingsLocalFile
 	}
-	data, readErr := os.ReadFile(path) //nolint:gosec // path is from AbsPath or a project-relative constant
+	data, readErr := readConfined(path)
 	if readErr != nil {
-		if os.IsNotExist(readErr) {
+		if errors.Is(readErr, fs.ErrNotExist) {
 			return path, map[string]json.RawMessage{}, false, nil
 		}
 		return path, nil, false, fmt.Errorf("reading local settings: %w", readErr)
@@ -498,6 +617,25 @@ func SaveProjectRaw(path string, raw map[string]json.RawMessage) error {
 	}
 	if err := jsonutil.WriteFileAtomic(path, data, 0o644); err != nil {
 		return fmt.Errorf("writing project settings: %w", err)
+	}
+	return nil
+}
+
+// SaveLocalRaw writes a generic JSON object back to .entire/settings.local.json
+// atomically (temp file + rename). Mirrors SaveProjectRaw for the per-developer
+// overrides file; the only difference is the error wording, which says "local
+// settings" so failure messages match the file actually being written.
+//
+// Pair with LoadLocalRaw for read-modify-write flows that target the local
+// override (e.g. persisting an interactive prompt's "always" choice without
+// touching the project-wide settings file).
+func SaveLocalRaw(path string, raw map[string]json.RawMessage) error {
+	data, err := jsonutil.MarshalIndentWithNewline(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal local settings: %w", err)
+	}
+	if err := jsonutil.WriteFileAtomic(path, data, 0o644); err != nil {
+		return fmt.Errorf("writing local settings: %w", err)
 	}
 	return nil
 }
@@ -529,6 +667,15 @@ func SaveClonePreferences(ctx context.Context, prefs *ClonePreferences) error {
 	return saveClonePreferencesToFile(prefs, path)
 }
 
+// ModifyClonePreferences runs a read-modify-write under the preferences lock.
+func ModifyClonePreferences(ctx context.Context, fn func(*ClonePreferences) error) error {
+	path, err := ClonePreferencesPath(ctx)
+	if err != nil {
+		return err
+	}
+	return modifyClonePreferencesFile(path, fn)
+}
+
 // LoadFromBytes parses settings from raw JSON bytes without merging local overrides.
 // Use this when you have settings content from a non-file source (e.g., git show).
 func LoadFromBytes(data []byte) (*EntireSettings, error) {
@@ -538,7 +685,39 @@ func LoadFromBytes(data []byte) (*EntireSettings, error) {
 	if err := dec.Decode(s); err != nil {
 		return nil, fmt.Errorf("parsing settings: %w", err)
 	}
+	if s.Redaction != nil {
+		if err := validateOPFSettings(s.Redaction.OpenAIPrivacyFilter); err != nil {
+			return nil, err
+		}
+	}
 	return s, nil
+}
+
+// readConfined reads filePath through an os.Root anchored at its parent
+// directory. The root confines the open to that directory, so the read cannot
+// be redirected outside it by a swapped or symlinked path between resolution and
+// open (TOCTOU) — unlike a bare os.ReadFile of an absolute path. A symlink that
+// escapes the directory surfaces as a non-ENOENT error. Callers must classify
+// "missing" with errors.Is(err, fs.ErrNotExist) rather than os.IsNotExist,
+// since the returned errors are wrapped.
+func readConfined(filePath string) ([]byte, error) {
+	root, err := os.OpenRoot(filepath.Dir(filePath))
+	if err != nil {
+		return nil, fmt.Errorf("open settings dir: %w", err)
+	}
+	defer root.Close()
+
+	f, err := root.Open(filepath.Base(filePath))
+	if err != nil {
+		return nil, fmt.Errorf("open settings file: %w", err)
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("read settings file: %w", err)
+	}
+	return data, nil
 }
 
 // loadFromFile loads settings from a specific file path.
@@ -548,9 +727,9 @@ func loadFromFile(filePath string) (*EntireSettings, error) {
 		Enabled: true, // Default to enabled
 	}
 
-	data, err := os.ReadFile(filePath) //nolint:gosec // path is from caller
+	data, err := readConfined(filePath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return settings, nil
 		}
 		return nil, fmt.Errorf("%w", err)
@@ -571,15 +750,21 @@ func loadFromFile(filePath string) (*EntireSettings, error) {
 	// legitimately contain only a model (provider comes from another file).
 	// Validation happens after merge in Load().
 
+	if settings.Redaction != nil {
+		if err := validateOPFSettings(settings.Redaction.OpenAIPrivacyFilter); err != nil {
+			return nil, err
+		}
+	}
+
 	return settings, nil
 }
 
 func loadClonePreferencesFromFile(filePath string) (*ClonePreferences, error) {
 	prefs := &ClonePreferences{}
 
-	data, err := os.ReadFile(filePath) //nolint:gosec // path is from caller
+	data, err := readConfined(filePath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return prefs, nil
 		}
 		return nil, fmt.Errorf("%w", err)
@@ -622,9 +807,58 @@ func saveClonePreferencesToFile(prefs *ClonePreferences, filePath string) error 
 	return nil
 }
 
+// mergeReviewProfiles overlays src review profiles onto base by name, returning
+// a new map. A profile from a higher-precedence layer (src) overrides the
+// same-named one from a lower layer (base), but profiles unique to each layer
+// are all preserved. This lets a team keep shared profiles in
+// .entire/settings.json while individuals add or override profiles in
+// clone-local preferences or .entire/settings.local.json, without one layer
+// hiding the others' profiles.
+//
+// Neither input map is mutated: callers (and the maps they own, e.g. a freshly
+// loaded ClonePreferences) can rely on their maps being left untouched. The
+// result is always a fresh, non-nil map (empty when both inputs are empty), so
+// callers never receive nil from a non-nil input.
+func mergeReviewProfiles(base, src map[string]ReviewProfileConfig) map[string]ReviewProfileConfig {
+	out := make(map[string]ReviewProfileConfig, len(base)+len(src))
+	for name, cfg := range base {
+		out[name] = cfg
+	}
+	for name, cfg := range src {
+		out[name] = cfg
+	}
+	return out
+}
+
+func modifyClonePreferencesFile(filePath string, fn func(*ClonePreferences) error) error {
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o750); err != nil {
+		return fmt.Errorf("creating preferences directory: %w", err)
+	}
+	release, err := flock.Acquire(filePath + ".lock")
+	if err != nil {
+		return fmt.Errorf("lock preferences file: %w", err)
+	}
+	defer release()
+
+	prefs, err := loadClonePreferencesFromFile(filePath)
+	if err != nil {
+		return err
+	}
+	if err := fn(prefs); err != nil {
+		return err
+	}
+	return saveClonePreferencesToFile(prefs, filePath)
+}
+
 func applyClonePreferences(settings *EntireSettings, prefs *ClonePreferences) {
 	if prefs == nil {
 		return
+	}
+	if prefs.ReviewProfiles != nil {
+		settings.ReviewProfiles = mergeReviewProfiles(settings.ReviewProfiles, prefs.ReviewProfiles)
+	}
+	if prefs.ReviewDefaultProfile != "" {
+		settings.ReviewDefaultProfile = prefs.ReviewDefaultProfile
 	}
 	if prefs.Review != nil {
 		settings.Review = prefs.Review
@@ -664,6 +898,15 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 	}
 	if err := mergeCommitLinking(settings, raw); err != nil {
 		return err
+	}
+	if profilesRaw, ok := raw["review_profiles"]; ok {
+		var profiles map[string]ReviewProfileConfig
+		if err := json.Unmarshal(profilesRaw, &profiles); err != nil {
+			return fmt.Errorf("parsing review_profiles field: %w", err)
+		}
+		// Merge per-profile so a local override file adds to / overrides shared
+		// profiles by name rather than replacing the whole set.
+		settings.ReviewProfiles = mergeReviewProfiles(settings.ReviewProfiles, profiles)
 	}
 	if reviewRaw, ok := raw["review"]; ok {
 		var review map[string]ReviewConfig
@@ -730,6 +973,9 @@ func mergeScalarFields(settings *EntireSettings, raw map[string]json.RawMessage)
 		return err
 	}
 	if err := mergeRawStringNonEmpty(raw, "log_level", &settings.LogLevel); err != nil {
+		return err
+	}
+	if err := mergeRawStringNonEmpty(raw, "review_default_profile", &settings.ReviewDefaultProfile); err != nil {
 		return err
 	}
 	if err := mergeRawStringNonEmpty(raw, "review_fix_agent", &settings.ReviewFixAgent); err != nil {
@@ -902,7 +1148,83 @@ func mergeRedaction(dst *RedactionSettings, data json.RawMessage) error {
 			}
 		}
 	}
+	if opfRaw, ok := raw["openai_privacy_filter"]; ok {
+		if dst.OpenAIPrivacyFilter == nil {
+			dst.OpenAIPrivacyFilter = &OPFSettings{}
+		}
+		if err := mergeOPFSettings(dst.OpenAIPrivacyFilter, opfRaw); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// validateOPFSettings rejects unknown category names so typos surface at
+// parse time. Silent zero-detection of a privacy category is effectively
+// a correctness bug — the user thinks they're protected but they're not.
+func validateOPFSettings(opf *OPFSettings) error {
+	if opf == nil {
+		return nil
+	}
+	for name := range opf.Categories {
+		if !redact.IsKnownOPFCategory(name) {
+			return fmt.Errorf("openai_privacy_filter.categories has unknown key %q (see docs/security-and-privacy.md for the supported set)", name)
+		}
+	}
+	if opf.TimeoutSeconds < 0 {
+		return fmt.Errorf("openai_privacy_filter.timeout_seconds must be greater than or equal to 0 (got %d)", opf.TimeoutSeconds)
+	}
+	switch opf.PromptDefault {
+	case "", OPFPromptAsk, OPFPromptNever, OPFPromptAlways:
+		// ok
+	default:
+		return fmt.Errorf("openai_privacy_filter.prompt_default must be one of %q, %q, %q (got %q)",
+			OPFPromptAsk, OPFPromptNever, OPFPromptAlways, opf.PromptDefault)
+	}
+	return nil
+}
+
+// mergeOPFSettings merges OPF overrides into existing OPFSettings. Only
+// fields present in the override JSON are applied; missing fields preserve
+// the base value.
+func mergeOPFSettings(dst *OPFSettings, data json.RawMessage) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parsing openai_privacy_filter: %w", err)
+	}
+	if v, ok := raw["enabled"]; ok {
+		if err := json.Unmarshal(v, &dst.Enabled); err != nil {
+			return fmt.Errorf("parsing openai_privacy_filter.enabled: %w", err)
+		}
+	}
+	if v, ok := raw["categories"]; ok {
+		var cats map[string]bool
+		if err := json.Unmarshal(v, &cats); err != nil {
+			return fmt.Errorf("parsing openai_privacy_filter.categories: %w", err)
+		}
+		if dst.Categories == nil {
+			dst.Categories = make(map[string]bool, len(cats))
+		}
+		for k, b := range cats {
+			dst.Categories[k] = b
+		}
+	}
+	if v, ok := raw["command"]; ok {
+		if err := json.Unmarshal(v, &dst.Command); err != nil {
+			return fmt.Errorf("parsing openai_privacy_filter.command: %w", err)
+		}
+	}
+	if v, ok := raw["timeout_seconds"]; ok {
+		if err := json.Unmarshal(v, &dst.TimeoutSeconds); err != nil {
+			return fmt.Errorf("parsing openai_privacy_filter.timeout_seconds: %w", err)
+		}
+	}
+	if v, ok := raw["prompt_default"]; ok {
+		if err := json.Unmarshal(v, &dst.PromptDefault); err != nil {
+			return fmt.Errorf("parsing openai_privacy_filter.prompt_default: %w", err)
+		}
+	}
+	return validateOPFSettings(dst)
 }
 
 // mergePIISettings merges PII overrides into existing PIISettings.
@@ -963,7 +1285,7 @@ func IsSetUp(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	_, err = os.Stat(settingsFileAbs)
+	_, err = os.Lstat(settingsFileAbs)
 	return err == nil
 }
 
@@ -994,50 +1316,6 @@ func IsSetUpAndEnabled(ctx context.Context) bool {
 		return false
 	}
 	return s.Enabled
-}
-
-// IsCheckpointsV2Enabled checks if checkpoints v2 is enabled in settings.
-// Returns false by default if settings cannot be loaded or the key is missing.
-func IsCheckpointsV2Enabled(ctx context.Context) bool {
-	settings, err := Load(ctx)
-	if err != nil {
-		return false
-	}
-	return settings.IsCheckpointsV2Enabled()
-}
-
-// CheckpointsVersion returns the configured checkpoints format version, or 1
-// if settings cannot be loaded or the value is unset/invalid.
-func CheckpointsVersion(ctx context.Context) int {
-	s, err := Load(ctx)
-	if err != nil {
-		return 1
-	}
-	version := s.CheckpointsVersion()
-	if s.StrategyOptions != nil {
-		if configured, ok := s.StrategyOptions["checkpoints_version"]; ok {
-			if _, supported := parseCheckpointsVersion(configured); !supported {
-				checkpointsVersionWarningOnce.Do(func() {
-					fmt.Fprintf(os.Stderr,
-						"[entire] unsupported strategy_options.checkpoints_version %v detected in settings. Falling back to the default version (1).\n",
-						configured,
-					)
-				})
-			}
-		}
-	}
-	return version
-}
-
-// WarnIfCheckpointsV2Disallowed emits the user-facing fallback warning when a
-// settings file still requests checkpoints v2. Call this from push-time flows
-// so users learn why v1 metadata is being pushed instead.
-func WarnIfCheckpointsV2Disallowed(ctx context.Context) {
-	s, err := Load(ctx)
-	if err != nil {
-		return
-	}
-	s.WarnIfCheckpointsV2Disallowed()
 }
 
 // IsFilteredFetchesEnabled checks if filtered fetches should be used.
@@ -1119,94 +1397,6 @@ func (s *EntireSettings) GetCheckpointRemote() *CheckpointRemoteConfig {
 		return nil
 	}
 	return &CheckpointRemoteConfig{Provider: provider, Repo: repo}
-}
-
-// IsCheckpointsV2Enabled checks if checkpoints v2 is enabled for read paths.
-// Existing v2 checkpoint metadata remains readable while new writes use v1.
-func (s *EntireSettings) IsCheckpointsV2Enabled() bool {
-	if s.StrategyOptions == nil {
-		return false
-	}
-	if val, ok := s.StrategyOptions["checkpoints_version"]; ok {
-		version, supported := parseCheckpointsVersion(val)
-		if supported && version == 2 {
-			return true
-		}
-	}
-	val, ok := s.StrategyOptions["checkpoints_v2"].(bool)
-	return ok && val
-}
-
-// CheckpointsVersion returns the configured checkpoints format version from
-// strategy_options.checkpoints_version. Returns 1 when unset, invalid, or
-// unsupported. Version 2 is no longer an exclusive storage mode; reads use
-// IsCheckpointsV2Enabled to enable dual v2/v1 lookup when legacy settings are
-// present.
-func (s *EntireSettings) CheckpointsVersion() int {
-	if s.StrategyOptions == nil {
-		return 1
-	}
-	val, ok := s.StrategyOptions["checkpoints_version"]
-	if !ok {
-		return 1
-	}
-	version, ok := parseCheckpointsVersion(val)
-	if ok && version == 1 {
-		return 1
-	}
-	return 1
-}
-
-// WarnIfCheckpointsV2Disallowed emits the v2 fallback warning when any legacy
-// settings key requests v2 writes or pushes.
-func (s *EntireSettings) WarnIfCheckpointsV2Disallowed() {
-	if val, ok := s.disallowedCheckpointsV2Value(); ok {
-		warnCheckpointsV2Disallowed(val)
-	}
-}
-
-func (s *EntireSettings) disallowedCheckpointsV2Value() (any, bool) {
-	if s.StrategyOptions == nil {
-		return nil, false
-	}
-	if val, ok := s.StrategyOptions["checkpoints_version"]; ok {
-		version, supported := parseCheckpointsVersion(val)
-		if supported && version == 2 {
-			return val, true
-		}
-	}
-	for _, key := range []string{"checkpoints_v2", "push_v2_refs", "push_v2"} {
-		if val, ok := s.StrategyOptions[key].(bool); ok && val {
-			return 2, true
-		}
-	}
-	return nil, false
-}
-
-func warnCheckpointsV2Disallowed(val any) {
-	fmt.Fprintf(os.Stderr,
-		"[entire] strategy_options.checkpoints_version %v is no longer supported. Falling back to version 1\n",
-		val,
-	)
-}
-
-func parseCheckpointsVersion(val any) (int, bool) {
-	v, ok := val.(int)
-	if ok && (v == 1 || v == 2) {
-		return v, true
-	}
-	floatV, ok := val.(float64)
-	if ok && (floatV == 1 || floatV == 2) {
-		return int(floatV), true
-	}
-	stringV, ok := val.(string)
-	if ok {
-		parsed, err := strconv.Atoi(stringV)
-		if err == nil && (parsed == 1 || parsed == 2) {
-			return parsed, true
-		}
-	}
-	return 1, false
 }
 
 // IsFilteredFetchesEnabled checks if fetches should use --filter=blob:none.

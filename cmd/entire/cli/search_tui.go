@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"charm.land/glamour/v2/ansi"
 	glamourstyles "charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/muesli/termenv"
@@ -33,6 +35,7 @@ const (
 type searchResultsMsg struct {
 	results []search.Result
 	total   int
+	counts  *search.TypeCounts
 	err     error
 }
 
@@ -55,6 +58,8 @@ type searchStyles struct {
 	helpSep      lipgloss.Style // dim separator dots in footer
 	detailTitle  lipgloss.Style // colored title and section headers (orange, bold)
 	detailBorder lipgloss.Style // border style for detail card
+	tabActive    lipgloss.Style // active type tab
+	tabInactive  lipgloss.Style // inactive type tab
 }
 
 // Search palette mirrors activity's dark-mode CSS variables (Tailwind 400-level).
@@ -80,7 +85,9 @@ func newSearchStyles(ss statusStyles) searchStyles {
 	s.detailBorder = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(searchAccentPurple)).
-		Padding(1, 2)
+		Padding(0, 2)
+	s.tabActive = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchAccentOrange))
+	s.tabInactive = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	return s
 }
 
@@ -91,7 +98,20 @@ func (s searchStyles) helpItem(keyLabel, desc string) string {
 	return s.render(s.helpKey, keyLabel) + " " + desc
 }
 
-const resultsPerPage = 25
+const resultsPerPage = 10
+
+// typeFilter represents the active type tab in the TUI.
+type typeFilter string
+
+const (
+	// typeFilterAll is no longer user-selectable in the TUI (no "All" tab), but
+	// remains the internal sentinel for "show every loaded result" used by the
+	// pagination/fetch-more math that reasons about the grand result total.
+	typeFilterAll         typeFilter = ""
+	typeFilterCheckpoints typeFilter = typeFilter(search.TypeCheckpoint)
+	typeFilterCommits     typeFilter = typeFilter(search.TypeCommit)
+	typeFilterSessions    typeFilter = typeFilter(search.TypeSession)
+)
 
 // searchModel is the bubbletea model for interactive search results.
 type searchModel struct {
@@ -109,8 +129,10 @@ type searchModel struct {
 	searchCfg    search.Config
 	apiPage      int // 1-based last-fetched API page
 	styles       searchStyles
-	detailVP     viewport.Model // full-screen detail view
-	browseVP     viewport.Model // scrollable browse view
+	detailVP     viewport.Model     // full-screen detail view
+	browseVP     viewport.Model     // scrollable browse view
+	filterType   typeFilter         // active type tab filter
+	counts       *search.TypeCounts // per-type counts from API
 
 	// darkBg is captured once before bubbletea takes over the terminal so the
 	// snippet renderer never re-queries the terminal via OSC during the Update
@@ -118,25 +140,46 @@ type searchModel struct {
 	darkBg bool
 }
 
+// filteredResults returns results matching the active type filter.
+func (m searchModel) filteredResults() []search.Result {
+	if m.filterType == typeFilterAll {
+		return m.results
+	}
+	var out []search.Result
+	for _, r := range m.results {
+		if typeFilter(r.Type) == m.filterType {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // pageResults returns the slice of results for the current page.
 func (m searchModel) pageResults() []search.Result {
+	filtered := m.filteredResults()
 	start := m.page * resultsPerPage
-	if start >= len(m.results) {
+	if start >= len(filtered) {
 		return nil
 	}
 	end := start + resultsPerPage
-	if end > len(m.results) {
-		end = len(m.results)
+	if end > len(filtered) {
+		end = len(filtered)
 	}
-	return m.results[start:end]
+	return filtered[start:end]
 }
 
-// totalPages returns the number of pages based on the API's total result count.
+// totalPages returns the number of pages based on the filtered result count.
 func (m searchModel) totalPages() int {
-	if m.total == 0 {
+	n := len(m.filteredResults())
+	// When showing all types, use the API total if it's larger than loaded results
+	// (we may not have fetched everything yet).
+	if m.filterType == typeFilterAll && m.total > n {
+		n = m.total
+	}
+	if n == 0 {
 		return 1
 	}
-	return (m.total + resultsPerPage - 1) / resultsPerPage
+	return (n + resultsPerPage - 1) / resultsPerPage
 }
 
 // selectedResult returns the currently selected result, accounting for pagination.
@@ -146,6 +189,27 @@ func (m searchModel) selectedResult() *search.Result {
 		return &pageResults[m.cursor]
 	}
 	return nil
+}
+
+// computeTypeCounts calculates per-type counts from the loaded results,
+// falling back to API-provided counts when available.
+func (m searchModel) computeTypeCounts() (checkpoints, commits, sessions int) {
+	if m.counts != nil {
+		return m.counts.Checkpoints, m.counts.Commits, m.counts.Sessions
+	}
+	for _, r := range m.results {
+		switch typeFilter(r.Type) {
+		case typeFilterCheckpoints:
+			checkpoints++
+		case typeFilterCommits:
+			commits++
+		case typeFilterSessions:
+			sessions++
+		case typeFilterAll:
+			// not a valid result type; skip
+		}
+	}
+	return
 }
 
 func newSearchModel(results []search.Result, query string, total int, cfg search.Config, ss statusStyles) searchModel {
@@ -175,16 +239,17 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	}
 
 	m := searchModel{
-		results:   results,
-		total:     total,
-		width:     ss.width,
-		mode:      modeBrowse,
-		input:     ti,
-		searchCfg: cfg,
-		apiPage:   apiPage,
-		styles:    styles,
-		browseVP:  viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
-		darkBg:    termenv.HasDarkBackground(),
+		results:    results,
+		total:      total,
+		width:      ss.width,
+		mode:       modeBrowse,
+		input:      ti,
+		searchCfg:  cfg,
+		apiPage:    apiPage,
+		styles:     styles,
+		browseVP:   viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
+		darkBg:     termenv.HasDarkBackground(),
+		filterType: typeFilterCheckpoints, // default the results table to checkpoints
 	}
 	m = m.refreshBrowseContent()
 	return m
@@ -210,6 +275,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		m.searchErr = ""
 		m.results = msg.results
 		m.total = msg.total
+		m.counts = msg.counts
 		m.apiPage = 1
 		m.cursor = 0
 		m.page = 0
@@ -302,6 +368,31 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 }
 
 func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Type tab keys (1/2/3)
+	switch msg.String() {
+	case "1":
+		m.filterType = typeFilterCheckpoints
+		m.cursor = 0
+		m.page = 0
+		m.browseVP.GotoTop()
+		m = m.refreshBrowseContent()
+		return m, nil
+	case "2":
+		m.filterType = typeFilterSessions
+		m.cursor = 0
+		m.page = 0
+		m.browseVP.GotoTop()
+		m = m.refreshBrowseContent()
+		return m, nil
+	case "3":
+		m.filterType = typeFilterCommits
+		m.cursor = 0
+		m.page = 0
+		m.browseVP.GotoTop()
+		m = m.refreshBrowseContent()
+		return m, nil
+	}
+
 	pageLen := len(m.pageResults())
 	switch {
 	case key.Matches(msg, keys.Quit), key.Matches(msg, keys.Back), msg.String() == "h":
@@ -322,8 +413,9 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		m = m.refreshBrowseContent()
 		m.browseVP.GotoTop()
 	case key.Matches(msg, keys.End):
-		if len(m.results) > 0 {
-			lastLoaded := len(m.results) - 1
+		filtered := m.filteredResults()
+		if len(filtered) > 0 {
+			lastLoaded := len(filtered) - 1
 			m.page = min(lastLoaded/resultsPerPage, m.totalPages()-1)
 			if pageLen := len(m.pageResults()); pageLen > 0 {
 				m.cursor = pageLen - 1
@@ -338,7 +430,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			m.browseVP.GotoTop()
 			// Fetch next API page if we've scrolled past loaded results
 			start := m.page * resultsPerPage
-			if start >= len(m.results) && !m.fetchingMore {
+			if start >= len(m.filteredResults()) && !m.fetchingMore {
 				m.fetchingMore = true
 				m = m.refreshBrowseContent()
 				return m, fetchMoreResults(m.searchCfg, m.apiPage+1)
@@ -396,7 +488,7 @@ func performSearch(cfg search.Config) tea.Cmd {
 		if err != nil {
 			return searchResultsMsg{err: err}
 		}
-		return searchResultsMsg{results: resp.Results, total: resp.Total}
+		return searchResultsMsg{results: resp.Results, total: resp.Total, counts: resp.Counts}
 	}
 }
 
@@ -425,9 +517,71 @@ func (m searchModel) View() tea.View {
 	case modeSearch:
 		v.SetContent(m.viewSearchMode())
 	case modeBrowse:
-		v.SetContent(m.browseVP.View() + "\n" + m.viewHelp())
+		v.SetContent(m.viewBrowse())
 	}
 	return v
+}
+
+// viewBrowse composes the browse screen as a fixed master-detail layout:
+//
+//	┌ header  (search title, query, tabs, RESULTS) — pinned top
+//	│ list    (scrollable result rows in browseVP)
+//	│ detail  (bordered card for the selected row) — pinned bottom
+//	└ footer  (help line) — pinned very bottom
+//
+// Heights are budgeted from the terminal height so the detail card is always
+// fully visible and can never be clipped, regardless of how the list scrolls.
+func (m searchModel) viewBrowse() string {
+	footer := strings.TrimRight(m.viewHelp(), "\n")
+	header, showList := m.viewBrowseHeader()
+
+	var body string
+	switch {
+	case !showList:
+		// Loading / error / empty states: header is the whole body; pin the
+		// footer to the bottom of the screen.
+		body = padToHeight(header, max(m.height-1, 0)) + "\n" + footer
+	default:
+		paneH := m.detailPaneHeight(lipgloss.Height(header))
+		// browseVP height is kept in sync by refreshBrowseContent; render
+		// whatever window it currently exposes.
+		list := m.browseVP.View()
+		// The reserved row beneath the list shows the page/results count (and a
+		// scroll affordance when rows are cut off).
+		gap := m.viewListStatusRow()
+		if paneH <= 0 {
+			body = header + "\n" + list + "\n" + gap + "\n" + footer
+		} else {
+			body = header + "\n" + list + "\n" + gap + "\n" + m.viewDetailPane(paneH) + "\n" + footer
+		}
+	}
+
+	// Final safety net: on a terminal too short to fit even the pinned chrome,
+	// clamp so we never emit more rows than the screen (which would scroll the
+	// alt-screen and clip the top). Exactly-budgeted layouts are unaffected.
+	return clampToHeight(body, m.height)
+}
+
+// padToHeight pads s with blank lines so it occupies exactly n lines (or leaves
+// it unchanged when already taller). Used to push a pinned footer to the bottom.
+func padToHeight(s string, n int) string {
+	h := lipgloss.Height(s)
+	if h >= n {
+		return s
+	}
+	return s + strings.Repeat("\n", n-h)
+}
+
+// clampToHeight returns at most the first n lines of s.
+func clampToHeight(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[:n], "\n")
 }
 
 func (m searchModel) viewSearchHeader(b *strings.Builder) {
@@ -454,8 +608,32 @@ func (m searchModel) viewSearchMode() string {
 	return b.String()
 }
 
-// renderBrowseContent builds the scrollable content for browse mode (everything except the footer).
-func (m searchModel) renderBrowseContent() string {
+// viewTypeTabs renders the type filter tabs with counts.
+func (m searchModel) viewTypeTabs() string {
+	cpCount, cmCount, ssCount := m.computeTypeCounts()
+
+	renderTab := func(label string, filter typeFilter, count int, keyHint string) string {
+		text := fmt.Sprintf("[%s] %s %d", keyHint, label, count)
+		if m.filterType == filter {
+			return m.styles.render(m.styles.tabActive, text)
+		}
+		return m.styles.render(m.styles.tabInactive, text)
+	}
+
+	tabs := []string{
+		renderTab("Checkpoints", typeFilterCheckpoints, cpCount, "1"),
+		renderTab("Sessions", typeFilterSessions, ssCount, "2"),
+		renderTab("Commits", typeFilterCommits, cmCount, "3"),
+	}
+
+	return strings.Join(tabs, "  ")
+}
+
+// viewBrowseHeader builds the pinned top chrome (search title, query, type
+// tabs, RESULTS heading). The second return value reports whether the
+// scrolling list + detail regions should render; it is false for the
+// loading / error / empty states, where the returned string is the whole body.
+func (m searchModel) viewBrowseHeader() (string, bool) {
 	var b strings.Builder
 	pad := " "
 
@@ -468,189 +646,491 @@ func (m searchModel) renderBrowseContent() string {
 	// Loading / error / empty states
 	if m.loading {
 		b.WriteString(pad + m.styles.render(m.styles.dim, "Searching..."))
-		return b.String()
+		return b.String(), false
 	}
 	if m.searchErr != "" {
 		b.WriteString(pad + m.styles.render(m.styles.red, "Error: "+m.searchErr))
-		return b.String()
+		return b.String(), false
 	}
 	if len(m.results) == 0 {
 		b.WriteString(pad + m.styles.render(m.styles.dim, "No results found."))
-		return b.String()
+		return b.String(), false
 	}
+
+	// Type tabs
+	b.WriteString(pad + m.viewTypeTabs())
+	b.WriteString("\n\n")
 
 	// Section: RESULTS
 	b.WriteString(pad + m.styles.render(m.styles.sectionTitle, "RESULTS"))
-	b.WriteString("\n\n")
-
-	// Table (current page only)
-	if m.fetchingMore && m.pageResults() == nil {
-		b.WriteString(pad + m.styles.render(m.styles.dim, "Loading more results...") + "\n")
-	} else {
-		b.WriteString(m.viewTable())
-	}
 	b.WriteString("\n")
 
-	// Detail card (no truncation — viewport handles overflow)
-	if r := m.selectedResult(); r != nil {
-		b.WriteString(m.viewDetailCard(*r))
+	filtered := m.filteredResults()
+	if len(filtered) == 0 {
+		b.WriteString("\n" + pad + m.styles.render(m.styles.dim, "No results for this type."))
+		return b.String(), false
+	}
+	if m.fetchingMore && m.pageResults() == nil {
+		b.WriteString("\n" + pad + m.styles.render(m.styles.dim, "Loading more results..."))
+		return b.String(), false
 	}
 
-	return strings.TrimRight(b.String(), "\n")
+	return b.String(), true
 }
 
-// refreshBrowseContent rebuilds the browse viewport content from current state.
+// refreshBrowseContent rebuilds the scrollable list viewport and re-applies the
+// master-detail layout (list height + cursor visibility) for the current state.
 func (m searchModel) refreshBrowseContent() searchModel {
-	m.browseVP.SetContent(m.renderBrowseContent())
+	// Trim the trailing newline so the viewport's line count reflects the real
+	// number of rows (a phantom blank line would keep "scroll down" lit at the
+	// bottom of the list).
+	m.browseVP.SetContent(strings.TrimRight(m.viewResultList(), "\n"))
+
+	if m.height <= 0 || m.width == 0 {
+		return m
+	}
+	header, showList := m.viewBrowseHeader()
+	if !showList {
+		return m
+	}
+	headerLines := lipgloss.Height(header)
+	paneH := m.detailPaneHeight(headerLines)
+	// Always reserve the gap/scroll-hint row and the footer row.
+	listH := max(m.height-headerLines-paneH-detailGap-1, 1)
+	m.browseVP.SetHeight(listH)
+	return m.ensureCursorVisible()
+}
+
+// detailPaneHeight returns the number of terminal rows reserved for the pinned
+// detail pane, or 0 when there is no selection or the screen is too short to
+// pin one (in which case the list takes the full area and detail is reachable
+// via the full-screen view). headerLines is the height of the pinned top chrome.
+func (m searchModel) detailPaneHeight(headerLines int) int {
+	if m.height <= 0 || m.selectedResult() == nil {
+		return 0
+	}
+	avail := m.height - 1 - headerLines - detailGap // footer + gap rows
+	if avail < minListHeight+minDetailPaneHeight {
+		return 0
+	}
+	h := m.height * 2 / 5 // ~40% of the screen
+	h = min(max(h, minDetailPaneHeight), maxDetailPaneHeight)
+	if h > avail-minListHeight {
+		h = avail - minListHeight
+	}
+	return h
+}
+
+// ensureCursorVisible scrolls the list viewport so the selected row stays
+// within the visible window as the cursor moves.
+func (m searchModel) ensureCursorVisible() searchModel {
+	listH := m.browseVP.Height()
+	if listH <= 0 {
+		return m
+	}
+	top := m.cursor * linesPerResult // first line of the selected item
+	bottom := top + 1                // each item occupies 2 lines
+	yo := m.browseVP.YOffset()
+	switch {
+	case top < yo:
+		yo = top
+	case bottom > yo+listH-1:
+		yo = bottom - listH + 1
+	}
+	m.browseVP.SetYOffset(max(yo, 0))
 	return m
 }
 
-func (m searchModel) viewTable() string {
+// viewListStatusRow renders the single reserved row directly beneath the result
+// list: a "more results" scroll affordance on the left (only when rows are
+// scrolled out of view) and the page / total-results indicator on the right.
+// It is exactly one line wide (never wraps) so the layout budget holds.
+func (m searchModel) viewListStatusRow() string {
+	contentWidth := max(m.width-2, 0)
+
+	// Left: scroll affordance when the list viewport can't show every row.
+	left := ""
+	if listH := m.browseVP.Height(); listH > 0 {
+		if total := m.browseVP.TotalLineCount(); total > listH {
+			yo := m.browseVP.YOffset()
+			switch {
+			case yo > 0 && yo+listH < total:
+				left = "↑↓ more results"
+			case yo+listH < total:
+				left = "↓ more results"
+			default:
+				left = "↑ more results"
+			}
+		}
+	}
+
+	// Right: page X/Y · N results (drops the page clause for a single page).
+	n := len(m.filteredResults())
+	right := fmt.Sprintf("%d results", n)
+	if pages := m.totalPages(); pages > 1 {
+		right = fmt.Sprintf("page %d/%d · %d results", m.page+1, pages, n)
+	}
+	if lipgloss.Width(right) > contentWidth {
+		right = stringutil.TruncateRunes(right, contentWidth, "…")
+	}
+
+	// Drop the scroll hint if both can't fit on one row.
+	if lipgloss.Width(left)+1+lipgloss.Width(right) > contentWidth {
+		left = ""
+	}
+	gap := max(contentWidth-lipgloss.Width(left)-lipgloss.Width(right), 1)
+
+	return " " + m.styles.render(m.styles.dim, left) +
+		strings.Repeat(" ", gap) + m.styles.render(m.styles.dim, right)
+}
+
+// gutterWidth is the fixed-width left rail of the result list: a selection
+// caret, the graph node glyph, and trailing space. The metadata line is
+// indented to align with the title (col gutterWidth).
+const gutterWidth = 4
+
+// Layout constants for the master-detail browse view.
+const (
+	// linesPerResult is the vertical stride of one result in the list: 2 content
+	// lines (title + meta) plus 1 separator rule between items.
+	linesPerResult = 3
+
+	minListHeight       = 4  // never shrink the list below this to fit the detail pane
+	minDetailPaneHeight = 6  // smallest worthwhile pinned detail pane (border + a few rows)
+	maxDetailPaneHeight = 24 // cap so the detail pane never dominates a tall terminal
+
+	// detailGap is the blank line between the result list and the pinned detail
+	// card, for a little breathing room.
+	detailGap = 1
+)
+
+// viewResultList renders the current page of results as a two-line list:
+// a type-colored graph node + bold title with a right-aligned relative age,
+// then a dim metadata line (type · repo · ⎇ branch · author). Items are
+// separated by a thin rule, mirroring the web activity list.
+func (m searchModel) viewResultList() string {
 	contentWidth := max(m.width-2, 0) // 1 char padding each side
-	cols := computeColumns(contentWidth)
 	pad := " "
 
 	var b strings.Builder
+	results := m.pageResults()
+	rule := pad + m.styles.render(m.styles.dim, strings.Repeat("─", contentWidth)) + "\n"
 
-	// Column headers
-	hdr := fmt.Sprintf("%-*s %-*s %-*s %-*s %-*s %-*s",
-		cols.age, "Age",
-		cols.id, "ID",
-		cols.branch, "Branch",
-		cols.repo, "Repo",
-		cols.prompt, "Prompt",
-		cols.author, "Author",
-	)
-	b.WriteString(pad + m.styles.render(m.styles.dim, hdr) + "\n")
-
-	// Header separator
-	b.WriteString(pad + m.styles.render(m.styles.dim, strings.Repeat("─", contentWidth)) + "\n")
-
-	// Rows
-	for i, r := range m.pageResults() {
-		row := m.viewRow(r, cols)
-		if i == m.cursor && m.styles.colorEnabled {
-			b.WriteString(pad + m.styles.selected.Render(row))
-		} else {
-			b.WriteString(pad + row)
+	for i, r := range results {
+		if i > 0 {
+			b.WriteString(rule)
 		}
-		b.WriteString("\n")
+		b.WriteString(m.viewResultItem(r, i == m.cursor, contentWidth))
 	}
 
 	return b.String()
 }
 
-func (m searchModel) viewRow(r search.Result, cols columnLayout) string {
-	age := fmt.Sprintf("%-*s", cols.age, stringutil.TruncateRunes(formatSearchAge(r.Data.CreatedAt), cols.age, ""))
-	id := fmt.Sprintf("%-*s", cols.id, stringutil.TruncateRunes(r.Data.ID, cols.id-1, "…"))
-	branch := fmt.Sprintf("%-*s", cols.branch, stringutil.TruncateRunes(r.Data.Branch, cols.branch-1, "…"))
-	repo := fmt.Sprintf("%-*s", cols.repo, stringutil.TruncateRunes(
-		r.Data.Org+"/"+r.Data.Repo, cols.repo-1, "…",
-	))
-	prompt := fmt.Sprintf("%-*s", cols.prompt, stringutil.TruncateRunes(
-		stringutil.CollapseWhitespace(r.Data.Prompt), cols.prompt-1, "…",
-	))
-	authorName := derefStr(r.Data.AuthorUsername, r.Data.Author)
-	author := fmt.Sprintf("%-*s", cols.author, stringutil.TruncateRunes(authorName, cols.author-1, "…"))
+// viewResultItem renders a single two-line result entry (title line + meta line)
+// with a leading 1-char pad on each line, matching the surrounding browse layout.
+func (m searchModel) viewResultItem(r search.Result, selected bool, contentWidth int) string {
+	pad := " "
+	var b strings.Builder
 
-	return fmt.Sprintf("%s %s %s %s %s %s", age, id, branch, repo, prompt, author)
+	// ── Title line: gutter + bold title …… right-aligned age ──
+	node, caret := "◇", " "
+	if selected {
+		node, caret = "◆", "▸"
+	}
+	gutter := caret + " " + m.styles.render(resultNodeStyle(m.styles, r.Type, selected), node) + " "
+
+	age := formatSearchAge(r.ResultCreatedAt())
+	ageW := lipgloss.Width(age)
+
+	titleMax := max(contentWidth-gutterWidth-ageW-1, 8)
+	title := stringutil.TruncateRunes(stringutil.CollapseWhitespace(r.ResultTitle()), titleMax, "…")
+	titleStyle := m.styles.bold
+	if selected {
+		titleStyle = m.styles.selected
+	}
+
+	gap := max(contentWidth-gutterWidth-lipgloss.Width(title)-ageW, 1)
+	b.WriteString(pad + gutter + m.styles.render(titleStyle, title) +
+		strings.Repeat(" ", gap) + m.styles.render(m.styles.dim, age) + "\n")
+
+	// ── Meta line: type · repo · ⎇ branch · author (indented to title col) ──
+	indent := strings.Repeat(" ", gutterWidth)
+	// The search type constants ("checkpoint", "commit", "session") double as
+	// the lowercase type word shown on the metadata line.
+	typeWord := r.Type
+	typeTag := m.styles.render(resultNodeStyle(m.styles, r.Type, false), typeWord)
+
+	var meta strings.Builder
+	meta.WriteString(r.ResultOrg() + "/" + r.ResultRepo())
+	if br := r.ResultBranch(); br != "" {
+		meta.WriteString("  ⎇ " + br)
+	}
+	if author := r.ResultAuthor(); author != "" {
+		meta.WriteString("  · " + author)
+	}
+	metaMax := max(contentWidth-gutterWidth-lipgloss.Width(typeWord)-2, 8)
+	metaStr := stringutil.TruncateRunes(meta.String(), metaMax, "…")
+	b.WriteString(pad + indent + typeTag + "  " + m.styles.render(m.styles.dim, metaStr) + "\n")
+
+	return b.String()
 }
 
-// renderDetailContent builds the text content for a checkpoint detail (no border/card chrome).
+// resultNodeStyle returns the accent style for a result's graph node and type
+// tag: orange for checkpoints, purple for sessions, blue for commits. The
+// selected node is always rendered in the shared selection accent.
+func resultNodeStyle(s searchStyles, resultType string, selected bool) lipgloss.Style {
+	if !s.colorEnabled {
+		return lipgloss.NewStyle()
+	}
+	if selected {
+		return s.selected
+	}
+	switch resultType {
+	case search.TypeSession:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccentPurple))
+	case search.TypeCommit:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccentBlue))
+	default: // checkpoint and unknown
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccentOrange))
+	}
+}
+
+// typeLabel returns a short type badge for display in the static table.
+func typeLabel(resultType string) string {
+	switch resultType {
+	case search.TypeCheckpoint:
+		return "CP"
+	case search.TypeCommit:
+		return "CM"
+	case search.TypeSession:
+		return "SS"
+	default:
+		return strings.ToUpper(resultType[:min(2, len(resultType))])
+	}
+}
+
+// formatResultID returns a display-friendly ID for a result.
+func formatResultID(r search.Result) string {
+	if r.Type == search.TypeCommit && r.Commit != nil && len(r.Commit.CommitSHA) > 7 {
+		return r.Commit.CommitSHA[:7]
+	}
+	return r.ResultID()
+}
+
+// renderDetailContent builds the text content for a result detail (no border/card chrome).
 func (m searchModel) renderDetailContent(r search.Result, contentWidth int, showSections bool) string {
+	switch r.Type {
+	case search.TypeCheckpoint:
+		return m.renderCheckpointDetail(r, contentWidth, showSections)
+	case search.TypeCommit:
+		return m.renderCommitDetail(r, contentWidth, showSections)
+	case search.TypeSession:
+		return m.renderSessionDetail(r, contentWidth, showSections)
+	default:
+		return m.renderCheckpointDetail(r, contentWidth, showSections)
+	}
+}
+
+// detailWriter accumulates a label/value detail body. It owns the shared
+// layout (label column width, value wrap width, section spacing) so the
+// per-type renderers below differ only in which fields they emit.
+type detailWriter struct {
+	b            strings.Builder
+	styles       searchStyles
+	labelWidth   int
+	valueWidth   int
+	showSections bool
+}
+
+func (m searchModel) newDetailWriter(title string, contentWidth int, showSections bool) *detailWriter {
 	const labelWidth = 12
-	// Available width for field values: content width minus label minus space.
 	valueWidth := contentWidth - labelWidth - 1
 	if valueWidth < 20 {
-		valueWidth = 0 // disable wrapping on very narrow terminals
+		valueWidth = 0
 	}
-
-	var content strings.Builder
-
-	content.WriteString(m.styles.render(m.styles.detailTitle, "Checkpoint Detail"))
-	content.WriteString("\n")
-
-	formatLabel := func(label string) string {
-		return m.styles.render(m.styles.label, fmt.Sprintf("%-*s", labelWidth, label+":"))
+	w := &detailWriter{
+		styles:       m.styles,
+		labelWidth:   labelWidth,
+		valueWidth:   valueWidth,
+		showSections: showSections,
 	}
+	w.b.WriteString(w.styles.render(w.styles.detailTitle, title) + "\n")
+	return w
+}
 
-	writeField := func(label, value string) {
-		content.WriteString(formatLabel(label) + " " + value + "\n")
+func (w *detailWriter) label(label string) string {
+	return w.styles.render(w.styles.label, fmt.Sprintf("%-*s", w.labelWidth, label+":"))
+}
+
+func (w *detailWriter) field(label, value string) {
+	w.b.WriteString(w.label(label) + " " + value + "\n")
+}
+
+func (w *detailWriter) wrappedField(label, value string) {
+	if w.valueWidth == 0 || len(value) <= w.valueWidth {
+		w.field(label, value)
+		return
 	}
-
-	// writeWrappedField word-wraps a long value, indenting continuation lines to align with the value column.
-	writeWrappedField := func(label, value string) {
-		if valueWidth == 0 || len(value) <= valueWidth {
-			writeField(label, value)
-			return
-		}
-		indent := strings.Repeat(" ", labelWidth+1) // align with value column
-		wrapped := wrapText(value, valueWidth)
-		lines := strings.Split(wrapped, "\n")
-		content.WriteString(formatLabel(label) + " " + lines[0] + "\n")
-		for _, line := range lines[1:] {
-			content.WriteString(indent + line + "\n")
-		}
+	indent := strings.Repeat(" ", w.labelWidth+1)
+	lines := strings.Split(wrapText(value, w.valueWidth), "\n")
+	w.b.WriteString(w.label(label) + " " + lines[0] + "\n")
+	for _, line := range lines[1:] {
+		w.b.WriteString(indent + line + "\n")
 	}
+}
 
-	writeSection := func(title string) {
-		if showSections {
-			content.WriteString("\n" + m.styles.render(m.styles.detailTitle, title) + "\n")
-		} else {
-			content.WriteString("\n")
-		}
+func (w *detailWriter) section(title string) {
+	if w.showSections {
+		w.b.WriteString("\n" + w.styles.render(w.styles.detailTitle, title) + "\n")
+	} else {
+		w.b.WriteString("\n")
+	}
+}
+
+// matchField emits the "Match" row, appending the relevance score when present.
+func (w *detailWriter) matchField(meta search.Meta) {
+	value := meta.MatchType
+	if meta.Score > 0 {
+		value += " " + w.styles.render(w.styles.dim, fmt.Sprintf("(score: %.3f)", meta.Score))
+	}
+	w.field("Match", value)
+}
+
+// authorField emits the "Author" row, preferring the username with the raw
+// author dimmed in parentheses when both are available.
+func (w *detailWriter) authorField(author string, username *string) {
+	value := author
+	if username != nil && *username != "" {
+		value = *username + " " + w.styles.render(w.styles.dim, "("+author+")")
+	}
+	w.field("Author", value)
+}
+
+func (w *detailWriter) String() string {
+	return strings.TrimRight(w.b.String(), "\n")
+}
+
+func (m searchModel) renderCheckpointDetail(r search.Result, contentWidth int, showSections bool) string {
+	w := m.newDetailWriter("Checkpoint Detail", contentWidth, showSections)
+	cp := r.Checkpoint
+	if cp == nil {
+		return w.String()
 	}
 
 	// ── OVERVIEW ──
-	writeSection("OVERVIEW")
-	writeField("ID", r.Data.ID)
-	writeWrappedField("Prompt", stringutil.CollapseWhitespace(r.Data.Prompt))
-	matchType := r.Meta.MatchType
-	if r.Meta.Score > 0 {
-		matchType += " " + m.styles.render(m.styles.dim, fmt.Sprintf("(score: %.3f)", r.Meta.Score))
-	}
-	writeField("Match", matchType)
+	w.section("OVERVIEW")
+	w.field("ID", cp.ID)
+	w.wrappedField("Prompt", stringutil.CollapseWhitespace(cp.Prompt))
+	w.matchField(r.Meta)
 
 	// ── SOURCE ──
-	writeSection("SOURCE")
-	writeWrappedField("Commit", formatCommit(r.Data.CommitSHA, r.Data.CommitMessage))
-	writeField("Branch", r.Data.Branch)
-	writeField("Repo", r.Data.Org+"/"+r.Data.Repo)
-	authorStr := r.Data.Author
-	if r.Data.AuthorUsername != nil && *r.Data.AuthorUsername != "" {
-		authorStr = *r.Data.AuthorUsername + " " + m.styles.render(m.styles.dim, "("+r.Data.Author+")")
-	}
-	writeField("Author", authorStr)
-	createdStr := formatDetailCreatedAt(r.Data.CreatedAt, m.styles)
-	writeField("Created", createdStr)
+	w.section("SOURCE")
+	w.wrappedField("Commit", formatCommit(cp.CommitSHA, cp.CommitMessage))
+	w.field("Branch", cp.Branch)
+	w.field("Repo", cp.Org+"/"+cp.Repo)
+	w.authorField(cp.Author, cp.AuthorUsername)
+	w.field("Created", formatDetailCreatedAt(cp.CreatedAt, m.styles))
 
 	// ── SNIPPET ──
 	if r.Meta.Snippet != "" {
-		writeSection("SNIPPET")
+		w.section("SNIPPET")
 		switch {
 		case showSections:
-			content.WriteString(renderSnippetMarkdown(r.Meta.Snippet, contentWidth, m.darkBg) + "\n")
-		case valueWidth > 0:
-			content.WriteString(wrapText(r.Meta.Snippet, contentWidth) + "\n")
+			w.b.WriteString(renderSnippetMarkdown(r.Meta.Snippet, contentWidth, m.darkBg) + "\n")
+		case w.valueWidth > 0:
+			w.b.WriteString(wrapText(r.Meta.Snippet, contentWidth) + "\n")
 		default:
-			content.WriteString(r.Meta.Snippet + "\n")
+			w.b.WriteString(r.Meta.Snippet + "\n")
 		}
 	}
 
 	// ── FILES ──
-	if len(r.Data.FilesTouched) > 0 {
-		content.WriteString("\n")
+	if len(cp.FilesTouched) > 0 {
+		w.b.WriteString("\n")
 		if showSections {
-			content.WriteString(m.styles.render(m.styles.detailTitle, "FILES") + "\n")
+			w.b.WriteString(m.styles.render(m.styles.detailTitle, "FILES") + "\n")
 		} else {
-			content.WriteString(m.styles.render(m.styles.label, "Files:") + "\n")
+			w.b.WriteString(m.styles.render(m.styles.label, "Files:") + "\n")
 		}
-		for _, f := range r.Data.FilesTouched {
-			content.WriteString("  " + f + "\n")
+		for _, f := range cp.FilesTouched {
+			w.b.WriteString("  " + f + "\n")
 		}
 	}
 
-	return strings.TrimRight(content.String(), "\n")
+	return w.String()
+}
+
+func (m searchModel) renderCommitDetail(r search.Result, contentWidth int, showSections bool) string {
+	w := m.newDetailWriter("Commit Detail", contentWidth, showSections)
+	cm := r.Commit
+	if cm == nil {
+		return w.String()
+	}
+
+	w.section("OVERVIEW")
+	sha := cm.CommitSHA
+	if len(sha) > 7 {
+		sha = sha[:7]
+	}
+	w.field("SHA", sha)
+	w.wrappedField("Subject", cm.CommitSubject)
+	if cm.CommitMessage != cm.CommitSubject {
+		w.wrappedField("Message", stringutil.CollapseWhitespace(cm.CommitMessage))
+	}
+	w.matchField(r.Meta)
+
+	w.section("SOURCE")
+	w.field("Branch", cm.Branch)
+	w.field("Repo", cm.Org+"/"+cm.Repo)
+	w.authorField(cm.Author, cm.AuthorUsername)
+	w.field("Created", formatDetailCreatedAt(cm.CreatedAt, m.styles))
+
+	w.section("STATS")
+	w.field("Additions", fmt.Sprintf("+%d", cm.Additions))
+	w.field("Deletions", fmt.Sprintf("-%d", cm.Deletions))
+	w.field("Files", fmt.Sprintf("%d changed", cm.FilesChanged))
+
+	if cm.HTMLUrl != nil && *cm.HTMLUrl != "" {
+		w.field("URL", *cm.HTMLUrl)
+	}
+
+	return w.String()
+}
+
+func (m searchModel) renderSessionDetail(r search.Result, contentWidth int, showSections bool) string {
+	w := m.newDetailWriter("Session Detail", contentWidth, showSections)
+	ss := r.Session
+	if ss == nil {
+		return w.String()
+	}
+
+	w.section("OVERVIEW")
+	w.field("Session ID", ss.SessionID)
+	w.wrappedField("Name", ss.DisplayName)
+	if ss.Prompt != nil && *ss.Prompt != "" {
+		w.wrappedField("Prompt", stringutil.CollapseWhitespace(*ss.Prompt))
+	}
+	if ss.Agent != nil && *ss.Agent != "" {
+		w.field("Agent", *ss.Agent)
+	}
+	if ss.Model != nil && *ss.Model != "" {
+		w.field("Model", *ss.Model)
+	}
+	w.field("Steps", strconv.Itoa(ss.StepCount))
+	w.matchField(r.Meta)
+
+	w.section("SOURCE")
+	w.field("Repo", ss.Org+"/"+ss.Repo)
+	if ss.Branch != nil && *ss.Branch != "" {
+		w.field("Branch", *ss.Branch)
+	}
+	// Session author is the username only (no raw-author fallback to dim).
+	if ss.AuthorUsername != nil && *ss.AuthorUsername != "" {
+		w.field("Author", *ss.AuthorUsername)
+	}
+	w.field("Created", formatDetailCreatedAt(ss.CreatedAt, m.styles))
+
+	return w.String()
 }
 
 // formatDetailCreatedAt renders date (default) + relative time (dim) for the detail view.
@@ -662,40 +1142,57 @@ func formatDetailCreatedAt(createdAt string, styles searchStyles) string {
 	return t.Format("Jan 02, 2006") + " " + styles.render(styles.dim, "("+timeAgo(t)+")")
 }
 
-// maxCardContentLines is the maximum number of content lines shown in the
-// inline detail card. Longer content is truncated with a "enter for more" hint.
-// The full content is always available via the detail view (enter key).
-const maxCardContentLines = 15
+// viewDetailPane renders the pinned detail card for the selected result,
+// sized to exactly paneH terminal rows. Content taller than the pane is
+// truncated with a "▼ enter for more" hint (the full content is always
+// available via the full-screen detail view). Shorter content is padded so
+// the pane occupies its full allotment and the footer stays pinned.
+func (m searchModel) viewDetailPane(paneH int) string {
+	r := m.selectedResult()
+	if r == nil || paneH <= 0 {
+		return strings.TrimSuffix(padToHeight("", paneH), "\n")
+	}
 
-func (m searchModel) viewDetailCard(r search.Result) string {
-	var contentWidth int
-	var borderWidth int
+	var contentWidth, borderWidth, chrome int
 	if m.styles.colorEnabled {
-		// lipgloss .Width(W) includes padding but excludes border:
-		//   text wraps at W - padding(4), rendered = W + border(2), + indent(1) = W + 3
+		// lipgloss v2 .Width(W) is the outer width: it absorbs horizontal padding
+		// (2+2) and the rounded border (1+1), so the inner text area is W-6.
+		// .Height(H) yields H + vertical-padding(0) + border(2) rendered rows, so
+		// vertical chrome is 2. Wrapping content to W-6 keeps the card at its
+		// budgeted height.
 		borderWidth = max(m.width-3, 0)
-		contentWidth = max(borderWidth-4, 0)
+		contentWidth = max(borderWidth-6, 0)
+		chrome = 2
 	} else {
-		// No border/padding in NO_COLOR mode, only indent(1)
+		// NO_COLOR: a leading dim rule stands in for the top border.
 		contentWidth = max(m.width-1, 0)
+		chrome = 1
 	}
-	cardContent := m.renderDetailContent(r, contentWidth, false)
 
-	lines := strings.Split(cardContent, "\n")
-	if len(lines) > maxCardContentLines {
-		lines = lines[:maxCardContentLines]
+	contentLines := max(paneH-chrome, 1)
+	lines := strings.Split(m.renderDetailContent(*r, contentWidth, false), "\n")
+	if len(lines) > contentLines {
+		lines = lines[:contentLines]
 		hint := m.styles.render(m.styles.dim, "▼ enter for more")
-		hintWidth := lipgloss.Width(hint)
-		lines = append(lines, "", strings.Repeat(" ", max(contentWidth-hintWidth, 0))+hint)
-		cardContent = strings.Join(lines, "\n")
+		lines[contentLines-1] = strings.Repeat(" ", max(contentWidth-lipgloss.Width(hint), 0)) + hint
 	}
+	// Hard-cap each line to the inner width (ANSI-aware) so no line wraps inside
+	// the bordered box and inflates the card past its budgeted height. This keeps
+	// the pane exactly paneH rows tall regardless of detail content.
+	for i, ln := range lines {
+		if lipgloss.Width(ln) > contentWidth {
+			lines[i] = xansi.Truncate(ln, contentWidth, "…")
+		}
+	}
+	body := strings.Join(lines, "\n")
 
-	card := cardContent
 	if m.styles.colorEnabled {
-		card = m.styles.detailBorder.Width(borderWidth).Render(cardContent)
+		card := m.styles.detailBorder.Width(borderWidth).Height(contentLines).Render(body)
+		return strings.TrimSuffix(indentLines(card, " "), "\n")
 	}
 
-	return indentLines(card, " ")
+	pane := " " + m.styles.horizontalRule(contentWidth) + "\n" + strings.TrimSuffix(indentLines(body, " "), "\n")
+	return padToHeight(pane, paneH)
 }
 
 func (m searchModel) viewDetailFull() string {
@@ -735,19 +1232,12 @@ func (m searchModel) viewHelp() string {
 	if pages > 1 {
 		left += dot + m.styles.helpItem("n/p", "page")
 	}
-	left += dot + m.styles.helpItem(keys.Quit.Help().Key, keys.Quit.Help().Desc)
+	left += dot + m.styles.helpItem("1-3", "type") + dot +
+		m.styles.helpItem(keys.Quit.Help().Key, keys.Quit.Help().Desc)
 
-	right := fmt.Sprintf("%d results", m.total)
-	if pages > 1 {
-		right = fmt.Sprintf("page %d/%d · %d results", m.page+1, pages, m.total)
-	}
-
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
-	if gap < 1 {
-		gap = 1
-	}
-
-	return left + strings.Repeat(" ", gap) + m.styles.render(m.styles.dim, right) + "\n"
+	// The page / results count lives on the status row beneath the list
+	// (viewListStatusRow), so the footer holds only the key hints.
+	return left + "\n"
 }
 
 // indentLines prefixes every line of text with the given prefix.
@@ -805,25 +1295,27 @@ func wrapParagraph(b *strings.Builder, text string, width int) {
 
 // columnLayout holds computed column widths for the search results table.
 type columnLayout struct {
-	age    int
-	id     int
-	branch int
-	repo   int
-	prompt int
-	author int
+	typeCol int
+	age     int
+	id      int
+	branch  int
+	repo    int
+	prompt  int
+	author  int
 }
 
 // computeColumns calculates column widths from terminal width.
 func computeColumns(width int) columnLayout {
 	const (
+		typeWidth   = 5
 		ageWidth    = 10
 		idWidth     = 12
 		repoMin     = 10
 		authorWidth = 14
-		gaps        = 5 // spaces between columns
+		gaps        = 6 // spaces between columns (one more than before for type col)
 	)
 
-	remaining := width - ageWidth - idWidth - authorWidth - gaps
+	remaining := width - typeWidth - ageWidth - idWidth - authorWidth - gaps
 	if remaining < 20 {
 		remaining = 20
 	}
@@ -838,12 +1330,13 @@ func computeColumns(width int) columnLayout {
 	}
 
 	return columnLayout{
-		age:    ageWidth,
-		id:     idWidth,
-		branch: branchWidth,
-		repo:   repoWidth,
-		prompt: promptWidth,
-		author: authorWidth,
+		typeCol: typeWidth,
+		age:     ageWidth,
+		id:      idWidth,
+		branch:  branchWidth,
+		repo:    repoWidth,
+		prompt:  promptWidth,
+		author:  authorWidth,
 	}
 }
 
@@ -972,35 +1465,38 @@ func snippetMarkdownStyles(dark bool) ansi.StyleConfig {
 
 // renderSearchStatic writes a non-interactive table for accessible mode.
 func renderSearchStatic(w io.Writer, results []search.Result, query string, total int, styles statusStyles) {
-	fmt.Fprintf(w, "Found %d checkpoints matching %q\n\n", total, query)
+	fmt.Fprintf(w, "Found %d results matching %q\n\n", total, query)
 
 	cols := computeColumns(styles.width)
 
-	fmt.Fprintf(w, "%-*s %-*s %-*s %-*s %-*s %-*s\n",
+	fmt.Fprintf(w, "%-*s %-*s %-*s %-*s %-*s %-*s %-*s\n",
+		cols.typeCol, "TYPE",
 		cols.age, "AGE",
 		cols.id, "ID",
 		cols.branch, "BRANCH",
 		cols.repo, "REPO",
-		cols.prompt, "PROMPT",
+		cols.prompt, "TITLE",
 		cols.author, "AUTHOR",
 	)
 
 	for _, r := range results {
-		age := formatSearchAge(r.Data.CreatedAt)
-		id := stringutil.TruncateRunes(r.Data.ID, cols.id, "")
-		branch := stringutil.TruncateRunes(r.Data.Branch, cols.branch, "...")
-		repo := stringutil.TruncateRunes(r.Data.Org+"/"+r.Data.Repo, cols.repo, "...")
-		prompt := stringutil.TruncateRunes(
-			stringutil.CollapseWhitespace(r.Data.Prompt), cols.prompt, "...",
+		typeBadge := typeLabel(r.Type)
+		age := formatSearchAge(r.ResultCreatedAt())
+		id := stringutil.TruncateRunes(formatResultID(r), cols.id, "")
+		branch := stringutil.TruncateRunes(r.ResultBranch(), cols.branch, "...")
+		repo := stringutil.TruncateRunes(r.ResultOrg()+"/"+r.ResultRepo(), cols.repo, "...")
+		title := stringutil.TruncateRunes(
+			stringutil.CollapseWhitespace(r.ResultTitle()), cols.prompt, "...",
 		)
-		author := stringutil.TruncateRunes(derefStr(r.Data.AuthorUsername, r.Data.Author), cols.author, "...")
+		author := stringutil.TruncateRunes(r.ResultAuthor(), cols.author, "...")
 
-		fmt.Fprintf(w, "%-*s %-*s %-*s %-*s %-*s %-*s\n",
+		fmt.Fprintf(w, "%-*s %-*s %-*s %-*s %-*s %-*s %-*s\n",
+			cols.typeCol, typeBadge,
 			cols.age, age,
 			cols.id, id,
 			cols.branch, branch,
 			cols.repo, repo,
-			cols.prompt, prompt,
+			cols.prompt, title,
 			cols.author, author,
 		)
 	}

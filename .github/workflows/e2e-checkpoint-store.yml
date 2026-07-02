@@ -1,0 +1,165 @@
+name: E2E Checkpoint Store
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent:
+        description: "Agent to run (leave empty to run all real agents; vogon must be selected explicitly)"
+        required: false
+        type: choice
+        options:
+          - ""
+          - vogon
+          - claude-code
+          - opencode
+          - gemini-cli
+          - factoryai-droid
+          - cursor-cli
+          - copilot-cli
+          - roger-roger
+          - codex
+      checkpoint_store:
+        description: "Checkpoint storage backend to run the suite against"
+        required: true
+        default: "git-refs"
+        type: choice
+        options:
+          - git-branch
+          - git-refs
+
+jobs:
+  # Build the agent matrix dynamically: a single selected agent, or all of them
+  # when the input is left empty.
+  matrix-setup:
+    runs-on: ubuntu-latest
+    outputs:
+      agents: ${{ steps.set.outputs.agents }}
+    steps:
+      - id: set
+        # Pass the input through env rather than interpolating it into the script:
+        # `type: choice` only constrains the UI, so a REST-API dispatch could inject
+        # shell metacharacters here otherwise.
+        env:
+          AGENT_INPUT: ${{ github.event.inputs.agent }}
+        run: |
+          input="$AGENT_INPUT"
+          if [ -n "$input" ]; then
+            echo "agents=[\"$input\"]" >> "$GITHUB_OUTPUT"
+          else
+            echo 'agents=["claude-code","opencode","gemini-cli","factoryai-droid","cursor-cli","copilot-cli","roger-roger","codex"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  e2e-checkpoint-store:
+    needs: matrix-setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      actions: read
+      contents: read
+      # Needed by the copilot-cli leg. GitHub does not allow matrix expressions in
+      # `permissions:`, so this scope is granted to every leg's GITHUB_TOKEN. The
+      # token is kept away from non-copilot agents in two ways: it is only placed
+      # in COPILOT_GITHUB_TOKEN for the copilot-cli leg (see env blocks below), and
+      # checkout runs with persist-credentials: false so it is not left in
+      # .git/config for an agent process to read.
+      copilot-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        agent: ${{ fromJson(needs.matrix-setup.outputs.agents) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Don't persist the (copilot-scoped) GITHUB_TOKEN in .git/config, where
+          # an agent process running in the checkout could read it.
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnome-keyring tmux
+          echo 'somecredstorepass' | gnome-keyring-daemon --unlock
+
+      - name: Setup mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+
+      - name: Build entire CLI
+        run: go build -o /usr/local/bin/entire ./cmd/entire
+
+      - name: Build vogon binary
+        if: matrix.agent == 'vogon'
+        run: go build -o /usr/local/bin/vogon ./e2e/vogon
+
+      - name: Install agent CLI
+        if: matrix.agent != 'vogon'
+        run: |
+          case "${{ matrix.agent }}" in
+            claude-code) curl -fsSL https://claude.ai/install.sh | bash ;;
+            opencode)    curl -fsSL https://opencode.ai/install | bash ;;
+            gemini-cli)  npm install -g @google/gemini-cli ;;
+            codex)       npm install -g @openai/codex ;;
+            cursor-cli)  curl https://cursor.com/install -fsS | bash ;;
+            factoryai-droid) curl -fsSL https://app.factory.ai/cli | sh ;;
+            copilot-cli)  npm install -g @github/copilot  ;;
+            roger-roger) ;; # installed by mise (see mise.toml)
+          esac
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Verify roger-roger agent
+        if: matrix.agent == 'roger-roger'
+        run: |
+          set -euo pipefail
+          echo "Verifying roger-roger binaries on PATH..."
+          command -v roger-roger
+          command -v entire-agent-roger-roger
+
+      - name: Bootstrap agent
+        if: matrix.agent != 'roger-roger' && matrix.agent != 'vogon'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          # Only the copilot-cli leg gets the token; other agents must not receive it.
+          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
+        run: go run ./e2e/bootstrap ${{ matrix.agent }}
+
+      - name: E2E Checkpoint Store
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Pin per-agent models and concurrency limits to match e2e.yml so this
+          # workflow tests the same versions and avoids per-agent rate limits.
+          E2E_CODEX_MODEL: ${{ matrix.agent == 'codex' && 'gpt-5.4-mini' || '' }}
+          E2E_GEMINI_MODEL: ${{ matrix.agent == 'gemini-cli' && 'gemini-3.1-flash-lite' || '' }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          # Only the copilot-cli leg gets the token; other agents must not receive it.
+          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
+          E2E_CONCURRENT_TEST_LIMIT: ${{ matrix.agent == 'gemini-cli' && '6' || matrix.agent == 'factoryai-droid' && '1' || matrix.agent == 'cursor-cli' && '2' || '' }}
+          E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
+          E2E_ENTIRE_BIN: /usr/local/bin/entire
+          E2E_CHECKPOINT_STORE: ${{ inputs.checkpoint_store }}
+        # roger-roger is deterministic, so it runs through its dedicated task,
+        # which does NOT enable --rerun-fails. Routing it through the default
+        # task (`test:e2e`) would retry a real regression and mask it.
+        run: |
+          mkdir -p "$E2E_ARTIFACT_DIR"
+          if [ "${{ matrix.agent }}" = "roger-roger" ]; then
+            mise run test:e2e:roger-roger TestExternalAgent
+          else
+            mise run test:e2e --agent ${{ matrix.agent }}
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: e2e-checkpoint-store-${{ matrix.agent }}-${{ inputs.checkpoint_store }}
+          path: e2e-artifacts/
+          retention-days: 7

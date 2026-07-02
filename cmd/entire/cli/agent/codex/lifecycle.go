@@ -15,6 +15,7 @@ import (
 var (
 	_ agent.HookSupport        = (*CodexAgent)(nil)
 	_ agent.HookResponseWriter = (*CodexAgent)(nil)
+	_ agent.ContextInjector    = (*CodexAgent)(nil)
 )
 
 // WriteHookResponse outputs a JSON hook response to stdout.
@@ -27,6 +28,21 @@ func (c *CodexAgent) WriteHookResponse(message string) error {
 		return fmt.Errorf("failed to encode hook response: %w", err)
 	}
 	return nil
+}
+
+// InjectionEvent reports that Codex injects model context at TurnStart (its
+// user-prompt-submit hook). Codex hosts Claude-compatible hooks, so it consumes
+// the same hookSpecificOutput.additionalContext shape.
+func (c *CodexAgent) InjectionEvent() agent.EventType { return agent.TurnStart }
+
+// RenderContextInjection renders the Claude-style additionalContext payload
+// Codex injects into the model context at user-prompt-submit.
+func (c *CodexAgent) RenderContextInjection(inj agent.ContextInjection) ([]byte, error) {
+	out, err := agent.RenderAdditionalContextHookOutput("UserPromptSubmit", inj.Text)
+	if err != nil {
+		return nil, fmt.Errorf("render codex context injection: %w", err)
+	}
+	return out, nil
 }
 
 // Codex hook names — these become subcommands under `entire hooks codex`

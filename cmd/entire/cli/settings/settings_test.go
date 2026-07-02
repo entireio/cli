@@ -3,9 +3,9 @@ package settings
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -54,8 +54,8 @@ func TestLoad_WithWorktreeRootReadsSettingsFromExplicitRepo(t *testing.T) {
 	testutil.InitRepo(t, targetDir)
 
 	for dir, content := range map[string]string{
-		cwdDir:    `{"enabled": true, "strategy_options": {"checkpoints_version": 2}}`,
-		targetDir: `{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`,
+		cwdDir:    `{"enabled": true, "strategy_options": {"filtered_fetches": false}}`,
+		targetDir: `{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
 	} {
 		entireDir := filepath.Join(dir, ".entire")
 		if err := os.MkdirAll(entireDir, 0o755); err != nil {
@@ -72,11 +72,8 @@ func TestLoad_WithWorktreeRootReadsSettingsFromExplicitRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.CheckpointsVersion() != 1 {
-		t.Fatalf("CheckpointsVersion() = %d, want target repo default v1", got.CheckpointsVersion())
-	}
-	if !got.IsCheckpointsV2Enabled() {
-		t.Fatal("IsCheckpointsV2Enabled() = false, want target repo checkpoints_v2 setting")
+	if !got.IsFilteredFetchesEnabled() {
+		t.Fatal("IsFilteredFetchesEnabled() = false, want target repo setting")
 	}
 }
 
@@ -704,237 +701,6 @@ func TestMergeJSON_SummaryGeneration_SameProviderPreservesModel(t *testing.T) {
 	}
 }
 
-func TestIsCheckpointsV2Enabled_DefaultsFalse(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{Enabled: true}
-	if s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to default to false")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_EmptyStrategyOptions(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{Enabled: true, StrategyOptions: map[string]any{}}
-	if s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be false with empty strategy_options")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_True(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{
-		Enabled:         true,
-		StrategyOptions: map[string]any{"checkpoints_v2": true},
-	}
-	if !s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be true")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_CheckpointsVersion2(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{
-		Enabled:         true,
-		StrategyOptions: map[string]any{"checkpoints_version": 2},
-	}
-	if !s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be true when checkpoints_version is 2")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_ExplicitlyFalse(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{
-		Enabled:         true,
-		StrategyOptions: map[string]any{"checkpoints_v2": false},
-	}
-	if s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be false when explicitly set to false")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_WrongType(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{
-		Enabled:         true,
-		StrategyOptions: map[string]any{"checkpoints_v2": "yes"},
-	}
-	if s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be false for non-bool value")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_LoadFromFile(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	entireDir := filepath.Join(tmpDir, ".entire")
-	if err := os.MkdirAll(entireDir, 0o755); err != nil {
-		t.Fatalf("failed to create .entire directory: %v", err)
-	}
-
-	settingsFile := filepath.Join(entireDir, "settings.json")
-	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`), 0o644); err != nil {
-		t.Fatalf("failed to write settings file: %v", err)
-	}
-
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
-		t.Fatalf("failed to create .git directory: %v", err)
-	}
-
-	t.Chdir(tmpDir)
-
-	s, err := Load(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be true after loading from file")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_LocalOverride(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	entireDir := filepath.Join(tmpDir, ".entire")
-	if err := os.MkdirAll(entireDir, 0o755); err != nil {
-		t.Fatalf("failed to create .entire directory: %v", err)
-	}
-
-	settingsFile := filepath.Join(entireDir, "settings.json")
-	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true}`), 0o644); err != nil {
-		t.Fatalf("failed to write settings file: %v", err)
-	}
-
-	localFile := filepath.Join(entireDir, "settings.local.json")
-	if err := os.WriteFile(localFile, []byte(`{"strategy_options": {"checkpoints_v2": true}}`), 0o644); err != nil {
-		t.Fatalf("failed to write local settings file: %v", err)
-	}
-
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
-		t.Fatalf("failed to create .git directory: %v", err)
-	}
-
-	t.Chdir(tmpDir)
-
-	s, err := Load(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be true from local override")
-	}
-}
-
-func TestCheckpointsVersion(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		opts map[string]any
-		want int
-	}{
-		{"unset defaults to one", nil, 1},
-		{"empty options defaults to one", map[string]any{}, 1},
-		{"integer 2 falls back to default", map[string]any{"checkpoints_version": 2}, 1},
-		{"float 2 falls back to default", map[string]any{"checkpoints_version": float64(2)}, 1},
-		{"string 2 falls back to default", map[string]any{"checkpoints_version": "2"}, 1},
-		{"integer 3 falls back to default", map[string]any{"checkpoints_version": 3}, 1},
-		{"zero falls back to default", map[string]any{"checkpoints_version": 0}, 1},
-		{"negative falls back to default", map[string]any{"checkpoints_version": -1}, 1},
-		{"non-integer float falls back to default", map[string]any{"checkpoints_version": 2.5}, 1},
-		{"bool falls back to default", map[string]any{"checkpoints_version": true}, 1},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			s := &EntireSettings{StrategyOptions: tt.opts}
-			if got := s.CheckpointsVersion(); got != tt.want {
-				t.Errorf("CheckpointsVersion() = %d, want %d", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestWarnIfCheckpointsV2Disallowed(t *testing.T) {
-	tests := []struct {
-		name     string
-		opts     map[string]any
-		wantWarn bool
-		wantText string
-	}{
-		{"unset", nil, false, ""},
-		{"version 1", map[string]any{"checkpoints_version": 1}, false, ""},
-		{"integer version 2", map[string]any{"checkpoints_version": 2}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
-		{"float version 2", map[string]any{"checkpoints_version": float64(2)}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
-		{"string version 2", map[string]any{"checkpoints_version": "2"}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
-		{"checkpoints_v2 true", map[string]any{"checkpoints_v2": true}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
-		{"push_v2_refs true", map[string]any{"push_v2_refs": true}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
-		{"push_v2 true", map[string]any{"push_v2": true}, true, "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"},
-		{"false flags", map[string]any{"checkpoints_v2": false, "push_v2_refs": false, "push_v2": false}, false, ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Cannot use t.Parallel(): inspects global stderr.
-			s := &EntireSettings{StrategyOptions: tt.opts}
-			stderr := captureSettingsStderr(t, s.WarnIfCheckpointsV2Disallowed)
-
-			gotWarn := stderr != ""
-			if gotWarn != tt.wantWarn {
-				t.Fatalf("warning emitted = %v, want %v (stderr: %q)", gotWarn, tt.wantWarn, stderr)
-			}
-			if tt.wantText != "" && !strings.Contains(stderr, tt.wantText) {
-				t.Fatalf("warning text mismatch: got %q, want it to contain %q", stderr, tt.wantText)
-			}
-		})
-	}
-}
-
-func TestWarnIfCheckpointsV2Disallowed_RepeatsUntilV2SettingRemoved(t *testing.T) {
-	// Cannot use t.Parallel(): inspects global stderr.
-	const warning = "strategy_options.checkpoints_version 2 is no longer supported. Falling back to version 1"
-
-	s := &EntireSettings{StrategyOptions: map[string]any{"checkpoints_version": 2}}
-	stderr := captureSettingsStderr(t, func() {
-		s.WarnIfCheckpointsV2Disallowed()
-		s.WarnIfCheckpointsV2Disallowed()
-	})
-	if count := strings.Count(stderr, warning); count != 2 {
-		t.Fatalf("warning count = %d, want 2 (stderr: %q)", count, stderr)
-	}
-
-	s.StrategyOptions = map[string]any{}
-	stderr = captureSettingsStderr(t, s.WarnIfCheckpointsV2Disallowed)
-	if stderr != "" {
-		t.Fatalf("warning after removing v2 setting = %q, want empty", stderr)
-	}
-}
-
-func captureSettingsStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	origStderr := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Stderr = w
-	t.Cleanup(func() { os.Stderr = origStderr })
-
-	fn()
-
-	if err := w.Close(); err != nil {
-		t.Fatalf("close stderr write end: %v", err)
-	}
-	buf, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read stderr: %v", err)
-	}
-	_ = r.Close()
-	os.Stderr = origStderr
-	return string(buf)
-}
-
 func TestIsFilteredFetchesEnabled_DefaultsFalse(t *testing.T) {
 	t.Parallel()
 	s := &EntireSettings{Enabled: true}
@@ -1067,6 +833,185 @@ func TestLoadFromBytes_CustomRedactions(t *testing.T) {
 	}
 }
 
+func TestLoadFromBytes_OPFSettings_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{
+  "redaction": {
+    "openai_privacy_filter": {
+      "enabled": true,
+      "categories": {"private_person": true, "secret": false},
+      "command": "/usr/local/bin/opf",
+      "timeout_seconds": 45
+    }
+  }
+}`)
+	got, err := LoadFromBytes(data)
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	opf := got.Redaction.OpenAIPrivacyFilter
+	if opf == nil {
+		t.Fatal("OpenAIPrivacyFilter is nil")
+	}
+	if !opf.Enabled {
+		t.Error("Enabled: want true")
+	}
+	if !opf.Categories["private_person"] {
+		t.Error("Categories[private_person]: want true")
+	}
+	if opf.Categories["secret"] {
+		t.Error("Categories[secret]: want false")
+	}
+	if opf.Command != "/usr/local/bin/opf" {
+		t.Errorf("Command: want /usr/local/bin/opf, got %q", opf.Command)
+	}
+	if opf.TimeoutSeconds != 45 {
+		t.Errorf("TimeoutSeconds: want 45, got %d", opf.TimeoutSeconds)
+	}
+}
+
+// TestLoadFromBytes_OPFSettings_RejectsUnknownCategory pins down that
+// category-name typos fail at parse time. Silent zero-detection of a
+// privacy category is effectively a correctness bug — the user thinks
+// they're protected but they're not. Runs on both load paths.
+func TestLoadFromBytes_OPFSettings_RejectsUnknownCategory(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		key     string
+		wantErr bool
+	}{
+		{"known_person", "private_person", false},
+		{"known_email", "private_email", false},
+		{"known_secret", "secret", false},
+		{"typo_peerson", "private_peerson", true},
+		{"unknown", "social_security_number", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := `{"redaction":{"openai_privacy_filter":{"categories":{"` + tc.key + `":true}}}}`
+			_, err := LoadFromBytes([]byte(body))
+			if tc.wantErr && err == nil {
+				t.Errorf("LoadFromBytes(%q): want error, got nil", tc.key)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("LoadFromBytes(%q): want nil, got %v", tc.key, err)
+			}
+		})
+	}
+}
+
+// TestLoadFromBytes_OPFSettings_RejectsOnFailureField pins down that the
+// dropped on_failure field is rejected by DisallowUnknownFields — there is
+// no warn-only fallback masquerading as fail-closed.
+func TestLoadFromBytes_OPFSettings_RejectsOnFailureField(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"redaction":{"openai_privacy_filter":{"enabled":true,"on_failure":"block"}}}`)
+	if _, err := LoadFromBytes(body); err == nil {
+		t.Error("LoadFromBytes with on_failure: want error from DisallowUnknownFields, got nil")
+	}
+}
+
+// TestLoadFromBytes_OPFSettings_PromptDefault covers parsing + validation
+// of the prompt_default field added for the pre-push prompt UX. Empty is
+// allowed (treated as "ask"); ask/never/always are the only valid values.
+func TestLoadFromBytes_OPFSettings_PromptDefault(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		value   string
+		wantErr bool
+		wantVal string
+	}{
+		{name: "ask", value: `"ask"`, wantVal: "ask"},
+		{name: "never", value: `"never"`, wantVal: "never"},
+		{name: "always", value: `"always"`, wantVal: "always"},
+		{name: "empty_string_allowed_as_ask", value: `""`, wantVal: ""},
+		{name: "bogus_value_rejected", value: `"sometimes"`, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := []byte(`{"redaction":{"openai_privacy_filter":{"prompt_default":` + tc.value + `}}}`)
+			s, err := LoadFromBytes(body)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil", tc.value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if s.Redaction == nil || s.Redaction.OpenAIPrivacyFilter == nil {
+				t.Fatal("OPF settings not parsed")
+			}
+			if got := s.Redaction.OpenAIPrivacyFilter.PromptDefault; got != tc.wantVal {
+				t.Errorf("PromptDefault = %q, want %q", got, tc.wantVal)
+			}
+		})
+	}
+}
+
+func TestLoadFromBytes_OPFSettings_TimeoutValidation(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{name: "positive_allowed", value: 45},
+		{name: "zero_allowed_as_default", value: 0},
+		{name: "negative_rejected", value: -1, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := []byte(`{"redaction":{"openai_privacy_filter":{"timeout_seconds":` + strconv.Itoa(tc.value) + `}}}`)
+			_, err := LoadFromBytes(body)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for timeout_seconds=%d, got nil", tc.value)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error for timeout_seconds=%d: %v", tc.value, err)
+			}
+		})
+	}
+}
+
+// TestLoadFromBytes_OPFSettings_Merge verifies override semantics for the
+// merge path (settings.local.json on top of settings.json): present fields
+// override, omitted fields preserve, categories merge per-key.
+func TestLoadFromBytes_OPFSettings_Merge(t *testing.T) {
+	t.Parallel()
+	base := []byte(`{"redaction":{"openai_privacy_filter":{"enabled":true,"categories":{"private_person":true,"secret":false}}}}`)
+	override := []byte(`{"redaction":{"openai_privacy_filter":{"categories":{"secret":true},"command":"/opt/opf"}}}`)
+
+	s, err := LoadFromBytes(base)
+	if err != nil {
+		t.Fatalf("base load: %v", err)
+	}
+	if err := mergeJSON(s, override); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	opf := s.Redaction.OpenAIPrivacyFilter
+	if !opf.Enabled {
+		t.Error("Enabled: want preserved=true")
+	}
+	if !opf.Categories["private_person"] {
+		t.Error("Categories[private_person]: want preserved=true")
+	}
+	if !opf.Categories["secret"] {
+		t.Error("Categories[secret]: want override=true")
+	}
+	if opf.Command != "/opt/opf" {
+		t.Errorf("Command: want override /opt/opf, got %q", opf.Command)
+	}
+}
+
 func TestEntireSettings_ReviewRoundTrip(t *testing.T) {
 	t.Parallel()
 	raw := []byte(`{
@@ -1177,19 +1122,6 @@ func TestLoad_AppliesClonePreferencesBeforeLocalSettings(t *testing.T) {
 	}
 	if s.ReviewFixAgent != "local-agent" {
 		t.Fatalf("ReviewFixAgent = %q, want local-agent", s.ReviewFixAgent)
-	}
-}
-
-func TestEntireSettings_ReviewConfigFor(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{Review: map[string]ReviewConfig{
-		"claude-code": {Skills: []string{"/pr-review-toolkit:review-pr"}},
-	}}
-	if cfg := s.ReviewConfigFor("claude-code"); len(cfg.Skills) != 1 {
-		t.Fatalf("expected 1 skill, got %v", cfg.Skills)
-	}
-	if cfg := s.ReviewConfigFor("codex"); !cfg.IsZero() {
-		t.Fatalf("expected zero config for unconfigured agent, got %+v", cfg)
 	}
 }
 
@@ -1349,5 +1281,52 @@ func TestLoad_MergesInvestigateLocalOverride(t *testing.T) {
 	}
 	if cfg.AlwaysPrompt != "Be brief." {
 		t.Errorf("AlwaysPrompt = %q, want %q", cfg.AlwaysPrompt, "Be brief.")
+	}
+}
+
+func TestMergeReviewProfiles_PureAndPrecedence(t *testing.T) {
+	t.Parallel()
+	base := map[string]ReviewProfileConfig{
+		"general":  {Task: "base general"},
+		"security": {Task: "base security"},
+	}
+	src := map[string]ReviewProfileConfig{
+		"general": {Task: "override general"}, // overrides base
+		"scratch": {Task: "src scratch"},      // unique to src
+	}
+
+	out := mergeReviewProfiles(base, src)
+
+	// Merged result: src overrides same-named, both layers' unique profiles kept.
+	if out["general"].Task != "override general" {
+		t.Errorf("general = %q, want src override", out["general"].Task)
+	}
+	if out["security"].Task != "base security" {
+		t.Errorf("security = %q, want base preserved", out["security"].Task)
+	}
+	if out["scratch"].Task != "src scratch" {
+		t.Errorf("scratch = %q, want src-only profile kept", out["scratch"].Task)
+	}
+
+	// Inputs must not be mutated.
+	if _, leaked := base["scratch"]; leaked {
+		t.Error("base was mutated: src profile leaked into it")
+	}
+	if base["general"].Task != "base general" {
+		t.Errorf("base[general] mutated: %q", base["general"].Task)
+	}
+	if len(src) != 2 {
+		t.Errorf("src mutated: len = %d, want 2", len(src))
+	}
+
+	// The result is always a fresh, non-nil map, even when both inputs are
+	// empty/nil, so callers never receive nil from a non-nil input.
+	if got := mergeReviewProfiles(nil, nil); got == nil {
+		t.Error("merge(nil, nil) should return a non-nil empty map, got nil")
+	} else if len(got) != 0 {
+		t.Errorf("merge(nil, nil) = %v, want empty", got)
+	}
+	if got := mergeReviewProfiles(nil, map[string]ReviewProfileConfig{}); got == nil {
+		t.Error("merge(nil, emptyNonNil) should return a non-nil empty map, got nil")
 	}
 }

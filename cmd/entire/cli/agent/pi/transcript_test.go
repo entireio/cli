@@ -17,6 +17,7 @@ var (
 	_ agent.TokenCalculator    = (*PiAgent)(nil)
 	_ agent.TranscriptAnalyzer = (*PiAgent)(nil)
 	_ agent.PromptExtractor    = (*PiAgent)(nil)
+	_ agent.ModelExtractor     = (*PiAgent)(nil)
 )
 
 // testSessionJSONL — linear session: header + model_change + 4 messages.
@@ -44,6 +45,30 @@ const testBranchingSessionJSONL = `{"type":"session","version":3,"id":"test-bran
 const testFlatSessionJSONL = `{"type":"session","id":"flat-123"}
 {"type":"message","id":"m1","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}
 {"type":"message","id":"m2","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0}}}
+`
+
+// testModelSessionJSONL — assistant messages carry message.model (the real Pi
+// shape: every assistant message records the model that produced it).
+const testModelSessionJSONL = `{"type":"session","version":3,"id":"model-uuid","timestamp":"2026-05-22T21:00:00.000Z","cwd":"/tmp/test"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-05-22T21:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"Hi"}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-05-22T21:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}],"model":"gpt-5.5","provider":"openai-codex","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0}}}
+{"type":"message","id":"m3","parentId":"m2","timestamp":"2026-05-22T21:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Done"}],"model":"gpt-5.5","provider":"openai-codex","usage":{"input":120,"output":40,"cacheRead":0,"cacheWrite":0}}}
+`
+
+// testModelChangeSessionJSONL — model switches mid-session; the most recent
+// active-branch assistant message wins.
+const testModelChangeSessionJSONL = `{"type":"session","version":3,"id":"model-change-uuid","timestamp":"2026-05-22T22:00:00.000Z","cwd":"/tmp/test"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-05-22T22:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"Hi"}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-05-22T22:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}],"model":"gpt-5.5","provider":"openai-codex","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0}}}
+{"type":"message","id":"m3","parentId":"m2","timestamp":"2026-05-22T22:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Switched"}],"model":"claude-sonnet-4-6","provider":"anthropic","usage":{"input":120,"output":40,"cacheRead":0,"cacheWrite":0}}}
+`
+
+// testModelBranchingJSONL — abandoned branch (m4) uses a different model than
+// the active branch (m5); only the active-branch model should be returned.
+const testModelBranchingJSONL = `{"type":"session","version":3,"id":"model-branch-uuid","timestamp":"2026-05-22T23:00:00.000Z","cwd":"/tmp/test"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-05-22T23:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"Hi"}]}}
+{"type":"message","id":"m4","parentId":"m1","timestamp":"2026-05-22T23:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"abandoned"}],"model":"claude-opus-4-8","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0}}}
+{"type":"message","id":"m5","parentId":"m1","timestamp":"2026-05-22T23:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"active"}],"model":"gpt-5.5","provider":"openai-codex","usage":{"input":120,"output":40,"cacheRead":0,"cacheWrite":0}}}
 `
 
 func writeJSONL(t *testing.T, name, content string) string {
@@ -228,6 +253,65 @@ func TestCalculateTokenUsage_FlatTranscript(t *testing.T) {
 // itself; the in-tree tests here verify the agent surface (CalculateTokenUsage,
 // ExtractModifiedFilesFromOffset, ExtractPrompts) honours active-branch
 // filtering end-to-end.
+
+// --- ExtractModel ---
+
+func TestExtractModel(t *testing.T) {
+	t.Parallel()
+	model, err := (&PiAgent{}).ExtractModel([]byte(testModelSessionJSONL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "gpt-5.5" {
+		t.Errorf("model = %q, want gpt-5.5", model)
+	}
+}
+
+func TestExtractModel_MostRecentWinsOnModelChange(t *testing.T) {
+	t.Parallel()
+	model, err := (&PiAgent{}).ExtractModel([]byte(testModelChangeSessionJSONL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "claude-sonnet-4-6" {
+		t.Errorf("model = %q, want claude-sonnet-4-6 (most recent)", model)
+	}
+}
+
+func TestExtractModel_Branching(t *testing.T) {
+	t.Parallel()
+	model, err := (&PiAgent{}).ExtractModel([]byte(testModelBranchingJSONL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "gpt-5.5" {
+		t.Errorf("model = %q, want gpt-5.5 (active branch only)", model)
+	}
+}
+
+func TestExtractModel_Empty(t *testing.T) {
+	t.Parallel()
+	model, err := (&PiAgent{}).ExtractModel(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "" {
+		t.Errorf("model = %q, want empty", model)
+	}
+}
+
+func TestExtractModel_NoModelField(t *testing.T) {
+	t.Parallel()
+	// testSessionJSONL records the model only on the model_change entry, not on
+	// message.model, so ExtractModel finds nothing.
+	model, err := (&PiAgent{}).ExtractModel([]byte(testSessionJSONL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "" {
+		t.Errorf("model = %q, want empty (no message.model present)", model)
+	}
+}
 
 // --- ReadSession / WriteSession ---
 

@@ -132,9 +132,9 @@ func TestDetectScopeBaseRef_BranchOffMain(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepo(t, dir)
 
-	baseRef, err := detectScopeBaseRef(ctx, repo)
+	baseRef, err := fallbackScopeRef(repo)
 	if err != nil {
-		t.Fatalf("detectScopeBaseRef: %v", err)
+		t.Fatalf("fallbackScopeRef: %v", err)
 	}
 	if baseRef != defaultBranchName {
 		t.Errorf("baseRef = %q, want %q", baseRef, defaultBranchName)
@@ -236,12 +236,11 @@ func TestDetectScopeBaseRef_PrefersMainOverAncestorBranches(t *testing.T) {
 	commitFile(t, dir, "child1.go", "package main", "child commit 1")
 	commitFile(t, dir, "child2.go", "package main", "child commit 2")
 
-	ctx := context.Background()
 	repo := openTestRepo(t, dir)
 
-	baseRef, err := detectScopeBaseRef(ctx, repo)
+	baseRef, err := fallbackScopeRef(repo)
 	if err != nil {
-		t.Fatalf("detectScopeBaseRef: %v", err)
+		t.Fatalf("fallbackScopeRef: %v", err)
 	}
 	// Mainline must win even though feat/parent's tip is newer.
 	if baseRef != defaultBranchName {
@@ -268,12 +267,11 @@ func TestDetectScopeBaseRef_DetachedHEAD(t *testing.T) {
 		t.Fatalf("detach HEAD: %v\n%s", err, out)
 	}
 
-	ctx := context.Background()
 	repo := openTestRepo(t, dir)
 
-	baseRef, err := detectScopeBaseRef(ctx, repo)
+	baseRef, err := fallbackScopeRef(repo)
 	if err != nil {
-		t.Fatalf("detectScopeBaseRef: %v", err)
+		t.Fatalf("fallbackScopeRef: %v", err)
 	}
 	// With no ancestor branches (detached HEAD, no origin), falls back to "main".
 	if baseRef != defaultBranchName {
@@ -307,9 +305,9 @@ func TestDetectScopeBaseRef_CleanDefaultBranch(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepo(t, dir)
 
-	baseRef, err := detectScopeBaseRef(ctx, repo)
+	baseRef, err := fallbackScopeRef(repo)
 	if err != nil {
-		t.Fatalf("detectScopeBaseRef: %v", err)
+		t.Fatalf("fallbackScopeRef: %v", err)
 	}
 
 	commits, err := countCommits(ctx, dir, baseRef)
@@ -381,7 +379,7 @@ func TestDetectScopeBaseRef_NoSuitableAncestor(t *testing.T) {
 	}
 	defaultBranch := strings.TrimSpace(string(branchOut))
 
-	// Rename default branch to a non-fallback name so detectScopeBaseRef
+	// Rename default branch to a non-fallback name so fallbackScopeRef
 	// cannot resolve any fallback.
 	//nolint:noctx // test helper
 	cmd := exec.Command("git", "branch", "-m", defaultBranch, "custom-branch")
@@ -390,12 +388,10 @@ func TestDetectScopeBaseRef_NoSuitableAncestor(t *testing.T) {
 		t.Fatalf("rename branch: %v\n%s", cmdErr, out)
 	}
 
-	ctx := context.Background()
-
 	// Re-open repo after rename.
 	repo := openTestRepo(t, dir)
 
-	_, detectErr := detectScopeBaseRef(ctx, repo)
+	_, detectErr := fallbackScopeRef(repo)
 	if detectErr == nil {
 		t.Error("expected error when no suitable ancestor branch exists, got nil")
 	}

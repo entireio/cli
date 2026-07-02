@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -50,10 +51,6 @@ type explainExportOptions struct {
 	// listLimit caps the JSON list view at N entries. 0 means use the
 	// default (branchCheckpointsLimit). Only consulted in list mode.
 	listLimit int
-}
-
-type compactTranscriptReader interface {
-	ReadSessionCompactTranscript(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) ([]byte, error)
 }
 
 // runExplainExport handles --json, --transcript, and --raw-transcript with an
@@ -203,22 +200,41 @@ func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer
 		return matches, lookup
 	}
 
+	// git-refs primary: there is no single metadata branch to fetch — each
+	// checkpoint is its own ref. When the prefix is a full checkpoint ID (the
+	// Entire-Checkpoint commit trailer always is), fetch that one ref directly,
+	// then re-list. Falls through to the v1-branch fetch below otherwise.
+	if cpCfg, _ := settings.LoadCheckpointsConfig(ctx); checkpoint.PrimaryIsRefs(cpCfg) { //nolint:errcheck // fail-soft: bad config surfaces via Open elsewhere
+		if cid, err := id.NewCheckpointID(prefix); err == nil {
+			// cid is already validated by NewCheckpointID above, so RefName can't
+			// error here; the guard is defensive — fall back to the v1-branch path
+			// rather than fetch a malformed ref.
+			refName, refErr := checkpoint.RefName(cid)
+			if refErr != nil {
+				return nil, lookup
+			}
+			stop := startSpinner(errW, "Fetching checkpoint from remote")
+			fetchErr := FetchCheckpointRef(ctx, refName)
+			stop(false)
+			if fetchErr == nil {
+				if fresh, freshErr := newExplainCheckpointLookup(ctx); freshErr == nil {
+					if m := matchCheckpointPrefix(fresh, prefix); len(m) > 0 {
+						return m, fresh
+					}
+					_ = fresh.Close()
+				}
+			}
+		}
+		return nil, lookup
+	}
+
 	stop := startSpinner(errW, "Fetching checkpoint metadata from remote")
 	_, v1Repo, v1Err := getMetadataTree(ctx)
 	if v1Repo != nil {
 		_ = v1Repo.Close()
 	}
-	v2OK := false
-	if shouldFetchV2Metadata(ctx, lookup) {
-		if _, v2Repo, v2Err := getV2MetadataTree(ctx); v2Err == nil {
-			if v2Repo != nil {
-				_ = v2Repo.Close()
-			}
-			v2OK = true
-		}
-	}
 	stop(false)
-	if v1Err != nil && !v2OK {
+	if v1Err != nil {
 		return nil, lookup
 	}
 	fresh, freshErr := newExplainCheckpointLookup(ctx)
@@ -226,21 +242,6 @@ func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer
 		return nil, lookup
 	}
 	return matchCheckpointPrefix(fresh, prefix), fresh
-}
-
-func shouldFetchV2Metadata(ctx context.Context, lookup *explainCheckpointLookup) bool {
-	if settings.IsCheckpointsV2Enabled(ctx) {
-		return true
-	}
-	if lookup == nil {
-		return false
-	}
-	switch lookup.store.(type) {
-	case *checkpoint.DualCheckpointReader:
-		return true
-	default:
-		return false
-	}
 }
 
 func matchCheckpointPrefix(lookup *explainCheckpointLookup, prefix string) []id.CheckpointID {
@@ -277,13 +278,8 @@ func resolveSessionIndex(summary *checkpoint.CheckpointSummary, requested int) (
 	return requested, nil
 }
 
-// runExplainStreamTranscript streams either the compact transcript (default)
-// or the raw transcript (when --raw-transcript is set) for the selected
-// session of the resolved checkpoint. When --transcript is used on a
-// v1-only checkpoint (compact transcripts are a v2-only artifact), falls
-// through to the raw transcript with a one-line stderr note rather than
-// erroring — the consumer's stated intent is "give me transcript bytes",
-// and we have a way to satisfy it without making them re-run.
+// runExplainStreamTranscript streams the stored transcript for the selected
+// session of the resolved checkpoint.
 func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts explainExportOptions) error {
 	cpID, lookup, err := resolveExplainCheckpointID(ctx, errW, opts)
 	if err != nil {
@@ -295,53 +291,24 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 	defer lookup.Close()
 
 	store := lookup.store
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
+	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
 	if err != nil {
 		return fmt.Errorf("failed to read checkpoint: %w", err)
 	}
-
-	compactReader, hasCompact := store.(compactTranscriptReader)
-	wantCompact := !opts.rawTranscript
+	if err := checkpointpolicy.EnsureCanReadVersion(cpID.String(), summary.CheckpointVersion); err != nil {
+		return err
+	}
 
 	idx, err := resolveSessionIndex(summary, opts.sessionIndex)
 	if err != nil {
 		return err
 	}
 
-	// Compact transcripts are only stored on v2; transparently fall through
-	// to raw on v1 so consumers don't need to retry.
-	if wantCompact && !hasCompact {
-		fmt.Fprintln(errW, "note: compact transcript unavailable on v1 checkpoint, falling back to raw transcript")
-		wantCompact = false
+	content, readErr := store.ReadSessionContent(ctx, cpID, idx)
+	if readErr != nil {
+		return fmt.Errorf("failed to read session content: %w", readErr)
 	}
-
-	if !wantCompact {
-		content, readErr := store.ReadSessionContent(ctx, cpID, idx)
-		if readErr != nil {
-			return fmt.Errorf("failed to read session content: %w", readErr)
-		}
-		if _, err := w.Write(content.Transcript); err != nil {
-			return fmt.Errorf("failed to write transcript: %w", err)
-		}
-		return nil
-	}
-
-	compact, err := compactReader.ReadSessionCompactTranscript(ctx, cpID, idx)
-	if err != nil {
-		if errors.Is(err, checkpoint.ErrCheckpointNotFound) || errors.Is(err, checkpoint.ErrNoTranscript) {
-			fmt.Fprintln(errW, "note: compact transcript unavailable, falling back to raw transcript")
-			content, readErr := store.ReadSessionContent(ctx, cpID, idx)
-			if readErr != nil {
-				return fmt.Errorf("failed to read session content: %w", readErr)
-			}
-			if _, writeErr := w.Write(content.Transcript); writeErr != nil {
-				return fmt.Errorf("failed to write transcript: %w", writeErr)
-			}
-			return nil
-		}
-		return fmt.Errorf("failed to read compact transcript: %w", err)
-	}
-	if _, err := w.Write(compact); err != nil {
+	if _, err := w.Write(content.Transcript); err != nil {
 		return fmt.Errorf("failed to write transcript: %w", err)
 	}
 	return nil
@@ -349,7 +316,7 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 
 // checkpointExportJSON is the metadata-only envelope returned by
 // `entire checkpoint explain --json`. It exposes only existing CheckpointSummary
-// and CommittedMetadata fields — no schema invention, no transcript bytes.
+// and Metadata fields — no schema invention, no transcript bytes.
 //
 // `partial` is true when any session metadata read failed; the offending
 // entries surface their cause via Sessions[].error. Consumers that don't
@@ -403,13 +370,26 @@ type checkpointSessionTokens struct {
 }
 
 type checkpointSessionSummary struct {
-	Intent  string `json:"intent,omitempty"`
-	Outcome string `json:"outcome,omitempty"`
+	Intent    string                      `json:"intent,omitempty"`
+	Outcome   string                      `json:"outcome,omitempty"`
+	Learnings *checkpointSessionLearnings `json:"learnings,omitempty"`
+	Friction  []string                    `json:"friction,omitempty"`
+	OpenItems []string                    `json:"open_items,omitempty"`
+}
+
+// checkpointSessionLearnings mirrors apicheckpoint.LearningsSummary but marks
+// every field omitempty so empty categories drop out of the export instead of
+// serializing as empty arrays. CodeLearning is reused as-is — its wire tags
+// already omit the zero line/end_line.
+type checkpointSessionLearnings struct {
+	Repo     []string                  `json:"repo,omitempty"`
+	Code     []checkpoint.CodeLearning `json:"code,omitempty"`
+	Workflow []string                  `json:"workflow,omitempty"`
 }
 
 // runExplainCheckpointJSON resolves a single checkpoint and emits a metadata-only
-// JSON envelope. Reads each session's metadata.json from /main; never reads any
-// transcript file.
+// JSON envelope. Reads each session's metadata through the committed checkpoint
+// reader; never reads any transcript file.
 func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts explainExportOptions) error {
 	cpID, lookup, err := resolveExplainCheckpointID(ctx, errW, opts)
 	if err != nil {
@@ -421,9 +401,12 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 	defer lookup.Close()
 
 	store := lookup.store
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
+	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
 	if err != nil {
 		return fmt.Errorf("failed to read checkpoint: %w", err)
+	}
+	if err := checkpointpolicy.EnsureCanReadVersion(cpID.String(), summary.CheckpointVersion); err != nil {
+		return err
 	}
 
 	envelope, failedSessions := buildCheckpointJSONEnvelope(ctx, store, summary, cpID)
@@ -449,11 +432,9 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 // buildCheckpointJSONEnvelope builds the JSON envelope for a single checkpoint,
 // reading each session's metadata via the supplied reader. Returns the envelope
 // plus the list of session indexes that failed to read; a non-empty failed
-// list means envelope.Partial is true. Extracted from runExplainCheckpointJSON
-// so the envelope-building behavior (per-session error fields, partial flag)
-// can be tested independently of the v2 git tree, which the cli package
-// can't easily corrupt.
-func buildCheckpointJSONEnvelope(ctx context.Context, reader checkpoint.CommittedReader, summary *checkpoint.CheckpointSummary, cpID id.CheckpointID) (checkpointExportJSON, []int) {
+// list means envelope.Partial is true. Extracted from runExplainCheckpointJSON so
+// the envelope-building behavior can be tested independently of git storage.
+func buildCheckpointJSONEnvelope(ctx context.Context, reader checkpoint.SessionReader, summary *checkpoint.CheckpointSummary, cpID id.CheckpointID) (checkpointExportJSON, []int) {
 	envelope := checkpointExportJSON{
 		CheckpointID:     cpID.String(),
 		Strategy:         summary.Strategy,
@@ -488,32 +469,17 @@ func buildCheckpointJSONEnvelope(ctx context.Context, reader checkpoint.Committe
 }
 
 // readSessionMetadataForExport reads only metadata.json for a session — no
-// transcript or prompt bytes. Both v1 and v2 stores expose a metadata-only
-// reader, so this never depends on transcript availability (which would
-// cause an unrelated ErrNoTranscript on v1 checkpoints whose raw transcript
-// has been pruned).
-func readSessionMetadataForExport(ctx context.Context, reader checkpoint.CommittedReader, cpID id.CheckpointID, idx int) (*checkpoint.CommittedMetadata, error) {
-	if r, ok := reader.(interface {
-		ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.CommittedMetadata, error)
-	}); ok {
-		meta, err := r.ReadSessionMetadata(ctx, cpID, idx)
-		if err != nil {
-			return nil, fmt.Errorf("read session metadata: %w", err)
-		}
-		return meta, nil
-	}
-	// CommittedReader doesn't promise a metadata-only method; fall back
-	// to the heavier ReadSessionContent path. Reachable only if a third
-	// store implementation is added without exposing metadata reads.
-	content, err := reader.ReadSessionContent(ctx, cpID, idx)
+// transcript or prompt bytes. GitStore exposes a metadata-only reader, so this
+// never depends on transcript availability.
+func readSessionMetadataForExport(ctx context.Context, reader checkpoint.SessionReader, cpID id.CheckpointID, idx int) (*checkpoint.Metadata, error) {
+	meta, err := reader.ReadSessionMetadata(ctx, cpID, idx)
 	if err != nil {
-		return nil, fmt.Errorf("read session content: %w", err)
+		return nil, fmt.Errorf("read session metadata: %w", err)
 	}
-	meta := content.Metadata
-	return &meta, nil
+	return meta, nil
 }
 
-func sessionMetadataToJSON(idx int, meta *checkpoint.CommittedMetadata) checkpointSessionJSON {
+func sessionMetadataToJSON(idx int, meta *checkpoint.Metadata) checkpointSessionJSON {
 	out := checkpointSessionJSON{
 		Index:            idx,
 		SessionID:        meta.SessionID,
@@ -541,9 +507,27 @@ func sessionMetadataToJSON(idx int, meta *checkpoint.CommittedMetadata) checkpoi
 		}
 	}
 	if meta.Summary != nil {
-		out.Summary = &checkpointSessionSummary{
-			Intent:  meta.Summary.Intent,
-			Outcome: meta.Summary.Outcome,
+		out.Summary = summaryToExportJSON(meta.Summary)
+	}
+	return out
+}
+
+// summaryToExportJSON projects the full persisted summary onto the export
+// struct. Friction/open_items/learnings were previously dropped, hiding data
+// the prose view already renders. Redaction is applied upstream at persist
+// time (RedactSummary), so no additional scrubbing is needed here.
+func summaryToExportJSON(s *checkpoint.Summary) *checkpointSessionSummary {
+	out := &checkpointSessionSummary{
+		Intent:    s.Intent,
+		Outcome:   s.Outcome,
+		Friction:  s.Friction,
+		OpenItems: s.OpenItems,
+	}
+	if hasAnyLearning(s.Learnings) {
+		out.Learnings = &checkpointSessionLearnings{
+			Repo:     s.Learnings.Repo,
+			Code:     s.Learnings.Code,
+			Workflow: s.Learnings.Workflow,
 		}
 	}
 	return out
@@ -567,11 +551,11 @@ type branchCheckpointJSON struct {
 // filtered by session ID prefix (mirrors the prose list view). The cap
 // defaults to branchCheckpointsLimit; pass listLimit > 0 to override.
 //
-// Truncation detection: we ask the underlying lister for one more than the
-// effective cap. If we got that many back, we know there were at least
-// `cap` checkpoints we didn't return — emit a stderr note so the consumer
-// knows to set --limit higher. The JSON shape stays a flat array so jq
-// pipelines don't have to unwrap.
+// Truncation detection: getBranchCheckpoints reports whether it hit its scan
+// budget (the authoritative signal — it applies the cap internally). We also
+// hard-cap the flat array at `limit` for the JSON contract, flagging
+// truncation if that slice drops anything. The JSON shape stays a flat array
+// so jq pipelines don't have to unwrap.
 func runExplainListJSON(ctx context.Context, w, errW io.Writer, sessionFilter string, listLimit int) error {
 	repo, err := openRepository(ctx)
 	if err != nil {
@@ -584,8 +568,7 @@ func runExplainListJSON(ctx context.Context, w, errW io.Writer, sessionFilter st
 		limit = branchCheckpointsLimit
 	}
 
-	// Probe one extra so we can detect truncation.
-	points, err := getBranchCheckpoints(ctx, repo, limit+1)
+	points, truncated, err := getBranchCheckpoints(ctx, repo, limit)
 	if err != nil {
 		if ctx.Err() != nil {
 			return NewSilentError(ctx.Err())
@@ -595,9 +578,12 @@ func runExplainListJSON(ctx context.Context, w, errW io.Writer, sessionFilter st
 		// a real diagnostic instead of silently degraded output.
 		return fmt.Errorf("failed to list checkpoints: %w", err)
 	}
-	truncated := len(points) > limit
-	if truncated {
+	// getBranchCheckpoints budgets the live and imported lists independently,
+	// so it can return up to 2*limit entries. Hard-cap the combined array to
+	// the requested limit for the JSON contract.
+	if len(points) > limit {
 		points = points[:limit]
+		truncated = true
 	}
 
 	out := make([]branchCheckpointJSON, 0, len(points))

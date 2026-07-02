@@ -2,6 +2,7 @@ package redact
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/betterleaks/betterleaks/detect"
 )
@@ -164,6 +166,15 @@ var connectionStringRules = []connectionStringRule{
 // 7. PII detection: email, phone, address patterns (only when configured via ConfigurePII)
 // A string is redacted if ANY method flags it.
 func String(s string) string {
+	return applyRegions(s, detectAllLayers(s))
+}
+
+// detectAllLayers runs the seven always-on/opt-in regex-based redaction
+// layers and returns their tagged regions. The OpenAI Privacy Filter
+// (layer 8) is NOT included — callers that want it append detectOPF spans
+// to the result before passing to applyRegions. See StringWithPrivacyFilter
+// for the augmented flow.
+func detectAllLayers(s string) []taggedRegion {
 	var regions []taggedRegion
 
 	// 1. Entropy-based detection (secrets — always on).
@@ -227,11 +238,16 @@ func String(s string) string {
 	// 7. PII detection (opt-in — only runs when configured).
 	regions = append(regions, detectPII(getPIIConfig(), s)...)
 
+	return regions
+}
+
+// applyRegions sorts, merges, and replaces the given regions in s, returning
+// the redacted string. Returns s unchanged when regions is empty.
+func applyRegions(s string, regions []taggedRegion) string {
 	if len(regions) == 0 {
 		return s
 	}
 
-	// Merge overlapping regions and build result.
 	sort.Slice(regions, func(i, j int) bool {
 		if regions[i].start != regions[j].start {
 			return regions[i].start < regions[j].start
@@ -498,6 +514,33 @@ func JSONLBytes(b []byte) (RedactedBytes, error) {
 	return RedactedBytes{data: []byte(redacted)}, nil
 }
 
+// JSONLBytesWithPrivacyFilter augments JSONLBytes with the OpenAI Privacy
+// Filter. Use only at condensation/export boundaries; per-turn writes must
+// use JSONLBytes.
+func JSONLBytesWithPrivacyFilter(ctx context.Context, b []byte) (RedactedBytes, error) {
+	s := string(b)
+	redacted, err := JSONLContentWithPrivacyFilter(ctx, s)
+	if err != nil {
+		return RedactedBytes{}, err
+	}
+	if redacted == s {
+		return RedactedBytes{data: b}, nil
+	}
+	return RedactedBytes{data: []byte(redacted)}, nil
+}
+
+// BytesWithPrivacyFilter augments Bytes with the OpenAI Privacy Filter for
+// raw (non-JSONL) byte content. Used by checkpoint write paths that handle
+// metadata files which may or may not be JSONL.
+func BytesWithPrivacyFilter(ctx context.Context, b []byte) []byte {
+	s := string(b)
+	redacted := StringWithPrivacyFilter(ctx, s)
+	if redacted == s {
+		return b
+	}
+	return []byte(redacted)
+}
+
 // JSONLContent parses each line as JSON to determine which string values
 // need redaction, then performs targeted replacements on the raw JSON bytes.
 // Lines with no secrets are returned unchanged, preserving original formatting.
@@ -508,6 +551,15 @@ func JSONLBytes(b []byte) (RedactedBytes, error) {
 // is used instead of falling back to entropy-based detection on raw text lines,
 // which would corrupt high-entropy identifiers.
 func JSONLContent(content string) (string, error) {
+	return jsonlContentImpl(content, String)
+}
+
+// jsonlContentImpl is the body of JSONLContent parameterized by a per-leaf
+// redactor. JSONLContent passes String (regex layers only). The OPF-enabled
+// flow uses two passes: one with a collector that records leaves and returns
+// identity, one with a redactor that combines regex layers with cached OPF
+// spans for the recorded leaves.
+func jsonlContentImpl(content string, redactor func(string) string) (string, error) {
 	// Try parsing the entire content as a single JSON value first.
 	// Uses a streaming decoder to avoid copying the full content into []byte.
 	// After decoding, attempts a second Decode to confirm EOF — if it succeeds,
@@ -518,7 +570,7 @@ func JSONLContent(content string) (string, error) {
 		var parsed any
 		if err := dec.Decode(&parsed); err == nil && isSingleJSONValue(dec) {
 			// Content is a single JSON value (object/array) — redact field-aware.
-			result, err := applyJSONReplacements(content, collectJSONLReplacements(parsed))
+			result, err := applyJSONReplacements(content, collectJSONLReplacements(parsed, redactor))
 			if err != nil {
 				return "", err
 			}
@@ -540,16 +592,114 @@ func JSONLContent(content string) (string, error) {
 		}
 		var parsed any
 		if err := json.Unmarshal([]byte(lineTrimmed), &parsed); err != nil {
-			b.WriteString(String(line))
+			b.WriteString(redactor(line))
 			continue
 		}
-		result, err := applyJSONReplacements(line, collectJSONLReplacements(parsed))
+		result, err := applyJSONReplacements(line, collectJSONLReplacements(parsed, redactor))
 		if err != nil {
 			return "", err
 		}
 		b.WriteString(result)
 	}
 	return b.String(), nil
+}
+
+// StringWithPrivacyFilter augments String with the OpenAI Privacy Filter.
+// Use only at condensation/export boundaries; per-turn writes must use
+// String to avoid the OPF shell-out cost inside the agent loop.
+func StringWithPrivacyFilter(ctx context.Context, s string) string {
+	regions := detectAllLayers(s)
+	regions = append(regions, detectOPF(ctx, getOPFConfig(), s)...)
+	return applyRegions(s, regions)
+}
+
+// JSONLContentWithPrivacyFilter augments JSONLContent with the OpenAI
+// Privacy Filter via batched inference. Walks the content twice: pass 1
+// collects unique prose-shaped leaves into a single RedactBatch call;
+// pass 2 applies the seven regex layers per leaf plus the cached OPF spans
+// for that leaf. One OPF shell-out covers the whole transcript instead of
+// one per leaf — without batching, a typical 500-leaf transcript would
+// take many minutes per commit.
+//
+// Falls back to the plain JSONLContent flow when OPF is unconfigured, the
+// breaker is tripped, no categories are enabled, or the batch call errors.
+func JSONLContentWithPrivacyFilter(ctx context.Context, content string) (string, error) {
+	cfg := getOPFConfig()
+	if cfg == nil || !cfg.Enabled || cfg.runtime == nil || opfBreakerTripped.Load() {
+		return jsonlContentImpl(content, String)
+	}
+	cats := enabledCategories(cfg)
+	if len(cats) == 0 {
+		return jsonlContentImpl(content, String)
+	}
+
+	// Pass 1: collect eligible (has-space, deduped) leaves. The collector
+	// closure returns identity so the JSONL walker doesn't mutate content.
+	seen := make(map[string]struct{})
+	var inputs []string
+	if _, err := jsonlContentImpl(content, func(v string) string {
+		if strings.ContainsRune(v, ' ') {
+			if _, ok := seen[v]; !ok {
+				seen[v] = struct{}{}
+				inputs = append(inputs, v)
+			}
+		}
+		return v
+	}); err != nil {
+		return "", err
+	}
+
+	// Pass 2: single batched OPF call.
+	spansByInput := make(map[string][]Span, len(inputs))
+	if len(inputs) > 0 {
+		fmt.Fprintln(opfStderr, "→ OpenAI Privacy Filter: scanning transcript…")
+		start := time.Now()
+		batched, err := cfg.runtime.RedactBatch(ctx, inputs, cats)
+		if err != nil {
+			handleOPFFailure(ctx, cfg, err)
+			return jsonlContentImpl(content, String)
+		}
+		fmt.Fprintf(opfStderr, "✓ OpenAI Privacy Filter: done (%.1fs)\n", time.Since(start).Seconds())
+		// A short return means the runtime gave us fewer span slices than
+		// inputs — the tail leaves would receive zero OPF spans and the
+		// caller would proceed as if OPF had found nothing. That silently
+		// produces under-redacted output and is indistinguishable from a
+		// "no PII present" result. Treat as a runtime contract violation:
+		// trip the breaker so the pre-push rewrite's post-loop
+		// OPFBreakerTripped() check aborts before the Entire-OPF-Applied
+		// trailer can be attached to under-redacted commits. The production
+		// shell-out always returns len(inputs), so this only fires for a
+		// misbehaving custom runtime — but the cost of leaving it dormant
+		// is too high for a privacy contract.
+		if len(batched) != len(inputs) {
+			shortErr := fmt.Errorf("opf runtime returned %d span slices for %d inputs", len(batched), len(inputs))
+			handleOPFFailure(ctx, cfg, shortErr)
+			return jsonlContentImpl(content, String)
+		}
+		for i, in := range inputs {
+			spansByInput[in] = batched[i]
+		}
+	}
+
+	// Pass 3: per-leaf regex layers + cached OPF spans.
+	return jsonlContentImpl(content, func(v string) string {
+		regions := detectAllLayers(v)
+		if spans, ok := spansByInput[v]; ok {
+			for _, sp := range spans {
+				if !cfg.Categories[sp.Label] {
+					continue
+				}
+				if sp.Start < 0 || sp.End > len(v) || sp.Start >= sp.End {
+					continue
+				}
+				regions = append(regions, taggedRegion{
+					region: region{sp.Start, sp.End},
+					label:  mapOPFLabel(sp.Label),
+				})
+			}
+		}
+		return applyRegions(v, regions)
+	})
 }
 
 // applyJSONReplacements applies collected (original, redacted) string pairs
@@ -638,9 +788,11 @@ func isSingleJSONValue(dec *json.Decoder) bool {
 	return dec.Decode(&discard) == io.EOF
 }
 
-// collectJSONLReplacements walks a parsed JSON value and collects unique string
-// replacements for values that need redaction.
-func collectJSONLReplacements(v any) []jsonReplacement {
+// collectJSONLReplacements walks a parsed JSON value and collects unique
+// string replacements via the supplied per-leaf redactor. JSONLContent
+// passes String; the OPF-enabled flow passes a closure that combines the
+// regex layers with cached batched OPF spans.
+func collectJSONLReplacements(v any, redactor func(string) string) []jsonReplacement {
 	seen := make(map[string]bool)
 	var repls []jsonReplacement
 	var walk func(key string, credentialContext bool, v any)
@@ -662,7 +814,7 @@ func collectJSONLReplacements(v any) []jsonReplacement {
 				walk("", credentialContext, child)
 			}
 		case string:
-			redacted := String(val)
+			redacted := redactor(val)
 			if redacted == val && isCredentialJSONSecretKey(key, credentialContext) && hasNonPlaceholderPasswordValue(val) {
 				redacted = RedactedPlaceholder
 			}

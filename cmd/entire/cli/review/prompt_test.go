@@ -61,6 +61,25 @@ func TestComposeReviewPrompt_AllSectionsWithScope(t *testing.T) {
 	}
 }
 
+func TestComposeReviewPrompt_TaskAddsFindingOutputFormat(t *testing.T) {
+	t.Parallel()
+	cfg := reviewtypes.RunConfig{
+		Task: "Review for real defects.",
+	}
+	got := ComposeReviewPrompt(cfg)
+	for _, want := range []string{
+		"Task: Review for real defects.",
+		"Each finding MUST be a separate top-level Markdown bullet",
+		"starting with [high], [medium], or [low]",
+		"Do not combine multiple defects",
+		"Do not emit severity-heading paragraphs",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestComposeReviewPrompt_IncludesCheckpointContext(t *testing.T) {
 	t.Parallel()
 	cfg := reviewtypes.RunConfig{

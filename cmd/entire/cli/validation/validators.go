@@ -5,6 +5,7 @@ package validation
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -20,8 +21,34 @@ func ValidateSessionID(id string) error {
 	if strings.TrimSpace(id) == "" {
 		return errors.New("session ID cannot be empty")
 	}
+	if strings.HasPrefix(id, "-") {
+		return fmt.Errorf("invalid session ID %q: starts with dash", id)
+	}
 	if strings.ContainsAny(id, "/\\") {
 		return fmt.Errorf("invalid session ID %q: contains path separators", id)
+	}
+	// A bare "." or ".." is separator-free but still traverses when used as a
+	// path segment (e.g. an agent that uses the ID as a directory component).
+	if id == "." || id == ".." {
+		return fmt.Errorf("invalid session ID %q: reserved path segment", id)
+	}
+	// Reject the Windows volume separator. A drive-relative path like "C:foo" is
+	// separator-free and filepath.IsAbs reports it as non-absolute, yet
+	// filepath.Join discards the base directory when the appended element
+	// carries a volume name — escaping the intended directory on Windows.
+	if strings.Contains(id, ":") {
+		return fmt.Errorf("invalid session ID %q: contains volume separator", id)
+	}
+	// Reject glob metacharacters. Session IDs are interpolated into
+	// filepath.Glob patterns in several places (agent transcript lookup,
+	// session-state cleanup); "*"/"?"/"[" could match and act on unrelated files.
+	if strings.ContainsAny(id, "*?[") {
+		return fmt.Errorf("invalid session ID %q: contains glob metacharacters", id)
+	}
+	// Defense in depth against platform-specific absolute forms (e.g. Windows
+	// drive paths) that the separator check above may not catch.
+	if filepath.IsAbs(id) || filepath.VolumeName(id) != "" {
+		return fmt.Errorf("invalid session ID %q: must not be an absolute path", id)
 	}
 	return nil
 }
@@ -55,6 +82,9 @@ func ValidateAgentID(id string) error {
 func ValidateAgentSessionID(id string) error {
 	if id == "" {
 		return errors.New("agent session ID cannot be empty")
+	}
+	if strings.HasPrefix(id, "-") {
+		return fmt.Errorf("invalid agent session ID %q: starts with dash", id)
 	}
 	if !pathSafeRegex.MatchString(id) {
 		return fmt.Errorf("invalid agent session ID %q: must be alphanumeric with underscores/hyphens only", id)

@@ -14,9 +14,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	remote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -27,17 +25,17 @@ import (
 // disconnectedOnce ensures the disconnection warning runs at most once per process.
 var disconnectedOnce sync.Once //nolint:gochecknoglobals // intentional per-process gate
 
-// IsMetadataDisconnected checks whether the local metadata branch
-// and the provided fetched or remote-tracking ref exist but share no common
+// IsMetadataDisconnected checks whether the local primary metadata ref and
+// the provided fetched or remote-tracking ref exist but share no common
 // ancestor.
 func IsMetadataDisconnected(ctx context.Context, repo *git.Repository, remoteRefName plumbing.ReferenceName) (bool, error) {
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	localRef, err := repo.Reference(refName, true)
+	refs := checkpoint.ResolveRefs(ctx)
+	localRef, err := repo.Reference(refs.Primary, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("failed to check local metadata branch: %w", err)
+		return false, fmt.Errorf("failed to check local primary metadata ref: %w", err)
 	}
 
 	remoteRef, err := repo.Reference(remoteRefName, true)
@@ -45,7 +43,7 @@ func IsMetadataDisconnected(ctx context.Context, repo *git.Repository, remoteRef
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("failed to check remote metadata branch: %w", err)
+		return false, fmt.Errorf("failed to check remote metadata ref: %w", err)
 	}
 
 	if localRef.Hash() == remoteRef.Hash() {
@@ -77,7 +75,11 @@ func WarnIfMetadataDisconnected() {
 			return
 		}
 		defer repo.Close()
-		disconnected, err := IsMetadataDisconnected(ctx, repo, plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName))
+		refs := checkpoint.ResolveRefs(ctx)
+		if !refs.PrimaryFetchableFromOrigin() {
+			return // origin doesn't track Primary; nothing to disconnect from
+		}
+		disconnected, err := IsMetadataDisconnected(ctx, repo, plumbing.NewRemoteReferenceName("origin", refs.Primary.Short()))
 		if err != nil {
 			logging.Debug(ctx, "metadata disconnection check failed",
 				slog.String("error", err.Error()))
@@ -91,10 +93,10 @@ func WarnIfMetadataDisconnected() {
 	})
 }
 
-// ReconcileDisconnectedMetadataBranch detects and repairs disconnected local/remote
-// entire/checkpoints/v1 branches. Disconnected means no common ancestor, which
+// ReconcileDisconnectedMetadataRef detects and repairs disconnected local/remote
+// metadata refs. Disconnected means no common ancestor, which
 // only happens due to the empty-orphan bug. Diverged (shared ancestor) is normal
-// and handled by the push path's tree merge.
+// and handled by the push path.
 //
 // Repair strategy: cherry-pick local commits onto remote tip, preserving all data.
 // Checkpoint shards use unique paths (<id[:2]>/<id[2:]>/), so cherry-picks always
@@ -103,30 +105,33 @@ func WarnIfMetadataDisconnected() {
 // Progress messages are written to w (typically os.Stderr for hooks or
 // cmd.ErrOrStderr() for commands).
 // The remote ref can be either a remote-tracking ref or a temporary fetched ref.
-func ReconcileDisconnectedMetadataBranch(
+func ReconcileDisconnectedMetadataRef(
 	ctx context.Context,
 	repo *git.Repository,
+	localRefName plumbing.ReferenceName,
 	remoteRefName plumbing.ReferenceName,
 	w io.Writer,
 ) error {
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	advance := func(hash plumbing.Hash) error {
+		return setRefHash(repo, localRefName, hash)
+	}
 
-	// Check local branch
-	localRef, err := repo.Reference(refName, true)
+	// Check local ref
+	localRef, err := repo.Reference(localRefName, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return nil // No local branch — nothing to reconcile
+		return nil // No local ref — nothing to reconcile
 	}
 	if err != nil {
-		return fmt.Errorf("failed to check local metadata branch: %w", err)
+		return fmt.Errorf("failed to check local metadata ref: %w", err)
 	}
 
-	// Check remote-tracking branch
+	// Check remote-tracking or fetched ref
 	remoteRef, err := repo.Reference(remoteRefName, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return nil // No remote branch — nothing to reconcile
+		return nil // No remote ref — nothing to reconcile
 	}
 	if err != nil {
-		return fmt.Errorf("failed to check remote metadata branch: %w", err)
+		return fmt.Errorf("failed to check remote metadata ref: %w", err)
 	}
 
 	localHash := localRef.Hash()
@@ -145,7 +150,7 @@ func ReconcileDisconnectedMetadataBranch(
 
 	disconnected, err := isDisconnected(ctx, repoPath, localHash.String(), remoteHash.String())
 	if err != nil {
-		return fmt.Errorf("failed to check metadata branch ancestry: %w", err)
+		return fmt.Errorf("failed to check metadata ref ancestry: %w", err)
 	}
 	if !disconnected {
 		// Shared ancestry (diverged or ancestor) — not our problem
@@ -180,9 +185,8 @@ func ReconcileDisconnectedMetadataBranch(
 
 	if len(dataCommits) == 0 {
 		// Local only had empty orphan — just point to remote
-		ref := plumbing.NewHashReference(refName, remoteHash)
-		if err := repo.Storer.SetReference(ref); err != nil {
-			return fmt.Errorf("failed to reset metadata branch to remote: %w", err)
+		if err := advance(remoteHash); err != nil {
+			return fmt.Errorf("failed to reset metadata ref to remote: %w", err)
 		}
 		fmt.Fprintln(w, "[entire] Done — local had no checkpoint data, reset to remote")
 		return nil
@@ -195,252 +199,12 @@ func ReconcileDisconnectedMetadataBranch(
 		return fmt.Errorf("failed to cherry-pick local commits onto remote: %w", err)
 	}
 
-	// Update local branch ref
-	ref := plumbing.NewHashReference(refName, newTip)
-	if err := repo.Storer.SetReference(ref); err != nil {
-		return fmt.Errorf("failed to update metadata branch: %w", err)
+	if err := advance(newTip); err != nil {
+		return fmt.Errorf("failed to update metadata ref: %w", err)
 	}
 
 	fmt.Fprintln(w, "[entire] Done — all local and remote checkpoints preserved")
 	return nil
-}
-
-// v2DoctorTmpRef is the temporary ref used by doctor to fetch and compare the remote v2 /main.
-// Uses the refs/entire-fetch-tmp/ namespace consistent with checkpoint_remote.go.
-const v2DoctorTmpRef = "refs/entire-fetch-tmp/doctor-v2-main"
-
-// IsV2MainDisconnected checks whether the local v2 /main ref and the remote
-// v2 /main ref exist but share no common ancestor. Uses git ls-remote to
-// discover the remote ref (custom refs don't have remote-tracking refs).
-//
-// remote is the git remote name, URL, or local path to check against.
-// Returns (false, nil) if either ref doesn't exist or they share ancestry.
-func IsV2MainDisconnected(ctx context.Context, repo *git.Repository, remote string) (bool, error) {
-	refName := plumbing.ReferenceName(paths.V2MainRefName)
-
-	localRef, err := repo.Reference(refName, true)
-	if errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("failed to check local v2 /main ref: %w", err)
-	}
-
-	repoPath, err := getRepoPath(repo)
-	if err != nil {
-		return false, err
-	}
-
-	remoteHash, err := lsRemoteRef(ctx, repoPath, remote, paths.V2MainRefName)
-	if err != nil {
-		return false, fmt.Errorf("failed to ls-remote v2 /main: %w", err)
-	}
-	if remoteHash == plumbing.ZeroHash {
-		return false, nil // Remote doesn't have the ref
-	}
-
-	if localRef.Hash() == remoteHash {
-		return false, nil
-	}
-
-	// Fetch remote ref to temporary local ref for merge-base check.
-	// Use the fetched hash (not ls-remote hash) since the remote may have advanced.
-	if fetchErr := fetchRefToTemp(ctx, repoPath, remote, paths.V2MainRefName, v2DoctorTmpRef); fetchErr != nil {
-		return false, fmt.Errorf("failed to fetch remote v2 /main: %w", fetchErr)
-	}
-	defer cleanupTmpRef(repo)
-
-	fetchedHash, err := resolveRefHash(repo, v2DoctorTmpRef)
-	if err != nil {
-		return false, fmt.Errorf("failed to read fetched v2 /main ref: %w", err)
-	}
-
-	if localRef.Hash() == fetchedHash {
-		return false, nil
-	}
-
-	return isDisconnected(ctx, repoPath, localRef.Hash().String(), fetchedHash.String())
-}
-
-// ReconcileDisconnectedV2Ref detects and repairs disconnected local/remote
-// v2 /main refs. Same strategy as v1: cherry-pick local commits onto remote tip.
-// The remote is discovered via git ls-remote and fetched to a temp ref.
-//
-// remote is the git remote name, URL, or local path.
-func ReconcileDisconnectedV2Ref(
-	ctx context.Context,
-	repo *git.Repository,
-	remote string,
-	w io.Writer,
-) error {
-	refName := plumbing.ReferenceName(paths.V2MainRefName)
-
-	localRef, err := repo.Reference(refName, true)
-	if errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("failed to check local v2 /main ref: %w", err)
-	}
-
-	repoPath, err := getRepoPath(repo)
-	if err != nil {
-		return err
-	}
-
-	remoteHash, err := lsRemoteRef(ctx, repoPath, remote, paths.V2MainRefName)
-	if err != nil {
-		return fmt.Errorf("failed to ls-remote v2 /main: %w", err)
-	}
-	if remoteHash == plumbing.ZeroHash {
-		return nil
-	}
-
-	if localRef.Hash() == remoteHash {
-		return nil
-	}
-
-	if fetchErr := fetchRefToTemp(ctx, repoPath, remote, paths.V2MainRefName, v2DoctorTmpRef); fetchErr != nil {
-		return fmt.Errorf("failed to fetch remote v2 /main: %w", fetchErr)
-	}
-	defer cleanupTmpRef(repo)
-
-	// Use the fetched hash (not ls-remote hash) since the remote may have advanced.
-	fetchedHash, err := resolveRefHash(repo, v2DoctorTmpRef)
-	if err != nil {
-		return fmt.Errorf("failed to read fetched v2 /main ref: %w", err)
-	}
-
-	if localRef.Hash() == fetchedHash {
-		return nil
-	}
-
-	disconnected, err := isDisconnected(ctx, repoPath, localRef.Hash().String(), fetchedHash.String())
-	if err != nil {
-		return fmt.Errorf("failed to check v2 /main ancestry: %w", err)
-	}
-	if !disconnected {
-		return nil
-	}
-
-	fmt.Fprintln(w, "[entire] Detected disconnected v2 /main refs (local and remote share no common ancestor)")
-
-	shallow, err := loadShallowHashes(ctx, repoPath)
-	if err != nil {
-		return fmt.Errorf("failed to load shallow boundaries: %w", err)
-	}
-
-	localCommits, err := collectCommitChain(repo, localRef.Hash(), shallow)
-	if err != nil {
-		return fmt.Errorf("failed to collect local commits: %w", err)
-	}
-
-	var dataCommits []*object.Commit
-	for _, c := range localCommits {
-		tree, treeErr := c.Tree()
-		if treeErr != nil {
-			return fmt.Errorf("failed to read tree for commit %s: %w", c.Hash.String()[:7], treeErr)
-		}
-		if len(tree.Entries) > 0 {
-			dataCommits = append(dataCommits, c)
-		}
-	}
-
-	if len(dataCommits) == 0 {
-		ref := plumbing.NewHashReference(refName, fetchedHash)
-		if setErr := repo.Storer.SetReference(ref); setErr != nil {
-			return fmt.Errorf("failed to reset v2 /main to remote: %w", setErr)
-		}
-		fmt.Fprintln(w, "[entire] Done — local had no checkpoint data, reset to remote")
-		return nil
-	}
-
-	fmt.Fprintf(w, "[entire] Cherry-picking %d local checkpoint(s) onto remote...\n", len(dataCommits))
-
-	newTip, err := cherryPickOnto(ctx, repo, fetchedHash, dataCommits, shallow)
-	if err != nil {
-		return fmt.Errorf("failed to cherry-pick local commits onto remote: %w", err)
-	}
-
-	ref := plumbing.NewHashReference(refName, newTip)
-	if setErr := repo.Storer.SetReference(ref); setErr != nil {
-		return fmt.Errorf("failed to update v2 /main ref: %w", setErr)
-	}
-
-	fmt.Fprintln(w, "[entire] Done — all local and remote checkpoints preserved")
-	return nil
-}
-
-// lsRemoteRef runs git ls-remote and returns the hash for a specific ref.
-// Returns plumbing.ZeroHash if the ref doesn't exist on the remote.
-func lsRemoteRef(ctx context.Context, repoPath, remoteName, refName string) (plumbing.Hash, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	fetchTarget, err := remote.ResolveFetchTarget(ctx, remoteName)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("resolve fetch target for ls-remote: %w", err)
-	}
-
-	output, err := remote.LsRemoteInDir(ctx, repoPath, fetchTarget, refName)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("git ls-remote %s failed: %w", remote.RedactURL(fetchTarget), err)
-	}
-
-	line := strings.TrimSpace(string(output))
-	if line == "" {
-		return plumbing.ZeroHash, nil
-	}
-
-	parts := strings.Fields(line)
-	if len(parts) < 2 {
-		return plumbing.ZeroHash, nil
-	}
-
-	return plumbing.NewHash(parts[0]), nil
-}
-
-// fetchRefToTemp fetches a remote ref to a temporary local ref for comparison.
-func fetchRefToTemp(ctx context.Context, repoPath, remoteName, srcRef, dstRef string) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	fetchTarget, err := remote.ResolveFetchTarget(ctx, remoteName)
-	if err != nil {
-		return fmt.Errorf("resolve fetch target for doctor v2 fetch: %w", err)
-	}
-
-	refspec := fmt.Sprintf("+%s:%s", srcRef, dstRef)
-	output, err := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:    fetchTarget,
-		RefSpecs:  []string{refspec},
-		NoTags:    true,
-		Unshallow: true,
-		Dir:       repoPath,
-	})
-	if err != nil {
-		redactedURL := remote.RedactURL(fetchTarget)
-		msg := strings.TrimSpace(strings.ReplaceAll(string(output), fetchTarget, redactedURL))
-		if msg != "" {
-			return fmt.Errorf("git fetch %s failed: %s: %w", redactedURL, msg, err)
-		}
-		return fmt.Errorf("git fetch %s failed: %w", redactedURL, err)
-	}
-	return nil
-}
-
-// resolveRefHash reads the commit hash that a ref points to.
-func resolveRefHash(repo *git.Repository, refName string) (plumbing.Hash, error) {
-	ref, err := repo.Reference(plumbing.ReferenceName(refName), true)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("ref %s not found: %w", refName, err)
-	}
-	return ref.Hash(), nil
-}
-
-// cleanupTmpRef deletes the temporary ref used by doctor checks.
-func cleanupTmpRef(repo *git.Repository) {
-	_ = repo.Storer.RemoveReference(plumbing.ReferenceName(v2DoctorTmpRef)) //nolint:errcheck // best-effort cleanup
 }
 
 // isDisconnected checks if two commits have no common ancestor using git merge-base.

@@ -113,12 +113,6 @@ func NewStateStoreWithDir(dir string) *StateStore {
 	return &StateStore{dir: dir}
 }
 
-// Root returns the absolute path the store is rooted at. Useful for callers
-// that need to derive sibling paths (e.g. findings.md alongside state.json).
-func (s *StateStore) Root() string {
-	return s.dir
-}
-
 // RunDir returns the absolute path of the per-run directory for runID,
 // where findings.md and state.json both live. The directory may or may
 // not exist on disk; callers that need it materialised should MkdirAll

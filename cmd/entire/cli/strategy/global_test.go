@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"testing"
 
@@ -12,6 +13,8 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	opfPrePushProgressWriter = io.Discard
+
 	// Register a default ConfigSource so tests that call ConfigScoped
 	// (directly or indirectly via Commit/CreateTag) don't fail with
 	// "no config loader registered".

@@ -18,6 +18,12 @@ var (
 	Commit  = "unknown"
 )
 
+// UserAgent is the HTTP User-Agent the CLI sends on outbound requests:
+// "entire-cli/<version>". Call after Load() so the version is resolved.
+func UserAgent() string {
+	return "entire-cli/" + Version
+}
+
 // Load fills Version and Commit from the binary's build info when ldflags left
 // them at their defaults. Call once from main() before either is read.
 func Load() {

@@ -28,8 +28,7 @@ import (
 // display the appropriate flag's prose around it.
 //
 // Single lookup: read the Entire-Checkpoint trailer from HEAD, then resolve
-// the CheckpointSummary through the configured committed checkpoint store
-// (handles v1, v2, and dual reader selection internally).
+// the CheckpointSummary from the v1 metadata branch.
 func headCheckpointFlags(ctx context.Context) (hasReview, hasInvestigation bool, info string) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -53,12 +52,12 @@ func headCheckpointFlags(ctx context.Context) (hasReview, hasInvestigation bool,
 		return false, false, ""
 	}
 	defer repo.Close()
-	store, storeErr := checkpoint.NewCommittedReader(ctx, repo, checkpoint.CommittedReaderOptions{})
-	if storeErr != nil {
-		logging.Debug(ctx, "head checkpoint flags: checkpoint store unavailable", slog.String("error", storeErr.Error()))
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	if err != nil {
+		logging.Debug(ctx, "head checkpoint flags: open store", slog.String("error", err.Error()))
 		return false, false, ""
 	}
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
+	summary, err := checkpoint.ReadCheckpoint(ctx, stores.Persistent, cpID)
 	if err != nil || summary == nil {
 		logging.Debug(ctx, "head checkpoint flags: resolve checkpoint summary",
 			slog.String("checkpoint_id", cpID.String()),

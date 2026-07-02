@@ -485,9 +485,10 @@ func TestDetectFileChanges_DeletedFilesWithNilPreState(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// Initialize git repo with go-git
-	repo, err := git.PlainInit(tmpDir, false)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open repo: %v", err)
 	}
 
 	// Create and commit a tracked file
@@ -547,9 +548,10 @@ func TestDetectFileChanges_NewAndDeletedFiles(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// Initialize git repo with go-git
-	repo, err := git.PlainInit(tmpDir, false)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open repo: %v", err)
 	}
 
 	// Create and commit tracked files
@@ -628,9 +630,10 @@ func TestDetectFileChanges_NoChanges(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// Initialize git repo with go-git
-	repo, err := git.PlainInit(tmpDir, false)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open repo: %v", err)
 	}
 
 	// Create and commit a tracked file
@@ -684,9 +687,10 @@ func TestDetectFileChanges_NilPreviouslyUntracked_ReturnsModified(t *testing.T) 
 	t.Chdir(tmpDir)
 
 	// Initialize git repo with go-git
-	repo, err := git.PlainInit(tmpDir, false)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open repo: %v", err)
 	}
 
 	// Create and commit a tracked file
@@ -881,9 +885,10 @@ func TestFilterToUncommittedFiles_ReallyModified(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	repo, err := git.PlainInit(tmpDir, false)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open repo: %v", err)
 	}
 
 	filePath := filepath.Join(tmpDir, "file.txt")

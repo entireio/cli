@@ -65,10 +65,7 @@ func (s statusStyles) render(style lipgloss.Style, text string) string {
 
 // shouldUseColor returns true if the writer supports color output.
 func shouldUseColor(w io.Writer) bool {
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	return interactive.IsTerminalWriter(w)
+	return interactive.ShouldStyle(w)
 }
 
 // getTerminalWidth returns the terminal width, capped at 80 with a fallback of 60.
@@ -112,8 +109,10 @@ func totalTokens(tu *agent.TokenUsage) int {
 	if tu == nil {
 		return 0
 	}
-	total := tu.InputTokens + tu.CacheCreationTokens + tu.CacheReadTokens + tu.OutputTokens
-	total += totalTokens(tu.SubagentTokens)
+	total := saturatingIntAdd(tu.InputTokens, tu.CacheCreationTokens)
+	total = saturatingIntAdd(total, tu.CacheReadTokens)
+	total = saturatingIntAdd(total, tu.OutputTokens)
+	total = saturatingIntAdd(total, totalTokens(tu.SubagentTokens))
 	return total
 }
 

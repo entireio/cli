@@ -4,10 +4,23 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
+
+// subagentSessionIDPrefix is the prefix Copilot uses when it reuses a Task
+// tool-use id as the sessionId on lifecycle hooks fired for a subagent turn.
+// Real Copilot session ids are UUIDs, so this prefix unambiguously marks a
+// subagent context (e.g. "toolu_bdrk_01K…" on Bedrock-backed models).
+const subagentSessionIDPrefix = "toolu_"
+
+// isSubagentSessionID reports whether a Copilot sessionId is actually a
+// subagent's tool-use id rather than a real interactive session id.
+func isSubagentSessionID(sessionID string) bool {
+	return strings.HasPrefix(sessionID, subagentSessionIDPrefix)
+}
 
 // Ensure CopilotCLIAgent implements HookSupport at compile time.
 var _ agent.HookSupport = (*CopilotCLIAgent)(nil)
@@ -66,6 +79,20 @@ func (c *CopilotCLIAgent) ParseHookEvent(ctx context.Context, hookName string, s
 				"hookEventName", env.HookEventName, "hookName", hookName)
 			return nil, nil //nolint:nilnil // Mismatched VS Code event — skip silently.
 		}
+	}
+
+	// Copilot fires the per-turn/session lifecycle hooks for subagent turns too,
+	// using the subagent's Task tool-use id (e.g. "toolu_…") as the sessionId.
+	// Those must NOT spin up a top-level Entire session: the subagent never gets
+	// a matching stop for that id, so the phantom session would stay "active"
+	// forever and pin its shadow branch open after the user commits. The
+	// subagent's work is still captured via the main session's subagentStop →
+	// task checkpoint path, so we drop only the session-lifecycle hooks here and
+	// leave subagentStop itself to run.
+	if hookName != HookNameSubagentStop && isSubagentSessionID(env.SessionID) {
+		logging.Debug(ctx, "copilot-cli: skipping lifecycle event for subagent session",
+			"sessionID", env.SessionID, "hook", hookName)
+		return nil, nil //nolint:nilnil // Subagent lifecycle hook — no top-level session action.
 	}
 
 	switch hookName {

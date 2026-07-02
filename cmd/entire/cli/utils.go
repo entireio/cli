@@ -28,10 +28,13 @@ func NewAccessibleForm(groups ...*huh.Group) *huh.Form {
 }
 
 // handleFormCancellation handles cancellation from huh form prompts.
-// User abort (Ctrl+C) and timeout both print a cancelled message and return nil.
-// Other errors are wrapped with the action name for context.
+// User abort (Ctrl+C), timeout, and a cancelled/expired context (when the form
+// ran via RunWithContext and the command's context was cancelled) all print a
+// cancelled message and return nil. Other errors are wrapped with the action
+// name for context.
 func handleFormCancellation(w io.Writer, action string, err error) error {
-	if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, huh.ErrTimeout) {
+	if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, huh.ErrTimeout) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		fmt.Fprintf(w, "%s cancelled.\n", action)
 		return nil
 	}

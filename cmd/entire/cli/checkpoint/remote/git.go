@@ -45,6 +45,15 @@ type FetchOptions struct {
 	// checkpoint ancestry. Do not set on generic branch fetches — it would
 	// silently convert a deliberately-shallow user clone into a full one.
 	Unshallow bool
+	// Depth adds --depth=<Depth>, fetching the refspec to this absolute depth.
+	// Unlike Unshallow (which is repo-global) this is ref-scoped: it fully
+	// fetches the named branch — healing a prior shallow boundary on it — while
+	// leaving an independently-shallow source-tree clone untouched, and it does
+	// not introduce shallowness on a full repo when the value exceeds the
+	// branch's length. Use a value above the branch's realistic length but below
+	// math.MaxInt32 (2147483647), which git special-cases as a global unshallow.
+	// Ignored when zero or when Shallow is set.
+	Depth     int
 	Dir       string   // working directory (empty = CWD)
 	ExtraArgs []string // additional flags before remote (e.g., "--no-write-fetch-head")
 }
@@ -65,6 +74,8 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	switch {
 	case opts.Shallow:
 		args = append(args, "--depth=1")
+	case opts.Depth > 0:
+		args = append(args, fmt.Sprintf("--depth=%d", opts.Depth))
 	case opts.Unshallow && isShallowRepository(ctx, opts.Dir):
 		args = append(args, "--unshallow")
 	}
@@ -279,12 +290,6 @@ func PushWithOptions(ctx context.Context, opts PushOptions) (PushResult, error) 
 	return PushResult{Output: string(output)}, nil
 }
 
-// LsRemote runs git ls-remote with token injection.
-// GIT_TERMINAL_PROMPT=0 is always set. Returns stdout only.
-func LsRemote(ctx context.Context, remote string, patterns ...string) ([]byte, error) {
-	return lsRemote(ctx, "", remote, patterns...)
-}
-
 // LsRemoteInDir is like LsRemote but runs in a specific directory.
 func LsRemoteInDir(ctx context.Context, dir, remote string, patterns ...string) ([]byte, error) {
 	return lsRemote(ctx, dir, remote, patterns...)
@@ -358,6 +363,7 @@ func newCommand(ctx context.Context, args ...string) *exec.Cmd {
 	mkCmd := func(finalArgs []string) *exec.Cmd {
 		c := exec.CommandContext(ctx, "git", finalArgs...)
 		c.Stdin = nil // Disconnect stdin to prevent hanging in hook context
+		terminateOnCancel(c)
 		return c
 	}
 

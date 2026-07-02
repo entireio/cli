@@ -21,11 +21,29 @@ func TestMain(m *testing.M) {
 
 	testBinaryPath = filepath.Join(tmpDir, "entire")
 
+	// Route every spawned CLI away from the developer's real ~/.config/entire
+	// (contexts.json, version_check.json), ~/.cache/entire (discovery caches),
+	// and OS keychain. testing.Testing() is false in the subprocess, so the
+	// internal/testdirs fallback cannot protect it — isolation must come from
+	// the environment, which children inherit because all integration env
+	// building starts from os.Environ() (testutil.GitIsolatedEnv).
+	isolation := map[string]string{
+		"ENTIRE_CONFIG_DIR":           filepath.Join(tmpDir, "entire-config"),
+		"XDG_CACHE_HOME":              filepath.Join(tmpDir, "entire-cache"),
+		"ENTIRE_TOKEN_STORE":          "file",
+		"ENTIRE_TOKEN_STORE_PATH":     filepath.Join(tmpDir, "entire-tokens.json"),
+		"ENTIRE_TEST_AUTH_STORE_FILE": filepath.Join(tmpDir, "entire-auth-tokens.json"),
+	}
+	for k, v := range isolation {
+		if err := os.Setenv(k, v); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to set %s: %v\n", k, err)
+			os.RemoveAll(tmpDir)
+			os.Exit(1)
+		}
+	}
+
 	moduleRoot := findModuleRoot()
-	// -tags=authfilestore enables the file-backed auth store backend so the
-	// subprocess can opt into ENTIRE_TEST_AUTH_STORE_FILE instead of touching
-	// the real OS keychain. Production builds omit this tag.
-	buildCmd := exec.Command("go", "build", "-tags=authfilestore", "-o", testBinaryPath, ".")
+	buildCmd := exec.Command("go", "build", "-o", testBinaryPath, ".")
 	buildCmd.Dir = filepath.Join(moduleRoot, "cmd", "entire")
 
 	buildOutput, err := buildCmd.CombinedOutput()

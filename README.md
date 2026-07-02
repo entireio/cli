@@ -43,12 +43,14 @@ With Entire, you can:
 ## Quick Start
 
 ```bash
-# Install stable via Homebrew
+# To use Homebrew, first tap:
 brew tap entireio/tap
+brew trust entireio/tap
+
+# Install stable via Homebrew
 brew install --cask entire
 
 # Or install nightly via Homebrew
-brew tap entireio/tap
 brew install --cask entire@nightly
 
 # Or install stable via install.sh
@@ -85,6 +87,7 @@ Entire currently ships two release channels:
 
 How to use each channel:
 
+- Homebrew (one-time setup): `brew tap entireio/tap && brew trust entireio/tap`
 - Homebrew stable: `brew install --cask entire`
 - Homebrew nightly: `brew install --cask entire@nightly`
 - `install.sh` stable: `curl -fsSL https://entire.io/install.sh | bash`
@@ -117,7 +120,9 @@ Just use one of your AI agents as before. Entire runs in the background, trackin
 entire status  # Check current session status anytime
 ```
 
-### 3. Rewind to a Previous Checkpoint
+### 3. Rewind to a Previous Checkpoint (deprecated)
+
+> **Deprecated:** `entire checkpoint rewind` will be removed in a future release.
 
 If you want to undo some changes and go back to an earlier checkpoint:
 
@@ -210,9 +215,12 @@ If you're working on the CLI device auth flow against a local `entire.io` checko
 cd ../entire.io-1
 mise run dev
 
-# In this repo, point the CLI at the local API
+# In this repo, point the CLI at the local API. The login flow targets
+# the local server via --server (the default is the production
+# us.auth.entire.io).
 cd ../cli
 export ENTIRE_API_BASE_URL=http://localhost:8787
+entire login --server https://localhost:8180
 
 # Run the smoke test
 ./scripts/local-device-auth-smoke.sh
@@ -222,7 +230,7 @@ Useful commands while developing:
 
 ```bash
 # Run the login flow against a local server (prompts to press Enter before opening the browser)
-go run ./cmd/entire login --insecure-http-auth
+go run ./cmd/entire login --server https://localhost:8180
 
 # Run the focused integration coverage for login
 go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
@@ -238,9 +246,9 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire disable` | Remove Entire hooks from repository                                                               |
 | `entire doctor`  | Fix or clean up stuck sessions                                                                    |
 | `entire enable`  | Enable Entire in your repository                                                                  |
-| `entire checkpoint`        | List, explain, rewind, and search checkpoints                                           |
+| `entire checkpoint`        | List, explain, and search checkpoints                                                   |
 | `entire checkpoint explain` | Explain a session, commit, or checkpoint                                               |
-| `entire checkpoint rewind` | Rewind to a previous checkpoint                                                         |
+| `entire checkpoint rewind` | Rewind to a previous checkpoint (deprecated, will be removed in a future release)       |
 | `entire login`   | Authenticate the CLI with Entire device auth                                                      |
 | `entire session` | View and manage agent sessions tracked by Entire                                                  |
 | `entire session resume`    | Switch to a branch, restore latest checkpointed session metadata, and show command(s) |
@@ -248,6 +256,13 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire status`  | Show current session info                                                                         |
 | `entire doctor trace` | Show hook performance traces                                                                 |
 | `entire version` | Show Entire CLI version                                                                           |
+
+`entire blame` and `entire why` are experimental Labs commands. Run `entire
+labs` to discover them. `entire blame <file>` shows which current file lines
+came from an Entire checkpoint, and `entire why <file>:<line>` jumps from a
+specific line back to the prompt, session, and checkpoint that created it. Use
+`entire blame <file> --long` for the full agent, model, author, and session
+table.
 
 ### `entire enable` Flags
 
@@ -433,7 +448,7 @@ Local settings override project settings field-by-field. When you run `entire st
 
 ### Agent-Specific Steps & Limitations
 
-- When enabling Entire for Codex, the command will also create or update `.codex/config.toml` with `codex_hooks = true` to enable Codex hooks. If you configure Codex manually, make sure this flag is set in your `.codex/config.toml`. Or select Codex from the interactive agent picker when running `entire enable`.
+- When enabling Entire for Codex, the command will also create or update `.codex/config.toml` with `hooks = true` to enable Codex hooks. If you configure Codex manually, make sure this flag is set in your `.codex/config.toml`. Or select Codex from the interactive agent picker when running `entire enable`.
 - Entire supports Cursor IDE and Cursor Agent CLI tool, but `entire rewind` is not available at this time. Other commands (`doctor`, `status` etc.) work the same as all other agents.
 - Entire supports Copilot CLI, but not Copilot in VS Code, in other IDEs, or on github.com.
 - Entire supports Pi coding agent (Preview). Pi uses a TypeScript extension instead of a JSON hook config. Subagent capture is not currently available.

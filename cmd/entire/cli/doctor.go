@@ -91,6 +91,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Error: metadata check failed: %v\n", metadataErr)
 		finalErr = NewSilentError(fmt.Errorf("metadata check failed: %w", metadataErr))
 	}
+
 	fmt.Fprintln(cmd.OutOrStdout())
 
 	ctx := cmd.Context()
@@ -122,6 +123,14 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
 	defer repo.Close()
+
+	// Finalize any ACTIVE session whose agent process has exited (no SessionStop
+	// hook fired). A gone process is unambiguous, so these are condensed on the
+	// spot rather than left for the interactive prompt below; the sweep marks
+	// them ended in place so classifySession won't re-flag them.
+	if n := finalizeExitedSessions(ctx, states); n > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Finalized %d exited session(s) (agent process gone).\n\n", n)
+	}
 
 	// Identify stuck sessions
 	now := time.Now()
@@ -213,14 +222,22 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 
 	switch {
 	case state.Phase.IsActive():
-		if !state.IsStuckActive() {
-			return nil
-		}
-
 		var reason string
-		if state.LastInteractionTime != nil {
+		switch {
+		case state.OwnerExited():
+			// Detected immediately (no timeout wait): the owning agent process
+			// is gone. Normally finalized up front in runSessionsFix; this
+			// branch covers a session that couldn't be finalized there.
+			pid := 0
+			if state.Owner != nil {
+				pid = state.Owner.PID
+			}
+			reason = fmt.Sprintf("agent process %d exited (no longer running)", pid)
+		case !state.IsStuckActive():
+			return nil
+		case state.LastInteractionTime != nil:
 			reason = fmt.Sprintf("active, last interaction %s ago", now.Sub(*state.LastInteractionTime).Truncate(time.Minute))
-		} else {
+		default:
 			reason = fmt.Sprintf("active, started %s ago with no recorded interaction", now.Sub(state.StartedAt).Truncate(time.Minute))
 		}
 
@@ -340,13 +357,17 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	defer repo.Close()
 
 	ctx := cmd.Context()
-	remoteRefName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
+	refs := checkpoint.ResolveRefs(ctx)
+	w := cmd.OutOrStdout()
+	if !refs.PrimaryFetchableFromOrigin() {
+		fmt.Fprintf(w, "✓ Metadata branches: OK (primary ref %s is not pushed to origin)\n", refs.Primary)
+		return nil
+	}
+	remoteRefName := plumbing.NewRemoteReferenceName("origin", refs.Primary.Short())
 	disconnected, err := strategy.IsMetadataDisconnected(ctx, repo, remoteRefName)
 	if err != nil {
 		return fmt.Errorf("could not check metadata branch state: %w", err)
 	}
-
-	w := cmd.OutOrStdout()
 
 	if !disconnected {
 		fmt.Fprintln(w, "✓ Metadata branches: OK")
@@ -354,37 +375,55 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	}
 
 	fmt.Fprintln(w, "Metadata branches: DISCONNECTED")
-	fmt.Fprintln(w, "  Local and remote entire/checkpoints/v1 branches share no common ancestor.")
+	fmt.Fprintf(w, "  Local and remote %s branches share no common ancestor.\n", refs.Primary.Short())
 	fmt.Fprintln(w, "  Some remote checkpoints may not be visible locally.")
 	fmt.Fprintln(w, "  Fix: cherry-pick local checkpoints onto remote tip (preserves all data).")
 
 	if !force {
-		var confirmed bool
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title("Fix disconnected metadata branches?").
-					Value(&confirmed),
-			),
-		)
-		if formErr := form.Run(); formErr != nil {
-			if errors.Is(formErr, huh.ErrUserAborted) {
-				return nil
-			}
-			return fmt.Errorf("prompt failed: %w", formErr)
+		proceed, promptErr := confirmDoctorFix(ctx, w, "Fix disconnected metadata branches?")
+		if promptErr != nil {
+			return promptErr
 		}
-		if !confirmed {
-			fmt.Fprintln(w, "  -> Skipped")
+		if !proceed {
 			return nil
 		}
 	}
 
-	if fixErr := strategy.ReconcileDisconnectedMetadataBranch(ctx, repo, remoteRefName, cmd.ErrOrStderr()); fixErr != nil {
+	if fixErr := strategy.ReconcileDisconnectedMetadataRef(ctx, repo, refs.Primary, remoteRefName, cmd.ErrOrStderr()); fixErr != nil {
 		return fmt.Errorf("failed to reconcile metadata branches: %w", fixErr)
 	}
 
 	fmt.Fprintln(w, "  ✓ Fixed: metadata branches reconciled")
 	return nil
+}
+
+// confirmDoctorFix prompts to apply a doctor fix. Declining (which prints
+// "-> Skipped"), aborting (Ctrl+C), and context cancellation all return false
+// with no error.
+func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, error) {
+	// huh opens the TTY during form startup regardless of context state, so
+	// guard explicitly to honor an already-cancelled command context.
+	if ctx.Err() != nil {
+		return false, nil //nolint:nilerr // cancelled context is a clean skip, not an error
+	}
+	var confirmed bool
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title(title).
+				Value(&confirmed),
+		),
+	)
+	if err := form.RunWithContext(ctx); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
+			return false, nil
+		}
+		return false, fmt.Errorf("prompt failed: %w", err)
+	}
+	if !confirmed {
+		fmt.Fprintln(w, "  -> Skipped")
+	}
+	return confirmed, nil
 }
 
 // checkCodexHookTrust warns about two kinds of drift in the Codex hook

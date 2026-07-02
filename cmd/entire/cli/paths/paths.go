@@ -26,31 +26,21 @@ const (
 
 // Metadata file names
 const (
-	PromptFileName                = "prompt.txt"
-	TranscriptFileName            = "full.jsonl"
-	TranscriptFileNameLegacy      = "full.log"
-	CompactTranscriptFileName     = "transcript.jsonl"
-	CompactTranscriptHashFileName = "transcript_hash.txt"
-	V2RawTranscriptFileName       = "raw_transcript"
-	V2RawTranscriptHashFileName   = "raw_transcript_hash.txt"
-	MetadataFileName              = "metadata.json"
-	CheckpointFileName            = "checkpoint.json"
-	ContentHashFileName           = "content_hash.txt"
-	SettingsFileName              = "settings.json"
+	PromptFileName           = "prompt.txt"
+	TranscriptFileName       = "full.jsonl"
+	TranscriptFileNameLegacy = "full.log"
+	// CompactTranscriptFileName is the compact transcript stored alongside
+	// full.jsonl. It holds the full compacted session; this checkpoint's slice
+	// begins at the session metadata's compact_transcript_start.
+	CompactTranscriptFileName = "transcript.jsonl"
+	MetadataFileName          = "metadata.json"
+	CheckpointFileName        = "checkpoint.json"
+	ContentHashFileName       = "content_hash.txt"
+	SettingsFileName          = "settings.json"
 )
 
 // MetadataBranchName is the orphan branch used by manual-commit strategy to store metadata
 const MetadataBranchName = "entire/checkpoints/v1"
-
-// Legacy v2 ref names use custom refs under refs/entire/ (not refs/heads/).
-// They are retained for read fallback while checkpoints v2 is rolled back.
-const (
-	// V2MainRefName is the legacy v2 metadata ref.
-	V2MainRefName = "refs/entire/checkpoints/v2/main"
-
-	// V2FullCurrentRefName is the legacy v2 raw transcript ref.
-	V2FullCurrentRefName = "refs/entire/checkpoints/v2/full/current"
-)
 
 // TrailsBranchName is the orphan branch used to store trail metadata.
 // Trails are branch-centric work tracking abstractions that link to checkpoints by branch name.
@@ -151,7 +141,13 @@ func IsSubpath(parent, child string) bool {
 	if err != nil {
 		return false
 	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return !IsRelativeTraversal(rel)
+}
+
+// IsRelativeTraversal reports whether rel escapes its base directory.
+// It accepts both OS-native paths and Git-style slash-normalized paths.
+func IsRelativeTraversal(rel string) bool {
+	return rel == ".." || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, `..\`)
 }
 
 // ToRelativePath converts an absolute path to relative.
@@ -171,7 +167,7 @@ func ToRelativePath(absPath, cwd string) string {
 		return absPath
 	}
 	relPath, err := filepath.Rel(cwd, absPath)
-	if err != nil || strings.HasPrefix(relPath, "..") {
+	if err != nil || IsRelativeTraversal(relPath) {
 		return ""
 	}
 

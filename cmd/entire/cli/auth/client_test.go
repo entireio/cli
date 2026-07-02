@@ -99,21 +99,21 @@ func TestSecondsUntil_PastExpiryClampsToZero(t *testing.T) {
 }
 
 func TestNewClient_AllowInsecureHTTPPermitsNonLoopback(t *testing.T) {
+	t.Parallel()
 	// --insecure-http-auth must reach the deviceflow client; without this,
 	// http://devbox.internal style auth hosts fail with ErrInsecureBaseURL
 	// even when the operator has explicitly opted in.
-	t.Setenv("ENTIRE_AUTH_BASE_URL", "http://devbox.internal:8787")
-	c := NewClient(nil, true)
+	c := NewClient("http://devbox.internal:8787", nil, true)
 	if !c.inner.AllowInsecureHTTP {
-		t.Fatal("NewClient(nil, true) AllowInsecureHTTP = false, want true")
+		t.Fatal("NewClient(server, nil, true) AllowInsecureHTTP = false, want true")
 	}
 }
 
 func TestNewClient_LoopbackHTTPAlwaysPermitted(t *testing.T) {
-	t.Setenv("ENTIRE_AUTH_BASE_URL", "http://127.0.0.1:8787")
-	c := NewClient(nil, false)
+	t.Parallel()
+	c := NewClient("http://127.0.0.1:8787", nil, false)
 	if !c.inner.AllowInsecureHTTP {
-		t.Fatal("NewClient(nil, false) AllowInsecureHTTP = false for loopback, want true")
+		t.Fatal("NewClient(server, nil, false) AllowInsecureHTTP = false for loopback, want true")
 	}
 }
 

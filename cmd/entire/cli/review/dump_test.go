@@ -13,9 +13,8 @@ func makeSummary(runs ...reviewtypes.AgentRun) reviewtypes.RunSummary {
 	return reviewtypes.RunSummary{AgentRuns: runs}
 }
 
-// Tests use bytes.Buffer as the writer, which is NOT a terminal — so DumpSink's
-// markdown is passed through as-is via mdrender.RenderForWriter. Assertions
-// therefore match the raw markdown body the user would see when running
+// DumpSink writes plain markdown directly (no glamour styling), so assertions
+// match the raw markdown body the user sees both on screen and when running
 // `entire review > out.txt`.
 
 func TestDumpSink_SucceededAgent(t *testing.T) {

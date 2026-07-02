@@ -45,6 +45,67 @@ func TestParseHookEvent_BeforeAgentStart(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_BeforeAgentStart_WithSkillEvent(t *testing.T) {
+	t.Parallel()
+	a := &PiAgent{}
+	stdin := strings.NewReader(`{"type":"before_agent_start","session_file":"/tmp/2026-05-09T12-00-00-000Z_abc-123.jsonl","prompt":"expanded skill","skill_events":[{"skill_name":"trigger-analysis","invocation":"/skill:trigger-analysis","timestamp":"2026-05-25T12:34:56Z"}]}`)
+	ev, err := a.ParseHookEvent(context.Background(), HookNameBeforeAgentStart, stdin)
+	if err != nil {
+		t.Fatalf("ParseHookEvent: %v", err)
+	}
+	if len(ev.SkillEvents) != 1 {
+		t.Fatalf("SkillEvents len = %d, want 1", len(ev.SkillEvents))
+	}
+	skillEvent := ev.SkillEvents[0]
+	if skillEvent.EventType != agent.SkillEventTypePromptInvocation {
+		t.Errorf("EventType = %q", skillEvent.EventType)
+	}
+	if skillEvent.Skill.Name != "trigger-analysis" {
+		t.Errorf("Skill.Name = %q", skillEvent.Skill.Name)
+	}
+	if skillEvent.Source.Signal != agent.SkillSignalPiInputSlashCommand {
+		t.Errorf("Source.Signal = %q", skillEvent.Source.Signal)
+	}
+	if skillEvent.Collapse.Target != agent.SkillCollapseTargetUserMessage || !skillEvent.Collapse.DefaultCollapsed {
+		t.Errorf("Collapse = %+v", skillEvent.Collapse)
+	}
+}
+
+// TestParseHookEvent_BeforeAgentStart_MultipleSkillEvents locks live capture of
+// every /skill:<name> in a turn (the path backing all live Pi sessions).
+func TestParseHookEvent_BeforeAgentStart_MultipleSkillEvents(t *testing.T) {
+	t.Parallel()
+	a := &PiAgent{}
+	stdin := strings.NewReader(`{"type":"before_agent_start","session_file":"/tmp/2026-05-09T12-00-00-000Z_abc-123.jsonl","prompt":"expanded","skill_events":[{"skill_name":"review-pr","invocation":"/skill:review-pr","timestamp":"2026-05-25T12:34:56Z"},{"skill_name":"test-auditor","invocation":"/skill:test-auditor","timestamp":"2026-05-25T12:35:10Z"}]}`)
+	ev, err := a.ParseHookEvent(context.Background(), HookNameBeforeAgentStart, stdin)
+	if err != nil {
+		t.Fatalf("ParseHookEvent: %v", err)
+	}
+	got := make(map[string]bool)
+	for _, se := range ev.SkillEvents {
+		got[se.Skill.Name] = true
+		if se.Source.Agent != string(agent.AgentNamePi) {
+			t.Errorf("Source.Agent = %q, want pi", se.Source.Agent)
+		}
+	}
+	for _, want := range []string{"review-pr", "test-auditor"} {
+		if !got[want] {
+			t.Errorf("missing live skill event for %q; got %v", want, got)
+		}
+	}
+}
+
+// TestPiAgent_UsesLiveSkillCaptureNotTranscriptExtraction guards Pi's
+// live-capture model: a transcript extractor would double-count at
+// condensation (see piSkillEvents).
+func TestPiAgent_UsesLiveSkillCaptureNotTranscriptExtraction(t *testing.T) {
+	t.Parallel()
+	if _, ok := agent.AsSkillEventExtractor(NewPiAgent()); ok {
+		t.Fatal("PiAgent must not implement SkillEventExtractor: Pi captures skills live; " +
+			"a transcript extractor would double-count at condensation (see piSkillEvents)")
+	}
+}
+
 func TestParseHookEvent_SessionShutdown_NoLifecycleEvent(t *testing.T) {
 	t.Parallel()
 	a := &PiAgent{}
@@ -185,6 +246,41 @@ func TestCaptureTranscript_MissingInputs(t *testing.T) {
 	}
 }
 
+// TestCaptureTranscript_RejectsTraversalSessionID verifies that captureTranscript
+// refuses an unsafe session ID. captureTranscript runs inside ParseHookEvent,
+// before the lifecycle dispatcher validates the ID, so it must guard the
+// transcript write itself — otherwise a "../"-laden ID escapes the cache dir.
+func TestCaptureTranscript_RejectsTraversalSessionID(t *testing.T) {
+	// Cannot use t.Parallel — t.Chdir.
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	src := filepath.Join(dir, "src.jsonl")
+	if err := os.WriteFile(src, []byte("payload\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A sentinel outside the cache dir that the traversal would target.
+	victim := filepath.Join(dir, "victim.json")
+	if err := os.WriteFile(victim, []byte("SAFE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, bad := range []string{"../victim", "/etc/passwd", "..", "a/b"} {
+		if got := captureTranscript(context.Background(), bad, src); got != "" {
+			t.Errorf("captureTranscript(%q) = %q, want \"\" (unsafe ID must be refused)", bad, got)
+		}
+	}
+
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "SAFE" {
+		t.Errorf("sentinel was overwritten via traversal: %q", string(got))
+	}
+}
+
 func TestGetSupportedHooks(t *testing.T) {
 	t.Parallel()
 	got := (&PiAgent{}).GetSupportedHooks()
@@ -214,5 +310,37 @@ func TestHookNamesMatchesParser(t *testing.T) {
 		if err != nil {
 			t.Errorf("ParseHookEvent(%q): %v", name, err)
 		}
+	}
+}
+
+func TestPiAgent_ContextInjector(t *testing.T) {
+	t.Parallel()
+	a := &PiAgent{}
+
+	// Pi injects model context at TurnStart (before_agent_start).
+	if got := a.InjectionEvent(); got != agent.TurnStart {
+		t.Errorf("InjectionEvent = %v, want TurnStart", got)
+	}
+
+	// Non-empty text renders a newline-terminated {"inject_context":...} line.
+	out, err := a.RenderContextInjection(agent.ContextInjection{Text: "use entire trail"})
+	if err != nil {
+		t.Fatalf("RenderContextInjection: %v", err)
+	}
+	got := string(out)
+	if !strings.HasSuffix(got, "\n") {
+		t.Errorf("payload must be newline-terminated, got %q", got)
+	}
+	if !strings.Contains(got, `"inject_context":"use entire trail"`) {
+		t.Errorf("payload missing inject_context envelope: %q", got)
+	}
+
+	// Empty text renders nothing.
+	out, err = a.RenderContextInjection(agent.ContextInjection{Text: "   "})
+	if err != nil {
+		t.Fatalf("RenderContextInjection(empty): %v", err)
+	}
+	if len(out) != 0 {
+		t.Errorf("empty text must render no payload, got %q", string(out))
 	}
 }

@@ -18,13 +18,16 @@
 // without depending on each other.
 package types
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // AgentReviewer drives a single agent's review run.
 type AgentReviewer interface {
 	// Name returns the agent's registry key (e.g., "claude-code", "codex",
 	// "gemini"). Stable identifier; do not change after release without
-	// updating settings migration.
+	// updating profile settings.
 	Name() string
 
 	// Start spawns the agent with the given run configuration. The returned
@@ -36,9 +39,10 @@ type AgentReviewer interface {
 	// lifecycle hooks adopt the session as a review session.
 	//
 	// Errors from Start indicate failure to construct or launch the process
-	// (e.g., binary not on PATH at exec.Cmd.Start time, invalid argv). Once
-	// Start returns nil, errors during the run flow through Process.Events
-	// (as RunError) and Process.Wait.
+	// (e.g., binary not on PATH at exec.Cmd.Start time, invalid argv). On error,
+	// Start must not retain background work that depends on ctx; no Process exists
+	// for the orchestrator to drain. Once Start returns nil, errors during the
+	// run flow through Process.Events (as RunError) and Process.Wait.
 	Start(ctx context.Context, run RunConfig) (Process, error)
 }
 
@@ -59,6 +63,13 @@ type Process interface {
 	// after the Events channel has closed. Consumers must drain Events until
 	// close before calling Wait; otherwise an implementation that forwards
 	// parsed events from another goroutine may block while sending.
+	//
+	// When Wait returns, the process has exited and any goroutines the Process
+	// spawned (stdout parsers, event forwarders) have finished — implementations
+	// MUST NOT leave goroutines running past Wait. The orchestrator relies on
+	// this: it releases the run context (cancelling any per-reviewer deadline)
+	// right after Wait returns, so a goroutine still bound to that context could
+	// otherwise be cancelled out from under it.
 	Wait() error
 }
 
@@ -75,12 +86,26 @@ type RunConfig struct {
 	// but they are not prepended to the prompt text.
 	PromptOverride string
 
+	// ProfileName is the named review profile being run (e.g. "general",
+	// "security", "accessibility"). It is included in the prompt and final
+	// adjudication context for traceability.
+	ProfileName string
+
+	// Task is the canonical review task for this profile. Every worker agent in
+	// a fan-out run receives the same task; per-agent Skills/AlwaysPrompt adapt
+	// execution mechanics without changing the task identity.
+	Task string
+
+	// Model is an optional model hint passed to the agent CLI. Empty means use
+	// the agent's default model.
+	Model string
+
 	// Skills are skill invocation strings passed to the agent verbatim.
 	Skills []string
 
-	// AlwaysPrompt is the per-agent always-prompt configured in settings.
-	// Concatenated with Skills + PerRunPrompt + a scope clause to form the
-	// composed agent prompt.
+	// AlwaysPrompt is the per-agent additional instruction configured in the
+	// selected review profile. Concatenated with Task + Skills + PerRunPrompt +
+	// a scope clause to form the composed agent prompt.
 	AlwaysPrompt string
 
 	// PerRunPrompt is optional textarea input from a single invocation.
@@ -103,6 +128,14 @@ type RunConfig struct {
 	// hook via ENTIRE_REVIEW_STARTING_SHA so checkpoint metadata records
 	// the commit that was reviewed.
 	StartingSHA string
+
+	// ReviewerTimeout bounds how long a single reviewer may run before the
+	// orchestrator cancels it (its process is killed and the run is marked
+	// failed-by-timeout) so a stuck agent can't hang the review forever. Zero
+	// or negative means use the orchestrator default (defaultReviewerTimeout).
+	// Sibling reviewers and the judge are unaffected by one reviewer's
+	// timeout.
+	ReviewerTimeout time.Duration
 
 	// EnrichSummary optionally updates the completed run summary before sinks
 	// receive RunFinished. It is used for post-process data such as token
