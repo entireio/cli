@@ -241,6 +241,38 @@ func TestReadCheckpointContextKeepsLocalWhenRefreshReadsWorse(t *testing.T) {
 		"must not speculate about remote-side truncation the retry disproved")
 }
 
+// A rejected-worse retry whose failure is NOT genuine absence (corrupt fetched
+// pack, cancellation) proves nothing about the remote: the reason must stay
+// neutral and surface the retry's error rather than speculating the metadata
+// branch "may have been pushed without" the session records.
+func TestReadCheckpointContextRejectedRetryNonAbsenceStaysNeutral(t *testing.T) {
+	cpID := checkpointid.MustCheckpointID("fdb2c3d4e5f6")
+	local := &attributionCheckpointReaderStub{
+		summary: &checkpoint.CheckpointSummary{
+			FilesTouched: []string{"auth.py"},
+			Sessions:     []checkpoint.SessionFilePaths{{Metadata: "metadata.json"}},
+		},
+		sessionErr: errors.New("object not found"),
+	}
+	overrideAttributionRefresh(t,
+		func(context.Context) error { return nil },
+		func(context.Context) (attributionCheckpointReader, *git.Repository, error) {
+			return &attributionCheckpointReaderStub{readErr: errors.New("packfile corrupt")}, nil, nil
+		})
+
+	resolver := newStubAttributionResolver(local)
+	resolver.fetchOnMiss = true
+	ctx := resolver.readCheckpointContext(cpID, "auth.py")
+
+	require.True(t, ctx.MetadataMissing)
+	require.Contains(t, ctx.MetadataMissingReason, "packfile corrupt",
+		"the rejected retry's error must be surfaced, not discarded")
+	require.NotContains(t, ctx.MetadataMissingReason, "pushed without them",
+		"a failed re-read is not evidence about the remote's contents")
+	require.NotContains(t, ctx.MetadataMissingReason, "not on the remote",
+		"a non-absence failure is not proof the remote lacks the checkpoint")
+}
+
 // The determinism contract of #1551 at the unit level: two "clones" with
 // DIFFERENT local damage (one can't read the summary, the other can't read the
 // session records) must converge on the identical complete context once both
@@ -420,6 +452,12 @@ func TestRefreshTokenPathOriginFallbackIsNotSuccess(t *testing.T) {
 		"the token-path origin fallback must surface as a failure, not fake a checkpoint-remote fetch")
 	require.NotContains(t, ctx.MetadataMissingReason, "may not have been pushed",
 		"we never reached the checkpoint remote, so nothing is known about what it contains")
+	// The appended recovery suggestion must not contradict the failure by
+	// telling the user to fetch from the very origin URL the refresh refused.
+	require.NotContains(t, ctx.MetadataMissingReason, "git fetch https://github.com/org/app.git",
+		"suggesting a fetch from origin would contradict the authoritative-remote policy")
+	require.Contains(t, ctx.MetadataMissingReason, "checkpoint_remote",
+		"the recovery guidance should point at the configuration that failed to resolve")
 }
 
 // Regression pin for the unsound-refresh bug: in a repo with a LOCAL metadata

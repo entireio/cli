@@ -576,13 +576,19 @@ func checkpointPresentLocally(ctx context.Context, repo *git.Repository, refs cp
 }
 
 // suggestCheckpointFetchCommand returns a git fetch command the user can
-// paste to pull the missing v1 metadata branch.
+// paste to pull the missing v1 metadata branch. When a checkpoint remote is
+// configured but its URL cannot be derived (FetchURL would silently fall back
+// to origin), the suggestion points at the configuration instead: telling the
+// user to fetch from origin would contradict the authoritative-remote policy
+// and fetch from a remote that may not carry the metadata branch at all.
 func suggestCheckpointFetchCommand(ctx context.Context) string {
 	ref := "entire/checkpoints/v1:entire/checkpoints/v1"
 	if remote.Configured(ctx) {
-		if url, err := remote.FetchURL(ctx); err == nil && url != "" {
+		url, usedCheckpointRemote, err := remote.FetchURLWithSource(ctx)
+		if err == nil && usedCheckpointRemote && url != "" {
 			return fmt.Sprintf("git fetch %s %s", url, ref)
 		}
+		return "review the checkpoint_remote setting in .entire/settings.json (its URL could not be derived), then: git fetch <checkpoint-remote-url> " + ref
 	}
 	return "git fetch origin " + ref
 }
