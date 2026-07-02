@@ -10,6 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/require"
 )
@@ -360,6 +361,10 @@ func TestReadCheckpointContextSessionsUnreadableAfterRefreshWording(t *testing.T
 // and no "may not have been pushed" claim about a remote never reached.
 func TestRefreshConfiguredCheckpointRemoteFailureIsAuthoritative(t *testing.T) {
 	repoRoot := newAttributionRepo(t)
+	// Hermeticity: with ENTIRE_CHECKPOINT_TOKEN set, FetchURL derives a real
+	// github.com URL without any git remote and the test would hit the network
+	// with the environment's token. Clear it so resolution fails fast locally.
+	t.Setenv(remote.CheckpointTokenEnvVar, "")
 	// A configured checkpoint remote in a repo with no origin: URL resolution
 	// fails fast (no network), exercising the authoritative-failure path.
 	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".entire"), 0o755))
@@ -385,6 +390,9 @@ func TestRefreshConfiguredCheckpointRemoteFailureIsAuthoritative(t *testing.T) {
 // Uses the real fetchAttributionMetadata seam.
 func TestRefreshWithLocalBranchButNoRemoteReportsFetchFailure(t *testing.T) {
 	repoRoot := newAttributionRepo(t)
+	// Hermeticity: ensure a developer/CI ENTIRE_CHECKPOINT_TOKEN can't turn
+	// this into a network-dependent test.
+	t.Setenv(remote.CheckpointTokenEnvVar, "")
 	// A local entire/checkpoints/v1 exists (the old getMetadataTree fallback
 	// would "succeed" from it); the queried checkpoint is not in it.
 	writeAttributionCheckpoint(t, repoRoot, "99b2c3d4e5f6", checkpoint.WriteOptions{
