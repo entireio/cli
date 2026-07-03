@@ -133,6 +133,12 @@ worktree than the localDev install still cleans up).
 
 - **Silent tracking** in the agy UI (no SessionStart surface); `entire status`
   is the visibility surface.
+- **Headless subagent runs leave a ghost parent session**: agy runs subagents
+  as separate conversations with their own hooks; in `-p` mode the parent
+  conversation only receives `fullyIdle=false` Stops before the process exits,
+  so its session stays ACTIVE (visible in `entire status` until the stale
+  threshold). The subagent's work condenses normally, and ghost sessions with
+  no tracked files no longer pin shadow branches.
 - **Mid-turn commit token scoping is coarse**: such checkpoints record zero
   tokens; the turn's delta lands on the next condensation (session totals stay
   correct).
