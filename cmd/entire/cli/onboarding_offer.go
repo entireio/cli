@@ -20,7 +20,9 @@ const (
 	setupModeAll onboardingSetupMode = iota
 	// setupModeStepByStep confirms each missing rung individually.
 	setupModeStepByStep
-	// setupModeSkip leaves everything local and prints the run-later checklist.
+	// setupModeSkip declines the offers this once — tracking continues either
+	// way; the closing checklist carries the run-later commands and re-running
+	// enable re-offers whatever is still missing.
 	setupModeSkip
 )
 
@@ -182,7 +184,7 @@ func promptOnboardingSetupMode(missing []onboarding.Result) (onboardingSetupMode
 				Options(
 					huh.NewOption("Yes, set up everything (recommended)", setupModeAll),
 					huh.NewOption("Choose step by step", setupModeStepByStep),
-					huh.NewOption("Skip — local tracking only", setupModeSkip),
+					huh.NewOption("Skip for now — finish anytime with `entire enable`", setupModeSkip),
 				).
 				Value(&mode),
 		),
