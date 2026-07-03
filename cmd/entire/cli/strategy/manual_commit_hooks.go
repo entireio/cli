@@ -1362,9 +1362,16 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 
 	// State is saved by the outer MutateSessionState in PostCommit.
 
-	// Only preserve shadow branch for active sessions that were NOT condensed.
-	// Condensed sessions already have their data on entire/checkpoints/v1.
-	if state.Phase.IsActive() && !handler.condensed {
+	// Only preserve the shadow branch for active sessions that were NOT
+	// condensed AND still track files — their uncondensed checkpoints are the
+	// only copy of that work. An active session with no tracked files has
+	// nothing on the branch to lose (SaveStep recreates shadow branches on
+	// demand), so it must not pin the branch. Observed with Antigravity:
+	// a subagent runs as its own conversation and does all the work, while
+	// the parent conversation's final fullyIdle Stop never arrives in
+	// headless mode — leaving a "ghost" session that is ACTIVE forever with
+	// zero files, which would otherwise preserve the branch indefinitely.
+	if state.Phase.IsActive() && !handler.condensed && len(handler.filesTouchedBefore) > 0 {
 		uncondensedActiveOnBranch[shadowBranchName] = true
 	}
 }

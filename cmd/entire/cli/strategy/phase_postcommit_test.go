@@ -314,12 +314,16 @@ func TestPostCommit_ReadOnlyActiveSessionNotCondensed(t *testing.T) {
 	assert.Equal(t, 0, idleState.StepCount,
 		"IDLE session StepCount should be reset after condensation")
 
-	// Shadow branch should be preserved because the ACTIVE session was NOT condensed
-	// (it had no files touched, and totalSessionCount > 1 triggered the gate)
+	// The shadow branch must be DELETED: the read-only ACTIVE session has no
+	// files and no checkpoints on it (nothing to lose), and PostCommit rebases
+	// its BaseCommit to the new HEAD anyway — future work goes to a NEW branch
+	// name, so preserving the old branch would leak it permanently. (This
+	// exact leak was observed live with Antigravity's headless subagent flow,
+	// where the parent conversation lingers as a files-less ACTIVE ghost.)
 	refName := plumbing.NewBranchReferenceName(shadowBranch)
 	_, err = repo.Reference(refName, true)
-	assert.NoError(t, err,
-		"shadow branch should be preserved — uncondensed ACTIVE session still references it")
+	assert.Error(t, err,
+		"shadow branch must be deleted — the read-only ACTIVE session has nothing on it and was rebased to the new HEAD")
 }
 
 // TestPostCommit_CondensationFailure_PreservesShadowBranch verifies that when
