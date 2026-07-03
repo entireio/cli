@@ -37,8 +37,8 @@ type onboardingOfferRunner struct {
 	deps        onboardingRungDeps
 	offerFns    map[string]func(ctx context.Context) error
 	canPrompt   func() bool
-	promptMode  func(missing []onboarding.Result) (onboardingSetupMode, error)
-	confirmRung func(r onboarding.Result) (bool, error)
+	promptMode  func(ctx context.Context, missing []onboarding.Result) (onboardingSetupMode, error)
+	confirmRung func(ctx context.Context, r onboarding.Result) (bool, error)
 	styles      func(w io.Writer) statusStyles
 }
 
@@ -47,7 +47,7 @@ func (r onboardingOfferRunner) run(ctx context.Context, w io.Writer) {
 	results := ladder.Checks(ctx)
 
 	if actionable := r.offerable(results); len(actionable) > 0 && r.canPrompt() {
-		mode, err := r.promptMode(actionable)
+		mode, err := r.promptMode(ctx, actionable)
 		if err != nil {
 			// Cancelling the consent prompt (Ctrl-C) behaves like skip: enable
 			// has already succeeded, so fall through to the checklist, whose
@@ -109,7 +109,7 @@ func (r onboardingOfferRunner) runOffers(ctx context.Context, w io.Writer, ladde
 			continue
 		}
 		if mode == setupModeStepByStep {
-			accepted, err := r.confirmRung(onboarding.Result{Rung: rung, Check: check})
+			accepted, err := r.confirmRung(ctx, onboarding.Result{Rung: rung, Check: check})
 			if err != nil || !accepted {
 				continue
 			}
@@ -155,15 +155,16 @@ var runEnableOnboarding = func(ctx context.Context, w io.Writer, assumeYes bool)
 }
 
 // newOnboardingOfferRunner wires the production runner: real rung probes,
-// the browser login and mirror-create offers, and huh-based prompts.
-func newOnboardingOfferRunner(errW io.Writer) onboardingOfferRunner {
+// the login/mirror/import offers, and huh-based prompts. w is enable's
+// output writer — offers write their progress there.
+func newOnboardingOfferRunner(w io.Writer) onboardingOfferRunner {
 	deps := newOnboardingRungDeps()
 	return onboardingOfferRunner{
 		deps: deps,
 		offerFns: map[string]func(ctx context.Context) error{
-			onboarding.KeyAuth:   func(ctx context.Context) error { return runOnboardingLogin(ctx, errW) },
-			onboarding.KeyMirror: func(ctx context.Context) error { return runOnboardingMirrorCreate(ctx, errW, deps) },
-			onboarding.KeyImport: func(ctx context.Context) error { return runOnboardingImport(ctx, errW) },
+			onboarding.KeyAuth:   func(ctx context.Context) error { return runOnboardingLogin(ctx, w) },
+			onboarding.KeyMirror: func(ctx context.Context) error { return runOnboardingMirrorCreate(ctx, w, deps) },
+			onboarding.KeyImport: func(ctx context.Context) error { return runOnboardingImport(ctx, w) },
 		},
 		canPrompt:   interactive.CanPromptInteractively,
 		promptMode:  promptOnboardingSetupMode,
@@ -174,7 +175,7 @@ func newOnboardingOfferRunner(errW io.Writer) onboardingOfferRunner {
 
 // promptOnboardingSetupMode is enable's single consent prompt, summarizing
 // what "finish setup" will do from the missing rungs' titles.
-func promptOnboardingSetupMode(missing []onboarding.Result) (onboardingSetupMode, error) {
+func promptOnboardingSetupMode(ctx context.Context, missing []onboarding.Result) (onboardingSetupMode, error) {
 	summary := onboardingSetupSummary(missing)
 	mode := setupModeAll
 	form := NewAccessibleForm(
@@ -190,7 +191,7 @@ func promptOnboardingSetupMode(missing []onboarding.Result) (onboardingSetupMode
 				Value(&mode),
 		),
 	)
-	if err := form.Run(); err != nil {
+	if err := form.RunWithContext(ctx); err != nil {
 		return setupModeSkip, fmt.Errorf("setup consent prompt: %w", err)
 	}
 	return mode, nil
@@ -214,21 +215,23 @@ func onboardingSetupSummary(missing []onboarding.Result) string {
 	if len(steps) == 0 {
 		return ""
 	}
-	summary := steps[0]
-	var summarySb188 strings.Builder
-	for i := 1; i < len(steps); i++ {
-		if i == len(steps)-1 {
-			summarySb188.WriteString(" and " + steps[i])
-		} else {
-			summarySb188.WriteString(", " + steps[i])
+	var b strings.Builder
+	for i, step := range steps {
+		switch {
+		case i == 0:
+		case i == len(steps)-1:
+			b.WriteString(" and ")
+		default:
+			b.WriteString(", ")
 		}
+		b.WriteString(step)
 	}
-	summary += summarySb188.String()
+	summary := b.String()
 	// Capitalize the first step: summaries are full sentences in the prompt.
-	return string(summary[0]-'a'+'A') + summary[1:] + " so your work shows up in the web UI."
+	return strings.ToUpper(summary[:1]) + summary[1:] + " so your work shows up in the web UI."
 }
 
-func confirmOnboardingRung(r onboarding.Result) (bool, error) {
+func confirmOnboardingRung(ctx context.Context, r onboarding.Result) (bool, error) {
 	title := r.Rung.Title
 	if r.Check.Detail != "" {
 		title += " — " + r.Check.Detail
@@ -241,7 +244,7 @@ func confirmOnboardingRung(r onboarding.Result) (bool, error) {
 				Value(&confirmed),
 		),
 	)
-	if err := form.Run(); err != nil {
+	if err := form.RunWithContext(ctx); err != nil {
 		return false, fmt.Errorf("rung confirm prompt: %w", err)
 	}
 	return confirmed, nil

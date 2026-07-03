@@ -5,7 +5,10 @@
 // status's checklist can never disagree about what is connected.
 package onboarding
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
 // Rung keys — stable identifiers shared by the ladder, enable's offer map,
 // the status renderer, and the `status --json` setup object.
@@ -81,12 +84,21 @@ type Result struct {
 	Check Check
 }
 
-// Checks runs every rung's Check in order.
+// Checks runs every rung's Check concurrently and returns results in ladder
+// order. Concurrency keeps hot paths (`entire status`) at the latency of the
+// slowest single probe instead of the sum; rung checks are independent,
+// read-only ground-truth reads.
 func (l Ladder) Checks(ctx context.Context) []Result {
-	results := make([]Result, 0, len(l))
-	for _, r := range l {
-		results = append(results, Result{Rung: r, Check: r.Check(ctx)})
+	results := make([]Result, len(l))
+	var wg sync.WaitGroup
+	for i, r := range l {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = Result{Rung: r, Check: r.Check(ctx)}
+		}()
 	}
+	wg.Wait()
 	return results
 }
 

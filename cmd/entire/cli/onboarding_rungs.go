@@ -43,9 +43,11 @@ type onboardingRungDeps struct {
 
 // agentImportStatus summarizes one agent's importable history for this repo.
 type agentImportStatus struct {
-	Agent           string
+	Agent string
+	// Sessions is every discovered session, imported or not.
 	Sessions        int
 	UnimportedTurns int
+	ImportedTurns   int
 }
 
 // newOnboardingRungDeps wires the rung probes to their real backends: agent
@@ -76,8 +78,16 @@ func onboardingLadder(deps onboardingRungDeps) onboarding.Ladder {
 }
 
 // probeRepoMirrored asks the active-context control plane whether owner/repo
-// already has a mirror. Owner/repo arrive lowercased from the mirror rung.
+// already has a mirror, consulting a short-TTL per-user cache first so hot
+// paths (`entire status`) don't pay a network round-trip on every run.
+// Owner/repo arrive lowercased from the mirror rung.
 func probeRepoMirrored(ctx context.Context, owner, repo string) (bool, error) {
+	slug := owner + "/" + repo
+	cache := defaultMirrorProbeCache()
+	now := time.Now()
+	if mirrored, ok := cache.get(slug, now); ok {
+		return mirrored, nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, mirrorProbeTimeout)
 	defer cancel()
 	client, err := coreapi.New()
@@ -90,12 +100,15 @@ func probeRepoMirrored(ctx context.Context, owner, repo string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	mirrored := false
 	for _, m := range out.Available {
 		if strings.EqualFold(m.Owner, owner) && strings.EqualFold(m.Repo, repo) {
-			return m.Status == coreapi.AvailableMirrorStatusMirrored, nil
+			mirrored = m.Status == coreapi.AvailableMirrorStatusMirrored
+			break
 		}
 	}
-	return false, nil
+	cache.put(slug, mirrored, now)
+	return mirrored, nil
 }
 
 // discoverAgentImports reports, per registered importer, how much local
@@ -130,6 +143,7 @@ func discoverAgentImports(ctx context.Context) ([]agentImportStatus, error) {
 			Agent:           imp.Name(),
 			Sessions:        res.SessionsScanned,
 			UnimportedTurns: res.TurnsImported,
+			ImportedTurns:   res.TurnsSkipped,
 		})
 	}
 	return statuses, nil
@@ -209,23 +223,43 @@ func importRung(deps onboardingRungDeps) onboarding.Rung {
 					Detail: fmt.Sprintf("%d sessions imported", totalSessions),
 				}
 			}
-			parts := make([]string, 0, len(unimported))
-			unimportedSessions := 0
-			for _, s := range unimported {
-				parts = append(parts, fmt.Sprintf("%d %s", s.Sessions, s.Agent))
-				unimportedSessions += s.Sessions
-			}
-			detail := strings.Join(parts, ", ") + " sessions found, not imported"
-			if unimportedSessions == 1 {
-				detail = strings.Join(parts, ", ") + " session found, not imported"
-			}
 			return onboarding.Check{
 				State:  onboarding.StateMissing,
-				Detail: detail,
+				Detail: unimportedDetail(unimported),
 				Hint:   "entire import " + unimported[0].Agent,
 			}
 		},
 	}
+}
+
+// unimportedDetail phrases the import rung's remaining work. When nothing was
+// ever imported, session counts are accurate ("12 claude-code sessions found,
+// not imported"). After a partial import, claiming every discovered session is
+// unimported would overstate the work, so the wording switches to pending
+// turns.
+func unimportedDetail(unimported []agentImportStatus) string {
+	agents := make([]string, 0, len(unimported))
+	parts := make([]string, 0, len(unimported))
+	sessions, pendingTurns, importedTurns := 0, 0, 0
+	for _, s := range unimported {
+		agents = append(agents, s.Agent)
+		parts = append(parts, fmt.Sprintf("%d %s", s.Sessions, s.Agent))
+		sessions += s.Sessions
+		pendingTurns += s.UnimportedTurns
+		importedTurns += s.ImportedTurns
+	}
+	if importedTurns > 0 {
+		noun := "turns"
+		if pendingTurns == 1 {
+			noun = "turn"
+		}
+		return fmt.Sprintf("%s history partially imported (%d %s pending)",
+			strings.Join(agents, ", "), pendingTurns, noun)
+	}
+	if sessions == 1 {
+		return strings.Join(parts, ", ") + " session found, not imported"
+	}
+	return strings.Join(parts, ", ") + " sessions found, not imported"
 }
 
 func authRung(deps onboardingRungDeps) onboarding.Rung {

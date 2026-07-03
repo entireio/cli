@@ -43,9 +43,16 @@ func renderOnboardingChecklist(results []onboarding.Result, sty statusStyles) st
 		b.WriteString(onboardingRowMarker(r.Check.State, sty))
 		b.WriteString(" ")
 		fmt.Fprintf(&b, "%-*s", titleWidth, r.Rung.Title)
-		if r.Check.Detail != "" {
+		detail := r.Check.Detail
+		// An unknown rung (e.g. offline mirror probe) doesn't count as a
+		// missing step, so its hint would otherwise never surface — carry it
+		// in the row instead of leaving a bare "?" with nothing actionable.
+		if detail == "" && r.Check.State == onboarding.StateUnknown && r.Check.Hint != "" {
+			detail = "couldn't check — retry with `" + r.Check.Hint + "`"
+		}
+		if detail != "" {
 			b.WriteString("  ")
-			b.WriteString(sty.render(sty.dim, r.Check.Detail))
+			b.WriteString(sty.render(sty.dim, detail))
 		}
 		b.WriteString("\n")
 	}

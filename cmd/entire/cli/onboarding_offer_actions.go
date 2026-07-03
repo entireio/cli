@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agentimport"
@@ -19,8 +18,8 @@ import (
 
 // runOnboardingLogin is the auth rung's offer: the same browser-first login
 // `entire login` runs, with default flags (standard login server, no device
-// mode unless the environment forces it).
-func runOnboardingLogin(ctx context.Context, errW io.Writer) error {
+// mode unless the environment forces it). w is enable's output writer.
+func runOnboardingLogin(ctx context.Context, w io.Writer) error {
 	loginServer, err := parseLoginServer(api.DefaultAuthBaseURL)
 	if err != nil {
 		return fmt.Errorf("resolve login server: %w", err)
@@ -29,7 +28,7 @@ func runOnboardingLogin(ctx context.Context, errW io.Writer) error {
 	startBrowser := func(ctx context.Context) (browserAuthFlow, error) {
 		return client.StartBrowserAuth(ctx)
 	}
-	return runLoginAuto(ctx, os.Stdout, errW, client, startBrowser, openBrowser, loginFlowFacts{
+	return runLoginAuto(ctx, w, w, client, startBrowser, openBrowser, loginFlowFacts{
 		canPrompt:  interactive.CanPromptInteractively(),
 		sshSession: isSSHSession(),
 	})
@@ -104,5 +103,9 @@ func runOnboardingMirrorCreate(ctx context.Context, errW io.Writer, deps onboard
 	if outcome.created != nil && !outcome.created.Empty {
 		fmt.Fprintln(errW, "  Mirror registered — the initial clone continues in the background.")
 	}
+	// Write-through: the placement is registered, so the probe cache can say
+	// "mirrored" immediately instead of waiting for the server-side clone to
+	// surface in the available-mirrors list.
+	defaultMirrorProbeCache().put(owner+"/"+repo, true, time.Now())
 	return nil
 }

@@ -136,3 +136,33 @@ func TestStateString_JSONStableNames(t *testing.T) {
 		}
 	}
 }
+
+// Checks runs rungs concurrently so a slow probe (network mirror check)
+// doesn't serialize behind other rungs on hot paths like `entire status`.
+func TestLadderChecks_RunsConcurrently(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{}, 2)
+	proceed := make(chan struct{})
+	blockingRung := func(key string) Rung {
+		return Rung{Key: key, Title: key, Check: func(context.Context) Check {
+			started <- struct{}{}
+			<-proceed
+			return Check{State: StateDone}
+		}}
+	}
+
+	done := make(chan []Result, 1)
+	go func() {
+		done <- Ladder{blockingRung("a"), blockingRung("b")}.Checks(context.Background())
+	}()
+
+	// Both checks must start before either finishes — impossible sequentially.
+	<-started
+	<-started
+	close(proceed)
+
+	results := <-done
+	if len(results) != 2 || results[0].Rung.Key != "a" || results[1].Rung.Key != "b" {
+		t.Fatalf("results order not preserved: %+v", results)
+	}
+}

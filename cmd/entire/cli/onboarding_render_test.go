@@ -128,3 +128,24 @@ func TestRenderOnboardingChecklist_SkipsNotApplicableRows(t *testing.T) {
 		t.Errorf("counter should exclude not-applicable rungs, got:\n%s", out)
 	}
 }
+
+// An unknown rung that carries a hint (e.g. offline mirror probe) must
+// surface it — otherwise an offline user gets a bare "?" row with nothing
+// actionable and no footer, since unknown doesn't count as a missing step.
+func TestRenderOnboardingChecklist_UnknownRowCarriesHint(t *testing.T) {
+	t.Parallel()
+	results := []onboarding.Result{
+		resultFor(onboarding.KeyHooks, "Agent hooks", onboarding.Check{State: onboarding.StateDone, Detail: "Claude Code"}),
+		resultFor(onboarding.KeyAuth, "Logged in", onboarding.Check{State: onboarding.StateDone, Detail: "peyton"}),
+		resultFor(onboarding.KeyMirror, "Repo mirrored", onboarding.Check{State: onboarding.StateUnknown, Hint: "entire repo mirror list"}),
+	}
+
+	out := renderOnboardingChecklist(results, plainStyles())
+
+	if !strings.Contains(out, "couldn't check — retry with `entire repo mirror list`") {
+		t.Errorf("unknown row should carry its hint, got:\n%s", out)
+	}
+	if strings.Contains(out, "steps left") {
+		t.Errorf("unknown rungs are not missing steps; no enable footer expected, got:\n%s", out)
+	}
+}

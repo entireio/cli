@@ -3,7 +3,10 @@ package cli
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/onboarding"
 	"github.com/entireio/cli/internal/entireclient/contexts"
@@ -329,5 +332,71 @@ func TestImportRung_SingularSessionCopy(t *testing.T) {
 
 	if check.Detail != "1 claude-code session found, not imported" {
 		t.Errorf("Detail = %q, want singular 'session'", check.Detail)
+	}
+}
+
+// A partial prior import (some turns already imported) must not claim every
+// discovered session is unimported.
+func TestImportRung_PartialImportWording(t *testing.T) {
+	t.Parallel()
+	deps := onboardingRungDeps{
+		discoverImports: func(context.Context) ([]agentImportStatus, error) {
+			return []agentImportStatus{
+				{Agent: "claude-code", Sessions: 10, UnimportedTurns: 4, ImportedTurns: 36},
+			}, nil
+		},
+	}
+
+	check := importRung(deps).Check(context.Background())
+
+	if check.State != onboarding.StateMissing {
+		t.Errorf("State = %v, want StateMissing", check.State)
+	}
+	if check.Detail != "claude-code history partially imported (4 turns pending)" {
+		t.Errorf("Detail = %q, want partial-import wording", check.Detail)
+	}
+}
+
+func TestMirrorProbeCache_RoundTripAndTTL(t *testing.T) {
+	t.Parallel()
+	cache := mirrorProbeCache{path: filepath.Join(t.TempDir(), "mirror.json"), ttl: 15 * time.Minute}
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+
+	if _, ok := cache.get("acme/api", now); ok {
+		t.Error("empty cache should miss")
+	}
+
+	cache.put("acme/api", true, now)
+	mirrored, ok := cache.get("acme/api", now.Add(5*time.Minute))
+	if !ok || !mirrored {
+		t.Errorf("fresh entry: get = (%v, %v), want (true, true)", mirrored, ok)
+	}
+
+	if _, ok := cache.get("acme/api", now.Add(16*time.Minute)); ok {
+		t.Error("entry past TTL should miss")
+	}
+
+	if _, ok := cache.get("other/repo", now); ok {
+		t.Error("unrelated slug should miss")
+	}
+}
+
+func TestMirrorProbeCache_CorruptFileIsAMiss(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "mirror.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cache := mirrorProbeCache{path: path, ttl: 15 * time.Minute}
+
+	if _, ok := cache.get("acme/api", time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)); ok {
+		t.Error("corrupt cache file should behave as a miss")
+	}
+	// And put should recover by rewriting the file.
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	cache.put("acme/api", false, now)
+	mirrored, ok := cache.get("acme/api", now)
+	if !ok || mirrored {
+		t.Errorf("after recovery put: get = (%v, %v), want (false, true)", mirrored, ok)
 	}
 }

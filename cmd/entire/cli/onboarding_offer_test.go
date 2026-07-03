@@ -80,7 +80,7 @@ func TestOnboardingLadder_ModeAll_RunsOffersAndUnblocks(t *testing.T) {
 	f := &fakeConnectState{}
 	var ran []string
 	r := newTestOffersRunner(f, &ran, t)
-	r.promptMode = func([]onboarding.Result) (onboardingSetupMode, error) { return setupModeAll, nil }
+	r.promptMode = func(context.Context, []onboarding.Result) (onboardingSetupMode, error) { return setupModeAll, nil }
 
 	var out bytes.Buffer
 	r.run(context.Background(), &out)
@@ -99,7 +99,7 @@ func TestOnboardingLadder_ModeSkip_PrintsHintsWithoutOffers(t *testing.T) {
 	f := &fakeConnectState{}
 	var ran []string
 	r := newTestOffersRunner(f, &ran, t)
-	r.promptMode = func([]onboarding.Result) (onboardingSetupMode, error) { return setupModeSkip, nil }
+	r.promptMode = func(context.Context, []onboarding.Result) (onboardingSetupMode, error) { return setupModeSkip, nil }
 
 	var out bytes.Buffer
 	r.run(context.Background(), &out)
@@ -117,8 +117,10 @@ func TestOnboardingLadder_StepByStep_HonorsDecline(t *testing.T) {
 	f := &fakeConnectState{}
 	var ran []string
 	r := newTestOffersRunner(f, &ran, t)
-	r.promptMode = func([]onboarding.Result) (onboardingSetupMode, error) { return setupModeStepByStep, nil }
-	r.confirmRung = func(res onboarding.Result) (bool, error) {
+	r.promptMode = func(context.Context, []onboarding.Result) (onboardingSetupMode, error) {
+		return setupModeStepByStep, nil
+	}
+	r.confirmRung = func(_ context.Context, res onboarding.Result) (bool, error) {
 		return res.Rung.Key != onboarding.KeyAuth, nil // decline login, accept the rest
 	}
 
@@ -140,7 +142,7 @@ func TestOnboardingLadder_NonInteractive_NeverPromptsOrOffers(t *testing.T) {
 	var ran []string
 	r := newTestOffersRunner(f, &ran, t)
 	r.canPrompt = func() bool { return false }
-	r.promptMode = func([]onboarding.Result) (onboardingSetupMode, error) {
+	r.promptMode = func(context.Context, []onboarding.Result) (onboardingSetupMode, error) {
 		t.Error("promptMode must not be called non-interactively")
 		return setupModeSkip, nil
 	}
@@ -161,7 +163,7 @@ func TestOnboardingLadder_FullyConnected_NoPromptCollapsedLine(t *testing.T) {
 	f := &fakeConnectState{loggedIn: true, mirrored: true}
 	var ran []string
 	r := newTestOffersRunner(f, &ran, t)
-	r.promptMode = func([]onboarding.Result) (onboardingSetupMode, error) {
+	r.promptMode = func(context.Context, []onboarding.Result) (onboardingSetupMode, error) {
 		t.Error("promptMode must not be called when nothing is missing")
 		return setupModeSkip, nil
 	}
@@ -185,7 +187,7 @@ func TestOnboardingLadder_OfferFailureIsBestEffort(t *testing.T) {
 	r.offerFns[onboarding.KeyMirror] = func(context.Context) error {
 		return errors.New("cluster unreachable")
 	}
-	r.promptMode = func([]onboarding.Result) (onboardingSetupMode, error) { return setupModeAll, nil }
+	r.promptMode = func(context.Context, []onboarding.Result) (onboardingSetupMode, error) { return setupModeAll, nil }
 
 	var out bytes.Buffer
 	r.run(context.Background(), &out)
@@ -231,7 +233,7 @@ func TestOnboardingLadder_SucceededOfferStillSyncingRendersInProgress(t *testing
 		ran = append(ran, "mirror")
 		return nil // create succeeded — but f.mirrored stays false (clone lag)
 	}
-	r.promptMode = func([]onboarding.Result) (onboardingSetupMode, error) { return setupModeAll, nil }
+	r.promptMode = func(context.Context, []onboarding.Result) (onboardingSetupMode, error) { return setupModeAll, nil }
 
 	var out bytes.Buffer
 	r.run(context.Background(), &out)
@@ -268,7 +270,7 @@ func TestOnboardingLadder_ModeAll_RunsImportOffer(t *testing.T) {
 		imported = true
 		return nil
 	}
-	r.promptMode = func([]onboarding.Result) (onboardingSetupMode, error) { return setupModeAll, nil }
+	r.promptMode = func(context.Context, []onboarding.Result) (onboardingSetupMode, error) { return setupModeAll, nil }
 
 	var out bytes.Buffer
 	r.run(context.Background(), &out)
