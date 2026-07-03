@@ -635,3 +635,48 @@ func (r *recordingSession) WaitFor(string, time.Duration) (string, error) {
 }
 func (r *recordingSession) Capture() string { return "" }
 func (r *recordingSession) Close() error    { return nil }
+
+// TestAntigravityFatalFromLogs pins the headless quota-wall detection: in -p
+// mode agy puts "Individual quota reached" ONLY in its CLI log — the
+// transcript's ERROR_MESSAGE carries just the generic "overloaded" text and
+// stderr is empty, so without the log peek the harness retries into a wall.
+func TestAntigravityFatalFromLogs(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("E2E_ANTIGRAVITY_LOG_DIR", dir)
+
+	logLine := "E0703 15:23:40.1 log.go:398] RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h46m10s.\n"
+	if err := os.WriteFile(filepath.Join(dir, "cli-20260703_152340.log"), []byte(logLine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	msg, fatal := antigravityFatalFromLogs(time.Now().Add(-time.Minute))
+	if !fatal {
+		t.Fatal("quota wall in agy CLI log must be detected as fatal")
+	}
+	if msg == "" {
+		t.Fatal("fatal log detection must return an actionable message")
+	}
+
+	// Logs older than `since` must be ignored (stale walls from prior runs).
+	_, fatalOld := antigravityFatalFromLogs(time.Now().Add(time.Hour))
+	if fatalOld {
+		t.Error("log files older than the prompt start must not be considered")
+	}
+}
+
+// TestAntigravityFatalErrorMatchesOwnMessages pins idempotent classification:
+// once a fatal log finding is folded into an error, IsTransientError must
+// still classify the combined text as fatal (non-transient) even though the
+// raw marker may only appear in our own generated message.
+func TestAntigravityFatalErrorMatchesOwnMessages(t *testing.T) {
+	t.Parallel()
+	for _, msg := range []string{
+		"agy individual quota exhausted (consumer tier resets on a multi-day window) — use an entitled account/ADC or wait for the reset shown in the error",
+		"agy backend not provisioned for this project/identity (cloudcode-pa is gated) — needs a Gemini Code Assist subscription + seat, not just an enabled API",
+		"agy is not logged in — authenticate with `agy` interactively or provide ADC credentials",
+	} {
+		if (&Antigravity{}).IsTransientError(Output{}, stringError(msg+": some wrapped transient 429 overloaded text")) {
+			t.Errorf("classifier must treat its own fatal message as fatal: %q", msg)
+		}
+	}
+}

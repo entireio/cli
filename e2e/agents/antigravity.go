@@ -103,17 +103,62 @@ func (a *Antigravity) IsTransientError(out Output, err error) bool {
 }
 
 // antigravityFatalError detects non-retryable walls that no scenario restart
-// will clear: an exhausted individual quota (multi-day reset), a gated/disabled
-// Code Assist backend, or a missing agy login. Returns a human-actionable
-// message and true when one is present. See reference_antigravity_auth_entitlement.
+// will clear: an exhausted individual quota, a gated/disabled Code Assist
+// backend, or a missing agy login. Returns a human-actionable message and true
+// when one is present. Also matches its own generated messages so a fatal
+// finding folded into an error stays fatal on reclassification.
+// See reference_antigravity_auth_entitlement.
 func antigravityFatalError(content string) (string, bool) {
 	switch {
-	case strings.Contains(content, "Individual quota reached"):
-		return "agy individual quota exhausted (consumer tier resets on a multi-day window) — use an entitled account/ADC or wait for the reset shown in the error", true
-	case strings.Contains(content, "SERVICE_DISABLED"), strings.Contains(content, "AUTH_PERMISSION_DENIED"):
+	case strings.Contains(content, "Individual quota reached"),
+		strings.Contains(content, "agy individual quota exhausted"):
+		return "agy individual quota exhausted (consumer tier resets on a rolling window) — use an entitled account/ADC or wait for the reset shown in the agy log", true
+	case strings.Contains(content, "SERVICE_DISABLED"),
+		strings.Contains(content, "AUTH_PERMISSION_DENIED"),
+		strings.Contains(content, "agy backend not provisioned"):
 		return "agy backend not provisioned for this project/identity (cloudcode-pa is gated) — needs a Gemini Code Assist subscription + seat, not just an enabled API", true
-	case strings.Contains(content, "not logged into Antigravity"):
+	case strings.Contains(content, "not logged into Antigravity"),
+		strings.Contains(content, "agy is not logged in"):
 		return "agy is not logged in — authenticate with `agy` interactively or provide ADC credentials", true
+	}
+	return "", false
+}
+
+// antigravityFatalFromLogs scans agy CLI log files modified since `since` for
+// fatal wall markers. Headless (-p) runs never surface the quota detail on
+// stderr, and the transcript's ERROR_MESSAGE carries only the generic
+// "overloaded" text — "Individual quota reached" lands solely in
+// ~/.gemini/antigravity-cli/log/cli-*.log. Without this peek the harness
+// classifies the quota wall as transient and retries into it.
+// E2E_ANTIGRAVITY_LOG_DIR overrides the directory (tests).
+func antigravityFatalFromLogs(since time.Time) (string, bool) {
+	dir := os.Getenv("E2E_ANTIGRAVITY_LOG_DIR")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", false
+		}
+		dir = filepath.Join(home, ".gemini", "antigravity-cli", "log")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "cli-") {
+			continue
+		}
+		info, infoErr := e.Info()
+		if infoErr != nil || info.ModTime().Before(since) {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(dir, e.Name()))
+		if readErr != nil {
+			continue
+		}
+		if msg, fatal := antigravityFatalError(string(data)); fatal {
+			return msg, true
+		}
 	}
 	return "", false
 }
@@ -179,6 +224,13 @@ func (a *Antigravity) RunPrompt(ctx context.Context, dir string, prompt string, 
 			err = errors.New(msg)
 		} else {
 			err = fmt.Errorf("%s (%w)", msg, err)
+		}
+	} else if err != nil {
+		// The stdout/stderr surface can be clean while the wall is only in
+		// agy's CLI log (headless quota exhaustion). Peek before letting the
+		// error be classified transient.
+		if logMsg, fatal := antigravityFatalFromLogs(startedAt); fatal {
+			err = fmt.Errorf("%s (%w)", logMsg, err)
 		}
 	}
 
