@@ -18,7 +18,8 @@ var onboardingStatusResults = func(ctx context.Context) []onboarding.Result {
 // renderOnboardingChecklist renders the setup ladder for `entire status` and
 // enable's closing summary. Fully connected collapses to a single line so the
 // steady state stays quiet; anything less renders one row per applicable rung
-// plus a pointer back at `entire enable`, which re-offers whatever is missing.
+// plus, when actionable steps remain, a pointer back at `entire enable`,
+// which re-offers whatever is missing.
 func renderOnboardingChecklist(results []onboarding.Result, sty statusStyles) string {
 	if onboarding.Complete(results) {
 		return renderConnectedLine(results, sty)

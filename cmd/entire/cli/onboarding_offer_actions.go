@@ -37,8 +37,9 @@ func runOnboardingLogin(ctx context.Context, w io.Writer) error {
 // runOnboardingImport is the import rung's offer: import discoverable agent
 // history as read-only checkpoints, same flow as `entire import <agent>`
 // (checkpoint policy honored, repo/user redaction config loaded before any
-// write). Minimal by design — PR #1595's richer enable-time offer (per-agent
-// selection, first-run gating) replaces these internals when it lands.
+// write). Minimal by design: all agents, all sessions, no per-agent
+// selection. PR #1595 explores per-agent selection for this offer; if
+// adopted it must keep the ladder's re-offer-on-re-enable resume semantics.
 func runOnboardingImport(ctx context.Context, w io.Writer) error {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -84,11 +85,7 @@ func runOnboardingMirrorCreate(ctx context.Context, errW io.Writer, deps onboard
 	if forge != "gh" {
 		return errors.New("origin is not a GitHub repository")
 	}
-	// parseGitHubURL semantics: server-side slugs are lowercase.
-	owner, repo, err = parseGitHubURL(fmt.Sprintf("github.com/%s/%s", owner, repo))
-	if err != nil {
-		return fmt.Errorf("parse origin slug: %w", err)
-	}
+	owner, repo = githubSlug(owner, repo)
 	client, err := coreapi.NewForCluster(ctx, defaultClusterHost)
 	if err != nil {
 		return fmt.Errorf("connect to %s: %w", defaultClusterHost, err)
@@ -100,12 +97,31 @@ func runOnboardingMirrorCreate(ctx context.Context, errW io.Writer, deps onboard
 	if err != nil {
 		return err
 	}
-	if outcome.created != nil && !outcome.created.Empty {
-		fmt.Fprintln(errW, "  Mirror registered — the initial clone continues in the background.")
+	return finalizeMirrorOffer(errW, outcome, owner+"/"+repo, func(slug string) {
+		// Write-through: the placement is registered, so the probe cache can
+		// say "mirrored" immediately instead of waiting for the server-side
+		// clone to surface in the available-mirrors list.
+		defaultMirrorProbeCache().put(slug, true, time.Now())
+	})
+}
+
+// finalizeMirrorOffer turns a nil-error createAndAwaitMirror outcome into the
+// offer's result. A suspended placement returns nil error from the create
+// path but will never serve — report it like `entire repo mirror create`
+// does, return an error so the rung keeps its retry hint, and skip the
+// cache write-through that would otherwise claim "mirrored" for the TTL.
+func finalizeMirrorOffer(w io.Writer, outcome mirrorCreateOutcome, slug string, cachePut func(slug string)) error {
+	created := outcome.created
+	if created == nil {
+		return errors.New("mirror placement not registered")
 	}
-	// Write-through: the placement is registered, so the probe cache can say
-	// "mirrored" immediately instead of waiting for the server-side clone to
-	// surface in the available-mirrors list.
-	defaultMirrorProbeCache().put(owner+"/"+repo, true, time.Now())
+	if created.Suspended {
+		fmt.Fprintln(w, "  WARNING: this mirror has been suspended by an admin and won't be usable.")
+		return errMirrorSuspended
+	}
+	if !created.Empty {
+		fmt.Fprintln(w, "  Mirror registered — the initial clone continues in the background.")
+	}
+	cachePut(slug)
 	return nil
 }

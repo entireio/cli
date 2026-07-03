@@ -1703,9 +1703,10 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return nil
 	}
 
-	// Connect rungs (login, mirror) — same ladder as interactive enable; the
-	// --agent path can still be a TTY, and --yes/no-TTY prints hints only.
-	runEnableOnboarding(ctx, w, opts.Yes)
+	// Connect rungs — same ladder as interactive enable, but --agent is
+	// documented as non-interactive, so prompting is always suppressed here:
+	// the checklist and run-later hints carry the follow-up commands.
+	runEnableOnboarding(ctx, w, true)
 
 	fmt.Fprintln(w, "\nReady.")
 

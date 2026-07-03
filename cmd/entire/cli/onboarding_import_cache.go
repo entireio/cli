@@ -3,9 +3,7 @@ package cli
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -19,7 +17,7 @@ import (
 // (path, mtime, size) plus the local metadata-branch tip, so an appended
 // transcript or a new checkpoint/import (ref moves) recomputes immediately,
 // while an unchanged repo pays only the cheap discovery glob on hot paths
-// like `entire status`.
+// like `entire status`. Persistence via the shared jsonFileCache shell.
 type importScanCache struct {
 	path string
 }
@@ -51,26 +49,19 @@ func importScanFingerprint(files []importScanInput, metadataTip string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// importScanEntry doubles as the on-disk schema: agentImportStatus's json
+// tags are part of the cache format.
 type importScanEntry struct {
 	Fingerprint string              `json:"fingerprint"`
 	Statuses    []agentImportStatus `json:"statuses"`
 }
 
-type importScanFile struct {
-	Entries map[string]importScanEntry `json:"entries"`
-}
-
-func (c importScanCache) load() importScanFile {
-	var f importScanFile
-	data, err := os.ReadFile(c.path)
-	if err != nil || json.Unmarshal(data, &f) != nil || f.Entries == nil {
-		return importScanFile{Entries: map[string]importScanEntry{}}
-	}
-	return f
+func (c importScanCache) shell() jsonFileCache[importScanEntry] {
+	return jsonFileCache[importScanEntry](c)
 }
 
 func (c importScanCache) get(repoRoot, fingerprint string) ([]agentImportStatus, bool) {
-	entry, found := c.load().Entries[repoRoot]
+	entry, found := c.shell().load()[repoRoot]
 	if !found || entry.Fingerprint != fingerprint {
 		return nil, false
 	}
@@ -78,15 +69,8 @@ func (c importScanCache) get(repoRoot, fingerprint string) ([]agentImportStatus,
 }
 
 func (c importScanCache) put(repoRoot, fingerprint string, statuses []agentImportStatus) {
-	f := c.load()
-	f.Entries[repoRoot] = importScanEntry{Fingerprint: fingerprint, Statuses: statuses}
-	data, err := json.Marshal(f)
-	if err != nil {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(c.path), 0o700); err != nil {
-		return
-	}
-	//nolint:errcheck,gosec // best-effort cache write; a miss next time is fine
-	os.WriteFile(c.path, data, 0o600)
+	shell := c.shell()
+	entries := shell.load()
+	entries[repoRoot] = importScanEntry{Fingerprint: fingerprint, Statuses: statuses}
+	shell.store(entries)
 }

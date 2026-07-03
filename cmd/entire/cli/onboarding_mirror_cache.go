@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -21,9 +19,9 @@ const mirrorProbeTTL = 15 * time.Minute
 // back online.
 const mirrorProbeFailureTTL = 5 * time.Minute
 
-// mirrorProbeCache is a best-effort per-user file cache of mirror-probe
-// results keyed by "owner/repo". Read/write errors degrade to cache misses;
-// the ground truth stays the control plane.
+// mirrorProbeCache is a best-effort per-user cache of mirror-probe results
+// keyed by "owner/repo", on the shared jsonFileCache shell. The ground truth
+// stays the control plane.
 type mirrorProbeCache struct {
 	path       string
 	ttl        time.Duration
@@ -44,21 +42,12 @@ type mirrorProbeEntry struct {
 	CheckedAt   time.Time `json:"checked_at"`
 }
 
-type mirrorProbeFile struct {
-	Entries map[string]mirrorProbeEntry `json:"entries"`
-}
-
-func (c mirrorProbeCache) load() mirrorProbeFile {
-	var f mirrorProbeFile
-	data, err := os.ReadFile(c.path)
-	if err != nil || json.Unmarshal(data, &f) != nil || f.Entries == nil {
-		return mirrorProbeFile{Entries: map[string]mirrorProbeEntry{}}
-	}
-	return f
+func (c mirrorProbeCache) shell() jsonFileCache[mirrorProbeEntry] {
+	return jsonFileCache[mirrorProbeEntry]{path: c.path}
 }
 
 func (c mirrorProbeCache) get(slug string, now time.Time) (mirrored, unreachable, ok bool) {
-	entry, found := c.load().Entries[slug]
+	entry, found := c.shell().load()[slug]
 	if !found {
 		return false, false, false
 	}
@@ -80,16 +69,28 @@ func (c mirrorProbeCache) putUnreachable(slug string, now time.Time) {
 	c.write(slug, mirrorProbeEntry{Unreachable: true, CheckedAt: now})
 }
 
+// clearUnreachable drops every cached failure while keeping successful probe
+// results. An explicit `entire enable` calls this before its checks: the user
+// asked for setup, so a transient blip cached minutes ago must not suppress
+// the mirror offer for the rest of the failure TTL.
+func (c mirrorProbeCache) clearUnreachable() {
+	shell := c.shell()
+	entries := shell.load()
+	changed := false
+	for slug, entry := range entries {
+		if entry.Unreachable {
+			delete(entries, slug)
+			changed = true
+		}
+	}
+	if changed {
+		shell.store(entries)
+	}
+}
+
 func (c mirrorProbeCache) write(slug string, entry mirrorProbeEntry) {
-	f := c.load()
-	f.Entries[slug] = entry
-	data, err := json.Marshal(f)
-	if err != nil {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(c.path), 0o700); err != nil {
-		return
-	}
-	//nolint:errcheck,gosec // best-effort cache write; a miss next time is fine
-	os.WriteFile(c.path, data, 0o600)
+	shell := c.shell()
+	entries := shell.load()
+	entries[slug] = entry
+	shell.store(entries)
 }

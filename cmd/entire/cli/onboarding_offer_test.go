@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/onboarding"
+	"github.com/entireio/cli/internal/coreapi"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 )
 
@@ -220,35 +221,6 @@ func TestOnboardingLadder_RunLaterHintsAreDeduped(t *testing.T) {
 	}
 }
 
-// A mirror create returns before the server-side clone finishes, so the
-// closing re-check can still read "not mirrored". A rung whose offer just
-// succeeded must not render as missing with a retry hint.
-func TestOnboardingLadder_SucceededOfferStillSyncingRendersInProgress(t *testing.T) {
-	t.Parallel()
-	f := &fakeConnectState{loggedIn: true}
-	var ran []string
-	r := newTestOffersRunner(f, &ran, t)
-	//nolint:unparam // the offer-map signature requires an error return
-	r.offerFns[onboarding.KeyMirror] = func(context.Context) error {
-		ran = append(ran, "mirror")
-		return nil // create succeeded — but f.mirrored stays false (clone lag)
-	}
-	r.promptMode = func(context.Context, []onboarding.Result) (onboardingSetupMode, error) { return setupModeAll, nil }
-
-	var out bytes.Buffer
-	r.run(context.Background(), &out)
-
-	if !strings.Contains(out.String(), "created — sync in progress") {
-		t.Errorf("succeeded-but-syncing rung should render as in progress, got:\n%s", out.String())
-	}
-	if strings.Contains(out.String(), "✗ Repo mirrored") {
-		t.Errorf("succeeded offer must not render as missing, got:\n%s", out.String())
-	}
-	if strings.Contains(out.String(), "run later: entire repo mirror create") {
-		t.Errorf("succeeded offer must not print a retry hint, got:\n%s", out.String())
-	}
-}
-
 // The import rung carries an inline offer: "set up everything" must carry the
 // ladder through history import, not dead-end at 3/4 with a hint.
 func TestOnboardingLadder_ModeAll_RunsImportOffer(t *testing.T) {
@@ -291,5 +263,129 @@ func TestNewOnboardingOfferRunner_WiresImportOffer(t *testing.T) {
 		if r.offerFns[key] == nil {
 			t.Errorf("offerFns[%q] = nil, want an offer wired", key)
 		}
+	}
+}
+
+// A suspended placement returns nil error from createAndAwaitMirror; the
+// offer must not report it as success or write-through the probe cache —
+// otherwise the checklist shows ✓ for an unusable mirror and the cache
+// suppresses re-offering for the TTL.
+func TestFinalizeMirrorOffer_SuspendedIsAnErrorAndNotCached(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	cached := false
+	outcome := mirrorCreateOutcome{created: &coreapi.CreatedMirror{Suspended: true}}
+
+	err := finalizeMirrorOffer(&out, outcome, "acme/api", func(string) { cached = true })
+
+	if err == nil {
+		t.Error("suspended placement must be an error so the rung keeps its retry hint")
+	}
+	if cached {
+		t.Error("suspended placement must not write-through mirrored=true")
+	}
+	if !strings.Contains(out.String(), "suspended") {
+		t.Errorf("user should be told the mirror is suspended, got:\n%s", out.String())
+	}
+}
+
+func TestFinalizeMirrorOffer_SuccessCachesAndReportsCloning(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	var cachedSlug string
+	outcome := mirrorCreateOutcome{created: &coreapi.CreatedMirror{}}
+
+	if err := finalizeMirrorOffer(&out, outcome, "acme/api", func(slug string) { cachedSlug = slug }); err != nil {
+		t.Fatalf("finalizeMirrorOffer error = %v", err)
+	}
+	if cachedSlug != "acme/api" {
+		t.Errorf("cachePut slug = %q, want acme/api", cachedSlug)
+	}
+	if !strings.Contains(out.String(), "clone continues in the background") {
+		t.Errorf("non-empty upstream should mention the background clone, got:\n%s", out.String())
+	}
+}
+
+func TestFinalizeMirrorOffer_EmptyUpstreamCachesWithoutCloneTalk(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	cached := false
+	outcome := mirrorCreateOutcome{created: &coreapi.CreatedMirror{Empty: true}}
+
+	if err := finalizeMirrorOffer(&out, outcome, "acme/api", func(string) { cached = true }); err != nil {
+		t.Fatalf("finalizeMirrorOffer error = %v", err)
+	}
+	if !cached {
+		t.Error("empty upstream is still a registered mirror; cache it")
+	}
+	if strings.Contains(out.String(), "clone continues") {
+		t.Errorf("empty upstream has no clone to wait for, got:\n%s", out.String())
+	}
+}
+
+// Cancelling the consent prompt (Ctrl-C / form error) must behave like skip:
+// no offers run, the checklist still prints. A regression here would run
+// login and mirror creation without consent.
+func TestOnboardingLadder_ConsentCancelBehavesLikeSkip(t *testing.T) {
+	t.Parallel()
+	f := &fakeConnectState{}
+	var ran []string
+	r := newTestOffersRunner(f, &ran, t)
+	r.promptMode = func(context.Context, []onboarding.Result) (onboardingSetupMode, error) {
+		return setupModeAll, errors.New("user aborted")
+	}
+
+	var out bytes.Buffer
+	r.run(context.Background(), &out)
+
+	if len(ran) != 0 {
+		t.Errorf("offers ran = %v, want none after a cancelled prompt", ran)
+	}
+	if !strings.Contains(out.String(), "Setup 1/3 complete") {
+		t.Errorf("checklist should still print after cancel, got:\n%s", out.String())
+	}
+}
+
+// Step-by-step accept must actually run the confirmed rung's offer.
+func TestOnboardingLadder_StepByStep_AcceptRunsOffer(t *testing.T) {
+	t.Parallel()
+	f := &fakeConnectState{loggedIn: true} // only mirror missing
+	var ran []string
+	r := newTestOffersRunner(f, &ran, t)
+	r.promptMode = func(context.Context, []onboarding.Result) (onboardingSetupMode, error) {
+		return setupModeStepByStep, nil
+	}
+	r.confirmRung = func(context.Context, onboarding.Result) (bool, error) { return true, nil }
+
+	var out bytes.Buffer
+	r.run(context.Background(), &out)
+
+	if len(ran) != 1 || ran[0] != onboarding.KeyMirror {
+		t.Errorf("offers ran = %v, want [mirror] on accept", ran)
+	}
+}
+
+// A blocked rung is only offerable when the rung blocking it can itself be
+// offered this pass. If auth is Unknown (e.g. unreadable context store),
+// promising "mirrors this repo" in the consent prompt would be a lie — the
+// mirror rung stays blocked and nothing would run.
+func TestOnboardingLadder_BlockedRungNotOfferableWithoutItsBlocker(t *testing.T) {
+	t.Parallel()
+	f := &fakeConnectState{}
+	var ran []string
+	r := newTestOffersRunner(f, &ran, t)
+	r.deps.listContexts = func() ([]*contexts.Context, string, error) {
+		return nil, "", errors.New("contexts.json: corrupt") // auth → Unknown
+	}
+	r.promptMode = func(_ context.Context, missing []onboarding.Result) (onboardingSetupMode, error) {
+		t.Errorf("promptMode called with %d rungs; nothing is actionable (auth unknown, mirror blocked)", len(missing))
+		return setupModeSkip, nil
+	}
+
+	var out bytes.Buffer
+	r.run(context.Background(), &out)
+
+	if len(ran) != 0 {
+		t.Errorf("offers ran = %v, want none", ran)
 	}
 }

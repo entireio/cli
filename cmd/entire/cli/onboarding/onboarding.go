@@ -1,6 +1,7 @@
 // Package onboarding models the setup ladder shared by `entire enable` and
 // `entire status`: an ordered list of rungs (hooks, auth, mirror, import),
-// each recomputing done/missing from ground truth on every check. Keeping the
+// each recomputing done/missing from ground truth — or a short-TTL cache of
+// it, for network probes — on every check. Keeping the
 // model in one place guarantees enable's prompts, its closing summary, and
 // status's checklist can never disagree about what is connected.
 package onboarding
@@ -58,8 +59,9 @@ type Check struct {
 	// Detail is a short human fragment for checklist rows, e.g. a login handle
 	// or "12 sessions found, not imported".
 	Detail string
-	// Hint is the exact command to run later when the rung is skipped/missing,
-	// e.g. "entire auth login".
+	// Hint is the exact command to run later when the rung is skipped/missing
+	// (e.g. "entire auth login"), or the retry/diagnose command when the
+	// check couldn't run (rendered as "couldn't check — retry with ...").
 	Hint string
 }
 
@@ -69,10 +71,9 @@ type Rung struct {
 	Key   string
 	Title string
 	// Check recomputes the rung's state from ground truth. It must not prompt.
+	// Offers (the interactive setup steps) are wired separately in the enable
+	// runner's offer map, keyed by Rung.Key.
 	Check func(ctx context.Context) Check
-	// Offer runs the rung's interactive setup step. Nil means the rung has no
-	// inline offer (e.g. import until the enable-time offer lands).
-	Offer func(ctx context.Context) error
 }
 
 // Ladder is an ordered set of rungs.

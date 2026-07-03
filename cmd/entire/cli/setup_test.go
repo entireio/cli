@@ -3230,3 +3230,60 @@ func TestEnableCmd_ReenableDisabledRepo_RunsOnboardingLadder(t *testing.T) {
 		t.Error("re-enable must run the onboarding ladder")
 	}
 }
+
+// The --agent path is documented as non-interactive ("Enables non-interactive
+// mode"); the onboarding ladder must run there with prompting suppressed
+// regardless of --yes, or CI on a TTY runner hangs on the consent prompt.
+func TestSetupAgentHooksNonInteractive_RunsOnboardingWithoutPrompts(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeClaudeHooksFixture(t)
+
+	var gotAssumeYes *bool
+	prev := runEnableOnboarding
+	runEnableOnboarding = func(_ context.Context, _ io.Writer, assumeYes bool) { gotAssumeYes = &assumeYes }
+	t.Cleanup(func() { runEnableOnboarding = prev })
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+	var buf bytes.Buffer
+	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, EnableOptions{}); err != nil {
+		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
+	}
+
+	if gotAssumeYes == nil {
+		t.Fatal("--agent enable must run the onboarding ladder")
+	}
+	if !*gotAssumeYes {
+		t.Error("--agent enable must suppress onboarding prompts (assumeYes=true) even without --yes")
+	}
+}
+
+// First-run interactive enable (the feature's primary audience) must run the
+// onboarding ladder; --yes must propagate so no prompt can appear.
+func TestRunEnableInteractive_FirstRun_RunsOnboardingLadder(t *testing.T) {
+	setupTestRepo(t)
+
+	var gotAssumeYes *bool
+	prev := runEnableOnboarding
+	runEnableOnboarding = func(_ context.Context, _ io.Writer, assumeYes bool) { gotAssumeYes = &assumeYes }
+	t.Cleanup(func() { runEnableOnboarding = prev })
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+	var buf bytes.Buffer
+	if err := runEnableInteractive(context.Background(), &buf, []agent.Agent{ag}, EnableOptions{Yes: true, Telemetry: true}); err != nil {
+		t.Fatalf("runEnableInteractive() error = %v", err)
+	}
+
+	if gotAssumeYes == nil {
+		t.Fatal("first-run enable must run the onboarding ladder")
+	}
+	if !*gotAssumeYes {
+		t.Error("--yes must propagate to the onboarding ladder")
+	}
+}

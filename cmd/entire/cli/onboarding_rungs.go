@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agentimport"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/onboarding"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/internal/coreapi"
@@ -38,7 +39,8 @@ type onboardingRungDeps struct {
 	resolveOrigin func(ctx context.Context) (forge, owner, repo string, err error)
 	// authed reports whether a usable login exists, without prompting.
 	authed func(ctx context.Context) bool
-	// probeMirror asks the control plane whether owner/repo is mirrored.
+	// probeMirror reports whether owner/repo is mirrored on any reachable
+	// core (production: cached, multi-core — see probeRepoMirrored).
 	probeMirror func(ctx context.Context, owner, repo string) (bool, error)
 	// discoverImports reports per-agent local history discoverable for this
 	// repo and how much of it has not been imported yet. Local-only.
@@ -81,8 +83,16 @@ func onboardingLadder(deps onboardingRungDeps) onboarding.Ladder {
 	return onboarding.Ladder{hooksRung(deps), authRung(deps), mirrorRung(deps), importRung(deps)}
 }
 
-// availableMirrorLister is the slice of *coreapi.Client the mirror probe needs; a
-// seam so probeMirrorAcross is testable without a control plane.
+// githubSlug is the single encoding of the "server-side mirror slugs are
+// lowercase" invariant (parseGitHubURL semantics) — used for probe queries,
+// the probe-cache key, and the create write-through, which must never fork
+// on case.
+func githubSlug(owner, repo string) (slugOwner, slugRepo string) {
+	return strings.ToLower(owner), strings.ToLower(repo)
+}
+
+// availableMirrorLister is the subset of *coreapi.Client's methods the mirror
+// probe needs; a seam so probeMirrorAcross is testable without a control plane.
 type availableMirrorLister interface {
 	ListAvailableMirrors(ctx context.Context, params coreapi.ListAvailableMirrorsParams) (*coreapi.ListAvailableMirrorsOutputBody, error)
 	CoreOrigin() string
@@ -181,9 +191,18 @@ func discoverAgentImports(ctx context.Context) ([]agentImportStatus, error) {
 	var discovered []discovery
 	var inputs []importScanInput
 	cacheable := true
+	discoverFailures := 0
 	for _, imp := range agentimport.All() {
 		files, discoverErr := imp.Discover(repoRoot, "", now, nil)
-		if discoverErr != nil || len(files) == 0 {
+		if discoverErr != nil {
+			// Best-effort per agent, but an error is not "nothing found":
+			// don't memoize a result computed without this agent's files.
+			logging.Warn(ctx, "onboarding: transcript discovery failed", "agent", imp.Name(), "error", discoverErr)
+			discoverFailures++
+			cacheable = false
+			continue
+		}
+		if len(files) == 0 {
 			continue
 		}
 		discovered = append(discovered, discovery{imp: imp, files: files})
@@ -199,6 +218,11 @@ func discoverAgentImports(ctx context.Context) ([]agentImportStatus, error) {
 		}
 	}
 	if len(discovered) == 0 {
+		if discoverFailures > 0 {
+			// Every answer we have is an error — "no prior history found"
+			// would be an affirmatively false settled state.
+			return nil, fmt.Errorf("transcript discovery failed for %d agent(s)", discoverFailures)
+		}
 		return nil, nil
 	}
 
@@ -217,6 +241,7 @@ func discoverAgentImports(ctx context.Context) ([]agentImportStatus, error) {
 	}
 
 	var statuses []agentImportStatus
+	runFailures := 0
 	for _, d := range discovered {
 		res, runErr := agentimport.Run(ctx, repo, d.imp, agentimport.Options{
 			RepoRoot: repoRoot, Now: now, DryRun: true,
@@ -224,6 +249,8 @@ func discoverAgentImports(ctx context.Context) ([]agentImportStatus, error) {
 		if runErr != nil {
 			// Best-effort per agent, but a partial result must not be
 			// memoized — it would stay wrong until the fingerprint moves.
+			logging.Warn(ctx, "onboarding: import dry-run failed", "agent", d.imp.Name(), "error", runErr)
+			runFailures++
 			cacheable = false
 			continue
 		}
@@ -233,6 +260,12 @@ func discoverAgentImports(ctx context.Context) ([]agentImportStatus, error) {
 			UnimportedTurns: res.TurnsImported,
 			ImportedTurns:   res.TurnsSkipped,
 		})
+	}
+	if runFailures == len(discovered) {
+		// Every scan failed (typically one repo-level cause): report the
+		// failure so the rung renders Unknown instead of a false
+		// "no prior history found" / "N sessions imported".
+		return nil, fmt.Errorf("import scan failed for all %d agent(s) with history", runFailures)
 	}
 	if cacheable {
 		cache.put(repoRoot, fingerprint, statuses)
@@ -270,11 +303,17 @@ func mirrorRung(deps onboardingRungDeps) onboarding.Rung {
 		Title: "Repo mirrored",
 		Check: func(ctx context.Context) onboarding.Check {
 			forge, owner, repo, err := deps.resolveOrigin(ctx)
-			if err != nil || forge != "gh" {
+			if err != nil {
+				// A resolution failure (git exec error, canceled context) is
+				// not the same fact as "this repo isn't on GitHub".
+				logging.Debug(ctx, "onboarding: origin resolution failed", "error", err)
+				return onboarding.Check{State: onboarding.StateUnknown, Hint: "entire repo mirror list"}
+			}
+			if forge != "gh" {
 				return onboarding.Check{State: onboarding.StateNotApplicable, Detail: "no GitHub origin"}
 			}
-			// Server-persisted mirror slugs are lowercase (parseGitHubURL semantics).
-			slug := "github.com/" + strings.ToLower(owner) + "/" + strings.ToLower(repo)
+			owner, repo = githubSlug(owner, repo)
+			slug := "github.com/" + owner + "/" + repo
 			if !deps.authed(ctx) {
 				return onboarding.Check{
 					State:  onboarding.StateBlocked,
@@ -282,7 +321,7 @@ func mirrorRung(deps onboardingRungDeps) onboarding.Rung {
 					Hint:   "entire auth login",
 				}
 			}
-			mirrored, err := deps.probeMirror(ctx, strings.ToLower(owner), strings.ToLower(repo))
+			mirrored, err := deps.probeMirror(ctx, owner, repo)
 			if err != nil {
 				return onboarding.Check{State: onboarding.StateUnknown, Hint: "entire repo mirror list"}
 			}
@@ -367,7 +406,7 @@ func authRung(deps onboardingRungDeps) onboarding.Rung {
 	return onboarding.Rung{
 		Key:   onboarding.KeyAuth,
 		Title: "Logged in",
-		Check: func(context.Context) onboarding.Check {
+		Check: func(ctx context.Context) onboarding.Check {
 			if deps.envToken() != "" {
 				return onboarding.Check{State: onboarding.StateDone, Detail: "using ENTIRE_TOKEN"}
 			}
@@ -379,7 +418,15 @@ func authRung(deps onboardingRungDeps) onboarding.Rung {
 				if c.Name != current {
 					continue
 				}
-				if token, tokenErr := deps.tokenForContext(c); tokenErr == nil && token != "" {
+				token, tokenErr := deps.tokenForContext(c)
+				if tokenErr != nil {
+					// A keyring/token-store failure is infrastructure, not
+					// "not logged in" — offering a browser login would fail
+					// against the same broken store.
+					logging.Warn(ctx, "onboarding: token store unreadable", "context", c.Name, "error", tokenErr)
+					return onboarding.Check{State: onboarding.StateUnknown, Hint: "entire auth status"}
+				}
+				if token != "" {
 					return onboarding.Check{State: onboarding.StateDone, Detail: c.Handle}
 				}
 				break

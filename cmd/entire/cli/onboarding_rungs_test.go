@@ -105,7 +105,28 @@ func TestAuthRung_MissingWhenNoContexts(t *testing.T) {
 	}
 }
 
-func TestAuthRung_MissingWhenStoredTokenGone(t *testing.T) {
+func TestAuthRung_MissingWhenStoredTokenEmpty(t *testing.T) {
+	t.Parallel()
+	active := &contexts.Context{Name: testCtxProd, Handle: "peyton"}
+	deps := onboardingRungDeps{
+		envToken: func() string { return "" },
+		listContexts: func() ([]*contexts.Context, string, error) {
+			return []*contexts.Context{active}, testCtxProd, nil
+		},
+		tokenForContext: func(*contexts.Context) (string, error) { return "", nil },
+	}
+
+	check := authRung(deps).Check(context.Background())
+
+	if check.State != onboarding.StateMissing {
+		t.Errorf("State = %v, want StateMissing for an empty stored token", check.State)
+	}
+}
+
+// A keyring/token-store failure is an infrastructure problem, not "not
+// logged in" — rendering Missing would send an already-logged-in user into a
+// browser login that fails against the same broken keyring.
+func TestAuthRung_UnknownWhenKeyringFails(t *testing.T) {
 	t.Parallel()
 	active := &contexts.Context{Name: testCtxProd, Handle: "peyton"}
 	deps := onboardingRungDeps{
@@ -114,14 +135,17 @@ func TestAuthRung_MissingWhenStoredTokenGone(t *testing.T) {
 			return []*contexts.Context{active}, testCtxProd, nil
 		},
 		tokenForContext: func(*contexts.Context) (string, error) {
-			return "", errors.New("keyring: not found")
+			return "", errors.New("keyring: locked")
 		},
 	}
 
 	check := authRung(deps).Check(context.Background())
 
-	if check.State != onboarding.StateMissing {
-		t.Errorf("State = %v, want StateMissing", check.State)
+	if check.State != onboarding.StateUnknown {
+		t.Errorf("State = %v, want StateUnknown for a keyring failure", check.State)
+	}
+	if check.Hint != "entire auth status" {
+		t.Errorf("Hint = %q, want the diagnose command", check.Hint)
 	}
 }
 
@@ -156,18 +180,23 @@ func TestMirrorRung_NotApplicableWithoutGitHubOrigin(t *testing.T) {
 	}
 }
 
-func TestMirrorRung_NotApplicableWithoutOrigin(t *testing.T) {
+// gitremote returns a distinguishable "no remote" answer as (forge "", nil
+// error) via empty forge with an error mentioning the missing remote; a repo
+// genuinely without a GitHub origin is NotApplicable, but a resolution
+// FAILURE (git exec error, canceled context) must not masquerade as a
+// permanent "no GitHub origin".
+func TestMirrorRung_UnknownWhenOriginResolutionFails(t *testing.T) {
 	t.Parallel()
 	deps := onboardingRungDeps{
 		resolveOrigin: func(context.Context) (forge, owner, repo string, err error) {
-			return "", "", "", errors.New("no origin remote")
+			return "", "", "", errors.New("git remote get-url: context canceled")
 		},
 	}
 
 	check := mirrorRung(deps).Check(context.Background())
 
-	if check.State != onboarding.StateNotApplicable {
-		t.Errorf("State = %v, want StateNotApplicable when origin is missing", check.State)
+	if check.State != onboarding.StateUnknown {
+		t.Errorf("State = %v, want StateUnknown when origin resolution fails", check.State)
 	}
 }
 
@@ -544,5 +573,25 @@ func TestImportScanCache_HitRequiresMatchingFingerprint(t *testing.T) {
 	}
 	if _, ok := cache.get("/other", "fp1"); ok {
 		t.Error("different repo should miss")
+	}
+}
+
+// An explicit `entire enable` must not be starved by a cached probe failure:
+// the user asked for setup, so they consent to paying the probe again. Only
+// unreachable entries are dropped — successful results stay cached.
+func TestMirrorProbeCache_ClearUnreachable(t *testing.T) {
+	t.Parallel()
+	cache := mirrorProbeCache{path: filepath.Join(t.TempDir(), "mirror.json"), ttl: 15 * time.Minute, failureTTL: 5 * time.Minute}
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	cache.put("acme/api", true, now)
+	cache.putUnreachable("acme/other", now)
+
+	cache.clearUnreachable()
+
+	if mirrored, _, ok := cache.get("acme/api", now); !ok || !mirrored {
+		t.Error("clearUnreachable must keep successful results")
+	}
+	if _, _, ok := cache.get("acme/other", now); ok {
+		t.Error("clearUnreachable must drop failure entries")
 	}
 }

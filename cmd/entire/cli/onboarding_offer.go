@@ -9,6 +9,7 @@ import (
 	"charm.land/huh/v2"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/onboarding"
 )
 
@@ -16,14 +17,15 @@ import (
 type onboardingSetupMode int
 
 const (
-	// setupModeAll runs every missing rung back-to-back without further questions.
-	setupModeAll onboardingSetupMode = iota
-	// setupModeStepByStep confirms each missing rung individually.
-	setupModeStepByStep
 	// setupModeSkip declines the offers this once — tracking continues either
 	// way; the closing checklist carries the run-later commands and re-running
-	// enable re-offers whatever is still missing.
-	setupModeSkip
+	// enable re-offers whatever is still missing. Deliberately the zero value:
+	// a forgotten or defaulted mode must never run login or mirror creation.
+	setupModeSkip onboardingSetupMode = iota
+	// setupModeAll runs every missing rung back-to-back without further questions.
+	setupModeAll
+	// setupModeStepByStep confirms each missing rung individually.
+	setupModeStepByStep
 )
 
 // onboardingOfferRunner drives the connect rungs at the end of `entire
@@ -51,42 +53,36 @@ func (r onboardingOfferRunner) run(ctx context.Context, w io.Writer) {
 		if err != nil {
 			// Cancelling the consent prompt (Ctrl-C) behaves like skip: enable
 			// has already succeeded, so fall through to the checklist, whose
-			// hints are the resume path.
+			// hints are the resume path. Logged so a broken terminal doesn't
+			// masquerade as a user choice.
+			logging.Debug(ctx, "onboarding: consent prompt did not complete", "error", err)
 			mode = setupModeSkip
 		}
 		if mode != setupModeSkip {
-			succeeded := r.runOffers(ctx, w, ladder, mode)
-			results = patchSucceededOffers(ladder.Checks(ctx), succeeded)
+			r.runOffers(ctx, w, ladder, mode)
+			results = ladder.Checks(ctx)
 		}
 	}
 
 	fmt.Fprint(w, r.renderChecklist(w, results))
 }
 
-// patchSucceededOffers reconciles the closing re-check with what just
-// happened: a rung whose offer succeeded this pass but whose probe hasn't
-// caught up (mirror create returns before the server-side clone finishes)
-// renders as in-progress, not as missing with a retry hint.
-func patchSucceededOffers(results []onboarding.Result, succeeded map[string]bool) []onboarding.Result {
-	for i, res := range results {
-		if !succeeded[res.Rung.Key] || res.Check.State == onboarding.StateDone {
-			continue
-		}
-		results[i].Check = onboarding.Check{
-			State:  onboarding.StateUnknown,
-			Detail: "created — sync in progress",
-		}
-	}
-	return results
-}
-
-// offerable filters the remaining work down to rungs this runner can act on:
-// missing or blocked, with an offer wired. Blocked rungs count because an
-// earlier offer in the same pass (login) can unblock them.
+// offerable filters the remaining work down to rungs this runner can act on.
+// Missing rungs with an offer always qualify. Blocked rungs qualify only when
+// an offerable Missing rung precedes them in the ladder — an earlier offer in
+// the same pass (login) can unblock them. Without that, the consent prompt
+// would promise work that can never run (e.g. auth Unknown leaves mirror
+// Blocked with nothing to unblock it).
 func (r onboardingOfferRunner) offerable(results []onboarding.Result) []onboarding.Result {
 	var actionable []onboarding.Result
-	for _, res := range onboarding.Missing(results) {
-		if r.offerFns[res.Rung.Key] != nil {
+	unblockPossible := false
+	for _, res := range results {
+		if res.Check.State == onboarding.StateMissing && r.offerFns[res.Rung.Key] != nil {
+			actionable = append(actionable, res)
+			unblockPossible = true
+			continue
+		}
+		if res.Check.State == onboarding.StateBlocked && r.offerFns[res.Rung.Key] != nil && unblockPossible {
 			actionable = append(actionable, res)
 		}
 	}
@@ -94,11 +90,9 @@ func (r onboardingOfferRunner) offerable(results []onboarding.Result) []onboardi
 }
 
 // runOffers walks the ladder in order, re-checking each rung immediately
-// before its offer, and returns the keys whose offer succeeded. Offers are
-// best-effort: a failure prints a notice and the closing checklist keeps the
-// retry hint, but enable never fails.
-func (r onboardingOfferRunner) runOffers(ctx context.Context, w io.Writer, ladder onboarding.Ladder, mode onboardingSetupMode) map[string]bool {
-	succeeded := map[string]bool{}
+// before its offer. Offers are best-effort: a failure prints a notice and
+// the closing checklist keeps the retry hint, but enable never fails.
+func (r onboardingOfferRunner) runOffers(ctx context.Context, w io.Writer, ladder onboarding.Ladder, mode onboardingSetupMode) {
 	for _, rung := range ladder {
 		offer := r.offerFns[rung.Key]
 		if offer == nil {
@@ -110,17 +104,19 @@ func (r onboardingOfferRunner) runOffers(ctx context.Context, w io.Writer, ladde
 		}
 		if mode == setupModeStepByStep {
 			accepted, err := r.confirmRung(ctx, onboarding.Result{Rung: rung, Check: check})
-			if err != nil || !accepted {
+			if err != nil {
+				logging.Debug(ctx, "onboarding: rung confirm prompt did not complete", "rung", rung.Key, "error", err)
+				continue
+			}
+			if !accepted {
 				continue
 			}
 		}
 		if err := offer(ctx); err != nil {
+			logging.Warn(ctx, "onboarding: offer failed", "rung", rung.Key, "error", err)
 			fmt.Fprintf(w, "  %s setup didn't complete: %v\n", rung.Title, err)
-			continue
 		}
-		succeeded[rung.Key] = true
 	}
-	return succeeded
 }
 
 func (r onboardingOfferRunner) renderChecklist(w io.Writer, results []onboarding.Result) string {
@@ -146,6 +142,10 @@ func (r onboardingOfferRunner) renderChecklist(w io.Writer, results []onboarding
 // implicit login/mirror — the checklist hints carry the follow-up commands.
 // Best-effort by design: onboarding output problems never fail enable.
 var runEnableOnboarding = func(ctx context.Context, w io.Writer, assumeYes bool) {
+	// The user explicitly asked for setup — retry probes that recently
+	// failed instead of serving the cached failure (which would silently
+	// suppress the mirror offer for the rest of the failure TTL).
+	defaultMirrorProbeCache().clearUnreachable()
 	r := newOnboardingOfferRunner(w)
 	if assumeYes {
 		r.canPrompt = func() bool { return false }
@@ -174,7 +174,7 @@ func newOnboardingOfferRunner(w io.Writer) onboardingOfferRunner {
 }
 
 // promptOnboardingSetupMode is enable's single consent prompt, summarizing
-// what "finish setup" will do from the missing rungs' titles.
+// what "finish setup" will do from the missing rungs.
 func promptOnboardingSetupMode(ctx context.Context, missing []onboarding.Result) (onboardingSetupMode, error) {
 	summary := onboardingSetupSummary(missing)
 	mode := setupModeAll
@@ -198,8 +198,8 @@ func promptOnboardingSetupMode(ctx context.Context, missing []onboarding.Result)
 }
 
 // onboardingSetupSummary describes what the fast path will do, e.g.
-// "Logs in to entire.io and mirrors github.com/acme/api so sessions and
-// commits appear in the web UI."
+// "Logs in to entire.io and mirrors this repo so your work shows up in the
+// web UI."
 func onboardingSetupSummary(missing []onboarding.Result) string {
 	steps := make([]string, 0, len(missing))
 	for _, r := range missing {
@@ -215,18 +215,7 @@ func onboardingSetupSummary(missing []onboarding.Result) string {
 	if len(steps) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	for i, step := range steps {
-		switch {
-		case i == 0:
-		case i == len(steps)-1:
-			b.WriteString(" and ")
-		default:
-			b.WriteString(", ")
-		}
-		b.WriteString(step)
-	}
-	summary := b.String()
+	summary := formatTokenClassList(steps)
 	// Capitalize the first step: summaries are full sentences in the prompt.
 	return strings.ToUpper(summary[:1]) + summary[1:] + " so your work shows up in the web UI."
 }
