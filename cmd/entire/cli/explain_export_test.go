@@ -736,6 +736,47 @@ func TestSessionMetadataToJSON_CopiesInvestigateFields(t *testing.T) {
 	require.Equal(t, "topic from metadata.json", got.InvestigateTopic)
 }
 
+func TestSessionMetadataToJSON_CopiesTicket(t *testing.T) {
+	t.Parallel()
+
+	meta := &checkpoint.Metadata{
+		SessionID: "ticketed-session",
+		Ticket: &checkpoint.TicketRef{
+			Platform: "linear",
+			ID:       "LIN-123",
+			Title:    "Fix login redirect loop",
+			State:    "in_progress",
+			URL:      "https://linear.app/acme/issue/LIN-123",
+		},
+	}
+
+	got := sessionMetadataToJSON(0, meta)
+	require.NotNil(t, got.Ticket)
+	require.Equal(t, "LIN-123", got.Ticket.ID)
+	require.Equal(t, "linear", got.Ticket.Platform)
+
+	// The ticket key serializes under "ticket" with its snapshot fields.
+	raw, err := json.Marshal(got)
+	require.NoError(t, err)
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	ticketField, ok := decoded["ticket"].(map[string]any)
+	require.True(t, ok, "expected a ticket object in JSON, got: %s", raw)
+	require.Equal(t, "Fix login redirect loop", ticketField["title"])
+	require.Equal(t, "in_progress", ticketField["state"])
+}
+
+func TestSessionMetadataToJSON_NoTicketStaysClean(t *testing.T) {
+	t.Parallel()
+
+	got := sessionMetadataToJSON(0, &checkpoint.Metadata{SessionID: "untracked"})
+	require.Nil(t, got.Ticket)
+
+	raw, err := json.Marshal(got)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), `"ticket"`, "ticket key must be omitted when nil")
+}
+
 // TestSessionMetadataToJSON_FullSummary pins that the export carries the whole
 // persisted summary — friction, open_items, and categorized learnings — not
 // just intent/outcome. The prose view already renders these; --json previously

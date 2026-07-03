@@ -2903,6 +2903,53 @@ func TestFormatCheckpointHeader_FullMetadataPlain(t *testing.T) {
 	}
 }
 
+func TestFormatCheckpointHeader_WithTicket(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("a3b2c4d5e6f7")
+	meta := checkpoint.Metadata{
+		SessionID: "s",
+		CreatedAt: time.Date(2026, 4, 29, 14, 22, 8, 0, time.UTC),
+		Ticket: &checkpoint.TicketRef{
+			Platform: "linear",
+			ID:       "LIN-123",
+			Title:    "Fix login redirect loop",
+			State:    "in_progress",
+			URL:      "https://linear.app/acme/issue/LIN-123",
+		},
+	}
+	styles := statusStyles{colorEnabled: false, width: 80}
+
+	got := formatCheckpointHeader(nil, meta, cpID, nil, checkpoint.Author{}, styles)
+
+	wantLines := []string{
+		"  ticket   LIN-123 — Fix login redirect loop (in progress)",
+		"           https://linear.app/acme/issue/LIN-123",
+	}
+	for _, line := range wantLines {
+		if !strings.Contains(got, line) {
+			t.Errorf("expected line %q in header, got:\n%s", line, got)
+		}
+	}
+}
+
+func TestFormatCheckpointHeader_NoTicket(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("a3b2c4d5e6f7")
+	meta := checkpoint.Metadata{
+		SessionID: "s",
+		CreatedAt: time.Date(2026, 4, 29, 14, 22, 8, 0, time.UTC),
+	}
+	styles := statusStyles{colorEnabled: false, width: 60}
+
+	got := formatCheckpointHeader(nil, meta, cpID, nil, checkpoint.Author{}, styles)
+
+	if strings.Contains(got, "  ticket") {
+		t.Errorf("did not expect ticket row when Ticket nil, got:\n%s", got)
+	}
+}
+
 func TestFormatCheckpointHeader_NoAuthor(t *testing.T) {
 	t.Parallel()
 
