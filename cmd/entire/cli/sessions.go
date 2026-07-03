@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/entireio/cli/cmd/entire/cli/ticket"
 	"github.com/spf13/cobra"
 )
 
@@ -526,16 +527,35 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, m
 
 	status := sessionPhaseLabel(state)
 
+	// Resolve the branch's linked ticket (best-effort, local only) so the detail
+	// view shows the intent this session was grounded in. Uses the session's
+	// recorded branch, so it works for ended sessions inspected after the fact.
+	link := sessionTicketLink(ctx, state.Branch)
+
 	switch mode {
 	case sessionOutputTranscript:
 		return writeSessionTranscript(ctx, cmd, state)
 	case sessionOutputJSON:
-		return writeSessionInfoJSON(cmd.OutOrStdout(), state, status)
+		return writeSessionInfoJSON(cmd.OutOrStdout(), state, status, link)
 	case sessionOutputText:
-		return writeSessionInfoText(cmd.OutOrStdout(), state, status)
+		return writeSessionInfoText(cmd.OutOrStdout(), state, status, link)
 	default:
 		return fmt.Errorf("unknown session output mode: %d", mode)
 	}
+}
+
+// sessionTicketLink resolves the ticket linked to branch, returning nil when the
+// branch is empty, nothing is linked, or the lookup fails. Never blocks the
+// session view on ticket state.
+func sessionTicketLink(ctx context.Context, branch string) *ticket.Link {
+	if branch == "" {
+		return nil
+	}
+	link, ok, err := ticket.LinkForBranch(ctx, branch)
+	if err != nil || !ok {
+		return nil
+	}
+	return &link
 }
 
 // writeSessionTranscript streams the live raw agent transcript for a session
@@ -582,6 +602,8 @@ type sessionInfoJSON struct {
 	Tokens         *tokenInfoJSON `json:"tokens,omitempty"`
 	LastPrompt     string         `json:"last_prompt,omitempty"`
 	FilesTouched   []string       `json:"files_touched,omitempty"`
+	// Ticket is the tracker ticket linked to this session's branch, if any.
+	Ticket *ticketBriefJSON `json:"ticket,omitempty"`
 }
 
 type tokenInfoJSON struct {
@@ -628,16 +650,20 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 	return info
 }
 
-func writeSessionInfoJSON(w io.Writer, state *strategy.SessionState, status string) error {
+func writeSessionInfoJSON(w io.Writer, state *strategy.SessionState, status string, link *ticket.Link) error {
+	info := buildSessionInfoJSON(state, status)
+	if link != nil {
+		info.Ticket = ticketBriefFromLink(*link)
+	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(buildSessionInfoJSON(state, status)); err != nil {
+	if err := enc.Encode(info); err != nil {
 		return fmt.Errorf("failed to encode session info: %w", err)
 	}
 	return nil
 }
 
-func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status string) error {
+func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status string, link *ticket.Link) error {
 	fmt.Fprintf(w, "Session %s\n\n", state.SessionID)
 
 	agentLabel := string(state.AgentType)
@@ -676,6 +702,13 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 
 	if state.LastCheckpointID != "" {
 		fmt.Fprintf(w, "Checkpoint:  %s\n", state.LastCheckpointID)
+	}
+
+	if link != nil {
+		fmt.Fprintf(w, "Ticket:      %s\n", formatTicketLinkLine(*link))
+		if link.Snapshot != nil && link.Snapshot.URL != "" {
+			fmt.Fprintf(w, "             %s\n", link.Snapshot.URL)
+		}
 	}
 
 	if t := totalTokens(state.TokenUsage); t > 0 {
