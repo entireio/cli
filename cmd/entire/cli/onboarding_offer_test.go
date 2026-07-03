@@ -217,3 +217,32 @@ func TestOnboardingLadder_RunLaterHintsAreDeduped(t *testing.T) {
 		t.Errorf("want 'run later:' hint phrasing, got:\n%s", out.String())
 	}
 }
+
+// A mirror create returns before the server-side clone finishes, so the
+// closing re-check can still read "not mirrored". A rung whose offer just
+// succeeded must not render as missing with a retry hint.
+func TestOnboardingLadder_SucceededOfferStillSyncingRendersInProgress(t *testing.T) {
+	t.Parallel()
+	f := &fakeConnectState{loggedIn: true}
+	var ran []string
+	r := newTestOffersRunner(f, &ran, t)
+	//nolint:unparam // the offer-map signature requires an error return
+	r.offerFns[onboarding.KeyMirror] = func(context.Context) error {
+		ran = append(ran, "mirror")
+		return nil // create succeeded — but f.mirrored stays false (clone lag)
+	}
+	r.promptMode = func([]onboarding.Result) (onboardingSetupMode, error) { return setupModeAll, nil }
+
+	var out bytes.Buffer
+	r.run(context.Background(), &out)
+
+	if !strings.Contains(out.String(), "created — sync in progress") {
+		t.Errorf("succeeded-but-syncing rung should render as in progress, got:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "✗ Repo mirrored") {
+		t.Errorf("succeeded offer must not render as missing, got:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "run later: entire repo mirror create") {
+		t.Errorf("succeeded offer must not print a retry hint, got:\n%s", out.String())
+	}
+}

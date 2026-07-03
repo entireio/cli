@@ -53,12 +53,29 @@ func (r onboardingOfferRunner) run(ctx context.Context, w io.Writer) {
 			mode = setupModeSkip
 		}
 		if mode != setupModeSkip {
-			r.runOffers(ctx, w, ladder, mode)
-			results = ladder.Checks(ctx)
+			succeeded := r.runOffers(ctx, w, ladder, mode)
+			results = patchSucceededOffers(ladder.Checks(ctx), succeeded)
 		}
 	}
 
 	fmt.Fprint(w, r.renderChecklist(w, results))
+}
+
+// patchSucceededOffers reconciles the closing re-check with what just
+// happened: a rung whose offer succeeded this pass but whose probe hasn't
+// caught up (mirror create returns before the server-side clone finishes)
+// renders as in-progress, not as missing with a retry hint.
+func patchSucceededOffers(results []onboarding.Result, succeeded map[string]bool) []onboarding.Result {
+	for i, res := range results {
+		if !succeeded[res.Rung.Key] || res.Check.State == onboarding.StateDone {
+			continue
+		}
+		results[i].Check = onboarding.Check{
+			State:  onboarding.StateUnknown,
+			Detail: "created — sync in progress",
+		}
+	}
+	return results
 }
 
 // offerable filters the remaining work down to rungs this runner can act on:
@@ -75,9 +92,11 @@ func (r onboardingOfferRunner) offerable(results []onboarding.Result) []onboardi
 }
 
 // runOffers walks the ladder in order, re-checking each rung immediately
-// before its offer. Offers are best-effort: a failure prints a notice and the
-// closing checklist keeps the retry hint, but enable never fails.
-func (r onboardingOfferRunner) runOffers(ctx context.Context, w io.Writer, ladder onboarding.Ladder, mode onboardingSetupMode) {
+// before its offer, and returns the keys whose offer succeeded. Offers are
+// best-effort: a failure prints a notice and the closing checklist keeps the
+// retry hint, but enable never fails.
+func (r onboardingOfferRunner) runOffers(ctx context.Context, w io.Writer, ladder onboarding.Ladder, mode onboardingSetupMode) map[string]bool {
+	succeeded := map[string]bool{}
 	for _, rung := range ladder {
 		offer := r.offerFns[rung.Key]
 		if offer == nil {
@@ -95,8 +114,11 @@ func (r onboardingOfferRunner) runOffers(ctx context.Context, w io.Writer, ladde
 		}
 		if err := offer(ctx); err != nil {
 			fmt.Fprintf(w, "  %s setup didn't complete: %v\n", rung.Title, err)
+			continue
 		}
+		succeeded[rung.Key] = true
 	}
+	return succeeded
 }
 
 func (r onboardingOfferRunner) renderChecklist(w io.Writer, results []onboarding.Result) string {
