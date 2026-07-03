@@ -6,10 +6,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agentimport"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -29,6 +33,44 @@ func runOnboardingLogin(ctx context.Context, errW io.Writer) error {
 		canPrompt:  interactive.CanPromptInteractively(),
 		sshSession: isSSHSession(),
 	})
+}
+
+// runOnboardingImport is the import rung's offer: import discoverable agent
+// history as read-only checkpoints, same flow as `entire import <agent>`
+// (checkpoint policy honored, repo/user redaction config loaded before any
+// write). Minimal by design — PR #1595's richer enable-time offer (per-agent
+// selection, first-run gating) replaces these internals when it lands.
+func runOnboardingImport(ctx context.Context, w io.Writer) error {
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve worktree root: %w", err)
+	}
+	repo, err := openRepository(ctx)
+	if err != nil {
+		return fmt.Errorf("open repository: %w", err)
+	}
+	defer repo.Close()
+	if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, repo); err != nil {
+		return err
+	}
+	strategy.EnsureRedactionConfigured()
+
+	now := time.Now()
+	for _, imp := range agentimport.All() {
+		files, discoverErr := imp.Discover(repoRoot, "", now, nil)
+		if discoverErr != nil || len(files) == 0 {
+			continue
+		}
+		res, runErr := agentimport.Run(ctx, repo, imp, agentimport.Options{
+			RepoRoot: repoRoot, Now: now,
+		})
+		if runErr != nil {
+			return fmt.Errorf("import %s: %w", imp.Name(), runErr)
+		}
+		fmt.Fprintf(w, "  Imported %d turn(s) from %d %s session(s) (%d already imported).\n",
+			res.TurnsImported, res.SessionsScanned, imp.Name(), res.TurnsSkipped)
+	}
+	return nil
 }
 
 // runOnboardingMirrorCreate is the mirror rung's offer: register a mirror for

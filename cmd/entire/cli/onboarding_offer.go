@@ -163,6 +163,7 @@ func newOnboardingOfferRunner(errW io.Writer) onboardingOfferRunner {
 		offerFns: map[string]func(ctx context.Context) error{
 			onboarding.KeyAuth:   func(ctx context.Context) error { return runOnboardingLogin(ctx, errW) },
 			onboarding.KeyMirror: func(ctx context.Context) error { return runOnboardingMirrorCreate(ctx, errW, deps) },
+			onboarding.KeyImport: func(ctx context.Context) error { return runOnboardingImport(ctx, errW) },
 		},
 		canPrompt:   interactive.CanPromptInteractively,
 		promptMode:  promptOnboardingSetupMode,

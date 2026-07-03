@@ -246,3 +246,48 @@ func TestOnboardingLadder_SucceededOfferStillSyncingRendersInProgress(t *testing
 		t.Errorf("succeeded offer must not print a retry hint, got:\n%s", out.String())
 	}
 }
+
+// The import rung carries an inline offer: "set up everything" must carry the
+// ladder through history import, not dead-end at 3/4 with a hint.
+func TestOnboardingLadder_ModeAll_RunsImportOffer(t *testing.T) {
+	t.Parallel()
+	f := &fakeConnectState{loggedIn: true, mirrored: true}
+	imported := false
+	var ran []string
+	r := newTestOffersRunner(f, &ran, t)
+	r.deps.discoverImports = func(context.Context) ([]agentImportStatus, error) {
+		status := agentImportStatus{Agent: "claude-code", Sessions: 1}
+		if !imported {
+			status.UnimportedTurns = 3
+		}
+		return []agentImportStatus{status}, nil
+	}
+	//nolint:unparam // the offer-map signature requires an error return
+	r.offerFns[onboarding.KeyImport] = func(context.Context) error {
+		ran = append(ran, "import")
+		imported = true
+		return nil
+	}
+	r.promptMode = func([]onboarding.Result) (onboardingSetupMode, error) { return setupModeAll, nil }
+
+	var out bytes.Buffer
+	r.run(context.Background(), &out)
+
+	if len(ran) != 1 || ran[0] != "import" {
+		t.Errorf("offers ran = %v, want [import]", ran)
+	}
+	if !strings.Contains(out.String(), "Connected") {
+		t.Errorf("ladder should be fully connected after import, got:\n%s", out.String())
+	}
+}
+
+// Production wiring must include the import offer alongside auth and mirror.
+func TestNewOnboardingOfferRunner_WiresImportOffer(t *testing.T) {
+	t.Parallel()
+	r := newOnboardingOfferRunner(io.Discard)
+	for _, key := range []string{onboarding.KeyAuth, onboarding.KeyMirror, onboarding.KeyImport} {
+		if r.offerFns[key] == nil {
+			t.Errorf("offerFns[%q] = nil, want an offer wired", key)
+		}
+	}
+}
