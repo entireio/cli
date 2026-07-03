@@ -5,10 +5,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/onboarding"
+	"github.com/entireio/cli/internal/coreapi"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 )
 
@@ -362,21 +364,21 @@ func TestMirrorProbeCache_RoundTripAndTTL(t *testing.T) {
 	cache := mirrorProbeCache{path: filepath.Join(t.TempDir(), "mirror.json"), ttl: 15 * time.Minute}
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 
-	if _, ok := cache.get("acme/api", now); ok {
+	if _, _, ok := cache.get("acme/api", now); ok {
 		t.Error("empty cache should miss")
 	}
 
 	cache.put("acme/api", true, now)
-	mirrored, ok := cache.get("acme/api", now.Add(5*time.Minute))
+	mirrored, _, ok := cache.get("acme/api", now.Add(5*time.Minute))
 	if !ok || !mirrored {
 		t.Errorf("fresh entry: get = (%v, %v), want (true, true)", mirrored, ok)
 	}
 
-	if _, ok := cache.get("acme/api", now.Add(16*time.Minute)); ok {
+	if _, _, ok := cache.get("acme/api", now.Add(16*time.Minute)); ok {
 		t.Error("entry past TTL should miss")
 	}
 
-	if _, ok := cache.get("other/repo", now); ok {
+	if _, _, ok := cache.get("other/repo", now); ok {
 		t.Error("unrelated slug should miss")
 	}
 }
@@ -389,14 +391,112 @@ func TestMirrorProbeCache_CorruptFileIsAMiss(t *testing.T) {
 	}
 	cache := mirrorProbeCache{path: path, ttl: 15 * time.Minute}
 
-	if _, ok := cache.get("acme/api", time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)); ok {
+	if _, _, ok := cache.get("acme/api", time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)); ok {
 		t.Error("corrupt cache file should behave as a miss")
 	}
 	// And put should recover by rewriting the file.
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 	cache.put("acme/api", false, now)
-	mirrored, ok := cache.get("acme/api", now)
+	mirrored, _, ok := cache.get("acme/api", now)
 	if !ok || mirrored {
 		t.Errorf("after recovery put: get = (%v, %v), want (false, true)", mirrored, ok)
+	}
+}
+
+type fakeMirrorLister struct {
+	origin   string
+	mirrored map[string]bool // slug -> mirrored
+	err      error
+	calls    int
+}
+
+func (f *fakeMirrorLister) ListAvailableMirrors(_ context.Context, params coreapi.ListAvailableMirrorsParams) (*coreapi.ListAvailableMirrorsOutputBody, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := &coreapi.ListAvailableMirrorsOutputBody{}
+	owner, _ := params.Owner.Get()
+	for slug, mirrored := range f.mirrored {
+		status := coreapi.AvailableMirrorStatusAvailable
+		if mirrored {
+			status = coreapi.AvailableMirrorStatusMirrored
+		}
+		parts := strings.SplitN(slug, "/", 2)
+		if parts[0] != owner {
+			continue
+		}
+		out.Available = append(out.Available, coreapi.AvailableMirror{Owner: parts[0], Repo: parts[1], Status: status})
+	}
+	return out, nil
+}
+
+func (f *fakeMirrorLister) CoreOrigin() string { return f.origin }
+
+// The probe must consult every distinct core the mirror could live on: the
+// active context's core AND the default cluster the create offer targets.
+// Otherwise a mirror created on the default cluster is invisible to an
+// active context fronting a different federation, and the rung re-offers
+// creation forever.
+func TestProbeMirrorAcross_FindsMirrorOnSecondCore(t *testing.T) {
+	t.Parallel()
+	active := &fakeMirrorLister{origin: "https://eu.core", mirrored: map[string]bool{}}
+	cluster := &fakeMirrorLister{origin: "https://us.core", mirrored: map[string]bool{"acme/api": true}}
+
+	mirrored, err := probeMirrorAcross(context.Background(), []availableMirrorLister{active, cluster}, "acme", "api")
+	if err != nil || !mirrored {
+		t.Errorf("probeMirrorAcross = (%v, %v), want (true, nil)", mirrored, err)
+	}
+}
+
+func TestProbeMirrorAcross_DedupesSameOrigin(t *testing.T) {
+	t.Parallel()
+	a := &fakeMirrorLister{origin: "https://us.core", mirrored: map[string]bool{}}
+	b := &fakeMirrorLister{origin: "https://us.core", mirrored: map[string]bool{}}
+
+	mirrored, err := probeMirrorAcross(context.Background(), []availableMirrorLister{a, b}, "acme", "api")
+	if err != nil || mirrored {
+		t.Errorf("probeMirrorAcross = (%v, %v), want (false, nil)", mirrored, err)
+	}
+	if a.calls+b.calls != 1 {
+		t.Errorf("same-origin cores queried %d times, want 1", a.calls+b.calls)
+	}
+}
+
+func TestProbeMirrorAcross_AllCoresFailingIsAnError(t *testing.T) {
+	t.Parallel()
+	a := &fakeMirrorLister{origin: "https://us.core", err: errors.New("offline")}
+	b := &fakeMirrorLister{origin: "https://eu.core", err: errors.New("offline")}
+
+	if _, err := probeMirrorAcross(context.Background(), []availableMirrorLister{a, b}, "acme", "api"); err == nil {
+		t.Error("want error when every core is unreachable")
+	}
+}
+
+func TestProbeMirrorAcross_PartialFailureStillAnswers(t *testing.T) {
+	t.Parallel()
+	broken := &fakeMirrorLister{origin: "https://eu.core", err: errors.New("offline")}
+	working := &fakeMirrorLister{origin: "https://us.core", mirrored: map[string]bool{"acme/api": true}}
+
+	mirrored, err := probeMirrorAcross(context.Background(), []availableMirrorLister{broken, working}, "acme", "api")
+	if err != nil || !mirrored {
+		t.Errorf("probeMirrorAcross = (%v, %v), want (true, nil) from the reachable core", mirrored, err)
+	}
+}
+
+// Probe failures are cached briefly so an authed-but-offline terminal hangs
+// on the probe once per failure-TTL, not on every `entire status`.
+func TestMirrorProbeCache_UnreachableEntriesExpireSooner(t *testing.T) {
+	t.Parallel()
+	cache := mirrorProbeCache{path: filepath.Join(t.TempDir(), "mirror.json"), ttl: 15 * time.Minute, failureTTL: 5 * time.Minute}
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+
+	cache.putUnreachable("acme/api", now)
+
+	if _, unreachable, ok := cache.get("acme/api", now.Add(4*time.Minute)); !ok || !unreachable {
+		t.Errorf("fresh failure entry: get = (unreachable=%v, ok=%v), want (true, true)", unreachable, ok)
+	}
+	if _, _, ok := cache.get("acme/api", now.Add(6*time.Minute)); ok {
+		t.Error("failure entry past failureTTL should miss")
 	}
 }

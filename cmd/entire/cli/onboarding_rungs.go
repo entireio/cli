@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -77,35 +78,81 @@ func onboardingLadder(deps onboardingRungDeps) onboarding.Ladder {
 	return onboarding.Ladder{hooksRung(deps), authRung(deps), mirrorRung(deps), importRung(deps)}
 }
 
-// probeRepoMirrored asks the active-context control plane whether owner/repo
-// already has a mirror, consulting a short-TTL per-user cache first so hot
-// paths (`entire status`) don't pay a network round-trip on every run.
-// Owner/repo arrive lowercased from the mirror rung.
+// availableMirrorLister is the slice of *coreapi.Client the mirror probe needs; a
+// seam so probeMirrorAcross is testable without a control plane.
+type availableMirrorLister interface {
+	ListAvailableMirrors(ctx context.Context, params coreapi.ListAvailableMirrorsParams) (*coreapi.ListAvailableMirrorsOutputBody, error)
+	CoreOrigin() string
+}
+
+// probeMirrorAcross asks each distinct core (deduped by origin) whether
+// owner/repo is mirrored. A mirror found on any core counts: the active
+// context's core and the default cluster the create offer targets can front
+// different federations, and a mirror created on one is invisible to the
+// other — probing only one would leave the rung re-offering creation
+// forever. Errors matter only when every core is unreachable.
+func probeMirrorAcross(ctx context.Context, clients []availableMirrorLister, owner, repo string) (bool, error) {
+	seen := map[string]bool{}
+	var lastErr error
+	answered := false
+	for _, client := range clients {
+		if client == nil || seen[client.CoreOrigin()] {
+			continue
+		}
+		seen[client.CoreOrigin()] = true
+		out, err := client.ListAvailableMirrors(ctx, coreapi.ListAvailableMirrorsParams{
+			Owner: coreapi.NewOptString(owner),
+		})
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		answered = true
+		for _, m := range out.Available {
+			if strings.EqualFold(m.Owner, owner) && strings.EqualFold(m.Repo, repo) &&
+				m.Status == coreapi.AvailableMirrorStatusMirrored {
+				return true, nil
+			}
+		}
+	}
+	if !answered {
+		if lastErr == nil {
+			lastErr = errors.New("no control-plane core reachable")
+		}
+		return false, fmt.Errorf("probe mirrors: %w", lastErr)
+	}
+	return false, nil
+}
+
+// probeRepoMirrored checks whether owner/repo has a mirror on the active
+// context's core or the default cluster's core, consulting a short-TTL
+// per-user cache first so hot paths (`entire status`) don't pay a network
+// round-trip on every run. Failures are cached briefly too, so an offline
+// terminal doesn't hang on every invocation. Owner/repo arrive lowercased
+// from the mirror rung.
 func probeRepoMirrored(ctx context.Context, owner, repo string) (bool, error) {
 	slug := owner + "/" + repo
 	cache := defaultMirrorProbeCache()
 	now := time.Now()
-	if mirrored, ok := cache.get(slug, now); ok {
+	if mirrored, unreachable, ok := cache.get(slug, now); ok {
+		if unreachable {
+			return false, errors.New("control plane unreachable (cached)")
+		}
 		return mirrored, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, mirrorProbeTimeout)
 	defer cancel()
-	client, err := coreapi.New()
-	if err != nil {
-		return false, err
+	var clients []availableMirrorLister
+	if activeCore, err := coreapi.New(); err == nil {
+		clients = append(clients, activeCore)
 	}
-	out, err := client.ListAvailableMirrors(ctx, coreapi.ListAvailableMirrorsParams{
-		Owner: coreapi.NewOptString(owner),
-	})
-	if err != nil {
-		return false, err
+	if clusterCore, err := coreapi.NewForCluster(ctx, defaultClusterHost); err == nil {
+		clients = append(clients, clusterCore)
 	}
-	mirrored := false
-	for _, m := range out.Available {
-		if strings.EqualFold(m.Owner, owner) && strings.EqualFold(m.Repo, repo) {
-			mirrored = m.Status == coreapi.AvailableMirrorStatusMirrored
-			break
-		}
+	mirrored, err := probeMirrorAcross(ctx, clients, owner, repo)
+	if err != nil {
+		cache.putUnreachable(slug, now)
+		return false, err
 	}
 	cache.put(slug, mirrored, now)
 	return mirrored, nil

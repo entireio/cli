@@ -15,24 +15,33 @@ import (
 // the TTL picks up mirrors created or removed out-of-band.
 const mirrorProbeTTL = 15 * time.Minute
 
+// mirrorProbeFailureTTL is the shorter trust window for unreachable-core
+// results: an authed-but-offline terminal hangs on the probe once per this
+// window instead of on every status invocation, and recovers quickly once
+// back online.
+const mirrorProbeFailureTTL = 5 * time.Minute
+
 // mirrorProbeCache is a best-effort per-user file cache of mirror-probe
 // results keyed by "owner/repo". Read/write errors degrade to cache misses;
 // the ground truth stays the control plane.
 type mirrorProbeCache struct {
-	path string
-	ttl  time.Duration
+	path       string
+	ttl        time.Duration
+	failureTTL time.Duration
 }
 
 func defaultMirrorProbeCache() mirrorProbeCache {
 	return mirrorProbeCache{
-		path: filepath.Join(userdirs.Cache(), "onboarding_mirror.json"),
-		ttl:  mirrorProbeTTL,
+		path:       filepath.Join(userdirs.Cache(), "onboarding_mirror.json"),
+		ttl:        mirrorProbeTTL,
+		failureTTL: mirrorProbeFailureTTL,
 	}
 }
 
 type mirrorProbeEntry struct {
-	Mirrored  bool      `json:"mirrored"`
-	CheckedAt time.Time `json:"checked_at"`
+	Mirrored    bool      `json:"mirrored"`
+	Unreachable bool      `json:"unreachable,omitempty"`
+	CheckedAt   time.Time `json:"checked_at"`
 }
 
 type mirrorProbeFile struct {
@@ -48,17 +57,32 @@ func (c mirrorProbeCache) load() mirrorProbeFile {
 	return f
 }
 
-func (c mirrorProbeCache) get(slug string, now time.Time) (mirrored, ok bool) {
+func (c mirrorProbeCache) get(slug string, now time.Time) (mirrored, unreachable, ok bool) {
 	entry, found := c.load().Entries[slug]
-	if !found || now.Sub(entry.CheckedAt) > c.ttl {
-		return false, false
+	if !found {
+		return false, false, false
 	}
-	return entry.Mirrored, true
+	ttl := c.ttl
+	if entry.Unreachable {
+		ttl = c.failureTTL
+	}
+	if now.Sub(entry.CheckedAt) > ttl {
+		return false, false, false
+	}
+	return entry.Mirrored, entry.Unreachable, true
 }
 
 func (c mirrorProbeCache) put(slug string, mirrored bool, now time.Time) {
+	c.write(slug, mirrorProbeEntry{Mirrored: mirrored, CheckedAt: now})
+}
+
+func (c mirrorProbeCache) putUnreachable(slug string, now time.Time) {
+	c.write(slug, mirrorProbeEntry{Unreachable: true, CheckedAt: now})
+}
+
+func (c mirrorProbeCache) write(slug string, entry mirrorProbeEntry) {
 	f := c.load()
-	f.Entries[slug] = mirrorProbeEntry{Mirrored: mirrored, CheckedAt: now}
+	f.Entries[slug] = entry
 	data, err := json.Marshal(f)
 	if err != nil {
 		return
