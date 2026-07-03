@@ -8,6 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+
 	"github.com/entireio/cli/cmd/entire/cli/agentimport"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -44,11 +47,11 @@ type onboardingRungDeps struct {
 
 // agentImportStatus summarizes one agent's importable history for this repo.
 type agentImportStatus struct {
-	Agent string
+	Agent string `json:"agent"`
 	// Sessions is every discovered session, imported or not.
-	Sessions        int
-	UnimportedTurns int
-	ImportedTurns   int
+	Sessions        int `json:"sessions"`
+	UnimportedTurns int `json:"unimported_turns"`
+	ImportedTurns   int `json:"imported_turns"`
 }
 
 // newOnboardingRungDeps wires the rung probes to their real backends: agent
@@ -160,40 +163,91 @@ func probeRepoMirrored(ctx context.Context, owner, repo string) (bool, error) {
 
 // discoverAgentImports reports, per registered importer, how much local
 // transcript history exists for this repo and how much of it has never been
-// imported. Discovery is file globbing; only agents with discoverable
-// sessions pay for the dry-run (which opens the checkpoint store to detect
-// already-imported turns). Local-only, best-effort per agent.
+// imported. Discovery is file globbing; the expensive dry-run (checkpoint
+// store open + transcript parsing) is memoized behind a fingerprint of the
+// discovered files and the metadata-branch tip, so an unchanged repo pays
+// only the glob on hot paths like `entire status`. Local-only, best-effort
+// per agent.
 func discoverAgentImports(ctx context.Context) ([]agentImportStatus, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
 	now := time.Now()
-	var statuses []agentImportStatus
+	type discovery struct {
+		imp   agentimport.Importer
+		files []agentimport.SessionFile
+	}
+	var discovered []discovery
+	var inputs []importScanInput
+	cacheable := true
 	for _, imp := range agentimport.All() {
 		files, discoverErr := imp.Discover(repoRoot, "", now, nil)
 		if discoverErr != nil || len(files) == 0 {
 			continue
 		}
-		repo, openErr := openRepository(ctx)
-		if openErr != nil {
-			return nil, openErr
+		discovered = append(discovered, discovery{imp: imp, files: files})
+		for _, f := range files {
+			info, statErr := os.Stat(f.Path)
+			if statErr != nil {
+				// A file vanished between glob and stat — don't trust a
+				// fingerprint built from a moving target.
+				cacheable = false
+				continue
+			}
+			inputs = append(inputs, importScanInput{Path: f.Path, ModTime: info.ModTime(), Size: info.Size()})
 		}
-		res, runErr := agentimport.Run(ctx, repo, imp, agentimport.Options{
+	}
+	if len(discovered) == 0 {
+		return nil, nil
+	}
+
+	repo, err := openRepository(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer repo.Close()
+
+	fingerprint := importScanFingerprint(inputs, metadataBranchTip(repo))
+	cache := defaultImportScanCache()
+	if cacheable {
+		if statuses, ok := cache.get(repoRoot, fingerprint); ok {
+			return statuses, nil
+		}
+	}
+
+	var statuses []agentImportStatus
+	for _, d := range discovered {
+		res, runErr := agentimport.Run(ctx, repo, d.imp, agentimport.Options{
 			RepoRoot: repoRoot, Now: now, DryRun: true,
 		})
-		_ = repo.Close()
 		if runErr != nil {
+			// Best-effort per agent, but a partial result must not be
+			// memoized — it would stay wrong until the fingerprint moves.
+			cacheable = false
 			continue
 		}
 		statuses = append(statuses, agentImportStatus{
-			Agent:           imp.Name(),
+			Agent:           d.imp.Name(),
 			Sessions:        res.SessionsScanned,
 			UnimportedTurns: res.TurnsImported,
 			ImportedTurns:   res.TurnsSkipped,
 		})
 	}
+	if cacheable {
+		cache.put(repoRoot, fingerprint, statuses)
+	}
 	return statuses, nil
+}
+
+// metadataBranchTip identifies the local checkpoint-metadata state for the
+// import-scan fingerprint: any new checkpoint or import moves the ref.
+func metadataBranchTip(repo *git.Repository) string {
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		return "none"
+	}
+	return ref.Hash().String()
 }
 
 func hooksRung(deps onboardingRungDeps) onboarding.Rung {

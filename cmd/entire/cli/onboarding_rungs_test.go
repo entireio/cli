@@ -500,3 +500,49 @@ func TestMirrorProbeCache_UnreachableEntriesExpireSooner(t *testing.T) {
 		t.Error("failure entry past failureTTL should miss")
 	}
 }
+
+func TestImportScanFingerprint_ChangesWithInputs(t *testing.T) {
+	t.Parallel()
+	base := []importScanInput{
+		{Path: "/t/a.jsonl", ModTime: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), Size: 100},
+		{Path: "/t/b.jsonl", ModTime: time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC), Size: 200},
+	}
+	fp := importScanFingerprint(base, "abc123")
+
+	reordered := []importScanInput{base[1], base[0]}
+	if importScanFingerprint(reordered, "abc123") != fp {
+		t.Error("fingerprint must be order-independent")
+	}
+
+	touched := []importScanInput{base[0], {Path: base[1].Path, ModTime: base[1].ModTime.Add(time.Second), Size: base[1].Size}}
+	if importScanFingerprint(touched, "abc123") == fp {
+		t.Error("appending to a transcript (mtime change) must change the fingerprint")
+	}
+
+	if importScanFingerprint(base, "def456") == fp {
+		t.Error("a moved metadata branch tip (new checkpoints/imports) must change the fingerprint")
+	}
+}
+
+func TestImportScanCache_HitRequiresMatchingFingerprint(t *testing.T) {
+	t.Parallel()
+	cache := importScanCache{path: filepath.Join(t.TempDir(), "imports.json")}
+	statuses := []agentImportStatus{{Agent: "claude-code", Sessions: 2, UnimportedTurns: 5}}
+
+	if _, ok := cache.get("/repo", "fp1"); ok {
+		t.Error("empty cache should miss")
+	}
+
+	cache.put("/repo", "fp1", statuses)
+	got, ok := cache.get("/repo", "fp1")
+	if !ok || len(got) != 1 || got[0].UnimportedTurns != 5 {
+		t.Errorf("get = (%+v, %v), want cached statuses", got, ok)
+	}
+
+	if _, ok := cache.get("/repo", "fp2"); ok {
+		t.Error("stale fingerprint should miss")
+	}
+	if _, ok := cache.get("/other", "fp1"); ok {
+		t.Error("different repo should miss")
+	}
+}
