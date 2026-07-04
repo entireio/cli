@@ -1852,6 +1852,17 @@ func (env *TestEnv) SetupNamedBareRemote(remoteName string) string {
 // The clone checks out the same branch as the current env's HEAD.
 func (env *TestEnv) CloneFrom(bareDir string) *TestEnv {
 	env.T.Helper()
+	return env.cloneFromWithArgs(bareDir, nil)
+}
+
+// cloneFromWithArgs is CloneFrom with an explicit clone source and extra `git
+// clone` flags/config, so callers can produce shallow (--depth) or partial
+// (--filter=blob:none) user clones. cloneSource may be a local path or a
+// file:// URL; extraArgs are inserted before the source (e.g. "-c",
+// "protocol.file.allow=always", "--filter=blob:none"). The resulting TestEnv is
+// otherwise identical to CloneFrom's (own .entire, git config guard baselined).
+func (env *TestEnv) cloneFromWithArgs(cloneSource string, extraArgs []string) *TestEnv {
+	env.T.Helper()
 
 	ctx := env.T.Context()
 
@@ -1867,14 +1878,15 @@ func (env *TestEnv) CloneFrom(bareDir string) *TestEnv {
 	// Bare repos may have HEAD pointing to a non-existent default branch
 	// when the original was on a feature branch.
 	cloneArgs := []string{"clone"}
+	cloneArgs = append(cloneArgs, extraArgs...)
 	if currentBranch != "" {
 		cloneArgs = append(cloneArgs, "--branch", currentBranch)
 	}
-	cloneArgs = append(cloneArgs, bareDir, cloneDir)
+	cloneArgs = append(cloneArgs, cloneSource, cloneDir)
 	cmd := exec.CommandContext(ctx, "git", cloneArgs...)
 	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
-		env.T.Fatalf("failed to clone from %s: %v\n%s", bareDir, err, output)
+		env.T.Fatalf("failed to clone from %s: %v\n%s", cloneSource, err, output)
 	}
 
 	// Configure git user (clone doesn't inherit local config from the bare repo)
