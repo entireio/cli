@@ -26,6 +26,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
@@ -63,6 +64,14 @@ type TestEnv struct {
 	// invocations (RunPrePush, GitCommitWithShadowHooks, etc.). Use this to
 	// pass ENTIRE_CHECKPOINT_TOKEN, GIT_SSL_CAINFO, and similar per-test env.
 	ExtraEnv []string
+
+	// CheckpointStore, when set (via ForEachBackend), selects the checkpoint
+	// storage backend for every spawned CLI/hook by injecting
+	// ENTIRE_CHECKPOINTS_PRIMARY into their environment. Empty means the CLI
+	// default (git-branch). It must be set before the first checkpoint-creating
+	// operation; the InitRepo/InitEntire/GitCommit factory steps create no
+	// checkpoints, so setting it right after a factory call is safe.
+	CheckpointStore string
 }
 
 // NewTestEnv creates a new isolated test environment.
@@ -130,7 +139,19 @@ func (env *TestEnv) cliEnv() []string {
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 	)
+	base = append(base, env.checkpointStoreEnv()...)
 	return append(base, env.ExtraEnv...)
+}
+
+// checkpointStoreEnv returns the ENTIRE_CHECKPOINTS_PRIMARY override for the
+// selected backend, or nil when unset. Included in both cliEnv (RunCLI, resume,
+// pre-push) and gitHookEnv (post-commit condensation, prepare-commit-msg) so the
+// backend is consistent across every subprocess a test spawns.
+func (env *TestEnv) checkpointStoreEnv() []string {
+	if env.CheckpointStore == "" {
+		return nil
+	}
+	return []string{settings.EnvCheckpointsPrimary + "=" + env.CheckpointStore}
 }
 
 // RunCLI runs the entire CLI with the given arguments and returns stdout.
@@ -1082,6 +1103,7 @@ func (env *TestEnv) gitHookEnv(extra ...string) []string {
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_TEST_OPENCODE_MOCK_EXPORT=1",
 	)
+	envVars = append(envVars, env.checkpointStoreEnv()...)
 	return append(envVars, extra...)
 }
 
@@ -1873,6 +1895,7 @@ func (env *TestEnv) CloneFrom(bareDir string) *TestEnv {
 		ClaudeProjectDir:   claudeProjectDir,
 		GeminiProjectDir:   geminiProjectDir,
 		OpenCodeProjectDir: openCodeProjectDir,
+		CheckpointStore:    env.CheckpointStore,
 	}
 
 	// Initialize Entire in the clone
