@@ -187,13 +187,44 @@ func (g *GitHooksSettings) Validate() error {
 		if filepath.IsAbs(g.ExternalDir) {
 			return fmt.Errorf("git_hooks.external_dir must be repo-relative (got %q)", g.ExternalDir)
 		}
-		if strings.Contains(g.ExternalDir, "..") {
-			return fmt.Errorf("git_hooks.external_dir must not contain %q (got %q)", "..", g.ExternalDir)
+		// filepath.VolumeName only recognizes drive letters and UNC on
+		// GOOS=windows, so we cannot rely on it to reject Windows-style
+		// drive-relative paths ("C:foo") when this binary happens to run
+		// on darwin/linux (e.g. when settings are shared through git).
+		// Match manually so the same input is rejected everywhere.
+		if isWindowsAnchoredPath(g.ExternalDir) {
+			return fmt.Errorf("git_hooks.external_dir must be repo-relative, not drive- or volume-anchored (got %q)", g.ExternalDir)
+		}
+		// Reject `..` as a distinct path segment (`../escape`, `foo/../bar`)
+		// but allow directories whose name legitimately starts with two dots
+		// (`..config`, `..dot-prefixed`). A blanket strings.Contains rejected
+		// both, which was too aggressive.
+		for _, seg := range strings.Split(filepath.ToSlash(g.ExternalDir), "/") {
+			if seg == ".." {
+				return fmt.Errorf("git_hooks.external_dir must not traverse outside the repo (got %q)", g.ExternalDir)
+			}
 		}
 		return nil
 	default:
 		return fmt.Errorf("git_hooks.backend must be %q or %q (got %q)", "direct", "external", g.Backend)
 	}
+}
+
+// isWindowsAnchoredPath reports whether p starts with a Windows drive
+// letter ("C:...") or a UNC prefix ("\\server\share", "//server/share").
+// Used cross-platform: settings sync via git, so a darwin binary can be
+// asked to validate a path a Windows user wrote.
+func isWindowsAnchoredPath(p string) bool {
+	if len(p) >= 2 {
+		c := p[0]
+		if p[1] == ':' && ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+			return true
+		}
+	}
+	if strings.HasPrefix(p, `\\`) || strings.HasPrefix(p, "//") {
+		return true
+	}
+	return false
 }
 
 // IsExternalGitHooks reports whether the external git hooks backend is active.

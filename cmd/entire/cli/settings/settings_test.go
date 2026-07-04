@@ -1448,3 +1448,52 @@ func TestMergeJSON_GitHooks_LocalOverridesProjectWholeBlock(t *testing.T) {
 		t.Errorf("ExternalHookDir() = %q, want empty after whole-block override", got)
 	}
 }
+
+// Windows drive-relative paths ("C:foo") are not absolute per
+// filepath.IsAbs on any platform but bind to the current directory of
+// drive C at runtime, which escapes the repo root. Reject them explicitly
+// (via filepath.VolumeName) so the check is cross-platform: darwin/linux
+// binaries reject the same input a Windows binary would.
+func TestLoad_GitHooks_ExternalDir_RejectsDriveRelative(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": "C:hooks"}}`,
+		"",
+	)
+	_, err := Load(context.Background())
+	if err == nil {
+		t.Fatal("Load() should reject drive-relative external_dir")
+	}
+	if !strings.Contains(err.Error(), "drive-") && !strings.Contains(err.Error(), "volume-") {
+		t.Errorf("error should mention the drive/volume anchor, got: %v", err)
+	}
+}
+
+// A directory whose name legitimately starts with two dots (e.g.
+// ..config) must not be rejected. The old strings.Contains(".") check
+// blanket-refused these; per-segment matching should let them through.
+func TestLoad_GitHooks_ExternalDir_AllowsDoubleDotPrefix(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": "..config"}}`,
+		"",
+	)
+	if _, err := Load(context.Background()); err != nil {
+		t.Fatalf("Load() should allow directory names starting with '..': got %v", err)
+	}
+}
+
+// Interior `..` segments still escape the repo root and must be rejected
+// even when embedded (foo/../bar). Companion to the leading-`../` case
+// covered by TestLoad_GitHooks_ExternalDir_RejectsPathTraversal.
+func TestLoad_GitHooks_ExternalDir_RejectsInteriorParentSegment(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": "foo/../bar"}}`,
+		"",
+	)
+	_, err := Load(context.Background())
+	if err == nil {
+		t.Fatal("Load() should reject external_dir with an interior '..' segment")
+	}
+	if !strings.Contains(err.Error(), "..") {
+		t.Errorf("error should mention '..', got: %v", err)
+	}
+}
