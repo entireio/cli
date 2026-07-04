@@ -53,6 +53,18 @@ func Doctor(t *testing.T, dir string) string {
 	return run(t, dir, "doctor", "--force")
 }
 
+// DoctorCtx runs `entire doctor --force` under the given context and returns the
+// combined output and any error WITHOUT failing the test. Use it to pin doctor's
+// behavior against a degraded/unreachable remote: pass a context.WithTimeout so a
+// hang surfaces as context.DeadlineExceeded rather than blocking the suite.
+func DoctorCtx(ctx context.Context, dir string) (string, error) {
+	cmd := execx.NonInteractive(ctx, BinPath(), "doctor", "--force")
+	cmd.Dir = dir
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
 // CleanDryRun runs `entire clean --dry-run` and returns the output.
 func CleanDryRun(t *testing.T, dir string) string {
 	t.Helper()
