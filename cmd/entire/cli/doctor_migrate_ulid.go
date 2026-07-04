@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	git "github.com/go-git/go-git/v6"
@@ -82,6 +83,15 @@ refs/original/ backup. Runs a dry-run preview unless --yes is given.`,
 			}
 
 			printMigrateToULIDPlan(out, result, userBranches, infraBranches)
+
+			// Surface trailers that reference a checkpoint absent from every v1
+			// source — they can't be remapped and will stay hex.
+			if n, derr := unmappedHexTrailerCount(ctx, repoRoot, result.Mapping, userBranches); derr == nil && n > 0 {
+				fmt.Fprintf(out, "\nNote: %d referenced checkpoint id(s) were not found on any v1 branch\n", n)
+				fmt.Fprintln(out, "(local or origin/entire/checkpoints/v1); their trailers will stay hex. If origin's")
+				fmt.Fprintln(out, "checkpoints branch may be stale, run `git fetch` and re-run; otherwise those")
+				fmt.Fprintln(out, "checkpoints are genuinely absent (dangling trailers).")
+			}
 
 			if len(result.Mapping) == 0 {
 				fmt.Fprintln(out, "\nNothing to migrate (no legacy-hex checkpoints found).")
@@ -162,6 +172,34 @@ func listRewritableBranches(ctx context.Context, repoRoot string) ([]string, err
 // listInfraBranches returns the entire/* branches (v1 + per-worktree shadow).
 func listInfraBranches(ctx context.Context, repoRoot string) ([]string, error) {
 	return forEachRef(ctx, repoRoot, "refs/heads/entire")
+}
+
+// hexCheckpointTrailerRe matches a legacy-hex Entire-Checkpoint trailer value.
+var hexCheckpointTrailerRe = regexp.MustCompile(`Entire-Checkpoint: ([0-9a-f]{12})`)
+
+// unmappedHexTrailerCount counts distinct legacy-hex checkpoint ids referenced by
+// commit trailers on the given branches that are NOT in the migration mapping —
+// i.e. checkpoints absent from every v1 source, whose trailers cannot be remapped.
+func unmappedHexTrailerCount(ctx context.Context, repoRoot string, mapping []cpkg.ULIDMapping, branches []string) (int, error) {
+	if len(branches) == 0 {
+		return 0, nil
+	}
+	mapped := make(map[string]bool, len(mapping))
+	for _, m := range mapping {
+		mapped[m.OldID.String()] = true
+	}
+	args := append([]string{"-C", repoRoot, "log", "--format=%B"}, branches...)
+	stdout, err := exec.CommandContext(ctx, "git", args...).Output()
+	if err != nil {
+		return 0, fmt.Errorf("git log: %w", err)
+	}
+	unmapped := make(map[string]bool)
+	for _, m := range hexCheckpointTrailerRe.FindAllStringSubmatch(string(stdout), -1) {
+		if !mapped[m[1]] {
+			unmapped[m[1]] = true
+		}
+	}
+	return len(unmapped), nil
 }
 
 // forEachRef lists full ref names under the given prefix.

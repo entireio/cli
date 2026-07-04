@@ -4,11 +4,21 @@ import (
 	"context"
 	"testing"
 
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
+
+// originV1Store returns a git-branch store whose ref is origin's remote-tracking
+// entire/checkpoints/v1, for seeding checkpoints that live only on origin.
+func originV1Store(repo *git.Repository) *GitStore {
+	originRef := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
+	return NewGitStore(repo, PersistentRefs{Primary: originRef, Read: originRef})
+}
 
 func TestMigrateBranchHexToULIDRefs(t *testing.T) {
 	t.Parallel()
@@ -59,6 +69,47 @@ func TestMigrateBranchHexToULIDRefs(t *testing.T) {
 	orig, err := branch.Read(ctx, hexA)
 	require.NoError(t, err)
 	assert.NotNil(t, orig, "hex checkpoint should remain on the branch")
+}
+
+func TestMigrateBranchHexToULIDRefs_UnionsLocalAndOriginV1(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, repo, _ := newTestRepo(t)
+
+	// A checkpoint only on the local v1 and another only on origin's v1 (the two
+	// can diverge). Both must be migrated — reading only one would leave the
+	// other's commit trailers un-remapped.
+	hexLocal := id.MustCheckpointID("a1b2c3d4e5f6")
+	hexOrigin := id.MustCheckpointID("ffffffffeeee")
+	writeRoutingCheckpoint(t, NewGitStore(repo, DefaultV1Refs()), hexLocal, "s-local")
+	writeRoutingCheckpoint(t, originV1Store(repo), hexOrigin, "s-origin")
+
+	result, err := MigrateBranchHexToULIDRefs(ctx, repo, false)
+	require.NoError(t, err)
+	assert.Equal(t, 2, result.Total, "should migrate checkpoints from BOTH local and origin v1")
+
+	migrated := make(map[id.CheckpointID]bool)
+	for _, m := range result.Mapping {
+		migrated[m.OldID] = true
+	}
+	assert.True(t, migrated[hexLocal], "local-only checkpoint should be migrated")
+	assert.True(t, migrated[hexOrigin], "origin-only checkpoint should be migrated")
+}
+
+func TestMigrateBranchHexToULIDRefs_DedupsAcrossV1Sources(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, repo, _ := newTestRepo(t)
+
+	// The same checkpoint present on both local and origin v1 must migrate once.
+	dup := id.MustCheckpointID("a1b2c3d4e5f6")
+	writeRoutingCheckpoint(t, NewGitStore(repo, DefaultV1Refs()), dup, "s")
+	writeRoutingCheckpoint(t, originV1Store(repo), dup, "s")
+
+	result, err := MigrateBranchHexToULIDRefs(ctx, repo, false)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Total, "a checkpoint on both v1 sources should migrate once")
+	assert.Len(t, result.Mapping, 1)
 }
 
 func TestMigrateBranchHexToULIDRefs_DryRunWritesNothing(t *testing.T) {

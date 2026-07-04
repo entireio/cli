@@ -3,7 +3,6 @@ package checkpoint
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -55,68 +54,104 @@ type ULIDMigrateResult struct {
 func MigrateBranchHexToULIDRefs(ctx context.Context, repo *git.Repository, dryRun bool) (ULIDMigrateResult, error) {
 	var result ULIDMigrateResult
 
-	branch := NewGitStore(repo, DefaultV1Refs())
-	tree, err := branch.getSessionsBranchTree()
-	if err != nil {
-		if errors.Is(err, plumbing.ErrReferenceNotFound) {
-			return result, nil // no v1 branch → nothing to migrate
-		}
-		return result, fmt.Errorf("read v1 checkpoint branch: %w", err)
+	trees := v1CheckpointTrees(repo)
+	if len(trees) == 0 {
+		return result, nil // no v1 branch anywhere → nothing to migrate
 	}
 
 	refsStore := newGitRefsStore(repo)
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
+	// Dedup across v1 sources: the local and origin v1 branches can diverge (each
+	// machine condenses onto its own), so a checkpoint may appear in more than one
+	// tree — migrate it once.
+	seen := make(map[id.CheckpointID]bool)
 
-	walkErr := WalkCheckpointShards(ctx, repo, tree, func(cid id.CheckpointID, cpTreeHash plumbing.Hash) error {
-		if err := ctx.Err(); err != nil {
-			return err //nolint:wrapcheck // propagate context cancellation
-		}
-		result.Total++
+	for _, tree := range trees {
+		walkErr := WalkCheckpointShards(ctx, repo, tree, func(cid id.CheckpointID, cpTreeHash plumbing.Hash) error {
+			if err := ctx.Err(); err != nil {
+				return err //nolint:wrapcheck // propagate context cancellation
+			}
+			if seen[cid] {
+				return nil
+			}
+			seen[cid] = true
+			result.Total++
 
-		// Already a ULID (re-run, or a mixed repo): its content and ref are already
-		// in the target shape, so leave it untouched.
-		if cid.Kind() == id.KindULID {
-			result.Skipped++
+			// Already a ULID (re-run, or a mixed repo): its content and ref are already
+			// in the target shape, so leave it untouched.
+			if cid.Kind() == id.KindULID {
+				result.Skipped++
+				return nil
+			}
+
+			cpTree, err := repo.TreeObject(cpTreeHash)
+			if err != nil {
+				return fmt.Errorf("read checkpoint tree %s: %w", cid, err)
+			}
+			info := readCommittedInfoFromCheckpointTree(cid, cpTree)
+			// Mint the ULID from the checkpoint's original creation time so the ULIDs
+			// sort chronologically — the repo reads as if it had used ULIDs all along.
+			newID, err := id.GenerateULIDAt(info.CreatedAt)
+			if err != nil {
+				return fmt.Errorf("mint ULID for checkpoint %s: %w", cid, err)
+			}
+			result.Mapping = append(result.Mapping, ULIDMapping{OldID: cid, NewID: newID})
+
+			if dryRun {
+				return nil
+			}
+
+			newTreeHash, err := restampCheckpointID(repo, cpTreeHash, newID, info.SessionCount)
+			if err != nil {
+				return fmt.Errorf("re-stamp checkpoint %s: %w", cid, err)
+			}
+			msg := fmt.Sprintf("Import checkpoint %s (migrated from git-branch hex %s)", newID, cid)
+			commitHash, err := CreateCommit(ctx, repo, newTreeHash, plumbing.ZeroHash, msg, authorName, authorEmail)
+			if err != nil {
+				return fmt.Errorf("commit checkpoint %s: %w", newID, err)
+			}
+			if err := refsStore.setRef(ctx, newID, commitHash); err != nil {
+				return fmt.Errorf("set ref for checkpoint %s: %w", newID, err)
+			}
+			logging.Debug(ctx, "migrate-to-ulid: re-identified checkpoint",
+				slog.String("old_id", cid.String()), slog.String("new_id", newID.String()))
 			return nil
+		})
+		if walkErr != nil {
+			return result, fmt.Errorf("walk v1 checkpoints: %w", walkErr)
 		}
-
-		cpTree, err := repo.TreeObject(cpTreeHash)
-		if err != nil {
-			return fmt.Errorf("read checkpoint tree %s: %w", cid, err)
-		}
-		info := readCommittedInfoFromCheckpointTree(cid, cpTree)
-		// Mint the ULID from the checkpoint's original creation time so the ULIDs
-		// sort chronologically — the repo reads as if it had used ULIDs all along.
-		newID, err := id.GenerateULIDAt(info.CreatedAt)
-		if err != nil {
-			return fmt.Errorf("mint ULID for checkpoint %s: %w", cid, err)
-		}
-		result.Mapping = append(result.Mapping, ULIDMapping{OldID: cid, NewID: newID})
-
-		if dryRun {
-			return nil
-		}
-
-		newTreeHash, err := restampCheckpointID(repo, cpTreeHash, newID, info.SessionCount)
-		if err != nil {
-			return fmt.Errorf("re-stamp checkpoint %s: %w", cid, err)
-		}
-		msg := fmt.Sprintf("Import checkpoint %s (migrated from git-branch hex %s)", newID, cid)
-		commitHash, err := CreateCommit(ctx, repo, newTreeHash, plumbing.ZeroHash, msg, authorName, authorEmail)
-		if err != nil {
-			return fmt.Errorf("commit checkpoint %s: %w", newID, err)
-		}
-		if err := refsStore.setRef(ctx, newID, commitHash); err != nil {
-			return fmt.Errorf("set ref for checkpoint %s: %w", newID, err)
-		}
-		logging.Debug(ctx, "migrate-to-ulid: re-identified checkpoint",
-			slog.String("old_id", cid.String()), slog.String("new_id", newID.String()))
-		return nil
-	})
-	if walkErr != nil {
-		return result, fmt.Errorf("walk v1 checkpoints: %w", walkErr)
 	}
 	return result, nil
+}
+
+// v1CheckpointTrees returns every available checkpoint tree to migrate: the local
+// entire/checkpoints/v1 branch AND origin's remote-tracking copy. The two can
+// diverge (each machine condenses checkpoints onto its own v1 before they are
+// reconciled), so reading only one silently drops the checkpoints that live on
+// the other — leaving their commit trailers un-remapped. Missing/unreadable refs
+// are skipped. Run `git fetch` first if origin's tracking ref may be stale.
+func v1CheckpointTrees(repo *git.Repository) []*object.Tree {
+	refNames := []plumbing.ReferenceName{
+		plumbing.NewBranchReferenceName(paths.MetadataBranchName),
+		plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName),
+	}
+	var trees []*object.Tree
+	for _, refName := range refNames {
+		ref, err := repo.Reference(refName, true)
+		if err != nil {
+			continue
+		}
+		commit, err := repo.CommitObject(ref.Hash())
+		if err != nil {
+			continue
+		}
+		tree, err := commit.Tree()
+		if err != nil {
+			continue
+		}
+		trees = append(trees, tree)
+	}
+	return trees
 }
 
 // restampCheckpointID rewrites the embedded checkpoint_id (hex → newID) in the
