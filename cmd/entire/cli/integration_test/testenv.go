@@ -1999,6 +1999,83 @@ func (env *TestEnv) GitPushWithHooks(remote, refSpec string) {
 	}
 }
 
+// SetGitConfig sets a repo-local git config value and re-baselines the
+// .git/config guard so the intentional mutation isn't flagged during cleanup
+// (mirrors the set-url + setGitConfigBaseline pattern in the HTTPS helpers).
+func (env *TestEnv) SetGitConfig(key, value string) {
+	env.T.Helper()
+	cmd := exec.CommandContext(env.T.Context(), "git", "config", key, value)
+	cmd.Dir = env.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		env.T.Fatalf("git config %s failed: %v\n%s", key, err, output)
+	}
+	env.setGitConfigBaseline()
+}
+
+// GitTag creates a lightweight tag at HEAD. Fails the test on error.
+func (env *TestEnv) GitTag(name string) {
+	env.T.Helper()
+	cmd := exec.CommandContext(env.T.Context(), "git", "tag", name)
+	cmd.Dir = env.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		env.T.Fatalf("git tag %s failed: %v\n%s", name, err, output)
+	}
+}
+
+// PushQueueRefs returns the checkpoint refs currently recorded in the git-refs
+// push queue (entire-checkpoint-push-queue.jsonl in the git common dir). It reads
+// the file directly rather than draining the queue so it is a non-destructive
+// peek. Returns nil when the queue file is absent (nothing queued).
+func (env *TestEnv) PushQueueRefs() []string {
+	env.T.Helper()
+
+	queuePath := filepath.Join(env.RepoDir, ".git", "entire-checkpoint-push-queue.jsonl")
+	data, err := os.ReadFile(queuePath) //nolint:gosec // G304: path built from test env, not user input
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		env.T.Fatalf("read push queue: %v", err)
+	}
+
+	var refs []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry struct {
+			Ref string `json:"ref"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			env.T.Fatalf("parse push queue line %q: %v", line, err)
+		}
+		if entry.Ref != "" {
+			refs = append(refs, entry.Ref)
+		}
+	}
+	return refs
+}
+
+// GitPushArgsWithHooks installs the pre-push hook and runs `git push <args>`
+// (WITHOUT --no-verify) so the real hook fires exactly as git runs it, then
+// returns the combined output and any error instead of failing the test. Use it
+// for push shapes GitPushWithHooks can't express — a `--delete` (zero-sha stdin),
+// a tag-only push, or an expected graceful-degradation exit code.
+func (env *TestEnv) GitPushArgsWithHooks(args ...string) (string, error) {
+	env.T.Helper()
+
+	env.InstallRealPrePushHook()
+
+	cmd := execx.NonInteractive(env.T.Context(), "git", append([]string{"push"}, args...)...)
+	cmd.Dir = env.RepoDir
+	cmd.Env = env.cliEnv()
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // RunPrePush runs the pre-push hook via the CLI binary, feeding realistic stdin
 // refspec lines for the current branch (see defaultPrePushStdin). This is the
 // direct-invocation stand-in for GitPushWithHooks used by tests that don't push
