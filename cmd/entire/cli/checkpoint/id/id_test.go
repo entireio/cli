@@ -3,6 +3,9 @@ package id
 import (
 	"encoding/json"
 	"testing"
+	"time"
+
+	ulid "github.com/oklog/ulid/v2"
 )
 
 // A representative ULID (Crockford base32, 26 chars) used across tests.
@@ -29,6 +32,44 @@ func TestGenerateULID(t *testing.T) {
 	}
 	if a == b {
 		t.Errorf("two GenerateULID() calls returned the same id %q", a)
+	}
+}
+
+func TestGenerateULIDAt(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
+
+	a, err := GenerateULIDAt(when)
+	if err != nil {
+		t.Fatalf("GenerateULIDAt() error = %v", err)
+	}
+	if a.Kind() != KindULID {
+		t.Errorf("Kind() = %v, want KindULID for %q", a.Kind(), a)
+	}
+	u, err := ulid.Parse(string(a))
+	if err != nil {
+		t.Fatalf("Parse(%q): %v", a, err)
+	}
+	if u.Time() != uint64(when.UnixMilli()) {
+		t.Errorf("ULID time = %d, want %d (source timestamp)", u.Time(), when.UnixMilli())
+	}
+
+	// Zero time falls back to now.
+	z, err := GenerateULIDAt(time.Time{})
+	if err != nil {
+		t.Fatalf("GenerateULIDAt(zero) error = %v", err)
+	}
+	if uz, perr := ulid.Parse(string(z)); perr != nil || uz.Time() == 0 {
+		t.Errorf("zero time should fall back to now; got %q (parse err %v)", z, perr)
+	}
+
+	// Same timestamp still yields distinct ids (entropy).
+	b, err := GenerateULIDAt(when)
+	if err != nil {
+		t.Fatalf("GenerateULIDAt() error = %v", err)
+	}
+	if a == b {
+		t.Errorf("same-timestamp ULIDs collided: %q", a)
 	}
 }
 

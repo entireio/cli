@@ -3,49 +3,12 @@ package checkpoint
 import (
 	"context"
 	"testing"
-	"time"
 
-	ulidpkg "github.com/oklog/ulid/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 )
-
-func TestMintULIDAt(t *testing.T) {
-	t.Parallel()
-
-	t.Run("carries the given timestamp", func(t *testing.T) {
-		t.Parallel()
-		when := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
-		cid, err := mintULIDAt(when)
-		require.NoError(t, err)
-		require.Equal(t, id.KindULID, cid.Kind())
-		u, err := ulidpkg.Parse(cid.String())
-		require.NoError(t, err)
-		assert.Equal(t, uint64(when.UnixMilli()), u.Time(), "ULID timestamp should match the source time")
-	})
-
-	t.Run("zero time falls back to now", func(t *testing.T) {
-		t.Parallel()
-		cid, err := mintULIDAt(time.Time{})
-		require.NoError(t, err)
-		require.Equal(t, id.KindULID, cid.Kind())
-		u, err := ulidpkg.Parse(cid.String())
-		require.NoError(t, err)
-		assert.NotZero(t, u.Time())
-	})
-
-	t.Run("same timestamp still yields distinct ids", func(t *testing.T) {
-		t.Parallel()
-		when := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
-		a, err := mintULIDAt(when)
-		require.NoError(t, err)
-		b, err := mintULIDAt(when)
-		require.NoError(t, err)
-		assert.NotEqual(t, a, b, "entropy should make same-time ULIDs unique")
-	})
-}
 
 func TestMigrateBranchHexToULIDRefs(t *testing.T) {
 	t.Parallel()

@@ -65,10 +65,12 @@ refs/original/ backup. Runs a dry-run preview unless --yes is given.`,
 				return fmt.Errorf("open repository: %w", err)
 			}
 
-			// Preview always (dry-run mapping), so --yes and no-flag share one code path.
-			preview, err := cpkg.MigrateBranchHexToULIDRefs(ctx, repo, true)
+			// Single walk: a dry-run for the preview, or the real migration under
+			// --yes. Running a dry pass and then a real one would mint different
+			// (random) ULIDs and print a mapping that didn't match what was written.
+			result, err := cpkg.MigrateBranchHexToULIDRefs(ctx, repo, !apply)
 			if err != nil {
-				return fmt.Errorf("scan checkpoints: %w", err)
+				return fmt.Errorf("migrate checkpoints to ULID refs: %w", err)
 			}
 			userBranches, err := listRewritableBranches(ctx, repoRoot)
 			if err != nil {
@@ -79,9 +81,9 @@ refs/original/ backup. Runs a dry-run preview unless --yes is given.`,
 				return fmt.Errorf("list entire/* branches: %w", err)
 			}
 
-			printMigrateToULIDPlan(out, preview, userBranches, infraBranches)
+			printMigrateToULIDPlan(out, result, userBranches, infraBranches)
 
-			if len(preview.Mapping) == 0 {
+			if len(result.Mapping) == 0 {
 				fmt.Fprintln(out, "\nNothing to migrate (no legacy-hex checkpoints found).")
 				return nil
 			}
@@ -89,15 +91,9 @@ refs/original/ backup. Runs a dry-run preview unless --yes is given.`,
 				fmt.Fprintln(out, "\nDry run. Re-run with --yes to apply (this rewrites history).")
 				return nil
 			}
-
-			// 1. Write the ULID refs and get the authoritative hex -> ULID mapping.
-			result, err := cpkg.MigrateBranchHexToULIDRefs(ctx, repo, false)
-			if err != nil {
-				return fmt.Errorf("migrate checkpoints to ULID refs: %w", err)
-			}
 			fmt.Fprintf(out, "\nWrote %d ULID checkpoint ref(s).\n", len(result.Mapping))
 
-			// 2. Rewrite the Entire-Checkpoint trailers across the user branches.
+			// Rewrite the Entire-Checkpoint trailers across the user branches.
 			if len(userBranches) > 0 {
 				if err := rewriteCheckpointTrailers(ctx, repoRoot, result.Mapping, userBranches); err != nil {
 					return fmt.Errorf("rewrite commit trailers: %w", err)

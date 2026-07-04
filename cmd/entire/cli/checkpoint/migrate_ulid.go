@@ -2,19 +2,15 @@ package checkpoint
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
-	"time"
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
-	ulidpkg "github.com/oklog/ulid/v2"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -89,7 +85,9 @@ func MigrateBranchHexToULIDRefs(ctx context.Context, repo *git.Repository, dryRu
 			return fmt.Errorf("read checkpoint tree %s: %w", cid, err)
 		}
 		info := readCommittedInfoFromCheckpointTree(cid, cpTree)
-		newID, err := mintULIDAt(info.CreatedAt)
+		// Mint the ULID from the checkpoint's original creation time so the ULIDs
+		// sort chronologically — the repo reads as if it had used ULIDs all along.
+		newID, err := id.GenerateULIDAt(info.CreatedAt)
 		if err != nil {
 			return fmt.Errorf("mint ULID for checkpoint %s: %w", cid, err)
 		}
@@ -121,91 +119,75 @@ func MigrateBranchHexToULIDRefs(ctx context.Context, repo *git.Repository, dryRu
 	return result, nil
 }
 
-// mintULIDAt mints a canonical ULID checkpoint id whose timestamp is t (falling
-// back to now when t is zero), with crypto-random entropy so concurrent-second
-// checkpoints stay unique.
-func mintULIDAt(t time.Time) (id.CheckpointID, error) {
-	if t.IsZero() {
-		t = time.Now()
-	}
-	u, err := ulidpkg.New(ulidpkg.Timestamp(t.UTC()), rand.Reader)
-	if err != nil {
-		return id.EmptyCheckpointID, fmt.Errorf("generate ULID: %w", err)
-	}
-	return id.NewCheckpointID(u.String()) //nolint:wrapcheck // id.NewCheckpointID already returns a descriptive error
-}
-
 // restampCheckpointID rewrites the embedded checkpoint_id (hex → newID) in the
-// checkpoint's metadata.json files — the root summary and each session's metadata
-// — and returns the new checkpoint tree hash. All other blobs are preserved
-// byte-for-byte. Files without a checkpoint_id key are left untouched.
+// checkpoint's metadata.json files and returns the new checkpoint tree hash. All
+// other blobs are preserved byte-for-byte.
+//
+// The root metadata.json (CheckpointSummary) and each <n>/metadata.json (Metadata)
+// carry the checkpoint's id; nothing else in the tree does.
 func restampCheckpointID(repo *git.Repository, cpTreeHash plumbing.Hash, newID id.CheckpointID, sessionCount int) (plumbing.Hash, error) {
-	// The root metadata.json (CheckpointSummary) and each <n>/metadata.json
-	// (Metadata) carry the checkpoint's id; nothing else in the tree does.
-	dirs := [][]string{nil} // root
-	for i := range sessionCount {
-		dirs = append(dirs, []string{strconv.Itoa(i)})
+	current, err := restampMetadataDir(repo, cpTreeHash, "", newID) // root summary
+	if err != nil {
+		return plumbing.ZeroHash, err
 	}
-
-	current := cpTreeHash
-	for _, dir := range dirs {
-		patched, mode, ok, err := restampMetadataAt(repo, current, dir, newID)
+	for i := range sessionCount {
+		current, err = restampMetadataDir(repo, current, strconv.Itoa(i), newID)
 		if err != nil {
 			return plumbing.ZeroHash, err
-		}
-		if !ok {
-			continue
-		}
-		current, err = UpdateSubtree(repo, current, dir,
-			[]object.TreeEntry{{Name: paths.MetadataFileName, Mode: mode, Hash: patched}},
-			UpdateSubtreeOptions{MergeMode: MergeKeepExisting})
-		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("graft metadata.json: %w", err)
 		}
 	}
 	return current, nil
 }
 
-// restampMetadataAt reads the metadata.json under dir within treeHash, rewrites
-// its checkpoint_id to newID, and stores the patched blob. ok is false when there
-// is no metadata.json at that path (skip) or it carries no checkpoint_id.
-func restampMetadataAt(repo *git.Repository, treeHash plumbing.Hash, dir []string, newID id.CheckpointID) (plumbing.Hash, filemode.FileMode, bool, error) {
+// restampMetadataDir re-stamps checkpoint_id → newID in the metadata.json under
+// sessionDir ("" = the checkpoint root) within treeHash and grafts the patched
+// file back, returning the new tree hash. treeHash is returned unchanged when
+// there is no metadata.json there or it carries no checkpoint_id.
+func restampMetadataDir(repo *git.Repository, treeHash plumbing.Hash, sessionDir string, newID id.CheckpointID) (plumbing.Hash, error) {
 	tree, err := repo.TreeObject(treeHash)
 	if err != nil {
-		return plumbing.ZeroHash, 0, false, fmt.Errorf("read tree %s: %w", treeHash, err)
+		return plumbing.ZeroHash, fmt.Errorf("read tree %s: %w", treeHash, err)
 	}
 	path := paths.MetadataFileName
-	if len(dir) > 0 {
-		path = dir[0] + "/" + paths.MetadataFileName
+	var segs []string
+	if sessionDir != "" {
+		path = sessionDir + "/" + paths.MetadataFileName
+		segs = []string{sessionDir}
 	}
 	file, err := tree.File(path)
 	if err != nil {
-		return plumbing.ZeroHash, 0, false, nil //nolint:nilerr // absent metadata.json → nothing to re-stamp
+		return treeHash, nil //nolint:nilerr // absent metadata.json → nothing to re-stamp
 	}
 	content, err := file.Contents()
 	if err != nil {
-		return plumbing.ZeroHash, 0, false, fmt.Errorf("read %s: %w", path, err)
+		return plumbing.ZeroHash, fmt.Errorf("read %s: %w", path, err)
 	}
 
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(content), &doc); err != nil {
-		return plumbing.ZeroHash, 0, false, fmt.Errorf("parse %s: %w", path, err)
+		return plumbing.ZeroHash, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if _, has := doc["checkpoint_id"]; !has {
-		return plumbing.ZeroHash, 0, false, nil // not an id-bearing metadata file
+		return treeHash, nil // not an id-bearing metadata file
 	}
 	idJSON, err := json.Marshal(newID.String())
 	if err != nil {
-		return plumbing.ZeroHash, 0, false, fmt.Errorf("encode checkpoint id: %w", err)
+		return plumbing.ZeroHash, fmt.Errorf("encode checkpoint id: %w", err)
 	}
 	doc["checkpoint_id"] = idJSON
 	out, err := json.Marshal(doc)
 	if err != nil {
-		return plumbing.ZeroHash, 0, false, fmt.Errorf("encode %s: %w", path, err)
+		return plumbing.ZeroHash, fmt.Errorf("encode %s: %w", path, err)
 	}
 	blobHash, err := CreateBlobFromContent(repo, out)
 	if err != nil {
-		return plumbing.ZeroHash, 0, false, fmt.Errorf("write %s blob: %w", path, err)
+		return plumbing.ZeroHash, fmt.Errorf("write %s blob: %w", path, err)
 	}
-	return blobHash, file.Mode, true, nil
+	newTree, err := UpdateSubtree(repo, treeHash, segs,
+		[]object.TreeEntry{{Name: paths.MetadataFileName, Mode: file.Mode, Hash: blobHash}},
+		UpdateSubtreeOptions{MergeMode: MergeKeepExisting})
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("graft %s: %w", path, err)
+	}
+	return newTree, nil
 }

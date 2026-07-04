@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"time"
 
 	ulid "github.com/oklog/ulid/v2"
 )
@@ -161,10 +162,22 @@ func Generate() (CheckpointID, error) {
 // (chosen by checkpoint.GenerateCheckpointID); the value is canonical and passes
 // KindOf/Validate as KindULID.
 //
-// The timestamp is Unix epoch milliseconds (via ulid.Now), so it is inherently
-// timezone-independent — the machine's local zone does not affect the ID.
+// The timestamp is Unix epoch milliseconds, so it is inherently timezone-
+// independent — the machine's local zone does not affect the ID.
 func GenerateULID() (CheckpointID, error) {
-	u, err := ulid.New(ulid.Now(), rand.Reader)
+	return GenerateULIDAt(time.Now())
+}
+
+// GenerateULIDAt is GenerateULID with an explicit timestamp: the ULID's
+// millisecond prefix is taken from t (falling back to now when t is zero), with
+// crypto-random entropy so same-millisecond IDs stay unique. Use it to mint an ID
+// that sorts at a historical time — e.g. re-identifying existing checkpoints as
+// ULIDs by their original creation time.
+func GenerateULIDAt(t time.Time) (CheckpointID, error) {
+	if t.IsZero() {
+		t = time.Now()
+	}
+	u, err := ulid.New(ulid.Timestamp(t.UTC()), rand.Reader)
 	if err != nil {
 		return EmptyCheckpointID, fmt.Errorf("failed to generate ULID checkpoint ID: %w", err)
 	}
