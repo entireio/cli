@@ -66,8 +66,10 @@ func TestExplainCheckpointFromClonedRepo(t *testing.T) {
 		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 
 		checkpointID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
+		// Plain push runs the installed pre-push hook, which syncs checkpoints —
+		// no explicit PushCheckpointRefs. This exercises the real hook end to end.
 		s.Git(t, "push", "-u", "origin", "feature")
-		testutil.PushCheckpointRefs(t, s.Dir)
+		testutil.AssertCheckpointsOnRemote(t, s, bareDir)
 
 		cloneDir := t.TempDir()
 		if resolved, symErr := filepath.EvalSymlinks(cloneDir); symErr == nil {

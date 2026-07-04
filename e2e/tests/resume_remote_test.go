@@ -44,9 +44,11 @@ func TestResumeFromClonedRepo(t *testing.T) {
 		checkpointID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		sessionMeta := testutil.WaitForSessionMetadata(t, s.Dir, checkpointID, 0, 30*time.Second)
 
-		// Push feature branch and checkpoint refs to the bare remote.
+		// Push the feature branch. The installed pre-push hook syncs checkpoints as
+		// part of the plain push — no explicit PushCheckpointRefs — so this covers
+		// the real hook end to end (A5/G1).
 		s.Git(t, "push", "-u", "origin", "feature")
-		testutil.PushCheckpointRefs(t, s.Dir)
+		testutil.AssertCheckpointsOnRemote(t, s, bareDir)
 
 		// Clone the repo to a new directory (simulating a teammate).
 		cloneDir := t.TempDir()
