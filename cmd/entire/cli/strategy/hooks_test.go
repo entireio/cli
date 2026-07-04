@@ -2014,6 +2014,42 @@ func TestIsGitHookInstalled_ExternalBackend_IgnoresGitHooksDir(t *testing.T) {
 	}
 }
 
+func TestExternalDispatchInvocation_PrePushOmitsOrTrue(t *testing.T) {
+	t.Parallel()
+
+	const prePush = "pre-push"
+	for _, name := range gitHookNames {
+		got := externalDispatchInvocation(name)
+		if name == prePush {
+			if strings.Contains(got, "|| true") {
+				t.Errorf("pre-push template must not swallow non-zero exit: %q\n(OPF privacy filter needs the non-zero exit to abort push)", got)
+			}
+			continue
+		}
+		if !strings.Contains(got, "|| true") {
+			t.Errorf("%s template should tolerate non-zero exits with `|| true`: %q", name, got)
+		}
+	}
+}
+
+func TestFormatExternalDirMissingHelp_PrePushWarnsAboutOrTrue(t *testing.T) {
+	t.Parallel()
+
+	msg := FormatExternalDirMissingHelp(".husky")
+
+	prePushLine := `entire hooks git pre-push "$1"`
+	if !strings.Contains(msg, prePushLine) {
+		t.Fatalf("help text should show the pre-push template line %q, got:\n%s", prePushLine, msg)
+	}
+	if strings.Contains(msg, prePushLine+" || true") {
+		t.Errorf("pre-push template in help text must not include `|| true`:\n%s", msg)
+	}
+
+	if !strings.Contains(msg, "OPF privacy filter") {
+		t.Errorf("help text should warn users why pre-push omits `|| true`:\n%s", msg)
+	}
+}
+
 func TestHasEntireMarkerLine(t *testing.T) {
 	t.Parallel()
 
@@ -2060,7 +2096,6 @@ func TestHasEntireMarkerLine(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if got := hasEntireMarkerLine([]byte(tc.data)); got != tc.want {

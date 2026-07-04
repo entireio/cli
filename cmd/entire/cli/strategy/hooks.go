@@ -606,7 +606,13 @@ func FormatExternalDirMissingHelp(extDir string) string {
 		fmt.Fprintf(&b, "  %s/%s:\n", extDir, h)
 		fmt.Fprintf(&b, "      #!/bin/sh\n")
 		fmt.Fprintf(&b, "      # %s\n", entireHookMarker)
-		fmt.Fprintf(&b, "      %s\n\n", externalDispatchInvocation(h))
+		fmt.Fprintf(&b, "      %s\n", externalDispatchInvocation(h))
+		if h == "pre-push" {
+			fmt.Fprintf(&b, "      # NOTE: pre-push MUST propagate the non-zero exit code (no `|| true`).\n")
+			fmt.Fprintf(&b, "      #       Entire's OPF privacy filter aborts push here to prevent\n")
+			fmt.Fprintf(&b, "      #       leaking unredacted content — swallowing the exit disables it.\n")
+		}
+		fmt.Fprintf(&b, "\n")
 	}
 	fmt.Fprintf(&b, "  To switch back to direct mode (Entire writes .git/hooks itself),\n")
 	fmt.Fprintf(&b, "  remove the \"git_hooks\" block from .entire/settings.json (the\n")
@@ -617,6 +623,12 @@ func FormatExternalDirMissingHelp(extDir string) string {
 // externalDispatchInvocation returns the recommended dispatch line for the
 // given hook in external mode. The args mirror what direct-mode install
 // scripts pass (see buildHookSpecs) so users get the same wiring.
+//
+// pre-push is intentionally NOT wrapped in `|| true`. The OpenAI Privacy
+// Filter runs in the pre-push hook and MUST be able to abort the push via a
+// non-zero exit code to prevent leaking unredacted content — matching the
+// direct-mode contract documented in buildHookSpecs. Users copying this
+// template into their hook manager must preserve that behavior.
 func externalDispatchInvocation(hookName string) string {
 	switch hookName {
 	case "prepare-commit-msg":
@@ -628,7 +640,9 @@ func externalDispatchInvocation(hookName string) string {
 	case "post-rewrite":
 		return `entire hooks git post-rewrite "$1" 2>/dev/null || true`
 	case "pre-push":
-		return `entire hooks git pre-push "$1" || true`
+		// No `|| true`: OPF relies on a non-zero exit here to abort push
+		// when unredacted content would otherwise leak. See buildHookSpecs.
+		return `entire hooks git pre-push "$1"`
 	default:
 		return fmt.Sprintf(`entire hooks git %s "$@"`, hookName)
 	}
