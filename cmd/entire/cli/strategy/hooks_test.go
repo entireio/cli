@@ -2013,3 +2013,59 @@ func TestIsGitHookInstalled_ExternalBackend_IgnoresGitHooksDir(t *testing.T) {
 		t.Error("IsGitHookInstalled() = true, want false when external_dir has no marker files (even though .git/hooks/ does)")
 	}
 }
+
+func TestHasEntireMarkerLine(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		data string
+		want bool
+	}{
+		{
+			name: "generated template header",
+			data: "#!/bin/sh\n# Entire CLI hooks\nentire hooks git pre-push \"$@\"\n",
+			want: true,
+		},
+		{
+			name: "marker line with leading whitespace",
+			data: "#!/bin/sh\n  # Entire CLI hooks\n",
+			want: true,
+		},
+		{
+			name: "marker line with trailing whitespace",
+			data: "#!/bin/sh\n# Entire CLI hooks   \n",
+			want: true,
+		},
+		{
+			name: "prose mentioning marker in comment",
+			data: "#!/bin/sh\n# TODO: replace with Entire CLI hooks marker\nentire hooks git pre-push \"$@\"\n",
+			want: false,
+		},
+		{
+			name: "docstring quoting marker",
+			data: "#!/bin/sh\n# The marker is: '# Entire CLI hooks'\n",
+			want: false,
+		},
+		{
+			name: "empty file",
+			data: "",
+			want: false,
+		},
+		{
+			name: "marker in the middle of a line",
+			data: "echo 'Entire CLI hooks are installed'\n",
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hasEntireMarkerLine([]byte(tc.data)); got != tc.want {
+				t.Errorf("hasEntireMarkerLine(%q) = %v, want %v", tc.data, got, tc.want)
+			}
+		})
+	}
+}

@@ -18,6 +18,26 @@ import (
 // Hook marker used to identify Entire CLI hooks
 const entireHookMarker = "Entire CLI hooks"
 
+// entireHookMarkerLine is the exact comment line that installed and
+// user-authored (external mode) scripts must contain for detection. Matching
+// on the full trimmed line — rather than a substring — prevents unrelated
+// scripts that mention the marker in prose (e.g. docs, error messages) from
+// being misidentified as Entire-owned.
+const entireHookMarkerLine = "# " + entireHookMarker
+
+// hasEntireMarkerLine reports whether data contains the marker as a standalone
+// comment line (after trimming leading/trailing whitespace). Used by all
+// detection sites; the generated and user-facing hook templates emit exactly
+// this line, so authored hooks will match.
+func hasEntireMarkerLine(data []byte) bool {
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == entireHookMarkerLine {
+			return true
+		}
+	}
+	return false
+}
+
 const backupSuffix = ".pre-entire"
 const chainComment = "# Chain: run pre-existing hook"
 const missingEntireGitHookWarning = "[entire] Entire CLI is enabled but not installed or not on PATH. Skipping Entire Git hook; continuing. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
@@ -195,7 +215,7 @@ func isGitHookInstalledInHooksDir(hooksDir string) bool {
 		if err != nil {
 			return false
 		}
-		if !strings.Contains(string(data), entireHookMarker) {
+		if !hasEntireMarkerLine(data) {
 			return false
 		}
 	}
@@ -358,7 +378,7 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 
 		// Back up existing non-Entire hooks
 		existing, existingErr := os.ReadFile(hookPath) //nolint:gosec // path is controlled
-		if existingErr == nil && !strings.Contains(string(existing), entireHookMarker) {
+		if existingErr == nil && !hasEntireMarkerLine(existing) {
 			if !backupExists {
 				if err := os.Rename(hookPath, backupPath); err != nil {
 					return installedCount, fmt.Errorf("failed to back up %s: %w", spec.name, err)
@@ -433,7 +453,7 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 
 		// Remove the hook if it contains our marker
 		data, err := os.ReadFile(hookPath) //nolint:gosec // path is controlled
-		hookIsOurs := err == nil && strings.Contains(string(data), entireHookMarker)
+		hookIsOurs := err == nil && hasEntireMarkerLine(data)
 		hookExists := err == nil
 
 		if hookIsOurs {
