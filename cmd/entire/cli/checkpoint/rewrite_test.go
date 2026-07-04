@@ -6,6 +6,8 @@ import (
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -137,6 +139,42 @@ func TestRewriteBranchToRefs_MultipleSessions(t *testing.T) {
 
 	names := rootTreeEntryNames(t, repo, cid)
 	assert.True(t, names["0"] && names["1"], "both session dirs at root")
+}
+
+func TestRewrite_GraftsTasksSubtree(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	ctx := context.Background()
+	branch := NewGitStore(repo, DefaultV1Refs())
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	seedBranchCheckpoint(t, branch, cid, "s1")
+
+	_, err := RewriteBranchToRefs(ctx, repo, false, false)
+	require.NoError(t, err)
+	require.False(t, rootTreeEntryNames(t, repo, cid)["tasks"], "no tasks before graft")
+
+	// Build a standalone tasks/ subtree object and graft it onto the ref.
+	blob, err := CreateBlobFromContent(repo, []byte("task data"))
+	require.NoError(t, err)
+	tasksTree, err := BuildTreeFromEntries(ctx, repo, map[string]object.TreeEntry{
+		"tool-1/checkpoint.json": {Name: "checkpoint.json", Mode: filemode.Regular, Hash: blob},
+	})
+	require.NoError(t, err)
+	refName, err := RefName(cid)
+	require.NoError(t, err)
+	require.NoError(t, graftTasksSubtree(ctx, repo, newGitRefsStore(repo), cid, refName, tasksTree,
+		commitAuthor{Name: "Test", Email: "test@test.com"}))
+
+	// tasks/ is spliced in while the existing entries keep their place.
+	after := rootTreeEntryNames(t, repo, cid)
+	assert.True(t, after["tasks"], "tasks grafted at the ref tree root")
+	assert.True(t, after["metadata.json"], "existing metadata preserved")
+	assert.True(t, after["0"], "existing session preserved")
+
+	// The checkpoint still reads back through the git-refs store.
+	summary, err := newGitRefsStore(repo).Read(ctx, cid)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
 }
 
 func TestRewriteBranchToRefs_DryRunAndNoBranch(t *testing.T) {

@@ -55,7 +55,8 @@ func RewriteBranchToRefs(ctx context.Context, repo *git.Repository, dryRun, forc
 	}
 
 	authors := branchSessionAuthors(ctx, repo)
-	fallbackName, fallbackEmail := GetGitAuthorFromRepo(repo)
+	fbName, fbEmail := GetGitAuthorFromRepo(repo)
+	fallback := commitAuthor{Name: fbName, Email: fbEmail}
 	refsStore := newGitRefsStore(repo)
 
 	walkErr := WalkCheckpointShards(ctx, repo, tree, func(cid id.CheckpointID, cpTreeHash plumbing.Hash) error {
@@ -80,7 +81,7 @@ func RewriteBranchToRefs(ctx context.Context, repo *git.Repository, dryRun, forc
 			return nil
 		}
 
-		if err := rewriteCheckpoint(ctx, branch, refsStore, repo, cid, cpTreeHash, authors, fallbackName, fallbackEmail); err != nil {
+		if err := rewriteCheckpoint(ctx, branch, refsStore, repo, cid, refName, cpTreeHash, authors, fallback, force); err != nil {
 			return fmt.Errorf("rewrite checkpoint %s: %w", cid, err)
 		}
 		result.Rewritten = append(result.Rewritten, cid)
@@ -92,10 +93,22 @@ func RewriteBranchToRefs(ctx context.Context, repo *git.Repository, dryRun, forc
 	return result, nil
 }
 
+// tasksDirName is the checkpoint subtree that holds subagent task steps.
+const tasksDirName = "tasks"
+
 // commitAuthor is a git author identity.
 type commitAuthor struct {
 	Name  string
 	Email string
+}
+
+// resolveAuthor returns the recorded author for a session, or the fallback when
+// the session has no mapped commit author.
+func resolveAuthor(sessionID string, authors map[string]commitAuthor, fallback commitAuthor) commitAuthor {
+	if a, ok := authors[sessionID]; ok && a.Name != "" {
+		return a
+	}
+	return fallback
 }
 
 // branchSessionAuthors maps each session id to the author of the earliest
@@ -137,9 +150,11 @@ func rewriteCheckpoint(
 	refsStore *gitRefsStore,
 	repo *git.Repository,
 	cid id.CheckpointID,
+	refName plumbing.ReferenceName,
 	cpTreeHash plumbing.Hash,
 	authors map[string]commitAuthor,
-	fallbackName, fallbackEmail string,
+	fallback commitAuthor,
+	force bool,
 ) error {
 	summary, err := branch.Read(ctx, cid)
 	if err != nil {
@@ -149,33 +164,29 @@ func rewriteCheckpoint(
 		return errors.New("checkpoint summary not found on branch")
 	}
 
-	// Start clean: drop any existing ref so the replay builds a fresh history
-	// rooted at an orphan commit rather than parenting on stale content.
-	refName, err := RefName(cid)
-	if err != nil {
-		return err
-	}
-	if _, err := repo.Reference(refName, true); err == nil {
-		if err := repo.Storer.RemoveReference(refName); err != nil {
-			return fmt.Errorf("reset existing ref: %w", err)
+	// Under --force, drop the existing ref so the replay builds a fresh history
+	// rooted at an orphan commit. Without --force the caller already skipped an
+	// existing ref, so there's nothing to reset.
+	if force {
+		if _, err := repo.Reference(refName, true); err == nil {
+			if err := repo.Storer.RemoveReference(refName); err != nil {
+				return fmt.Errorf("reset existing ref: %w", err)
+			}
 		}
 	}
 
 	// Replay each session in order. Writing session N then its summary keeps
 	// SessionSummary (which targets the latest session) pointed at the right one.
-	firstAuthor := commitAuthor{Name: fallbackName, Email: fallbackEmail}
+	firstAuthor := fallback
 	for idx := range summary.Sessions {
 		content, err := branch.ReadSessionContent(ctx, cid, idx)
 		if err != nil {
 			return fmt.Errorf("read session %d: %w", idx, err)
 		}
 		m := content.Metadata
-		name, email := fallbackName, fallbackEmail
-		if a, ok := authors[m.SessionID]; ok && a.Name != "" {
-			name, email = a.Name, a.Email
-		}
+		author := resolveAuthor(m.SessionID, authors, fallback)
 		if idx == 0 {
-			firstAuthor = commitAuthor{Name: name, Email: email}
+			firstAuthor = author
 		}
 
 		if err := refsStore.Write(ctx, Session(WriteOptions{
@@ -189,8 +200,8 @@ func rewriteCheckpoint(
 			FilesTouched:                m.FilesTouched,
 			CheckpointsCount:            m.CheckpointsCount,
 			SaveStepCount:               m.SaveStepCount,
-			AuthorName:                  name,
-			AuthorEmail:                 email,
+			AuthorName:                  author.Name,
+			AuthorEmail:                 author.Email,
 			Agent:                       m.Agent,
 			Model:                       m.Model,
 			TurnID:                      m.TurnID,
@@ -230,8 +241,8 @@ func rewriteCheckpoint(
 	// Graft the tasks/ subtree unchanged if the checkpoint has one — task steps
 	// aren't reconstructable through the write union, so the existing tree is
 	// carried over verbatim.
-	if tasksHash, ok := subtreeEntryHash(repo, cpTreeHash, "tasks"); ok {
-		if err := graftTasksSubtree(ctx, repo, refsStore, cid, tasksHash, firstAuthor); err != nil {
+	if tasksHash, ok := subtreeEntryHash(repo, cpTreeHash, tasksDirName); ok {
+		if err := graftTasksSubtree(ctx, repo, refsStore, cid, refName, tasksHash, firstAuthor); err != nil {
 			return fmt.Errorf("graft tasks: %w", err)
 		}
 	}
@@ -253,12 +264,10 @@ func subtreeEntryHash(repo *git.Repository, treeHash plumbing.Hash, name string)
 }
 
 // graftTasksSubtree adds the tasks/ subtree to the checkpoint's current ref tree
-// via one commit on top, reusing the existing task objects unchanged.
-func graftTasksSubtree(ctx context.Context, repo *git.Repository, refsStore *gitRefsStore, cid id.CheckpointID, tasksHash plumbing.Hash, author commitAuthor) error {
-	refName, err := RefName(cid)
-	if err != nil {
-		return err
-	}
+// via one commit on top, reusing the existing task objects unchanged. The tasks/
+// entry is spliced into the root tree with UpdateSubtree, so every sibling
+// session subtree keeps its hash — no whole-tree rebuild.
+func graftTasksSubtree(ctx context.Context, repo *git.Repository, refsStore *gitRefsStore, cid id.CheckpointID, refName plumbing.ReferenceName, tasksHash plumbing.Hash, author commitAuthor) error {
 	ref, err := repo.Reference(refName, true)
 	if err != nil {
 		return fmt.Errorf("resolve ref: %w", err)
@@ -267,25 +276,11 @@ func graftTasksSubtree(ctx context.Context, repo *git.Repository, refsStore *git
 	if err != nil {
 		return fmt.Errorf("read ref commit: %w", err)
 	}
-	rootTree, err := commit.Tree()
+	newTree, err := UpdateSubtree(repo, commit.TreeHash, nil,
+		[]object.TreeEntry{{Name: tasksDirName, Mode: filemode.Dir, Hash: tasksHash}},
+		UpdateSubtreeOptions{MergeMode: MergeKeepExisting})
 	if err != nil {
-		return fmt.Errorf("read ref tree: %w", err)
-	}
-	tasksTree, err := repo.TreeObject(tasksHash)
-	if err != nil {
-		return fmt.Errorf("read tasks subtree: %w", err)
-	}
-
-	entries := make(map[string]object.TreeEntry)
-	if err := FlattenTree(repo, rootTree, "", entries); err != nil {
-		return fmt.Errorf("flatten ref tree: %w", err)
-	}
-	if err := FlattenTree(repo, tasksTree, "tasks", entries); err != nil {
-		return fmt.Errorf("flatten tasks subtree: %w", err)
-	}
-	newTree, err := BuildTreeFromEntries(ctx, repo, entries)
-	if err != nil {
-		return fmt.Errorf("build grafted tree: %w", err)
+		return fmt.Errorf("graft tasks subtree: %w", err)
 	}
 	if newTree == commit.TreeHash {
 		return nil // tasks already present, nothing to graft
