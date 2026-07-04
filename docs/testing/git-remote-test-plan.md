@@ -1,6 +1,15 @@
 # Test Plan: Git Remote Operations & Upstream Resolution — Both Checkpoint Backends
 
-Status: proposal, 2026-07-04.
+Status: implemented on this branch, 2026-07-04 (originally a proposal; kept as the
+coverage map). Delivered: infrastructure I-1/I-2/I-4, groups A, C (incl. C5/C6),
+D, E, F1/F2/F4/F5, G1–G3, plus two fixes surfaced along the way (a
+graceful-degradation test false-positive and explain's git-refs fallback masking
+fetch errors as "checkpoint not found"). Still open: the B-group (blocked on
+decision D-1 below), F6 (needs an injectable provider host table), and the two
+pinned behaviors awaiting product decisions — the >1000-commit replay cap
+(`TestCollectCommitsSince_CommitCapPinsCurrentBehavior`; the historical fix
+4cf01edb3 was never merged) and the two-remote queue-clearing gap
+(`TestGitRefsQueue_TwoRemotesQueueClearedByFirstPush`, decision D-2).
 Scope: e2e (`e2e/tests/`) + integration (`cmd/entire/cli/integration_test/`) coverage for everything that talks to a git remote — pre-push checkpoint sync, remote/upstream resolution, cross-machine fetch — for the **git-branch** (`entire/checkpoints/v1`) and **git-refs** (`refs/entire/checkpoints/<shard>/<id>`) backends.
 
 ---
