@@ -12,6 +12,7 @@ import (
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
@@ -90,6 +91,16 @@ func TestDoctorMigrateToULID_EndToEnd(t *testing.T) {
 	}
 	if _, err := repo2.Reference(refName, true); err != nil {
 		t.Fatalf("ULID ref %s should exist: %v", refName, err)
+	}
+
+	// The repo is now configured on the git-refs backend (so pre-push flushes the
+	// ULID ref queue and reads resolve as refs).
+	cfg, err := settings.LoadCheckpointsConfig(ctx)
+	if err != nil {
+		t.Fatalf("load checkpoints config: %v", err)
+	}
+	if cfg == nil || cfg.Primary.Type != cpkg.BackendTypeGitRefs {
+		t.Fatalf("checkpoints.primary should be git-refs after migration, got %+v", cfg)
 	}
 
 	// The entire/checkpoints/v1 branch is gone (refs-native).

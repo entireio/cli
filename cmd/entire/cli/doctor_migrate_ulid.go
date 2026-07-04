@@ -3,11 +3,13 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -16,6 +18,7 @@ import (
 
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
 // newDoctorMigrateToULIDCmd builds the hidden `entire doctor migrate-to-ulid`
@@ -103,6 +106,15 @@ refs/original/ backup. Runs a dry-run preview unless --yes is given.`,
 			}
 			fmt.Fprintf(out, "\nWrote %d ULID checkpoint ref(s).\n", len(result.Mapping))
 
+			// Switch the repo onto the git-refs backend. Without this the configured
+			// primary stays git-branch, so the pre-push hook takes the v1-branch path
+			// and never flushes the queued ULID refs — the whole point is to be "on
+			// refs", which the settings must declare.
+			if err := setGitRefsPrimary(ctx); err != nil {
+				return fmt.Errorf("switch repo to git-refs backend: %w", err)
+			}
+			fmt.Fprintln(out, "Set checkpoints.primary = git-refs in .entire/settings.json.")
+
 			// Rewrite the Entire-Checkpoint trailers across the user branches.
 			if len(userBranches) > 0 {
 				if err := rewriteCheckpointTrailers(ctx, repoRoot, result.Mapping, userBranches); err != nil {
@@ -111,14 +123,16 @@ refs/original/ backup. Runs a dry-run preview unless --yes is given.`,
 				fmt.Fprintf(out, "Rewrote Entire-Checkpoint trailers on %d branch(es).\n", len(userBranches))
 			}
 
-			// 3. Drop the entire/* infra branches so only the ULID refs remain.
+			// Drop the entire/* infra branches so only the ULID refs remain.
 			dropped := deleteBranches(ctx, repoRoot, infraBranches)
 			if dropped > 0 {
 				fmt.Fprintf(out, "Deleted %d entire/* branch(es) (v1 + shadow).\n", dropped)
 			}
 
-			fmt.Fprintln(out, "\nDone. The repo now uses ULID refs only. Force-push branches and push the")
-			fmt.Fprintln(out, "checkpoint refs to your test remote to validate commands and the UI.")
+			fmt.Fprintln(out, "\nDone. The repo is now on the git-refs backend with ULID refs only.")
+			fmt.Fprintln(out, "The ULID refs are queued for push; a `git push` flushes them (the pre-push")
+			fmt.Fprintln(out, "hook runs even when the branch is up to date). Commit the settings change and")
+			fmt.Fprintln(out, "force-push the rewritten branches to your test remote to validate the UI.")
 			return nil
 		},
 	}
@@ -172,6 +186,34 @@ func listRewritableBranches(ctx context.Context, repoRoot string) ([]string, err
 // listInfraBranches returns the entire/* branches (v1 + per-worktree shadow).
 func listInfraBranches(ctx context.Context, repoRoot string) ([]string, error) {
 	return forEachRef(ctx, repoRoot, "refs/heads/entire")
+}
+
+// setGitRefsPrimary writes checkpoints.primary = git-refs into the project
+// .entire/settings.json, preserving all other keys, so the repo is actually on
+// the git-refs backend (reads route to refs and the pre-push hook flushes the
+// checkpoint-ref queue).
+func setGitRefsPrimary(ctx context.Context) error {
+	path, raw, _, err := settings.LoadProjectRaw(ctx)
+	if err != nil {
+		return fmt.Errorf("load project settings: %w", err)
+	}
+	if raw == nil {
+		raw = map[string]json.RawMessage{}
+	}
+	block, err := json.Marshal(settings.CheckpointsConfig{
+		Primary: settings.BackendConfig{Type: cpkg.BackendTypeGitRefs},
+	})
+	if err != nil {
+		return fmt.Errorf("encode checkpoints config: %w", err)
+	}
+	raw["checkpoints"] = block
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("create .entire dir: %w", err)
+	}
+	if err := settings.SaveProjectRaw(path, raw); err != nil {
+		return fmt.Errorf("write project settings: %w", err)
+	}
+	return nil
 }
 
 // hexCheckpointTrailerRe matches a legacy-hex Entire-Checkpoint trailer value.
