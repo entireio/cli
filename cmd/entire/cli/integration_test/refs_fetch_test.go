@@ -94,17 +94,14 @@ func TestGitRefsClone_UnreachableRemoteMissingRefSurfacesRealError(t *testing.T)
 		t.Fatalf("explain should fail when the ref is missing and the remote is unreachable, got success:\n%s", out)
 	}
 
-	// KNOWN BUG (regression class 7bbdad09c): the store layer preserves the real
-	// fetch error, but explain's git-refs prefix-match remote fallback discards
-	// the FetchCheckpointRef error (explain_export.go:216-227) and returns
-	// ErrCheckpointNotFound, so an unreachable remote is reported identically to a
-	// genuinely absent checkpoint. A parallel investigation owns the production
-	// fix — this test does not touch production code. It self-heals: once the
-	// fallback surfaces the fetch error, the skip stops firing and the assertions
-	// below guard against regressing back to the masked message.
-	if strings.Contains(out, "checkpoint not found") {
-		t.Skipf("KNOWN BUG (7bbdad09c): unreachable-remote fetch failure masked as 'checkpoint not found':\n%s", out)
+	// The store layer preserves the real fetch error (7bbdad09c), and explain's
+	// git-refs prefix-match remote fallback must not re-mask it as a plain
+	// "checkpoint not found" — that would report an unreachable remote
+	// identically to a genuinely absent checkpoint.
+	if strings.Contains(out, "checkpoint not found:") {
+		t.Errorf("unreachable-remote fetch failure masked as 'checkpoint not found':\n%s", out)
 	}
-	// Reaching here means the fallback surfaced a real error (the bug is fixed):
-	// err != nil is already asserted above, and the message is not the masked one.
+	if !strings.Contains(out, "fetching from remote failed") {
+		t.Errorf("explain should surface the real fetch failure, got:\n%s", out)
+	}
 }

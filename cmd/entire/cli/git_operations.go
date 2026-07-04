@@ -476,7 +476,8 @@ func resolveCheckpointFetchTarget(ctx context.Context) string {
 // FetchCheckpointRef fetches a single per-checkpoint ref (refs/entire/checkpoints/
 // <shard>/<id>) from the checkpoint remote into the local ref of the same name,
 // so the git-refs store can resolve a checkpoint written on another machine.
-// Best-effort: the caller treats a fetch failure as "checkpoint not found".
+// Callers must surface a fetch failure as a real error, not "checkpoint not
+// found" — the checkpoint may exist on a remote we simply could not reach.
 func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
