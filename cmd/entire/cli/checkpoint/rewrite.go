@@ -185,7 +185,7 @@ func rewriteCheckpoint(
 			Strategy:                    m.Strategy,
 			Branch:                      m.Branch,
 			Transcript:                  redact.AlreadyRedacted(content.Transcript),
-			Prompts:                     []string{content.Prompts},
+			Prompts:                     SplitPromptContent(content.Prompts),
 			FilesTouched:                m.FilesTouched,
 			CheckpointsCount:            m.CheckpointsCount,
 			SaveStepCount:               m.SaveStepCount,
@@ -198,6 +198,18 @@ func rewriteCheckpoint(
 			CheckpointTranscriptStart:   m.CheckpointTranscriptStart,
 			TokenUsage:                  m.TokenUsage,
 			SkillEvents:                 m.SkillEvents,
+			// Forward the remaining session-level fields so a rewritten ref
+			// matches the branch checkpoint the tool is meant to evaluate.
+			Attribution:            m.Attribution,
+			PromptAttributionsJSON: m.PromptAttributions,
+			SessionMetrics:         m.SessionMetrics,
+			Kind:                   m.Kind,
+			ReviewPrompt:           m.ReviewPrompt,
+			ReviewSkills:           m.ReviewSkills,
+			InvestigateRunID:       m.InvestigateRunID,
+			InvestigateTopic:       m.InvestigateTopic,
+			HasReview:              summary.HasReview,
+			HasInvestigation:       summary.HasInvestigation,
 		})); err != nil {
 			return fmt.Errorf("write session %d: %w", idx, err)
 		}
