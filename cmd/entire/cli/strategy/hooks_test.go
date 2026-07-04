@@ -1753,7 +1753,66 @@ func TestInstallGitHook_ExternalBackend_MissingDir_ReturnsHelpError(t *testing.T
 	}
 }
 
-// Variant-3 status line ("✓ Git hooks: external (.husky)") is emitted by
+// If settings.json cannot be loaded (corrupt JSON, permission error, etc.)
+// while external mode was previously configured, Entire must refuse to write
+// .git/hooks/ rather than silently fall back to direct mode. Falling back
+// would violate the "external mode never writes to .git/hooks/" contract:
+// the user opted into external mode but a transient error would cause writes
+// they never asked for.
+func TestInstallGitHook_ExternalMode_SettingsLoadFailure_DoesNotWriteHooks(t *testing.T) {
+	repoDir, hooksDir := initHooksTestRepo(t)
+
+	entireDir := filepath.Join(repoDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Write invalid JSON so settings.Load returns a syntax error.
+	if err := os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {broken`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	hooksBefore := snapshotDir(t, hooksDir)
+
+	ctx := context.Background()
+	installed, err := InstallGitHook(ctx, false, false, false)
+	if err == nil {
+		t.Fatal("InstallGitHook() should return error when settings.json is malformed")
+	}
+	if installed != 0 {
+		t.Errorf("InstallGitHook() installed %d hooks on settings load failure, want 0", installed)
+	}
+
+	hooksAfter := snapshotDir(t, hooksDir)
+	if !dirSnapshotsEqual(hooksBefore, hooksAfter) {
+		t.Error(".git/hooks/ was modified when settings load failed; fail-safe contract broken")
+	}
+}
+
+func TestRemoveGitHook_ExternalMode_SettingsLoadFailure_ReturnsError(t *testing.T) {
+	repoDir, _ := initHooksTestRepo(t)
+
+	entireDir := filepath.Join(repoDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {broken`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	if _, err := RemoveGitHook(ctx); err == nil {
+		t.Fatal("RemoveGitHook() should return error when settings.json is malformed (rather than silently touching direct-mode hooks)")
+	}
+}
+
 // strategy.PrintExternalHookStatusIfActive at the setup.go call sites, not
 // by InstallGitHook itself (production always calls InstallGitHook with
 // silent=true). The user-visible output is exercised end-to-end in

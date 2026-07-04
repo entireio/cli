@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -127,7 +128,17 @@ func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, localDev, absolu
 	// etc.) and configured Entire to coexist via marker detection. Warning that
 	// the manager exists would be noise, and the suggested "add these lines"
 	// fix is already the user's own setup path.
-	if _, ok := externalGitHooksDir(ctx); ok {
+	//
+	// If settings can't be loaded, skip the warning: whichever caller invoked
+	// InstallGitHook (the normal preceding step) will already have surfaced
+	// the same load error.
+	_, isExternal, err := externalGitHooksDir(ctx)
+	if err != nil {
+		logging.Warn(ctx, "external git hooks: settings load failed; skipping hook-manager warning",
+			"error", err.Error())
+		return
+	}
+	if isExternal {
 		return
 	}
 

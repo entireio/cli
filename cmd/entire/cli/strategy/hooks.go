@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -162,23 +163,33 @@ func getHooksDirInPath(ctx context.Context, dir string) (string, error) {
 
 // externalGitHooksDir reports whether the external git hooks backend is
 // configured and, if so, returns the configured external_dir verbatim
-// (still repo-relative). Returns ("", false) in direct mode and when
-// settings cannot be loaded — callers fall through to direct-mode logic.
-// Centralizing this load+check keeps every external-mode short-circuit
-// site uniform.
-func externalGitHooksDir(ctx context.Context) (string, bool) {
+// (still repo-relative). Returns ("", false, nil) in direct mode.
+//
+// When settings cannot be loaded the caller MUST NOT fall through to
+// direct-mode logic: silently writing to .git/hooks/ after the user opted
+// into external mode would violate the "external mode never writes"
+// contract. The load error is returned so write-path callers can refuse
+// and read-path callers can surface it.
+func externalGitHooksDir(ctx context.Context) (string, bool, error) {
 	s, err := settings.Load(ctx)
-	if err != nil || !s.IsExternalGitHooks() {
-		return "", false
+	if err != nil {
+		return "", false, fmt.Errorf("load settings for external git hooks: %w", err)
 	}
-	return s.ExternalHookDir(), true
+	if !s.IsExternalGitHooks() {
+		return "", false, nil
+	}
+	return s.ExternalHookDir(), true, nil
 }
 
 // GetGitHookDetectionDir returns the directory whose files prove Entire's
 // Git hooks are installed. Direct mode returns the active git hooks dir;
 // external mode returns repoRoot/external_dir.
 func GetGitHookDetectionDir(ctx context.Context) (string, error) {
-	if extDir, ok := externalGitHooksDir(ctx); ok {
+	extDir, ok, err := externalGitHooksDir(ctx)
+	if err != nil {
+		return "", err
+	}
+	if ok {
 		root, rErr := paths.WorktreeRoot(ctx)
 		if rErr != nil {
 			return "", fmt.Errorf("resolve worktree root for external git hooks: %w", rErr)
@@ -338,7 +349,11 @@ func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
 // absolutePath embeds the full binary path in hooks for GUI git clients.
 // Returns the number of hooks that were installed (0 if all already up to date).
 func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (int, error) {
-	if extDir, ok := externalGitHooksDir(ctx); ok {
+	extDir, isExternal, err := externalGitHooksDir(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if isExternal {
 		root, rErr := paths.WorktreeRoot(ctx)
 		if rErr != nil {
 			return 0, fmt.Errorf("external git hooks: cannot resolve repo root: %w", rErr)
@@ -435,7 +450,11 @@ func writeHookFile(path, content string) (bool, error) {
 func RemoveGitHook(ctx context.Context) (int, error) {
 	// External backend = Entire never installed hooks (neither in .git/hooks/
 	// nor in external_dir). Detection-only contract: removal must touch nothing.
-	if _, ok := externalGitHooksDir(ctx); ok {
+	_, isExternal, err := externalGitHooksDir(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if isExternal {
 		return 0, nil
 	}
 
@@ -570,7 +589,12 @@ func hookSettingsFromConfig(ctx context.Context) (localDev, absoluteHookPath boo
 // adjacent to the implementation it summarizes — direct-mode call sites
 // inside setup.go just gate their existing prints on this helper's return.
 func PrintExternalHookStatusIfActive(ctx context.Context, w io.Writer) bool {
-	extDir, ok := externalGitHooksDir(ctx)
+	extDir, ok, err := externalGitHooksDir(ctx)
+	if err != nil {
+		logging.Warn(ctx, "external git hooks: settings load failed; hiding status line",
+			"error", err.Error())
+		return false
+	}
 	if !ok {
 		return false
 	}
