@@ -3,11 +3,13 @@
 package integration
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 )
 
@@ -113,14 +115,26 @@ func TestEnable_ExternalBackend_HuskyShape_EndToEnd(t *testing.T) {
 	}
 
 	managedHooks := []string{"prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite", "pre-push"}
+	testBinary := getTestBinary()
 	for _, h := range managedHooks {
 		// .husky/_/<hook>: Husky's stub (we don't write or touch these)
 		stubContent := "#!/bin/sh\n# managed by husky — DO NOT EDIT\n" + h + " \"$@\"\n"
 		if err := os.WriteFile(filepath.Join(huskyStubsDir, h), []byte(stubContent), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		// .husky/<hook>: user-owned script containing the Entire marker
-		userContent := "#!/bin/sh\n# Entire CLI hooks\nentire hooks git " + h + " \"$@\"\n"
+		// .husky/<hook>: user-owned script containing the Entire marker.
+		// Invoke the test binary directly rather than relying on PATH; the
+		// child shell run by `git commit` inherits the same env we set on
+		// RunCLIWithError, but does not have `entire` on PATH.
+		//
+		// Match production semantics: every hook except pre-push swallows
+		// its exit code, but pre-push must propagate so OPF can abort push
+		// on unredacted content.
+		dispatch := testBinary + " hooks git " + h + " \"$@\""
+		if h != "pre-push" {
+			dispatch += " || true"
+		}
+		userContent := "#!/bin/sh\n# Entire CLI hooks\n" + dispatch + "\n"
 		if err := os.WriteFile(filepath.Join(huskyDir, h), []byte(userContent), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -128,6 +142,19 @@ func TestEnable_ExternalBackend_HuskyShape_EndToEnd(t *testing.T) {
 
 	// Configure external backend pointed at .husky/
 	writeExternalHooksSettings(t, env, ".husky")
+
+	// NewRepoWithCommit pins core.hooksPath at .git/hooks for direct-mode
+	// tests; point it at .husky/ instead so git actually routes hook events
+	// through the user-owned scripts we just created (real Husky sets this
+	// during `husky install`). Rebaseline the config guard so cleanup
+	// tolerates the intentional change.
+	hooksPathCmd := execx.NonInteractive(context.Background(), "git", "config", "--local", "core.hooksPath", ".husky")
+	hooksPathCmd.Dir = env.RepoDir
+	hooksPathCmd.Env = env.cliEnv()
+	if out, err := hooksPathCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config core.hooksPath failed: %v\noutput:\n%s", err, string(out))
+	}
+	env.setGitConfigBaseline()
 
 	hooksDir := filepath.Join(env.RepoDir, ".git", "hooks")
 	gitHooksBefore := snapshotFiles(t, hooksDir)
@@ -156,6 +183,37 @@ func TestEnable_ExternalBackend_HuskyShape_EndToEnd(t *testing.T) {
 	if msg, ok := mapsEqual(huskyBefore, huskyAfter); !ok {
 		t.Errorf(".husky/ changed in external mode: %s\nbefore: %d files\nafter: %d files",
 			msg, len(huskyBefore), len(huskyAfter))
+	}
+
+	// Detection-only contract is only useful if git actually routes hook
+	// events through the user's .husky/ scripts. Run a real commit and
+	// assert (1) the commit succeeds and (2) it produces the same
+	// Entire-side side effects a direct-mode commit would, proving the
+	// marker-based dispatch reached `entire hooks git ...`.
+	if err := os.WriteFile(filepath.Join(env.RepoDir, "trigger.txt"), []byte("husky trigger\n"), 0o644); err != nil {
+		t.Fatalf("write trigger file: %v", err)
+	}
+	env.GitAdd("trigger.txt")
+
+	// Take a snapshot of the entire log dir before the commit so we can
+	// detect writes even if the directory pre-exists from `entire enable`.
+	logsDir := filepath.Join(env.RepoDir, ".entire", "logs")
+	logsBefore := snapshotFiles(t, logsDir)
+
+	commitCmd := execx.NonInteractive(context.Background(), "git", "commit", "-m", "trigger husky hooks", "--no-gpg-sign")
+	commitCmd.Dir = env.RepoDir
+	commitCmd.Env = env.cliEnv()
+	if commitOut, cErr := commitCmd.CombinedOutput(); cErr != nil {
+		t.Fatalf("real git commit through husky hooks failed: %v\noutput:\n%s", cErr, string(commitOut))
+	}
+
+	// entire's log dir should have grown (existing files updated or new ones
+	// added) once the husky-dispatched hooks called into `entire hooks git`.
+	// Any observable change to the log tree proves the marker-based dispatch
+	// reached the entire binary.
+	logsAfter := snapshotFiles(t, logsDir)
+	if _, unchanged := mapsEqual(logsBefore, logsAfter); unchanged {
+		t.Errorf(".entire/logs/ unchanged after husky-dispatched commit (before=%d files, after=%d); expected entire hook to have been invoked", len(logsBefore), len(logsAfter))
 	}
 }
 
