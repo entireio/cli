@@ -305,6 +305,9 @@ func updateGlobalSettings(ctx context.Context, cmd *cobra.Command, w io.Writer, 
 	}
 
 	if cmd.Flags().Changed(flagForce) || cmd.Flags().Changed(flagAbsoluteGitHookPath) || cmd.Flags().Changed(flagLocalDev) {
+		if extErr := verifyExternalGitHooksPrecondition(ctx, cmd.ErrOrStderr()); extErr != nil {
+			return extErr
+		}
 		if _, err := strategy.InstallGitHook(ctx, true, s.LocalDev, s.AbsoluteGitHookPath); err != nil {
 			return fmt.Errorf("failed to reinstall git hook: %w", err)
 		}
@@ -388,6 +391,13 @@ func parseCheckpointRemoteFlag(value string) (provider, repo string, err error) 
 // runSetupFlow runs the first-time setup flow (agent selection + hooks + settings).
 // Shared by root command (no args), `entire configure`, and `entire enable` on fresh repos.
 func runSetupFlow(ctx context.Context, w io.Writer, opts EnableOptions) error {
+	// External git hooks precondition — every entry point into the setup flow
+	// (root, `configure`, `enable`, `agent` interactive menu) must fail here
+	// before we start writing agent files if external_dir is missing.
+	if extErr := verifyExternalGitHooksPrecondition(ctx, w); extErr != nil {
+		return extErr
+	}
+
 	// Discover external agent plugins so they appear in agent selection.
 	// Use DiscoverAndRegisterAlways to bypass the external_agents setting —
 	// during setup the setting doesn't exist yet.
@@ -1629,6 +1639,13 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	// Check if agent supports hooks
 	if _, ok := agent.AsHookSupport(ag); !ok {
 		return fmt.Errorf("agent %s does not support hooks", agentName)
+	}
+
+	// External git hooks precondition: fail before writing any agent-side
+	// files. Otherwise `entire agent add` would leave a partial state (agent
+	// scripts on disk, git hooks unset) that the user has to unwind by hand.
+	if extErr := verifyExternalGitHooksPrecondition(ctx, w); extErr != nil {
+		return extErr
 	}
 
 	fmt.Fprintf(w, "  Agent: %s\n", ag.Type())

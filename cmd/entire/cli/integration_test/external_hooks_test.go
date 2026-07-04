@@ -159,7 +159,40 @@ func TestEnable_ExternalBackend_HuskyShape_EndToEnd(t *testing.T) {
 	}
 }
 
-// TestEnable_ExternalBackend_MissingDir_AbortsWithHelp pins down the failure
+// TestAgentAdd_ExternalBackend_MissingDir_AbortsBeforeAgentFiles guards
+// against a bug where `entire agent add` (unlike `entire enable`) wrote
+// agent-side files before checking the external-hooks precondition,
+// leaving a half-enabled state that users had to unwind by hand. The
+// precondition now runs first, so no agent files should exist after the
+// aborted call.
+func TestAgentAdd_ExternalBackend_MissingDir_AbortsBeforeAgentFiles(t *testing.T) {
+	t.Parallel()
+	env := NewRepoWithCommit(t)
+
+	// external_dir points at a directory that does not exist on disk.
+	writeExternalHooksSettings(t, env, ".husky")
+
+	// Snapshot the repo root before the aborted call so we can prove no
+	// agent-side files (.claude/, .entire/, etc.) were written.
+	before := snapshotFiles(t, env.RepoDir)
+
+	output, err := env.RunCLIWithError("agent", "add", "claude-code")
+	if err == nil {
+		t.Fatalf("agent add should fail when external_dir is missing\noutput:\n%s", output)
+	}
+	if !strings.Contains(output, "Required setup for external git hooks") {
+		t.Errorf("output should carry the external-hooks help block\noutput:\n%s", output)
+	}
+
+	after := snapshotFiles(t, env.RepoDir)
+	// Any new file that appeared under the repo root is a leaked write.
+	for k := range after {
+		if _, existed := before[k]; !existed {
+			t.Errorf("agent add wrote %q after failing external-hooks gate; expected no partial state", k)
+		}
+	}
+}
+
 // path: external + dir absent → exit non-zero + full instructional message
 // printed. We don't assert the entire 30+ line block, just the key markers
 // that prove it came from FormatExternalDirMissingHelp.
