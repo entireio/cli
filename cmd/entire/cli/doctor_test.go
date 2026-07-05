@@ -625,3 +625,89 @@ func TestCheckExternalGitHooks_FailsWithFullHelpWhenDirMissing(t *testing.T) {
 		require.Contains(t, out, s, "missing %q from doctor help text", s)
 	}
 }
+
+const lefthookDoctorAllHooks = `prepare-commit-msg:
+  commands:
+    entire:
+      run: entire hooks git prepare-commit-msg {1} {2}
+commit-msg:
+  commands:
+    entire:
+      run: entire hooks git commit-msg {1}
+post-commit:
+  commands:
+    entire:
+      run: entire hooks git post-commit
+post-rewrite:
+  commands:
+    entire:
+      run: entire hooks git post-rewrite {1}
+pre-push:
+  commands:
+    entire:
+      run: entire hooks git pre-push {1}
+`
+
+// Lefthook manager mode, all hooks wired → ✓.
+func TestCheckExternalGitHooks_LefthookManager_OKWhenAllWired(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`),
+		0o644,
+	))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "lefthook.yml"), []byte(lefthookDoctorAllHooks), 0o644))
+
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, checkExternalGitHooks(cmd))
+	out := stdout.String()
+	require.Contains(t, out, "✓ External git hooks")
+	require.Contains(t, out, "lefthook")
+}
+
+// Lefthook manager mode, no config → ✗ + help.
+func TestCheckExternalGitHooks_LefthookManager_FailsWhenNoConfig(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`),
+		0o644,
+	))
+
+	cmd, stdout := newTestCmd(t)
+	require.Error(t, checkExternalGitHooks(cmd))
+	out := stdout.String()
+	require.Contains(t, out, "✗ External git hooks")
+	require.Contains(t, out, "lefthook")
+}
+
+// Lefthook manager mode, missing one hook → ✗ and the missing hook is named.
+func TestCheckExternalGitHooks_LefthookManager_ListsMissingHook(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`),
+		0o644,
+	))
+	partial := strings.Replace(lefthookDoctorAllHooks,
+		"pre-push:\n  commands:\n    entire:\n      run: entire hooks git pre-push {1}\n", "", 1)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "lefthook.yml"), []byte(partial), 0o644))
+
+	cmd, stdout := newTestCmd(t)
+	require.Error(t, checkExternalGitHooks(cmd))
+	out := stdout.String()
+	require.Contains(t, out, "✗ External git hooks")
+	require.Contains(t, out, "pre-push", "should name the missing hook")
+}

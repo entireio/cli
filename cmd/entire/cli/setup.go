@@ -1266,12 +1266,28 @@ func verifyExternalGitHooksPrecondition(ctx context.Context, errW io.Writer) err
 	if !s.IsExternalGitHooks() {
 		return nil
 	}
-	extDir := s.ExternalHookDir()
 	root, rErr := paths.WorktreeRoot(ctx)
 	if rErr != nil {
 		fmt.Fprintf(errW, "external git hooks: cannot resolve repo root: %v\n", rErr)
 		return NewSilentError(fmt.Errorf("external git hooks: %w", rErr))
 	}
+
+	// Config-driven manager mode (lefthook): require the config file to exist
+	// and wire every managed hook, mirroring doctor's check.
+	if manager := s.HookManager(); manager != "" {
+		st, wErr := strategy.ManagerWiring(root, manager)
+		if wErr != nil {
+			fmt.Fprintf(errW, "external git hooks (%s): %v\n", manager, wErr)
+			return NewSilentError(fmt.Errorf("external git hooks: %w", wErr))
+		}
+		if st.ConfigPath == "" || len(st.Missing) > 0 {
+			fmt.Fprintf(errW, "external git hooks (%s) not fully wired\n\n%s", manager, strategy.FormatManagerNotWiredHelp(manager, st.Wired))
+			return NewSilentError(fmt.Errorf("external git hooks (%s) not fully wired", manager))
+		}
+		return nil
+	}
+
+	extDir := s.ExternalHookDir()
 	absDir := filepath.Clean(filepath.Join(root, extDir))
 	if _, statErr := os.Stat(absDir); os.IsNotExist(statErr) {
 		fmt.Fprintf(errW, "external_dir %q not found in repo root\n\n%s", extDir, strategy.FormatExternalDirMissingHelp(extDir))

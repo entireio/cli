@@ -201,6 +201,49 @@ func isEntireWiredIntoManager(repoRoot, manager string) (bool, error) {
 	}
 }
 
+// ManagerWiringStatus reports, for a config-driven hook manager, whether its
+// config file was found, which managed hooks are wired to Entire, and which
+// are missing. Exported for doctor / setup so they can render actionable
+// health output without re-parsing the config themselves.
+type ManagerWiringStatus struct {
+	// ConfigPath is the repo-relative path to the located config file, or
+	// empty when no config file exists.
+	ConfigPath string
+	// Wired is the set of managed hooks currently dispatching to Entire.
+	Wired map[string]bool
+	// Missing lists managed hooks not yet wired, in gitHookNames order.
+	Missing []string
+}
+
+// ManagerWiring inspects a config-driven hook manager (currently "lefthook")
+// under repoRoot and reports its wiring status.
+func ManagerWiring(repoRoot, manager string) (ManagerWiringStatus, error) {
+	switch manager {
+	case "lefthook":
+		st := ManagerWiringStatus{Wired: map[string]bool{}}
+		if cfg, ok := lefthookConfigPath(repoRoot); ok {
+			rel, err := filepath.Rel(repoRoot, cfg)
+			if err != nil {
+				rel = filepath.Base(cfg)
+			}
+			st.ConfigPath = rel
+		}
+		wired, err := lefthookWiredHooks(repoRoot)
+		if err != nil {
+			return st, err
+		}
+		st.Wired = wired
+		for _, hook := range gitHookNames {
+			if !wired[hook] {
+				st.Missing = append(st.Missing, hook)
+			}
+		}
+		return st, nil
+	default:
+		return ManagerWiringStatus{}, fmt.Errorf("unsupported hook manager %q", manager)
+	}
+}
+
 // lefthookWiredHooks parses the lefthook config (main + -local overlay) and
 // returns the set of managed git hooks that invoke `entire hooks git <hook>`.
 // A hook counts as wired if any command's `run` value or any scripts entry

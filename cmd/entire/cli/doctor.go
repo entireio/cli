@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"charm.land/huh/v2"
@@ -450,6 +451,13 @@ func checkExternalGitHooks(cmd *cobra.Command) error {
 	}
 
 	w := cmd.OutOrStdout()
+
+	// Config-driven manager mode (lefthook): report wiring status from the
+	// manager's config file rather than checking for a script directory.
+	if manager := s.HookManager(); manager != "" {
+		return checkExternalGitHooksManager(cmd, w, manager)
+	}
+
 	extDir := s.ExternalHookDir()
 	root, rErr := paths.WorktreeRoot(ctx)
 	if rErr != nil {
@@ -462,6 +470,35 @@ func checkExternalGitHooks(cmd *cobra.Command) error {
 		return fmt.Errorf("external_dir %q not found", extDir)
 	}
 	fmt.Fprintf(w, "✓ External git hooks: external_dir %q exists\n", extDir)
+	return nil
+}
+
+// checkExternalGitHooksManager reports the health of a config-driven hook
+// manager (lefthook): whether Entire is wired into all managed hooks. Missing
+// hooks produce a ✗ plus the instructional help, and a non-nil error so the
+// doctor exit code reflects the issue.
+func checkExternalGitHooksManager(cmd *cobra.Command, w io.Writer, manager string) error {
+	ctx := cmd.Context()
+	root, rErr := paths.WorktreeRoot(ctx)
+	if rErr != nil {
+		fmt.Fprintf(w, "✗ External git hooks: cannot resolve repo root: %v\n", rErr)
+		return fmt.Errorf("external git hooks: %w", rErr)
+	}
+	st, err := strategy.ManagerWiring(root, manager)
+	if err != nil {
+		fmt.Fprintf(w, "✗ External git hooks (%s): %v\n", manager, err)
+		return fmt.Errorf("external git hooks: %w", err)
+	}
+	if st.ConfigPath == "" {
+		fmt.Fprintf(w, "✗ External git hooks (%s): no config file found\n\n%s", manager, strategy.FormatManagerNotWiredHelp(manager, st.Wired))
+		return fmt.Errorf("external git hooks (%s): no config file found", manager)
+	}
+	if len(st.Missing) > 0 {
+		fmt.Fprintf(w, "✗ External git hooks (%s): %s missing entire dispatch for %s\n\n%s",
+			manager, st.ConfigPath, strings.Join(st.Missing, ", "), strategy.FormatManagerNotWiredHelp(manager, st.Wired))
+		return fmt.Errorf("external git hooks (%s): hooks not wired: %s", manager, strings.Join(st.Missing, ", "))
+	}
+	fmt.Fprintf(w, "✓ External git hooks: external via %s (%s)\n", manager, st.ConfigPath)
 	return nil
 }
 
