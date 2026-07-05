@@ -1874,11 +1874,25 @@ func (env *TestEnv) cloneFromWithArgs(cloneSource string, extraArgs []string) *T
 	// Get the current branch name to clone the right branch
 	currentBranch := env.GetCurrentBranch()
 
+	// Hoist "-c key=val" pairs before the clone subcommand: as a global git
+	// option the config applies to the transport for this invocation only,
+	// whereas `git clone -c` also persists it into the clone's .git/config.
+	// Everything else stays a clone flag (--depth, --filter, ...).
+	var globalArgs, cloneFlags []string
+	for i := 0; i < len(extraArgs); i++ {
+		if extraArgs[i] == "-c" && i+1 < len(extraArgs) {
+			globalArgs = append(globalArgs, "-c", extraArgs[i+1])
+			i++
+			continue
+		}
+		cloneFlags = append(cloneFlags, extraArgs[i])
+	}
+
 	// Clone the bare repo, explicitly checking out the right branch.
 	// Bare repos may have HEAD pointing to a non-existent default branch
 	// when the original was on a feature branch.
-	cloneArgs := []string{"clone"}
-	cloneArgs = append(cloneArgs, extraArgs...)
+	cloneArgs := append(globalArgs, "clone")
+	cloneArgs = append(cloneArgs, cloneFlags...)
 	if currentBranch != "" {
 		cloneArgs = append(cloneArgs, "--branch", currentBranch)
 	}
