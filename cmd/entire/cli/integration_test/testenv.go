@@ -310,6 +310,21 @@ func (env *TestEnv) gitConfigPath() string {
 	return filepath.Join(env.RepoDir, ".git", "config")
 }
 
+// commitMsgPath returns the COMMIT_EDITMSG scratch path inside the repo's real
+// git dir, resolved via git so it is correct in a linked worktree (where ".git"
+// is a file pointing at the common dir's worktrees/<name>, not a directory). For
+// a normal checkout this equals RepoDir/.git/COMMIT_EDITMSG.
+func (env *TestEnv) commitMsgPath() string {
+	cmd := exec.CommandContext(env.T.Context(), "git", "rev-parse", "--absolute-git-dir")
+	cmd.Dir = env.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	}
+	return filepath.Join(strings.TrimSpace(string(out)), "COMMIT_EDITMSG")
+}
+
 var gitConfigGuardRepositoryFormatVersionRE = regexp.MustCompile(`(?m)^([ \t]*)repositoryformatversion = [01]$`)
 
 var gitConfigGuardTransportPromisorRemoteRE = regexp.MustCompile(
@@ -1045,7 +1060,7 @@ func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, f
 	}
 
 	// Create a temp file for the commit message (prepare-commit-msg hook modifies this)
-	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	msgFile := env.commitMsgPath()
 	if err := os.WriteFile(msgFile, []byte(message), 0o644); err != nil {
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
@@ -1119,7 +1134,7 @@ func (env *TestEnv) GitCommitAmendWithShadowHooks(message string, files ...strin
 	}
 
 	// Write commit message to temp file
-	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	msgFile := env.commitMsgPath()
 	if err := os.WriteFile(msgFile, []byte(message), 0o644); err != nil {
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
@@ -1206,7 +1221,7 @@ func (env *TestEnv) GitCommitWithTrailerRemoved(message string, files ...string)
 	}
 
 	// Create a temp file for the commit message (prepare-commit-msg hook modifies this)
-	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	msgFile := env.commitMsgPath()
 	if err := os.WriteFile(msgFile, []byte(message), 0o644); err != nil {
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
@@ -1303,7 +1318,7 @@ func (env *TestEnv) gitCommitStagedWithShadowHooks(message string, simulateTTY b
 	env.T.Helper()
 
 	// Create a temp file for the commit message (prepare-commit-msg hook modifies this)
-	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	msgFile := env.commitMsgPath()
 	if err := os.WriteFile(msgFile, []byte(message), 0o644); err != nil {
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
@@ -1913,6 +1928,60 @@ func (env *TestEnv) BranchExistsOnRemote(bareDir, branchName string) bool {
 	cmd.Dir = bareDir
 	cmd.Env = testutil.GitIsolatedEnv()
 	return cmd.Run() == nil
+}
+
+// AddWorktree creates a linked git worktree on a new branch and returns a
+// TestEnv pointing at it. The worktree shares the main repo's git common dir
+// (objects, refs, and the git-refs push queue live there), so sessions run in
+// either worktree enqueue into the same queue. Because .entire/ is gitignored
+// (not committed), the worktree gets its own freshly-initialized .entire/. The
+// checkpoint-store backend is inherited from the parent env.
+func (env *TestEnv) AddWorktree(branch string) *TestEnv {
+	env.T.Helper()
+
+	worktreeDir := filepath.Join(env.T.TempDir(), "worktree")
+	if resolved, err := filepath.EvalSymlinks(filepath.Dir(worktreeDir)); err == nil {
+		worktreeDir = filepath.Join(resolved, "worktree")
+	}
+
+	cmd := exec.CommandContext(env.T.Context(), "git", "worktree", "add", worktreeDir, "-b", branch)
+	cmd.Dir = env.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		env.T.Fatalf("failed to add worktree on branch %s: %v\n%s", branch, err, output)
+	}
+
+	claudeProjectDir := env.T.TempDir()
+	if resolved, err := filepath.EvalSymlinks(claudeProjectDir); err == nil {
+		claudeProjectDir = resolved
+	}
+	geminiProjectDir := env.T.TempDir()
+	if resolved, err := filepath.EvalSymlinks(geminiProjectDir); err == nil {
+		geminiProjectDir = resolved
+	}
+	openCodeProjectDir := env.T.TempDir()
+	if resolved, err := filepath.EvalSymlinks(openCodeProjectDir); err == nil {
+		openCodeProjectDir = resolved
+	}
+
+	wtEnv := &TestEnv{
+		T:                  env.T,
+		RepoDir:            worktreeDir,
+		ClaudeProjectDir:   claudeProjectDir,
+		GeminiProjectDir:   geminiProjectDir,
+		OpenCodeProjectDir: openCodeProjectDir,
+		CheckpointStore:    env.CheckpointStore,
+		// Session IDs are "test-session-<counter>" per env and the session state
+		// store is shared across worktrees (git common dir). Offset the worktree's
+		// counter so its sessions never collide with the parent worktree's.
+		SessionCounter: 500,
+	}
+	wtEnv.InitEntire()
+	// A linked worktree's ".git" is a file, not a directory, so the .git/config
+	// guard (which reads RepoDir/.git/config) cannot baseline it. The worktree
+	// shares the main repo's common config, which the parent env already guards,
+	// so intentionally skip setGitConfigBaseline here.
+	return wtEnv
 }
 
 // PatchSettings merges extra keys into .entire/settings.json.
