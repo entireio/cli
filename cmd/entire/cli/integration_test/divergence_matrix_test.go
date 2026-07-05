@@ -4,6 +4,7 @@ package integration
 
 import (
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -66,7 +67,7 @@ func forceLocalV1Orphan(t *testing.T, env *TestEnv, checkpointID string) {
 	runGit := func(stdin string, args ...string) string {
 		c := exec.CommandContext(env.T.Context(), "git", args...)
 		c.Dir = env.RepoDir
-		c.Env = append(testutil.GitIsolatedEnv(), "GIT_INDEX_FILE="+env.RepoDir+"/.git/entire-orphan-index")
+		c.Env = append(testutil.GitIsolatedEnv(), "GIT_INDEX_FILE="+filepath.Join(env.RepoDir, ".git", "entire-orphan-index"))
 		if stdin != "" {
 			c.Stdin = strings.NewReader(stdin)
 		}
