@@ -13,6 +13,8 @@ import (
 
 // isAccessibleMode returns true if accessibility mode should be enabled.
 // This checks the ACCESSIBLE environment variable.
+//
+//nolint:unused // kept for strategy prompts that cannot use uiform.New directly
 func isAccessibleMode() bool {
 	return os.Getenv("ACCESSIBLE") != ""
 }
