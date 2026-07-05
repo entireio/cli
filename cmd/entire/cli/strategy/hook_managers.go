@@ -244,6 +244,13 @@ func firstExisting(repoRoot string, candidates []string) (string, bool) {
 	return "", false
 }
 
+// lefthookConfigPath returns the absolute path to the repo's primary lefthook
+// config file (ignoring the -local overlay), if one exists.
+func lefthookConfigPath(repoRoot string) (string, bool) {
+	mainCfgs, _ := lefthookConfigCandidates()
+	return firstExisting(repoRoot, mainCfgs)
+}
+
 // parseLefthookConfig reads a lefthook config file and decodes it into a
 // generic map, dispatching on the file extension (yml/yaml/json/toml).
 func parseLefthookConfig(path string) (map[string]any, error) {

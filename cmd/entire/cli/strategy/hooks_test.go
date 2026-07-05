@@ -2076,10 +2076,9 @@ func TestIsGitHookInstalled_ExternalBackend_IgnoresGitHooksDir(t *testing.T) {
 func TestExternalDispatchInvocation_PrePushOmitsOrTrue(t *testing.T) {
 	t.Parallel()
 
-	const prePush = "pre-push"
 	for _, name := range gitHookNames {
 		got := externalDispatchInvocation(name)
-		if name == prePush {
+		if name == hookPrePush {
 			if strings.Contains(got, "|| true") {
 				t.Errorf("pre-push template must not swallow non-zero exit: %q\n(OPF privacy filter needs the non-zero exit to abort push)", got)
 			}
@@ -2161,5 +2160,107 @@ func TestHasEntireMarkerLine(t *testing.T) {
 				t.Errorf("hasEntireMarkerLine(%q) = %v, want %v", tc.data, got, tc.want)
 			}
 		})
+	}
+}
+
+// In lefthook manager mode, IsGitHookInstalled must detect wiring in the
+// lefthook config file — NOT look for marker scripts in a directory.
+func TestIsGitHookInstalled_LefthookManager_ReadsConfig(t *testing.T) {
+	repoDir, _ := initHooksTestRepo(t)
+
+	entireDir := filepath.Join(repoDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), []byte(lefthookAllHooksYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !IsGitHookInstalled(context.Background()) {
+		t.Error("IsGitHookInstalled() = false, want true when lefthook config wires all hooks")
+	}
+}
+
+func TestIsGitHookInstalled_LefthookManager_MissingHookIsNotInstalled(t *testing.T) {
+	repoDir, _ := initHooksTestRepo(t)
+
+	entireDir := filepath.Join(repoDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	partial := strings.Replace(lefthookAllHooksYAML,
+		"pre-push:\n  commands:\n    entire:\n      run: entire hooks git pre-push {1}\n", "", 1)
+	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), []byte(partial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if IsGitHookInstalled(context.Background()) {
+		t.Error("IsGitHookInstalled() = true, want false when a hook is missing from lefthook config")
+	}
+}
+
+func TestPrintExternalHookStatusIfActive_LefthookManager(t *testing.T) {
+	repoDir, _ := initHooksTestRepo(t)
+
+	entireDir := filepath.Join(repoDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	if printed := PrintExternalHookStatusIfActive(context.Background(), &buf); !printed {
+		t.Error("PrintExternalHookStatusIfActive returned false in lefthook manager mode")
+	}
+	if !strings.Contains(buf.String(), "lefthook") {
+		t.Errorf("output should name the lefthook manager; got:\n%s", buf.String())
+	}
+}
+
+func TestFormatManagerNotWiredHelp_Lefthook(t *testing.T) {
+	t.Parallel()
+
+	msg := FormatManagerNotWiredHelp("lefthook", nil)
+
+	// Must show a lefthook config snippet, not a directory-of-scripts one.
+	if !strings.Contains(msg, "lefthook") {
+		t.Errorf("help should mention lefthook; got:\n%s", msg)
+	}
+	// pre-push must be present and must NOT be wrapped in `|| true`.
+	prePushIdx := strings.Index(msg, "entire hooks git pre-push")
+	if prePushIdx < 0 {
+		t.Fatalf("help should show the pre-push dispatch; got:\n%s", msg)
+	}
+	// The remainder of the pre-push line must not carry `|| true`.
+	rest := msg[prePushIdx:]
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		rest = rest[:nl]
+	}
+	if strings.Contains(rest, "|| true") {
+		t.Errorf("pre-push dispatch line must not include `|| true`; got line: %q", rest)
+	}
+	// Should mention running `lefthook install` to sync the generated hooks.
+	if !strings.Contains(msg, "lefthook install") {
+		t.Errorf("help should remind the user to run `lefthook install`; got:\n%s", msg)
 	}
 }
