@@ -377,6 +377,17 @@ The checkpoint ID is the **stable identifier** that links user commits to metada
 
 Both formats are validated by `id.KindOf` / `id.Validate`; readers accept either.
 
+**Read routing (`checkpoint.Open` → `kindRoutingStore`):** id-keyed reads resolve
+across both git backends by the checkpoint's format, so a repo running git-refs
+and git-branch side by side (or mid-migration) reads either format without
+reconfiguring:
+- A **ULID** is read from the git-refs store only — never the branch.
+- A **hex** ID is read from the active (configured) primary first; when the
+  primary is git-refs it also falls back to the git-branch store (a hex checkpoint
+  may still sit on the pre-migration v1 branch, or have been migrated into refs).
+- `List` unions both backends. **Writes are not kind-routed** — they go to the
+  configured primary (+ mirrors); the minted ID already matches the primary.
+
 **Generation:**
 - Minted by `checkpoint.GenerateCheckpointID`, which picks the format from the
   configured primary store (ULID under git-refs, 12-hex otherwise). Do not call

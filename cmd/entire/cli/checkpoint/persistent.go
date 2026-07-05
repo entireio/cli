@@ -1564,10 +1564,7 @@ func (s *GitStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 		return nil
 	})
 
-	// Sort by time (most recent first)
-	sort.Slice(checkpoints, func(i, j int) bool {
-		return checkpoints[i].CreatedAt.After(checkpoints[j].CreatedAt)
-	})
+	sortCheckpointInfosByRecency(checkpoints) // most recent first
 
 	return checkpoints, nil
 }

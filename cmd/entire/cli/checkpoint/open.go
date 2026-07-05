@@ -78,12 +78,43 @@ func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores,
 	if err != nil {
 		return nil, err
 	}
+	writer := newFanoutStore(primary, mirrors)
+
+	// Read routing: resolve id-keyed reads by the checkpoint's format across both
+	// git backends (a ULID lives in refs, a hex ID on the branch or a migrated
+	// ref), so a coexisting / mid-migration repo reads either format without
+	// reconfiguring. Writes still go through writer (configured primary + mirrors).
+	branchStore, refsStore, err := buildKindReadStores(ctx, env, primaryType, primary)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Stores{
-		Persistent: newFanoutStore(primary, mirrors),
+		Persistent: newKindRoutingStore(writer, branchStore, refsStore, primaryType),
 		ephemeral:  newEphemeralStore(repo, refs),
 		refs:       refs,
 	}, nil
+}
+
+// buildKindReadStores returns the git-branch and git-refs read stores used for
+// id-kind read routing, reusing the already-built primary for whichever kind it
+// is and constructing the sibling. A non-branch/refs git-backed primary (not a
+// real configuration today, since buildPrimary only accepts git-backed backends)
+// yields both freshly built git stores.
+func buildKindReadStores(ctx context.Context, env OpenEnv, primaryType string, primary PersistentStore) (branch, refs PersistentStore, err error) {
+	switch primaryType {
+	case BackendTypeGitBranch:
+		branch = primary
+		refs, err = build(ctx, env, BackendTypeGitRefs, nil)
+	case BackendTypeGitRefs:
+		refs = primary
+		branch, err = build(ctx, env, BackendTypeGitBranch, nil)
+	default:
+		if branch, err = build(ctx, env, BackendTypeGitBranch, nil); err == nil {
+			refs, err = build(ctx, env, BackendTypeGitRefs, nil)
+		}
+	}
+	return branch, refs, err
 }
 
 // resolvePrimaryType returns the configured primary backend type, defaulting to

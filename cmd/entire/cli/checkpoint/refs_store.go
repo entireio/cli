@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
 	"strconv"
 
 	"github.com/go-git/go-git/v6"
@@ -392,9 +391,7 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 		return nil, fmt.Errorf("iterate checkpoint refs: %w", err)
 	}
 
-	sort.Slice(checkpoints, func(i, j int) bool {
-		return checkpoints[i].CreatedAt.After(checkpoints[j].CreatedAt)
-	})
+	sortCheckpointInfosByRecency(checkpoints)
 	return checkpoints, nil
 }
 
