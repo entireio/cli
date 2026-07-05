@@ -393,7 +393,7 @@ func parseCheckpointRemoteFlag(value string) (provider, repo string, err error) 
 func runSetupFlow(ctx context.Context, w io.Writer, opts EnableOptions) error {
 	// External git hooks precondition — every entry point into the setup flow
 	// (root, `configure`, `enable`, `agent` interactive menu) must fail here
-	// before we start writing agent files if external_dir is missing.
+	// before we start writing agent files if external_path is missing.
 	if extErr := verifyExternalGitHooksPrecondition(ctx, w); extErr != nil {
 		return extErr
 	}
@@ -884,7 +884,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 			}
 
 			// External git hooks health gate: if user opted into external mode
-			// but external_dir is missing on disk, every enable variant (bare,
+			// but external_path is missing on disk, every enable variant (bare,
 			// --force, --agent) should refuse with the same instructional
 			// message. Centralized here so all downstream branches get the
 			// same protection rather than duplicating the check in each.
@@ -1247,7 +1247,8 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 // printEnabledStatus prints agents and a hint about `entire agent`.
 // verifyExternalGitHooksPrecondition fails fast when the external git hooks
-// backend is configured but external_dir does not exist on disk. The error
+// backend is configured but external_path does not exist on disk (or, for a
+// config-driven manager, is not fully wired). The error
 // carries the same instructional message used by `entire doctor`, so users
 // see one canonical setup procedure regardless of which command exposed the
 // issue first. Returns nil in direct mode and in healthy external mode.
@@ -1274,24 +1275,31 @@ func verifyExternalGitHooksPrecondition(ctx context.Context, errW io.Writer) err
 
 	// Config-driven manager mode (lefthook): require the config file to exist
 	// and wire every managed hook, mirroring doctor's check.
-	if manager := s.HookManager(); manager != "" {
-		st, wErr := strategy.ManagerWiring(root, manager)
+	if s.IsLefthookManager() {
+		manager := s.HookManager()
+		externalPath := s.ExternalHookPath()
+		cmdPrefix, cErr := strategy.HookCmdPrefix(s.LocalDev, s.AbsoluteGitHookPath)
+		if cErr != nil {
+			fmt.Fprintf(errW, "external git hooks (%s): %v\n", manager, cErr)
+			return NewSilentError(fmt.Errorf("external git hooks: %w", cErr))
+		}
+		st, wErr := strategy.ManagerWiring(root, manager, externalPath, cmdPrefix)
 		if wErr != nil {
 			fmt.Fprintf(errW, "external git hooks (%s): %v\n", manager, wErr)
 			return NewSilentError(fmt.Errorf("external git hooks: %w", wErr))
 		}
 		if st.ConfigPath == "" || len(st.Missing) > 0 {
-			fmt.Fprintf(errW, "external git hooks (%s) not fully wired\n\n%s", manager, strategy.FormatManagerNotWiredHelp(manager, st.Wired))
+			fmt.Fprintf(errW, "external git hooks (%s) not fully wired\n\n%s", manager, strategy.FormatManagerNotWiredHelp(manager, externalPath, st.Wired, cmdPrefix))
 			return NewSilentError(fmt.Errorf("external git hooks (%s) not fully wired", manager))
 		}
 		return nil
 	}
 
-	extDir := s.ExternalHookDir()
+	extDir := s.ExternalHookPath()
 	absDir := filepath.Clean(filepath.Join(root, extDir))
 	if _, statErr := os.Stat(absDir); os.IsNotExist(statErr) {
-		fmt.Fprintf(errW, "external_dir %q not found in repo root\n\n%s", extDir, strategy.FormatExternalDirMissingHelp(extDir))
-		return NewSilentError(fmt.Errorf("external_dir %q not found", extDir))
+		fmt.Fprintf(errW, "external_path %q not found in repo root\n\n%s", extDir, strategy.FormatExternalDirMissingHelp(extDir))
+		return NewSilentError(fmt.Errorf("external_path %q not found", extDir))
 	}
 	return nil
 }

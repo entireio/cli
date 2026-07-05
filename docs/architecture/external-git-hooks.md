@@ -38,14 +38,25 @@ Add a `git_hooks` block to `.entire/settings.json`:
   "enabled": true,
   "git_hooks": {
     "backend": "external",
-    "external_dir": ".husky"
+    "manager": "scripts",
+    "external_path": ".husky"
   }
 }
 ```
 
-`external_dir` is repo-relative. Common values:
+Both `manager` and `external_path` are required whenever
+`backend = "external"` — there is no implicit default for either field.
+`manager` tells Entire *how* to interpret `external_path`:
 
-| Hook manager | `external_dir` |
+- `"scripts"` — `external_path` is a directory containing one
+  hand-written (or manager-generated) script per managed hook. This is
+  what Husky, Rush, and any custom setup use.
+- `"lefthook"` — `external_path` is the exact lefthook config file to
+  parse. See "Config-driven managers" below.
+
+Common values for `manager = "scripts"`:
+
+| Hook manager | `external_path` |
 | --- | --- |
 | Husky v9 | `.husky` |
 | Rush | `common/git-hooks` |
@@ -55,39 +66,62 @@ Validation rules:
 
 - `backend` must be `"direct"` or `"external"`. Typos are rejected at
   load time so silent misconfiguration is impossible.
-- `external_dir` is required when `backend = "external"` (unless a
-  config-driven `manager` is set — see below).
-- `external_dir` must be repo-relative (no leading `/`, no `..` segments,
+- `manager` is required when `backend = "external"` and must be
+  `"scripts"` or `"lefthook"`. Empty/missing `manager` is a load error —
+  it is never treated as an implicit default.
+- `external_path` is required when `backend = "external"`, regardless of
+  `manager`.
+- `external_path` must be repo-relative (no leading `/`, no `..` segments,
   no Windows drive/volume anchor).
 
-`external_dir` existence is NOT checked at parse time — that is a runtime
+`external_path` existence is NOT checked at parse time — that is a runtime
 health concern surfaced by `entire enable` and `entire doctor`.
+
+**Why both fields are always required:** early drafts let `manager`
+default implicitly to "scripts" when omitted, and let lefthook mode scan
+the repo root for `lefthook.yml`/`.lefthook.yaml`/etc. when
+`external_path` was omitted. Both defaults turned out to be foot-guns: a
+typo'd or forgotten `manager` silently fell back to directory-of-scripts
+detection against the wrong path, and filename scanning meant a
+`lefthook.yml` living in an unexpected location (or a repo with multiple
+lefthook config candidates) could wire against the wrong file with no
+error. Treating `manager` as an explicit, required discriminator —
+mirroring how Terraform backends and Kubernetes `kind` never leave "which
+variant" implicit — and requiring `external_path` to name one exact
+file/directory removes both classes of silent misconfiguration at the
+cost of one extra line in `settings.json`.
 
 ### Config-driven managers (lefthook)
 
 Husky and Rush keep per-hook script files in a directory, so Entire can
-detect its wiring by scanning `external_dir/<hook>` for a marker line.
+detect its wiring by scanning `external_path/<hook>` for a marker line.
 Lefthook is different: it describes hooks declaratively in a config file
-(`lefthook.yml`) and generates the `.git/hooks` wrappers itself — there is
-no directory of user-authored scripts to scan.
+and generates the `.git/hooks` wrappers itself — there is no directory of
+user-authored scripts to scan.
 
-For these managers, set `manager` instead of (or alongside) `external_dir`:
+For lefthook, set `manager` to `"lefthook"` and point `external_path` at
+the exact config file Entire should parse:
 
 ```json
 {
   "enabled": true,
   "git_hooks": {
     "backend": "external",
-    "manager": "lefthook"
+    "manager": "lefthook",
+    "external_path": "lefthook.yml"
   }
 }
 ```
 
-In manager mode Entire parses the lefthook config
-(`{.,}lefthook{,-local}.{yml,yaml,json,toml}`) and confirms every managed
-hook dispatches to `entire hooks git <hook>`. `external_dir` is optional.
-`manager` is only valid with `backend = "external"` and currently accepts
-only `"lefthook"`.
+In manager mode Entire parses exactly the file named by `external_path`
+(by extension: `.yml`/`.yaml`/`.json`/`.toml`) and confirms every managed
+hook dispatches to `<cmdPrefix> hooks git <hook>`, where `<cmdPrefix>` is
+however this environment's settings actually invoke Entire (the `entire`
+binary on `PATH`, an absolute path for GUI git clients, or the local-dev
+launcher). There is no filename scanning and no `-local` overlay
+auto-merge — `external_path` names the one file Entire trusts. If you
+split configuration across `lefthook.yml` and `lefthook-local.yml`, put
+the commands that dispatch to Entire in the file named by `external_path`.
 
 Wire Entire into your `lefthook.yml`:
 
@@ -124,20 +158,22 @@ which are still missing.
 
 ## User contract
 
-In external mode, Entire considers a hook "installed" iff
-`<external_dir>/<hook>` contains the marker comment `# Entire CLI hooks`
-somewhere in the file. Detection reads only this marker; the actual
-dispatch invocation is the user's responsibility.
+In external mode with `manager = "scripts"`, Entire considers a hook
+"installed" iff `<external_path>/<hook>` contains the marker comment
+`# Entire CLI hooks` somewhere in the file. Detection reads only this
+marker; the actual dispatch invocation is the user's responsibility. (For
+`manager = "lefthook"`, see "Config-driven managers" above — detection
+parses the config file's `run:` values instead of scanning scripts.)
 
 The five managed hooks Entire wants to see (these match direct-mode
 installs byte-for-byte except they live in your directory):
 
 ```
-<external_dir>/prepare-commit-msg
-<external_dir>/commit-msg
-<external_dir>/post-commit
-<external_dir>/post-rewrite
-<external_dir>/pre-push
+<external_path>/prepare-commit-msg
+<external_path>/commit-msg
+<external_path>/post-commit
+<external_path>/post-rewrite
+<external_path>/pre-push
 ```
 
 Each script must:
@@ -192,20 +228,27 @@ the dispatch as needed.
 
 **Does:**
 
-- Detect marker presence in `<external_dir>/<hook>` via
-  `IsGitHookInstalled` (read-only).
-- Report `external_dir` health in `entire doctor` (exists/missing).
+- Detect marker presence in `<external_path>/<hook>` (manager="scripts")
+  via `IsGitHookInstalled`, or parse the exact `external_path` config
+  file for `run:` dispatch lines (manager="lefthook") — both read-only.
+- Report `external_path` health in `entire doctor` (exists/missing, and
+  for lefthook mode, which managed hooks are wired vs. missing).
 - Abort `entire enable` with the instructional message when
-  `external_dir` doesn't exist on disk.
+  `external_path` doesn't exist on disk, or (lefthook mode) when any
+  managed hook isn't wired yet.
 - Silence the hook-manager warning that fires in direct mode (you've
   already opted in to coexistence).
 
 **Does not:**
 
-- Write anything to `external_dir` or `.git/hooks/` in external mode.
-- Append, edit, or normalize user-owned hook scripts.
-- Validate the exact dispatch command string — only the marker is
-  checked. If you change the invocation form, detection still passes.
+- Write anything to `external_path` or `.git/hooks/` in external mode.
+- Append, edit, or normalize user-owned hook scripts or config files.
+- Scan for alternate lefthook filenames or merge in a `-local` overlay —
+  only the exact file named by `external_path` is parsed.
+- Validate the exact dispatch command string in scripts mode — only the
+  marker is checked. If you change the invocation form, detection still
+  passes. (Lefthook mode does check the actual `run:` value, since that's
+  the only signal available.)
 - Remove hooks on `entire disable` — `RemoveGitHook` is a no-op in
   external mode regardless of what files exist.
 
@@ -213,13 +256,15 @@ the dispatch as needed.
 
 Tested layouts:
 
-- **Husky v9** — `.husky/_/<hook>` (Husky-generated stubs, untouched) +
-  `.husky/<hook>` (user scripts with the marker).
-- **Rush** — `common/git-hooks/<hook>` with the marker.
-- **Generic** — any repo-relative directory you control.
-- **Lefthook** — config-driven (`manager: "lefthook"`); detection parses
-  `lefthook.yml` rather than a script directory. See "Config-driven
-  managers" above.
+- **Husky v9** (`manager: "scripts"`) — `.husky/_/<hook>` (Husky-generated
+  stubs, untouched) + `.husky/<hook>` (user scripts with the marker).
+- **Rush** (`manager: "scripts"`) — `common/git-hooks/<hook>` with the
+  marker.
+- **Generic** (`manager: "scripts"`) — any repo-relative directory you
+  control.
+- **Lefthook** (`manager: "lefthook"`) — config-driven; detection parses
+  the exact file named by `external_path` rather than a script directory.
+  See "Config-driven managers" above.
 
 ## Migration: direct → external
 
@@ -230,10 +275,16 @@ Tested layouts:
    examples above). `chmod +x` each script.
 3. Add the `git_hooks` block to `.entire/settings.json`:
    ```json
-   { "git_hooks": { "backend": "external", "external_dir": ".husky" } }
+   {
+     "git_hooks": {
+       "backend": "external",
+       "manager": "scripts",
+       "external_path": ".husky"
+     }
+   }
    ```
 4. Run `entire doctor` — expect
-   `✓ External git hooks: external_dir ".husky" exists`.
+   `✓ External git hooks: external_path ".husky" exists`.
 5. The previously-installed `.git/hooks/<hook>` files from direct mode
    are now stale. Entire will leave them alone (detection-only contract);
    remove them manually if your hook manager doesn't already do so.
@@ -275,20 +326,31 @@ We chose marker detection instead, for three reasons:
 
 ## Troubleshooting
 
-**"external_dir not found in repo root"** — the directory you named in
-`external_dir` doesn't exist on disk. Either create it (with the hook
-scripts inside) or set `backend` back to `direct`.
+**"external_path not found in repo root"** — the path you named in
+`external_path` doesn't exist on disk. Either create it (the script
+directory, or the lefthook config file) or set `backend` back to
+`direct`.
 
-**"Marker present but hook doesn't fire"** — check that the script is
-executable (`chmod +x`) and that your hook manager actually links it
-into `.git/hooks/` (Husky v9 does this via `.husky/_/`; Rush does it on
-`rush install`).
+**"Marker present but hook doesn't fire" (manager="scripts")** — check
+that the script is executable (`chmod +x`) and that your hook manager
+actually links it into `.git/hooks/` (Husky v9 does this via
+`.husky/_/`; Rush does it on `rush install`).
 
 **"Husky stubs in `.husky/_/` are being detected"** — they aren't.
-Detection looks at `<external_dir>/<hook>`, not `<external_dir>/_/<hook>`.
-The `_/` directory is Husky's plumbing, ignored by Entire's marker check.
+Detection looks at `<external_path>/<hook>`, not
+`<external_path>/_/<hook>`. The `_/` directory is Husky's plumbing,
+ignored by Entire's marker check.
+
+**"hooks not wired" (manager="lefthook")** — `entire doctor` lists which
+managed hooks are missing a `run:` value that dispatches to Entire.
+Remember detection only reads the exact file named by `external_path`;
+if you configured the dispatch commands in `lefthook-local.yml` but
+`external_path` points at `lefthook.yml`, they won't be seen. Point
+`external_path` at whichever file actually contains the `entire hooks
+git ...` commands, then run `lefthook install`.
 
 **`entire enable` says "Entire is already enabled" without the
-external hint** — your `external_dir` does not exist; the precondition
-check at the top of `enable` aborts before the success surface runs. The
-error message lists the required scripts inline.
+external hint** — your `external_path` does not exist (or, in lefthook
+mode, isn't fully wired); the precondition check at the top of `enable`
+aborts before the success surface runs. The error message lists the
+required scripts/commands inline.

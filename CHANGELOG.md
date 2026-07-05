@@ -11,14 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - External git hooks backend (`git_hooks.backend = "external"`): Entire
   detects user-managed hook scripts via marker presence in a configured
-  `external_dir` (e.g. `.husky/`, `common/git-hooks/`) instead of writing
+  `external_path` (e.g. `.husky/`, `common/git-hooks/`) instead of writing
   to `.git/hooks/`. Compatible with Husky, Rush, and similar managers.
-  Entire never writes to `external_dir` in this mode — users own the hook
-  scripts. Config-driven managers are supported via `git_hooks.manager`
-  (currently `"lefthook"`): Entire parses the manager's config file and
-  confirms each managed hook dispatches to Entire, no script directory
-  required. See `docs/architecture/external-git-hooks.md` for the required
-  marker contract and dispatch invocations. Closes [#1250](https://github.com/entireio/cli/issues/1250), addresses [#1349](https://github.com/entireio/cli/issues/1349).
+  Entire never writes to `external_path` in this mode — users own the hook
+  scripts. `git_hooks.manager` is a required enum (`"scripts"` or
+  `"lefthook"`, no implicit default) that selects the detection strategy:
+  `"scripts"` scans `external_path` for marker-tagged scripts;
+  `"lefthook"` parses the exact config file named by `external_path` (no
+  filename scanning, no `-local` overlay) and confirms each managed hook
+  dispatches to Entire. See `docs/architecture/external-git-hooks.md` for
+  the required marker contract and dispatch invocations. Closes [#1250](https://github.com/entireio/cli/issues/1250), addresses [#1349](https://github.com/entireio/cli/issues/1349).
 
 ### Changed
 

@@ -577,7 +577,7 @@ func TestCheckExternalGitHooks_SilentInDirectMode(t *testing.T) {
 	require.Empty(t, stdout.String(), "direct mode should produce no output")
 }
 
-// TestCheckExternalGitHooks_OKWhenDirExists — happy path. external_dir
+// TestCheckExternalGitHooks_OKWhenDirExists — happy path. external_path
 // exists, doctor reports it with the canonical ✓ marker.
 func TestCheckExternalGitHooks_OKWhenDirExists(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
@@ -587,7 +587,7 @@ func TestCheckExternalGitHooks_OKWhenDirExists(t *testing.T) {
 	require.NoError(t, os.MkdirAll(entireDir, 0o755))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": ".husky"}}`),
 		0o644,
 	))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".husky"), 0o755))
@@ -600,7 +600,7 @@ func TestCheckExternalGitHooks_OKWhenDirExists(t *testing.T) {
 }
 
 // TestCheckExternalGitHooks_FailsWithFullHelpWhenDirMissing — failure path.
-// external_dir missing → ✗ marker + the same instructional message used by
+// external_path missing → ✗ marker + the same instructional message used by
 // `entire enable`. Doctor does NOT abort; the issue surfaces in the final
 // exit code (verified separately).
 func TestCheckExternalGitHooks_FailsWithFullHelpWhenDirMissing(t *testing.T) {
@@ -611,12 +611,12 @@ func TestCheckExternalGitHooks_FailsWithFullHelpWhenDirMissing(t *testing.T) {
 	require.NoError(t, os.MkdirAll(entireDir, 0o755))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": ".husky"}}`),
 		0o644,
 	))
 
 	cmd, stdout := newTestCmd(t)
-	require.Error(t, checkExternalGitHooks(cmd), "missing external_dir should produce non-nil status")
+	require.Error(t, checkExternalGitHooks(cmd), "missing external_path should produce non-nil status")
 	out := stdout.String()
 	require.Contains(t, out, "✗ External git hooks")
 	require.Contains(t, out, ".husky")
@@ -657,7 +657,7 @@ func TestCheckExternalGitHooks_LefthookManager_OKWhenAllWired(t *testing.T) {
 	require.NoError(t, os.MkdirAll(entireDir, 0o755))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook", "external_path": "lefthook.yml"}}`),
 		0o644,
 	))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "lefthook.yml"), []byte(lefthookDoctorAllHooks), 0o644))
@@ -678,7 +678,7 @@ func TestCheckExternalGitHooks_LefthookManager_FailsWhenNoConfig(t *testing.T) {
 	require.NoError(t, os.MkdirAll(entireDir, 0o755))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook", "external_path": "lefthook.yml"}}`),
 		0o644,
 	))
 
@@ -698,7 +698,7 @@ func TestCheckExternalGitHooks_LefthookManager_ListsMissingHook(t *testing.T) {
 	require.NoError(t, os.MkdirAll(entireDir, 0o755))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook", "external_path": "lefthook.yml"}}`),
 		0o644,
 	))
 	partial := strings.Replace(lefthookDoctorAllHooks,

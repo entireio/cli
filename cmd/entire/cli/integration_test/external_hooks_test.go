@@ -14,10 +14,11 @@ import (
 )
 
 // writeExternalHooksSettings overwrites .entire/settings.json with the
-// external git hooks backend pointed at the given external_dir.
-// Replaces (not merges) because InitEntire's writer used the wrong shape
-// for our discriminated union — full overwrite is the cleanest path.
-func writeExternalHooksSettings(t *testing.T, env *TestEnv, externalDir string) {
+// external git hooks backend (manager="scripts") pointed at the given
+// external_path. Replaces (not merges) because InitEntire's writer used
+// the wrong shape for our discriminated union — full overwrite is the
+// cleanest path.
+func writeExternalHooksSettings(t *testing.T, env *TestEnv, externalPath string) {
 	t.Helper()
 	settings := map[string]any{
 		"enabled":   true,
@@ -26,8 +27,9 @@ func writeExternalHooksSettings(t *testing.T, env *TestEnv, externalDir string) 
 			"filtered_fetches": true,
 		},
 		"git_hooks": map[string]any{
-			"backend":      "external",
-			"external_dir": externalDir,
+			"backend":       "external",
+			"manager":       "scripts",
+			"external_path": externalPath,
 		},
 	}
 	data, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")
@@ -227,7 +229,7 @@ func TestAgentAdd_ExternalBackend_MissingDir_AbortsBeforeAgentFiles(t *testing.T
 	t.Parallel()
 	env := NewRepoWithCommit(t)
 
-	// external_dir points at a directory that does not exist on disk.
+	// external_path points at a directory that does not exist on disk.
 	writeExternalHooksSettings(t, env, ".husky")
 
 	// Snapshot the repo root before the aborted call so we can prove no
@@ -236,7 +238,7 @@ func TestAgentAdd_ExternalBackend_MissingDir_AbortsBeforeAgentFiles(t *testing.T
 
 	output, err := env.RunCLIWithError("agent", "add", "claude-code")
 	if err == nil {
-		t.Fatalf("agent add should fail when external_dir is missing\noutput:\n%s", output)
+		t.Fatalf("agent add should fail when external_path is missing\noutput:\n%s", output)
 	}
 	if !strings.Contains(output, "Required setup for external git hooks") {
 		t.Errorf("output should carry the external-hooks help block\noutput:\n%s", output)
@@ -251,9 +253,9 @@ func TestAgentAdd_ExternalBackend_MissingDir_AbortsBeforeAgentFiles(t *testing.T
 	}
 }
 
-// path: external + dir absent → exit non-zero + full instructional message
-// printed. We don't assert the entire 30+ line block, just the key markers
-// that prove it came from FormatExternalDirMissingHelp.
+// path: external + external_path absent → exit non-zero + full instructional
+// message printed. We don't assert the entire 30+ line block, just the key
+// markers that prove it came from FormatExternalDirMissingHelp.
 func TestEnable_ExternalBackend_MissingDir_AbortsWithHelp(t *testing.T) {
 	t.Parallel()
 	env := NewRepoWithCommit(t)
@@ -263,7 +265,7 @@ func TestEnable_ExternalBackend_MissingDir_AbortsWithHelp(t *testing.T) {
 
 	output, err := env.RunCLIWithError("enable")
 	if err == nil {
-		t.Fatalf("enable should fail when external_dir is missing\noutput:\n%s", output)
+		t.Fatalf("enable should fail when external_path is missing\noutput:\n%s", output)
 	}
 
 	// Output must contain the instructional message key phrases
@@ -285,7 +287,8 @@ func TestEnable_ExternalBackend_MissingDir_AbortsWithHelp(t *testing.T) {
 }
 
 // writeLefthookManagerSettings overwrites .entire/settings.json with the
-// external backend in lefthook manager mode (no external_dir).
+// external backend in lefthook manager mode, pointed at the exact
+// lefthook.yml config file this test writes.
 func writeLefthookManagerSettings(t *testing.T, env *TestEnv) {
 	t.Helper()
 	settings := map[string]any{
@@ -295,8 +298,9 @@ func writeLefthookManagerSettings(t *testing.T, env *TestEnv) {
 			"filtered_fetches": true,
 		},
 		"git_hooks": map[string]any{
-			"backend": "external",
-			"manager": "lefthook",
+			"backend":       "external",
+			"manager":       "lefthook",
+			"external_path": "lefthook.yml",
 		},
 	}
 	data, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")
@@ -309,26 +313,29 @@ func writeLefthookManagerSettings(t *testing.T, env *TestEnv) {
 	}
 }
 
+// lefthookAllHooksConfig wires every managed hook to "./scripts/entire-dev",
+// matching the cmdPrefix HookCmdPrefix derives for local_dev=true (the mode
+// writeLefthookManagerSettings configures).
 const lefthookAllHooksConfig = `prepare-commit-msg:
   commands:
     entire:
-      run: entire hooks git prepare-commit-msg {1} {2}
+      run: ./scripts/entire-dev hooks git prepare-commit-msg {1} {2}
 commit-msg:
   commands:
     entire:
-      run: entire hooks git commit-msg {1}
+      run: ./scripts/entire-dev hooks git commit-msg {1}
 post-commit:
   commands:
     entire:
-      run: entire hooks git post-commit
+      run: ./scripts/entire-dev hooks git post-commit
 post-rewrite:
   commands:
     entire:
-      run: entire hooks git post-rewrite {1}
+      run: ./scripts/entire-dev hooks git post-rewrite {1}
 pre-push:
   commands:
     entire:
-      run: entire hooks git pre-push {1}
+      run: ./scripts/entire-dev hooks git pre-push {1}
 `
 
 // TestEnable_ExternalBackend_Lefthook_AllHooksWired verifies that with the
@@ -371,7 +378,7 @@ func TestEnable_ExternalBackend_Lefthook_MissingHookAborts(t *testing.T) {
 
 	writeLefthookManagerSettings(t, env)
 	partial := strings.Replace(lefthookAllHooksConfig,
-		"pre-push:\n  commands:\n    entire:\n      run: entire hooks git pre-push {1}\n", "", 1)
+		"pre-push:\n  commands:\n    entire:\n      run: ./scripts/entire-dev hooks git pre-push {1}\n", "", 1)
 	if err := os.WriteFile(filepath.Join(env.RepoDir, "lefthook.yml"), []byte(partial), 0o644); err != nil {
 		t.Fatalf("write lefthook.yml: %v", err)
 	}

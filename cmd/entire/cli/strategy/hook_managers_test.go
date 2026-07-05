@@ -3,6 +3,7 @@ package strategy
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -511,7 +512,7 @@ func TestCheckAndWarnHookManagers_ExternalBackend_IsSilent(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": ".husky"}}`),
 		0o644,
 	); err != nil {
 		t.Fatal(err)
@@ -556,12 +557,41 @@ pre-push:
       run: entire hooks git pre-push {1}
 `
 
+// lefthookConfigWithCmdPrefix builds a lefthook YAML config wiring all 5
+// managed hooks through cmdPrefix, double-quoting each run: value so a
+// cmdPrefix containing single quotes (as shellQuote produces for
+// --absolute-git-hook-path) still parses as valid YAML.
+func lefthookConfigWithCmdPrefix(cmdPrefix string) string {
+	quoted := strings.ReplaceAll(cmdPrefix, `"`, `\"`)
+	return fmt.Sprintf(`prepare-commit-msg:
+  commands:
+    entire:
+      run: "%[1]s hooks git prepare-commit-msg {1} {2}"
+commit-msg:
+  commands:
+    entire:
+      run: "%[1]s hooks git commit-msg {1}"
+post-commit:
+  commands:
+    entire:
+      run: "%[1]s hooks git post-commit"
+post-rewrite:
+  commands:
+    entire:
+      run: "%[1]s hooks git post-rewrite {1}"
+pre-push:
+  commands:
+    entire:
+      run: "%[1]s hooks git pre-push {1}"
+`, quoted)
+}
+
 func TestIsEntireWiredIntoManager_Lefthook_AllHooksYAML(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeLefthookConfig(t, dir, "lefthook.yml", lefthookAllHooksYAML)
 
-	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	ok, err := isEntireWiredIntoManager(dir, "lefthook", "lefthook.yml", "entire")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -578,7 +608,7 @@ func TestIsEntireWiredIntoManager_Lefthook_MissingOneHook(t *testing.T) {
 		"pre-push:\n  commands:\n    entire:\n      run: entire hooks git pre-push {1}\n", "", 1)
 	writeLefthookConfig(t, dir, "lefthook.yml", partial)
 
-	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	ok, err := isEntireWiredIntoManager(dir, "lefthook", "lefthook.yml", "entire")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -594,7 +624,7 @@ func TestIsEntireWiredIntoManager_Lefthook_OnlyInComment(t *testing.T) {
 	commented := "# entire hooks git pre-push {1}\npre-push:\n  commands:\n    lint:\n      run: npm run lint\n"
 	writeLefthookConfig(t, dir, "lefthook.yml", commented)
 
-	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	ok, err := isEntireWiredIntoManager(dir, "lefthook", "lefthook.yml", "entire")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -615,7 +645,7 @@ func TestIsEntireWiredIntoManager_Lefthook_JSON(t *testing.T) {
 }`
 	writeLefthookConfig(t, dir, "lefthook.json", json)
 
-	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	ok, err := isEntireWiredIntoManager(dir, "lefthook", "lefthook.json", "entire")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -640,7 +670,7 @@ run = "entire hooks git pre-push {1}"
 `
 	writeLefthookConfig(t, dir, "lefthook.toml", toml)
 
-	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	ok, err := isEntireWiredIntoManager(dir, "lefthook", "lefthook.toml", "entire")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -685,7 +715,7 @@ pre-push:
 		t.Fatal(err)
 	}
 
-	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	ok, err := isEntireWiredIntoManager(dir, "lefthook", "lefthook.yml", "entire")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -694,24 +724,28 @@ pre-push:
 	}
 }
 
-// lefthook-local.yml should fill in a hook missing from the main config.
-func TestIsEntireWiredIntoManager_Lefthook_LocalOverlay(t *testing.T) {
+// externalPath names the exact config file to parse — a sibling
+// lefthook-local.yml is never auto-merged in, even if it would fill in an
+// otherwise-missing hook. This is the explicit-path contract: no
+// filesystem guessing.
+func TestIsEntireWiredIntoManager_Lefthook_LocalFileNotAutoMerged(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	// Main config wires 4 hooks, missing pre-push.
 	main := strings.Replace(lefthookAllHooksYAML,
 		"pre-push:\n  commands:\n    entire:\n      run: entire hooks git pre-push {1}\n", "", 1)
 	writeLefthookConfig(t, dir, "lefthook.yml", main)
-	// Local overlay adds pre-push.
+	// A sibling "-local" file adds pre-push, but externalPath below points
+	// only at lefthook.yml, so this file must never be consulted.
 	writeLefthookConfig(t, dir, "lefthook-local.yml",
 		"pre-push:\n  commands:\n    entire:\n      run: entire hooks git pre-push {1}\n")
 
-	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	ok, err := isEntireWiredIntoManager(dir, "lefthook", "lefthook.yml", "entire")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !ok {
-		t.Error("expected wired=true when lefthook-local fills in the missing hook")
+	if ok {
+		t.Error("expected wired=false: lefthook-local.yml must not be auto-merged into the explicit externalPath")
 	}
 }
 
@@ -719,12 +753,55 @@ func TestIsEntireWiredIntoManager_Lefthook_NoConfig(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	ok, err := isEntireWiredIntoManager(dir, "lefthook", "lefthook.yml", "entire")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if ok {
 		t.Error("expected wired=false when no lefthook config exists")
+	}
+}
+
+// cmdPrefix must match whatever this environment's settings actually
+// dispatch through — the local-dev launcher and an absolute binary path
+// are just as valid as the bare "entire" prefix, and detection must
+// recognize each one it is given, but never a different one.
+func TestIsEntireWiredIntoManager_Lefthook_CmdPrefixVariants(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		cmdPrefix string
+	}{
+		{"PathBinary", "entire"},
+		{"AbsolutePath", "'/usr/local/bin/entire'"},
+		{"LocalDevLauncher", localDevHookCmdPrefix},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeLefthookConfig(t, dir, "lefthook.yml", lefthookConfigWithCmdPrefix(tt.cmdPrefix))
+
+			ok, err := isEntireWiredIntoManager(dir, "lefthook", "lefthook.yml", tt.cmdPrefix)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !ok {
+				t.Errorf("expected wired=true when config dispatches via cmdPrefix %q and detection uses the same cmdPrefix", tt.cmdPrefix)
+			}
+
+			// A config that only matches a different cmdPrefix must not be
+			// mistakenly recognized against this one.
+			ok2, err2 := isEntireWiredIntoManager(dir, "lefthook", "lefthook.yml", "some-other-prefix")
+			if err2 != nil {
+				t.Fatalf("unexpected error: %v", err2)
+			}
+			if ok2 {
+				t.Errorf("expected wired=false when detection cmdPrefix %q does not match the config's dispatch prefix %q", "some-other-prefix", tt.cmdPrefix)
+			}
+		})
 	}
 }
 
@@ -737,7 +814,7 @@ func TestLefthookWiredHooks_PartialReporting(t *testing.T) {
 		"pre-push:\n  commands:\n    entire:\n      run: entire hooks git pre-push {1}\n", "", 1)
 	writeLefthookConfig(t, dir, "lefthook.yml", partial)
 
-	wired, err := lefthookWiredHooks(dir)
+	wired, err := lefthookWiredHooks(dir, "lefthook.yml", "entire")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -746,5 +823,24 @@ func TestLefthookWiredHooks_PartialReporting(t *testing.T) {
 	}
 	if !wired["commit-msg"] {
 		t.Error("commit-msg should be reported as wired")
+	}
+}
+
+// lefthookWiredHooks must never fall back to scanning candidate filenames
+// when the configured externalPath does not exist on disk — it returns an
+// empty (all-unwired) set instead.
+func TestLefthookWiredHooks_ExternalPathMissing_ReturnsEmptySet(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// A differently-named config exists, but externalPath below doesn't
+	// match it — no scanning/fallback should kick in.
+	writeLefthookConfig(t, dir, "lefthook.yml", lefthookAllHooksYAML)
+
+	wired, err := lefthookWiredHooks(dir, "custom-lefthook.yml", "entire")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(wired) != 0 {
+		t.Errorf("expected empty wired set when externalPath does not exist on disk, got %v", wired)
 	}
 }

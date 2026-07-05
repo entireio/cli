@@ -153,7 +153,8 @@ type EntireSettings struct {
 	// GitHooks configures which directory Entire uses for git hook detection
 	// and installation. When nil or backend="direct", Entire manages hooks in
 	// .git/hooks/ directly. When backend="external", Entire only detects
-	// marker presence in the user-owned external_dir and never writes hooks.
+	// wiring at the user-owned external_path (a directory or a manager
+	// config file, per manager) and never writes hooks.
 	GitHooks *GitHooksSettings `json:"git_hooks,omitempty"`
 
 	// Deprecated: no longer used. Exists to tolerate old settings files
@@ -166,23 +167,44 @@ type GitHooksSettings struct {
 	// Backend selects the hook management mode: "direct" (default) or "external".
 	Backend string `json:"backend"`
 
-	// ExternalDir is a repo-relative path to the user-owned hook directory
-	// (e.g. ".husky" for Husky v9, "common/git-hooks" for Rush).
-	// Required when Backend == "external" unless Manager is set.
-	ExternalDir string `json:"external_dir,omitempty"`
+	// ExternalPath is a repo-relative path Entire trusts as the source of
+	// truth for hook wiring when Backend == "external". Its meaning depends
+	// on Manager, and it is always required in that mode — Entire never
+	// guesses or scans for it:
+	//   - manager = "scripts": a directory of user-owned hook scripts
+	//     (e.g. ".husky" for Husky v9, "common/git-hooks" for Rush).
+	//     Entire looks for its marker line in each hook script.
+	//   - manager = "lefthook": the exact path to the lefthook config file
+	//     Entire should parse (e.g. "lefthook.yml"). No candidate-filename
+	//     scanning and no "-local" overlay merging.
+	ExternalPath string `json:"external_path,omitempty"`
 
-	// Manager names a config-driven hook manager whose configuration file
-	// (rather than a directory of scripts) is the source of truth for
-	// whether Entire is wired in. Currently only "lefthook" is supported.
-	// Only valid when Backend == "external". When set, ExternalDir is
-	// optional because detection reads the manager's config file instead
-	// of a directory of per-hook scripts.
+	// Manager selects how Entire verifies hook wiring when
+	// Backend == "external". Required (no implicit default) when
+	// Backend == "external":
+	//   - "scripts": ExternalPath is a directory of hook scripts, detected
+	//     via marker-line presence (Husky, Rush, hand-written setups).
+	//   - "lefthook": ExternalPath is a lefthook config file, parsed to
+	//     confirm each managed hook dispatches to Entire.
+	// Only valid when Backend == "external".
 	Manager string `json:"manager,omitempty"`
 }
 
-// knownHookManagers is the set of config-driven managers Entire can detect.
+// ManagerScripts and ManagerLefthook are the recognized values for
+// git_hooks.manager when backend = "external". Manager is a required,
+// always-explicit discriminator (no empty-string default) so the two modes
+// stay symmetric — mirroring how Terraform backends or Kubernetes "kind"
+// never leave the "which variant" field implicit.
+const (
+	ManagerScripts  = "scripts"
+	ManagerLefthook = "lefthook"
+)
+
+// knownHookManagers is the set of manager values Entire recognizes for
+// git_hooks.manager when backend = "external".
 var knownHookManagers = map[string]bool{
-	"lefthook": true,
+	ManagerScripts:  true,
+	ManagerLefthook: true,
 }
 
 // backendExternal is the git_hooks.backend value that yields hook ownership
@@ -194,44 +216,40 @@ func (g *GitHooksSettings) Validate() error {
 	if g == nil {
 		return nil
 	}
-	if g.Manager != "" {
-		if g.Backend != backendExternal {
+	switch g.Backend {
+	case "", "direct":
+		if g.Manager != "" {
 			return fmt.Errorf(`git_hooks.manager is only valid with backend = "external" (got backend %q)`, g.Backend)
+		}
+		return nil
+	case backendExternal:
+		if g.Manager == "" {
+			return fmt.Errorf(`git_hooks.manager is required when backend = "external" (must be %q or %q)`, ManagerScripts, ManagerLefthook)
 		}
 		if !knownHookManagers[g.Manager] {
 			return fmt.Errorf("git_hooks.manager %q is not a supported hook manager", g.Manager)
 		}
-	}
-	switch g.Backend {
-	case "", "direct":
-		return nil
-	case backendExternal:
-		// external_dir is required only when no config-driven manager is
-		// set — a manager (lefthook) locates wiring via its config file.
-		if g.ExternalDir == "" && g.Manager == "" {
-			return errors.New(`git_hooks.external_dir is required when backend = "external"`)
+		if g.ExternalPath == "" {
+			return errors.New(`git_hooks.external_path is required when backend = "external"`)
 		}
-		if g.ExternalDir == "" {
-			return nil
-		}
-		if filepath.IsAbs(g.ExternalDir) {
-			return fmt.Errorf("git_hooks.external_dir must be repo-relative (got %q)", g.ExternalDir)
+		if filepath.IsAbs(g.ExternalPath) {
+			return fmt.Errorf("git_hooks.external_path must be repo-relative (got %q)", g.ExternalPath)
 		}
 		// filepath.VolumeName only recognizes drive letters and UNC on
 		// GOOS=windows, so we cannot rely on it to reject Windows-style
 		// drive-relative paths ("C:foo") when this binary happens to run
 		// on darwin/linux (e.g. when settings are shared through git).
 		// Match manually so the same input is rejected everywhere.
-		if isWindowsAnchoredPath(g.ExternalDir) {
-			return fmt.Errorf("git_hooks.external_dir must be repo-relative, not drive- or volume-anchored (got %q)", g.ExternalDir)
+		if isWindowsAnchoredPath(g.ExternalPath) {
+			return fmt.Errorf("git_hooks.external_path must be repo-relative, not drive- or volume-anchored (got %q)", g.ExternalPath)
 		}
 		// Reject `..` as a distinct path segment (`../escape`, `foo/../bar`)
 		// but allow directories whose name legitimately starts with two dots
 		// (`..config`, `..dot-prefixed`). A blanket strings.Contains rejected
 		// both, which was too aggressive.
-		for _, seg := range strings.Split(filepath.ToSlash(g.ExternalDir), "/") {
+		for _, seg := range strings.Split(filepath.ToSlash(g.ExternalPath), "/") {
 			if seg == ".." {
-				return fmt.Errorf("git_hooks.external_dir must not traverse outside the repo (got %q)", g.ExternalDir)
+				return fmt.Errorf("git_hooks.external_path must not traverse outside the repo (got %q)", g.ExternalPath)
 			}
 		}
 		return nil
@@ -262,23 +280,33 @@ func (s *EntireSettings) IsExternalGitHooks() bool {
 	return s != nil && s.GitHooks != nil && s.GitHooks.Backend == backendExternal
 }
 
-// ExternalHookDir returns the configured external hook directory, or empty
-// string when the external backend is not active.
-func (s *EntireSettings) ExternalHookDir() string {
+// ExternalHookPath returns the configured external hook path, or empty
+// string when the external backend is not active. Its meaning depends on
+// HookManager(): a directory when "scripts", an exact config file when
+// "lefthook".
+func (s *EntireSettings) ExternalHookPath() string {
 	if !s.IsExternalGitHooks() {
 		return ""
 	}
-	return s.GitHooks.ExternalDir
+	return s.GitHooks.ExternalPath
 }
 
-// HookManager returns the configured config-driven hook manager (e.g.
-// "lefthook"), or empty string when the external backend is not active or
-// no manager is configured (directory-of-scripts mode).
+// HookManager returns the configured hook manager ("scripts" or "lefthook"),
+// or empty string when the external backend is not active. Manager is
+// required whenever the external backend is active, so a non-empty
+// IsExternalGitHooks() implies a non-empty HookManager().
 func (s *EntireSettings) HookManager() string {
 	if !s.IsExternalGitHooks() {
 		return ""
 	}
 	return s.GitHooks.Manager
+}
+
+// IsLefthookManager reports whether the external git hooks backend is
+// configured with the lefthook config-driven manager, as opposed to
+// ManagerScripts (a directory of hand-written/Husky/Rush hook scripts).
+func (s *EntireSettings) IsLefthookManager() bool {
+	return s.HookManager() == ManagerLefthook
 }
 
 // ClonePreferences stores clone-local, uncommitted preferences that should be
@@ -1042,7 +1070,7 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 
 	// git_hooks is a discriminated union (backend selects the shape), so it
 	// uses wholesale replace like review — field-level merge could produce
-	// illegal combinations such as {backend:"direct", external_dir:".husky"}.
+	// illegal combinations such as {backend:"direct", external_path:".husky"}.
 	if gitHooksRaw, ok := raw["git_hooks"]; ok {
 		var gh GitHooksSettings
 		if err := json.Unmarshal(gitHooksRaw, &gh); err != nil {

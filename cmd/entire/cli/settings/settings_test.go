@@ -1333,7 +1333,7 @@ func TestMergeReviewProfiles_PureAndPrecedence(t *testing.T) {
 
 func TestLoad_GitHooks_ExternalParsesCorrectly(t *testing.T) {
 	setupSettingsDir(t,
-		`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": ".husky"}}`,
 		"",
 	)
 	s, err := Load(context.Background())
@@ -1343,8 +1343,11 @@ func TestLoad_GitHooks_ExternalParsesCorrectly(t *testing.T) {
 	if !s.IsExternalGitHooks() {
 		t.Error("IsExternalGitHooks() = false, want true")
 	}
-	if got := s.ExternalHookDir(); got != ".husky" {
-		t.Errorf("ExternalHookDir() = %q, want %q", got, ".husky")
+	if got := s.ExternalHookPath(); got != ".husky" {
+		t.Errorf("ExternalHookPath() = %q, want %q", got, ".husky")
+	}
+	if got := s.HookManager(); got != "scripts" {
+		t.Errorf("HookManager() = %q, want %q", got, "scripts")
 	}
 }
 
@@ -1357,8 +1360,8 @@ func TestLoad_GitHooks_DirectIsDefault(t *testing.T) {
 	if s.IsExternalGitHooks() {
 		t.Error("IsExternalGitHooks() = true, want false for missing git_hooks")
 	}
-	if got := s.ExternalHookDir(); got != "" {
-		t.Errorf("ExternalHookDir() = %q, want empty", got)
+	if got := s.ExternalHookPath(); got != "" {
+		t.Errorf("ExternalHookPath() = %q, want empty", got)
 	}
 }
 
@@ -1376,42 +1379,56 @@ func TestLoad_GitHooks_ExplicitDirectBackend(t *testing.T) {
 	}
 }
 
-func TestLoad_GitHooks_ExternalMissingExternalDir_ReturnsError(t *testing.T) {
+func TestLoad_GitHooks_External_ManagerRequired_ReturnsError(t *testing.T) {
 	setupSettingsDir(t,
 		`{"enabled": true, "git_hooks": {"backend": "external"}}`,
 		"",
 	)
 	_, err := Load(context.Background())
 	if err == nil {
-		t.Fatal("Load() should return error when backend=external but external_dir is missing")
+		t.Fatal("Load() should return error when backend=external but manager is missing")
 	}
-	if !strings.Contains(err.Error(), "external_dir") {
-		t.Errorf("error should mention external_dir, got: %v", err)
+	if !strings.Contains(err.Error(), "manager") {
+		t.Errorf("error should mention manager, got: %v", err)
 	}
 }
 
-func TestLoad_GitHooks_ExternalDir_RejectsPathTraversal(t *testing.T) {
+func TestLoad_GitHooks_ExternalMissingExternalPath_ReturnsError(t *testing.T) {
 	setupSettingsDir(t,
-		`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": "../escape"}}`,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts"}}`,
 		"",
 	)
 	_, err := Load(context.Background())
 	if err == nil {
-		t.Fatal("Load() should reject external_dir containing '..'")
+		t.Fatal("Load() should return error when backend=external but external_path is missing")
+	}
+	if !strings.Contains(err.Error(), "external_path") {
+		t.Errorf("error should mention external_path, got: %v", err)
+	}
+}
+
+func TestLoad_GitHooks_ExternalPath_RejectsPathTraversal(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": "../escape"}}`,
+		"",
+	)
+	_, err := Load(context.Background())
+	if err == nil {
+		t.Fatal("Load() should reject external_path containing '..'")
 	}
 	if !strings.Contains(err.Error(), "..") {
 		t.Errorf("error should mention '..', got: %v", err)
 	}
 }
 
-func TestLoad_GitHooks_ExternalDir_RejectsAbsolutePath(t *testing.T) {
+func TestLoad_GitHooks_ExternalPath_RejectsAbsolutePath(t *testing.T) {
 	setupSettingsDir(t,
-		`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": "/tmp/hooks"}}`,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": "/tmp/hooks"}}`,
 		"",
 	)
 	_, err := Load(context.Background())
 	if err == nil {
-		t.Fatal("Load() should reject absolute external_dir")
+		t.Fatal("Load() should reject absolute external_path")
 	}
 	if !strings.Contains(err.Error(), "repo-relative") {
 		t.Errorf("error should mention 'repo-relative', got: %v", err)
@@ -1434,7 +1451,7 @@ func TestLoad_GitHooks_InvalidBackend_ReturnsError(t *testing.T) {
 
 func TestMergeJSON_GitHooks_LocalOverridesProjectWholeBlock(t *testing.T) {
 	setupSettingsDir(t,
-		`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": ".husky"}}`,
 		`{"git_hooks": {"backend": "direct"}}`,
 	)
 	s, err := Load(context.Background())
@@ -1444,8 +1461,8 @@ func TestMergeJSON_GitHooks_LocalOverridesProjectWholeBlock(t *testing.T) {
 	if s.IsExternalGitHooks() {
 		t.Error("IsExternalGitHooks() = true, want false after local override to direct")
 	}
-	if got := s.ExternalHookDir(); got != "" {
-		t.Errorf("ExternalHookDir() = %q, want empty after whole-block override", got)
+	if got := s.ExternalHookPath(); got != "" {
+		t.Errorf("ExternalHookPath() = %q, want empty after whole-block override", got)
 	}
 }
 
@@ -1454,14 +1471,14 @@ func TestMergeJSON_GitHooks_LocalOverridesProjectWholeBlock(t *testing.T) {
 // drive C at runtime, which escapes the repo root. Reject them explicitly
 // (via filepath.VolumeName) so the check is cross-platform: darwin/linux
 // binaries reject the same input a Windows binary would.
-func TestLoad_GitHooks_ExternalDir_RejectsDriveRelative(t *testing.T) {
+func TestLoad_GitHooks_ExternalPath_RejectsDriveRelative(t *testing.T) {
 	setupSettingsDir(t,
-		`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": "C:hooks"}}`,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": "C:hooks"}}`,
 		"",
 	)
 	_, err := Load(context.Background())
 	if err == nil {
-		t.Fatal("Load() should reject drive-relative external_dir")
+		t.Fatal("Load() should reject drive-relative external_path")
 	}
 	if !strings.Contains(err.Error(), "drive-") && !strings.Contains(err.Error(), "volume-") {
 		t.Errorf("error should mention the drive/volume anchor, got: %v", err)
@@ -1471,9 +1488,9 @@ func TestLoad_GitHooks_ExternalDir_RejectsDriveRelative(t *testing.T) {
 // A directory whose name legitimately starts with two dots (e.g.
 // ..config) must not be rejected. The old strings.Contains(".") check
 // blanket-refused these; per-segment matching should let them through.
-func TestLoad_GitHooks_ExternalDir_AllowsDoubleDotPrefix(t *testing.T) {
+func TestLoad_GitHooks_ExternalPath_AllowsDoubleDotPrefix(t *testing.T) {
 	setupSettingsDir(t,
-		`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": "..config"}}`,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": "..config"}}`,
 		"",
 	)
 	if _, err := Load(context.Background()); err != nil {
@@ -1483,15 +1500,15 @@ func TestLoad_GitHooks_ExternalDir_AllowsDoubleDotPrefix(t *testing.T) {
 
 // Interior `..` segments still escape the repo root and must be rejected
 // even when embedded (foo/../bar). Companion to the leading-`../` case
-// covered by TestLoad_GitHooks_ExternalDir_RejectsPathTraversal.
-func TestLoad_GitHooks_ExternalDir_RejectsInteriorParentSegment(t *testing.T) {
+// covered by TestLoad_GitHooks_ExternalPath_RejectsPathTraversal.
+func TestLoad_GitHooks_ExternalPath_RejectsInteriorParentSegment(t *testing.T) {
 	setupSettingsDir(t,
-		`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": "foo/../bar"}}`,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": "foo/../bar"}}`,
 		"",
 	)
 	_, err := Load(context.Background())
 	if err == nil {
-		t.Fatal("Load() should reject external_dir with an interior '..' segment")
+		t.Fatal("Load() should reject external_path with an interior '..' segment")
 	}
 	if !strings.Contains(err.Error(), "..") {
 		t.Errorf("error should mention '..', got: %v", err)
@@ -1499,22 +1516,44 @@ func TestLoad_GitHooks_ExternalDir_RejectsInteriorParentSegment(t *testing.T) {
 }
 
 // A config-driven manager (lefthook) is expressed via git_hooks.manager.
-// external_dir is optional in that mode — lefthook stores hook wiring in
-// its own config file, not a directory of scripts.
-func TestLoad_GitHooks_ManagerLefthook_ExternalDirOptional(t *testing.T) {
+// external_path is the exact lefthook config file to parse — always
+// required, no auto-discovery of candidate filenames.
+func TestLoad_GitHooks_ManagerLefthook_ExternalPathIsExactFile(t *testing.T) {
 	setupSettingsDir(t,
-		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook", "external_path": "lefthook.yml"}}`,
 		"",
 	)
 	s, err := Load(context.Background())
 	if err != nil {
-		t.Fatalf("Load() error = %v (external_dir should be optional when manager is set)", err)
+		t.Fatalf("Load() error = %v", err)
 	}
 	if !s.IsExternalGitHooks() {
 		t.Error("IsExternalGitHooks() = false, want true")
 	}
 	if got := s.HookManager(); got != "lefthook" {
 		t.Errorf("HookManager() = %q, want %q", got, "lefthook")
+	}
+	if got := s.ExternalHookPath(); got != "lefthook.yml" {
+		t.Errorf("ExternalHookPath() = %q, want %q", got, "lefthook.yml")
+	}
+	if !s.IsLefthookManager() {
+		t.Error("IsLefthookManager() = false, want true")
+	}
+}
+
+// external_path is required in lefthook mode too — no falling back to
+// scanning candidate filenames when it is omitted.
+func TestLoad_GitHooks_ManagerLefthook_MissingExternalPath_ReturnsError(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`,
+		"",
+	)
+	_, err := Load(context.Background())
+	if err == nil {
+		t.Fatal("Load() should return error when manager=lefthook but external_path is missing")
+	}
+	if !strings.Contains(err.Error(), "external_path") {
+		t.Errorf("error should mention external_path, got: %v", err)
 	}
 }
 
@@ -1546,18 +1585,37 @@ func TestLoad_GitHooks_Manager_RejectsUnknownValue(t *testing.T) {
 	}
 }
 
-// manager and external_dir can coexist (user points lefthook detection at
-// a repo but also keeps a directory around); external_dir still validated.
-func TestLoad_GitHooks_Manager_WithExternalDir_StillValidatesDir(t *testing.T) {
+// external_path is validated the same way regardless of manager: a
+// lefthook config path that traverses outside the repo is still rejected.
+func TestLoad_GitHooks_ManagerLefthook_ExternalPath_StillValidatesTraversal(t *testing.T) {
 	setupSettingsDir(t,
-		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook", "external_dir": "../escape"}}`,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook", "external_path": "../escape"}}`,
 		"",
 	)
 	_, err := Load(context.Background())
 	if err == nil {
-		t.Fatal("Load() should still reject a traversing external_dir even when manager is set")
+		t.Fatal("Load() should still reject a traversing external_path when manager=lefthook")
 	}
 	if !strings.Contains(err.Error(), "..") {
 		t.Errorf("error should mention '..', got: %v", err)
+	}
+}
+
+// git_hooks.manager must be one of the two recognized values; empty or
+// unknown manager should never silently be treated as "scripts".
+func TestLoad_GitHooks_ManagerScripts_IsValidEnumValue(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": "common/git-hooks"}}`,
+		"",
+	)
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if s.IsLefthookManager() {
+		t.Error("IsLefthookManager() = true, want false for manager=scripts")
+	}
+	if got := s.HookManager(); got != "scripts" {
+		t.Errorf("HookManager() = %q, want %q", got, "scripts")
 	}
 }

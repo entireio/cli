@@ -169,7 +169,7 @@ func getHooksDirInPath(ctx context.Context, dir string) (string, error) {
 }
 
 // externalGitHooksDir reports whether the external git hooks backend is
-// configured and, if so, returns the configured external_dir verbatim
+// configured and, if so, returns the configured external_path verbatim
 // (still repo-relative). Returns ("", false, nil) in direct mode.
 //
 // When settings cannot be loaded the caller MUST NOT fall through to
@@ -185,12 +185,12 @@ func externalGitHooksDir(ctx context.Context) (string, bool, error) {
 	if !s.IsExternalGitHooks() {
 		return "", false, nil
 	}
-	return s.ExternalHookDir(), true, nil
+	return s.ExternalHookPath(), true, nil
 }
 
 // GetGitHookDetectionDir returns the directory whose files prove Entire's
 // Git hooks are installed. Direct mode returns the active git hooks dir;
-// external mode returns repoRoot/external_dir.
+// external mode (manager="scripts") returns repoRoot/external_path.
 func GetGitHookDetectionDir(ctx context.Context) (string, error) {
 	extDir, ok, err := externalGitHooksDir(ctx)
 	if err != nil {
@@ -206,32 +206,52 @@ func GetGitHookDetectionDir(ctx context.Context) (string, error) {
 	return GetHooksDir(ctx)
 }
 
-// hookManagerMode reports whether a config-driven hook manager (e.g.
-// "lefthook") is configured under the external backend. Returns ("", false, nil)
-// when not in external mode or no manager is set. Load errors are surfaced so
-// callers don't silently fall through — mirroring externalGitHooksDir.
-func hookManagerMode(ctx context.Context) (string, bool, error) {
+// managerConfig bundles what isEntireWiredIntoManager/ManagerWiring need to
+// check a config-driven hook manager: which manager, its exact externally
+// configured path, and the dispatch cmdPrefix this environment's settings
+// would actually use.
+type managerConfig struct {
+	Manager      string
+	ExternalPath string
+	CmdPrefix    string
+}
+
+// lefthookManagerConfig reports whether the lefthook config-driven manager
+// is configured under the external backend and, if so, resolves its
+// externalPath and cmdPrefix. Returns ok=false (not an error) when the
+// external backend is inactive or configured with manager="scripts" —
+// callers fall through to directory-of-scripts detection in that case.
+// Load and cmdPrefix-resolution errors are surfaced so callers don't
+// silently fall through — mirroring externalGitHooksDir.
+func lefthookManagerConfig(ctx context.Context) (managerConfig, bool, error) {
 	s, err := settings.Load(ctx)
 	if err != nil {
-		return "", false, fmt.Errorf("load settings for hook manager: %w", err)
+		return managerConfig{}, false, fmt.Errorf("load settings for hook manager: %w", err)
 	}
-	m := s.HookManager()
-	if m == "" {
-		return "", false, nil
+	if !s.IsLefthookManager() {
+		return managerConfig{}, false, nil
 	}
-	return m, true, nil
+	cmdPrefix, cErr := HookCmdPrefix(s.LocalDev, s.AbsoluteGitHookPath)
+	if cErr != nil {
+		return managerConfig{}, false, cErr
+	}
+	return managerConfig{
+		Manager:      s.HookManager(),
+		ExternalPath: s.ExternalHookPath(),
+		CmdPrefix:    cmdPrefix,
+	}, true, nil
 }
 
 // IsGitHookInstalled checks if all generic Entire CLI hooks are installed.
 func IsGitHookInstalled(ctx context.Context) bool {
 	// Config-driven manager (lefthook): detection reads the manager's config
 	// file rather than a directory of marker scripts.
-	if manager, ok, err := hookManagerMode(ctx); err == nil && ok {
+	if mc, ok, err := lefthookManagerConfig(ctx); err == nil && ok {
 		root, rErr := paths.WorktreeRoot(ctx)
 		if rErr != nil {
 			return false
 		}
-		wired, wErr := isEntireWiredIntoManager(root, manager)
+		wired, wErr := isEntireWiredIntoManager(root, mc.Manager, mc.ExternalPath, mc.CmdPrefix)
 		return wErr == nil && wired
 	}
 
@@ -245,8 +265,8 @@ func IsGitHookInstalled(ctx context.Context) bool {
 // IsGitHookInstalledInDir checks if all Entire CLI hooks are installed in the given repo directory.
 // This is useful for tests that need to check hooks without changing the working directory.
 func IsGitHookInstalledInDir(ctx context.Context, repoDir string) bool {
-	if manager, ok, err := hookManagerMode(ctx); err == nil && ok {
-		wired, wErr := isEntireWiredIntoManager(repoDir, manager)
+	if mc, ok, err := lefthookManagerConfig(ctx); err == nil && ok {
+		wired, wErr := isEntireWiredIntoManager(repoDir, mc.Manager, mc.ExternalPath, mc.CmdPrefix)
 		return wErr == nil && wired
 	}
 	hooksDir, err := getHooksDirInPath(ctx, repoDir)
@@ -398,7 +418,7 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 		}
 		absDir := filepath.Clean(filepath.Join(root, extDir))
 		if _, statErr := os.Stat(absDir); os.IsNotExist(statErr) {
-			return 0, fmt.Errorf("external_dir %q not found in repo root\n\n%s", extDir, FormatExternalDirMissingHelp(extDir))
+			return 0, fmt.Errorf("external_path %q not found in repo root\n\n%s", extDir, FormatExternalDirMissingHelp(extDir))
 		}
 		// External mode = no install. The variant-3 status line is emitted by
 		// PrintExternalHookStatusIfActive at the setup.go call sites, so it
@@ -417,7 +437,7 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 		return 0, fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
-	cmdPrefix, err := hookCmdPrefix(localDev, absolutePath)
+	cmdPrefix, err := HookCmdPrefix(localDev, absolutePath)
 	if err != nil {
 		return 0, err
 	}
@@ -487,7 +507,7 @@ func writeHookFile(path, content string) (bool, error) {
 // Returns the number of hooks removed.
 func RemoveGitHook(ctx context.Context) (int, error) {
 	// External backend = Entire never installed hooks (neither in .git/hooks/
-	// nor in external_dir). Detection-only contract: removal must touch nothing.
+	// nor in external_path). Detection-only contract: removal must touch nothing.
 	_, isExternal, err := externalGitHooksDir(ctx)
 	if err != nil {
 		return 0, err
@@ -577,12 +597,15 @@ fi
 `, chainComment, backupSuffix, backupSuffix)
 }
 
-// hookCmdPrefix returns the command prefix for hook scripts and warning messages.
+// HookCmdPrefix returns the command prefix for hook scripts, warning
+// messages, and config-driven manager (lefthook) dispatch matching.
 // Returns the scripts/entire-dev launcher when local_dev is enabled.
 // When absolutePath is true, resolves the full binary path via os.Executable()
 // and returns an error if resolution fails. This is needed for GUI git clients
-// (Xcode, Tower, etc.) that don't source shell profiles.
-func hookCmdPrefix(localDev, absolutePath bool) (string, error) {
+// (Xcode, Tower, etc.) that don't source shell profiles. Exported so doctor/
+// setup (package cli) can resolve the same cmdPrefix strategy's lefthook
+// wiring checks use.
+func HookCmdPrefix(localDev, absolutePath bool) (string, error) {
 	if localDev {
 		return localDevHookCmdPrefix, nil
 	}
@@ -628,20 +651,9 @@ func hookSettingsFromConfig(ctx context.Context) (localDev, absoluteHookPath boo
 // inside setup.go just gate their existing prints on this helper's return.
 func PrintExternalHookStatusIfActive(ctx context.Context, w io.Writer) bool {
 	// Config-driven manager mode takes precedence: report the manager and its
-	// config file rather than a directory.
-	if manager, ok, err := hookManagerMode(ctx); err == nil && ok {
-		root, rErr := paths.WorktreeRoot(ctx)
-		if rErr == nil {
-			if cfg, found := lefthookConfigPath(root); found {
-				rel, relErr := filepath.Rel(root, cfg)
-				if relErr != nil {
-					rel = filepath.Base(cfg)
-				}
-				fmt.Fprintf(w, "  ✓ Git hooks: external via %s (%s)\n", manager, rel)
-				return true
-			}
-		}
-		fmt.Fprintf(w, "  ✓ Git hooks: external via %s\n", manager)
+	// explicitly configured config file rather than a directory.
+	if mc, ok, err := lefthookManagerConfig(ctx); err == nil && ok {
+		fmt.Fprintf(w, "  ✓ Git hooks: external via %s (%s)\n", mc.Manager, mc.ExternalPath)
 		return true
 	}
 
@@ -659,10 +671,11 @@ func PrintExternalHookStatusIfActive(ctx context.Context, w io.Writer) bool {
 }
 
 // FormatExternalDirMissingHelp returns the instructional message shown when
-// git_hooks.backend == "external" but external_dir does not exist on disk.
+// git_hooks.backend == "external" (manager="scripts") but external_path
+// does not exist on disk.
 //
 // Design philosophy: external git hooks are explicitly the user's
-// responsibility. Entire never writes to external_dir; it only detects the
+// responsibility. Entire never writes to external_path; it only detects the
 // marker "Entire CLI hooks" in user-owned scripts. This message is therefore
 // *instructional* ("here is what you must create") rather than *directive*
 // ("run this command to fix it") — the latter would suggest Entire could
@@ -677,7 +690,7 @@ func FormatExternalDirMissingHelp(extDir string) string {
 	fmt.Fprintf(&b, "Required setup for external git hooks:\n\n")
 	fmt.Fprintf(&b, "  External backend means Entire reads hook scripts from your repo, but\n")
 	fmt.Fprintf(&b, "  does not write them. You are responsible for creating these %d scripts\n", len(gitHookNames))
-	fmt.Fprintf(&b, "  under external_dir (%s/).\n\n", extDir)
+	fmt.Fprintf(&b, "  under external_path (%s/).\n\n", extDir)
 	fmt.Fprintf(&b, "  Each script must:\n")
 	fmt.Fprintf(&b, "    1. Be executable (chmod +x).\n")
 	fmt.Fprintf(&b, "    2. Contain the marker comment:  # %s\n", entireHookMarker)
@@ -729,27 +742,30 @@ func externalDispatchInvocation(hookName string) string {
 }
 
 // lefthookDispatchInvocation returns the `run:` value recommended for a
-// lefthook command that dispatches the given hook to Entire. lefthook
-// substitutes {1}, {2}, ... with the hook's positional args, so we use those
-// placeholders rather than shell $1/$2 (which would be empty inside run:).
+// lefthook command that dispatches the given hook to Entire, using
+// cmdPrefix as the invocation prefix (normally "entire", or the local-dev
+// launcher for this repo's own testing — see hookCmdPrefix). lefthook
+// substitutes {1}, {2}, ... with the hook's positional args, so we use
+// those placeholders rather than shell $1/$2 (which would be empty inside
+// run:).
 //
 // pre-push is intentionally NOT wrapped in `|| true`: lefthook aborts the
 // push when a command exits non-zero, which is exactly what the OPF privacy
 // filter needs. Wrapping it would silently disable that protection.
-func lefthookDispatchInvocation(hookName string) string {
+func lefthookDispatchInvocation(hookName, cmdPrefix string) string {
 	switch hookName {
 	case "prepare-commit-msg":
-		return `entire hooks git prepare-commit-msg {1} {2}`
+		return cmdPrefix + " hooks git prepare-commit-msg {1} {2}"
 	case "commit-msg":
-		return `entire hooks git commit-msg {1}`
+		return cmdPrefix + " hooks git commit-msg {1}"
 	case "post-commit":
-		return `entire hooks git post-commit`
+		return cmdPrefix + " hooks git post-commit"
 	case hookPostRewrite:
-		return `entire hooks git post-rewrite {1}`
+		return cmdPrefix + " hooks git post-rewrite {1}"
 	case hookPrePush:
-		return `entire hooks git pre-push {1}`
+		return cmdPrefix + " hooks git pre-push {1}"
 	default:
-		return "entire hooks git " + hookName
+		return cmdPrefix + " hooks git " + hookName
 	}
 }
 
@@ -757,16 +773,19 @@ func lefthookDispatchInvocation(hookName string) string {
 // config-driven hook manager (lefthook) is configured but Entire is not wired
 // into all managed hooks. wiredHooks (may be nil) is the set of hooks already
 // dispatching to Entire, used to focus the message on what's missing.
+// externalPath is the exact, configured lefthook config file (git_hooks.
+// external_path), and cmdPrefix is the invocation prefix this environment's
+// settings would dispatch through — the recommended snippets must match
+// exactly what detection checks for.
 //
 // Like FormatExternalDirMissingHelp this is instructional, not directive:
 // Entire never edits the user's lefthook config; the user adds these commands
 // themselves.
-func FormatManagerNotWiredHelp(manager string, wiredHooks map[string]bool) string {
+func FormatManagerNotWiredHelp(manager, externalPath string, wiredHooks map[string]bool, cmdPrefix string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Required setup for external git hooks via %s:\n\n", manager)
-	fmt.Fprintf(&b, "  Entire reads your %s config to confirm it is wired in, but never\n", manager)
-	fmt.Fprintf(&b, "  edits it. Add a command for each managed hook to your lefthook config\n")
-	fmt.Fprintf(&b, "  (lefthook.yml), then run `lefthook install`:\n\n")
+	fmt.Fprintf(&b, "  Entire reads %s to confirm it is wired in, but never edits it.\n", externalPath)
+	fmt.Fprintf(&b, "  Add a command for each managed hook, then run `lefthook install`:\n\n")
 	for _, h := range gitHookNames {
 		if wiredHooks[h] {
 			continue
@@ -774,7 +793,7 @@ func FormatManagerNotWiredHelp(manager string, wiredHooks map[string]bool) strin
 		fmt.Fprintf(&b, "  %s:\n", h)
 		fmt.Fprintf(&b, "    commands:\n")
 		fmt.Fprintf(&b, "      entire:\n")
-		fmt.Fprintf(&b, "        run: %s\n", lefthookDispatchInvocation(h))
+		fmt.Fprintf(&b, "        run: %s\n", lefthookDispatchInvocation(h, cmdPrefix))
 		if h == hookPrePush {
 			fmt.Fprintf(&b, "        # NOTE: do NOT add `|| true` here. lefthook aborts the push on a\n")
 			fmt.Fprintf(&b, "        #       non-zero exit, which is how Entire's OPF privacy filter\n")

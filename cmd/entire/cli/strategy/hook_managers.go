@@ -14,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
 // hookManager describes an external hook manager detected in a repository.
@@ -166,7 +167,7 @@ func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, localDev, absolu
 		return
 	}
 
-	cmdPrefix, err := hookCmdPrefix(localDev, absolutePath)
+	cmdPrefix, err := HookCmdPrefix(localDev, absolutePath)
 	if err != nil {
 		// Best-effort: hook manager warnings are advisory, skip on resolution failure
 		return
@@ -180,13 +181,15 @@ func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, localDev, absolu
 
 // isEntireWiredIntoManager reports whether every managed git hook dispatches
 // to Entire through the config-driven hook manager (currently only lefthook).
-// Unlike directory-of-scripts detection, this parses the manager's config
-// file(s) and confirms each of the 5 managed hooks invokes
-// `entire hooks git <hook>`.
-func isEntireWiredIntoManager(repoRoot, manager string) (bool, error) {
+// externalPath is the exact, repo-relative config file path the user
+// configured (git_hooks.external_path) — no candidate-filename scanning, no
+// "-local" overlay merging. cmdPrefix is the expected invocation prefix
+// (e.g. "entire" or the local-dev launcher), so detection matches whatever
+// this environment's settings would actually dispatch through.
+func isEntireWiredIntoManager(repoRoot, manager, externalPath, cmdPrefix string) (bool, error) {
 	switch manager {
-	case "lefthook":
-		wired, err := lefthookWiredHooks(repoRoot)
+	case settings.ManagerLefthook:
+		wired, err := lefthookWiredHooks(repoRoot, externalPath, cmdPrefix)
 		if err != nil {
 			return false, err
 		}
@@ -207,7 +210,7 @@ func isEntireWiredIntoManager(repoRoot, manager string) (bool, error) {
 // health output without re-parsing the config themselves.
 type ManagerWiringStatus struct {
 	// ConfigPath is the repo-relative path to the located config file, or
-	// empty when no config file exists.
+	// empty when the configured externalPath does not exist on disk.
 	ConfigPath string
 	// Wired is the set of managed hooks currently dispatching to Entire.
 	Wired map[string]bool
@@ -216,19 +219,17 @@ type ManagerWiringStatus struct {
 }
 
 // ManagerWiring inspects a config-driven hook manager (currently "lefthook")
-// under repoRoot and reports its wiring status.
-func ManagerWiring(repoRoot, manager string) (ManagerWiringStatus, error) {
+// at the explicit, repo-relative externalPath and reports its wiring status.
+// cmdPrefix is the expected dispatch invocation prefix for this environment
+// (see isEntireWiredIntoManager).
+func ManagerWiring(repoRoot, manager, externalPath, cmdPrefix string) (ManagerWiringStatus, error) {
 	switch manager {
-	case "lefthook":
+	case settings.ManagerLefthook:
 		st := ManagerWiringStatus{Wired: map[string]bool{}}
-		if cfg, ok := lefthookConfigPath(repoRoot); ok {
-			rel, err := filepath.Rel(repoRoot, cfg)
-			if err != nil {
-				rel = filepath.Base(cfg)
-			}
-			st.ConfigPath = rel
+		if _, err := os.Stat(filepath.Join(repoRoot, externalPath)); err == nil {
+			st.ConfigPath = externalPath
 		}
-		wired, err := lefthookWiredHooks(repoRoot)
+		wired, err := lefthookWiredHooks(repoRoot, externalPath, cmdPrefix)
 		if err != nil {
 			return st, err
 		}
@@ -244,60 +245,39 @@ func ManagerWiring(repoRoot, manager string) (ManagerWiringStatus, error) {
 	}
 }
 
-// lefthookWiredHooks parses the lefthook config (main + -local overlay) and
-// returns the set of managed git hooks that invoke `entire hooks git <hook>`.
-// A hook counts as wired if any command's `run` value or any scripts entry
-// (a script file whose contents call the dispatcher) references the hook's
-// dispatch command. Returns an empty (non-nil) set when no config exists.
-func lefthookWiredHooks(repoRoot string) (map[string]bool, error) {
+// lefthookWiredHooks parses the lefthook config file at the exact,
+// repo-relative externalPath and returns the set of managed git hooks that
+// invoke the dispatch command for cmdPrefix. A hook counts as wired if any
+// command's `run` value or any scripts entry (a script file whose contents
+// call the dispatcher) references the hook's dispatch command. Returns an
+// empty (non-nil) set when externalPath does not exist on disk — Entire
+// never scans for alternate candidate filenames.
+func lefthookWiredHooks(repoRoot, externalPath, cmdPrefix string) (map[string]bool, error) {
 	wired := make(map[string]bool)
 
-	mainCfgs, localCfgs := lefthookConfigCandidates()
-	// Parse main config first, then overlay -local; a hook wired in either
-	// counts (union), matching lefthook's own merge behavior.
-	for _, group := range [][]string{mainCfgs, localCfgs} {
-		path, ok := firstExisting(repoRoot, group)
-		if !ok {
-			continue
-		}
-		cfg, err := parseLefthookConfig(path)
-		if err != nil {
-			return nil, fmt.Errorf("parse lefthook config %s: %w", filepath.Base(path), err)
-		}
-		for _, hook := range gitHookNames {
-			if wired[hook] {
-				continue
-			}
-			if lefthookHookInvokesEntire(repoRoot, cfg, hook) {
-				wired[hook] = true
-			}
+	absPath := filepath.Join(repoRoot, externalPath)
+	if _, statErr := os.Stat(absPath); statErr != nil {
+		// Missing config file is not an error here: callers (ManagerWiring,
+		// doctor/setup checks) treat "no config" the same as "nothing wired"
+		// and report it via the Missing list instead of surfacing an error.
+		return wired, nil //nolint:nilerr // missing config is "nothing wired", not an error
+	}
+	cfg, err := parseLefthookConfig(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("parse lefthook config %s: %w", externalPath, err)
+	}
+	for _, hook := range gitHookNames {
+		if lefthookHookInvokesEntire(repoRoot, cfg, hook, cmdPrefix) {
+			wired[hook] = true
 		}
 	}
 	return wired, nil
 }
 
-// firstExisting returns the first candidate under repoRoot that exists.
-func firstExisting(repoRoot string, candidates []string) (string, bool) {
-	for _, name := range candidates {
-		p := filepath.Join(repoRoot, name)
-		if _, err := os.Stat(p); err == nil {
-			return p, true
-		}
-	}
-	return "", false
-}
-
-// lefthookConfigPath returns the absolute path to the repo's primary lefthook
-// config file (ignoring the -local overlay), if one exists.
-func lefthookConfigPath(repoRoot string) (string, bool) {
-	mainCfgs, _ := lefthookConfigCandidates()
-	return firstExisting(repoRoot, mainCfgs)
-}
-
 // parseLefthookConfig reads a lefthook config file and decodes it into a
 // generic map, dispatching on the file extension (yml/yaml/json/toml).
 func parseLefthookConfig(path string) (map[string]any, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path comes from a fixed candidate list joined to repoRoot
+	data, err := os.ReadFile(path) //nolint:gosec // path is validated repo-relative (git_hooks.external_path) joined to repoRoot
 	if err != nil {
 		return nil, fmt.Errorf("read lefthook config: %w", err)
 	}
@@ -322,14 +302,17 @@ func parseLefthookConfig(path string) (map[string]any, error) {
 }
 
 // lefthookHookInvokesEntire reports whether the given hook's config section
-// calls `entire hooks git <hook>`, either directly in a command's run value
-// or via a scripts entry whose script file contains the dispatch call.
-func lefthookHookInvokesEntire(repoRoot string, cfg map[string]any, hook string) bool {
+// calls "<cmdPrefix> hooks git <hook>", either directly in a command's run
+// value or via a scripts entry whose script file contains the dispatch
+// call. cmdPrefix is the invocation prefix this environment's settings
+// actually dispatch through (see hookCmdPrefix) — matching only the literal
+// "entire" prefix would miss local-dev (`./scripts/entire-dev`) setups.
+func lefthookHookInvokesEntire(repoRoot string, cfg map[string]any, hook, cmdPrefix string) bool {
 	section, ok := cfg[hook].(map[string]any)
 	if !ok {
 		return false
 	}
-	dispatch := "entire hooks git " + hook
+	dispatch := cmdPrefix + " hooks git " + hook
 
 	// commands.<name>.run
 	if commands, ok := section["commands"].(map[string]any); ok {

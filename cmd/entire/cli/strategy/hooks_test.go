@@ -1710,7 +1710,7 @@ func TestInstallGitHook_ExternalBackend_MissingDir_ReturnsHelpError(t *testing.T
 	}
 	if err := os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": ".husky"}}`),
 		0o644,
 	); err != nil {
 		t.Fatal(err)
@@ -1721,7 +1721,7 @@ func TestInstallGitHook_ExternalBackend_MissingDir_ReturnsHelpError(t *testing.T
 	ctx := context.Background()
 	installed, err := InstallGitHook(ctx, false, false, false)
 	if err == nil {
-		t.Fatal("InstallGitHook() should return error when external_dir does not exist")
+		t.Fatal("InstallGitHook() should return error when external_path does not exist")
 	}
 	if installed != 0 {
 		t.Errorf("InstallGitHook() installed %d hooks on error, want 0", installed)
@@ -1826,7 +1826,7 @@ func TestPrintExternalHookStatusIfActive_ExternalMode(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": ".husky"}}`),
 		0o644,
 	); err != nil {
 		t.Fatal(err)
@@ -1875,13 +1875,13 @@ func TestInstallGitHook_ExternalBackend_SkipsAndPreservesGitHooks(t *testing.T) 
 	}
 	if err := os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": ".husky"}}`),
 		0o644,
 	); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create external_dir (must exist for this test path)
+	// Create external_path (must exist for this test path)
 	huskyDir := filepath.Join(repoDir, ".husky")
 	if err := os.MkdirAll(huskyDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -1951,7 +1951,7 @@ func TestRemoveGitHook_ExternalBackend_IsNoOp(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": ".husky"}}`),
 		0o644,
 	); err != nil {
 		t.Fatal(err)
@@ -1999,7 +1999,7 @@ func TestRemoveGitHook_ExternalBackend_IsNoOp(t *testing.T) {
 		t.Error(".git/hooks/ was modified by RemoveGitHook in external mode")
 	}
 	if !dirSnapshotsEqual(huskyBefore, snapshotDir(t, huskyDir)) {
-		t.Error("external_dir was modified by RemoveGitHook in external mode")
+		t.Error("external_path was modified by RemoveGitHook in external mode")
 	}
 }
 
@@ -2013,13 +2013,13 @@ func TestIsGitHookInstalled_ExternalBackend_ReadsExternalDir(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": ".husky"}}`),
 		0o644,
 	); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create external_dir with marker-containing hook files
+	// Create external_path with marker-containing hook files
 	huskyDir := filepath.Join(repoDir, ".husky")
 	if err := os.MkdirAll(huskyDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -2036,7 +2036,7 @@ func TestIsGitHookInstalled_ExternalBackend_ReadsExternalDir(t *testing.T) {
 
 	ctx := context.Background()
 	if !IsGitHookInstalled(ctx) {
-		t.Error("IsGitHookInstalled() = false, want true when external_dir has marker files")
+		t.Error("IsGitHookInstalled() = false, want true when external_path has marker files")
 	}
 }
 
@@ -2050,7 +2050,7 @@ func TestIsGitHookInstalled_ExternalBackend_IgnoresGitHooksDir(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "external_dir": ".husky"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "scripts", "external_path": ".husky"}}`),
 		0o644,
 	); err != nil {
 		t.Fatal(err)
@@ -2069,7 +2069,7 @@ func TestIsGitHookInstalled_ExternalBackend_IgnoresGitHooksDir(t *testing.T) {
 
 	ctx := context.Background()
 	if IsGitHookInstalled(ctx) {
-		t.Error("IsGitHookInstalled() = true, want false when external_dir has no marker files (even though .git/hooks/ does)")
+		t.Error("IsGitHookInstalled() = true, want false when external_path has no marker files (even though .git/hooks/ does)")
 	}
 }
 
@@ -2174,7 +2174,7 @@ func TestIsGitHookInstalled_LefthookManager_ReadsConfig(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook", "external_path": "lefthook.yml"}}`),
 		0o644,
 	); err != nil {
 		t.Fatal(err)
@@ -2197,7 +2197,7 @@ func TestIsGitHookInstalled_LefthookManager_MissingHookIsNotInstalled(t *testing
 	}
 	if err := os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook", "external_path": "lefthook.yml"}}`),
 		0o644,
 	); err != nil {
 		t.Fatal(err)
@@ -2222,7 +2222,7 @@ func TestPrintExternalHookStatusIfActive_LefthookManager(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`),
+		[]byte(`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook", "external_path": "lefthook.yml"}}`),
 		0o644,
 	); err != nil {
 		t.Fatal(err)
@@ -2240,11 +2240,16 @@ func TestPrintExternalHookStatusIfActive_LefthookManager(t *testing.T) {
 func TestFormatManagerNotWiredHelp_Lefthook(t *testing.T) {
 	t.Parallel()
 
-	msg := FormatManagerNotWiredHelp("lefthook", nil)
+	msg := FormatManagerNotWiredHelp("lefthook", "lefthook.yml", nil, "entire")
 
 	// Must show a lefthook config snippet, not a directory-of-scripts one.
 	if !strings.Contains(msg, "lefthook") {
 		t.Errorf("help should mention lefthook; got:\n%s", msg)
+	}
+	// The exact configured path must be echoed back so users know which
+	// file Entire is reading (no filename-scanning ambiguity).
+	if !strings.Contains(msg, "lefthook.yml") {
+		t.Errorf("help should mention the configured external_path; got:\n%s", msg)
 	}
 	// pre-push must be present and must NOT be wrapped in `|| true`.
 	prePushIdx := strings.Index(msg, "entire hooks git pre-push")
