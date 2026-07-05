@@ -55,11 +55,72 @@ Validation rules:
 
 - `backend` must be `"direct"` or `"external"`. Typos are rejected at
   load time so silent misconfiguration is impossible.
-- `external_dir` is required when `backend = "external"`.
-- `external_dir` must be repo-relative (no leading `/`, no `..` segments).
+- `external_dir` is required when `backend = "external"` (unless a
+  config-driven `manager` is set — see below).
+- `external_dir` must be repo-relative (no leading `/`, no `..` segments,
+  no Windows drive/volume anchor).
 
 `external_dir` existence is NOT checked at parse time — that is a runtime
 health concern surfaced by `entire enable` and `entire doctor`.
+
+### Config-driven managers (lefthook)
+
+Husky and Rush keep per-hook script files in a directory, so Entire can
+detect its wiring by scanning `external_dir/<hook>` for a marker line.
+Lefthook is different: it describes hooks declaratively in a config file
+(`lefthook.yml`) and generates the `.git/hooks` wrappers itself — there is
+no directory of user-authored scripts to scan.
+
+For these managers, set `manager` instead of (or alongside) `external_dir`:
+
+```json
+{
+  "enabled": true,
+  "git_hooks": {
+    "backend": "external",
+    "manager": "lefthook"
+  }
+}
+```
+
+In manager mode Entire parses the lefthook config
+(`{.,}lefthook{,-local}.{yml,yaml,json,toml}`) and confirms every managed
+hook dispatches to `entire hooks git <hook>`. `external_dir` is optional.
+`manager` is only valid with `backend = "external"` and currently accepts
+only `"lefthook"`.
+
+Wire Entire into your `lefthook.yml`:
+
+```yaml
+prepare-commit-msg:
+  commands:
+    entire:
+      run: entire hooks git prepare-commit-msg {1} {2}
+commit-msg:
+  commands:
+    entire:
+      run: entire hooks git commit-msg {1}
+post-commit:
+  commands:
+    entire:
+      run: entire hooks git post-commit
+post-rewrite:
+  commands:
+    entire:
+      run: entire hooks git post-rewrite {1}
+pre-push:
+  commands:
+    entire:
+      run: entire hooks git pre-push {1}
+      # Do NOT add `|| true`: lefthook aborts the push on a non-zero exit,
+      # which is how Entire's OPF privacy filter stops unredacted content
+      # from leaving the machine.
+```
+
+Use lefthook's `{1}` / `{2}` placeholders in `run:` (shell `$1` / `$2` are
+empty there). After editing, run `lefthook install` so lefthook regenerates
+its `.git/hooks` wrappers. `entire doctor` reports which hooks are wired and
+which are still missing.
 
 ## User contract
 
@@ -156,6 +217,9 @@ Tested layouts:
   `.husky/<hook>` (user scripts with the marker).
 - **Rush** — `common/git-hooks/<hook>` with the marker.
 - **Generic** — any repo-relative directory you control.
+- **Lefthook** — config-driven (`manager: "lefthook"`); detection parses
+  `lefthook.yml` rather than a script directory. See "Config-driven
+  managers" above.
 
 ## Migration: direct → external
 

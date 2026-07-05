@@ -14,8 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `external_dir` (e.g. `.husky/`, `common/git-hooks/`) instead of writing
   to `.git/hooks/`. Compatible with Husky, Rush, and similar managers.
   Entire never writes to `external_dir` in this mode — users own the hook
-  scripts. See `docs/architecture/external-git-hooks.md` for the required
-  marker contract and dispatch invocations. Closes [#1250](https://github.com/entireio/cli/issues/1250).
+  scripts. Config-driven managers are supported via `git_hooks.manager`
+  (currently `"lefthook"`): Entire parses the manager's config file and
+  confirms each managed hook dispatches to Entire, no script directory
+  required. See `docs/architecture/external-git-hooks.md` for the required
+  marker contract and dispatch invocations. Closes [#1250](https://github.com/entireio/cli/issues/1250), addresses [#1349](https://github.com/entireio/cli/issues/1349).
 
 ## [0.7.8] - 2026-06-30
 

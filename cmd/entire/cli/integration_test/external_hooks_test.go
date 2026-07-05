@@ -283,3 +283,106 @@ func TestEnable_ExternalBackend_MissingDir_AbortsWithHelp(t *testing.T) {
 		}
 	}
 }
+
+// writeLefthookManagerSettings overwrites .entire/settings.json with the
+// external backend in lefthook manager mode (no external_dir).
+func writeLefthookManagerSettings(t *testing.T, env *TestEnv) {
+	t.Helper()
+	settings := map[string]any{
+		"enabled":   true,
+		"local_dev": true,
+		"strategy_options": map[string]any{
+			"filtered_fetches": true,
+		},
+		"git_hooks": map[string]any{
+			"backend": "external",
+			"manager": "lefthook",
+		},
+	}
+	data, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	settingsPath := filepath.Join(env.RepoDir, ".entire", "settings.json")
+	if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+}
+
+const lefthookAllHooksConfig = `prepare-commit-msg:
+  commands:
+    entire:
+      run: entire hooks git prepare-commit-msg {1} {2}
+commit-msg:
+  commands:
+    entire:
+      run: entire hooks git commit-msg {1}
+post-commit:
+  commands:
+    entire:
+      run: entire hooks git post-commit
+post-rewrite:
+  commands:
+    entire:
+      run: entire hooks git post-rewrite {1}
+pre-push:
+  commands:
+    entire:
+      run: entire hooks git pre-push {1}
+`
+
+// TestEnable_ExternalBackend_Lefthook_AllHooksWired verifies that with the
+// lefthook manager configured and a lefthook.yml wiring all 5 managed hooks,
+// `entire enable` succeeds and reports the lefthook status line — proving
+// config-driven detection works end to end through the real binary.
+func TestEnable_ExternalBackend_Lefthook_AllHooksWired(t *testing.T) {
+	t.Parallel()
+	env := NewRepoWithCommit(t)
+
+	writeLefthookManagerSettings(t, env)
+	if err := os.WriteFile(filepath.Join(env.RepoDir, "lefthook.yml"), []byte(lefthookAllHooksConfig), 0o644); err != nil {
+		t.Fatalf("write lefthook.yml: %v", err)
+	}
+
+	output, err := env.RunCLIWithError("enable")
+	if err != nil {
+		t.Fatalf("enable failed: %v\noutput:\n%s", err, output)
+	}
+	if !strings.Contains(output, "lefthook") {
+		t.Errorf("expected output to name the lefthook manager\nfull output:\n%s", output)
+	}
+
+	// doctor should report the wiring as healthy.
+	doctorOut, dErr := env.RunCLIWithError("doctor")
+	if dErr != nil {
+		t.Fatalf("doctor failed unexpectedly: %v\noutput:\n%s", dErr, doctorOut)
+	}
+	if !strings.Contains(doctorOut, "✓ External git hooks") {
+		t.Errorf("doctor should report external git hooks healthy\noutput:\n%s", doctorOut)
+	}
+}
+
+// TestEnable_ExternalBackend_Lefthook_MissingHookAborts verifies that a
+// lefthook.yml missing one managed hook (pre-push) makes `entire enable`
+// abort with the instructional help naming the missing hook.
+func TestEnable_ExternalBackend_Lefthook_MissingHookAborts(t *testing.T) {
+	t.Parallel()
+	env := NewRepoWithCommit(t)
+
+	writeLefthookManagerSettings(t, env)
+	partial := strings.Replace(lefthookAllHooksConfig,
+		"pre-push:\n  commands:\n    entire:\n      run: entire hooks git pre-push {1}\n", "", 1)
+	if err := os.WriteFile(filepath.Join(env.RepoDir, "lefthook.yml"), []byte(partial), 0o644); err != nil {
+		t.Fatalf("write lefthook.yml: %v", err)
+	}
+
+	output, err := env.RunCLIWithError("enable")
+	if err == nil {
+		t.Fatalf("enable should abort when a lefthook hook is not wired\noutput:\n%s", output)
+	}
+	for _, s := range []string{"lefthook", "pre-push", "lefthook install"} {
+		if !strings.Contains(output, s) {
+			t.Errorf("output missing %q\nfull output:\n%s", s, output)
+		}
+	}
+}
