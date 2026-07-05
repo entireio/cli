@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/internal/coreapi"
@@ -833,4 +834,65 @@ func TestValidateClusterHost(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRemoveMirror covers `repo mirror remove`'s DeleteMirror call:
+// removeMirror dials via runCoreForCluster, which the activeCoreClient test
+// seam does not intercept, so this drives the helper directly against an
+// httptest server the way the createAndAwaitMirror tests do.
+func TestRemoveMirror(t *testing.T) {
+	t.Parallel()
+
+	t.Run("success", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, http.MethodDelete, r.Method)
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		t.Cleanup(srv.Close)
+		c, err := coreapi.NewWithBearer(srv.URL, "tok")
+		require.NoError(t, err)
+
+		var out bytes.Buffer
+		err = removeMirror(t.Context(), &out, c, "octocat", "hello-world", "aws-us-east-2.entire.io")
+		require.NoError(t, err)
+		require.Contains(t, out.String(), "✓ Removed mirror github.com/octocat/hello-world from aws-us-east-2.entire.io")
+	})
+
+	t.Run("decoded 404 appends server detail", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeNotFoundProblem(t, w)
+		}))
+		t.Cleanup(srv.Close)
+		c, err := coreapi.NewWithBearer(srv.URL, "tok")
+		require.NoError(t, err)
+
+		var out bytes.Buffer
+		err = removeMirror(t.Context(), &out, c, "octocat", "hello-world", "aws-us-east-2.entire.io")
+		require.Error(t, err)
+		require.ErrorContains(t, err, "may be on a different cluster")
+		require.ErrorContains(t, err, "(server: not found)")
+		require.Empty(t, out.String())
+	})
+
+	t.Run("non-404 server error passes through the problem detail", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusInternalServerError)
+			if _, werr := w.Write([]byte(`{"status":500,"detail":"boom"}`)); werr != nil {
+				t.Errorf("write problem: %v", werr)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := coreapi.NewWithBearer(srv.URL, "tok")
+		require.NoError(t, err)
+
+		var out bytes.Buffer
+		err = removeMirror(t.Context(), &out, c, "octocat", "hello-world", "aws-us-east-2.entire.io")
+		require.Error(t, err)
+		require.Equal(t, "boom", coreapi.APIError(err))
+		require.Empty(t, out.String())
+	})
 }

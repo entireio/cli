@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   required. See `docs/architecture/external-git-hooks.md` for the required
   marker contract and dispatch invocations. Closes [#1250](https://github.com/entireio/cli/issues/1250), addresses [#1349](https://github.com/entireio/cli/issues/1349).
 
+### Changed
+
+- Control-plane commands (`org`, `project`, `repo`, `grant`) now print human-readable confirmations by default; the wire JSON (including `repo create`'s `entire://` remote) moved behind `--json`. Empty `--json` lists emit `[]`, and success messages moved from stderr to stdout ([#1626](https://github.com/entireio/cli/pull/1626))
+
 ## [0.7.8] - 2026-06-30
 
 ### Added

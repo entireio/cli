@@ -207,8 +207,8 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().BoolVar(&noWait, "no-wait", false, "return once the placement is registered, without waiting for the initial clone")
-	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Minute, "how long to wait for the initial clone to finish")
+	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return once the placement is registered, without waiting for the initial clone")
+	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Minute, "How long to wait for the initial clone to finish")
 	return cmd
 }
 
@@ -291,7 +291,7 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 		return err
 	}
 	if created.Created {
-		fmt.Fprintf(out, "\nRegistered mirror %s\n", created.MirrorId)
+		fmt.Fprintf(out, "\n✓ Registered mirror %s\n", created.MirrorId)
 	} else {
 		fmt.Fprintf(out, "\nMirror exists (%s)\n", created.MirrorId)
 	}
@@ -341,7 +341,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if showAvailable {
-				return runCoreList(cmd, availableMirrorColumns, availableMirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.AvailableMirror, error) {
+				return runCoreList(cmd, "No repos available to mirror.", availableMirrorColumns, availableMirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.AvailableMirror, error) {
 					// Computed live from GitHub using your own login, so name the
 					// core being dialled (same rationale as the existing-mirror
 					// banner). --cluster/--provider don't apply here: the
@@ -360,7 +360,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 					return out.Available, nil
 				})
 			}
-			return runCoreList(cmd, mirrorColumns, mirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Mirror, error) {
+			return runCoreList(cmd, "No mirrors found.", mirrorColumns, mirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Mirror, error) {
 				// mirror list is identity-scoped: it shows the mirrors visible
 				// from the active login's federation, so naming that login server
 				// makes a surprising empty result legible — e.g. mirrors in a
@@ -397,10 +397,10 @@ func newRepoMirrorListCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&cluster, "cluster", "", "filter by cluster public host")
-	cmd.Flags().StringVar(&provider, "provider", "", "filter by upstream provider (e.g. github)")
-	cmd.Flags().StringVar(&owner, "owner", "", "filter by upstream owner login")
-	cmd.Flags().BoolVar(&showAvailable, "show-available", false, "instead of existing mirrors, list GitHub repos you could onboard as mirrors (ignores --cluster/--provider)")
+	cmd.Flags().StringVar(&cluster, "cluster", "", "Filter by cluster public host")
+	cmd.Flags().StringVar(&provider, "provider", "", "Filter by upstream provider (e.g. github)")
+	cmd.Flags().StringVar(&owner, "owner", "", "Filter by upstream owner login")
+	cmd.Flags().BoolVar(&showAvailable, "show-available", false, "Instead of existing mirrors, list GitHub repos you could onboard as mirrors (ignores --cluster/--provider)")
 	return cmd
 }
 
@@ -523,23 +523,36 @@ func newRepoMirrorRemoveCmd() *cobra.Command {
 				return fmt.Errorf("invalid [cluster-host]: %w", err)
 			}
 			return runCoreForCluster(cmd, clusterHost, func(ctx context.Context, c *coreapi.Client) error {
-				// Delete by upstream coords in one call. A 404 is a real
-				// error here, not idempotent success: the server only
-				// answers 204 when it actually removed a placement, so a
-				// 404 ("no such mirror / not visible / different cluster")
-				// surfaces verbatim via renderCoreError rather than being
-				// reported as a successful removal.
-				if err := c.DeleteMirror(ctx, coreapi.DeleteMirrorParams{
-					Provider:    coreapi.DeleteMirrorProviderGithub,
-					Owner:       owner,
-					Repo:        repo,
-					ClusterHost: clusterHost,
-				}); err != nil {
-					return err
-				}
-				cmd.Printf("Removed mirror github.com/%s/%s from %s\n", owner, repo, clusterHost)
-				return nil
+				return removeMirror(ctx, cmd.OutOrStdout(), c, owner, repo, clusterHost)
 			})
 		},
 	}
+}
+
+// removeMirror deletes the (owner, repo) placement on clusterHost via c and
+// reports the outcome on w. A decoded 404 is a real error here (the server
+// only answers 204 when it actually removed a placement); it is rewritten
+// into a targeted message with the server's own detail appended so no
+// information is lost.
+func removeMirror(ctx context.Context, w io.Writer, c *coreapi.Client, owner, repo, clusterHost string) error {
+	if err := c.DeleteMirror(ctx, coreapi.DeleteMirrorParams{
+		Provider:    coreapi.DeleteMirrorProviderGithub,
+		Owner:       owner,
+		Repo:        repo,
+		ClusterHost: clusterHost,
+	}); err != nil {
+		if isCoreNotFound(err) {
+			// Deliberately not %w-wrapped: renderCoreError would extract the
+			// server's problem detail and replace this targeted message. The
+			// detail is appended as plain text instead, so nothing is lost.
+			msg := fmt.Sprintf("no mirror of github.com/%s/%s on %s — it may be on a different cluster (run `entire repo mirror list` to see placements)", owner, repo, clusterHost)
+			if detail := coreapi.APIError(err); detail != "" {
+				msg += " (server: " + detail + ")"
+			}
+			return errors.New(msg)
+		}
+		return err
+	}
+	fmt.Fprintf(w, "✓ Removed mirror github.com/%s/%s from %s\n", owner, repo, clusterHost)
+	return nil
 }

@@ -69,7 +69,7 @@ func newRepoMirrorCollaboratorsListCmd() *cobra.Command {
 				cmd.SilenceUsage = true
 				return fmt.Errorf("invalid [cluster-host]: %w", err)
 			}
-			return runCoreListForCluster(cmd, clusterHost, mirrorCollaboratorColumns, mirrorCollaboratorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.MirrorCollaborator, error) {
+			return runCoreListForCluster(cmd, clusterHost, "No collaborators found.", mirrorCollaboratorColumns, mirrorCollaboratorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.MirrorCollaborator, error) {
 				out, err := c.ListMirrorCollaborators(ctx, coreapi.ListMirrorCollaboratorsParams{
 					Provider:    coreapi.ListMirrorCollaboratorsProviderGithub,
 					Owner:       owner,

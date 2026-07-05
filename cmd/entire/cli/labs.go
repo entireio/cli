@@ -48,17 +48,17 @@ var experimentalCommands = []experimentalCommandInfo{
 	{
 		CommandPath: []string{"org"},
 		Invocation:  "entire org",
-		Summary:     "Manage Entire organizations (create, list)",
+		Summary:     "Manage Entire organizations (create, list, get, delete)",
 	},
 	{
 		CommandPath: []string{"project"},
 		Invocation:  "entire project",
-		Summary:     "Manage Entire projects (create, list)",
+		Summary:     "Manage Entire projects (create, list, get, delete)",
 	},
 	{
 		CommandPath: []string{"repo"},
 		Invocation:  "entire repo",
-		Summary:     "Manage Entire repositories (create, list, get, delete)",
+		Summary:     "Manage Entire repositories (create, list, get, delete, clone, mirror, visibility)",
 	},
 	{
 		CommandPath: []string{"grant"},

@@ -50,43 +50,50 @@ func grantWiringHandler(t *testing.T, record func(method, path string), deleteFn
 // then hits the by-provider revoke route, while an account ULID hits the
 // typed-id route directly. This locks in the grantee→route mapping.
 //
-// Not parallel: runDeleteCmd swaps the package-level activeCoreClient seam.
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestGrantRemove_RouteWiring(t *testing.T) {
 	cases := []struct {
-		name     string
-		newCmd   func() *cobra.Command
-		args     []string
-		wantPath string
+		name       string
+		newCmd     func() *cobra.Command
+		args       []string
+		wantPath   string
+		wantOutput string // when set, the full success line; otherwise just "✓ " is checked
 	}{
 		{
 			"repo/by-provider",
 			newGrantRepoRemoveCmd,
 			[]string{wiringRepoULID, "github:alice"},
 			"/api/v1/repos/" + wiringRepoULID + "/grants/account/github/12345",
+			"✓ Revoked github:alice from repo " + wiringRepoULID,
 		},
 		{
 			"repo/by-grantee-id",
 			newGrantRepoRemoveCmd,
 			[]string{wiringRepoULID, wiringGranteeULID},
 			"/api/v1/repos/" + wiringRepoULID + "/grants/account/" + wiringGranteeULID,
+			"",
 		},
 		{
 			"project/by-provider",
 			newGrantProjectRemoveCmd,
 			[]string{wiringProjULID, "github:alice"},
 			"/api/v1/projects/" + wiringProjULID + "/grants/account/github/12345",
+			"",
 		},
 		{
 			"project/by-grantee-id",
 			newGrantProjectRemoveCmd,
 			[]string{wiringProjULID, wiringGranteeULID},
 			"/api/v1/projects/" + wiringProjULID + "/grants/account/" + wiringGranteeULID,
+			"",
 		},
 		{
 			"org/by-provider",
 			newGrantOrgRemoveCmd,
 			[]string{wiringOrgULID, "github:alice"},
 			"/api/v1/orgs/" + wiringOrgULID + "/members/github/12345",
+			// org remove uses verb "Removed"; project/repo use "Revoked".
+			"✓ Removed github:alice from org " + wiringOrgULID,
 		},
 	}
 
@@ -99,10 +106,14 @@ func TestGrantRemove_RouteWiring(t *testing.T) {
 			))
 			t.Cleanup(srv.Close)
 
-			_, err := runDeleteCmd(t, tc.newCmd, srv.URL, tc.args...)
+			out, _, err := runCoreCmd(t, tc.newCmd, srv.URL, tc.args...)
 			require.NoError(t, err)
 			require.Equal(t, http.MethodDelete, gotMethod)
 			require.Equal(t, tc.wantPath, gotPath)
+			require.Contains(t, out, "✓ ")
+			if tc.wantOutput != "" {
+				require.Contains(t, out, tc.wantOutput)
+			}
 		})
 	}
 }
@@ -111,7 +122,7 @@ func TestGrantRemove_RouteWiring(t *testing.T) {
 // (the server answers 404) is a no-op success — "no such grant; nothing to
 // revoke" — rather than surfacing a raw 404, matching the typed deletes.
 //
-// Not parallel: runDeleteCmd swaps the package-level activeCoreClient seam.
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestGrantRemove_Idempotent(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -132,9 +143,10 @@ func TestGrantRemove_Idempotent(t *testing.T) {
 			))
 			t.Cleanup(srv.Close)
 
-			out, err := runDeleteCmd(t, tc.newCmd, srv.URL, tc.args...)
+			out, errOut, err := runCoreCmd(t, tc.newCmd, srv.URL, tc.args...)
 			require.NoError(t, err)
 			require.Contains(t, out, "nothing to revoke")
+			require.Empty(t, errOut)
 		})
 	}
 }
