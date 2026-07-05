@@ -2,11 +2,15 @@ package strategy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	toml "github.com/pelletier/go-toml/v2"
+	yaml "gopkg.in/yaml.v3"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -17,6 +21,20 @@ type hookManager struct {
 	Name            string // "Husky", "Lefthook", "pre-commit", "Overcommit"
 	ConfigPath      string // relative path that triggered detection (e.g., ".husky/")
 	OverwritesHooks bool   // true if the tool will overwrite Entire's hooks on reinstall
+}
+
+// lefthookConfigCandidates returns lefthook's supported config filenames in
+// precedence order: the main config first, then the -local overlay. lefthook
+// accepts {.,}lefthook{,-local}.{yml,yaml,json,toml}.
+func lefthookConfigCandidates() (main, local []string) {
+	exts := []string{"yml", "yaml", "json", "toml"}
+	for _, prefix := range []string{"", "."} {
+		for _, ext := range exts {
+			main = append(main, prefix+"lefthook."+ext)
+			local = append(local, prefix+"lefthook-local."+ext)
+		}
+	}
+	return main, local
 }
 
 // detectHookManagers checks the repository root for known hook manager config
@@ -31,13 +49,9 @@ func detectHookManagers(repoRoot string) []hookManager {
 	}
 
 	// Lefthook supports {.,}lefthook{,-local}.{yml,yaml,json,toml}
-	for _, prefix := range []string{"", "."} {
-		for _, variant := range []string{"", "-local"} {
-			for _, ext := range []string{"yml", "yaml", "json", "toml"} {
-				name := prefix + "lefthook" + variant + "." + ext
-				checks = append(checks, hookManager{"Lefthook", name, false})
-			}
-		}
+	mainCfgs, localCfgs := lefthookConfigCandidates()
+	for _, name := range append(append([]string{}, mainCfgs...), localCfgs...) {
+		checks = append(checks, hookManager{"Lefthook", name, false})
 	}
 
 	// hk supports {.config/,}hk{,.local}.pkl
@@ -162,4 +176,132 @@ func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, localDev, absolu
 		fmt.Fprintln(w)
 		fmt.Fprint(w, warning)
 	}
+}
+
+// isEntireWiredIntoManager reports whether every managed git hook dispatches
+// to Entire through the config-driven hook manager (currently only lefthook).
+// Unlike directory-of-scripts detection, this parses the manager's config
+// file(s) and confirms each of the 5 managed hooks invokes
+// `entire hooks git <hook>`.
+func isEntireWiredIntoManager(repoRoot, manager string) (bool, error) {
+	switch manager {
+	case "lefthook":
+		wired, err := lefthookWiredHooks(repoRoot)
+		if err != nil {
+			return false, err
+		}
+		for _, hook := range gitHookNames {
+			if !wired[hook] {
+				return false, nil
+			}
+		}
+		return true, nil
+	default:
+		return false, fmt.Errorf("unsupported hook manager %q", manager)
+	}
+}
+
+// lefthookWiredHooks parses the lefthook config (main + -local overlay) and
+// returns the set of managed git hooks that invoke `entire hooks git <hook>`.
+// A hook counts as wired if any command's `run` value or any scripts entry
+// (a script file whose contents call the dispatcher) references the hook's
+// dispatch command. Returns an empty (non-nil) set when no config exists.
+func lefthookWiredHooks(repoRoot string) (map[string]bool, error) {
+	wired := make(map[string]bool)
+
+	mainCfgs, localCfgs := lefthookConfigCandidates()
+	// Parse main config first, then overlay -local; a hook wired in either
+	// counts (union), matching lefthook's own merge behavior.
+	for _, group := range [][]string{mainCfgs, localCfgs} {
+		path, ok := firstExisting(repoRoot, group)
+		if !ok {
+			continue
+		}
+		cfg, err := parseLefthookConfig(path)
+		if err != nil {
+			return nil, fmt.Errorf("parse lefthook config %s: %w", filepath.Base(path), err)
+		}
+		for _, hook := range gitHookNames {
+			if wired[hook] {
+				continue
+			}
+			if lefthookHookInvokesEntire(repoRoot, cfg, hook) {
+				wired[hook] = true
+			}
+		}
+	}
+	return wired, nil
+}
+
+// firstExisting returns the first candidate under repoRoot that exists.
+func firstExisting(repoRoot string, candidates []string) (string, bool) {
+	for _, name := range candidates {
+		p := filepath.Join(repoRoot, name)
+		if _, err := os.Stat(p); err == nil {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+// parseLefthookConfig reads a lefthook config file and decodes it into a
+// generic map, dispatching on the file extension (yml/yaml/json/toml).
+func parseLefthookConfig(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path comes from a fixed candidate list joined to repoRoot
+	if err != nil {
+		return nil, fmt.Errorf("read lefthook config: %w", err)
+	}
+	out := make(map[string]any)
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".yml", ".yaml":
+		if err := yaml.Unmarshal(data, &out); err != nil {
+			return nil, fmt.Errorf("parse lefthook YAML: %w", err)
+		}
+	case ".json":
+		if err := json.Unmarshal(data, &out); err != nil {
+			return nil, fmt.Errorf("parse lefthook JSON: %w", err)
+		}
+	case ".toml":
+		if err := toml.Unmarshal(data, &out); err != nil {
+			return nil, fmt.Errorf("parse lefthook TOML: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported lefthook config extension %q", filepath.Ext(path))
+	}
+	return out, nil
+}
+
+// lefthookHookInvokesEntire reports whether the given hook's config section
+// calls `entire hooks git <hook>`, either directly in a command's run value
+// or via a scripts entry whose script file contains the dispatch call.
+func lefthookHookInvokesEntire(repoRoot string, cfg map[string]any, hook string) bool {
+	section, ok := cfg[hook].(map[string]any)
+	if !ok {
+		return false
+	}
+	dispatch := "entire hooks git " + hook
+
+	// commands.<name>.run
+	if commands, ok := section["commands"].(map[string]any); ok {
+		for _, cmd := range commands {
+			if cmdMap, ok := cmd.(map[string]any); ok {
+				if run, ok := cmdMap["run"].(string); ok && strings.Contains(run, dispatch) {
+					return true
+				}
+			}
+		}
+	}
+
+	// scripts.<file>: the dispatch lives in the script file under
+	// .lefthook/<hook>/<file> (lefthook's default source_dir). Read it.
+	if scripts, ok := section["scripts"].(map[string]any); ok {
+		for scriptName := range scripts {
+			scriptPath := filepath.Join(repoRoot, ".lefthook", hook, scriptName)
+			if data, err := os.ReadFile(scriptPath); err == nil && strings.Contains(string(data), dispatch) { //nolint:gosec // path derived from repo-relative config
+				return true
+			}
+		}
+	}
+
+	return false
 }

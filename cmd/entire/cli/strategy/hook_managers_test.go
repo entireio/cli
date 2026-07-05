@@ -524,3 +524,227 @@ func TestCheckAndWarnHookManagers_ExternalBackend_IsSilent(t *testing.T) {
 		t.Errorf("expected no output in external mode, got %q", buf.String())
 	}
 }
+
+// A lefthook config that wires entire into all 5 managed hooks (via
+// commands) should be detected as fully installed.
+func writeLefthookConfig(t *testing.T, dir, filename, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, filename), []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", filename, err)
+	}
+}
+
+const lefthookAllHooksYAML = `prepare-commit-msg:
+  commands:
+    entire:
+      run: entire hooks git prepare-commit-msg {1} {2}
+commit-msg:
+  commands:
+    entire:
+      run: entire hooks git commit-msg {1}
+post-commit:
+  commands:
+    entire:
+      run: entire hooks git post-commit
+post-rewrite:
+  commands:
+    entire:
+      run: entire hooks git post-rewrite {1}
+pre-push:
+  commands:
+    entire:
+      run: entire hooks git pre-push {1}
+`
+
+func TestIsEntireWiredIntoManager_Lefthook_AllHooksYAML(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeLefthookConfig(t, dir, "lefthook.yml", lefthookAllHooksYAML)
+
+	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Error("expected wired=true when all 5 hooks call entire dispatch")
+	}
+}
+
+func TestIsEntireWiredIntoManager_Lefthook_MissingOneHook(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Drop the pre-push section entirely.
+	partial := strings.Replace(lefthookAllHooksYAML,
+		"pre-push:\n  commands:\n    entire:\n      run: entire hooks git pre-push {1}\n", "", 1)
+	writeLefthookConfig(t, dir, "lefthook.yml", partial)
+
+	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Error("expected wired=false when pre-push is not wired")
+	}
+}
+
+func TestIsEntireWiredIntoManager_Lefthook_OnlyInComment(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// The dispatch string appears only in a comment, not in any run:.
+	commented := "# entire hooks git pre-push {1}\npre-push:\n  commands:\n    lint:\n      run: npm run lint\n"
+	writeLefthookConfig(t, dir, "lefthook.yml", commented)
+
+	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Error("expected wired=false when entire dispatch only appears in a comment")
+	}
+}
+
+func TestIsEntireWiredIntoManager_Lefthook_JSON(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	json := `{
+  "prepare-commit-msg": {"commands": {"entire": {"run": "entire hooks git prepare-commit-msg {1} {2}"}}},
+  "commit-msg": {"commands": {"entire": {"run": "entire hooks git commit-msg {1}"}}},
+  "post-commit": {"commands": {"entire": {"run": "entire hooks git post-commit"}}},
+  "post-rewrite": {"commands": {"entire": {"run": "entire hooks git post-rewrite {1}"}}},
+  "pre-push": {"commands": {"entire": {"run": "entire hooks git pre-push {1}"}}}
+}`
+	writeLefthookConfig(t, dir, "lefthook.json", json)
+
+	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Error("expected wired=true for JSON config with all hooks")
+	}
+}
+
+func TestIsEntireWiredIntoManager_Lefthook_TOML(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	toml := `[prepare-commit-msg.commands.entire]
+run = "entire hooks git prepare-commit-msg {1} {2}"
+[commit-msg.commands.entire]
+run = "entire hooks git commit-msg {1}"
+[post-commit.commands.entire]
+run = "entire hooks git post-commit"
+[post-rewrite.commands.entire]
+run = "entire hooks git post-rewrite {1}"
+[pre-push.commands.entire]
+run = "entire hooks git pre-push {1}"
+`
+	writeLefthookConfig(t, dir, "lefthook.toml", toml)
+
+	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Error("expected wired=true for TOML config with all hooks")
+	}
+}
+
+// A scripts/-style entry (native $1/$@ rather than {1}) should also count.
+func TestIsEntireWiredIntoManager_Lefthook_ScriptsForm(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	yaml := `prepare-commit-msg:
+  scripts:
+    "entire.sh":
+      runner: sh
+commit-msg:
+  commands:
+    entire:
+      run: entire hooks git commit-msg {1}
+post-commit:
+  commands:
+    entire:
+      run: entire hooks git post-commit
+post-rewrite:
+  commands:
+    entire:
+      run: entire hooks git post-rewrite {1}
+pre-push:
+  commands:
+    entire:
+      run: entire hooks git pre-push {1}
+`
+	writeLefthookConfig(t, dir, "lefthook.yml", yaml)
+	// The prepare-commit-msg script file carries the dispatch call.
+	scriptsDir := filepath.Join(dir, ".lefthook", "prepare-commit-msg")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptsDir, "entire.sh"),
+		[]byte("#!/bin/sh\nentire hooks git prepare-commit-msg \"$1\" \"$2\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Error("expected wired=true when a hook is wired via a scripts/ entry")
+	}
+}
+
+// lefthook-local.yml should fill in a hook missing from the main config.
+func TestIsEntireWiredIntoManager_Lefthook_LocalOverlay(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Main config wires 4 hooks, missing pre-push.
+	main := strings.Replace(lefthookAllHooksYAML,
+		"pre-push:\n  commands:\n    entire:\n      run: entire hooks git pre-push {1}\n", "", 1)
+	writeLefthookConfig(t, dir, "lefthook.yml", main)
+	// Local overlay adds pre-push.
+	writeLefthookConfig(t, dir, "lefthook-local.yml",
+		"pre-push:\n  commands:\n    entire:\n      run: entire hooks git pre-push {1}\n")
+
+	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Error("expected wired=true when lefthook-local fills in the missing hook")
+	}
+}
+
+func TestIsEntireWiredIntoManager_Lefthook_NoConfig(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ok, err := isEntireWiredIntoManager(dir, "lefthook")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Error("expected wired=false when no lefthook config exists")
+	}
+}
+
+// wiredManagerHooks reports which hooks are wired so doctor can show the
+// missing set. Verify it returns the accurate subset.
+func TestLefthookWiredHooks_PartialReporting(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	partial := strings.Replace(lefthookAllHooksYAML,
+		"pre-push:\n  commands:\n    entire:\n      run: entire hooks git pre-push {1}\n", "", 1)
+	writeLefthookConfig(t, dir, "lefthook.yml", partial)
+
+	wired, err := lefthookWiredHooks(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wired["pre-push"] {
+		t.Error("pre-push should not be reported as wired")
+	}
+	if !wired["commit-msg"] {
+		t.Error("commit-msg should be reported as wired")
+	}
+}
