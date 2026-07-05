@@ -168,21 +168,51 @@ type GitHooksSettings struct {
 
 	// ExternalDir is a repo-relative path to the user-owned hook directory
 	// (e.g. ".husky" for Husky v9, "common/git-hooks" for Rush).
-	// Required when Backend == "external".
+	// Required when Backend == "external" unless Manager is set.
 	ExternalDir string `json:"external_dir,omitempty"`
+
+	// Manager names a config-driven hook manager whose configuration file
+	// (rather than a directory of scripts) is the source of truth for
+	// whether Entire is wired in. Currently only "lefthook" is supported.
+	// Only valid when Backend == "external". When set, ExternalDir is
+	// optional because detection reads the manager's config file instead
+	// of a directory of per-hook scripts.
+	Manager string `json:"manager,omitempty"`
 }
+
+// knownHookManagers is the set of config-driven managers Entire can detect.
+var knownHookManagers = map[string]bool{
+	"lefthook": true,
+}
+
+// backendExternal is the git_hooks.backend value that yields hook ownership
+// to a user-managed directory or config-driven manager.
+const backendExternal = "external"
 
 // Validate returns an error if the git hooks configuration is invalid.
 func (g *GitHooksSettings) Validate() error {
 	if g == nil {
 		return nil
 	}
+	if g.Manager != "" {
+		if g.Backend != backendExternal {
+			return fmt.Errorf(`git_hooks.manager is only valid with backend = "external" (got backend %q)`, g.Backend)
+		}
+		if !knownHookManagers[g.Manager] {
+			return fmt.Errorf("git_hooks.manager %q is not a supported hook manager", g.Manager)
+		}
+	}
 	switch g.Backend {
 	case "", "direct":
 		return nil
-	case "external":
-		if g.ExternalDir == "" {
+	case backendExternal:
+		// external_dir is required only when no config-driven manager is
+		// set — a manager (lefthook) locates wiring via its config file.
+		if g.ExternalDir == "" && g.Manager == "" {
 			return errors.New(`git_hooks.external_dir is required when backend = "external"`)
+		}
+		if g.ExternalDir == "" {
+			return nil
 		}
 		if filepath.IsAbs(g.ExternalDir) {
 			return fmt.Errorf("git_hooks.external_dir must be repo-relative (got %q)", g.ExternalDir)
@@ -229,7 +259,7 @@ func isWindowsAnchoredPath(p string) bool {
 
 // IsExternalGitHooks reports whether the external git hooks backend is active.
 func (s *EntireSettings) IsExternalGitHooks() bool {
-	return s != nil && s.GitHooks != nil && s.GitHooks.Backend == "external"
+	return s != nil && s.GitHooks != nil && s.GitHooks.Backend == backendExternal
 }
 
 // ExternalHookDir returns the configured external hook directory, or empty
@@ -239,6 +269,16 @@ func (s *EntireSettings) ExternalHookDir() string {
 		return ""
 	}
 	return s.GitHooks.ExternalDir
+}
+
+// HookManager returns the configured config-driven hook manager (e.g.
+// "lefthook"), or empty string when the external backend is not active or
+// no manager is configured (directory-of-scripts mode).
+func (s *EntireSettings) HookManager() string {
+	if !s.IsExternalGitHooks() {
+		return ""
+	}
+	return s.GitHooks.Manager
 }
 
 // ClonePreferences stores clone-local, uncommitted preferences that should be

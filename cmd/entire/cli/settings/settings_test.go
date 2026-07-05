@@ -1497,3 +1497,67 @@ func TestLoad_GitHooks_ExternalDir_RejectsInteriorParentSegment(t *testing.T) {
 		t.Errorf("error should mention '..', got: %v", err)
 	}
 }
+
+// A config-driven manager (lefthook) is expressed via git_hooks.manager.
+// external_dir is optional in that mode — lefthook stores hook wiring in
+// its own config file, not a directory of scripts.
+func TestLoad_GitHooks_ManagerLefthook_ExternalDirOptional(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook"}}`,
+		"",
+	)
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load() error = %v (external_dir should be optional when manager is set)", err)
+	}
+	if !s.IsExternalGitHooks() {
+		t.Error("IsExternalGitHooks() = false, want true")
+	}
+	if got := s.HookManager(); got != "lefthook" {
+		t.Errorf("HookManager() = %q, want %q", got, "lefthook")
+	}
+}
+
+func TestLoad_GitHooks_Manager_RequiresExternalBackend(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "direct", "manager": "lefthook"}}`,
+		"",
+	)
+	_, err := Load(context.Background())
+	if err == nil {
+		t.Fatal("Load() should reject manager when backend is not external")
+	}
+	if !strings.Contains(err.Error(), "manager") {
+		t.Errorf("error should mention manager, got: %v", err)
+	}
+}
+
+func TestLoad_GitHooks_Manager_RejectsUnknownValue(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "overcommit"}}`,
+		"",
+	)
+	_, err := Load(context.Background())
+	if err == nil {
+		t.Fatal("Load() should reject an unknown manager value")
+	}
+	if !strings.Contains(err.Error(), "overcommit") {
+		t.Errorf("error should contain the unknown manager value, got: %v", err)
+	}
+}
+
+// manager and external_dir can coexist (user points lefthook detection at
+// a repo but also keeps a directory around); external_dir still validated.
+func TestLoad_GitHooks_Manager_WithExternalDir_StillValidatesDir(t *testing.T) {
+	setupSettingsDir(t,
+		`{"enabled": true, "git_hooks": {"backend": "external", "manager": "lefthook", "external_dir": "../escape"}}`,
+		"",
+	)
+	_, err := Load(context.Background())
+	if err == nil {
+		t.Fatal("Load() should still reject a traversing external_dir even when manager is set")
+	}
+	if !strings.Contains(err.Error(), "..") {
+		t.Errorf("error should mention '..', got: %v", err)
+	}
+}
