@@ -464,3 +464,106 @@ func TestHTTPS_PushFailsWithoutToken(t *testing.T) {
 		}
 	})
 }
+
+// =============================================================================
+// C. Cross-machine clone → fetch (over HTTPS with token)
+// =============================================================================
+
+// TestHTTPS_FetchMetadataBranchIfMissingOnPrePush is test C1: the production
+// fetchMetadataBranchIfMissing path, exercised for real. A clone that lacks the
+// local v1 branch resolves its pre-push settings; because a checkpoint_remote is
+// configured, resolvePushSettings fetches the missing v1 branch from the remote
+// before pushing — so the local branch appears without any manual `git fetch`.
+//
+// It runs over HTTPS because a local-path origin can't derive a checkpoint URL
+// (ParseURL fails and derivation falls back to origin without fetching). git-branch
+// only: it asserts on the v1 branch, which git-refs has no equivalent of.
+func TestHTTPS_FetchMetadataBranchIfMissingOnPrePush(t *testing.T) {
+	t.Parallel()
+
+	srv := startGitHTTPSServer(t, "testorg/main-repo")
+	env := NewFeatureBranchEnv(t)
+
+	mainBare := srv.BareDirs["testorg/main-repo"]
+	httpsURL := srv.URL + "/testorg/main-repo.git"
+	seedBareRepo(t, env, mainBare, httpsURL)
+	env.ExtraEnv = srv.tokenEnv("c1-token")
+
+	// Repo A creates and pushes a checkpoint so the remote has a v1 branch.
+	_ = createCheckpointedCommit(t, env, "Add module", "mod.go", "package mod", "Add module")
+	env.RunPrePush("origin")
+	if !env.BranchExistsOnRemote(mainBare, paths.MetadataBranchName) {
+		t.Fatal("v1 branch should be on the remote after repo A's push")
+	}
+
+	// Clone over HTTPS. A plain clone leaves v1 only as a remote-tracking ref, not
+	// a local branch.
+	clone := cloneFromBareWithHTTPS(t, env, mainBare, httpsURL)
+	clone.ExtraEnv = srv.tokenEnv("c1-token")
+	clone.PatchSettings(map[string]any{
+		"strategy_options": map[string]any{
+			"checkpoint_remote": map[string]any{
+				"provider": "github",
+				"repo":     "testorg/main-repo",
+			},
+		},
+	})
+	if clone.BranchExists(paths.MetadataBranchName) {
+		t.Fatal("clone should not have a local v1 branch before pre-push settings resolution")
+	}
+
+	// Resolving pre-push settings triggers fetchMetadataBranchIfMissing, which
+	// fetches v1 from the checkpoint remote — no manual git fetch.
+	clone.RunPrePush("origin")
+
+	if !clone.BranchExists(paths.MetadataBranchName) {
+		t.Error("local v1 branch should appear after pre-push settings resolution fetched it (fetchMetadataBranchIfMissing)")
+	}
+}
+
+// TestHTTPS_CloneReadAutoFetchesWithToken is test C4: reading a checkpoint from a
+// fresh clone over an authenticated HTTPS remote auto-fetches the checkpoint data
+// with the token. The git-branch path fetches the v1 branch on miss; the git-refs
+// path fetches exactly the per-checkpoint ref via the on-demand RefFetcher. Both
+// require ENTIRE_CHECKPOINT_TOKEN to reach the server.
+func TestHTTPS_CloneReadAutoFetchesWithToken(t *testing.T) {
+	t.Parallel()
+
+	ForEachBackend(t, func(t *testing.T, backend string) {
+		srv := startGitHTTPSServer(t, "testorg/main-repo")
+		env := NewFeatureBranchEnv(t)
+		env.CheckpointStore = backend
+
+		mainBare := srv.BareDirs["testorg/main-repo"]
+		httpsURL := srv.URL + "/testorg/main-repo.git"
+		seedBareRepo(t, env, mainBare, httpsURL)
+		env.ExtraEnv = srv.tokenEnv("c4-token")
+
+		checkpointID := createCheckpointedCommit(t, env, "Add remote feature", "feat.go", "package feat", "Add remote feature")
+		if checkpointID == "" {
+			t.Fatal("should have a checkpoint ID after condensation")
+		}
+		// Push checkpoints into the server (token-authenticated CLI push).
+		env.RunPrePush("origin")
+		if !env.CheckpointExistsOnRemote(mainBare, checkpointID) {
+			t.Fatal("checkpoint should be on the HTTPS remote after push")
+		}
+
+		clone := cloneFromBareWithHTTPS(t, env, mainBare, httpsURL)
+		clone.ExtraEnv = srv.tokenEnv("c4-token")
+		if clone.CheckpointsPresentLocally() {
+			t.Fatalf("[%s] clone should not have the checkpoint locally before a read", backend)
+		}
+
+		// Reading the checkpoint auto-fetches it from the authenticated remote.
+		out := clone.RunCLI("checkpoint", "explain", "--checkpoint", checkpointID)
+		if !strings.Contains(out, "Add remote feature") {
+			t.Errorf("[%s] explain should surface the prompt after auto-fetch, got:\n%s", backend, out)
+		}
+
+		// git-refs lands exactly the per-checkpoint ref locally after the read.
+		if clone.usingGitRefs() && !refExists(t, clone.RepoDir, checkpointRefName(checkpointID)) {
+			t.Errorf("git-refs: checkpoint ref should be fetched locally after the authenticated read")
+		}
+	})
+}

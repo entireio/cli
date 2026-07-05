@@ -599,7 +599,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	}()
 
 	// Match the prefix locally; on miss, fetch from remote and retry once.
-	matches, lookup := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, checkpointIDPrefix)
+	matches, lookup, fallbackErr := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, checkpointIDPrefix)
 
 	var fullCheckpointID id.CheckpointID
 	switch len(matches) {
@@ -630,6 +630,12 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 			}
 			outputExplainContent(w, output, noPager)
 			return nil
+		}
+		// The prefix matched nothing locally (including temp checkpoints) and
+		// the remote fetch failed: report the fetch failure, not "not found" —
+		// the checkpoint may well exist on a reachable remote.
+		if fallbackErr != nil {
+			return fmt.Errorf("checkpoint %s not found locally; fetching from remote failed: %w", checkpointIDPrefix, fallbackErr)
 		}
 		return fmt.Errorf("%w: %s", checkpoint.ErrCheckpointNotFound, checkpointIDPrefix)
 	case 1:

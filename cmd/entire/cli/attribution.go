@@ -571,11 +571,14 @@ func (r *attributionResolver) fetchCheckpointContext(cpID id.CheckpointID, file 
 	}
 	defer lookup.Close()
 
-	matches, fresh := matchCheckpointPrefixWithRemoteFallback(r.ctx, io.Discard, lookup, cpID.String())
+	matches, fresh, fallbackErr := matchCheckpointPrefixWithRemoteFallback(r.ctx, io.Discard, lookup, cpID.String())
 	if fresh != lookup {
 		defer fresh.Close()
 	}
 	if len(matches) != 1 {
+		if fallbackErr != nil {
+			return attributionCheckpointContext{}, fallbackErr
+		}
 		return attributionCheckpointContext{}, checkpoint.ErrCheckpointNotFound
 	}
 

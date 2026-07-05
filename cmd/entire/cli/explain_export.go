@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -110,7 +111,7 @@ func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explai
 		return id.CheckpointID(""), nil, lookupErr
 	}
 
-	matches, resolvedLookup := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, prefix)
+	matches, resolvedLookup, fallbackErr := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, prefix)
 	if resolvedLookup != lookup {
 		_ = lookup.Close()
 		lookup = resolvedLookup
@@ -128,6 +129,9 @@ func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explai
 				_ = lookup.Close()
 				return cpID, freshLookup, nil
 			}
+		}
+		if fallbackErr != nil {
+			return id.CheckpointID(""), lookup, fmt.Errorf("checkpoint %s not found locally; fetching from remote failed: %w", prefix, fallbackErr)
 		}
 		return id.CheckpointID(""), lookup, fmt.Errorf("%w: %s", checkpoint.ErrCheckpointNotFound, prefix)
 	default:
@@ -166,9 +170,12 @@ func resolveCheckpointFromCommitRef(ctx context.Context, errW io.Writer, commitR
 
 	// If the trailer points at a checkpoint we don't have locally, do the
 	// same remote-fetch retry the prefix path uses; otherwise downstream
-	// metadata reads would fail with an immediate "not found".
+	// metadata reads would fail with an immediate "not found". A fetch error
+	// is deliberately ignored here: this is an opportunistic prefetch, and the
+	// downstream store read surfaces real fetch failures with the correct
+	// absent-vs-error semantics.
 	if !lookupHasCheckpoint(lookup, cpID) {
-		if matches, fresh := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, cpID.String()); len(matches) == 1 {
+		if matches, fresh, _ := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, cpID.String()); len(matches) == 1 { //nolint:errcheck // opportunistic prefetch; downstream store read surfaces real fetch failures
 			if fresh != lookup {
 				_ = lookup.Close()
 			}
@@ -192,11 +199,15 @@ func lookupHasCheckpoint(lookup *explainCheckpointLookup, cpID id.CheckpointID) 
 // matchCheckpointPrefixWithRemoteFallback returns all committed checkpoints
 // whose ID starts with prefix. On a local miss, fetches metadata from the
 // remote (treeless origin → full origin chain) and retries once with a fresh
-// lookup. The returned lookup may differ from the input on retry.
-func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer, lookup *explainCheckpointLookup, prefix string) ([]id.CheckpointID, *explainCheckpointLookup) {
+// lookup. The returned lookup may differ from the input on retry. A non-nil
+// error means the remote fetch (or the post-fetch re-list) failed for real —
+// callers must surface it instead of reporting "checkpoint not found", which
+// would tell the user the checkpoint doesn't exist when it may well exist on
+// a reachable remote (regression class 7bbdad09c).
+func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer, lookup *explainCheckpointLookup, prefix string) ([]id.CheckpointID, *explainCheckpointLookup, error) {
 	matches := matchCheckpointPrefix(lookup, prefix)
 	if len(matches) > 0 {
-		return matches, lookup
+		return matches, lookup, nil
 	}
 
 	// git-refs primary: there is no single metadata branch to fetch — each
@@ -210,21 +221,30 @@ func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer
 			// rather than fetch a malformed ref.
 			refName, refErr := checkpoint.RefName(cid)
 			if refErr != nil {
-				return nil, lookup
+				return nil, lookup, nil //nolint:nilerr // defensive: fall through to not-found rather than fetch a malformed ref
+			}
+			// No resolvable checkpoint source (e.g. a repo with no remote):
+			// local absence is authoritative, so report not-found rather than
+			// attempting a fetch that can only fail with a confusing error.
+			if _, urlErr := remote.FetchURL(ctx); urlErr != nil {
+				return nil, lookup, nil //nolint:nilerr // no remote to consult; local absence is authoritative
 			}
 			stop := startSpinner(errW, "Fetching checkpoint from remote")
 			fetchErr := FetchCheckpointRef(ctx, refName)
 			stop(false)
-			if fetchErr == nil {
-				if fresh, freshErr := newExplainCheckpointLookup(ctx); freshErr == nil {
-					if m := matchCheckpointPrefix(fresh, prefix); len(m) > 0 {
-						return m, fresh
-					}
-					_ = fresh.Close()
-				}
+			if fetchErr != nil {
+				return nil, lookup, fetchErr
 			}
+			fresh, freshErr := newExplainCheckpointLookup(ctx)
+			if freshErr != nil {
+				return nil, lookup, freshErr
+			}
+			if m := matchCheckpointPrefix(fresh, prefix); len(m) > 0 {
+				return m, fresh, nil
+			}
+			_ = fresh.Close()
 		}
-		return nil, lookup
+		return nil, lookup, nil
 	}
 
 	stop := startSpinner(errW, "Fetching checkpoint metadata from remote")
@@ -234,13 +254,13 @@ func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer
 	}
 	stop(false)
 	if v1Err != nil {
-		return nil, lookup
+		return nil, lookup, nil //nolint:nilerr // v1-branch fallback keeps its historical fail-soft behavior (see plan B-group)
 	}
 	fresh, freshErr := newExplainCheckpointLookup(ctx)
 	if freshErr != nil {
-		return nil, lookup
+		return nil, lookup, nil //nolint:nilerr // v1-branch fallback keeps its historical fail-soft behavior (see plan B-group)
 	}
-	return matchCheckpointPrefix(fresh, prefix), fresh
+	return matchCheckpointPrefix(fresh, prefix), fresh, nil
 }
 
 func matchCheckpointPrefix(lookup *explainCheckpointLookup, prefix string) []id.CheckpointID {

@@ -1961,11 +1961,14 @@ func (env *TestEnv) GitPush(remote, refSpec string) {
 }
 
 // InstallRealPrePushHook writes .git/hooks/pre-push so a plain `git push` (no
-// --no-verify) runs the checkpoint sync exactly as git runs it: git invokes the
-// hook with the remote name ($1) and URL ($2) as argv and feeds
-// "<local-ref> <local-sha> <remote-ref> <remote-sha>" lines on stdin. The hook
-// inherits the pushing process's environment, so the checkpoint-store and git
-// isolation overrides from GitPushWithHooks propagate into it.
+// --no-verify) runs the checkpoint sync through a real git-invoked hook: git
+// feeds "<local-ref> <local-sha> <remote-ref> <remote-sha>" lines on stdin
+// (inherited by the exec'd binary) and passes the remote name ($1) and URL
+// ($2) as argv. Like the production hook template (strategy/hooks.go), the
+// script forwards only the remote name — `entire hooks git pre-push` does not
+// take the URL. The hook inherits the pushing process's environment, so the
+// checkpoint-store and git isolation overrides from GitPushWithHooks propagate
+// into it.
 func (env *TestEnv) InstallRealPrePushHook() {
 	env.T.Helper()
 
@@ -1997,6 +2000,94 @@ func (env *TestEnv) GitPushWithHooks(remote, refSpec string) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		env.T.Fatalf("git push (with hooks) %s %s failed: %v\n%s", remote, refSpec, err, output)
 	}
+}
+
+// SetGitConfig sets a repo-local git config value and re-baselines the
+// .git/config guard so the intentional mutation isn't flagged during cleanup
+// (mirrors the set-url + setGitConfigBaseline pattern in the HTTPS helpers).
+func (env *TestEnv) SetGitConfig(key, value string) {
+	env.T.Helper()
+	cmd := exec.CommandContext(env.T.Context(), "git", "config", key, value)
+	cmd.Dir = env.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		env.T.Fatalf("git config %s failed: %v\n%s", key, err, output)
+	}
+	env.setGitConfigBaseline()
+}
+
+// GitTag creates a lightweight tag at HEAD. Fails the test on error.
+func (env *TestEnv) GitTag(name string) {
+	env.T.Helper()
+	cmd := exec.CommandContext(env.T.Context(), "git", "tag", name)
+	cmd.Dir = env.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		env.T.Fatalf("git tag %s failed: %v\n%s", name, err, output)
+	}
+}
+
+// PushQueueRefs returns the checkpoint refs currently recorded in the git-refs
+// push queue (entire-checkpoint-push-queue.jsonl in the git common dir). It reads
+// the file directly rather than draining the queue so it is a non-destructive
+// peek. Returns nil when the queue file is absent (nothing queued).
+func (env *TestEnv) PushQueueRefs() []string {
+	env.T.Helper()
+
+	// Resolve the common dir like production does (checkpoint/pushqueue.go):
+	// in a linked worktree .git is a file and the queue lives in the shared
+	// common dir, not under RepoDir/.git.
+	cmd := exec.CommandContext(env.T.Context(), "git", "rev-parse", "--path-format=absolute", "--git-common-dir")
+	cmd.Dir = env.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	commonDirOut, err := cmd.Output()
+	if err != nil {
+		env.T.Fatalf("resolve git common dir: %v", err)
+	}
+	queuePath := filepath.Join(strings.TrimSpace(string(commonDirOut)), "entire-checkpoint-push-queue.jsonl")
+	data, err := os.ReadFile(queuePath) //nolint:gosec // G304: path built from test env, not user input
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		env.T.Fatalf("read push queue: %v", err)
+	}
+
+	var refs []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry struct {
+			Ref string `json:"ref"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			env.T.Fatalf("parse push queue line %q: %v", line, err)
+		}
+		if entry.Ref != "" {
+			refs = append(refs, entry.Ref)
+		}
+	}
+	return refs
+}
+
+// GitPushArgsWithHooks installs the pre-push hook and runs `git push <args>`
+// (WITHOUT --no-verify) so the real git-invoked hook fires (see
+// InstallRealPrePushHook for its fidelity notes), then
+// returns the combined output and any error instead of failing the test. Use it
+// for push shapes GitPushWithHooks can't express — a `--delete` (zero-sha stdin),
+// a tag-only push, or an expected graceful-degradation exit code.
+func (env *TestEnv) GitPushArgsWithHooks(args ...string) (string, error) {
+	env.T.Helper()
+
+	env.InstallRealPrePushHook()
+
+	cmd := execx.NonInteractive(env.T.Context(), "git", append([]string{"push"}, args...)...)
+	cmd.Dir = env.RepoDir
+	cmd.Env = env.cliEnv()
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 // RunPrePush runs the pre-push hook via the CLI binary, feeding realistic stdin

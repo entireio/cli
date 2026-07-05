@@ -567,7 +567,7 @@ func TestGracefulDegradation_UnreachableCheckpointRemoteOnCloneIsSilent(t *testi
 		bareDir := env.SetupBareRemote()
 
 		// Create a session in repo A and push
-		createCheckpointedCommit(t, env, "Initial work", "init.go", "package init", "Initial work")
+		initialID := createCheckpointedCommit(t, env, "Initial work", "init.go", "package init", "Initial work")
 		env.GitPush("origin", "HEAD")
 		env.RunPrePush("origin")
 
@@ -597,35 +597,31 @@ func TestGracefulDegradation_UnreachableCheckpointRemoteOnCloneIsSilent(t *testi
 			t.Fatalf("session start should not fail with unreachable checkpoint_remote: %v", err)
 		}
 
+		// Stage the session's changes before stop (as a real agent session would;
+		// the stop hook skips condensation entirely when no files changed on disk
+		// during the session).
+		cloneEnv.WriteFile("clone.go", "package clone")
+		cloneEnv.GitAdd("clone.go")
+
 		if err := cloneEnv.SimulateStop(session.ID, transcriptPath); err != nil {
 			t.Fatalf("session stop should not fail: %v", err)
 		}
 
 		// PrePush should also not fail -- checkpoint_remote URL derivation will fail
 		// (origin is a local path, can't parse it), so it falls back to pushing to origin.
-		cloneEnv.WriteFile("clone.go", "package clone")
-		cloneEnv.GitAdd("clone.go")
 		cloneEnv.GitCommitWithShadowHooks("Clone work", "clone.go")
 		cloneEnv.RunPrePush("origin")
 
-		// Verify that the session actually created a local checkpoint despite the
-		// unreachable checkpoint_remote config.
-		//
-		// KNOWN BUG (git-refs): this test stages the session's file changes AFTER
-		// the stop hook. Under git-branch, condensation still creates the local v1
-		// checkpoint; under git-refs it creates no per-checkpoint ref (only the v1
-		// session-metadata branch is updated). A fresh git-refs repo and a git-refs
-		// clone that stages before stop both create the ref correctly (verified), so
-		// this is a real backend divergence in the write-after-stop path, not a
-		// harness artifact. The graceful-degradation path this test targets
-		// (session start/stop/pre-push do not error with an unreachable
-		// checkpoint_remote) is exercised under git-refs above; only this final
-		// local-presence check is skipped. Tracked for the section-3 follow-up.
-		if env.usingGitRefs() {
-			t.Skip("KNOWN BUG: git-refs creates no per-checkpoint ref when files are staged after the stop hook")
-		}
+		// Verify the clone's session condensed a NEW local checkpoint despite the
+		// unreachable checkpoint_remote config. Comparing against the initial
+		// checkpoint matters under git-branch: the clone inherits repo A's v1
+		// branch from the plain clone, so mere branch presence would pass even if
+		// condensation never ran.
 		if !cloneEnv.CheckpointsPresentLocally() {
 			t.Error("checkpoints should exist locally after session + commit in clone")
+		}
+		if newID := cloneEnv.LatestCheckpointID(); newID == "" || newID == initialID {
+			t.Errorf("clone session should have condensed a new checkpoint, got %q (initial %q)", newID, initialID)
 		}
 	})
 }
