@@ -24,8 +24,9 @@ func TestHermeticityGuard_ExternalHostFailsFast(t *testing.T) {
 	defer cancel()
 
 	// ls-remote against a public-looking github URL must be refused immediately
-	// by the insteadOf redirect to 127.0.0.1:1, not hang on DNS/network or block
-	// on a credential prompt.
+	// by the per-host http.<url>.proxy entries pointing at the dead loopback
+	// address (see testutil.hermeticGitConfig), not hang on DNS/network or
+	// block on a credential prompt.
 	cmd := exec.CommandContext(ctx, "git", "ls-remote", "https://github.com/example/example")
 	cmd.Env = testutil.GitIsolatedEnv()
 

@@ -114,7 +114,9 @@ func (env *TestEnv) RemoteCheckpointState(bareDir string) string {
 	cmd.Env = testutil.GitIsolatedEnv()
 	out, err := cmd.Output()
 	if err != nil {
-		return ""
+		// Fail rather than return "": two broken invocations comparing equal
+		// would make an idempotence assertion pass vacuously.
+		env.T.Fatalf("RemoteCheckpointState: git for-each-ref %s in %s failed: %v", prefix, bareDir, err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	sort.Strings(lines)
