@@ -208,7 +208,11 @@ func AssertCheckpointsOnRemote(t *testing.T, _ *RepoState, bareDir string) {
 	t.Helper()
 
 	if UsingGitRefs() {
-		out := gitOutputSafe(bareDir, "for-each-ref", "--format=%(refname)", checkpointRefPrefix)
+		out, err := GitOutputErr(bareDir, "for-each-ref", "--format=%(refname)", checkpointRefPrefix)
+		if err != nil {
+			t.Errorf("listing %s* refs on remote %s failed: %v", checkpointRefPrefix, bareDir, err)
+			return
+		}
 		if strings.TrimSpace(out) == "" {
 			t.Errorf("expected at least one %s* ref on remote %s, found none", checkpointRefPrefix, bareDir)
 		}
