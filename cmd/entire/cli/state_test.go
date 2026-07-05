@@ -65,9 +65,13 @@ func TestPrePromptState_BackwardCompat_LastTranscriptLineCount(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	// Initialize git repo
+	// Initialize git repo. refs/ is required alongside objects/ and HEAD for
+	// the native git CLI (used by GitCLIStatus) to recognize the directory.
 	if err := os.MkdirAll(".git/objects", 0o755); err != nil {
 		t.Fatalf("Failed to create .git: %v", err)
+	}
+	if err := os.MkdirAll(".git/refs", 0o755); err != nil {
+		t.Fatalf("Failed to create .git/refs: %v", err)
 	}
 	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
 		t.Fatalf("Failed to create HEAD: %v", err)
@@ -347,9 +351,13 @@ func setupTestRepoWithTranscript(t *testing.T, transcriptContent string, transcr
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	// Initialize git repo
+	// Initialize git repo. refs/ is required alongside objects/ and HEAD for
+	// the native git CLI (used by GitCLIStatus) to recognize the directory.
 	if err := os.MkdirAll(".git/objects", 0o755); err != nil {
 		t.Fatalf("Failed to create .git: %v", err)
+	}
+	if err := os.MkdirAll(".git/refs", 0o755); err != nil {
+		t.Fatalf("Failed to create .git/refs: %v", err)
 	}
 	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
 		t.Fatalf("Failed to create HEAD: %v", err)

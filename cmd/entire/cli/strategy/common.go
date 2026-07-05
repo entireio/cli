@@ -1330,6 +1330,50 @@ func CollectUntrackedFiles(ctx context.Context) ([]string, error) {
 	return collectUntrackedFiles(ctx)
 }
 
+// GitCLIStatus returns the worktree status using the native git CLI, parsed
+// into a go-git-compatible git.Status map. Native git prunes gitignored
+// directories during its walk and uses the index/fsmonitor; go-git's
+// worktree.Status() stats and hashes every file on disk, which costs tens of
+// seconds per call on repos with large ignored directories (node_modules/,
+// SwiftPM .build/, etc.). Only entries that differ from HEAD/index appear in
+// the map — callers treat missing entries as unmodified, matching how the
+// go-git map is consumed.
+func GitCLIStatus(ctx context.Context) (git.Status, error) {
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve worktree root: %w", err)
+	}
+
+	// -z: NUL-separated, no quoting; -uall: individual untracked files rather
+	// than collapsed directories; --no-renames: one path per entry so the
+	// parser never needs the two-path rename form.
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain=v1", "-z", "-uall", "--no-renames")
+	cmd.Dir = repoRoot
+	output, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil, fmt.Errorf("git status failed: %s: %w", strings.TrimSpace(string(exitErr.Stderr)), err)
+		}
+		return nil, fmt.Errorf("git status failed: %w", err)
+	}
+
+	status := make(git.Status)
+	for _, entry := range strings.Split(string(output), "\x00") {
+		// Format: "XY path" — X staging code, Y worktree code, one space.
+		if len(entry) < 4 || entry[2] != ' ' {
+			continue
+		}
+		// Porcelain v1 status letters are identical to go-git's StatusCode
+		// byte values ('?', 'M', 'A', 'D', 'U', ' ', ...).
+		status[entry[3:]] = &git.FileStatus{
+			Staging:  git.StatusCode(entry[0]),
+			Worktree: git.StatusCode(entry[1]),
+		}
+	}
+	return status, nil
+}
+
 // NOTE: The following git tree helper functions have been moved to checkpoint/ package:
 // - FlattenTree -> checkpoint.FlattenTree
 // - CreateBlobFromContent -> checkpoint.CreateBlobFromContent

@@ -2488,8 +2488,9 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 		return result
 	}
 
-	// Get worktree status to find ALL changed files
-	status, err := worktree.Status()
+	// Get worktree status to find ALL changed files. Native git CLI — go-git's
+	// worktree.Status() scans every file on disk including gitignored trees.
+	status, err := GitCLIStatus(ctx)
 	if err != nil {
 		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree status",
 			slog.String("error", err.Error()))

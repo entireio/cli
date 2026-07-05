@@ -264,18 +264,7 @@ func shouldIgnoreSessionTrackingPath(relPath string) bool {
 // Deleted includes both staged and unstaged deletions.
 // All results exclude .entire/ directory.
 func DetectFileChanges(ctx context.Context, previouslyUntracked []string) (*FileChanges, error) {
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
-
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get worktree: %w", err)
-	}
-
-	status, err := worktree.Status()
+	status, err := strategy.GitCLIStatus(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get status: %w", err)
 	}
@@ -433,18 +422,7 @@ func resolveTmpDir(ctx context.Context) string {
 // getUntrackedFilesForState returns a list of untracked files using go-git
 // Excludes .entire directory
 func getUntrackedFilesForState(ctx context.Context) ([]string, error) {
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer repo.Close()
-
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return nil, err //nolint:wrapcheck // already present in codebase
-	}
-
-	status, err := worktree.Status()
+	status, err := strategy.GitCLIStatus(ctx)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // already present in codebase
 	}
