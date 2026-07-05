@@ -184,6 +184,31 @@ Tested layouts:
    invokes them, so empty/delete them if they'd duplicate Entire's
    direct-mode work.
 
+## Why marker detection and not active probing
+
+An alternative we considered: `entire doctor` invokes each user hook
+script with a sentinel argument, and Entire's own hook handler records
+when it was called this way. If the handler observes the sentinel,
+the wiring is proven end-to-end without asking the user to write
+anything specific.
+
+We chose marker detection instead, for three reasons:
+
+- **User hook scripts are unpredictable.** They may `set -e`, exit
+  early on conditions, or rely on real `$1` / `$2` values (commit-msg
+  file paths, push refs, etc.). A synthetic probe cannot construct
+  valid arguments for every hook, so a probe that "doesn't fire" could
+  mean the wiring is broken *or* mean the script legitimately took an
+  early-exit branch. The signal is ambiguous.
+- **Responsibility should sit with the user, not Entire.** Active
+  probing implies Entire has verified the wiring works, which it
+  hasn't — it has only verified one code path. Marker detection makes
+  the contract explicit: the user asserts they have wired Entire in;
+  Entire only checks that assertion.
+- **Marker detection is manager-agnostic.** The same one-line check
+  works for Husky's `.husky/`, Rush's `common/git-hooks/`, and any
+  custom directory a team decides to use, without per-manager logic.
+
 ## Troubleshooting
 
 **"external_dir not found in repo root"** — the directory you named in
