@@ -74,6 +74,36 @@ func findSentinelSpans(s string) []redact.Span {
 	return spans
 }
 
+// fakeOPFMovesRefOnce redacts nothing (empty spans) but, on its FIRST
+// RedactBatch call, invokes onFirst — a hook the test uses to advance the
+// local v1 ref mid-rewrite, simulating another worktree writing a checkpoint
+// between the OPF shell-out and the CAS ref update. This is the deterministic
+// integration-impossible seam for the V1RefMovedError path: at integration
+// level the rewrite runs inside a spawned hook subprocess, so there is no way
+// to interpose a concurrent ref move at exactly the right instant. Injecting
+// the move through the runtime here reproduces the CAS race precisely.
+type fakeOPFMovesRefOnce struct {
+	mu      sync.Mutex
+	moved   bool
+	onFirst func()
+}
+
+func (f *fakeOPFMovesRefOnce) Redact(_ context.Context, _ string, _ []string) ([]redact.Span, error) {
+	return nil, nil
+}
+
+func (f *fakeOPFMovesRefOnce) RedactBatch(_ context.Context, inputs []string, _ []string) ([][]redact.Span, error) {
+	f.mu.Lock()
+	if !f.moved && f.onFirst != nil {
+		f.moved = true
+		f.onFirst()
+	}
+	f.mu.Unlock()
+	// Empty spans: no OPF redaction, but the runtime succeeds so the rewrite
+	// proceeds to the CAS step (where the injected ref move trips it).
+	return make([][]redact.Span, len(inputs)), nil
+}
+
 // fakeRuntimeAlwaysFails trips the OPF circuit breaker on first call.
 // Used to test the fail-closed assertion that breaker-trip during
 // rewrite aborts before CAS.
@@ -565,6 +595,48 @@ func TestCollectTreeBlobs_RedactsAllFileTypes(t *testing.T) {
 	require.True(t, collectedNames["notes.md"], ".md blob must be collected for redaction (privacy contract)")
 	require.True(t, collectedNames["transcript"], "no-extension blob must be collected for redaction (privacy contract)")
 	require.False(t, collectedNames[paths.ContentHashFileName], "content_hash.txt must be excluded from collection (deferred path)")
+}
+
+// E3 (strategy layer): a concurrent local ref move between the OPF shell-out
+// and the CAS ref update surfaces as V1RefMovedError, and a clean re-run then
+// succeeds. This is the strategy-level home of test-plan E3: the pre-push hook
+// runs the rewrite in a spawned subprocess, so the CAS race can only be hit
+// deterministically here, by advancing the local v1 ref from inside the OPF
+// runtime (fakeOPFMovesRefOnce.onFirst). The integration E-group notes this
+// split.
+func TestRewriteUnpushedV1WithOPF_RefMovedDuringRewrite_ThenRetrySucceeds(t *testing.T) {
+	fake := &fakeOPFMovesRefOnce{}
+	configureFakeOPF(t, fake)
+	repo, originalTip := setupV1Repo(t)
+
+	// Between the OPF batch call and atomicSetV1Ref, "another worktree" writes a
+	// new checkpoint, advancing local v1 off originalTip.
+	fake.onFirst = func() {
+		addV1Checkpoint(t, repo, "b2c3d4e5f6a7", "concurrent-session",
+			"A concurrent session mentions PERSONABC", "Concurrent PERSONABC work")
+	}
+
+	_, err := RewriteUnpushedV1WithOPF(context.Background(), repo, "origin")
+	var moved *V1RefMovedError
+	require.ErrorAs(t, err, &moved, "want V1RefMovedError when the local v1 ref moves mid-rewrite, got %T: %v", err, err)
+	require.Equal(t, moved.Expected, originalTip,
+		"V1RefMovedError.Expected should be the tip captured at the start of the rewrite")
+	require.NotEqual(t, originalTip, moved.Actual,
+		"V1RefMovedError.Actual should be the ref's new position after the concurrent write")
+
+	// A re-run sees the moved ref as the new baseline; no further move is
+	// injected, so the CAS matches and the push proceeds.
+	newTip, err := RewriteUnpushedV1WithOPF(context.Background(), repo, "origin")
+	require.NoError(t, err, "the retry after a V1RefMovedError should succeed")
+	require.False(t, newTip.IsZero())
+	retryCommit, err := repo.CommitObject(newTip)
+	require.NoError(t, err)
+	require.True(t, trailers.HasOPFApplied(retryCommit.Message),
+		"the retried rewrite should tag the new tip Entire-OPF-Applied")
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	require.Equal(t, newTip, ref.Hash(), "local v1 ref should point at the retried rewrite's tip")
 }
 
 // Fail-closed regression: when the OPF runtime fails and the breaker
