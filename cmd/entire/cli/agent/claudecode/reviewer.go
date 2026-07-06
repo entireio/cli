@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
@@ -33,11 +34,36 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 	}
 }
 
+// reviewToolAllowlist is the read-only tool surface a headless claude
+// review child gets pre-approved. Print mode (-p) auto-denies any tool call
+// that would have prompted interactively, so without an explicit allowlist
+// every finder that runs `git diff`/`git log` bounces off a denial and
+// detours (slower reviews, findings verified by workaround or not at all).
+//
+// Deliberately narrow: read-only git subcommands are enumerated instead of
+// granting Bash(git:*) — git can execute arbitrary code via aliases/hooks,
+// and push/commit match the blanket pattern. Nothing write-capable (Edit,
+// Write) and never --dangerously-skip-permissions: reviewers process
+// untrusted input (the diff under review), so the child must stay unable to
+// modify the repo. --allowedTools ADDS to the user's own permission config;
+// it cannot revoke anything.
+var reviewToolAllowlist = []string{
+	"Read", "Grep", "Glob", "Task", "TodoWrite",
+	"Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+	"Bash(git status:*)", "Bash(git blame:*)", "Bash(git rev-parse:*)",
+	"Bash(git merge-base:*)", "Bash(git ls-files:*)", "Bash(git branch:*)",
+	"Bash(entire search:*)", "Bash(entire checkpoint explain:*)",
+}
+
 // buildReviewCmd builds the exec.Cmd for a claude review run.
 // Exposed at package level for test inspection of argv and env.
 func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	prompt := review.ComposeReviewPrompt(cfg)
-	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
+	args := []string{
+		"-p", prompt,
+		"--output-format", "stream-json", "--verbose",
+		"--allowedTools", strings.Join(reviewToolAllowlist, ","),
+	}
 	args = review.AppendModelFlag(args, cfg.Model)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "claude-code", cfg, prompt)

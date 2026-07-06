@@ -96,7 +96,8 @@ func TestReviewer_ArgvShape(t *testing.T) {
 	cmd := buildReviewCmd(context.Background(), cfg)
 
 	// Expect: claude -p <prompt> --output-format stream-json --verbose
-	wantSuffix := []string{"--output-format", "stream-json", "--verbose"}
+	//         --allowedTools <read-only allowlist>
+	wantSuffix := []string{"--output-format", "stream-json", "--verbose", "--allowedTools", strings.Join(reviewToolAllowlist, ",")}
 	if len(cmd.Args) != 3+len(wantSuffix) {
 		t.Fatalf("expected %d args, got %d: %v", 3+len(wantSuffix), len(cmd.Args), cmd.Args)
 	}
@@ -398,5 +399,48 @@ func collectEvents(ch <-chan reviewtypes.Event) []reviewtypes.Event {
 func drainEvents(ch <-chan reviewtypes.Event) {
 	for ev := range ch {
 		_ = ev
+	}
+}
+
+// TestReviewer_ArgvIncludesReadOnlyAllowlist verifies the spawned claude
+// child gets an explicit read-only tool allowlist. Headless -p mode
+// auto-denies any tool call not pre-approved, so without this every finder
+// that runs `git diff`/`git log` bounces off a denial and detours — slower
+// reviews and findings that were never verified. The allowlist grants the
+// read-only surface a review needs and nothing write-capable.
+func TestReviewer_ArgvIncludesReadOnlyAllowlist(t *testing.T) {
+	t.Parallel()
+	cmd := buildReviewCmd(context.Background(), reviewtypes.RunConfig{Skills: []string{"/x"}})
+
+	allowed := ""
+	for i, arg := range cmd.Args {
+		if arg == "--allowedTools" && i+1 < len(cmd.Args) {
+			allowed = cmd.Args[i+1]
+		}
+		if arg == "--dangerously-skip-permissions" {
+			t.Fatal("reviewer child must never run with permissions disabled")
+		}
+	}
+	if allowed == "" {
+		t.Fatalf("--allowedTools missing from argv: %v", cmd.Args)
+	}
+
+	members := make(map[string]bool)
+	for _, m := range strings.Split(allowed, ",") {
+		members[strings.TrimSpace(m)] = true
+	}
+	for _, want := range []string{
+		"Read", "Grep", "Glob", "Task",
+		"Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+		"Bash(git status:*)", "Bash(git blame:*)", "Bash(git rev-parse:*)",
+	} {
+		if !members[want] {
+			t.Errorf("allowlist missing %q; got %q", want, allowed)
+		}
+	}
+	for _, banned := range []string{"Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "Bash(git:*)"} {
+		if members[banned] {
+			t.Errorf("allowlist must not grant write-capable or blanket tool %q; got %q", banned, allowed)
+		}
 	}
 }
