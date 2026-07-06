@@ -1353,7 +1353,9 @@ func GitCLIStatus(ctx context.Context) (git.Status, error) {
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return nil, fmt.Errorf("git status failed: %s: %w", strings.TrimSpace(string(exitErr.Stderr)), err)
+			if detail := strings.TrimSpace(string(exitErr.Stderr)); detail != "" {
+				return nil, fmt.Errorf("git status failed: %w: %s", err, detail)
+			}
 		}
 		return nil, fmt.Errorf("git status failed: %w", err)
 	}
