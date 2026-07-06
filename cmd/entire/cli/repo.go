@@ -148,16 +148,23 @@ func newRepoCreateCmd() *cobra.Command {
 				}
 				return msg, wire, nil
 			}
-			// With --cluster-host, dial that cluster's own regional core so the
-			// create lands there (the cluster's core resolves the globally
-			// registered project). Without it, use the active context's core,
-			// which applies the jurisdiction default. Dialing the active core with
-			// a cross-jurisdiction --cluster-host is what the home core rejects
-			// with "cluster host ... is in jurisdiction ... not ...".
-			if clusterHost != "" {
-				return runCoreMutationForCluster(cmd, clusterHost, mutate)
+			// Always dial the target cluster's own regional core (never the
+			// active-context core): the cluster's core resolves the globally
+			// registered project and provisions the repo locally, so this works
+			// even when the target cluster lives in a different jurisdiction than
+			// the active login. Dialing the active core would reject a foreign
+			// cluster with "cluster host ... is in jurisdiction ... not ...".
+			// --cluster-host picks the cluster; when omitted we fall back to the
+			// same defaultClusterHost the positional-arg mirror commands use.
+			host := clusterHost
+			if host == "" {
+				host = defaultClusterHost
 			}
-			return runCoreMutation(cmd, mutate)
+			if err := validateClusterHost(host); err != nil {
+				cmd.SilenceUsage = true
+				return err
+			}
+			return runCoreMutationForCluster(cmd, host, mutate)
 		},
 	}
 	cmd.Flags().StringVar(&projectID, "project", "", "Owning project (name or ULID) (required)")

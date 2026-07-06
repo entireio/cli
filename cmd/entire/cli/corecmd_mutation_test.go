@@ -100,11 +100,12 @@ func TestRepoCreate_JSONOnRequest(t *testing.T) {
 	require.NotContains(t, out, "✓ Created")
 }
 
-// TestRepoCreate_ClusterHostRouting pins the routing fix: `repo create
-// --cluster-host X` must dial that cluster's own core (coreapi.NewForCluster),
-// not the active-context core, so a repo requested in another jurisdiction lands
-// on the correct regional deployment instead of being rejected as
-// cross-jurisdiction. Without --cluster-host it must keep dialing the active core.
+// TestRepoCreate_ClusterHostRouting pins the routing fix: `repo create` must
+// always dial the target cluster's own core (coreapi.NewForCluster), never the
+// active-context core, so a repo lands on the correct regional deployment even
+// when the target cluster is in a different jurisdiction than the active login.
+// --cluster-host X targets cluster X; omitting it falls back to
+// defaultClusterHost. The active core seam must never be used for the create.
 //
 // Not parallel: swaps the package-level activeCoreClient and clusterCoreClient seams.
 func TestRepoCreate_ClusterHostRouting(t *testing.T) {
@@ -162,7 +163,7 @@ func TestRepoCreate_ClusterHostRouting(t *testing.T) {
 		return aHit, cHit, host, buf.String()
 	}
 
-	t.Run("--cluster-host dials the cluster core, not the active core", func(t *testing.T) {
+	t.Run("--cluster-host dials that cluster's core, not the active core", func(t *testing.T) {
 		activeHit, clusterHit, gotHost, out := run(t, "--cluster-host", "aws-ap-southeast-2.entire.io")
 		require.True(t, clusterHit, "the cluster core should receive the create")
 		require.False(t, activeHit, "the active core must not be dialed")
@@ -170,10 +171,11 @@ func TestRepoCreate_ClusterHostRouting(t *testing.T) {
 		require.Contains(t, out, "✓ Created repository web")
 	})
 
-	t.Run("no --cluster-host dials the active core", func(t *testing.T) {
-		activeHit, clusterHit, _, out := run(t)
-		require.True(t, activeHit, "the active core should receive the create")
-		require.False(t, clusterHit, "the cluster core must not be dialed")
+	t.Run("no --cluster-host falls back to the default cluster's core, not the active core", func(t *testing.T) {
+		activeHit, clusterHit, gotHost, out := run(t)
+		require.True(t, clusterHit, "the default cluster's core should receive the create")
+		require.False(t, activeHit, "the active core must not be dialed")
+		require.Equal(t, defaultClusterHost, gotHost)
 		require.Contains(t, out, "✓ Created repository web")
 	})
 }

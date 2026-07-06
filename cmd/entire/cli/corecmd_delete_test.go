@@ -32,12 +32,15 @@ func writeNotFoundProblem(t *testing.T, w http.ResponseWriter) {
 	}
 }
 
-// runCoreCmd runs any active-context control-plane command against a seamed
-// httptest core: it points the active-context client at srv via the
-// activeCoreClient seam, runs newCmd() with args, and returns its stdout,
-// stderr, and error. Commands dialing via runCoreForCluster (mirror
-// create/remove/collaborators) bypass the seam and need their own httptest
-// wiring. The caller must not be parallel: the seam is package-global.
+// runCoreCmd runs a control-plane command against a seamed httptest core: it
+// points both the active-context (activeCoreClient) and cluster-addressed
+// (clusterCoreClient) client seams at srv, runs newCmd() with args, and returns
+// its stdout, stderr, and error. Seaming both lets it drive active-context
+// commands (org/project create, delete) and cluster-addressed ones (repo
+// create, which always dials the cluster's core) through the same helper.
+// Commands dialing via runCoreForCluster directly (mirror create/remove/
+// collaborators) still need their own httptest wiring. The caller must not be
+// parallel: the seams are package-global.
 //
 // Note: cobra's cmd.Print* falls back to OutOrStderr(), which under SetOut
 // resolves to the stdout buffer — so Empty(errOut) assertions in these tests
@@ -45,11 +48,18 @@ func writeNotFoundProblem(t *testing.T, w http.ResponseWriter) {
 // are what pin the production stream.
 func runCoreCmd(t *testing.T, newCmd func() *cobra.Command, srvURL string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
-	prev := activeCoreClient
+	prevActive := activeCoreClient
+	prevCluster := clusterCoreClient
 	activeCoreClient = func(context.Context) (*coreapi.Client, error) {
 		return coreapi.NewWithBearer(srvURL, "tok")
 	}
-	t.Cleanup(func() { activeCoreClient = prev })
+	clusterCoreClient = func(context.Context, string) (*coreapi.Client, error) {
+		return coreapi.NewWithBearer(srvURL, "tok")
+	}
+	t.Cleanup(func() {
+		activeCoreClient = prevActive
+		clusterCoreClient = prevCluster
+	})
 
 	cmd := newCmd()
 	var out, errW bytes.Buffer
