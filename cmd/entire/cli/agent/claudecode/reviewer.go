@@ -48,7 +48,7 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 // modify the repo. --allowedTools ADDS to the user's own permission config;
 // it cannot revoke anything.
 var reviewToolAllowlist = []string{
-	"Read", "Grep", "Glob", "Task", "TodoWrite",
+	"Read", "Grep", "Glob", "Task", "TodoWrite", "Skill",
 	"Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
 	"Bash(git status:*)", "Bash(git blame:*)", "Bash(git rev-parse:*)",
 	"Bash(git merge-base:*)", "Bash(git ls-files:*)", "Bash(git branch:*)",
@@ -58,7 +58,7 @@ var reviewToolAllowlist = []string{
 // buildReviewCmd builds the exec.Cmd for a claude review run.
 // Exposed at package level for test inspection of argv and env.
 func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
-	prompt := review.ComposeReviewPrompt(cfg)
+	prompt := guardSlashExpansion(review.ComposeReviewPrompt(cfg))
 	args := []string{
 		"-p", prompt,
 		"--output-format", "stream-json", "--verbose",
@@ -68,6 +68,22 @@ func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "claude-code", cfg, prompt)
 	return cmd
+}
+
+// guardSlashExpansion prevents claude -p from interpreting the prompt as a
+// slash command. The composed prompt leads with the configured skill line
+// (e.g. "/pr-review-toolkit:review-pr"); print mode expands a leading slash
+// token as a command invocation — observed to resolve to the BUILT-IN
+// /review skill with the entire prompt (skill name included) as its
+// arguments, so the configured skill never ran and the built-in PR-review
+// harness treated the skill name as a PR number. A prose preamble makes
+// expansion impossible while telling the agent to invoke the skill lines
+// properly via the Skill tool (which the allowlist pre-approves).
+func guardSlashExpansion(prompt string) string {
+	if !strings.HasPrefix(prompt, "/") {
+		return prompt
+	}
+	return "Perform the review below. Lines starting with \"/\" name configured review skills: invoke each with the Skill tool and follow it.\n\n" + prompt
 }
 
 // parseClaudeOutput converts claude's --output-format stream-json --verbose

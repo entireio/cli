@@ -444,3 +444,59 @@ func TestReviewer_ArgvIncludesReadOnlyAllowlist(t *testing.T) {
 		}
 	}
 }
+
+// TestReviewer_PromptNeverStartsWithSlash guards against claude -p's
+// slash-command expansion swallowing the composed prompt. Observed live: a
+// prompt beginning with the configured skill line
+// "/pr-review-toolkit:review-pr" was expanded by the harness as a slash
+// command — it resolved to the BUILT-IN /review skill with the entire
+// composed prompt (skill name included) as its arguments, so the configured
+// skill never ran and the built-in PR-review harness interpolated the skill
+// name where a PR number belongs. The reviewer must deliver a prompt that
+// cannot trigger expansion, while still instructing the agent to invoke the
+// configured skills via the Skill tool.
+func TestReviewer_PromptNeverStartsWithSlash(t *testing.T) {
+	t.Parallel()
+	cmd := buildReviewCmd(context.Background(), reviewtypes.RunConfig{
+		Skills: []string{"/pr-review-toolkit:review-pr"},
+	})
+	prompt := cmd.Args[2]
+	if strings.HasPrefix(prompt, "/") {
+		t.Fatalf("prompt starts with %q — claude -p will expand it as a slash command:\n%s", "/", prompt)
+	}
+	if !strings.Contains(prompt, "/pr-review-toolkit:review-pr") {
+		t.Errorf("prompt lost the configured skill invocation:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Skill tool") {
+		t.Errorf("prompt missing instruction to invoke skills via the Skill tool:\n%s", prompt)
+	}
+}
+
+// TestReviewer_PromptWithoutLeadingSlashUnchanged verifies the guard only
+// fires when needed: a prompt that already starts with prose is passed
+// through without the skill-invocation preamble.
+func TestReviewer_PromptWithoutLeadingSlashUnchanged(t *testing.T) {
+	t.Parallel()
+	cmd := buildReviewCmd(context.Background(), reviewtypes.RunConfig{
+		PromptOverride: "Review the change described below.",
+	})
+	if got := cmd.Args[2]; got != "Review the change described below." {
+		t.Errorf("prose prompt was modified: %q", got)
+	}
+}
+
+// TestReviewer_AllowlistIncludesSkillTool verifies the child can actually
+// invoke the configured skills headlessly.
+func TestReviewer_AllowlistIncludesSkillTool(t *testing.T) {
+	t.Parallel()
+	cmd := buildReviewCmd(context.Background(), reviewtypes.RunConfig{Skills: []string{"/x"}})
+	for i, arg := range cmd.Args {
+		if arg == "--allowedTools" {
+			if !strings.Contains(cmd.Args[i+1], "Skill") {
+				t.Errorf("allowlist missing Skill tool: %q", cmd.Args[i+1])
+			}
+			return
+		}
+	}
+	t.Fatal("--allowedTools not found")
+}
