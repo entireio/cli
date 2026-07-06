@@ -171,7 +171,10 @@ func guidedProfileTask(profileName, generatedTask, existingTask, customTask stri
 	if strings.TrimSpace(generatedTask) != "" {
 		return generatedTask
 	}
-	return profileTask(profileName, settings.ReviewProfileConfig{})
+	// No user-provided task: persist empty. The built-in brief is a runtime
+	// fallback (workerTask/profileTask), not saved configuration — persisting
+	// it would make it indistinguishable from a task the user wrote.
+	return ""
 }
 
 func launchableInstalledAgentNames(installed []types.AgentName, reviewerFor func(string) reviewtypes.AgentReviewer) []string {

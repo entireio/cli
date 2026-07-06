@@ -64,3 +64,16 @@ func TestReviewModelSelectOptionsPreservesCurrentCustomModel(t *testing.T) {
 		t.Fatal("custom model option missing")
 	}
 }
+
+// TestGuidedProfileTask_NoBuiltinFallbackPersisted verifies setup never bakes
+// the built-in default brief into the saved profile: with no custom, existing,
+// or generated task, the persisted task stays empty and the runtime fallback
+// (workerTask / profileTask) supplies defaults where needed. Persisting the
+// built-in text made it indistinguishable from a user-configured task, so
+// skill-bearing workers kept receiving the maximal-audit brief forever.
+func TestGuidedProfileTask_NoBuiltinFallbackPersisted(t *testing.T) {
+	t.Parallel()
+	if got := guidedProfileTask(DefaultProfileName, "", "", ""); got != "" {
+		t.Fatalf("guidedProfileTask with nothing user-provided = %q, want empty", got)
+	}
+}

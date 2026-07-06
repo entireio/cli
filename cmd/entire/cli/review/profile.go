@@ -329,8 +329,9 @@ func defaultReviewProfileForInstalledAgents(
 	if len(agents) == 0 {
 		return settings.ReviewProfileConfig{}, errors.New("no agents with review runner adapters and hooks installed; run `entire configure --agent claude-code`, `entire configure --agent codex`, `entire configure --agent gemini`, or `entire configure --agent pi`")
 	}
+	// Task deliberately left empty: the built-in brief is a runtime fallback
+	// for skill-less workers, not user configuration to persist.
 	profile := settings.ReviewProfileConfig{
-		Task:   profileTask(profileName, settings.ReviewProfileConfig{}),
 		Agents: agents,
 	}
 	if j, ok := defaultJudge(ctx, agents); ok {
