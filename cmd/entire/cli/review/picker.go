@@ -434,8 +434,9 @@ func promptChangeModel(ctx context.Context, seed crewSlot) (crewSlot, error) {
 // a worker keyed by workerIDForAgentModel, which disambiguates duplicates
 // (claude-code, claude-code-2, claude-code:opus, …).
 func buildCrewProfile(ctx context.Context, profileName string, slots []crewSlot) settings.ReviewProfileConfig {
+	// Task deliberately left empty: the built-in brief is a runtime fallback
+	// for skill-less workers, not user configuration to persist.
 	profile := settings.ReviewProfileConfig{
-		Task:   profileTask(profileName, settings.ReviewProfileConfig{}),
 		Agents: make(map[string]settings.ReviewConfig, len(slots)),
 	}
 	for _, s := range slots {
@@ -972,9 +973,6 @@ func saveReviewProfileConfig(ctx context.Context, profileName string, agents map
 		profile.Judge = &settings.ReviewConfig{Agent: strings.TrimSpace(judgeAgent)}
 	} else {
 		profile.Judge = nil
-	}
-	if strings.TrimSpace(profile.Task) == "" {
-		profile.Task = profileTask(profileName, settings.ReviewProfileConfig{})
 	}
 	hadProfiles := len(profiles) > 0
 	profiles[profileName] = profile

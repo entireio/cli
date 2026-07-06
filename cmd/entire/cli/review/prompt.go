@@ -99,7 +99,20 @@ func renderScopeContext(sc reviewtypes.ScopeContext, baseRef string) string {
 	writeList("Files under review (vs merge-base with "+baseRef+"):", sc.Files, sc.FilesTruncated)
 	writeList("Uncommitted working-tree changes:", sc.Uncommitted, sc.UncommittedTruncated)
 
-	b.WriteString("\n\nOnly the files listed above are in scope. Findings that point anywhere else are out of scope — discard them.")
+	// The discard rule must match what was actually rendered: with no file
+	// lists there is nothing to gate on, and with truncated lists files
+	// beyond the cap are genuinely in scope — a categorical discard order
+	// would drop their findings before the judge could rescue them.
+	hasFileLists := len(sc.Files) > 0 || len(sc.Uncommitted) > 0
+	listsTruncated := sc.FilesTruncated || sc.UncommittedTruncated
+	switch {
+	case !hasFileLists:
+		// No gate to state.
+	case listsTruncated:
+		b.WriteString("\n\nThe file lists above are truncated. Prefer findings in the listed files; verify any finding outside them against `git diff` before keeping it.")
+	default:
+		b.WriteString("\n\nOnly the files listed above are in scope. Findings that point anywhere else are out of scope — discard them.")
+	}
 
 	switch {
 	case sc.Diff != "":

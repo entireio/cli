@@ -69,8 +69,8 @@ func TestBuildConfiguredProfile_FromFlags(t *testing.T) {
 	if profile.Judge == nil || profile.Judge.Agent != "codex" {
 		t.Errorf("judge = %#v, want codex", profile.Judge)
 	}
-	if profile.Task == "" {
-		t.Error("task should default to the built-in general task")
+	if profile.Task != "" {
+		t.Errorf("task = %q, want empty — the built-in brief is a runtime fallback, never persisted config", profile.Task)
 	}
 }
 

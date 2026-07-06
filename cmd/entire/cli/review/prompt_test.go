@@ -292,3 +292,42 @@ func TestComposeReviewPrompt_DiffWithBackticksKeepsFenceIntact(t *testing.T) {
 		t.Errorf("closing fence must match the longer opening fence; got:\n%s", got)
 	}
 }
+
+func TestComposeReviewPrompt_TruncatedFilesSoftensDiscardRule(t *testing.T) {
+	t.Parallel()
+	// Files beyond the cap are genuinely in scope; a categorical discard
+	// order would drop their findings before the judge could rescue them.
+	cfg := reviewtypes.RunConfig{
+		Skills:       []string{"/x"},
+		ScopeBaseRef: "main",
+		ScopeContext: reviewtypes.ScopeContext{
+			Files:          []string{"M\ta.go"},
+			FilesTruncated: true,
+		},
+	}
+	got := ComposeReviewPrompt(cfg)
+	if strings.Contains(got, "discard them") {
+		t.Errorf("truncated list must not carry the categorical discard rule:\n%s", got)
+	}
+	if !strings.Contains(got, "verify") {
+		t.Errorf("truncated list should ask for verification of outside findings:\n%s", got)
+	}
+}
+
+func TestComposeReviewPrompt_NoFilesNoDiscardRule(t *testing.T) {
+	t.Parallel()
+	// Commits with a net-zero three-dot diff (e.g. commit + revert) have no
+	// file list; rendering "only the files listed above" with no list would
+	// declare everything out of scope.
+	cfg := reviewtypes.RunConfig{
+		Skills:       []string{"/x"},
+		ScopeBaseRef: "main",
+		ScopeContext: reviewtypes.ScopeContext{
+			Commits: []string{"abc1234 add then revert"},
+		},
+	}
+	got := ComposeReviewPrompt(cfg)
+	if strings.Contains(got, "out of scope") {
+		t.Errorf("no file list rendered — discard rule must be omitted:\n%s", got)
+	}
+}

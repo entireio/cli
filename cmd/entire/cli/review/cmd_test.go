@@ -776,6 +776,12 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, cwd, "fanout-dirty.txt", "wip")
+
 	claudeReviewer := &captureRunConfigReviewer{name: "claude-code"}
 	codexReviewer := &captureRunConfigReviewer{name: testCodexAgent}
 	deps := review.Deps{
@@ -829,6 +835,14 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 		}
 		if tc.reviewer.got.StartingSHA == "" {
 			t.Fatalf("%s StartingSHA is empty", tc.name)
+		}
+		// The fan-out loop wires ScopeContext and Task independently of the
+		// single-agent path; a regression there passes every single-agent test.
+		if len(tc.reviewer.got.ScopeContext.Uncommitted) == 0 {
+			t.Fatalf("%s ScopeContext.Uncommitted is empty, want the dirty file", tc.name)
+		}
+		if tc.reviewer.got.Task != "Test review task." {
+			t.Fatalf("%s Task = %q, want the seeded user task", tc.name, tc.reviewer.got.Task)
 		}
 	}
 }

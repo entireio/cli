@@ -77,3 +77,17 @@ func TestGuidedProfileTask_NoBuiltinFallbackPersisted(t *testing.T) {
 		t.Fatalf("guidedProfileTask with nothing user-provided = %q, want empty", got)
 	}
 }
+
+// TestBuildCrewProfile_NoBuiltinTaskPersisted drives the REAL guided-setup
+// profile constructor — not guidedProfileTask with hand-fed empty inputs —
+// and asserts it does not seed the built-in brief. This is the test the
+// dogfood review flagged as missing: the previous test passed with inputs
+// production never produces, while buildCrewProfile still baked the default
+// task into every interactively-configured profile.
+func TestBuildCrewProfile_NoBuiltinTaskPersisted(t *testing.T) {
+	t.Parallel()
+	profile := buildCrewProfile(context.Background(), DefaultProfileName, []crewSlot{{agent: "claude-code"}})
+	if profile.Task != "" {
+		t.Errorf("buildCrewProfile persisted Task %q, want empty (built-in brief is runtime fallback only)", profile.Task)
+	}
+}

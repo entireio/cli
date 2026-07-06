@@ -655,9 +655,6 @@ func buildConfiguredProfile(ctx context.Context, profileName string, opts review
 	if opts.Task != "" {
 		profile.Task = opts.Task
 	}
-	if strings.TrimSpace(profile.Task) == "" {
-		profile.Task = profileTask(profileName, settings.ReviewProfileConfig{})
-	}
 
 	// Judge: explicit --set-judge wins; otherwise a multi-reviewer profile gets
 	// an auto-selected judge, and a single-reviewer profile needs none.
@@ -1040,7 +1037,7 @@ func runSingleAgentPath(
 	if deps.ReviewCheckpointContext != nil {
 		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
 	}
-	scopeCtx := buildScopeContextBestEffort(ctx, worktreeRoot, scopeBaseRef)
+	scopeCtx := buildScopeContextBestEffort(ctx, out, worktreeRoot, scopeBaseRef)
 
 	runCfg := reviewtypes.RunConfig{
 		ProfileName:       profileName,
@@ -1173,7 +1170,7 @@ func runMultiAgentPath(
 	if deps.ReviewCheckpointContext != nil {
 		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
 	}
-	scopeCtx := buildScopeContextBestEffort(ctx, worktreeRoot, scopeBaseRef)
+	scopeCtx := buildScopeContextBestEffort(ctx, out, worktreeRoot, scopeBaseRef)
 	reviewers := make([]reviewtypes.AgentReviewer, 0, len(launchableEligible))
 	for _, choice := range launchableEligible {
 		workerName := choice.Name
@@ -1299,13 +1296,17 @@ func handlePickerError(cmd *cobra.Command, silentErr func(error) error, pickErr 
 // buildScopeContextBestEffort wraps BuildScopeContext for the launch paths:
 // scope enumeration is prompt enrichment, so a failure (odd repo state, git
 // error) degrades to the descriptive scope clause instead of failing the run.
-func buildScopeContextBestEffort(ctx context.Context, worktreeRoot, scopeBaseRef string) reviewtypes.ScopeContext {
+func buildScopeContextBestEffort(ctx context.Context, out io.Writer, worktreeRoot, scopeBaseRef string) reviewtypes.ScopeContext {
 	if scopeBaseRef == "" {
 		return reviewtypes.ScopeContext{}
 	}
 	sc, err := BuildScopeContext(ctx, worktreeRoot, scopeBaseRef)
 	if err != nil {
-		logging.Debug(ctx, "review scope context unavailable", slog.String("error", err.Error()))
+		// Degrading silently would revert to the divergent-scope behavior
+		// this enumeration exists to prevent, right after the banner told
+		// the user the scope was computed — so the fallback must be visible.
+		logging.Warn(ctx, "review scope context unavailable", slog.String("error", err.Error()))
+		fmt.Fprintln(out, "Note: could not compute the authoritative scope listing; reviewers will derive scope from the base ref themselves.")
 		return reviewtypes.ScopeContext{}
 	}
 	return sc

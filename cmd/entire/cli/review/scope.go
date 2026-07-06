@@ -315,16 +315,34 @@ func buildScopeContextCapped(ctx context.Context, repoRoot, baseRef string, caps
 	if err != nil {
 		return sc, fmt.Errorf("compute scope diff: %w", err)
 	}
+	// The rendered lists ship in the same prompt (argv + ENTIRE_REVIEW_PROMPT
+	// env var), so they are charged against the inline budget before the
+	// diff: individually-capped sections could otherwise sum past the ~32KiB
+	// platform limits the budget exists for.
+	allowance := caps.diffInlineLimit - scopeListBytes(sc)
 	switch {
 	case strings.TrimSpace(diffOut) == "":
 		// No committed diff — nothing to inline, nothing omitted.
-	case caps.diffInlineLimit > 0 && len(diffOut) > caps.diffInlineLimit:
+	case caps.diffInlineLimit > 0 && len(diffOut) > allowance:
 		sc.DiffOmitted = true
 	default:
 		sc.Diff = diffOut
 	}
 
 	return sc, nil
+}
+
+// scopeListBytes returns the bytes the rendered list sections will occupy
+// in the composed prompt (one newline per line), for charging against the
+// inline-diff budget.
+func scopeListBytes(sc reviewtypes.ScopeContext) int {
+	total := 0
+	for _, group := range [][]string{sc.Commits, sc.Files, sc.Uncommitted} {
+		for _, line := range group {
+			total += len(line) + 1
+		}
+	}
+	return total
 }
 
 // capScopeLines splits command output into lines and applies a cap. Only

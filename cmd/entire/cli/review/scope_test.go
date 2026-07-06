@@ -641,3 +641,52 @@ func TestComputeScopeStats_Integration(t *testing.T) {
 		t.Errorf("Uncommitted = %d, want 0", stats.Uncommitted)
 	}
 }
+
+// TestBuildScopeContext_UncommittedOnlyNoDiffOmitted verifies a branch with
+// only working-tree changes yields Diff=="" and DiffOmitted==false — the
+// prompt must not claim "too large to inline" for a diff that outputs nothing.
+func TestBuildScopeContext_UncommittedOnlyNoDiffOmitted(t *testing.T) {
+	dir := t.TempDir()
+	initRepoOnMain(t, dir)
+	commitFile(t, dir, "main.go", "package main", "init")
+	testutil.GitCheckoutNewBranch(t, dir, "feat/dirty-only")
+	testutil.WriteFile(t, dir, "wip.go", "package wip")
+
+	sc, err := BuildScopeContext(context.Background(), dir, defaultBranchName)
+	if err != nil {
+		t.Fatalf("BuildScopeContext: %v", err)
+	}
+	if sc.Diff != "" || sc.DiffOmitted {
+		t.Errorf("Diff=%q DiffOmitted=%v, want empty diff without omission flag", sc.Diff, sc.DiffOmitted)
+	}
+	if len(sc.Uncommitted) != 1 {
+		t.Errorf("Uncommitted = %v, want the wip file", sc.Uncommitted)
+	}
+}
+
+// TestBuildScopeContext_ListsCountAgainstDiffBudget pins the total-size
+// contract: the inline-diff allowance shrinks by the bytes the rendered
+// lists already consume, so the composed prompt (argv + ENTIRE_REVIEW_PROMPT
+// env var) stays bounded on platforms with ~32KiB limits.
+func TestBuildScopeContext_ListsCountAgainstDiffBudget(t *testing.T) {
+	dir := t.TempDir()
+	initRepoOnMain(t, dir)
+	commitFile(t, dir, "main.go", "package main", "init")
+	testutil.GitCheckoutNewBranch(t, dir, "feat/budget")
+	commitFile(t, dir, "a.go", "package a", "add a")
+
+	// Budget generous enough for the diff alone, but the commit/file/porcelain
+	// list bytes must be charged against it first, leaving no room.
+	sc, err := buildScopeContextCapped(context.Background(), dir, defaultBranchName, scopeContextCaps{
+		maxCommits:      50,
+		maxFiles:        200,
+		maxUncommitted:  100,
+		diffInlineLimit: 40, // smaller than the rendered lists
+	})
+	if err != nil {
+		t.Fatalf("buildScopeContextCapped: %v", err)
+	}
+	if sc.Diff != "" || !sc.DiffOmitted {
+		t.Errorf("Diff=%q DiffOmitted=%v, want diff omitted once lists consume the budget", sc.Diff, sc.DiffOmitted)
+	}
+}

@@ -430,7 +430,7 @@ func TestReviewer_ArgvIncludesReadOnlyAllowlist(t *testing.T) {
 		members[strings.TrimSpace(m)] = true
 	}
 	for _, want := range []string{
-		"Read", "Grep", "Glob", "Task",
+		"Read", "Grep", "Glob", "Task", "Skill",
 		"Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
 		"Bash(git status:*)", "Bash(git blame:*)", "Bash(git rev-parse:*)",
 	} {
@@ -483,20 +483,4 @@ func TestReviewer_PromptWithoutLeadingSlashUnchanged(t *testing.T) {
 	if got := cmd.Args[2]; got != "Review the change described below." {
 		t.Errorf("prose prompt was modified: %q", got)
 	}
-}
-
-// TestReviewer_AllowlistIncludesSkillTool verifies the child can actually
-// invoke the configured skills headlessly.
-func TestReviewer_AllowlistIncludesSkillTool(t *testing.T) {
-	t.Parallel()
-	cmd := buildReviewCmd(context.Background(), reviewtypes.RunConfig{Skills: []string{"/x"}})
-	for i, arg := range cmd.Args {
-		if arg == "--allowedTools" {
-			if !strings.Contains(cmd.Args[i+1], "Skill") {
-				t.Errorf("allowlist missing Skill tool: %q", cmd.Args[i+1])
-			}
-			return
-		}
-	}
-	t.Fatal("--allowedTools not found")
 }

@@ -42,11 +42,15 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 //
 // Deliberately narrow: read-only git subcommands are enumerated instead of
 // granting Bash(git:*) — git can execute arbitrary code via aliases/hooks,
-// and push/commit match the blanket pattern. Nothing write-capable (Edit,
+// and push/commit match the blanket pattern. No file tools that write (Edit,
 // Write) and never --dangerously-skip-permissions: reviewers process
 // untrusted input (the diff under review), so the child must stay unable to
-// modify the repo. --allowedTools ADDS to the user's own permission config;
-// it cannot revoke anything.
+// modify the repo. Known accepted residual: the granted subcommands accept
+// --output=<path>, so a prompt-injected reviewer could write query output to
+// an arbitrary path — defense-in-depth weakening, not code execution; the
+// tradeoff is accepted because the alternative is denying the git access a
+// review needs. --allowedTools ADDS to the user's own permission config; it
+// cannot revoke anything.
 var reviewToolAllowlist = []string{
 	"Read", "Grep", "Glob", "Task", "TodoWrite", "Skill",
 	"Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
