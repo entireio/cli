@@ -1040,6 +1040,7 @@ func runSingleAgentPath(
 	if deps.ReviewCheckpointContext != nil {
 		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
 	}
+	scopeCtx := buildScopeContextBestEffort(ctx, worktreeRoot, scopeBaseRef)
 
 	runCfg := reviewtypes.RunConfig{
 		ProfileName:       profileName,
@@ -1047,6 +1048,7 @@ func runSingleAgentPath(
 		PerRunPrompt:      perRunPrompt,
 		ScopeBaseRef:      scopeBaseRef,
 		CheckpointContext: checkpointContext,
+		ScopeContext:      scopeCtx,
 		StartingSHA:       headSHA,
 		ReviewerTimeout:   timeout,
 	}
@@ -1171,6 +1173,7 @@ func runMultiAgentPath(
 	if deps.ReviewCheckpointContext != nil {
 		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
 	}
+	scopeCtx := buildScopeContextBestEffort(ctx, worktreeRoot, scopeBaseRef)
 	reviewers := make([]reviewtypes.AgentReviewer, 0, len(launchableEligible))
 	for _, choice := range launchableEligible {
 		workerName := choice.Name
@@ -1201,6 +1204,7 @@ func runMultiAgentPath(
 				PerRunPrompt:      perRunPrompt,
 				ScopeBaseRef:      scopeBaseRef,
 				CheckpointContext: checkpointContext,
+				ScopeContext:      scopeCtx,
 				StartingSHA:       headSHA,
 			}, agentCfg),
 		})
@@ -1221,6 +1225,7 @@ func runMultiAgentPath(
 	var synthProvider SynthesisProvider = AgentSynthesisProvider{AgentName: judge.agent, Model: judge.model}
 	masterLabel := judgeLabel(judge)
 	sinks := composeMultiAgentSinks(multiAgentSinkInputs{
+		scope:             scopeCtx,
 		out:               out,
 		isTTY:             interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively(),
 		agentNames:        agentNames,
@@ -1291,6 +1296,21 @@ func handlePickerError(cmd *cobra.Command, silentErr func(error) error, pickErr 
 	return silentErr(pickErr)
 }
 
+// buildScopeContextBestEffort wraps BuildScopeContext for the launch paths:
+// scope enumeration is prompt enrichment, so a failure (odd repo state, git
+// error) degrades to the descriptive scope clause instead of failing the run.
+func buildScopeContextBestEffort(ctx context.Context, worktreeRoot, scopeBaseRef string) reviewtypes.ScopeContext {
+	if scopeBaseRef == "" {
+		return reviewtypes.ScopeContext{}
+	}
+	sc, err := BuildScopeContext(ctx, worktreeRoot, scopeBaseRef)
+	if err != nil {
+		logging.Debug(ctx, "review scope context unavailable", slog.String("error", err.Error()))
+		return reviewtypes.ScopeContext{}
+	}
+	return sc
+}
+
 // multiAgentSinkInputs collects the parameters composeMultiAgentSinks needs.
 // It exists so tests can drive the helper with an explicit isTTY value
 // instead of monkey-patching interactive helpers at run time.
@@ -1319,6 +1339,9 @@ type multiAgentSinkInputs struct {
 	judgeTimeout      time.Duration
 	onSynthesisResult func(result string)
 	onSynthesisError  func(err error)
+	// scope is the parent-computed authoritative scope, threaded to the
+	// judge so consolidation can discard out-of-scope findings.
+	scope reviewtypes.ScopeContext
 }
 
 type singleAgentSinkInputs struct {
@@ -1349,6 +1372,7 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 			sinks = append(sinks, DumpSink{W: postRunOut})
 			sinks = append(sinks, SynthesisSink{
 				Provider:        in.synthesisProvider,
+				Scope:           in.scope,
 				Writer:          postRunOut,
 				RenderWriter:    in.out,
 				PerRunPrompt:    in.perRunPrompt,
@@ -1378,6 +1402,7 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 	if in.synthesisProvider != nil {
 		sinks = append(sinks, SynthesisSink{
 			Provider:        in.synthesisProvider,
+			Scope:           in.scope,
 			Writer:          in.out,
 			PerRunPrompt:    in.perRunPrompt,
 			ProfileName:     in.profileName,

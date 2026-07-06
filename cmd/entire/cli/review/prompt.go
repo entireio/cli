@@ -62,11 +62,55 @@ func ComposeReviewPrompt(cfg reviewtypes.RunConfig) string {
 			"Scope: review the commits unique to this branch vs "+cfg.ScopeBaseRef+
 				", plus any uncommitted changes in the working tree. Ignore code outside this scope.")
 	}
+	if scoped := renderScopeContext(cfg.ScopeContext, cfg.ScopeBaseRef); scoped != "" {
+		sections = append(sections, scoped)
+	}
 	if trimmed := strings.TrimRight(cfg.CheckpointContext, "\n\r "); trimmed != "" {
 		sections = append(sections, trimmed)
 	}
 
 	return strings.Join(sections, "\n\n")
+}
+
+// renderScopeContext renders the parent-computed scope enumeration. Handing
+// agents the concrete commit/file lists (instead of only describing how to
+// derive them) removes both the re-derivation cost at the start of every run
+// and the failure mode where an agent diffs in the wrong direction and
+// reports mainline evolution as branch regressions.
+func renderScopeContext(sc reviewtypes.ScopeContext, baseRef string) string {
+	if sc.IsZero() {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("Authoritative scope, computed by entire — use it as-is, do not re-derive it:")
+
+	writeList := func(header string, lines []string, truncated bool) {
+		if len(lines) == 0 {
+			return
+		}
+		b.WriteString("\n\n" + header + "\n")
+		b.WriteString(strings.Join(lines, "\n"))
+		if truncated {
+			b.WriteString("\n(list truncated; consult git for the remainder)")
+		}
+	}
+	writeList("Commits under review (oldest first):", sc.Commits, sc.CommitsTruncated)
+	writeList("Files under review (vs merge-base with "+baseRef+"):", sc.Files, sc.FilesTruncated)
+	writeList("Uncommitted working-tree changes:", sc.Uncommitted, sc.UncommittedTruncated)
+
+	b.WriteString("\n\nOnly the files listed above are in scope. Findings that point anywhere else are out of scope — discard them.")
+
+	switch {
+	case sc.Diff != "":
+		b.WriteString("\n\nDiff under review:\n```diff\n")
+		b.WriteString(strings.TrimRight(sc.Diff, "\n"))
+		b.WriteString("\n```")
+	case sc.DiffOmitted:
+		b.WriteString("\n\nThe diff is too large to inline. Read it with `git diff " + baseRef + "...HEAD` (three-dot), plus `git status --porcelain` for uncommitted files.")
+	}
+
+	return b.String()
 }
 
 const reviewerOutputFormatInstructions = `Output format:

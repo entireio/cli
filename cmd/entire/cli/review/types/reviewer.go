@@ -124,6 +124,15 @@ type RunConfig struct {
 	// this context.
 	CheckpointContext string
 
+	// ScopeContext is the authoritative scope data computed by the parent
+	// process before spawning agents: the commits, changed files, uncommitted
+	// files, and (when small enough to inline) the diff itself. Injecting it
+	// into the prompt means agents never re-derive the scope — the divergence
+	// where one agent diffs in the wrong direction and reports mainline
+	// evolution as branch regressions cannot happen when the enumeration is
+	// handed over instead of described. Zero value renders nothing.
+	ScopeContext ScopeContext
+
 	// StartingSHA is HEAD at invocation time, propagated to the lifecycle
 	// hook via ENTIRE_REVIEW_STARTING_SHA so checkpoint metadata records
 	// the commit that was reviewed.
@@ -165,6 +174,37 @@ type RunConfig struct {
 	// goroutine-safe across N agents and must not block on a sink. A panic
 	// is recovered; no synthetic Tokens event is emitted on panic.
 	EnrichAgentRun func(context.Context, AgentRun) AgentRun
+}
+
+// ScopeContext is the parent-computed enumeration of what a review run
+// covers. All list fields are pre-bounded by the producer; the *Truncated
+// flags record that a cap was hit so the prompt can say the enumeration is
+// partial rather than letting agents treat it as exhaustive.
+type ScopeContext struct {
+	// Commits holds "shortsha subject" lines for base..HEAD, oldest first.
+	Commits          []string
+	CommitsTruncated bool
+
+	// Files holds `git diff --name-status base...HEAD` lines (three-dot:
+	// merge-base diff, so mainline-only changes never appear).
+	Files          []string
+	FilesTruncated bool
+
+	// Uncommitted holds `git status --porcelain` lines for the working tree.
+	Uncommitted          []string
+	UncommittedTruncated bool
+
+	// Diff is the unified three-dot diff when it fits the inline budget;
+	// empty otherwise. DiffOmitted distinguishes "no changes" from "too
+	// large to inline" so the prompt can point at the exact git command.
+	Diff        string
+	DiffOmitted bool
+}
+
+// IsZero reports whether no scope data was populated.
+func (s ScopeContext) IsZero() bool {
+	return len(s.Commits) == 0 && len(s.Files) == 0 && len(s.Uncommitted) == 0 &&
+		s.Diff == "" && !s.DiffOmitted
 }
 
 // Event is the sealed sum type emitted by Process.Events. The unexported

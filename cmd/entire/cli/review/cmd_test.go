@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -1218,4 +1219,94 @@ func TestComposeMultiAgentSinks_TTYAutoSynthesisRunsBeforeTUIExit(t *testing.T) 
 	if synth.OnStart == nil || synth.OnComplete == nil {
 		t.Fatal("auto synthesis should notify the TUI when the final judge starts/completes")
 	}
+}
+
+// TestRunReview_InjectsScopeContext verifies the single-agent path hands the
+// spawned reviewer the parent-computed scope enumeration (commits, files,
+// uncommitted, inline diff) so the child never re-derives review scope.
+func TestRunReview_InjectsScopeContext(t *testing.T) {
+	setupCmdTestRepo(t)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.GitCheckoutNewBranch(t, cwd, "feat/scope-ctx")
+	testutil.WriteFile(t, cwd, "changed.go", "package changed")
+	testutil.GitAdd(t, cwd, "changed.go")
+	testutil.GitCommit(t, cwd, "add changed.go")
+	testutil.WriteFile(t, cwd, "dirty.txt", "wip")
+
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+		testAgentName: {Skills: []string{"/review"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewer := &captureRunConfigReviewer{name: testAgentName}
+	deps := review.Deps{
+		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
+			return []types.AgentName{testAgentName}
+		},
+		NewSilentError: func(err error) error { return err },
+		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
+			return false, ""
+		},
+		ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
+			if agentName == testAgentName {
+				return reviewer
+			}
+			return nil
+		},
+	}
+
+	out := &bytes.Buffer{}
+	cmd := review.NewCommand(deps)
+	cmd.SetOut(out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"general"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reviewer.called {
+		t.Fatal("reviewer was not started")
+	}
+
+	sc := reviewer.got.ScopeContext
+	if len(sc.Commits) != 1 || !strings.HasSuffix(sc.Commits[0], "add changed.go") {
+		t.Errorf("ScopeContext.Commits = %v, want the branch commit", sc.Commits)
+	}
+	if len(sc.Files) != 1 || sc.Files[0] != "A\tchanged.go" {
+		t.Errorf("ScopeContext.Files = %v, want [A\\tchanged.go]", sc.Files)
+	}
+	if len(sc.Uncommitted) != 1 || !strings.Contains(sc.Uncommitted[0], "dirty.txt") {
+		t.Errorf("ScopeContext.Uncommitted = %v, want dirty.txt porcelain line", sc.Uncommitted)
+	}
+	if !strings.Contains(sc.Diff, "+package changed") {
+		t.Errorf("ScopeContext.Diff missing committed content:\n%s", sc.Diff)
+	}
+}
+
+// TestComposeMultiAgentSinks_ThreadsScopeToSynthesisSink verifies the judge
+// sink receives the scope so out-of-scope findings can be discarded during
+// consolidation.
+func TestComposeMultiAgentSinks_ThreadsScopeToSynthesisSink(t *testing.T) {
+	t.Parallel()
+	scope := reviewtypes.ScopeContext{Files: []string{"M\tcmd/foo.go"}}
+	sinks := review.ExposedComposeMultiAgentSinks(review.SinkComposeInputs{
+		Out:               &bytes.Buffer{},
+		IsTTY:             false,
+		AgentNames:        []string{"a", "b"},
+		SynthesisProvider: &stubSynthesisProvider{},
+		Scope:             scope,
+	})
+	for _, s := range sinks {
+		if syn, ok := s.(review.SynthesisSink); ok {
+			if len(syn.Scope.Files) != 1 || syn.Scope.Files[0] != "M\tcmd/foo.go" {
+				t.Errorf("SynthesisSink.Scope = %+v, want threaded scope", syn.Scope)
+			}
+			return
+		}
+	}
+	t.Fatal("no SynthesisSink composed")
 }

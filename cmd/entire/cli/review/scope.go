@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitexec"
+	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/storer"
@@ -248,4 +249,87 @@ func countUncommitted(ctx context.Context, repoRoot string) (int, error) {
 // wrapper around gitexec.Run preserved so existing call sites don't change.
 func runGit(ctx context.Context, repoRoot string, args ...string) (string, error) {
 	return gitexec.Run(ctx, repoRoot, args...) //nolint:wrapcheck // gitexec already wraps
+}
+
+// scopeContextCaps bounds each ScopeContext field so the composed prompt
+// stays well under per-argument exec limits (Linux caps a single argv string
+// at 128KiB; the diff budget plus list caps keep the whole prompt far below).
+type scopeContextCaps struct {
+	maxCommits      int
+	maxFiles        int
+	maxUncommitted  int
+	diffInlineLimit int
+}
+
+const (
+	scopeMaxCommits      = 50
+	scopeMaxFiles        = 200
+	scopeMaxUncommitted  = 100
+	scopeDiffInlineLimit = 48 * 1024
+)
+
+// BuildScopeContext enumerates the review scope for prompt injection: the
+// branch's commits (oldest first), the three-dot changed-file list, the
+// uncommitted porcelain lines, and — when it fits the inline budget — the
+// diff itself. Three-dot (merge-base) semantics throughout, so upstream-only
+// changes on baseRef never enter the scope handed to agents.
+func BuildScopeContext(ctx context.Context, repoRoot, baseRef string) (reviewtypes.ScopeContext, error) {
+	return buildScopeContextCapped(ctx, repoRoot, baseRef, scopeContextCaps{
+		maxCommits:      scopeMaxCommits,
+		maxFiles:        scopeMaxFiles,
+		maxUncommitted:  scopeMaxUncommitted,
+		diffInlineLimit: scopeDiffInlineLimit,
+	})
+}
+
+func buildScopeContextCapped(ctx context.Context, repoRoot, baseRef string, caps scopeContextCaps) (reviewtypes.ScopeContext, error) {
+	var sc reviewtypes.ScopeContext
+
+	commitsOut, err := runGit(ctx, repoRoot, "log", "--reverse", "--format=%h %s", baseRef+"..HEAD")
+	if err != nil {
+		return sc, fmt.Errorf("list scope commits: %w", err)
+	}
+	sc.Commits, sc.CommitsTruncated = capScopeLines(commitsOut, caps.maxCommits)
+
+	filesOut, err := runGit(ctx, repoRoot, "diff", "--name-status", baseRef+"...HEAD")
+	if err != nil {
+		return sc, fmt.Errorf("list scope files: %w", err)
+	}
+	sc.Files, sc.FilesTruncated = capScopeLines(filesOut, caps.maxFiles)
+
+	uncommittedOut, err := runGit(ctx, repoRoot, "status", "--porcelain")
+	if err != nil {
+		return sc, fmt.Errorf("list uncommitted files: %w", err)
+	}
+	sc.Uncommitted, sc.UncommittedTruncated = capScopeLines(uncommittedOut, caps.maxUncommitted)
+
+	diffOut, err := runGit(ctx, repoRoot, "diff", baseRef+"...HEAD")
+	if err != nil {
+		return sc, fmt.Errorf("compute scope diff: %w", err)
+	}
+	switch {
+	case strings.TrimSpace(diffOut) == "":
+		// No committed diff — nothing to inline, nothing omitted.
+	case caps.diffInlineLimit > 0 && len(diffOut) > caps.diffInlineLimit:
+		sc.DiffOmitted = true
+	default:
+		sc.Diff = diffOut
+	}
+
+	return sc, nil
+}
+
+// capScopeLines splits command output into lines and applies a cap. Only
+// trailing newlines are trimmed — porcelain status lines carry a significant
+// leading space. maxLines <= 0 means unlimited.
+func capScopeLines(out string, maxLines int) ([]string, bool) {
+	trimmed := strings.TrimRight(out, "\n")
+	if trimmed == "" {
+		return nil, false
+	}
+	lines := strings.Split(trimmed, "\n")
+	if maxLines > 0 && len(lines) > maxLines {
+		return lines[:maxLines], true
+	}
+	return lines, false
 }

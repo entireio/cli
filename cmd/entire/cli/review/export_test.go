@@ -12,7 +12,7 @@ import (
 // package-external tests (synthesis_prompt_test.go, synthesis_sink_test.go).
 // Only compiled during `go test`.
 func ExposedComposeSynthesisPrompt(summary reviewtypes.RunSummary, perRunPrompt string) string {
-	return composeSynthesisPrompt(summary, perRunPrompt, "", "")
+	return composeSynthesisPrompt(summary, perRunPrompt, "", "", reviewtypes.ScopeContext{})
 }
 
 // SinkComposeInputs is the test-facing alias for multiAgentSinkInputs.
@@ -28,6 +28,7 @@ type SinkComposeInputs struct {
 	MasterName        string
 	JudgeTimeout      time.Duration
 	OnSynthesisError  func(error)
+	Scope             reviewtypes.ScopeContext
 }
 
 type SingleAgentSinkComposeInputs struct {
@@ -50,6 +51,7 @@ func ExposedComposeMultiAgentSinks(in SinkComposeInputs) []reviewtypes.Sink {
 		masterName:        in.MasterName,
 		judgeTimeout:      in.JudgeTimeout,
 		onSynthesisError:  in.OnSynthesisError,
+		scope:             in.Scope,
 	})
 }
 
@@ -73,4 +75,10 @@ func ExposedFindTUISink(sinks []reviewtypes.Sink) (*TUISink, bool) {
 func ExposedIsTUIPostRunCompleteSink(s reviewtypes.Sink) bool {
 	_, ok := s.(tuiPostRunCompleteSink)
 	return ok
+}
+
+// ExposedComposeSynthesisPromptScoped exposes composeSynthesisPrompt with a
+// ScopeContext for scope-gate tests.
+func ExposedComposeSynthesisPromptScoped(summary reviewtypes.RunSummary, perRunPrompt string, scope reviewtypes.ScopeContext) string {
+	return composeSynthesisPrompt(summary, perRunPrompt, "", "", scope)
 }

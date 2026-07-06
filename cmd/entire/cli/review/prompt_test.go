@@ -193,3 +193,80 @@ func TestComposeReviewPrompt_TrailingWhitespaceStripped(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+func TestComposeReviewPrompt_IncludesScopeContext(t *testing.T) {
+	t.Parallel()
+	// A populated ScopeContext must land in the prompt so agents never
+	// re-derive (or mis-derive) the review scope themselves.
+	cfg := reviewtypes.RunConfig{
+		Skills:       []string{"/x"},
+		ScopeBaseRef: "origin/main",
+		ScopeContext: reviewtypes.ScopeContext{
+			Commits:     []string{"abc1234 add feature", "def5678 fix bug"},
+			Files:       []string{"M\tcmd/foo.go", "A\tcmd/bar.go"},
+			Uncommitted: []string{" M docs/readme.md"},
+			Diff:        "diff --git a/cmd/foo.go b/cmd/foo.go\n+added line",
+		},
+	}
+	got := ComposeReviewPrompt(cfg)
+	for _, want := range []string{
+		"Commits under review",
+		"abc1234 add feature",
+		"def5678 fix bug",
+		"Files under review",
+		"M\tcmd/foo.go",
+		"A\tcmd/bar.go",
+		"Uncommitted working-tree changes:",
+		" M docs/readme.md",
+		"out of scope",
+		"```diff",
+		"+added line",
+		"```",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestComposeReviewPrompt_ScopeContextOmittedDiffPointsAtGitCommand(t *testing.T) {
+	t.Parallel()
+	// When the diff was too large to inline, the prompt must give the agent
+	// the exact three-dot command instead of a diff fence, so scope stays
+	// authoritative even without inline content.
+	cfg := reviewtypes.RunConfig{
+		Skills:       []string{"/x"},
+		ScopeBaseRef: "origin/main",
+		ScopeContext: reviewtypes.ScopeContext{
+			Files:       []string{"M\tcmd/foo.go"},
+			DiffOmitted: true,
+		},
+	}
+	got := ComposeReviewPrompt(cfg)
+	if !strings.Contains(got, "git diff origin/main...HEAD") {
+		t.Errorf("prompt missing exact three-dot diff command:\n%s", got)
+	}
+	if strings.Contains(got, "```diff") {
+		t.Errorf("prompt must not contain a diff fence when the diff was omitted:\n%s", got)
+	}
+}
+
+func TestComposeReviewPrompt_ScopeContextTruncationNoted(t *testing.T) {
+	t.Parallel()
+	// Truncated lists must say so, so agents know the enumeration is partial
+	// and consult git for the remainder instead of treating it as exhaustive.
+	cfg := reviewtypes.RunConfig{
+		Skills:       []string{"/x"},
+		ScopeBaseRef: "origin/main",
+		ScopeContext: reviewtypes.ScopeContext{
+			Commits:          []string{"abc1234 add feature"},
+			CommitsTruncated: true,
+			Files:            []string{"M\tcmd/foo.go"},
+			FilesTruncated:   true,
+		},
+	}
+	got := ComposeReviewPrompt(cfg)
+	if !strings.Contains(got, "list truncated") {
+		t.Errorf("prompt missing truncation note:\n%s", got)
+	}
+}

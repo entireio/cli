@@ -67,10 +67,14 @@ type SynthesisSink struct {
 	// RenderWriter is the writer whose terminal capabilities should be used for
 	// markdown rendering. It defaults to Writer. TTY review runs use this when
 	// Writer is a post-run buffer that will later flush to the real terminal.
-	RenderWriter    io.Writer
-	PerRunPrompt    string // if non-empty, included in the synthesis prompt for context
-	ProfileName     string
-	Task            string
+	RenderWriter io.Writer
+	PerRunPrompt string // if non-empty, included in the synthesis prompt for context
+	ProfileName  string
+	Task         string
+	// Scope is the parent-computed authoritative scope; the judge uses its
+	// file list to discard findings that point outside the change under
+	// review.
+	Scope           reviewtypes.ScopeContext
 	MasterName      string
 	RunContext      context.Context // optional; nil falls back to context.Background()
 	ProviderTimeout time.Duration   // positive: use it; zero: defaultSynthesisProviderTimeout; negative: disabled (no deadline)
@@ -113,7 +117,7 @@ func (s SynthesisSink) RunFinished(summary reviewtypes.RunSummary) {
 		return
 	}
 
-	synthesisPrompt := composeSynthesisPrompt(summary, s.PerRunPrompt, s.ProfileName, s.Task)
+	synthesisPrompt := composeSynthesisPrompt(summary, s.PerRunPrompt, s.ProfileName, s.Task, s.Scope)
 	providerCtx, cancelProvider := s.providerContext()
 	defer cancelProvider()
 	if s.MasterName != "" {
