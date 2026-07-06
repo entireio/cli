@@ -419,8 +419,8 @@ func resolveTmpDir(ctx context.Context) string {
 	return abs
 }
 
-// getUntrackedFilesForState returns a list of untracked files using go-git
-// Excludes .entire directory
+// getUntrackedFilesForState returns a list of untracked files using the native git CLI.
+// Excludes .entire directory.
 func getUntrackedFilesForState(ctx context.Context) ([]string, error) {
 	status, err := strategy.GitCLIStatus(ctx)
 	if err != nil {
