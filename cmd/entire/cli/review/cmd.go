@@ -847,20 +847,22 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	}
 	profile.Task = profileTask(profileName, profile)
 	profile.Agents = nonZeroAgentConfigs(profile.Agents)
+	// Fan out multi-skill workers into one worker per skill so skills run
+	// concurrently: the wait is the slowest skill, not the sum.
+	profile = explodeSkillWorkers(profile)
 	outputMode := profileOutput(profile)
 
 	if agentOverride != "" {
-		workerName, cfg, selectErr := selectProfileWorker(profile, agentOverride)
+		workerName, cfg, single, selectErr := applyAgentOverride(&profile, agentOverride, modelOverride)
 		if selectErr != nil {
 			cmd.SilenceUsage = true
 			err := fmt.Errorf("%w in review profile %q", selectErr, profileName)
 			fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
 			return silentErr(err)
 		}
-		if modelOverride != "" {
-			cfg.Model = modelOverride
+		if single {
+			return runSingleAgentPath(ctx, cmd, profileName, workerName, baseOverride, perRunPrompt, profile.Task, outputMode, timeout, cfg, installed, deps, out)
 		}
-		return runSingleAgentPath(ctx, cmd, profileName, workerName, baseOverride, perRunPrompt, profile.Task, outputMode, timeout, cfg, installed, deps, out)
 	}
 
 	if missing := missingInstalledProfileAgents(profile.Agents, installed); len(missing) > 0 {
@@ -1677,8 +1679,9 @@ func (r *perAgentConfiguredReviewer) Name() string {
 	}
 	return r.inner.Name()
 }
-func (r *perAgentConfiguredReviewer) ActualAgentName() string { return r.inner.Name() }
-func (r *perAgentConfiguredReviewer) ModelName() string       { return strings.TrimSpace(r.cfg.Model) }
+func (r *perAgentConfiguredReviewer) ActualAgentName() string  { return r.inner.Name() }
+func (r *perAgentConfiguredReviewer) ModelName() string        { return strings.TrimSpace(r.cfg.Model) }
+func (r *perAgentConfiguredReviewer) ReviewerSkills() []string { return r.cfg.Skills }
 func (r *perAgentConfiguredReviewer) Start(ctx context.Context, _ reviewtypes.RunConfig) (reviewtypes.Process, error) {
 	return r.inner.Start(ctx, r.cfg) //nolint:wrapcheck // transparent adapter; callers see inner's error type directly
 }

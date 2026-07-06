@@ -64,6 +64,12 @@ type AgentRun struct {
 	// Model is the optional model hint used for this worker.
 	Model string
 
+	// Skills are the skill invocations this worker ran. When the same agent
+	// runs multiple exploded skill workers with the same model, skills are
+	// the only discriminator left for session matching (the lifecycle hook
+	// records the child's ENTIRE_REVIEW_SKILLS as session.State.ReviewSkills).
+	Skills []string
+
 	Status AgentStatus
 	Tokens Tokens
 

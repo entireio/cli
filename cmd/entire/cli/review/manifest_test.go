@@ -563,6 +563,67 @@ func TestBuildLocalReviewManifestFromSummary_DisambiguatesSameAgentByModel(t *te
 	}
 }
 
+// TestBuildLocalReviewManifestFromSummary_DisambiguatesSameModelBySkills
+// covers exploded skill workers: the same agent with the SAME model runs
+// twice (once per skill), so agent+model matching alone can cross-assign
+// sessions — the session started later would be claimed by whichever run is
+// iterated first, attributing tokens and transcripts to the wrong skill.
+// ReviewSkills (recorded from ENTIRE_REVIEW_SKILLS by the lifecycle hook) is
+// the discriminator. The states are ordered so newest-first claiming WOULD
+// cross-assign without the skills check.
+func TestBuildLocalReviewManifestFromSummary_DisambiguatesSameModelBySkills(t *testing.T) {
+	started := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{
+			{
+				Name:      "claude-code:review",
+				AgentName: "claude-code",
+				Skills:    []string{"/review"},
+				Status:    reviewtypes.AgentStatusSucceeded,
+				Buffer:    []reviewtypes.Event{reviewtypes.AssistantText{Text: "review finding"}},
+			},
+			{
+				Name:      "claude-code:security-review",
+				AgentName: "claude-code",
+				Skills:    []string{"/security-review"},
+				Status:    reviewtypes.AgentStatusSucceeded,
+				Buffer:    []reviewtypes.Event{reviewtypes.AssistantText{Text: "security finding"}},
+			},
+		},
+	}
+	states := []*session.State{
+		{
+			SessionID:    "security-session",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(2 * time.Second), // newer — would be claimed first without skills
+			ReviewSkills: []string{"/security-review"},
+		},
+		{
+			SessionID:    "review-session",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			ReviewSkills: []string{"/review"},
+		},
+	}
+
+	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "")
+
+	if len(manifest.Sources) != 2 {
+		t.Fatalf("sources = %d, want 2: %#v", len(manifest.Sources), manifest.Sources)
+	}
+	if manifest.Sources[0].SessionID != "review-session" || manifest.Sources[0].Label != "claude-code:review" {
+		t.Fatalf("review source mismatch (cross-assigned?): %#v", manifest.Sources[0])
+	}
+	if manifest.Sources[1].SessionID != "security-session" || manifest.Sources[1].Label != "claude-code:security-review" {
+		t.Fatalf("security source mismatch (cross-assigned?): %#v", manifest.Sources[1])
+	}
+}
+
 func TestWarnManifestNotWritten_PrintsReasonAndDiagnosticHints(t *testing.T) {
 	var b strings.Builder
 

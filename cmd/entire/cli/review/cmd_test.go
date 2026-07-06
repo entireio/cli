@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1424,5 +1425,110 @@ func TestRunReview_TaskSemantics(t *testing.T) {
 				t.Errorf("Task = %q, %s", reviewer.got.Task, tc.desc)
 			}
 		})
+	}
+}
+
+// multiStartCaptureReviewer records every Start call — the fan-out spawns
+// the same agent multiple times, once per exploded skill worker.
+type multiStartCaptureReviewer struct {
+	name string
+	mu   sync.Mutex
+	got  []reviewtypes.RunConfig
+}
+
+func (r *multiStartCaptureReviewer) Name() string { return r.name }
+func (r *multiStartCaptureReviewer) Start(_ context.Context, cfg reviewtypes.RunConfig) (reviewtypes.Process, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.got = append(r.got, cfg)
+	return &stubDispatchProcess{}, nil
+}
+
+func (r *multiStartCaptureReviewer) captured() []reviewtypes.RunConfig {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]reviewtypes.RunConfig(nil), r.got...)
+}
+
+func multiCaptureDeps(reviewer *multiStartCaptureReviewer) review.Deps {
+	return review.Deps{
+		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
+			return []types.AgentName{types.AgentName(reviewer.name)}
+		},
+		NewSilentError: func(err error) error { return err },
+		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
+			return false, ""
+		},
+		ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
+			if agentName == reviewer.name {
+				return reviewer
+			}
+			return nil
+		},
+	}
+}
+
+// TestRunReview_MultiSkillWorkerFansOut verifies a worker with two skills
+// spawns two parallel children, one skill each — wait is the slowest skill,
+// not the sum.
+func TestRunReview_MultiSkillWorkerFansOut(t *testing.T) {
+	setupCmdTestRepo(t)
+	if err := seedReviewProfile(context.Background(), settings.ReviewProfileConfig{
+		Agents: map[string]settings.ReviewConfig{
+			testAgentName: {Skills: []string{"/review", "/security-review"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewer := &multiStartCaptureReviewer{name: testAgentName}
+	cmd := review.NewCommand(multiCaptureDeps(reviewer))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"general"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := reviewer.captured()
+	if len(got) != 2 {
+		t.Fatalf("Start called %d times, want 2 (one per skill)", len(got))
+	}
+	skills := map[string]bool{}
+	for _, cfg := range got {
+		if len(cfg.Skills) != 1 {
+			t.Errorf("run Skills = %v, want exactly one per exploded worker", cfg.Skills)
+			continue
+		}
+		skills[cfg.Skills[0]] = true
+	}
+	if !skills["/review"] || !skills["/security-review"] {
+		t.Errorf("fan-out skills = %v, want both configured skills", skills)
+	}
+}
+
+// TestRunReview_AgentOverrideRunsAllExplodedWorkers verifies --agent with a
+// multi-skill agent runs every exploded worker for that agent instead of
+// erroring on ambiguity.
+func TestRunReview_AgentOverrideRunsAllExplodedWorkers(t *testing.T) {
+	setupCmdTestRepo(t)
+	if err := seedReviewProfile(context.Background(), settings.ReviewProfileConfig{
+		Agents: map[string]settings.ReviewConfig{
+			testAgentName: {Skills: []string{"/review", "/security-review"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewer := &multiStartCaptureReviewer{name: testAgentName}
+	cmd := review.NewCommand(multiCaptureDeps(reviewer))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"general", "--agent", testAgentName})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := reviewer.captured(); len(got) != 2 {
+		t.Fatalf("Start called %d times, want 2 (agent override filters, not selects one)", len(got))
 	}
 }

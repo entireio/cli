@@ -259,6 +259,38 @@ func selectProfileWorker(profile settings.ReviewProfileConfig, selector string) 
 	}
 }
 
+// selectProfileWorkers resolves an --agent/worker selector to every matching
+// worker. An exact worker key wins alone; otherwise all workers whose agent
+// resolves to the selector are returned — multiple matches are the agent's
+// exploded skill workers, which run together as a filtered crew rather than
+// erroring on ambiguity.
+func selectProfileWorkers(profile settings.ReviewProfileConfig, selector string) (map[string]settings.ReviewConfig, error) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return nil, errors.New("empty review reviewer selector")
+	}
+	if cfg, ok := profile.Agents[selector]; ok && !cfg.IsZero() {
+		return map[string]settings.ReviewConfig{selector: cfg}, nil
+	}
+	matched := make(map[string]settings.ReviewConfig)
+	for workerName, cfg := range profile.Agents {
+		if cfg.IsZero() {
+			continue
+		}
+		if reviewAgentName(workerName, cfg) == selector {
+			matched[workerName] = cfg
+		}
+	}
+	if len(matched) == 0 {
+		configured := sortedMapKeys(profile.Agents)
+		if len(configured) == 0 {
+			return nil, fmt.Errorf("review reviewer or agent %q is not configured", selector)
+		}
+		return nil, fmt.Errorf("review reviewer or agent %q is not configured; configured reviewers: %s", selector, strings.Join(configured, ", "))
+	}
+	return matched, nil
+}
+
 func workerIDForAgentModel(agentName, model string, existing map[string]settings.ReviewConfig) string {
 	base := strings.TrimSpace(agentName)
 	if strings.TrimSpace(model) != "" {

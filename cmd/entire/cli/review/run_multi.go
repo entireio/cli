@@ -47,6 +47,7 @@ type perAgentState struct {
 	name         string
 	agentName    string
 	model        string
+	skills       []string
 	proc         reviewtypes.Process
 	startErr     error
 	startedAt    time.Time
@@ -120,6 +121,7 @@ func RunMulti(
 			name:      run.Name,
 			agentName: run.AgentName,
 			model:     run.Model,
+			skills:    run.Skills,
 			startedAt: time.Now(),
 		}
 	}
@@ -267,6 +269,7 @@ func RunMulti(
 			Name:      st.name,
 			AgentName: st.agentName,
 			Model:     st.model,
+			Skills:    st.skills,
 			Status:    status,
 			Tokens:    st.tokens,
 			Buffer:    st.buffer,
@@ -303,10 +306,15 @@ func plannedAgentRunsForReviewers(reviewers []reviewtypes.AgentReviewer, cfg rev
 		if model == "" {
 			model = cfg.Model
 		}
+		skills := reviewerSkills(r)
+		if len(skills) == 0 {
+			skills = cfg.Skills
+		}
 		planned[i] = reviewtypes.AgentRun{
 			Name:      r.Name(),
 			AgentName: reviewerActualAgentName(r),
 			Model:     model,
+			Skills:    skills,
 		}
 	}
 	return planned

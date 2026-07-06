@@ -320,7 +320,7 @@ func matchReviewSessionStateWithUsed(
 	if usedSessions == nil {
 		usedSessions = map[string]bool{}
 	}
-	st := matchReviewSessionState(worktreeRoot, headSHA, run.StartedAt, agentNameForRun(run), run.Model, states, usedSessions)
+	st := matchReviewSessionState(worktreeRoot, headSHA, run.StartedAt, agentNameForRun(run), run.Model, run.Skills, states, usedSessions)
 	if st == nil || st.SessionID == "" {
 		return st
 	}
@@ -391,7 +391,7 @@ func matchSessionsToRuns(worktreeRoot, headSHA string, summary reviewtypes.RunSu
 			if (strings.TrimSpace(run.Model) != "") != explicitModel {
 				continue // belongs to the other pass
 			}
-			st := matchReviewSessionState(worktreeRoot, headSHA, summary.StartedAt, agentNameForRun(run), run.Model, states, usedSessions)
+			st := matchReviewSessionState(worktreeRoot, headSHA, summary.StartedAt, agentNameForRun(run), run.Model, run.Skills, states, usedSessions)
 			if st == nil || st.SessionID == "" {
 				continue
 			}
@@ -484,6 +484,7 @@ func matchReviewSessionState(
 	runStartedAt time.Time,
 	agentName string,
 	modelName string,
+	runSkills []string,
 	states []*session.State,
 	used map[string]bool,
 ) *session.State {
@@ -508,11 +509,37 @@ func matchReviewSessionState(
 		if !reviewRunModelMatches(modelName, st.ModelName) {
 			continue
 		}
+		// Exploded skill workers share agent AND model; the session's
+		// recorded ReviewSkills (from ENTIRE_REVIEW_SKILLS) is the only
+		// discriminator left. Either side missing means no signal — match
+		// as before rather than rejecting.
+		if len(runSkills) > 0 && len(st.ReviewSkills) > 0 && !stringSetsEqual(runSkills, st.ReviewSkills) {
+			continue
+		}
 		if best == nil || st.StartedAt.After(best.StartedAt) {
 			best = st
 		}
 	}
 	return best
+}
+
+// stringSetsEqual reports whether two string slices contain the same
+// elements regardless of order.
+func stringSetsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]int, len(a))
+	for _, s := range a {
+		set[s]++
+	}
+	for _, s := range b {
+		set[s]--
+		if set[s] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func reviewRunModelMatches(want, got string) bool {
