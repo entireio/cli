@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -96,4 +98,82 @@ func TestRepoCreate_JSONOnRequest(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, out, `"remote": "entire://c.example.com/gh/o/web"`)
 	require.NotContains(t, out, "✓ Created")
+}
+
+// TestRepoCreate_ClusterHostRouting pins the routing fix: `repo create
+// --cluster-host X` must dial that cluster's own core (coreapi.NewForCluster),
+// not the active-context core, so a repo requested in another jurisdiction lands
+// on the correct regional deployment instead of being rejected as
+// cross-jurisdiction. Without --cluster-host it must keep dialing the active core.
+//
+// Not parallel: swaps the package-level activeCoreClient and clusterCoreClient seams.
+func TestRepoCreate_ClusterHostRouting(t *testing.T) {
+	newRepoServer := func(hit *bool) *httptest.Server {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			*hit = true
+			assert.Equal(t, http.MethodPost, r.Method)
+			assert.Equal(t, "/api/v1/repos", r.URL.Path)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			if err := printJSON(w, &coreapi.Repo{
+				ID:              testDeleteULID,
+				Name:            "web",
+				OwningProjectId: testRepoCreateProjectULID,
+				ClusterHost:     coreapi.NewOptString("c.example.com"),
+				Path:            coreapi.NewOptString("/gh/o/web"),
+			}); err != nil {
+				t.Errorf("encode repo: %v", err)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+
+	// run points both seams at distinct fake cores, runs `repo create` with the
+	// extra args, and reports which core received the POST plus the cluster host
+	// the cluster seam was asked for.
+	run := func(t *testing.T, extra ...string) (activeHit, clusterHit bool, gotClusterHost, out string) {
+		t.Helper()
+		var aHit, cHit bool
+		var host string
+		activeSrv := newRepoServer(&aHit)
+		clusterSrv := newRepoServer(&cHit)
+
+		prevActive := activeCoreClient
+		prevCluster := clusterCoreClient
+		activeCoreClient = func(context.Context) (*coreapi.Client, error) {
+			return coreapi.NewWithBearer(activeSrv.URL, "tok")
+		}
+		clusterCoreClient = func(_ context.Context, clusterHost string) (*coreapi.Client, error) {
+			host = clusterHost
+			return coreapi.NewWithBearer(clusterSrv.URL, "tok")
+		}
+		t.Cleanup(func() {
+			activeCoreClient = prevActive
+			clusterCoreClient = prevCluster
+		})
+
+		cmd := newRepoCmd()
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs(append([]string{"create", "web", "--project", testRepoCreateProjectULID}, extra...))
+		require.NoError(t, cmd.ExecuteContext(t.Context()))
+		return aHit, cHit, host, buf.String()
+	}
+
+	t.Run("--cluster-host dials the cluster core, not the active core", func(t *testing.T) {
+		activeHit, clusterHit, gotHost, out := run(t, "--cluster-host", "aws-ap-southeast-2.entire.io")
+		require.True(t, clusterHit, "the cluster core should receive the create")
+		require.False(t, activeHit, "the active core must not be dialed")
+		require.Equal(t, "aws-ap-southeast-2.entire.io", gotHost)
+		require.Contains(t, out, "✓ Created repository web")
+	})
+
+	t.Run("no --cluster-host dials the active core", func(t *testing.T) {
+		activeHit, clusterHit, _, out := run(t)
+		require.True(t, activeHit, "the active core should receive the create")
+		require.False(t, clusterHit, "the cluster core must not be dialed")
+		require.Contains(t, out, "✓ Created repository web")
+	})
 }

@@ -122,7 +122,7 @@ func newRepoCreateCmd() *cobra.Command {
 		Short: "Create a repository in a project",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreMutation(cmd, func(ctx context.Context, c *coreapi.Client) (string, any, error) {
+			mutate := func(ctx context.Context, c *coreapi.Client) (string, any, error) {
 				projID, err := resolveProjectRef(ctx, c, projectID)
 				if err != nil {
 					return "", nil, err
@@ -147,7 +147,17 @@ func newRepoCreateCmd() *cobra.Command {
 					msg += "\n  Remote: " + remote
 				}
 				return msg, wire, nil
-			})
+			}
+			// With --cluster-host, dial that cluster's own regional core so the
+			// create lands there (the cluster's core resolves the globally
+			// registered project). Without it, use the active context's core,
+			// which applies the jurisdiction default. Dialing the active core with
+			// a cross-jurisdiction --cluster-host is what the home core rejects
+			// with "cluster host ... is in jurisdiction ... not ...".
+			if clusterHost != "" {
+				return runCoreMutationForCluster(cmd, clusterHost, mutate)
+			}
+			return runCoreMutation(cmd, mutate)
 		},
 	}
 	cmd.Flags().StringVar(&projectID, "project", "", "Owning project (name or ULID) (required)")

@@ -364,7 +364,25 @@ func writeTableRow(b *strings.Builder, cells []string, widths []int, styleFor fu
 // preamble as the other runCore variants: silence usage, build the client,
 // map API errors to problem-detail messages.
 func runCoreMutation(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client) (message string, wire any, err error)) error {
-	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+	return runCore(cmd, renderCoreMutation(cmd, fn))
+}
+
+// runCoreMutationForCluster is runCoreMutation for a resource-provider command
+// (see runCoreForCluster): identical ✓-line / --json rendering, but dialing the
+// core that fronts clusterHost rather than the active context. `repo create
+// --cluster-host` uses this so a repo requested in another jurisdiction lands on
+// that cluster's own regional core (which resolves the globally-registered
+// project) instead of the active login's core rejecting it as cross-jurisdiction.
+func runCoreMutationForCluster(cmd *cobra.Command, clusterHost string, fn func(ctx context.Context, c *coreapi.Client) (message string, wire any, err error)) error {
+	return runCoreForCluster(cmd, clusterHost, renderCoreMutation(cmd, fn))
+}
+
+// renderCoreMutation builds the run-function shared by runCoreMutation and
+// runCoreMutationForCluster: run fn, then print the ✓-prefixed human line
+// (default) or the wire object (--json). Kept separate from the client-selection
+// so the two mutation variants differ only in which core they dial.
+func renderCoreMutation(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client) (message string, wire any, err error)) func(context.Context, *coreapi.Client) error {
+	return func(ctx context.Context, c *coreapi.Client) error {
 		message, wire, err := fn(ctx, c)
 		if err != nil {
 			return err
@@ -374,7 +392,7 @@ func runCoreMutation(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), message)
 		return nil
-	})
+	}
 }
 
 // activeCoreClient builds the control-plane client for active-context
@@ -382,6 +400,12 @@ func runCoreMutation(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi
 // command-level tests can point the whole command tree at an httptest server
 // without standing up the auth/context/TLS stack.
 var activeCoreClient = func(context.Context) (*coreapi.Client, error) { return coreapi.New() }
+
+// clusterCoreClient builds the control-plane client for cluster-addressed
+// commands (production wiring is coreapi.NewForCluster). A package-level seam
+// mirroring activeCoreClient so command-level tests can point the cluster path
+// at an httptest server without standing up cluster discovery.
+var clusterCoreClient = coreapi.NewForCluster
 
 // runCore is the shared base for every active-context control-plane command:
 // it owns the preamble only — silence usage, build the client, map API
@@ -403,7 +427,7 @@ func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client)
 // cluster_host". See coreapi.NewForCluster.
 func runCoreForCluster(cmd *cobra.Command, clusterHost string, fn func(ctx context.Context, c *coreapi.Client) error) error {
 	return runCoreClient(cmd, func(ctx context.Context) (*coreapi.Client, error) {
-		return coreapi.NewForCluster(ctx, clusterHost)
+		return clusterCoreClient(ctx, clusterHost)
 	}, fn)
 }
 
