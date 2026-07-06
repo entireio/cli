@@ -162,13 +162,13 @@ func newRepoCreateCmd() *cobra.Command {
 			}
 			if err := validateClusterHost(host); err != nil {
 				cmd.SilenceUsage = true
-				return err
+				return fmt.Errorf("invalid --cluster-host: %w", err)
 			}
 			return runCoreMutationForCluster(cmd, host, mutate)
 		},
 	}
 	cmd.Flags().StringVar(&projectID, "project", "", "Owning project (name or ULID) (required)")
-	cmd.Flags().StringVar(&clusterHost, "cluster-host", "", "Public host of the cluster to pin the repo to (defaults to the jurisdiction default)")
+	cmd.Flags().StringVar(&clusterHost, "cluster-host", "", "Public host of the cluster to pin the repo to (defaults to "+defaultClusterHost+")")
 	markRequired(cmd, "project")
 	return cmd
 }

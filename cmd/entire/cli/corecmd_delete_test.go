@@ -37,10 +37,10 @@ func writeNotFoundProblem(t *testing.T, w http.ResponseWriter) {
 // (clusterCoreClient) client seams at srv, runs newCmd() with args, and returns
 // its stdout, stderr, and error. Seaming both lets it drive active-context
 // commands (org/project create, delete) and cluster-addressed ones (repo
-// create, which always dials the cluster's core) through the same helper.
-// Commands dialing via runCoreForCluster directly (mirror create/remove/
-// collaborators) still need their own httptest wiring. The caller must not be
-// parallel: the seams are package-global.
+// create, which always dials the cluster's core) through the same helper —
+// runCoreForCluster now routes through the clusterCoreClient seam, so
+// cluster-addressed commands no longer need their own httptest wiring. The
+// caller must not be parallel: the seams are package-global.
 //
 // Note: cobra's cmd.Print* falls back to OutOrStderr(), which under SetOut
 // resolves to the stdout buffer — so Empty(errOut) assertions in these tests

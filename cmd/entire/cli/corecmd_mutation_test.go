@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -109,9 +110,8 @@ func TestRepoCreate_JSONOnRequest(t *testing.T) {
 //
 // Not parallel: swaps the package-level activeCoreClient and clusterCoreClient seams.
 func TestRepoCreate_ClusterHostRouting(t *testing.T) {
-	newRepoServer := func(hit *bool) *httptest.Server {
+	newRepoServer := func() *httptest.Server {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			*hit = true
 			assert.Equal(t, http.MethodPost, r.Method)
 			assert.Equal(t, "/api/v1/repos", r.URL.Path)
 			w.Header().Set("Content-Type", "application/json")
@@ -130,20 +130,23 @@ func TestRepoCreate_ClusterHostRouting(t *testing.T) {
 		return srv
 	}
 
-	// run points both seams at distinct fake cores, runs `repo create` with the
-	// extra args, and reports which core received the POST plus the cluster host
-	// the cluster seam was asked for.
-	run := func(t *testing.T, extra ...string) (activeHit, clusterHit bool, gotClusterHost, out string) {
+	// run wires the cluster seam at a fake core and makes the active-core seam
+	// fail loudly if it's ever dialed, then runs `repo create` and returns the
+	// cluster host the cluster seam was asked for plus stdout. The host is
+	// captured in the seam closure, which runs on this (test) goroutine during
+	// the synchronous ExecuteContext — no state is written by the httptest
+	// handler goroutine and read here, so there's nothing to race. A successful
+	// "✓ Created" round-trip is itself proof the cluster core served the create.
+	run := func(t *testing.T, extra ...string) (gotClusterHost, out string) {
 		t.Helper()
-		var aHit, cHit bool
 		var host string
-		activeSrv := newRepoServer(&aHit)
-		clusterSrv := newRepoServer(&cHit)
+		clusterSrv := newRepoServer()
 
 		prevActive := activeCoreClient
 		prevCluster := clusterCoreClient
 		activeCoreClient = func(context.Context) (*coreapi.Client, error) {
-			return coreapi.NewWithBearer(activeSrv.URL, "tok")
+			t.Error("active core must not be dialed for repo create")
+			return nil, errors.New("active core dialed")
 		}
 		clusterCoreClient = func(_ context.Context, clusterHost string) (*coreapi.Client, error) {
 			host = clusterHost
@@ -160,21 +163,17 @@ func TestRepoCreate_ClusterHostRouting(t *testing.T) {
 		cmd.SetErr(&buf)
 		cmd.SetArgs(append([]string{"create", "web", "--project", testRepoCreateProjectULID}, extra...))
 		require.NoError(t, cmd.ExecuteContext(t.Context()))
-		return aHit, cHit, host, buf.String()
+		return host, buf.String()
 	}
 
 	t.Run("--cluster-host dials that cluster's core, not the active core", func(t *testing.T) {
-		activeHit, clusterHit, gotHost, out := run(t, "--cluster-host", "aws-ap-southeast-2.entire.io")
-		require.True(t, clusterHit, "the cluster core should receive the create")
-		require.False(t, activeHit, "the active core must not be dialed")
+		gotHost, out := run(t, "--cluster-host", "aws-ap-southeast-2.entire.io")
 		require.Equal(t, "aws-ap-southeast-2.entire.io", gotHost)
 		require.Contains(t, out, "✓ Created repository web")
 	})
 
 	t.Run("no --cluster-host falls back to the default cluster's core, not the active core", func(t *testing.T) {
-		activeHit, clusterHit, gotHost, out := run(t)
-		require.True(t, clusterHit, "the default cluster's core should receive the create")
-		require.False(t, activeHit, "the active core must not be dialed")
+		gotHost, out := run(t)
 		require.Equal(t, defaultClusterHost, gotHost)
 		require.Contains(t, out, "✓ Created repository web")
 	})
