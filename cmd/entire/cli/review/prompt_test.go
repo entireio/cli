@@ -270,3 +270,25 @@ func TestComposeReviewPrompt_ScopeContextTruncationNoted(t *testing.T) {
 		t.Errorf("prompt missing truncation note:\n%s", got)
 	}
 }
+
+func TestComposeReviewPrompt_DiffWithBackticksKeepsFenceIntact(t *testing.T) {
+	t.Parallel()
+	// A diff touching markdown can contain triple-backtick fences; a plain ```
+	// wrapper would be closed early, corrupting the prompt structure and
+	// letting diff content escape into instruction position.
+	cfg := reviewtypes.RunConfig{
+		Skills:       []string{"/x"},
+		ScopeBaseRef: "main",
+		ScopeContext: reviewtypes.ScopeContext{
+			Files: []string{"M\tREADME.md"},
+			Diff:  "diff --git a/README.md b/README.md\n+```go\n+code\n+```",
+		},
+	}
+	got := ComposeReviewPrompt(cfg)
+	if !strings.Contains(got, "````diff") {
+		t.Errorf("diff containing ``` must be wrapped in a longer fence; got:\n%s", got)
+	}
+	if !strings.Contains(got, "\n````") {
+		t.Errorf("closing fence must match the longer opening fence; got:\n%s", got)
+	}
+}

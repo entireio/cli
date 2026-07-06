@@ -588,6 +588,12 @@ func TestBuildScopeContext_CapsTruncateAndFlagLists(t *testing.T) {
 	if len(sc.Commits) != 1 || !sc.CommitsTruncated {
 		t.Errorf("Commits = %v truncated=%v, want 1 entry with flag", sc.Commits, sc.CommitsTruncated)
 	}
+	// The cap must keep the NEWEST commits: the prompt declares this list
+	// authoritative and forbids re-deriving, so dropping recent commits
+	// would hide exactly the changes most likely to need review.
+	if len(sc.Commits) == 1 && !strings.HasSuffix(sc.Commits[0], "add b") {
+		t.Errorf("Commits cap kept %q, want the newest commit (add b)", sc.Commits[0])
+	}
 	if len(sc.Files) != 1 || !sc.FilesTruncated {
 		t.Errorf("Files = %v truncated=%v, want 1 entry with flag", sc.Files, sc.FilesTruncated)
 	}

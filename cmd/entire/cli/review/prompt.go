@@ -103,14 +103,38 @@ func renderScopeContext(sc reviewtypes.ScopeContext, baseRef string) string {
 
 	switch {
 	case sc.Diff != "":
-		b.WriteString("\n\nDiff under review:\n```diff\n")
+		// The fence must be longer than any backtick run inside the diff
+		// (diffs touching markdown contain ``` lines), or the fence closes
+		// early and diff content escapes into instruction position.
+		fence := diffFence(sc.Diff)
+		b.WriteString("\n\nDiff under review:\n" + fence + "diff\n")
 		b.WriteString(strings.TrimRight(sc.Diff, "\n"))
-		b.WriteString("\n```")
+		b.WriteString("\n" + fence)
 	case sc.DiffOmitted:
 		b.WriteString("\n\nThe diff is too large to inline. Read it with `git diff " + baseRef + "...HEAD` (three-dot), plus `git status --porcelain` for uncommitted files.")
 	}
 
 	return b.String()
+}
+
+// diffFence returns a backtick fence one longer than the longest backtick
+// run in the diff (minimum the standard three).
+func diffFence(diff string) string {
+	longest, run := 0, 0
+	for _, r := range diff {
+		if r == '`' {
+			run++
+			if run > longest {
+				longest = run
+			}
+			continue
+		}
+		run = 0
+	}
+	if longest < 3 {
+		return "```"
+	}
+	return strings.Repeat("`", longest+1)
 }
 
 const reviewerOutputFormatInstructions = `Output format:

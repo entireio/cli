@@ -51,7 +51,7 @@ var reviewToolAllowlist = []string{
 	"Read", "Grep", "Glob", "Task", "TodoWrite", "Skill",
 	"Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
 	"Bash(git status:*)", "Bash(git blame:*)", "Bash(git rev-parse:*)",
-	"Bash(git merge-base:*)", "Bash(git ls-files:*)", "Bash(git branch:*)",
+	"Bash(git merge-base:*)", "Bash(git ls-files:*)",
 	"Bash(entire search:*)", "Bash(entire checkpoint explain:*)",
 }
 

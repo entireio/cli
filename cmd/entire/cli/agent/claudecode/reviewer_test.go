@@ -438,7 +438,7 @@ func TestReviewer_ArgvIncludesReadOnlyAllowlist(t *testing.T) {
 			t.Errorf("allowlist missing %q; got %q", want, allowed)
 		}
 	}
-	for _, banned := range []string{"Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "Bash(git:*)"} {
+	for _, banned := range []string{"Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "Bash(git:*)", "Bash(git branch:*)"} {
 		if members[banned] {
 			t.Errorf("allowlist must not grant write-capable or blanket tool %q; got %q", banned, allowed)
 		}

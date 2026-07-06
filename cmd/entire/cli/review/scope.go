@@ -11,6 +11,7 @@ package review
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -262,10 +263,13 @@ type scopeContextCaps struct {
 }
 
 const (
-	scopeMaxCommits      = 50
-	scopeMaxFiles        = 200
-	scopeMaxUncommitted  = 100
-	scopeDiffInlineLimit = 48 * 1024
+	scopeMaxCommits     = 50
+	scopeMaxFiles       = 200
+	scopeMaxUncommitted = 100
+	// scopeDiffInlineLimit stays well under Windows' ~32KiB CreateProcess
+	// command-line cap (the prompt travels as one argv string and again via
+	// ENTIRE_REVIEW_PROMPT), leaving headroom for the rest of the prompt.
+	scopeDiffInlineLimit = 24 * 1024
 )
 
 // BuildScopeContext enumerates the review scope for prompt injection: the
@@ -285,11 +289,15 @@ func BuildScopeContext(ctx context.Context, repoRoot, baseRef string) (reviewtyp
 func buildScopeContextCapped(ctx context.Context, repoRoot, baseRef string, caps scopeContextCaps) (reviewtypes.ScopeContext, error) {
 	var sc reviewtypes.ScopeContext
 
-	commitsOut, err := runGit(ctx, repoRoot, "log", "--reverse", "--format=%h %s", baseRef+"..HEAD")
+	// Newest-first from git, cap (keeping the newest — the prompt declares
+	// this list authoritative, and recent commits are the ones a review can
+	// least afford to lose), then reverse for oldest-first reading order.
+	commitsOut, err := runGit(ctx, repoRoot, "log", "--format=%h %s", baseRef+"..HEAD")
 	if err != nil {
 		return sc, fmt.Errorf("list scope commits: %w", err)
 	}
 	sc.Commits, sc.CommitsTruncated = capScopeLines(commitsOut, caps.maxCommits)
+	slices.Reverse(sc.Commits)
 
 	filesOut, err := runGit(ctx, repoRoot, "diff", "--name-status", baseRef+"...HEAD")
 	if err != nil {
