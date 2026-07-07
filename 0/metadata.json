@@ -1,0 +1,153 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KWY3M0FWWCV0SVB84CPG040G",
+  "session_id": "93833a17-c2c6-4cb0-85b2-663c867b105f",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-07T10:57:52.07004Z",
+  "branch": "feat/review-no-default-timeout",
+  "checkpoints_count": 65,
+  "save_step_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/review/cmd.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "8b3d25a74d37",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 51602,
+    "cache_creation_tokens": 11788817,
+    "cache_read_tokens": 171435231,
+    "output_tokens": 410032,
+    "api_call_count": 429
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01UmMkcBXFxjZPrJDGwRsmY2",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:using-git-worktrees"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "8b3d25a74d37",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 369,
+        "end": 370,
+        "entry_ids": [
+          "67579af8-1344-456b-b2d9-2e2394e9a937"
+        ],
+        "tool_use_id": "toolu_01UmMkcBXFxjZPrJDGwRsmY2"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01UmMkcBXFxjZPrJDGwRsmY2"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:using-git-worktrees",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_018gUnzU1VrpMQAu72PSKsVb",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:test-driven-development"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "8b3d25a74d37",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 395,
+        "end": 396,
+        "entry_ids": [
+          "ec0b8dc7-ff09-4a05-ac00-a5cfee0d4b0d"
+        ],
+        "tool_use_id": "toolu_018gUnzU1VrpMQAu72PSKsVb"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_018gUnzU1VrpMQAu72PSKsVb"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:test-driven-development",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 65
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-07T10:57:51.828245Z",
+    "agent_lines": 0,
+    "agent_removed": 32,
+    "human_added": 794,
+    "human_modified": 430,
+    "human_removed": 0,
+    "total_committed": 1224,
+    "total_lines_changed": 1291,
+    "agent_percentage": 2.478698683191325,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 2806,
+      "user_lines_removed": 0,
+      "agent_lines_added": 184,
+      "agent_lines_removed": 1067,
+      "user_added_per_file": {
+        ".codex/agents/dev.toml": 108,
+        ".codex/agents/reviewer.toml": 163,
+        "cmd/entire/cli/review/review_run.go": 515,
+        "cmd/entire/cli/review/review_run_test.go": 184,
+        "docs/architecture/review-pr-stack-salvage.md": 350,
+        "docs/architecture/review-readiness-engine-scope.md": 797,
+        "entire-review-redesign/DESIGN.md": 346,
+        "entire-review-redesign/agent-cli.html": 57,
+        "entire-review-redesign/headless.html": 50,
+        "entire-review-redesign/index.html": 68,
+        "entire-review-redesign/pipeline-demo.html": 168
+      }
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 2806,
+      "user_lines_removed": 0,
+      "agent_lines_added": 184,
+      "agent_lines_removed": 1067,
+      "user_added_per_file": {
+        ".codex/agents/dev.toml": 108,
+        ".codex/agents/reviewer.toml": 163,
+        "cmd/entire/cli/review/review_run.go": 515,
+        "cmd/entire/cli/review/review_run_test.go": 184,
+        "docs/architecture/review-pr-stack-salvage.md": 350,
+        "docs/architecture/review-readiness-engine-scope.md": 797,
+        "entire-review-redesign/DESIGN.md": 346,
+        "entire-review-redesign/agent-cli.html": 57,
+        "entire-review-redesign/headless.html": 50,
+        "entire-review-redesign/index.html": 68,
+        "entire-review-redesign/pipeline-demo.html": 168
+      }
+    }
+  ]
+}
