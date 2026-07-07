@@ -109,8 +109,8 @@ github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkp
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/emirpasic/gods v1.18.1 h1:FXtiHYKDGKCW2KzwZKx0iC0PQmdlorYgdFG9jPXJ1Bc=
 github.com/emirpasic/gods v1.18.1/go.mod h1:8tpGGwCnJ5H4r6BWwaV6OrWmMoPhUl5jm/FMNAnJvWQ=
-github.com/entireio/auth-go v0.5.0 h1:omda1kFqyxrxxzDHtb9HH2ObgCaDUz8P2HQK+3g1QLg=
-github.com/entireio/auth-go v0.5.0/go.mod h1:eqFYgiNSBw6HXYR3j8DRW0/WTV1dX3SWxr2D6YCYNQ0=
+github.com/entireio/auth-go v0.5.1 h1:V72PnApZRGtg5+691YcaokNR7Jpda7OrBEL8g9ge2XY=
+github.com/entireio/auth-go v0.5.1/go.mod h1:eqFYgiNSBw6HXYR3j8DRW0/WTV1dX3SWxr2D6YCYNQ0=
 github.com/fatih/color v1.19.0 h1:Zp3PiM21/9Ld6FzSKyL5c/BULoe/ONr9KlbYVOfG8+w=
 github.com/fatih/color v1.19.0/go.mod h1:zNk67I0ZUT1bEGsSGyCZYZNrHuTkJJB+r6Q9VuMi0LE=
 github.com/fatih/semgroup v1.2.0 h1:h/OLXwEM+3NNyAdZEpMiH1OzfplU09i2qXPVThGZvyg=
