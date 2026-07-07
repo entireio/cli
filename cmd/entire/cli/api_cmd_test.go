@@ -142,8 +142,44 @@ func TestValidateAPIPath(t *testing.T) {
 
 func TestResolveAPIClient_UnknownTarget(t *testing.T) {
 	t.Parallel()
-	if _, err := resolveAPIClient(context.Background(), "banana", false); err == nil {
+	if _, err := resolveAPIClient(context.Background(), "banana", "", false); err == nil {
 		t.Error("expected error for unknown --to")
+	}
+}
+
+func TestResolveAPITarget(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		flags      apiFlags
+		toExplicit bool
+		wantTo     string
+		wantJuris  string
+		wantErr    bool
+	}{
+		// No --jurisdiction: --to is passed through untouched.
+		{"default", apiFlags{to: apiTargetCore}, false, apiTargetCore, "", false},
+		// --jurisdiction with default --to: implies cell, slug normalized to lowercase.
+		{"implied cell", apiFlags{to: apiTargetCore, jurisdiction: " US "}, false, apiTargetCell, "us", false},
+		// --jurisdiction with explicit --to cell: allowed.
+		{"explicit cell", apiFlags{to: apiTargetCell, jurisdiction: "eu"}, true, apiTargetCell, "eu", false},
+		// --jurisdiction with explicit --to core: contradiction, rejected.
+		{"contradiction", apiFlags{to: apiTargetCore, jurisdiction: "eu"}, true, "", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			to, j, err := resolveAPITarget(&tc.flags, tc.toExplicit)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("resolveAPITarget(%+v) = (%q, %q, nil), want error", tc.flags, to, j)
+				}
+				return
+			}
+			if err != nil || to != tc.wantTo || j != tc.wantJuris {
+				t.Fatalf("resolveAPITarget(%+v) = (%q, %q, %v), want (%q, %q, nil)", tc.flags, to, j, err, tc.wantTo, tc.wantJuris)
+			}
+		})
 	}
 }
 

@@ -3,6 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +41,59 @@ func TestCreateOneMirror_Suspended(t *testing.T) {
 	require.Equal(t, mirrorStatusSuspended, final)
 	require.False(t, finalOK)
 	require.Equal(t, []string{mirrorsAPIPath}, *paths, "suspended must not poll GetMirror")
+}
+
+// TestCreateOneMirror_PollErrorRendersCleanDetail pins the fix for a create
+// that succeeds but whose readiness poll keeps 404ing (the us-east-2 symptom:
+// CreateMirror returns a placement + clone URL, but GetMirror on it reports
+// "mirror not found"). The per-mirror error must render the server's problem
+// Detail, not ogen's raw decoded ErrorModel struct — so it goes through
+// renderCoreError like the create-failure branch, and the clone URL is still
+// captured from the successful create.
+//
+// Not parallel: shortens the package-level mirrorPollInterval.
+func TestCreateOneMirror_PollErrorRendersCleanDetail(t *testing.T) {
+	prev := mirrorPollInterval
+	mirrorPollInterval = time.Millisecond
+	t.Cleanup(func() { mirrorPollInterval = prev })
+	ctx := t.Context()
+
+	created := &coreapi.CreatedMirror{Created: true, MirrorId: "m1", MirrorUrl: "entire://c/gh/o/r"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == mirrorsAPIPath:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			if err := printJSON(w, created); err != nil {
+				t.Errorf("encode created response: %v", err)
+			}
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/mirrors/"):
+			// The status poll can't find the placement the create just returned.
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusNotFound)
+			if _, err := w.Write([]byte(`{"title":"Not Found","detail":"mirror not found","status":404}`)); err != nil {
+				t.Errorf("write problem response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := coreapi.NewWithBearer(srv.URL, "tok")
+	require.NoError(t, err)
+
+	target := mirrorTarget{owner: "o", repo: "r", region: regionChoice{host: "c"}}
+	res := createOneMirror(ctx, target, c, nil, false, time.Second, nil)
+
+	require.Equal(t, mirrorStatusError, res.status)
+	require.Equal(t, "entire://c/gh/o/r", res.cloneURL, "a successful create still yields the clone URL")
+	require.Error(t, res.err)
+	require.EqualError(t, res.err, "mirror not found", "must render the server's problem Detail")
+	// Guard against ogen's raw `code 404: {Schema:... Set:true}` struct dump leaking.
+	require.NotContains(t, res.err.Error(), "Set:", "must not leak the decoded ErrorModel struct")
+	require.NotContains(t, res.err.Error(), "decode response")
+	require.NotContains(t, res.err.Error(), "code 404")
 }
 
 func TestRunMirrorCreateWizard_RequiresTTY(t *testing.T) {

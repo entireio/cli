@@ -335,10 +335,13 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 		return fmt.Errorf("initial clone of mirror %s failed", created.MirrorId)
 	case coreapi.MirrorStatusProcessing:
 		// Still processing when the poll returned: the wait timed out (or a
-		// transport error broke the poll). awaitMirrorReady's err carries which.
-		return err
+		// poll call errored). awaitMirrorReady's err carries which. Route it
+		// through renderCoreError so an API error (e.g. a 404 problem+json)
+		// renders as the server's Detail rather than ogen's raw decoded struct;
+		// a timeout error passes through unchanged.
+		return renderCoreError(err)
 	default:
-		return err
+		return renderCoreError(err)
 	}
 }
 

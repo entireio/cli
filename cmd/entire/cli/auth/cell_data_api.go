@@ -413,11 +413,31 @@ func resolveTargetCellBaseURL(ctx context.Context, target *CellTarget, dataOrigi
 	if target != nil && strings.TrimSpace(target.BaseURL) != "" {
 		return strings.TrimRight(target.BaseURL, "/"), nil
 	}
-	if !isBFFOrigin(dataOrigin) {
-		// Already a cell URL, or a loopback local-dev host: keep it verbatim.
+	// The configured origin is kept verbatim when it isn't a BFF/apex fronting
+	// multiple cells — i.e. it's already a direct cell or a loopback dev host —
+	// EXCEPT when a jurisdiction is explicitly pinned (target.Jurisdiction, e.g.
+	// `entire api --jurisdiction eu`) against a non-loopback origin. A pinned
+	// jurisdiction may name a DIFFERENT cell than the configured direct-cell
+	// origin, so dialing that origin verbatim would send an identity token minted
+	// for the pinned jurisdiction to the wrong cell; resolve the pinned
+	// jurisdiction's own cell from the catalog instead. A loopback dev host serves
+	// a single cell with no jurisdiction catalog, so it always stays verbatim.
+	explicitJurisdiction := target != nil && strings.TrimSpace(target.Jurisdiction) != ""
+	if !isBFFOrigin(dataOrigin) && (!explicitJurisdiction || isLoopbackOrigin(dataOrigin)) {
 		return strings.TrimRight(dataOrigin, "/"), nil
 	}
 	return resolveCellAPIBaseURL(ctx, listCoreURL, loginJWT, jurisdiction, httpClient)
+}
+
+// isLoopbackOrigin reports whether origin's host is a loopback address, at any
+// scheme (isLoopbackHTTP only accepts http). Used to keep a local-dev cell
+// verbatim even when a jurisdiction is explicitly pinned.
+func isLoopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return isLoopbackHost(strings.ToLower(u.Hostname()))
 }
 
 // isBFFOrigin reports whether origin is a BFF / apex host that fronts multiple
