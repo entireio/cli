@@ -2078,13 +2078,7 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 			continue
 		}
 		activeSessions++
-		// Skip sessions that have no condensable content: no transcript path,
-		// no tracked files, and no shadow branch data (StepCount == 0). These
-		// would produce a Skipped result in CondenseSession, leaving the
-		// Entire-Checkpoint trailer pointing to nothing on the metadata branch.
-		// NOTE: conservative approximation of the skip gate in CondenseSession
-		// (which checks extracted data, not raw state). Keep aligned.
-		if state.TranscriptPath == "" && len(state.FilesTouched) == 0 && state.StepCount == 0 {
+		if sessionLacksCondensableContent(state) {
 			emptyActiveSessions++
 			logging.Debug(logCtx, "prepare-commit-msg: fast path skipping empty session",
 				slog.String("session_id", state.SessionID),
@@ -2111,6 +2105,36 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		slog.Int("empty_active_sessions", emptyActiveSessions),
 		slog.Any("session_phases", phases),
 	)
+	return false
+}
+
+// sessionLacksCondensableContent reports whether an ACTIVE session has nothing
+// CondenseSession could turn into a checkpoint: no tracked files, no shadow
+// branch data (StepCount == 0), and no transcript content. Stamping a trailer
+// for such a session would leave the commit permanently referencing a
+// checkpoint the condensation skip gate never writes (dangling trailer).
+//
+// For most agents a non-empty TranscriptPath implies content — their
+// transcripts stream during the turn. Antigravity writes its transcript file
+// only AFTER the Stop hook, so mid-turn the recorded path routinely points at
+// a missing or still-empty file; only an on-disk stat tells the truth. Other
+// agents keep the cheap path-only check: for them an empty transcript file at
+// commit time is a transient write race, and condensation errors-and-retries
+// rather than skipping, so the trailer heals on the next commit.
+//
+// NOTE: conservative approximation of the skip gate in CondenseSession (which
+// checks extracted data, not raw state). Keep aligned.
+func sessionLacksCondensableContent(state *SessionState) bool {
+	if len(state.FilesTouched) > 0 || state.StepCount > 0 {
+		return false
+	}
+	if state.TranscriptPath == "" {
+		return true
+	}
+	if state.AgentType == agent.AgentTypeAntigravity {
+		info, err := os.Stat(state.TranscriptPath)
+		return err != nil || info.Size() == 0
+	}
 	return false
 }
 

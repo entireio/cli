@@ -226,10 +226,7 @@ func TestAppendStatusSnapshot_PrunesStaleFilesOnCreate(t *testing.T) {
 // for conversationID, using the statusDirEnv override already set by the test.
 func writeSnapshotFixture(t *testing.T, conversationID string, snaps []statusSnapshot) {
 	t.Helper()
-	path, err := statusFilePath(conversationID)
-	if err != nil {
-		t.Fatalf("statusFilePath: %v", err)
-	}
+	path := statusFilePath(conversationID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}

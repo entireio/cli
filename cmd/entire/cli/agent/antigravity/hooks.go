@@ -207,7 +207,9 @@ func writeJSONMapFile(rawFile map[string]json.RawMessage, path, what string) err
 		return fmt.Errorf("failed to marshal %s: %w", what, err)
 	}
 
-	if err := os.WriteFile(path, output, 0o600); err != nil {
+	// Atomic write: settings.json is machine-global (its title slot is shared
+	// by every repo on the machine), so a crash mid-write must not truncate it.
+	if err := jsonutil.WriteFileAtomic(path, output, 0o600); err != nil {
 		return fmt.Errorf("failed to write %s: %w", what, err)
 	}
 	return nil

@@ -1372,12 +1372,16 @@ func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID s
 // can't tell a follow-up model call from a resumed turn) must be dropped. Only
 // a genuinely mid-turn session suppresses it — an idle/ended/condensed/absent
 // session means the prior turn finished, so a new or resumed turn should be
-// tracked. A stuck-ACTIVE session (crashed/killed before its Stop hook fired,
-// no interaction beyond session.StuckActiveThreshold) must NOT suppress:
-// otherwise every resume of a crashed conversation would run untracked and
-// uninitialized.
+// tracked. A crashed session (killed before its Stop hook fired) must NOT
+// suppress — otherwise every resume of a crashed conversation would run
+// untracked and uninitialized, computing its TurnEnd delta against the stale
+// crashed-turn baseline. Crash detection is two-tier: OwnerExited catches a
+// dead owner process immediately (PID liveness), and IsStuckActive covers the
+// cases liveness can't see (no recorded owner, cross-host state) after
+// session.StuckActiveThreshold of silence.
 func shouldSuppressConditionalTurnStart(event *agent.Event, state *strategy.SessionState) bool {
-	return event.SuppressIfSessionActive && state != nil && state.Phase.IsActive() && !state.IsStuckActive()
+	return event.SuppressIfSessionActive && state != nil && state.Phase.IsActive() &&
+		!state.IsStuckActive() && !state.OwnerExited()
 }
 
 // logFileChanges logs the files modified, created, and deleted during a session.

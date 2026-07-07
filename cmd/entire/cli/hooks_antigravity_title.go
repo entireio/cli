@@ -46,12 +46,22 @@ func newAntigravityTitleTeeCmd() *cobra.Command {
 			}
 			// wrap is the user's own original title command, preserved from
 			// settings.json and round-tripped via shellSingleQuote, so running
-			// it under `sh -c` is intentional — not an external-input injection surface.
+			// it under `sh -c` is intentional — not an external-input injection
+			// surface. POSIX-only: a stock Windows PATH has no `sh`, so a
+			// wrapped user title command would fail there (shellSingleQuote's
+			// POSIX quoting wouldn't survive cmd.exe either); revisit shell
+			// selection if agy ships on Windows.
 			wrapped := exec.CommandContext(cmd.Context(), "sh", "-c", wrap)
 			wrapped.Stdin = bytes.NewReader(payload)
 			wrapped.Stdout = cmd.OutOrStdout()
 			wrapped.Stderr = cmd.ErrOrStderr()
-			_ = wrapped.Run() //nolint:errcheck // a failing user title script must not fail the tee
+			if err := wrapped.Run(); err != nil {
+				// A failing user title script must not fail the tee (token
+				// capture already succeeded), but leave a breadcrumb — the
+				// user's own title rendering silently disappearing is
+				// otherwise undiagnosable.
+				logging.Debug(cmd.Context(), "antigravity title-tee: wrapped title command failed", "error", err.Error())
+			}
 			return nil
 		},
 	}

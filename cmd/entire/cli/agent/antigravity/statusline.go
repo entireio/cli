@@ -5,12 +5,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // agy's title/statusline hook pipes a state JSON to the configured command on
@@ -58,26 +61,21 @@ type statuslinePayload struct {
 
 // statusDir returns the directory used to store snapshot files.
 // It honours the ENTIRE_ANTIGRAVITY_STATUS_DIR env override (tests, ops),
-// otherwise uses <os.UserCacheDir()>/entire/antigravity/status.
-func statusDir() (string, error) {
+// otherwise uses <userdirs.Cache()>/antigravity/status. userdirs is the
+// mandated resolver: it honours $XDG_CACHE_HOME on every platform (os.
+// UserCacheDir ignores it on darwin, defeating harness isolation) and falls
+// back to a throwaway per-process dir under `go test`.
+func statusDir() string {
 	if override := os.Getenv(statusDirEnv); override != "" {
-		return override, nil
+		return override
 	}
-	cacheDir, err := os.UserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("antigravity status: resolve user cache dir: %w", err)
-	}
-	return filepath.Join(cacheDir, "entire", "antigravity", "status"), nil
+	return filepath.Join(userdirs.Cache(), "antigravity", "status")
 }
 
 // statusFilePath returns the path for the JSONL snapshot file of a conversation.
 // filepath.Base guards against path traversal in the conversation ID.
-func statusFilePath(conversationID string) (string, error) {
-	dir, err := statusDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, filepath.Base(conversationID)+".jsonl"), nil
+func statusFilePath(conversationID string) string {
+	return filepath.Join(statusDir(), filepath.Base(conversationID)+".jsonl")
 }
 
 // AppendStatusSnapshot parses an agy state-JSON payload and appends a snapshot
@@ -92,17 +90,18 @@ func AppendStatusSnapshot(payload []byte) error {
 		return nil // missing required fields — silently skip
 	}
 
-	filePath, err := statusFilePath(p.ConversationID)
-	if err != nil {
-		return err
-	}
+	filePath := statusFilePath(p.ConversationID)
 	isNew := false
 	if _, statErr := os.Stat(filePath); os.IsNotExist(statErr) {
 		isNew = true
 	}
 
-	if err := os.MkdirAll(filepath.Dir(filePath), 0o750); err != nil {
-		return fmt.Errorf("antigravity status: mkdir: %w", err)
+	// The directory necessarily exists once the snapshot file does, so only
+	// pay the MkdirAll syscall on the first append of a conversation.
+	if isNew {
+		if err := os.MkdirAll(filepath.Dir(filePath), 0o750); err != nil {
+			return fmt.Errorf("antigravity status: mkdir: %w", err)
+		}
 	}
 
 	// Dedup: compare compact JSON of the new context_window against the last
@@ -161,11 +160,7 @@ func AppendStatusSnapshot(payload []byte) error {
 // hasn't written a snapshot before the first TurnStart will over-count the
 // prior cumulative total on that first tracked turn.
 func (a *AntigravityAgent) SnapshotTokenBaseline(_ context.Context, sessionID string) (json.RawMessage, error) {
-	filePath, err := statusFilePath(sessionID)
-	if err != nil {
-		return nil, nil //nolint:nilerr // degrade to "no baseline"; never block the turn
-	}
-	snap, err := readLastStatusSnapshot(filePath)
+	snap, err := readLastStatusSnapshot(statusFilePath(sessionID))
 	if err != nil || snap == nil {
 		return nil, nil //nolint:nilerr // ditto (missing file, no lines, malformed)
 	}
@@ -226,12 +221,17 @@ func (a *AntigravityAgent) CalculateTokenUsageSince(_ context.Context, sessionID
 	return usage, nil
 }
 
-// readLastStatusSnapshot streams the JSONL file line-by-line and returns the
-// snapshot on the final non-empty line (O(1) memory, single JSON decode), or
-// nil if the file has no usable line. Shared by the dedup comparison and
-// SnapshotTokenBaseline — the latter runs on every TurnStart, so decoding the
-// whole history just to keep the last line would grow linearly with
-// conversation length.
+// statusTailWindow bounds how many bytes readLastStatusSnapshot reads from the
+// end of the file. Snapshot lines are well under 1 KB, so 64 KB always covers
+// the final line with huge margin.
+const statusTailWindow = 64 * 1024
+
+// readLastStatusSnapshot returns the snapshot on the final non-empty line, or
+// nil if the file has no usable line. It reads a bounded tail window instead
+// of streaming the whole file: it is shared by the per-fire dedup comparison
+// in AppendStatusSnapshot and by every-TurnStart SnapshotTokenBaseline, and
+// agy fires the title command on each agent state change — a front-to-back
+// scan would cost O(file) per fire, O(n^2) over a conversation.
 func readLastStatusSnapshot(filePath string) (*statusSnapshot, error) {
 	//nolint:gosec // filePath is derived from filepath.Base(conversationID)
 	f, err := os.Open(filePath)
@@ -240,24 +240,42 @@ func readLastStatusSnapshot(filePath string) (*statusSnapshot, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("antigravity status: stat: %w", err)
+	}
 
-	var lastLine string
-	for scanner.Scan() {
-		if line := scanner.Text(); line != "" {
+	offset := info.Size() - statusTailWindow
+	if offset < 0 {
+		offset = 0
+	}
+	buf := make([]byte, info.Size()-offset)
+	if _, err := f.ReadAt(buf, offset); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("antigravity status: read tail: %w", err)
+	}
+
+	// When the window starts mid-file, the first chunk may be a partial line —
+	// discard through the first newline so only whole lines are considered.
+	if offset > 0 {
+		nl := bytes.IndexByte(buf, '\n')
+		if nl < 0 {
+			return nil, nil //nolint:nilnil // single line larger than the window — treat as no usable snapshot
+		}
+		buf = buf[nl+1:]
+	}
+
+	var lastLine []byte
+	for _, line := range bytes.Split(buf, []byte("\n")) {
+		if line = bytes.TrimSpace(line); len(line) > 0 {
 			lastLine = line
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("antigravity status: scan: %w", err)
-	}
-	if lastLine == "" {
+	if len(lastLine) == 0 {
 		return nil, nil //nolint:nilnil // no lines yet — caller handles nil gracefully
 	}
 
 	var snap statusSnapshot
-	if err := json.Unmarshal([]byte(lastLine), &snap); err != nil {
+	if err := json.Unmarshal(lastLine, &snap); err != nil {
 		return nil, nil //nolint:nilnil // malformed last line — treat as no prior snapshot
 	}
 	return &snap, nil
@@ -266,10 +284,7 @@ func readLastStatusSnapshot(filePath string) (*statusSnapshot, error) {
 // readStatusSnapshots reads all valid snapshot lines from the JSONL file for
 // the given conversationID. A missing file returns nil, nil (not an error).
 func readStatusSnapshots(conversationID string) ([]statusSnapshot, error) {
-	filePath, err := statusFilePath(conversationID)
-	if err != nil {
-		return nil, err
-	}
+	filePath := statusFilePath(conversationID)
 
 	//nolint:gosec // filePath is derived from filepath.Base(conversationID)
 	f, err := os.Open(filePath)

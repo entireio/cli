@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -828,6 +829,19 @@ func TestShouldSuppressConditionalTurnStart(t *testing.T) {
 	// fire, or the crashed conversation is untracked forever.
 	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, stuckActive) {
 		t.Error("conditional TurnStart with a stuck-ACTIVE session must fire (resume after crash)")
+	}
+	// Dead owner (crash detected via PID liveness) => a resume must fire
+	// immediately, without waiting out StuckActiveThreshold. A mismatched
+	// start fingerprint on our own PID is proclive's deterministic "dead
+	// owner" signal on supported platforms.
+	deadOwner := &strategy.SessionState{
+		Phase: session.PhaseActive, StartedAt: now, LastInteractionTime: &now,
+		Owner: &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
+	}
+	if deadOwner.OwnerLiveness() != proclive.LivenessDead {
+		t.Logf("skipping dead-owner case: liveness = %v on this platform", deadOwner.OwnerLiveness())
+	} else if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, deadOwner) {
+		t.Error("conditional TurnStart with a dead-owner ACTIVE session must fire (resume within the stuck threshold)")
 	}
 	// Idle session => the prior turn finished; a new/resumed turn must fire.
 	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, idle) {
