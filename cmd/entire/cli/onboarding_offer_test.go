@@ -51,15 +51,15 @@ func (f *fakeConnectState) deps() onboardingRungDeps {
 }
 
 //nolint:unparam // the offer-map signature requires an error return
-func (f *fakeConnectState) offers(t *testing.T, ran *[]string) map[string]func(context.Context) error {
+func (f *fakeConnectState) offers(t *testing.T, ran *[]string) map[string]func(context.Context, bool) error {
 	t.Helper()
-	return map[string]func(context.Context) error{
-		onboarding.KeyAuth: func(context.Context) error {
+	return map[string]func(context.Context, bool) error{
+		onboarding.KeyAuth: func(context.Context, bool) error {
 			*ran = append(*ran, onboarding.KeyAuth)
 			f.loggedIn = true
 			return nil
 		},
-		onboarding.KeyMirror: func(context.Context) error {
+		onboarding.KeyMirror: func(context.Context, bool) error {
 			*ran = append(*ran, onboarding.KeyMirror)
 			f.mirrored = true
 			return nil
@@ -185,7 +185,7 @@ func TestOnboardingLadder_OfferFailureIsBestEffort(t *testing.T) {
 	f := &fakeConnectState{loggedIn: true} // only mirror left to do
 	var ran []string
 	r := newTestOffersRunner(f, &ran, t)
-	r.offerFns[onboarding.KeyMirror] = func(context.Context) error {
+	r.offerFns[onboarding.KeyMirror] = func(context.Context, bool) error {
 		return errors.New("cluster unreachable")
 	}
 	r.promptMode = func(context.Context, []onboarding.Result) (onboardingSetupMode, error) { return setupModeAll, nil }
@@ -237,8 +237,8 @@ func TestOnboardingLadder_ModeAll_RunsImportOffer(t *testing.T) {
 		return []agentImportStatus{status}, nil
 	}
 	//nolint:unparam // the offer-map signature requires an error return
-	r.offerFns[onboarding.KeyImport] = func(context.Context) error {
-		ran = append(ran, "import")
+	r.offerFns[onboarding.KeyImport] = func(context.Context, bool) error {
+		ran = append(ran, onboarding.KeyImport)
 		imported = true
 		return nil
 	}
@@ -247,7 +247,7 @@ func TestOnboardingLadder_ModeAll_RunsImportOffer(t *testing.T) {
 	var out bytes.Buffer
 	r.run(context.Background(), &out)
 
-	if len(ran) != 1 || ran[0] != "import" {
+	if len(ran) != 1 || ran[0] != onboarding.KeyImport {
 		t.Errorf("offers ran = %v, want [import]", ran)
 	}
 	if !strings.Contains(out.String(), "Connected") {
@@ -387,5 +387,98 @@ func TestOnboardingLadder_BlockedRungNotOfferableWithoutItsBlocker(t *testing.T)
 
 	if len(ran) != 0 {
 		t.Errorf("offers ran = %v, want none", ran)
+	}
+}
+
+// --yes ("accept all defaults") auto-runs the import offer — import is
+// local-only — while login and mirror stay strictly opt-in.
+func TestOnboardingLadder_AutoRunImportsWithoutPrompting(t *testing.T) {
+	t.Parallel()
+	f := &fakeConnectState{}
+	imported := false
+	var ran []string
+	r := newTestOffersRunner(f, &ran, t)
+	r.canPrompt = func() bool { return false }
+	r.autoRun = map[string]bool{onboarding.KeyImport: true}
+	r.deps.discoverImports = func(context.Context) ([]agentImportStatus, error) {
+		status := agentImportStatus{Agent: "claude-code", Sessions: 2}
+		if !imported {
+			status.UnimportedTurns = 2
+		}
+		return []agentImportStatus{status}, nil
+	}
+	//nolint:unparam // the offer-map signature requires an error return
+	r.offerFns[onboarding.KeyImport] = func(_ context.Context, granular bool) error {
+		if granular {
+			t.Error("auto-run offers must not be granular (no prompting available)")
+		}
+		ran = append(ran, onboarding.KeyImport)
+		imported = true
+		return nil
+	}
+
+	var out bytes.Buffer
+	r.run(context.Background(), &out)
+
+	if len(ran) != 1 || ran[0] != onboarding.KeyImport {
+		t.Errorf("offers ran = %v, want [import] only — login/mirror are never implicit", ran)
+	}
+}
+
+// Without autoRun (non-interactive without --yes), nothing runs at all.
+func TestOnboardingLadder_NoAutoRunWithoutYes(t *testing.T) {
+	t.Parallel()
+	f := &fakeConnectState{}
+	var ran []string
+	r := newTestOffersRunner(f, &ran, t)
+	r.canPrompt = func() bool { return false }
+
+	var out bytes.Buffer
+	r.run(context.Background(), &out)
+
+	if len(ran) != 0 {
+		t.Errorf("offers ran = %v, want none non-interactively without --yes", ran)
+	}
+}
+
+// The import offer presents its own picker in step-by-step mode, so the
+// generic yes/no confirm is skipped for it (no double-asking) and the offer
+// receives granular=true.
+func TestOnboardingLadder_StepByStep_SelfPromptingImportSkipsConfirm(t *testing.T) {
+	t.Parallel()
+	f := &fakeConnectState{loggedIn: true, mirrored: true}
+	imported := false
+	var ran []string
+	r := newTestOffersRunner(f, &ran, t)
+	r.selfPrompting = map[string]bool{onboarding.KeyImport: true}
+	r.deps.discoverImports = func(context.Context) ([]agentImportStatus, error) {
+		status := agentImportStatus{Agent: "claude-code", Sessions: 1}
+		if !imported {
+			status.UnimportedTurns = 1
+		}
+		return []agentImportStatus{status}, nil
+	}
+	//nolint:unparam // the offer-map signature requires an error return
+	r.offerFns[onboarding.KeyImport] = func(_ context.Context, granular bool) error {
+		if !granular {
+			t.Error("step-by-step import offer must be granular (its picker is the confirm)")
+		}
+		ran = append(ran, onboarding.KeyImport)
+		imported = true
+		return nil
+	}
+	r.promptMode = func(context.Context, []onboarding.Result) (onboardingSetupMode, error) {
+		return setupModeStepByStep, nil
+	}
+	r.confirmRung = func(_ context.Context, res onboarding.Result) (bool, error) {
+		t.Errorf("generic confirm called for self-prompting rung %q", res.Rung.Key)
+		return false, nil
+	}
+
+	var out bytes.Buffer
+	r.run(context.Background(), &out)
+
+	if len(ran) != 1 || ran[0] != onboarding.KeyImport {
+		t.Errorf("offers ran = %v, want [import]", ran)
 	}
 }

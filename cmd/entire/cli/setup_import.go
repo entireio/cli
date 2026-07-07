@@ -10,9 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agentimport"
-	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
@@ -32,60 +30,6 @@ var (
 	sessionImportPrompt   = promptImportSelection
 	sessionImportRun      = runSelectedImports
 )
-
-// maybeOfferSessionImport offers, on first-time enable only, to import
-// pre-existing agent history for the just-selected agents. Granularity is
-// agent-level: choosing an agent imports all its discoverable sessions (30-day
-// lookback, matching `entire import`). It is best-effort — discovery or import
-// failures are logged and reported to the user but never fail enable.
-//
-// Import only happens on an explicit choice: an interactive run presents a
-// multi-select (nothing pre-checked) and imports what the user selects; `--yes`
-// ("accept all defaults") auto-imports all eligible agents. A non-interactive
-// run without `--yes` (a script, a piped shell, or an agent with no TTY) makes
-// no choice, so it imports nothing and just points at `entire import` — silently
-// importing history there would be surprising.
-func maybeOfferSessionImport(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions, firstRun bool) {
-	if !firstRun {
-		return
-	}
-
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		// No worktree root => nothing to import against. Enabling still succeeds.
-		logging.Warn(ctx, "session import offer skipped: no worktree root", "error", err)
-		return
-	}
-
-	eligible := sessionImportDiscover(ctx, agents, repoRoot)
-	if len(eligible) == 0 {
-		return
-	}
-
-	selected := eligible
-	if !opts.Yes {
-		if !interactive.CanPromptInteractively() {
-			// Non-interactive without --yes: don't silently import. Leave a
-			// pointer so scripted/agent enables can still import on demand.
-			logging.Info(ctx, "session import offer skipped: non-interactive without --yes", "eligible", len(eligible))
-			fmt.Fprintf(w, "Found importable history for %s. Run 'entire import <agent>' to import it.\n", pluralAgents(len(eligible)))
-			return
-		}
-		selected, err = sessionImportPrompt(ctx, w, eligible)
-		if err != nil {
-			// Best-effort: a prompt/UI failure must never fail enable. Log,
-			// note it, and skip import.
-			logging.Warn(ctx, "session import offer skipped: prompt failed", "error", err)
-			fmt.Fprintf(w, "Note: could not show import prompt: %v\n", err)
-			return
-		}
-	}
-	if len(selected) == 0 {
-		return
-	}
-
-	sessionImportRun(ctx, w, repoRoot, selected)
-}
 
 // discoverImportableAgents keeps the selected agents that have a registered
 // importer and at least one discoverable session for the repo.
@@ -242,12 +186,4 @@ func pluralSessions(n int) string {
 		return "1 session"
 	}
 	return fmt.Sprintf("%d sessions", n)
-}
-
-// pluralAgents renders an agent count with correct pluralization.
-func pluralAgents(n int) string {
-	if n == 1 {
-		return "1 agent"
-	}
-	return fmt.Sprintf("%d agents", n)
 }

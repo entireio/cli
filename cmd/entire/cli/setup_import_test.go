@@ -80,23 +80,12 @@ func withImportSeams(t *testing.T, discover func(context.Context, []agent.Agent,
 	}
 }
 
-func TestMaybeOfferSessionImport_FirstRunGate(t *testing.T) {
-	// Not parallel: overrides package seams. No repo needed — the gate returns
-	// before any discovery.
-	called := false
-	withImportSeams(t,
-		func(context.Context, []agent.Agent, string) []eligibleImport {
-			called = true
-			return []eligibleImport{{displayName: "X", sessionCount: 1}}
-		}, nil, nil)
+// The ladder replaced #1595's first-run gate with ground truth: the import
+// rung recomputes "unimported history exists" every enable, so re-enabling
+// after a full import is a no-op without any persisted gate. These tests
+// cover the offer composition (runOnboardingImport) over the same seams.
 
-	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{}, false /* firstRun */)
-	if called {
-		t.Error("discovery ran on a non-first-run enable; the offer must be gated to first run")
-	}
-}
-
-func TestMaybeOfferSessionImport_NonInteractiveAutoImportsAll(t *testing.T) {
+func TestRunOnboardingImport_NonGranularImportsAll(t *testing.T) {
 	// Not parallel: overrides seams and chdirs into a temp repo.
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -107,63 +96,24 @@ func TestMaybeOfferSessionImport_NonInteractiveAutoImportsAll(t *testing.T) {
 		{displayName: "Codex", sessionCount: 1},
 	}
 	var ran []eligibleImport
-	promptCalled := false
 	withImportSeams(t,
 		func(context.Context, []agent.Agent, string) []eligibleImport { return eligible },
 		func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error) {
-			promptCalled = true
+			t.Error("prompt shown for a non-granular import (mode-all / --yes)")
 			return nil, nil
 		},
 		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
 	)
 
-	// opts.Yes forces the non-interactive path even if a TTY is present.
-	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{Yes: true}, true)
-	if promptCalled {
-		t.Error("prompt shown under --yes; non-interactive enable must not prompt")
+	if err := runOnboardingImport(context.Background(), io.Discard, false); err != nil {
+		t.Fatalf("runOnboardingImport() error = %v", err)
 	}
 	if len(ran) != len(eligible) {
 		t.Fatalf("imported %d agents, want all %d", len(ran), len(eligible))
 	}
 }
 
-func TestMaybeOfferSessionImport_NonInteractiveWithoutYesSkips(t *testing.T) {
-	// Not parallel: overrides seams and chdirs into a temp repo.
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	t.Chdir(dir)
-	// No ENTIRE_TEST_TTY => CanPromptInteractively() is false (non-interactive),
-	// e.g. a scripted or agent-driven enable.
-
-	promptCalled := false
-	var ran []eligibleImport
-	withImportSeams(t,
-		func(context.Context, []agent.Agent, string) []eligibleImport {
-			return []eligibleImport{{displayName: testAgentClaude, sessionCount: 3}}
-		},
-		func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error) {
-			promptCalled = true
-			return nil, nil
-		},
-		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
-	)
-
-	// No --yes and no TTY: neither prompt nor auto-import; just hint at the
-	// manual command.
-	var buf bytes.Buffer
-	maybeOfferSessionImport(context.Background(), &buf, nil, EnableOptions{}, true)
-	if promptCalled {
-		t.Error("prompt shown in a non-interactive context")
-	}
-	if len(ran) != 0 {
-		t.Errorf("auto-imported %d agent(s) without --yes in a non-interactive context; expected skip", len(ran))
-	}
-	if got := buf.String(); !strings.Contains(got, "entire import") {
-		t.Errorf("expected a pointer to 'entire import', got %q", got)
-	}
-}
-
-func TestMaybeOfferSessionImport_NoEligibleIsNoOp(t *testing.T) {
+func TestRunOnboardingImport_NoEligibleIsNoOp(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
@@ -175,18 +125,18 @@ func TestMaybeOfferSessionImport_NoEligibleIsNoOp(t *testing.T) {
 		func(context.Context, io.Writer, string, []eligibleImport) { runCalled = true },
 	)
 
-	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{Yes: true}, true)
+	if err := runOnboardingImport(context.Background(), io.Discard, false); err != nil {
+		t.Fatalf("runOnboardingImport() error = %v", err)
+	}
 	if runCalled {
 		t.Error("import ran with nothing discoverable; expected a silent no-op")
 	}
 }
 
-func TestMaybeOfferSessionImport_InteractiveUsesSelection(t *testing.T) {
+func TestRunOnboardingImport_GranularUsesSelection(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
-	// Force interactive so the prompt branch is taken.
-	t.Setenv("ENTIRE_TEST_TTY", "1")
 
 	eligible := []eligibleImport{
 		{displayName: testAgentClaude, sessionCount: 3},
@@ -201,17 +151,18 @@ func TestMaybeOfferSessionImport_InteractiveUsesSelection(t *testing.T) {
 		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
 	)
 
-	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{}, true)
+	if err := runOnboardingImport(context.Background(), io.Discard, true); err != nil {
+		t.Fatalf("runOnboardingImport() error = %v", err)
+	}
 	if len(ran) != 1 || ran[0].displayName != testAgentClaude {
 		t.Fatalf("imported %+v, want only the user-selected Claude Code", ran)
 	}
 }
 
-func TestMaybeOfferSessionImport_EmptySelectionSkips(t *testing.T) {
+func TestRunOnboardingImport_EmptySelectionSkips(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
 
 	runCalled := false
 	withImportSeams(t,
@@ -222,9 +173,37 @@ func TestMaybeOfferSessionImport_EmptySelectionSkips(t *testing.T) {
 		func(context.Context, io.Writer, string, []eligibleImport) { runCalled = true },
 	)
 
-	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{}, true)
+	if err := runOnboardingImport(context.Background(), io.Discard, true); err != nil {
+		t.Fatalf("runOnboardingImport() error = %v", err)
+	}
 	if runCalled {
 		t.Error("import ran after an empty selection; expected skip")
+	}
+}
+
+func TestRunOnboardingImport_PromptErrorReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	runCalled := false
+	withImportSeams(t,
+		func(context.Context, []agent.Agent, string) []eligibleImport {
+			return []eligibleImport{{displayName: testAgentClaude, sessionCount: 3}}
+		},
+		func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error) {
+			return nil, errors.New("terminal exploded")
+		},
+		func(context.Context, io.Writer, string, []eligibleImport) { runCalled = true },
+	)
+
+	// The offer surfaces the error; the runner downgrades it to a printed
+	// notice, so enable still never fails.
+	if err := runOnboardingImport(context.Background(), io.Discard, true); err == nil {
+		t.Error("want an error from a failed selection prompt")
+	}
+	if runCalled {
+		t.Error("import ran after a prompt error; expected skip")
 	}
 }
 
@@ -255,30 +234,5 @@ func TestRunSelectedImports_UnsatisfiablePolicySkips(t *testing.T) {
 
 	if got := buf.String(); !strings.Contains(got, "skipping agent history import") {
 		t.Errorf("expected a skip note for an unsatisfiable checkpoint policy, got %q", got)
-	}
-}
-
-func TestMaybeOfferSessionImport_PromptErrorIsBestEffort(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	t.Chdir(dir)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
-
-	runCalled := false
-	withImportSeams(t,
-		func(context.Context, []agent.Agent, string) []eligibleImport {
-			return []eligibleImport{{displayName: testAgentClaude, sessionCount: 3}}
-		},
-		func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error) {
-			return nil, errors.New("terminal exploded")
-		},
-		func(context.Context, io.Writer, string, []eligibleImport) { runCalled = true },
-	)
-
-	// A prompt failure must never fail enable: the offer is best-effort, so this
-	// simply returns and does not panic or propagate.
-	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{}, true)
-	if runCalled {
-		t.Error("import ran after a prompt error; expected skip")
 	}
 }

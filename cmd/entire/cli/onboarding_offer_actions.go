@@ -7,12 +7,11 @@ import (
 	"io"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/agentimport"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -34,43 +33,49 @@ func runOnboardingLogin(ctx context.Context, w io.Writer) error {
 	})
 }
 
-// runOnboardingImport is the import rung's offer: import discoverable agent
-// history as read-only checkpoints, same flow as `entire import <agent>`
-// (checkpoint policy honored, repo/user redaction config loaded before any
-// write). Minimal by design: all agents, all sessions, no per-agent
-// selection. PR #1595 explores per-agent selection for this offer; if
-// adopted it must keep the ladder's re-offer-on-re-enable resume semantics.
-func runOnboardingImport(ctx context.Context, w io.Writer) error {
+// runOnboardingImport is the import rung's offer, composing the enable-time
+// import machinery from PR #1595: agent-scoped discovery, the optional
+// per-agent picker, and best-effort per-agent imports (checkpoint policy and
+// redaction config are enforced inside runSelectedImports). granular=true
+// (step-by-step mode) shows the picker — Import/Skip confirm for one agent,
+// multi-select for several, empty selection skips. granular=false imports
+// everything eligible: the "set up everything" and --yes paths, where consent
+// was already given.
+func runOnboardingImport(ctx context.Context, w io.Writer, granular bool) error {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve worktree root: %w", err)
 	}
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("open repository: %w", err)
+	eligible := sessionImportDiscover(ctx, installedImportAgents(ctx), repoRoot)
+	if len(eligible) == 0 {
+		return nil
 	}
-	defer repo.Close()
-	if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, repo); err != nil {
-		return err
-	}
-	strategy.EnsureRedactionConfigured()
-
-	now := time.Now()
-	for _, imp := range agentimport.All() {
-		files, discoverErr := imp.Discover(repoRoot, "", now, nil)
-		if discoverErr != nil || len(files) == 0 {
-			continue
+	selected := eligible
+	if granular {
+		selected, err = sessionImportPrompt(ctx, w, eligible)
+		if err != nil {
+			return fmt.Errorf("import selection: %w", err)
 		}
-		res, runErr := agentimport.Run(ctx, repo, imp, agentimport.Options{
-			RepoRoot: repoRoot, Now: now,
-		})
-		if runErr != nil {
-			return fmt.Errorf("import %s: %w", imp.Name(), runErr)
+		if len(selected) == 0 {
+			return nil
 		}
-		fmt.Fprintf(w, "  Imported %d turn(s) from %d %s session(s) (%d already imported).\n",
-			res.TurnsImported, res.SessionsScanned, imp.Name(), res.TurnsSkipped)
 	}
+	sessionImportRun(ctx, w, repoRoot, selected)
 	return nil
+}
+
+// installedImportAgents resolves the agents whose hooks are installed — the
+// ladder's import scope. (#1595 scoped to the just-selected agents; the
+// ladder runs on resume paths too, where "installed" is the equivalent set.)
+func installedImportAgents(ctx context.Context) []agent.Agent {
+	names := GetAgentsWithHooksInstalled(ctx)
+	out := make([]agent.Agent, 0, len(names))
+	for _, name := range names {
+		if ag, err := agent.Get(name); err == nil {
+			out = append(out, ag)
+		}
+	}
+	return out
 }
 
 // runOnboardingMirrorCreate is the mirror rung's offer: register a mirror for

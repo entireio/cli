@@ -36,8 +36,18 @@ const (
 // re-running `entire enable` the resume path after an interrupted setup.
 // All fields are seams; newOnboardingOfferRunner wires production behavior.
 type onboardingOfferRunner struct {
-	deps        onboardingRungDeps
-	offerFns    map[string]func(ctx context.Context) error
+	deps onboardingRungDeps
+	// offerFns runs a rung's setup step; granular=true (step-by-step mode)
+	// lets an offer present its own finer-grained picker.
+	offerFns map[string]func(ctx context.Context, granular bool) error
+	// selfPrompting marks offers that present their own confirmation UI in
+	// granular mode (the import picker), so runOffers skips the generic
+	// yes/no confirm instead of asking twice.
+	selfPrompting map[string]bool
+	// autoRun marks rungs whose offer runs without a prompt when prompting is
+	// unavailable — --yes ("accept all defaults") auto-imports, matching the
+	// enable-time import contract; login/mirror are never implicit.
+	autoRun     map[string]bool
 	canPrompt   func() bool
 	promptMode  func(ctx context.Context, missing []onboarding.Result) (onboardingSetupMode, error)
 	confirmRung func(ctx context.Context, r onboarding.Result) (bool, error)
@@ -62,9 +72,32 @@ func (r onboardingOfferRunner) run(ctx context.Context, w io.Writer) {
 			r.runOffers(ctx, w, ladder, mode)
 			results = ladder.Checks(ctx)
 		}
+	} else if r.runAutoOffers(ctx, w, ladder) {
+		results = ladder.Checks(ctx)
 	}
 
 	fmt.Fprint(w, r.renderChecklist(w, results))
+}
+
+// runAutoOffers runs the autoRun rungs' offers when the prompt path didn't
+// execute (no TTY or --yes). Reports whether any offer ran.
+func (r onboardingOfferRunner) runAutoOffers(ctx context.Context, w io.Writer, ladder onboarding.Ladder) bool {
+	ran := false
+	for _, rung := range ladder {
+		offer := r.offerFns[rung.Key]
+		if offer == nil || !r.autoRun[rung.Key] {
+			continue
+		}
+		if rung.Check(ctx).State != onboarding.StateMissing {
+			continue
+		}
+		ran = true
+		if err := offer(ctx, false); err != nil {
+			logging.Warn(ctx, "onboarding: auto offer failed", "rung", rung.Key, "error", err)
+			fmt.Fprintf(w, "  %s setup didn't complete: %v\n", rung.Title, err)
+		}
+	}
+	return ran
 }
 
 // offerable filters the remaining work down to rungs this runner can act on.
@@ -93,6 +126,7 @@ func (r onboardingOfferRunner) offerable(results []onboarding.Result) []onboardi
 // before its offer. Offers are best-effort: a failure prints a notice and
 // the closing checklist keeps the retry hint, but enable never fails.
 func (r onboardingOfferRunner) runOffers(ctx context.Context, w io.Writer, ladder onboarding.Ladder, mode onboardingSetupMode) {
+	granular := mode == setupModeStepByStep
 	for _, rung := range ladder {
 		offer := r.offerFns[rung.Key]
 		if offer == nil {
@@ -102,7 +136,7 @@ func (r onboardingOfferRunner) runOffers(ctx context.Context, w io.Writer, ladde
 		if check.State != onboarding.StateMissing {
 			continue
 		}
-		if mode == setupModeStepByStep {
+		if granular && !r.selfPrompting[rung.Key] {
 			accepted, err := r.confirmRung(ctx, onboarding.Result{Rung: rung, Check: check})
 			if err != nil {
 				logging.Debug(ctx, "onboarding: rung confirm prompt did not complete", "rung", rung.Key, "error", err)
@@ -112,7 +146,7 @@ func (r onboardingOfferRunner) runOffers(ctx context.Context, w io.Writer, ladde
 				continue
 			}
 		}
-		if err := offer(ctx); err != nil {
+		if err := offer(ctx, granular); err != nil {
 			logging.Warn(ctx, "onboarding: offer failed", "rung", rung.Key, "error", err)
 			fmt.Fprintf(w, "  %s setup didn't complete: %v\n", rung.Title, err)
 		}
@@ -138,17 +172,23 @@ func (r onboardingOfferRunner) renderChecklist(w io.Writer, results []onboarding
 }
 
 // runEnableOnboarding runs the connect ladder at the end of `entire enable`.
-// assumeYes (--yes) forces the non-interactive contract: no prompts and no
-// implicit login/mirror — the checklist hints carry the follow-up commands.
-// Best-effort by design: onboarding output problems never fail enable.
-var runEnableOnboarding = func(ctx context.Context, w io.Writer, assumeYes bool) {
+// assumeYes (--yes, "accept all defaults") suppresses prompts and auto-runs
+// the import offer — import is local-only; login and mirror are never
+// implicit. neverPrompt (the --agent path's documented non-interactive
+// contract) suppresses prompts without auto-running anything: the checklist
+// hints carry the follow-up commands. Best-effort by design: onboarding
+// problems never fail enable.
+var runEnableOnboarding = func(ctx context.Context, w io.Writer, assumeYes, neverPrompt bool) {
 	// The user explicitly asked for setup — retry probes that recently
 	// failed instead of serving the cached failure (which would silently
 	// suppress the mirror offer for the rest of the failure TTL).
 	defaultMirrorProbeCache().clearUnreachable()
 	r := newOnboardingOfferRunner(w)
-	if assumeYes {
+	if assumeYes || neverPrompt {
 		r.canPrompt = func() bool { return false }
+	}
+	if assumeYes {
+		r.autoRun = map[string]bool{onboarding.KeyImport: true}
 	}
 	fmt.Fprintln(w)
 	r.run(ctx, w)
@@ -161,15 +201,16 @@ func newOnboardingOfferRunner(w io.Writer) onboardingOfferRunner {
 	deps := newOnboardingRungDeps()
 	return onboardingOfferRunner{
 		deps: deps,
-		offerFns: map[string]func(ctx context.Context) error{
-			onboarding.KeyAuth:   func(ctx context.Context) error { return runOnboardingLogin(ctx, w) },
-			onboarding.KeyMirror: func(ctx context.Context) error { return runOnboardingMirrorCreate(ctx, w, deps) },
-			onboarding.KeyImport: func(ctx context.Context) error { return runOnboardingImport(ctx, w) },
+		offerFns: map[string]func(ctx context.Context, granular bool) error{
+			onboarding.KeyAuth:   func(ctx context.Context, _ bool) error { return runOnboardingLogin(ctx, w) },
+			onboarding.KeyMirror: func(ctx context.Context, _ bool) error { return runOnboardingMirrorCreate(ctx, w, deps) },
+			onboarding.KeyImport: func(ctx context.Context, granular bool) error { return runOnboardingImport(ctx, w, granular) },
 		},
-		canPrompt:   interactive.CanPromptInteractively,
-		promptMode:  promptOnboardingSetupMode,
-		confirmRung: confirmOnboardingRung,
-		styles:      newStatusStyles,
+		selfPrompting: map[string]bool{onboarding.KeyImport: true},
+		canPrompt:     interactive.CanPromptInteractively,
+		promptMode:    promptOnboardingSetupMode,
+		confirmRung:   confirmOnboardingRung,
+		styles:        newStatusStyles,
 	}
 }
 

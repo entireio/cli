@@ -913,13 +913,13 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 					printEnabledStatus(ctx, w)
 					// Re-running enable is the resume path for interrupted
 					// onboarding: offer whichever connect rungs are still missing.
-					runEnableOnboarding(ctx, w, opts.Yes)
+					runEnableOnboarding(ctx, w, opts.Yes, false)
 					return nil
 				}
 				if err := runEnable(ctx, cmd.OutOrStdout(), opts.UseProjectSettings); err != nil {
 					return err
 				}
-				runEnableOnboarding(ctx, cmd.OutOrStdout(), opts.Yes)
+				runEnableOnboarding(ctx, cmd.OutOrStdout(), opts.Yes, false)
 				return nil
 			}
 
@@ -1089,11 +1089,6 @@ To completely remove Entire integrations from this repository, use --uninstall:
 // runEnableInteractive runs the interactive enable flow.
 // agents must be provided by the caller (via detectOrSelectAgent).
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
-	// Capture first-run status before we write any settings: setupEntireDirectory
-	// and saveSettings below make IsSetUpAny report true. maybeOfferSessionImport
-	// uses this so the import offer only fires on the very first enable.
-	firstRun := !settings.IsSetUpAny(ctx)
-
 	// Uninstall hooks for agents that were previously active but are no longer selected
 	if err := uninstallDeselectedAgentHooks(ctx, w, agents); err != nil {
 		return fmt.Errorf("failed to clean up deselected agents: %w", err)
@@ -1213,10 +1208,6 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
 
-	// Offer to import pre-existing agent history for the just-selected agents.
-	// First-run only; best-effort (never fails enable).
-	maybeOfferSessionImport(ctx, w, agents, opts, firstRun)
-
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary after
 		// making the initial commit and pushing.
@@ -1226,7 +1217,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	// Connect rungs (login, mirror): one consent prompt covering whatever is
 	// missing, then the setup checklist. Also the resume path — re-running
 	// enable re-offers only rungs that are still missing.
-	runEnableOnboarding(ctx, w, opts.Yes)
+	runEnableOnboarding(ctx, w, opts.Yes, false)
 
 	fmt.Fprintln(w, "\nReady.")
 
@@ -1595,10 +1586,6 @@ func printWrongAgentError(w io.Writer, name string) {
 // setupAgentHooksNonInteractive sets up hooks for a specific agent non-interactively.
 // If strategyName is provided, it sets the strategy; otherwise uses default.
 func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Agent, opts EnableOptions) error {
-	// Capture first-run status before setupEntireDirectory/saveEnabledState make
-	// IsSetUpAny report true, so the import offer fires only on first enable.
-	firstRun := !settings.IsSetUpAny(ctx)
-
 	agentName := ag.Name()
 	// Check if agent supports hooks
 	if _, ok := agent.AsHookSupport(ag); !ok {
@@ -1689,19 +1676,16 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
 
-	// Offer to import pre-existing history for the just-configured agent.
-	// First-run only; best-effort (never fails enable).
-	maybeOfferSessionImport(ctx, w, []agent.Agent{ag}, opts, firstRun)
-
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary.
 		return nil
 	}
 
 	// Connect rungs — same ladder as interactive enable, but --agent is
-	// documented as non-interactive, so prompting is always suppressed here:
-	// the checklist and run-later hints carry the follow-up commands.
-	runEnableOnboarding(ctx, w, true)
+	// documented as non-interactive, so prompting is always suppressed here;
+	// --yes additionally auto-imports (local-only), matching the enable-time
+	// import contract. The checklist hints carry the rest.
+	runEnableOnboarding(ctx, w, opts.Yes, true)
 
 	fmt.Fprintln(w, "\nReady.")
 

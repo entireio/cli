@@ -3185,7 +3185,7 @@ func TestEnableCmd_AlreadyEnabled_RunsOnboardingLadder(t *testing.T) {
 
 	ladderRan := false
 	prev := runEnableOnboarding
-	runEnableOnboarding = func(context.Context, io.Writer, bool) { ladderRan = true }
+	runEnableOnboarding = func(context.Context, io.Writer, bool, bool) { ladderRan = true }
 	t.Cleanup(func() { runEnableOnboarding = prev })
 
 	cmd := newEnableCmd()
@@ -3214,7 +3214,7 @@ func TestEnableCmd_ReenableDisabledRepo_RunsOnboardingLadder(t *testing.T) {
 
 	ladderRan := false
 	prev := runEnableOnboarding
-	runEnableOnboarding = func(context.Context, io.Writer, bool) { ladderRan = true }
+	runEnableOnboarding = func(context.Context, io.Writer, bool, bool) { ladderRan = true }
 	t.Cleanup(func() { runEnableOnboarding = prev })
 
 	cmd := newEnableCmd()
@@ -3239,9 +3239,11 @@ func TestSetupAgentHooksNonInteractive_RunsOnboardingWithoutPrompts(t *testing.T
 	writeSettings(t, testSettingsEnabled)
 	writeClaudeHooksFixture(t)
 
-	var gotAssumeYes *bool
+	var gotNeverPrompt, gotAssumeYes *bool
 	prev := runEnableOnboarding
-	runEnableOnboarding = func(_ context.Context, _ io.Writer, assumeYes bool) { gotAssumeYes = &assumeYes }
+	runEnableOnboarding = func(_ context.Context, _ io.Writer, assumeYes, neverPrompt bool) {
+		gotAssumeYes, gotNeverPrompt = &assumeYes, &neverPrompt
+	}
 	t.Cleanup(func() { runEnableOnboarding = prev })
 
 	ag, err := agent.Get(types.AgentName("claude-code"))
@@ -3253,11 +3255,14 @@ func TestSetupAgentHooksNonInteractive_RunsOnboardingWithoutPrompts(t *testing.T
 		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
 	}
 
-	if gotAssumeYes == nil {
+	if gotNeverPrompt == nil {
 		t.Fatal("--agent enable must run the onboarding ladder")
 	}
-	if !*gotAssumeYes {
-		t.Error("--agent enable must suppress onboarding prompts (assumeYes=true) even without --yes")
+	if !*gotNeverPrompt {
+		t.Error("--agent enable must suppress onboarding prompts even without --yes")
+	}
+	if *gotAssumeYes {
+		t.Error("--agent without --yes must not auto-run offers (assumeYes must be false)")
 	}
 }
 
@@ -3268,7 +3273,7 @@ func TestRunEnableInteractive_FirstRun_RunsOnboardingLadder(t *testing.T) {
 
 	var gotAssumeYes *bool
 	prev := runEnableOnboarding
-	runEnableOnboarding = func(_ context.Context, _ io.Writer, assumeYes bool) { gotAssumeYes = &assumeYes }
+	runEnableOnboarding = func(_ context.Context, _ io.Writer, assumeYes, _ bool) { gotAssumeYes = &assumeYes }
 	t.Cleanup(func() { runEnableOnboarding = prev })
 
 	ag, err := agent.Get(types.AgentName("claude-code"))
