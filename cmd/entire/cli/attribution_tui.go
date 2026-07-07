@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -318,18 +317,15 @@ func (m whyTUIModel) selectedLine() *attributionLine {
 	return &m.result.Lines[m.cursor]
 }
 
-// sessionWebURL builds the entire.io session URL for the selected line, or ""
-// when there is nothing to link.
+// sessionWebURL builds the session URL for the selected line, or "" when there
+// is nothing to link. Delegates to expertsSessionURL so the host honors
+// ENTIRE_WEB_BASE_URL / the active API origin (staging, self-hosted, dev)
+// instead of hardcoding production.
 func (m whyTUIModel) sessionWebURL(line *attributionLine) string {
-	if line == nil || m.repoFullName == "" || line.SessionID == "" {
+	if line == nil {
 		return ""
 	}
-	owner, repo, ok := strings.Cut(m.repoFullName, "/")
-	if !ok || owner == "" || repo == "" {
-		return ""
-	}
-	return fmt.Sprintf("https://entire.io/gh/%s/%s/session/%s",
-		url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(line.SessionID))
+	return expertsSessionURL(m.repoFullName, line.SessionID)
 }
 
 func (m whyTUIModel) View() tea.View {
