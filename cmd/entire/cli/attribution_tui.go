@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 )
@@ -35,12 +36,6 @@ const (
 // 80-column budget (with its 2-space indent); full sentences live in the why
 // detail views, and [??]/~/? markers are explained by their own legend line.
 const whyMarkerLegend = "per commit: [AI] all agent · [MX] mixed — line may be either · [HU] no agent"
-
-// whyMarkerLegendNote spells out the inference rule people don't guess (a
-// single human edit anywhere in a commit turns EVERY line of it [MX] — [AI]
-// appears only for fully agent-authored commits). Rendered as a second dim
-// line under the legend in the plain-text views.
-const whyMarkerLegendNote = "note: [AI] requires a fully agent commit; one human edit turns all lines [MX]"
 
 // whyTUIStyles holds the interactive viewer's palette. Empty styles render as
 // plain text when color is off, which also keeps tests assertable.
@@ -349,19 +344,15 @@ func (m whyTUIModel) View() tea.View {
 		m.styles.render(m.styles.dim, fmt.Sprintf("%d lines · %d%% AI · %d%% human · %d%% mixed",
 			summary.TotalLines, summary.AIPercentage, summary.HumanPercentage, summary.MixedPercentage)))
 
-	list := m.renderList(m.listWidth(), m.bodyHeight())
-	detail := strings.Split(m.vp.View(), "\n")
-	sep := m.styles.render(m.styles.sepBar, "│")
-	for i := range m.bodyHeight() {
-		left, right := "", ""
-		if i < len(list) {
-			left = list[i]
-		}
-		if i < len(detail) {
-			right = detail[i]
-		}
-		fmt.Fprintf(&b, "%-*s %s %s\n", m.listWidth(), left, sep, right)
-	}
+	bodyH := m.bodyHeight()
+	left := m.renderList(m.listWidth(), bodyH)
+	sep := m.verticalSep(bodyH)
+	right := m.vp.View()
+	// JoinHorizontal is ANSI-aware: it measures each pane's VISIBLE width, so
+	// colored list rows stay aligned and the separator column doesn't drift
+	// (a raw %-*s pads on byte length and breaks once escape codes are present).
+	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, sep, right))
+	b.WriteString("\n")
 
 	legend := whyMarkerLegend
 	if m.statusMsg != "" {
@@ -372,12 +363,15 @@ func (m whyTUIModel) View() tea.View {
 	return tea.NewView(b.String())
 }
 
-// renderList renders the visible window of file lines, keeping the cursor in
-// view. Lines are windowed manually (a file can be thousands of lines).
-func (m whyTUIModel) renderList(width, height int) []string {
+// renderList renders the visible window of file lines as a single block (rows
+// joined by newlines), each row fit to width and the block padded to height.
+// Lines are windowed manually (a file can be thousands of lines). Rows are
+// width-fit with fitLine (ANSI-aware) so JoinHorizontal keeps the columns and
+// separator aligned once color escape codes are present.
+func (m whyTUIModel) renderList(width, height int) string {
 	lines := m.result.Lines
 	if len(lines) == 0 {
-		return []string{m.styles.render(m.styles.dim, "(empty file)")}
+		return m.fitLine(m.styles.render(m.styles.dim, "(empty file)"), width)
 	}
 
 	// Read-only clamp: the persisted window is maintained by
@@ -395,23 +389,57 @@ func (m whyTUIModel) renderList(width, height int) []string {
 	}
 
 	numW := len(strconv.Itoa(lines[len(lines)-1].LineNumber))
-	out := make([]string, 0, height)
-	for i := top; i < len(lines) && len(out) < height; i++ {
+	rows := make([]string, 0, height)
+	for i := top; i < len(lines) && len(rows) < height; i++ {
 		line := lines[i]
 		tag := attributionTag(line.Authorship)
 		marker := attributionLineMarker(line)
 		if marker == "" {
 			marker = " "
 		}
-		content := stringutil.TruncateRunes(strings.ReplaceAll(line.Content, "\t", "    "), width-numW-9, "…")
-		row := fmt.Sprintf("%*d %s%s %s", numW, line.LineNumber,
-			m.styles.render(m.styles.tagStyle(tag), tag), marker, content)
+		content := strings.ReplaceAll(line.Content, "\t", "    ")
+		var row string
 		if i == m.cursor {
-			row = m.styles.render(m.styles.selected, fmt.Sprintf("%*d %s%s %s", numW, line.LineNumber, tag, marker, content))
+			// One outer style over the whole row so the selection reads as a
+			// single unit (no nested tag styling to unbalance the escapes).
+			row = m.styles.render(m.styles.selected,
+				fmt.Sprintf("%*d %s%s %s", numW, line.LineNumber, tag, marker, content))
+		} else {
+			row = fmt.Sprintf("%*d %s%s %s", numW, line.LineNumber,
+				m.styles.render(m.styles.tagStyle(tag), tag), marker, content)
 		}
-		out = append(out, stringutil.TruncateRunes(row, width+64, "")) // guard against style overshoot
+		rows = append(rows, m.fitLine(row, width))
+	}
+	// Pad to a full-height block so JoinHorizontal aligns the panes.
+	for len(rows) < height {
+		rows = append(rows, strings.Repeat(" ", width))
+	}
+	return strings.Join(rows, "\n")
+}
+
+// fitLine truncates s to width and right-pads it to exactly width, measuring
+// VISIBLE width (xansi.Truncate / lipgloss.Width ignore escape codes) so
+// colored rows occupy the same column span as plain ones.
+func (m whyTUIModel) fitLine(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	out := xansi.Truncate(s, width, "…")
+	if pad := width - lipgloss.Width(out); pad > 0 {
+		out += strings.Repeat(" ", pad)
 	}
 	return out
+}
+
+// verticalSep is the " │ " column between the list and detail panes, h rows tall
+// so JoinHorizontal has a full-height middle block to align against.
+func (m whyTUIModel) verticalSep(h int) string {
+	bar := " " + m.styles.render(m.styles.sepBar, "│") + " "
+	lines := make([]string, h)
+	for i := range lines {
+		lines[i] = bar
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderDetail builds the explanation pane for the selected line — the same
