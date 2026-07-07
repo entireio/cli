@@ -199,7 +199,7 @@ func HTTPErrorMessage(statusCode int, serverMsg, baseURL string) error {
 		if serverMsg != "" {
 			return fmt.Errorf("authentication failed: %s", serverMsg)
 		}
-		return errors.New("authentication failed - please run 'entire login'")
+		return errors.New("authentication failed - the cached credential was rejected and has been discarded; retry the command (if this persists, run 'entire login')")
 	case http.StatusNotFound:
 		if serverMsg != "" {
 			return errors.New(serverMsg)
