@@ -3185,7 +3185,7 @@ func TestEnableCmd_AlreadyEnabled_RunsOnboardingLadder(t *testing.T) {
 
 	ladderRan := false
 	prev := runEnableOnboarding
-	runEnableOnboarding = func(context.Context, io.Writer, bool, bool) { ladderRan = true }
+	runEnableOnboarding = func(context.Context, io.Writer, enableOnboardingOpts) { ladderRan = true }
 	t.Cleanup(func() { runEnableOnboarding = prev })
 
 	cmd := newEnableCmd()
@@ -3214,7 +3214,7 @@ func TestEnableCmd_ReenableDisabledRepo_RunsOnboardingLadder(t *testing.T) {
 
 	ladderRan := false
 	prev := runEnableOnboarding
-	runEnableOnboarding = func(context.Context, io.Writer, bool, bool) { ladderRan = true }
+	runEnableOnboarding = func(context.Context, io.Writer, enableOnboardingOpts) { ladderRan = true }
 	t.Cleanup(func() { runEnableOnboarding = prev })
 
 	cmd := newEnableCmd()
@@ -3239,11 +3239,9 @@ func TestSetupAgentHooksNonInteractive_RunsOnboardingWithoutPrompts(t *testing.T
 	writeSettings(t, testSettingsEnabled)
 	writeClaudeHooksFixture(t)
 
-	var gotNeverPrompt, gotAssumeYes *bool
+	var got *enableOnboardingOpts
 	prev := runEnableOnboarding
-	runEnableOnboarding = func(_ context.Context, _ io.Writer, assumeYes, neverPrompt bool) {
-		gotAssumeYes, gotNeverPrompt = &assumeYes, &neverPrompt
-	}
+	runEnableOnboarding = func(_ context.Context, _ io.Writer, o enableOnboardingOpts) { got = &o }
 	t.Cleanup(func() { runEnableOnboarding = prev })
 
 	ag, err := agent.Get(types.AgentName("claude-code"))
@@ -3255,14 +3253,17 @@ func TestSetupAgentHooksNonInteractive_RunsOnboardingWithoutPrompts(t *testing.T
 		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
 	}
 
-	if gotNeverPrompt == nil {
+	if got == nil {
 		t.Fatal("--agent enable must run the onboarding ladder")
 	}
-	if !*gotNeverPrompt {
+	if !got.neverPrompt {
 		t.Error("--agent enable must suppress onboarding prompts even without --yes")
 	}
-	if *gotAssumeYes {
+	if got.assumeYes {
 		t.Error("--agent without --yes must not auto-run offers (assumeYes must be false)")
+	}
+	if len(got.importScope) != 1 {
+		t.Errorf("importScope has %d agents, want just the --agent target", len(got.importScope))
 	}
 }
 
@@ -3271,9 +3272,9 @@ func TestSetupAgentHooksNonInteractive_RunsOnboardingWithoutPrompts(t *testing.T
 func TestRunEnableInteractive_FirstRun_RunsOnboardingLadder(t *testing.T) {
 	setupTestRepo(t)
 
-	var gotAssumeYes *bool
+	var got *enableOnboardingOpts
 	prev := runEnableOnboarding
-	runEnableOnboarding = func(_ context.Context, _ io.Writer, assumeYes, _ bool) { gotAssumeYes = &assumeYes }
+	runEnableOnboarding = func(_ context.Context, _ io.Writer, o enableOnboardingOpts) { got = &o }
 	t.Cleanup(func() { runEnableOnboarding = prev })
 
 	ag, err := agent.Get(types.AgentName("claude-code"))
@@ -3285,10 +3286,39 @@ func TestRunEnableInteractive_FirstRun_RunsOnboardingLadder(t *testing.T) {
 		t.Fatalf("runEnableInteractive() error = %v", err)
 	}
 
-	if gotAssumeYes == nil {
+	if got == nil {
 		t.Fatal("first-run enable must run the onboarding ladder")
 	}
-	if !*gotAssumeYes {
+	if !got.assumeYes {
 		t.Error("--yes must propagate to the onboarding ladder")
+	}
+	if !got.firstRun {
+		t.Error("a fresh repo must report firstRun=true (gates --yes auto-import)")
+	}
+}
+
+// The bootstrap flow (--init-repo / non-git dir) suppresses the "Ready."
+// message but must still get the onboarding ladder — a just-bootstrapped
+// GitHub repo is exactly where login/mirror/import matter most.
+func TestRunEnableInteractive_BootstrapPathRunsOnboardingLadder(t *testing.T) {
+	setupTestRepo(t)
+
+	ladderRan := false
+	prev := runEnableOnboarding
+	runEnableOnboarding = func(context.Context, io.Writer, enableOnboardingOpts) { ladderRan = true }
+	t.Cleanup(func() { runEnableOnboarding = prev })
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+	var buf bytes.Buffer
+	if err := runEnableInteractive(context.Background(), &buf, []agent.Agent{ag},
+		EnableOptions{Yes: true, Telemetry: true, SuppressDoneMessage: true}); err != nil {
+		t.Fatalf("runEnableInteractive() error = %v", err)
+	}
+
+	if !ladderRan {
+		t.Error("bootstrap enable (SuppressDoneMessage) must still run the onboarding ladder")
 	}
 }

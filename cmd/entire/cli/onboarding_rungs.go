@@ -192,7 +192,14 @@ func discoverAgentImports(ctx context.Context) ([]agentImportStatus, error) {
 	var inputs []importScanInput
 	cacheable := true
 	discoverFailures := 0
-	for _, imp := range agentimport.All() {
+	// Scope to agents with hooks installed — the same set the import offer
+	// acts on. Iterating every registered importer would report Missing for
+	// history the offer will never import, an unresolvable checklist row.
+	for _, ag := range installedImportAgents(ctx) {
+		imp := importerForAgent(ag)
+		if imp == nil {
+			continue
+		}
 		files, discoverErr := imp.Discover(repoRoot, "", now, nil)
 		if discoverErr != nil {
 			// Best-effort per agent, but an error is not "nothing found":
@@ -231,6 +238,13 @@ func discoverAgentImports(ctx context.Context) ([]agentImportStatus, error) {
 		return nil, err
 	}
 	defer repo.Close()
+
+	// The offer's import runner refuses to write under a restrictive
+	// checkpoint policy; the rung must agree, or it reports Missing forever
+	// while every consented offer silently skips.
+	if policyErr := ensureCheckpointPolicyAllowsCheckpointData(ctx, repo); policyErr != nil {
+		return nil, fmt.Errorf("%w: %w", errImportsPolicyRestricted, policyErr)
+	}
 
 	fingerprint := importScanFingerprint(inputs, metadataBranchTip(repo))
 	cache := defaultImportScanCache()
@@ -337,12 +351,22 @@ func mirrorRung(deps onboardingRungDeps) onboarding.Rung {
 	}
 }
 
+// errImportsPolicyRestricted marks a repo whose checkpoint policy forbids
+// writing checkpoint data: importing is impossible here, not pending.
+var errImportsPolicyRestricted = errors.New("checkpoint policy restricts imported history")
+
 func importRung(deps onboardingRungDeps) onboarding.Rung {
 	return onboarding.Rung{
 		Key:   onboarding.KeyImport,
 		Title: "History",
 		Check: func(ctx context.Context) onboarding.Check {
 			statuses, err := deps.discoverImports(ctx)
+			if errors.Is(err, errImportsPolicyRestricted) {
+				return onboarding.Check{
+					State:  onboarding.StateNotApplicable,
+					Detail: "imports restricted by checkpoint policy",
+				}
+			}
 			if err != nil {
 				return onboarding.Check{State: onboarding.StateUnknown, Hint: "entire import"}
 			}

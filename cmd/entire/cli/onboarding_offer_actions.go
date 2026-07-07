@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -41,12 +40,15 @@ func runOnboardingLogin(ctx context.Context, w io.Writer) error {
 // multi-select for several, empty selection skips. granular=false imports
 // everything eligible: the "set up everything" and --yes paths, where consent
 // was already given.
-func runOnboardingImport(ctx context.Context, w io.Writer, granular bool) error {
+func runOnboardingImport(ctx context.Context, w io.Writer, granular bool, scope []agent.Agent) error {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve worktree root: %w", err)
 	}
-	eligible := sessionImportDiscover(ctx, installedImportAgents(ctx), repoRoot)
+	if scope == nil {
+		scope = installedImportAgents(ctx)
+	}
+	eligible := sessionImportDiscover(ctx, scope, repoRoot)
 	if len(eligible) == 0 {
 		return nil
 	}
@@ -102,20 +104,16 @@ func runOnboardingMirrorCreate(ctx context.Context, errW io.Writer, deps onboard
 	if err != nil {
 		return err
 	}
-	return finalizeMirrorOffer(errW, outcome, owner+"/"+repo, func(slug string) {
-		// Write-through: the placement is registered, so the probe cache can
-		// say "mirrored" immediately instead of waiting for the server-side
-		// clone to surface in the available-mirrors list.
-		defaultMirrorProbeCache().put(slug, true, time.Now())
-	})
+	return finalizeMirrorOffer(errW, outcome)
 }
 
 // finalizeMirrorOffer turns a nil-error createAndAwaitMirror outcome into the
 // offer's result. A suspended placement returns nil error from the create
 // path but will never serve — report it like `entire repo mirror create`
-// does, return an error so the rung keeps its retry hint, and skip the
-// cache write-through that would otherwise claim "mirrored" for the TTL.
-func finalizeMirrorOffer(w io.Writer, outcome mirrorCreateOutcome, slug string, cachePut func(slug string)) error {
+// does and return an error so the rung keeps its retry hint. (The probe-cache
+// write-through lives in createAndAwaitMirror, which already skips suspended
+// placements.)
+func finalizeMirrorOffer(w io.Writer, outcome mirrorCreateOutcome) error {
 	created := outcome.created
 	if created == nil {
 		return errors.New("mirror placement not registered")
@@ -127,6 +125,5 @@ func finalizeMirrorOffer(w io.Writer, outcome mirrorCreateOutcome, slug string, 
 	if !created.Empty {
 		fmt.Fprintln(w, "  Mirror registered — the initial clone continues in the background.")
 	}
-	cachePut(slug)
 	return nil
 }

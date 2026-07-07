@@ -105,7 +105,7 @@ func TestRunOnboardingImport_NonGranularImportsAll(t *testing.T) {
 		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
 	)
 
-	if err := runOnboardingImport(context.Background(), io.Discard, false); err != nil {
+	if err := runOnboardingImport(context.Background(), io.Discard, false, nil); err != nil {
 		t.Fatalf("runOnboardingImport() error = %v", err)
 	}
 	if len(ran) != len(eligible) {
@@ -125,7 +125,7 @@ func TestRunOnboardingImport_NoEligibleIsNoOp(t *testing.T) {
 		func(context.Context, io.Writer, string, []eligibleImport) { runCalled = true },
 	)
 
-	if err := runOnboardingImport(context.Background(), io.Discard, false); err != nil {
+	if err := runOnboardingImport(context.Background(), io.Discard, false, nil); err != nil {
 		t.Fatalf("runOnboardingImport() error = %v", err)
 	}
 	if runCalled {
@@ -151,7 +151,7 @@ func TestRunOnboardingImport_GranularUsesSelection(t *testing.T) {
 		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
 	)
 
-	if err := runOnboardingImport(context.Background(), io.Discard, true); err != nil {
+	if err := runOnboardingImport(context.Background(), io.Discard, true, nil); err != nil {
 		t.Fatalf("runOnboardingImport() error = %v", err)
 	}
 	if len(ran) != 1 || ran[0].displayName != testAgentClaude {
@@ -173,7 +173,7 @@ func TestRunOnboardingImport_EmptySelectionSkips(t *testing.T) {
 		func(context.Context, io.Writer, string, []eligibleImport) { runCalled = true },
 	)
 
-	if err := runOnboardingImport(context.Background(), io.Discard, true); err != nil {
+	if err := runOnboardingImport(context.Background(), io.Discard, true, nil); err != nil {
 		t.Fatalf("runOnboardingImport() error = %v", err)
 	}
 	if runCalled {
@@ -199,7 +199,7 @@ func TestRunOnboardingImport_PromptErrorReturnsError(t *testing.T) {
 
 	// The offer surfaces the error; the runner downgrades it to a printed
 	// notice, so enable still never fails.
-	if err := runOnboardingImport(context.Background(), io.Discard, true); err == nil {
+	if err := runOnboardingImport(context.Background(), io.Discard, true, nil); err == nil {
 		t.Error("want an error from a failed selection prompt")
 	}
 	if runCalled {

@@ -256,6 +256,14 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 	if onCreated != nil {
 		onCreated(created)
 	}
+	// Heal the onboarding probe cache on every successful placement — the
+	// setup checklist's own hint is `entire repo mirror create <slug>`, and a
+	// cached "not mirrored" must not survive the prescribed remediation. A
+	// suspended placement never serves, so it is deliberately not cached.
+	if !created.Suspended {
+		slugOwner, slugRepo := githubSlug(owner, repo)
+		defaultMirrorProbeCache().put(slugOwner+"/"+slugRepo, true, time.Now())
+	}
 	outcome := mirrorCreateOutcome{created: created}
 	if created.Suspended {
 		// The placement already existed and an admin has suspended it, so it

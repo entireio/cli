@@ -913,13 +913,13 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 					printEnabledStatus(ctx, w)
 					// Re-running enable is the resume path for interrupted
 					// onboarding: offer whichever connect rungs are still missing.
-					runEnableOnboarding(ctx, w, opts.Yes, false)
+					runEnableOnboarding(ctx, w, enableOnboardingOpts{assumeYes: opts.Yes})
 					return nil
 				}
 				if err := runEnable(ctx, cmd.OutOrStdout(), opts.UseProjectSettings); err != nil {
 					return err
 				}
-				runEnableOnboarding(ctx, cmd.OutOrStdout(), opts.Yes, false)
+				runEnableOnboarding(ctx, cmd.OutOrStdout(), enableOnboardingOpts{assumeYes: opts.Yes})
 				return nil
 			}
 
@@ -1089,6 +1089,10 @@ To completely remove Entire integrations from this repository, use --uninstall:
 // runEnableInteractive runs the interactive enable flow.
 // agents must be provided by the caller (via detectOrSelectAgent).
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
+	// Capture first-run status before any settings write makes IsSetUpAny
+	// report true: --yes auto-import is gated to the very first enable.
+	firstRun := !settings.IsSetUpAny(ctx)
+
 	// Uninstall hooks for agents that were previously active but are no longer selected
 	if err := uninstallDeselectedAgentHooks(ctx, w, agents); err != nil {
 		return fmt.Errorf("failed to clean up deselected agents: %w", err)
@@ -1208,16 +1212,22 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
 
+	// Connect rungs (login, mirror, import): one consent prompt covering
+	// whatever is missing, then the setup checklist. Also the resume path —
+	// re-running enable re-offers only rungs that are still missing. Runs
+	// before the bootstrap early-return below: a just-bootstrapped repo is
+	// exactly where the login/mirror/import offers matter most.
+	runEnableOnboarding(ctx, w, enableOnboardingOpts{
+		assumeYes:   opts.Yes,
+		firstRun:    firstRun,
+		importScope: agents,
+	})
+
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary after
 		// making the initial commit and pushing.
 		return nil
 	}
-
-	// Connect rungs (login, mirror): one consent prompt covering whatever is
-	// missing, then the setup checklist. Also the resume path — re-running
-	// enable re-offers only rungs that are still missing.
-	runEnableOnboarding(ctx, w, opts.Yes, false)
 
 	fmt.Fprintln(w, "\nReady.")
 
@@ -1586,6 +1596,10 @@ func printWrongAgentError(w io.Writer, name string) {
 // setupAgentHooksNonInteractive sets up hooks for a specific agent non-interactively.
 // If strategyName is provided, it sets the strategy; otherwise uses default.
 func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Agent, opts EnableOptions) error {
+	// Capture first-run status before any settings write makes IsSetUpAny
+	// report true: --yes auto-import is gated to the very first enable.
+	firstRun := !settings.IsSetUpAny(ctx)
+
 	agentName := ag.Name()
 	// Check if agent supports hooks
 	if _, ok := agent.AsHookSupport(ag); !ok {
@@ -1676,16 +1690,23 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
 
+	// Connect rungs — same ladder as interactive enable, but --agent is
+	// documented as non-interactive, so prompting is always suppressed here;
+	// --yes additionally auto-imports on first run (local-only, scoped to the
+	// targeted agent), matching the enable-time import contract. The
+	// checklist hints carry the rest. Runs before the bootstrap early-return
+	// so bootstrapped repos get the ladder too.
+	runEnableOnboarding(ctx, w, enableOnboardingOpts{
+		assumeYes:   opts.Yes,
+		neverPrompt: true,
+		firstRun:    firstRun,
+		importScope: []agent.Agent{ag},
+	})
+
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary.
 		return nil
 	}
-
-	// Connect rungs — same ladder as interactive enable, but --agent is
-	// documented as non-interactive, so prompting is always suppressed here;
-	// --yes additionally auto-imports (local-only), matching the enable-time
-	// import contract. The checklist hints carry the rest.
-	runEnableOnboarding(ctx, w, opts.Yes, true)
 
 	fmt.Fprintln(w, "\nReady.")
 

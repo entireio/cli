@@ -258,7 +258,7 @@ func TestOnboardingLadder_ModeAll_RunsImportOffer(t *testing.T) {
 // Production wiring must include the import offer alongside auth and mirror.
 func TestNewOnboardingOfferRunner_WiresImportOffer(t *testing.T) {
 	t.Parallel()
-	r := newOnboardingOfferRunner(io.Discard)
+	r := newOnboardingOfferRunner(io.Discard, nil)
 	for _, key := range []string{onboarding.KeyAuth, onboarding.KeyMirror, onboarding.KeyImport} {
 		if r.offerFns[key] == nil {
 			t.Errorf("offerFns[%q] = nil, want an offer wired", key)
@@ -273,16 +273,12 @@ func TestNewOnboardingOfferRunner_WiresImportOffer(t *testing.T) {
 func TestFinalizeMirrorOffer_SuspendedIsAnErrorAndNotCached(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	cached := false
 	outcome := mirrorCreateOutcome{created: &coreapi.CreatedMirror{Suspended: true}}
 
-	err := finalizeMirrorOffer(&out, outcome, "acme/api", func(string) { cached = true })
+	err := finalizeMirrorOffer(&out, outcome)
 
 	if err == nil {
 		t.Error("suspended placement must be an error so the rung keeps its retry hint")
-	}
-	if cached {
-		t.Error("suspended placement must not write-through mirrored=true")
 	}
 	if !strings.Contains(out.String(), "suspended") {
 		t.Errorf("user should be told the mirror is suspended, got:\n%s", out.String())
@@ -292,14 +288,10 @@ func TestFinalizeMirrorOffer_SuspendedIsAnErrorAndNotCached(t *testing.T) {
 func TestFinalizeMirrorOffer_SuccessCachesAndReportsCloning(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	var cachedSlug string
 	outcome := mirrorCreateOutcome{created: &coreapi.CreatedMirror{}}
 
-	if err := finalizeMirrorOffer(&out, outcome, "acme/api", func(slug string) { cachedSlug = slug }); err != nil {
+	if err := finalizeMirrorOffer(&out, outcome); err != nil {
 		t.Fatalf("finalizeMirrorOffer error = %v", err)
-	}
-	if cachedSlug != "acme/api" {
-		t.Errorf("cachePut slug = %q, want acme/api", cachedSlug)
 	}
 	if !strings.Contains(out.String(), "clone continues in the background") {
 		t.Errorf("non-empty upstream should mention the background clone, got:\n%s", out.String())
@@ -309,14 +301,10 @@ func TestFinalizeMirrorOffer_SuccessCachesAndReportsCloning(t *testing.T) {
 func TestFinalizeMirrorOffer_EmptyUpstreamCachesWithoutCloneTalk(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	cached := false
 	outcome := mirrorCreateOutcome{created: &coreapi.CreatedMirror{Empty: true}}
 
-	if err := finalizeMirrorOffer(&out, outcome, "acme/api", func(string) { cached = true }); err != nil {
+	if err := finalizeMirrorOffer(&out, outcome); err != nil {
 		t.Fatalf("finalizeMirrorOffer error = %v", err)
-	}
-	if !cached {
-		t.Error("empty upstream is still a registered mirror; cache it")
 	}
 	if strings.Contains(out.String(), "clone continues") {
 		t.Errorf("empty upstream has no clone to wait for, got:\n%s", out.String())
@@ -480,5 +468,63 @@ func TestOnboardingLadder_StepByStep_SelfPromptingImportSkipsConfirm(t *testing.
 
 	if len(ran) != 1 || ran[0] != onboarding.KeyImport {
 		t.Errorf("offers ran = %v, want [import]", ran)
+	}
+}
+
+// A failed rung confirm (Ctrl-C, broken terminal) means the user is bailing
+// out: the walk must stop instead of surfacing every remaining prompt.
+func TestOnboardingLadder_ConfirmErrorStopsTheWalk(t *testing.T) {
+	t.Parallel()
+	f := &fakeConnectState{}
+	var ran []string
+	confirms := 0
+	r := newTestOffersRunner(f, &ran, t)
+	r.promptMode = func(context.Context, []onboarding.Result) (onboardingSetupMode, error) {
+		return setupModeStepByStep, nil
+	}
+	r.confirmRung = func(context.Context, onboarding.Result) (bool, error) {
+		confirms++
+		return false, errors.New("user aborted")
+	}
+
+	var out bytes.Buffer
+	r.run(context.Background(), &out)
+
+	if confirms != 1 {
+		t.Errorf("confirm prompts shown = %d, want 1 (abort must stop the walk)", confirms)
+	}
+	if len(ran) != 0 {
+		t.Errorf("offers ran = %v, want none after abort", ran)
+	}
+}
+
+// The option→runner mapping: --yes auto-imports only on the very first
+// enable; any later --yes must not import history the user may have declined.
+func TestNewEnableOnboardingRunner_AutoRunGatedOnFirstRun(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		opts    enableOnboardingOpts
+		autoRun bool
+		prompts bool
+	}{
+		{"first-run --yes", enableOnboardingOpts{assumeYes: true, firstRun: true}, true, false},
+		{"re-enable --yes", enableOnboardingOpts{assumeYes: true}, false, false},
+		{"first-run interactive", enableOnboardingOpts{firstRun: true}, false, true},
+		{"--agent without --yes", enableOnboardingOpts{neverPrompt: true, firstRun: true}, false, false},
+	}
+	for _, tc := range cases {
+		r := newEnableOnboardingRunner(io.Discard, tc.opts)
+		if got := r.autoRun[onboarding.KeyImport]; got != tc.autoRun {
+			t.Errorf("%s: autoRun[import] = %v, want %v", tc.name, got, tc.autoRun)
+		}
+		if tc.prompts && r.canPrompt == nil {
+			t.Errorf("%s: canPrompt unexpectedly overridden", tc.name)
+		}
+		if !tc.prompts && !tc.autoRun {
+			if r.canPrompt() {
+				t.Errorf("%s: canPrompt() = true, want prompting suppressed", tc.name)
+			}
+		}
 	}
 }

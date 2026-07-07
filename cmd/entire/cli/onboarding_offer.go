@@ -8,6 +8,7 @@ import (
 
 	"charm.land/huh/v2"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/onboarding"
@@ -139,8 +140,11 @@ func (r onboardingOfferRunner) runOffers(ctx context.Context, w io.Writer, ladde
 		if granular && !r.selfPrompting[rung.Key] {
 			accepted, err := r.confirmRung(ctx, onboarding.Result{Rung: rung, Check: check})
 			if err != nil {
-				logging.Debug(ctx, "onboarding: rung confirm prompt did not complete", "rung", rung.Key, "error", err)
-				continue
+				// A failed confirm (Ctrl-C, broken terminal, cancelled ctx)
+				// means the user is bailing out — stop walking rungs instead
+				// of surfacing every remaining prompt one Ctrl-C at a time.
+				logging.Debug(ctx, "onboarding: rung confirm prompt did not complete; stopping offers", "rung", rung.Key, "error", err)
+				return
 			}
 			if !accepted {
 				continue
@@ -171,40 +175,67 @@ func (r onboardingOfferRunner) renderChecklist(w io.Writer, results []onboarding
 	return b.String()
 }
 
+// enableOnboardingOpts carries the enable-path context the ladder needs.
+type enableOnboardingOpts struct {
+	// assumeYes: --yes, "accept all defaults" — suppresses prompts.
+	assumeYes bool
+	// neverPrompt: the --agent path's documented non-interactive contract —
+	// suppresses prompts without auto-running anything.
+	neverPrompt bool
+	// firstRun gates --yes auto-import: on the very first enable, --yes
+	// auto-imports (the enable-time import contract); on any later enable it
+	// must not, because "unimported history exists" cannot distinguish "new
+	// history" from "history the user explicitly declined to import".
+	// Interactive re-enables still offer — consent is explicit there.
+	firstRun bool
+	// importScope narrows the import offer to specific agents (the
+	// just-selected ones, or the --agent target). Nil means every agent
+	// with hooks installed — the resume-path scope.
+	importScope []agent.Agent
+}
+
+// newEnableOnboardingRunner applies enableOnboardingOpts to the production
+// runner. Split from runEnableOnboarding so the option→runner mapping is
+// unit-testable without network or keyring access.
+func newEnableOnboardingRunner(w io.Writer, o enableOnboardingOpts) onboardingOfferRunner {
+	r := newOnboardingOfferRunner(w, o.importScope)
+	if o.assumeYes || o.neverPrompt {
+		r.canPrompt = func() bool { return false }
+	}
+	if o.assumeYes && o.firstRun {
+		// Import is local-only, so "accept all defaults" may run it without
+		// a prompt; login and mirror are never implicit.
+		r.autoRun = map[string]bool{onboarding.KeyImport: true}
+	}
+	return r
+}
+
 // runEnableOnboarding runs the connect ladder at the end of `entire enable`.
-// assumeYes (--yes, "accept all defaults") suppresses prompts and auto-runs
-// the import offer — import is local-only; login and mirror are never
-// implicit. neverPrompt (the --agent path's documented non-interactive
-// contract) suppresses prompts without auto-running anything: the checklist
-// hints carry the follow-up commands. Best-effort by design: onboarding
-// problems never fail enable.
-var runEnableOnboarding = func(ctx context.Context, w io.Writer, assumeYes, neverPrompt bool) {
+// Best-effort by design: onboarding problems never fail enable.
+var runEnableOnboarding = func(ctx context.Context, w io.Writer, o enableOnboardingOpts) {
 	// The user explicitly asked for setup — retry probes that recently
 	// failed instead of serving the cached failure (which would silently
 	// suppress the mirror offer for the rest of the failure TTL).
 	defaultMirrorProbeCache().clearUnreachable()
-	r := newOnboardingOfferRunner(w)
-	if assumeYes || neverPrompt {
-		r.canPrompt = func() bool { return false }
-	}
-	if assumeYes {
-		r.autoRun = map[string]bool{onboarding.KeyImport: true}
-	}
+	r := newEnableOnboardingRunner(w, o)
 	fmt.Fprintln(w)
 	r.run(ctx, w)
 }
 
 // newOnboardingOfferRunner wires the production runner: real rung probes,
 // the login/mirror/import offers, and huh-based prompts. w is enable's
-// output writer — offers write their progress there.
-func newOnboardingOfferRunner(w io.Writer) onboardingOfferRunner {
+// output writer — offers write their progress there. importScope narrows the
+// import offer (nil = all agents with hooks installed).
+func newOnboardingOfferRunner(w io.Writer, importScope []agent.Agent) onboardingOfferRunner {
 	deps := newOnboardingRungDeps()
 	return onboardingOfferRunner{
 		deps: deps,
 		offerFns: map[string]func(ctx context.Context, granular bool) error{
 			onboarding.KeyAuth:   func(ctx context.Context, _ bool) error { return runOnboardingLogin(ctx, w) },
 			onboarding.KeyMirror: func(ctx context.Context, _ bool) error { return runOnboardingMirrorCreate(ctx, w, deps) },
-			onboarding.KeyImport: func(ctx context.Context, granular bool) error { return runOnboardingImport(ctx, w, granular) },
+			onboarding.KeyImport: func(ctx context.Context, granular bool) error {
+				return runOnboardingImport(ctx, w, granular, importScope)
+			},
 		},
 		selfPrompting: map[string]bool{onboarding.KeyImport: true},
 		canPrompt:     interactive.CanPromptInteractively,

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -593,5 +594,26 @@ func TestMirrorProbeCache_ClearUnreachable(t *testing.T) {
 	}
 	if _, _, ok := cache.get("acme/other", now); ok {
 		t.Error("clearUnreachable must drop failure entries")
+	}
+}
+
+// A checkpoint policy that forbids checkpoint data makes import impossible —
+// the rung must say so instead of reporting Missing forever while every
+// consented offer silently no-ops.
+func TestImportRung_PolicyRestrictedIsNotApplicable(t *testing.T) {
+	t.Parallel()
+	deps := onboardingRungDeps{
+		discoverImports: func(context.Context) ([]agentImportStatus, error) {
+			return nil, fmt.Errorf("%w: checkpoint_version branch-v99 unsupported", errImportsPolicyRestricted)
+		},
+	}
+
+	check := importRung(deps).Check(context.Background())
+
+	if check.State != onboarding.StateNotApplicable {
+		t.Errorf("State = %v, want StateNotApplicable when policy forbids imports", check.State)
+	}
+	if !strings.Contains(check.Detail, "checkpoint policy") {
+		t.Errorf("Detail = %q, want a policy explanation", check.Detail)
 	}
 }
