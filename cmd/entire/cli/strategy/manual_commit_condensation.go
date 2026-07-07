@@ -163,6 +163,10 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// Errors are ignored; downstream readers handle missing transcripts gracefully.
 	resolveTranscriptPath(state) //nolint:errcheck,gosec // best-effort; downstream readers handle missing files
 
+	// Complete a turn-end offset advance that lost the transcript flush race
+	// (late-transcript agents) before any offset-scoped extraction below.
+	resolvePendingTranscriptOffset(logCtx, ag, state)
+
 	extractStart := time.Now()
 	_, extractSessionDataSpan := perf.Start(ctx, "extract_session_data")
 	var shadowHash plumbing.Hash
@@ -983,18 +987,19 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 		return nil, fmt.Errorf("failed to read live transcript: %w", err)
 	}
 
-	// An empty live transcript degrades for Antigravity but errors for other
-	// agents. agy writes its transcript AFTER the Stop hook, so a first-turn
-	// mid-turn commit legitimately condenses while the transcript is still an
-	// empty placeholder — and erroring happens after prepare-commit-msg
-	// already stamped the Entire-Checkpoint trailer, leaving the commit
-	// pointing at a checkpoint that never gets written. For every other agent
-	// an empty live transcript is a transient race (the file exists but the
-	// write hasn't landed), and erroring preserves the retry invariant: the
-	// failed condensation leaves session state untouched so the next commit
-	// re-condenses with the populated transcript.
+	// An empty live transcript degrades for late-transcript agents but errors
+	// for the rest. A LateTranscriptWriter (e.g. agy) flushes its transcript
+	// AFTER the Stop hook, so a first-turn mid-turn commit legitimately
+	// condenses while the transcript is still an empty placeholder — and
+	// erroring happens after prepare-commit-msg already stamped the
+	// Entire-Checkpoint trailer, leaving the commit pointing at a checkpoint
+	// that never gets written. For every other agent an empty live transcript
+	// is a transient race (the file exists but the write hasn't landed), and
+	// erroring preserves the retry invariant: the failed condensation leaves
+	// session state untouched so the next commit re-condenses with the
+	// populated transcript.
 	if len(liveData) == 0 {
-		if state.AgentType != agent.AgentTypeAntigravity {
+		if _, lateOK := agent.AsLateTranscriptWriter(ag); !lateOK {
 			return nil, errors.New("live transcript is empty")
 		}
 		logging.Warn(logging.WithComponent(ctx, "checkpoint"),
@@ -1025,6 +1030,53 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	}
 
 	return data, nil
+}
+
+// resolvePendingTranscriptOffset completes a turn-end advance of
+// CheckpointTranscriptStart that HandleTurnEnd could not perform because a
+// late-transcript agent (agent.LateTranscriptWriter) had not flushed its
+// transcript by the Stop hook. TranscriptOffsetPending guarantees everything
+// the flush eventually wrote is already-condensed content, and mid-turn
+// (ACTIVE) such an agent's file cannot yet contain the current turn — so the
+// flushed file end IS the correct start of the current checkpoint scope.
+// Without this, prompt extraction and the scoped transcript for the current
+// checkpoint would start inside the previous turn, attributing the previous
+// turn's prompt to this checkpoint.
+//
+// The flag is one-shot: condensation rewrites CheckpointTranscriptStart to
+// the current transcript end on success regardless, so a pending advance must
+// never outlive this attempt. Outside ACTIVE phase the file may already
+// include the current turn's (uncondensed) content, so the advance is skipped
+// — the scope is bloated by the condensed tail this once, then self-heals.
+func resolvePendingTranscriptOffset(ctx context.Context, ag agent.Agent, state *SessionState) {
+	if !state.TranscriptOffsetPending {
+		return
+	}
+	state.TranscriptOffsetPending = false
+	if !state.Phase.IsActive() {
+		return
+	}
+	if _, ok := agent.AsLateTranscriptWriter(ag); !ok {
+		return
+	}
+	analyzer, ok := agent.AsTranscriptAnalyzer(ag)
+	if !ok {
+		return
+	}
+	transcriptPath, err := resolveTranscriptPath(state)
+	if err != nil {
+		return
+	}
+	pos, posErr := analyzer.GetTranscriptPosition(transcriptPath)
+	if posErr != nil || pos <= state.CheckpointTranscriptStart {
+		return
+	}
+	logging.Info(ctx, "completing deferred turn-end offset advance before condensation",
+		slog.String("session_id", state.SessionID),
+		slog.Int("old_offset", state.CheckpointTranscriptStart),
+		slog.Int("new_offset", pos),
+	)
+	state.CheckpointTranscriptStart = pos
 }
 
 // resolvePromptsFromLateFlushedTranscript re-extracts user prompts directly
@@ -1081,20 +1133,16 @@ func countTranscriptItems(agentType types.AgentType, content string) int {
 		// Otherwise fall through to JSONL parsing for Unknown type
 	}
 
-	// Antigravity: count non-blank lines only, matching the agent's own
-	// readers (ExtractPrompts and GetTranscriptPosition skip blank lines
-	// before counting, the codex splitJSONL convention). This value is stored
-	// in CheckpointTranscriptStart and later fed back to those readers as an
-	// offset — the writer and readers must agree on the metric or an interior
-	// blank line silently shifts prompt extraction for the next checkpoint.
-	if agentType == agent.AgentTypeAntigravity {
-		count := 0
-		for _, line := range strings.Split(content, "\n") {
-			if strings.TrimSpace(line) != "" {
-				count++
-			}
+	// Late-transcript agents (e.g. Antigravity) own their offset metric: the
+	// value counted here lands in CheckpointTranscriptStart and is later fed
+	// back to the agent's own readers (ExtractPrompts, GetTranscriptPosition)
+	// as an offset, so writer and readers must agree on the counting rule.
+	// Delegating via the capability keeps the metric in one place instead of
+	// hand-syncing a copy across the package boundary.
+	if ag, agErr := agent.GetByAgentType(agentType); agErr == nil {
+		if lw, ok := agent.AsLateTranscriptWriter(ag); ok {
+			return lw.CountTranscriptPosition([]byte(content))
 		}
-		return count
 	}
 
 	// Claude Code and other JSONL-based agents

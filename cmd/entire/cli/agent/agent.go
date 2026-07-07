@@ -189,6 +189,26 @@ type TranscriptPreparer interface {
 	PrepareTranscript(ctx context.Context, sessionRef string) error
 }
 
+// LateTranscriptWriter marks agents whose transcript file is written only
+// AFTER the Stop hook rather than streamed during the turn (e.g. Antigravity).
+// Implementing this interface is the trait signal the strategy layer keys off
+// instead of hardcoding agent types: mid-turn, such an agent's on-disk
+// transcript can only contain previous turns' content, so an empty live
+// transcript at condensation is a legitimate state (degrade, don't error) and
+// transcript positions recorded at Stop may lag when the flush loses the race.
+type LateTranscriptWriter interface {
+	Agent
+
+	// CountTranscriptPosition returns the checkpoint-offset position for raw
+	// transcript content, using the same counting rule as the agent's readers
+	// (GetTranscriptPosition, ExtractPrompts). The value is stored in
+	// CheckpointTranscriptStart and later fed back to those readers as an
+	// offset — writer and readers must agree on the metric or an interior
+	// format quirk (e.g. a blank line) silently shifts extraction for the
+	// next checkpoint.
+	CountTranscriptPosition(content []byte) int
+}
+
 // TokenCalculator provides token usage calculation for a session.
 // The framework calls this during step save and checkpoint if implemented.
 type TokenCalculator interface {

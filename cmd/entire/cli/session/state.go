@@ -206,6 +206,16 @@ type State struct {
 	// against this value without reading the full transcript content.
 	CheckpointTranscriptSize int64 `json:"checkpoint_transcript_size,omitempty"`
 
+	// TranscriptOffsetPending records that the turn-end advance of
+	// CheckpointTranscriptStart could not run because a late-transcript agent
+	// (agent.LateTranscriptWriter, e.g. Antigravity) had not flushed its
+	// transcript by the Stop hook. Everything the flush will eventually write
+	// is already condensed, so the next mid-turn condensation resolves the
+	// pending advance against the by-then-flushed file — without this, prompts
+	// and the scoped transcript for the next checkpoint would start inside the
+	// previous (already-condensed) turn, attributing the wrong prompt to it.
+	TranscriptOffsetPending bool `json:"transcript_offset_pending,omitempty"`
+
 	// Deprecated: CondensedTranscriptLines is replaced by CheckpointTranscriptStart.
 	// Kept for backward compatibility with existing state files.
 	// Use NormalizeAfterLoad() to migrate.

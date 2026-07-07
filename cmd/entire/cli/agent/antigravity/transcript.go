@@ -16,8 +16,9 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ agent.PromptExtractor    = (*AntigravityAgent)(nil)
-	_ agent.TranscriptAnalyzer = (*AntigravityAgent)(nil)
+	_ agent.PromptExtractor      = (*AntigravityAgent)(nil)
+	_ agent.TranscriptAnalyzer   = (*AntigravityAgent)(nil)
+	_ agent.LateTranscriptWriter = (*AntigravityAgent)(nil)
 )
 
 // Antigravity 2.0 (agy) writes JSONL transcripts at
@@ -132,6 +133,14 @@ func (a *AntigravityAgent) GetTranscriptPosition(path string) (int, error) {
 		return 0, fmt.Errorf("antigravity: transcript position: %w", err)
 	}
 	return forEachNonBlankLine(data, 0, nil), nil
+}
+
+// CountTranscriptPosition implements agent.LateTranscriptWriter: agy writes
+// its transcript only after the Stop hook, and its offset metric counts
+// non-blank lines. Delegating to forEachNonBlankLine keeps this byte-identical
+// with GetTranscriptPosition/ExtractPrompts (see the iterator's doc comment).
+func (a *AntigravityAgent) CountTranscriptPosition(content []byte) int {
+	return forEachNonBlankLine(content, 0, nil)
 }
 
 // ExtractModifiedFilesFromOffset implements agent.TranscriptAnalyzer. It scans
