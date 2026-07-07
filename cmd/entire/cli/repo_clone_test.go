@@ -201,7 +201,7 @@ func TestListMirrorsForRepo_FiltersByRepo(t *testing.T) {
 			{Owner: "entirehq", Repo: "entire-api", ClusterHost: "aws-eu-west-1.entire.io"},
 			{Owner: "entirehq", Repo: "entire-cli", ClusterHost: "aws-us-east-2.entire.io"},
 		}}
-		if err := writeJSON(w, body); err != nil {
+		if err := printJSON(w, body); err != nil {
 			t.Errorf("encode response: %v", err)
 		}
 	}))

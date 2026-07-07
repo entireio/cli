@@ -10,11 +10,6 @@ import (
 // prompts are stored in a single file.
 const PromptSeparator = "\n\n---\n\n"
 
-// JoinPrompts serializes prompts to prompt.txt format.
-func JoinPrompts(prompts []string) string {
-	return strings.Join(prompts, PromptSeparator)
-}
-
 // SplitPromptContent deserializes prompt.txt content into individual prompts.
 func SplitPromptContent(content string) []string {
 	if content == "" {

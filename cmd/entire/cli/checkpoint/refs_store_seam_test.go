@@ -63,7 +63,7 @@ func TestSeam_GitRefsPrimaryWithGitBranchMirror(t *testing.T) {
 
 	// Reads resolve from the git-refs primary.
 	t.Run("git-refs primary", func(t *testing.T) {
-		assertSeamVariants(t, stores.Persistent, cid, CheckpointVersionRefsV1)
+		assertSeamVariants(t, stores.Persistent, cid)
 		// The primary is the per-checkpoint-ref store, not a fan-out of nothing.
 		_, err := repo.Reference(mustRefName(t, cid), true)
 		assert.NoError(t, err, "primary should have written the per-checkpoint ref")
@@ -72,18 +72,24 @@ func TestSeam_GitRefsPrimaryWithGitBranchMirror(t *testing.T) {
 	// The git-branch mirror independently received every write on the v1 branch.
 	t.Run("git-branch mirror", func(t *testing.T) {
 		mirror := NewGitStore(repo, DefaultV1Refs())
-		assertSeamVariants(t, mirror, cid, CheckpointVersionBranchV1)
+		assertSeamVariants(t, mirror, cid)
+	})
+
+	// Reads must be served by the git-refs primary, not the mirror: after the
+	// mirror's v1 branch is deleted, the composed store still reads everything.
+	t.Run("reads resolve from primary", func(t *testing.T) {
+		require.NoError(t, repo.Storer.RemoveReference(v1BranchRef()))
+		assertSeamVariants(t, stores.Persistent, cid)
 	})
 }
 
-func assertSeamVariants(t *testing.T, store PersistentStore, cid id.CheckpointID, wantVersion string) {
+func assertSeamVariants(t *testing.T, store PersistentStore, cid id.CheckpointID) {
 	t.Helper()
 	ctx := context.Background()
 
 	summary, err := store.Read(ctx, cid)
 	require.NoError(t, err)
 	require.NotNil(t, summary, "checkpoint should exist")
-	assert.Equal(t, wantVersion, summary.CheckpointVersion)
 	require.Len(t, summary.Sessions, 1)
 	require.NotNil(t, summary.CombinedAttribution)
 	assert.Equal(t, 7, summary.CombinedAttribution.AgentLines)

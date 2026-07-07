@@ -1,20 +1,21 @@
 package checkpoint
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestJoinAndSplitPrompts_RoundTrip(t *testing.T) {
+func TestSplitPromptContent_RoundTrip(t *testing.T) {
 	t.Parallel()
 
 	original := []string{
 		"first line\nwith newline",
 		"second prompt",
 	}
-	joined := JoinPrompts(original)
+	joined := strings.Join(original, PromptSeparator)
 	split := SplitPromptContent(joined)
 
 	require.Len(t, split, 2)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
@@ -56,12 +57,51 @@ func NewClientWithBaseURL(token, baseURL string) *Client {
 				token: token,
 				base:  http.DefaultTransport,
 			},
+			// A cross-host redirect must never carry the Entire bearer to
+			// another origin; refuse it rather than follow it. Same-origin
+			// requests are guaranteed by the base-host check in do().
+			CheckRedirect: rejectCrossHostRedirect,
 		},
 		baseURL: baseURL,
 	}
 }
 
+// rejectCrossHostRedirect stops a redirect chain from leaving the origin the
+// client was built for. Same-host redirects (e.g. a trailing-slash normalize)
+// still follow, up to Go's usual 10-hop cap.
+func rejectCrossHostRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+		return fmt.Errorf("refusing redirect to a different host (%s → %s): the Entire bearer must not leave its origin", via[0].URL.Host, req.URL.Host)
+	}
+	return nil
+}
+
+// requireSameHost rejects an endpoint whose host differs from the base URL's.
+// It guards the direct case (a path that resolved to another host); redirects
+// are handled by rejectCrossHostRedirect.
+func requireSameHost(baseURL, endpoint string) error {
+	b, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("parse base URL: %w", err)
+	}
+	e, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("parse endpoint URL: %w", err)
+	}
+	if !strings.EqualFold(b.Host, e.Host) {
+		return fmt.Errorf("refusing to send an authenticated request to %q, which is not the API host %q", e.Host, b.Host)
+	}
+	return nil
+}
+
 // bearerTransport is an http.RoundTripper that injects the Authorization header.
+//
+// The token is only ever sent to the client's base host: do() rejects a request
+// URL whose host differs from the base, and CheckRedirect refuses a cross-host
+// redirect, so every request this transport sees is same-origin as the base.
 //
 // When token is empty, the Authorization header is omitted (rather than sent
 // as a malformed "Authorization: Bearer "). This supports endpoints like
@@ -105,8 +145,8 @@ func (c *Client) GetStream(ctx context.Context, path string, headers http.Header
 	return c.do(ctx, http.MethodGet, path, nil, headers)
 }
 
-// Post sends an authenticated POST request with a JSON body to the given API-relative path.
-func (c *Client) Post(ctx context.Context, path string, body any) (*http.Response, error) {
+// doJSON sends an authenticated request with an optional JSON-marshaled body.
+func (c *Client) doJSON(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -115,33 +155,22 @@ func (c *Client) Post(ctx context.Context, path string, body any) (*http.Respons
 		}
 		reader = bytes.NewReader(data)
 	}
-	return c.do(ctx, http.MethodPost, path, reader, nil)
+	return c.do(ctx, method, path, reader, nil)
+}
+
+// Post sends an authenticated POST request with a JSON body to the given API-relative path.
+func (c *Client) Post(ctx context.Context, path string, body any) (*http.Response, error) {
+	return c.doJSON(ctx, http.MethodPost, path, body)
 }
 
 // Put sends an authenticated PUT request with a JSON body to the given API-relative path.
 func (c *Client) Put(ctx context.Context, path string, body any) (*http.Response, error) {
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("marshal request body: %w", err)
-		}
-		reader = bytes.NewReader(data)
-	}
-	return c.do(ctx, http.MethodPut, path, reader, nil)
+	return c.doJSON(ctx, http.MethodPut, path, body)
 }
 
 // Patch sends an authenticated PATCH request with a JSON body to the given API-relative path.
 func (c *Client) Patch(ctx context.Context, path string, body any) (*http.Response, error) {
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("marshal request body: %w", err)
-		}
-		reader = bytes.NewReader(data)
-	}
-	return c.do(ctx, http.MethodPatch, path, reader, nil)
+	return c.doJSON(ctx, http.MethodPatch, path, body)
 }
 
 // Delete sends an authenticated DELETE request to the given API-relative path.
@@ -149,10 +178,26 @@ func (c *Client) Delete(ctx context.Context, path string) (*http.Response, error
 	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
+// Request sends an authenticated request with an explicit method, optional
+// extra headers, and an optional raw body. It's the general-purpose escape
+// hatch behind `entire api`; prefer the typed verbs (Get/Post/…) for normal
+// use. The bearer, User-Agent, and default Accept are still attached by the
+// transport; a body defaults to Content-Type: application/json unless the
+// caller supplies its own via headers.
+func (c *Client) Request(ctx context.Context, method, path string, headers http.Header, body io.Reader) (*http.Response, error) {
+	return c.do(ctx, method, path, body, headers)
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader, headers http.Header) (*http.Response, error) {
 	endpoint, err := ResolveURLFromBase(c.baseURL, path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve URL %s: %w", path, err)
+	}
+	// The bearer is only ever sent to the API's own host. A path that resolves
+	// to another host (absolute or scheme-relative URL) would otherwise redirect
+	// the Authorization header off-origin.
+	if err := requireSameHost(c.baseURL, endpoint); err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
@@ -166,7 +211,10 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, he
 		}
 	}
 
-	if body != nil {
+	// Default a body's Content-Type to JSON, but don't clobber a caller-supplied
+	// one — the `entire api -H 'Content-Type: …'` escape hatch must be able to
+	// send non-JSON bodies.
+	if body != nil && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
 

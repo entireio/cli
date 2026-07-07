@@ -143,7 +143,7 @@ func TestReviewSummaryTokenEnricher_LoadsCurrentSessionState(t *testing.T) {
 		t.Fatalf("tokens = {%d %d}, want {12 5}", tokens.In, tokens.Out)
 	}
 
-	gotRun := reviewAgentRunTokenEnricher(repoRoot, "abc123")(ctx, reviewtypes.AgentRun{
+	gotRun := reviewAgentRunTokenEnricherForRuns(repoRoot, "abc123", nil)(ctx, reviewtypes.AgentRun{
 		Name:      manifestTestCodexAgent,
 		StartedAt: started,
 	})
@@ -1176,8 +1176,8 @@ func TestHydrateReviewAgentRunTokensFromStatesWithUsedDisambiguatesDuplicateSlot
 		},
 	}
 
-	freshA := hydrateReviewAgentRunTokensFromStates(context.Background(), "/repo", "abc123", run, states, nil)
-	freshB := hydrateReviewAgentRunTokensFromStates(context.Background(), "/repo", "abc123", run, states, nil)
+	freshA := hydrateReviewAgentRunTokensFromStatesWithUsed(context.Background(), "/repo", "abc123", run, states, nil, map[string]bool{})
+	freshB := hydrateReviewAgentRunTokensFromStatesWithUsed(context.Background(), "/repo", "abc123", run, states, nil, map[string]bool{})
 	if freshA.Tokens.In != 10 || freshB.Tokens.In != 10 {
 		t.Fatalf("fresh-map setup changed: tokens = %d/%d, want both newest session token count 10", freshA.Tokens.In, freshB.Tokens.In)
 	}

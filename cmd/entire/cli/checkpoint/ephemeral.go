@@ -939,67 +939,6 @@ func createBlobFromFile(repo *git.Repository, filePath string) (plumbing.Hash, f
 	return hash, mode, nil
 }
 
-// addDirectoryToEntriesWithAbsPath recursively adds all files in a directory to the entries map.
-func addDirectoryToEntriesWithAbsPath(ctx context.Context, repo *git.Repository, dirPathAbs, dirPathRel string, entries map[string]object.TreeEntry) error {
-	err := filepath.Walk(dirPathAbs, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Skip symlinks to prevent reading files outside the metadata directory.
-		// A symlink could point to sensitive files (e.g., /etc/passwd) which would
-		// then be captured in the checkpoint and stored in git history.
-		// NOTE: filepath.Walk uses os.Stat (follows symlinks), so info.Mode() never
-		// reports ModeSymlink. We use os.Lstat to check the entry itself.
-		// This check MUST come before IsDir() because Walk follows symlinked
-		// directories and would recurse into them otherwise.
-		linfo, lstatErr := os.Lstat(path)
-		if lstatErr != nil {
-			return fmt.Errorf("failed to lstat %s: %w", path, lstatErr)
-		}
-		if linfo.Mode()&os.ModeSymlink != 0 {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		if info.IsDir() {
-			return nil
-		}
-
-		// Calculate relative path within the directory, then join with dirPathRel for tree entry
-		relWithinDir, err := filepath.Rel(dirPathAbs, path)
-		if err != nil {
-			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
-		}
-
-		// Prevent path traversal via unexpected relative paths outside the metadata dir.
-		if paths.IsRelativeTraversal(relWithinDir) {
-			return fmt.Errorf("path traversal detected: %s", relWithinDir)
-		}
-
-		treePath := filepath.ToSlash(filepath.Join(dirPathRel, relWithinDir))
-
-		// Use redacted blob creation for metadata files (transcripts, prompts, etc.)
-		// to ensure PII and secrets are redacted before writing to git.
-		blobHash, mode, err := createRedactedBlobFromFile(ctx, repo, path, treePath)
-		if err != nil {
-			return fmt.Errorf("failed to create blob for %s: %w", path, err)
-		}
-		entries[treePath] = object.TreeEntry{
-			Name: treePath,
-			Mode: mode,
-			Hash: blobHash,
-		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("failed to walk directory %s: %w", dirPathAbs, err)
-	}
-	return nil
-}
-
 // treeNode represents a node in our tree structure.
 type treeNode struct {
 	entries map[string]*treeNode // subdirectories
@@ -1016,7 +955,13 @@ func addDirectoryToChanges(ctx context.Context, repo *git.Repository, dirPathAbs
 			return err
 		}
 
-		// Skip symlinks (same security rationale as addDirectoryToEntriesWithAbsPath)
+		// Skip symlinks to prevent reading files outside the metadata directory.
+		// A symlink could point to sensitive files (e.g., /etc/passwd) which would
+		// then be captured in the checkpoint and stored in git history.
+		// NOTE: filepath.Walk uses os.Stat (follows symlinks), so info.Mode() never
+		// reports ModeSymlink. We use os.Lstat to check the entry itself.
+		// This check MUST come before IsDir() because Walk follows symlinked
+		// directories and would recurse into them otherwise.
 		linfo, lstatErr := os.Lstat(path)
 		if lstatErr != nil {
 			return fmt.Errorf("failed to lstat %s: %w", path, lstatErr)

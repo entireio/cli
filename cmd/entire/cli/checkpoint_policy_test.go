@@ -39,7 +39,7 @@ func TestCheckpointPolicyCmd_HelpDocumentsEnforcementBehavior(t *testing.T) {
 	require.NoError(t, err)
 
 	help := stdout.String()
-	require.Contains(t, help, "checkpoint_version selects the checkpoint metadata format used for new writes")
+	require.Contains(t, help, "checkpoint_version is a checkpoint-data write guard")
 	require.Contains(t, help, `If another client configures a checkpoint_version this CLI cannot write`)
 	require.Contains(t, help, "commands that create checkpoint data fail until the CLI is upgraded")
 	require.Contains(t, help, "checkpoint_min_version is an upgrade nudge")

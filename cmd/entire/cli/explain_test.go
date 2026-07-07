@@ -994,24 +994,6 @@ func TestGenerateCheckpointAISummary_PreservesClaudeErrorWhenCtxIsDone(t *testin
 	}
 }
 
-func TestLoadCheckpointForExplainRejectsUnsupportedCheckpointVersion(t *testing.T) {
-	repo := setupExportRepo(t)
-
-	cpID := id.MustCheckpointID("bbbbccccdddd")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
-		SessionID:  "session-explain-unsupported",
-		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
-	})
-	rewriteExportCheckpointVersionToRefsV2(t, repo, cpID)
-
-	lookup, err := newExplainCheckpointLookup(context.Background())
-	require.NoError(t, err)
-	defer lookup.Close()
-
-	_, _, err = loadCheckpointForExplain(context.Background(), lookup, cpID)
-	require.ErrorContains(t, err, `checkpoint bbbbccccdddd uses unsupported checkpoint_version "refs-v2"`)
-}
-
 // Not parallel: uses t.Chdir() and package-level var stubs.
 type generateSummaryFixture struct {
 	ctx       context.Context
@@ -1456,116 +1438,6 @@ func TestExplainCommit_WithMetadataTrailerButNoCheckpoint(t *testing.T) {
 	}
 }
 
-func TestExplainDefault_ShowsBranchView(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize git repo
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	// Create initial commit so HEAD exists (required for branch view)
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("test content"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	_, err = w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test",
-			Email: "test@example.com",
-		},
-	})
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	// Create .entire directory
-	if err := os.MkdirAll(".entire", 0o750); err != nil {
-		t.Fatalf("failed to create .entire dir: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	err = runExplainDefault(context.Background(), &stdout, &stderr, true) // noPager=true for test
-
-	// Should NOT error - should show branch view
-	if err != nil {
-		t.Errorf("expected no error, got: %v", err)
-	}
-
-	output := stdout.String()
-	// Should show branch header (new metadata-row shape: "branch  <name>")
-	if !strings.Contains(output, "branch  ") {
-		t.Errorf("expected 'branch' row in output, got: %s", output)
-	}
-	// Should show checkpoints count (likely 0)
-	if !strings.Contains(output, "checkpoints") {
-		t.Errorf("expected 'checkpoints' row in output, got: %s", output)
-	}
-}
-
-func TestExplainDefault_NoCheckpoints_ShowsHelpfulMessage(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize git repo
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	// Create initial commit so HEAD exists (required for branch view)
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("test content"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	_, err = w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test",
-			Email: "test@example.com",
-		},
-	})
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	// Create .entire directory but no checkpoints
-	if err := os.MkdirAll(".entire", 0o750); err != nil {
-		t.Fatalf("failed to create .entire dir: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	err = runExplainDefault(context.Background(), &stdout, &stderr, true) // noPager=true for test
-
-	// Should NOT error
-	if err != nil {
-		t.Errorf("expected no error, got: %v", err)
-	}
-
-	output := stdout.String()
-	// Should show checkpoints count as 0 (new metadata-row shape)
-	if !strings.Contains(output, "checkpoints  0") {
-		t.Errorf("expected 'checkpoints  0' in output, got: %s", output)
-	}
-	// Should show helpful message about checkpoints appearing after saves
-	if !strings.Contains(output, "Checkpoints will appear") || !strings.Contains(output, "agent session") {
-		t.Errorf("expected helpful message about checkpoints, got: %s", output)
-	}
-}
-
 func TestExplainBothFlagsError(t *testing.T) {
 	// Test that providing both --session and --commit returns an error
 	var stdout, stderr bytes.Buffer
@@ -1578,390 +1450,6 @@ func TestExplainBothFlagsError(t *testing.T) {
 	errLower := strings.ToLower(err.Error())
 	if !strings.Contains(errLower, "cannot specify multiple") {
 		t.Errorf("expected 'cannot specify multiple' in error, got: %v", err)
-	}
-}
-
-func TestFormatSessionInfo(t *testing.T) {
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-09-test-session-abc",
-		Description: "Test description",
-		Strategy:    "manual-commit",
-		StartTime:   now,
-		Checkpoints: []strategy.Checkpoint{
-			{
-				CheckpointID: "abc1234567890",
-				Message:      "First checkpoint",
-				Timestamp:    now.Add(-time.Hour),
-			},
-			{
-				CheckpointID: "def0987654321",
-				Message:      "Second checkpoint",
-				Timestamp:    now,
-			},
-		},
-	}
-
-	// Create checkpoint details matching the session checkpoints
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:     1,
-			ShortID:   "abc1234",
-			Timestamp: now.Add(-time.Hour),
-			Message:   "First checkpoint",
-			Interactions: []interaction{{
-				Prompt:    "Fix the bug",
-				Responses: []string{"Fixed the bug in auth module"},
-				Files:     []string{"auth.go"},
-			}},
-			Files: []string{"auth.go"},
-		},
-		{
-			Index:     2,
-			ShortID:   "def0987",
-			Timestamp: now,
-			Message:   "Second checkpoint",
-			Interactions: []interaction{{
-				Prompt:    "Add tests",
-				Responses: []string{"Added unit tests"},
-				Files:     []string{"auth_test.go"},
-			}},
-			Files: []string{"auth_test.go"},
-		},
-	}
-
-	output := formatSessionInfo(session, "", checkpointDetails)
-
-	// Verify output contains expected sections
-	if !strings.Contains(output, "Session:") {
-		t.Error("expected output to contain 'Session:'")
-	}
-	if !strings.Contains(output, session.ID) {
-		t.Error("expected output to contain session ID")
-	}
-	if !strings.Contains(output, "Strategy:") {
-		t.Error("expected output to contain 'Strategy:'")
-	}
-	if !strings.Contains(output, "manual-commit") {
-		t.Error("expected output to contain strategy name")
-	}
-	if !strings.Contains(output, "Checkpoints: 2") {
-		t.Error("expected output to contain 'Checkpoints: 2'")
-	}
-	// Check checkpoint details
-	if !strings.Contains(output, "Checkpoint 1") {
-		t.Error("expected output to contain 'Checkpoint 1'")
-	}
-	if !strings.Contains(output, "## Prompt") {
-		t.Error("expected output to contain '## Prompt'")
-	}
-	if !strings.Contains(output, "## Responses") {
-		t.Error("expected output to contain '## Responses'")
-	}
-	if !strings.Contains(output, "Files Modified") {
-		t.Error("expected output to contain 'Files Modified'")
-	}
-}
-
-func TestFormatSessionInfo_WithSourceRef(t *testing.T) {
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-09-test-session-abc",
-		Description: "Test description",
-		Strategy:    "manual-commit",
-		StartTime:   now,
-		Checkpoints: []strategy.Checkpoint{
-			{
-				CheckpointID: "abc1234567890",
-				Message:      "First checkpoint",
-				Timestamp:    now,
-			},
-		},
-	}
-
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:     1,
-			ShortID:   "abc1234",
-			Timestamp: now,
-			Message:   "First checkpoint",
-		},
-	}
-
-	// Test with source ref provided
-	sourceRef := "entire/metadata@abc123def456"
-	output := formatSessionInfo(session, sourceRef, checkpointDetails)
-
-	// Verify source ref is displayed
-	if !strings.Contains(output, "Source Ref:") {
-		t.Error("expected output to contain 'Source Ref:'")
-	}
-	if !strings.Contains(output, sourceRef) {
-		t.Errorf("expected output to contain source ref %q, got:\n%s", sourceRef, output)
-	}
-}
-
-func TestFormatSessionInfo_CheckpointNumberingReversed(t *testing.T) {
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-09-test-session",
-		Strategy:    "manual-commit",
-		StartTime:   now.Add(-2 * time.Hour),
-		Checkpoints: []strategy.Checkpoint{}, // Not used for format test
-	}
-
-	// Simulate checkpoints coming in newest-first order from ListSessions
-	// but numbered with oldest=1, newest=N
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:     3, // Newest checkpoint should have highest number
-			ShortID:   "ccc3333",
-			Timestamp: now,
-			Message:   "Third (newest) checkpoint",
-			Interactions: []interaction{{
-				Prompt:    "Latest change",
-				Responses: []string{},
-			}},
-		},
-		{
-			Index:     2,
-			ShortID:   "bbb2222",
-			Timestamp: now.Add(-time.Hour),
-			Message:   "Second checkpoint",
-			Interactions: []interaction{{
-				Prompt:    "Middle change",
-				Responses: []string{},
-			}},
-		},
-		{
-			Index:     1, // Oldest checkpoint should be #1
-			ShortID:   "aaa1111",
-			Timestamp: now.Add(-2 * time.Hour),
-			Message:   "First (oldest) checkpoint",
-			Interactions: []interaction{{
-				Prompt:    "Initial change",
-				Responses: []string{},
-			}},
-		},
-	}
-
-	output := formatSessionInfo(session, "", checkpointDetails)
-
-	// Verify checkpoint ordering in output
-	// Checkpoint 3 should appear before Checkpoint 2 which should appear before Checkpoint 1
-	idx3 := strings.Index(output, "Checkpoint 3")
-	idx2 := strings.Index(output, "Checkpoint 2")
-	idx1 := strings.Index(output, "Checkpoint 1")
-
-	if idx3 == -1 || idx2 == -1 || idx1 == -1 {
-		t.Fatalf("expected all checkpoints to be in output, got:\n%s", output)
-	}
-
-	// In the output, they should appear in the order they're in the slice (newest first)
-	if idx3 > idx2 || idx2 > idx1 {
-		t.Errorf("expected checkpoints to appear in order 3, 2, 1 in output (newest first), got positions: 3=%d, 2=%d, 1=%d", idx3, idx2, idx1)
-	}
-
-	// Verify the dates appear correctly
-	if !strings.Contains(output, "Latest change") {
-		t.Error("expected output to contain 'Latest change' prompt")
-	}
-	if !strings.Contains(output, "Initial change") {
-		t.Error("expected output to contain 'Initial change' prompt")
-	}
-}
-
-func TestFormatSessionInfo_EmptyCheckpoints(t *testing.T) {
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-09-empty-session",
-		Strategy:    "manual-commit",
-		StartTime:   now,
-		Checkpoints: []strategy.Checkpoint{},
-	}
-
-	output := formatSessionInfo(session, "", nil)
-
-	if !strings.Contains(output, "Checkpoints: 0") {
-		t.Errorf("expected output to contain 'Checkpoints: 0', got:\n%s", output)
-	}
-}
-
-func TestFormatSessionInfo_CheckpointWithTaskMarker(t *testing.T) {
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-09-task-session",
-		Strategy:    "manual-commit",
-		StartTime:   now,
-		Checkpoints: []strategy.Checkpoint{},
-	}
-
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:            1,
-			ShortID:          "abc1234",
-			Timestamp:        now,
-			IsTaskCheckpoint: true,
-			Message:          "Task checkpoint",
-			Interactions: []interaction{{
-				Prompt:    "Run tests",
-				Responses: []string{},
-			}},
-		},
-	}
-
-	output := formatSessionInfo(session, "", checkpointDetails)
-
-	if !strings.Contains(output, "[Task]") {
-		t.Errorf("expected output to contain '[Task]' marker, got:\n%s", output)
-	}
-}
-
-func TestFormatSessionInfo_CheckpointWithDate(t *testing.T) {
-	// Test that checkpoint headers include the full date
-	timestamp := time.Date(2025, 12, 10, 14, 35, 0, 0, time.UTC)
-	session := &strategy.Session{
-		ID:          "2025-12-10-dated-session",
-		Strategy:    "manual-commit",
-		StartTime:   timestamp,
-		Checkpoints: []strategy.Checkpoint{},
-	}
-
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:     1,
-			ShortID:   "abc1234",
-			Timestamp: timestamp,
-			Message:   "Test checkpoint",
-		},
-	}
-
-	output := formatSessionInfo(session, "", checkpointDetails)
-
-	// Should contain "2025-12-10 14:35" in the checkpoint header
-	if !strings.Contains(output, "2025-12-10 14:35") {
-		t.Errorf("expected output to contain date '2025-12-10 14:35', got:\n%s", output)
-	}
-}
-
-func TestFormatSessionInfo_ShowsMessageWhenNoInteractions(t *testing.T) {
-	// Test that checkpoints without transcript content show the commit message
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-12-incremental-session",
-		Strategy:    "manual-commit",
-		StartTime:   now,
-		Checkpoints: []strategy.Checkpoint{},
-	}
-
-	// Checkpoint with message but no interactions (like incremental checkpoints)
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:            1,
-			ShortID:          "abc1234",
-			Timestamp:        now,
-			IsTaskCheckpoint: true,
-			Message:          "Starting 'dev' agent: Implement feature X (toolu_01ABC)",
-			Interactions:     []interaction{}, // Empty - no transcript available
-		},
-	}
-
-	output := formatSessionInfo(session, "", checkpointDetails)
-
-	// Should show the commit message when there are no interactions
-	if !strings.Contains(output, "Starting 'dev' agent: Implement feature X (toolu_01ABC)") {
-		t.Errorf("expected output to contain commit message when no interactions, got:\n%s", output)
-	}
-
-	// Should NOT show "## Prompt" or "## Responses" sections since there are no interactions
-	if strings.Contains(output, "## Prompt") {
-		t.Errorf("expected output to NOT contain '## Prompt' when no interactions, got:\n%s", output)
-	}
-	if strings.Contains(output, "## Responses") {
-		t.Errorf("expected output to NOT contain '## Responses' when no interactions, got:\n%s", output)
-	}
-}
-
-func TestFormatSessionInfo_ShowsMessageAndFilesWhenNoInteractions(t *testing.T) {
-	// Test that checkpoints without transcript but with files show both message and files
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-12-incremental-with-files",
-		Strategy:    "manual-commit",
-		StartTime:   now,
-		Checkpoints: []strategy.Checkpoint{},
-	}
-
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:            1,
-			ShortID:          "def5678",
-			Timestamp:        now,
-			IsTaskCheckpoint: true,
-			Message:          "Running tests for API endpoint (toolu_02DEF)",
-			Interactions:     []interaction{}, // Empty - no transcript
-			Files:            []string{"api/endpoint.go", "api/endpoint_test.go"},
-		},
-	}
-
-	output := formatSessionInfo(session, "", checkpointDetails)
-
-	// Should show the commit message
-	if !strings.Contains(output, "Running tests for API endpoint (toolu_02DEF)") {
-		t.Errorf("expected output to contain commit message, got:\n%s", output)
-	}
-
-	// Should also show the files
-	if !strings.Contains(output, "Files Modified") {
-		t.Errorf("expected output to contain 'Files Modified', got:\n%s", output)
-	}
-	if !strings.Contains(output, "api/endpoint.go") {
-		t.Errorf("expected output to contain modified file, got:\n%s", output)
-	}
-}
-
-func TestFormatSessionInfo_DoesNotShowMessageWhenHasInteractions(t *testing.T) {
-	// Test that checkpoints WITH interactions don't show the message separately
-	// (the interactions already contain the content)
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-12-full-checkpoint",
-		Strategy:    "manual-commit",
-		StartTime:   now,
-		Checkpoints: []strategy.Checkpoint{},
-	}
-
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:            1,
-			ShortID:          "ghi9012",
-			Timestamp:        now,
-			IsTaskCheckpoint: true,
-			Message:          "Completed 'dev' agent: Implement feature (toolu_03GHI)",
-			Interactions: []interaction{
-				{
-					Prompt:    "Implement the feature",
-					Responses: []string{"I've implemented the feature by..."},
-					Files:     []string{"feature.go"},
-				},
-			},
-		},
-	}
-
-	output := formatSessionInfo(session, "", checkpointDetails)
-
-	// Should show the interaction content
-	if !strings.Contains(output, "Implement the feature") {
-		t.Errorf("expected output to contain prompt, got:\n%s", output)
-	}
-	if !strings.Contains(output, "I've implemented the feature by") {
-		t.Errorf("expected output to contain response, got:\n%s", output)
-	}
-
-	// The message should NOT appear as a separate line (it's redundant when we have interactions)
-	// The output should contain ## Prompt and ## Responses for the interaction
-	if !strings.Contains(output, "## Prompt") {
-		t.Errorf("expected output to contain '## Prompt' when has interactions, got:\n%s", output)
 	}
 }
 
@@ -4169,65 +3657,6 @@ func TestGetReachableTemporaryCheckpoints_FiltersByWorktree(t *testing.T) {
 	}
 }
 
-// TestRunExplainBranchDefault_ShowsBranchCheckpoints is covered by TestExplainDefault_ShowsBranchView
-// since runExplainDefault now calls runExplainBranchDefault directly.
-
-func TestRunExplainBranchDefault_DetachedHead(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize git repo with a commit
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("test content"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	commitHash, err := w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test",
-			Email: "test@example.com",
-		},
-	})
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	// Checkout to detached HEAD state
-	if err := w.Checkout(&git.CheckoutOptions{Hash: commitHash}); err != nil {
-		t.Fatalf("failed to checkout detached HEAD: %v", err)
-	}
-
-	// Create .entire directory
-	if err := os.MkdirAll(".entire", 0o750); err != nil {
-		t.Fatalf("failed to create .entire dir: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	err = runExplainBranchDefault(context.Background(), &stdout, &stderr, true)
-
-	// Should NOT error
-	if err != nil {
-		t.Errorf("expected no error, got: %v", err)
-	}
-
-	output := stdout.String()
-
-	// Should indicate detached HEAD state in branch name
-	if !strings.Contains(output, "HEAD") && !strings.Contains(output, "detached") {
-		t.Errorf("expected output to indicate detached HEAD state, got: %s", output)
-	}
-}
-
 func TestIsAncestorOf(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -4336,220 +3765,6 @@ func TestGetBranchCheckpoints_OnFeatureBranch(t *testing.T) {
 	// Should return empty list (no checkpoints yet)
 	if len(points) != 0 {
 		t.Errorf("expected 0 checkpoints, got %d", len(points))
-	}
-}
-
-func TestHasCodeChanges_FirstCommitReturnsTrue(t *testing.T) {
-	// First commit on a shadow branch (no parent) should return true
-	// since it captures the working copy state - real uncommitted work
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create first commit (has no parent)
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	commitHash, err := w.Commit("first commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create commit: %v", err)
-	}
-
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		t.Fatalf("failed to get commit object: %v", err)
-	}
-
-	// First commit (no parent) captures working copy state - should return true
-	if !hasCodeChanges(commit) {
-		t.Error("hasCodeChanges() should return true for first commit (captures working copy)")
-	}
-}
-
-func TestHasCodeChanges_OnlyMetadataChanges(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create first commit
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	_, err = w.Commit("first commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create first commit: %v", err)
-	}
-
-	// Create second commit with only .entire/ metadata changes
-	metadataDir := filepath.Join(tmpDir, ".entire", "metadata", "session-123")
-	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
-		t.Fatalf("failed to create metadata dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
-		t.Fatalf("failed to write metadata file: %v", err)
-	}
-	if _, err := w.Add(".entire"); err != nil {
-		t.Fatalf("failed to add .entire: %v", err)
-	}
-	commitHash, err := w.Commit("metadata only commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create second commit: %v", err)
-	}
-
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		t.Fatalf("failed to get commit object: %v", err)
-	}
-
-	// Only .entire/ changes should return false
-	if hasCodeChanges(commit) {
-		t.Error("hasCodeChanges() should return false when only .entire/ files changed")
-	}
-}
-
-func TestHasCodeChanges_WithCodeChanges(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create first commit
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	_, err = w.Commit("first commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create first commit: %v", err)
-	}
-
-	// Create second commit with code changes
-	if err := os.WriteFile(testFile, []byte("modified"), 0o644); err != nil {
-		t.Fatalf("failed to modify test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add modified file: %v", err)
-	}
-	commitHash, err := w.Commit("code change commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create second commit: %v", err)
-	}
-
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		t.Fatalf("failed to get commit object: %v", err)
-	}
-
-	// Code changes should return true
-	if !hasCodeChanges(commit) {
-		t.Error("hasCodeChanges() should return true when code files changed")
-	}
-}
-
-func TestHasCodeChanges_MixedChanges(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create first commit
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	_, err = w.Commit("first commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create first commit: %v", err)
-	}
-
-	// Create second commit with BOTH code and metadata changes
-	if err := os.WriteFile(testFile, []byte("modified"), 0o644); err != nil {
-		t.Fatalf("failed to modify test file: %v", err)
-	}
-	metadataDir := filepath.Join(tmpDir, ".entire", "metadata", "session-123")
-	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
-		t.Fatalf("failed to create metadata dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
-		t.Fatalf("failed to write metadata file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	if _, err := w.Add(".entire"); err != nil {
-		t.Fatalf("failed to add .entire: %v", err)
-	}
-	commitHash, err := w.Commit("mixed changes commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create second commit: %v", err)
-	}
-
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		t.Fatalf("failed to get commit object: %v", err)
-	}
-
-	// Mixed changes should return true (code changes present)
-	if !hasCodeChanges(commit) {
-		t.Error("hasCodeChanges() should return true when commit has both code and metadata changes")
 	}
 }
 
@@ -6287,7 +5502,7 @@ func TestHasAnyChanges_FirstCommitReturnsTrue(t *testing.T) {
 }
 
 func TestHasAnyChanges_MetadataOnlyChangeReturnsTrue(t *testing.T) {
-	// Unlike hasCodeChanges, hasAnyChanges uses tree hash comparison and
+	// hasAnyChanges uses tree hash comparison and
 	// does not filter out .entire/ metadata files. A metadata-only change
 	// should return true because the tree hash differs from the parent's.
 	tmpDir := t.TempDir()
@@ -6341,7 +5556,7 @@ func TestHasAnyChanges_MetadataOnlyChangeReturnsTrue(t *testing.T) {
 	}
 
 	// hasAnyChanges compares tree hashes, so metadata-only changes DO count
-	// (unlike hasCodeChanges which filters .entire/ files)
+	// (it does not filter .entire/ files)
 	if !hasAnyChanges(commit) {
 		t.Error("hasAnyChanges() should return true for metadata-only changes (tree hash differs)")
 	}
@@ -6532,22 +5747,16 @@ func TestGetBranchCheckpoints_TruncationSignal(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "test.txt", "initial")
+	testutil.GitAdd(t, tmpDir, "test.txt")
+	testutil.GitCommit(t, tmpDir, "initial commit")
+
 	repo, err := git.PlainOpen(tmpDir)
 	require.NoError(t, err)
 
-	w, err := repo.Worktree()
-	require.NoError(t, err)
-
-	testFile := filepath.Join(tmpDir, "test.txt")
-	require.NoError(t, os.WriteFile(testFile, []byte("initial"), 0o644))
-	_, err = w.Add("test.txt")
-	require.NoError(t, err)
-	_, err = w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	require.NoError(t, err)
-
-	// Create 4 committed checkpoints, each its own commit carrying the trailer.
+	// Create 4 committed checkpoints, each on its own commit carrying the
+	// Entire-Checkpoint trailer. The testutil helpers configure user identity
+	// and disable GPG signing, matching repo convention.
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	const total = 4
 	cpIDs := []string{"aa11aa11aa11", "bb22bb22bb22", "cc33cc33cc33", "dd44dd44dd44"}
@@ -6559,13 +5768,9 @@ func TestGetBranchCheckpoints_TruncationSignal(t *testing.T) {
 			Strategy:     "manual-commit",
 			Prompts:      []string{fmt.Sprintf("prompt %d", i)},
 		}))
-		require.NoError(t, os.WriteFile(testFile, []byte(fmt.Sprintf("change %d", i)), 0o644))
-		_, err = w.Add("test.txt")
-		require.NoError(t, err)
-		_, err = w.Commit(trailers.FormatCheckpoint(fmt.Sprintf("checkpoint %d", i), cpID), &git.CommitOptions{
-			Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(time.Duration(i) * time.Second)},
-		})
-		require.NoError(t, err)
+		testutil.WriteFile(t, tmpDir, "test.txt", fmt.Sprintf("change %d", i))
+		testutil.GitAdd(t, tmpDir, "test.txt")
+		testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint(fmt.Sprintf("checkpoint %d", i), cpID))
 	}
 
 	t.Run("budget hit reports truncated and caps the slice", func(t *testing.T) {
@@ -6587,4 +5792,97 @@ func TestGetBranchCheckpoints_TruncationSignal(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, truncated)
 	})
+}
+
+// setupExplainBranchViewRepo initializes a repo with one commit and an .entire
+// dir in a temp CWD, returning the commit hash. Shared scaffolding for the
+// default branch-view tests of runExplainBranchWithFilter.
+func setupExplainBranchViewRepo(t *testing.T) plumbing.Hash {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	w, err := repo.Worktree()
+	require.NoError(t, err)
+	testFile := filepath.Join(tmpDir, "test.txt")
+	require.NoError(t, os.WriteFile(testFile, []byte("test content"), 0o644))
+	_, err = w.Add("test.txt")
+	require.NoError(t, err)
+	commitHash, err := w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test",
+			Email: "test@example.com",
+		},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll(".entire", 0o750))
+	return commitHash
+}
+
+// TestRunExplainBranchWithFilter_ShowsBranchView covers the default
+// `entire explain` view (no filter): branch header plus checkpoint count.
+func TestRunExplainBranchWithFilter_ShowsBranchView(t *testing.T) {
+	setupExplainBranchViewRepo(t)
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainBranchWithFilter(context.Background(), &stdout, &stderr, true, "")
+	if err != nil {
+		t.Errorf("expected no error, got: %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "branch  ") {
+		t.Errorf("expected 'branch' row in output, got: %s", output)
+	}
+	if !strings.Contains(output, "checkpoints") {
+		t.Errorf("expected 'checkpoints' row in output, got: %s", output)
+	}
+}
+
+// TestRunExplainBranchWithFilter_NoCheckpoints_ShowsHelpfulMessage pins the
+// zero-checkpoint hint shown to users before their first agent session saves.
+func TestRunExplainBranchWithFilter_NoCheckpoints_ShowsHelpfulMessage(t *testing.T) {
+	setupExplainBranchViewRepo(t)
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainBranchWithFilter(context.Background(), &stdout, &stderr, true, "")
+	if err != nil {
+		t.Errorf("expected no error, got: %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "checkpoints  0") {
+		t.Errorf("expected 'checkpoints  0' in output, got: %s", output)
+	}
+	if !strings.Contains(output, "Checkpoints will appear") || !strings.Contains(output, "agent session") {
+		t.Errorf("expected helpful message about checkpoints, got: %s", output)
+	}
+}
+
+// TestRunExplainBranchWithFilter_DetachedHead covers the default view's branch
+// labeling when HEAD is detached — a real user path with no branch name.
+func TestRunExplainBranchWithFilter_DetachedHead(t *testing.T) {
+	commitHash := setupExplainBranchViewRepo(t)
+
+	repo, err := git.PlainOpen(".")
+	require.NoError(t, err)
+	w, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, w.Checkout(&git.CheckoutOptions{Hash: commitHash}))
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainBranchWithFilter(context.Background(), &stdout, &stderr, true, "")
+	if err != nil {
+		t.Errorf("expected no error, got: %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "HEAD") && !strings.Contains(output, "detached") {
+		t.Errorf("expected output to indicate detached HEAD state, got: %s", output)
+	}
 }

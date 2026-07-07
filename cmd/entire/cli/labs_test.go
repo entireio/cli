@@ -29,6 +29,8 @@ func TestLabsCmd_PrintsExperimentalCommandList(t *testing.T) {
 		"entire tokens",
 		"entire tokens profile",
 		"entire tokens profile --help",
+		"entire session tokens",
+		"entire session tokens --help",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("entire labs output missing %q:\n%s", want, got)

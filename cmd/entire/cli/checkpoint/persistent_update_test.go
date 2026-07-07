@@ -16,7 +16,6 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
@@ -66,60 +65,6 @@ func setupRepoForUpdate(t *testing.T) (*git.Repository, *GitStore, id.Checkpoint
 	}
 
 	return repo, store, cpID
-}
-
-func rewriteRootSummary(t *testing.T, store *GitStore, cpID id.CheckpointID, mutate func(*CheckpointSummary)) {
-	t.Helper()
-	ctx := context.Background()
-	parentHash, rootTreeHash, err := store.getSessionsBranchRef()
-	if err != nil {
-		t.Fatalf("getSessionsBranchRef(): %v", err)
-	}
-
-	basePath := cpID.Path() + "/"
-	existing, err := store.subtreeObjAt(rootTreeHash, cpID.Path())
-	if err != nil {
-		t.Fatalf("subtreeObjAt(): %v", err)
-	}
-	entries, err := store.flattenExisting(existing, basePath)
-	if err != nil {
-		t.Fatalf("flattenExisting(): %v", err)
-	}
-
-	summary := readSummaryFromBranch(t, store.repo, cpID)
-	mutate(&summary)
-
-	metadataJSON, err := json.Marshal(summary)
-	if err != nil {
-		t.Fatalf("marshal summary: %v", err)
-	}
-	metadataHash, err := CreateBlobFromContent(store.repo, metadataJSON)
-	if err != nil {
-		t.Fatalf("CreateBlobFromContent(): %v", err)
-	}
-
-	rootMetadataPath := basePath + paths.MetadataFileName
-	entries[rootMetadataPath] = object.TreeEntry{
-		Name: rootMetadataPath,
-		Mode: filemode.Regular,
-		Hash: metadataHash,
-	}
-
-	checkpointSubtree, err := store.buildCheckpointSubtree(ctx, entries, basePath)
-	if err != nil {
-		t.Fatalf("buildCheckpointSubtree(): %v", err)
-	}
-	newTreeHash, err := store.spliceCheckpointSubtree(rootTreeHash, cpID, checkpointSubtree)
-	if err != nil {
-		t.Fatalf("spliceCheckpointSubtree(): %v", err)
-	}
-	commitHash, err := CreateCommit(ctx, store.repo, newTreeHash, parentHash, "rewrite checkpoint summary\n", "Test", "test@test.com")
-	if err != nil {
-		t.Fatalf("CreateCommit(): %v", err)
-	}
-	if err := store.setPrimaryRef(commitHash); err != nil {
-		t.Fatalf("setPrimaryRef(): %v", err)
-	}
 }
 
 func TestUpdateCommitted_ReplacesTranscript(t *testing.T) {
@@ -405,104 +350,6 @@ func TestUpdateCommitted_SummaryPreserved(t *testing.T) {
 	}
 	if len(summaryAfter.Sessions) != len(summaryBefore.Sessions) {
 		t.Errorf("sessions count changed: %d -> %d", len(summaryBefore.Sessions), len(summaryAfter.Sessions))
-	}
-}
-
-func TestReadCommittedDefaultsLegacyCheckpointVersion(t *testing.T) {
-	t.Parallel()
-	_, store, cpID := setupRepoForUpdate(t)
-
-	rewriteRootSummary(t, store, cpID, func(summary *CheckpointSummary) {
-		summary.CheckpointVersion = ""
-	})
-
-	rawSummary := readSummaryFromBranch(t, store.repo, cpID)
-	if rawSummary.CheckpointVersion != "" {
-		t.Fatalf("raw legacy CheckpointVersion = %q, want empty", rawSummary.CheckpointVersion)
-	}
-
-	summary, err := store.Read(context.Background(), cpID)
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	if summary == nil {
-		t.Fatal("Read() returned nil summary")
-	}
-	if summary.CheckpointVersion != CheckpointVersionBranchV1 {
-		t.Fatalf("CheckpointVersion = %q, want %q", summary.CheckpointVersion, CheckpointVersionBranchV1)
-	}
-}
-
-func TestUpdateCheckpointSummaryBackfillsLegacyCheckpointVersion(t *testing.T) {
-	t.Parallel()
-	_, store, cpID := setupRepoForUpdate(t)
-
-	rewriteRootSummary(t, store, cpID, func(summary *CheckpointSummary) {
-		summary.CheckpointVersion = ""
-	})
-
-	if err := store.Write(context.Background(), CheckpointAttribution{CheckpointID: cpID, Attribution: &Attribution{AgentLines: 7}}); err != nil {
-		t.Fatalf("UpdateCheckpointSummary() error = %v", err)
-	}
-
-	rawSummary := readSummaryFromBranch(t, store.repo, cpID)
-	if rawSummary.CheckpointVersion != CheckpointVersionBranchV1 {
-		t.Fatalf("raw checkpoint_version = %q, want %q", rawSummary.CheckpointVersion, CheckpointVersionBranchV1)
-	}
-	if rawSummary.CombinedAttribution == nil || rawSummary.CombinedAttribution.AgentLines != 7 {
-		t.Fatalf("CombinedAttribution = %+v, want AgentLines 7", rawSummary.CombinedAttribution)
-	}
-}
-
-func TestUpdateCheckpointSummaryPreservesExplicitCheckpointVersion(t *testing.T) {
-	t.Parallel()
-	_, store, cpID := setupRepoForUpdate(t)
-	const futureVersion = "refs-v1"
-
-	rewriteRootSummary(t, store, cpID, func(summary *CheckpointSummary) {
-		summary.CheckpointVersion = futureVersion
-	})
-
-	if err := store.Write(context.Background(), CheckpointAttribution{CheckpointID: cpID, Attribution: &Attribution{AgentLines: 11}}); err != nil {
-		t.Fatalf("UpdateCheckpointSummary() error = %v", err)
-	}
-
-	rawSummary := readSummaryFromBranch(t, store.repo, cpID)
-	if rawSummary.CheckpointVersion != futureVersion {
-		t.Fatalf("raw checkpoint_version = %q, want %q", rawSummary.CheckpointVersion, futureVersion)
-	}
-	if rawSummary.CombinedAttribution == nil || rawSummary.CombinedAttribution.AgentLines != 11 {
-		t.Fatalf("CombinedAttribution = %+v, want AgentLines 11", rawSummary.CombinedAttribution)
-	}
-}
-
-func TestWriteCommittedPreservesExplicitCheckpointVersion(t *testing.T) {
-	t.Parallel()
-	_, store, cpID := setupRepoForUpdate(t)
-	const futureVersion = "refs-v1"
-
-	rewriteRootSummary(t, store, cpID, func(summary *CheckpointSummary) {
-		summary.CheckpointVersion = futureVersion
-	})
-
-	if err := store.Write(context.Background(), Session{
-		CheckpointID: cpID,
-		SessionID:    "session-002",
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte("second session\n")),
-		Prompts:      []string{"second prompt"},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	}); err != nil {
-		t.Fatalf("WriteCommitted() error = %v", err)
-	}
-
-	rawSummary := readSummaryFromBranch(t, store.repo, cpID)
-	if rawSummary.CheckpointVersion != futureVersion {
-		t.Fatalf("raw checkpoint_version = %q, want %q", rawSummary.CheckpointVersion, futureVersion)
-	}
-	if len(rawSummary.Sessions) != 2 {
-		t.Fatalf("len(Sessions) = %d, want 2", len(rawSummary.Sessions))
 	}
 }
 

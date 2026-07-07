@@ -759,24 +759,34 @@ func runStopAll(ctx context.Context, cmd *cobra.Command, activeSessions []*strat
 	}
 
 	if !force {
-		var confirmed bool
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title(fmt.Sprintf("Stop %d session(s)?", len(activeSessions))).
-					Value(&confirmed),
-			),
-		)
-		if err := form.Run(); err != nil {
-			return handleFormCancellation(cmd.OutOrStdout(), "Stop", err)
-		}
-		if !confirmed {
-			fmt.Fprintln(cmd.OutOrStdout(), "Stop cancelled.")
-			return nil
+		confirmed, err := confirmStopSessions(cmd, len(activeSessions))
+		if err != nil || !confirmed {
+			return err
 		}
 	}
 
 	return stopSelectedSessions(ctx, cmd, activeSessions)
+}
+
+// confirmStopSessions asks the user to confirm stopping count sessions.
+// When declined or cancelled it prints the outcome and returns confirmed=false.
+func confirmStopSessions(cmd *cobra.Command, count int) (bool, error) {
+	var confirmed bool
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title(fmt.Sprintf("Stop %d session(s)?", count)).
+				Value(&confirmed),
+		),
+	)
+	if err := form.Run(); err != nil {
+		return false, handleFormCancellation(cmd.OutOrStdout(), "Stop", err)
+	}
+	if !confirmed {
+		fmt.Fprintln(cmd.OutOrStdout(), "Stop cancelled.")
+		return false, nil
+	}
+	return true, nil
 }
 
 // runStopMultiSelect shows a TUI multi-select for multiple active sessions.
@@ -819,20 +829,9 @@ func runStopMultiSelect(ctx context.Context, cmd *cobra.Command, activeSessions 
 
 	// Confirm only if not forcing
 	if !force {
-		var confirmed bool
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title(fmt.Sprintf("Stop %d session(s)?", len(selectedIDs))).
-					Value(&confirmed),
-			),
-		)
-		if err := form.Run(); err != nil {
-			return handleFormCancellation(cmd.OutOrStdout(), "Stop", err)
-		}
-		if !confirmed {
-			fmt.Fprintln(cmd.OutOrStdout(), "Stop cancelled.")
-			return nil
+		confirmed, err := confirmStopSessions(cmd, len(selectedIDs))
+		if err != nil || !confirmed {
+			return err
 		}
 	}
 

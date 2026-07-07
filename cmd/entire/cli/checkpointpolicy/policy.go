@@ -3,8 +3,6 @@ package checkpointpolicy
 import (
 	"fmt"
 	"strings"
-
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 )
 
 type Policy struct {
@@ -14,13 +12,13 @@ type Policy struct {
 
 func DefaultPolicy() Policy {
 	return Policy{
-		CheckpointVersion:    checkpoint.CheckpointVersionBranchV1,
-		CheckpointMinVersion: checkpoint.CheckpointVersionBranchV1,
+		CheckpointVersion:    CheckpointVersionBranchV1,
+		CheckpointMinVersion: CheckpointVersionBranchV1,
 	}
 }
 
 func DefaultCheckpointVersion() string {
-	return checkpoint.CheckpointVersionBranchV1
+	return CheckpointVersionBranchV1
 }
 
 func Normalize(policy Policy) Policy {
@@ -28,7 +26,7 @@ func Normalize(policy Policy) Policy {
 		policy.CheckpointVersion = DefaultCheckpointVersion()
 	}
 	if policy.CheckpointMinVersion == "" {
-		policy.CheckpointMinVersion = checkpoint.CheckpointVersionBranchV1
+		policy.CheckpointMinVersion = CheckpointVersionBranchV1
 	}
 	return policy
 }

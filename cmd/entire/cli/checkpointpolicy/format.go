@@ -14,6 +14,9 @@ const (
 	CheckpointFamilyRefs   CheckpointFamily = "refs"
 )
 
+// CheckpointVersionBranchV1 identifies the branch-backed checkpoint format.
+const CheckpointVersionBranchV1 = "branch-v1"
+
 type CheckpointFormat struct {
 	Family CheckpointFamily
 	Major  int

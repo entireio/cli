@@ -182,16 +182,6 @@ func RedactURL(rawURL string) string {
 	return u.Scheme + "://" + u.Host + u.Path
 }
 
-// ExtractOwnerFromRemoteURL extracts the owner component from a git remote URL.
-// Returns an empty string if the URL cannot be parsed.
-func ExtractOwnerFromRemoteURL(rawURL string) string {
-	info, err := ParseURL(rawURL)
-	if err != nil {
-		return ""
-	}
-	return info.Owner
-}
-
 // ResolveRemoteRepo returns the forge identifier, owner, and repo name for the
 // given git remote. The forge is the short id used by the trails API ("gh",
 // "et", ...); it is derived from the hostname for direct git URLs or from the

@@ -91,3 +91,37 @@ type commitDay struct {
 	Date    string
 	Commits []userCommit
 }
+
+// userSessionsResponse is the API response for GET /api/v1/me/sessions — the
+// cross-repo recent-session feed the entire.io Overview page renders. The
+// envelope is snake_case; session-item fields are camelCase (mirrors entire-api
+// / entire.io exactly). Timeframe/UpdatedAt are unused by the CLI today.
+type userSessionsResponse struct {
+	Sessions  []userSession `json:"sessions"`
+	Timeframe string        `json:"timeframe"`
+	UpdatedAt string        `json:"updated_at"`
+}
+
+// userSession is one row of /me/sessions. Only the fields the Overview row
+// renders are kept; the wire also carries token and attribution totals, plus
+// prompt/stepCount/startedAt/customName/firstCommitAuthorUsername, which the
+// web (and so the CLI) does not display. Agent/Model are pointers because the
+// API sends null when unknown. DisplayName is already resolved server-side
+// (custom name > AI-generated name > heuristic). repo_full_name / is_private
+// are the two snake_case cross-repo fields.
+type userSession struct {
+	SessionID       string  `json:"sessionId"`
+	DisplayName     string  `json:"displayName"`
+	IsPublic        bool    `json:"isPublic"`
+	Agent           *string `json:"agent"`
+	Model           *string `json:"model"`
+	LastActivityAt  string  `json:"lastActivityAt"`
+	CheckpointCount int     `json:"checkpointCount"`
+	RepoFullName    string  `json:"repo_full_name"`
+}
+
+// sessionDay groups sessions by the local day of their last activity.
+type sessionDay struct {
+	Date     string
+	Sessions []userSession
+}

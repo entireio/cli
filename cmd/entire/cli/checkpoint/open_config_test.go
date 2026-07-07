@@ -43,8 +43,13 @@ func TestOpen_DefaultIsGitPrimaryNoMirrors(t *testing.T) {
 
 	stores, err := Open(context.Background(), repo, OpenOptions{})
 	require.NoError(t, err)
-	_, isGit := stores.Persistent.(*GitStore)
-	assert.True(t, isGit, "default persistent store should be the raw git store, not a fan-out wrapper")
+	// Persistent is always the kind-routing store now (it routes id-keyed reads
+	// across the git backends); with a git-branch primary it preserves the git
+	// AuthorReader capability.
+	_, isRouting := stores.Persistent.(*kindRoutingStoreWithAuthor)
+	assert.True(t, isRouting, "default persistent store should be the kind-routing store")
+	_, isAuthor := stores.Persistent.(AuthorReader)
+	assert.True(t, isAuthor, "routing store should preserve the git primary's AuthorReader")
 }
 
 func TestOpen_RejectsNonGitBackedPrimary(t *testing.T) {
@@ -101,12 +106,12 @@ func TestOpen_BuildsConfiguredMirror(t *testing.T) {
 	stores, err := Open(context.Background(), repo, OpenOptions{})
 	require.NoError(t, err)
 
-	// With a mirror configured the persistent store is the fan-out wrapper, not
-	// the raw git store, and it still exposes AuthorReader (git primary has it).
+	// The persistent store is the kind-routing store (never the raw git store),
+	// and it still exposes AuthorReader (git primary has it).
 	_, isGit := stores.Persistent.(*GitStore)
-	assert.False(t, isGit, "configured mirror should wrap the primary in a fan-out store")
+	assert.False(t, isGit, "configured mirror should not expose the raw git store")
 	_, isAuthor := stores.Persistent.(AuthorReader)
-	assert.True(t, isAuthor, "fan-out store should preserve the git primary's AuthorReader")
+	assert.True(t, isAuthor, "routing store should preserve the git primary's AuthorReader")
 }
 
 func TestOpen_InvalidCheckpointsBlockErrors(t *testing.T) {
@@ -129,8 +134,10 @@ func TestOpen_ToleratesUnrelatedMalformedSettings(t *testing.T) {
 
 	stores, err := Open(context.Background(), repo, OpenOptions{})
 	require.NoError(t, err)
-	_, isGit := stores.Persistent.(*GitStore)
-	assert.True(t, isGit)
+	// Fail-soft default is the git-branch backend, so the routing store still
+	// exposes the git AuthorReader capability.
+	_, isAuthor := stores.Persistent.(AuthorReader)
+	assert.True(t, isAuthor)
 }
 
 func TestOpen_ToleratesWholeFileSyntaxError(t *testing.T) {
@@ -140,6 +147,8 @@ func TestOpen_ToleratesWholeFileSyntaxError(t *testing.T) {
 
 	stores, err := Open(context.Background(), repo, OpenOptions{})
 	require.NoError(t, err)
-	_, isGit := stores.Persistent.(*GitStore)
-	assert.True(t, isGit)
+	// Fail-soft default is the git-branch backend, so the routing store still
+	// exposes the git AuthorReader capability.
+	_, isAuthor := stores.Persistent.(AuthorReader)
+	assert.True(t, isAuthor)
 }

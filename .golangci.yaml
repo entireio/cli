@@ -107,6 +107,9 @@ linters:
         - pattern: '^.*\.Checkout$'
           msg: "go-git Checkout deletes .gitignored dirs - use CheckoutBranch() from git_operations.go"
           pkg: 'github\.com/go-git/go-git'
+        - pattern: '^.*\.(Print|Println|Printf)$'
+          msg: "cobra's Print* writes to OutOrStderr (stderr in production); use fmt.Fprint*(cmd.OutOrStdout(), ...)"
+          pkg: 'github\.com/spf13/cobra'
     govet:
       enable-all: true
       disable:

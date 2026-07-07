@@ -122,16 +122,3 @@ func TestDiscover(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
-
-func TestRenderLoginHint(t *testing.T) {
-	hint := RenderLoginHint("rc.partial.to", []string{"https://a.example", "https://b.example"})
-
-	assert.Contains(t, hint, "no auth context for cluster rc.partial.to")
-	assert.Contains(t, hint, "entire login")
-	// The advertised login servers are intentionally squashed from the hint
-	// until the multi-login UX is ready (see renderLoginHint): the coreURLs
-	// argument is accepted but not yet surfaced, so neither the URLs nor the
-	// `entire auth use` switch hint appear.
-	assert.NotContains(t, hint, "https://a.example", "login servers should be squashed for now: %q", hint)
-	assert.NotContains(t, hint, "entire auth use", "auth-use hint should be squashed for now: %q", hint)
-}

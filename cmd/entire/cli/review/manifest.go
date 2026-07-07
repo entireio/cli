@@ -251,17 +251,6 @@ func hydrateReviewSummaryTokensFromCurrentState(
 	return hydrateReviewSummaryTokensFromStates(ctx, worktreeRoot, headSHA, summary, states, lookup), nil
 }
 
-func hydrateReviewAgentRunTokensFromStates(
-	ctx context.Context,
-	worktreeRoot string,
-	headSHA string,
-	run reviewtypes.AgentRun,
-	states []*session.State,
-	lookup agentTypeLookup,
-) reviewtypes.AgentRun {
-	return hydrateReviewAgentRunTokensFromStatesWithUsed(ctx, worktreeRoot, headSHA, run, states, lookup, map[string]bool{})
-}
-
 func hydrateReviewAgentRunTokensFromStatesWithUsed(
 	ctx context.Context,
 	worktreeRoot string,

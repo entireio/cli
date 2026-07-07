@@ -52,11 +52,6 @@ func BaseURL() string {
 	return DefaultBaseURL
 }
 
-// ResolveURL joins an API-relative path against the effective base URL.
-func ResolveURL(path string) (string, error) {
-	return ResolveURLFromBase(BaseURL(), path)
-}
-
 // ResolveURLFromBase joins an API-relative path against an explicit base URL.
 // Only http and https schemes are accepted.
 func ResolveURLFromBase(baseURL, path string) (string, error) {

@@ -195,6 +195,85 @@ func regionLabel(r regionChoice) string {
 	}
 }
 
+// resolveOneShotClusterHost picks the cluster `repo mirror create
+// <github-url>` targets when [cluster-host] is omitted. Non-interactive
+// callers keep the fixed defaultClusterHost so scripts stay stable and
+// offline-resolvable; on a terminal the control plane's cluster catalog is
+// offered as a single-select (skipped when only one cluster exists),
+// pre-selecting the caller's jurisdiction default — the same
+// prompt-only-when-there-is-a-choice shape `repo clone` uses for
+// multi-cluster placements.
+func resolveOneShotClusterHost(cmd *cobra.Command) (string, error) {
+	if !interactive.CanPromptInteractively() {
+		return defaultClusterHost, nil
+	}
+	errW := cmd.ErrOrStderr()
+	var (
+		regions      []regionChoice
+		jurisdiction string
+	)
+	if err := runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+		stop := startSpinner(errW, "Fetching clusters")
+		var err error
+		if regions, err = availableRegions(ctx, c); err != nil {
+			stop(false)
+			return err
+		}
+		// The jurisdiction only pre-selects the picker's default; a /me
+		// hiccup shouldn't sink the create, so fall back to no pre-selection.
+		if me, merr := c.GetMe(ctx); merr == nil {
+			jurisdiction, _ = me.Jurisdiction.Get()
+		}
+		stop(true)
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	if len(regions) == 0 {
+		return "", errors.New("no clusters available to mirror into; pass [cluster-host] explicitly")
+	}
+	if len(regions) == 1 {
+		fmt.Fprintf(errW, "Using cluster %s\n", regions[0].host)
+		return regions[0].host, nil
+	}
+	return pickOneCluster(cmd.Context(), errW, regions, jurisdiction)
+}
+
+// pickOneCluster runs the one-shot create's cluster single-select,
+// pre-selecting the default cluster for the caller's jurisdiction. A clean
+// cancel (Ctrl+C / cancelled ctx) surfaces as a SilentError so the create
+// stops instead of falling through to a cluster the user didn't choose.
+func pickOneCluster(ctx context.Context, w io.Writer, regions []regionChoice, jurisdiction string) (string, error) {
+	opts, defaults := clusterChoices(regions, jurisdiction)
+	var selected string
+	if len(defaults) > 0 {
+		selected = defaults[0]
+	}
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Select the cluster to mirror into").
+				Options(opts...).
+				Value(&selected),
+		),
+	)
+	if err := form.RunWithContext(ctx); err != nil {
+		if cerr := handleFormCancellation(w, "Mirror create", err); cerr != nil {
+			return "", cerr
+		}
+		return "", NewSilentError(errors.New("mirror create cancelled"))
+	}
+	// Guard the selection against the offered hosts (like repo clone's
+	// picker) so a zero-value fall-through can't reach the caller as a
+	// misleading "invalid [cluster-host]" error.
+	for _, r := range regions {
+		if r.host == selected {
+			return selected, nil
+		}
+	}
+	return "", NewSilentError(errors.New("mirror create cancelled"))
+}
+
 // mirrorTarget is one unit of work: a selected repo to be mirrored into a
 // selected region. The wizard creates the cross-product of repos × regions.
 type mirrorTarget struct {

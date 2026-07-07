@@ -204,51 +204,6 @@ func GetCurrentBranch(ctx context.Context) (string, error) {
 	return head.Name().Short(), nil
 }
 
-// GetMergeBase finds the common ancestor (merge-base) between two branches.
-// Returns the hash of the merge-base commit.
-func GetMergeBase(ctx context.Context, branch1, branch2 string) (*plumbing.Hash, error) {
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open git repository: %w", err)
-	}
-	defer repo.Close()
-
-	// Resolve branch references
-	ref1, err := repo.Reference(plumbing.NewBranchReferenceName(branch1), true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve branch %s: %w", branch1, err)
-	}
-
-	ref2, err := repo.Reference(plumbing.NewBranchReferenceName(branch2), true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve branch %s: %w", branch2, err)
-	}
-
-	// Get commit objects
-	commit1, err := repo.CommitObject(ref1.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit for %s: %w", branch1, err)
-	}
-
-	commit2, err := repo.CommitObject(ref2.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit for %s: %w", branch2, err)
-	}
-
-	// Find common ancestor
-	mergeBase, err := commit1.MergeBase(commit2)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find merge base: %w", err)
-	}
-
-	if len(mergeBase) == 0 {
-		return nil, errors.New("no common ancestor found")
-	}
-
-	hash := mergeBase[0].Hash
-	return &hash, nil
-}
-
 // HasUncommittedChanges checks if there are any uncommitted changes in the repository.
 // This includes staged changes, unstaged changes, and untracked files.
 // Uses git CLI instead of go-git because go-git doesn't respect global gitignore
@@ -262,22 +217,6 @@ func HasUncommittedChanges(ctx context.Context) (bool, error) {
 
 	// If output is empty, there are no changes
 	return len(strings.TrimSpace(string(output))) > 0, nil
-}
-
-// findNewUntrackedFiles finds files that are newly untracked (not in pre-existing list)
-func findNewUntrackedFiles(current, preExisting []string) []string {
-	preExistingSet := make(map[string]bool)
-	for _, file := range preExisting {
-		preExistingSet[file] = true
-	}
-
-	var newFiles []string
-	for _, file := range current {
-		if !preExistingSet[file] {
-			newFiles = append(newFiles, file)
-		}
-	}
-	return newFiles
 }
 
 // BranchExistsOnRemote checks if a branch exists on the origin remote.

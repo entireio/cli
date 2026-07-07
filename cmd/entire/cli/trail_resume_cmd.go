@@ -648,14 +648,6 @@ func trailResumeTopFindingOptions() trailReviewListOptions {
 	}
 }
 
-func buildTrailResumeContext(found api.TrailResource, sessions []trailResumeSessionContext, sessionsUnavailable string, findings trailResumeFindingsContext) trailResumeContext {
-	return buildTrailResumeContextForRepoWithSkipped(found, sessions, sessionsUnavailable, 0, findings, "")
-}
-
-func buildTrailResumeContextForRepo(found api.TrailResource, sessions []trailResumeSessionContext, sessionsUnavailable string, findings trailResumeFindingsContext, repoFullName string) trailResumeContext {
-	return buildTrailResumeContextForRepoWithSkipped(found, sessions, sessionsUnavailable, 0, findings, repoFullName)
-}
-
 func buildTrailResumeContextForRepoWithSkipped(found api.TrailResource, sessions []trailResumeSessionContext, sessionsUnavailable string, sessionsSkipped int, findings trailResumeFindingsContext, repoFullName string) trailResumeContext {
 	trailCtx := trailResumeTrailContext{
 		ID:     found.ID,

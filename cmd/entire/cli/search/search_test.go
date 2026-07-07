@@ -437,6 +437,18 @@ func TestSearch_ResultAccessors(t *testing.T) {
 	if cp.ResultOrg() != "o" {
 		t.Errorf("ResultOrg = %q", cp.ResultOrg())
 	}
+	if cp.ResultRepo() != "r" {
+		t.Errorf("ResultRepo = %q", cp.ResultRepo())
+	}
+	if cp.ResultBranch() != "main" {
+		t.Errorf("ResultBranch = %q", cp.ResultBranch())
+	}
+	if cp.ResultCreatedAt() != "2026-01-01T00:00:00Z" {
+		t.Errorf("ResultCreatedAt = %q", cp.ResultCreatedAt())
+	}
+	if cp.ResultAuthor() != "alice" {
+		t.Errorf("ResultAuthor = %q", cp.ResultAuthor())
+	}
 	if cp.ResultTitle() != "fix bug" {
 		t.Errorf("ResultTitle = %q", cp.ResultTitle())
 	}
@@ -444,9 +456,23 @@ func TestSearch_ResultAccessors(t *testing.T) {
 		t.Errorf("ResultID = %q", cp.ResultID())
 	}
 
+	// AuthorUsername, when set and non-empty, wins over Author; a commit
+	// subject wins over the prompt.
+	const usernameOverride = "alice-gh"
+	username := usernameOverride
+	subject := "fix: the bug"
+	cp.Checkpoint.AuthorUsername = &username
+	cp.Checkpoint.CommitSubject = &subject
+	if cp.ResultAuthor() != usernameOverride {
+		t.Errorf("ResultAuthor with username = %q", cp.ResultAuthor())
+	}
+	if cp.ResultTitle() != "fix: the bug" {
+		t.Errorf("ResultTitle with subject = %q", cp.ResultTitle())
+	}
+
 	cm := Result{
 		Type:   TypeCommit,
-		Commit: &CommitResult{CommitSHA: "abc123", CommitSubject: "fix: bug", Org: "o", Repo: "r", Branch: "dev", Author: "bob"},
+		Commit: &CommitResult{CommitSHA: "abc123", CommitSubject: "fix: bug", Org: "o", Repo: "r", Branch: "dev", Author: "bob", CreatedAt: "2026-02-02T00:00:00Z"},
 	}
 	if cm.ResultTitle() != "fix: bug" {
 		t.Errorf("commit ResultTitle = %q", cm.ResultTitle())
@@ -454,16 +480,50 @@ func TestSearch_ResultAccessors(t *testing.T) {
 	if cm.ResultID() != "abc123" {
 		t.Errorf("commit ResultID = %q", cm.ResultID())
 	}
+	if cm.ResultRepo() != "r" {
+		t.Errorf("commit ResultRepo = %q", cm.ResultRepo())
+	}
+	if cm.ResultBranch() != "dev" {
+		t.Errorf("commit ResultBranch = %q", cm.ResultBranch())
+	}
+	if cm.ResultCreatedAt() != "2026-02-02T00:00:00Z" {
+		t.Errorf("commit ResultCreatedAt = %q", cm.ResultCreatedAt())
+	}
+	if cm.ResultAuthor() != "bob" {
+		t.Errorf("commit ResultAuthor = %q", cm.ResultAuthor())
+	}
 
+	branch := "feature"
 	ss := Result{
 		Type:    TypeSession,
-		Session: &SessionResult{SessionID: "ss1", DisplayName: "Debug session", Org: "o", Repo: "r"},
+		Session: &SessionResult{SessionID: "ss1", DisplayName: "Debug session", Org: "o", Repo: "r", Branch: &branch, CreatedAt: "2026-03-03T00:00:00Z"},
 	}
 	if ss.ResultTitle() != "Debug session" {
 		t.Errorf("session ResultTitle = %q", ss.ResultTitle())
 	}
 	if ss.ResultID() != "ss1" {
 		t.Errorf("session ResultID = %q", ss.ResultID())
+	}
+	if ss.ResultBranch() != "feature" {
+		t.Errorf("session ResultBranch = %q", ss.ResultBranch())
+	}
+	if ss.ResultCreatedAt() != "2026-03-03T00:00:00Z" {
+		t.Errorf("session ResultCreatedAt = %q", ss.ResultCreatedAt())
+	}
+	// Session author comes only from AuthorUsername.
+	if ss.ResultAuthor() != "" {
+		t.Errorf("session ResultAuthor without username = %q", ss.ResultAuthor())
+	}
+	ss.Session.AuthorUsername = &username
+	if ss.ResultAuthor() != usernameOverride {
+		t.Errorf("session ResultAuthor = %q", ss.ResultAuthor())
+	}
+
+	// Nil payloads and unknown types resolve to "" on every accessor.
+	for _, r := range []Result{{Type: TypeCheckpoint}, {Type: TypeCommit}, {Type: TypeSession}, {Type: "repo"}} {
+		if got := r.ResultOrg() + r.ResultRepo() + r.ResultBranch() + r.ResultCreatedAt() + r.ResultAuthor() + r.ResultID() + r.ResultTitle(); got != "" {
+			t.Errorf("accessors on %q with nil payload = %q, want all empty", r.Type, got)
+		}
 	}
 }
 

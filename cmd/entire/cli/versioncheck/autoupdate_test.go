@@ -126,7 +126,7 @@ func TestMaybeAutoUpdate_KillSwitch(t *testing.T) {
 	if f.installCalls != 0 {
 		t.Errorf("installer called with kill-switch set")
 	}
-	assertManualHint(t, buf.String(), "brew upgrade entire")
+	assertManualHint(t, buf.String(), brewUpgradeCmd)
 }
 
 func TestMaybeAutoUpdate_NoTTY(t *testing.T) {
@@ -141,7 +141,7 @@ func TestMaybeAutoUpdate_NoTTY(t *testing.T) {
 	if f.installCalls != 0 {
 		t.Errorf("installer called without TTY")
 	}
-	assertManualHint(t, buf.String(), "brew upgrade entire")
+	assertManualHint(t, buf.String(), brewUpgradeCmd)
 }
 
 func TestMaybeAutoUpdate_CIEnv(t *testing.T) {
@@ -157,7 +157,7 @@ func TestMaybeAutoUpdate_CIEnv(t *testing.T) {
 	if f.installCalls != 0 {
 		t.Errorf("installer called on CI (CI=true)")
 	}
-	assertManualHint(t, buf.String(), "brew upgrade entire")
+	assertManualHint(t, buf.String(), brewUpgradeCmd)
 }
 
 func TestMaybeAutoUpdate_NonTerminalWriter(t *testing.T) {
@@ -171,7 +171,7 @@ func TestMaybeAutoUpdate_NonTerminalWriter(t *testing.T) {
 	if f.installCalls != 0 {
 		t.Errorf("installer called with non-terminal output writer")
 	}
-	assertManualHint(t, buf.String(), "brew upgrade entire")
+	assertManualHint(t, buf.String(), brewUpgradeCmd)
 }
 
 // TestMaybeAutoUpdate_WindowsUnknownInstallerNoAutoRun verifies that on
@@ -256,8 +256,8 @@ func TestMaybeAutoUpdate_HappyPath(t *testing.T) {
 	if f.installCalls != 1 {
 		t.Fatalf("installer called %d times, want 1", f.installCalls)
 	}
-	if f.lastCommand != "brew upgrade entire" {
-		t.Errorf("installer got %q, want brew upgrade entire", f.lastCommand)
+	if f.lastCommand != brewUpgradeCmd {
+		t.Errorf("installer got %q, want %q", f.lastCommand, brewUpgradeCmd)
 	}
 	if action != autoUpdateActionUpdate {
 		t.Errorf("action = %q, want %q", action, autoUpdateActionUpdate)
@@ -286,7 +286,7 @@ func TestMaybeAutoUpdate_InstallerFailurePrintedToUser(t *testing.T) {
 	if !strings.Contains(out, "Try again later running:") {
 		t.Errorf("missing retry hint: %q", out)
 	}
-	if !strings.Contains(out, "brew upgrade entire") {
+	if !strings.Contains(out, brewUpgradeCmd) {
 		t.Errorf("retry hint missing installer command: %q", out)
 	}
 }
@@ -301,7 +301,7 @@ type installerCase struct {
 
 func nonWindowsAutoInstallers() []installerCase {
 	return []installerCase{
-		{name: "brew", setup: useBrewExecutable, wantCmd: "brew upgrade entire"},
+		{name: "brew", setup: useBrewExecutable, wantCmd: brewUpgradeCmd},
 		{name: "mise", setup: useMiseExecutable, wantCmd: "mise upgrade entire"},
 		{name: "scoop", setup: useScoopExecutable, wantCmd: "scoop update entire/cli"},
 		{name: "unknown_curl_bash", setup: useUnknownExecutable, wantCmd: "curl -fsSL https://entire.io/install.sh | bash"},

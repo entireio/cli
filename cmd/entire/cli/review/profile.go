@@ -134,19 +134,16 @@ func applyLegacyReviewProfileFallback(s *settings.EntireSettings) {
 }
 
 func nonZeroProfiles(in map[string]settings.ReviewProfileConfig) map[string]settings.ReviewProfileConfig {
-	out := make(map[string]settings.ReviewProfileConfig, len(in))
-	for name, cfg := range in {
-		name = strings.TrimSpace(name)
-		if name == "" || cfg.IsZero() {
-			continue
-		}
-		out[name] = cfg
-	}
-	return out
+	return nonZeroNamed(in)
 }
 
 func nonZeroAgentConfigs(in map[string]settings.ReviewConfig) map[string]settings.ReviewConfig {
-	out := make(map[string]settings.ReviewConfig, len(in))
+	return nonZeroNamed(in)
+}
+
+// nonZeroNamed drops entries with blank names or zero-valued configs.
+func nonZeroNamed[T interface{ IsZero() bool }](in map[string]T) map[string]T {
+	out := make(map[string]T, len(in))
 	for name, cfg := range in {
 		name = strings.TrimSpace(name)
 		if name == "" || cfg.IsZero() {

@@ -684,20 +684,7 @@ func JSONLContentWithPrivacyFilter(ctx context.Context, content string) (string,
 	// Pass 3: per-leaf regex layers + cached OPF spans.
 	return jsonlContentImpl(content, func(v string) string {
 		regions := detectAllLayers(v)
-		if spans, ok := spansByInput[v]; ok {
-			for _, sp := range spans {
-				if !cfg.Categories[sp.Label] {
-					continue
-				}
-				if sp.Start < 0 || sp.End > len(v) || sp.Start >= sp.End {
-					continue
-				}
-				regions = append(regions, taggedRegion{
-					region: region{sp.Start, sp.End},
-					label:  mapOPFLabel(sp.Label),
-				})
-			}
-		}
+		regions = append(regions, opfSpanRegions(v, spansByInput[v], cfg)...)
 		return applyRegions(v, regions)
 	})
 }

@@ -32,8 +32,8 @@ func TestWriteAndReadLocalPolicy(t *testing.T) {
 	t.Parallel()
 	repo := initPolicyRepo(t)
 	policy := checkpointpolicy.Policy{
-		CheckpointVersion:    checkpoint.CheckpointVersionBranchV1,
-		CheckpointMinVersion: checkpoint.CheckpointVersionBranchV1,
+		CheckpointVersion:    checkpointpolicy.CheckpointVersionBranchV1,
+		CheckpointMinVersion: checkpointpolicy.CheckpointVersionBranchV1,
 	}
 	hash, err := checkpointpolicy.WriteLocal(t.Context(), repo, plumbing.ZeroHash, policy)
 	require.NoError(t, err)

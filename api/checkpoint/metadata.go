@@ -26,9 +26,6 @@ type WriteOptions struct {
 	// Strategy is the name of the strategy that created this checkpoint
 	Strategy string
 
-	// CheckpointVersion is the checkpoint metadata format for new root summaries.
-	CheckpointVersion string
-
 	// Branch is the branch name where the checkpoint was created (empty if detached HEAD)
 	Branch string
 
@@ -448,7 +445,6 @@ type SessionFilePaths struct {
 //nolint:revive // Named CheckpointSummary to avoid conflict with existing Summary struct
 type CheckpointSummary struct {
 	CLIVersion          string             `json:"cli_version,omitempty"`
-	CheckpointVersion   string             `json:"checkpoint_version,omitempty"`
 	CheckpointID        id.CheckpointID    `json:"checkpoint_id"`
 	Strategy            string             `json:"strategy"`
 	Branch              string             `json:"branch,omitempty"`

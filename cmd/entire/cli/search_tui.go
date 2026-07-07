@@ -17,6 +17,7 @@ import (
 	glamourstyles "charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
 	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/muesli/termenv"
@@ -56,19 +57,19 @@ type searchStyles struct {
 	selected     lipgloss.Style // highlighted selected row
 	helpKey      lipgloss.Style // colored key hints in footer
 	helpSep      lipgloss.Style // dim separator dots in footer
-	detailTitle  lipgloss.Style // colored title and section headers (orange, bold)
+	detailTitle  lipgloss.Style // colored title and section headers (accent, bold)
 	detailBorder lipgloss.Style // border style for detail card
 	tabActive    lipgloss.Style // active type tab
 	tabInactive  lipgloss.Style // inactive type tab
 }
 
-// Search palette mirrors activity's dark-mode CSS variables (Tailwind 400-level).
-// orange-400 is the primary accent (matches Claude in activity); purple-400 frames
-// detail; blue-400 is reserved for links inside markdown snippets.
+// Search palette draws from the shared base16 palette: the primary accent
+// styles titles/tabs/selection, the detail accent frames the detail card, and
+// the link accent is reserved for links inside markdown snippets.
 const (
-	searchAccentOrange = "#fb923c" // matches agentDisplayMap["claude"] in activity_render.go
-	searchAccentPurple = "#c084fc" // matches agentDisplayMap["kiro"] in activity_render.go
-	searchAccentBlue   = "#60a5fa" // matches agentDisplayMap["gemini"] in activity_render.go
+	searchAccent       = palette.Accent  // primary accent (titles, tabs, selection)
+	searchDetailAccent = palette.Accent2 // detail card framing
+	searchLinkAccent   = palette.Blue    // links in markdown snippets
 )
 
 func newSearchStyles(ss statusStyles) searchStyles {
@@ -76,18 +77,18 @@ func newSearchStyles(ss statusStyles) searchStyles {
 	if !ss.colorEnabled {
 		return s
 	}
-	s.sectionTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchAccentOrange))
-	s.label = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Bold(true)
-	s.selected = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchAccentOrange))
-	s.helpKey = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Bold(true)
-	s.helpSep = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	s.detailTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchAccentPurple))
+	s.sectionTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchAccent))
+	s.label = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Bold(true)
+	s.selected = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchAccent))
+	s.helpKey = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Bold(true)
+	s.helpSep = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Faint(true)
+	s.detailTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchDetailAccent))
 	s.detailBorder = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color(searchAccentPurple)).
+		BorderForeground(lipgloss.Color(searchDetailAccent)).
 		Padding(0, 2)
-	s.tabActive = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchAccentOrange))
-	s.tabInactive = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	s.tabActive = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchAccent))
+	s.tabInactive = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
 	return s
 }
 
@@ -225,11 +226,11 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	if ss.colorEnabled {
 		s := ti.Styles()
 		focused := s.Focused
-		focused.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccentOrange)).Bold(true)
+		focused.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccent)).Bold(true)
 		focused.Text = lipgloss.NewStyle()
-		focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Faint(true)
 		s.Focused = focused
-		s.Cursor.Color = lipgloss.Color(searchAccentOrange)
+		s.Cursor.Color = lipgloss.Color(searchAccent)
 		ti.SetStyles(s)
 	}
 
@@ -876,7 +877,8 @@ func (m searchModel) viewResultItem(r search.Result, selected bool, contentWidth
 }
 
 // resultNodeStyle returns the accent style for a result's graph node and type
-// tag: orange for checkpoints, purple for sessions, blue for commits. The
+// tag: accent (magenta) for checkpoints, bright magenta for sessions, blue for
+// commits. The
 // selected node is always rendered in the shared selection accent.
 func resultNodeStyle(s searchStyles, resultType string, selected bool) lipgloss.Style {
 	if !s.colorEnabled {
@@ -887,11 +889,11 @@ func resultNodeStyle(s searchStyles, resultType string, selected bool) lipgloss.
 	}
 	switch resultType {
 	case search.TypeSession:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccentPurple))
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchDetailAccent))
 	case search.TypeCommit:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccentBlue))
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchLinkAccent))
 	default: // checkpoint and unknown
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccentOrange))
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccent))
 	}
 }
 
@@ -1453,8 +1455,8 @@ func snippetMarkdownStyles(dark bool) ansi.StyleConfig {
 	s.List.Color = nil
 
 	// Links are the one place we *want* a colour: an underline alone is easy
-	// to miss inline. Use an explicit hex so it survives theme remapping.
-	linkColor := searchAccentBlue
+	// to miss inline.
+	linkColor := searchLinkAccent
 	s.Link.Color = &linkColor
 	s.LinkText.Color = &linkColor
 

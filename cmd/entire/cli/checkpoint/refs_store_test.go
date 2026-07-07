@@ -145,7 +145,6 @@ func TestGitRefsStore_WriteAllVariantsAndRead(t *testing.T) {
 	summary, err := store.Read(ctx, cid)
 	require.NoError(t, err)
 	require.NotNil(t, summary)
-	assert.Equal(t, CheckpointVersionRefsV1, summary.CheckpointVersion)
 	require.Len(t, summary.Sessions, 1)
 	require.NotNil(t, summary.CombinedAttribution)
 	assert.Equal(t, 7, summary.CombinedAttribution.AgentLines)

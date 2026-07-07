@@ -26,6 +26,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
@@ -63,6 +64,14 @@ type TestEnv struct {
 	// invocations (RunPrePush, GitCommitWithShadowHooks, etc.). Use this to
 	// pass ENTIRE_CHECKPOINT_TOKEN, GIT_SSL_CAINFO, and similar per-test env.
 	ExtraEnv []string
+
+	// CheckpointStore, when set (via ForEachBackend), selects the checkpoint
+	// storage backend for every spawned CLI/hook by injecting
+	// ENTIRE_CHECKPOINTS_PRIMARY into their environment. Empty means the CLI
+	// default (git-branch). It must be set before the first checkpoint-creating
+	// operation; the InitRepo/InitEntire/GitCommit factory steps create no
+	// checkpoints, so setting it right after a factory call is safe.
+	CheckpointStore string
 }
 
 // NewTestEnv creates a new isolated test environment.
@@ -130,7 +139,19 @@ func (env *TestEnv) cliEnv() []string {
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 	)
+	base = append(base, env.checkpointStoreEnv()...)
 	return append(base, env.ExtraEnv...)
+}
+
+// checkpointStoreEnv returns the ENTIRE_CHECKPOINTS_PRIMARY override for the
+// selected backend, or nil when unset. Included in both cliEnv (RunCLI, resume,
+// pre-push) and gitHookEnv (post-commit condensation, prepare-commit-msg) so the
+// backend is consistent across every subprocess a test spawns.
+func (env *TestEnv) checkpointStoreEnv() []string {
+	if env.CheckpointStore == "" {
+		return nil
+	}
+	return []string{settings.EnvCheckpointsPrimary + "=" + env.CheckpointStore}
 }
 
 // RunCLI runs the entire CLI with the given arguments and returns stdout.
@@ -1082,6 +1103,7 @@ func (env *TestEnv) gitHookEnv(extra ...string) []string {
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_TEST_OPENCODE_MOCK_EXPORT=1",
 	)
+	envVars = append(envVars, env.checkpointStoreEnv()...)
 	return append(envVars, extra...)
 }
 
@@ -1873,6 +1895,7 @@ func (env *TestEnv) CloneFrom(bareDir string) *TestEnv {
 		ClaudeProjectDir:   claudeProjectDir,
 		GeminiProjectDir:   geminiProjectDir,
 		OpenCodeProjectDir: openCodeProjectDir,
+		CheckpointStore:    env.CheckpointStore,
 	}
 
 	// Initialize Entire in the clone
@@ -1922,7 +1945,10 @@ func (env *TestEnv) PatchSettings(extra map[string]any) {
 	}
 }
 
-// GitPush pushes a branch to a remote. Fails the test on error.
+// GitPush pushes a branch to a remote with --no-verify, bypassing the pre-push
+// hook. Use this for setup plumbing (seeding remotes, pushing the user branch)
+// where the checkpoint sync should NOT run. To exercise the real hook, use
+// GitPushWithHooks. Fails the test on error.
 func (env *TestEnv) GitPush(remote, refSpec string) {
 	env.T.Helper()
 
@@ -1934,8 +1960,50 @@ func (env *TestEnv) GitPush(remote, refSpec string) {
 	}
 }
 
-// RunPrePush runs the pre-push hook via the CLI binary, consistent with how
-// other CLI invocations (GitCommitWithShadowHooks, RunCLI) use env.cliEnv().
+// InstallRealPrePushHook writes .git/hooks/pre-push so a plain `git push` (no
+// --no-verify) runs the checkpoint sync exactly as git runs it: git invokes the
+// hook with the remote name ($1) and URL ($2) as argv and feeds
+// "<local-ref> <local-sha> <remote-ref> <remote-sha>" lines on stdin. The hook
+// inherits the pushing process's environment, so the checkpoint-store and git
+// isolation overrides from GitPushWithHooks propagate into it.
+func (env *TestEnv) InstallRealPrePushHook() {
+	env.T.Helper()
+
+	hooksDir := filepath.Join(env.RepoDir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		env.T.Fatalf("failed to create hooks dir: %v", err)
+	}
+	// Quote the binary path so a temp path containing spaces still execs.
+	script := fmt.Sprintf("#!/bin/sh\nexec %q hooks git pre-push \"$1\"\n", getTestBinary())
+	hookPath := filepath.Join(hooksDir, "pre-push")
+	if err := os.WriteFile(hookPath, []byte(script), 0o755); err != nil { //nolint:gosec // G306: hook scripts must be executable
+		env.T.Fatalf("failed to write pre-push hook: %v", err)
+	}
+}
+
+// GitPushWithHooks pushes a branch to a remote WITHOUT --no-verify, so the
+// installed pre-push hook (see InstallRealPrePushHook) runs as part of the push.
+// This is the real-git path: git feeds the hook realistic stdin refspec lines
+// and the remote name/URL argv, so the checkpoint sync happens without any
+// explicit RunPrePush. Fails the test on error.
+func (env *TestEnv) GitPushWithHooks(remote, refSpec string) {
+	env.T.Helper()
+
+	env.InstallRealPrePushHook()
+
+	cmd := execx.NonInteractive(env.T.Context(), "git", "push", remote, refSpec)
+	cmd.Dir = env.RepoDir
+	cmd.Env = env.cliEnv()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		env.T.Fatalf("git push (with hooks) %s %s failed: %v\n%s", remote, refSpec, err, output)
+	}
+}
+
+// RunPrePush runs the pre-push hook via the CLI binary, feeding realistic stdin
+// refspec lines for the current branch (see defaultPrePushStdin). This is the
+// direct-invocation stand-in for GitPushWithHooks used by tests that don't push
+// the user branch. Consistent with other CLI invocations (RunCLI) it uses
+// env.cliEnv().
 func (env *TestEnv) RunPrePush(remote string) {
 	env.T.Helper()
 	if err := env.RunPrePushWithError(remote); err != nil {
@@ -1946,11 +2014,24 @@ func (env *TestEnv) RunPrePush(remote string) {
 // RunPrePushWithError runs the pre-push hook and returns any error instead of failing.
 func (env *TestEnv) RunPrePushWithError(remote string) error {
 	env.T.Helper()
+	return env.runPrePush(remote, env.defaultPrePushStdin())
+}
 
+// RunPrePushWithStdin runs the pre-push hook feeding the given stdin verbatim.
+// Pass "" to exercise the real no-op case (a `git push` with nothing new to
+// push feeds the hook empty stdin).
+func (env *TestEnv) RunPrePushWithStdin(remote, stdin string) error {
+	env.T.Helper()
+	return env.runPrePush(remote, stdin)
+}
+
+func (env *TestEnv) runPrePush(remote, stdin string) error {
 	cmd := exec.CommandContext(env.T.Context(), getTestBinary(), "hooks", "git", "pre-push", remote)
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
-	cmd.Stdin = nil
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 
 	output, err := cmd.CombinedOutput()
 	env.T.Logf("pre-push output: %s", output)
@@ -1958,6 +2039,29 @@ func (env *TestEnv) RunPrePushWithError(remote string) error {
 		return fmt.Errorf("pre-push hook failed: %w", err)
 	}
 	return nil
+}
+
+// defaultPrePushStdin builds the stdin line git feeds a pre-push hook for the
+// current branch: "<local-ref> <local-sha> <remote-ref> <remote-sha>". The
+// remote sha is all-zeros (a new branch) since it doesn't change the checkpoint
+// sync behavior. Returns "" when HEAD is detached or unresolvable, so callers
+// exercise the empty-stdin (no-op) case.
+func (env *TestEnv) defaultPrePushStdin() string {
+	branch := env.GetCurrentBranch()
+	if branch == "" {
+		return ""
+	}
+	repo, err := gitrepo.OpenPath(env.RepoDir)
+	if err != nil {
+		return ""
+	}
+	defer repo.Close()
+	head, err := repo.Head()
+	if err != nil {
+		return ""
+	}
+	ref := "refs/heads/" + branch
+	return fmt.Sprintf("%s %s %s %s\n", ref, head.Hash().String(), ref, plumbing.ZeroHash.String())
 }
 
 // FetchMetadataBranch fetches the entire/checkpoints/v1 branch from a remote URL.

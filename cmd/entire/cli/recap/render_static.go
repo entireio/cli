@@ -23,11 +23,16 @@ const (
 )
 
 type RenderOptions struct {
-	Range    RangeKey
-	View     ViewMode
-	Agent    string
-	Width    int
-	Color    bool
+	Range RangeKey
+	View  ViewMode
+	Agent string
+	Width int
+	Color bool
+	// RepoName is the human owner/repo name of the repo the recap is scoped to,
+	// when the caller knows it. It is preferred over the response's repo field
+	// for display: /me/recap identifies the scoped repo by its repo_id ULID
+	// (echoed back verbatim), which is meaningless to show a user.
+	RepoName string
 	Location *time.Location
 }
 
@@ -160,7 +165,7 @@ func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles 
 		lines = append(lines, "", styles.muted.Render("top")+"  "+strings.Join(top, styles.muted.Render(" · ")))
 	}
 	context := []string{plural(len(filteredAgents(resp, opts)), "agent")}
-	if repoScope := repoScopeText(resp); repoScope != "" {
+	if repoScope := repoScopeText(resp, opts.RepoName); repoScope != "" {
 		context = append(context, repoScope)
 	}
 	if !agentFiltered {
@@ -309,7 +314,12 @@ func formatWindowTime(t time.Time) string {
 	return t.Format("Jan 2, 2006 15:04 MST")
 }
 
-func repoScopeText(resp *MeRecapResponse) string {
+func repoScopeText(resp *MeRecapResponse, repoName string) string {
+	// The caller-supplied human name wins when the recap is scoped to one repo:
+	// the response echoes the queried repo_id ULID, not an owner/repo slug.
+	if name := strings.TrimSpace(repoName); name != "" {
+		return "repo " + name
+	}
 	repos := recapRepoNames(resp)
 	switch {
 	case len(repos) == 1:

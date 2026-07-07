@@ -132,27 +132,6 @@ func TestParseURL(t *testing.T) {
 	}
 }
 
-func TestExtractOwnerFromRemoteURL(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		url  string
-		want string
-	}{
-		{"SSH", "git@github.com:org/repo.git", "org"},
-		{"HTTPS", "https://github.com/org/repo.git", "org"},
-		{"invalid", "not-a-url", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, ExtractOwnerFromRemoteURL(tt.url))
-		})
-	}
-}
-
 func TestInfo_CanonicalHost(t *testing.T) {
 	t.Parallel()
 

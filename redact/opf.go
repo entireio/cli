@@ -229,12 +229,19 @@ func detectOPF(ctx context.Context, cfg *OPFConfig, s string) []taggedRegion {
 	spans := batched[0]
 	fmt.Fprintf(opfStderr, "✓ OpenAI Privacy Filter: done (%.1fs)\n", time.Since(start).Seconds())
 
+	return opfSpanRegions(s, spans, cfg)
+}
+
+// opfSpanRegions converts OPF spans detected in v into tagged regions,
+// dropping spans whose category is disabled in cfg or whose bounds don't
+// fit v.
+func opfSpanRegions(v string, spans []Span, cfg *OPFConfig) []taggedRegion {
 	out := make([]taggedRegion, 0, len(spans))
 	for _, sp := range spans {
 		if !cfg.Categories[sp.Label] {
 			continue
 		}
-		if sp.Start < 0 || sp.End > len(s) || sp.Start >= sp.End {
+		if sp.Start < 0 || sp.End > len(v) || sp.Start >= sp.End {
 			continue
 		}
 		out = append(out, taggedRegion{

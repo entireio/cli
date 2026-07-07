@@ -68,8 +68,11 @@ func NewRootCmd() *cobra.Command {
 			}
 
 			// Version check and notification (synchronous with 2s timeout)
-			// Runs AFTER command completes to avoid interfering with interactive modes
-			versioncheck.CheckAndNotify(cmd.Context(), cmd.OutOrStdout(), versioninfo.Version)
+			// Runs AFTER command completes to avoid interfering with interactive modes.
+			// Stderr, never stdout: this hook also fires after --json commands whose
+			// stdout is piped into jq or captured by scripts — a notice on stdout
+			// corrupts that output while staying invisible in the caller's logs.
+			versioncheck.CheckAndNotify(cmd.Context(), cmd.ErrOrStderr(), versioninfo.Version)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -112,6 +115,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newDispatchCmd())
 	cmd.AddCommand(newActivityCmd())
 	cmd.AddCommand(newRecapCmd())
+	cmd.AddCommand(newAPICmd())          // authenticated passthrough to core/cell APIs
 	cmd.AddCommand(newAgentHelpCmd(cmd)) // visible: agents on transports without context injection discover it via `entire help`
 
 	// Hidden top-level shortcuts. Functional but print a deprecation hint.

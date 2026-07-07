@@ -23,9 +23,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -214,13 +214,6 @@ func abbreviateCommitHash(repo *git.Repository, hash plumbing.Hash) string {
 	return full
 }
 
-// interaction holds a single prompt and its responses for display.
-type interaction struct {
-	Prompt    string
-	Responses []string // Multiple responses can occur between tool calls
-	Files     []string
-}
-
 // associatedCommit holds information about a git commit associated with a checkpoint.
 type associatedCommit struct {
 	SHA      string
@@ -229,20 +222,6 @@ type associatedCommit struct {
 	Author   string
 	Email    string
 	Date     time.Time
-}
-
-// checkpointDetail holds detailed information about a checkpoint for display.
-type checkpointDetail struct {
-	Index            int
-	ShortID          string
-	Timestamp        time.Time
-	IsTaskCheckpoint bool
-	Message          string
-	// Interactions contains all prompt/response pairs in this checkpoint.
-	// Most strategies have one, but shadow condensations may have multiple.
-	Interactions []interaction
-	// Files is the aggregate list of all files modified (for backwards compat)
-	Files []string
 }
 
 func newExplainCmd() *cobra.Command {
@@ -552,10 +531,9 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 // Best-effort: on repo/list failures we return nil so the main flow
 // surfaces the real error instead of double-reporting.
 func runExplainAutoAmbiguityGuard(ctx context.Context, target string, lookup *explainCheckpointLookup, lookupErr error) error {
-	// Targets longer than a checkpoint ID can't prefix-match one.
-	// This is coupled to checkpoint IDs being fixed-width; longer targets
-	// cannot be prefixes of committed checkpoint IDs.
-	if len(target) > id.ShortIDLength {
+	// Targets longer than the longest possible checkpoint ID (a 26-char ULID)
+	// can't be a prefix of one, so they can't be an ambiguous checkpoint target.
+	if len(target) > id.MaxIDLength {
 		return nil
 	}
 	if lookupErr != nil {
@@ -666,6 +644,26 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		return NewSilentError(fmt.Errorf("%w: %s matches %d checkpoints", errAmbiguousCommitPrefix, checkpointIDPrefix, len(matches)))
 	}
 
+	// Fast-fail on imported checkpoints before the expensive content load.
+	// --generate is read-only-rejected for imported history, so fetching
+	// transcript blobs first (prefetch + ReadLatestSessionContent inside
+	// loadCheckpointForExplain) is wasted work for a guaranteed rejection.
+	// Imported lives in the checkpoint metadata, so a metadata-only
+	// ReadCheckpoint settles it without reading any session content. On the
+	// non-imported path loadCheckpointForExplain re-reads this summary, but
+	// that extra metadata-only read is cheap and happens only under
+	// --generate — the skipped blob prefetch + transcript load on the
+	// imported path is the larger win.
+	if generate {
+		summary, summaryErr := checkpoint.ReadCheckpoint(ctx, lookup.store, fullCheckpointID)
+		if summaryErr != nil {
+			return fmt.Errorf("failed to read checkpoint: %w", summaryErr)
+		}
+		if summary.Imported {
+			return fmt.Errorf("cannot generate a summary for imported checkpoint %s: imported history is read-only", fullCheckpointID)
+		}
+	}
+
 	// One spinner covers the entire data-loading pipeline: prefetch's
 	// missing-blob analysis (which spawns one cat-file -e per blob and
 	// can take seconds on a deep checkpoint subtree), the prefetch fetch
@@ -673,22 +671,6 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	// reads, and getAssociatedCommits' git log walk. Stop strictly before
 	// any write to w (stdout) so stderr spinner frames and stdout output
 	// never interleave.
-	// Fast-fail on imported checkpoints before the expensive content load.
-	// --generate is read-only-rejected for imported history, so fetching
-	// transcript blobs first (prefetch + ReadLatestSessionContent inside
-	// loadCheckpointForExplain) is wasted work for a guaranteed rejection.
-	// summary.Imported lives in the checkpoint metadata, so a metadata-only
-	// ReadCheckpoint settles it without reading any session content.
-	if generate {
-		meta, metaErr := checkpoint.ReadCheckpoint(ctx, lookup.store, fullCheckpointID)
-		if metaErr != nil {
-			return fmt.Errorf("failed to read checkpoint: %w", metaErr)
-		}
-		if meta.Imported {
-			return fmt.Errorf("cannot generate a summary for imported checkpoint %s: imported history is read-only", fullCheckpointID)
-		}
-	}
-
 	stopLoad := startSpinner(errW, fmt.Sprintf("Loading checkpoint %s", fullCheckpointID))
 
 	summary, content, err := loadCheckpointForExplain(ctx, lookup, fullCheckpointID)
@@ -776,10 +758,6 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
-	if err := checkpointpolicy.EnsureCanReadVersion(cpID.String(), summary.CheckpointVersion); err != nil {
-		return nil, nil, err
-	}
-
 	content, contentErr := checkpoint.ReadLatestSessionContent(ctx, store, cpID, summary)
 	if contentErr != nil {
 		return nil, nil, fmt.Errorf("failed to read checkpoint content: %w", contentErr)
@@ -1797,9 +1775,9 @@ func formatCheckpointHeader(
 
 	headline := "● Checkpoint " + cpID.String()
 	if styles.colorEnabled {
-		bullet := styles.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), "●")
+		bullet := styles.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)), "●")
 		key := styles.render(styles.bold, "Checkpoint")
-		val := styles.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), cpID.String())
+		val := styles.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)), cpID.String())
 		headline = bullet + " " + key + " " + val
 	}
 	sb.WriteString(headline)
@@ -1947,12 +1925,6 @@ func escapeInlineCodeText(s string) string {
 	s = strings.ReplaceAll(s, "\r", " ")
 	s = strings.ReplaceAll(s, "\n", " ")
 	return strings.ReplaceAll(s, "`", "‘")
-}
-
-// runExplainDefault shows all checkpoints on the current branch.
-// This is the default view when no flags are provided.
-func runExplainDefault(ctx context.Context, w, errW io.Writer, noPager bool) error {
-	return runExplainBranchDefault(ctx, w, errW, noPager)
 }
 
 // branchCheckpointsLimit is the max checkpoints to show in branch view
@@ -2329,8 +2301,8 @@ func isShadowBranchReachable(ctx context.Context, repo *git.Repository, baseComm
 // convertTemporaryCheckpoint converts a EphemeralCheckpointInfo to a RewindPoint.
 // Returns nil if the checkpoint should be skipped (no tree changes or can't be read).
 //
-// Filtering uses hasAnyChanges (O(1) tree hash comparison) rather than hasCodeChanges
-// (O(files) full diff). This means metadata-only checkpoints (.entire/ changes without
+// Filtering uses hasAnyChanges (O(1) tree hash comparison) rather than a full
+// O(files) diff. This means metadata-only checkpoints (.entire/ changes without
 // code changes) are kept — only true no-ops (identical tree as parent) are dropped.
 // This trade-off is intentional for list-view performance.
 func convertTemporaryCheckpoint(repo *git.Repository, tc checkpoint.EphemeralCheckpointInfo) *strategy.RewindPoint {
@@ -2397,6 +2369,15 @@ func runExplainBranchWithFilter(ctx context.Context, w, errW io.Writer, noPager 
 	// reports whether it hit its budget; we render everything it returns (it
 	// already enforces the cap internally) and only surface a note when older
 	// checkpoints were actually dropped.
+	//
+	// Note this prose view and the --json list path (runExplainListJSON)
+	// truncate differently on purpose: getBranchCheckpoints budgets the live
+	// and imported lists independently, so it can return up to 2*limit entries.
+	// This grouped view renders them all and only notes when a budget was hit;
+	// the JSON path hard-caps the flat array at limit (its array contract). So
+	// e.g. 60 live + 60 imported shows 120 rows with no note here, but 100
+	// entries with a note under --json. The `--limit` help text ("Only meaningful with --json")
+	// reflects that the cap is a JSON-path concept.
 	points, truncated, err := getBranchCheckpoints(ctx, repo, branchCheckpointsLimit)
 	if err != nil {
 		// If context was cancelled (e.g. user hit Ctrl+C), exit silently
@@ -2426,12 +2407,6 @@ func runExplainBranchWithFilter(ctx context.Context, w, errW io.Writer, noPager 
 			"Run 'entire checkpoint explain --json --limit <N>' to see more.\n")
 	}
 	return nil
-}
-
-// runExplainBranchDefault shows all checkpoints on the current branch grouped by date.
-// This is a convenience wrapper that calls runExplainBranchWithFilter with no filter.
-func runExplainBranchDefault(ctx context.Context, w, errW io.Writer, noPager bool) error {
-	return runExplainBranchWithFilter(ctx, w, errW, noPager, "")
 }
 
 // outputExplainContent outputs content with optional pager support.
@@ -2486,94 +2461,6 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 	// Delegate to checkpoint detail view, forwarding the full flag set so
 	// --generate / --raw-transcript / --force work via --commit as well.
 	return runExplainCheckpoint(ctx, w, errW, checkpointID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, summaryTimeoutSeconds)
-}
-
-// formatSessionInfo formats session information for display.
-//
-// NOTE: This function has no production caller — `entire explain --session`
-// flows through formatBranchCheckpoints (the list view filtered by session),
-// not through here. It is kept for tests that exercise the per-checkpoint
-// markdown body shape used elsewhere; restyling it for the brand format was
-// not worth the diff. If the CLI ever grows a session-detail surface, revisit.
-func formatSessionInfo(session *strategy.Session, sourceRef string, checkpoints []checkpointDetail) string {
-	var sb strings.Builder
-
-	// Session header
-	fmt.Fprintf(&sb, "Session: %s\n", session.ID)
-	fmt.Fprintf(&sb, "Strategy: %s\n", session.Strategy)
-
-	if !session.StartTime.IsZero() {
-		fmt.Fprintf(&sb, "Started: %s\n", session.StartTime.Format("2006-01-02 15:04:05"))
-	}
-
-	if sourceRef != "" {
-		fmt.Fprintf(&sb, "Source Ref: %s\n", sourceRef)
-	}
-
-	fmt.Fprintf(&sb, "Checkpoints: %d\n", len(checkpoints))
-
-	// Checkpoint details
-	for _, cp := range checkpoints {
-		sb.WriteString("\n")
-
-		// Checkpoint header
-		taskMarker := ""
-		if cp.IsTaskCheckpoint {
-			taskMarker = " [Task]"
-		}
-		fmt.Fprintf(&sb, "─── Checkpoint %d [%s] %s%s ───\n",
-			cp.Index, cp.ShortID, cp.Timestamp.Format("2006-01-02 15:04"), taskMarker)
-		sb.WriteString("\n")
-
-		// Display all interactions in this checkpoint
-		for i, inter := range cp.Interactions {
-			// For multiple interactions, add a sub-header
-			if len(cp.Interactions) > 1 {
-				fmt.Fprintf(&sb, "### Interaction %d\n\n", i+1)
-			}
-
-			// Prompt section
-			if inter.Prompt != "" {
-				sb.WriteString("## Prompt\n\n")
-				sb.WriteString(inter.Prompt)
-				sb.WriteString("\n\n")
-			}
-
-			// Response section
-			if len(inter.Responses) > 0 {
-				sb.WriteString("## Responses\n\n")
-				sb.WriteString(strings.Join(inter.Responses, "\n\n"))
-				sb.WriteString("\n\n")
-			}
-
-			// Files modified for this interaction
-			if len(inter.Files) > 0 {
-				fmt.Fprintf(&sb, "Files Modified (%d):\n", len(inter.Files))
-				for _, file := range inter.Files {
-					fmt.Fprintf(&sb, "  - %s\n", file)
-				}
-				sb.WriteString("\n")
-			}
-		}
-
-		// If no interactions, show message and/or files
-		if len(cp.Interactions) == 0 {
-			// Show commit message as summary when no transcript available
-			if cp.Message != "" {
-				sb.WriteString(cp.Message)
-				sb.WriteString("\n\n")
-			}
-			// Show aggregate files if available
-			if len(cp.Files) > 0 {
-				fmt.Fprintf(&sb, "Files Modified (%d):\n", len(cp.Files))
-				for _, file := range cp.Files {
-					fmt.Fprintf(&sb, "  - %s\n", file)
-				}
-			}
-		}
-	}
-
-	return sb.String()
 }
 
 // pagerLookupEnv is overridable for tests so pager env-gate behavior can be
@@ -2680,8 +2567,6 @@ const (
 	maxMessageDisplayLength = 80
 	// maxPromptDisplayLength is the maximum length for session prompts before truncation
 	maxPromptDisplayLength = 60
-	// checkpointIDDisplayLength is the number of characters to show from checkpoint IDs
-	checkpointIDDisplayLength = 12
 )
 
 // formatBranchCheckpoints formats checkpoint information for a branch.
@@ -2838,14 +2723,13 @@ func groupByCheckpointID(points []strategy.RewindPoint) []checkpointGroup {
 }
 
 // formatCheckpointGroup formats a single checkpoint group for display.
-// The list view headline puts the checkpoint ID first (in bold orange),
+// The list view headline puts the checkpoint ID first (in bold accent/magenta),
 // followed by indicators and the prompt — which cascades from
 // SessionPrompt → latest commit message → dimmed `(no prompt recorded)`.
 func formatCheckpointGroup(sb *strings.Builder, group checkpointGroup, styles statusStyles) {
-	cpID := group.checkpointID
-	if len(cpID) > checkpointIDDisplayLength {
-		cpID = cpID[:checkpointIDDisplayLength]
-	}
+	// Kind-aware trim: a legacy hex ID shows its 12-char prefix; a ULID is shown
+	// in full (front-truncating a ULID drops its entropy tail and won't resolve).
+	cpID := id.CheckpointID(group.checkpointID).DisplayShort()
 
 	// Indicators (Task / temporary). Skip [temporary] when cpID already says so.
 	var indicators []string
@@ -2923,54 +2807,7 @@ func transcriptOffset(transcriptBytes []byte, agentType types.AgentType) int {
 	return countLines(transcriptBytes)
 }
 
-// hasCodeChanges returns true if the commit has changes to non-metadata files.
-// Uses a full tree diff to distinguish code changes from .entire/ metadata-only changes.
-// Returns false only if the commit has a parent AND only modified .entire/ metadata files.
-//
-// WARNING: This is expensive via go-git (resolves many tree/blob objects from packfiles).
-// For list views with many checkpoints, use hasAnyChanges instead.
-func hasCodeChanges(commit *object.Commit) bool {
-	// First commit on shadow branch captures working copy state - always meaningful
-	if commit.NumParents() == 0 {
-		return true
-	}
-
-	parent, err := commit.Parent(0)
-	if err != nil {
-		return true // Can't check, assume meaningful
-	}
-
-	commitTree, err := commit.Tree()
-	if err != nil {
-		return true
-	}
-
-	parentTree, err := parent.Tree()
-	if err != nil {
-		return true
-	}
-
-	changes, err := parentTree.Diff(commitTree)
-	if err != nil {
-		return true
-	}
-
-	// Check if any non-metadata file was changed
-	for _, change := range changes {
-		name := change.To.Name
-		if name == "" {
-			name = change.From.Name
-		}
-		// Skip .entire/ metadata files
-		if !strings.HasPrefix(name, ".entire/") {
-			return true
-		}
-	}
-
-	return false
-}
-
-// hasAnyChanges is a lightweight alternative to hasCodeChanges that compares
+// hasAnyChanges compares
 // tree hashes without doing a full diff. Returns true if the commit's tree
 // differs from its parent's tree. This may include metadata-only changes,
 // but is O(1) instead of O(files) — suitable for list views.

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -129,7 +128,7 @@ func runTokensProfile(ctx context.Context, cmd *cobra.Command, jsonOutput bool, 
 	}
 
 	if jsonOutput {
-		return writeTokensProfileJSON(cmd.OutOrStdout(), report)
+		return printJSON(cmd.OutOrStdout(), report)
 	}
 	writeTokensProfileText(cmd.OutOrStdout(), report)
 	return nil
@@ -365,15 +364,6 @@ func tokensProfileLimitations(report tokensProfileReport) []string {
 		limitations = append(limitations, "Tool-level search/read spend is not captured yet; this profile infers patterns from token totals, cache/context replay, API call counts, and subagent totals.")
 	}
 	return limitations
-}
-
-func writeTokensProfileJSON(w io.Writer, report tokensProfileReport) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(report); err != nil {
-		return fmt.Errorf("failed to encode token profile report: %w", err)
-	}
-	return nil
 }
 
 func writeTokensProfileText(w io.Writer, report tokensProfileReport) {

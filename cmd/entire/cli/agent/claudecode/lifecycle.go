@@ -70,13 +70,13 @@ func (c *ClaudeCodeAgent) HookNames() []string {
 func (c *ClaudeCodeAgent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
-		return c.parseSessionStart(stdin)
+		return c.parseSessionInfoEvent(stdin, agent.SessionStart)
 	case HookNameUserPromptSubmit:
 		return c.parseTurnStart(stdin)
 	case HookNameStop:
-		return c.parseTurnEnd(stdin)
+		return c.parseSessionInfoEvent(stdin, agent.TurnEnd)
 	case HookNameSessionEnd:
-		return c.parseSessionEnd(stdin)
+		return c.parseSessionInfoEvent(stdin, agent.SessionEnd)
 	case HookNamePreTask:
 		return c.parseSubagentStart(stdin)
 	case HookNamePostTask:
@@ -112,13 +112,15 @@ func (c *ClaudeCodeAgent) CalculateTokenUsage(transcriptData []byte, fromOffset 
 
 // --- Internal hook parsing functions ---
 
-func (c *ClaudeCodeAgent) parseSessionStart(stdin io.Reader) (*agent.Event, error) {
+// parseSessionInfoEvent parses the hooks whose payload is sessionInfoRaw —
+// SessionStart, Stop, and SessionEnd differ only in the resulting event type.
+func (c *ClaudeCodeAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent.EventType) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
 	if err != nil {
 		return nil, err
 	}
 	return &agent.Event{
-		Type:       agent.SessionStart,
+		Type:       eventType,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
 		Model:      raw.Model,
@@ -136,34 +138,6 @@ func (c *ClaudeCodeAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) 
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
 		Prompt:     raw.Prompt,
-		Timestamp:  time.Now(),
-	}, nil
-}
-
-func (c *ClaudeCodeAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
-	if err != nil {
-		return nil, err
-	}
-	return &agent.Event{
-		Type:       agent.TurnEnd,
-		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
-		Model:      raw.Model,
-		Timestamp:  time.Now(),
-	}, nil
-}
-
-func (c *ClaudeCodeAgent) parseSessionEnd(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
-	if err != nil {
-		return nil, err
-	}
-	return &agent.Event{
-		Type:       agent.SessionEnd,
-		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
-		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
 }

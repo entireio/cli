@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -144,7 +143,7 @@ func runSessionTokens(ctx context.Context, cmd *cobra.Command, sessionID string,
 
 	report := buildSessionTokensReport(state, sessionPhaseLabel(state))
 	if jsonOutput {
-		return writeSessionTokensJSON(cmd.OutOrStdout(), report)
+		return printJSON(cmd.OutOrStdout(), report)
 	}
 	if agentBrief {
 		writeSessionTokensAgentBrief(cmd.OutOrStdout(), report)
@@ -431,15 +430,6 @@ func skillEventLabels(events []agent.SkillEvent) []string {
 		labels = append(labels, label)
 	}
 	return labels
-}
-
-func writeSessionTokensJSON(w io.Writer, report sessionTokensReport) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(report); err != nil {
-		return fmt.Errorf("failed to encode session token report: %w", err)
-	}
-	return nil
 }
 
 func writeSessionTokensText(w io.Writer, report sessionTokensReport) {

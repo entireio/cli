@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -235,7 +234,7 @@ func runAttributionBlame(ctx context.Context, w io.Writer, file string, opts att
 	}
 
 	if opts.JSON {
-		return writeJSON(w, result)
+		return printJSON(w, result)
 	}
 	renderAttributionBlame(w, result, opts.LineFlag, opts.Long)
 	return nil
@@ -266,7 +265,7 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts att
 
 	if !hasLine {
 		if opts.JSON {
-			return writeJSON(w, result)
+			return printJSON(w, result)
 		}
 		renderAttributionFileWhy(w, result)
 		return nil
@@ -293,7 +292,7 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts att
 			Line:        *selected,
 			Checkpoints: checkpointContextsForLines([]attributionLine{*selected}, result.Checkpoints),
 		}
-		return writeJSON(w, payload)
+		return printJSON(w, payload)
 	}
 	renderAttributionLineWhy(w, result.File, *selected)
 	return nil
@@ -1013,26 +1012,43 @@ func renderAttributionBlameCompact(w io.Writer, result *fileAttributionResult, l
 func renderAttributionBlameLong(w io.Writer, result *fileAttributionResult, lineFlag string) {
 	renderAttributionBlameTable(w, result, lineFlag, func(sty statusStyles) {
 		lineWidth := attributionLineColumnWidth(result.Lines)
-		const checkpointColumnWidth = 21
-		fmt.Fprintf(w, "  %*s  Tag   %-12s  %-18s  %-16s  %-21s    Content\n",
-			lineWidth, "Line", "Agent", "Model", "Author", "Checkpoint/Session")
-		fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", lineWidth+92)))
+		// Size the Checkpoint/Session column to its content so a ULID checkpoint
+		// (26 chars, vs a 12-hex ID) is not front-truncated into an unresolvable,
+		// session-less prefix. The other columns sum to 71 alongside these two.
+		cpWidth := attributionCheckpointColumnWidth(result.Lines)
+		ruleWidth := lineWidth + cpWidth + 71
+		fmt.Fprintf(w, "  %*s  Tag   %-12s  %-18s  %-16s  %-*s    Content\n",
+			lineWidth, "Line", "Agent", "Model", "Author", cpWidth, "Checkpoint/Session")
+		fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", ruleWidth)))
 
 		for _, line := range result.Lines {
-			fmt.Fprintf(w, "  %s  %s  %-12s  %-18s  %-16s  %-21s  %s %s\n",
+			fmt.Fprintf(w, "  %s  %s  %-12s  %-18s  %-16s  %-*s  %s %s\n",
 				sty.render(sty.dim, fmt.Sprintf("%*d", lineWidth, line.LineNumber)),
 				renderAttributionTag(sty, line.Authorship),
 				stringutil.TruncateRunes(line.Agent, 12, ""),
 				stringutil.TruncateRunes(line.Model, 18, ""),
 				stringutil.TruncateRunes(shortAuthorName(line.Author), 16, ""),
-				stringutil.TruncateRunes(shortCheckpointSession(line), checkpointColumnWidth, ""),
+				cpWidth, shortCheckpointSession(line),
 				sty.render(sty.dim, attributionLineMarker(line)),
 				renderAttributionContent(sty, line),
 			)
 		}
 
-		fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", lineWidth+92)))
+		fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", ruleWidth)))
 	})
+}
+
+// attributionCheckpointColumnWidth sizes the Checkpoint/Session column to the
+// widest value it must show (header label or any rendered checkpoint/session),
+// so ULID checkpoints render in full rather than being clipped to a 12-hex width.
+func attributionCheckpointColumnWidth(lines []attributionLine) int {
+	w := len("Checkpoint/Session")
+	for i := range lines {
+		if n := len(shortCheckpointSession(lines[i])); n > w {
+			w = n
+		}
+	}
+	return w
 }
 
 func renderAttributionSummary(w io.Writer, sty statusStyles, summary attributionSummary, lineFlag string) {
@@ -1425,13 +1441,4 @@ func appendUniqueString(values []string, value string) []string {
 
 func isZeroCommit(sha string) bool {
 	return sha == "" || strings.Trim(sha, "0") == ""
-}
-
-func writeJSON(w io.Writer, value any) error {
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(value); err != nil {
-		return fmt.Errorf("encode json: %w", err)
-	}
-	return nil
 }

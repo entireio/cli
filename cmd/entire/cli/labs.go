@@ -41,19 +41,24 @@ var experimentalCommands = []experimentalCommandInfo{
 		Summary:     "Aggregate token usage across committed checkpoints",
 	},
 	{
+		CommandPath: []string{"session", "tokens"},
+		Invocation:  "entire session tokens",
+		Summary:     "Show token usage and recommendations for a session",
+	},
+	{
 		CommandPath: []string{"org"},
 		Invocation:  "entire org",
-		Summary:     "Manage Entire organizations (create, list)",
+		Summary:     "Manage Entire organizations (create, list, get, delete)",
 	},
 	{
 		CommandPath: []string{"project"},
 		Invocation:  "entire project",
-		Summary:     "Manage Entire projects (create, list)",
+		Summary:     "Manage Entire projects (create, list, get, delete)",
 	},
 	{
 		CommandPath: []string{"repo"},
 		Invocation:  "entire repo",
-		Summary:     "Manage Entire repositories (create, list, get, delete)",
+		Summary:     "Manage Entire repositories (create, list, get, delete, clone, mirror, visibility)",
 	},
 	{
 		CommandPath: []string{"grant"},
@@ -119,6 +124,7 @@ Try:
   entire investigate --help
   entire tokens --help
   entire tokens profile --help
+  entire session tokens --help
   entire org --help
   entire project --help
   entire repo --help
