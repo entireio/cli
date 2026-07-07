@@ -1,0 +1,73 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KWYNX0XYRTQ8NPMPPP62JGGV",
+  "session_id": "1dcb66d1-6f40-466c-8d0d-8919653da730",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-07T16:17:18.948132Z",
+  "branch": "feat/antigravity-agent",
+  "checkpoints_count": 9,
+  "save_step_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/explain.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-fable-5",
+  "turn_id": "8d78b0e2dc6d",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 30218,
+    "cache_creation_tokens": 823069,
+    "cache_read_tokens": 43076534,
+    "output_tokens": 161791,
+    "api_call_count": 185
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01TN22d3ZJ7f4wDr8sRzN7Bb",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "entire:session-handoff"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "8d78b0e2dc6d",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 19,
+        "end": 20,
+        "entry_ids": [
+          "9d2d02bb-b88d-4c37-8320-7ad86c2cc2e0"
+        ],
+        "tool_use_id": "toolu_01TN22d3ZJ7f4wDr8sRzN7Bb"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01TN22d3ZJ7f4wDr8sRzN7Bb"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: entire:session-handoff",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 9
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-07T16:17:18.873376Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 2,
+    "human_modified": 1,
+    "human_removed": 0,
+    "total_committed": 2,
+    "total_lines_changed": 3,
+    "agent_percentage": 0,
+    "metric_version": 2
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KWYNX0XYRTQ8NPMPPP62JGGV",
+  "strategy": "manual-commit",
+  "branch": "feat/antigravity-agent",
+  "checkpoints_count": 9,
+  "files_touched": [
+    "cmd/entire/cli/explain.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 30218,
+    "cache_creation_tokens": 823069,
+    "cache_read_tokens": 43076534,
+    "output_tokens": 161791,
+    "api_call_count": 185
+  }
+}
