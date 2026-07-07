@@ -1,0 +1,32 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KWXZRCYHYMEGP8MNGYH9B7CZ",
+  "strategy": "manual-commit",
+  "branch": "cli-onboard",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/onboarding_offer.go",
+    "cmd/entire/cli/onboarding_offer_actions.go",
+    "cmd/entire/cli/onboarding_offer_test.go",
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/setup_import.go",
+    "cmd/entire/cli/setup_import_test.go",
+    "cmd/entire/cli/setup_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 91496,
+    "cache_creation_tokens": 4629023,
+    "cache_read_tokens": 151029661,
+    "output_tokens": 372165,
+    "api_call_count": 451
+  }
+}
