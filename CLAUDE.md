@@ -65,7 +65,17 @@ Experimental command families advertised through `entire labs`:
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
-`configure`, `agent-help`.
+`configure`, `agent-help`, `api`.
+
+`api` is an authenticated passthrough to Entire's HTTP APIs (gh-style): it
+attaches the right bearer and dials the right host so callers don't plumb auth
+themselves. `--to core` (default) hits the control plane; `--to cell` hits an
+entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
+jurisdiction's cell instead of the caller's home cell and implies `--to cell`
+(cell routing + identity-token exchange live in `auth.NewEntireAPICellClient`
+via `auth.CellTarget`). `{owner}`/`{repo}`/`{repo_id}` in the path are filled
+from the current repo's origin remote. It is visible in `entire help` and
+`entire agent-help`, so agents discover it as the supported way to call the API.
 
 `agent-help` renders machine-readable, agent-facing usage live from the Cobra
 command tree (so it always matches the installed binary): bare prints a

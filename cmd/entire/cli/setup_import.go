@@ -22,9 +22,9 @@ type eligibleImport struct {
 	sessionCount int
 }
 
-// Seams for testing the orchestration in maybeOfferSessionImport without disk
-// discovery, a real TTY, or real checkpoint writes. Production wiring uses the
-// real implementations below.
+// Seams for testing the import-offer orchestration (runOnboardingImport)
+// without disk discovery, a real TTY, or real checkpoint writes. Production
+// wiring uses the real implementations below.
 var (
 	sessionImportDiscover = discoverImportableAgents
 	sessionImportPrompt   = promptImportSelection

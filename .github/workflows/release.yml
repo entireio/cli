@@ -20,6 +20,8 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.release-type.outputs.prerelease }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -142,10 +144,55 @@ jobs:
           done
           exit $fail
 
-  notify-slack:
+  # A stable tag only refreshes the stable cask; the nightly channel would
+  # otherwise not catch up until the next scheduled nightly run cuts a tag from
+  # a *newer* commit (and create-nightly-tag.sh skips when HEAD already has a
+  # nightly). To ship the release on both channels immediately, cut a nightly
+  # tag from the exact stable commit and push it. That push re-triggers this
+  # workflow on the nightly-tag path, which uploads the entire@nightly cask.
+  mirror-nightly:
     runs-on: ubuntu-latest
     needs: [release]
-    if: ${{ always() && needs.release.result == 'failure' }}
+    # Only mirror stable releases. On a nightly-tag run the release job already
+    # published the nightly channel, so this would recurse — skip it there.
+    if: ${{ needs.release.result == 'success' && needs.release.outputs.prerelease == 'false' }}
+    steps:
+      # A cli-scoped GitHub App token (not the default GITHUB_TOKEN) so the tag
+      # push triggers a fresh workflow run — GITHUB_TOKEN pushes are suppressed
+      # to prevent recursion, which would leave the nightly cask un-uploaded.
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: cli
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Cut nightly tag from the stable commit
+        run: |
+          TAG=$(scripts/create-nightly-tag.sh) && EXIT_CODE=0 || EXIT_CODE=$?
+          if [ "$EXIT_CODE" -eq 2 ]; then
+            echo "Nightly already current for this commit — nothing to mirror."
+            exit 0
+          elif [ "$EXIT_CODE" -ne 0 ] || [ -z "$TAG" ]; then
+            echo "::error::Failed to generate nightly tag to mirror ${RELEASE_TAG}"
+            exit 1
+          fi
+          echo "Mirroring ${RELEASE_TAG} to nightly channel as ${TAG}"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+  notify-slack:
+    runs-on: ubuntu-latest
+    needs: [release, mirror-nightly]
+    if: ${{ always() && (needs.release.result == 'failure' || needs.mirror-nightly.result == 'failure') }}
     steps:
       - name: Notify Slack of release failure
         uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3

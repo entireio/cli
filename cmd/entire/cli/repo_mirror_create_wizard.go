@@ -615,11 +615,16 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 
 	// nonTerminal classifies a still-processing/unknown result: the poll ended
 	// without a terminal status, so the wait timed out or a poll call errored.
+	// A poll that errored carries an ogen API error (e.g. a 404 problem+json);
+	// route it through renderCoreError so it renders as the server's Detail
+	// ("mirror not found") instead of the raw decoded struct — the same
+	// treatment the create-failure branch above gives its error. A timeout
+	// error isn't an API error, so renderCoreError passes it through unchanged.
 	nonTerminal := func() {
 		if errors.Is(err, context.DeadlineExceeded) {
 			res.status, res.err = mirrorStatusTimedOut, err
 		} else {
-			res.status, res.err = mirrorStatusError, err
+			res.status, res.err = mirrorStatusError, renderCoreError(err)
 		}
 	}
 	switch outcome.status {

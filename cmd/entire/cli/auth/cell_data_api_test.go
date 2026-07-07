@@ -330,6 +330,26 @@ func TestResolveTargetCellBaseURL(t *testing.T) {
 	if got, err := resolveTargetCellBaseURL(ctx, &CellTarget{BaseURL: "https://eu.api.entire.io/"}, "https://entire.io", "eu", "https://eu.auth.entire.io", "login", nil); err != nil || got != "https://eu.api.entire.io" {
 		t.Fatalf("target override: got %q, %v", got, err)
 	}
+	// A loopback origin with an explicitly pinned jurisdiction stays verbatim:
+	// local dev serves a single cell with no jurisdiction catalog to consult.
+	if got, err := resolveTargetCellBaseURL(ctx, &CellTarget{Jurisdiction: "us"}, "http://127.0.0.1:8099", "us", "http://127.0.0.1:9000", "login", nil); err != nil || got != "http://127.0.0.1:8099" {
+		t.Fatalf("loopback + explicit jurisdiction: got %q, %v", got, err)
+	}
+	// A non-loopback DIRECT cell origin with an explicitly pinned jurisdiction
+	// must NOT be dialed verbatim (it may name a different jurisdiction's cell):
+	// resolve the pinned jurisdiction's own cell from the catalog instead.
+	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != clustersAPIPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"clusters":[{"jurisdiction":"eu","isDefault":true,"apiUrl":"https://eu.api.entire.io"}]}`)
+	}))
+	defer catalog.Close()
+	if got, err := resolveTargetCellBaseURL(ctx, &CellTarget{Jurisdiction: "eu"}, "https://aws-us-east-2.api.entire.io", "eu", catalog.URL, "login", catalog.Client()); err != nil || got != "https://eu.api.entire.io" {
+		t.Fatalf("direct cell + explicit jurisdiction: got %q, %v (want catalog-resolved eu cell)", got, err)
+	}
 }
 
 // TestNewEntireAPICellClient_TargetRoutesToRepoCell proves the repo-scoped path:
