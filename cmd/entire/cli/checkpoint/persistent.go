@@ -470,7 +470,7 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 	}
 
 	if len(opts.Subagents) > 0 {
-		if err := s.replaceSubagents(opts.Subagents, sessionPath, entries); err != nil {
+		if err := s.replaceSubagents(opts.Subagents, sessionDir, entries); err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to replace subagents: %w", err)
 		}
 	}
