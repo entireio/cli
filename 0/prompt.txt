@@ -1,0 +1,1163 @@
+we need the option for useres to improve their onboarding to the CLI and UI. Right now, we have enable and people tend to get confused. there is this draft, https://github.com/entireio/cli/pull/1595 for enable after import, also I have this but omit the linkage between imported sessions and then commits that are mirrored into the repo - 1. entire enable
+  After normal enable succeeds:
+  New sessions will be tracked from now on.
+  Then, if the current directory is a Git repo with existing commits, show one simple
+  prompt:
+  Set up existing history now? [Y/n]
+  If no:
+  Skipped existing history setup.
+  You can run this later:
+    entire import claude-code --dry-run --link-commits
+  If yes, call the same flow as:
+  entire import claude-code --dry-run --link-commits
+  using the agent they just selected.
+  2. entire import <agent>
+  Unchanged.
+  entire import claude-code
+  This only imports local agent sessions/checkpoints as read-only history. No login
+  requirement, no mirror requirement, no commit matching.
+  3. entire import <agent> --dry-run --link-commits
+  This is the preview/re-entry flow.
+  Interactive logic:
+  detect git repo
+  detect local sessions for <agent>
+  check auth
+    if not logged in:
+      prompt login
+      if declined: show local import preview only, mark commit linking blocked
+  check repo mirror
+    if not mirrored:
+      prompt to mirror
+      infer GitHub URL from origin if possible
+      if missing URL: ask for GitHub URL
+      create/wait for mirror readiness
+  load mirrored commits
+  run matcher: imported sessions/checkpoints ↔ mirrored commits
+  show preview
+  write nothing because --dry-run
+  print apply command
+  Preview output should say things like:
+  Would import 7 Claude Code sessions as read-only history.
+  Would link 5 high-confidence commit matches.
+  ✓ 8f31c2a Add billing webhook
+    Session ended 2 min before the commit.
+    Files overlap: billing/webhook.go, billing/router.go
+  Run to apply safe matches:
+    entire import claude-code --link-commits --yes --high-confidence
+  4. entire import <agent> --link-commits --yes --high-confidence
+  This is the non-interactive apply path.
+  Logic:
+  require git repo
+  require auth
+  require mirrored repo
+  require imported/local sessions available
+  run matcher
+  apply only high-confidence, unambiguous links
+  skip medium/weak/ambiguous matches
+  If prerequisites are missing, do not partially write links. Print exact next steps:
+  Commit linking needs login and mirrored Git history.
+  Run:
+    entire auth login
+    entire repo mirror create <github-url>
+    entire import claude-code --dry-run --link-commits
+  5. Writes
+  Allowed writes:
+  - Plain import writes read-only imported checkpoint/session history.
+  - --link-commits writes Entire metadata links between imported sessions/checkpoints
+    and mirrored commit SHAs.
+  Never:
+  - rewrite Git history
+  - amend commits
+  - add retroactive Entire-Checkpoint trailers
+  - use session attach for batch onboarding
+  session attach stays the manual repair path for a known session.
+S - but this is another idea.
+
+Basically the onboarding to CLI is not good and people get confused easily, especially if they're doing it manually
+
+---
+
+what was the queston?
+
+---
+
+drop it for now
+
+---
+
+B for sure
+
+---
+
+B for sure, but I want to confirm the flow
+
+---
+
+yes, the only thing is like we need the option for users to not have a really long enable process
+
+---
+
+can you show me with status what this looks like? it's kind of unclear. And yes, how does someone resume the setup if they don't finish this?
+
+---
+
+so you just run entire enable in the same repository or wherever to contiue setup? Is this the best flow you think? I do like that it will surface in status and then it's just resumed by enabling again
+
+---
+
+yeah i think what we have is good. Is it dependent on pr 1595?
+
+---
+
+it's someone else's PR and I would like to do this
+
+---
+
+it's someone else's PR and I would like to do this. So waiting til it lands isn't like really good option
+
+---
+
+proceed
+
+---
+
+proceed
+
+---
+
+proceed
+
+---
+
+<task-notification>
+<task-id>b49lvn556</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/b49lvn556.output</output-file>
+<status>completed</status>
+<summary>Background command "Run full CI test suite" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+yes fix
+
+---
+
+<task-notification>
+<task-id>bkttesnw5</task-id>
+<tool-use-id>toolu_01Gtbty26jZMqzeomzuys1xB</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/bkttesnw5.output</output-file>
+<status>completed</status>
+<summary>Background command "Final full CI suite on the finished tree" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>bfjax3zix</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/bfjax3zix.output</output-file>
+<status>completed</status>
+<summary>Background command "Rerun CI suite, show failures only" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+did you push
+
+---
+
+first, can you smoke test the changes to onboarding with like a fresh test repo to see please? and hten run throuh the commmands, stop it half way, check status, then run enable again to continue the onboard, etc.
+
+---
+
+<task-notification>
+<task-id>bxdyn0x7t</task-id>
+<tool-use-id>toolu_01ABU1YoVD5TR5TVCj7XeceL</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/bxdyn0x7t.output</output-file>
+<status>completed</status>
+<summary>Background command "Final full CI suite with complete log" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+yes, and this will then be a separate PR from the one that's in draft right?
+
+---
+
+im looking at the trail, https://entire.io/gh/entireio/cli/trails/742/feat-onboarding-guided-setup-ladder-enable-walks-login, and see no sessions on the commits
+
+---
+
+To github.com:entireio/cli-checkpoints.git
+ ! [rejected]            entire/checkpoints/v1 -> entire/checkpoints/v1 (fetch first)
+error: failed to push some refs to 'github.com:entireio/cli-checkpoints.git'
+hint: Updates were rejected because the remote contains work that you do not
+hint: have locally. This is usually caused by another repository pushing to
+hint: the same ref. If you want to integrate the remote changes, use
+hint: 'git pull' before pushing again.
+hint: See the 'Note about fast-forwards' in 'git push --help' for details. are you sure this is the right approach?
+
+---
+
+so we need to mirror cli-checkpoints?
+
+---
+
+okay yeah i guess, it's just something going on with the front end now becuse i do see linked checkpoints, but not in trail history
+
+---
+
+back to the original issue we're solving. Did you smoke test all the cases I indicated for this new onboarding PR?
+
+---
+
+yes go ahead with the gap 3 test to run, and you can create a new repository, there should be an entirehq/demo-repository - like can you use this? or can you create tmp repository?
+
+---
+
+can i run these too, to see?
+
+---
+
+the skip-local tracking only" - option I assume is continue with how enable acts now, but is phrased a little strange like technically if they continue like this, once they push they should see their commits/sessions in the UI if they logged in manually from the url
+
+---
+
+yes i like that better
+
+---
+
+okay can i rebuild and redo the test with this fix please
+
+---
+
+okay for login, Logging in to: https://us.auth.entire.io
+
+Press Enter to open in browser...
+
+Did you configure it to be us.auth?
+
+---
+
+i think there is somethign wrong because if i just run entire login myself, it works fine
+
+peytonmontei@mac-2 ~/D/e/d/e/c/.w/cli-onboard (cli-onboard)> entire login
+Logging in to: https://us.auth.entire.io
+
+Press Enter to open in browser...
+
+Waiting for sign-in... ✓ Login complete.
+
+but then when i did it with the flow got a bad gateway to cloudflare, which maybe it's outdated or soemthing
+
+---
+
+running /tmp/entire-onboard login worked
+
+---
+
+doing /tmp/entire-onboard login worked
+
+---
+
+okay so that wokred and then it only prompted me to login bu then said that 3/4 steps were done but just ended, like didn't proceed through the steps after I logged in 
+
+peytonmontei@mac-3 /v/f/d/g/T/tmp.uhDZwags6u (main)> /tmp/entire-onboard enable
+Entire is already enabled.
+Agents: Claude Code, Codex
+
+To add more agents, run `entire agent add <name>`.
+
+Logging in to: https://us.auth.entire.io
+
+Press Enter to open in browser...
+
+Waiting for sign-in... ✓ Login complete.
+
+Setup 3/4 complete
+  ✓ Agent hooks    Claude Code, Codex
+  ✓ Logged in      peyton-alt
+  ✓ Repo mirrored  github.com/entirehq/tmp-onboarding-smoke
+  ✗ History        1 claude-code session found, not imported
+→ Run `entire enable` to finish setup (1 step left)
+  run later: entire import claude-code
+
+---
+
+I like option 2, and you'll have to mention this in PR description and trail description too please
+
+---
+
+<task-notification>
+<task-id>b5by7vl3h</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/b5by7vl3h.output</output-file>
+<status>completed</status>
+<summary>Background command "Final CI suite for the import offer" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+okay see findings on the PR and trail
+
+---
+
+<task-notification>
+<task-id>bprvfj52v</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/bprvfj52v.output</output-file>
+<status>completed</status>
+<summary>Background command "Full CI on findings fixes" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+you addressed all findings?
+
+---
+
+<task-notification>
+<task-id>b6ss4qhx1</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/b6ss4qhx1.output</output-file>
+<status>completed</status>
+<summary>Background command "Full CI on the cross-core probe fixes" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+did you push the findings fix?
+
+---
+
+new finding on traik
+
+---
+
+<task-notification>
+<task-id>biyv536kj</task-id>
+<tool-use-id>toolu_018278ef4qvGQ17DrffymGiL</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/biyv536kj.output</output-file>
+<status>completed</status>
+<summary>Background command "Full CI on the memoization fix" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+can you investigate why the risk is so high on the gates? I feel like htat's realy high
+
+---
+
+so it's just becuse we touch the auth? but if the code add is just adding it to a workflow then does that still have the risk high jst because it touches this path?
+
+---
+
+okay well for this can you run /pr-review-toolkit:review-pr and /review please on hte overall state and wehre we are now
+
+---
+
+<task-notification>
+<task-id>a7c5d434466248b9a</task-id>
+<tool-use-id>toolu_011DzrEvx6mNoahLecNE2eC8</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/a7c5d434466248b9a.output</output-file>
+<status>completed</status>
+<summary>Agent "Type design review of PR #1618" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All files read. Here is the type-design review for PR #1618's onboarding-ladder types.
+
+# Type Design Review — onboarding ladder (branch `cli-onboard`, `git diff main...HEAD`)
+
+## Package `cmd/entire/cli/onboarding` (onboarding.go)
+
+### Type: State
+
+**Invariants identified**
+- Exactly five valid values; `String()` must emit stable machine-readable names consumed by `status --json` (`status.go:670`).
+- Zero value is `StateUnknown`.
+
+**Ratings**
+- **Encapsulation**: 7/10 — Plain int enum, standard Go. Nothing prevents `State(42)`, but `String()` collapses out-of-range values to `"unknown"` (onboarding.go:52), which is the right fail-safe for a JSON surface.
+- **Invariant Expression**: 8/10 — Each constant has a doc comment explaining semantics including examples; the "stable machine-readable name" contract is stated at `String()` (onboarding.go:38).
+- **Invariant Usefulness**: 9/10 — The zero value being `StateUnknown` is a genuinely good choice here, and the semantics compose safely: an accidental zero-value `Check` contributes to `total` but never to `done` in `Summary()` (onboarding.go:107-118), so `Complete()` can never be true by omission, and `Missing()` deliberately excludes Unknown (onboarding.go:129) so a broken probe never triggers an offer. Fail-safe in both directions.
+- **Invariant Enforcement**: 6/10 — No exhaustiveness protection: adding a sixth state compiles silently and renders as `"unknown"` in JSON and `"?"` in `onboardingRowMarker` (onboarding_render.go:72-82). The default-case fallthroughs mask a missing switch arm rather than surfacing it.
+
+**Recommended improvement**: consider `//exhaustive` lint annotations or a test asserting `String()` round-trips every constant, so a new state can't silently degrade to `"unknown"` in the `--json` contract.
+
+---
+
+### Type: Check
+
+**Invariants identified (all conventional, none enforced)**
+- `Detail` is a short human fragment; `Hint` is an exact runnable command.
+- Convention by state: Done → Detail set, no Hint; Missing/Blocked → Hint set (it feeds the "run later" lines at onboarding_offer.go:134-140); Unknown → Hint set but Detail often empty; NotApplicable → Detail only.
+- The renderer *knows* this coupling: onboarding_render.go:50 special-cases "Unknown with empty Detail borrows Hint into Detail" because Unknown rungs are excluded from `Missing()` and their hint would otherwise never surface.
+
+**Ratings**
+- **Encapsulation**: 4/10 — Three exported fields, all independently settable. Any combination is representable, including nonsense (`StateDone` with a retry Hint, `StateMissing` with no Hint — the latter silently produces a red ✗ row with no recourse and no "run later" line).
+- **Invariant Expression**: 5/10 — Field comments are good, but the per-state coupling rules live partly in comments and partly in the renderer (`onboarding_render.go:47-52`). A reader of the type alone cannot learn that "Missing implies Hint" or that Unknown's Hint is rendered through Detail.
+- **Invariant Usefulness**: 8/10 — The State/Detail/Hint triple is exactly the right shape for the three consumers (checklist row, run-later line, JSON state). The invariants would prevent real bugs (a missing rung with no follow-up command is a UX dead end).
+- **Invariant Enforcement**: 3/10 — Nothing at construction. Every rung constructs `Check{...}` literals by hand (nine sites in onboarding_rungs.go), each re-remembering the convention.
+
+**Recommended improvements**
+- Add small constructors in the `onboarding` package: `Done(detail string)`, `Missing(detail, hint string)`, `Blocked(detail, hint string)`, `Unknown(hint string)`, `NotApplicable(detail string)`. This makes "Missing carries a hint" a signature, not a convention, collapses the nine literal sites, and lets `Unknown(hint)` document the Detail-borrowing rendering rule at the source rather than in the renderer. Cheap, non-breaking (keep the struct exported).
+- Alternatively (lighter): a `Check.EffectiveDetail() string` method owning the Unknown-borrows-Hint rule, moving that coupling out of `renderOnboardingChecklist` (onboarding_render.go:50) into the type that owns the fields.
+
+---
+
+### Types: Rung, Ladder, Result, Key* constants
+
+**Invariants identified**
+- `Rung.Check` must be non-nil (implicit — `Ladder.Checks` at onboarding.go:98 dereferences it, panicking otherwise).
+- `Rung.Check` must not prompt (comment-only, onboarding.go:71) and must be safe to run concurrently (comment at onboarding.go:87-90).
+- `Rung.Key` should be one of the `Key*` constants and unique within a `Ladder` (implicit — the offer runner's `offerFns` map and `statusJSON.Setup` map both key by it; a duplicate key would silently lose an entry in JSON).
+- `Ladder` order is meaningful (offer order, checklist order).
+
+**Ratings**
+- **Encapsulation**: 5/10 — Everything exported and mutable, but this is a deliberate "data, not interface" design and the package comment says why (onboarding.go:66-67). For a four-rung ladder built in one factory (`onboardingLadder`, onboarding_rungs.go:80-82), that's proportionate.
+- **Invariant Expression**: 7/10 — The struct-with-func-fields choice is well argued and correct for this size: closures capture `onboardingRungDeps` naturally, tests build fake rungs inline (onboarding_test.go does exactly this), and an interface would add four single-method types for zero polymorphism gain. The "must not prompt" and concurrency contracts are stated, though only in prose.
+- **Invariant Usefulness**: 8/10 — The Key-as-shared-identifier design is what keeps enable's offers, the checklist, and `status --json` from disagreeing — the package's stated purpose. Order-as-data cleanly encodes offer sequencing (login unblocks mirror in the same pass, onboarding_offer.go:100-124 depends on ladder order).
+- **Invariant Enforcement**: 4/10 — Nil `Check` panics in a goroutine inside `Checks()` — the worst place to discover it. `Key` is an untyped string with no tie to the `Key*` constants; a typo'd key silently detaches a rung from its offer (`offerFns[res.Rung.Key] != nil` at onboarding_offer.go:89 just filters it out — no error, the rung becomes permanently un-offerable). Duplicate keys are unchecked.
+
+**On Rung vs interface**: struct-with-func-fields is the right call at this scale. The verdict would flip if rungs grew a third behavior (e.g. per-rung JSON detail) — at that point an interface with a base struct beats a widening bag of func fields.
+
+**Concern — dead field**: `Rung.Offer` (onboarding.go:75) is never assigned or read anywhere in the diff. The offer mechanism that actually shipped is the parallel `offerFns map[string]func` on `onboardingOfferRunner` (onboarding_offer.go:38, wired at onboarding_offer.go:164-168). Two mechanisms exist for one concept; one is dead. Either delete `Rung.Offer`, or move the three offers into it and drop `offerFns` — the map-keyed-by-string indirection is strictly weaker (a key typo is a silent no-op) than a field on the rung itself. The field's own doc comment ("e.g. import until the enable-time offer lands") suggests it's speculative; import's offer nonetheless landed in the *map*, so the speculation already expired.
+
+**Recommended improvements**
+- Resolve the `Rung.Offer` / `offerFns` duplication (prefer keeping `Rung.Offer`, since it makes "this rung has an offer" a property of the rung, checked at construction, instead of a string-keyed lookup).
+- If both stay data, add a cheap `Ladder` validity check (non-nil Check, unique keys) exercised by a test against `onboardingLadder(...)` — one test, permanent protection.
+- Optional: `type Key string` for the constants to prevent arbitrary strings; low cost since all producers/consumers are in-repo.
+
+---
+
+## Package `cli`
+
+### Type: onboardingRungDeps (onboarding_rungs.go:31-46)
+
+**Invariants**: all eight func fields non-nil; `authed` must be side-effect-free and non-prompting (it wraps `authRung(deps).Check` — onboarding_rungs.go:73-75); `resolveOrigin` returns `"gh"` for GitHub per gitremote semantics; `probeMirror` receives lowercased owner/repo (stated at onboarding_rungs.go:134-135 and honored at the call site, onboarding_rungs.go:285).
+
+**Ratings**: Encapsulation 6/10 (unexported, constructor exists, but zero value panics deep inside a concurrent `Checks()`); Expression 8/10 (every field documented, including the deliberate offline-not-RefreshedLoginToken choice at onboarding_rungs.go:58-59 — excellent); Usefulness 9/10 (this seam is why the rung tests run without keyring/network, exactly as claimed); Enforcement 4/10 (nothing stops a test from injecting a partial deps and hitting a nil-func panic; the lowercase precondition on `probeMirror` is prose-only).
+
+**Suggestion**: the lowercasing precondition is split between the rung (onboarding_rungs.go:277,285) and the probe's doc; safer to lowercase *inside* `probeRepoMirrored` (onboarding_rungs.go:137) so the cache key can never fork on case. One line, removes a cross-function invariant.
+
+### Type: agentImportStatus (onboarding_rungs.go:49-55)
+
+Honest DTO; field comments good. One expression gap: the population site maps `UnimportedTurns: res.TurnsImported` (onboarding_rungs.go:232) — correct only because the run is `DryRun: true`, where "imported" means "would import". That inversion reads like a bug until you check the options five lines up. A one-line comment at onboarding_rungs.go:232 ("dry-run: TurnsImported = would-import") would pay for itself. Also note this type doubles as the import-cache's persisted schema (`importScanEntry.Statuses`) — a rename changes on-disk format; the fingerprint mechanism happens to absorb that, but a comment noting the dual role is warranted. Ratings: 6/8/8/5.
+
+### Types: onboardingOfferRunner + onboardingSetupMode (onboarding_offer.go)
+
+**onboardingOfferRunner** — same seam pattern, same trade-offs as deps: all six fields required, constructor wires production, zero value panics at `r.styles(w)` (onboarding_offer.go:127). Expression is a highlight: the type comment (onboarding_offer.go:29-35) states the key behavioral invariant — recompute state before each offer, so re-running enable is the resume path — and `runOffers` visibly enforces it (re-check at onboarding_offer.go:107). `patchSucceededOffers` (onboarding_offer.go:70) encodes a subtle eventual-consistency invariant with a clear comment. Ratings: 6/9/9/5.
+
+**onboardingSetupMode** — the one enum where the zero value is the *most permissive* option: `setupModeAll = iota` (onboarding_offer.go:20) means a forgotten or defaulted mode runs every offer, including a login and a network mirror-create. Today it's safe — `run()` maps prompt errors to `setupModeSkip` (onboarding_offer.go:55) and `mode := setupModeAll` at onboarding_offer.go:180 is an intentional preselect — but it inverts the fail-safe convention `State` gets right. Reordering so `setupModeSkip = iota` costs one line at the preselect and makes "zero value = do nothing to the user's account" structural. Ratings: 6/7/8/5.
+
+### Types: mirrorProbeCache/mirrorProbeEntry, importScanCache/importScanInput/importScanEntry, availableMirrorLister
+
+**mirrorProbeEntry** (onboarding_mirror_cache.go:41-45) can represent the illegal state `{Mirrored: true, Unreachable: true}`. It's guarded in practice — the only writers are `put` (never sets Unreachable) and `putUnreachable` (never sets Mirrored), and `write` is the sole file-touching path — good procedural encapsulation. But `get`'s `(mirrored, unreachable, ok bool)` triple (onboarding_mirror_cache.go:60) is three-boolean blindness; the call site (onboarding_rungs.go:140-145) must remember unreachable-wins ordering. A tiny sum-shaped result (`type probeResult int: probeMiss, probeMirrored, probeNotMirrored, probeUnreachable`) would make both the entry's illegal state and the caller's branching disappear. Note also the write-through at onboarding_offer_actions.go:109 — a second producer outside the probe path; it honors the invariant but is the kind of thing the sum type would keep honest. Ratings: 7/7/9/6.
+
+**The two caches sharing structure**: the load/marshal/mkdir/write plumbing is duplicated nearly verbatim (onboarding_mirror_cache.go:51-58,83-95 vs onboarding_import_cache.go:63-70,80-92 — including the identical nolint comment). The *invalidation policies* are genuinely different and should stay separate types: TTL-with-failure-window vs exact fingerprint is the essential design content of each. But the persistence shell is incidental and is exactly the ~10-line duplication this repo's `mise run dup` (threshold 50) exists to catch. A small generic `jsonFileCache[E any]` with `load() map[string]E` / `store(key string, e E)` in one place would keep both policy types thin without merging their semantics. I'd stop short of unifying `get` semantics — forcing TTL and fingerprint through one interface would be over-abstraction. Import cache ratings: 7/8/9/6 (the order-independent fingerprint with the `cacheable` poison flag for vanished files and partial results, onboarding_rungs.go:183-236, is careful, well-commented invariant work — the best enforcement in the PR).
+
+**availableMirrorLister** (onboarding_rungs.go:86-89) — textbook consumer-side interface: two methods, defined where consumed, named for what it does, with `CoreOrigin()` doing double duty as the dedupe key in `probeMirrorAcross` (onboarding_rungs.go:102). Nothing to change. Ratings: 9/9/9/8.
+
+---
+
+## Summary
+
+| Type | Encap | Express | Useful | Enforce |
+|---|---|---|---|---|
+| State | 7 | 8 | 9 | 6 |
+| Check | 4 | 5 | 8 | 3 |
+| Rung/Ladder/Result/Key* | 5 | 7 | 8 | 4 |
+| onboardingRungDeps | 6 | 8 | 9 | 4 |
+| agentImportStatus | 6 | 8 | 8 | 5 |
+| onboardingOfferRunner | 6 | 9 | 9 | 5 |
+| onboardingSetupMode | 6 | 7 | 8 | 5 |
+| mirrorProbeCache/Entry | 7 | 7 | 9 | 6 |
+| importScanCache/Input/Entry | 7 | 8 | 9 | 6 |
+| availableMirrorLister | 9 | 9 | 9 | 8 |
+
+The design is well above average for CLI glue: fail-safe zero value on `State`, disciplined seams, and unusually good invariant *documentation*. The actionable gaps, in priority order:
+
+1. **Delete or adopt `Rung.Offer`** (onboarding.go:75) — dead field duplicating `offerFns` (onboarding_offer.go:38); the string-keyed map is the weaker of the two mechanisms.
+2. **Check constructors** (`Done`/`Missing`/`Blocked`/`Unknown`/`NotApplicable`) to turn the State↔Hint/Detail conventions into signatures and pull the Unknown-borrows-Hint rule (onboarding_render.go:50) into the type.
+3. **Zero value of `onboardingSetupMode`** should be `setupModeSkip`, not `setupModeAll` — make "forgot to set it" mean "touch nothing".
+4. **Shared JSON-file-cache shell** for the two caches (persistence only; keep TTL vs fingerprint policies as distinct types).
+5. Small hardening: lowercase inside `probeRepoMirrored` (onboarding_rungs.go:137); a ladder-validity test (non-nil Check, unique keys); a dry-run comment at onboarding_rungs.go:232.
+
+No files were modified.</result>
+<usage><subagent_tokens>61086</subagent_tokens><tool_uses>10</tool_uses><duration_ms>160643</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a9164e1db25050a39</task-id>
+<tool-use-id>toolu_01QQetg6UEEfHwPrd6dRdsFT</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/a9164e1db25050a39.output</output-file>
+<status>completed</status>
+<summary>Agent "Test coverage review of PR #1618" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have a complete picture now. Here is the coverage analysis for PR #1618.
+
+## Summary
+
+Coverage is strong overall — I'd rate it 8/10. The rung state machine, renderer, offer orchestration, caches, and status/JSON integration are all tested behaviorally through well-designed seams (`onboardingRungDeps`, `onboardingOfferRunner` fields, the `onboardingStatusResults` / `runEnableOnboarding` package vars). The gaps cluster in exactly one place: the production glue that has no seams — `discoverAgentImports`, `probeRepoMirrored`, and the three offer actions in `onboarding_offer_actions.go`.
+
+On the specific question: **no unit tests for the offer actions is mostly acceptable.** `runOnboardingLogin` delegates to `runLoginAuto` (11 tests in `login_test.go` covering browser/device/SSH/headless) and `runOnboardingMirrorCreate` delegates to `createAndAwaitMirror` (tested in `repo_mirror_test.go`). Re-testing that delegation would be testing implementation. But two of the three actions carry behavior *beyond* delegation that is untested — detailed below.
+
+## Critical Gaps (8+)
+
+None. Nothing here risks data loss or corruption; both caches degrade to misses, and onboarding is explicitly best-effort (enable never fails because of it). The worst realistic regressions are wrong status display and consent violations.
+
+## Important Improvements (5–7)
+
+**1. `discoverAgentImports` memoization rules — rating 7** (`onboarding_rungs.go:171-241`)
+This is the entire top commit ("memoize the import rung's dry-run scan") and it has zero tests. The pieces (fingerprint, cache file) are tested, but the composition rules are not:
+- a failed `agentimport.Run` must set `cacheable = false` (a memoized partial result would pin a wrong "History" row in `entire status` until a transcript mtime or the metadata tip moves — potentially indefinitely while the error persists);
+- a vanished file between glob and stat must skip both `cache.get` and `cache.put`;
+- a fingerprint hit must actually short-circuit the expensive dry-run.
+
+Regression it catches: someone "simplifies" the function, drops the `cacheable` flag, and `entire status` permanently reports stale import state. The blocker is that `agentimport.All()`/`agentimport.Run`/`openRepository` are hardwired — this needs a small seam (or an integration test with a fixture transcript) to be testable. Given every other probe in this PR got a seam, this one deserves the same treatment.
+
+**2. Consent-prompt cancel (Ctrl-C) must behave like skip — rating 6** (`onboarding_offer.go:50-56`)
+The comment documents the contract; no test enforces it. If the `err != nil → setupModeSkip` branch regresses (e.g. error propagates into `runOffers` with the zero value `setupModeAll`), Ctrl-C at the consent prompt would *run login and mirror creation without consent* — the exact opposite of what the user asked for. This test is nearly free with the existing harness: `r.promptMode` returns an error, assert `ran` is empty and the checklist still prints.
+
+**3. Fresh-enable call sites are unverified — rating 6** (`setup.go`, `runEnableInteractive` and `setupAgentHooksNonInteractive`)
+`setup_test.go` asserts the ladder runs on the *already-enabled* and *re-enable* paths, but not on the two primary first-run paths (interactive enable, `--agent` non-interactive enable). If someone deletes the `runEnableOnboarding` call in `runEnableInteractive`, first-run users — the feature's main audience — never see the offer, and no test fails. Same stub pattern as the two existing tests; cheap to add.
+
+**4. `probeRepoMirrored` failure-caching composition — rating 6** (`onboarding_rungs.go:136-162`)
+Commit 95a17113c's fix ("cache probe failures") has its cache TTL tested and `probeMirrorAcross` tested, but not the glue: probe failure → `putUnreachable`, cached-unreachable → immediate error without dialing, success → `put`. If the `putUnreachable` call is dropped, an authed-but-offline terminal hangs 5s on *every* `entire status` — precisely the bug this commit fixed, with no failing test. Needs the coreapi construction extracted behind a seam (the `clients` slice is already the right shape).
+
+**5. `--yes` forces non-interactive — rating 5** (`onboarding_offer.go:148-155`)
+`runEnableOnboarding(_, _, assumeYes=true)` overrides `canPrompt`. The runner-level `canPrompt=false` behavior is tested, but nothing verifies the `assumeYes` plumbing — and the setup_test stubs discard the bool. If the override is lost, `entire enable --yes` in a TTY blocks on a huh prompt, breaking scripted installs (the curl-bash path). Minimal fix: have the setup_test stubs assert the bool they receive matches the flag; better: make `runEnableOnboarding` testable by injecting the runner.
+
+**6. `runOnboardingMirrorCreate` write-through cache put — rating 5** (`onboarding_offer_actions.go:109`)
+The one behavior in the offer actions beyond delegation: after a successful create, the probe cache is seeded with `mirrored=true` so `entire status` immediately after enable doesn't render "✗ Repo mirrored" for the duration of the server-side clone (the display half of this, `patchSucceededOffers`, is tested; the persistence half is not). Failure mode is confusing-but-self-healing, hence 5. Also worth an eyeball: the slug format (`owner+"/"+repo`, lowercased via `parseGitHubURL`) must stay consistent with `probeRepoMirrored`'s key — a mismatch would silently make the write-through a no-op.
+
+## Test Quality Issues
+
+- **Step-by-step "accept" arm never exercised.** `TestOnboardingLadder_StepByStep_HonorsDecline` declines auth, which blocks mirror, so *zero* offers run — the test proves decline works but no test proves `confirmRung → true` actually runs that rung's offer in step-by-step mode (mode-all covers offers running, but through a different branch of `runOffers`). One variant test closes this. Rating 4.
+- The two new `setup_test.go` tests stub `runEnableOnboarding` to a bare flag — fine for "was it called", but they'd be strictly better asserting the `assumeYes` argument (see gap 5).
+- Several assertions pin exact user-facing copy ("commits won't appear in the web UI", "created — sync in progress"). Acceptable for UX text the PR deliberately worked on (commits 48fcbeb0a, 2b5610dc7), but expect churn on copy edits.
+
+## On Cache Concurrency
+
+I looked for a real gap here and recommend **no test**. Both caches are load-modify-write with non-atomic `os.WriteFile` — concurrent writers can lose each other's entries, and a reader can catch a torn file. But every failure mode degrades to a cache miss (torn file → `json.Unmarshal` fails → empty cache, already covered by `TestMirrorProbeCache_CorruptFileIsAMiss`), and ground truth is always re-derivable. The design deliberately makes no concurrency guarantee; a test asserting one would be overfit. The `Ladder.Checks` goroutines don't share cache files across rungs, so there's no in-process race either.
+
+## On Accessibility/TTY
+
+Adequate. Both prompts go through `NewAccessibleForm` (the project pattern — no per-feature `ACCESSIBLE=1` tests exist elsewhere either, since the helper is the tested seam), and the non-interactive contract has a dedicated unit test plus incidental subprocess coverage from existing integration tests that spawn `entire enable` (which now run the ladder with real deps in an isolated config dir — a free hang-detection canary).
+
+## Positive Observations
+
+- Every rung state transition is covered, including the subtle ones: mixed-case origin → lowercase slug, partial-import wording vs. never-imported wording, blocked-vs-unknown semantics in `Missing()`.
+- `TestLadderChecks_RunsConcurrently` is a textbook concurrency test — proves parallelism via rendezvous channels rather than timing.
+- `TestProbeMirrorAcross_*` covers the full matrix of the multi-core fix (second core, dedupe, all-fail, partial-fail) with call-count assertions.
+- `TestNewOnboardingOfferRunner_WiresImportOffer` is a cheap, high-value production-wiring smoke test — exactly the kind of test that catches "forgot to register the new rung's offer".
+- The fingerprint test asserts the three invalidation triggers as behaviors (order-independence, mtime, metadata tip) rather than a golden hash.
+
+Key files: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_rungs.go` (gaps 1, 4), `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_offer.go` (gaps 2, 5), `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_offer_actions.go` (gap 6), `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/setup_test.go` (gap 3).</result>
+<usage><subagent_tokens>87674</subagent_tokens><tool_uses>17</tool_uses><duration_ms>206324</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a5a5f493cd82b4e4b</task-id>
+<tool-use-id>toolu_01TEWWJTTjm5PWS6PVW5ykgS</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/a5a5f493cd82b4e4b.output</output-file>
+<status>completed</status>
+<summary>Agent "Angle B: removed behavior" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Removed-behavior audit complete. Findings below. All file paths absolute; line numbers refer to the post-PR working tree.
+
+---
+
+**Candidate 1 — `entire enable` (bare, already-enabled) lost its fast, offline, non-prompting exit**
+File: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/setup.go:916`
+Old code: the `err == nil &amp;&amp; enabled` branch printed "Entire is already enabled." + `printEnabledStatus` and `return nil` immediately — a purely local, instantaneous, non-interactive idempotent operation.
+Invariant removed: bare re-enable is a lightweight, network-free, prompt-free confirmation. The PR inserts `runEnableOnboarding(ctx, w, opts.Yes)` before the return; that runs `onboardingLadder(...).Checks(ctx)`, which includes the mirror rung's control-plane probe, and (when `canPrompt()` is true and rungs are missing) shows the interactive "Finish setup?" `huh` form. Nothing re-establishes the old fast/quiet contract.
+Failure scenario: a developer on a TTY runs `entire enable` in an already-enabled repo just to re-confirm; instead of an instant "already enabled" they are blocked on an interactive setup prompt and a network round-trip (up to the 5s `mirrorProbeTimeout` on cache miss/offline). Any wrapper that ran bare `enable` expecting a no-op now stalls or blocks on stdin.
+
+**Candidate 2 — `entire enable --agent X` breaks its documented "non-interactive mode" by prompting**
+File: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/setup.go:1708` (in `setupAgentHooksNonInteractive`)
+The `--agent` flag is documented as "Enables non-interactive mode" (setup.go:937) and the function is `setupAgentHooksNonInteractive` (setup.go:1608). The PR adds `runEnableOnboarding(ctx, w, opts.Yes)`. `runEnableOnboarding` only disables prompting when `assumeYes` is true (`onboarding_offer.go:670-677`); `--agent` does not imply `--yes`.
+Invariant removed: `--agent` invocations never prompt. Re-establishment is missing — prompt suppression is gated on `opts.Yes`, not on the non-interactive `--agent` invocation.
+Failure scenario: CI or a provisioning script runs `entire enable --agent claude-code` on an allocated TTY (common in interactive CI runners) without `--yes`. Previously it completed silently; now `promptOnboardingSetupMode` renders "Finish setup?" and the process hangs waiting for keyboard input.
+
+**Candidate 3 — `entire status` was local-only and is now a networked command**
+File: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/status.go:2536` (diff) / enabled branch of `runStatus`
+The PR's own comment (`onboarding_mirror_cache.go:436`) states status is "a hot, previously local-only command." The added `onboardingStatusResults(ctx)` runs the full ladder, whose mirror rung calls `probeRepoMirrored` → `coreapi.New()` / `coreapi.NewForCluster` → `ListAvailableMirrors` (network).
+Invariant removed: `entire status` performs no network I/O and cannot hang. The cache mitigates steady state but does not restore the guarantee: first run after enable, post-TTL expiry, or a cold cache each pay up to 5s.
+Failure scenario: a user runs `entire status` on a plane / offline right after enabling; the command that used to be instant now blocks ~5s on the mirror probe before degrading to `StateUnknown`. A monitoring script polling `entire status` on an interval now emits network traffic and variable latency it never did before.
+
+**Candidate 4 — `entire status` human output gained lines in a new position; script-parseable output changed**
+File: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/status.go:2536`
+The checklist is printed via `renderOnboardingChecklist` between `writeActiveSessions` and `writeAgentHelpHint`. On the enabled-but-incomplete path this injects a "Setup N/M complete" block, per-rung `✓/✗/?` rows, and a "→ Run `entire enable` to finish setup" line; on the connected path it injects a "Connected: … · mirrored to …" line.
+Invariant removed: the stable line set/ordering of `entire status` output. Nothing preserves the old layout for existing consumers.
+Failure scenario: a script that greps `entire status` output (e.g. matching on line position or counting lines, or asserting the output ends at the agent-help hint) now sees extra rows inserted ahead of the hint and misparses. Note the `--json` path is safer (additive `setup` object), but the human path is the one that changed shape.
+
+**Candidate 5 — idempotent `entire enable --yes` (CI re-enable) can now block on the mirror-probe timeout**
+File: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/setup.go:916` and `:922`
+Even with `--yes` (which sets `canPrompt=false`, so no prompt), `runEnableOnboarding` still calls `ladder.Checks(ctx)` including the networked mirror probe. Previously both the already-enabled branch (`return nil`) and the re-enable branch (`return runEnable(...)`) completed with no control-plane call.
+Invariant removed: `entire enable --yes` is a bounded, network-optional idempotent operation.
+Failure scenario: a CI step runs `entire enable --yes` on every build to guarantee hooks are installed; on a runner without control-plane egress this now adds up to a 5s stall per build (failure cached 5min, but cold containers pay it every run), where it used to return immediately.
+
+**Candidate 6 — new already-enabled test stubs out the very behavior that changed, so the regression is uncovered**
+File: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/setup_test.go:2483` (`TestEnableCmd_AlreadyEnabled_RunsOnboardingLadder`)
+The test replaces `runEnableOnboarding` with a no-op flag-setter (`runEnableOnboarding = func(...) { ladderRan = true }`), then asserts the "already enabled" message still prints. It never exercises the real ladder's network I/O or prompt path.
+Invariant concern: there is no test guarding that the already-enabled / `--agent` / `--yes` paths remain non-hanging and non-prompting under non-interactive conditions — exactly the behaviors Candidates 1, 2, and 5 identify as newly at risk.
+Failure scenario: a future change that makes `runEnableOnboarding` prompt or block unconditionally passes CI, because the only coverage of these paths stubs the function out entirely.</result>
+<usage><subagent_tokens>58414</subagent_tokens><tool_uses>6</tool_uses><duration_ms>140009</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ad7c6df24fc6053a9</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/ad7c6df24fc6053a9.output</output-file>
+<status>completed</status>
+<summary>Agent "Silent-failure hunt in PR #1618" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I've completed the audit. All findings below; ordered by severity, all file paths absolute, line numbers from the current branch tip.
+
+# Silent-failure audit: onboarding ladder (PR #1618)
+
+## CRITICAL
+
+### 1. Suspended mirror is reported as success, and the poisoned cache hides it for 15 minutes
+`/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_offer_actions.go:97-110`
+
+`runOnboardingMirrorCreate` calls `createAndAwaitMirror(..., noWait=true, ...)` and only inspects `outcome.created.Empty`. It never checks `outcome.created.Suspended`. Per `repo_mirror.go:250-255`, a suspended placement returns `outcome` with **nil error** — the canonical `entire repo mirror create` path explicitly handles this (`repo_mirror.go:300-305`: prints `"WARNING: this mirror has been suspended by an admin and won't be usable."` and returns `NewSilentError(errMirrorSuspended)`). The onboarding offer swallows that exact case:
+
+- The offer returns nil → `runOffers` marks the rung `succeeded` → checklist renders "created — sync in progress".
+- Worse, line 109 write-through-caches `mirrored=true` for 15 minutes (`mirrorProbeTTL`), so `entire status` shows "Repo mirrored ✓" and re-running `entire enable` (the documented resume path) will **not re-offer** until the TTL expires — and after TTL the real probe may also disagree only if the server's available-mirrors status is honest about suspension.
+
+**Hidden error**: admin-suspended placement, which "will never serve".
+**User impact**: user believes onboarding is complete; commits never appear in the web UI; no message ever explains why; the self-healing "re-run enable" contract is defeated by the cache.
+**Fix**: after `createAndAwaitMirror` returns, branch on `outcome.created.Suspended` — print the same warning the mirror command prints, return an error (so the rung keeps its retry hint), and do not write `put(slug, true)`.
+
+### 2. Import dry-run failures degrade to "no prior history found" — an affirmatively false settled state
+`/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_rungs.go:221-229` with `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_rungs.go:306-319`
+
+In `discoverAgentImports`, `agentimport.Run(... DryRun: true)` failure does `continue` (correctly uncached via `cacheable = false`, which is good), but the error itself is discarded — not logged, not returned, not counted. Two concrete failure scenarios:
+
+- **All discovered agents fail** (e.g. corrupt checkpoint store, unreadable metadata branch — the same repo-level cause will typically fail every agent): `statuses` is nil, returned `err` is nil → `importRung` computes `totalSessions == 0` → `StateNotApplicable, "no prior history found"`. A repo with hundreds of importable sessions renders the one state that says *"nothing to do here, ever"*. NotApplicable rows aren't even rendered (`onboarding_render.go:39-41`), so the rung silently disappears from the checklist. This is materially different from the `StateUnknown` the rung correctly uses for `WorktreeRoot`/`openRepository` errors at lines 172-175/205-208.
+- **Partial failure**: agent A fully imported, agent B's dry-run errors → `statuses = [A]`, `unimported` empty → `StateDone, "N sessions imported"`. A false green checkmark hiding agent B entirely.
+
+**Fix**: track per-agent run errors; if every discovered agent failed, return an error (rung → StateUnknown, which the renderer already surfaces as "couldn't check — retry with ..."); on partial failure, at minimum `logging.Warn` the per-agent error and reflect the failed agent in `Detail` rather than counting it as absent.
+
+## HIGH
+
+### 3. `imp.Discover` errors silently erase an agent — in both the rung probe and the accepted offer
+`/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_rungs.go:185-188` and `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_offer_actions.go:59-61`
+
+`if discoverErr != nil || len(files) == 0 { continue }` conflates "error" with "nothing found". Hidden errors: permission denied on `~/.claude/projects` or another agent's session dir, a malformed glob root, an I/O error mid-walk (partial `files` returned alongside the error are also thrown away). Unlike the `runErr` path, `discoverErr` does **not** set `cacheable = false` in the rung probe — a fingerprint and cached result built *without* the failed agent's files is stored, so the omission persists across runs while the failure persists (it self-corrects only when Discover recovers, since recovered files change the fingerprint).
+
+The offer path is worse for user trust: the user was told "12 claude-code sessions found, not imported", consented to "imports existing agent history", and if Discover then fails transiently at offer time, `runOnboardingImport` prints **nothing**, returns nil, and `runOffers` records success. Combined with finding 4, the closing checklist then shows a fabricated in-progress state.
+
+**Fix**: log `discoverErr` with the agent name; in the offer, treat a Discover failure for an agent as an error (the offer path already returns errors for `runErr` at line 67 — the asymmetry is unjustified).
+
+### 4. `patchSucceededOffers` stamps the mirror-specific "created — sync in progress" on *any* rung, masking real failures of login and import
+`/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_offer.go:70-81`
+
+The patch applies to every key in `succeeded` whose re-check isn't Done. The lag rationale in the comment is only true for the mirror rung. Concrete scenarios:
+
+- Login flow "succeeds" but the token doesn't persist (keyring write raced, file-backend path unwritable) → auth re-check is Missing → the "Logged in" row renders `? created — sync in progress`. There is no sync; the login failed. The user walks away believing it will settle; it never does, and the "run later: entire auth login" hint is suppressed because the state was patched away from Missing.
+- Import offer returns nil having imported nothing (finding 3) → "History" row shows "created — sync in progress" — semantically meaningless for imports, which are synchronous and local.
+
+**Fix**: restrict the patch to `onboarding.KeyMirror` (the only offer with genuine server-side lag), or make the patched detail per-rung. For auth/import, a succeeded offer whose re-check is still Missing is itself a signal that should render as Missing with its hint.
+
+### 5. `authRung` swallows `tokenForContext` errors and misdiagnoses infrastructure failure as "not logged in"
+`/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_rungs.go:378-387`
+
+`if token, tokenErr := deps.tokenForContext(c); tokenErr == nil &amp;&amp; token != ""` — `auth.LoginTokenForContext` returns rich, distinguishable errors (`contexts.go:188-201`: "context %q has no keychain slot", "read token for context %q: &lt;keyring error&gt;"), all of which are discarded here. A locked keychain, a broken `ENTIRE_TOKEN_STORE_PATH`, or a keyring daemon outage renders `StateMissing → "entire auth login"` for a user who **is** logged in. The inconsistency is internal to the same function: `listContexts` failure two branches up correctly maps to `StateUnknown`.
+
+**Cascade**: `deps.authed` (line 73-75) is defined as "auth rung == Done", so `mirrorRung` then renders `StateBlocked, "needs login"`, and `entire enable` offers a full browser login the user doesn't need — which may itself fail against the same broken keyring, looping the user with no diagnosis. The keyring error message that would have identified the problem in seconds is never shown or logged.
+
+**Fix**: distinguish `tokenErr != nil` (→ `StateUnknown`, hint `entire auth status`, plus `logging.Warn` with the error) from `token == ""` (→ genuinely Missing).
+
+## MEDIUM
+
+### 6. `mirrorRung` conflates origin-resolution *failure* with "no GitHub origin"
+`/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_rungs.go:272-275`
+
+`if err != nil || forge != "gh" → StateNotApplicable, "no GitHub origin"`. Hidden errors: `git remote get-url` exec failure (context canceled/timed out under the concurrent `Ladder.Checks`, git binary issue), `ParseURL` failure on an unusual-but-GitHub URL, or the control-character rejection in `splitOwnerRepo` (`gitremote.go:224-226`). A repo that *is* on GitHub renders the permanent-sounding "no GitHub origin", the row for the mirror rung effectively self-excuses (NotApplicable rows are hidden and excluded from Summary), and `status --json` reports `"mirror": "not_applicable"` — a machine-readable lie. Same fix shape as finding 5: `err != nil` → StateUnknown (+ debug log); only `forge != "gh"` → NotApplicable.
+
+### 7. Write-through cache asserts "mirrored" for 15 minutes on the strength of registration only
+`/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_offer_actions.go:106-110`
+
+With `noWait=true`, success means the placement was registered (`repo_mirror.go:275-276`); the clone runs later and can fail (revoked app access, upstream deleted between registration and clone). `put(slug, true)` makes `mirrorRung` report `StateDone` with the slug — not "sync in progress" — for the full `mirrorProbeTTL`, during which `entire enable` will not re-offer and `entire status` claims a mirror that may not exist. The comment documents the intent, but the cache stores a *stronger* claim (Mirrored) than the ground truth the probe normally requires (`AvailableMirrorStatusMirrored`, `onboarding_rungs.go:114-118`). Consider a distinct "pending" cache state that renders like the patched "sync in progress" row, or a much shorter TTL for write-through entries.
+
+### 8. Consent/confirm prompt errors are indistinguishable from user choices, and the error text is dropped
+`/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_offer.go:50-56` and `:111-115`
+
+- `promptMode` error → `mode = setupModeSkip`. The comment justifies Ctrl-C, but any huh failure (terminal state corruption, form error) takes the same branch, and the wrapped error built at line 195 ("setup consent prompt: %w") is constructed and then thrown away unread — nothing is printed or logged.
+- `confirmRung` error → `continue`, i.e. treated as "declined". If the TTY breaks mid-flow, every remaining rung fails its confirm silently, one after another, and the user gets no indication the prompts errored at all.
+
+This is acceptable as *flow control* (the checklist hints are a real resume path), but the errors should at least be `logging.Debug`'d, and `errors.Is(err, huh.ErrUserAborted)` should gate the "treat as skip/decline" path so genuine failures print one line.
+
+### 9. No logging anywhere in the feature — every swallowed error above is unrecoverable via `doctor logs`
+All new files: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_rungs.go`, `onboarding_offer.go`, `onboarding_offer_actions.go`, `onboarding_mirror_cache.go`, `onboarding_import_cache.go`, `onboarding_render.go`.
+
+Verified by grep: zero references to the `logging` package. CLAUDE.md requires operational decisions to go through `logging.Debug/Warn/Error`. The feature makes at least eight distinct "degrade and continue" decisions (findings 1-8) and none leaves a trace. When a user reports "status says no prior history but I have months of Claude sessions", there will be nothing in `.entire/logs/` to debug with. Every `continue`/discard above should carry a `logging.Debug` or `logging.Warn` with agent name / slug / error.
+
+## JUSTIFIED best-effort (reviewed, no action needed)
+
+- **Cache read/write degradation** (`onboarding_mirror_cache.go:51-58, 83-95`; `onboarding_import_cache.go:63-70, 80-92`): unreadable/corrupt cache → empty map (miss → re-probe); write failures → nolint-documented no-op. Ground truth is elsewhere, misses self-heal, `0o600`/`0o700` perms are right. The load-modify-write in `write()` can lose a concurrent process's entry, but the loss is a cache miss. Fine. (A single `logging.Debug` on write failure would still be nice given finding 9.)
+- **`statErr` → `cacheable = false`** (`onboarding_rungs.go:191-197`): correctly refuses to fingerprint a moving target, documented inline. Good.
+- **`runErr` → `cacheable = false`** (`onboarding_rungs.go:224-228`): the *cache* handling is exactly right (partial results never memoized) — the problem is only the missing signal (finding 2).
+- **Mirror probe failure → `StateUnknown` + hint** (`onboarding_rungs.go:285-288`) and the renderer's "couldn't check — retry with \`entire repo mirror list\`" row (`onboarding_render.go:50-52`): the user gets signal and an action; failure-TTL caching (`mirrorProbeFailureTTL`) prevents repeated hangs. The one loss is *why* (offline vs 401), which logging (finding 9) would cover.
+- **Offer failure in `runOffers`** (`onboarding_offer.go:117-120`): prints "`&lt;Title&gt; setup didn't complete: &lt;err&gt;`" and keeps the checklist retry hint. This is the model the rest of the feature should follow.
+- **`runEnableOnboarding` never failing enable** (`onboarding_offer.go:148-155`, `setup.go:914-923, 1217-1221, 1706-1709`): correct design — hooks are already installed at that point; failing enable over connect rungs would be worse. The wiring itself adds no new swallow.
+
+## Summary
+
+The best-effort architecture is sound where the user still gets a signal (Unknown + inline retry hint, printed offer failures). The unjustified swallows cluster in two patterns: (a) **errors collapsing into terminal-looking states** — NotApplicable ("no GitHub origin", "no prior history found") and Missing ("entire auth login") — which read as settled facts and hide the rung from the checklist or send the user down the wrong fix; and (b) **success being overclaimed** — the suspended-mirror nil-error path plus the 15-minute `mirrored=true` write-through, and `patchSucceededOffers` inventing "sync in progress" for rungs that have no async phase. Findings 1 and 2 are the ones that will generate support tickets.</result>
+<usage><subagent_tokens>69914</subagent_tokens><tool_uses>13</tool_uses><duration_ms>244204</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a5cb0fcb8c4a7ad12</task-id>
+<tool-use-id>toolu_01Wo1fP3aJQo1dQLvaWZ4A7m</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/a5cb0fcb8c4a7ad12.output</output-file>
+<status>completed</status>
+<summary>Agent "Angles: reuse + simplification" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have everything needed. Here are the findings.
+
+---
+
+## PR #1618 review — REUSE &amp; SIMPLIFICATION candidates
+
+### 1. REUSE — new cache files re-implement the generic cache toolkit in `internal/entireclient/discovery/cache.go`
+- **Files:** `cmd/entire/cli/onboarding_mirror_cache.go:51` (`load`) &amp; `:83` (`write`); `cmd/entire/cli/onboarding_import_cache.go:63` (`load`) &amp; `:80` (`put`)
+- **Summary:** Both hand-roll the load path (`os.ReadFile` → `json.Unmarshal` → nil-map fallback) and the write path (`json.Marshal` → `os.MkdirAll` → `os.WriteFile`). `discovery/cache.go` already has generic, tested primitives for exactly this: `loadCacheFile[T]` (:129, corrupt-file self-heal), `writeCacheFile[T]` (:144) and `writeCacheBytesAtomic` (:167, tmp-file + rename), plus `readCacheBytes` (:154).
+- **failure_scenario:** The new writes are **non-atomic** — a plain `os.WriteFile`. The onboarding ladder runs rung checks concurrently (`Ladder.Checks` spawns a goroutine per rung), and `entire status`/`entire enable` can overlap; a reader that hits the file mid-write gets truncated JSON and silently drops the whole cache (treated as a miss), re-paying the network probe / transcript re-scan the cache exists to avoid. The existing `writeCacheBytesAtomic` prevents exactly this via tmp+rename. Alternative: promote the `discovery` primitives (currently package-private) into a shared cache util and use it here.
+
+### 2. SIMPLIFICATION — `mirrorProbeCache` and `importScanCache` are the same cache with two names
+- **Files:** `cmd/entire/cli/onboarding_mirror_cache.go:51-95` vs `cmd/entire/cli/onboarding_import_cache.go:63-92`
+- **Summary:** `load()` is byte-for-byte identical modulo the file struct type (`{ ... f.Entries == nil }` → empty-map). The write bodies (`mirrorProbeCache.write` / `importScanCache.put`) are also identical: `load` → mutate `Entries[key]` → `Marshal` → `MkdirAll` → `WriteFile 0o600` with the same `//nolint:errcheck,gosec` comment. Both file structs are just `struct{ Entries map[string]T }`.
+- **failure_scenario:** Two copies of the same read-modify-write drift independently — e.g. a bug fix (atomic write, an `fsync`, a permission change) applied to one silently misses the other. The obvious alternative is one generic `entryCache[T]` (or the `discovery` helper from #1) parameterized on the entry type.
+
+### 3. REUSE — `onboardingSetupSummary` re-implements the English "and"-join that already exists as `formatTokenClassList`
+- **File:** `cmd/entire/cli/onboarding_offer.go:203-233` (loop at :219-227 with `WriteString(" and ")` / `", "`)
+- **Existing helper:** `cmd/entire/cli/checkpoint_tokens.go:450` `formatTokenClassList` — same package (`cli`), handles the 0/1/2/n cases of joining a `[]string` with commas and a trailing "and".
+- **failure_scenario:** Duplicated list-grammar logic. The new copy hand-manages the first/middle/last separators inline and then slices `summary[:1]` to capitalize — a second, subtly different implementation (no Oxford comma; the existing one uses `", and "`) that must be maintained in parallel and can diverge in phrasing/edge cases. Refactor to build `steps` then call the existing joiner.
+
+### 4. SIMPLIFICATION — `patchSucceededOffers` is dead for the only rung it targets, because the mirror offer write-throughs the cache
+- **Files:** `cmd/entire/cli/onboarding_offer.go:59` + `:70` (`patchSucceededOffers`) vs `cmd/entire/cli/onboarding_offer_actions.go:109` (`defaultMirrorProbeCache().put(owner+"/"+repo, true, ...)`)
+- **Summary:** `patchSucceededOffers` exists to render a rung as "created — sync in progress" (StateUnknown) when its offer succeeded but the closing re-check still reads not-done. It skips any rung already `StateDone` (`onboarding_offer.go:71`). But mirror-create write-throughs the probe cache to `mirrored=true` (`onboarding_offer_actions.go:109`), and the closing re-check reads that same cache — keys match exactly (write-through uses `parseGitHubURL`-lowercased `owner+"/"+repo`; `probeRepoMirrored` uses `strings.ToLower(owner)+"/"+strings.ToLower(repo)`). So the mirror re-check returns `StateDone` and `patchSucceededOffers` `continue`s. Auth flips `loggedIn` synchronously and import writes checkpoints synchronously, so neither is ever "succeeded-but-not-done" either.
+- **failure_scenario:** The whole `patchSucceededOffers` path (and its `StateUnknown "created — sync in progress"` UX) never fires in production — it's only exercised by `TestOnboardingLadder_SucceededOfferStillSyncingRendersInProgress`, which deliberately omits the write-through the real offer performs. Two mechanisms solve the same clone-lag problem; one is redundant. Keep the write-through (it also fixes `entire status` in the next 15 min) and drop `patchSucceededOffers`, or keep the patch and drop the write-through — but not both.
+
+### 5. SIMPLIFICATION — `deps.authed` runs a second full auth probe per ladder check
+- **File:** `cmd/entire/cli/onboarding_rungs.go:73` (`deps.authed = func(ctx) bool { return authRung(deps).Check(ctx).State == StateDone }`), consumed at `:284` inside `mirrorRung.Check`
+- **Summary:** `authed` is derived state — it reconstructs a whole `authRung` and re-runs its `Check` (env-token read, `listContexts`, `tokenForContext`). During one `Ladder.Checks`, the auth rung's `Check` already runs; the mirror rung then re-invokes the identical probe via `authed`.
+- **failure_scenario:** The auth/keyring/contexts.json probe executes twice per `entire status` / `entire enable` invocation, wasted work whose result the ladder already computed for the auth rung. It's kept as a test seam, but production wiring pays double. Simpler: the mirror rung could treat a probe error as blocked/unknown, or the ladder could pass the already-computed auth result — avoiding a second identical ground-truth read.
+
+### 6. SIMPLIFICATION — slug lowercasing done two different ways for the same "server slugs are lowercase" invariant
+- **Files:** `cmd/entire/cli/onboarding_rungs.go:277` &amp; `:285` (`strings.ToLower(owner)`/`ToLower(repo)`, applied 4×) vs `cmd/entire/cli/onboarding_offer_actions.go:88` (`parseGitHubURL(fmt.Sprintf("github.com/%s/%s", owner, repo))` round-trip purely to lowercase)
+- **Summary:** `mirrorRung` lowercases inline with `strings.ToLower`; `runOnboardingMirrorCreate` instead re-serializes the already-resolved `owner`/`repo` back into a `github.com/...` string and re-parses it through `parseGitHubURL` just to get the lowercase form (and its cache key at `:109`). Both encode the same rule, referenced by the same comments ("parseGitHubURL semantics: server-side slugs are lowercase").
+- **failure_scenario:** Two encodings of one invariant that must stay in lockstep with the mirror cache key and the server. If the slug rule ever changes (e.g. case-preserving owners, or `parseGitHubURL` rejects something `ToLower` accepts), the probe key and the create/write-through key can diverge and the rung re-offers creation forever. `runOnboardingMirrorCreate` already holds resolved `owner`/`repo` — a single shared `strings.ToLower` (or one shared `githubSlug(owner,repo)` helper used by both rung and offer) removes the round-trip and the drift.
+
+---
+
+Minor (not counted): `onboardingRowMarker` (`onboarding_render.go:72-79`) re-emits the `✓`/green and `✗`/red glyphs that `statusStyles.successBullet`/`failureBullet` (`status_style.go:164-178`) already produce. Weaker than the above because the marker renders the glyph alone (no label) for column alignment, so the bullet helpers aren't a drop-in — but the green-`✓`/red-`✗` literals are duplicated and could drift from the rest of `entire status`.</result>
+<usage><subagent_tokens>81404</subagent_tokens><tool_uses>16</tool_uses><duration_ms>186332</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a1b22ead6d7ad92df</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/a1b22ead6d7ad92df.output</output-file>
+<status>completed</status>
+<summary>Agent "General code review of PR #1618" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## Review Summary
+
+I reviewed the full 10-commit branch diff for PR #1618 (the onboarding-ladder feature): the new `onboarding/` package, the 6 `onboarding_*.go` files, and the integration edits in `setup.go`/`status.go`, plus their tests. I built the packages, ran `go vet`, ran the new tests (all pass), and ran the concurrency test under `-race` (clean).
+
+**Verdict: no findings at or above the confidence-≥80 reporting threshold.** The feature is well-constructed and adheres to the CLAUDE.md conventions I checked:
+
+- **Accessibility** — both huh forms (`promptOnboardingSetupMode`, `confirmOnboardingRung`) go through `NewAccessibleForm`. ✓
+- **Agent-safe non-interactive fallback** — `--yes`/no-TTY paths force `canPrompt=false`, so no offer ever runs silently; the checklist prints complete run-later hints and `status --json` exposes the `setup` map. ✓
+- **Config/cache isolation** — caches resolve paths only via `userdirs.Cache()`; tests use `t.TempDir()` cache paths. ✓
+- **Test parallelization/isolation** — new tests call `t.Parallel()` (or correctly omit it where `t.Chdir`/`t.Setenv` is used). ✓
+- **Best-effort error handling** — onboarding never fails `enable` (offers print a notice and continue); `SilentError` is correctly not used here. ✓
+- **No go-git checkout/reset misuse; repo-root via `paths.WorktreeRoot`, not cwd.** ✓
+- **No double-invocation** — the three `runEnableOnboarding` call sites in `setup.go` (lines 916, 922, and inside `runEnableInteractive`/`setupAgentHooksNonInteractive`) are on mutually exclusive return paths.
+- The ladder-ordering logic (login unblocks mirror in the same pass; blocked rungs skipped in `runOffers` unless a same-pass offer flips them to `Missing`) is correct.
+
+### Sub-threshold observations (below 80 — noted for author awareness, not blocking)
+
+1. **`entire status` now performs synchronous network + transcript-parsing work on a previously local-only hot path** (confidence ~70). `onboardingStatusResults` (status.go:106 and the `--json` path) runs the mirror probe (up to 5s) and the import dry-run scan. Both are cached (15-min mirror TTL, fingerprinted import scan), but on a cold/expired cache an authed repo pays real latency on a command agents poll. The design clearly anticipates this (caching, 5s timeout, `StateUnknown` degradation), so it's a deliberate tradeoff rather than a defect — flagging only so the latency budget on `status`/`status --json` is a conscious decision.
+
+2. **`patchSucceededOffers` applies the wording "created — sync in progress" to any succeeded rung whose re-check isn't `Done`, including auth and import** (`onboarding_offer.go:70-81`, confidence ~50). The phrasing only makes sense for the mirror rung. In practice a succeeded login/import re-checks to `Done` (import moves the metadata-branch tip, invalidating its scan cache), so this is an unlikely edge case, but if a login or import offer ever succeeded without the probe catching up, the row copy would be misleading. Consider scoping the "sync in progress" patch to `KeyMirror`.
+
+Relevant files: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/status.go`, `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_offer.go`.</result>
+<usage><subagent_tokens>87873</subagent_tokens><tool_uses>21</tool_uses><duration_ms>299364</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>af5805d3a393ee6af</task-id>
+<tool-use-id>toolu_01QptKq8jdf1qkSLrRgL1mnR</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/af5805d3a393ee6af.output</output-file>
+<status>completed</status>
+<summary>Agent "Angles: efficiency + altitude + conventions" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I've read the full diff and the relevant CLAUDE.md sections. Here are my findings across the three angles.
+
+---
+
+## EFFICIENCY
+
+### EFF-1 — Mirror rung re-derives auth (keyring read) on every check; multiplied across passes
+`cmd/entire/cli/onboarding_rungs.go:73` (authed wiring) + `:278` (mirrorRung calls `deps.authed`)
+
+`newOnboardingRungDeps` wires `deps.authed = func(ctx) bool { return authRung(deps).Check(ctx).State == StateDone }`. So `mirrorRung.Check` runs a *complete* auth probe (`listContexts` + `tokenForContext`, i.e. keyring reads) in addition to the `authRung` that already ran in the same `Ladder.Checks` pass. Each full `Checks()` therefore does 2 keyring reads (auth rung + mirror's re-derivation), not 1.
+
+failure_scenario: One `entire enable` runs the ladder at least 3 times (initial `run` → `ladder.Checks`, `onboarding_offer.go:60`; `runOffers` per-rung re-check, `onboarding_offer.go:108`; final `ladder.Checks`, `onboarding_offer.go:60`). Combined with the mirror rung's duplicate auth derivation, that's ~6 keyring accesses for one enable; on macOS a locked keychain can prompt/stall per read. The auth rung's already-computed result is discarded instead of threaded into the mirror check.
+
+### EFF-2 — `runOffers` re-checks each rung then a final full `Checks()` re-runs the whole ladder
+`cmd/entire/cli/onboarding_offer.go:108` (`check := rung.Check(ctx)`) + `:60` (`patchSucceededOffers(ladder.Checks(ctx), …)`)
+
+`run()` computes `ladder.Checks(ctx)` up front, then `runOffers` calls `rung.Check(ctx)` again for each offerable rung (serially, not concurrently), then `run()` calls `ladder.Checks(ctx)` a third time for the closing render. `discoverAgentImports` (`onboarding_rungs.go:171`) — which does the discovery glob, a `stat` per file, `openRepository` (`:205`), and metadata-ref read to build the fingerprint — executes on each of those passes.
+
+failure_scenario: In the common enable-with-import case the import offer *runs* and moves the metadata-branch tip, which invalidates the scan cache by design (`onboarding_rungs.go` fingerprint). The third `Checks()` pass then re-runs the full dry-run transcript parse (`agentimport.Run(..., DryRun:true)`) over every discovered session — the exact expensive work the cache exists to avoid — right after the import already parsed them. Repos with large transcript histories pay a second full parse at the end of every enable.
+
+### EFF-3 — Cache `load()` runs twice per write (get then put both re-read+parse the file)
+`cmd/entire/cli/onboarding_import_cache.go:73` (`get`→`load`) and `:82` (`put`→`load`); same shape in `onboarding_mirror_cache.go` `get`/`write`
+
+On a cache miss the flow is `get()` → `load()` (ReadFile + `json.Unmarshal` of the whole file), then `put()` → `load()` again (second ReadFile + Unmarshal) before marshalling back out. The file is read and parsed twice for a single memoize.
+
+failure_scenario: Minor per-call, but this is on the `entire status` hot path (every invocation) and the file grows one entry per repo the user touches. It's also a subtle correctness smell — the `put` re-reads a snapshot that can differ from the one `get` read (concurrent `status` runs), so a write can silently clobber another process's entry. Cost is small; flagged because the prompt called it out and it's trivially fixable by threading the loaded file through.
+
+---
+
+## ALTITUDE
+
+### ALT-1 — `patchSucceededOffers` is a render-layer patch that duplicates the mirror write-through cache
+`cmd/entire/cli/onboarding_offer.go:70` (`patchSucceededOffers`) vs `onboarding_offer_actions.go:888` (`defaultMirrorProbeCache().put(owner+"/"+repo, true, …)`)
+
+Two mechanisms solve the same "create returned before the clone finished" problem at different depths. `runOnboardingMirrorCreate` already does write-through: after a successful create it writes `mirrored=true` into the probe cache, so the closing `ladder.Checks` → `probeRepoMirrored` → cache hit → `StateDone`. Yet `patchSucceededOffers` *also* overrides any succeeded-but-not-done rung to `StateUnknown / "created — sync in progress"`.
+
+failure_scenario: In production the write-through makes the mirror rung read `StateDone` at the closing re-check, so `patchSucceededOffers`'s `res.Check.State == StateDone` guard skips it — the patch is effectively dead for the only rung that can hit this case (auth flips done immediately; import moves the metadata tip and re-scans done). The render-layer patch appears "needed" only because the test (`TestOnboardingLadder_SucceededOfferStillSyncingRendersInProgress`) uses a fake that bypasses the write-through cache. So the truth is patched in two places that can disagree: if the create slug and probe slug ever diverge, production shows "created — sync in progress" while the cache says done. The fix belongs at one layer (probe truth), not split across probe write-through + render override.
+
+### ALT-2 — Unknown-rung hint copy is synthesized in the renderer instead of modeled in `Check`
+`cmd/entire/cli/onboarding_render.go:51`
+
+```go
+if detail == "" &amp;&amp; r.Check.State == onboarding.StateUnknown &amp;&amp; r.Check.Hint != "" {
+    detail = "couldn't check — retry with `" + r.Check.Hint + "`"
+}
+```
+
+The renderer derives user-facing copy from `(State, Detail, Hint)` for one specific state. The `onboarding` package's whole premise (its package doc) is that rungs "recompute done/missing from ground truth" and carry `Detail`/`Hint` so the model is the single source of truth. Here presentation logic reconstructs what the `Check` should have said.
+
+failure_scenario: enable's closing checklist and `status` both render through this function, but any *other* consumer of `Result` (the `status --json` `setup` map added in this PR, or a future surface) sees a bare `StateUnknown` with empty `Detail` — the "couldn't check, retry with X" guidance exists only in the terminal renderer and is silently absent from JSON. Modeling it in the mirror/auth/import `Check` (set `Detail` when returning `StateUnknown`) keeps every consumer consistent.
+
+### ALT-3 — Import offer is wired unconditionally now; will structurally fight PR #1595's first-run gate
+`cmd/entire/cli/onboarding_offer.go` (`offerFns[KeyImport]` in `newOnboardingOfferRunner`) + `onboarding_offer_actions.go:821` (`runOnboardingImport` imports *all* discoverable agents)
+
+The comment at `onboarding_offer_actions.go` says #1595 will add "per-agent selection, first-run gating" and "replaces these internals." But the import rung is already a first-class member of `offerFns`, `offerable`, and the single consent prompt — `setupModeAll` runs `runOnboardingImport` with no gate, and re-running enable (the advertised resume path) re-offers import every time unimported history exists.
+
+failure_scenario: #1595's first-run gate has to retrofit into `runOffers`/`offerable` (where import is treated identically to auth/mirror) and into `promptOnboardingSetupMode`'s summary ("imports existing agent history"), rather than plugging into a clean seam. The test `TestOnboardingLadder_ModeAll_RunsImportOffer` and `TestNewOnboardingOfferRunner_WiresImportOffer` both assert import runs unconditionally, so #1595 must rewrite behavioral tests, not just add them. If the gate is meant to run import only on first enable, the resume-path semantics baked in here (re-offer whatever is missing) directly contradict it.
+
+---
+
+## CONVENTIONS
+
+### CONV-1 — New `huh` prompts are never tested with `ACCESSIBLE=1`
+`cmd/entire/cli/onboarding_offer.go` (`promptOnboardingSetupMode`, `confirmOnboardingRung`) — tests in `onboarding_offer_test.go`
+
+CLAUDE.md, Accessibility → Key Points: *"Test new interactive features with `ACCESSIBLE=1` to ensure they work"* (line 682). The two new forms correctly use `NewAccessibleForm` (compliant with line 681), but every test injects fakes for `promptMode`/`confirmRung` (e.g. `newTestOffersRunner` sets `r.promptMode = func(...)` at `onboarding_offer_test.go:979`), so the real forms — and their accessible rendering — are never exercised.
+
+failure_scenario: A regression in the huh form wiring (e.g. a future edit swapping `NewAccessibleForm` back to `huh.NewForm`, the exact "Bad" case at CLAUDE.md:658) passes all tests. Screen-reader users hit a broken/TUI-only consent prompt with no coverage catching it.
+
+### CONV-2 — `--agent` non-interactive setup path can still prompt for onboarding
+`cmd/entire/cli/setup.go:2451` (`runEnableOnboarding(ctx, w, opts.Yes)` inside `setupAgentHooksNonInteractive`)
+
+CLAUDE.md, Agent-Safe CLI Fallbacks: *"Agents must be able to complete the same read-only workflow from a non-interactive terminal … Flag the change if a non-interactive agent can only see a … confirmation dialog"* (lines 569-592). `runEnableOnboarding` only forces `canPrompt=false` when `assumeYes` is set (`onboarding_offer.go:runEnableOnboarding`). In `setupAgentHooksNonInteractive` without `--yes`, `canPrompt` falls back to `interactive.CanPromptInteractively()`, so a function explicitly named "NonInteractive" will present the huh consent select whenever a TTY is present.
+
+failure_scenario: An agent orchestrating `entire enable --agent claude-code` (TTY attached, no `--yes`) blocks on the "Finish setup?" select with no way to proceed. This relies entirely on `CanPromptInteractively` returning false — the only guardrail is `interactive.UnderTest()`/no-TTY, not the command's own non-interactive contract. Worth confirming the intended contract: the inline comment says "the --agent path can still be a TTY," which reads as deliberate, but it conflicts with the function name and the fallback rule.
+
+Note: I did **not** find violations for the fmt.Print*/logging split (all new `fmt.Fprint*` writes go to the command writer for user-facing output, per CLAUDE.md:411), user-content-in-logs (the onboarding code uses no `logging.*` calls at all; `status --json` `setup` emits only state strings), or direct settings access outside the settings package (config touched only via `strategy.*` helpers).</result>
+<usage><subagent_tokens>79243</subagent_tokens><tool_uses>7</tool_uses><duration_ms>214239</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a4909237007c70c06</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/a4909237007c70c06.output</output-file>
+<status>completed</status>
+<summary>Agent "Comment accuracy review of PR #1618" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>**Summary**: Analyzed all doc comments in the onboarding-ladder diff (`git diff main...HEAD`, PR #1618): `cmd/entire/cli/onboarding/onboarding.go`, `onboarding_rungs.go`, `onboarding_offer.go`, `onboarding_offer_actions.go`, `onboarding_render.go`, both cache files, tests, and the `setup.go`/`status.go` edits. I verified each claim against the code and the 8-commit history. Found 5 factual/rot issues (three are exactly the "earlier behavior" categories flagged: no-offer import, uncached probes, PR #1595) and 6 smaller improvement opportunities. Comment quality overall is high — most comments state constraints and rationale, not code restatement.
+
+---
+
+**Critical Issues**
+
+1. **Stale "no offer" example on a field that is also dead code**
+   - Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding/onboarding.go:73-75`
+   - Issue: `// Offer runs the rung's interactive setup step. Nil means the rung has no inline offer (e.g. import until the enable-time offer lands).` Two problems. (a) The example is rotted: the import rung gained an inline offer in commit `4c80ae0ba` (`runOnboardingImport`, wired at `onboarding_offer.go:167`). (b) Worse, the `Offer` field itself is never read or set anywhere in the codebase — production wiring goes through `onboardingOfferRunner.offerFns` (`onboarding_offer.go:38`, `onboarding_offer.go:164-168`), not `Rung.Offer`. The comment actively misdirects a future maintainer toward the wrong extension point.
+   - Suggestion: Delete the unused `Offer` field (and its comment). If it must stay for a planned refactor, rewrite as: "Offer is currently unused; enable's offers are wired via onboardingOfferRunner.offerFns keyed by Rung.Key" — and drop the import example entirely.
+
+2. **Package doc claims ground truth "on every check"; the mirror probe is now cached**
+   - Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding/onboarding.go:3` (package doc: "each recomputing done/missing from ground truth on every check"), reinforced at line 71 ("Check recomputes the rung's state from ground truth")
+   - Issue: Since commit `95a17113c`, the mirror rung's production check reads a 15-minute-TTL per-user file cache (`mirrorProbeTTL`, `onboarding_mirror_cache.go:16`; consulted in `probeRepoMirrored`, `onboarding_rungs.go:138-145`). A mirror removed out-of-band renders Done for up to 15 minutes — that is not "ground truth on every check". (The import-scan memoization is fingerprint-exact and doesn't contradict the claim; the TTL cache does.)
+   - Suggestion: Qualify, e.g. "each recomputing done/missing from ground truth (or a short-TTL cache of it, for network probes) on every check", or move the ground-truth claim to the rungs that actually honor it.
+
+3. **Doc example no longer matches the function's output**
+   - Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_offer.go:200-202`
+   - Issue: `onboardingSetupSummary` doc example says `"Logs in to entire.io and mirrors github.com/acme/api so sessions and commits appear in the web UI."` The actual output (lines 210, 231) is `"Logs in to entire.io and mirrors this repo so your work shows up in the web UI."` — the mirror step never includes a slug, and the closing clause is different. The comment dates from `f3a322df0`; the copy changed underneath it.
+   - Suggestion: Update the example to the real string: `// "Logs in to entire.io and mirrors this repo so your work shows up in the web UI."`
+
+4. **PR #1595 reference asserts a plan that contradicts this branch's own semantics**
+   - Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_offer_actions.go:40-41`
+   - Issue: "Minimal by design — PR #1595's richer enable-time offer (per-agent selection, first-run gating) replaces these internals when it lands." I checked PR #1595: it is still OPEN, and its core design is **first-run-only** gating ("gated on `!settings.IsSetUpAny`… Re-enable never re-offers"). That directly contradicts the ladder's load-bearing resume-path contract documented at `onboarding_offer.go:32-34` and `setup.go:914-915` (re-running enable re-offers whatever is still missing). #1595 as described cannot simply "replace these internals" without regressing the documented resume path — more likely #1595 gets rebased/reduced onto this ladder. The comment also has the classic rot shape of predicting an unmerged PR's fate.
+   - Suggestion: Drop the prediction. Either state only present behavior ("Minimal by design: all-agents, no per-agent selection") or soften to a tracked cross-reference: "PR #1595 explores per-agent selection for this offer; if adopted it must keep the ladder's re-offer-on-re-enable semantics."
+
+5. **`setup.go` call-site comments enumerate "(login, mirror)" — import offer missing**
+   - Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/setup.go:1217` and `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/setup.go:1706`
+   - Issue: Both comments ("Connect rungs (login, mirror): one consent prompt…" and "Connect rungs (login, mirror) — same ladder as interactive enable…") were written in `3fbeea028`, before the import offer landed in `4c80ae0ba`. `runEnableOnboarding` now also offers history import (`onboarding_offer.go:167`). This is precisely the "comment still claiming the import rung has no offer" pattern.
+   - Suggestion: Either update both to "(login, mirror, import)" or — more rot-resistant — drop the enumeration: "Connect rungs: one consent prompt covering whatever is missing…". The parenthetical will go stale again with the next rung.
+
+---
+
+**Improvement Opportunities**
+
+6. **`patchSucceededOffers` documents a scenario that the write-through cache now normally prevents**
+   - Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_offer.go:66-69`
+   - Current state: The example "(mirror create returns before the server-side clone finishes)" was the live failure mode when the helper was added (`2b5610dc7`). Since `577523c5c`, `runOnboardingMirrorCreate` write-throughs the probe cache (`onboarding_offer_actions.go:106-109`), so the closing re-check normally reads "mirrored" from cache and the patch never fires for mirror. It remains a genuine fallback (the cache write is best-effort and can fail silently), but the comment presents it as the primary mechanism.
+   - Suggestion: Reword to acknowledge the layering, e.g. "…whose probe hasn't caught up (fallback: the mirror-create write-through in runOnboardingMirrorCreate normally covers this, but the cache write is best-effort)".
+
+7. **"slice of *coreapi.Client" is a misnomer**
+   - Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_rungs.go:84`
+   - Current state: `// availableMirrorLister is the slice of *coreapi.Client the mirror probe needs` — in Go, "slice" reads as `[]T`; this is an interface capturing a method subset.
+   - Suggestion: "availableMirrorLister is the subset of *coreapi.Client's methods the mirror probe needs; a seam so probeMirrorAcross is testable without a control plane."
+
+8. **`probeMirror` seam doc still reads single-core**
+   - Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_rungs.go:41`
+   - Current state: `// probeMirror asks the control plane whether owner/repo is mirrored.` Since `95a17113c` the production implementation probes every distinct reachable core (active context + default cluster) and consults/updates a cache. As the seam contract, singular "the control plane" is tolerable, but it's the last remaining single-core phrasing.
+   - Suggestion: "probeMirror reports whether owner/repo is mirrored on any reachable core (production: cached, multi-core — see probeRepoMirrored)."
+
+9. **`Check.Hint` doc omits its Unknown-state role**
+   - Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding/onboarding.go:61-63`
+   - Current state: "Hint is the exact command to run later when the rung is skipped/missing" — but every Unknown check also carries a hint (`entire auth status`, `entire repo mirror list`, `entire import`), which the renderer surfaces as "couldn't check — retry with `…`" (`onboarding_render.go:48-52`).
+   - Suggestion: "…when the rung is skipped/missing, or the retry/diagnose command when the check couldn't run."
+
+10. **`promptOnboardingSetupMode` doc says summary comes "from the missing rungs' titles"**
+    - Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_offer.go:176-177`
+    - Current state: `onboardingSetupSummary` switches on `Rung.Key` with hardcoded phrases (lines 206-213); titles are not used.
+    - Suggestion: "…summarizing what 'finish setup' will do from the missing rungs' keys" (or just "from the missing rungs").
+
+11. **`renderOnboardingChecklist` doc overstates when the enable pointer renders**
+    - Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_render.go:19-21`
+    - Current state: "anything less renders one row per applicable rung plus a pointer back at `entire enable`" — the pointer renders only when `Missing()` is non-empty (line 60); an incomplete ladder whose only non-done rungs are Unknown renders rows with no pointer (the render test at `onboarding_render_test.go:132-134` depends on exactly this).
+    - Suggestion: "…plus, when actionable steps remain, a pointer back at `entire enable`".
+
+---
+
+**Recommended Removals**
+
+None beyond issue 1 — if the dead `Rung.Offer` field is removed, its comment goes with it. No comments merely restate code; the diff is notably free of that failure mode.
+
+---
+
+**Positive Findings**
+
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_rungs.go:57-60` — "deliberately not RefreshedLoginToken, which can hit the network" is a verified, load-bearing why-comment (both functions exist; the offline constraint is real).
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_rungs.go:91-96` — `probeMirrorAcross` explains the federation-invisibility failure mode ("re-offering creation forever") rather than the loop mechanics; matches the code exactly, including "errors matter only when every core is unreachable".
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_import_cache.go:16-22` — precise, verified description of exact-fingerprint invalidation (path/mtime/size + metadata-branch tip), including the hot-path rationale.
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/cli-onboard/cmd/entire/cli/onboarding_rungs.go:192-197` and `:225-228` — the two `cacheable = false` comments state real invariants (don't fingerprint a moving target; never memoize a partial result) that would be easy to break in a refactor.
+- The skip-mode comments (`onboarding_offer.go:23-26`) correctly reflect the post-`48fcbeb0a` semantics ("declines the offers this once — tracking continues either way") — no rot from that re-wording survived.</result>
+<usage><subagent_tokens>79794</subagent_tokens><tool_uses>23</tool_uses><duration_ms>337004</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a6d19c36c4193978c</task-id>
+<tool-use-id>toolu_01An95wc2c3DXShcH3EkoD4j</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/a6d19c36c4193978c.output</output-file>
+<status>completed</status>
+<summary>Agent "Angle A: line-by-line scan" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Read the full diff and the enclosing production functions. Findings below (repo-relative paths, honest confidence).
+
+---
+
+**1. `cmd/entire/cli/onboarding_offer_actions.go` ~882-889 — a suspended (or empty) mirror is reported/cached as "mirrored ✓"**
+`runOnboardingMirrorCreate` calls `createAndAwaitMirror(..., noWait=true, ...)`, then on `err == nil` unconditionally prints "Mirror registered..." and runs `defaultMirrorProbeCache().put(owner+"/"+repo, true, ...)`. But `createAndAwaitMirror` (repo_mirror.go:250-273) returns `(outcome, nil)` — no error — when the placement already exists and is **admin-suspended**, and also when the upstream is **empty**.
+Failure scenario: user runs `entire enable` on a repo whose mirror was suspended by an admin. The offer swallows the suspension, prints "Mirror registered — the initial clone continues in the background", and write-throughs `mirrored=true`. The closing checklist and `entire status` then show a green "Repo mirrored ✓" for an unusable mirror — directly contradicting the one-shot `repo mirror create` path (`reportOneShotMirror`, repo_mirror.go:300-305), which warns and exits non-zero for the identical suspension.
+
+**2. `cmd/entire/cli/onboarding_offer.go` ~571-616 — consent prompt promises mirror setup that can never run when the auth rung is `Unknown`**
+`offerable` builds the prompt list from `onboarding.Missing()` (Missing + Blocked). When `contexts.json` is unreadable, `authRung` returns `StateUnknown` (onboarding_rungs.go:1841-1843), so auth is excluded from `Missing()` and never offered; but `mirrorRung` sees `authed==false` → `StateBlocked`, which *is* in `Missing()` and has an offerFn, so mirror is added to the consent prompt.
+Failure scenario: corrupt/unreadable context store → the prompt says it will "mirror this repo", user picks "set up everything", `runOffers` re-checks each rung and skips auth (Unknown ≠ Missing) and mirror (still Blocked ≠ Missing) → nothing runs. The user consented to setup that silently no-ops, and there is no path to log in via onboarding in this state.
+
+**3. `cmd/entire/cli/status.go` 106-108 (+ onboarding_rungs.go `probeRepoMirrored`) — `entire status` regresses from instant/offline to a blocking network probe**
+`runStatus` now calls `onboardingStatusResults(ctx)` unconditionally when enabled, which runs the mirror rung → `probeRepoMirrored` → up to `mirrorProbeTimeout` (5s) of control-plane round-trip whenever the probe cache is cold or past TTL.
+Failure scenario: an authed user on a flaky/slow network, or whose 15-min success-TTL just expired, runs `entire status` — a previously local-only, instant command now stalls up to 5s before printing. (The 5-min failure-TTL bounds *repeated* hangs, but the first hit each window still blocks.)
+
+**4. `cmd/entire/cli/status.go` 106-108 (+ onboarding_rungs.go `discoverAgentImports`) — first `entire status` after any checkpoint parses every transcript on the hot path**
+The import rung's dry-run scan is memoized behind a fingerprint that includes the metadata-branch tip, so *every* new checkpoint or import moves the ref and invalidates the cache. `discoverAgentImports` then re-opens the checkpoint store and re-parses all discovered transcripts synchronously inside `entire status`.
+Failure scenario: a heavy user (many/large agent transcripts) who checkpoints frequently pays a full transcript re-parse on essentially every `entire status`, since the tip moves between invocations — the cache rarely hits on the exact path it was designed to speed up.
+
+Notes on things I checked and cleared: the `Ladder.Checks` goroutine closure (onboarding.go:100-106) is safe — go.mod is `go 1.26`, so per-iteration loop capture; `strings.ToUpper(summary[:1])` (onboarding_offer.go:753) can't panic/mis-slice because every step string is hardcoded ASCII and `len(steps)&gt;0` guards emptiness; `auth.Contexts`/`LoginTokenForContext` re-read from disk with no shared mutable cache, so the concurrent auth-rung / mirror-rung `deps.authed` calls don't race; `probeMirrorAcross`'s `out.Available` deref is safe because the ogen client returns a non-nil body whenever `err == nil`.</result>
+<usage><subagent_tokens>85552</subagent_tokens><tool_uses>14</tool_uses><duration_ms>304630</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ab5a508bf1e2a7331</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/ab5a508bf1e2a7331.output</output-file>
+<status>completed</status>
+<summary>Agent "Angle C: cross-file tracer" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I've traced all six angles against the actual code. Here are my findings.
+
+## Verified findings
+
+### 1. `status --json` now performs network I/O + cache-file writes (was pure/local)
+**File:** `cmd/entire/cli/status.go:666` (JSON path), also `:106` (human path)
+**Trace:** `onboardingStatusResults(ctx)` → `onboardingLadder(...).Checks` runs every rung concurrently. `mirrorRung.Check` → `deps.probeMirror` → `probeRepoMirrored` (onboarding_rungs.go:136) dials the control plane via `coreapi.New()`/`NewForCluster` (5s timeout) and writes `onboarding_mirror.json` under `userdirs.Cache()`; `importRung.Check` → `discoverAgentImports` opens the go-git repo, parses transcripts (dry-run), and writes `onboarding_imports.json`.
+**Failure scenario:** An agent/CI script parsing `entire status --json` — previously a fast, offline-safe, side-effect-free command — now blocks up to 5s on a control-plane round-trip, emits network traffic, and writes files into the user cache dir on every invocation. In an offline/sandboxed agent each call also seeds a 5-minute failure-cache entry. The rung docs promise "must not prompt," but network + disk side effects on the `--json` contract are new and unannounced. This is the strongest concern for machine consumers.
+
+### 2. Transient probe blip suppresses the mirror-create offer for the whole failure-TTL window
+**Files:** `cmd/entire/cli/onboarding_rungs.go:157` (`cache.putUnreachable`) + `:287` (probe error → `StateUnknown`); `cmd/entire/cli/onboarding_offer.go:86` (`offerable` → `onboarding.Missing`, which excludes `StateUnknown`).
+**Trace:** In `entire enable` (user already/just logged in), `mirrorRung.Check` calls `probeRepoMirrored`; a transient network error caches "unreachable" for `mirrorProbeFailureTTL` (5 min) and returns `StateUnknown`. `offerable()` filters to `onboarding.Missing()` = Missing/Blocked only, so Unknown is dropped.
+**Failure scenario:** A single network blip during enable's first `ladder.Checks` (or the post-login re-check in `runOffers`, where `if check.State != StateMissing { continue }` also skips it) means the mirror-create offer is never presented even under "set up everything." Because the failure is cached, re-running `entire enable` within 5 minutes keeps reading the cached unreachable result, so the user cannot complete mirror setup until the TTL expires — the closing checklist just shows a bare "?" mirror row.
+
+### 3. `authRung` executes twice concurrently per ladder run (redundant keyring/context reads)
+**Files:** `cmd/entire/cli/onboarding_rungs.go:73` (`deps.authed = func...{ return authRung(deps).Check(ctx)... }`), `onboardingLadder` (authRung + mirrorRung both present), `onboarding/onboarding.go:97` (`Checks` runs each rung in its own goroutine).
+**Trace:** `Checks` launches `authRung.Check` in one goroutine while `mirrorRung.Check` concurrently calls `deps.authed(ctx)` → `authRung(deps).Check(ctx)`. Both invoke `auth.Contexts` (disk read, `context_store.go:102`) and `deps.tokenForContext` → `auth.LoginTokenForContext` → `tokenstore.Get` (OS keyring) at the same time.
+**Failure scenario:** Every `entire status`/`entire enable` reads the keyring twice concurrently. On macOS `security` this is functionally safe but doubles keychain latency; on backends that serialize or prompt (locked keychain, libsecret) it can trigger two concurrent unlock prompts. There's also a small correctness window: if the token rotates between the two reads, the standalone auth rung and the mirror rung's `authed()` gate can momentarily disagree within the same checklist. (Note: the *recursion* concern in trace 3 is clean — `authRung.Check` never reads `deps.authed`, so no infinite loop despite `deps.authed` being set.)
+
+### 4. `patchSucceededOffers` mislabels the local import rung as "created — sync in progress"
+**File:** `cmd/entire/cli/onboarding_offer.go:70-77`
+**Trace:** `patchSucceededOffers` rewrites *any* succeeded-but-not-Done rung to `StateUnknown` / `Detail: "created — sync in progress"`. The import offer (`onboarding_offer_actions.go:42`) is a fully local, synchronous import with no server-side async component.
+**Failure scenario:** If the import offer runs, succeeds, but the closing re-check still reports pending turns (a session dry-run counted as importable that the real run skips), the import row renders "created — sync in progress" — wording that only makes sense for the mirror rung's background clone. The user is told to wait for a sync that will never happen. (Mirror/auth benefit from the write-through and fingerprint invalidation, so this misfires specifically on import.)
+
+### 5. Import-offer behavior differs from standalone `entire import &lt;agent&gt;` (low risk)
+**Files:** `cmd/entire/cli/onboarding_offer_actions.go:42` (`runOnboardingImport`) vs `cmd/entire/cli/import_cmd.go:45-82`.
+**Trace:** Both honor checkpoint policy (`ensureCheckpointPolicyAllowsCheckpointData`) and redaction (`strategy.EnsureRedactionConfigured`) before any write — safety parity holds. The offer loops over `agentimport.All()` and runs a real (non-dry-run) import for *every* agent with discoverable history, all sessions; the standalone command is per-agent and supports `--path`/`--session`/`--dry-run`.
+**Failure scenario:** Low severity — no safety drift. The only divergence is scope: enable imports everything discoverable unconditionally, so a user with large multi-agent history gets a broader import than `entire import &lt;agent&gt;` would do, with no way to scope it from the enable path.
+
+## Traces cleared (no bug found)
+- **Trace 1 (double-invocation / wrong writer):** The four `runEnableOnboarding` call sites (setup.go:916, 922, 1220, 1708) are mutually exclusive — `--agent` returns at :883 before the `IsSetUpAny` block; `runEnable` (:1248) is the lightweight path and does not call the interactive/non-interactive functions; `runSetupFlow` reaches only :1220. All pass `cmd.OutOrStdout()`/propagated `w`. `printEnabledStatus` (:1238) does not render the checklist, so no double-print on the already-enabled path.
+- **Trace 4 (stale cache before login):** Before login the mirror rung is `StateBlocked`, so `probeRepoMirrored` is never called and nothing is cached; `ResolveControlPlaneTarget` and `auth.Contexts` both read fresh from disk, so the post-login re-check sees the new context; `runOnboardingMirrorCreate`'s write-through (`onboarding_offer_actions.go`) overwrites any prior "not mirrored" entry with the same lowercased `owner/repo` slug key. Consistent.</result>
+<usage><subagent_tokens>94562</subagent_tokens><tool_uses>20</tool_uses><duration_ms>358875</duration_ms></usage>
+</task-notification>
+
+---
+
+yes proceed
+
+---
+
+<task-notification>
+<task-id>bgldxcp8h</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/bgldxcp8h.output</output-file>
+<status>completed</status>
+<summary>Background command "Full CI on the review batch" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+1595 was merged, do we need to do anyhting on our end to finish this?
+
+---
+
+<task-notification>
+<task-id>bc3r7djg7</task-id>
+<tool-use-id>toolu_019rYpnbbR6KbTaww1uhT3En</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/bc3r7djg7.output</output-file>
+<status>completed</status>
+<summary>Background command "Full CI including merged import integration tests" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+why did the pr just grow so much? The idea was to improve the flow with things that are already existing and now this is a huge change
+
+---
+
+for the status " pull the status integration + both caches + cache shell into a follow-up PR. " would this be dependant on 1618?
+
+---
+
+it's just very large, so im just confused. After changing nothing except that the prior pr was merged grew by 1000 lines
+
+---
+
+can you do a full review then now beceause not convinced
+
+---
+
+<task-notification>
+<task-id>wxg441lcm</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/wxg441lcm.output</output-file>
+<status>completed</status>
+<summary>Dynamic workflow "Workflow-backed code review — one finder per correctness angle plus one finder covering all cleanup angles, an independent verifier for every distinct (file, line) location across the pooled candidates, then a ranked, capped findings report." completed</summary>
+<result>{"level":"high","target":"— review the full PR #1618 branch diff (git diff origin/main...HEAD), the onboarding ladder including the just-landed #1595 absorption. Context: 11 commits; three prior review rounds already fixed suspended-mirror handling, honest Unknown states, cross-core probing, cache atomicity, and the #1595 double-offer. Focus on the CURRENT state: correctness of the merged result (especially the absorption in onboarding_offer_actions.go/setup_import.go/setup.go and the autoRun/--yes semantics), regressions the fix layers may have introduced against each other, and anything remaining that would block a maintainer from merging.","summary":"The review found one high-severity regression cluster — bootstrap-path enables (non-git dir / --init-repo) return before runEnableOnboarding, silently losing the entire onboarding ladder including the #1595 import offer — plus several correctness gaps in the new ladder: --yes re-enables auto-import history a user explicitly declined, the import offer's agent scope diverges from the rung check in both directions (narrower than agentimport.All, wider than the --agent target), policy-restricted repos and the mirror hint command produce unresolvable or stale checklist states, and Ctrl-C on a rung confirm keeps walking rungs. Remaining findings are efficiency/duplication cleanups (per-turn cache misses, doubled keyring IPC, duplicate checks, hand-rolled atomic write) and one deliberate self-referential footer; the three least severe were dropped under the cap.","findings":[{"file":"cmd/entire/cli/setup.go","line":1211,"summary":"The bootstrap (--init-repo / non-git dir) enable path returns at SuppressDoneMessage before runEnableOnboarding, so it gets no onboarding ladder at all and loses the #1595 import offer that on origin/main ran before this early return (maybeOfferSessionImport was called at old line 1211, before the SuppressDoneMessage check; runGitHubBootstrapFinalize in setup_github.go never calls onboarding either). [same root cause also at: cmd/entire/cli/setup.go:1211, cmd/entire/cli/setup.go:1211, cmd/entire/cli/setup.go:1211]","failure_scenario":"A user runs `entire enable` in a non-git directory that has prior Claude Code/Codex history (bootstrap init flow, or --init-repo). On main they got the first-run import offer; on this branch enable completes with no import offer, no login/mirror offer, and no setup checklist — the connect rungs and history import silently never happen until the user happens to re-run `entire enable`, which they were just told is done. This is also the flow where the mirror rung is most relevant (a GitHub repo was just created).","category":"correctness","verdict":"CONFIRMED"},{"file":"cmd/entire/cli/onboarding_offer.go","line":191,"summary":"The removed first-run gate (firstRun := !settings.IsSetUpAny) is only partially re-established by ground truth: 'unimported turns exist' stays StateMissing forever after a user explicitly declines import, so any later `entire enable --yes` auto-imports history the user already declined.","failure_scenario":"User enables interactively and deliberately skips the import offer (privacy: doesn't want old transcripts in checkpoint metadata). Weeks later a script or the user runs `entire enable --yes` to re-enable/reinstall hooks. autoRun[KeyImport] fires with no prompt, imports all declined transcripts into the entire/checkpoints metadata branch, and they get pushed to the remote on the next git push. On origin/main firstRun=false made every re-enable a guaranteed no-import.","category":"correctness","verdict":"CONFIRMED"},{"file":"cmd/entire/cli/onboarding_offer_actions.go","line":49,"summary":"The import offer's scope (installedImportAgents — agents with hooks installed) diverges from the import rung's Missing computation (discoverAgentImports iterates agentimport.All(), every registered importer at onboarding_rungs.go:195), so the offer can import nothing while the rung that triggered it stays Missing. [same root cause also at: cmd/entire/cli/onboarding_offer_actions.go:49, cmd/entire/cli/onboarding_offer_actions.go:49]","failure_scenario":"User has Cursor (or Codex, etc.) transcript history in the repo but enables only claude-code hooks. The import rung reports Missing (\"N cursor sessions found, not imported\"), the consent prompt promises \"imports existing agent history\", the user accepts (or passes --yes, whose autoRun path hits the same code) — runOnboardingImport discovers over installed agents only, finds nothing eligible, and returns nil with no output. Nothing is imported, no message explains why, the closing checklist still shows ✗ History, and every subsequent `entire enable` re-offers the same no-op forever; the rung can never be completed through the ladder.","category":"correctness","verdict":"CONFIRMED"},{"file":"cmd/entire/cli/onboarding_offer_actions.go","line":70,"summary":"Import scope widened from the just-selected agents to ALL agents with hooks installed: old code passed []agent.Agent{ag} on the --agent path, new installedImportAgents() returns every installed agent, so `entire enable --agent X --yes` imports other agents' history too.","failure_scenario":"Repo has claude-code and gemini hooks installed. User runs `entire enable --agent claude-code --yes --force` to reinstall just Claude's hooks. The import rung discovers unimported gemini transcripts and auto-imports them (no prompt, --yes), writing gemini history the user never targeted into checkpoint metadata that is pushed with the v1 branch. On origin/main the --agent path scoped the offer strictly to the targeted agent.","category":"correctness","verdict":"CONFIRMED"},{"file":"cmd/entire/cli/onboarding_offer_actions.go","line":63,"summary":"The offer's sessionImportRun (runSelectedImports) gates on ensureCheckpointPolicyAllowsCheckpointData and skips with a note, but the import rung's Check (agentimport.Run DryRun) has no policy gate — on a policy-restricted repo the rung reports Missing forever and every consented offer silently does nothing.","failure_scenario":"In a repo whose checkpoint policy forbids checkpoint data, `entire enable` shows the import rung as Missing (dry-run counts unimported turns), the user picks \"Yes, set up everything\" (or passes --yes), runSelectedImports prints \"Note: skipping agent history import: ...\" and imports nothing, and the closing checklist still shows ✗ History with the same hint — an unresolvable offer loop on every enable/status instead of the rung reporting not-applicable/blocked.","category":"correctness","verdict":"CONFIRMED"},{"file":"cmd/entire/cli/onboarding_offer.go","line":143,"summary":"In step-by-step mode, a rung-confirm prompt error (including Ctrl-C / huh.ErrUserAborted) is logged and `continue`s to the next rung instead of aborting the offer walk, unlike the consent prompt where the same error is treated as skip-everything.","failure_scenario":"User picks \"Choose step by step\", then presses Ctrl-C on the \"Logged in\" confirm to bail out of setup. Instead of stopping, the mirror rung's confirm appears next (or, since import is selfPrompting, the import multi-select picker opens with no confirm at all), forcing the user to Ctrl-C once per remaining rung to escape; with a cancelled command context every remaining prompt errors and is swallowed one by one, still walking the full ladder.","category":"correctness","verdict":"CONFIRMED"},{"file":"cmd/entire/cli/onboarding_rungs.go","line":334,"summary":"The mirror rung's hinted command `entire repo mirror create &lt;slug&gt;` does not write through or invalidate the onboarding mirror-probe cache (only runOnboardingMirrorCreate does the put), so a cached mirrored=false survives the exact remediation the checklist prescribes.","failure_scenario":"User sees ✗ Repo mirrored in `entire status`, runs the hinted `entire repo mirror create github.com/o/r` successfully, then re-runs `entire status` — it still shows \"✗ Repo mirrored — commits won't appear in
+... (truncated 3347 chars, full result in /private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/wxg441lcm.output)</result>
+<diagnostics>Per-agent results: /Users/peytonmontei/.claude/projects/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/subagents/workflows/wf_7e317825-699/journal.jsonl — one {"type":"result",...} line per completed agent with its full return value.
+If the result above is empty or unexpected, Read this file BEFORE diagnosing — do not assume agents returned non-empty results.
+To re-run with edited post-processing: Workflow({scriptPath: '/Users/peytonmontei/.claude/projects/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/workflows/scripts/code-review-wf_7e317825-699.js', resumeFromRunId: 'wf_7e317825-699', args: "high — review the full PR #1618 branch diff (git diff origin/main...HEAD), the onboarding ladder including the just-landed #1595 absorption. Context: 11 commits; three prior review rounds already fixed suspended-mirror handling, honest Unknown states, cross-core probing, cache atomicity, and the #1595 double-offer. Focus on the CURRENT state: correctness of the merged result (especially the absorption in onboarding_offer_actions.go/setup_import.go/setup.go and the autoRun/--yes semantics), regressions the fix layers may have introduced against each other, and anything remaining that would block a maintainer from merging."}) — agents whose (prompt, opts) are unchanged replay from cache.</diagnostics>
+<usage><agent_count>20</agent_count><agents_done>20</agents_done><agents_error>0</agents_error><agents_skipped>0</agents_skipped><agents_empty_result>0</agents_empty_result><subagent_tokens>1165329</subagent_tokens><tool_uses>214</tool_uses><duration_ms>850467</duration_ms></usage>
+</task-notification>
+
+---
+
+yes start fixing
+
+---
+
+<task-notification>
+<task-id>b3qji5fxe</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/53aa8a48-c58b-4b77-9f62-406a46324e57/tasks/b3qji5fxe.output</output-file>
+<status>completed</status>
+<summary>Background command "Full CI on the findings fixes" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+did you fix all of the blockers?
+
+---
+
+now it's larger
+
+---
+
+it's a large code change for simple fix
+
+---
+
+okay try again
+
+---
+
+i thought reviewer walkthrough was going to be the walkthrough of the cahnfes
+
+---
+
+i thought reviewer walkthrough was going to be the walkthrough of the changes
+
+---
+
+can you resolve merge conflicts
