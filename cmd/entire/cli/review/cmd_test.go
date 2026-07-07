@@ -69,6 +69,48 @@ func seedReviewConfig(ctx context.Context, cfg map[string]settings.ReviewConfig)
 	return settings.SaveClonePreferences(ctx, prefs)
 }
 
+// seedReviewProfile persists an explicit profile into clone-local
+// preferences — unlike seedReviewConfig it does not invent a task, so tests
+// can distinguish user-configured tasks from the runtime default.
+func seedReviewProfile(ctx context.Context, profile settings.ReviewProfileConfig) error {
+	prefs, err := settings.LoadClonePreferences(ctx)
+	if err != nil {
+		return err
+	}
+	if prefs == nil {
+		prefs = &settings.ClonePreferences{}
+	}
+	prefs.ReviewDefaultProfile = review.DefaultProfileName
+	if profile.Judge == nil {
+		if judge := defaultTestJudge(profile.Agents); judge != "" {
+			profile.Judge = &settings.ReviewConfig{Agent: judge}
+		}
+	}
+	prefs.ReviewProfiles = map[string]settings.ReviewProfileConfig{
+		review.DefaultProfileName: profile,
+	}
+	return settings.SaveClonePreferences(ctx, prefs)
+}
+
+// newCaptureDeps builds minimal Deps that route every launch to reviewer.
+func newCaptureDeps(reviewer *captureRunConfigReviewer) review.Deps {
+	return review.Deps{
+		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
+			return []types.AgentName{types.AgentName(reviewer.name)}
+		},
+		NewSilentError: func(err error) error { return err },
+		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
+			return false, ""
+		},
+		ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
+			if agentName == reviewer.name {
+				return reviewer
+			}
+			return nil
+		},
+	}
+}
+
 func defaultTestJudge(cfg map[string]settings.ReviewConfig) string {
 	if _, ok := cfg[string(agent.AgentNameClaudeCode)]; ok {
 		return string(agent.AgentNameClaudeCode)
@@ -1323,4 +1365,64 @@ func TestComposeMultiAgentSinks_ThreadsScopeToSynthesisSink(t *testing.T) {
 		}
 	}
 	t.Fatal("no SynthesisSink composed")
+}
+
+// TestRunReview_TaskSemantics pins the task contract after the
+// persistence-only change: the built-in brief is a RUNTIME default — a
+// profile saved without a task still briefs every worker (skill-bearing
+// included, #1312's deliberate design), while a user-configured task
+// reaches workers verbatim. Setup never persisting the built-in text is
+// covered separately (TestBuildCrewProfile_NoBuiltinTaskPersisted et al).
+func TestRunReview_TaskSemantics(t *testing.T) {
+	cases := []struct {
+		name     string
+		profile  settings.ReviewProfileConfig
+		wantTask func(string) bool
+		desc     string
+	}{
+		{
+			name: "empty task briefs skill workers with runtime default",
+			profile: settings.ReviewProfileConfig{
+				Agents: map[string]settings.ReviewConfig{testAgentName: {Skills: []string{"/review"}}},
+			},
+			wantTask: func(got string) bool { return got != "" },
+			desc:     "want non-empty runtime default",
+		},
+		{
+			name: "user task reaches workers verbatim",
+			profile: settings.ReviewProfileConfig{
+				Task:   "Focus on the storage layer only.",
+				Agents: map[string]settings.ReviewConfig{testAgentName: {Skills: []string{"/review"}}},
+			},
+			wantTask: func(got string) bool { return got == "Focus on the storage layer only." },
+			desc:     "want the user task verbatim",
+		},
+		{
+			name: "skill-less worker briefed too",
+			profile: settings.ReviewProfileConfig{
+				Agents: map[string]settings.ReviewConfig{testAgentName: {Prompt: "Look carefully."}},
+			},
+			wantTask: func(got string) bool { return got != "" },
+			desc:     "want non-empty runtime default",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupCmdTestRepo(t)
+			if err := seedReviewProfile(context.Background(), tc.profile); err != nil {
+				t.Fatal(err)
+			}
+			reviewer := &captureRunConfigReviewer{name: testAgentName}
+			cmd := review.NewCommand(newCaptureDeps(reviewer))
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{"general"})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tc.wantTask(reviewer.got.Task) {
+				t.Errorf("Task = %q, %s", reviewer.got.Task, tc.desc)
+			}
+		})
+	}
 }
