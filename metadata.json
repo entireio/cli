@@ -1,0 +1,31 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KWYP9YXJ19MGHWQ2RWFA4EDR",
+  "strategy": "manual-commit",
+  "branch": "feat/review-live-tokens",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/reviewer.go",
+    "cmd/entire/cli/agent/claudecode/reviewer_test.go",
+    "cmd/entire/cli/agent/codex/review_tokens.go",
+    "cmd/entire/cli/agent/codex/review_tokens_test.go",
+    "cmd/entire/cli/agent/codex/reviewer.go",
+    "cmd/entire/cli/agent/codex/reviewer_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 37002,
+    "cache_creation_tokens": 992021,
+    "cache_read_tokens": 73250802,
+    "output_tokens": 192990,
+    "api_call_count": 281
+  }
+}
