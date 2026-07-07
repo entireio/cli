@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KWYW70EFC8JERS2Q1FRNFXKY",
+  "strategy": "manual-commit",
+  "branch": "feat/codex-skill-discovery",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/review/cmd_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 37707,
+    "cache_creation_tokens": 2704537,
+    "cache_read_tokens": 84991300,
+    "output_tokens": 214217,
+    "api_call_count": 311
+  }
+}
