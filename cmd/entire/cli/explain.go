@@ -1089,7 +1089,7 @@ func formatCheckpointSummaryError(err error, deadline time.Duration) (string, []
 	var claudeErr *claudecode.ClaudeError
 	switch {
 	case errors.As(err, &claudeErr):
-		switch claudeErr.Kind { //nolint:exhaustive // ClaudeErrorUnknown handled by default
+		switch claudeErr.Kind {
 		case claudecode.ClaudeErrorAuth:
 			label := "Claude authentication failed"
 			rows := []explainRow{
@@ -1120,6 +1120,8 @@ func formatCheckpointSummaryError(err error, deadline time.Duration) (string, []
 		case claudecode.ClaudeErrorCLIMissing:
 			label := "Claude CLI is not installed or not on PATH"
 			return label, nil, errors.New("Claude CLI is not installed or not on PATH") //nolint:staticcheck // ST1005
+		case claudecode.ClaudeErrorUnknown:
+			fallthrough
 		default:
 			label := "Claude failed to generate the summary"
 			suffix := formatClaudeErrorSuffix(claudeErr)
