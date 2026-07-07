@@ -18,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -225,17 +224,7 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 		return handleLogsOnlyRewindInteractive(ctx, w, errW, start, *selectedPoint, shortID)
 	}
 
-	// Preview rewind to show warnings about files that will be deleted
-	preview, previewErr := start.PreviewRewind(ctx, *selectedPoint)
-	if previewErr != nil {
-		fmt.Fprintf(errW, "Warning: could not preview rewind effects: %v\n", previewErr)
-	} else if preview != nil && len(preview.FilesToDelete) > 0 {
-		fmt.Fprintf(errW, "\nWarning: The following untracked files will be DELETED:\n")
-		for _, f := range preview.FilesToDelete {
-			fmt.Fprintf(errW, "  - %s\n", f)
-		}
-		fmt.Fprintf(errW, "\n")
-	}
+	printRewindPreviewWarnings(ctx, errW, start, *selectedPoint)
 
 	// Confirm rewind
 	var confirm bool
@@ -331,12 +320,9 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 	var restored bool
 	if !selectedPoint.CheckpointID.IsEmpty() {
 		// Try checkpoint storage first for committed checkpoints
-		returnedSessionID, err := restoreSessionTranscriptFromStrategy(ctx, selectedPoint.CheckpointID, sessionID, agent)
-		if err == nil {
+		if returnedSessionID, err := restoreSessionTranscriptFromStrategy(ctx, selectedPoint.CheckpointID, sessionID, agent); err == nil {
 			sessionID = returnedSessionID
 			restored = true
-		} else if checkpointpolicy.IsUnsupportedVersion(err) {
-			return err
 		}
 	}
 
@@ -497,17 +483,7 @@ func runRewindToInternal(ctx context.Context, w, errW io.Writer, commitID string
 		return handleLogsOnlyRewindNonInteractive(ctx, w, errW, start, *selectedPoint)
 	}
 
-	// Preview rewind to show warnings about files that will be deleted
-	preview, previewErr := start.PreviewRewind(ctx, *selectedPoint)
-	if previewErr != nil {
-		fmt.Fprintf(errW, "Warning: could not preview rewind effects: %v\n", previewErr)
-	} else if preview != nil && len(preview.FilesToDelete) > 0 {
-		fmt.Fprintf(errW, "\nWarning: The following untracked files will be DELETED:\n")
-		for _, f := range preview.FilesToDelete {
-			fmt.Fprintf(errW, "  - %s\n", f)
-		}
-		fmt.Fprintf(errW, "\n")
-	}
+	printRewindPreviewWarnings(ctx, errW, start, *selectedPoint)
 
 	// Resolve agent once for use throughout
 	agent, err := getAgent(selectedPoint.Agent)
@@ -576,12 +552,9 @@ func runRewindToInternal(ctx context.Context, w, errW io.Writer, commitID string
 	var restored bool
 	if !selectedPoint.CheckpointID.IsEmpty() {
 		// Try checkpoint storage first for committed checkpoints
-		returnedSessionID, err := restoreSessionTranscriptFromStrategy(ctx, selectedPoint.CheckpointID, sessionID, agent)
-		if err == nil {
+		if returnedSessionID, err := restoreSessionTranscriptFromStrategy(ctx, selectedPoint.CheckpointID, sessionID, agent); err == nil {
 			sessionID = returnedSessionID
 			restored = true
-		} else if checkpointpolicy.IsUnsupportedVersion(err) {
-			return err
 		}
 	}
 
@@ -735,6 +708,22 @@ func legacyFallbackTranscriptPath(metadataDir string) string {
 	return filepath.Join(cleaned, paths.TranscriptFileNameLegacy)
 }
 
+// printRewindPreviewWarnings previews the rewind and warns about untracked
+// files it would delete. Preview failures are non-fatal — the rewind itself
+// still runs, so the warning degrades to a notice.
+func printRewindPreviewWarnings(ctx context.Context, errW io.Writer, start *strategy.ManualCommitStrategy, point strategy.RewindPoint) {
+	preview, previewErr := start.PreviewRewind(ctx, point)
+	if previewErr != nil {
+		fmt.Fprintf(errW, "Warning: could not preview rewind effects: %v\n", previewErr)
+	} else if preview != nil && len(preview.FilesToDelete) > 0 {
+		fmt.Fprintf(errW, "\nWarning: The following untracked files will be DELETED:\n")
+		for _, f := range preview.FilesToDelete {
+			fmt.Fprintf(errW, "  - %s\n", f)
+		}
+		fmt.Fprintf(errW, "\n")
+	}
+}
+
 func restoreSessionTranscript(ctx context.Context, w io.Writer, transcriptFile, sessionID string, agent agentpkg.Agent) error {
 	sessionFile, err := resolveTranscriptPath(ctx, sessionID, agent)
 	if err != nil {
@@ -768,14 +757,6 @@ func restoreSessionTranscriptFromStrategy(ctx context.Context, cpID id.Checkpoin
 	if err != nil {
 		return "", fmt.Errorf("open checkpoint store: %w", err)
 	}
-	summary, err := checkpoint.ReadCheckpoint(ctx, stores.Persistent, cpID)
-	if err != nil {
-		return "", fmt.Errorf("failed to read checkpoint: %w", err)
-	}
-	if err := checkpointpolicy.EnsureCanReadVersion(cpID.String(), summary.CheckpointVersion); err != nil {
-		return "", err
-	}
-
 	logContent, returnedSessionID, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, stores.Persistent, cpID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get session log: %w", err)

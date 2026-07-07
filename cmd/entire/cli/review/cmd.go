@@ -1568,10 +1568,6 @@ func reviewSummaryTokenEnricher(worktreeRoot, headSHA string) func(context.Conte
 	}
 }
 
-func reviewAgentRunTokenEnricher(worktreeRoot, headSHA string) func(context.Context, reviewtypes.AgentRun) reviewtypes.AgentRun {
-	return reviewAgentRunTokenEnricherForRuns(worktreeRoot, headSHA, nil)
-}
-
 func reviewAgentRunTokenEnricherForRuns(worktreeRoot, headSHA string, planned []reviewtypes.AgentRun) func(context.Context, reviewtypes.AgentRun) reviewtypes.AgentRun {
 	var mu sync.Mutex
 	usedSessions := map[string]bool{}

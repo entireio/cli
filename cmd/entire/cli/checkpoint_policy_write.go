@@ -15,17 +15,6 @@ import (
 var errUnsupportedCheckpointPolicy = errors.New("checkpoint policy cannot be satisfied by this Entire CLI")
 var errUnreadableCheckpointPolicy = errors.New("checkpoint policy could not be read")
 
-func checkpointVersionForNewCheckpoint(ctx context.Context, repo *git.Repository) (string, error) {
-	policy, err := checkpointPolicyForCheckpointData(ctx, repo)
-	if err != nil {
-		return "", err
-	}
-	if !checkpointpolicy.CanSatisfyPolicy(policy) {
-		return "", unsupportedCheckpointPolicyError(policy)
-	}
-	return checkpointpolicy.Normalize(policy).CheckpointVersion, nil
-}
-
 func ensureCheckpointPolicyAllowsCheckpointData(ctx context.Context, repo *git.Repository) error {
 	policy, err := checkpointPolicyForCheckpointData(ctx, repo)
 	if err != nil {

@@ -21,7 +21,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -90,11 +89,7 @@ func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
 	if err != nil {
 		return err
 	}
-	checkpointVersion := CheckpointVersionBranchV1
-	if opts.CheckpointVersion != "" {
-		checkpointVersion = opts.CheckpointVersion
-	}
-	checkpointSubtree, taskMetadataPath, err := s.applySessionWrite(ctx, opts, existing, opts.CheckpointID.Path()+"/", checkpointVersion)
+	checkpointSubtree, taskMetadataPath, err := s.applySessionWrite(ctx, opts, existing, opts.CheckpointID.Path()+"/")
 	if err != nil {
 		return err
 	}
@@ -216,9 +211,8 @@ func (s *GitStore) spliceCheckpointSubtree(rootTreeHash plumbing.Hash, checkpoin
 // applySessionWrite applies a Session write to a checkpoint's current subtree and
 // returns the new checkpoint subtree hash plus the task metadata path (for the
 // commit trailer). It is backing-independent: the v1-branch store passes the
-// sharded basePath and the per-checkpoint-ref store passes "". checkpointVersion
-// is stamped into a freshly written root summary.
-func (s *treeWriter) applySessionWrite(ctx context.Context, opts WriteOptions, existing *object.Tree, basePath, checkpointVersion string) (plumbing.Hash, string, error) {
+// sharded basePath and the per-checkpoint-ref store passes "".
+func (s *treeWriter) applySessionWrite(ctx context.Context, opts WriteOptions, existing *object.Tree, basePath string) (plumbing.Hash, string, error) {
 	entries, err := s.flattenExisting(existing, basePath)
 	if err != nil {
 		return plumbing.ZeroHash, "", err
@@ -232,7 +226,7 @@ func (s *treeWriter) applySessionWrite(ctx context.Context, opts WriteOptions, e
 		}
 	}
 
-	if err := s.writeStandardCheckpointEntries(ctx, opts, basePath, entries, checkpointVersion); err != nil {
+	if err := s.writeStandardCheckpointEntries(ctx, opts, basePath, entries); err != nil {
 		return plumbing.ZeroHash, "", err
 	}
 
@@ -570,7 +564,7 @@ func (s *treeWriter) writeFinalTaskCheckpoint(ctx context.Context, opts WriteOpt
 //	│   └── content_hash.txt
 //	├── 2/                    # Second session
 //	└── ...
-func (s *treeWriter) writeStandardCheckpointEntries(ctx context.Context, opts WriteOptions, basePath string, entries map[string]object.TreeEntry, checkpointVersion string) error {
+func (s *treeWriter) writeStandardCheckpointEntries(ctx context.Context, opts WriteOptions, basePath string, entries map[string]object.TreeEntry) error {
 	// Read existing summary to get current session count
 	var existingSummary *CheckpointSummary
 	metadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
@@ -659,7 +653,7 @@ func (s *treeWriter) writeStandardCheckpointEntries(ctx context.Context, opts Wr
 	}
 
 	// Update root metadata.json with CheckpointSummary
-	return s.writeCheckpointSummary(opts, basePath, entries, sessions, checkpointVersion)
+	return s.writeCheckpointSummary(opts, basePath, entries, sessions)
 }
 
 // writeSessionToSubdirectory writes a single session's files to a numbered subdirectory.
@@ -765,7 +759,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 
 // writeCheckpointSummary writes the root-level CheckpointSummary with aggregated statistics.
 // sessions is the complete sessions array (already built by the caller).
-func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, entries map[string]object.TreeEntry, sessions []SessionFilePaths, checkpointVersion string) error {
+func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, entries map[string]object.TreeEntry, sessions []SessionFilePaths) error {
 	checkpointsCount, filesTouched, tokenUsage, err := s.reaggregateFromEntries(basePath, len(sessions), entries)
 	if err != nil {
 		return fmt.Errorf("failed to aggregate session stats: %w", err)
@@ -782,7 +776,6 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	if entry, exists := entries[rootMetadataPath]; exists {
 		existingSummary, readErr := s.readSummaryFromBlob(entry.Hash)
 		if readErr == nil {
-			checkpointVersion = existingSummary.CheckpointVersion
 			if combinedAttribution == nil {
 				combinedAttribution = existingSummary.CombinedAttribution
 			}
@@ -801,7 +794,6 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	summary := CheckpointSummary{
 		CheckpointID:        opts.CheckpointID,
 		CLIVersion:          versioninfo.Version,
-		CheckpointVersion:   checkpointVersion,
 		Strategy:            opts.Strategy,
 		Branch:              opts.Branch,
 		CheckpointsCount:    checkpointsCount,
@@ -960,11 +952,7 @@ func readJSONFromBlob[T any](repo *git.Repository, hash plumbing.Hash) (*T, erro
 
 // readSummaryFromBlob reads CheckpointSummary from a blob hash.
 func (s *treeWriter) readSummaryFromBlob(hash plumbing.Hash) (*CheckpointSummary, error) {
-	summary, err := readJSONFromBlob[CheckpointSummary](s.repo, hash)
-	if err != nil {
-		return nil, err
-	}
-	return normalizeCheckpointSummary(summary), nil
+	return readJSONFromBlob[CheckpointSummary](s.repo, hash)
 }
 
 // aggregateTokenUsage sums two TokenUsage structs.
@@ -1352,7 +1340,7 @@ func readSummaryFromCheckpointTree(checkpointTree *FetchingTree) (*CheckpointSum
 		return nil, fmt.Errorf("failed to parse metadata.json: %w", err)
 	}
 
-	return normalizeCheckpointSummary(&summary), nil
+	return &summary, nil
 }
 
 // getSessionTree resolves the FetchingTree for a single session within a
@@ -1576,10 +1564,7 @@ func (s *GitStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 		return nil
 	})
 
-	// Sort by time (most recent first)
-	sort.Slice(checkpoints, func(i, j int) bool {
-		return checkpoints[i].CreatedAt.After(checkpoints[j].CreatedAt)
-	})
+	sortCheckpointInfosByRecency(checkpoints) // most recent first
 
 	return checkpoints, nil
 }
@@ -1670,24 +1655,6 @@ func (s *GitStore) GetSessionLog(ctx context.Context, cpID id.CheckpointID) ([]b
 		return nil, "", err
 	}
 	return content.Transcript, content.Metadata.SessionID, nil
-}
-
-// LookupSessionLog is a convenience function that opens the repository and retrieves
-// a session log by checkpoint ID. This is the primary entry point for callers that
-// do not already have a committed store instance.
-// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
-// Returns ErrNoTranscript if the checkpoint exists but has no transcript.
-func LookupSessionLog(ctx context.Context, cpID id.CheckpointID) ([]byte, string, error) {
-	repo, err := gitrepo.OpenCurrent(ctx)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to open git repository: %w", err)
-	}
-	defer repo.Close()
-	stores, err := Open(ctx, repo, OpenOptions{})
-	if err != nil {
-		return nil, "", fmt.Errorf("open checkpoint store: %w", err)
-	}
-	return ReadRawSessionLogForCheckpoint(ctx, stores.Persistent, cpID)
 }
 
 // backfillSummary updates the summary field in the latest session's metadata.
@@ -2497,6 +2464,13 @@ func transcriptBlobHashesFromTreeEntries(entries []object.TreeEntry) []plumbing.
 type Author struct {
 	Name  string
 	Email string
+}
+
+// AuthorReader provides optional checkpoint author lookup. It stays in the
+// implementation package: GetCheckpointAuthor is a git-log operation and Author
+// is an implementation type, not part of the storage contract.
+type AuthorReader interface {
+	GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (Author, error)
 }
 
 // GetCheckpointAuthor retrieves the author of a checkpoint from the configured

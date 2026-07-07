@@ -50,8 +50,16 @@ func TestRegistry_AllSupportedAgents(t *testing.T) {
 	want := []string{
 		"claude-code", "cursor", "pi", "factoryai-droid", "codex", "copilot-cli", "gemini",
 	}
+	registered := make(map[string]Importer)
+	for _, imp := range All() {
+		if _, dup := registered[imp.Name()]; dup {
+			t.Errorf("duplicate importer name %q", imp.Name())
+		}
+		registered[imp.Name()] = imp
+	}
+
 	for _, name := range want {
-		imp, ok := Get(name)
+		imp, ok := registered[name]
 		if !ok {
 			t.Errorf("%s importer not registered", name)
 			continue
@@ -59,14 +67,6 @@ func TestRegistry_AllSupportedAgents(t *testing.T) {
 		if imp.AgentType() == "" {
 			t.Errorf("%s importer has empty AgentType", name)
 		}
-	}
-
-	seen := make(map[string]bool)
-	for _, imp := range All() {
-		if seen[imp.Name()] {
-			t.Errorf("duplicate importer name %q", imp.Name())
-		}
-		seen[imp.Name()] = true
 	}
 	if len(All()) != len(want) {
 		t.Errorf("registered %d importers, want %d (%v)", len(All()), len(want), want)

@@ -3,7 +3,6 @@ package checkpointpolicy_test
 import (
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/stretchr/testify/require"
 )
@@ -11,8 +10,8 @@ import (
 func TestDefaultPolicy(t *testing.T) {
 	t.Parallel()
 	got := checkpointpolicy.DefaultPolicy()
-	require.Equal(t, checkpoint.CheckpointVersionBranchV1, got.CheckpointVersion)
-	require.Equal(t, checkpoint.CheckpointVersionBranchV1, got.CheckpointMinVersion)
+	require.Equal(t, checkpointpolicy.CheckpointVersionBranchV1, got.CheckpointVersion)
+	require.Equal(t, checkpointpolicy.CheckpointVersionBranchV1, got.CheckpointMinVersion)
 }
 
 func TestNormalize(t *testing.T) {
@@ -29,18 +28,18 @@ func TestNormalize(t *testing.T) {
 		},
 		{
 			name: "missing version",
-			in:   checkpointpolicy.Policy{CheckpointMinVersion: checkpoint.CheckpointVersionBranchV1},
+			in:   checkpointpolicy.Policy{CheckpointMinVersion: checkpointpolicy.CheckpointVersionBranchV1},
 			want: checkpointpolicy.DefaultPolicy(),
 		},
 		{
 			name: "configured versions",
 			in: checkpointpolicy.Policy{
 				CheckpointVersion:    "refs-v1",
-				CheckpointMinVersion: checkpoint.CheckpointVersionBranchV1,
+				CheckpointMinVersion: checkpointpolicy.CheckpointVersionBranchV1,
 			},
 			want: checkpointpolicy.Policy{
 				CheckpointVersion:    "refs-v1",
-				CheckpointMinVersion: checkpoint.CheckpointVersionBranchV1,
+				CheckpointMinVersion: checkpointpolicy.CheckpointVersionBranchV1,
 			},
 		},
 	}

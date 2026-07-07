@@ -413,6 +413,32 @@ func selectAllAgents(available []string) ([]string, error) {
 	return available, nil
 }
 
+// hookAgentOptions builds selector options for every registered agent that
+// supports hooks and isn't test-only (e.g. the Vogon canary), preselecting
+// the names in selected.
+func hookAgentOptions(selected map[types.AgentName]struct{}) []huh.Option[string] {
+	agentNames := agent.List()
+	options := make([]huh.Option[string], 0, len(agentNames))
+	for _, name := range agentNames {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		if _, ok := agent.AsHookSupport(ag); !ok {
+			continue
+		}
+		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
+			continue
+		}
+		opt := huh.NewOption(string(ag.Type()), string(name))
+		if _, ok := selected[name]; ok {
+			opt = opt.Selected(true)
+		}
+		options = append(options, opt)
+	}
+	return options
+}
+
 // runManageAgents shows which agents are currently enabled and lets the user
 // add or remove agents. Deselecting an installed agent removes its hooks.
 func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selectFn func(available []string) ([]string, error)) error {
@@ -420,13 +446,7 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 
 	// Show currently installed agents
 	if len(installedNames) > 0 {
-		displayNames := make([]string, 0, len(installedNames))
-		for _, name := range installedNames {
-			if ag, err := agent.Get(name); err == nil {
-				displayNames = append(displayNames, string(ag.Type()))
-			}
-		}
-		fmt.Fprintf(w, "Enabled agents: %s\n\n", strings.Join(displayNames, ", "))
+		fmt.Fprintf(w, "Enabled agents: %s\n\n", strings.Join(agentDisplayNames(installedNames), ", "))
 	}
 
 	// Build pre-selection set from installed agents
@@ -465,27 +485,7 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 	// during setup the setting doesn't exist yet.
 	external.DiscoverAndRegisterAlways(ctx)
 
-	// Build options from registered agents
-	agentNames := agent.List()
-	options := make([]huh.Option[string], 0, len(agentNames))
-	for _, name := range agentNames {
-		ag, err := agent.Get(name)
-		if err != nil {
-			continue
-		}
-		if _, ok := agent.AsHookSupport(ag); !ok {
-			continue
-		}
-		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
-			continue
-		}
-		opt := huh.NewOption(string(ag.Type()), string(name))
-		if _, installed := installedSet[name]; installed {
-			opt = opt.Selected(true)
-		}
-		options = append(options, opt)
-	}
-
+	options := hookAgentOptions(installedSet)
 	if len(options) == 0 {
 		return errors.New("no agents with hook support available")
 	}
@@ -1089,6 +1089,11 @@ To completely remove Entire integrations from this repository, use --uninstall:
 // runEnableInteractive runs the interactive enable flow.
 // agents must be provided by the caller (via detectOrSelectAgent).
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
+	// Capture first-run status before we write any settings: setupEntireDirectory
+	// and saveSettings below make IsSetUpAny report true. maybeOfferSessionImport
+	// uses this so the import offer only fires on the very first enable.
+	firstRun := !settings.IsSetUpAny(ctx)
+
 	// Uninstall hooks for agents that were previously active but are no longer selected
 	if err := uninstallDeselectedAgentHooks(ctx, w, agents); err != nil {
 		return fmt.Errorf("failed to clean up deselected agents: %w", err)
@@ -1207,6 +1212,10 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	if err := strategy.EnsureSetup(ctx); err != nil {
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
+
+	// Offer to import pre-existing agent history for the just-selected agents.
+	// First-run only; best-effort (never fails enable).
+	maybeOfferSessionImport(ctx, w, agents, opts, firstRun)
 
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary after
@@ -1494,29 +1503,7 @@ func detectOrSelectAgent(ctx context.Context, w io.Writer, selectFn func(availab
 		}
 	}
 
-	// Build options from registered agents
-	agentNames := agent.List()
-	options := make([]huh.Option[string], 0, len(agentNames))
-	for _, name := range agentNames {
-		ag, err := agent.Get(name)
-		if err != nil {
-			continue
-		}
-		// Only show agents that support hooks
-		if _, ok := agent.AsHookSupport(ag); !ok {
-			continue
-		}
-		// Skip test-only agents (e.g., Vogon canary)
-		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
-			continue
-		}
-		opt := huh.NewOption(string(ag.Type()), string(name))
-		if _, isPreSelected := preSelectedSet[name]; isPreSelected {
-			opt = opt.Selected(true)
-		}
-		options = append(options, opt)
-	}
-
+	options := hookAgentOptions(preSelectedSet)
 	if len(options) == 0 {
 		return nil, errors.New("no agents with hook support available")
 	}
@@ -1608,6 +1595,10 @@ func printWrongAgentError(w io.Writer, name string) {
 // setupAgentHooksNonInteractive sets up hooks for a specific agent non-interactively.
 // If strategyName is provided, it sets the strategy; otherwise uses default.
 func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Agent, opts EnableOptions) error {
+	// Capture first-run status before setupEntireDirectory/saveEnabledState make
+	// IsSetUpAny report true, so the import offer fires only on first enable.
+	firstRun := !settings.IsSetUpAny(ctx)
+
 	agentName := ag.Name()
 	// Check if agent supports hooks
 	if _, ok := agent.AsHookSupport(ag); !ok {
@@ -1697,6 +1688,10 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	if err := strategy.EnsureSetup(ctx); err != nil {
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
+
+	// Offer to import pre-existing history for the just-configured agent.
+	// First-run only; best-effort (never fails enable).
+	maybeOfferSessionImport(ctx, w, []agent.Agent{ag}, opts, firstRun)
 
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary.
@@ -2103,13 +2098,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 			fmt.Fprintf(w, "  - Shadow branches (%d)\n", shadowBranchCount)
 		}
 		if len(agentsWithInstalledHooks) > 0 {
-			displayNames := make([]string, 0, len(agentsWithInstalledHooks))
-			for _, name := range agentsWithInstalledHooks {
-				if ag, err := agent.Get(name); err == nil {
-					displayNames = append(displayNames, string(ag.Type()))
-				}
-			}
-			fmt.Fprintf(w, "  - Agent hooks (%s)\n", strings.Join(displayNames, ", "))
+			fmt.Fprintf(w, "  - Agent hooks (%s)\n", strings.Join(agentDisplayNames(agentsWithInstalledHooks), ", "))
 		}
 		fmt.Fprintln(w)
 

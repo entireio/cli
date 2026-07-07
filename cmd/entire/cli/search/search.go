@@ -183,156 +183,115 @@ func (r *Result) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// ResultOrg returns the org for any result type.
-func (r *Result) ResultOrg() string {
+// resultField dispatches to the accessor matching the result's type, guarding
+// against a nil payload (returns "" for nil or unknown types like repo/pr).
+func resultField(r *Result, fromCheckpoint func(*CheckpointResult) string, fromCommit func(*CommitResult) string, fromSession func(*SessionResult) string) string {
 	switch r.Type {
 	case TypeCheckpoint:
 		if r.Checkpoint != nil {
-			return r.Checkpoint.Org
+			return fromCheckpoint(r.Checkpoint)
 		}
 	case TypeCommit:
 		if r.Commit != nil {
-			return r.Commit.Org
+			return fromCommit(r.Commit)
 		}
 	case TypeSession:
 		if r.Session != nil {
-			return r.Session.Org
+			return fromSession(r.Session)
 		}
 	}
 	return ""
+}
+
+// ResultOrg returns the org for any result type.
+func (r *Result) ResultOrg() string {
+	return resultField(r,
+		func(c *CheckpointResult) string { return c.Org },
+		func(c *CommitResult) string { return c.Org },
+		func(s *SessionResult) string { return s.Org })
 }
 
 // ResultRepo returns the repo for any result type.
 func (r *Result) ResultRepo() string {
-	switch r.Type {
-	case TypeCheckpoint:
-		if r.Checkpoint != nil {
-			return r.Checkpoint.Repo
-		}
-	case TypeCommit:
-		if r.Commit != nil {
-			return r.Commit.Repo
-		}
-	case TypeSession:
-		if r.Session != nil {
-			return r.Session.Repo
-		}
-	}
-	return ""
+	return resultField(r,
+		func(c *CheckpointResult) string { return c.Repo },
+		func(c *CommitResult) string { return c.Repo },
+		func(s *SessionResult) string { return s.Repo })
 }
 
 // ResultBranch returns the branch for any result type.
 func (r *Result) ResultBranch() string {
-	switch r.Type {
-	case TypeCheckpoint:
-		if r.Checkpoint != nil {
-			return r.Checkpoint.Branch
-		}
-	case TypeCommit:
-		if r.Commit != nil {
-			return r.Commit.Branch
-		}
-	case TypeSession:
-		if r.Session != nil && r.Session.Branch != nil {
-			return *r.Session.Branch
-		}
-	}
-	return ""
+	return resultField(r,
+		func(c *CheckpointResult) string { return c.Branch },
+		func(c *CommitResult) string { return c.Branch },
+		func(s *SessionResult) string {
+			if s.Branch != nil {
+				return *s.Branch
+			}
+			return ""
+		})
 }
 
 // ResultCreatedAt returns the createdAt for any result type.
 func (r *Result) ResultCreatedAt() string {
-	switch r.Type {
-	case TypeCheckpoint:
-		if r.Checkpoint != nil {
-			return r.Checkpoint.CreatedAt
-		}
-	case TypeCommit:
-		if r.Commit != nil {
-			return r.Commit.CreatedAt
-		}
-	case TypeSession:
-		if r.Session != nil {
-			return r.Session.CreatedAt
-		}
-	}
-	return ""
+	return resultField(r,
+		func(c *CheckpointResult) string { return c.CreatedAt },
+		func(c *CommitResult) string { return c.CreatedAt },
+		func(s *SessionResult) string { return s.CreatedAt })
 }
 
 // ResultAuthor returns the display author for any result type.
 func (r *Result) ResultAuthor() string {
-	switch r.Type {
-	case TypeCheckpoint:
-		if r.Checkpoint != nil {
-			if r.Checkpoint.AuthorUsername != nil && *r.Checkpoint.AuthorUsername != "" {
-				return *r.Checkpoint.AuthorUsername
+	return resultField(r,
+		func(c *CheckpointResult) string {
+			if c.AuthorUsername != nil && *c.AuthorUsername != "" {
+				return *c.AuthorUsername
 			}
-			return r.Checkpoint.Author
-		}
-	case TypeCommit:
-		if r.Commit != nil {
-			if r.Commit.AuthorUsername != nil && *r.Commit.AuthorUsername != "" {
-				return *r.Commit.AuthorUsername
+			return c.Author
+		},
+		func(c *CommitResult) string {
+			if c.AuthorUsername != nil && *c.AuthorUsername != "" {
+				return *c.AuthorUsername
 			}
-			return r.Commit.Author
-		}
-	case TypeSession:
-		if r.Session != nil {
-			if r.Session.AuthorUsername != nil {
-				return *r.Session.AuthorUsername
+			return c.Author
+		},
+		func(s *SessionResult) string {
+			if s.AuthorUsername != nil {
+				return *s.AuthorUsername
 			}
-		}
-	}
-	return ""
+			return ""
+		})
 }
 
 // ResultID returns the primary ID for any result type.
 func (r *Result) ResultID() string {
-	switch r.Type {
-	case TypeCheckpoint:
-		if r.Checkpoint != nil {
-			return r.Checkpoint.ID
-		}
-	case TypeCommit:
-		if r.Commit != nil {
-			return r.Commit.CommitSHA
-		}
-	case TypeSession:
-		if r.Session != nil {
-			return r.Session.SessionID
-		}
-	}
-	return ""
+	return resultField(r,
+		func(c *CheckpointResult) string { return c.ID },
+		func(c *CommitResult) string { return c.CommitSHA },
+		func(s *SessionResult) string { return s.SessionID })
 }
 
 // ResultTitle returns the primary display text for any result type.
 func (r *Result) ResultTitle() string {
-	switch r.Type {
-	case TypeCheckpoint:
-		if r.Checkpoint != nil {
+	return resultField(r,
+		func(c *CheckpointResult) string {
 			// Prefer the commit title over the prompt; fall back to the prompt
 			// for uncommitted checkpoints. The full prompt remains in the detail view.
-			if r.Checkpoint.CommitSubject != nil && *r.Checkpoint.CommitSubject != "" {
-				return *r.Checkpoint.CommitSubject
+			if c.CommitSubject != nil && *c.CommitSubject != "" {
+				return *c.CommitSubject
 			}
-			if r.Checkpoint.CommitMessage != nil && *r.Checkpoint.CommitMessage != "" {
-				return *r.Checkpoint.CommitMessage
+			if c.CommitMessage != nil && *c.CommitMessage != "" {
+				return *c.CommitMessage
 			}
-			return r.Checkpoint.Prompt
-		}
-	case TypeCommit:
-		if r.Commit != nil {
-			if r.Commit.CommitSubject != "" {
-				return r.Commit.CommitSubject
+			return c.Prompt
+		},
+		func(c *CommitResult) string {
+			if c.CommitSubject != "" {
+				return c.CommitSubject
 			}
-			return r.Commit.CommitMessage
-		}
-	case TypeSession:
-		if r.Session != nil {
-			return r.Session.DisplayName
-		}
-	}
-	return ""
+			return c.CommitMessage
+		},
+		func(s *SessionResult) string { return s.DisplayName })
 }
 
 // TypeCounts holds per-type result counts.

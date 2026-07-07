@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
@@ -174,46 +172,6 @@ func (s *StateStore) Load(ctx context.Context, runID string) (*RunState, error) 
 		return nil, fmt.Errorf("unmarshal run state: %w", err)
 	}
 	return &st, nil
-}
-
-// List returns all persisted run states. Returns nil (and no error) when the
-// state directory does not exist.
-func (s *StateStore) List(ctx context.Context) ([]*RunState, error) {
-	entries, err := os.ReadDir(s.dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read investigations directory: %w", err)
-	}
-
-	var states []*RunState
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		runID := entry.Name()
-		if err := validateRunID(runID); err != nil {
-			// Skip directories that don't match the run-ID format — they
-			// are not ours (e.g. the manifests/ sibling).
-			continue
-		}
-		st, loadErr := s.Load(ctx, runID)
-		if loadErr != nil {
-			// state.json exists but won't parse — surface so the user can
-			// inspect or `entire investigate clean <runID>`. Listing keeps
-			// going so one bad run doesn't hide the rest.
-			logging.Warn(ctx, "investigate: list skipped unreadable run state",
-				slog.String("run_id", runID),
-				slog.String("err", loadErr.Error()))
-			continue
-		}
-		if st == nil {
-			continue
-		}
-		states = append(states, st)
-	}
-	return states, nil
 }
 
 // Clear removes the persisted state for runID. Missing files are treated as a

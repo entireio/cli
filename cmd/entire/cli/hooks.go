@@ -9,87 +9,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
-// TaskHookInput represents the JSON input from PreToolUse[Task] hook
-type TaskHookInput struct {
-	SessionID      string          `json:"session_id"`
-	TranscriptPath string          `json:"transcript_path"`
-	ToolUseID      string          `json:"tool_use_id"`
-	ToolInput      json.RawMessage `json:"tool_input"`
-}
-
-// postTaskHookInputRaw is the raw JSON structure from PostToolUse[Task] hook
-type postTaskHookInputRaw struct {
-	SessionID      string          `json:"session_id"`
-	TranscriptPath string          `json:"transcript_path"`
-	ToolUseID      string          `json:"tool_use_id"`
-	ToolInput      json.RawMessage `json:"tool_input"`
-	ToolResponse   struct {
-		AgentID string `json:"agentId"`
-	} `json:"tool_response"`
-}
-
-// PostTaskHookInput represents the parsed input from PostToolUse[Task] hook
-type PostTaskHookInput struct {
-	TaskHookInput
-
-	AgentID   string          // Extracted from tool_response.agentId
-	ToolInput json.RawMessage // Raw tool input for reference
-}
-
-// parseTaskHookInput parses PreToolUse[Task] hook input from reader
-func parseTaskHookInput(r io.Reader) (*TaskHookInput, error) {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read input: %w", err)
-	}
-
-	if len(data) == 0 {
-		return nil, errors.New("empty input")
-	}
-
-	var input TaskHookInput
-	if err := json.Unmarshal(data, &input); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
-	}
-
-	return &input, nil
-}
-
-// parsePostTaskHookInput parses PostToolUse[Task] hook input from reader
-func parsePostTaskHookInput(r io.Reader) (*PostTaskHookInput, error) {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read input: %w", err)
-	}
-
-	if len(data) == 0 {
-		return nil, errors.New("empty input")
-	}
-
-	var raw postTaskHookInputRaw
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
-	}
-
-	return &PostTaskHookInput{
-		TaskHookInput: TaskHookInput{
-			SessionID:      raw.SessionID,
-			TranscriptPath: raw.TranscriptPath,
-			ToolUseID:      raw.ToolUseID,
-		},
-		AgentID:   raw.ToolResponse.AgentID,
-		ToolInput: raw.ToolInput,
-	}, nil
-}
-
-// logPreTaskHookContext logs the PreToolUse[Task] hook context to the writer
-func logPreTaskHookContext(w io.Writer, input *TaskHookInput) {
-	_, _ = fmt.Fprintln(w, "[entire] PreToolUse[Task] hook invoked")
-	_, _ = fmt.Fprintf(w, "  Session ID: %s\n", input.SessionID)
-	_, _ = fmt.Fprintf(w, "  Tool Use ID: %s\n", input.ToolUseID)
-	_, _ = fmt.Fprintf(w, "  Transcript: %s\n", input.TranscriptPath)
-}
-
 // SubagentCheckpointHookInput represents the JSON input from PostToolUse hooks for
 // subagent checkpoint creation (TodoWrite, Edit, Write)
 type SubagentCheckpointHookInput struct {
@@ -208,25 +127,4 @@ func CountTodosFromToolInput(toolInput json.RawMessage) int {
 
 	// Delegate to strategy package for the actual count
 	return strategy.CountTodos(input.Todos)
-}
-
-// logPostTaskHookContext logs the PostToolUse[Task] hook context to the writer
-func logPostTaskHookContext(w io.Writer, input *PostTaskHookInput, subagentTranscriptPath string) {
-	_, _ = fmt.Fprintln(w, "[entire] PostToolUse[Task] hook invoked")
-	_, _ = fmt.Fprintf(w, "  Session ID: %s\n", input.SessionID)
-	_, _ = fmt.Fprintf(w, "  Tool Use ID: %s\n", input.ToolUseID)
-
-	if input.AgentID != "" {
-		_, _ = fmt.Fprintf(w, "  Agent ID: %s\n", input.AgentID)
-	} else {
-		_, _ = fmt.Fprintln(w, "  Agent ID: (none)")
-	}
-
-	_, _ = fmt.Fprintf(w, "  Transcript: %s\n", input.TranscriptPath)
-
-	if subagentTranscriptPath != "" {
-		_, _ = fmt.Fprintf(w, "  Subagent Transcript: %s\n", subagentTranscriptPath)
-	} else {
-		_, _ = fmt.Fprintln(w, "  Subagent Transcript: (none)")
-	}
 }

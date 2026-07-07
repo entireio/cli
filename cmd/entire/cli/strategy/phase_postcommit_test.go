@@ -910,58 +910,6 @@ func TestPostCommit_FilesTouched_ResetsAfterCondensation(t *testing.T) {
 		"Second condensation should only contain C.txt and D.txt, not accumulated files from first condensation")
 }
 
-// TestSubtractFiles verifies that subtractFiles correctly removes files present
-// in the exclude set and preserves files not in it.
-func TestSubtractFiles(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		files    []string
-		exclude  map[string]struct{}
-		expected []string
-	}{
-		{
-			name:     "no overlap",
-			files:    []string{"a.txt", "b.txt"},
-			exclude:  map[string]struct{}{"c.txt": {}},
-			expected: []string{"a.txt", "b.txt"},
-		},
-		{
-			name:     "full overlap",
-			files:    []string{"a.txt", "b.txt"},
-			exclude:  map[string]struct{}{"a.txt": {}, "b.txt": {}},
-			expected: nil,
-		},
-		{
-			name:     "partial overlap",
-			files:    []string{"a.txt", "b.txt", "c.txt"},
-			exclude:  map[string]struct{}{"b.txt": {}},
-			expected: []string{"a.txt", "c.txt"},
-		},
-		{
-			name:     "empty files",
-			files:    []string{},
-			exclude:  map[string]struct{}{"a.txt": {}},
-			expected: nil,
-		},
-		{
-			name:     "empty exclude",
-			files:    []string{"a.txt", "b.txt"},
-			exclude:  map[string]struct{}{},
-			expected: []string{"a.txt", "b.txt"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			result := subtractFiles(tt.files, tt.exclude)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
 // TestFilesChangedInCommit verifies that filesChangedInCommit correctly extracts
 // the set of files changed in a commit by diffing against its parent.
 func TestFilesChangedInCommit(t *testing.T) {

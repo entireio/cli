@@ -243,18 +243,6 @@ func (t *FetchingTree) RawEntries() []object.TreeEntry {
 	return t.inner.Entries
 }
 
-// Unwrap returns the underlying *object.Tree.
-func (t *FetchingTree) Unwrap() *object.Tree {
-	return t.inner
-}
-
-// Files returns a recursive file iterator from the underlying tree.
-// Warning: after a treeless fetch, this iterator will fail when it tries
-// to resolve blob objects. Use File() for on-demand blob fetching instead.
-func (t *FetchingTree) Files() *object.FileIter {
-	return t.inner.Files()
-}
-
 // FileReader provides read access to files within a git tree.
 // Both *object.Tree and *FetchingTree implement this interface.
 type FileReader interface {

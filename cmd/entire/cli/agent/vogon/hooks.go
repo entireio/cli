@@ -37,17 +37,7 @@ func (v *Agent) HookNames() []string {
 func (v *Agent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
-		raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
-		if err != nil {
-			return nil, err
-		}
-		return &agent.Event{
-			Type:       agent.SessionStart,
-			SessionID:  raw.SessionID,
-			SessionRef: raw.TranscriptPath,
-			Model:      raw.Model,
-			Timestamp:  time.Now(),
-		}, nil
+		return parseSessionInfoEvent(stdin, agent.SessionStart)
 
 	case HookNameUserPromptSubmit:
 		raw, err := agent.ReadAndParseHookInput[userPromptSubmitRaw](stdin)
@@ -64,34 +54,30 @@ func (v *Agent) ParseHookEvent(_ context.Context, hookName string, stdin io.Read
 		}, nil
 
 	case HookNameStop:
-		raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
-		if err != nil {
-			return nil, err
-		}
-		return &agent.Event{
-			Type:       agent.TurnEnd,
-			SessionID:  raw.SessionID,
-			SessionRef: raw.TranscriptPath,
-			Model:      raw.Model,
-			Timestamp:  time.Now(),
-		}, nil
+		return parseSessionInfoEvent(stdin, agent.TurnEnd)
 
 	case HookNameSessionEnd:
-		raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
-		if err != nil {
-			return nil, err
-		}
-		return &agent.Event{
-			Type:       agent.SessionEnd,
-			SessionID:  raw.SessionID,
-			SessionRef: raw.TranscriptPath,
-			Model:      raw.Model,
-			Timestamp:  time.Now(),
-		}, nil
+		return parseSessionInfoEvent(stdin, agent.SessionEnd)
 
 	default:
 		return nil, nil //nolint:nilnil // Unknown hooks have no lifecycle action
 	}
+}
+
+// parseSessionInfoEvent parses the hooks whose payload is sessionInfoRaw —
+// SessionStart, Stop, and SessionEnd differ only in the resulting event type.
+func parseSessionInfoEvent(stdin io.Reader, eventType agent.EventType) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
+	if err != nil {
+		return nil, err
+	}
+	return &agent.Event{
+		Type:       eventType,
+		SessionID:  raw.SessionID,
+		SessionRef: raw.TranscriptPath,
+		Model:      raw.Model,
+		Timestamp:  time.Now(),
+	}, nil
 }
 
 // InstallHooks is a no-op — the vogon binary fires hooks directly.

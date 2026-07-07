@@ -406,6 +406,83 @@ func TestAttach_AppendsAsAdditionalSessionWhenIDDiffers(t *testing.T) {
 	}
 }
 
+// Regression: under the git-refs backend a checkpoint lives at its own ref, not
+// on the v1 branch. Attaching a second session to a commit that already carries
+// a git-refs (ULID) checkpoint must find it present locally and append — the
+// earlier v1-branch presence gate wrongly refused it as "missing from the local
+// entire/checkpoints/v1 branch" (which does not exist in a refs-only repo).
+func TestAttach_GitRefsBackend_AppendsToExistingCheckpoint(t *testing.T) {
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+	setupAttachTestRepo(t)
+
+	firstSessionID := "refs-first-session-original"
+	setupClaudeTranscript(t, firstSessionID, `{"type":"user","message":{"role":"user","content":"first"},"uuid":"u1"}
+`)
+	var out bytes.Buffer
+	if err := runAttach(context.Background(), &out, &out, firstSessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+		t.Fatalf("first attach failed: %v", err)
+	}
+
+	repoRoot := mustGetwd(t)
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headRef, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	headCommit, err := repo.CommitObject(headRef.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing := trailers.ParseAllCheckpoints(headCommit.Message)
+	if len(existing) != 1 {
+		t.Fatalf("expected one Entire-Checkpoint trailer after first attach; got %v", existing)
+	}
+	checkpointID := existing[0]
+	if checkpointID.Kind() != id.KindULID {
+		t.Fatalf("git-refs backend should mint a ULID checkpoint id; got %q (kind %v)", checkpointID, checkpointID.Kind())
+	}
+
+	// The checkpoint must live at its per-checkpoint ref, and no v1 branch should exist.
+	refName, err := cpkg.RefName(checkpointID)
+	if err != nil {
+		t.Fatalf("RefName(%s): %v", checkpointID, err)
+	}
+	if _, err := repo.Reference(refName, true); err != nil {
+		t.Fatalf("checkpoint ref %s should exist after attach: %v", refName, err)
+	}
+	if _, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true); err == nil {
+		t.Fatal("git-refs backend must not create the entire/checkpoints/v1 branch")
+	}
+
+	// Second attach on the same HEAD (now carrying the ULID trailer) must see the
+	// checkpoint at its ref as present and append, not refuse it as missing.
+	secondSessionID := "refs-second-session-append"
+	setupClaudeTranscript(t, secondSessionID, `{"type":"user","message":{"role":"user","content":"second"},"uuid":"u1"}
+`)
+	out.Reset()
+	if err := runAttach(context.Background(), &out, &out, secondSessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+		t.Fatalf("second attach failed (checkpoint at its ref must be seen as present): %v", err)
+	}
+
+	stores, err := cpkg.Open(context.Background(), repo, cpkg.OpenOptions{})
+	if err != nil {
+		t.Fatalf("open git-refs store: %v", err)
+	}
+	summary, err := stores.Persistent.Read(context.Background(), checkpointID)
+	if err != nil {
+		t.Fatalf("Read(%s): %v", checkpointID, err)
+	}
+	if summary == nil {
+		t.Fatalf("checkpoint %s summary nil after two attaches", checkpointID)
+	}
+	if len(summary.Sessions) != 2 {
+		t.Fatalf("checkpoint has %d sessions, want 2", len(summary.Sessions))
+	}
+}
+
 func TestAttach_RefusesWhenCheckpointMissingFromLocalBranch(t *testing.T) {
 	setupAttachTestRepo(t)
 

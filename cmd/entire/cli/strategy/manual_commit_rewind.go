@@ -16,7 +16,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -652,10 +651,6 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
-	if err := checkpointpolicy.EnsureCanReadVersion(point.CheckpointID.String(), summary.CheckpointVersion); err != nil {
-		return nil, err
-	}
-
 	// Get worktree root for agent session directory lookup
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {

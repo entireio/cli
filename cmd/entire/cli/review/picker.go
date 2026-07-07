@@ -1199,51 +1199,21 @@ func BuildReviewPickerFields(
 	builtinPreselected := preselectedSet(builtinPicksOut)
 	discoveredPreselected := preselectedSet(discoveredPicksOut)
 
-	if len(builtins) > 0 {
-		opts := make([]huh.Option[string], 0, len(builtins))
-		for _, b := range builtins {
-			opt := huh.NewOption(b.Name, b.Name)
-			if _, ok := builtinPreselected[b.Name]; ok {
-				opt = opt.Selected(true)
-			}
-			opts = append(opts, opt)
-		}
-		ms := huh.NewMultiSelect[string]().
-			Title("Built-in commands").
-			Options(opts...).
-			Height(len(opts) + 1)
-		if builtinPicksOut != nil {
-			ms = ms.Value(builtinPicksOut)
-		}
-		fields = append(fields, ms)
-	} else {
-		fields = append(fields, huh.NewNote().
-			Title("Built-in commands").
-			Description(fmt.Sprintf("No built-in review commands in %s.", agentName)))
+	builtinNames := make([]string, len(builtins))
+	for i, b := range builtins {
+		builtinNames[i] = b.Name
+	}
+	discoveredNames := make([]string, len(discovered))
+	for i, d := range discovered {
+		discoveredNames[i] = d.Name
 	}
 
-	if len(discovered) > 0 {
-		opts := make([]huh.Option[string], 0, len(discovered))
-		for _, d := range discovered {
-			opt := huh.NewOption(d.Name, d.Name)
-			if _, ok := discoveredPreselected[d.Name]; ok {
-				opt = opt.Selected(true)
-			}
-			opts = append(opts, opt)
-		}
-		ms := huh.NewMultiSelect[string]().
-			Title("Installed plugin skills").
-			Options(opts...).
-			Height(len(opts) + 1)
-		if discoveredPicksOut != nil {
-			ms = ms.Value(discoveredPicksOut)
-		}
-		fields = append(fields, ms)
-	} else {
-		fields = append(fields, huh.NewNote().
-			Title("Installed plugin skills").
-			Description("No plugin review skills detected on disk."))
-	}
+	fields = append(fields, skillMultiSelectField("Built-in commands",
+		fmt.Sprintf("No built-in review commands in %s.", agentName),
+		builtinNames, builtinPreselected, builtinPicksOut))
+	fields = append(fields, skillMultiSelectField("Installed plugin skills",
+		"No plugin review skills detected on disk.",
+		discoveredNames, discoveredPreselected, discoveredPicksOut))
 
 	if len(activeHints) > 0 {
 		var sb strings.Builder
@@ -1300,6 +1270,30 @@ func SplitSavedPicks(saved []string, builtins []skilldiscovery.CuratedSkill, dis
 
 // preselectedSet turns a slice pointer's current contents into a lookup
 // set for the picker's "previously-saved" pre-selection.
+// skillMultiSelectField builds the multiselect for one skill group, or an
+// explanatory note when the group is empty.
+func skillMultiSelectField(title, emptyDesc string, names []string, preselected map[string]struct{}, picksOut *[]string) huh.Field {
+	if len(names) == 0 {
+		return huh.NewNote().Title(title).Description(emptyDesc)
+	}
+	opts := make([]huh.Option[string], 0, len(names))
+	for _, name := range names {
+		opt := huh.NewOption(name, name)
+		if _, ok := preselected[name]; ok {
+			opt = opt.Selected(true)
+		}
+		opts = append(opts, opt)
+	}
+	ms := huh.NewMultiSelect[string]().
+		Title(title).
+		Options(opts...).
+		Height(len(opts) + 1)
+	if picksOut != nil {
+		ms = ms.Value(picksOut)
+	}
+	return ms
+}
+
 func preselectedSet(slice *[]string) map[string]struct{} {
 	if slice == nil || len(*slice) == 0 {
 		return nil

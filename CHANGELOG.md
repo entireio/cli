@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-07-06
+
+### Added
+
+- A git-refs checkpoint store (per-checkpoint git-ref backend) with ULID checkpoint IDs, ID-kind read routing across git backends, and pre-push push progress ([#1566](https://github.com/entireio/cli/pull/1566), [#1629](https://github.com/entireio/cli/pull/1629), [#1630](https://github.com/entireio/cli/pull/1630), [#1632](https://github.com/entireio/cli/pull/1632))
+- `entire agent-help`: machine-readable, agent-facing usage rendered live from the Cobra command tree, plus active and passive discovery paths so no-channel agents (Cursor, Copilot CLI, Factory Droid, MCP hosts) can reach it via `entire help`, the `status` footer, `status --json`, and an MCP tool ([#1562](https://github.com/entireio/cli/pull/1562), [#1585](https://github.com/entireio/cli/pull/1585))
+- `entire experts` (hidden, via `entire labs`): ranks prior agent sessions with real evidence for a given path — matching checkpoints, attributed lines, skills, tools, and MCP servers — without exposing prompts or transcripts, routed to the repo's entire-api cell with an identity token ([#1573](https://github.com/entireio/cli/pull/1573), [#1588](https://github.com/entireio/cli/pull/1588))
+- `entire api`, a `gh api`-style authenticated passthrough that dials the control-plane core (default) or your home entire-api cell (`--to cell`) with the right bearer, filling `{owner}`/`{repo}`/`{repo_id}` placeholders from the current repo ([#1605](https://github.com/entireio/cli/pull/1605))
+- `entire auth token` is now visible and takes `--jurisdiction <slug>` to mint a jurisdictional identity token for that jurisdiction's entire-api cells ([#1619](https://github.com/entireio/cli/pull/1619))
+- Pi review-runner adapter, so Pi can drive `entire review` ([#1313](https://github.com/entireio/cli/pull/1313))
+- Codex session token diagnostics under `entire labs` ([#1558](https://github.com/entireio/cli/pull/1558))
+- Interactive one-shot `entire repo mirror create` now offers a cluster picker ([#1645](https://github.com/entireio/cli/pull/1645))
+
+### Changed
+
+- Control-plane commands (`org`, `project`, `repo`, `grant`) now print human-readable confirmations by default; the wire JSON (including `repo create`'s `entire://` remote) moved behind `--json`. Empty `--json` lists emit `[]`, and success messages moved from stderr to stdout ([#1626](https://github.com/entireio/cli/pull/1626))
+- Each checkpoint now stores the full compacted transcript with a scope marker, so every checkpoint is self-contained ([#1581](https://github.com/entireio/cli/pull/1581))
+- git-remote-entire authenticates git pushes with persisted jurisdictional access tokens, and the `ENTIRE_TOKEN` (CI) path was migrated to jurisdiction tokens ([#1621](https://github.com/entireio/cli/pull/1621), [#1622](https://github.com/entireio/cli/pull/1622))
+- git-remote-entire binaries are now published per-commit to the public release bucket ([#1623](https://github.com/entireio/cli/pull/1623))
+- `entire activity` and `entire recap` route through the entire-api cell client ([#1592](https://github.com/entireio/cli/pull/1592))
+- Checkpoint writes are gated on repo policy support, with telemetry for policy-blocked hooks ([#1541](https://github.com/entireio/cli/pull/1541), [#1586](https://github.com/entireio/cli/pull/1586))
+- `entire review` raised its timeouts (reviewer 10m→20m) and `--timeout` now also governs the judge (default 5m), plus an agent-safe plain-text findings fallback when stdout isn't a terminal ([#1584](https://github.com/entireio/cli/pull/1584), [#1598](https://github.com/entireio/cli/pull/1598))
+- `entire repo mirror create` splits placement and clone into separate progress steps and warns when creating against an admin-suspended mirror (sunset collaborator verbs removed) ([#1587](https://github.com/entireio/cli/pull/1587), [#1602](https://github.com/entireio/cli/pull/1602))
+- `entire attach` warns on an empty transcript, captures the session footer, and notes when an amend fails ([#1568](https://github.com/entireio/cli/pull/1568))
+- Removed `checkpoint_version` from checkpoint metadata ([#1620](https://github.com/entireio/cli/pull/1620))
+
+### Fixed
+
+- Ctrl-C now escapes shell loops and aborts cleanly, closing a keyring-interrupt race in the signal-abort path ([#1604](https://github.com/entireio/cli/pull/1604), [#1625](https://github.com/entireio/cli/pull/1625))
+- Fixed the Codex Windows hook fallback ([#1555](https://github.com/entireio/cli/pull/1555))
+- Wrong-cluster clone errors are now surfaced clearly in git-remote-entire ([#1575](https://github.com/entireio/cli/pull/1575))
+
+### Housekeeping
+
+- De-slop pass: removed dead code and deduplicated hot spots (−5.6k lines) ([#1606](https://github.com/entireio/cli/pull/1606))
+- Removed a dead `entiredb-original-url` read path in checkpoint/remote ([#1624](https://github.com/entireio/cli/pull/1624))
+- Build checkpoint subtree paths via a `path.Join` helper (no tree change) ([#1576](https://github.com/entireio/cli/pull/1576))
+- Resolved goconst lint findings for checkpoint/trail, and fixed a red main by routing corecmd stub handlers through `printJSON` ([#1594](https://github.com/entireio/cli/pull/1594), [#1640](https://github.com/entireio/cli/pull/1640))
+- Added agent-safe CLI fallback guidance and a review rule to the docs ([#1596](https://github.com/entireio/cli/pull/1596))
+- Pretty-print the vendored OpenAPI spec via jq ([#1603](https://github.com/entireio/cli/pull/1603))
+- E2E: `e2e-checkpoint-store`'s blank agent now runs all agents, the Copilot GitHub token is scoped to the copilot-cli agent, and droid/claude-code subagent flakes were fixed ([#1580](https://github.com/entireio/cli/pull/1580), [#1583](https://github.com/entireio/cli/pull/1583), [#1599](https://github.com/entireio/cli/pull/1599))
+- Dependency bumps ([#1608](https://github.com/entireio/cli/pull/1608), [#1609](https://github.com/entireio/cli/pull/1609))
+
 ## [0.7.8] - 2026-06-30
 
 ### Added

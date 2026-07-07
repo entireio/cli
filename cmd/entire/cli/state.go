@@ -202,7 +202,12 @@ func CleanupPrePromptState(ctx context.Context, sessionID string) error {
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid session ID for pre-prompt state cleanup: %w", err)
 	}
+	return cleanupTmpStateFile(ctx, fmt.Sprintf("pre-prompt-%s.json", sessionID))
+}
 
+// cleanupTmpStateFile removes one state file from .entire/tmp, treating a
+// missing directory as already clean.
+func cleanupTmpStateFile(ctx context.Context, fileName string) error {
 	tmpDirAbs := resolveTmpDir(ctx)
 
 	root, err := os.OpenRoot(tmpDirAbs)
@@ -214,7 +219,6 @@ func CleanupPrePromptState(ctx context.Context, sessionID string) error {
 	}
 	defer root.Close()
 
-	fileName := fmt.Sprintf("pre-prompt-%s.json", sessionID)
 	return osroot.Remove(root, fileName) //nolint:wrapcheck // best-effort cleanup, caller adds context via wrapping function name
 }
 
@@ -570,20 +574,7 @@ func CleanupPreTaskState(ctx context.Context, toolUseID string) error {
 	if err := validation.ValidateToolUseID(toolUseID); err != nil {
 		return fmt.Errorf("invalid tool use ID for pre-task state cleanup: %w", err)
 	}
-
-	tmpDirAbs := resolveTmpDir(ctx)
-
-	root, err := os.OpenRoot(tmpDirAbs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // Directory doesn't exist, nothing to clean up
-		}
-		return fmt.Errorf("failed to open tmp directory root: %w", err)
-	}
-	defer root.Close()
-
-	fileName := fmt.Sprintf("pre-task-%s.json", toolUseID)
-	return osroot.Remove(root, fileName) //nolint:wrapcheck // best-effort cleanup, caller adds context via wrapping function name
+	return cleanupTmpStateFile(ctx, fmt.Sprintf("pre-task-%s.json", toolUseID))
 }
 
 // preTaskFilePrefix is the prefix for pre-task state files

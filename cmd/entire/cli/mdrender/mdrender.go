@@ -1,5 +1,5 @@
 // Package mdrender renders markdown to terminal-styled output using the
-// shared entire CLI palette (orange H1, cyan H2, indigo H3, plus chroma
+// shared entire CLI base16 palette (magenta H1, cyan H2, blue H3, plus chroma
 // syntax highlighting). Used by `entire dispatch`, `entire review`, and
 // any other command that prints LLM-generated markdown to the terminal.
 //
@@ -22,6 +22,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 )
 
 // DefaultTerminalWidth caps glamour word-wrap when no real terminal width
@@ -107,15 +108,23 @@ func terminalWidth(w io.Writer) int {
 	return DefaultTerminalWidth
 }
 
-// stylesForBackground returns the entire CLI's glamour StyleConfig.
+// stylesForBackground returns the entire CLI's glamour StyleConfig, using
+// only base16 (ANSI 0–15) colors.
 //
 // Palette:
-//   - H1: orange (#fb923c) — agent name, top-level section
-//   - H2: cyan (#22d3ee) — secondary headings, links
-//   - H3: indigo (#818cf8) — tertiary headings, enumerations, keywords
-//   - List items: orange
-//   - Inline code: orange
-//   - Code-block chroma: indigo keywords, cyan function names, amber literals
+//   - H1: magenta — agent name, top-level section
+//   - H2: cyan — secondary headings, links
+//   - H3: blue — tertiary headings, enumerations, keywords
+//   - List items: magenta
+//   - Inline code: magenta
+//   - Code-block chroma: hex palette (see chromaForBackground — glamour's
+//     chroma parser requires hex, so this is the one non-base16 exception)
+//
+// Body/heading text is left unset so it uses the terminal's default
+// foreground, which inverts with the background (dark text on light, light on
+// dark). Accent colors are ANSI slots the terminal already remaps per theme,
+// so the StyleConfig itself no longer needs a dark/light branch — only the
+// chroma block does.
 func stylesForBackground(darkBackground bool) ansi.StyleConfig {
 	var styles ansi.StyleConfig
 	if darkBackground {
@@ -124,50 +133,45 @@ func stylesForBackground(darkBackground bool) ansi.StyleConfig {
 		styles = glamourstyles.LightStyleConfig
 	}
 
-	if darkBackground {
-		styles.Document.Color = strPtr("252")
-		styles.Heading.Color = strPtr("252")
-		styles.Code.BackgroundColor = strPtr("236")
-		styles.CodeBlock.Color = strPtr("252")
-	} else {
-		styles.Document.Color = strPtr("234")
-		styles.Heading.Color = strPtr("234")
-		styles.Code.BackgroundColor = strPtr("254")
-		styles.CodeBlock.Color = strPtr("242")
-	}
+	// Body text: leave colors unset so glamour uses the terminal's default
+	// foreground (which inverts with the background) instead of a pinned slot.
+	styles.Document.Color = nil
+	styles.Heading.Color = nil
+	styles.Code.BackgroundColor = nil // use terminal default background
+	styles.CodeBlock.Color = nil
 	styles.Heading.Bold = boolPtrV(true)
 
 	styles.H1.Prefix = "# "
 	styles.H1.Suffix = ""
-	styles.H1.Color = strPtr("#fb923c")
+	styles.H1.Color = strPtr(palette.Accent)
 	styles.H1.BackgroundColor = nil
 	styles.H1.Bold = boolPtrV(true)
 
-	styles.H2.Color = strPtr("#22d3ee")
+	styles.H2.Color = strPtr(palette.Cyan)
 	styles.H2.Bold = boolPtrV(true)
-	styles.H3.Color = strPtr("#818cf8")
+	styles.H3.Color = strPtr(palette.Blue)
 	styles.H3.Bold = boolPtrV(true)
-	styles.H4.Color = strPtr("252")
+	styles.H4.Color = nil // default fg (inverts with terminal theme)
 	styles.H4.Bold = boolPtrV(true)
-	styles.H5.Color = strPtr("245")
+	styles.H5.Color = strPtr(palette.Muted)
 	styles.H5.Bold = boolPtrV(true)
-	styles.H6.Color = strPtr("245")
+	styles.H6.Color = strPtr(palette.Muted)
 	styles.H6.Bold = boolPtrV(false)
 
-	styles.HorizontalRule.Color = strPtr("240")
-	styles.Item.Color = strPtr("#fb923c")
-	styles.Enumeration.Color = strPtr("#818cf8")
-	styles.BlockQuote.Color = strPtr("245")
+	styles.HorizontalRule.Color = strPtr(palette.Muted)
+	styles.Item.Color = strPtr(palette.Accent)
+	styles.Enumeration.Color = strPtr(palette.Blue)
+	styles.BlockQuote.Color = strPtr(palette.Muted)
 
-	styles.Link.Color = strPtr("#22d3ee")
+	styles.Link.Color = strPtr(palette.Cyan)
 	styles.Link.Underline = boolPtrV(true)
-	styles.LinkText.Color = strPtr("#818cf8")
+	styles.LinkText.Color = strPtr(palette.Blue)
 	styles.LinkText.Bold = boolPtrV(true)
 
-	styles.Code.Color = strPtr("#fb923c")
+	styles.Code.Color = strPtr(palette.Accent)
 	styles.CodeBlock.Chroma = chromaForBackground(darkBackground)
 
-	styles.Table.Color = strPtr("245")
+	styles.Table.Color = strPtr(palette.Muted)
 	styles.Table.CenterSeparator = strPtr(" ")
 	styles.Table.ColumnSeparator = strPtr(" ")
 	styles.Table.RowSeparator = strPtr("-")
@@ -175,9 +179,15 @@ func stylesForBackground(darkBackground bool) ansi.StyleConfig {
 	return styles
 }
 
-// chromaForBackground returns the syntax-highlighting palette for code
-// blocks. Dark and light backgrounds use distinct text colors but share
-// the same accent colors for keywords/functions/literals.
+// chromaForBackground returns the syntax-highlighting palette for code blocks.
+//
+// NOTE: unlike the rest of mdrender, the chroma block must use hex colors.
+// glamour parses these through the chroma library's color parser, which only
+// accepts hex (#rrggbb) — bare ANSI palette indices like "5" are rejected at
+// render time (panic: unknown style element). So code-block syntax colors are
+// the one place the CLI can't express its palette in base16; we keep the hex
+// values closest in hue to the base16 accents used elsewhere (blue keywords,
+// cyan functions, amber/yellow literals, red/green diff markers).
 func chromaForBackground(darkBackground bool) *ansi.Chroma {
 	textColor := "#2A2A2A"
 	commentColor := "#8D8D8D"

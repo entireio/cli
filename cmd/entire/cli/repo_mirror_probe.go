@@ -24,7 +24,7 @@ import (
 //
 // The owner/repo capture groups are restricted to GitHub's real identifier
 // charset rather than a permissive "anything but slash". owner/repo flow
-// unescaped into the STS audience (auth.RepoScopedToken) and the clone URL;
+// unescaped into the STS audience (entireclient/repocreds) and the clone URL;
 // a loose pattern would admit ?, #, %, .. and control chars, letting a name
 // like `repo?bypass=1` smuggle a query string or `repo#x` truncate the path.
 // GitHub owners are [A-Za-z0-9-] and repos are [A-Za-z0-9._-], so matching

@@ -382,7 +382,7 @@ func TestRunTrailListAll_PrintsLoginHintWhenNotLoggedIn(t *testing.T) {
 		}))
 
 	var out, errOut bytes.Buffer
-	err := runTrailListAll(t.Context(), &out, &errOut, defaultTrailListOptions(false))
+	err := runTrailListAll(t.Context(), &out, &errOut, trailListOptions{Status: defaultTrailListStatus, Limit: defaultTrailListLimit})
 	if err == nil {
 		t.Fatal("expected error when not logged in")
 	}
@@ -414,8 +414,7 @@ func TestRunTrailListAll_ValidatesOptionsBeforeAuth(t *testing.T) {
 			return nil, errors.New("unreachable")
 		}))
 
-	opts := defaultTrailListOptions(false)
-	opts.Limit = 0
+	opts := trailListOptions{Status: defaultTrailListStatus, Limit: 0}
 
 	var out, errOut bytes.Buffer
 	err := runTrailListAll(t.Context(), &out, &errOut, opts)
@@ -430,22 +429,6 @@ func TestRunTrailListAll_ValidatesOptionsBeforeAuth(t *testing.T) {
 	}
 	if errOut.Len() != 0 {
 		t.Fatalf("errOut = %q, want no auth hint", errOut.String())
-	}
-}
-
-func TestRunTrailListAllWithClient_ValidatesOptionsBeforeRepoLookup(t *testing.T) {
-	t.Parallel()
-
-	opts := defaultTrailListOptions(false)
-	opts.Limit = 0
-
-	var out bytes.Buffer
-	err := runTrailListAllValidatedWithClient(t.Context(), &out, nil, opts)
-	if err == nil {
-		t.Fatal("expected validation error")
-	}
-	if got, want := err.Error(), "limit must be greater than 0"; got != want {
-		t.Fatalf("error = %q, want %q", got, want)
 	}
 }
 
@@ -788,7 +771,17 @@ func TestResolveTrailRemote_RejectsUnsupportedForge(t *testing.T) {
 // (2xx => enabled) is covered by api.TestClient_TrailsEnabled.
 //
 // Not parallel: uses t.Chdir() to point clone preferences at a fake repo.
-func TestTrailsEnabledForRepo_ReadsClonePreference(t *testing.T) {
+func TestTrailEnablementCache_ReadsClonePreference(t *testing.T) {
+	// Inline of the former trailsEnabledForRepo wrapper: resolves the current
+	// repo's enablement scope and checks the cached enablement decision.
+	trailsEnabledForCurrentRepo := func(ctx context.Context) bool {
+		scope, err := currentTrailEnablementScope(ctx)
+		if err != nil {
+			return false
+		}
+		return cachedTrailsEnablementForScope(ctx, scope, time.Now()) == trailEnablementCacheEnabled
+	}
+
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
 	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@github.com:acme/repo.git")
@@ -800,19 +793,19 @@ func TestTrailsEnabledForRepo_ReadsClonePreference(t *testing.T) {
 	t.Chdir(repoDir)
 	ctx := context.Background()
 
-	if trailsEnabledForRepo(ctx) {
+	if trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails disabled when cache is absent")
 	}
 	if err := saveTrailsEnabledForRepo(ctx, false); err != nil {
 		t.Fatalf("save false cache: %v", err)
 	}
-	if trailsEnabledForRepo(ctx) {
+	if trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails disabled when cache is false")
 	}
 	if err := saveTrailsEnabledForRepo(ctx, true); err != nil {
 		t.Fatalf("save true cache: %v", err)
 	}
-	if !trailsEnabledForRepo(ctx) {
+	if !trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails enabled when cache is true")
 	}
 
@@ -829,7 +822,7 @@ func TestTrailsEnabledForRepo_ReadsClonePreference(t *testing.T) {
 	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
 		t.Fatalf("save auth-mismatched prefs: %v", err)
 	}
-	if trailsEnabledForRepo(ctx) {
+	if trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails disabled for mismatched auth cache scope")
 	}
 	prefs.TrailsEnabledAuthKey = currentAuthKey
@@ -844,14 +837,14 @@ func TestTrailsEnabledForRepo_ReadsClonePreference(t *testing.T) {
 	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
 		t.Fatalf("save stale prefs: %v", err)
 	}
-	if trailsEnabledForRepo(ctx) {
+	if trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails disabled when cache is stale")
 	}
 
 	if err := saveTrailsEnabledForRemote(ctx, "gh", "other", "repo", true); err != nil {
 		t.Fatalf("save mismatched cache: %v", err)
 	}
-	if trailsEnabledForRepo(ctx) {
+	if trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails disabled for mismatched cache scope")
 	}
 }

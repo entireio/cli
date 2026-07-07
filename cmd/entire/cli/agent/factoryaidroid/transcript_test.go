@@ -523,236 +523,6 @@ func TestExtractAgentIDFromText(t *testing.T) {
 	}
 }
 
-func TestCalculateTotalTokenUsageFromTranscript_PerCheckpoint(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	transcriptPath := tmpDir + "/transcript.jsonl"
-
-	// Build transcript with 3 turns:
-	// Turn 1: user + assistant (100 input, 50 output)
-	// Turn 2: user + assistant (200 input, 100 output)
-	// Turn 3: user + assistant (300 input, 150 output)
-	//
-	// Lines:
-	// 0: user message 1
-	// 1: assistant response 1 (100/50 tokens)
-	// 2: user message 2
-	// 3: assistant response 2 (200/100 tokens)
-	// 4: user message 3
-	// 5: assistant response 3 (300/150 tokens)
-
-	// Droid format: outer type is always "message", role is inside the inner message
-	transcriptContent := []byte(
-		`{"type":"message","id":"u1","message":{"role":"user","content":"first prompt"}}` + "\n" +
-			`{"type":"message","id":"a1","message":{"role":"assistant","id":"m1","usage":{"input_tokens":100,"output_tokens":50}}}` + "\n" +
-			`{"type":"message","id":"u2","message":{"role":"user","content":"second prompt"}}` + "\n" +
-			`{"type":"message","id":"a2","message":{"role":"assistant","id":"m2","usage":{"input_tokens":200,"output_tokens":100}}}` + "\n" +
-			`{"type":"message","id":"u3","message":{"role":"user","content":"third prompt"}}` + "\n" +
-			`{"type":"message","id":"a3","message":{"role":"assistant","id":"m3","usage":{"input_tokens":300,"output_tokens":150}}}` + "\n",
-	)
-	if err := os.WriteFile(transcriptPath, transcriptContent, 0o600); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-
-	// Test 1: From line 0 - all 3 turns = 600 input, 300 output
-	usage1, err := CalculateTotalTokenUsageFromTranscript(transcriptPath, 0, "")
-	if err != nil {
-		t.Fatalf("CalculateTotalTokenUsageFromTranscript(0) error: %v", err)
-	}
-	if usage1.InputTokens != 600 || usage1.OutputTokens != 300 {
-		t.Errorf("From line 0: got input=%d output=%d, want input=600 output=300",
-			usage1.InputTokens, usage1.OutputTokens)
-	}
-	if usage1.APICallCount != 3 {
-		t.Errorf("From line 0: got APICallCount=%d, want 3", usage1.APICallCount)
-	}
-
-	// Test 2: From line 2 (after turn 1) - turns 2+3 only = 500 input, 250 output
-	usage2, err := CalculateTotalTokenUsageFromTranscript(transcriptPath, 2, "")
-	if err != nil {
-		t.Fatalf("CalculateTotalTokenUsageFromTranscript(2) error: %v", err)
-	}
-	if usage2.InputTokens != 500 || usage2.OutputTokens != 250 {
-		t.Errorf("From line 2: got input=%d output=%d, want input=500 output=250",
-			usage2.InputTokens, usage2.OutputTokens)
-	}
-	if usage2.APICallCount != 2 {
-		t.Errorf("From line 2: got APICallCount=%d, want 2", usage2.APICallCount)
-	}
-
-	// Test 3: From line 4 (after turns 1+2) - turn 3 only = 300 input, 150 output
-	usage3, err := CalculateTotalTokenUsageFromTranscript(transcriptPath, 4, "")
-	if err != nil {
-		t.Fatalf("CalculateTotalTokenUsageFromTranscript(4) error: %v", err)
-	}
-	if usage3.InputTokens != 300 || usage3.OutputTokens != 150 {
-		t.Errorf("From line 4: got input=%d output=%d, want input=300 output=150",
-			usage3.InputTokens, usage3.OutputTokens)
-	}
-	if usage3.APICallCount != 1 {
-		t.Errorf("From line 4: got APICallCount=%d, want 1", usage3.APICallCount)
-	}
-}
-
-func TestExtractAllModifiedFilesFromTranscript_IncludesSubagentFiles(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	transcriptPath := tmpDir + "/transcript.jsonl"
-	subagentsDir := tmpDir + "/tasks/toolu_task1"
-
-	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
-		t.Fatalf("failed to create subagents dir: %v", err)
-	}
-
-	// Main transcript: Write to main.go + Task call spawning subagent "sub1"
-	writeJSONLFile(t, transcriptPath,
-		makeWriteToolLine(t, "a1", "/repo/main.go"),
-		makeTaskToolUseLine(t, "a2", "toolu_task1"),
-		makeTaskResultLine(t, "u1", "toolu_task1", "sub1"),
-	)
-
-	// Subagent transcript: Write to helper.go + Edit to utils.go
-	writeJSONLFile(t, subagentsDir+"/agent-sub1.jsonl",
-		makeWriteToolLine(t, "sa1", "/repo/helper.go"),
-		makeEditToolLine(t, "sa2", "/repo/utils.go"),
-	)
-
-	files, err := ExtractAllModifiedFilesFromTranscript(transcriptPath, 0, subagentsDir)
-	if err != nil {
-		t.Fatalf("ExtractAllModifiedFilesFromTranscript() error: %v", err)
-	}
-
-	if len(files) != 3 {
-		t.Errorf("expected 3 files, got %d: %v", len(files), files)
-	}
-
-	wantFiles := map[string]bool{
-		"/repo/main.go":   true,
-		"/repo/helper.go": true,
-		"/repo/utils.go":  true,
-	}
-	for _, f := range files {
-		if !wantFiles[f] {
-			t.Errorf("unexpected file %q in result", f)
-		}
-		delete(wantFiles, f)
-	}
-	for f := range wantFiles {
-		t.Errorf("missing expected file %q", f)
-	}
-}
-
-func TestExtractAllModifiedFilesFromTranscript_DeduplicatesAcrossAgents(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	transcriptPath := tmpDir + "/transcript.jsonl"
-	subagentsDir := tmpDir + "/tasks/toolu_task1"
-
-	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
-		t.Fatalf("failed to create subagents dir: %v", err)
-	}
-
-	// Main transcript: Write to shared.go + Task call
-	writeJSONLFile(t, transcriptPath,
-		makeWriteToolLine(t, "a1", "/repo/shared.go"),
-		makeTaskToolUseLine(t, "a2", "toolu_task1"),
-		makeTaskResultLine(t, "u1", "toolu_task1", "sub1"),
-	)
-
-	// Subagent transcript: Also modifies shared.go (same file as main)
-	writeJSONLFile(t, subagentsDir+"/agent-sub1.jsonl",
-		makeEditToolLine(t, "sa1", "/repo/shared.go"),
-	)
-
-	files, err := ExtractAllModifiedFilesFromTranscript(transcriptPath, 0, subagentsDir)
-	if err != nil {
-		t.Fatalf("ExtractAllModifiedFilesFromTranscript() error: %v", err)
-	}
-
-	if len(files) != 1 {
-		t.Errorf("expected 1 file (deduplicated), got %d: %v", len(files), files)
-	}
-	if len(files) > 0 && files[0] != "/repo/shared.go" {
-		t.Errorf("expected /repo/shared.go, got %q", files[0])
-	}
-}
-
-func TestExtractAllModifiedFilesFromTranscript_NoSubagents(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	transcriptPath := tmpDir + "/transcript.jsonl"
-
-	// Main transcript: Write to a file, no Task calls
-	writeJSONLFile(t, transcriptPath,
-		makeWriteToolLine(t, "a1", "/repo/solo.go"),
-	)
-
-	files, err := ExtractAllModifiedFilesFromTranscript(transcriptPath, 0, tmpDir+"/nonexistent")
-	if err != nil {
-		t.Fatalf("ExtractAllModifiedFilesFromTranscript() error: %v", err)
-	}
-
-	if len(files) != 1 {
-		t.Errorf("expected 1 file, got %d: %v", len(files), files)
-	}
-	if len(files) > 0 && files[0] != "/repo/solo.go" {
-		t.Errorf("expected /repo/solo.go, got %q", files[0])
-	}
-}
-
-func TestExtractAllModifiedFilesFromTranscript_SubagentOnlyChanges(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	transcriptPath := tmpDir + "/transcript.jsonl"
-	subagentsDir := tmpDir + "/tasks/toolu_task1"
-
-	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
-		t.Fatalf("failed to create subagents dir: %v", err)
-	}
-
-	// Main transcript: ONLY a Task call, no direct file modifications
-	// This is the key bug scenario - if we only look at the main transcript,
-	// we miss all the subagent's file changes entirely.
-	writeJSONLFile(t, transcriptPath,
-		makeTaskToolUseLine(t, "a1", "toolu_task1"),
-		makeTaskResultLine(t, "u1", "toolu_task1", "sub1"),
-	)
-
-	// Subagent transcript: Write to two files
-	writeJSONLFile(t, subagentsDir+"/agent-sub1.jsonl",
-		makeWriteToolLine(t, "sa1", "/repo/subagent_file1.go"),
-		makeWriteToolLine(t, "sa2", "/repo/subagent_file2.go"),
-	)
-
-	files, err := ExtractAllModifiedFilesFromTranscript(transcriptPath, 0, subagentsDir)
-	if err != nil {
-		t.Fatalf("ExtractAllModifiedFilesFromTranscript() error: %v", err)
-	}
-
-	if len(files) != 2 {
-		t.Errorf("expected 2 files from subagent, got %d: %v", len(files), files)
-	}
-
-	wantFiles := map[string]bool{
-		"/repo/subagent_file1.go": true,
-		"/repo/subagent_file2.go": true,
-	}
-	for _, f := range files {
-		if !wantFiles[f] {
-			t.Errorf("unexpected file %q in result", f)
-		}
-		delete(wantFiles, f)
-	}
-	for f := range wantFiles {
-		t.Errorf("missing expected file %q", f)
-	}
-}
-
 // mustMarshal is a test helper that marshals a value to JSON or fails the test.
 func mustMarshal(t *testing.T, v interface{}) []byte {
 	t.Helper()
@@ -804,55 +574,6 @@ func makeWriteToolLine(t *testing.T, id, filePath string) string {
 	return makeFileToolLine(t, "Write", id, filePath)
 }
 
-// makeEditToolLine returns a Droid-format JSONL line with an Edit tool_use for the given file.
-func makeEditToolLine(t *testing.T, id, filePath string) string {
-	t.Helper()
-	return makeFileToolLine(t, "Edit", id, filePath)
-}
-
-// makeTaskToolUseLine returns a Droid-format JSONL line with a Task tool_use (spawning a subagent).
-func makeTaskToolUseLine(t *testing.T, id, toolUseID string) string {
-	t.Helper()
-	innerMsg := mustMarshal(t, map[string]interface{}{
-		"role": "assistant",
-		"content": []map[string]interface{}{
-			{
-				"type":  "tool_use",
-				"id":    toolUseID,
-				"name":  "Task",
-				"input": map[string]string{"prompt": "do something"},
-			},
-		},
-	})
-	line := mustMarshal(t, map[string]interface{}{
-		"type":    "message",
-		"id":      id,
-		"message": json.RawMessage(innerMsg),
-	})
-	return string(line)
-}
-
-// makeTaskResultLine returns a Droid-format JSONL user line with a tool_result containing agentId.
-func makeTaskResultLine(t *testing.T, id, toolUseID, agentID string) string {
-	t.Helper()
-	innerMsg := mustMarshal(t, map[string]interface{}{
-		"role": "user",
-		"content": []map[string]interface{}{
-			{
-				"type":        "tool_result",
-				"tool_use_id": toolUseID,
-				"content":     "agentId: " + agentID,
-			},
-		},
-	})
-	line := mustMarshal(t, map[string]interface{}{
-		"type":    "message",
-		"id":      id,
-		"message": json.RawMessage(innerMsg),
-	})
-	return string(line)
-}
-
 // makeUserTextLine returns a Droid-format JSONL line with a user text message (array content).
 func makeUserTextLine(t *testing.T, id, text string) string {
 	t.Helper()
@@ -877,25 +598,6 @@ func makeAssistantTextLine(t *testing.T, id, text string) string {
 		"role": "assistant",
 		"content": []map[string]interface{}{
 			{"type": "text", "text": text},
-		},
-	})
-	line := mustMarshal(t, map[string]interface{}{
-		"type":    "message",
-		"id":      id,
-		"message": json.RawMessage(innerMsg),
-	})
-	return string(line)
-}
-
-// makeAssistantTokenLine returns a Droid-format JSONL line with an assistant message that has usage data.
-func makeAssistantTokenLine(t *testing.T, id, msgID string, inputTokens, outputTokens int) string {
-	t.Helper()
-	innerMsg := mustMarshal(t, map[string]interface{}{
-		"role": "assistant",
-		"id":   msgID,
-		"usage": map[string]int{
-			"input_tokens":  inputTokens,
-			"output_tokens": outputTokens,
 		},
 	})
 	line := mustMarshal(t, map[string]interface{}{
@@ -1087,61 +789,6 @@ func TestParseDroidTranscript_MalformedLines(t *testing.T) {
 	}
 }
 
-func TestCalculateTotalTokenUsageFromTranscript_WithSubagentFiles(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	transcriptPath := tmpDir + "/transcript.jsonl"
-	subagentsDir := tmpDir + "/tasks/toolu_task1"
-
-	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
-		t.Fatalf("failed to create subagents dir: %v", err)
-	}
-
-	// Main transcript: assistant message with tokens + Task spawning subagent "sub1"
-	writeJSONLFile(t, transcriptPath,
-		makeAssistantTokenLine(t, "a1", "msg_main1", 100, 50),
-		makeTaskToolUseLine(t, "a2", "toolu_task2"),
-		makeTaskResultLine(t, "u2", "toolu_task2", "sub99"),
-	)
-
-	// Subagent transcript: assistant message with its own tokens
-	writeJSONLFile(t, subagentsDir+"/agent-sub99.jsonl",
-		makeAssistantTokenLine(t, "sa1", "msg_sub1", 200, 80),
-		makeAssistantTokenLine(t, "sa2", "msg_sub2", 150, 60),
-	)
-
-	usage, err := CalculateTotalTokenUsageFromTranscript(transcriptPath, 0, subagentsDir)
-	if err != nil {
-		t.Fatalf("CalculateTotalTokenUsageFromTranscript() error: %v", err)
-	}
-
-	// Main agent: 100 input, 50 output, 1 API call
-	if usage.InputTokens != 100 {
-		t.Errorf("main InputTokens = %d, want 100", usage.InputTokens)
-	}
-	if usage.OutputTokens != 50 {
-		t.Errorf("main OutputTokens = %d, want 50", usage.OutputTokens)
-	}
-	if usage.APICallCount != 1 {
-		t.Errorf("main APICallCount = %d, want 1", usage.APICallCount)
-	}
-
-	// Subagent tokens should be aggregated
-	if usage.SubagentTokens == nil {
-		t.Fatal("SubagentTokens is nil, expected subagent token data")
-	}
-	if usage.SubagentTokens.InputTokens != 350 {
-		t.Errorf("subagent InputTokens = %d, want 350 (200+150)", usage.SubagentTokens.InputTokens)
-	}
-	if usage.SubagentTokens.OutputTokens != 140 {
-		t.Errorf("subagent OutputTokens = %d, want 140 (80+60)", usage.SubagentTokens.OutputTokens)
-	}
-	if usage.SubagentTokens.APICallCount != 2 {
-		t.Errorf("subagent APICallCount = %d, want 2", usage.SubagentTokens.APICallCount)
-	}
-}
-
 func TestCleanModelName(t *testing.T) {
 	t.Parallel()
 
@@ -1269,5 +916,311 @@ func TestExtractModelFromTranscript_EmptyPath(t *testing.T) {
 	model := ExtractModelFromTranscript("")
 	if model != "" {
 		t.Errorf("ExtractModelFromTranscript(\"\") = %q, want empty", model)
+	}
+}
+
+// makeEditToolLine returns a Droid-format JSONL line with an Edit tool_use for the given file.
+func makeEditToolLine(t *testing.T, id, filePath string) string {
+	t.Helper()
+	return makeFileToolLine(t, "Edit", id, filePath)
+}
+
+// makeTaskToolUseLine returns a Droid-format JSONL line with a Task tool_use (spawning a subagent).
+func makeTaskToolUseLine(t *testing.T, id, toolUseID string) string {
+	t.Helper()
+	innerMsg := mustMarshal(t, map[string]interface{}{
+		"role": "assistant",
+		"content": []map[string]interface{}{
+			{
+				"type":  "tool_use",
+				"id":    toolUseID,
+				"name":  "Task",
+				"input": map[string]string{"prompt": "do something"},
+			},
+		},
+	})
+	line := mustMarshal(t, map[string]interface{}{
+		"type":    "message",
+		"id":      id,
+		"message": json.RawMessage(innerMsg),
+	})
+	return string(line)
+}
+
+// makeTaskResultLine returns a Droid-format JSONL user line with a tool_result containing agentId.
+func makeTaskResultLine(t *testing.T, id, toolUseID, agentID string) string {
+	t.Helper()
+	innerMsg := mustMarshal(t, map[string]interface{}{
+		"role": "user",
+		"content": []map[string]interface{}{
+			{
+				"type":        "tool_result",
+				"tool_use_id": toolUseID,
+				"content":     "agentId: " + agentID,
+			},
+		},
+	})
+	line := mustMarshal(t, map[string]interface{}{
+		"type":    "message",
+		"id":      id,
+		"message": json.RawMessage(innerMsg),
+	})
+	return string(line)
+}
+
+// makeAssistantTokenLine returns a Droid-format JSONL line with an assistant message that has usage data.
+func makeAssistantTokenLine(t *testing.T, id, msgID string, inputTokens, outputTokens int) string {
+	t.Helper()
+	innerMsg := mustMarshal(t, map[string]interface{}{
+		"role": "assistant",
+		"id":   msgID,
+		"usage": map[string]int{
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
+		},
+	})
+	line := mustMarshal(t, map[string]interface{}{
+		"type":    "message",
+		"id":      id,
+		"message": json.RawMessage(innerMsg),
+	})
+	return string(line)
+}
+
+// joinJSONL joins transcript lines into the raw bytes the FromBytes entry
+// points consume (the production path via lifecycle.go).
+func joinJSONL(lines ...string) []byte {
+	return []byte(strings.Join(lines, "\n") + "\n")
+}
+
+func TestCalculateTotalTokenUsageFromBytes_PerCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	// Three turns; lines 0/2/4 are user prompts, 1/3/5 assistant responses
+	// carrying 100/50, 200/100, and 300/150 input/output tokens.
+	data := joinJSONL(
+		`{"type":"message","id":"u1","message":{"role":"user","content":"first prompt"}}`,
+		`{"type":"message","id":"a1","message":{"role":"assistant","id":"m1","usage":{"input_tokens":100,"output_tokens":50}}}`,
+		`{"type":"message","id":"u2","message":{"role":"user","content":"second prompt"}}`,
+		`{"type":"message","id":"a2","message":{"role":"assistant","id":"m2","usage":{"input_tokens":200,"output_tokens":100}}}`,
+		`{"type":"message","id":"u3","message":{"role":"user","content":"third prompt"}}`,
+		`{"type":"message","id":"a3","message":{"role":"assistant","id":"m3","usage":{"input_tokens":300,"output_tokens":150}}}`,
+	)
+
+	cases := []struct {
+		startLine             int
+		wantInput, wantOutput int
+		wantAPICalls          int
+	}{
+		{0, 600, 300, 3},
+		{2, 500, 250, 2},
+		{4, 300, 150, 1},
+	}
+	for _, tc := range cases {
+		usage, err := CalculateTotalTokenUsageFromBytes(data, tc.startLine, "")
+		if err != nil {
+			t.Fatalf("CalculateTotalTokenUsageFromBytes(%d) error: %v", tc.startLine, err)
+		}
+		if usage.InputTokens != tc.wantInput || usage.OutputTokens != tc.wantOutput {
+			t.Errorf("from line %d: got input=%d output=%d, want input=%d output=%d",
+				tc.startLine, usage.InputTokens, usage.OutputTokens, tc.wantInput, tc.wantOutput)
+		}
+		if usage.APICallCount != tc.wantAPICalls {
+			t.Errorf("from line %d: got APICallCount=%d, want %d", tc.startLine, usage.APICallCount, tc.wantAPICalls)
+		}
+	}
+}
+
+func TestCalculateTotalTokenUsageFromBytes_WithSubagentFiles(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	subagentsDir := tmpDir + "/tasks/toolu_task1"
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatalf("failed to create subagents dir: %v", err)
+	}
+
+	// Main transcript: assistant message with tokens + Task spawning subagent "sub99"
+	data := joinJSONL(
+		makeAssistantTokenLine(t, "a1", "msg_main1", 100, 50),
+		makeTaskToolUseLine(t, "a2", "toolu_task2"),
+		makeTaskResultLine(t, "u2", "toolu_task2", "sub99"),
+	)
+
+	// Subagent transcript: assistant messages with their own tokens
+	writeJSONLFile(t, subagentsDir+"/agent-sub99.jsonl",
+		makeAssistantTokenLine(t, "sa1", "msg_sub1", 200, 80),
+		makeAssistantTokenLine(t, "sa2", "msg_sub2", 150, 60),
+	)
+
+	usage, err := CalculateTotalTokenUsageFromBytes(data, 0, subagentsDir)
+	if err != nil {
+		t.Fatalf("CalculateTotalTokenUsageFromBytes() error: %v", err)
+	}
+
+	if usage.InputTokens != 100 {
+		t.Errorf("main InputTokens = %d, want 100", usage.InputTokens)
+	}
+	if usage.OutputTokens != 50 {
+		t.Errorf("main OutputTokens = %d, want 50", usage.OutputTokens)
+	}
+	if usage.APICallCount != 1 {
+		t.Errorf("main APICallCount = %d, want 1", usage.APICallCount)
+	}
+
+	if usage.SubagentTokens == nil {
+		t.Fatal("SubagentTokens is nil, expected subagent token data")
+	}
+	if usage.SubagentTokens.InputTokens != 350 {
+		t.Errorf("subagent InputTokens = %d, want 350 (200+150)", usage.SubagentTokens.InputTokens)
+	}
+	if usage.SubagentTokens.OutputTokens != 140 {
+		t.Errorf("subagent OutputTokens = %d, want 140 (80+60)", usage.SubagentTokens.OutputTokens)
+	}
+	if usage.SubagentTokens.APICallCount != 2 {
+		t.Errorf("subagent APICallCount = %d, want 2", usage.SubagentTokens.APICallCount)
+	}
+}
+
+func TestExtractAllModifiedFilesFromBytes_IncludesSubagentFiles(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	subagentsDir := tmpDir + "/tasks/toolu_task1"
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatalf("failed to create subagents dir: %v", err)
+	}
+
+	// Main transcript: Write to main.go + Task call spawning subagent "sub1"
+	data := joinJSONL(
+		makeWriteToolLine(t, "a1", "/repo/main.go"),
+		makeTaskToolUseLine(t, "a2", "toolu_task1"),
+		makeTaskResultLine(t, "u1", "toolu_task1", "sub1"),
+	)
+
+	// Subagent transcript: Write to helper.go + Edit to utils.go
+	writeJSONLFile(t, subagentsDir+"/agent-sub1.jsonl",
+		makeWriteToolLine(t, "sa1", "/repo/helper.go"),
+		makeEditToolLine(t, "sa2", "/repo/utils.go"),
+	)
+
+	files, err := ExtractAllModifiedFilesFromBytes(data, 0, subagentsDir)
+	if err != nil {
+		t.Fatalf("ExtractAllModifiedFilesFromBytes() error: %v", err)
+	}
+
+	wantFiles := map[string]bool{
+		"/repo/main.go":   true,
+		"/repo/helper.go": true,
+		"/repo/utils.go":  true,
+	}
+	if len(files) != len(wantFiles) {
+		t.Errorf("expected %d files, got %d: %v", len(wantFiles), len(files), files)
+	}
+	for _, f := range files {
+		if !wantFiles[f] {
+			t.Errorf("unexpected file %q in result", f)
+		}
+		delete(wantFiles, f)
+	}
+	for f := range wantFiles {
+		t.Errorf("missing expected file %q", f)
+	}
+}
+
+func TestExtractAllModifiedFilesFromBytes_DeduplicatesAcrossAgents(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	subagentsDir := tmpDir + "/tasks/toolu_task1"
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatalf("failed to create subagents dir: %v", err)
+	}
+
+	// Main transcript and subagent both modify shared.go.
+	data := joinJSONL(
+		makeWriteToolLine(t, "a1", "/repo/shared.go"),
+		makeTaskToolUseLine(t, "a2", "toolu_task1"),
+		makeTaskResultLine(t, "u1", "toolu_task1", "sub1"),
+	)
+	writeJSONLFile(t, subagentsDir+"/agent-sub1.jsonl",
+		makeEditToolLine(t, "sa1", "/repo/shared.go"),
+	)
+
+	files, err := ExtractAllModifiedFilesFromBytes(data, 0, subagentsDir)
+	if err != nil {
+		t.Fatalf("ExtractAllModifiedFilesFromBytes() error: %v", err)
+	}
+
+	if len(files) != 1 {
+		t.Errorf("expected 1 file (deduplicated), got %d: %v", len(files), files)
+	}
+	if len(files) > 0 && files[0] != "/repo/shared.go" {
+		t.Errorf("expected /repo/shared.go, got %q", files[0])
+	}
+}
+
+func TestExtractAllModifiedFilesFromBytes_NoSubagents(t *testing.T) {
+	t.Parallel()
+
+	// Missing subagents dir must be tolerated: main-agent files still count.
+	data := joinJSONL(
+		makeWriteToolLine(t, "a1", "/repo/solo.go"),
+	)
+
+	files, err := ExtractAllModifiedFilesFromBytes(data, 0, t.TempDir()+"/nonexistent")
+	if err != nil {
+		t.Fatalf("ExtractAllModifiedFilesFromBytes() error: %v", err)
+	}
+
+	if len(files) != 1 {
+		t.Errorf("expected 1 file, got %d: %v", len(files), files)
+	}
+	if len(files) > 0 && files[0] != "/repo/solo.go" {
+		t.Errorf("expected /repo/solo.go, got %q", files[0])
+	}
+}
+
+func TestExtractAllModifiedFilesFromBytes_SubagentOnlyChanges(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	subagentsDir := tmpDir + "/tasks/toolu_task1"
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatalf("failed to create subagents dir: %v", err)
+	}
+
+	// Main transcript: ONLY a Task call, no direct file modifications.
+	// If only the main transcript were scanned, all subagent changes
+	// would be missed entirely.
+	data := joinJSONL(
+		makeTaskToolUseLine(t, "a1", "toolu_task1"),
+		makeTaskResultLine(t, "u1", "toolu_task1", "sub1"),
+	)
+	writeJSONLFile(t, subagentsDir+"/agent-sub1.jsonl",
+		makeWriteToolLine(t, "sa1", "/repo/subagent_file1.go"),
+		makeWriteToolLine(t, "sa2", "/repo/subagent_file2.go"),
+	)
+
+	files, err := ExtractAllModifiedFilesFromBytes(data, 0, subagentsDir)
+	if err != nil {
+		t.Fatalf("ExtractAllModifiedFilesFromBytes() error: %v", err)
+	}
+
+	wantFiles := map[string]bool{
+		"/repo/subagent_file1.go": true,
+		"/repo/subagent_file2.go": true,
+	}
+	if len(files) != len(wantFiles) {
+		t.Errorf("expected %d files from subagent, got %d: %v", len(wantFiles), len(files), files)
+	}
+	for _, f := range files {
+		if !wantFiles[f] {
+			t.Errorf("unexpected file %q in result", f)
+		}
+		delete(wantFiles, f)
+	}
+	for f := range wantFiles {
+		t.Errorf("missing expected file %q", f)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 
 	"golang.org/x/term"
 )
@@ -26,7 +27,7 @@ type statusStyles struct {
 	gray   lipgloss.Style
 	bold   lipgloss.Style
 	dim    lipgloss.Style
-	agent  lipgloss.Style // amber/orange for agent names
+	agent  lipgloss.Style // accent (magenta) for agent names
 	cyan   lipgloss.Style
 	yellow lipgloss.Style // yellow for stale warnings
 }
@@ -42,14 +43,14 @@ func newStatusStyles(w io.Writer) statusStyles {
 	}
 
 	if useColor {
-		s.green = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-		s.red = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-		s.gray = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+		s.green = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Success))
+		s.red = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Error))
+		s.gray = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
 		s.bold = lipgloss.NewStyle().Bold(true)
 		s.dim = lipgloss.NewStyle().Faint(true)
-		s.agent = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
-		s.cyan = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-		s.yellow = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+		s.agent = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(palette.Accent))
+		s.cyan = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Info))
+		s.yellow = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Warning))
 	}
 
 	return s
@@ -122,8 +123,9 @@ type explainRow struct {
 	Value string
 }
 
-// identityBullet renders "● <label> <id>\n". Bullet is brand orange when color
-// is enabled; ID is also orange to mirror the existing checkpoint header. When
+// identityBullet renders "● <label> <id>\n". Bullet is the brand accent
+// (magenta) when color is enabled; ID is also the accent to mirror the existing
+// checkpoint header. When
 // id is empty (e.g., temporary checkpoints append "[temporary]" to the label
 // instead of using an id slot), the trailing space + id is suppressed.
 func (s statusStyles) identityBullet(label, id string) string {
@@ -131,18 +133,18 @@ func (s statusStyles) identityBullet(label, id string) string {
 		if !s.colorEnabled {
 			return fmt.Sprintf("● %s\n", label)
 		}
-		bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), "●")
+		bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)), "●")
 		return fmt.Sprintf("%s %s\n", bullet, s.render(s.bold, label))
 	}
 	if !s.colorEnabled {
 		return fmt.Sprintf("● %s %s\n", label, id)
 	}
-	bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), "●")
-	idStyled := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), id)
+	bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)), "●")
+	idStyled := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)), id)
 	return fmt.Sprintf("%s %s %s\n", bullet, s.render(s.bold, label), idStyled)
 }
 
-// listIdentityBullet renders "● <id>  <suffix>\n" — orange bullet, bold-orange ID,
+// listIdentityBullet renders "● <id>  <suffix>\n" — accent bullet, bold-accent ID,
 // then plain (or dimmed) suffix. Used by the explain list view where the ID is
 // the primary identifier (different ordering from identityBullet, which puts
 // the static label first).
@@ -153,8 +155,8 @@ func (s statusStyles) listIdentityBullet(id, suffix string) string {
 		}
 		return fmt.Sprintf("● %s  %s\n", id, suffix)
 	}
-	bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), "●")
-	idStyled := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")).Bold(true), id)
+	bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)), "●")
+	idStyled := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)).Bold(true), id)
 	if suffix == "" {
 		return fmt.Sprintf("%s %s\n", bullet, idStyled)
 	}
@@ -207,25 +209,12 @@ func (s statusStyles) renderFailure(label string, rows []explainRow) string {
 	return s.failureBullet(label) + s.metadataRows(rows)
 }
 
-// metadataRow renders a single key/value row using a 7-char min-padded label.
-// 7-char-pad + 2-space-gutter is visually equivalent to the existing
-// formatCheckpointHeader's %-9s + no-gutter (see explain.go) for any label up
-// to 9 chars, and the explicit gutter scales cleanly when a longer label
-// (e.g. "checkpoints", 11 chars) is present.
-//
-// Use metadataRows for multi-row blocks where alignment depends on the
-// widest label.
-func (s statusStyles) metadataRow(label, value string) string {
-	width := 7
-	if l := len(label); l > width {
-		width = l
-	}
-	return s.metadataRowsWithWidth([]explainRow{{Label: label, Value: value}}, width)
-}
-
 // metadataRows joins rows with consistent label-column width:
-// max(7, widest label in slice). See metadataRow for the 7 vs 9
-// equivalence note.
+// max(7, widest label in slice). 7-char-pad + 2-space-gutter is visually
+// equivalent to the existing formatCheckpointHeader's %-9s + no-gutter
+// (see explain.go) for any label up to 9 chars, and the explicit gutter
+// scales cleanly when a longer label (e.g. "checkpoints", 11 chars) is
+// present.
 func (s statusStyles) metadataRows(rows []explainRow) string {
 	width := 7
 	for _, r := range rows {
@@ -236,13 +225,13 @@ func (s statusStyles) metadataRows(rows []explainRow) string {
 	return s.metadataRowsWithWidth(rows, width)
 }
 
-// metadataRowsWithWidth is the underlying renderer used by metadataRow and
+// metadataRowsWithWidth is the underlying renderer used by
 // metadataRows. The caller computes the column width; this function owns the
 // byte layout (2-space indent, padded label, 2-space gutter, value, newline)
 // and the empty-label continuation branch (4-space hanging indent, no dim
 // styling — used for multi-line items beneath a parent label like "causes").
 //
-// The min=7 default chosen by metadataRow/metadataRows produces output
+// The min=7 default chosen by metadataRows produces output
 // identical to formatCheckpointHeader's %-9s + no-gutter rendering at
 // explain.go for any label up to 9 chars.
 func (s statusStyles) metadataRowsWithWidth(rows []explainRow, width int) string {

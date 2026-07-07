@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -188,34 +187,6 @@ func normalizeMSYSPath(p string) string {
 		return string(unicode.ToUpper(rune(p[1]))) + ":" + p[2:]
 	}
 	return p
-}
-
-// nonAlphanumericRegex matches any non-alphanumeric character
-var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]`)
-
-// SanitizePathForClaude converts a path to Claude's project directory format.
-// Claude replaces any non-alphanumeric character with a dash.
-func SanitizePathForClaude(path string) string {
-	return nonAlphanumericRegex.ReplaceAllString(path, "-")
-}
-
-// GetClaudeProjectDir returns the directory where Claude stores session transcripts
-// for the given repository path.
-//
-// In test environments, set ENTIRE_TEST_CLAUDE_PROJECT_DIR to override the default location.
-func GetClaudeProjectDir(repoPath string) (string, error) {
-	override := os.Getenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR")
-	if override != "" {
-		return override, nil
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	projectDir := SanitizePathForClaude(repoPath)
-	return filepath.Join(homeDir, ".claude", "projects", projectDir), nil
 }
 
 // SessionMetadataDirFromSessionID returns the path to a session's metadata directory

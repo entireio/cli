@@ -247,40 +247,6 @@ func TestCountTranscriptItems_CursorEmpty(t *testing.T) {
 	}
 }
 
-func TestExtractUserPrompts_Cursor(t *testing.T) {
-	t.Parallel()
-
-	// Cursor uses "role":"user" instead of "type":"human". extractUserPromptsFromLines
-	// handles both via the "role" fallback.
-	prompts := extractUserPrompts(agent.AgentTypeCursor, cursorSampleTranscript)
-	if len(prompts) != 3 {
-		t.Fatalf("extractUserPrompts(Cursor) returned %d prompts, want 3", len(prompts))
-	}
-
-	if !strings.Contains(prompts[0], "create a file with contents 'a'") {
-		t.Errorf("prompt[0] = %q, expected to contain file creation request", prompts[0])
-	}
-	if !strings.Contains(prompts[2], "bingo") {
-		t.Errorf("prompt[2] = %q, expected to contain 'bingo'", prompts[2])
-	}
-
-	// Verify <user_query> tags are stripped
-	for i, p := range prompts {
-		if strings.Contains(p, "<user_query>") || strings.Contains(p, "</user_query>") {
-			t.Errorf("prompt[%d] still contains <user_query> tags: %q", i, p)
-		}
-	}
-}
-
-func TestExtractUserPrompts_CursorEmpty(t *testing.T) {
-	t.Parallel()
-
-	prompts := extractUserPrompts(agent.AgentTypeCursor, "")
-	if len(prompts) != 0 {
-		t.Errorf("extractUserPrompts(Cursor, empty) = %v, want empty", prompts)
-	}
-}
-
 func TestSessionStateBackfillTokenUsage_CopilotUsesZeroInputSessionAggregate(t *testing.T) {
 	t.Parallel()
 

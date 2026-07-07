@@ -63,7 +63,7 @@ func TestGrantRows(t *testing.T) {
 			Role:        "writer",
 			Source:      "direct",
 		})
-		want := []string{"account", "github:alice", ulid, "writer", "direct"}
+		want := []string{"github:alice", "writer", "direct", "account", ulid}
 		if !slices.Equal(row, want) {
 			t.Errorf("projectGrantRow = %v, want %v", row, want)
 		}
@@ -78,7 +78,7 @@ func TestGrantRows(t *testing.T) {
 			Role:        "reader",
 			Source:      "inherited",
 		})
-		want := []string{"team", ulid, ulid, "reader", "inherited"}
+		want := []string{ulid, "reader", "inherited", "team", ulid}
 		if !slices.Equal(row, want) {
 			t.Errorf("repoGrantRow = %v, want %v", row, want)
 		}

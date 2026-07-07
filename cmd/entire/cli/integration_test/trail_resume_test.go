@@ -183,7 +183,7 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 	host := mustTrailResumeIntegrationHost(t, coreURL)
 	cacheDir := filepath.Join(xdgCacheHome, "entire")
 	if err := discovery.ModifyAPICores(cacheDir, func(c discovery.ClusterCoresCache) error {
-		c.Set(host, []string{coreURL})
+		c.SetEntry(host, discovery.CoresEntry{CoreURLs: []string{coreURL}})
 		return nil
 	}); err != nil {
 		t.Fatalf("seed API discovery cache: %v", err)

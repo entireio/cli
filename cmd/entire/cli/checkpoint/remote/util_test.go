@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 )
@@ -401,38 +402,17 @@ func TestPushURL(t *testing.T) {
 // setup: origin migrated to an entire:// URL (forge-prefixed /gh/owner/repo)
 // with a github checkpoint_remote. The checkpoint URL must route to github
 // rather than fall back to the entire:// origin, reusing the auth/scheme the
-// repo had for that endpoint — first from the pre-mirror URL that
-// `entire-repo mirror use` saves (remote.origin.entiredb-original-url), then an
-// existing remote on the provider host, then defaulting to SSH.
+// repo had for that endpoint — a token forces HTTPS, then an existing remote
+// on the provider host, then defaulting to SSH.
 func TestPushURL_EntireOriginReusesProviderRemoteScheme(t *testing.T) {
 	const entireOrigin = "entire://aws-eu-central-1.entire.io/gh/entireio/cli"
 	tests := []struct {
 		name        string
 		githubURL   string
-		savedURL    string
 		token       string
 		wantURL     string
 		wantEnabled bool
 	}{
-		{
-			name:        "pre-mirror ssh url yields ssh checkpoint url",
-			savedURL:    "git@github.com:entireio/cli.git",
-			wantURL:     "git@github.com:entireio/cli-checkpoints.git",
-			wantEnabled: true,
-		},
-		{
-			name:        "pre-mirror https url yields https checkpoint url",
-			savedURL:    "https://github.com/entireio/cli.git",
-			wantURL:     "https://github.com/entireio/cli-checkpoints.git",
-			wantEnabled: true,
-		},
-		{
-			name:        "pre-mirror url wins over token",
-			savedURL:    "git@github.com:entireio/cli.git",
-			token:       "ci-token",
-			wantURL:     "git@github.com:entireio/cli-checkpoints.git",
-			wantEnabled: true,
-		},
 		{
 			name:        "ssh github remote yields ssh checkpoint url",
 			githubURL:   "git@github.com:entireio/cli.git",
@@ -451,7 +431,7 @@ func TestPushURL_EntireOriginReusesProviderRemoteScheme(t *testing.T) {
 			wantEnabled: true,
 		},
 		{
-			name:        "token forces https when no pre-mirror url",
+			name:        "token forces https over existing ssh remote",
 			githubURL:   "git@github.com:entireio/cli.git",
 			token:       "ci-token",
 			wantURL:     "https://github.com/entireio/cli-checkpoints.git",
@@ -466,9 +446,6 @@ func TestPushURL_EntireOriginReusesProviderRemoteScheme(t *testing.T) {
 			runGit(t, repoDir, "remote", "add", "origin", entireOrigin)
 			if tt.githubURL != "" {
 				runGit(t, repoDir, "remote", "add", "github", tt.githubURL)
-			}
-			if tt.savedURL != "" {
-				runGit(t, repoDir, "config", "remote.origin.entiredb-original-url", tt.savedURL)
 			}
 			writeSettings(t, repoDir, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"entireio/cli-checkpoints"}}}`)
 			t.Chdir(repoDir)
@@ -553,4 +530,99 @@ func initBareRepo(t *testing.T, repoDir string) {
 
 func fileURL(path string) string {
 	return "file://" + filepath.ToSlash(path)
+}
+
+// TestDeriveCheckpointURLFromInfo covers the push-remote to checkpoint-remote
+// URL mapping (previously exercised cross-package via the removed
+// DeriveCheckpointURL wrapper).
+func TestDeriveCheckpointURLFromInfo(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		pushRemoteURL  string
+		checkpointRepo string
+		want           string
+		wantParseErr   bool
+		wantDeriveErr  bool
+	}{
+		{
+			name:           "SSH push remote",
+			pushRemoteURL:  "git@github.com:org/main-repo.git",
+			checkpointRepo: "org/checkpoints",
+			want:           "git@github.com:org/checkpoints.git",
+		},
+		{
+			name:           "HTTPS push remote",
+			pushRemoteURL:  "https://github.com/org/main-repo.git",
+			checkpointRepo: "org/checkpoints",
+			want:           "https://github.com/org/checkpoints.git",
+		},
+		{
+			name:           "SSH protocol push remote",
+			pushRemoteURL:  "ssh://git@github.com/org/main-repo.git",
+			checkpointRepo: "org/checkpoints",
+			want:           "git@github.com:org/checkpoints.git",
+		},
+		{
+			name:           "different host",
+			pushRemoteURL:  "git@github.example.com:org/main-repo.git",
+			checkpointRepo: "org/checkpoints",
+			want:           "git@github.example.com:org/checkpoints.git",
+		},
+		{
+			name:           "HTTPS with non-standard port",
+			pushRemoteURL:  "https://git.example.com:8443/org/main-repo.git",
+			checkpointRepo: "org/checkpoints",
+			want:           "https://git.example.com:8443/org/checkpoints.git",
+		},
+		{
+			name:           "SSH protocol with non-standard port",
+			pushRemoteURL:  "ssh://git@git.example.com:2222/org/main-repo.git",
+			checkpointRepo: "org/checkpoints",
+			want:           "ssh://git@git.example.com:2222/org/checkpoints.git",
+		},
+		{
+			name:          "invalid push remote",
+			pushRemoteURL: "not-a-url",
+			wantParseErr:  true,
+		},
+		{
+			name:           "unsupported protocol",
+			pushRemoteURL:  "file:///tmp/repo.git",
+			checkpointRepo: "org/checkpoints",
+			wantDeriveErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			info, err := ParseURL(tt.pushRemoteURL)
+			if tt.wantParseErr {
+				if err == nil {
+					t.Fatalf("ParseURL(%q) = nil error, want parse error", tt.pushRemoteURL)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseURL(%q) error = %v", tt.pushRemoteURL, err)
+			}
+
+			config := &settings.CheckpointRemoteConfig{Provider: "github", Repo: tt.checkpointRepo}
+			got, err := deriveCheckpointURLFromInfo(info, config)
+			if tt.wantDeriveErr {
+				if err == nil {
+					t.Fatalf("deriveCheckpointURLFromInfo(%q) = %q, nil error; want error", tt.pushRemoteURL, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("deriveCheckpointURLFromInfo(%q) error = %v", tt.pushRemoteURL, err)
+			}
+			if got != tt.want {
+				t.Errorf("deriveCheckpointURLFromInfo(%q) = %q, want %q", tt.pushRemoteURL, got, tt.want)
+			}
+		})
+	}
 }

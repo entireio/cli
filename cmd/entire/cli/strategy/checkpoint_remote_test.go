@@ -11,81 +11,11 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestDeriveCheckpointURL(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name           string
-		pushRemoteURL  string
-		checkpointRepo string
-		want           string
-		wantErr        bool
-	}{
-		{
-			name:           "SSH push remote",
-			pushRemoteURL:  "git@github.com:org/main-repo.git",
-			checkpointRepo: "org/checkpoints",
-			want:           "git@github.com:org/checkpoints.git",
-		},
-		{
-			name:           "HTTPS push remote",
-			pushRemoteURL:  "https://github.com/org/main-repo.git",
-			checkpointRepo: "org/checkpoints",
-			want:           "https://github.com/org/checkpoints.git",
-		},
-		{
-			name:           "SSH protocol push remote",
-			pushRemoteURL:  "ssh://git@github.com/org/main-repo.git",
-			checkpointRepo: "org/checkpoints",
-			want:           "git@github.com:org/checkpoints.git",
-		},
-		{
-			name:           "different host",
-			pushRemoteURL:  "git@github.example.com:org/main-repo.git",
-			checkpointRepo: "org/checkpoints",
-			want:           "git@github.example.com:org/checkpoints.git",
-		},
-		{
-			name:           "HTTPS with non-standard port",
-			pushRemoteURL:  "https://git.example.com:8443/org/main-repo.git",
-			checkpointRepo: "org/checkpoints",
-			want:           "https://git.example.com:8443/org/checkpoints.git",
-		},
-		{
-			name:           "SSH protocol with non-standard port",
-			pushRemoteURL:  "ssh://git@git.example.com:2222/org/main-repo.git",
-			checkpointRepo: "org/checkpoints",
-			want:           "ssh://git@git.example.com:2222/org/checkpoints.git",
-		},
-		{
-			name:           "invalid push remote",
-			pushRemoteURL:  "not-a-url",
-			checkpointRepo: "org/checkpoints",
-			wantErr:        true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			config := &settings.CheckpointRemoteConfig{Provider: "github", Repo: tt.checkpointRepo}
-			got, err := remote.DeriveCheckpointURL(tt.pushRemoteURL, config)
-			if tt.wantErr {
-				assert.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
 
 func TestIsURL(t *testing.T) {
 	t.Parallel()

@@ -84,69 +84,6 @@ func TestWrite_DispatchesEachRequest(t *testing.T) {
 	}
 }
 
-func TestWriteCommittedWritesBranchCheckpointVersion(t *testing.T) {
-	t.Parallel()
-	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo, DefaultV1Refs())
-	ctx := context.Background()
-	cpID := id.MustCheckpointID("b1b2c3d4e5f6")
-
-	if err := store.Write(ctx, Session{
-		CheckpointID: cpID,
-		SessionID:    "session-001",
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
-		Prompts:      []string{"initial"},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	}); err != nil {
-		t.Fatalf("WriteCommitted() error = %v", err)
-	}
-
-	summary, err := store.Read(ctx, cpID)
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	if summary == nil {
-		t.Fatal("Read() returned nil summary")
-	}
-	if summary.CheckpointVersion != CheckpointVersionBranchV1 {
-		t.Fatalf("CheckpointVersion = %q, want %q", summary.CheckpointVersion, CheckpointVersionBranchV1)
-	}
-
-	rawSummary := readSummaryFromBranch(t, repo, cpID)
-	if rawSummary.CheckpointVersion != CheckpointVersionBranchV1 {
-		t.Fatalf("raw checkpoint_version = %q, want %q", rawSummary.CheckpointVersion, CheckpointVersionBranchV1)
-	}
-}
-
-func TestWriteCommittedUsesExplicitCheckpointVersion(t *testing.T) {
-	t.Parallel()
-	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo, DefaultV1Refs())
-	ctx := context.Background()
-	cpID := id.MustCheckpointID("c1c2c3d4e5f6")
-	const configuredVersion = "refs-v1"
-
-	if err := store.Write(ctx, Session{
-		CheckpointID:      cpID,
-		SessionID:         "session-001",
-		Strategy:          "manual-commit",
-		Transcript:        redact.AlreadyRedacted([]byte("transcript\n")),
-		Prompts:           []string{"initial"},
-		AuthorName:        "Test",
-		AuthorEmail:       "test@test.com",
-		CheckpointVersion: configuredVersion,
-	}); err != nil {
-		t.Fatalf("WriteCommitted() error = %v", err)
-	}
-
-	rawSummary := readSummaryFromBranch(t, repo, cpID)
-	if rawSummary.CheckpointVersion != configuredVersion {
-		t.Fatalf("raw checkpoint_version = %q, want %q", rawSummary.CheckpointVersion, configuredVersion)
-	}
-}
-
 // TestWrite_BackfillSummaryNotFound verifies error propagation through dispatch.
 func TestWrite_BackfillSummaryNotFound(t *testing.T) {
 	t.Parallel()

@@ -563,22 +563,7 @@ func LoadFromFile(filePath string) (*EntireSettings, error) {
 // from duplicating settings parsing in violation of the "Settings access must
 // go through the settings package" rule in CLAUDE.md.
 func LoadProjectRaw(ctx context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error) {
-	path, err = paths.AbsPath(ctx, EntireSettingsFile)
-	if err != nil {
-		path = EntireSettingsFile
-	}
-	data, readErr := readConfined(path)
-	if readErr != nil {
-		if errors.Is(readErr, fs.ErrNotExist) {
-			return path, map[string]json.RawMessage{}, false, nil
-		}
-		return path, nil, false, fmt.Errorf("reading project settings: %w", readErr)
-	}
-	raw = map[string]json.RawMessage{}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return path, nil, true, fmt.Errorf("parsing project settings: %w", err)
-	}
-	return path, raw, true, nil
+	return loadRaw(ctx, EntireSettingsFile, "project")
 }
 
 // LoadLocalRaw reads .entire/settings.local.json as a generic JSON object,
@@ -589,20 +574,27 @@ func LoadProjectRaw(ctx context.Context) (path string, raw map[string]json.RawMe
 // Pair with SaveProjectRaw for read-modify-write flows that need to preserve
 // unrelated keys in the per-developer override file.
 func LoadLocalRaw(ctx context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error) {
-	path, err = paths.AbsPath(ctx, EntireSettingsLocalFile)
+	return loadRaw(ctx, EntireSettingsLocalFile, "local")
+}
+
+// loadRaw reads a settings file as a generic JSON object. label ("project" or
+// "local") only differentiates error wording so failures name the file
+// actually being read.
+func loadRaw(ctx context.Context, file, label string) (path string, raw map[string]json.RawMessage, exists bool, err error) {
+	path, err = paths.AbsPath(ctx, file)
 	if err != nil {
-		path = EntireSettingsLocalFile
+		path = file
 	}
 	data, readErr := readConfined(path)
 	if readErr != nil {
 		if errors.Is(readErr, fs.ErrNotExist) {
 			return path, map[string]json.RawMessage{}, false, nil
 		}
-		return path, nil, false, fmt.Errorf("reading local settings: %w", readErr)
+		return path, nil, false, fmt.Errorf("reading %s settings: %w", label, readErr)
 	}
 	raw = map[string]json.RawMessage{}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return path, nil, true, fmt.Errorf("parsing local settings: %w", err)
+		return path, nil, true, fmt.Errorf("parsing %s settings: %w", label, err)
 	}
 	return path, raw, true, nil
 }
@@ -611,14 +603,7 @@ func LoadLocalRaw(ctx context.Context) (path string, raw map[string]json.RawMess
 // atomically (temp file + rename). Callers should mutate the map returned by
 // LoadProjectRaw and pass it back here so unrelated fields are preserved.
 func SaveProjectRaw(path string, raw map[string]json.RawMessage) error {
-	data, err := jsonutil.MarshalIndentWithNewline(raw, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal project settings: %w", err)
-	}
-	if err := jsonutil.WriteFileAtomic(path, data, 0o644); err != nil {
-		return fmt.Errorf("writing project settings: %w", err)
-	}
-	return nil
+	return saveRaw(path, "project", raw)
 }
 
 // SaveLocalRaw writes a generic JSON object back to .entire/settings.local.json
@@ -630,12 +615,18 @@ func SaveProjectRaw(path string, raw map[string]json.RawMessage) error {
 // override (e.g. persisting an interactive prompt's "always" choice without
 // touching the project-wide settings file).
 func SaveLocalRaw(path string, raw map[string]json.RawMessage) error {
+	return saveRaw(path, "local", raw)
+}
+
+// saveRaw writes a generic JSON settings object atomically (temp file +
+// rename). label matches loadRaw's error-wording convention.
+func saveRaw(path, label string, raw map[string]json.RawMessage) error {
 	data, err := jsonutil.MarshalIndentWithNewline(raw, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal local settings: %w", err)
+		return fmt.Errorf("marshal %s settings: %w", label, err)
 	}
 	if err := jsonutil.WriteFileAtomic(path, data, 0o644); err != nil {
-		return fmt.Errorf("writing local settings: %w", err)
+		return fmt.Errorf("writing %s settings: %w", label, err)
 	}
 	return nil
 }
@@ -1136,16 +1127,8 @@ func mergeRedaction(dst *RedactionSettings, data json.RawMessage) error {
 		}
 	}
 	if csRaw, ok := raw["custom_redactions"]; ok {
-		var cs map[string]string
-		if err := json.Unmarshal(csRaw, &cs); err != nil {
-			return fmt.Errorf("parsing redaction.custom_redactions: %w", err)
-		}
-		if dst.CustomRedactions == nil {
-			dst.CustomRedactions = cs
-		} else {
-			for k, v := range cs {
-				dst.CustomRedactions[k] = v
-			}
+		if err := mergeStringMap(&dst.CustomRedactions, csRaw, "redaction.custom_redactions"); err != nil {
+			return err
 		}
 	}
 	if opfRaw, ok := raw["openai_privacy_filter"]; ok {
@@ -1262,17 +1245,27 @@ func mergePIISettings(dst *PIISettings, data json.RawMessage) error {
 		dst.Address = &b
 	}
 	if v, ok := raw["custom_patterns"]; ok {
-		var cp map[string]string
-		if err := json.Unmarshal(v, &cp); err != nil {
-			return fmt.Errorf("parsing pii.custom_patterns: %w", err)
+		if err := mergeStringMap(&dst.CustomPatterns, v, "pii.custom_patterns"); err != nil {
+			return err
 		}
-		if dst.CustomPatterns == nil {
-			dst.CustomPatterns = cp
-		} else {
-			for k, val := range cp {
-				dst.CustomPatterns[k] = val
-			}
-		}
+	}
+	return nil
+}
+
+// mergeStringMap unmarshals raw into a string map and merges it into dst,
+// adopting the parsed map wholesale when dst is nil. field names the setting
+// in parse errors.
+func mergeStringMap(dst *map[string]string, raw json.RawMessage, field string) error {
+	var m map[string]string
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return fmt.Errorf("parsing %s: %w", field, err)
+	}
+	if *dst == nil {
+		*dst = m
+		return nil
+	}
+	for k, v := range m {
+		(*dst)[k] = v
 	}
 	return nil
 }

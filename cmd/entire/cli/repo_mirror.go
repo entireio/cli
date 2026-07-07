@@ -49,9 +49,11 @@ func availableMirrorRow(m coreapi.AvailableMirror) []string {
 
 // defaultClusterHost is the cluster the positional-arg mirror commands target
 // when the caller omits the <cluster-host> argument. The no-arg create wizard
-// instead enumerates real clusters from the catalog (GET /api/v1/clusters, see
-// availableRegions in repo_mirror_create_wizard.go); this stays as the
-// single-region fallback for the explicit `create <github-url>` form.
+// and the interactive one-shot `create <github-url>` instead enumerate real
+// clusters from the catalog (GET /api/v1/clusters, see availableRegions and
+// resolveOneShotClusterHost in repo_mirror_create_wizard.go); this stays as
+// the fixed fallback for non-interactive invocations, so scripts keep a
+// stable, offline-resolvable default.
 const defaultClusterHost = "aws-us-east-2.entire.io"
 
 // clusterArg returns the cluster host from the optional second positional
@@ -77,7 +79,7 @@ var clusterHostLabelRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-
 // validateClusterHost rejects a cluster host that is anything other than a
 // bare DNS name or IP with an optional :port. The host is concatenated as
 // "https://"+host into the clone URL and the STS audience
-// (auth.RepoScopedToken), so a value carrying URL metacharacters can redirect
+// (entireclient/repocreds), so a value carrying URL metacharacters can redirect
 // the request — and the repo-scoped basic-auth token it carries — somewhere
 // other than the intended cluster. Classic case:
 // `aws-us-east-2.entire.io@evil.com`, which Go's URL parser reads as
@@ -144,9 +146,9 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 			"the target cluster, then waits for the initial GitHub→EntireDB clone " +
 			"to finish so `git clone` works on return. Pass --no-wait to return " +
 			"as soon as the placement is registered. Idempotent on " +
-			"(upstream, cluster). The cluster-host defaults to " +
-			defaultClusterHost + " when omitted (the interactive wizard, with " +
-			"no args, instead lets you pick clusters).",
+			"(upstream, cluster). When the cluster-host is omitted, an " +
+			"interactive terminal offers the available clusters as a picker; " +
+			"non-interactive runs default to " + defaultClusterHost + ".",
 		Example: "  entire repo mirror create\n" +
 			"  entire repo mirror create github.com/octocat/hello-world\n" +
 			"  entire repo mirror create github.com/octocat/hello-world aws-us-east-2.entire.io",
@@ -160,11 +162,19 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 				cmd.SilenceUsage = true
 				return fmt.Errorf("invalid <github-url>: %w", err)
 			}
-			// The non-interactive one-shot keeps a fixed default cluster
-			// (defaultClusterHost) when [cluster-host] is omitted — catalog-based
-			// cluster guessing is intentionally limited to the interactive
-			// wizard (the no-args path above), so scripts get stable behavior.
-			clusterHost := clusterArg(args)
+			// [cluster-host] omitted: on an interactive terminal, offer the
+			// catalog's clusters as a picker (the same prompt-only-when-there-
+			// is-a-choice shape as `repo clone`); non-interactive invocations
+			// keep the fixed defaultClusterHost so scripts get stable behavior.
+			var clusterHost string
+			if len(args) > 1 {
+				clusterHost = args[1]
+			} else {
+				var rerr error
+				if clusterHost, rerr = resolveOneShotClusterHost(cmd); rerr != nil {
+					return rerr
+				}
+			}
 			if err := validateClusterHost(clusterHost); err != nil {
 				cmd.SilenceUsage = true
 				return fmt.Errorf("invalid [cluster-host]: %w", err)
@@ -207,8 +217,8 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().BoolVar(&noWait, "no-wait", false, "return once the placement is registered, without waiting for the initial clone")
-	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Minute, "how long to wait for the initial clone to finish")
+	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return once the placement is registered, without waiting for the initial clone")
+	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Minute, "How long to wait for the initial clone to finish")
 	return cmd
 }
 
@@ -291,7 +301,7 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 		return err
 	}
 	if created.Created {
-		fmt.Fprintf(out, "\nRegistered mirror %s\n", created.MirrorId)
+		fmt.Fprintf(out, "\n✓ Registered mirror %s\n", created.MirrorId)
 	} else {
 		fmt.Fprintf(out, "\nMirror exists (%s)\n", created.MirrorId)
 	}
@@ -341,7 +351,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if showAvailable {
-				return runCoreList(cmd, availableMirrorColumns, availableMirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.AvailableMirror, error) {
+				return runCoreList(cmd, "No repos available to mirror.", availableMirrorColumns, availableMirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.AvailableMirror, error) {
 					// Computed live from GitHub using your own login, so name the
 					// core being dialled (same rationale as the existing-mirror
 					// banner). --cluster/--provider don't apply here: the
@@ -360,7 +370,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 					return out.Available, nil
 				})
 			}
-			return runCoreList(cmd, mirrorColumns, mirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Mirror, error) {
+			return runCoreList(cmd, "No mirrors found.", mirrorColumns, mirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Mirror, error) {
 				// mirror list is identity-scoped: it shows the mirrors visible
 				// from the active login's federation, so naming that login server
 				// makes a surprising empty result legible — e.g. mirrors in a
@@ -397,10 +407,10 @@ func newRepoMirrorListCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&cluster, "cluster", "", "filter by cluster public host")
-	cmd.Flags().StringVar(&provider, "provider", "", "filter by upstream provider (e.g. github)")
-	cmd.Flags().StringVar(&owner, "owner", "", "filter by upstream owner login")
-	cmd.Flags().BoolVar(&showAvailable, "show-available", false, "instead of existing mirrors, list GitHub repos you could onboard as mirrors (ignores --cluster/--provider)")
+	cmd.Flags().StringVar(&cluster, "cluster", "", "Filter by cluster public host")
+	cmd.Flags().StringVar(&provider, "provider", "", "Filter by upstream provider (e.g. github)")
+	cmd.Flags().StringVar(&owner, "owner", "", "Filter by upstream owner login")
+	cmd.Flags().BoolVar(&showAvailable, "show-available", false, "Instead of existing mirrors, list GitHub repos you could onboard as mirrors (ignores --cluster/--provider)")
 	return cmd
 }
 
@@ -523,23 +533,36 @@ func newRepoMirrorRemoveCmd() *cobra.Command {
 				return fmt.Errorf("invalid [cluster-host]: %w", err)
 			}
 			return runCoreForCluster(cmd, clusterHost, func(ctx context.Context, c *coreapi.Client) error {
-				// Delete by upstream coords in one call. A 404 is a real
-				// error here, not idempotent success: the server only
-				// answers 204 when it actually removed a placement, so a
-				// 404 ("no such mirror / not visible / different cluster")
-				// surfaces verbatim via renderCoreError rather than being
-				// reported as a successful removal.
-				if err := c.DeleteMirror(ctx, coreapi.DeleteMirrorParams{
-					Provider:    coreapi.DeleteMirrorProviderGithub,
-					Owner:       owner,
-					Repo:        repo,
-					ClusterHost: clusterHost,
-				}); err != nil {
-					return err
-				}
-				cmd.Printf("Removed mirror github.com/%s/%s from %s\n", owner, repo, clusterHost)
-				return nil
+				return removeMirror(ctx, cmd.OutOrStdout(), c, owner, repo, clusterHost)
 			})
 		},
 	}
+}
+
+// removeMirror deletes the (owner, repo) placement on clusterHost via c and
+// reports the outcome on w. A decoded 404 is a real error here (the server
+// only answers 204 when it actually removed a placement); it is rewritten
+// into a targeted message with the server's own detail appended so no
+// information is lost.
+func removeMirror(ctx context.Context, w io.Writer, c *coreapi.Client, owner, repo, clusterHost string) error {
+	if err := c.DeleteMirror(ctx, coreapi.DeleteMirrorParams{
+		Provider:    coreapi.DeleteMirrorProviderGithub,
+		Owner:       owner,
+		Repo:        repo,
+		ClusterHost: clusterHost,
+	}); err != nil {
+		if isCoreNotFound(err) {
+			// Deliberately not %w-wrapped: renderCoreError would extract the
+			// server's problem detail and replace this targeted message. The
+			// detail is appended as plain text instead, so nothing is lost.
+			msg := fmt.Sprintf("no mirror of github.com/%s/%s on %s — it may be on a different cluster (run `entire repo mirror list` to see placements)", owner, repo, clusterHost)
+			if detail := coreapi.APIError(err); detail != "" {
+				msg += " (server: " + detail + ")"
+			}
+			return errors.New(msg)
+		}
+		return err
+	}
+	fmt.Fprintf(w, "✓ Removed mirror github.com/%s/%s from %s\n", owner, repo, clusterHost)
+	return nil
 }

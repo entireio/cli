@@ -465,7 +465,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 	// Generate a fresh checkpoint ID and resolve session metadata
 	_, resolveMetadataSpan := perf.Start(ctx, "resolve_session_metadata")
-	checkpointID, err := id.Generate()
+	checkpointID, err := checkpoint.GenerateCheckpointID(ctx)
 	if err != nil {
 		resolveMetadataSpan.RecordError(err)
 		resolveMetadataSpan.End()
@@ -2111,7 +2111,7 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 // (ACTIVE session + no TTY). Generates a checkpoint ID and adds the trailer
 // directly, bypassing content detection and interactive prompts.
 func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string) error { //nolint:unparam // kept for signature stability
-	cpID, err := id.Generate()
+	cpID, err := checkpoint.GenerateCheckpointID(logCtx)
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
@@ -2953,17 +2953,6 @@ func filesChangedInCommitFallback(ctx context.Context, headTree, parentTree *obj
 		result[f] = struct{}{}
 	}
 	return result
-}
-
-// subtractFiles returns files that are NOT in the exclude set.
-func subtractFiles(files []string, exclude map[string]struct{}) []string {
-	var remaining []string
-	for _, f := range files {
-		if _, excluded := exclude[f]; !excluded {
-			remaining = append(remaining, f)
-		}
-	}
-	return remaining
 }
 
 // carryForwardToNewShadowBranch creates a new shadow branch at the current HEAD

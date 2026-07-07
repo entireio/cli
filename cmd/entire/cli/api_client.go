@@ -60,7 +60,7 @@ func NewAuthenticatedAPIClient(ctx context.Context, insecureHTTP bool) (*api.Cli
 // failure yields a nil target and NewEntireAPICellClient falls back to
 // home-jurisdiction routing, so the common same-region case never regresses.
 func NewAuthenticatedEntireAPICellClient(ctx context.Context, insecureHTTP bool, fullName, ulid string) (*api.Client, error) {
-	target := resolveExpertsCellTarget(ctx, fullName, ulid)
+	target := resolveRepoCellTarget(ctx, fullName, ulid)
 	// NewEntireAPICellClient already returns user-facing, context-rich errors
 	// (login hint, discovery-unavailable, region guidance); re-wrapping here
 	// would bury them, so surface them verbatim.

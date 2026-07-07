@@ -15,7 +15,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
-	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -225,9 +224,6 @@ func restoreByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID 
 
 	metadata, err := readCheckpointInfoFromStore(ctx, store, checkpointID)
 	if err != nil {
-		if checkpointpolicy.IsUnsupportedVersion(err) {
-			return nil, err
-		}
 		logging.Debug(ctx, "resume by checkpoint: metadata read failed, checking remote",
 			slog.String("checkpoint_id", checkpointID.String()),
 			slog.String("error", err.Error()),
@@ -339,9 +335,6 @@ func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName
 		if storeErr == nil {
 			metadata = storeInfo
 		} else {
-			if checkpointpolicy.IsUnsupportedVersion(storeErr) {
-				return nil, storeErr
-			}
 			logging.Debug(ctx, "checkpoint store metadata read failed",
 				slog.String("checkpoint_id", checkpointID.String()),
 				slog.String("error", storeErr.Error()),
@@ -394,9 +387,6 @@ func readCheckpointInfoFromStore(ctx context.Context, store checkpointInfoReader
 	summary, err := checkpoint.ReadCheckpoint(ctx, store, checkpointID)
 	if err != nil {
 		return nil, fmt.Errorf("read checkpoint: %w", err)
-	}
-	if err := checkpointpolicy.EnsureCanReadVersion(checkpointID.String(), summary.CheckpointVersion); err != nil {
-		return nil, err
 	}
 	info := &strategy.CheckpointInfo{
 		CheckpointID:     checkpointID,
@@ -787,7 +777,6 @@ func checkRemoteMetadata(
 
 	// Resolve checkpoint remote URL once; reuse for both fetch and error message.
 	hasCheckpointRemote := remote.Configured(ctx)
-	var unsupportedVersionErr error
 
 	// Try checkpoint_remote first if configured and resolved (that's where checkpoints are stored)
 	var checkpointURL string
@@ -805,9 +794,6 @@ func checkRemoteMetadata(
 					defer freshRepo.Close()
 					metadata, err := readCheckpointInfoFromRef(ctx, freshRepo, refs, checkpointID)
 					if err != nil {
-						if checkpointpolicy.IsUnsupportedVersion(err) {
-							unsupportedVersionErr = err
-						}
 						logging.Debug(logCtx, "checkpoint remote: fetch succeeded but checkpoint metadata read failed",
 							slog.String("checkpoint_id", checkpointID.String()),
 							slog.String("error", err.Error()),
@@ -830,9 +816,6 @@ func checkRemoteMetadata(
 	if metadataErr == nil {
 		return restoreResumeSessions(ctx, w, errW, metadata, false)
 	}
-	if checkpointpolicy.IsUnsupportedVersion(metadataErr) {
-		unsupportedVersionErr = metadataErr
-	}
 	logging.Debug(logCtx, "remote-tracking metadata read failed",
 		slog.String("checkpoint_id", checkpointID.String()),
 		slog.String("error", metadataErr.Error()),
@@ -848,9 +831,6 @@ func checkRemoteMetadata(
 			defer freshRepo.Close()
 			metadata, err := readCheckpointInfoFromRef(ctx, freshRepo, refs, checkpointID)
 			if err != nil {
-				if checkpointpolicy.IsUnsupportedVersion(err) && unsupportedVersionErr == nil {
-					unsupportedVersionErr = err
-				}
 				logging.Debug(logCtx, "origin metadata fetch succeeded but checkpoint metadata read failed",
 					slog.String("checkpoint_id", checkpointID.String()),
 					slog.String("error", err.Error()),
@@ -864,10 +844,6 @@ func checkRemoteMetadata(
 			slog.String("error", fetchErr.Error()),
 		)
 	}
-	if unsupportedVersionErr != nil {
-		return nil, unsupportedVersionErr
-	}
-
 	// Nothing worked — print helpful error message
 	if hasCheckpointRemote {
 		if resolveErr != nil {
@@ -1036,14 +1012,7 @@ func restoreSingleSession(ctx context.Context, w io.Writer, ag agent.Agent, sess
 	if err != nil {
 		return strategy.RestoredSession{}, false, fmt.Errorf("open checkpoint store: %w", err)
 	}
-	summary, err := checkpoint.ReadCheckpoint(ctx, stores.Persistent, checkpointID)
-	if err == nil {
-		err = checkpointpolicy.EnsureCanReadVersion(checkpointID.String(), summary.CheckpointVersion)
-	}
-	var logContent []byte
-	if err == nil {
-		logContent, _, err = checkpoint.ReadRawSessionLogForCheckpoint(ctx, stores.Persistent, checkpointID)
-	}
+	logContent, _, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, stores.Persistent, checkpointID)
 	if err != nil {
 		if errors.Is(err, checkpoint.ErrCheckpointNotFound) || errors.Is(err, checkpoint.ErrNoTranscript) {
 			logging.Debug(ctx, "resume session completed (no metadata)",

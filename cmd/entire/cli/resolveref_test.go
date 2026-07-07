@@ -69,7 +69,7 @@ func TestResolveOrgRef(t *testing.T) {
 		var gotName string
 		c, calls := resolveTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 			gotName = r.URL.Query().Get("name")
-			if err := writeJSON(w, &coreapi.ListOrgsOutputBody{Org: coreapi.NewOptOrg(coreapi.Org{ID: ulidOrgGlobex, Name: "globex"})}); err != nil {
+			if err := printJSON(w, &coreapi.ListOrgsOutputBody{Org: coreapi.NewOptOrg(coreapi.Org{ID: ulidOrgGlobex, Name: "globex"})}); err != nil {
 				t.Errorf("encode org: %v", err)
 			}
 		})
@@ -91,7 +91,7 @@ func TestResolveOrgRef(t *testing.T) {
 	t.Run("unknown name is a friendly error", func(t *testing.T) {
 		t.Parallel()
 		c, _ := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-			if err := writeJSON(w, &coreapi.ListOrgsOutputBody{}); err != nil {
+			if err := printJSON(w, &coreapi.ListOrgsOutputBody{}); err != nil {
 				t.Errorf("encode empty: %v", err)
 			}
 		})
@@ -129,7 +129,7 @@ func TestResolveProjectRef(t *testing.T) {
 		var gotName string
 		c, calls := resolveTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 			gotName = r.URL.Query().Get("name")
-			if err := writeJSON(w, &coreapi.ListProjectsOutputBody{Project: matched}); err != nil {
+			if err := printJSON(w, &coreapi.ListProjectsOutputBody{Project: matched}); err != nil {
 				t.Errorf("encode project: %v", err)
 			}
 		})
@@ -151,7 +151,7 @@ func TestResolveProjectRef(t *testing.T) {
 	t.Run("unknown name is a friendly error", func(t *testing.T) {
 		t.Parallel()
 		c, _ := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-			if err := writeJSON(w, &coreapi.ListProjectsOutputBody{}); err != nil {
+			if err := printJSON(w, &coreapi.ListProjectsOutputBody{}); err != nil {
 				t.Errorf("encode empty: %v", err)
 			}
 		})
@@ -209,7 +209,7 @@ func TestResolveRepoRef(t *testing.T) {
 			// which is only populated for an unfiltered page. Reading `repos`
 			// here was the COR-699 bug, so the fixture must mirror the real
 			// server's singular field to keep that regression covered.
-			if err := writeJSON(w, &coreapi.ListProjectReposOutputBody{Repo: coreapi.NewOptRepo(coreapi.Repo{ID: ulidRepoWeb, Name: "web"})}); err != nil {
+			if err := printJSON(w, &coreapi.ListProjectReposOutputBody{Repo: coreapi.NewOptRepo(coreapi.Repo{ID: ulidRepoWeb, Name: "web"})}); err != nil {
 				t.Errorf("encode repo: %v", err)
 			}
 		})
@@ -233,7 +233,7 @@ func TestResolveRepoRef(t *testing.T) {
 	t.Run("unknown name is a friendly error", func(t *testing.T) {
 		t.Parallel()
 		c, _ := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-			if err := writeJSON(w, &coreapi.ListProjectReposOutputBody{}); err != nil {
+			if err := printJSON(w, &coreapi.ListProjectReposOutputBody{}); err != nil {
 				t.Errorf("encode empty: %v", err)
 			}
 		})
@@ -268,7 +268,7 @@ func TestResolveAccountRef(t *testing.T) {
 	t.Run("handle resolves via exactly one call", func(t *testing.T) {
 		t.Parallel()
 		c, calls := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-			if err := writeJSON(w, &coreapi.ResolvedIdentity{AccountId: ulidResolvedAcct, Provider: "github", Handle: "alice"}); err != nil {
+			if err := printJSON(w, &coreapi.ResolvedIdentity{AccountId: ulidResolvedAcct, Provider: "github", Handle: "alice"}); err != nil {
 				t.Errorf("encode identity: %v", err)
 			}
 		})
@@ -287,7 +287,7 @@ func TestResolveAccountRef(t *testing.T) {
 	t.Run("empty resolved account id is an error", func(t *testing.T) {
 		t.Parallel()
 		c, _ := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-			if err := writeJSON(w, &coreapi.ResolvedIdentity{AccountId: "", Provider: "github", Handle: "alice"}); err != nil {
+			if err := printJSON(w, &coreapi.ResolvedIdentity{AccountId: "", Provider: "github", Handle: "alice"}); err != nil {
 				t.Errorf("encode identity: %v", err)
 			}
 		})
@@ -317,7 +317,7 @@ func TestResolveGranteeProvider(t *testing.T) {
 	t.Run("handle resolves to the provider user id in one call", func(t *testing.T) {
 		t.Parallel()
 		c, calls := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-			if err := writeJSON(w, &coreapi.ResolvedIdentity{AccountId: ulidResolvedAcct, Provider: providerGitHub, Handle: "alice", ProviderUserId: "12345"}); err != nil {
+			if err := printJSON(w, &coreapi.ResolvedIdentity{AccountId: ulidResolvedAcct, Provider: providerGitHub, Handle: "alice", ProviderUserId: "12345"}); err != nil {
 				t.Errorf("encode identity: %v", err)
 			}
 		})
@@ -368,7 +368,7 @@ func TestResolveGranteeProvider(t *testing.T) {
 	t.Run("empty provider user id is an error", func(t *testing.T) {
 		t.Parallel()
 		c, _ := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-			if err := writeJSON(w, &coreapi.ResolvedIdentity{AccountId: ulidResolvedAcct, Provider: providerGitHub, Handle: "alice", ProviderUserId: ""}); err != nil {
+			if err := printJSON(w, &coreapi.ResolvedIdentity{AccountId: ulidResolvedAcct, Provider: providerGitHub, Handle: "alice", ProviderUserId: ""}); err != nil {
 				t.Errorf("encode identity: %v", err)
 			}
 		})

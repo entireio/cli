@@ -141,63 +141,6 @@ func TestStateStore_LoadMissingDirectoryReturnsNilNil(t *testing.T) {
 	}
 }
 
-func TestStateStore_List(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	store := NewStateStoreWithDir(dir)
-	now := time.Now().UTC()
-	for _, runID := range []string{"abcdef012345", "0123456789ab"} {
-		if err := store.Save(context.Background(), &RunState{
-			RunID:       runID,
-			Topic:       "topic",
-			StartingSHA: "sha",
-			StartedAt:   now,
-			UpdatedAt:   now,
-		}); err != nil {
-			t.Fatalf("Save(%s): %v", runID, err)
-		}
-	}
-
-	// A non-run sibling in the directory (e.g. the manifests/ subdir or a
-	// stray file) must be ignored, not crash List.
-	if err := os.MkdirAll(filepath.Join(dir, "manifests"), 0o750); err != nil {
-		t.Fatalf("mkdir manifests sibling: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "garbage.txt"), []byte("x"), 0o600); err != nil {
-		t.Fatalf("write garbage: %v", err)
-	}
-
-	got, err := store.List(context.Background())
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(got) != 2 {
-		t.Errorf("List() returned %d entries, want 2", len(got))
-	}
-	seen := make(map[string]bool)
-	for _, st := range got {
-		seen[st.RunID] = true
-	}
-	if !seen["abcdef012345"] || !seen["0123456789ab"] {
-		t.Errorf("missing run IDs: %+v", seen)
-	}
-}
-
-func TestStateStore_ListEmptyDirectory(t *testing.T) {
-	t.Parallel()
-
-	dir := filepath.Join(t.TempDir(), "missing")
-	store := NewStateStoreWithDir(dir)
-	got, err := store.List(context.Background())
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(got) != 0 {
-		t.Errorf("List on missing dir should return empty, got %+v", got)
-	}
-}
-
 func TestStateStore_Clear(t *testing.T) {
 	t.Parallel()
 

@@ -45,19 +45,6 @@ type trailEnablementScope struct {
 	Supported bool   `json:"supported"`
 }
 
-// trailsEnabledForRepo reports cached enablement for the current repo.
-func trailsEnabledForRepo(ctx context.Context) bool {
-	return cachedTrailsEnablementForRepo(ctx, time.Now()) == trailEnablementCacheEnabled
-}
-
-func cachedTrailsEnablementForRepo(ctx context.Context, now time.Time) trailEnablementCacheStatus {
-	scope, err := currentTrailEnablementScope(ctx)
-	if err != nil {
-		return trailEnablementCacheUnknown
-	}
-	return cachedTrailsEnablementForScope(ctx, scope, now)
-}
-
 func cachedTrailsEnablementForScope(ctx context.Context, scope trailEnablementScope, now time.Time) trailEnablementCacheStatus {
 	prefs, err := settings.LoadClonePreferences(ctx)
 	if err != nil || prefs.TrailsEnabled == nil || prefs.TrailsEnabledCheckedAt == nil {

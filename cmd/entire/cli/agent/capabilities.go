@@ -31,116 +31,73 @@ type DeclaredCaps struct {
 	SubagentAwareExtractor bool `json:"subagent_aware_extractor"`
 }
 
+// declaredCapability returns the agent as T if it both implements T and (for
+// CapabilityDeclarer agents) has the capability selected by declared set to true.
+func declaredCapability[T any](ag Agent, declared func(DeclaredCaps) bool) (T, bool) {
+	t, ok := builtinCapability[T](ag)
+	if !ok {
+		return t, false
+	}
+	if cd, ok := ag.(CapabilityDeclarer); ok {
+		return t, declared(cd.DeclaredCapabilities())
+	}
+	return t, true
+}
+
+// builtinCapability returns the agent as T by type assertion alone, for
+// built-in-only capabilities that have no DeclaredCaps gate.
+func builtinCapability[T any](ag Agent) (T, bool) {
+	var zero T
+	if ag == nil {
+		return zero, false
+	}
+	t, ok := ag.(T)
+	if !ok {
+		return zero, false
+	}
+	return t, true
+}
+
 // AsHookSupport returns the agent as HookSupport if it both implements the
 // interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsHookSupport(ag Agent) (HookSupport, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	hs, ok := ag.(HookSupport)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return hs, cd.DeclaredCapabilities().Hooks
-	}
-	return hs, true
+	return declaredCapability[HookSupport](ag, func(c DeclaredCaps) bool { return c.Hooks })
 }
 
 // AsTranscriptAnalyzer returns the agent as TranscriptAnalyzer if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTranscriptAnalyzer(ag Agent) (TranscriptAnalyzer, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	ta, ok := ag.(TranscriptAnalyzer)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return ta, cd.DeclaredCapabilities().TranscriptAnalyzer
-	}
-	return ta, true
+	return declaredCapability[TranscriptAnalyzer](ag, func(c DeclaredCaps) bool { return c.TranscriptAnalyzer })
 }
 
 // AsTranscriptPreparer returns the agent as TranscriptPreparer if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTranscriptPreparer(ag Agent) (TranscriptPreparer, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	tp, ok := ag.(TranscriptPreparer)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return tp, cd.DeclaredCapabilities().TranscriptPreparer
-	}
-	return tp, true
+	return declaredCapability[TranscriptPreparer](ag, func(c DeclaredCaps) bool { return c.TranscriptPreparer })
 }
 
 // AsTokenCalculator returns the agent as TokenCalculator if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTokenCalculator(ag Agent) (TokenCalculator, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	tc, ok := ag.(TokenCalculator)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return tc, cd.DeclaredCapabilities().TokenCalculator
-	}
-	return tc, true
+	return declaredCapability[TokenCalculator](ag, func(c DeclaredCaps) bool { return c.TokenCalculator })
 }
 
 // AsTextGenerator returns the agent as TextGenerator if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTextGenerator(ag Agent) (TextGenerator, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	tg, ok := ag.(TextGenerator)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return tg, cd.DeclaredCapabilities().TextGenerator
-	}
-	return tg, true
+	return declaredCapability[TextGenerator](ag, func(c DeclaredCaps) bool { return c.TextGenerator })
 }
 
 // AsTranscriptCompactor returns the agent as TranscriptCompactor if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTranscriptCompactor(ag Agent) (TranscriptCompactor, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	tc, ok := ag.(TranscriptCompactor)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return tc, cd.DeclaredCapabilities().CompactTranscript
-	}
-	return tc, true
+	return declaredCapability[TranscriptCompactor](ag, func(c DeclaredCaps) bool { return c.CompactTranscript })
 }
 
 // AsHookResponseWriter returns the agent as HookResponseWriter if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsHookResponseWriter(ag Agent) (HookResponseWriter, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	hrw, ok := ag.(HookResponseWriter)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return hrw, cd.DeclaredCapabilities().HookResponseWriter
-	}
-	return hrw, true
+	return declaredCapability[HookResponseWriter](ag, func(c DeclaredCaps) bool { return c.HookResponseWriter })
 }
 
 // AsPromptExtractor returns the agent as PromptExtractor if it both implements
@@ -149,31 +106,20 @@ func AsHookResponseWriter(ag Agent) (HookResponseWriter, bool) {
 // capability gate — this prevents calling extract-prompts on external agent binaries
 // that never declared transcript_analyzer support.
 func AsPromptExtractor(ag Agent) (PromptExtractor, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	pe, ok := ag.(PromptExtractor)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return pe, cd.DeclaredCapabilities().TranscriptAnalyzer
-	}
-	return pe, true
+	return declaredCapability[PromptExtractor](ag, func(c DeclaredCaps) bool { return c.TranscriptAnalyzer })
+}
+
+// AsSubagentAwareExtractor returns the agent as SubagentAwareExtractor if it both
+// implements the interface and (for CapabilityDeclarer agents) has declared the capability.
+func AsSubagentAwareExtractor(ag Agent) (SubagentAwareExtractor, bool) {
+	return declaredCapability[SubagentAwareExtractor](ag, func(c DeclaredCaps) bool { return c.SubagentAwareExtractor })
 }
 
 // AsSessionBaseDirProvider returns the agent as SessionBaseDirProvider if it implements
 // the interface. No capability declaration is needed since this is a built-in-only feature
 // (external agents use the agent binary's own session resolution).
 func AsSessionBaseDirProvider(ag Agent) (SessionBaseDirProvider, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	sbp, ok := ag.(SessionBaseDirProvider)
-	if !ok {
-		return nil, false
-	}
-	return sbp, true
+	return builtinCapability[SessionBaseDirProvider](ag)
 }
 
 // AsModelExtractor returns the agent as ModelExtractor if it implements the
@@ -181,39 +127,12 @@ func AsSessionBaseDirProvider(ag Agent) (SessionBaseDirProvider, bool) {
 // extraction is a built-in-only fallback for agents whose hooks omit the model
 // (e.g., Pi). External agents report the model through their own hook protocol.
 func AsModelExtractor(ag Agent) (ModelExtractor, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	me, ok := ag.(ModelExtractor)
-	if !ok {
-		return nil, false
-	}
-	return me, true
-}
-
-// AsSubagentAwareExtractor returns the agent as SubagentAwareExtractor if it both
-// implements the interface and (for CapabilityDeclarer agents) has declared the capability.
-func AsSubagentAwareExtractor(ag Agent) (SubagentAwareExtractor, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	sae, ok := ag.(SubagentAwareExtractor)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return sae, cd.DeclaredCapabilities().SubagentAwareExtractor
-	}
-	return sae, true
+	return builtinCapability[ModelExtractor](ag)
 }
 
 // AsSkillEventExtractor returns the agent as SkillEventExtractor if it implements
 // the interface. Skill-event extraction is currently built-in only; external
 // agents do not expose this optional interface through declared capabilities.
 func AsSkillEventExtractor(ag Agent) (SkillEventExtractor, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	see, ok := ag.(SkillEventExtractor)
-	return see, ok
+	return builtinCapability[SkillEventExtractor](ag)
 }

@@ -1,0 +1,53 @@
+name: publish-git-remote-entire
+
+# Publishes git-remote-entire (linux amd64/arm64 tarballs) to the public
+# release bucket on every push to main, keyed by commit sha. Consumed by
+# the entire-core-auth Buildkite plugin, whose environment hook installs
+# a pinned sha on hosted agents so `git clone entire://…` resolves.
+# See .goreleaser.nonprod.yaml for the artifact layout.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Required to mint the OIDC token that assume-role exchanges for AWS
+  # credentials.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      # GoReleaser refuses to run untagged. The tag is local to the
+      # runner, never pushed, and deliberately not stamped into the
+      # binary (see the ldflags note in .goreleaser.nonprod.yaml).
+      - name: Make a throwaway tag
+        run: git tag --force v0.0.0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        with:
+          role-to-assume: arn:aws:iam::128096325110:role/github-actions-public-release-upload
+          aws-region: us-east-2
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: -f .goreleaser.nonprod.yaml release --clean --skip=validate
+        env:
+          GORELEASER_CURRENT_TAG: v0.0.0

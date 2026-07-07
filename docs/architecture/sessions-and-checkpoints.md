@@ -26,7 +26,7 @@ A **Checkpoint** captures a point-in-time within a session. Defined in `strategy
 
 ```go
 type Checkpoint struct {
-    CheckpointID     id.CheckpointID // Stable 12-hex-char identifier
+    CheckpointID     id.CheckpointID // Stable identifier (12-hex or ULID; see Checkpoint ID Linking)
     Message          string          // Commit message or checkpoint description
     Timestamp        time.Time
     IsTaskCheckpoint bool            // Task checkpoint (subagent) vs session checkpoint
@@ -251,7 +251,6 @@ failed or skipped regeneration **drops** the prior `transcript.jsonl` and clears
 ```json
 {
   "cli_version": "0.0.0-dev",
-  "checkpoint_version": "branch-v1",
   "checkpoint_id": "abc123def456",
   "strategy": "manual-commit",
   "branch": "main",
@@ -320,13 +319,13 @@ CLI defaults:
 {}
 ```
 
-`checkpoint_version` selects the checkpoint format for new writes. If no policy
-is configured, a policy omits `checkpoint_version`, or the field was set to an
+`checkpoint_version` is a checkpoint-data write guard. If no policy is
+configured, a policy omits `checkpoint_version`, or the field was set to an
 empty string with `entire checkpoint policy --checkpoint-version ""`, the CLI
-writes its default checkpoint version. The quotes are required so the shell
-passes an empty value instead of omitting the flag value. If another client
-configures a `checkpoint_version` this CLI cannot write, explicit
-checkpoint-data writers fail until the CLI is upgraded.
+uses its default checkpoint version for policy decisions. The quotes are
+required so the shell passes an empty value instead of omitting the flag value.
+If another client configures a `checkpoint_version` this CLI cannot write,
+explicit checkpoint-data writers fail until the CLI is upgraded.
 
 `checkpoint_min_version` is an upgrade nudge and checkpoint-data write guard.
 Clients that cannot read that version warn users to upgrade. Explicit
@@ -361,17 +360,38 @@ policy first, then applies the same skip behavior to checkpoint push work.
 User-driven commands warn when the local policy indicates the CLI should be
 upgraded. Explicit checkpoint-data writers such as `entire session attach`,
 `entire checkpoint explain --generate`, and `entire import <agent>` fail when
-the local policy cannot be satisfied. Commands that need to decode checkpoint
-contents, such as `entire checkpoint explain` and `entire session resume`, fail
-when the target checkpoint uses an unsupported `checkpoint_version`.
+the local policy cannot be satisfied.
 
 ### Checkpoint ID Linking
 
 The checkpoint ID is the **stable identifier** that links user commits to metadata across branches.
 
-**Format:** 12-hex-character random ID (e.g., `a3b2c4d5e6f7`)
+**Format:** one of two shapes — do **not** assume a fixed width:
+- **Legacy 12-hex** random ID (e.g., `a3b2c4d5e6f7`) — the git-branch store's format.
+- **26-char ULID** (Crockford base32, e.g., `01KVBJCWYA4YW6J5M9GP655HZN`) — minted only
+  under the git-refs checkpoint store. A ULID's leading chars encode a millisecond
+  timestamp (so it is lexicographically time-sortable) and its tail is random; front
+  prefixes are therefore ambiguous — trim ULIDs from nowhere / show them in full for
+  display (see `id.CheckpointID.DisplayShort`), and use `id.MaxIDLength`, not a
+  hardcoded 12, when reasoning about maximum width.
+
+Both formats are validated by `id.KindOf` / `id.Validate`; readers accept either.
+
+**Read routing (`checkpoint.Open` → `kindRoutingStore`):** id-keyed reads resolve
+across both git backends by the checkpoint's format, so a repo running git-refs
+and git-branch side by side (or mid-migration) reads either format without
+reconfiguring:
+- A **ULID** is read from the git-refs store only — never the branch.
+- A **hex** ID is read from the active (configured) primary first; when the
+  primary is git-refs it also falls back to the git-branch store (a hex checkpoint
+  may still sit on the pre-migration v1 branch, or have been migrated into refs).
+- `List` unions both backends. **Writes are not kind-routed** — they go to the
+  configured primary (+ mirrors); the minted ID already matches the primary.
 
 **Generation:**
+- Minted by `checkpoint.GenerateCheckpointID`, which picks the format from the
+  configured primary store (ULID under git-refs, 12-hex otherwise). Do not call
+  `id.Generate()` / `id.GenerateULID()` directly from a checkpoint write path.
 - Generated during condensation (post-commit hook)
 
 **Usage:**

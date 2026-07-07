@@ -130,19 +130,7 @@ func (c *Codex) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err = cmd.Run()
-	exitCode := 0
-	if err != nil {
-		exitErr := &exec.ExitError{}
-		if errors.As(err, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		} else {
-			exitCode = -1
-		}
-		if promptCtx.Err() == context.DeadlineExceeded {
-			err = fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
-		}
-	}
+	exitCode, err := runCapture(cmd, promptCtx)
 
 	return Output{
 		Command:  c.Binary() + " " + strings.Join(args[:len(args)-1], " ") + " " + fmt.Sprintf("%q", prompt),

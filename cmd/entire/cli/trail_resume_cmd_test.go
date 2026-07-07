@@ -166,7 +166,7 @@ func TestBuildTrailResumeContextSortsCheckpointSessions(t *testing.T) {
 
 	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 	const newSessionID = "new-session"
-	ctx := buildTrailResumeContext(api.TrailResource{
+	ctx := buildTrailResumeContextForRepoWithSkipped(api.TrailResource{
 		ID:     "trl_1",
 		Number: 575,
 		Title:  "Add trail resume",
@@ -188,7 +188,7 @@ func TestBuildTrailResumeContextSortsCheckpointSessions(t *testing.T) {
 			LastActive:   now,
 			CheckpointID: "aaaaaaaaaaaa",
 		},
-	}, "", trailResumeFindingsContext{})
+	}, "", 0, trailResumeFindingsContext{}, "")
 
 	if len(ctx.Sessions) != 2 {
 		t.Fatalf("sessions len = %d, want 2: %#v", len(ctx.Sessions), ctx.Sessions)
@@ -222,12 +222,12 @@ func TestBuildTrailResumeContextSortsCheckpointSessions(t *testing.T) {
 func TestBuildTrailResumeContextWithRepoIncludesRepoInResumeCommands(t *testing.T) {
 	t.Parallel()
 
-	ctx := buildTrailResumeContextForRepo(api.TrailResource{
+	ctx := buildTrailResumeContextForRepoWithSkipped(api.TrailResource{
 		ID:     "trl_1",
 		Number: 575,
 		Title:  "Add trail resume",
 		Branch: "feature/trail-resume",
-	}, nil, "", trailResumeFindingsContext{}, "entireio/cli")
+	}, nil, "", 0, trailResumeFindingsContext{}, "entireio/cli")
 
 	wantCommands := []string{
 		"entire trail finding 575 --json",

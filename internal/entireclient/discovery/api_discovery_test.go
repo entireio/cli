@@ -10,13 +10,13 @@ func TestAPICores_SeparateFileFromClusterCores(t *testing.T) {
 	dir := t.TempDir()
 
 	if err := ModifyClusterCores(dir, func(c ClusterCoresCache) error {
-		c.Set("shared.example", []string{"https://cluster-core.example"})
+		c.SetEntry("shared.example", CoresEntry{CoreURLs: []string{"https://cluster-core.example"}})
 		return nil
 	}); err != nil {
 		t.Fatalf("ModifyClusterCores: %v", err)
 	}
 	if err := ModifyAPICores(dir, func(c ClusterCoresCache) error {
-		c.Set("shared.example", []string{"https://api-core.example"})
+		c.SetEntry("shared.example", CoresEntry{CoreURLs: []string{"https://api-core.example"}})
 		return nil
 	}); err != nil {
 		t.Fatalf("ModifyAPICores: %v", err)
@@ -31,12 +31,12 @@ func TestAPICores_SeparateFileFromClusterCores(t *testing.T) {
 		t.Fatalf("LoadAPICores: %v", err)
 	}
 
-	clusterURLs, _, ok := clusterCache.Get("shared.example")
-	if !ok || clusterURLs[0] != "https://cluster-core.example" {
-		t.Fatalf("cluster cache = %v (ok=%v), want the cluster core", clusterURLs, ok)
+	clusterEntry, _, ok := clusterCache.GetEntry("shared.example")
+	if !ok || clusterEntry.CoreURLs[0] != "https://cluster-core.example" {
+		t.Fatalf("cluster cache = %v (ok=%v), want the cluster core", clusterEntry, ok)
 	}
-	apiURLs, fresh, ok := apiCache.Get("shared.example")
-	if !ok || !fresh || apiURLs[0] != "https://api-core.example" {
-		t.Fatalf("api cache = %v (fresh=%v ok=%v), want the api core", apiURLs, fresh, ok)
+	apiEntry, fresh, ok := apiCache.GetEntry("shared.example")
+	if !ok || !fresh || apiEntry.CoreURLs[0] != "https://api-core.example" {
+		t.Fatalf("api cache = %v (fresh=%v ok=%v), want the api core", apiEntry, fresh, ok)
 	}
 }

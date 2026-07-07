@@ -28,7 +28,7 @@ func newCheckpointPolicyCmd() *cobra.Command {
 		Short: "Inspect and update checkpoint policy",
 		Long: `Inspect and update checkpoint policy.
 
-checkpoint_version selects the checkpoint metadata format used for new writes.
+checkpoint_version is a checkpoint-data write guard.
 If no policy is configured, Entire uses the CLI default.
 If another client configures a checkpoint_version this CLI cannot write,
 commands that create checkpoint data fail until the CLI is upgraded. Other commands warn and

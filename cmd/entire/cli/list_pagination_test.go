@@ -35,7 +35,7 @@ func TestOrgList_FollowsCursor(t *testing.T) {
 		default:
 			t.Errorf("unexpected cursor %q", cursor)
 		}
-		if err := writeJSON(w, &body); err != nil {
+		if err := printJSON(w, &body); err != nil {
 			t.Errorf("encode orgs: %v", err)
 		}
 	}))
@@ -89,7 +89,7 @@ func TestMirrorList_FollowsCursor(t *testing.T) {
 		default:
 			t.Errorf("unexpected pageToken %q", token)
 		}
-		if err := writeJSON(w, &body); err != nil {
+		if err := printJSON(w, &body); err != nil {
 			t.Errorf("encode mirrors: %v", err)
 		}
 	}))

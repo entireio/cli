@@ -11,6 +11,8 @@ import (
 
 const euCellAPIURL = "https://eu.api.entire.io"
 
+const euWestCell = "aws-eu-west-1"
+
 func TestDistinctActiveClusterHosts(t *testing.T) {
 	t.Parallel()
 	mirrors := []coreapi.Mirror{
@@ -88,8 +90,8 @@ func TestClusterHostJoin(t *testing.T) {
 	}
 }
 
-// fakeExpertsCore is a stub control plane for resolveExpertsCellTarget tests.
-type fakeExpertsCore struct {
+// fakeCellCore is a stub control plane for resolveRepoCellTarget tests.
+type fakeCellCore struct {
 	repo        *coreapi.Repo
 	repoErr     error
 	mirrors     []coreapi.Mirror
@@ -98,29 +100,29 @@ type fakeExpertsCore struct {
 	clustersErr error
 }
 
-func (f *fakeExpertsCore) GetRepo(context.Context, coreapi.GetRepoParams) (*coreapi.Repo, error) {
+func (f *fakeCellCore) GetRepo(context.Context, coreapi.GetRepoParams) (*coreapi.Repo, error) {
 	return f.repo, f.repoErr
 }
 
-func (f *fakeExpertsCore) ListClusters(context.Context) (*coreapi.ListClustersOutputBody, error) {
+func (f *fakeCellCore) ListClusters(context.Context) (*coreapi.ListClustersOutputBody, error) {
 	if f.clustersErr != nil {
 		return nil, f.clustersErr
 	}
 	return &coreapi.ListClustersOutputBody{Clusters: f.clusters}, nil
 }
 
-func (f *fakeExpertsCore) ListMirrors(context.Context, coreapi.ListMirrorsParams) (*coreapi.ListMirrorsOutputBody, error) {
+func (f *fakeCellCore) ListMirrors(context.Context, coreapi.ListMirrorsParams) (*coreapi.ListMirrorsOutputBody, error) {
 	if f.mirrorsErr != nil {
 		return nil, f.mirrorsErr
 	}
 	return &coreapi.ListMirrorsOutputBody{Mirrors: f.mirrors}, nil
 }
 
-func withFakeExpertsCore(t *testing.T, f *fakeExpertsCore) {
+func withFakeCellCore(t *testing.T, f *fakeCellCore) {
 	t.Helper()
-	prev := newExpertsCoreClient
-	newExpertsCoreClient = func() (expertsCoreClient, error) { return f, nil }
-	t.Cleanup(func() { newExpertsCoreClient = prev })
+	prev := newCellCoreClient
+	newCellCoreClient = func() (cellCoreClient, error) { return f, nil }
+	t.Cleanup(func() { newCellCoreClient = prev })
 }
 
 func euClusters() []coreapi.Cluster {
@@ -130,12 +132,12 @@ func euClusters() []coreapi.Cluster {
 	}
 }
 
-func TestResolveExpertsCellTarget_ULID(t *testing.T) {
-	withFakeExpertsCore(t, &fakeExpertsCore{
+func TestResolveRepoCellTarget_ULID(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
 		repo:     &coreapi.Repo{ID: "ULID", ClusterHost: coreapi.NewOptString("eu.entire.io")},
 		clusters: euClusters(),
 	})
-	target := resolveExpertsCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	target := resolveRepoCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
 	if target == nil {
 		t.Fatal("expected a target for a resolvable ULID")
 	}
@@ -144,15 +146,15 @@ func TestResolveExpertsCellTarget_ULID(t *testing.T) {
 	}
 }
 
-func TestResolveExpertsCellTarget_ULIDError_FallsBack(t *testing.T) {
-	withFakeExpertsCore(t, &fakeExpertsCore{repoErr: errors.New("boom"), clusters: euClusters()})
-	if target := resolveExpertsCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV"); target != nil {
+func TestResolveRepoCellTarget_ULIDError_FallsBack(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{repoErr: errors.New("boom"), clusters: euClusters()})
+	if target := resolveRepoCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV"); target != nil {
 		t.Fatalf("expected nil (fallback) on GetRepo error, got %+v", target)
 	}
 }
 
-func TestResolveExpertsCellTarget_OwnerRepoSingleRegion(t *testing.T) {
-	withFakeExpertsCore(t, &fakeExpertsCore{
+func TestResolveRepoCellTarget_OwnerRepoSingleRegion(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
 		mirrors: []coreapi.Mirror{
 			{Repo: "widget", ClusterHost: "eu.entire.io", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusReady)},
 			// A failed placement in another region must be ignored, not create ambiguity.
@@ -162,43 +164,43 @@ func TestResolveExpertsCellTarget_OwnerRepoSingleRegion(t *testing.T) {
 		},
 		clusters: euClusters(),
 	})
-	target := resolveExpertsCellTarget(context.Background(), "acme/widget", "")
+	target := resolveRepoCellTarget(context.Background(), "acme/widget", "")
 	if target == nil || target.Jurisdiction != "eu" || target.BaseURL != euCellAPIURL {
 		t.Fatalf("target = %+v, want eu cell", target)
 	}
 }
 
-func TestResolveExpertsCellTarget_MultiRegion_FallsBack(t *testing.T) {
-	withFakeExpertsCore(t, &fakeExpertsCore{
+func TestResolveRepoCellTarget_MultiRegion_FallsBack(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
 		mirrors: []coreapi.Mirror{
 			{Repo: "widget", ClusterHost: "eu.entire.io"},
 			{Repo: "widget", ClusterHost: "us.entire.io"},
 		},
 		clusters: euClusters(),
 	})
-	if target := resolveExpertsCellTarget(context.Background(), "acme/widget", ""); target != nil {
+	if target := resolveRepoCellTarget(context.Background(), "acme/widget", ""); target != nil {
 		t.Fatalf("expected nil (fallback) for ambiguous multi-region repo, got %+v", target)
 	}
 }
 
-func TestResolveExpertsCellTarget_NoClusterMatch_FallsBack(t *testing.T) {
-	withFakeExpertsCore(t, &fakeExpertsCore{
+func TestResolveRepoCellTarget_NoClusterMatch_FallsBack(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
 		repo:     &coreapi.Repo{ClusterHost: coreapi.NewOptString("ap.entire.io")}, // not in catalog
 		clusters: euClusters(),
 	})
-	if target := resolveExpertsCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV"); target != nil {
+	if target := resolveRepoCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV"); target != nil {
 		t.Fatalf("expected nil (fallback) when no cluster matches, got %+v", target)
 	}
 }
 
-func TestResolveExpertsCellTarget_JurisdictionLowercased(t *testing.T) {
-	withFakeExpertsCore(t, &fakeExpertsCore{
+func TestResolveRepoCellTarget_JurisdictionLowercased(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
 		repo: &coreapi.Repo{ClusterHost: coreapi.NewOptString("eu.entire.io")},
 		clusters: []coreapi.Cluster{
 			{PublicUrl: "https://eu.entire.io", Jurisdiction: "EU", ApiUrl: coreapi.NewOptString(euCellAPIURL)},
 		},
 	})
-	target := resolveExpertsCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	target := resolveRepoCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
 	if target == nil || target.Jurisdiction != "eu" {
 		t.Fatalf("target = %+v, want lowercased jurisdiction eu", target)
 	}

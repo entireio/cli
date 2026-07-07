@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
@@ -17,6 +18,10 @@ import (
 // command makes to learn which core fronts the cluster. Short so an absent or
 // slow endpoint fails the command promptly.
 const controlPlaneClusterDiscoveryTimeout = 8 * time.Second
+
+// resolveContextForCluster is the discovery seam, swapped in tests so they
+// don't reach the network. Mirrors clusterdiscovery.ResolveContextForCluster.
+var resolveContextForCluster resolveContextFunc = clusterdiscovery.ResolveContextForCluster
 
 // ControlPlaneTarget is the resolved login server a control-plane request
 // (org/repo/project/grant) should dial, plus the bearer source for it.
@@ -66,7 +71,7 @@ func ResolveControlPlaneTarget() (ControlPlaneTarget, error) {
 // /.well-known/entire-cluster.json and pick the local context eligible for one
 // of them — active-wins-if-eligible, else the sole eligible context, else an
 // explicit-choice / login hint — exactly as git and data-API resolution do
-// (see RepoTokenSource, ResolveDataAPIToken). The bearer is that context's
+// (see ResolveDataAPIToken). The bearer is that context's
 // refreshing login provider (silent JWT re-mint from its stored refresh token).
 //
 // With no eligible local context the discovery resolver returns its login hint
@@ -77,7 +82,7 @@ func ResolveControlPlaneTargetForCluster(ctx context.Context, clusterHost string
 	if clusterHost == "" {
 		return ControlPlaneTarget{}, errors.New("cluster-addressed control-plane command requires a target cluster host")
 	}
-	httpClient := &http.Client{Timeout: controlPlaneClusterDiscoveryTimeout, Transport: repoExchangeTransportForTest}
+	httpClient := &http.Client{Timeout: controlPlaneClusterDiscoveryTimeout}
 	c, err := resolveContextForCluster(ctx, userdirs.Config(), userdirs.Cache(), clusterHost, httpClient, nil)
 	if err != nil {
 		return ControlPlaneTarget{}, err

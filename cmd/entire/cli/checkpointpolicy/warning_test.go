@@ -3,7 +3,6 @@ package checkpointpolicy_test
 import (
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/stretchr/testify/require"
 )
@@ -13,11 +12,11 @@ func TestRequiresUpgrade(t *testing.T) {
 
 	require.False(t, checkpointpolicy.RequiresUpgrade(checkpointpolicy.DefaultPolicy()))
 	require.True(t, checkpointpolicy.RequiresUpgrade(checkpointpolicy.Policy{
-		CheckpointVersion:    checkpoint.CheckpointVersionBranchV1,
+		CheckpointVersion:    checkpointpolicy.CheckpointVersionBranchV1,
 		CheckpointMinVersion: "refs-v2",
 	}))
 	require.True(t, checkpointpolicy.RequiresUpgrade(checkpointpolicy.Policy{
-		CheckpointVersion:    checkpoint.CheckpointVersionBranchV1,
+		CheckpointVersion:    checkpointpolicy.CheckpointVersionBranchV1,
 		CheckpointMinVersion: "invalid",
 	}))
 }
@@ -28,11 +27,11 @@ func TestUnsupportedWrite(t *testing.T) {
 	require.False(t, checkpointpolicy.UnsupportedWrite(checkpointpolicy.DefaultPolicy()))
 	require.True(t, checkpointpolicy.UnsupportedWrite(checkpointpolicy.Policy{
 		CheckpointVersion:    "refs-v2",
-		CheckpointMinVersion: checkpoint.CheckpointVersionBranchV1,
+		CheckpointMinVersion: checkpointpolicy.CheckpointVersionBranchV1,
 	}))
 	require.True(t, checkpointpolicy.UnsupportedWrite(checkpointpolicy.Policy{
 		CheckpointVersion:    "invalid",
-		CheckpointMinVersion: checkpoint.CheckpointVersionBranchV1,
+		CheckpointMinVersion: checkpointpolicy.CheckpointVersionBranchV1,
 	}))
 }
 
@@ -43,10 +42,10 @@ func TestCanSatisfyPolicy(t *testing.T) {
 	require.True(t, checkpointpolicy.CanSatisfyPolicy(checkpointpolicy.Policy{}))
 	require.False(t, checkpointpolicy.CanSatisfyPolicy(checkpointpolicy.Policy{
 		CheckpointVersion:    "refs-v2",
-		CheckpointMinVersion: checkpoint.CheckpointVersionBranchV1,
+		CheckpointMinVersion: checkpointpolicy.CheckpointVersionBranchV1,
 	}))
 	require.False(t, checkpointpolicy.CanSatisfyPolicy(checkpointpolicy.Policy{
-		CheckpointVersion:    checkpoint.CheckpointVersionBranchV1,
+		CheckpointVersion:    checkpointpolicy.CheckpointVersionBranchV1,
 		CheckpointMinVersion: "refs-v2",
 	}))
 }

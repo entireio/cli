@@ -3,7 +3,6 @@ package checkpointpolicy_test
 import (
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/stretchr/testify/require"
 )
@@ -41,7 +40,7 @@ func TestParseFormat(t *testing.T) {
 func TestSupportedFormats(t *testing.T) {
 	t.Parallel()
 
-	branchV1, err := checkpointpolicy.ParseFormat(checkpoint.CheckpointVersionBranchV1)
+	branchV1, err := checkpointpolicy.ParseFormat(checkpointpolicy.CheckpointVersionBranchV1)
 	require.NoError(t, err)
 	refsV1, err := checkpointpolicy.ParseFormat("refs-v1")
 	require.NoError(t, err)
@@ -50,7 +49,7 @@ func TestSupportedFormats(t *testing.T) {
 
 	require.True(t, checkpointpolicy.CanRead(branchV1))
 	require.True(t, checkpointpolicy.CanWrite(branchV1))
-	require.Equal(t, checkpoint.CheckpointVersionBranchV1, branchV1.String())
+	require.Equal(t, checkpointpolicy.CheckpointVersionBranchV1, branchV1.String())
 
 	// refs-v1 is the git-refs store format: read- and write-supported.
 	require.True(t, checkpointpolicy.CanRead(refsV1))

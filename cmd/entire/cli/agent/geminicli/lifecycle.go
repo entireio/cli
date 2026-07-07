@@ -78,15 +78,15 @@ func (g *GeminiCLIAgent) HookNames() []string {
 func (g *GeminiCLIAgent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
-		return g.parseSessionStart(stdin)
+		return g.parseSessionInfoEvent(stdin, agent.SessionStart)
 	case HookNameBeforeAgent:
 		return g.parseTurnStart(stdin)
 	case HookNameAfterAgent:
 		return g.parseTurnEnd(stdin)
 	case HookNameSessionEnd:
-		return g.parseSessionEnd(stdin)
+		return g.parseSessionInfoEvent(stdin, agent.SessionEnd)
 	case HookNamePreCompress:
-		return g.parseCompaction(stdin)
+		return g.parseSessionInfoEvent(stdin, agent.Compaction)
 	case HookNameBeforeModel:
 		return g.parseBeforeModel(stdin)
 	case HookNameBeforeTool, HookNameAfterTool,
@@ -145,13 +145,15 @@ func (g *GeminiCLIAgent) CalculateTokenUsage(transcriptData []byte, fromOffset i
 
 // --- Internal hook parsing functions ---
 
-func (g *GeminiCLIAgent) parseSessionStart(stdin io.Reader) (*agent.Event, error) {
+// parseSessionInfoEvent parses the hooks whose payload is sessionInfoRaw —
+// SessionStart, SessionEnd, and PreCompress differ only in the event type.
+func (g *GeminiCLIAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent.EventType) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
 	if err != nil {
 		return nil, err
 	}
 	return &agent.Event{
-		Type:       agent.SessionStart,
+		Type:       eventType,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
 		Timestamp:  time.Now(),
@@ -185,19 +187,6 @@ func (g *GeminiCLIAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
 	}, nil
 }
 
-func (g *GeminiCLIAgent) parseSessionEnd(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
-	if err != nil {
-		return nil, err
-	}
-	return &agent.Event{
-		Type:       agent.SessionEnd,
-		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
-		Timestamp:  time.Now(),
-	}, nil
-}
-
 func (g *GeminiCLIAgent) parseBeforeModel(stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[beforeModelRaw](stdin)
 	if err != nil {
@@ -212,18 +201,5 @@ func (g *GeminiCLIAgent) parseBeforeModel(stdin io.Reader) (*agent.Event, error)
 		SessionID: raw.SessionID,
 		Model:     model,
 		Timestamp: time.Now(),
-	}, nil
-}
-
-func (g *GeminiCLIAgent) parseCompaction(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
-	if err != nil {
-		return nil, err
-	}
-	return &agent.Event{
-		Type:       agent.Compaction,
-		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
-		Timestamp:  time.Now(),
 	}, nil
 }

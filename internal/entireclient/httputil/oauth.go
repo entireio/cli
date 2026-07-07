@@ -20,6 +20,28 @@ const (
 	TokenTypeAccessToken   = "urn:ietf:params:oauth:token-type:access_token"   //nolint:gosec // G101: an RFC 8693 token-type URN, not a credential
 )
 
+// OAuthClientID is the public OAuth client_id the CLI identifies as on
+// /oauth/token. Lifted into Basic auth by PostOAuthToken.
+const OAuthClientID = "entire-cli"
+
+// TokenExchangeForm builds the RFC 8693 token-exchange form every CLI
+// exchange POSTs to /oauth/token: subjectToken (the login JWT) is traded
+// for an access token pinned to audience with the given scope. The one
+// form shape serves repo-scoped and jurisdiction tokens alike — only
+// audience and scope differ — so keep call sites on this builder rather
+// than open-coding the fields.
+func TokenExchangeForm(subjectToken, audience, scope string) url.Values {
+	form := url.Values{}
+	form.Set("grant_type", GrantTypeTokenExchange)
+	form.Set("subject_token_type", TokenTypeAccessToken)
+	form.Set("subject_token", subjectToken)
+	form.Set("requested_token_type", TokenTypeAccessToken)
+	form.Set("audience", audience)
+	form.Set("scope", scope)
+	form.Set("client_id", OAuthClientID)
+	return form
+}
+
 // BufferRequestBody reads the request body once so a fallback retry
 // can replay it. http.NoBody (and nil) short-circuits — both signal
 // "no body" but only the latter is a runtime nil, so the explicit
@@ -63,9 +85,10 @@ func cloneValuesWithoutClient(v url.Values) url.Values {
 // status-specific UX (e.g. a friendly 403 message) or branch on the
 // RFC 6749 error code.
 type OAuthError struct {
-	Status int
-	Code   string // RFC 6749 `error` code from the response body; "" when not present
-	Body   string
+	Status      int
+	Code        string // RFC 6749 `error` code from the response body; "" when not present
+	Description string // RFC 6749 `error_description` from the response body; "" when not present
+	Body        string
 }
 
 func (e *OAuthError) Error() string {
@@ -118,10 +141,11 @@ func PostOAuthToken(ctx context.Context, httpClient *http.Client, coreURL string
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024)) //nolint:errcheck // best-effort body read for error message
 		var oauthBody struct {
-			Code string `json:"error"`
+			Code        string `json:"error"`
+			Description string `json:"error_description"`
 		}
 		_ = json.Unmarshal(msg, &oauthBody) //nolint:errcheck // best-effort code extraction; non-JSON bodies leave Code empty
-		return "", 0, &OAuthError{Status: resp.StatusCode, Code: oauthBody.Code, Body: strings.TrimSpace(string(msg))}
+		return "", 0, &OAuthError{Status: resp.StatusCode, Code: oauthBody.Code, Description: oauthBody.Description, Body: strings.TrimSpace(string(msg))}
 	}
 
 	var out struct {

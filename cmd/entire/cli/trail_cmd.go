@@ -145,14 +145,6 @@ type trailListOptions struct {
 	Repo string
 }
 
-func defaultTrailListOptions(insecureHTTP bool) trailListOptions {
-	return trailListOptions{
-		Status:       defaultTrailListStatus,
-		Limit:        defaultTrailListLimit,
-		InsecureHTTP: insecureHTTP,
-	}
-}
-
 func newTrailShowCmd() *cobra.Command {
 	var branch string
 	cmd := &cobra.Command{
@@ -408,14 +400,6 @@ func validateTrailListOptions(opts trailListOptions) ([]trail.Status, error) {
 		return nil, errors.New("limit must be greater than 0")
 	}
 	return parseTrailStatusFilter(opts.Status)
-}
-
-func runTrailListAllValidatedWithClient(ctx context.Context, w io.Writer, client *api.Client, opts trailListOptions) error {
-	statusFilters, err := validateTrailListOptions(opts)
-	if err != nil {
-		return err
-	}
-	return runTrailListAllWithClient(ctx, w, client, opts, statusFilters)
 }
 
 func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Client, opts trailListOptions, statusFilters []trail.Status) error {

@@ -29,7 +29,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
@@ -228,29 +227,6 @@ func Warn(ctx context.Context, msg string, attrs ...any) {
 // Error logs at ERROR level with context values automatically extracted.
 func Error(ctx context.Context, msg string, attrs ...any) {
 	log(ctx, slog.LevelError, msg, attrs...)
-}
-
-// LogDuration logs a message with duration_ms calculated from the start time.
-// The level parameter specifies the log level (use slog.LevelDebug, slog.LevelInfo, etc).
-// Designed for use with defer:
-//
-//	defer logging.LogDuration(ctx, slog.LevelInfo, "operation completed", time.Now())
-//
-// Or with additional attrs:
-//
-//	defer logging.LogDuration(ctx, slog.LevelDebug, "hook executed", start,
-//	    slog.String("hook", hookName),
-//	    slog.Bool("success", true),
-//	)
-func LogDuration(ctx context.Context, level slog.Level, msg string, start time.Time, attrs ...any) {
-	durationMs := time.Since(start).Milliseconds()
-
-	// Prepend duration_ms to attrs
-	allAttrs := make([]any, 0, len(attrs)+1)
-	allAttrs = append(allAttrs, slog.Int64("duration_ms", durationMs))
-	allAttrs = append(allAttrs, attrs...)
-
-	log(ctx, level, msg, allAttrs...)
 }
 
 // log is the internal logging function that extracts context values and logs.

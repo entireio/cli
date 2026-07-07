@@ -162,7 +162,7 @@ func newRepoCloneCmd() *cobra.Command {
 			return runGitClone(cmd.Context(), cmd, cloneURL, targetDir)
 		},
 	}
-	cmd.Flags().StringVar(&cluster, "cluster", "", "cluster host to clone from when the repo is mirrored on more than one (may belong to another auth context)")
+	cmd.Flags().StringVar(&cluster, "cluster", "", "Cluster host to clone from when the repo is mirrored on more than one (may belong to another auth context)")
 	return cmd
 }
 
