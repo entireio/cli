@@ -1797,6 +1797,17 @@ func formatCheckpointHeader(
 		writeRow("author", fmt.Sprintf("%s <%s>", author.Name, author.Email))
 	}
 
+	// The linked ticket frozen at condense time — the intent this work was
+	// grounded in. Shown when the branch had a ticket linked.
+	if t := meta.Ticket; t != nil {
+		writeRow("ticket", formatTicketRefLine(t))
+		if t.URL != "" {
+			// Align the URL under the value column (11-space indent), same as
+			// the multi-commit continuation lines below.
+			fmt.Fprintf(&sb, "           %s\n", t.URL)
+		}
+	}
+
 	tokenUsage := meta.TokenUsage
 	if tokenUsage == nil && summary != nil {
 		tokenUsage = summary.TokenUsage

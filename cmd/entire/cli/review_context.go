@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/entireio/cli/cmd/entire/cli/ticket"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
@@ -33,9 +34,55 @@ type reviewContextSessionMetadataReader interface {
 }
 
 func reviewCheckpointContext(ctx context.Context, worktreeRoot string, scopeBaseRef string) string {
+	ticketIntent := reviewTicketContext(ctx)
 	committed := reviewCommittedCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
 	inProgress := reviewSessionContextForCurrentHead(ctx, worktreeRoot)
-	return joinReviewContextSections(committed, inProgress)
+	// Ticket first: it is the original intent the reviewer should ground the
+	// diff against, ahead of the checkpoint/session narrative of how it got done.
+	return joinReviewContextSections(ticketIntent, committed, inProgress)
+}
+
+// reviewTicketContext renders the branch's linked ticket as the reviewer's
+// grounding intent, e.g.
+//
+//	Linked ticket (original intent the change should satisfy):
+//	- LIN-123 (in progress): Fix login redirect loop
+//	  https://linear.app/acme/issue/LIN-123
+//
+// Best-effort and local only: no link (or any lookup error) yields an empty
+// section, which ComposeReviewPrompt skips.
+func reviewTicketContext(ctx context.Context) string {
+	link, ok, err := ticket.LinkForBranch(ctx, "")
+	if err != nil || !ok {
+		return ""
+	}
+	label := link.ID
+	if label == "" {
+		label = link.Platform
+	}
+	var state, title, url string
+	if link.Snapshot != nil {
+		state = formatTicketState(link.Snapshot.State)
+		title = link.Snapshot.Title
+		url = link.Snapshot.URL
+	}
+
+	var b strings.Builder
+	b.WriteString("Linked ticket (original intent the change should satisfy):\n")
+	b.WriteString("- ")
+	b.WriteString(label)
+	if state != "" {
+		fmt.Fprintf(&b, " (%s)", state)
+	}
+	if title != "" {
+		b.WriteString(": ")
+		b.WriteString(title)
+	}
+	if url != "" {
+		b.WriteString("\n  ")
+		b.WriteString(url)
+	}
+	return b.String()
 }
 
 // joinReviewContextSections concatenates non-empty review-context sections

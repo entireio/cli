@@ -351,6 +351,10 @@ type checkpointSessionJSON struct {
 	InvestigateRunID string `json:"investigate_run_id,omitempty"`
 	InvestigateTopic string `json:"investigate_topic,omitempty"`
 
+	// Ticket is the external tracker ticket frozen into this session's
+	// checkpoint at condense time. Omitted when nothing was linked.
+	Ticket *checkpoint.TicketRef `json:"ticket,omitempty"`
+
 	// Error is set when this session's metadata could not be read. The Index
 	// field remains valid; all other content fields are zero. Consumers can
 	// detect this by checking for a non-empty Error.
@@ -484,6 +488,7 @@ func sessionMetadataToJSON(idx int, meta *checkpoint.Metadata) checkpointSession
 		FilesTouched:     meta.FilesTouched,
 		InvestigateRunID: meta.InvestigateRunID,
 		InvestigateTopic: meta.InvestigateTopic,
+		Ticket:           meta.Ticket,
 	}
 	if !meta.CreatedAt.IsZero() {
 		ts := meta.CreatedAt

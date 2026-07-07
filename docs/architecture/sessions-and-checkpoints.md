@@ -287,9 +287,28 @@ failed or skipped regeneration **drops** the prior `transcript.jsonl` and clears
   "branch": "main",
   "checkpoints_count": 3,
   "save_step_count": 3,
-  "files_touched": ["file1.txt", "file2.txt"]
+  "files_touched": ["file1.txt", "file2.txt"],
+  "ticket": {
+    "platform": "linear",
+    "id": "ENG-142",
+    "title": "Fix greeting trim bug",
+    "state": "in_progress",
+    "url": "https://linear.app/acme/issue/ENG-142",
+    "digest": "…",
+    "fetched_at": "2025-12-01T12:30:00Z"
+  }
 }
 ```
+
+The optional `ticket` field (`checkpoint.TicketRef`) is the external tracker
+ticket linked to the branch when the checkpoint was condensed — durable
+provenance of the intent the work was grounded in. It is populated at condense
+time by `ticketRefForBranch` (strategy) reading the branch's locally stored
+`entire ticket` link + snapshot (no network fetch), so the checkpoint history on
+`entire/checkpoints/v1` becomes the ticket's timeline. Omitted when the branch
+has no linked ticket. `api/checkpoint` holds the field as plain data so it never
+depends on the `ticket` package; the `strategy` layer maps `ticket.Link` →
+`TicketRef`.
 
 In session metadata, `checkpoints_count` is the displayed prompt-window count for that session. `save_step_count` records SaveStep-created shadow-branch commits and is the conservative "real checkpoint work happened" signal; it is omitted when zero (for example, commit-only/fallback sessions). `save_step_count` is not aggregated into the root `CheckpointSummary`.
 

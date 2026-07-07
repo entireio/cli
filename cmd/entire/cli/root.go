@@ -9,6 +9,7 @@ import (
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
+	"github.com/entireio/cli/cmd/entire/cli/ticket"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
@@ -102,6 +103,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newProjectCmd())                                // hidden during maturation; control-plane project management
 	cmd.AddCommand(newRepoCmd())                                   // hidden during maturation; control-plane repo lifecycle
 	cmd.AddCommand(newGrantCmd())                                  // hidden during maturation; control-plane access grants
+	cmd.AddCommand(ticket.NewCommand(buildTicketDeps()))           // hidden during maturation; link work to external tickets
 	cmd.AddCommand(newCleanCmd())
 	cmd.AddCommand(newSetupCmd()) // 'configure' — non-agent settings; agent CRUD lives under 'agent'
 	cmd.AddCommand(newEnableCmd())

@@ -620,3 +620,75 @@ func writeReviewContextSessionPrompt(t *testing.T, repoRoot, sessionID, content 
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+// TestReviewTicketContext_RendersLinkedTicket seeds a branch→ticket link and
+// asserts reviewTicketContext surfaces it as the reviewer's grounding intent.
+// Uses t.Chdir (not parallel) because the ticket link store resolves the git
+// common dir from the current working directory.
+func TestReviewTicketContext_RendersLinkedTicket(t *testing.T) {
+	repo := t.TempDir()
+	testutil.InitRepo(t, repo)
+	testutil.WriteFile(t, repo, "f.txt", "init")
+	testutil.GitAdd(t, repo, "f.txt")
+	testutil.GitCommit(t, repo, "init")
+
+	// Resolve the current branch so we seed the link under the right key.
+	branchOut, err := exec.CommandContext(context.Background(), "git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("resolve branch: %v", err)
+	}
+	branch := strings.TrimSpace(string(branchOut))
+
+	// Seed the link store the same way the ticket package persists it.
+	linksDir := filepath.Join(repo, ".git", "entire-tickets")
+	if err := os.MkdirAll(linksDir, 0o755); err != nil {
+		t.Fatalf("mkdir links dir: %v", err)
+	}
+	links := map[string]any{
+		branch: map[string]any{
+			"platform": "linear",
+			"id":       "LIN-123",
+			"snapshot": map[string]any{
+				"title": "Fix login redirect loop",
+				"state": "in_progress",
+				"url":   "https://linear.app/acme/issue/LIN-123",
+			},
+		},
+	}
+	raw, err := json.Marshal(links)
+	if err != nil {
+		t.Fatalf("marshal links: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(linksDir, "links.json"), raw, 0o644); err != nil {
+		t.Fatalf("write links.json: %v", err)
+	}
+
+	t.Chdir(repo)
+
+	got := reviewTicketContext(context.Background())
+	for _, want := range []string{
+		"Linked ticket (original intent the change should satisfy):",
+		"LIN-123 (in progress): Fix login redirect loop",
+		"https://linear.app/acme/issue/LIN-123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in ticket context, got:\n%s", want, got)
+		}
+	}
+}
+
+// TestReviewTicketContext_NoLinkIsEmpty confirms the section is omitted when the
+// branch has no linked ticket.
+func TestReviewTicketContext_NoLinkIsEmpty(t *testing.T) {
+	repo := t.TempDir()
+	testutil.InitRepo(t, repo)
+	testutil.WriteFile(t, repo, "f.txt", "init")
+	testutil.GitAdd(t, repo, "f.txt")
+	testutil.GitCommit(t, repo, "init")
+
+	t.Chdir(repo)
+
+	if got := reviewTicketContext(context.Background()); got != "" {
+		t.Errorf("expected empty ticket context with no link, got:\n%s", got)
+	}
+}

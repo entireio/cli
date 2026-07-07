@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/ticket"
 	"github.com/entireio/cli/redact"
 )
 
@@ -3301,5 +3302,71 @@ func TestSessionPhaseLabel(t *testing.T) {
 				t.Errorf("sessionPhaseLabel() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestWriteSessionInfoText_WithTicket(t *testing.T) {
+	t.Parallel()
+
+	state := &strategy.SessionState{SessionID: "s1", Branch: "feat/login", StartedAt: time.Now()}
+	link := &ticket.Link{
+		Platform: "linear",
+		ID:       "LIN-123",
+		Snapshot: &ticket.Snapshot{
+			Title: "Fix login redirect loop",
+			State: "in_progress",
+			URL:   "https://linear.app/acme/issue/LIN-123",
+		},
+	}
+
+	var out bytes.Buffer
+	if err := writeSessionInfoText(&out, state, "active", link); err != nil {
+		t.Fatalf("writeSessionInfoText: %v", err)
+	}
+	for _, want := range []string{
+		"Ticket:      LIN-123 — Fix login redirect loop (in progress)",
+		"             https://linear.app/acme/issue/LIN-123",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("expected %q in output, got:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestWriteSessionInfoText_NoTicket(t *testing.T) {
+	t.Parallel()
+
+	state := &strategy.SessionState{SessionID: "s1", Branch: "feat/login", StartedAt: time.Now()}
+
+	var out bytes.Buffer
+	if err := writeSessionInfoText(&out, state, "active", nil); err != nil {
+		t.Fatalf("writeSessionInfoText: %v", err)
+	}
+	if strings.Contains(out.String(), "Ticket:") {
+		t.Errorf("did not expect a Ticket row with nil link, got:\n%s", out.String())
+	}
+}
+
+func TestWriteSessionInfoJSON_WithTicket(t *testing.T) {
+	t.Parallel()
+
+	state := &strategy.SessionState{SessionID: "s1", Branch: "feat/login", StartedAt: time.Now()}
+	link := &ticket.Link{Platform: "linear", ID: "LIN-123", Snapshot: &ticket.Snapshot{Title: "Fix login", State: "in_progress"}}
+
+	var out bytes.Buffer
+	if err := writeSessionInfoJSON(&out, state, "active", link); err != nil {
+		t.Fatalf("writeSessionInfoJSON: %v", err)
+	}
+	var decoded struct {
+		Ticket *ticketBriefJSON `json:"ticket"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded.Ticket == nil {
+		t.Fatalf("expected ticket in JSON, got:\n%s", out.String())
+	}
+	if decoded.Ticket.ID != "LIN-123" || decoded.Ticket.Title != "Fix login" {
+		t.Errorf("unexpected ticket: %+v", decoded.Ticket)
 	}
 }

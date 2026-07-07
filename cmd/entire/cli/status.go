@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/entireio/cli/cmd/entire/cli/ticket"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/spf13/cobra"
@@ -180,11 +181,22 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 	b.WriteString(displayName)
 
 	// Resolve branch from repo root
+	var branch string
 	if repoRoot, err := paths.WorktreeRoot(ctx); err == nil {
-		if branch := resolveWorktreeBranch(ctx, repoRoot); branch != "" {
+		if branch = resolveWorktreeBranch(ctx, repoRoot); branch != "" {
 			b.WriteString(sty.render(sty.dim, " · "))
 			b.WriteString("branch ")
 			b.WriteString(sty.render(sty.cyan, branch))
+		}
+	}
+
+	// Show the linked ticket for this branch, if any. Best-effort and local
+	// only (no network); a missing link or lookup error simply omits the line.
+	if branch != "" {
+		if link, ok, err := ticket.LinkForBranch(ctx, branch); err == nil && ok {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.dim, "  Ticket · "))
+			b.WriteString(formatTicketLinkLine(link))
 		}
 	}
 
@@ -599,7 +611,9 @@ type statusJSON struct {
 	// `entire status --json` instead of the human footer. Set only on the
 	// success path (mirrors writeAgentHelpHint, which only renders when set up).
 	AgentHelp string `json:"agent_help,omitempty"`
-	Error     string `json:"error,omitempty"`
+	// Ticket is the tracker ticket linked to the current branch, if any.
+	Ticket *ticketBriefJSON `json:"ticket,omitempty"`
+	Error  string           `json:"error,omitempty"`
 }
 
 type sessionBriefJSON struct {
@@ -700,6 +714,15 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 				sort.Slice(result.ActiveSessions, func(i, j int) bool {
 					return result.ActiveSessions[i].Agent < result.ActiveSessions[j].Agent
 				})
+			}
+		}
+	}
+
+	// Linked ticket for the current branch (best-effort, local only).
+	if repoRoot, err := paths.WorktreeRoot(ctx); err == nil {
+		if branch := resolveWorktreeBranch(ctx, repoRoot); branch != "" {
+			if link, ok, err := ticket.LinkForBranch(ctx, branch); err == nil && ok {
+				result.Ticket = ticketBriefFromLink(link)
 			}
 		}
 	}

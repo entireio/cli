@@ -115,6 +115,11 @@ type EntireSettings struct {
 	// `entire investigate` triggers the first-run picker.
 	Investigate *InvestigateConfig `json:"investigate,omitempty"`
 
+	// Ticket holds configuration for `entire ticket` — the active ticket
+	// platform and team/workspace key. The API credential is stored in the
+	// OS credential store, never here.
+	Ticket *TicketConfig `json:"ticket,omitempty"`
+
 	// CommitLinking controls how commits are linked to agent sessions.
 	// "always" = auto-link without prompting, "prompt" = ask on each commit.
 	// Defaults to "prompt" (preserves existing user behavior).
@@ -426,6 +431,34 @@ func (s *EntireSettings) InvestigateConfig() *InvestigateConfig {
 		return nil
 	}
 	return s.Investigate
+}
+
+// TicketConfig holds the non-secret configuration for `entire ticket`: the
+// selected ticket platform and the team/workspace key on it. The API
+// credential is stored in the OS credential store, never in settings.
+type TicketConfig struct {
+	// Platform is the ticket-platform identifier, e.g. "linear".
+	Platform string `json:"platform,omitempty"`
+
+	// Team is the team, project, or workspace key on the platform.
+	Team string `json:"team,omitempty"`
+}
+
+// IsZero reports whether the config is effectively unset.
+func (c *TicketConfig) IsZero() bool {
+	if c == nil {
+		return true
+	}
+	return c.Platform == "" && c.Team == ""
+}
+
+// TicketConfig returns the configured ticket config. Returns nil when no
+// configuration is present; callers should check IsZero (or guard for nil).
+func (s *EntireSettings) TicketConfig() *TicketConfig {
+	if s == nil {
+		return nil
+	}
+	return s.Ticket
 }
 
 // Load loads the Entire settings from .entire/settings.json, then applies
