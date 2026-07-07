@@ -1,0 +1,105 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KWYNWMTR2EHMVWK1FKAKC13J",
+  "session_id": "1dcb66d1-6f40-466c-8d0d-8919653da730",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-07T16:17:09.968645Z",
+  "branch": "feat/antigravity-agent",
+  "checkpoints_count": 9,
+  "files_touched": [
+    "cmd/entire/cli/agent/antigravity/hooks.go",
+    "cmd/entire/cli/agent/antigravity/statusline.go",
+    "cmd/entire/cli/agent/antigravity/statusline_test.go",
+    "cmd/entire/cli/hooks_antigravity_title.go",
+    "cmd/entire/cli/lifecycle.go",
+    "cmd/entire/cli/lifecycle_test.go",
+    "cmd/entire/cli/strategy/condense_skip_test.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-fable-5",
+  "turn_id": "8d78b0e2dc6d",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 30218,
+    "cache_creation_tokens": 823069,
+    "cache_read_tokens": 43076534,
+    "output_tokens": 161791,
+    "api_call_count": 185
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01TN22d3ZJ7f4wDr8sRzN7Bb",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "entire:session-handoff"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "8d78b0e2dc6d",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 19,
+        "end": 20,
+        "entry_ids": [
+          "9d2d02bb-b88d-4c37-8320-7ad86c2cc2e0"
+        ],
+        "tool_use_id": "toolu_01TN22d3ZJ7f4wDr8sRzN7Bb"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01TN22d3ZJ7f4wDr8sRzN7Bb"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: entire:session-handoff",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 9
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-07T16:17:09.89727Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 1866,
+    "human_modified": 144,
+    "human_removed": 0,
+    "total_committed": 1866,
+    "total_lines_changed": 2010,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 2208,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".agents/skills/agent-integration/README.md": 71,
+        ".agents/skills/agent-integration/SKILL.md": 107,
+        ".agents/skills/agent-integration/implementer.md": 346,
+        ".agents/skills/agent-integration/researcher.md": 161,
+        ".agents/skills/agent-integration/test-writer.md": 211,
+        ".agents/skills/changelog/SKILL.md": 88,
+        ".agents/skills/e2e/SKILL.md": 32,
+        ".agents/skills/e2e/debug.md": 88,
+        ".agents/skills/e2e/implement.md": 117,
+        ".agents/skills/e2e/triage-ci.md": 176,
+        ".agents/skills/test-repo/README.md": 65,
+        ".agents/skills/test-repo/SKILL.md": 230,
+        ".agents/skills/test-repo/test-harness.sh": 245,
+        ".codex/agents/dev.toml": 108,
+        ".codex/agents/reviewer.toml": 163
+      }
+    }
+  ]
+}
