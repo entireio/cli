@@ -1099,6 +1099,8 @@ func TestTrailCreateAndUpdateRejectUnexpectedArgs(t *testing.T) {
 func TestTrailUpdateRejectsNonPositiveNumber(t *testing.T) {
 	t.Parallel()
 	cmd := newTrailUpdateCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{"--number", "0", "--title", "New"})
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "--number must be greater than 0") {

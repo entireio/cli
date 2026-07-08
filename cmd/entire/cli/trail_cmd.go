@@ -1068,7 +1068,7 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 			return err
 		}
 
-		branch := inputs.Branch
+		branch := strings.TrimSpace(inputs.Branch)
 		var found *api.TrailResource
 		if inputs.Number > 0 {
 			found, err = fetchTrailByNumber(ctx, client, forge, owner, repoName, inputs.Number)
@@ -1198,7 +1198,7 @@ func fetchTrailByNumber(ctx context.Context, client *api.Client, forge, owner, r
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to fetch trail %d: %w", number, err)
 	}
 	var detail struct {
 		Trail api.TrailResource `json:"trail"`
