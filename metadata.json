@@ -1,0 +1,24 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KX14MDBGM3BNQK1JKDH030FY",
+  "strategy": "manual-commit",
+  "branch": "feat/review-child-context",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 76597,
+    "cache_creation_tokens": 4546576,
+    "cache_read_tokens": 300825226,
+    "output_tokens": 479938,
+    "api_call_count": 637
+  }
+}
