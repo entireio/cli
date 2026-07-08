@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KX0FGHZAT1G7CBBZ8ECS8G90",
+  "strategy": "manual-commit",
+  "branch": "paul/mirror-get-cluster-routing",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/repo_mirror.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 209,
+    "cache_creation_tokens": 1534,
+    "cache_read_tokens": 378808,
+    "output_tokens": 1127,
+    "api_call_count": 3
+  }
+}

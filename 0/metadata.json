@@ -1,0 +1,40 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KX0FGHZAT1G7CBBZ8ECS8G90",
+  "session_id": "dd0563ee-7267-469e-85b8-f43a5a0f3315",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-08T09:04:11.242744Z",
+  "branch": "paul/mirror-get-cluster-routing",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/repo_mirror.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-fable-5",
+  "turn_id": "d1a611bde3fc",
+  "checkpoint_transcript_start": 234,
+  "transcript_lines_at_start": 234,
+  "compact_transcript_start": 53,
+  "token_usage": {
+    "input_tokens": 209,
+    "cache_creation_tokens": 1534,
+    "cache_read_tokens": 378808,
+    "output_tokens": 1127,
+    "api_call_count": 3
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-08T09:04:11.209685Z",
+    "agent_lines": 4,
+    "agent_removed": 3,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 4,
+    "total_lines_changed": 7,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
