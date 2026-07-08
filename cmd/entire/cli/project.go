@@ -9,14 +9,12 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// newProjectCmd is the hidden `entire project` command group: create, list,
-// get, and delete projects on the Entire control plane. Surfaced via `entire
-// labs`.
+// newProjectCmd is the `entire project` command group: create, list,
+// get, and delete projects on the Entire control plane.
 func newProjectCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "project",
-		Short:  "Manage Entire projects",
-		Hidden: true,
+		Use:   "project",
+		Short: "Manage Entire projects",
 	}
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newProjectCreateCmd())

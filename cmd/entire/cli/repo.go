@@ -12,17 +12,15 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// newRepoCmd is the hidden `entire repo` command group: control-plane
+// newRepoCmd is the `entire repo` command group: control-plane
 // repository lifecycle (create, list within a project, get, delete), the
 // `mirror` and `visibility` subtrees, plus the `clone` convenience that
 // resolves a mirror and shells out to `git clone`. Other git content
-// operations (log, diff, …) remain intentionally out of scope here. Surfaced
-// via `entire labs`.
+// operations (log, diff, …) remain intentionally out of scope here.
 func newRepoCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "repo",
-		Short:  "Manage Entire repositories",
-		Hidden: true,
+		Use:   "repo",
+		Short: "Manage Entire repositories",
 	}
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newRepoCreateCmd())

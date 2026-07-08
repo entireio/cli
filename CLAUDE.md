@@ -22,7 +22,7 @@ This repo contains the CLI for Entire.
 
 ### Command Layout
 
-The visible CLI is organized around five noun groups plus a small set of
+The visible CLI is organized around a set of noun groups plus a small set of
 top-level verbs. The groups are the canonical home for each verb; legacy
 top-level shortcuts remain functional but hidden, and emit a deprecation hint
 pointing at the canonical group form. Newer experimental command families are
@@ -58,6 +58,13 @@ their canonical paths are still runnable.
   takes `--everywhere` (revoke every session on the active core, not just the
   current one) and `--all-contexts` (log out of every saved login)
 - `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+- `org`: control-plane organization management — `create`, `list`, `get`, `delete`
+- `project`: control-plane project management — `create`, `list`, `get`, `delete`
+- `repo`: control-plane repository lifecycle — `create`, `list`, `get`, `delete`,
+  `clone`, plus the `mirror` and `visibility` subtrees. Git content operations
+  (log, diff, …) are intentionally out of scope.
+- `grant`: manage access grants and org membership — `org`, `project`, and `repo`
+  each support `add` / `list` / `remove`
 
 Experimental command families advertised through `entire labs`:
 
@@ -65,7 +72,17 @@ Experimental command families advertised through `entire labs`:
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
-`configure`, `agent-help`.
+`configure`, `agent-help`, `api`.
+
+`api` is an authenticated passthrough to Entire's HTTP APIs (gh-style): it
+attaches the right bearer and dials the right host so callers don't plumb auth
+themselves. `--to core` (default) hits the control plane; `--to cell` hits an
+entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
+jurisdiction's cell instead of the caller's home cell and implies `--to cell`
+(cell routing + identity-token exchange live in `auth.NewEntireAPICellClient`
+via `auth.CellTarget`). `{owner}`/`{repo}`/`{repo_id}` in the path are filled
+from the current repo's origin remote. It is visible in `entire help` and
+`entire agent-help`, so agents discover it as the supported way to call the API.
 
 `agent-help` renders machine-readable, agent-facing usage live from the Cobra
 command tree (so it always matches the installed binary): bare prints a
@@ -505,6 +522,35 @@ env-token-first precedence itself — see `resolveAuthStatusTarget` /
 `auth.EnvTokenVar` before falling back to the active context. `logout` is the
 deliberate exception: it manages a *stored* login session, which an ephemeral
 env token has none of, so it stays on the active context.
+
+### Entire-API Cell Routing (which cell does a data-plane request go to?)
+
+The data plane (entire-api) is deployed per jurisdiction; a repo placement
+lives in exactly one cell, user `/me/*` activity is consolidated in the
+caller's home cell, and no server-side cross-cell aggregator exists. The CLI
+therefore has exactly three routing shapes, mirroring the entire.io BFF:
+
+- **Repo-scoped → one cell**: `resolveRepoCellTarget` (`cell_target.go`) maps
+  a repo (ULID or owner/repo) to the cell hosting it via mirrors + the cluster
+  catalog. Best-effort: any failure returns nil and the auth layer falls back
+  to home-jurisdiction routing. Used by experts
+  (`NewAuthenticatedEntireAPICellClient` in `api_client.go`).
+- **User-scoped `/me` → home cell, never fan out**:
+  `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the
+  `home_jurisdiction` JWT claim; activity/recap use it with a data-API
+  fallback (`runAuthenticatedActivityAPI` in `entireapi_client.go`).
+- **Repo-set queries → fan out and merge client-side**: `cell_fanout.go` —
+  `groupReposByCell` (repo index → per-cell groups; the catalog join key is
+  `ClusterSlug`↔`Cluster.Slug`, NOT the cell name, which the catalog does not
+  expose), `resolveCellBaseURLs`, and `fanOutCells` (parallel per-cell calls,
+  per-cell timeout, partial failures isolated per slot). Merge semantics stay
+  with the command.
+
+Token rule: identity tokens are **per-jurisdiction, not per-cell**. Multi-cell
+callers must build one `auth.CellClientFactory`
+(`NewEntireAPICellClientFactory`) per operation — it resolves the login
+subject once and mints at most one token per jurisdiction. `fanOutCells` does
+this automatically; do not call `NewEntireAPICellClient` in a loop.
 
 ### Session Strategy (`cmd/entire/cli/strategy/`)
 

@@ -12,6 +12,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -97,21 +98,64 @@ func SetCellExchangeTransportForTest(t interface{ Helper() }, rt http.RoundTripp
 //   - otherwise the data host is a BFF/apex: resolve the caller's home-cell
 //     apiUrl from the cluster catalog (home-jurisdiction fallback).
 func NewEntireAPICellClient(ctx context.Context, insecureHTTP bool, target *CellTarget) (*api.Client, error) {
-	// NewEntireAPICellClient deliberately does NOT consult ENTIRE_TOKEN: it
-	// resolves the active stored login context (like every other cell/data-API
-	// command). Only `entire auth token --jurisdiction` (JurisdictionToken) adds
-	// the env-token path.
+	factory, err := NewEntireAPICellClientFactory(ctx, insecureHTTP)
+	if err != nil {
+		return nil, err
+	}
+	return factory.ClientFor(ctx, target)
+}
+
+// CellClientFactory builds entire-api cell clients from a single resolved
+// exchange subject, minting at most one jurisdictional identity token per
+// jurisdiction. Identity tokens are per-jurisdiction, not per-cell — every cell
+// in a jurisdiction accepts the same token — so a caller dialing several cells
+// in one operation (multi-cell fan-out over the caller's repos) should build
+// one factory and reuse it for every cell, instead of paying discovery + login
+// refresh + RFC 8693 exchange once per cell via NewEntireAPICellClient.
+//
+// A factory is safe for concurrent use, and holds credentials resolved at
+// construction time — build it per operation, don't store it long-term. Like
+// NewEntireAPICellClient it deliberately does NOT consult ENTIRE_TOKEN.
+type CellClientFactory struct {
+	subject cellSubject
+
+	// mu guards the slots map only and is never held across I/O; the
+	// hold-across-I/O locking is per-jurisdiction, on each mintSlot.mu.
+	mu    sync.Mutex
+	slots map[string]*mintSlot // jurisdiction -> its token slot
+}
+
+// mintSlot single-flights one jurisdiction's token. Unlike the factory-level
+// mutex, the slot mutex IS deliberately held across the network exchange:
+// concurrent callers for the same jurisdiction wait for one mint instead of
+// duplicating it, while other jurisdictions mint in parallel on their own
+// slots. A failed mint caches nothing — the next caller retries.
+type mintSlot struct {
+	mu    sync.Mutex
+	token string
+}
+
+// NewEntireAPICellClientFactory resolves the exchange subject (active stored
+// login context) once, for building clients aimed at several cells. See
+// NewEntireAPICellClient for the single-cell convenience wrapper.
+func NewEntireAPICellClientFactory(ctx context.Context, insecureHTTP bool) (*CellClientFactory, error) {
 	subject, err := resolveStoredCellSubject(ctx, insecureHTTP)
 	if err != nil {
 		return nil, err
 	}
+	return &CellClientFactory{subject: subject, slots: make(map[string]*mintSlot)}, nil
+}
 
-	jurisdiction, err := targetJurisdiction(target, subject.loginJWT)
+// ClientFor returns an authenticated client for the given cell target (nil
+// falls back to home-jurisdiction routing), reusing an already-minted identity
+// token when the target's jurisdiction matches an earlier call.
+func (f *CellClientFactory) ClientFor(ctx context.Context, target *CellTarget) (*api.Client, error) {
+	jurisdiction, err := targetJurisdiction(target, f.subject.loginJWT)
 	if err != nil {
 		return nil, err
 	}
 
-	coreURL := jurisdictionCoreURL(jurisdiction, subject.dataOrigin, subject.discoveredCore)
+	coreURL := jurisdictionCoreURL(jurisdiction, f.subject.dataOrigin, f.subject.discoveredCore)
 	if err := requireSafeExchangeURL("entire-core", coreURL); err != nil {
 		return nil, err
 	}
@@ -120,7 +164,7 @@ func NewEntireAPICellClient(ctx context.Context, insecureHTTP bool, target *Cell
 	// which is signed by the discovered login core — so list there, not at the
 	// templated jurisdiction core (coreURL), which in a multi-core setup could
 	// differ and reject the token. coreURL still governs the token exchange below.
-	cellBaseURL, err := resolveTargetCellBaseURL(ctx, target, subject.dataOrigin, jurisdiction, subject.discoveredCore, subject.loginJWT, subject.httpClient)
+	cellBaseURL, err := resolveTargetCellBaseURL(ctx, target, f.subject.dataOrigin, jurisdiction, f.subject.discoveredCore, f.subject.loginJWT, f.subject.httpClient)
 	if err != nil {
 		return nil, err
 	}
@@ -128,13 +172,40 @@ func NewEntireAPICellClient(ctx context.Context, insecureHTTP bool, target *Cell
 		return nil, err
 	}
 
-	audience := jurisdictionAudience(jurisdiction, subject.dataOrigin, subject.discoveredCore)
-	token, err := exchangeJurisdictionToken(ctx, coreURL, subject.loginJWT, audience, subject.httpClient)
+	token, err := f.tokenFor(ctx, jurisdiction, coreURL)
 	if err != nil {
-		return nil, fmt.Errorf("exchange jurisdictional identity token: %w", err)
+		return nil, err
 	}
 
 	return api.NewClientWithBaseURL(token, cellBaseURL), nil
+}
+
+// tokenFor returns the cached identity token for jurisdiction, minting it on
+// first use. Locking is per jurisdiction (see mintSlot): a slow exchange for
+// one jurisdiction never blocks another jurisdiction's mint — in a fan-out,
+// healthy cells must not burn their per-cell deadline waiting on an unrelated
+// region's exchange.
+func (f *CellClientFactory) tokenFor(ctx context.Context, jurisdiction, coreURL string) (string, error) {
+	f.mu.Lock()
+	slot, ok := f.slots[jurisdiction]
+	if !ok {
+		slot = &mintSlot{}
+		f.slots[jurisdiction] = slot
+	}
+	f.mu.Unlock()
+
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+	if slot.token != "" {
+		return slot.token, nil
+	}
+	audience := jurisdictionAudience(jurisdiction, f.subject.dataOrigin, f.subject.discoveredCore)
+	token, err := exchangeJurisdictionToken(ctx, coreURL, f.subject.loginJWT, audience, f.subject.httpClient)
+	if err != nil {
+		return "", fmt.Errorf("exchange jurisdictional identity token: %w", err)
+	}
+	slot.token = token
+	return token, nil
 }
 
 // JurisdictionToken mints and returns a jurisdictional identity token
@@ -342,11 +413,31 @@ func resolveTargetCellBaseURL(ctx context.Context, target *CellTarget, dataOrigi
 	if target != nil && strings.TrimSpace(target.BaseURL) != "" {
 		return strings.TrimRight(target.BaseURL, "/"), nil
 	}
-	if !isBFFOrigin(dataOrigin) {
-		// Already a cell URL, or a loopback local-dev host: keep it verbatim.
+	// The configured origin is kept verbatim when it isn't a BFF/apex fronting
+	// multiple cells — i.e. it's already a direct cell or a loopback dev host —
+	// EXCEPT when a jurisdiction is explicitly pinned (target.Jurisdiction, e.g.
+	// `entire api --jurisdiction eu`) against a non-loopback origin. A pinned
+	// jurisdiction may name a DIFFERENT cell than the configured direct-cell
+	// origin, so dialing that origin verbatim would send an identity token minted
+	// for the pinned jurisdiction to the wrong cell; resolve the pinned
+	// jurisdiction's own cell from the catalog instead. A loopback dev host serves
+	// a single cell with no jurisdiction catalog, so it always stays verbatim.
+	explicitJurisdiction := target != nil && strings.TrimSpace(target.Jurisdiction) != ""
+	if !isBFFOrigin(dataOrigin) && (!explicitJurisdiction || isLoopbackOrigin(dataOrigin)) {
 		return strings.TrimRight(dataOrigin, "/"), nil
 	}
 	return resolveCellAPIBaseURL(ctx, listCoreURL, loginJWT, jurisdiction, httpClient)
+}
+
+// isLoopbackOrigin reports whether origin's host is a loopback address, at any
+// scheme (isLoopbackHTTP only accepts http). Used to keep a local-dev cell
+// verbatim even when a jurisdiction is explicitly pinned.
+func isLoopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return isLoopbackHost(strings.ToLower(u.Hostname()))
 }
 
 // isBFFOrigin reports whether origin is a BFF / apex host that fronts multiple
@@ -518,7 +609,7 @@ var ErrNoCellForJurisdiction = errors.New("no entire-api cell configured for jur
 // cluster first). It hand-parses GET /api/v1/clusters rather than reusing the
 // generated coreapi.ListClusters() because coreapi imports this (auth) package,
 // so auth cannot import coreapi without a cycle — the repo-scoped path avoids
-// this by resolving the cell in the cli layer (see resolveExpertsCellTarget).
+// this by resolving the cell in the cli layer (see resolveRepoCellTarget).
 func resolveCellAPIBaseURL(ctx context.Context, coreURL, loginJWT, jurisdiction string, httpClient *http.Client) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(coreURL, "/")+clustersAPIPath, nil)
 	if err != nil {

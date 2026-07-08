@@ -139,12 +139,8 @@ func primaryConfig(cfg *settings.CheckpointsConfig) json.RawMessage {
 // the primary's record through the repo and its refs, so a non-git-backed
 // primary is rejected rather than silently half-supported.
 func buildPrimary(ctx context.Context, env OpenEnv, typ string, raw json.RawMessage) (PersistentStore, error) {
-	b, err := lookupBackend(typ)
-	if err != nil {
+	if err := ValidatePrimaryBackend(typ); err != nil {
 		return nil, fmt.Errorf("checkpoints.primary: %w", err)
-	}
-	if !b.gitBacked {
-		return nil, fmt.Errorf("checkpoints.primary.type %q cannot be the primary: only git-backed backends (e.g. %q) may be the primary", typ, BackendTypeGitBranch)
 	}
 	return build(ctx, env, typ, raw)
 }

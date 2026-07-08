@@ -14,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -214,7 +215,23 @@ func fetchAllPages[T any](ctx context.Context, fetch func(ctx context.Context, c
 // field/value list (default) or raw JSON (--json), reusing the same column
 // definition as the matching list view.
 func runCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) error {
-	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+	return runCore(cmd, renderCoreObject(cmd, headers, row, fn))
+}
+
+// runCoreObjectForCluster is runCoreObject for a resource-provider command (see
+// runCoreForCluster): identical field/JSON rendering, but dialing the core that
+// fronts clusterHost rather than the active context.
+func runCoreObjectForCluster[T any](cmd *cobra.Command, clusterHost string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) error {
+	return runCoreForCluster(cmd, clusterHost, renderCoreObject(cmd, headers, row, fn))
+}
+
+// renderCoreObject builds the run-function shared by runCoreObject and
+// runCoreObjectForCluster: fetch via fn, then render as a field/value list
+// (default) or raw JSON (--json). Kept separate from the client-selection so
+// the two object variants differ only in which core they dial (mirroring
+// renderCoreList).
+func renderCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) func(context.Context, *coreapi.Client) error {
+	return func(ctx context.Context, c *coreapi.Client) error {
 		item, err := fn(ctx, c)
 		if err != nil {
 			return err
@@ -223,7 +240,7 @@ func runCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []st
 			return printJSON(cmd.OutOrStdout(), item)
 		}
 		return printFields(cmd.OutOrStdout(), headers, row(*item))
-	})
+	}
 }
 
 // tableStyles holds the foreground styles for the human table/field views,
@@ -244,9 +261,9 @@ func newTableStyles(w io.Writer) tableStyles {
 	}
 	return tableStyles{
 		enabled: true,
-		header:  lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true),
-		primary: lipgloss.NewStyle().Foreground(lipgloss.Color("7")),
-		cell:    lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+		header:  lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Bold(true),
+		primary: lipgloss.NewStyle(), // default fg: inverts with terminal theme
+		cell:    lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)),
 	}
 }
 
@@ -383,6 +400,12 @@ func runCoreMutation(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi
 // without standing up the auth/context/TLS stack.
 var activeCoreClient = func(context.Context) (*coreapi.Client, error) { return coreapi.New() }
 
+// clusterCoreClient builds the control-plane client for cluster-addressed
+// commands (see runCoreForCluster). Same test seam as activeCoreClient —
+// production wiring is coreapi.NewForCluster, which does live /.well-known
+// discovery that command-level tests must not reach.
+var clusterCoreClient func(ctx context.Context, clusterHost string) (*coreapi.Client, error) = coreapi.NewForCluster
+
 // runCore is the shared base for every active-context control-plane command:
 // it owns the preamble only — silence usage, build the client, map API
 // errors — and leaves all rendering to fn. The delete/revoke verbs call it
@@ -403,7 +426,7 @@ func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client)
 // cluster_host". See coreapi.NewForCluster.
 func runCoreForCluster(cmd *cobra.Command, clusterHost string, fn func(ctx context.Context, c *coreapi.Client) error) error {
 	return runCoreClient(cmd, func(ctx context.Context) (*coreapi.Client, error) {
-		return coreapi.NewForCluster(ctx, clusterHost)
+		return clusterCoreClient(ctx, clusterHost)
 	}, fn)
 }
 

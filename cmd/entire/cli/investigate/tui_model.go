@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
@@ -108,7 +109,7 @@ type investigateTUIModel struct {
 func newInvestigateTUIModel(topic, runID string, agents []string, maxTurns, quorum int, cancel context.CancelFunc) investigateTUIModel {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
-	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
 
 	rows := make([]agentRow, len(agents))
 	rowIdx := make(map[string]int, len(agents))

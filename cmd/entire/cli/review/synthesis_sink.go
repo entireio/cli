@@ -94,8 +94,12 @@ var _ reviewtypes.Sink = SynthesisSink{}
 // defaultSynthesisProviderTimeout bounds the judge's single consolidation call
 // when SynthesisSink.ProviderTimeout is unset. The judge reads every reviewer's
 // report and writes the combined verdict in one text-generation call, which
-// regularly needs more than the original 2m, so the default is 5m.
-const defaultSynthesisProviderTimeout = 5 * time.Minute
+// regularly needs more than the original 2m. 20m matches the judge's previous
+// effective bound: before the reviewer default was dropped, the --timeout flag
+// default (20m) always flowed into ProviderTimeout on the no-flag path, so
+// keeping 5m here would have silently tightened the judge 4x — and a judge
+// timeout discards an entire multi-reviewer run with no verdict.
+const defaultSynthesisProviderTimeout = 20 * time.Minute
 
 // AgentEvent is a no-op; SynthesisSink only acts in RunFinished.
 func (SynthesisSink) AgentEvent(_ string, _ reviewtypes.Event) {}

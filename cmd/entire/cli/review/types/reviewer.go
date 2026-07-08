@@ -140,10 +140,11 @@ type RunConfig struct {
 
 	// ReviewerTimeout bounds how long a single reviewer may run before the
 	// orchestrator cancels it (its process is killed and the run is marked
-	// failed-by-timeout) so a stuck agent can't hang the review forever. Zero
-	// or negative means use the orchestrator default (defaultReviewerTimeout).
-	// Sibling reviewers and the judge are unaffected by one reviewer's
-	// timeout.
+	// failed-by-timeout). Positive is a hard cap; zero or negative means no
+	// cap — reviewers run until they finish, like a skill invoked directly
+	// in a session (there is deliberately no default: every wall-clock
+	// default shipped killed legitimate long-running work). Sibling
+	// reviewers and the judge are unaffected by one reviewer's timeout.
 	ReviewerTimeout time.Duration
 
 	// EnrichSummary optionally updates the completed run summary before sinks

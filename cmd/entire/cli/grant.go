@@ -42,9 +42,9 @@ func validateGrantRole(role string) error {
 	}
 }
 
-// newGrantCmd is the hidden `entire grant` command group: manage access
+// newGrantCmd is the `entire grant` command group: manage access
 // grants and org membership on the Entire control plane. Org, project, and
-// repo each support add / list / remove. Surfaced via `entire labs`.
+// repo each support add / list / remove.
 //
 // Grantees are addressed by a provider-qualified handle (e.g. github:alice),
 // which the CLI resolves to the provider account behind the scenes. `remove`
@@ -52,9 +52,8 @@ func validateGrantRole(role string) error {
 // repo) are addressed by name or ULID.
 func newGrantCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "grant",
-		Short:  "Manage Entire access grants and org membership",
-		Hidden: true,
+		Use:   "grant",
+		Short: "Manage Entire access grants and org membership",
 	}
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newGrantOrgCmd())

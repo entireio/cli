@@ -312,7 +312,8 @@ func TestSynthesisSink_DefaultProviderTimeoutBounds(t *testing.T) {
 }
 
 // TestSynthesisSink_DefaultProviderTimeoutValue pins the judge's default
-// deadline (~5m) when ProviderTimeout is unset, so an accidental change to
+// deadline (~20m, the flag default's previous effective bound) when
+// ProviderTimeout is unset, so an accidental change to
 // defaultSynthesisProviderTimeout is caught rather than passing silently.
 func TestSynthesisSink_DefaultProviderTimeoutValue(t *testing.T) {
 	t.Parallel()
@@ -326,10 +327,10 @@ func TestSynthesisSink_DefaultProviderTimeoutValue(t *testing.T) {
 	if !provider.hadDeadline {
 		t.Fatal("unset ProviderTimeout must apply the default deadline")
 	}
-	// The default is 5m; allow generous slack for scheduling between context
+	// The default is 20m; allow generous slack for scheduling between context
 	// creation and the provider reading the deadline.
-	if provider.remaining < 4*time.Minute || provider.remaining > 5*time.Minute {
-		t.Fatalf("default deadline remaining = %v, want ~5m", provider.remaining)
+	if provider.remaining < 19*time.Minute || provider.remaining > 20*time.Minute {
+		t.Fatalf("default deadline remaining = %v, want ~20m", provider.remaining)
 	}
 }
 
@@ -365,7 +366,7 @@ func TestSynthesisSink_ExplicitProviderTimeoutHonored(t *testing.T) {
 	if !provider.hadDeadline {
 		t.Fatal("explicit ProviderTimeout must apply a deadline")
 	}
-	// Generous slack: the deadline should be ~1h out, far above the 5m default.
+	// Generous slack: the deadline should be ~1h out, far above the 20m default.
 	if provider.remaining < 30*time.Minute {
 		t.Fatalf("deadline remaining = %v, want ~1h (explicit timeout not honored, fell back to default)", provider.remaining)
 	}

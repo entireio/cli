@@ -5747,22 +5747,16 @@ func TestGetBranchCheckpoints_TruncationSignal(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "test.txt", "initial")
+	testutil.GitAdd(t, tmpDir, "test.txt")
+	testutil.GitCommit(t, tmpDir, "initial commit")
+
 	repo, err := git.PlainOpen(tmpDir)
 	require.NoError(t, err)
 
-	w, err := repo.Worktree()
-	require.NoError(t, err)
-
-	testFile := filepath.Join(tmpDir, "test.txt")
-	require.NoError(t, os.WriteFile(testFile, []byte("initial"), 0o644))
-	_, err = w.Add("test.txt")
-	require.NoError(t, err)
-	_, err = w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	require.NoError(t, err)
-
-	// Create 4 committed checkpoints, each its own commit carrying the trailer.
+	// Create 4 committed checkpoints, each on its own commit carrying the
+	// Entire-Checkpoint trailer. The testutil helpers configure user identity
+	// and disable GPG signing, matching repo convention.
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	const total = 4
 	cpIDs := []string{"aa11aa11aa11", "bb22bb22bb22", "cc33cc33cc33", "dd44dd44dd44"}
@@ -5774,13 +5768,9 @@ func TestGetBranchCheckpoints_TruncationSignal(t *testing.T) {
 			Strategy:     "manual-commit",
 			Prompts:      []string{fmt.Sprintf("prompt %d", i)},
 		}))
-		require.NoError(t, os.WriteFile(testFile, []byte(fmt.Sprintf("change %d", i)), 0o644))
-		_, err = w.Add("test.txt")
-		require.NoError(t, err)
-		_, err = w.Commit(trailers.FormatCheckpoint(fmt.Sprintf("checkpoint %d", i), cpID), &git.CommitOptions{
-			Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(time.Duration(i) * time.Second)},
-		})
-		require.NoError(t, err)
+		testutil.WriteFile(t, tmpDir, "test.txt", fmt.Sprintf("change %d", i))
+		testutil.GitAdd(t, tmpDir, "test.txt")
+		testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint(fmt.Sprintf("checkpoint %d", i), cpID))
 	}
 
 	t.Run("budget hit reports truncated and caps the slice", func(t *testing.T) {

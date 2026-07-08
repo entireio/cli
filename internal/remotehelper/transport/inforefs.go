@@ -199,7 +199,9 @@ func HTTPErrorMessage(statusCode int, serverMsg, baseURL string) error {
 		if serverMsg != "" {
 			return fmt.Errorf("authentication failed: %s", serverMsg)
 		}
-		return errors.New("authentication failed - please run 'entire login'")
+		// Reaching here means the transport already re-minted and retried once
+		// (see retryOn401) and the fresh credential was still rejected.
+		return errors.New("authentication failed even after refreshing credentials - run 'entire login' if this persists")
 	case http.StatusNotFound:
 		if serverMsg != "" {
 			return errors.New(serverMsg)

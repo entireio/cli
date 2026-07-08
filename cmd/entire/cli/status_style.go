@@ -11,6 +11,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 
 	"golang.org/x/term"
 )
@@ -26,7 +27,7 @@ type statusStyles struct {
 	gray   lipgloss.Style
 	bold   lipgloss.Style
 	dim    lipgloss.Style
-	agent  lipgloss.Style // amber/orange for agent names
+	agent  lipgloss.Style // accent (magenta) for agent names
 	cyan   lipgloss.Style
 	yellow lipgloss.Style // yellow for stale warnings
 }
@@ -42,14 +43,14 @@ func newStatusStyles(w io.Writer) statusStyles {
 	}
 
 	if useColor {
-		s.green = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-		s.red = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-		s.gray = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+		s.green = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Success))
+		s.red = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Error))
+		s.gray = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
 		s.bold = lipgloss.NewStyle().Bold(true)
 		s.dim = lipgloss.NewStyle().Faint(true)
-		s.agent = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
-		s.cyan = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-		s.yellow = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+		s.agent = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(palette.Accent))
+		s.cyan = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Info))
+		s.yellow = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Warning))
 	}
 
 	return s
@@ -122,8 +123,9 @@ type explainRow struct {
 	Value string
 }
 
-// identityBullet renders "● <label> <id>\n". Bullet is brand orange when color
-// is enabled; ID is also orange to mirror the existing checkpoint header. When
+// identityBullet renders "● <label> <id>\n". Bullet is the brand accent
+// (magenta) when color is enabled; ID is also the accent to mirror the existing
+// checkpoint header. When
 // id is empty (e.g., temporary checkpoints append "[temporary]" to the label
 // instead of using an id slot), the trailing space + id is suppressed.
 func (s statusStyles) identityBullet(label, id string) string {
@@ -131,18 +133,18 @@ func (s statusStyles) identityBullet(label, id string) string {
 		if !s.colorEnabled {
 			return fmt.Sprintf("● %s\n", label)
 		}
-		bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), "●")
+		bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)), "●")
 		return fmt.Sprintf("%s %s\n", bullet, s.render(s.bold, label))
 	}
 	if !s.colorEnabled {
 		return fmt.Sprintf("● %s %s\n", label, id)
 	}
-	bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), "●")
-	idStyled := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), id)
+	bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)), "●")
+	idStyled := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)), id)
 	return fmt.Sprintf("%s %s %s\n", bullet, s.render(s.bold, label), idStyled)
 }
 
-// listIdentityBullet renders "● <id>  <suffix>\n" — orange bullet, bold-orange ID,
+// listIdentityBullet renders "● <id>  <suffix>\n" — accent bullet, bold-accent ID,
 // then plain (or dimmed) suffix. Used by the explain list view where the ID is
 // the primary identifier (different ordering from identityBullet, which puts
 // the static label first).
@@ -153,8 +155,8 @@ func (s statusStyles) listIdentityBullet(id, suffix string) string {
 		}
 		return fmt.Sprintf("● %s  %s\n", id, suffix)
 	}
-	bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), "●")
-	idStyled := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")).Bold(true), id)
+	bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)), "●")
+	idStyled := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)).Bold(true), id)
 	if suffix == "" {
 		return fmt.Sprintf("%s %s\n", bullet, idStyled)
 	}
