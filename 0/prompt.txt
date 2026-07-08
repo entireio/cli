@@ -1,0 +1,24 @@
+I consider this a bug:
+
+18:36:30 $ entire repo mirror get entire://eukanuba.partial.to/gh/entirehq/librarian
+no mirror matching "entire://eukanuba.partial.to/gh/entirehq/librarian" (run `entire repo mirror list` to see clone URLs, or pass a ULID)
+[paul@boulot] ~
+18:36:42 $ entire auth contexts
+   CONTEXT             HANDLE      LOGIN SERVER
+*  eu.auth.entire.io   toothbrush  https://eu.auth.entire.io
+   eu.auth.partial.to  toothbrush  https://eu.auth.partial.to
+[paul@boulot] ~
+18:36:56 $ entire auth use eu.auth.partial.to
+Now using context "eu.auth.partial.to".
+[paul@boulot] ~
+18:37:00 $ entire repo mirror get entire://eukanuba.partial.to/gh/entirehq/librarian
+REPO       entirehq/librarian
+CLONE URL  entire://eukanuba.partial.to/gh/entirehq/librarian
+PRIVATE    yes
+
+
+what i expect the cli should've done, is notice that eukanuba.partial.to (via .well-known/... which we cache) is actually a cluster that recognises a eu.auth.partial.to context, and used that.  why didn't it?  branch off origin/main and make the fix.  prior patterns for solving this already abound.
+
+---
+
+i could have sworn this worked a while ago.  is this a regression?  If so point at the offending PR.
