@@ -1450,3 +1450,91 @@ func TestFetchCurrentUserLoginWrapsGhError(t *testing.T) {
 		t.Fatalf("error should mention the --author fallback hint, got: %v", err)
 	}
 }
+
+// checkTrailResponse must reserve the re-login hint for 401: a 403 is an
+// authorization denial for a validated credential, so telling the user to
+// re-login sends them in circles (ENT-1064). The 403 message names the host
+// that denied access and keeps the server's error body.
+func TestCheckTrailResponse(t *testing.T) {
+	t.Parallel()
+
+	respFor := func(t *testing.T, status int, body string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://entire.io/api/v1/trails/gh/acme/app", nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		return &http.Response{
+			StatusCode: status,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}
+	}
+
+	t.Run("2xx passes", func(t *testing.T) {
+		t.Parallel()
+		resp := respFor(t, http.StatusOK, "")
+		defer resp.Body.Close()
+		if err := checkTrailResponse(resp); err != nil {
+			t.Fatalf("expected nil, got %v", err)
+		}
+	})
+
+	t.Run("401 hints re-login", func(t *testing.T) {
+		t.Parallel()
+		resp := respFor(t, http.StatusUnauthorized, `{"error":"Not authenticated"}`)
+		defer resp.Body.Close()
+		err := checkTrailResponse(resp)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "run 'entire login' to re-authenticate") {
+			t.Fatalf("401 must hint re-login, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "Not authenticated") {
+			t.Fatalf("401 must preserve the server message, got: %v", err)
+		}
+	})
+
+	t.Run("403 names the denying host and does not hint re-login", func(t *testing.T) {
+		t.Parallel()
+		resp := respFor(t, http.StatusForbidden, `{"error":"Forbidden"}`)
+		defer resp.Body.Close()
+		err := checkTrailResponse(resp)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if strings.Contains(err.Error(), "entire login") {
+			t.Fatalf("403 must not tell the user to re-login, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "entire.io denied access") {
+			t.Fatalf("403 must name the denying host, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "Forbidden") {
+			t.Fatalf("403 must preserve the server message, got: %v", err)
+		}
+	})
+
+	t.Run("403 without a request falls back to a generic host", func(t *testing.T) {
+		t.Parallel()
+		resp := &http.Response{
+			StatusCode: http.StatusForbidden,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"Forbidden"}`)),
+		}
+		defer resp.Body.Close()
+		err := checkTrailResponse(resp)
+		if err == nil || !strings.Contains(err.Error(), "the server denied access") {
+			t.Fatalf("expected generic-host fallback, got: %v", err)
+		}
+	})
+
+	t.Run("other statuses keep the trail API prefix", func(t *testing.T) {
+		t.Parallel()
+		resp := respFor(t, http.StatusInternalServerError, `{"error":"boom"}`)
+		defer resp.Body.Close()
+		err := checkTrailResponse(resp)
+		if err == nil || !strings.Contains(err.Error(), "trail API:") {
+			t.Fatalf("expected trail API prefix, got: %v", err)
+		}
+	})
+}

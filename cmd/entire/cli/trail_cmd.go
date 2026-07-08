@@ -1762,12 +1762,25 @@ func parseTrailRepoArg(raw string) (forge, owner, repo string, err error) {
 	return info.Forge, info.Owner, info.Repo, nil
 }
 
-// checkTrailResponse checks the API response and returns user-friendly errors.
-// For auth failures, it appends a hint to re-authenticate while preserving the server's error message.
+// checkTrailResponse checks the API response and returns user-friendly errors,
+// preserving the server's error message.
+//
+// The re-login hint is reserved for 401: a 403 means the server validated the
+// credential and denied access anyway, so re-authenticating mints the same
+// authority and sends the user in circles (ENT-1064). For 403 we name the host
+// that denied us instead, so a wrong-server or wrong-account situation is
+// visible from the message alone.
 func checkTrailResponse(resp *http.Response) error {
 	if err := api.CheckResponse(resp); err != nil {
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		switch resp.StatusCode {
+		case http.StatusUnauthorized:
 			return fmt.Errorf("%w — run 'entire login' to re-authenticate", err)
+		case http.StatusForbidden:
+			host := "the server"
+			if resp.Request != nil && resp.Request.URL != nil && resp.Request.URL.Host != "" {
+				host = resp.Request.URL.Host
+			}
+			return fmt.Errorf("%w — %s denied access for your account (re-login won't fix a 403; check that your account has access to this repo's trails)", err, host)
 		}
 		return fmt.Errorf("trail API: %w", err)
 	}
