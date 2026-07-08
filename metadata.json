@@ -1,0 +1,24 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KX0Y35F2WQNBG14701C9WNWF",
+  "strategy": "manual-commit",
+  "branch": "feat/codex-skill-discovery",
+  "checkpoints_count": 33,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 58073,
+    "cache_creation_tokens": 4421928,
+    "cache_read_tokens": 223253337,
+    "output_tokens": 396303,
+    "api_call_count": 540
+  }
+}
