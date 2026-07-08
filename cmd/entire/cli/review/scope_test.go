@@ -722,3 +722,28 @@ func TestBuildScopeContext_ListsBoundedByBytes(t *testing.T) {
 		t.Error("byte cap should keep the leading files, not empty the list")
 	}
 }
+
+// TestCapScopeLists_TrimmedCommitsKeepNewestOldestFirst pins the interaction
+// of byte-trimming with the commit ordering contract: trimming happens while
+// commits are newest-first (keeping the newest), and the final reversal must
+// apply to the TRIMMED slice. A `defer slices.Reverse(sc.Commits)` that
+// captured the pre-trim slice header reversed the full backing array
+// instead, leaving the trimmed view holding the OLDEST commits — inverting
+// the documented keep-newest semantics exactly when truncation matters most.
+func TestCapScopeLists_TrimmedCommitsKeepNewestOldestFirst(t *testing.T) {
+	t.Parallel()
+	sc := reviewtypes.ScopeContext{
+		// Newest-first, as capScopeLines delivers before the reversal.
+		Commits: []string{"c5 newest", "c4", "c3", "c2", "c1 oldest"},
+	}
+	// Budget fits exactly two lines ("c5 newest\n" = 10, "c4\n" = 3).
+	capScopeListsToBudget(&sc, 13)
+
+	if !sc.CommitsTruncated {
+		t.Fatal("expected CommitsTruncated after byte trim")
+	}
+	want := []string{"c4", "c5 newest"} // newest kept, oldest-first order
+	if len(sc.Commits) != 2 || sc.Commits[0] != want[0] || sc.Commits[1] != want[1] {
+		t.Fatalf("Commits = %v, want %v (newest survive, oldest-first)", sc.Commits, want)
+	}
+}

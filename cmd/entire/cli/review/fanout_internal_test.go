@@ -24,7 +24,7 @@ func TestExplodeSkillWorkers_SplitsMultiSkillWorker(t *testing.T) {
 			},
 		},
 	}
-	got := explodeSkillWorkers(profile)
+	got := explodeSkillWorkers(profile, allAdapters)
 
 	if len(got.Agents) != 2 {
 		t.Fatalf("Agents = %v, want 2 exploded workers", got.Agents)
@@ -64,7 +64,7 @@ func TestExplodeSkillWorkers_PassThrough(t *testing.T) {
 			"pi":    {Prompt: "review the change"},
 		},
 	}
-	got := explodeSkillWorkers(profile)
+	got := explodeSkillWorkers(profile, allAdapters)
 	if len(got.Agents) != 2 {
 		t.Fatalf("Agents = %v, want unchanged worker count", got.Agents)
 	}
@@ -87,8 +87,8 @@ func TestExplodeSkillWorkers_DeterministicDistinctKeys(t *testing.T) {
 			"claude-code:review": {Agent: "claude-code", Prompt: "existing worker with colliding name"},
 		},
 	}
-	a := explodeSkillWorkers(profile)
-	b := explodeSkillWorkers(profile)
+	a := explodeSkillWorkers(profile, allAdapters)
+	b := explodeSkillWorkers(profile, allAdapters)
 	if len(a.Agents) != 3 {
 		t.Fatalf("Agents = %v, want 3 (2 exploded + 1 pass-through)", a.Agents)
 	}
@@ -137,3 +137,45 @@ func TestPlannedAgentRunsCarrySkills(t *testing.T) {
 		t.Errorf("planned[1].Skills = %v, want [/security-review]", planned[1].Skills)
 	}
 }
+
+// TestExplodeSkillWorkers_SkipsAgentsWithoutRunnerAdapter pins the
+// marker-fallback escape hatch: a multi-skill worker whose agent has no
+// review-runner adapter must NOT be exploded. Before this guard, explosion
+// pushed such profiles into the multi-agent branch, which hard-fails on
+// adapter-less agents ("without review runner adapters in a fan-out run"),
+// while the suggested --agent workaround matched all exploded workers and
+// dead-ended circularly — a regression from the working single-agent
+// RunMarkerFallback path.
+func TestExplodeSkillWorkers_SkipsAgentsWithoutRunnerAdapter(t *testing.T) {
+	t.Parallel()
+	profile := settings.ReviewProfileConfig{
+		Agents: map[string]settings.ReviewConfig{
+			"cursor":     {Skills: []string{"/review", "/security-review"}},
+			tAgentClaude: {Skills: []string{"/review", "/simplify"}},
+		},
+	}
+	hasAdapter := func(agentName string) bool { return agentName == tAgentClaude }
+	got := explodeSkillWorkers(profile, hasAdapter)
+
+	if cfg, ok := got.Agents["cursor"]; !ok || len(cfg.Skills) != 2 {
+		t.Fatalf("adapter-less worker must pass through unexploded; got %+v", got.Agents)
+	}
+	if _, ok := got.Agents[tAgentClaude+":review"]; !ok {
+		t.Fatalf("adapter-backed worker should still explode; got keys %v", mapKeys(got.Agents))
+	}
+	if _, ok := got.Agents[tAgentClaude]; ok {
+		t.Fatalf("exploded worker's original key should be replaced; got keys %v", mapKeys(got.Agents))
+	}
+}
+
+func mapKeys(m map[string]settings.ReviewConfig) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// allAdapters treats every agent as having a review-runner adapter — the
+// common case for the explosion tests above.
+func allAdapters(string) bool { return true }

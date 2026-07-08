@@ -171,9 +171,10 @@ func guidedProfileTask(generatedTask, existingTask, customTask string) string {
 	if strings.TrimSpace(generatedTask) != "" {
 		return generatedTask
 	}
-	// No user-provided task: persist empty. The built-in brief is a runtime
-	// fallback (workerTask/profileTask), not saved configuration — persisting
-	// it would make it indistinguishable from a task the user wrote.
+	// No user-provided task: persist empty. The built-in brief is applied at
+	// runtime by profileTask (cmd.go sets profile.Task for every worker), not
+	// saved configuration — persisting it would make it indistinguishable
+	// from a task the user wrote.
 	return ""
 }
 

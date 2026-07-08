@@ -341,7 +341,12 @@ func buildScopeContextCapped(ctx context.Context, repoRoot, baseRef string, caps
 // also performs that reversal, making it the single exit point for commit
 // ordering. A non-positive budget only reverses.
 func capScopeListsToBudget(sc *reviewtypes.ScopeContext, budget int) {
-	defer slices.Reverse(sc.Commits)
+	// The closure re-reads sc.Commits at return time: a bare
+	// `defer slices.Reverse(sc.Commits)` would capture the pre-trim slice
+	// header and reverse the full backing array, leaving a trimmed view
+	// holding the OLDEST commits — inverting keep-newest exactly when
+	// truncation matters.
+	defer func() { slices.Reverse(sc.Commits) }()
 	if budget <= 0 {
 		return
 	}

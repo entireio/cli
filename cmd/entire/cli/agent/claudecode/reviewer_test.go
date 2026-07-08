@@ -431,6 +431,10 @@ func TestReviewer_ArgvIncludesReadOnlyAllowlist(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Read", "Grep", "Glob", "Task", "Skill",
+		// The checkpoint context injected into the same prompt instructs
+		// reviewers to run `entire explain <id>` — the allowlist must cover
+		// the command the prompt itself recommends, or headless -p denies it.
+		"Bash(entire explain:*)",
 		"Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
 		"Bash(git status:*)", "Bash(git blame:*)", "Bash(git rev-parse:*)",
 	} {

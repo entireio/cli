@@ -56,7 +56,10 @@ var reviewToolAllowlist = []string{
 	"Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
 	"Bash(git status:*)", "Bash(git blame:*)", "Bash(git rev-parse:*)",
 	"Bash(git merge-base:*)", "Bash(git ls-files:*)",
-	"Bash(entire search:*)", "Bash(entire checkpoint explain:*)",
+	// `entire explain` is the command the injected checkpoint context tells
+	// reviewers to run; granting only the canonical `checkpoint explain`
+	// form left the prompt's own guidance auto-denied in headless -p.
+	"Bash(entire search:*)", "Bash(entire checkpoint explain:*)", "Bash(entire explain:*)",
 }
 
 // buildReviewCmd builds the exec.Cmd for a claude review run.

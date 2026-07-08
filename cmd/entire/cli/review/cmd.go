@@ -847,8 +847,12 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	profile.Task = profileTask(profileName, profile)
 	profile.Agents = nonZeroAgentConfigs(profile.Agents)
 	// Fan out multi-skill workers into one worker per skill so skills run
-	// concurrently: the wait is the slowest skill, not the sum.
-	profile = explodeSkillWorkers(profile)
+	// concurrently: the wait is the slowest skill, not the sum. Agents
+	// without a review-runner adapter stay unexploded so they keep the
+	// single-agent marker-fallback path.
+	profile = explodeSkillWorkers(profile, func(agentName string) bool {
+		return deps.ReviewerFor(agentName) != nil
+	})
 	outputMode := profileOutput(profile)
 
 	if agentOverride != "" {

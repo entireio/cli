@@ -20,16 +20,20 @@ import (
 // source worker's model and prompt, carry an explicit Agent so the derived
 // key still resolves to the real agent, and get deterministic keys
 // (<worker>:<skill-slug>, deduped against existing keys).
-func explodeSkillWorkers(profile settings.ReviewProfileConfig) settings.ReviewProfileConfig {
+func explodeSkillWorkers(profile settings.ReviewProfileConfig, hasAdapter func(agentName string) bool) settings.ReviewProfileConfig {
 	out := profile
 	agents := make(map[string]settings.ReviewConfig, len(profile.Agents))
 
 	// Pass-through workers claim their keys first so exploded keys can never
 	// clobber an existing worker that happens to match a derived name.
+	// Workers whose agent has no review-runner adapter also pass through:
+	// exploding them forces the multi-agent branch, which hard-fails on
+	// adapter-less agents, while unexploded they keep the working
+	// single-agent RunMarkerFallback path.
 	multiSkill := make([]string, 0, len(profile.Agents))
 	for _, name := range sortedMapKeys(profile.Agents) {
 		cfg := profile.Agents[name]
-		if len(cfg.Skills) <= 1 {
+		if len(cfg.Skills) <= 1 || !hasAdapter(reviewAgentName(name, cfg)) {
 			agents[name] = cfg
 			continue
 		}
