@@ -1002,6 +1002,7 @@ func newTrailCreateRequest(title, body, branch, base, statusStr string) api.Trai
 
 func newTrailUpdateCmd() *cobra.Command {
 	var statusStr, title, body, branch string
+	var number int
 	var labelAdd, labelRemove []string
 
 	cmd := &cobra.Command{
@@ -1009,7 +1010,14 @@ func newTrailUpdateCmd() *cobra.Command {
 		Short: "Update trail metadata",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := ensureTrailRepoHasTarget(cmd, strings.TrimSpace(branch) != "", "pass --branch"); err != nil {
+			numberChanged := cmd.Flags().Changed("number")
+			if numberChanged && number <= 0 {
+				return errors.New("--number must be greater than 0")
+			}
+			if numberChanged && strings.TrimSpace(branch) != "" {
+				return errors.New("cannot combine --number with --branch")
+			}
+			if err := ensureTrailRepoHasTarget(cmd, numberChanged || strings.TrimSpace(branch) != "", "pass --number or --branch"); err != nil {
 				return err
 			}
 			return runTrailUpdate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailUpdateInputs{
@@ -1020,6 +1028,7 @@ func newTrailUpdateCmd() *cobra.Command {
 				Body:          body,
 				BodyChanged:   cmd.Flags().Changed("body"),
 				Branch:        branch,
+				Number:        number,
 				Repo:          trailRepoFlag(cmd),
 				LabelAdd:      labelAdd,
 				LabelRemove:   labelRemove,
@@ -1031,6 +1040,7 @@ func newTrailUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&title, "title", "", "Update title")
 	cmd.Flags().StringVar(&body, "body", "", "Update body")
 	cmd.Flags().StringVar(&branch, "branch", "", "Branch to update trail for (defaults to current)")
+	cmd.Flags().IntVar(&number, "number", 0, "Trail number to update")
 	cmd.Flags().StringSliceVar(&labelAdd, "add-label", nil, "Add label(s)")
 	cmd.Flags().StringSliceVar(&labelRemove, "remove-label", nil, "Remove label(s)")
 
@@ -1045,6 +1055,7 @@ type trailUpdateInputs struct {
 	Body          string
 	BodyChanged   bool
 	Branch        string
+	Number        int
 	Repo          string
 	LabelAdd      []string
 	LabelRemove   []string
@@ -1057,22 +1068,28 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 			return err
 		}
 
-		// Determine branch.
 		branch := inputs.Branch
-		if branch == "" {
-			branch, err = GetCurrentBranch(ctx)
+		var found *api.TrailResource
+		if inputs.Number > 0 {
+			found, err = fetchTrailByNumber(ctx, client, forge, owner, repoName, inputs.Number)
 			if err != nil {
-				return fmt.Errorf("failed to determine current branch: %w", err)
+				return err
 			}
-		}
+		} else {
+			if branch == "" {
+				branch, err = GetCurrentBranch(ctx)
+				if err != nil {
+					return fmt.Errorf("failed to determine current branch: %w", err)
+				}
+			}
 
-		// Find the trail by branch.
-		found, err := findTrailByBranch(ctx, client, forge, owner, repoName, branch)
-		if err != nil {
-			return err
-		}
-		if found == nil {
-			return fmt.Errorf("no trail found for branch %q", branch)
+			found, err = findTrailByBranch(ctx, client, forge, owner, repoName, branch)
+			if err != nil {
+				return err
+			}
+			if found == nil {
+				return fmt.Errorf("no trail found for branch %q", branch)
+			}
 		}
 
 		// Interactive mode when no update flags are provided.
@@ -1146,7 +1163,7 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 		// The single-trail endpoint is keyed by trail number, not id; the server
 		// rejects an id here with "Invalid trail number format".
 		if found.Number <= 0 {
-			return fmt.Errorf("trail for branch %q has no number yet; cannot update", branch)
+			return fmt.Errorf("trail %q has no number yet; cannot update", describeTrailRef(found))
 		}
 		resp, err := client.Patch(ctx, trailNumberPath(forge, owner, repoName, found.Number), updateReq)
 		if err != nil {
@@ -1162,9 +1179,37 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 			return fmt.Errorf("failed to decode update response: %w", err)
 		}
 
-		fmt.Fprintf(w, "Updated trail for branch %s\n", branch)
+		if strings.TrimSpace(found.Branch) != "" {
+			fmt.Fprintf(w, "Updated trail for branch %s\n", found.Branch)
+		} else {
+			fmt.Fprintf(w, "Updated trail %d\n", found.Number)
+		}
 		return nil
 	})
+}
+
+func fetchTrailByNumber(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (*api.TrailResource, error) {
+	if number <= 0 {
+		return nil, errors.New("trail number must be greater than 0")
+	}
+	resp, err := client.Get(ctx, trailNumberPath(forge, owner, repo, number))
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch trail %d: %w", number, err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return nil, err
+	}
+	var detail struct {
+		Trail api.TrailResource `json:"trail"`
+	}
+	if err := api.DecodeJSON(resp, &detail); err != nil {
+		return nil, fmt.Errorf("failed to decode trail %d: %w", number, err)
+	}
+	if detail.Trail.Number == 0 {
+		detail.Trail.Number = number
+	}
+	return &detail.Trail, nil
 }
 
 func validateTrailUpdateFields(inputs trailUpdateInputs) error {
