@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KX0Z9J512Y4QA9MHEGY042RT",
+  "strategy": "manual-commit",
+  "branch": "feat/review-nonblocking-tui-sink",
+  "checkpoints_count": 39,
+  "files_touched": [
+    "cmd/entire/cli/review/tui_sink.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 65876,
+    "cache_creation_tokens": 4443502,
+    "cache_read_tokens": 236717444,
+    "output_tokens": 410588,
+    "api_call_count": 558
+  }
+}
