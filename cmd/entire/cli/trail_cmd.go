@@ -1322,7 +1322,10 @@ func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool,
 	})
 }
 
-func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string, force bool, trailNumber int) error {
+func checkoutTrailWorktree(ctx context.Context, w, _ io.Writer, branch string, force bool, trailNumber int) error {
+	if err := ValidateBranchName(ctx, branch); err != nil {
+		return err
+	}
 	if existing, ok, err := findWorktreeForBranch(ctx, branch); err != nil {
 		return err
 	} else if ok {
@@ -1331,8 +1334,13 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 		return nil
 	}
 
-	if err := ensureTrailWorktreeBranchAvailable(ctx, w, branch, force); err != nil {
+	proceed, err := ensureTrailWorktreeBranchAvailable(ctx, w, branch, force)
+	if err != nil {
 		return err
+	}
+	if !proceed {
+		fmt.Fprintf(w, "Checkout of branch %s cancelled.\n", branch)
+		return nil
 	}
 	if err := ensureTrailWorktreeLocalExclude(ctx); err != nil {
 		return err
@@ -1349,7 +1357,6 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 
 	cmd := exec.CommandContext(ctx, "git", "worktree", "add", worktreePath, branch)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		fmt.Fprintf(errW, "Error: failed to create worktree: %v\n", err)
 		return fmt.Errorf("failed to create worktree: %s: %w", strings.TrimSpace(string(output)), err)
 	}
 	fmt.Fprintf(w, "✓ Worktree ready at %s\n", worktreePath)
@@ -1405,37 +1412,37 @@ func gitCommonDirForTrailWorktree(ctx context.Context) (string, error) {
 	return filepath.Clean(gitDir), nil
 }
 
-func ensureTrailWorktreeBranchAvailable(ctx context.Context, w io.Writer, branch string, force bool) error {
+func ensureTrailWorktreeBranchAvailable(ctx context.Context, w io.Writer, branch string, force bool) (bool, error) {
 	exists, err := BranchExistsLocally(ctx, branch)
 	if err != nil {
-		return fmt.Errorf("failed to check branch: %w", err)
+		return false, fmt.Errorf("failed to check branch: %w", err)
 	}
 	if exists {
-		return nil
+		return true, nil
 	}
 
 	remoteExists, err := BranchExistsOnRemote(ctx, branch)
 	if err != nil {
-		return fmt.Errorf("failed to check remote branch: %w", err)
+		return false, fmt.Errorf("failed to check remote branch: %w", err)
 	}
 	if !remoteExists {
-		return fmt.Errorf("branch '%s' not found locally or on origin", branch)
+		return false, fmt.Errorf("branch '%s' not found locally or on origin", branch)
 	}
 	if !force {
 		shouldFetch, err := promptFetchFromRemote(branch)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if !shouldFetch {
-			return errors.New("checkout cancelled")
+			return false, nil
 		}
 	}
 
 	fmt.Fprintf(w, "Fetching branch '%s' from origin...\n", branch)
 	if err := fetchTrailWorktreeBranch(ctx, branch); err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	return true, nil
 }
 
 func fetchTrailWorktreeBranch(ctx context.Context, branch string) error {

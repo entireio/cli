@@ -130,6 +130,7 @@ func TestShellQuotePath(t *testing.T) {
 }
 
 func TestCheckoutTrailWorktreeCreatesRepoLocalWorktree(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
@@ -172,6 +173,7 @@ func TestCheckoutTrailWorktreeCreatesRepoLocalWorktree(t *testing.T) {
 }
 
 func TestEnsureTrailWorktreeLocalExcludeIsIdempotent(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
@@ -196,6 +198,7 @@ func TestEnsureTrailWorktreeLocalExcludeIsIdempotent(t *testing.T) {
 }
 
 func TestCheckoutTrailWorktreeFetchesRemoteOnlyBranch(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
@@ -236,6 +239,7 @@ func TestCheckoutTrailWorktreeFetchesRemoteOnlyBranch(t *testing.T) {
 }
 
 func TestCheckoutTrailWorktreeReusesExistingWorktree(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
@@ -257,6 +261,16 @@ func TestCheckoutTrailWorktreeReusesExistingWorktree(t *testing.T) {
 	}
 	if !strings.Contains(secondOut.String(), "Worktree already exists") {
 		t.Fatalf("second output = %q, want existing worktree message", secondOut.String())
+	}
+}
+
+func TestCheckoutTrailWorktreeRejectsInvalidBranch(t *testing.T) {
+	t.Parallel()
+
+	var out, errOut bytes.Buffer
+	err := checkoutTrailWorktree(context.Background(), &out, &errOut, "-bad", true, 1)
+	if err == nil || !strings.Contains(err.Error(), "invalid branch") {
+		t.Fatalf("error = %v, want invalid branch", err)
 	}
 }
 
