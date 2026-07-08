@@ -1,0 +1,28 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KX0NQY37TYQ2B8DF5CGBA8FJ",
+  "strategy": "manual-commit",
+  "branch": "feat/review-no-default-timeout",
+  "checkpoints_count": 15,
+  "files_touched": [
+    "cmd/entire/cli/review/cmd.go",
+    "cmd/entire/cli/review/run_test.go",
+    "cmd/entire/cli/review/types/reviewer.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 49045,
+    "cache_creation_tokens": 4305979,
+    "cache_read_tokens": 143249858,
+    "output_tokens": 315909,
+    "api_call_count": 421
+  }
+}
