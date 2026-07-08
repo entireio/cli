@@ -126,7 +126,7 @@ func writeSynthesisScopeGate(b *strings.Builder, scope reviewtypes.ScopeContext)
 	b.WriteString(fence + "scope\n")
 	b.WriteString(data.String())
 	b.WriteString(fence + "\n")
-	note := "Findings that point at files not listed above are out of scope — discard them, no matter which reviewer reported them."
+	note := "Findings caused by code outside the files listed above are out of scope — discard them, no matter which reviewer reported them. Exception: keep a finding whose cause is a listed file even when its impact lands in an unlisted file (an in-scope change breaking an unchanged caller or consumer is in scope)."
 	if scope.FilesTruncated || scope.UncommittedTruncated {
 		note = "This list is truncated. Prefer findings in the listed files; verify any finding outside them against `git diff` before keeping it."
 	}

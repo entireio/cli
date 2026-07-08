@@ -381,3 +381,17 @@ func TestRenderScopeContext_EnumerationsAreFencedAsData(t *testing.T) {
 		t.Errorf("fenced block should be labeled as data, not instructions:\n%s", out)
 	}
 }
+
+// TestRenderScopeContext_DiscardRuleIsCauseBased mirrors the judge-side pin
+// for the worker prompt: the scope gate must not order reviewers to discard
+// cross-file regressions (in-scope cause, out-of-scope impact).
+func TestRenderScopeContext_DiscardRuleIsCauseBased(t *testing.T) {
+	t.Parallel()
+	out := renderScopeContext(reviewtypes.ScopeContext{Files: []string{"A\tchanged.go"}}, "main")
+	if !strings.Contains(out, "caused by") {
+		t.Errorf("worker discard rule should gate on cause:\n%s", out)
+	}
+	if !strings.Contains(out, "unlisted file") {
+		t.Errorf("worker discard rule should keep in-scope-cause/out-of-scope-impact findings:\n%s", out)
+	}
+}

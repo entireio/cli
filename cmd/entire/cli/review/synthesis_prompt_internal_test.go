@@ -44,3 +44,22 @@ func TestWriteSynthesisScopeGate_FencesUntrustedFileList(t *testing.T) {
 		t.Errorf("data block must be labeled untrusted:\n%s", out)
 	}
 }
+
+// TestWriteSynthesisScopeGate_DiscardRuleIsCauseBased pins the discard
+// rule's semantics: it must gate on where a finding's CAUSE lives, and
+// explicitly keep cross-file regressions — an in-scope change breaking an
+// unchanged caller in an unlisted file is exactly what reviews exist to
+// catch, and a categorical anchored-file discard was dropping that class.
+func TestWriteSynthesisScopeGate_DiscardRuleIsCauseBased(t *testing.T) {
+	t.Parallel()
+	var b strings.Builder
+	writeSynthesisScopeGate(&b, reviewtypes.ScopeContext{Files: []string{"A\tchanged.go"}})
+	out := b.String()
+
+	if !strings.Contains(out, "caused by") {
+		t.Errorf("discard rule should gate on the finding's cause, not its anchored file:\n%s", out)
+	}
+	if !strings.Contains(out, "unlisted file") {
+		t.Errorf("discard rule should keep in-scope-cause findings whose impact lands in an unlisted file:\n%s", out)
+	}
+}

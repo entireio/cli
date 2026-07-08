@@ -123,7 +123,7 @@ func renderScopeContext(sc reviewtypes.ScopeContext, baseRef string) string {
 	case listsTruncated:
 		b.WriteString("\n\nThe file lists above are truncated. Prefer findings in the listed files; verify any finding outside them against `git diff` before keeping it.")
 	default:
-		b.WriteString("\n\nOnly the files listed above are in scope. Findings that point anywhere else are out of scope — discard them.")
+		b.WriteString("\n\nOnly the files listed above are in scope. Findings caused by code outside them are out of scope — discard them. A listed file's change that breaks code in an unlisted file (an unchanged caller or consumer) IS in scope — report it anchored to the in-scope cause.")
 	}
 
 	switch {
