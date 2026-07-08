@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 )
@@ -688,5 +689,36 @@ func TestBuildScopeContext_ListsCountAgainstDiffBudget(t *testing.T) {
 	}
 	if sc.Diff != "" || !sc.DiffOmitted {
 		t.Errorf("Diff=%q DiffOmitted=%v, want diff omitted once lists consume the budget", sc.Diff, sc.DiffOmitted)
+	}
+}
+
+// TestBuildScopeContext_ListsBoundedByBytes pins the byte bound on the list
+// sections: line-count caps alone let wide branches with long paths push the
+// rendered lists past the ~32KiB platform argv cap even with the diff
+// omitted. The lists must be trimmed to fit within half the inline budget,
+// with truncation flags set so the prompt states the elision.
+func TestBuildScopeContext_ListsBoundedByBytes(t *testing.T) {
+	t.Parallel()
+	longPath := "A\t" + strings.Repeat("deeply/nested/directory/", 20) + "file.go" // ~480 bytes
+	sc := reviewtypes.ScopeContext{
+		Commits: []string{"abc1234 subject"},
+	}
+	for range 200 {
+		sc.Files = append(sc.Files, longPath)
+	}
+	budget := 4096
+	capScopeListsToBudget(&sc, budget)
+
+	if got := scopeListBytes(sc); got > budget {
+		t.Errorf("rendered list bytes = %d, want <= %d", got, budget)
+	}
+	if !sc.FilesTruncated {
+		t.Error("files list trimmed by byte budget must set FilesTruncated")
+	}
+	if len(sc.Commits) == 0 || sc.CommitsTruncated {
+		t.Errorf("small commits list should survive untouched: %v truncated=%v", sc.Commits, sc.CommitsTruncated)
+	}
+	if len(sc.Files) == 0 {
+		t.Error("byte cap should keep the leading files, not empty the list")
 	}
 }

@@ -297,7 +297,6 @@ func buildScopeContextCapped(ctx context.Context, repoRoot, baseRef string, caps
 		return sc, fmt.Errorf("list scope commits: %w", err)
 	}
 	sc.Commits, sc.CommitsTruncated = capScopeLines(commitsOut, caps.maxCommits)
-	slices.Reverse(sc.Commits)
 
 	filesOut, err := runGit(ctx, repoRoot, "diff", "--name-status", baseRef+"...HEAD")
 	if err != nil {
@@ -316,9 +315,11 @@ func buildScopeContextCapped(ctx context.Context, repoRoot, baseRef string, caps
 		return sc, fmt.Errorf("compute scope diff: %w", err)
 	}
 	// The rendered lists ship in the same prompt (argv + ENTIRE_REVIEW_PROMPT
-	// env var), so they are charged against the inline budget before the
-	// diff: individually-capped sections could otherwise sum past the ~32KiB
-	// platform limits the budget exists for.
+	// env var). Line-count caps alone don't bound them — a wide branch with
+	// long paths can push the lists past the platform argv cap even with the
+	// diff omitted — so first trim the lists to half the inline budget, then
+	// charge what remains against the diff allowance.
+	capScopeListsToBudget(&sc, caps.diffInlineLimit/2)
 	allowance := caps.diffInlineLimit - scopeListBytes(sc)
 	switch {
 	case strings.TrimSpace(diffOut) == "":
@@ -330,6 +331,34 @@ func buildScopeContextCapped(ctx context.Context, repoRoot, baseRef string, caps
 	}
 
 	return sc, nil
+}
+
+// capScopeListsToBudget trims the list sections so their rendered bytes fit
+// budget, charging commits, files, then uncommitted against it in order and
+// keeping each list's leading lines. Called while commits are still
+// newest-first (before the oldest-first reversal), so trimming the tail
+// drops the oldest commits — matching the keep-newest cap semantics. It
+// also performs that reversal, making it the single exit point for commit
+// ordering. A non-positive budget only reverses.
+func capScopeListsToBudget(sc *reviewtypes.ScopeContext, budget int) {
+	defer slices.Reverse(sc.Commits)
+	if budget <= 0 {
+		return
+	}
+	remaining := budget
+	trim := func(lines []string, truncated bool) ([]string, bool) {
+		for i, line := range lines {
+			cost := len(line) + 1
+			if cost > remaining {
+				return lines[:i], true
+			}
+			remaining -= cost
+		}
+		return lines, truncated
+	}
+	sc.Commits, sc.CommitsTruncated = trim(sc.Commits, sc.CommitsTruncated)
+	sc.Files, sc.FilesTruncated = trim(sc.Files, sc.FilesTruncated)
+	sc.Uncommitted, sc.UncommittedTruncated = trim(sc.Uncommitted, sc.UncommittedTruncated)
 }
 
 // scopeListBytes returns the bytes the rendered list sections will occupy
