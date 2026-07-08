@@ -43,6 +43,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/spawn"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/procutil"
 )
 
 // LoopDeps collects the runtime-injectable hooks RunInvestigateLoop needs.
@@ -311,6 +312,9 @@ func runOneTurn(ctx context.Context, cfg turnConfig, state *RunState) turnOutcom
 		StartingSHA: in.StartingSHA,
 	})
 	cmd := spawner.BuildCmd(ctx, env, prompt)
+	// Kill the agent's whole process group on cancel so a grandchild holding the
+	// pipe can't make cmd.Run block forever (Ctrl+C hang).
+	procutil.TerminateOnCancel(cmd)
 
 	// Agent stdout/stderr are captured by the lifecycle hooks into the
 	// session transcript (full.jsonl) and condensed onto

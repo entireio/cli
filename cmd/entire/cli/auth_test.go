@@ -90,6 +90,25 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	}
 }
 
+// TestWriteProfileLines_Jurisdiction verifies the home jurisdiction slug is
+// rendered (so `auth token --jurisdiction` is discoverable) and omitted when the
+// server didn't populate it.
+func TestWriteProfileLines_Jurisdiction(t *testing.T) {
+	t.Parallel()
+
+	var withJ bytes.Buffer
+	writeProfileLines(&withJ, &authProfile{Handle: "alice", Provider: "github", Jurisdiction: "us"})
+	if !strings.Contains(withJ.String(), "Jurisdiction: us") {
+		t.Fatalf("output = %q, want a 'Jurisdiction: us' line", withJ.String())
+	}
+
+	var withoutJ bytes.Buffer
+	writeProfileLines(&withoutJ, &authProfile{Handle: "alice", Provider: "github"})
+	if strings.Contains(withoutJ.String(), "Jurisdiction") {
+		t.Fatalf("output = %q, want no Jurisdiction line when the slug is empty", withoutJ.String())
+	}
+}
+
 // In ENTIRE_TOKEN mode there is no stored context, keychain slot, or revocable
 // session: status names the env-token core and bearer source, and renders none
 // of the context/keychain/session lines. listSessions must not be called — you

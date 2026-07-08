@@ -90,17 +90,6 @@ func DetectAll(ctx context.Context) []Agent {
 	return detected
 }
 
-// Detect attempts to auto-detect which agent is being used.
-// Iterates registered agents in sorted name order for deterministic results.
-// Returns the first agent whose DetectPresence reports true.
-func Detect(ctx context.Context) (Agent, error) {
-	detected := DetectAll(ctx)
-	if len(detected) == 0 {
-		return nil, fmt.Errorf("no agent detected (available: %v)", List())
-	}
-	return detected[0], nil
-}
-
 // AgentForTranscriptPath returns the registered agent whose session directory
 // for repoPath contains the given transcript path. Used to disambiguate which
 // agent owns a session when multiple agents' hooks fire for the same session

@@ -2,19 +2,17 @@
 //
 // marker_fallback.go provides the PendingReviewMarker type and its
 // write/read/clear helpers, plus RunMarkerFallback which handles review for
-// non-launchable agents (cursor, opencode, factoryai-droid, copilot-cli) —
 // agents that don't (yet) implement AgentReviewer.
 //
-// For launchable agents (claude-code, codex, gemini) the new
-// architecture uses env-var handshake (env.go) + AgentReviewer.Start, and
+// For adapter-backed review workers, the new architecture uses env-var
+// handshake (env.go) + AgentReviewer.Start, and
 // the lifecycle hook reads ENTIRE_REVIEW_* env vars off the spawned
 // process — there is no marker-file adoption code path.
 //
-// For non-launchable agents the marker is purely a record of what the user
-// was asked to do: RunMarkerFallback writes it before printing manual-start
-// guidance, and `entire attach --review <session-id>` (and its discovery
-// shortcut `entire review attach`) reads the marker to tag a manual
-// session after the fact. ReadPendingReviewMarker / ClearPendingReviewMarker
+// For agents without a review-runner adapter, the marker is purely a record of
+// what the user was asked to do: RunMarkerFallback writes it before printing manual-start
+// guidance, and `entire attach --review <session-id>` reads the marker to tag a
+// manual session after the fact. ReadPendingReviewMarker / ClearPendingReviewMarker
 // are exported for that attach flow; nothing else reads the marker.
 package review
 
@@ -35,8 +33,8 @@ import (
 const pendingReviewMarkerFilename = "review-pending.json"
 
 // PendingReviewMarker is written by `entire review` before instructing the
-// user to open a non-launchable agent. The marker records which agent and
-// skills should run so that `entire review attach` can tag the resulting
+// user to open an agent manually. The marker records which agent and
+// skills should run so that `entire attach --review` can tag the resulting
 // session after the fact.
 //
 // WorktreePath scopes the marker to the worktree `entire review` was invoked
@@ -116,18 +114,17 @@ func ClearPendingReviewMarker(ctx context.Context) error {
 	return nil
 }
 
-// RunMarkerFallback handles review for non-launchable agents (cursor,
-// opencode, factoryai-droid, copilot-cli) by writing the pending-review
-// marker file and printing manual-start guidance. The user is told to open
-// the agent themselves and run the configured skills.
+// RunMarkerFallback handles review for agents that do not yet have an Entire
+// review-runner adapter by writing the pending-review marker file and printing
+// manual-start guidance. The user is told to open the agent themselves and run
+// the configured skills.
 //
 // The marker is NOT auto-adopted by anything — the lifecycle hook reads
 // ENTIRE_REVIEW_* env vars on the spawned process, not the marker file.
-// For non-launchable agents the user starts the agent manually, so no env
+// For adapterless review agents the user starts the agent manually, so no env
 // inheritance happens. The marker exists purely so that `entire attach
-// --review <session-id>` (and its `entire review attach` shortcut) has a
-// record of what the user was asked to review when tagging the session
-// after the fact.
+// --review <session-id>` has a record of what the user was asked to review
+// when tagging the session after the fact.
 //
 // agentName must be the agent's registry key (e.g. "cursor").
 // cfg carries skills and the starting SHA.
@@ -146,7 +143,7 @@ func RunMarkerFallback(ctx context.Context, agentName string, cfg reviewtypes.Ru
 		return fmt.Errorf("write pending marker: %w", err)
 	}
 
-	fmt.Fprintf(out, "%s does not support subprocess launch yet. Marker written.\n", agentName)
+	fmt.Fprintf(out, "%s does not have an Entire review runner adapter yet. Marker written.\n", agentName)
 	if len(cfg.Skills) > 0 {
 		fmt.Fprintf(out, "Start %s manually and run these skills:\n", agentName)
 		for i, skill := range cfg.Skills {

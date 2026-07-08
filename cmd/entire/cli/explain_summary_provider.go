@@ -61,7 +61,7 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 
 	switch len(candidates) {
 	case 0:
-		return nil, errors.New("no summary-capable provider is available; install claude, codex, gemini, cursor, or copilot, install an external entire-agent-* plugin that declares text_generator, or set summary_generation.provider in settings")
+		return nil, errors.New("no summary-capable provider is available; install claude, codex, gemini, pi, cursor, or copilot, install an external entire-agent-* plugin that declares text_generator, or set summary_generation.provider in settings")
 	case 1:
 		return autoSelectSummaryProvider(ctx, w, candidates[0].Name, "non-interactive auto-select: single installed provider")
 	default:

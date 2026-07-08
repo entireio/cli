@@ -142,6 +142,12 @@ type Event struct {
 	ContextTokens     int   // Context window tokens used (e.g., Cursor PreCompact hook)
 	ContextWindowSize int   // Total context window size (e.g., Cursor PreCompact hook)
 
+	// TokenUsage carries per-turn token accounting reported by an agent hook
+	// directly (e.g., Cursor's Stop hook). Set when the hook payload contains
+	// authoritative token data that the JSONL transcript does not. Lifecycle
+	// handlers prefer this over transcript-based calculation when populated.
+	TokenUsage *TokenUsage
+
 	// SkillEvents records native agent skill signals surfaced by hooks.
 	// The lifecycle layer persists these to session state and later checkpoint metadata.
 	SkillEvents []SkillEvent

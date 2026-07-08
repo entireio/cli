@@ -49,6 +49,12 @@ jobs:
     permissions:
       actions: read
       contents: read
+      # Needed by the copilot-cli leg. GitHub does not allow matrix expressions in
+      # `permissions:`, so this scope is granted to every leg's GITHUB_TOKEN. The
+      # token is kept away from non-copilot agents in two ways: it is only placed
+      # in COPILOT_GITHUB_TOKEN for the copilot-cli leg (see env blocks below), and
+      # checkout runs with persist-credentials: false so it is not left in
+      # .git/config for an agent process to read.
       copilot-requests: write
     strategy:
       fail-fast: false
@@ -58,6 +64,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Don't persist the (copilot-scoped) GITHUB_TOKEN in .git/config, where
+          # an agent process running in the checkout could read it.
+          persist-credentials: false
 
       - name: Setup mise
         uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
@@ -95,7 +105,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
-          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+          # Only the copilot-cli leg gets the token; other agents must not receive it.
+          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
         run: go run ./e2e/bootstrap
 
       - name: Run E2E Tests
@@ -107,9 +118,18 @@ jobs:
           E2E_GEMINI_MODEL: ${{ matrix.agent == 'gemini-cli' && 'gemini-3.1-flash-lite' || '' }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
-          COPILOT_GITHUB_TOKEN: ${{ github.token }}
-          E2E_CONCURRENT_TEST_LIMIT: ${{ matrix.agent == 'gemini-cli' && '6' || matrix.agent == 'factoryai-droid' && '1' || '' }}
-        run: mise run test:e2e --agent ${{ matrix.agent }} ${{ matrix.agent == 'roger-roger' && 'TestExternalAgent' || '' }}
+          # Only the copilot-cli leg gets the token; other agents must not receive it.
+          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
+          E2E_CONCURRENT_TEST_LIMIT: ${{ matrix.agent == 'gemini-cli' && '6' || matrix.agent == 'factoryai-droid' && '1' || matrix.agent == 'cursor-cli' && '2' || '' }}
+        # roger-roger is deterministic, so it runs through its dedicated task,
+        # which does NOT enable --rerun-fails. Routing it through the default
+        # task (`test:e2e`) would retry a real regression and mask it.
+        run: |
+          if [ "${{ matrix.agent }}" = "roger-roger" ]; then
+            mise run test:e2e:roger-roger TestExternalAgent
+          else
+            mise run test:e2e --agent ${{ matrix.agent }}
+          fi
 
       - name: Upload artifacts
         if: always()
@@ -128,14 +148,64 @@ jobs:
     needs: [e2e-tests, e2e-windows]
     if: ${{ always() && (needs.e2e-tests.result == 'failure' || needs.e2e-windows.result == 'failure') && github.event_name == 'push' }}
     steps:
-      - name: Get failed agents
-        id: failed
+      # Classify the failed jobs into two severities:
+      #   RED    — a "reliable" agent (or Windows) failed. These pass on every
+      #            healthy run, so a failure here is a real regression.
+      #   YELLOW — only a known-flaky agent failed. Worth investigating, but not
+      #            a `main` regression. Reported so we don't lose visibility.
+      - name: Classify failures
+        id: classify
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          failed=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs \
-            --jq '[.jobs[] | select(.conclusion == "failure") | .name | if test("\\(") then capture("\\((?<agent>[^)]+)\\)") | .agent else . end] | join(", ")')
-          echo "agents=$failed" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          # Reliable tier (RED). The e2e-windows reusable job is also RED but
+          # is matched separately below since it has no "(agent)" suffix.
+          reliable="claude-code opencode gemini-cli roger-roger"
+
+          failed_names=$(gh api --paginate \
+            "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+            --jq '.jobs[] | select(.conclusion == "failure") | .name')
+
+          red=""
+          yellow=""
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            case "$name" in
+              *e2e-windows*) red="$red windows"; continue ;;
+            esac
+            # "e2e-tests (cursor-cli)" -> "cursor-cli"
+            agent="${name#*(}"; agent="${agent%)*}"
+            case " $reliable " in
+              *" $agent "*) red="$red $agent" ;;
+              *)            yellow="$yellow $agent" ;;
+            esac
+          done <<EOF
+          $failed_names
+          EOF
+
+          # Each list was built as " a b c" (leading space, space-separated).
+          # Strip the leading space, then join on ", ". Empty stays empty.
+          red="${red# }";       red="${red// /, }"
+          yellow="${yellow# }"; yellow="${yellow// /, }"
+
+          if [ -n "$red" ]; then
+            color="#d50200"
+            header=":red_circle: *E2E Tests Failed* on \`main\`"
+          else
+            color="#daa038"
+            header=":large_yellow_circle: *E2E flaky-agent failures* on \`main\`"
+          fi
+
+          body=""
+          [ -n "$red" ]    && body="${body}Reliable agents (regression): *${red}*\\n"
+          [ -n "$yellow" ] && body="${body}Flaky agents (investigate): *${yellow}*\\n"
+
+          {
+            echo "color=$color"
+            echo "header=$header"
+            echo "body=$body"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Notify Slack of E2E failure
         uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3
@@ -144,20 +214,25 @@ jobs:
           webhook-type: incoming-webhook
           payload: |
             {
-              "blocks": [
+              "attachments": [
                 {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": ":red_circle: *E2E Tests Failed* on `main`\n\nFailed agents: *${{ steps.failed.outputs.agents }}*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
-                  }
-                },
-                {
-                  "type": "context",
-                  "elements": [
+                  "color": "${{ steps.classify.outputs.color }}",
+                  "blocks": [
                     {
-                      "type": "mrkdwn",
-                      "text": "Commit: <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}> by ${{ github.actor }}"
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": "${{ steps.classify.outputs.header }}\n\n${{ steps.classify.outputs.body }}<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
+                      }
+                    },
+                    {
+                      "type": "context",
+                      "elements": [
+                        {
+                          "type": "mrkdwn",
+                          "text": "Commit: <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}> by ${{ github.actor }}"
+                        }
+                      ]
                     }
                   ]
                 }

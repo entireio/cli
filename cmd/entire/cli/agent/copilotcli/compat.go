@@ -80,7 +80,7 @@ func parseHookEnvelope(data []byte) (*hookEnvelope, error) {
 		Reason:         firstString(raw, "reason"),
 	}
 
-	ts, err := parseTimestamp(raw["timestamp"])
+	ts, err := ParseTimestamp(raw["timestamp"])
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse hook input: %w", err)
 	}
@@ -126,7 +126,11 @@ func firstString(raw map[string]json.RawMessage, keys ...string) string {
 	return ""
 }
 
-func parseTimestamp(raw json.RawMessage) (time.Time, error) {
+// ParseTimestamp decodes a Copilot event timestamp, which may be either numeric
+// epoch-millis or an RFC3339(Nano) string. A null/zero value returns the zero
+// time (callers treat that as "missing"). Exported so transcript importers can
+// decode the same dual-format field without re-implementing the logic.
+func ParseTimestamp(raw json.RawMessage) (time.Time, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return time.Time{}, nil
 	}

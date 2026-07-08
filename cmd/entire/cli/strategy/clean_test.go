@@ -499,7 +499,7 @@ func TestListOrphanedSessionStates_MultiSessionArchivedNotOrphaned(t *testing.T)
 	// and lists both IDs in SessionIDs.
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	for _, sid := range []string{archivedSessionID, latestSessionID} {
-		require.NoError(t, store.WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
+		require.NoError(t, store.Write(t.Context(), checkpoint.Session{
 			CheckpointID: cpID,
 			SessionID:    sid,
 			Strategy:     "manual-commit",

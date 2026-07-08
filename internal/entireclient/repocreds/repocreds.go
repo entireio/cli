@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -29,10 +28,6 @@ import (
 // RPCs a fresh token. Matches admincreds.safetyMargin so the two cred caches
 // don't diverge on freshness semantics.
 const SafetyMargin = time.Minute
-
-// oauthClientID is the public OAuth client_id the CLI identifies as on
-// /oauth/token. Lifted into Basic auth by httputil.PostOAuthToken.
-const oauthClientID = "entire-cli"
 
 // LoginJWTProvider returns the current login JWT. Callers wire this to their
 // own refresh logic (e.g. proactive refresh, 401 retry) so the Cache always
@@ -169,14 +164,7 @@ func (c *Cache) exchange(ctx context.Context, audienceSuffix, action string) (st
 	if err != nil {
 		return "", 0, err
 	}
-	form := url.Values{}
-	form.Set("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")
-	form.Set("subject_token_type", "urn:ietf:params:oauth:token-type:access_token")
-	form.Set("subject_token", loginJWT)
-	form.Set("requested_token_type", "urn:ietf:params:oauth:token-type:access_token")
-	form.Set("audience", c.clusterURL+audienceSuffix)
-	form.Set("scope", "repo:"+action)
-	form.Set("client_id", oauthClientID)
+	form := httputil.TokenExchangeForm(loginJWT, c.clusterURL+audienceSuffix, "repo:"+action)
 
 	token, expiresIn, err := httputil.PostOAuthToken(ctx, c.httpClient, c.coreURL, form)
 	if err != nil {

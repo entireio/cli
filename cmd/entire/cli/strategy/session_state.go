@@ -138,20 +138,40 @@ func FindMostRecentSession(ctx context.Context) string {
 	}
 
 	// Scope to current worktree to prevent cross-worktree pollution.
-	worktreePath, wpErr := paths.WorktreeRoot(ctx)
-	if wpErr == nil && worktreePath != "" {
-		var filtered []*SessionState
-		for _, s := range states {
-			if s.WorktreePath == worktreePath {
-				filtered = append(filtered, s)
-			}
-		}
-		if len(filtered) > 0 {
-			states = filtered
-		}
-		// If no sessions match the worktree, fall back to all sessions
+	if filtered := sessionStatesForCurrentWorktree(ctx, states); len(filtered) > 0 {
+		states = filtered
+		// If no sessions match the worktree, fall back to all sessions.
 	}
 
+	return mostRecentSessionID(states)
+}
+
+// FindMostRecentSessionInCurrentWorktree returns the most recently interacted
+// session from the current worktree only. Unlike FindMostRecentSession, it does
+// not fall back to sessions from other worktrees.
+func FindMostRecentSessionInCurrentWorktree(ctx context.Context) string {
+	states, err := ListSessionStates(ctx)
+	if err != nil || len(states) == 0 {
+		return ""
+	}
+	return mostRecentSessionID(sessionStatesForCurrentWorktree(ctx, states))
+}
+
+func sessionStatesForCurrentWorktree(ctx context.Context, states []*SessionState) []*SessionState {
+	worktreePath, err := paths.WorktreeRoot(ctx)
+	if err != nil || worktreePath == "" {
+		return nil
+	}
+	filtered := make([]*SessionState, 0, len(states))
+	for _, s := range states {
+		if s.WorktreePath == worktreePath {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered
+}
+
+func mostRecentSessionID(states []*SessionState) string {
 	var best *SessionState
 	for _, s := range states {
 		if s.LastInteractionTime == nil {
@@ -572,6 +592,48 @@ func acquireSessionGate(ctx context.Context, sessionID string) (gate *sessionGat
 	}, nil
 }
 
+// WithSessionStateLocks acquires the per-session state lock in each git common
+// dir, then runs fn. Lock paths are deduplicated and sorted so callers that
+// span repositories or worktrees can safely acquire more than one lock.
+func WithSessionStateLocks(ctx context.Context, sessionID string, commonDirs []string, fn func() error) error {
+	lockPaths := make([]string, 0, len(commonDirs))
+	seen := make(map[string]struct{}, len(commonDirs))
+	for _, commonDir := range commonDirs {
+		lockPath, err := stateLockPathInCommonDir(commonDir, sessionID)
+		if err != nil {
+			return err
+		}
+		if _, ok := seen[lockPath]; ok {
+			continue
+		}
+		seen[lockPath] = struct{}{}
+		lockPaths = append(lockPaths, lockPath)
+	}
+	slices.Sort(lockPaths)
+
+	releases := make([]func(), 0, len(lockPaths))
+	releaseAll := func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+	}
+	for _, lockPath := range lockPaths {
+		if err := ctx.Err(); err != nil {
+			releaseAll()
+			return fmt.Errorf("session state lock canceled: %w", err)
+		}
+		release, err := flock.Acquire(lockPath)
+		if err != nil {
+			releaseAll()
+			return fmt.Errorf("acquire session state lock: %w", err)
+		}
+		releases = append(releases, release)
+	}
+	defer releaseAll()
+
+	return fn()
+}
+
 // ErrMutationSkip signals MutateSessionState to skip the save without
 // treating fn's return as an error. Use it when the mutation function
 // observes the loaded state and decides no write is needed (for example,
@@ -614,12 +676,19 @@ func RecordFilesTouched(ctx context.Context, sessionID string, modified, added, 
 // holder distinct from the data — Save's atomic-rename pattern would
 // otherwise unlink the inode the flock is held on.
 func stateLockPath(ctx context.Context, sessionID string) (string, error) {
-	if err := validation.ValidateSessionID(sessionID); err != nil {
-		return "", fmt.Errorf("invalid session ID: %w", err)
-	}
 	commonDir, err := GetGitCommonDir(ctx)
 	if err != nil {
 		return "", err
+	}
+	return stateLockPathInCommonDir(commonDir, sessionID)
+}
+
+func stateLockPathInCommonDir(commonDir, sessionID string) (string, error) {
+	if strings.TrimSpace(commonDir) == "" {
+		return "", errors.New("empty git common dir")
+	}
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		return "", fmt.Errorf("invalid session ID: %w", err)
 	}
 	lockDir := filepath.Join(commonDir, "entire-session-locks")
 	if err := os.MkdirAll(lockDir, 0o750); err != nil {

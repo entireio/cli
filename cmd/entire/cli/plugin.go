@@ -47,7 +47,9 @@ func MaybeRunPlugin(ctx context.Context, rootCmd *cobra.Command, args []string) 
 	exitCode = runPlugin(ctx, pluginName, binPath, pluginArgs)
 	if exitCode == 0 {
 		maybeTrackPluginInvocation(ctx, pluginName)
-		versioncheck.CheckAndNotify(ctx, os.Stdout, versioninfo.Version)
+		// Stderr, matching the built-in PersistentPostRun: the plugin's own
+		// stdout may be machine-readable and piped.
+		versioncheck.CheckAndNotify(ctx, os.Stderr, versioninfo.Version)
 	}
 	return true, exitCode
 }

@@ -103,7 +103,7 @@ const FetchTmpRefPrefix = "refs/entire-fetch-tmp/"
 // label is a short human-readable name used in error messages. Typical use:
 //
 //	// fetch with refspec "+<src>:<tmpRefName>"
-//	refs := checkpoint.ResolveCommittedRefs(ctx)
+//	refs := checkpoint.ResolveRefs(ctx)
 //	return PromoteTmpRefSafely(ctx, tmpRefName, refs.Primary, refs.Primary.Short())
 func PromoteTmpRefSafely(ctx context.Context, tmpRefName, destRefName plumbing.ReferenceName, label string) error {
 	repo, err := OpenRepository(ctx)
@@ -309,14 +309,14 @@ func ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
-	committed, err := stores.Primary.ListCommitted(ctx)
+	committed, err := stores.Persistent.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list committed checkpoints: %w", err)
 	}
 	return checkpointInfosFromCommitted(committed), nil
 }
 
-func checkpointInfosFromCommitted(committed []checkpoint.CommittedInfo) []CheckpointInfo {
+func checkpointInfosFromCommitted(committed []checkpoint.CheckpointInfo) []CheckpointInfo {
 	result := make([]CheckpointInfo, 0, len(committed))
 	for _, c := range committed {
 		result = append(result, CheckpointInfo{
@@ -330,6 +330,7 @@ func checkpointInfosFromCommitted(committed []checkpoint.CommittedInfo) []Checkp
 			ToolUseID:        c.ToolUseID,
 			SessionCount:     c.SessionCount,
 			SessionIDs:       c.SessionIDs,
+			Imported:         c.Imported,
 		})
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -468,7 +469,7 @@ func resolveAgentType(ctxAgentType types.AgentType, state *SessionState) types.A
 // empty, creates/updates the local ref from origin's remote-tracking ref.
 // Otherwise creates an empty orphan.
 func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	primaryName := refs.Primary.Short()
 
 	// Origin only tracks Primary when Primary is in Push.
@@ -593,184 +594,6 @@ func isEmptyMetadataBranch(repo *git.Repository, ref *plumbing.Reference) (bool,
 	return len(tree.Entries) == 0, nil
 }
 
-// sessionMetadataLite contains only the fields needed from session-level metadata.json.
-// Using a minimal struct avoids allocating large nested objects (Summary, InitialAttribution,
-// TokenUsage, etc.) that CommittedMetadata carries but callers never need here.
-type sessionMetadataLite struct {
-	SessionID string          `json:"session_id"`
-	Agent     types.AgentType `json:"agent,omitempty"`
-	CreatedAt time.Time       `json:"created_at"`
-	IsTask    bool            `json:"is_task,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-}
-
-// checkpointSummaryLite contains only the fields needed from the root metadata.json.
-// Avoids allocating TokenUsage and other heavy fields from CheckpointSummary.
-type checkpointSummaryLite struct {
-	CheckpointID     id.CheckpointID               `json:"checkpoint_id"`
-	CheckpointsCount int                           `json:"checkpoints_count"`
-	FilesTouched     []string                      `json:"files_touched"`
-	Sessions         []checkpoint.SessionFilePaths `json:"sessions"`
-}
-
-// decodeSessionMetadataLite reads a session metadata.json from the tree using a streaming
-// json.Decoder and a minimal struct to avoid allocating large unused fields.
-func decodeSessionMetadataLite(tree checkpoint.FileReader, metadataPath string) (*sessionMetadataLite, error) {
-	file, err := tree.File(metadataPath)
-	if err != nil {
-		return nil, fmt.Errorf("session metadata file %s: %w", metadataPath, err)
-	}
-	reader, err := file.Reader()
-	if err != nil {
-		return nil, fmt.Errorf("session metadata reader %s: %w", metadataPath, err)
-	}
-	defer reader.Close()
-
-	var meta sessionMetadataLite
-	if err := json.NewDecoder(reader).Decode(&meta); err != nil {
-		return nil, fmt.Errorf("decode session metadata %s: %w", metadataPath, err)
-	}
-	return &meta, nil
-}
-
-// decodeSummaryLiteFromTree reads and decodes metadata.json from a checkpoint tree
-// using a streaming decoder and minimal struct. Returns the decoded summary and true
-// if successful with at least one session, or zero value and false otherwise.
-func decodeSummaryLiteFromTree(checkpointTree checkpoint.FileReader) (checkpointSummaryLite, bool) {
-	metadataFile, fileErr := checkpointTree.File(paths.MetadataFileName)
-	if fileErr != nil {
-		return checkpointSummaryLite{}, false
-	}
-	reader, readerErr := metadataFile.Reader()
-	if readerErr != nil {
-		return checkpointSummaryLite{}, false
-	}
-	defer reader.Close()
-
-	var summary checkpointSummaryLite
-	if err := json.NewDecoder(reader).Decode(&summary); err != nil || len(summary.Sessions) == 0 {
-		return checkpointSummaryLite{}, false
-	}
-	return summary, true
-}
-
-// ReadCheckpointMetadata reads metadata.json from a checkpoint path on entire/checkpoints/v1.
-// With the new format, root metadata.json is a CheckpointSummary with Agents array.
-// This function reads the summary and extracts relevant fields into CheckpointInfo,
-// also reading session-level metadata for IsTask/ToolUseID fields.
-//
-// Uses streaming json.Decoder and minimal structs to avoid loading large nested
-// objects (Summary, InitialAttribution, TokenUsage) into memory.
-func ReadCheckpointMetadata(tree checkpoint.FileReader, checkpointPath string) (*CheckpointInfo, error) {
-	metadataPath := checkpointPath + "/metadata.json"
-	file, err := tree.File(metadataPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find metadata at %s: %w", metadataPath, err)
-	}
-
-	// Session metadata paths in the summary are absolute (e.g., "/ca/b75de47439/0/metadata.json").
-	// For a full tree, strip the leading "/" to get tree-relative paths.
-	normalizePath := func(raw string) string {
-		return strings.TrimPrefix(raw, "/")
-	}
-	return decodeCheckpointInfo(file, tree, checkpointPath, normalizePath)
-}
-
-// ReadCheckpointMetadataFromSubtree reads checkpoint metadata from a tree that is
-// already rooted at the checkpoint directory (e.g., after tree.Tree(checkpointID.Path())).
-// checkpointPath is the original sharded path (e.g., "ca/b75de47439") and is used
-// to strip the prefix from absolute session metadata paths stored in the summary.
-func ReadCheckpointMetadataFromSubtree(tree checkpoint.FileReader, checkpointPath string) (*CheckpointInfo, error) {
-	file, err := tree.File(paths.MetadataFileName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find %s in checkpoint subtree: %w", paths.MetadataFileName, err)
-	}
-
-	// Session metadata paths are absolute from the tree root (e.g., "/ca/b75de47439/0/metadata.json").
-	// Strip the checkpoint prefix to get paths relative to the subtree (e.g., "0/metadata.json").
-	prefix := "/" + checkpointPath + "/"
-	normalizePath := func(raw string) string {
-		return strings.TrimPrefix(raw, prefix)
-	}
-	return decodeCheckpointInfo(file, tree, checkpointPath, normalizePath)
-}
-
-// decodeCheckpointInfo is the shared implementation for ReadCheckpointMetadata and
-// ReadCheckpointMetadataFromSubtree. It decodes the root metadata.json, reads
-// per-session metadata, and populates a CheckpointInfo.
-//
-// normalizePath transforms absolute session metadata paths from the summary into
-// paths that are valid for tree.File() lookups (the transform differs depending on
-// whether tree is a full metadata branch tree or a checkpoint subtree).
-func decodeCheckpointInfo(
-	file checkpoint.FileOpener,
-	tree checkpoint.FileReader,
-	checkpointPath string,
-	normalizePath func(string) string,
-) (*CheckpointInfo, error) {
-	reader, err := file.Reader()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read metadata: %w", err)
-	}
-	defer reader.Close()
-
-	// Try to parse as CheckpointSummary first (new format) using lite struct
-	var summary checkpointSummaryLite
-	if decodeErr := json.NewDecoder(reader).Decode(&summary); decodeErr == nil {
-		if len(summary.Sessions) > 0 {
-			info := &CheckpointInfo{
-				CheckpointID:     summary.CheckpointID,
-				CheckpointsCount: summary.CheckpointsCount,
-				FilesTouched:     summary.FilesTouched,
-				SessionCount:     len(summary.Sessions),
-			}
-
-			// Read all sessions' metadata to populate SessionIDs and get other fields from first session
-			var sessionIDs []string
-			for i, sessionPaths := range summary.Sessions {
-				if sessionPaths.Metadata == "" {
-					continue
-				}
-				sessionMetadataPath := normalizePath(sessionPaths.Metadata)
-				sessionMeta, sErr := decodeSessionMetadataLite(tree, sessionMetadataPath)
-				if sErr != nil {
-					logging.Debug(context.Background(), "decodeCheckpointInfo: session metadata decode failed",
-						slog.Int("session_index", i),
-						slog.String("metadata_path", sessionMetadataPath),
-						slog.String("checkpoint_path", checkpointPath),
-						slog.String("error", sErr.Error()),
-					)
-					continue
-				}
-				sessionIDs = append(sessionIDs, sessionMeta.SessionID)
-				if i == 0 {
-					info.Agent = sessionMeta.Agent
-					info.SessionID = sessionMeta.SessionID
-					info.CreatedAt = sessionMeta.CreatedAt
-					info.IsTask = sessionMeta.IsTask
-					info.ToolUseID = sessionMeta.ToolUseID
-				}
-			}
-			info.SessionIDs = sessionIDs
-			return info, nil
-		}
-	}
-
-	// Fall back to parsing as CheckpointInfo (old format or direct info).
-	// Re-read the file since the decoder consumed the reader.
-	fallbackReader, err := file.Reader()
-	if err != nil {
-		return nil, fmt.Errorf("failed to re-read metadata: %w", err)
-	}
-	defer fallbackReader.Close()
-
-	var metadata CheckpointInfo
-	if err := json.NewDecoder(fallbackReader).Decode(&metadata); err != nil {
-		return nil, fmt.Errorf("failed to parse metadata: %w", err)
-	}
-	return &metadata, nil
-}
-
 // GetMetadataRefTree returns the tree object at the given committed-metadata ref.
 func GetMetadataRefTree(repo *git.Repository, ref plumbing.ReferenceName) (*object.Tree, error) {
 	resolvedRef, err := repo.Reference(ref, true)
@@ -843,7 +666,7 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 	metadataPath := checkpointPath + "/" + paths.MetadataFileName
 	if file, err := tree.File(metadataPath); err == nil {
 		if content, err := file.Contents(); err == nil {
-			var metadata checkpoint.CommittedMetadata
+			var metadata checkpoint.Metadata
 			if err := json.Unmarshal([]byte(content), &metadata); err == nil && metadata.Agent != "" {
 				return metadata.Agent
 			}
@@ -908,7 +731,7 @@ func isOnlySeparators(s string) bool {
 //
 // Falls back through earlier sessions when the latest has no prompt.
 // Avoids reading full transcripts — only reads prompt.txt files.
-// sessionCount is the number of sessions in the checkpoint (from CommittedInfo.SessionCount).
+// sessionCount is the number of sessions in the checkpoint (from CheckpointInfo.SessionCount).
 func ReadLatestSessionPromptFromCommittedTree(tree *object.Tree, cpID id.CheckpointID, sessionCount int) string {
 	cpPath := cpID.Path()
 	cpTree, err := tree.Tree(cpPath)
@@ -983,7 +806,7 @@ func ReadAllSessionPromptsFromTree(tree *object.Tree, checkpointPath string, ses
 // GetRemotePrimaryTree returns the tree at origin's remote-tracking ref for
 // the configured Primary. Errors when Primary isn't in Push (no origin shadow).
 func GetRemotePrimaryTree(ctx context.Context, repo *git.Repository) (*object.Tree, error) {
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	if !refs.PrimaryFetchableFromOrigin() {
 		return nil, fmt.Errorf("primary metadata ref %s is not pushed to origin", refs.Primary)
 	}
@@ -1014,62 +837,6 @@ func OpenRepository(ctx context.Context) (*git.Repository, error) {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
 	return repo, nil
-}
-
-// IsInsideWorktree returns true if the current directory is inside a git worktree
-// (as opposed to the main repository). Worktrees have .git as a file pointing
-// to the main repo, while the main repo has .git as a directory.
-// This function works correctly from any subdirectory within the repository.
-func IsInsideWorktree(ctx context.Context) bool {
-	// First find the repository root
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return false
-	}
-
-	gitPath := filepath.Join(repoRoot, gitDir)
-	gitInfo, err := os.Stat(gitPath)
-	if err != nil {
-		return false
-	}
-	return !gitInfo.IsDir()
-}
-
-// GetMainRepoRoot returns the root directory of the main repository.
-// In the main repo, this is the worktree path (repo root).
-// In a worktree, this parses the .git file to find the main repo.
-// This function works correctly from any subdirectory within the repository.
-//
-// Per gitrepository-layout(5), a worktree's .git file is a "gitfile" containing
-// "gitdir: <path>" pointing to $GIT_DIR/worktrees/<id> in the main repository.
-// See: https://git-scm.com/docs/gitrepository-layout
-func GetMainRepoRoot(ctx context.Context) (string, error) {
-	// First find the worktree/repo root
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return "", fmt.Errorf("failed to get worktree path: %w", err)
-	}
-
-	if !IsInsideWorktree(ctx) {
-		return repoRoot, nil
-	}
-
-	// Worktree .git file contains: "gitdir: /path/to/main/.git/worktrees/<id>"
-	gitFilePath := filepath.Join(repoRoot, gitDir)
-	content, err := os.ReadFile(gitFilePath) //nolint:gosec // G304: gitFilePath is constructed from repo root, not user input
-	if err != nil {
-		return "", fmt.Errorf("failed to read .git file: %w", err)
-	}
-
-	gitdir := strings.TrimSpace(string(content))
-	gitdir = strings.TrimPrefix(gitdir, "gitdir: ")
-
-	// Extract main repo root: everything before "/.git/"
-	idx := strings.LastIndex(gitdir, "/.git/")
-	if idx < 0 {
-		return "", fmt.Errorf("unexpected gitdir format: %s", gitdir)
-	}
-	return gitdir[:idx], nil
 }
 
 // GetGitCommonDir returns the path to the shared git directory.
@@ -1555,6 +1322,12 @@ func collectUntrackedFiles(ctx context.Context) ([]string, error) {
 		}
 	}
 	return files, nil
+}
+
+// CollectUntrackedFiles collects untracked, non-ignored paths relative to the
+// repository root.
+func CollectUntrackedFiles(ctx context.Context) ([]string, error) {
+	return collectUntrackedFiles(ctx)
 }
 
 // NOTE: The following git tree helper functions have been moved to checkpoint/ package:

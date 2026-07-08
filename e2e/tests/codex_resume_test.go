@@ -3,11 +3,11 @@
 package tests
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"regexp"
 	"testing"
 	"time"
 
@@ -77,10 +77,32 @@ func readCodexSessionID(t *testing.T, rolloutPath string) string {
 	data, err := os.ReadFile(rolloutPath)
 	require.NoError(t, err)
 
-	re := regexp.MustCompile(`(?m)^\{"timestamp":".*","type":"session_meta","payload":\{"id":"([^"]+)"`)
-	m := re.FindSubmatch(data)
-	require.Len(t, m, 2, "session_meta id not found in rollout")
-	return string(m[1])
+	// Codex rollout files are JSONL; the session id lives in the payload of the
+	// first "session_meta" line. Parse line-by-line rather than anchoring a
+	// regex on field order — Codex reorders JSON keys between versions (the old
+	// regex silently stopped matching on Codex 0.142.x). This mirrors the CLI's
+	// own parser in cmd/entire/cli/agent/codex/transcript.go.
+	for _, raw := range bytes.Split(data, []byte("\n")) {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+		var line struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(raw, &line); err != nil || line.Type != "session_meta" {
+			continue
+		}
+		var payload struct {
+			ID string `json:"id"`
+		}
+		require.NoError(t, json.Unmarshal(line.Payload, &payload))
+		require.NotEmpty(t, payload.ID, "session_meta payload missing id")
+		return payload.ID
+	}
+
+	t.Fatalf("session_meta line not found in rollout %s", rolloutPath)
+	return ""
 }
 
 func appendCompactedEncryptedHistory(t *testing.T, rolloutPath string) {

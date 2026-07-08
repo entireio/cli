@@ -62,7 +62,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          # Only copilot-cli gets the token; other agents must not receive it.
+          COPILOT_GITHUB_TOKEN: ${{ inputs.agent == 'copilot-cli' && secrets.COPILOT_GITHUB_TOKEN || '' }}
         run: go run ./e2e/bootstrap
 
       - name: Run isolated test
@@ -73,7 +74,8 @@ jobs:
           E2E_CODEX_MODEL: ${{ inputs.agent == 'codex' && 'gpt-5.4-mini' || '' }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          # Only copilot-cli gets the token; other agents must not receive it.
+          COPILOT_GITHUB_TOKEN: ${{ inputs.agent == 'copilot-cli' && secrets.COPILOT_GITHUB_TOKEN || '' }}
           E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
           E2E_ENTIRE_BIN: /usr/local/bin/entire
         run: |

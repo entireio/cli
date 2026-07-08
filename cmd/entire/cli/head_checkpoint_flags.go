@@ -57,7 +57,7 @@ func headCheckpointFlags(ctx context.Context) (hasReview, hasInvestigation bool,
 		logging.Debug(ctx, "head checkpoint flags: open store", slog.String("error", err.Error()))
 		return false, false, ""
 	}
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, stores.Primary, cpID)
+	summary, err := checkpoint.ReadCheckpoint(ctx, stores.Persistent, cpID)
 	if err != nil || summary == nil {
 		logging.Debug(ctx, "head checkpoint flags: resolve checkpoint summary",
 			slog.String("checkpoint_id", cpID.String()),

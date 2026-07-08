@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -66,16 +65,6 @@ func TestResolveTranscriptPath_AllowsLegitSessionID(t *testing.T) {
 	if got != want {
 		t.Fatalf("resolveTranscriptPath(%q) = %q, want %q", sessionID, got, want)
 	}
-}
-
-func createTempTranscript(t *testing.T, content string) string {
-	t.Helper()
-	tmpDir := t.TempDir()
-	tmpFile := filepath.Join(tmpDir, "transcript.jsonl")
-	if err := os.WriteFile(tmpFile, []byte(content), 0o644); err != nil {
-		t.Fatalf("failed to create temp file: %v", err)
-	}
-	return tmpFile
 }
 
 func TestAgentTranscriptPath(t *testing.T) {
@@ -215,138 +204,5 @@ func TestTruncateTranscriptAtUUID(t *testing.T) {
 				t.Errorf("TruncateTranscriptAtUUID() last UUID = %s, want %s", result[len(result)-1].UUID, tt.expectedLast)
 			}
 		})
-	}
-}
-
-func TestGetTranscriptPosition_BasicMessages(t *testing.T) {
-	content := `{"type":"user","uuid":"user-1","message":{"content":"Hello"}}
-{"type":"assistant","uuid":"asst-1","message":{"content":[{"type":"text","text":"Hi"}]}}
-{"type":"user","uuid":"user-2","message":{"content":"Bye"}}`
-
-	tmpFile := createTempTranscript(t, content)
-
-	pos, err := GetTranscriptPosition(tmpFile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if pos.LineCount != 3 {
-		t.Errorf("LineCount = %d, want 3", pos.LineCount)
-	}
-	if pos.LastUUID != "user-2" {
-		t.Errorf("LastUUID = %q, want 'user-2'", pos.LastUUID)
-	}
-}
-
-func TestGetTranscriptPosition_WithSummaryRows(t *testing.T) {
-	// Summary rows have leafUuid but no uuid field - they should not be tracked
-	content := `{"type":"summary","leafUuid":"leaf-1","summary":"Previous context"}
-{"type":"summary","leafUuid":"leaf-2","summary":"More context"}
-{"type":"user","uuid":"user-1","message":{"content":"Hello"}}
-{"type":"assistant","uuid":"asst-1","message":{"content":[{"type":"text","text":"Hi"}]}}`
-
-	tmpFile := createTempTranscript(t, content)
-
-	pos, err := GetTranscriptPosition(tmpFile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if pos.LineCount != 4 {
-		t.Errorf("LineCount = %d, want 4", pos.LineCount)
-	}
-	// LastUUID should be from user/assistant messages, not summary rows
-	if pos.LastUUID != "asst-1" {
-		t.Errorf("LastUUID = %q, want 'asst-1'", pos.LastUUID)
-	}
-}
-
-func TestGetTranscriptPosition_EmptyFile(t *testing.T) {
-	tmpFile := createTempTranscript(t, "")
-
-	pos, err := GetTranscriptPosition(tmpFile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if pos.LineCount != 0 {
-		t.Errorf("LineCount = %d, want 0", pos.LineCount)
-	}
-	if pos.LastUUID != "" {
-		t.Errorf("LastUUID = %q, want empty", pos.LastUUID)
-	}
-}
-
-func TestGetTranscriptPosition_NonExistentFile(t *testing.T) {
-	pos, err := GetTranscriptPosition("/nonexistent/path/transcript.jsonl")
-	if err != nil {
-		t.Fatalf("unexpected error for non-existent file: %v", err)
-	}
-
-	// Should return empty position for non-existent file
-	if pos.LineCount != 0 {
-		t.Errorf("LineCount = %d, want 0", pos.LineCount)
-	}
-	if pos.LastUUID != "" {
-		t.Errorf("LastUUID = %q, want empty", pos.LastUUID)
-	}
-}
-
-func TestGetTranscriptPosition_EmptyPath(t *testing.T) {
-	pos, err := GetTranscriptPosition("")
-	if err != nil {
-		t.Fatalf("unexpected error for empty path: %v", err)
-	}
-
-	if pos.LineCount != 0 {
-		t.Errorf("LineCount = %d, want 0", pos.LineCount)
-	}
-	if pos.LastUUID != "" {
-		t.Errorf("LastUUID = %q, want empty", pos.LastUUID)
-	}
-}
-
-func TestGetTranscriptPosition_OnlySummaryRows(t *testing.T) {
-	// File with only summary rows (no uuid field, only leafUuid)
-	content := `{"type":"summary","leafUuid":"leaf-1","summary":"Context 1"}
-{"type":"summary","leafUuid":"leaf-2","summary":"Context 2"}`
-
-	tmpFile := createTempTranscript(t, content)
-
-	pos, err := GetTranscriptPosition(tmpFile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if pos.LineCount != 2 {
-		t.Errorf("LineCount = %d, want 2", pos.LineCount)
-	}
-	// No uuid field in summary rows, so LastUUID should be empty
-	if pos.LastUUID != "" {
-		t.Errorf("LastUUID = %q, want empty (summary rows don't have uuid)", pos.LastUUID)
-	}
-}
-
-func TestGetTranscriptPosition_MixedWithMalformedLines(t *testing.T) {
-	content := `{"type":"user","uuid":"user-1","message":{"content":"Hello"}}
-not valid json
-{"type":"assistant","uuid":"asst-1","message":{"content":[{"type":"text","text":"Hi"}]}}
-{broken json
-{"type":"user","uuid":"user-2","message":{"content":"Final"}}`
-
-	tmpFile := createTempTranscript(t, content)
-
-	pos, err := GetTranscriptPosition(tmpFile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// All lines count, including malformed
-	if pos.LineCount != 5 {
-		t.Errorf("LineCount = %d, want 5", pos.LineCount)
-	}
-	// But LastUUID should be from last valid line with uuid
-	if pos.LastUUID != "user-2" {
-		t.Errorf("LastUUID = %q, want 'user-2'", pos.LastUUID)
 	}
 }

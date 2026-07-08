@@ -37,8 +37,17 @@ type ClusterCoresCache map[string]*CoresEntry
 // Freshness is fetched_at + ClusterCoresTTL, computed at read time so a TTL
 // change re-interprets existing entries without a migration.
 type CoresEntry struct {
-	CoreURLs  []string  `json:"core_urls"`
-	FetchedAt time.Time `json:"fetched_at"`
+	CoreURLs []string `json:"core_urls"`
+	// JurisdictionAudience is the cluster's jurisdiction-token audience as
+	// advertised by its /.well-known/entire-cluster.json. Empty when the
+	// cluster does not accept jurisdiction access tokens (or predates
+	// the field) — git-remote-entire treats that as an error; other
+	// callers decide their own fallback.
+	JurisdictionAudience string `json:"jurisdiction_audience,omitempty"`
+	// JurisdictionCoreURL is the advertised core that mints for
+	// JurisdictionAudience — the cross-jurisdiction exchange endpoint.
+	JurisdictionCoreURL string    `json:"jurisdiction_core_url,omitempty"`
+	FetchedAt           time.Time `json:"fetched_at"`
 }
 
 // LoadClusterCores reads the cluster→cores cache. A missing or corrupt file
@@ -83,23 +92,23 @@ func ModifyAPICores(cacheDir string, fn func(ClusterCoresCache) error) error {
 	return modifyCacheFile(cacheDir, apiDiscoveryFileName, readClusterCoresNoLock, writeClusterCoresNoLock, fn)
 }
 
-// Get returns a cluster's cached core URLs, whether the entry is still fresh,
+// GetEntry returns a cluster's cached cores entry, whether it is still fresh,
 // and whether it exists at all. A present-but-stale entry returns
-// (urls, false, true) so callers can attempt a re-fetch yet fall back to the
-// stale URLs if that fetch fails.
-func (c ClusterCoresCache) Get(cluster string) (urls []string, fresh, ok bool) {
-	entry := c[cluster]
+// (entry, false, true) so callers can attempt a re-fetch yet fall back to
+// the stale entry if that fetch fails.
+func (c ClusterCoresCache) GetEntry(cluster string) (entry *CoresEntry, fresh, ok bool) {
+	entry = c[cluster]
 	if entry == nil || len(entry.CoreURLs) == 0 {
 		return nil, false, false
 	}
-	return entry.CoreURLs, time.Now().Before(entry.FetchedAt.Add(ClusterCoresTTL)), true
+	return entry, time.Now().Before(entry.FetchedAt.Add(ClusterCoresTTL)), true
 }
 
-// Set records a cluster's core URLs, stamping the fetch time to now. The
+// SetEntry records a full discovery result (cores plus the jurisdiction
+// audience/core when advertised), stamping the fetch time to now. The
 // slice is copied so later mutation by the caller can't corrupt the cache.
-func (c ClusterCoresCache) Set(cluster string, urls []string) {
-	c[cluster] = &CoresEntry{
-		CoreURLs:  append([]string(nil), urls...),
-		FetchedAt: time.Now(),
-	}
+func (c ClusterCoresCache) SetEntry(cluster string, entry CoresEntry) {
+	entry.CoreURLs = append([]string(nil), entry.CoreURLs...)
+	entry.FetchedAt = time.Now()
+	c[cluster] = &entry
 }

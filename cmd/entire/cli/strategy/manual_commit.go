@@ -40,16 +40,34 @@ func (s *ManualCommitStrategy) getStateStore(_ context.Context) (*session.StateS
 	return s.stateStore, s.stateStoreErr
 }
 
-// getCheckpointStore returns a store bound to the resolved committed-metadata
-// topology. Writes target refs.Primary; reads target refs.Read. The strategy's
-// blob fetcher is wired in so reads can fetch blobs on demand after a treeless
-// fetch.
-func (s *ManualCommitStrategy) getCheckpointStore(ctx context.Context, repo *git.Repository) (*checkpoint.GitStore, error) {
+func (s *ManualCommitStrategy) getCheckpointStores(ctx context.Context, repo *git.Repository) (*checkpoint.Stores, error) {
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: s.blobFetcher})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
-	return stores.Primary, nil
+	return stores, nil
+}
+
+// getPersistentStore returns a store bound to the resolved committed-metadata
+// topology. Writes target refs.Primary; reads target refs.Read. The strategy's
+// blob fetcher is wired in so reads can fetch blobs on demand after a treeless
+// fetch.
+func (s *ManualCommitStrategy) getPersistentStore(ctx context.Context, repo *git.Repository) (checkpoint.PersistentStore, error) {
+	stores, err := s.getCheckpointStores(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	return stores.Persistent, nil
+}
+
+// getEphemeralStore returns the git-backed shadow-branch store with the
+// strategy's blob fetcher wired in.
+func (s *ManualCommitStrategy) getEphemeralStore(ctx context.Context, repo *git.Repository) (checkpoint.EphemeralStore, error) {
+	stores, err := s.getCheckpointStores(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	return stores.Ephemeral(), nil
 }
 
 // NewManualCommitStrategy creates a new manual-commit strategy instance.

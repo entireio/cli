@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
@@ -146,6 +147,23 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 			slog.String("error", hintErr.Error()))
 	}
 
+	// Resolve scope before the TurnStart prompt path.
+	refreshCtx, refreshCancel := context.WithTimeout(ctx, trailEnablementSessionStartRefreshTimeout)
+	if scope, scopeErr := currentTrailEnablementScope(refreshCtx); scopeErr != nil {
+		logging.Debug(logCtx, "trails enablement refresh skipped",
+			slog.String("error", scopeErr.Error()))
+	} else {
+		if hintErr := saveTrailEnablementScopeHint(ctx, event.SessionID, scope); hintErr != nil {
+			logging.Debug(logCtx, "failed to cache trails scope hint",
+				slog.String("error", hintErr.Error()))
+		}
+		if refreshErr := refreshTrailsEnabledCacheIfStaleForScope(refreshCtx, scope); refreshErr != nil {
+			logging.Debug(logCtx, "trails enablement refresh skipped",
+				slog.String("error", refreshErr.Error()))
+		}
+	}
+	refreshCancel()
+
 	// Build informational message — warn early if repo has no commits yet,
 	// since checkpoints require at least one commit to work.
 	message := sessionStartMessage(ag.Name(), false)
@@ -191,9 +209,10 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// the banner marker is only claimed inside this branch so a non-writer
 	// winner can't consume the user's only banner.
 	_, hookResponseSpan := perf.Start(ctx, "write_hook_response")
-	if event.ResponseMessage != "" {
-		message = event.ResponseMessage
-	}
+	// Apply any agent-supplied ResponseMessage override, then append the
+	// agent-help banner pointer so it survives the override — banner-only agents
+	// (Factory Droid) have no other in-session channel for it.
+	message = finalizeSessionStartBanner(message, event.ResponseMessage, ag.Name())
 	if writer, ok := agent.AsHookResponseWriter(ag); ok {
 		bannerFirst, bErr := strategy.ClaimSessionStartBanner(ctx, event.SessionID)
 		if bErr != nil {
@@ -225,6 +244,11 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// so ErrStateNotFound is the normal first-session path — only warn on
 	// genuinely unexpected errors, matching the rest of this file.
 	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
+		if state.AdoptedIntoWorktreePath != "" {
+			logging.Info(logCtx, "skipping adopted-away source session start",
+				slog.String("adopted_into_worktree", state.AdoptedIntoWorktreePath))
+			return strategy.ErrMutationSkip
+		}
 		persistEventMetadataToState(event, state)
 		if transErr := strategy.TransitionAndLog(ctx, state, session.EventSessionStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logCtx, "session start transition failed",
@@ -252,6 +276,32 @@ func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
 		return "\n\nEntire CLI found no commits yet — checkpoints will activate after your first commit."
 	}
 	return "\n\nEntire CLI will link this conversation to your next commit."
+}
+
+// agentHelpBannerSuffix returns the SessionStart banner suffix that points an
+// agent at `entire agent-help`. It targets Factory AI Droid, which is banner-only
+// — no model-context injection and no agent-help skill file — so the SessionStart
+// banner is its sole in-session channel for the pointer. Every other agent gets
+// the pointer via context injection (Claude/Codex/Gemini/OpenCode/Pi), a skill
+// file (Claude/Codex/Gemini), or the passive `entire status` surface
+// (Cursor/Copilot), so this returns "" for them to avoid a duplicate pointer.
+func agentHelpBannerSuffix(agentName types.AgentName) string {
+	if agentName == agent.AgentNameFactoryAIDroid {
+		return fmt.Sprintf("\n  Run `%s` to see entire's commands and flags.", agentHelpCommand)
+	}
+	return ""
+}
+
+// finalizeSessionStartBanner applies an agent-supplied ResponseMessage override
+// (if any) and THEN appends the agent-help banner pointer, so the pointer
+// survives even when the agent supplies its own banner text. Order matters: a
+// ResponseMessage override replaces the assembled message wholesale, so the
+// pointer must be appended after it, not before.
+func finalizeSessionStartBanner(message, responseMessage string, agentName types.AgentName) string {
+	if responseMessage != "" {
+		message = responseMessage
+	}
+	return message + agentHelpBannerSuffix(agentName)
 }
 
 // handleLifecycleModelUpdate persists the model name for the current session.
@@ -365,12 +415,34 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 
 // handleLifecycleTurnStart handles turn start: captures pre-prompt state,
 // ensures strategy setup, initializes session.
-// entireTrailContextInjection is the one-time, model-facing documentation Entire
-// injects to teach the agent the `entire trail` command. Kept terse: it costs
-// context-window tokens on the first turn of every session, and states no
-// transient fact (whether a trail exists can change at any time).
-func entireTrailContextInjection() string {
-	return "A trail ties together the context for a branch. Use `entire trail` to view, create, update, or watch it."
+// entireTrailContextInjection is the one-time, model-facing pointer Entire
+// injects on the first turn of a session. It deliberately enumerates NO flags or
+// subcommands — that surface is fetched on demand via `entire agent-help`, which
+// always matches the installed CLI — so the injection never goes stale when the
+// command surface grows. It names the auto-detected repo (from the already-loaded
+// session scope, no IO) and carries the standing rule that the agent is inside
+// the repo and must never ask the user for the repo name. Kept terse: it costs
+// context-window tokens on the first turn of every session.
+func entireTrailContextInjection(scope trailEnablementScope) string {
+	repo := ""
+	if scope.Forge != "" && scope.Owner != "" && scope.Repo != "" {
+		repo = trailEnablementRepoKey(scope.Forge, scope.Owner, scope.Repo)
+	}
+	var b strings.Builder
+	b.WriteString("Entire is enabled for this repo. Run `entire agent-help` to see what entire does and which subcommand to use, then `entire agent-help <command>` for that command's exact, current flags. ")
+	// Mirror agentHelpRepoBlock's defense-in-depth: this string is injected raw
+	// into the agent's model context (no escaping), so a repo key carrying control
+	// characters (e.g. an <sessionID>.trail-scope.json cache written by a pre-fix
+	// binary, or tampered) degrades to the generic message rather than reaching
+	// that sink.
+	if repo != "" && strings.IndexFunc(repo, unicode.IsControl) < 0 {
+		b.WriteString("This repo is auto-detected from the git origin remote as ")
+		b.WriteString(repo)
+		b.WriteString("; you are already inside it, so never ask the user for the repo name.")
+	} else {
+		b.WriteString("Entire auto-detects the repo from the git origin remote, so never ask the user for the repo name.")
+	}
+	return b.String()
 }
 
 // emitContextInjection writes ag's native context-injection payload to stdout
@@ -384,12 +456,14 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	}
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 
-	// Decide once per session, recorded on the session state itself (not a
-	// separate marker file). Winning the check-and-set means this turn owns the
-	// decision. trailsEnabledForRepo only reads clone-local cached enablement;
-	// the API refresh happens earlier on `entire enable`, outside the prompt path.
-	// Marking "decided" before checking the cache means a missing/stale false
-	// cache fails closed (no hint for this session) rather than retrying/spamming.
+	// Unknown cache leaves the session retryable.
+	scope, scopeOK, scopeErr := loadTrailEnablementScopeHint(ctx, event.SessionID)
+	if scopeErr != nil {
+		logging.Warn(logCtx, "failed to load trails scope hint",
+			slog.String("error", scopeErr.Error()))
+		return
+	}
+	decision := trailEnablementCacheUnknown
 	mutated := false
 	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
 		if state.ContextInjectionDecided {
@@ -399,6 +473,13 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 		// trail pointer; skip without marking decided so normal sessions keep the
 		// usual first-turn behavior.
 		if state.Kind != "" {
+			return strategy.ErrMutationSkip
+		}
+		if !scopeOK {
+			return strategy.ErrMutationSkip
+		}
+		decision = cachedTrailsEnablementForScope(ctx, scope, time.Now())
+		if decision == trailEnablementCacheUnknown {
 			return strategy.ErrMutationSkip
 		}
 		state.ContextInjectionDecided = true
@@ -414,16 +495,11 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	// state failed, mutErr was non-nil above and we returned without injecting,
 	// leaving a later turn free to retry safely.
 	won := mutErr == nil && mutated
-	if !won {
-		return // already decided for this session, skipped kind, or no session state yet
-	}
-
-	// Only advertise trails when they're literally enabled for this repo on the API.
-	if !trailsEnabledForRepo(ctx) {
+	if !won || decision != trailEnablementCacheEnabled {
 		return
 	}
 
-	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: entireTrailContextInjection()})
+	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: entireTrailContextInjection(scope)})
 	if err != nil {
 		logging.Warn(logCtx, "failed to render context injection",
 			slog.String("error", err.Error()))
@@ -836,8 +912,15 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		transcriptLinesAtStart = preState.TranscriptOffset
 	}
 
-	// Calculate token usage - prefer SubagentAwareExtractor to include subagent tokens
-	tokenUsage := agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
+	// Resolve token usage. Hook-provided counts (e.g., Cursor's stop hook,
+	// which is the only authoritative source for Cursor sessions because the
+	// JSONL transcript has no usage fields) take precedence; otherwise fall
+	// back to transcript-based computation, preferring SubagentAwareExtractor
+	// to include subagent tokens.
+	tokenUsage := event.TokenUsage
+	if tokenUsage == nil {
+		tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
+	}
 
 	// Build fully-populated step context and delegate to strategy
 	stepCtx := strategy.StepContext{
@@ -933,26 +1016,39 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 	// the transcript to extract file changes. Cleanup is handled by
 	// `entire clean` or when the session state is fully removed.
 
-	if err := markSessionEnded(ctx, event, event.SessionID); err != nil {
+	if _, err := endSessionNow(ctx, event, event.SessionID, nil); err != nil {
 		logging.Warn(logCtx, "failed to mark session ended",
-			slog.String("error", err.Error()))
-		// Don't attempt eager condense if we couldn't even mark the session ended —
-		// the session state may be in an inconsistent state.
-		return nil
-	}
-
-	// Eagerly condense session data so PostCommit doesn't have to process it.
-	// This prevents zombie ENDED sessions from accumulating and causing O(N)
-	// overhead on every future commit (GitHub issue #591).
-	// Fail-open: if this fails, PostCommit will still process it on the next commit.
-	strat := GetStrategy(ctx)
-	if err := strat.CondenseAndMarkFullyCondensed(ctx, event.SessionID); err != nil {
-		logging.Warn(logCtx, "eager condense on session stop failed",
-			slog.String("session_id", event.SessionID),
 			slog.String("error", err.Error()))
 	}
 
 	return nil
+}
+
+// endSessionNow runs the canonical "this session is over" sequence: it marks the
+// session ended (firing the SessionStop transition → PhaseEnded + EndedAt) and
+// eagerly condenses its pending work so PostCommit need not. This prevents
+// zombie ENDED sessions from accumulating and causing O(N) overhead on every
+// future commit (GitHub issue #591). It is shared by the SessionStop hook
+// (handleLifecycleSessionEnd) and the exited-session sweep
+// (finalizeExitedSessions), so the two stay in lockstep.
+//
+// The condense is fail-open (PostCommit retries on the next commit); an error
+// marking the session ended is returned so callers can react, and skips the
+// condense since the state may be inconsistent. event may be nil when no hook
+// event drives the end (the sweep), which skips event-metadata persistence.
+// guard is forwarded to markSessionEnded (see there); when it skips the end,
+// the condense is skipped too and ended is false.
+func endSessionNow(ctx context.Context, event *agent.Event, sessionID string, guard func(*strategy.SessionState) bool) (ended bool, err error) {
+	ended, err = markSessionEnded(ctx, event, sessionID, guard)
+	if err != nil || !ended {
+		return ended, err
+	}
+	if condErr := GetStrategy(ctx).CondenseAndMarkFullyCondensed(ctx, sessionID); condErr != nil {
+		logging.Warn(logging.WithComponent(ctx, "lifecycle"), "eager condense on session end failed",
+			slog.String("session_id", sessionID),
+			slog.String("error", condErr.Error()))
+	}
+	return true, nil
 }
 
 // handleLifecycleSubagentStart handles subagent start: captures pre-task state.
@@ -1170,8 +1266,18 @@ func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agen
 
 // markSessionEnded transitions the session to ENDED phase via the state machine.
 // If event is non-nil, hook-provided metrics are persisted to state before saving.
-func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string) error {
+// markSessionEnded fires the SessionStop transition (PhaseEnded + EndedAt) under
+// the session-state lock. When guard is non-nil and returns false on the
+// freshly-loaded state, the transition is skipped — callers use it to
+// re-validate a precondition that may have changed since their snapshot (the
+// exited-session sweep re-checks OwnerExited under the lock so it never ends a
+// session a concurrent turn just revived). It reports whether the session was
+// actually ended.
+func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string, guard func(*strategy.SessionState) bool) (ended bool, err error) {
 	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if guard != nil && !guard(state) {
+			return strategy.ErrMutationSkip
+		}
 		if event != nil {
 			persistEventMetadataToState(event, state)
 		}
@@ -1181,15 +1287,16 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string)
 		}
 		now := time.Now()
 		state.EndedAt = &now
+		ended = true
 		return nil
 	})
-	if errors.Is(mutErr, strategy.ErrStateNotFound) {
-		return nil
+	if errors.Is(mutErr, strategy.ErrStateNotFound) || errors.Is(mutErr, strategy.ErrMutationSkip) {
+		return false, nil
 	}
 	if mutErr != nil {
-		return fmt.Errorf("failed to save session state: %w", mutErr)
+		return false, fmt.Errorf("failed to save session state: %w", mutErr)
 	}
-	return nil
+	return ended, nil
 }
 
 // logFileChanges logs the files modified, created, and deleted during a session.

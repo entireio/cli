@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,8 +18,10 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trail"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
@@ -45,6 +48,219 @@ func TestNewTrailCreateRequestUsesLinkBranchAction(t *testing.T) {
 		Base:         "main",
 		Status:       "open",
 	}, req)
+}
+
+func TestNewTrailCreateRequestCanBeBranchless(t *testing.T) {
+	req := newTrailCreateRequest("title", "body", "", "main", "open")
+
+	require.Equal(t, api.TrailCreateRequest{
+		Title:  "title",
+		Body:   "body",
+		Base:   "main",
+		Status: "open",
+	}, req)
+
+	encoded, err := json.Marshal(req)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "branch_name")
+	require.NotContains(t, string(encoded), "branch_action")
+}
+
+func TestPrepareTrailCreateBranchSkipsBranchlessTrail(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		branch   string
+		noBranch bool
+	}{
+		{name: "explicit no-branch", branch: "", noBranch: true},
+		{name: "empty branch defensive guard", branch: "", noBranch: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			state, err := prepareTrailCreateBranch(io.Discard, io.Discard, nil, tc.branch, "main", tc.noBranch)
+
+			require.NoError(t, err)
+			require.False(t, state.NeedsCreation)
+			require.False(t, state.LocalCreated)
+			require.False(t, state.RemotePushed)
+		})
+	}
+}
+
+func TestValidateTrailCreateFlagCombosRejectsBranchlessConflicts(t *testing.T) {
+	t.Parallel()
+
+	t.Run("branch", func(t *testing.T) {
+		t.Parallel()
+		cmd := newTrailCreateCmd()
+		require.NoError(t, cmd.Flags().Set("branch", "feature/x"))
+
+		err := validateTrailCreateFlagCombos(cmd, false, true)
+
+		require.EqualError(t, err, "cannot combine --no-branch with --branch")
+	})
+
+	t.Run("checkout", func(t *testing.T) {
+		t.Parallel()
+		cmd := newTrailCreateCmd()
+
+		err := validateTrailCreateFlagCombos(cmd, true, true)
+
+		require.EqualError(t, err, "cannot combine --no-branch with --checkout")
+	})
+}
+
+func TestTrailCreateCommandRejectsBranchlessFlagConflictsBeforeRepoLookup(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "branch",
+			args:    []string{"--no-branch", "--branch", "feature/x", "--title", "Branchless"},
+			wantErr: "cannot combine --no-branch with --branch",
+		},
+		{
+			name:    "checkout",
+			args:    []string{"--no-branch", "--checkout", "--title", "Branchless"},
+			wantErr: "cannot combine --no-branch with --checkout",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := newTrailCreateCmd()
+			cmd.SetContext(context.Background())
+			cmd.SetArgs(tc.args)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+
+			err := cmd.Execute()
+
+			require.EqualError(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestResolveTrailCreateFieldsBranchlessNonInteractiveClearsBranchAndDefaultsStatus(t *testing.T) {
+	t.Parallel()
+
+	cmd := newTrailCreateCmd()
+	require.NoError(t, cmd.Flags().Set("title", "  Branchless trail  "))
+
+	title, body, base, branch, status, err := resolveTrailCreateFields(cmd, io.Discard, "  Branchless trail  ", "body", " main ", "", "", "feature/current", true)
+
+	require.NoError(t, err)
+	require.Equal(t, "Branchless trail", title)
+	require.Equal(t, "body", body)
+	require.Equal(t, "main", base)
+	require.Empty(t, branch)
+	require.Equal(t, string(trail.StatusOpen), status)
+}
+
+func TestValidateTrailCreateFieldsAllowsBranchlessEmptyBranch(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, validateTrailCreateFields(context.Background(), "Branchless", "", string(trail.StatusOpen), true))
+	require.EqualError(t,
+		validateTrailCreateFields(context.Background(), "Branch backed", "", string(trail.StatusOpen), false),
+		"branch name is required")
+}
+
+func TestRunTrailCreateInteractiveBranchlessSkipsBranchPrompt(t *testing.T) {
+	// No t.Parallel: runTrailCreateForm is package-global test seam.
+	previous := runTrailCreateForm
+	calls := 0
+	runTrailCreateForm = func(*huh.Form) error {
+		calls++
+		return nil
+	}
+	t.Cleanup(func() { runTrailCreateForm = previous })
+
+	title := "  Branchless trail  "
+	body := "body"
+	branch := "must-be-cleared"
+	status := ""
+
+	err := runTrailCreateInteractive(&title, &body, &branch, &status, true)
+
+	require.NoError(t, err)
+	require.Equal(t, 2, calls)
+	require.Equal(t, "Branchless trail", title)
+	require.Empty(t, branch)
+	require.Equal(t, string(trail.StatusOpen), status)
+}
+
+func TestRunTrailCreateBranchlessHappyPath(t *testing.T) {
+	// No t.Parallel: uses t.Chdir plus auth/tokenstore package-level test seams.
+	var gotCreate map[string]any
+	var gotCreateAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"access_token":"exchanged-token","token_type":"Bearer","expires_in":3600}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/trails/gh/acme/repo":
+			gotCreateAuth = r.Header.Get("Authorization")
+			if err := json.NewDecoder(r.Body).Decode(&gotCreate); err != nil {
+				t.Errorf("decode create request: %v", err)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailCreateResponse{
+				Trail: api.TrailResource{ID: "trl_branchless", Title: "Branchless full path"},
+			}); err != nil {
+				t.Errorf("encode create response: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv(api.BaseURLEnvVar, srv.URL)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
+	service := tokenstore.CoreKeyringService(srv.URL)
+	jwt := makeContextJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"me","exp":%d}`, srv.URL, time.Now().Add(2*time.Hour).Unix()))
+	require.NoError(t, tokenstore.Set(service, "me", tokenstore.EncodeTokenWithExpiration(jwt, 7200)))
+	ctxObj := &contexts.Context{Name: "me@core", CoreURL: srv.URL, Handle: "me", KeychainService: service}
+	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
+		func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
+			return ctxObj, nil
+		}))
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	runGitTrailTest(t, repoDir, "remote", "add", "origin", "https://github.com/acme/repo.git")
+	t.Chdir(repoDir)
+
+	cmd := newTrailCreateCmd()
+	cmd.SetContext(context.Background())
+	cmd.Flags().Bool("insecure-http-auth", true, "")
+	require.NoError(t, cmd.Flags().Set("insecure-http-auth", "true"))
+	cmd.SetArgs([]string{"--title", "Branchless full path", "--body", "body", "--base", "main", "--no-branch"})
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+
+	err := cmd.Execute()
+
+	require.NoError(t, err)
+	require.Contains(t, gotCreateAuth, "Bearer ")
+	require.Equal(t, "Branchless full path", gotCreate["title"])
+	require.Equal(t, "body", gotCreate["body"])
+	require.Equal(t, "main", gotCreate["base"])
+	require.Equal(t, string(trail.StatusOpen), gotCreate["status"])
+	require.NotContains(t, gotCreate, "branch_name")
+	require.NotContains(t, gotCreate, "branch_action")
+	require.Contains(t, out.String(), `Created trail "Branchless full path" (ID: trl_branchless)`)
+	require.NotContains(t, out.String(), "Pushed branch")
+	require.Empty(t, errOut.String())
 }
 
 func TestCleanupCreatedTrailBranch(t *testing.T) {
@@ -166,7 +382,7 @@ func TestRunTrailListAll_PrintsLoginHintWhenNotLoggedIn(t *testing.T) {
 		}))
 
 	var out, errOut bytes.Buffer
-	err := runTrailListAll(t.Context(), &out, &errOut, defaultTrailListOptions(false))
+	err := runTrailListAll(t.Context(), &out, &errOut, trailListOptions{Status: defaultTrailListStatus, Limit: defaultTrailListLimit})
 	if err == nil {
 		t.Fatal("expected error when not logged in")
 	}
@@ -198,8 +414,7 @@ func TestRunTrailListAll_ValidatesOptionsBeforeAuth(t *testing.T) {
 			return nil, errors.New("unreachable")
 		}))
 
-	opts := defaultTrailListOptions(false)
-	opts.Limit = 0
+	opts := trailListOptions{Status: defaultTrailListStatus, Limit: 0}
 
 	var out, errOut bytes.Buffer
 	err := runTrailListAll(t.Context(), &out, &errOut, opts)
@@ -217,22 +432,6 @@ func TestRunTrailListAll_ValidatesOptionsBeforeAuth(t *testing.T) {
 	}
 }
 
-func TestRunTrailListAllWithClient_ValidatesOptionsBeforeRepoLookup(t *testing.T) {
-	t.Parallel()
-
-	opts := defaultTrailListOptions(false)
-	opts.Limit = 0
-
-	var out bytes.Buffer
-	err := runTrailListAllValidatedWithClient(t.Context(), &out, nil, opts)
-	if err == nil {
-		t.Fatal("expected validation error")
-	}
-	if got, want := err.Error(), "limit must be greater than 0"; got != want {
-		t.Fatalf("error = %q, want %q", got, want)
-	}
-}
-
 func TestTrailRootPrintsHelp(t *testing.T) {
 	t.Parallel()
 	cmd := newTrailCmd()
@@ -244,7 +443,7 @@ func TestTrailRootPrintsHelp(t *testing.T) {
 		t.Fatalf("execute trail root: %v", err)
 	}
 	text := out.String()
-	for _, want := range []string{"A trail ties together the context for a branch", "show", "list", "create"} {
+	for _, want := range []string{"A trail ties together the context for a branch", "`entire trail finding`", "show", "list", "create", "finding"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("help output missing %q, got:\n%s", want, text)
 		}
@@ -287,6 +486,108 @@ func TestTrailNumberPath(t *testing.T) {
 	// (it starts with a non-[1-9] char), which previously surfaced as a 400.
 	if strings.Contains(got, "-") {
 		t.Fatalf("trailNumberPath must use the integer number, got %q", got)
+	}
+}
+
+func TestTrailWebURL(t *testing.T) {
+	t.Parallel()
+	want := "https://entire.io/gh/acme/repo/trails/575"
+	if got := trailWebURL("https://entire.io", "gh", "acme", "repo", 575); got != want {
+		t.Fatalf("trailWebURL = %q, want %q", got, want)
+	}
+	// A trailing slash on the base must not double up.
+	if got := trailWebURL("https://entire.io/", "gh", "acme", "repo", 575); got != want {
+		t.Fatalf("trailWebURL(trailing slash) = %q, want %q", got, want)
+	}
+}
+
+func TestPrintCreatedTrail(t *testing.T) {
+	t.Parallel()
+
+	// The server-provided URL is used verbatim.
+	var out bytes.Buffer
+	printCreatedTrail(&out, api.TrailResource{Title: "Fix it", Branch: "feat/x", ID: "abc123", Number: 575, URL: "https://entire.io/gh/acme/repo/trails/575/fix-it"}, "gh", "acme", "repo")
+	text := out.String()
+	if !strings.Contains(text, `Created trail "Fix it" for branch feat/x (ID: abc123)`) {
+		t.Fatalf("missing create summary line, got:\n%s", text)
+	}
+	if !strings.Contains(text, "URL: https://entire.io/gh/acme/repo/trails/575/fix-it") {
+		t.Fatalf("expected the server-provided URL, got:\n%s", text)
+	}
+
+	// Without a number, omit the URL line.
+	out.Reset()
+	printCreatedTrail(&out, api.TrailResource{Title: "No num", Branch: "feat/y", ID: "def456"}, "gh", "acme", "repo")
+	if text := out.String(); strings.Contains(text, "URL:") {
+		t.Fatalf("expected URL omitted when number and URL are absent, got:\n%s", text)
+	}
+}
+
+func TestTrailDisplayURL(t *testing.T) {
+	t.Parallel()
+
+	// Server URL wins, even when a number is present.
+	got := trailDisplayURL(api.TrailResource{Number: 5, URL: "https://server/url"}, "gh", "acme", "repo")
+	if got != "https://server/url" {
+		t.Fatalf("expected server URL, got %q", got)
+	}
+
+	// Falls back to a constructed URL for older servers that omit it.
+	got = trailDisplayURL(api.TrailResource{Number: 5}, "gh", "acme", "repo")
+	if !strings.HasSuffix(got, "/gh/acme/repo/trails/5") {
+		t.Fatalf("expected constructed fallback URL, got %q", got)
+	}
+
+	// Nothing to show when neither is available.
+	if got := trailDisplayURL(api.TrailResource{}, "gh", "acme", "repo"); got != "" {
+		t.Fatalf("expected empty URL, got %q", got)
+	}
+}
+
+func TestTrailDescriptionForDisplay(t *testing.T) {
+	t.Parallel()
+	if got := trailDescriptionForDisplay("the body", true); got != "the body" {
+		t.Fatalf("non-empty body: got %q, want %q", got, "the body")
+	}
+	if got := trailDescriptionForDisplay("the body", false); got != "the body" {
+		t.Fatalf("non-empty body (not loaded): got %q, want %q", got, "the body")
+	}
+	// Loaded but empty/whitespace → explicit placeholder.
+	if got := trailDescriptionForDisplay("", true); got != noTrailDescription {
+		t.Fatalf("loaded+empty: got %q, want %q", got, noTrailDescription)
+	}
+	if got := trailDescriptionForDisplay("   ", true); got != noTrailDescription {
+		t.Fatalf("loaded+whitespace: got %q, want %q", got, noTrailDescription)
+	}
+	// Not loaded (fetch failed) → nothing (the caller already warned).
+	if got := trailDescriptionForDisplay("", false); got != "" {
+		t.Fatalf("not loaded+empty: got %q, want empty", got)
+	}
+}
+
+func TestFetchTrailDescription_ReadsNestedBodyDocument(t *testing.T) {
+	t.Parallel()
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		// Regression guard: body_document is nested under `trail`, and
+		// `checkpoints` is a bare array the decode must ignore.
+		if _, err := io.WriteString(w, `{"trail":{"number":777,"branch":"feat/x","body_document":{"text_snapshot":"the intent text"}},"checkpoints":[],"has_write_permission":true}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	bodyText, err := fetchTrailDescription(t.Context(), client, "gh", "acme", "repo", 777)
+	if err != nil {
+		t.Fatalf("fetchTrailDescription: %v", err)
+	}
+	if want := "/api/v1/trails/gh/acme/repo/777"; gotPath != want {
+		t.Fatalf("path = %q, want %q", gotPath, want)
+	}
+	if bodyText != "the intent text" {
+		t.Fatalf("bodyText = %q, want %q", bodyText, "the intent text")
 	}
 }
 
@@ -470,26 +771,81 @@ func TestResolveTrailRemote_RejectsUnsupportedForge(t *testing.T) {
 // (2xx => enabled) is covered by api.TestClient_TrailsEnabled.
 //
 // Not parallel: uses t.Chdir() to point clone preferences at a fake repo.
-func TestTrailsEnabledForRepo_ReadsClonePreference(t *testing.T) {
+func TestTrailEnablementCache_ReadsClonePreference(t *testing.T) {
+	// Inline of the former trailsEnabledForRepo wrapper: resolves the current
+	// repo's enablement scope and checks the cached enablement decision.
+	trailsEnabledForCurrentRepo := func(ctx context.Context) bool {
+		scope, err := currentTrailEnablementScope(ctx)
+		if err != nil {
+			return false
+		}
+		return cachedTrailsEnablementForScope(ctx, scope, time.Now()) == trailEnablementCacheEnabled
+	}
+
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
+	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@github.com:acme/repo.git")
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git remote add: %v", err)
+	}
 	t.Chdir(repoDir)
 	ctx := context.Background()
 
-	if trailsEnabledForRepo(ctx) {
+	if trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails disabled when cache is absent")
 	}
 	if err := saveTrailsEnabledForRepo(ctx, false); err != nil {
 		t.Fatalf("save false cache: %v", err)
 	}
-	if trailsEnabledForRepo(ctx) {
+	if trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails disabled when cache is false")
 	}
 	if err := saveTrailsEnabledForRepo(ctx, true); err != nil {
 		t.Fatalf("save true cache: %v", err)
 	}
-	if !trailsEnabledForRepo(ctx) {
+	if !trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails enabled when cache is true")
+	}
+
+	prefs, err := settings.LoadClonePreferences(ctx)
+	if err != nil {
+		t.Fatalf("load prefs: %v", err)
+	}
+	if prefs.TrailsEnabledRepoKey != "gh/acme/repo" {
+		t.Fatalf("repo key = %q, want gh/acme/repo", prefs.TrailsEnabledRepoKey)
+	}
+
+	currentAuthKey := prefs.TrailsEnabledAuthKey
+	prefs.TrailsEnabledAuthKey = currentAuthKey + "-other"
+	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+		t.Fatalf("save auth-mismatched prefs: %v", err)
+	}
+	if trailsEnabledForCurrentRepo(ctx) {
+		t.Fatal("expected trails disabled for mismatched auth cache scope")
+	}
+	prefs.TrailsEnabledAuthKey = currentAuthKey
+	fresh := time.Now()
+	prefs.TrailsEnabledCheckedAt = &fresh
+	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+		t.Fatalf("restore auth-matched prefs: %v", err)
+	}
+
+	stale := time.Now().Add(-trailEnablementCacheTTL - time.Minute)
+	prefs.TrailsEnabledCheckedAt = &stale
+	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+		t.Fatalf("save stale prefs: %v", err)
+	}
+	if trailsEnabledForCurrentRepo(ctx) {
+		t.Fatal("expected trails disabled when cache is stale")
+	}
+
+	if err := saveTrailsEnabledForRemote(ctx, "gh", "other", "repo", true); err != nil {
+		t.Fatalf("save mismatched cache: %v", err)
+	}
+	if trailsEnabledForCurrentRepo(ctx) {
+		t.Fatal("expected trails disabled for mismatched cache scope")
 	}
 }
 
@@ -791,6 +1147,35 @@ func TestPrintTrailListYourTrailsRelabelsAndSurfacesGhLogin(t *testing.T) {
 	}
 }
 
+func TestPrintTrailListShowsURLColumnWhenPresent(t *testing.T) {
+	t.Parallel()
+	alice := trailListTestAuthorAlice
+	var out bytes.Buffer
+	printTrailList(&out, []*trail.Metadata{
+		{Number: 5, Branch: "feat/a", Status: trail.StatusOpen, URL: "https://entire.io/gh/acme/repo/trails/5", Author: &trail.Author{Login: &alice}, UpdatedAt: time.Now()},
+	}, trailListDisplayOptions{StatusFilters: []trail.Status{trail.StatusOpen}})
+
+	text := out.String()
+	if !strings.Contains(text, "URL") || !strings.Contains(text, "https://entire.io/gh/acme/repo/trails/5") {
+		t.Fatalf("expected a URL column with the trail url, got:\n%s", text)
+	}
+}
+
+func TestPrintTrailListOmitsURLColumnWhenAbsent(t *testing.T) {
+	t.Parallel()
+	alice := trailListTestAuthorAlice
+	var out bytes.Buffer
+	printTrailList(&out, []*trail.Metadata{
+		{Number: 5, Branch: "feat/a", Status: trail.StatusOpen, Author: &trail.Author{Login: &alice}, UpdatedAt: time.Now()},
+	}, trailListDisplayOptions{StatusFilters: []trail.Status{trail.StatusOpen}})
+
+	// The column header must not appear when no trail carries a URL (e.g. an
+	// older server that omits the field and no local fallback was attached).
+	if text := out.String(); strings.Contains(text, "URL") {
+		t.Fatalf("expected URL column omitted when no trail has a url, got:\n%s", text)
+	}
+}
+
 func TestPrintTrailListAnyStatusShowsStatusColumn(t *testing.T) {
 	t.Parallel()
 	alice := trailListTestAuthorAlice
@@ -839,10 +1224,32 @@ func TestPrintTrailDetailsOmitsWhitespacePhase(t *testing.T) {
 		Base:   "main",
 		Status: trail.StatusOpen,
 		Phase:  "   ",
-	})
+	}, "", "")
 
 	if text := out.String(); strings.Contains(text, "Phase:") {
 		t.Fatalf("expected whitespace phase to be omitted, got:\n%s", text)
+	}
+}
+
+func TestPrintTrailDetailsRendersURLAndDescription(t *testing.T) {
+	t.Parallel()
+	m := &trail.Metadata{Title: "T", Branch: "feat/a", Base: "main", Status: trail.StatusOpen}
+
+	var out bytes.Buffer
+	printTrailDetails(&out, m, "https://entire.io/gh/acme/repo/trails/5", "line one\nline two")
+	text := out.String()
+	if !strings.Contains(text, "URL:") || !strings.Contains(text, "https://entire.io/gh/acme/repo/trails/5") {
+		t.Fatalf("expected a URL line, got:\n%s", text)
+	}
+	if !strings.Contains(text, "Description:") || !strings.Contains(text, "line one\nline two") {
+		t.Fatalf("expected a Description block, got:\n%s", text)
+	}
+
+	// Empty URL and whitespace-only body are omitted.
+	out.Reset()
+	printTrailDetails(&out, m, "", "   ")
+	if text := out.String(); strings.Contains(text, "URL:") || strings.Contains(text, "Description:") {
+		t.Fatalf("expected URL/Description omitted for empty values, got:\n%s", text)
 	}
 }
 

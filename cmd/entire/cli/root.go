@@ -68,8 +68,11 @@ func NewRootCmd() *cobra.Command {
 			}
 
 			// Version check and notification (synchronous with 2s timeout)
-			// Runs AFTER command completes to avoid interfering with interactive modes
-			versioncheck.CheckAndNotify(cmd.Context(), cmd.OutOrStdout(), versioninfo.Version)
+			// Runs AFTER command completes to avoid interfering with interactive modes.
+			// Stderr, never stdout: this hook also fires after --json commands whose
+			// stdout is piped into jq or captured by scripts — a notice on stdout
+			// corrupts that output while staying invisible in the caller's logs.
+			versioncheck.CheckAndNotify(cmd.Context(), cmd.ErrOrStderr(), versioninfo.Version)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -84,19 +87,21 @@ func NewRootCmd() *cobra.Command {
 	// Noun groups (canonical homes for subcommands).
 	cmd.AddCommand(newSessionsCmd())        // 'session' (with 'sessions' as Cobra alias)
 	cmd.AddCommand(newCheckpointGroupCmd()) // 'checkpoint' / 'cp' / 'checkpoints'
+	cmd.AddCommand(newTokensGroupCmd())     // 'tokens'
 	cmd.AddCommand(newAgentGroupCmd())      // 'agent'
 	cmd.AddCommand(newAuthCmd())            // 'auth'
 	cmd.AddCommand(newDoctorCmd())          // 'doctor' (group: trace/logs/bundle)
 	cmd.AddCommand(newLabsCmd())            // 'labs' (experimental workflow discovery)
 	cmd.AddCommand(newPluginGroupCmd())     // 'plugin' (managed install/list/remove)
+	cmd.AddCommand(newImportCmd())          // 'import' (hidden; import pre-existing agent history)
+	cmd.AddCommand(newOrgCmd())             // 'org' — control-plane org management
+	cmd.AddCommand(newProjectCmd())         // 'project' — control-plane project management
+	cmd.AddCommand(newRepoCmd())            // 'repo' — control-plane repo lifecycle
+	cmd.AddCommand(newGrantCmd())           // 'grant' — control-plane access grants
 
 	// Top-level lifecycle and standalone commands.
-	cmd.AddCommand(cliReview.NewCommand(buildReviewDeps(newReviewAttachCmd()))) // hidden during maturation; runs configured review skills
-	cmd.AddCommand(investigate.NewCommand(buildInvestigateDeps()))              // hidden during maturation; runs a multi-agent investigation
-	cmd.AddCommand(newOrgCmd())                                                 // hidden during maturation; control-plane org management
-	cmd.AddCommand(newProjectCmd())                                             // hidden during maturation; control-plane project management
-	cmd.AddCommand(newRepoCmd())                                                // hidden during maturation; control-plane repo lifecycle
-	cmd.AddCommand(newGrantCmd())                                               // hidden during maturation; control-plane access grants
+	cmd.AddCommand(cliReview.NewCommand(buildReviewDeps()))        // `review`; hidden during maturation
+	cmd.AddCommand(investigate.NewCommand(buildInvestigateDeps())) // hidden during maturation; runs a multi-agent investigation
 	cmd.AddCommand(newCleanCmd())
 	cmd.AddCommand(newSetupCmd()) // 'configure' — non-agent settings; agent CRUD lives under 'agent'
 	cmd.AddCommand(newEnableCmd())
@@ -110,6 +115,8 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newDispatchCmd())
 	cmd.AddCommand(newActivityCmd())
 	cmd.AddCommand(newRecapCmd())
+	cmd.AddCommand(newAPICmd())          // authenticated passthrough to core/cell APIs
+	cmd.AddCommand(newAgentHelpCmd(cmd)) // visible: agents on transports without context injection discover it via `entire help`
 
 	// Hidden top-level shortcuts. Functional but print a deprecation hint.
 	cmd.AddCommand(hideAsAlias(newResumeCmd(), "entire session resume"))
@@ -118,14 +125,19 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(hideAsAlias(newTraceCmd(), "entire doctor trace"))
 	cmd.AddCommand(newSearchCmd()) // 'entire search' = 'checkpoint search' (hidden, no hint)
 
+	// Hidden labs commands (listed via `entire labs`; not deprecation shortcuts).
+	cmd.AddCommand(newExpertsCmd()) // agent/workflow provenance
+
 	// Deprecated top-level commands (functional; the constructors mark them
 	// Deprecated, which also excludes them from help and completion).
 	cmd.AddCommand(newResetCmd())
 	cmd.AddCommand(newRewindCmd())
 
 	// Hidden infrastructure.
+	cmd.AddCommand(newMCPCmd(cmd)) // MCP stdio server for MCP-host agents
 	cmd.AddCommand(newHooksCmd())
 	cmd.AddCommand(newTrailCmd())
+	cmd.AddCommand(newRunnerCmd()) // 'runner' (setup/tune runners); hidden during maturation
 	cmd.AddCommand(newSendAnalyticsCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
 

@@ -28,7 +28,7 @@ func TestAgentContinuesAfterCommit(t *testing.T) {
 
 		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		cpID1 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
-		cpBranchAfterFirst := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
+		cpBranchAfterFirst := testutil.CheckpointState(s.Dir)
 
 		// Second prompt — agent creates another file, user commits.
 		_, err = s.RunPrompt(t, ctx,
@@ -43,7 +43,7 @@ func TestAgentContinuesAfterCommit(t *testing.T) {
 		// Wait for checkpoint branch to advance past the first checkpoint.
 		deadline := time.Now().Add(15 * time.Second)
 		for time.Now().Before(deadline) {
-			after := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
+			after := testutil.CheckpointState(s.Dir)
 			if after != cpBranchAfterFirst {
 				break
 			}

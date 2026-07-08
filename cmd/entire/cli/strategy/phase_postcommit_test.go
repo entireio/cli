@@ -71,6 +71,67 @@ func TestPostCommit_ActiveSession_CondensesImmediately(t *testing.T) {
 		"StepCount should be reset after immediate condensation")
 }
 
+// TestPostCommit_ReviewSession_PinnedToSingleCheckpoint verifies that a
+// read-only review session is marked terminal once it has been condensed into a
+// checkpoint, so PostCommit stops re-attaching it to every later commit in the
+// worktree. This is the regression guard for the bug where a single `entire
+// review` session leaked into many unrelated checkpoints' session lists (its
+// prompt then rendering once per checkpoint on the session page). Contrast with
+// TestPostCommit_ActiveSession_CondensesImmediately, where a normal ACTIVE
+// session is expected to stay ACTIVE.
+func TestPostCommit_ReviewSession_PinnedToSingleCheckpoint(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-postcommit-review"
+
+	// Give the review session real shadow-branch content so its first PostCommit
+	// actually condenses (handler.condensed == true).
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	// Tag it as an in-flight agent-review session.
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	now := time.Now()
+	state.Phase = session.PhaseActive
+	state.Kind = session.KindAgentReview
+	state.LastInteractionTime = &now
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// First commit: the review is condensed into this one checkpoint, then pinned.
+	commitWithCheckpointTrailer(t, repo, dir, "a1b2c3d4e5f6")
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, session.PhaseEnded, state.Phase,
+		"review session should be marked ENDED after its single condensation")
+	assert.True(t, state.FullyCondensed,
+		"review session should be FullyCondensed so PostCommit skips it on later commits")
+	require.NotNil(t, state.EndedAt, "review session should have EndedAt stamped")
+	firstCheckpoint := state.LastCheckpointID
+
+	// Second commit (with a genuinely new file so it isn't an empty commit): the
+	// pinned review session must NOT be re-condensed, i.e. it must not be
+	// attached to a second checkpoint.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "second.txt"), []byte("unrelated change"), 0o644))
+	commitFilesWithTrailer(t, repo, dir, "b2c3d4e5f6a1", "second.txt")
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, session.PhaseEnded, state.Phase, "review session should stay terminal")
+	assert.True(t, state.FullyCondensed, "review session should stay FullyCondensed")
+	assert.Equal(t, firstCheckpoint, state.LastCheckpointID,
+		"review session must not be condensed into a second checkpoint")
+}
+
 // TestPostCommit_IdleSession_Condenses verifies that PostCommit on an IDLE
 // session condenses session data and cleans up the shadow branch.
 func TestPostCommit_IdleSession_Condenses(t *testing.T) {
@@ -780,7 +841,7 @@ func TestPostCommit_FilesTouched_ResetsAfterCondensation(t *testing.T) {
 	// Verify first condensation contains A.txt and B.txt
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	cpID1 := id.MustCheckpointID(checkpointID1)
-	summary1, err := store.ReadCommitted(context.Background(), cpID1)
+	summary1, err := store.Read(context.Background(), cpID1)
 	require.NoError(t, err)
 	require.NotNil(t, summary1)
 	assert.ElementsMatch(t, []string{"A.txt", "B.txt"}, summary1.FilesTouched,
@@ -842,63 +903,11 @@ func TestPostCommit_FilesTouched_ResetsAfterCondensation(t *testing.T) {
 
 	// Verify second condensation contains ONLY C.txt and D.txt
 	cpID2 := id.MustCheckpointID(checkpointID2)
-	summary2, err := store.ReadCommitted(context.Background(), cpID2)
+	summary2, err := store.Read(context.Background(), cpID2)
 	require.NoError(t, err)
 	require.NotNil(t, summary2, "Second condensation should exist")
 	assert.ElementsMatch(t, []string{"C.txt", "D.txt"}, summary2.FilesTouched,
 		"Second condensation should only contain C.txt and D.txt, not accumulated files from first condensation")
-}
-
-// TestSubtractFiles verifies that subtractFiles correctly removes files present
-// in the exclude set and preserves files not in it.
-func TestSubtractFiles(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		files    []string
-		exclude  map[string]struct{}
-		expected []string
-	}{
-		{
-			name:     "no overlap",
-			files:    []string{"a.txt", "b.txt"},
-			exclude:  map[string]struct{}{"c.txt": {}},
-			expected: []string{"a.txt", "b.txt"},
-		},
-		{
-			name:     "full overlap",
-			files:    []string{"a.txt", "b.txt"},
-			exclude:  map[string]struct{}{"a.txt": {}, "b.txt": {}},
-			expected: nil,
-		},
-		{
-			name:     "partial overlap",
-			files:    []string{"a.txt", "b.txt", "c.txt"},
-			exclude:  map[string]struct{}{"b.txt": {}},
-			expected: []string{"a.txt", "c.txt"},
-		},
-		{
-			name:     "empty files",
-			files:    []string{},
-			exclude:  map[string]struct{}{"a.txt": {}},
-			expected: nil,
-		},
-		{
-			name:     "empty exclude",
-			files:    []string{"a.txt", "b.txt"},
-			exclude:  map[string]struct{}{},
-			expected: []string{"a.txt", "b.txt"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			result := subtractFiles(tt.files, tt.exclude)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
 }
 
 // TestFilesChangedInCommit verifies that filesChangedInCommit correctly extracts

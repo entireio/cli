@@ -64,14 +64,19 @@ func main() {
 		scanner := bufio.NewScanner(os.Stdin)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
-			if line == "" || line == "exit" || line == "quit" {
+			if line == "exit" || line == "quit" {
 				break
 			}
-			// Give tmux's Send() time to capture the echoed-input state
-			// before we produce any output. Send polls every 200ms; without
-			// this pause, vogon output appears in the same capture window
-			// as the echo, causing stableAtSend to include final output and
-			// preventing WaitFor's contentChanged detection.
+			// Ignore empty lines: tmux's Send() may retry Enter when the pane
+			// doesn't visibly react in time, and treating that as termination
+			// would end the session mid-test.
+			if line == "" {
+				fmt.Fprint(os.Stdout, "> ")
+				continue
+			}
+			// Give tmux's Send() time to observe a distinct pre-output pane
+			// state, so its Enter verification and WaitFor's contentChanged
+			// detection see a clean echo -> output transition.
 			time.Sleep(700 * time.Millisecond)
 			fmt.Fprintln(os.Stdout, "Working...")
 			runTurn(dir, cfg.sessionID, transcriptPath, line)

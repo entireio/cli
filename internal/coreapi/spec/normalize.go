@@ -29,7 +29,7 @@
 // gen.go), or by hand after refreshing the spec:
 //
 //	curl -fsSL https://us.console.entire.io/api/v1/openapi.json \
-//	    -o internal/coreapi/spec/core.openapi.json
+//	    | jq . > internal/coreapi/spec/core.openapi.json
 //	go run spec/normalize.go
 package main
 

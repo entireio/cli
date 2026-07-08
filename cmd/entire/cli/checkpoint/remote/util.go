@@ -115,7 +115,7 @@ func FetchURL(ctx context.Context, opts ...FetchURLOptions) (string, error) {
 		// Origin's protocol can't be mapped to a git transport (e.g. entire://,
 		// file://). Honor the configured checkpoint_remote by targeting the
 		// provider's canonical host over HTTPS rather than falling back to origin.
-		if providerURL, ok := resolveProviderCheckpointURL(config, originRemote, opt.WorktreeRoot); ok {
+		if providerURL, ok := resolveProviderCheckpointURL(config, opt.WorktreeRoot); ok {
 			return providerURL, nil
 		}
 		logFallback(ctx, "fetch", originURL, "derive checkpoint remote URL", err)
@@ -223,7 +223,7 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 		// (e.g. entire://, file://). Honor the configured checkpoint_remote by
 		// targeting the provider's canonical host over HTTPS rather than
 		// misrouting checkpoints to the origin remote.
-		if providerURL, ok := resolveProviderCheckpointURL(config, pushRemoteName, ""); ok {
+		if providerURL, ok := resolveProviderCheckpointURL(config, ""); ok {
 			return providerURL, true, nil
 		}
 		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
@@ -278,14 +278,6 @@ func ParseURL(rawURL string) (*Info, error) {
 	return info, nil
 }
 
-func DeriveCheckpointURL(pushRemoteURL string, config *settings.CheckpointRemoteConfig) (string, error) {
-	info, err := gitremote.ParseURL(pushRemoteURL)
-	if err != nil {
-		return "", fmt.Errorf("cannot parse push remote URL: %w", err)
-	}
-	return deriveCheckpointURLFromInfo(info, config)
-}
-
 // isDerivableProtocol reports whether deriveCheckpointURLFromInfo can map the
 // protocol to a checkpoint URL (i.e. it's a real git transport, not a remote
 // helper scheme like entire:// or a local file://).
@@ -309,12 +301,6 @@ func deriveCheckpointURLFromInfo(info *Info, config *settings.CheckpointRemoteCo
 	}
 }
 
-// originalURLConfigKey is the git config option, under remote.<name>., where
-// entiredb's `entire-repo mirror use` records the URL a remote had before it was
-// switched to entire://. It is the most faithful record of the endpoint and auth
-// method the user had for that remote.
-const originalURLConfigKey = "entiredb-original-url"
-
 // resolveProviderCheckpointURL builds the checkpoint URL for the configured
 // provider, choosing the transport from what's already configured for that
 // endpoint. It is the fallback used when the push/origin remote's protocol can't
@@ -323,24 +309,21 @@ const originalURLConfigKey = "entiredb-original-url"
 // than being misrouted to the origin remote.
 //
 // Transport precedence:
-//  1. The remote's pre-mirror URL (remote.<name>.entiredb-original-url) — the
-//     endpoint and scheme the remote used before `entire-repo mirror use`
-//     switched it to entire://. Reused verbatim (host + scheme + port).
-//  2. ENTIRE_CHECKPOINT_TOKEN set -> HTTPS on the provider host (the token is
+//  1. ENTIRE_CHECKPOINT_TOKEN set -> HTTPS on the provider host (the token is
 //     the credential).
-//  3. An existing remote already targets the provider host -> reuse its scheme,
+//  2. An existing remote already targets the provider host -> reuse its scheme,
 //     so checkpoints use the same auth the user already has for that endpoint.
-//  4. Otherwise SSH on the provider host.
+//  3. Otherwise SSH on the provider host.
 //
 // Returns ok=false when no transport can be determined (unknown provider with no
 // usable signal), in which case the caller falls back to the origin remote.
-func resolveProviderCheckpointURL(config *settings.CheckpointRemoteConfig, remoteName, dir string) (string, bool) {
+func resolveProviderCheckpointURL(config *settings.CheckpointRemoteConfig, dir string) (string, bool) {
 	repo, err := openRepoAt(dir)
 	if err != nil {
 		repo = nil // Fall back to env/provider-only signals.
 	}
 
-	info, ok := pickProviderTransport(repo, config, remoteName)
+	info, ok := pickProviderTransport(repo, config)
 	if !ok {
 		return "", false
 	}
@@ -354,31 +337,22 @@ func resolveProviderCheckpointURL(config *settings.CheckpointRemoteConfig, remot
 // pickProviderTransport returns the protocol/host/port to use when deriving a
 // checkpoint URL, following the precedence documented on
 // resolveProviderCheckpointURL.
-func pickProviderTransport(repo *git.Repository, config *settings.CheckpointRemoteConfig, remoteName string) (*Info, bool) {
-	// 1. The remote's saved pre-mirror URL: the endpoint and auth the user had.
-	if repo != nil {
-		if original := originalRemoteURL(repo, remoteName); original != "" {
-			if info, err := gitremote.ParseURL(original); err == nil && isDerivableProtocol(info.Protocol) {
-				return info, true
-			}
-		}
-	}
-
+func pickProviderTransport(repo *git.Repository, config *settings.CheckpointRemoteConfig) (*Info, bool) {
 	host, hostOK := providerHost(config.Provider)
 
-	// 2. Explicit token -> HTTPS on the provider host.
+	// 1. Explicit token -> HTTPS on the provider host.
 	if hostOK && strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)) != "" {
 		return &Info{Protocol: ProtocolHTTPS, Host: host}, true
 	}
 
-	// 3. An existing remote already targeting the provider host -> reuse scheme.
+	// 2. An existing remote already targeting the provider host -> reuse scheme.
 	if hostOK && repo != nil {
 		if info, ok := findRemoteInfoForHost(repo, host); ok {
 			return &Info{Protocol: info.Protocol, Host: info.Host, Port: info.Port}, true
 		}
 	}
 
-	// 4. Default to SSH on the provider host.
+	// 3. Default to SSH on the provider host.
 	if hostOK {
 		return &Info{Protocol: ProtocolSSH, Host: host}, true
 	}
@@ -397,16 +371,6 @@ func openRepoAt(dir string) (*git.Repository, error) {
 		return nil, fmt.Errorf("open git repository: %w", err)
 	}
 	return repo, nil
-}
-
-// originalRemoteURL returns the pre-mirror URL saved by `entire-repo mirror use`
-// in remote.<name>.entiredb-original-url, or "" when absent.
-func originalRemoteURL(repo *git.Repository, remoteName string) string {
-	cfg, err := repo.Config()
-	if err != nil {
-		return ""
-	}
-	return cfg.Raw.Section("remote").Subsection(remoteName).Option(originalURLConfigKey)
 }
 
 // findRemoteInfoForHost returns the parsed Info of the first configured git

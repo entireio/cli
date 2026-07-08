@@ -71,6 +71,48 @@
         ],
         "type": "object"
       },
+      "AvailableMirror": {
+        "additionalProperties": true,
+        "properties": {
+          "access": {
+            "description": "Caller's effective GitHub access: read, write, or admin.",
+            "enum": [
+              "read",
+              "write",
+              "admin"
+            ],
+            "type": "string"
+          },
+          "isArchived": {
+            "type": "boolean"
+          },
+          "isPrivate": {
+            "type": "boolean"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "status": {
+            "description": "available (can onboard), mirrored (already mirrored), or owner-only (personal repo of another user).",
+            "enum": [
+              "available",
+              "mirrored",
+              "owner-only"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "access",
+          "status"
+        ],
+        "type": "object"
+      },
       "BatchLookupInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -157,6 +199,33 @@
         ],
         "type": "object"
       },
+      "Cluster": {
+        "additionalProperties": true,
+        "properties": {
+          "apiUrl": {
+            "type": "string"
+          },
+          "isDefault": {
+            "type": "boolean"
+          },
+          "jurisdiction": {
+            "type": "string"
+          },
+          "publicUrl": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "jurisdiction",
+          "publicUrl",
+          "isDefault"
+        ],
+        "type": "object"
+      },
       "CreateBindingInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -195,7 +264,7 @@
             "type": "string"
           },
           "clusterHost": {
-            "description": "DNS host of the destination cluster.",
+            "description": "Destination cluster, as either a bare DNS host or the publicUrl returned by GET /api/v1/clusters.",
             "minLength": 1,
             "type": "string"
           },
@@ -383,6 +452,10 @@
           },
           "publicUrl": {
             "type": "string"
+          },
+          "suspended": {
+            "description": "true when an existing placement was returned that an admin suspended.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -390,7 +463,8 @@
           "mirrorUrl",
           "publicUrl",
           "created",
-          "empty"
+          "empty",
+          "suspended"
         ],
         "type": "object"
       },
@@ -549,6 +623,31 @@
         ],
         "type": "object"
       },
+      "GetRepoVisibilityOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/GetRepoVisibilityOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "public",
+              "private"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "visibility"
+        ],
+        "type": "object"
+      },
       "GetVersionOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -580,61 +679,6 @@
         ],
         "type": "object"
       },
-      "GrantMirrorCollaboratorInputBody": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/GrantMirrorCollaboratorInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "clusterHost": {
-            "description": "Public host of the cluster serving the mirror.",
-            "minLength": 1,
-            "type": "string"
-          },
-          "handle": {
-            "description": "Qualified grantee handle, e.g. github:alice.",
-            "minLength": 1,
-            "type": "string"
-          },
-          "owner": {
-            "minLength": 1,
-            "type": "string"
-          },
-          "provider": {
-            "enum": [
-              "github"
-            ],
-            "type": "string"
-          },
-          "repo": {
-            "minLength": 1,
-            "type": "string"
-          },
-          "role": {
-            "description": "Grant level: reader (pull) or writer (pull+push).",
-            "enum": [
-              "reader",
-              "writer"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "provider",
-          "owner",
-          "repo",
-          "clusterHost",
-          "handle",
-          "role"
-        ],
-        "type": "object"
-      },
       "GrantProjectAccessInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -650,9 +694,7 @@
           "granteeType": {
             "default": "account",
             "enum": [
-              "account",
-              "org",
-              "team"
+              "account"
             ],
             "type": "string"
           },
@@ -665,7 +707,11 @@
             "type": "string"
           },
           "role": {
-            "minLength": 1,
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
             "type": "string"
           }
         },
@@ -712,9 +758,7 @@
           "granteeType": {
             "default": "account",
             "enum": [
-              "account",
-              "org",
-              "team"
+              "account"
             ],
             "type": "string"
           },
@@ -727,7 +771,11 @@
             "type": "string"
           },
           "role": {
-            "minLength": 1,
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
             "type": "string"
           }
         },
@@ -783,7 +831,11 @@
             "type": "string"
           },
           "role": {
-            "minLength": 1,
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
             "type": "string"
           }
         },
@@ -815,32 +867,6 @@
         ],
         "type": "object"
       },
-      "GrantedMirrorCollaborator": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/GrantedMirrorCollaborator.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "accountId": {
-            "description": "Entire account the grant was written for.",
-            "type": "string"
-          },
-          "role": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "accountId",
-          "role"
-        ],
-        "type": "object"
-      },
       "ListAuditEventsOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -858,10 +884,38 @@
               "$ref": "#/components/schemas/AuditEvent"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
           "events"
+        ],
+        "type": "object"
+      },
+      "ListAvailableMirrorsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListAvailableMirrorsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "available": {
+            "items": {
+              "$ref": "#/components/schemas/AvailableMirror"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "available"
         ],
         "type": "object"
       },
@@ -882,10 +936,38 @@
               "$ref": "#/components/schemas/Binding"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
           "bindings"
+        ],
+        "type": "object"
+      },
+      "ListClustersOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListClustersOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "clusters": {
+            "items": {
+              "$ref": "#/components/schemas/Cluster"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "clusters"
         ],
         "type": "object"
       },
@@ -930,6 +1012,10 @@
               "$ref": "#/components/schemas/Mirror"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -947,6 +1033,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "providers": {
@@ -978,6 +1068,10 @@
               "$ref": "#/components/schemas/Membership"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -997,6 +1091,13 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
+          "project": {
+            "$ref": "#/components/schemas/Project"
+          },
           "projects": {
             "items": {
               "$ref": "#/components/schemas/Project"
@@ -1004,9 +1105,6 @@
             "type": "array"
           }
         },
-        "required": [
-          "projects"
-        ],
         "type": "object"
       },
       "ListOrgsOutputBody": {
@@ -1021,6 +1119,13 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
+          "org": {
+            "$ref": "#/components/schemas/Org"
+          },
           "orgs": {
             "items": {
               "$ref": "#/components/schemas/Org"
@@ -1028,9 +1133,6 @@
             "type": "array"
           }
         },
-        "required": [
-          "orgs"
-        ],
         "type": "object"
       },
       "ListProjectMembersOutputBody": {
@@ -1050,6 +1152,10 @@
               "$ref": "#/components/schemas/ProjectGrant"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -1069,6 +1175,13 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
+          "repo": {
+            "$ref": "#/components/schemas/Repo"
+          },
           "repos": {
             "items": {
               "$ref": "#/components/schemas/Repo"
@@ -1076,9 +1189,6 @@
             "type": "array"
           }
         },
-        "required": [
-          "repos"
-        ],
         "type": "object"
       },
       "ListProjectsOutputBody": {
@@ -1093,6 +1203,10 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
           "project": {
             "$ref": "#/components/schemas/Project"
           },
@@ -1103,6 +1217,62 @@
             "type": "array"
           }
         },
+        "type": "object"
+      },
+      "ListRepoGrantsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListRepoGrantsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "grants": {
+            "items": {
+              "$ref": "#/components/schemas/RepoGrant"
+            },
+            "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "grants"
+        ],
+        "type": "object"
+      },
+      "ListReposOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListReposOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "repos": {
+            "items": {
+              "$ref": "#/components/schemas/RepoIndexEntry"
+            },
+            "type": "array"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "repos",
+          "truncated"
+        ],
         "type": "object"
       },
       "ListServiceAccountGrantsOutputBody": {
@@ -1122,6 +1292,10 @@
               "$ref": "#/components/schemas/ServiceAccountGrant"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -1141,6 +1315,10 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
           "serviceAccounts": {
             "items": {
               "$ref": "#/components/schemas/ServiceAccountWithGrants"
@@ -1150,6 +1328,43 @@
         },
         "required": [
           "serviceAccounts"
+        ],
+        "type": "object"
+      },
+      "LookupBySlugOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/LookupBySlugOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "cell": {
+            "type": "string"
+          },
+          "jurisdiction": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "cell",
+          "jurisdiction",
+          "owner",
+          "repo"
         ],
         "type": "object"
       },
@@ -1217,6 +1432,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "permission": {
@@ -1290,6 +1509,10 @@
       "MeIdentityHandle": {
         "additionalProperties": true,
         "properties": {
+          "email": {
+            "description": "The provider's publicly-visible profile email (from the provider at login; may be empty). NOT the account's contact email.",
+            "type": "string"
+          },
           "handle": {
             "type": "string"
           },
@@ -1416,6 +1639,10 @@
             "readOnly": true,
             "type": "string"
           },
+          "cell": {
+            "description": "Physical cell the mirror's cluster runs in, e.g. aws-us-east-2.",
+            "type": "string"
+          },
           "clusterHost": {
             "description": "Public host of the cluster serving this mirror.",
             "type": "string"
@@ -1447,6 +1674,16 @@
             "type": "string"
           },
           "repo": {
+            "type": "string"
+          },
+          "status": {
+            "description": "Clone lifecycle: processing (cloning), ready (clonable), failed (initial clone failed), or suspended.",
+            "enum": [
+              "processing",
+              "ready",
+              "failed",
+              "suspended"
+            ],
             "type": "string"
           },
           "suspendedAt": {
@@ -1596,17 +1833,24 @@
           "granteeId": {
             "type": "string"
           },
+          "granteeName": {
+            "type": "string"
+          },
           "granteeType": {
             "type": "string"
           },
           "role": {
+            "type": "string"
+          },
+          "source": {
             "type": "string"
           }
         },
         "required": [
           "granteeType",
           "granteeId",
-          "role"
+          "role",
+          "source"
         ],
         "type": "object"
       },
@@ -1667,12 +1911,113 @@
               "failed"
             ],
             "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "public",
+              "private"
+            ],
+            "type": "string"
           }
         },
         "required": [
           "id",
           "owningProjectId",
           "name"
+        ],
+        "type": "object"
+      },
+      "RepoGrant": {
+        "additionalProperties": true,
+        "properties": {
+          "granteeId": {
+            "type": "string"
+          },
+          "granteeName": {
+            "type": "string"
+          },
+          "granteeType": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "granteeType",
+          "granteeId",
+          "role",
+          "source"
+        ],
+        "type": "object"
+      },
+      "RepoIndexEntry": {
+        "additionalProperties": true,
+        "properties": {
+          "cell": {
+            "type": "string"
+          },
+          "clusterSlug": {
+            "type": "string"
+          },
+          "full_name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "jurisdiction": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "placements": {
+            "items": {
+              "$ref": "#/components/schemas/RepoPlacement"
+            },
+            "type": "array"
+          },
+          "visibility": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "jurisdiction",
+          "cell",
+          "clusterSlug",
+          "name",
+          "full_name",
+          "visibility",
+          "placements"
+        ],
+        "type": "object"
+      },
+      "RepoPlacement": {
+        "additionalProperties": true,
+        "properties": {
+          "cell": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "jurisdiction": {
+            "type": "string"
+          },
+          "mirror": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "jurisdiction",
+          "cell",
+          "mirror"
         ],
         "type": "object"
       },
@@ -1832,6 +2177,102 @@
           "createdAt"
         ],
         "type": "object"
+      },
+      "SetRepoVisibilityInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetRepoVisibilityInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "public",
+              "private"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "visibility"
+        ],
+        "type": "object"
+      },
+      "SetRepoVisibilityOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetRepoVisibilityOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "public",
+              "private"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "visibility"
+        ],
+        "type": "object"
+      },
+      "UpdateMeInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/UpdateMeInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "email": {
+            "description": "Contact email.",
+            "format": "email",
+            "maxLength": 254,
+            "minLength": 5,
+            "type": "string"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "type": "object"
+      },
+      "UpdateMeOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/UpdateMeOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -1861,6 +2302,29 @@
         "operationId": "lookupResources",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "description": "SpiceDB resource type (e.g. \"repo\", \"project\", \"org\").",
             "in": "path",
             "name": "resourceType",
@@ -1872,12 +2336,12 @@
             }
           },
           {
-            "description": "Optional: only list resources where the caller has this permission.",
+            "description": "Optional: only list resources where the caller has this permission. pageSize/pageToken apply only when set.",
             "explode": false,
             "in": "query",
             "name": "permission",
             "schema": {
-              "description": "Optional: only list resources where the caller has this permission.",
+              "description": "Optional: only list resources where the caller has this permission. pageSize/pageToken apply only when set.",
               "type": "string"
             }
           }
@@ -1990,6 +2454,31 @@
     "/audit": {
       "get": {
         "operationId": "listAuditEvents",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2023,6 +2512,45 @@
         "summary": "List the calling account's recent audit events",
         "tags": [
           "identity"
+        ]
+      }
+    },
+    "/clusters": {
+      "get": {
+        "operationId": "listClusters",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListClustersOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List data-plane clusters attached to this control plane",
+        "tags": [
+          "clusters"
         ]
       }
     },
@@ -2139,6 +2667,36 @@
       }
     },
     "/me": {
+      "delete": {
+        "operationId": "deleteMe",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Request deletion of the calling account (7-day cooldown; login cancels)",
+        "tags": [
+          "identity"
+        ]
+      },
       "get": {
         "operationId": "getMe",
         "responses": {
@@ -2172,6 +2730,53 @@
           }
         ],
         "summary": "Get the calling account's identity and profile",
+        "tags": [
+          "identity"
+        ]
+      },
+      "patch": {
+        "operationId": "updateMe",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMeInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateMeOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Update the calling account's contact email",
         "tags": [
           "identity"
         ]
@@ -2258,32 +2863,55 @@
         "operationId": "listMirrors",
         "parameters": [
           {
-            "description": "Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to).",
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to). Case-sensitive exact match.",
             "explode": false,
             "in": "query",
             "name": "cluster",
             "schema": {
-              "description": "Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to).",
+              "description": "Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to). Case-sensitive exact match.",
               "type": "string"
             }
           },
           {
-            "description": "Optional: restrict to mirrors of this upstream provider (e.g. \"github\").",
+            "description": "Optional: restrict to mirrors of this upstream provider, case-insensitive (e.g. \"github\").",
             "explode": false,
             "in": "query",
             "name": "provider",
             "schema": {
-              "description": "Optional: restrict to mirrors of this upstream provider (e.g. \"github\").",
+              "description": "Optional: restrict to mirrors of this upstream provider, case-insensitive (e.g. \"github\").",
               "type": "string"
             }
           },
           {
-            "description": "Optional: restrict to mirrors with this upstream owner login.",
+            "description": "Optional: restrict to mirrors with this upstream owner login (case-insensitive).",
             "explode": false,
             "in": "query",
             "name": "owner",
             "schema": {
-              "description": "Optional: restrict to mirrors with this upstream owner login.",
+              "description": "Optional: restrict to mirrors with this upstream owner login (case-insensitive).",
               "type": "string"
             }
           }
@@ -2371,70 +2999,31 @@
         ]
       }
     },
-    "/mirrors/collaborators": {
-      "delete": {
-        "operationId": "revokeMirrorCollaborator",
+    "/mirrors/available": {
+      "get": {
+        "operationId": "listAvailableMirrors",
         "parameters": [
           {
-            "explode": false,
-            "in": "query",
-            "name": "provider",
-            "required": true,
-            "schema": {
-              "enum": [
-                "github"
-              ],
-              "type": "string"
-            }
-          },
-          {
+            "description": "Optional: restrict to repos with this owner login (case-insensitive).",
             "explode": false,
             "in": "query",
             "name": "owner",
-            "required": true,
             "schema": {
-              "minLength": 1,
-              "type": "string"
-            }
-          },
-          {
-            "explode": false,
-            "in": "query",
-            "name": "repo",
-            "required": true,
-            "schema": {
-              "minLength": 1,
-              "type": "string"
-            }
-          },
-          {
-            "description": "Public host of the cluster serving the mirror.",
-            "explode": false,
-            "in": "query",
-            "name": "clusterHost",
-            "required": true,
-            "schema": {
-              "description": "Public host of the cluster serving the mirror.",
-              "minLength": 1,
-              "type": "string"
-            }
-          },
-          {
-            "description": "Qualified grantee handle, e.g. github:alice.",
-            "explode": false,
-            "in": "query",
-            "name": "handle",
-            "required": true,
-            "schema": {
-              "description": "Qualified grantee handle, e.g. github:alice.",
-              "minLength": 1,
+              "description": "Optional: restrict to repos with this owner login (case-insensitive).",
               "type": "string"
             }
           }
         ],
         "responses": {
-          "204": {
-            "description": "No Content"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListAvailableMirrorsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
           },
           "default": {
             "content": {
@@ -2455,11 +3044,13 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Revoke a user's access to a mirror (live GitHub-admin gated)",
+        "summary": "List GitHub repos the caller could onboard as mirrors",
         "tags": [
           "mirrors"
         ]
-      },
+      }
+    },
+    "/mirrors/collaborators": {
       "get": {
         "operationId": "listMirrorCollaborators",
         "parameters": [
@@ -2542,53 +3133,6 @@
         "tags": [
           "mirrors"
         ]
-      },
-      "post": {
-        "operationId": "grantMirrorCollaborator",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GrantMirrorCollaboratorInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GrantedMirrorCollaborator"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "sessionAuth": []
-          }
-        ],
-        "summary": "Grant a user reader/writer access to a mirror (live GitHub-admin gated)",
-        "tags": [
-          "mirrors"
-        ]
       }
     },
     "/mirrors/{mirrorId}": {
@@ -2644,6 +3188,31 @@
     "/oidc-providers": {
       "get": {
         "operationId": "listOIDCProviders",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2683,6 +3252,41 @@
     "/orgs": {
       "get": {
         "operationId": "listOrgs",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match org name (case-insensitive).",
+            "explode": false,
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "description": "Optional: exact-match org name (case-insensitive).",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2713,7 +3317,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "List organizations the caller can see",
+        "summary": "List organizations the caller can see (or one by name)",
         "tags": [
           "orgs"
         ]
@@ -2766,10 +3370,124 @@
         ]
       }
     },
+    "/orgs/{orgId}": {
+      "delete": {
+        "operationId": "deleteOrg",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete an organization",
+        "tags": [
+          "orgs"
+        ]
+      },
+      "get": {
+        "operationId": "getOrg",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Org"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get an organization",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
     "/orgs/{orgId}/members": {
       "get": {
         "operationId": "listOrgMembers",
         "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
           {
             "in": "path",
             "name": "orgId",
@@ -2940,11 +3658,44 @@
         "operationId": "listOrgProjects",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "orgId",
             "required": true,
             "schema": {
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match project name (case-insensitive).",
+            "explode": false,
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "description": "Optional: exact-match project name (case-insensitive).",
               "type": "string"
             }
           }
@@ -2990,12 +3741,35 @@
         "operationId": "listProjects",
         "parameters": [
           {
-            "description": "Optional: exact-match project name.",
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match project name (case-insensitive).",
             "explode": false,
             "in": "query",
             "name": "name",
             "schema": {
-              "description": "Optional: exact-match project name.",
+              "description": "Optional: exact-match project name (case-insensitive).",
               "type": "string"
             }
           }
@@ -3078,6 +3852,97 @@
           }
         ],
         "summary": "Create project",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/projects/{projectId}": {
+      "delete": {
+        "operationId": "deleteProject",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete a project",
+        "tags": [
+          "projects"
+        ]
+      },
+      "get": {
+        "operationId": "getProject",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get a project by id",
         "tags": [
           "projects"
         ]
@@ -3270,6 +4135,29 @@
         "operationId": "listProjectMembers",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "projectId",
             "required": true,
@@ -3320,11 +4208,44 @@
         "operationId": "listProjectRepos",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "projectId",
             "required": true,
             "schema": {
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match repo name (case-insensitive).",
+            "explode": false,
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "description": "Optional: exact-match repo name (case-insensitive).",
               "type": "string"
             }
           }
@@ -3359,13 +4280,50 @@
             "sessionAuth": []
           }
         ],
-        "summary": "List repositories in a project",
+        "summary": "List repositories in a project (or one by name)",
         "tags": [
           "repos"
         ]
       }
     },
     "/repos": {
+      "get": {
+        "operationId": "listRepos",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListReposOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List the caller's readable repositories (placement index)",
+        "tags": [
+          "repos"
+        ]
+      },
       "post": {
         "operationId": "createRepo",
         "requestBody": {
@@ -3409,6 +4367,50 @@
           }
         ],
         "summary": "Create repository",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/lookup-by-slug": {
+      "get": {
+        "operationId": "lookupRepoBySlug",
+        "parameters": [
+          {
+            "description": "Provider-scoped slug, e.g. gh/acme/oss-lib or et/my-project/my-repo",
+            "explode": false,
+            "in": "query",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "description": "Provider-scoped slug, e.g. gh/acme/oss-lib or et/my-project/my-repo",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LookupBySlugOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Resolve a repo slug to routing info (unauthenticated)",
         "tags": [
           "repos"
         ]
@@ -3506,6 +4508,77 @@
       }
     },
     "/repos/{repoId}/grants": {
+      "get": {
+        "operationId": "listRepoGrants",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRepoGrantsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List repo grants",
+        "tags": [
+          "repos"
+        ]
+      },
       "post": {
         "operationId": "grantRepoAccess",
         "parameters": [
@@ -3565,10 +4638,263 @@
         ]
       }
     },
+    "/repos/{repoId}/grants/account/{provider}/{providerUserId}": {
+      "delete": {
+        "operationId": "revokeRepoAccessByProvider",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "providerUserId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke repo access by provider identity",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/grants/{granteeType}/{granteeId}": {
+      "delete": {
+        "operationId": "revokeRepoAccess",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "granteeType",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "granteeId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke repo access by grantee id",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/visibility": {
+      "get": {
+        "operationId": "getRepoVisibility",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetRepoVisibilityOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get repository visibility",
+        "tags": [
+          "repos"
+        ]
+      },
+      "put": {
+        "operationId": "setRepoVisibility",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetRepoVisibilityInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetRepoVisibilityOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Set repository visibility",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
     "/service-accounts": {
       "get": {
         "operationId": "listServiceAccounts",
         "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
           {
             "explode": false,
             "in": "query",
@@ -3759,6 +5085,29 @@
         "operationId": "listBindings",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "accountId",
             "required": true,
@@ -3918,6 +5267,29 @@
       "get": {
         "operationId": "listServiceAccountGrants",
         "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
           {
             "in": "path",
             "name": "accountId",

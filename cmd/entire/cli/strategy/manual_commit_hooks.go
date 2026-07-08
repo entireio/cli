@@ -21,10 +21,12 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitops"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
@@ -463,7 +465,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 	// Generate a fresh checkpoint ID and resolve session metadata
 	_, resolveMetadataSpan := perf.Start(ctx, "resolve_session_metadata")
-	checkpointID, err := id.Generate()
+	checkpointID, err := checkpoint.GenerateCheckpointID(ctx)
 	if err != nil {
 		resolveMetadataSpan.RecordError(err)
 		resolveMetadataSpan.End()
@@ -1065,9 +1067,9 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
 	}
-	store := stores.Primary
+	store := stores.Persistent
 
-	summary, err := store.ReadCommitted(ctx, checkpointID)
+	summary, err := store.Read(ctx, checkpointID)
 	if err != nil {
 		return fmt.Errorf("reading checkpoint summary: %w", err)
 	}
@@ -1137,7 +1139,7 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 		agentPercentage = float64(agentAdded+agentRemoved) / float64(totalLinesChanged) * 100
 	}
 
-	combined := &checkpoint.InitialAttribution{
+	combined := &checkpoint.Attribution{
 		CalculatedAt:      time.Now().UTC(),
 		AgentLines:        agentAdded,
 		AgentRemoved:      agentRemoved,
@@ -1158,7 +1160,7 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 		slog.Float64("agent_percentage", agentPercentage),
 	)
 
-	if err := store.UpdateCheckpointSummary(ctx, checkpointID, combined); err != nil {
+	if err := store.Write(ctx, checkpoint.CheckpointAttribution{CheckpointID: checkpointID, Attribution: combined}); err != nil {
 		return fmt.Errorf("persisting combined attribution: %w", err)
 	}
 
@@ -1338,6 +1340,26 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		state.FullyCondensed = true
 	}
 
+	// Pin a review session to the single checkpoint it was just condensed into.
+	// A review is a read-only one-shot: it touches no files, so it never accrues
+	// shadow-branch content and the FullyCondensed branch above never fires for
+	// it. Left active, it stays in this worktree's session set and gets
+	// re-condensed into every subsequent commit — which is how one review ends
+	// up attributed to many unrelated checkpoints (its prompt rendering once per
+	// checkpoint on the session page). Once condensed, its transcript is captured
+	// and it has nothing further to contribute, so mark it terminal here. Gated
+	// on handler.condensed so it only fires after the review actually landed in a
+	// checkpoint — a review skipped by the read-only gate is never written to a
+	// checkpoint and stays eligible to attach to a later one.
+	if state.Kind.IsReview() && handler.condensed {
+		if state.EndedAt == nil {
+			endedAt := time.Now().UTC()
+			state.EndedAt = &endedAt
+		}
+		state.Phase = session.PhaseEnded
+		state.FullyCondensed = true
+	}
+
 	// State is saved by the outer MutateSessionState in PostCommit.
 
 	// Only preserve shadow branch for active sessions that were NOT condensed.
@@ -1386,6 +1408,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	state.BaseCommit = newHead
 	state.RealignAttributionBase(newHead)
 	state.StepCount = 0
+	state.CheckpointTokenUsage = nil
 	state.CheckpointTranscriptStart = result.TotalTranscriptLines
 	state.CheckpointTranscriptSize = int64(len(result.Transcript))
 
@@ -2088,7 +2111,7 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 // (ACTIVE session + no TTY). Generates a checkpoint ID and adds the trailer
 // directly, bypassing content detection and interactive prompts.
 func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string) error { //nolint:unparam // kept for signature stability
-	cpID, err := id.Generate()
+	cpID, err := checkpoint.GenerateCheckpointID(logCtx)
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
@@ -2262,6 +2285,12 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		if state.BaseCommit == "" {
 			return errPartialState
 		}
+		if state.AdoptedIntoWorktreePath != "" {
+			logging.Info(logging.WithComponent(ctx, "hooks"), "skipping adopted-away source session",
+				slog.String("session_id", sessionID),
+				slog.String("adopted_into_worktree", state.AdoptedIntoWorktreePath))
+			return ErrMutationSkip
+		}
 		if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
 				slog.String("session_id", sessionID),
@@ -2296,6 +2325,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 			state.TranscriptPath = transcriptPath
 		}
 		captureSessionBranch(repo, state)
+		captureSessionOwner(state)
 
 		// ORDERING: attribution runs BEFORE migrate to use the pre-migration
 		// BaseCommit as the base tree (preserving correct agent-line counts
@@ -2340,6 +2370,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		promptAttr := s.calculatePromptAttributionAtStart(ctx, repo, state)
 		state.PendingPromptAttribution = &promptAttr
 		captureSessionBranch(repo, state)
+		captureSessionOwner(state)
 		return nil
 	})
 	if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
@@ -2367,6 +2398,26 @@ func captureSessionBranch(repo *git.Repository, state *SessionState) {
 		// falls back to deriving the branch from checkpoint trailers instead of
 		// using a stale, now-incorrect value.
 		state.Branch = ""
+	}
+}
+
+// captureSessionOwner records the owning agent process (PID + start-time
+// fingerprint) into the session state so liveness checks can later detect an
+// ACTIVE session whose agent exited without firing a SessionStop hook. The hook
+// runs as a short-lived child of the agent, so proclive.ResolveOwner walks up
+// past our own binary and any shells to the long-lived agent process.
+//
+// It is best-effort and re-run on every turn start: if the owner can't be
+// resolved (unsupported platform, transient-only ancestry) the field is cleared
+// and liveness degrades to the inactivity timeout; re-resolving each turn keeps
+// the fingerprint current across agent restarts.
+func captureSessionOwner(state *SessionState) {
+	// Clear first: a failed resolve must never leave a stale owner from an
+	// earlier turn. Otherwise a now-live session (agent restarted with a new
+	// PID) could still carry a dead PID and be wrongly finalized as exited.
+	state.Owner = nil
+	if owner, ok := proclive.ResolveOwner(); ok {
+		state.Owner = &owner
 	}
 }
 
@@ -2762,6 +2813,17 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		return 1 // Count as error - all checkpoints will be skipped
 	}
 	defer repo.Close()
+	policy, err := readLocalCheckpointPolicy(logCtx, repo)
+	if err != nil {
+		warnOrLogCheckpointPolicyReadFailure(logCtx, err)
+		state.TurnCheckpointIDs = nil
+		return 1
+	}
+	if !checkpointpolicy.CanSatisfyPolicy(policy) {
+		warnIfCheckpointPolicyNeedsUpgrade(logCtx, policy)
+		state.TurnCheckpointIDs = nil
+		return 1
+	}
 
 	prompts := readPromptsFromShadowBranch(ctx, repo, state)
 	if len(prompts) == 0 {
@@ -2804,7 +2866,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		)
 		return 1 // Count as error - all checkpoints will be skipped
 	}
-	store := stores.Primary
+	store := stores.Persistent
 
 	precomputed := precomputeTranscriptBlobsForFinalize(logCtx, repo, redactedTranscript, state)
 
@@ -2820,7 +2882,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			continue
 		}
 
-		updateOpts := checkpoint.UpdateCommittedOptions{
+		updateOpts := checkpoint.UpdateOptions{
 			CheckpointID:     cpID,
 			SessionID:        state.SessionID,
 			Transcript:       redactedTranscript,
@@ -2830,7 +2892,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			PrecomputedBlobs: precomputed,
 		}
 
-		updateErr := store.UpdateCommitted(ctx, updateOpts)
+		updateErr := store.Write(ctx, checkpoint.SessionTranscript(updateOpts))
 		if updateErr != nil {
 			logging.Warn(logCtx, "finalize: failed to update checkpoint",
 				slog.String("checkpoint_id", cpIDStr),
@@ -2893,17 +2955,6 @@ func filesChangedInCommitFallback(ctx context.Context, headTree, parentTree *obj
 	return result
 }
 
-// subtractFiles returns files that are NOT in the exclude set.
-func subtractFiles(files []string, exclude map[string]struct{}) []string {
-	var remaining []string
-	for _, f := range files {
-		if _, excluded := exclude[f]; !excluded {
-			remaining = append(remaining, f)
-		}
-	}
-	return remaining
-}
-
 // carryForwardToNewShadowBranch creates a new shadow branch at the current HEAD
 // containing the remaining uncommitted files and all session metadata.
 // This enables the next commit to get its own unique checkpoint.
@@ -2929,7 +2980,7 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 	// Including the transcript would cause sessionHasNewContent to always return true
 	// because CheckpointTranscriptStart is reset to 0 for carry-forward.
 	writeCtx, carryForwardWriteSpan := perf.Start(ctx, "write_carry_forward_shadow")
-	result, err := stores.Temporary().WriteTemporary(writeCtx, checkpoint.WriteTemporaryOptions{
+	result, err := stores.Ephemeral().Write(writeCtx, checkpoint.Step{
 		SessionID:         state.SessionID,
 		BaseCommit:        state.BaseCommit,
 		WorktreeID:        state.WorktreeID,

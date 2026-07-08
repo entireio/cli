@@ -67,9 +67,3 @@ func AppendInvestigateEnv(base []string, opts AppendOptions) []string {
 		EnvStartingSHA+"="+opts.StartingSHA,
 	)
 }
-
-// IsInvestigateEnvEntry reports whether kv is a "KEY=VALUE" entry whose key
-// is one of the ENTIRE_INVESTIGATE_* contract variables.
-func IsInvestigateEnvEntry(kv string) bool {
-	return provenance.IsInvestigateEntry(kv)
-}

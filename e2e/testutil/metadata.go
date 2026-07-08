@@ -40,19 +40,19 @@ type SessionRef struct {
 }
 
 type SessionMetadata struct {
-	CLIVersion         string      `json:"cli_version"`
-	CheckpointID       string      `json:"checkpoint_id"`
-	SessionID          string      `json:"session_id"`
-	Strategy           string      `json:"strategy"`
-	CreatedAt          time.Time   `json:"created_at"`
-	Branch             string      `json:"branch"`
-	Agent              string      `json:"agent"`
-	Model              string      `json:"model"`
-	CheckpointsCount   int         `json:"checkpoints_count"`
-	FilesTouched       []string    `json:"files_touched"`
-	TokenUsage         TokenUsage  `json:"token_usage"`
-	InitialAttribution Attribution `json:"initial_attribution"`
-	TranscriptPath     string      `json:"transcript_path"`
+	CLIVersion       string      `json:"cli_version"`
+	CheckpointID     string      `json:"checkpoint_id"`
+	SessionID        string      `json:"session_id"`
+	Strategy         string      `json:"strategy"`
+	CreatedAt        time.Time   `json:"created_at"`
+	Branch           string      `json:"branch"`
+	Agent            string      `json:"agent"`
+	Model            string      `json:"model"`
+	CheckpointsCount int         `json:"checkpoints_count"`
+	FilesTouched     []string    `json:"files_touched"`
+	TokenUsage       TokenUsage  `json:"token_usage"`
+	Attribution      Attribution `json:"initial_attribution"`
+	TranscriptPath   string      `json:"transcript_path"`
 
 	// CheckpointTranscriptStart is the transcript.jsonl line offset where this
 	// checkpoint's contributions begin. For the first checkpoint in a session

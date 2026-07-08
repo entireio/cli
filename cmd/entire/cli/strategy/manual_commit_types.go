@@ -44,6 +44,7 @@ type CheckpointInfo struct {
 	ToolUseID        string          `json:"tool_use_id,omitempty"`
 	SessionCount     int             `json:"session_count,omitempty"` // Number of sessions (1 if omitted)
 	SessionIDs       []string        `json:"session_ids,omitempty"`   // All session IDs in this checkpoint
+	Imported         bool            `json:"imported,omitempty"`      // True for read-only imported (commit-less) checkpoints
 }
 
 // CondenseResult contains the result of a session condensation operation.

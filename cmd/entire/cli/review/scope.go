@@ -90,7 +90,7 @@ func ComputeScopeStats(ctx context.Context, repo *git.Repository, baseOverride s
 		}
 		baseRef = baseOverride
 	} else {
-		baseRef, err = detectScopeBaseRef(ctx, repo)
+		baseRef, err = fallbackScopeRef(repo)
 		if err != nil {
 			return ScopeStats{}, fmt.Errorf("detect scope base ref: %w", err)
 		}
@@ -122,9 +122,22 @@ func ComputeScopeStats(ctx context.Context, repo *git.Repository, baseOverride s
 	}, nil
 }
 
-// detectScopeBaseRef returns the mainline ref the review should be scoped
-// against, walking the fallback chain origin/HEAD → origin/main →
-// origin/master → main → master and returning the first that exists.
+// repoWorktreePath returns the working-tree path for repo, or an error if the
+// repo is bare or its worktree can't be resolved. ComputeScopeStats uses this
+// as the cwd for the runGit invocations in countCommits / countFilesChanged /
+// countUncommitted.
+func repoWorktreePath(repo *git.Repository) (string, error) {
+	wt, err := repo.Worktree()
+	if err != nil {
+		return "", fmt.Errorf("resolve worktree: %w", err)
+	}
+	return wt.Filesystem().Root(), nil
+}
+
+// fallbackScopeRef returns the mainline ref the review should be scoped
+// against: the first existing ref from the fallback chain origin/HEAD →
+// origin/main → origin/master → main → master. Returns an error naming the
+// tried refs if none exist.
 //
 // A previous implementation tried to be clever: it picked the merged-into-HEAD
 // branch with the most recent committerdate, on the theory that stacked PRs
@@ -141,25 +154,6 @@ func ComputeScopeStats(ctx context.Context, repo *git.Repository, baseOverride s
 // Stacked PR review is now served by the explicit `--base <ref>` flag at
 // the command surface, not an inference. The default stays predictable
 // (always mainline); the override is explicit when users actually want it.
-func detectScopeBaseRef(_ context.Context, repo *git.Repository) (string, error) {
-	return fallbackScopeRef(repo)
-}
-
-// repoWorktreePath returns the working-tree path for repo, or an error if the
-// repo is bare or its worktree can't be resolved. ComputeScopeStats uses this
-// as the cwd for the runGit invocations in countCommits / countFilesChanged /
-// countUncommitted.
-func repoWorktreePath(repo *git.Repository) (string, error) {
-	wt, err := repo.Worktree()
-	if err != nil {
-		return "", fmt.Errorf("resolve worktree: %w", err)
-	}
-	return wt.Filesystem().Root(), nil
-}
-
-// fallbackScopeRef returns the first existing ref from the fallback chain:
-// origin/HEAD → origin/main → origin/master → main → master.
-// Returns an error naming the tried refs if none exist.
 func fallbackScopeRef(repo *git.Repository) (string, error) {
 	chain := []string{"origin/HEAD", "origin/main", "origin/master", "main", "master"}
 	for _, name := range chain {

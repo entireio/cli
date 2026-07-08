@@ -234,6 +234,28 @@ func TestCheckpointSearchIsVisibleButTopLevelSearchIsHidden(t *testing.T) {
 	}
 }
 
+func TestCheckpointPolicyCommandIsHiddenDuringDevelopment(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+
+	checkpointPolicy, remaining, err := root.Find([]string{"checkpoint", "policy"})
+	if err != nil {
+		t.Fatalf("find checkpoint policy command: %v", err)
+	}
+	if len(remaining) != 0 || checkpointPolicy.Use != "policy" {
+		t.Fatalf("checkpoint policy resolved to %q with remaining args %v", checkpointPolicy.Use, remaining)
+	}
+	if !checkpointPolicy.Hidden {
+		t.Fatal("checkpoint policy should be hidden while it is in active development")
+	}
+
+	topLevelPolicy, remaining, err := root.Find([]string{"policy"})
+	if err == nil && len(remaining) == 0 && topLevelPolicy.Use == "policy" {
+		t.Fatal("top-level policy command should not remain after moving policy under checkpoint")
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

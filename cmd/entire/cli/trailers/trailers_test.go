@@ -128,18 +128,6 @@ func TestParseMetadata(t *testing.T) {
 	}
 }
 
-func TestFormatTaskMetadata(t *testing.T) {
-	message := "Task: Implement feature X"
-	taskMetadataDir := ".entire/metadata/2025-01-28-abc123/tasks/toolu_xyz"
-
-	expected := "Task: Implement feature X\n\nEntire-Metadata-Task: .entire/metadata/2025-01-28-abc123/tasks/toolu_xyz\n"
-	got := FormatTaskMetadata(message, taskMetadataDir)
-
-	if got != expected {
-		t.Errorf("FormatTaskMetadata() = %q, want %q", got, expected)
-	}
-}
-
 func TestParseTaskMetadata(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -175,52 +163,6 @@ func TestParseTaskMetadata(t *testing.T) {
 			}
 			if gotDir != tt.wantDir {
 				t.Errorf("ParseTaskMetadata() dir = %v, want %v", gotDir, tt.wantDir)
-			}
-		})
-	}
-}
-
-func TestParseBaseCommit(t *testing.T) {
-	tests := []struct {
-		name      string
-		message   string
-		wantSHA   string
-		wantFound bool
-	}{
-		{
-			name:      "valid 40-char SHA",
-			message:   "Checkpoint\n\nBase-Commit: abc123def456789012345678901234567890abcd\n",
-			wantSHA:   "abc123def456789012345678901234567890abcd",
-			wantFound: true,
-		},
-		{
-			name:      "no trailer",
-			message:   "Simple commit message",
-			wantSHA:   "",
-			wantFound: false,
-		},
-		{
-			name:      "short hash rejected",
-			message:   "Message\n\nBase-Commit: abc123\n",
-			wantSHA:   "",
-			wantFound: false,
-		},
-		{
-			name:      "with multiple trailers",
-			message:   "Session\n\nBase-Commit: 0123456789abcdef0123456789abcdef01234567\nEntire-Strategy: linear-shadow\n",
-			wantSHA:   "0123456789abcdef0123456789abcdef01234567",
-			wantFound: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotSHA, gotFound := ParseBaseCommit(tt.message)
-			if gotFound != tt.wantFound {
-				t.Errorf("ParseBaseCommit() found = %v, want %v", gotFound, tt.wantFound)
-			}
-			if gotSHA != tt.wantSHA {
-				t.Errorf("ParseBaseCommit() sha = %v, want %v", gotSHA, tt.wantSHA)
 			}
 		})
 	}
@@ -272,61 +214,6 @@ func TestParseSession(t *testing.T) {
 	}
 }
 
-func TestParseAllSessions(t *testing.T) {
-	tests := []struct {
-		name    string
-		message string
-		want    []string
-	}{
-		{
-			name:    "single session trailer",
-			message: "Update logic\n\nEntire-Session: 2025-12-10-abc123def\n",
-			want:    []string{"2025-12-10-abc123def"},
-		},
-		{
-			name:    "no trailer",
-			message: "Simple commit message",
-			want:    nil,
-		},
-		{
-			name:    "multiple session trailers",
-			message: "Merge commit\n\nEntire-Session: session-1\nEntire-Session: session-2\nEntire-Session: session-3\n",
-			want:    []string{"session-1", "session-2", "session-3"},
-		},
-		{
-			name:    "duplicate session IDs are deduplicated",
-			message: "Merge\n\nEntire-Session: session-1\nEntire-Session: session-2\nEntire-Session: session-1\n",
-			want:    []string{"session-1", "session-2"},
-		},
-		{
-			name:    "trailers with extra spaces",
-			message: "Message\n\nEntire-Session:   session-a   \nEntire-Session:  session-b \n",
-			want:    []string{"session-a", "session-b"},
-		},
-		{
-			name:    "mixed with other trailers",
-			message: "Merge\n\nEntire-Session: session-1\nEntire-Metadata: .entire/metadata/xyz\nEntire-Session: session-2\n",
-			want:    []string{"session-1", "session-2"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ParseAllSessions(tt.message)
-			if len(got) != len(tt.want) {
-				t.Errorf("ParseAllSessions() returned %d items, want %d", len(got), len(tt.want))
-				t.Errorf("got: %v, want: %v", got, tt.want)
-				return
-			}
-			for i, wantID := range tt.want {
-				if got[i] != wantID {
-					t.Errorf("ParseAllSessions()[%d] = %v, want %v", i, got[i], wantID)
-				}
-			}
-		})
-	}
-}
-
 func TestParseAllCheckpoints(t *testing.T) {
 	t.Parallel()
 
@@ -365,6 +252,11 @@ func TestParseAllCheckpoints(t *testing.T) {
 			message: "Merge\n\nEntire-Checkpoint: a1b2c3d4e5f6\nEntire-Session: session-1\nEntire-Checkpoint: b2c3d4e5f6a1\n",
 			want:    []string{"a1b2c3d4e5f6", "b2c3d4e5f6a1"},
 		},
+		{
+			name:    "mixed hex and ULID checkpoint trailers",
+			message: "Squash (#3)\n\n* legacy\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n* new\n\nEntire-Checkpoint: 01KVBJCWYA4YW6J5M9GP655HZN\n",
+			want:    []string{"a1b2c3d4e5f6", "01KVBJCWYA4YW6J5M9GP655HZN"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -398,6 +290,12 @@ func TestParseCheckpoint(t *testing.T) {
 			name:      "valid checkpoint trailer",
 			message:   "Add feature\n\nEntire-Checkpoint: a1b2c3d4e5f6\n",
 			wantID:    "a1b2c3d4e5f6",
+			wantFound: true,
+		},
+		{
+			name:      "valid ULID checkpoint trailer",
+			message:   "Add feature\n\nEntire-Checkpoint: 01KVBJCWYA4YW6J5M9GP655HZN\n",
+			wantID:    "01KVBJCWYA4YW6J5M9GP655HZN",
 			wantFound: true,
 		},
 		{

@@ -14,18 +14,17 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
-	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
@@ -49,12 +48,12 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected()
-	store, err := s.getCheckpointStore(ctx, repo)
+	store, err := s.getPersistentStore(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
 
-	committed, err := store.ListCommitted(ctx)
+	committed, err := store.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list committed checkpoints: %w", err)
 	}
@@ -71,12 +70,12 @@ func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointI
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected()
-	store, err := s.getCheckpointStore(ctx, repo)
+	store, err := s.getPersistentStore(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
 
-	summary, err := cpkg.ReadCommittedCheckpoint(ctx, store, checkpointID)
+	summary, err := cpkg.ReadCheckpoint(ctx, store, checkpointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
@@ -135,7 +134,7 @@ func checkpointStepCount(s *SessionState) int {
 // CondenseSession condenses a session's shadow branch to permanent storage.
 // checkpointID is the 12-hex-char value from the Entire-Checkpoint trailer.
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/
-// Uses checkpoint.GitStore.WriteCommitted for the git operations.
+// Uses checkpoint.PersistentStore.Write with a checkpoint.Session request for persistent storage.
 //
 // For mid-session commits (no Stop/SaveStep called yet), the shadow branch may not exist.
 // In this case, data is extracted from the live transcript instead.
@@ -147,6 +146,14 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	condenseStart := time.Now()
+	policy, err := readLocalCheckpointPolicy(logCtx, repo)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint policy could not be read: %w", err)
+	}
+	if !checkpointpolicy.CanSatisfyPolicy(policy) {
+		warnIfCheckpointPolicyNeedsUpgrade(logCtx, policy)
+		return nil, errors.New("checkpoint policy cannot be satisfied by this Entire CLI")
+	}
 
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	ref, hasShadowBranch := resolveShadowRef(repo, shadowBranchName, o.shadowRef)
@@ -177,6 +184,10 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// while keeping checkpoint metadata scoped to CheckpointTranscriptStart.
 	if backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, sessionData.Transcript, sessionData.TokenUsage); backfillUsage != nil {
 		state.TokenUsage = backfillUsage
+	}
+
+	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.CheckpointTokenUsage) {
+		sessionData.TokenUsage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
 	}
 
 	// Backfill the model from the transcript for agents that don't report it via
@@ -215,7 +226,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		return skipped, nil
 	}
 
-	store, err := s.getCheckpointStore(ctx, repo)
+	store, err := s.getPersistentStore(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +266,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// pre-push rewrite path, never here.
 	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(sessionData.SkillEvents, state.TurnID))
 
-	writeOpts := cpkg.WriteCommittedOptions{
+	writeOpts := cpkg.WriteOptions{
 		CheckpointID:                checkpointID,
 		SessionID:                   state.SessionID,
 		Strategy:                    StrategyNameManualCommit,
@@ -276,7 +287,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TokenUsage:                  sessionData.TokenUsage,
 		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),
-		InitialAttribution:          attribution,
+		Attribution:                 attribution,
 		PromptAttributionsJSON:      marshalPromptAttributionsIncludingPending(state),
 		Summary:                     summary,
 		Kind:                        string(state.Kind),
@@ -290,7 +301,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
-	if err := store.WriteCommitted(writeCtx, writeOpts); err != nil {
+	if err := store.Write(writeCtx, cpkg.Session(writeOpts)); err != nil {
 		writeCommittedSpan.RecordError(err)
 		writeCommittedSpan.End()
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)
@@ -533,7 +544,7 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 // The return type is the summarize.Generator interface rather than the concrete
 // adapter pointer so callers can't accidentally hold a non-nil interface that
 // wraps a nil pointer (the classic Go nil-interface footgun).
-func buildSummaryGenerator(ctx context.Context) summarize.Generator { //nolint:ireturn,nolintlint // interface return is intentional for provider abstraction and nil-safety; nolintlint flagged as "unused" under some linter versions but ireturn fires in others
+func buildSummaryGenerator(ctx context.Context) summarize.Generator {
 	s, err := settings.Load(ctx)
 	if err != nil {
 		// Warn (not Debug): this is the auto-summarize hot path on every commit.
@@ -585,7 +596,7 @@ func buildSummaryGenerator(ctx context.Context) summarize.Generator { //nolint:i
 // marshalPromptAttributionsIncludingPending builds the complete prompt attribution slice
 // (including PendingPromptAttribution for mid-turn commits) and encodes it to JSON.
 // This must stay consistent with the slice used by calculateSessionAttributions so the
-// persisted diagnostics match the computed InitialAttribution.
+// persisted diagnostics match the computed Attribution.
 func marshalPromptAttributionsIncludingPending(state *SessionState) json.RawMessage {
 	pas := make([]PromptAttribution, len(state.PromptAttributions), len(state.PromptAttributions)+1)
 	copy(pas, state.PromptAttributions)
@@ -680,7 +691,7 @@ type attributionOpts struct {
 	allAgentFiles         map[string]struct{} // Union of all sessions' FilesTouched (nil = single-session)
 }
 
-func calculateSessionAttributions(ctx context.Context, repo *git.Repository, shadowRef *plumbing.Reference, sessionData *ExtractedSessionData, state *SessionState, opts ...attributionOpts) *cpkg.InitialAttribution {
+func calculateSessionAttributions(ctx context.Context, repo *git.Repository, shadowRef *plumbing.Reference, sessionData *ExtractedSessionData, state *SessionState, opts ...attributionOpts) *cpkg.Attribution {
 	// Calculate initial attribution using accumulated prompt attribution data.
 	// This uses user edits captured at each prompt start (before agent works),
 	// plus any user edits after the final checkpoint (shadow → head).
@@ -1005,135 +1016,6 @@ func countTranscriptItems(agentType types.AgentType, content string) int {
 	return len(allLines)
 }
 
-// extractUserPrompts extracts all user prompts from transcript content.
-// Returns prompts with IDE context tags stripped (e.g., <ide_opened_file>).
-func extractUserPrompts(agentType types.AgentType, content string) []string {
-	if content == "" {
-		return nil
-	}
-
-	// Droid has its own envelope format — use its parser to normalize first
-	if agentType == agent.AgentTypeFactoryAIDroid {
-		lines, _, err := factoryaidroid.ParseDroidTranscriptFromBytes([]byte(content), 0)
-		if err != nil {
-			return nil
-		}
-		var prompts []string
-		for _, line := range lines {
-			if line.Type != transcript.TypeUser {
-				continue
-			}
-			if text := transcript.ExtractUserContent(line.Message); text != "" {
-				if stripped := textutil.StripIDEContextTags(text); stripped != "" {
-					prompts = append(prompts, stripped)
-				}
-			}
-		}
-		return prompts
-	}
-
-	// OpenCode uses JSONL with a different per-line schema than Claude Code
-	if agentType == agent.AgentTypeOpenCode {
-		prompts, err := opencode.ExtractAllUserPrompts([]byte(content))
-		if err == nil && len(prompts) > 0 {
-			cleaned := make([]string, 0, len(prompts))
-			for _, prompt := range prompts {
-				if stripped := textutil.StripIDEContextTags(prompt); stripped != "" {
-					cleaned = append(cleaned, stripped)
-				}
-			}
-			return cleaned
-		}
-		return nil
-	}
-
-	// Try Gemini format first if agentType is Gemini, or as fallback if Unknown
-	if agentType == agent.AgentTypeGemini || agentType == agent.AgentTypeUnknown {
-		prompts, err := geminicli.ExtractAllUserPrompts([]byte(content))
-		if err == nil && len(prompts) > 0 {
-			// Strip IDE context tags for consistency with Claude Code handling
-			cleaned := make([]string, 0, len(prompts))
-			for _, prompt := range prompts {
-				if stripped := textutil.StripIDEContextTags(prompt); stripped != "" {
-					cleaned = append(cleaned, stripped)
-				}
-			}
-			return cleaned
-		}
-		// If agentType is explicitly Gemini but parsing failed, return nil
-		if agentType == agent.AgentTypeGemini {
-			return nil
-		}
-		// Otherwise fall through to JSONL parsing for Unknown type
-	}
-
-	// Claude Code and other JSONL-based agents
-	return extractUserPromptsFromLines(strings.Split(content, "\n"))
-}
-
-// extractUserPromptsFromLines extracts user prompts from JSONL transcript lines.
-// IDE-injected context tags (like <ide_opened_file>) are stripped from the results.
-func extractUserPromptsFromLines(lines []string) []string {
-	var prompts []string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		var entry map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
-		}
-
-		// Check for user message:
-		// - Claude Code uses "type": "human" or "type": "user"
-		// - Cursor uses "role": "user"
-		msgType, _ := entry["type"].(string) //nolint:errcheck // type assertion on interface{} from JSON
-		msgRole, _ := entry["role"].(string) //nolint:errcheck // type assertion on interface{} from JSON
-		isUser := msgType == "human" || msgType == "user" || msgRole == "user"
-		if !isUser {
-			continue
-		}
-
-		// Extract message content
-		message, ok := entry["message"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		// Handle string content
-		if content, ok := message["content"].(string); ok && content != "" {
-			cleaned := textutil.StripIDEContextTags(content)
-			if cleaned != "" {
-				prompts = append(prompts, cleaned)
-			}
-			continue
-		}
-
-		// Handle array content (e.g., multiple text blocks from VSCode)
-		if arr, ok := message["content"].([]interface{}); ok {
-			var texts []string
-			for _, item := range arr {
-				if m, ok := item.(map[string]interface{}); ok {
-					if m["type"] == "text" {
-						if text, ok := m["text"].(string); ok {
-							texts = append(texts, text)
-						}
-					}
-				}
-			}
-			if len(texts) > 0 {
-				cleaned := textutil.StripIDEContextTags(strings.Join(texts, "\n\n"))
-				if cleaned != "" {
-					prompts = append(prompts, cleaned)
-				}
-			}
-		}
-	}
-	return prompts
-}
-
 // splitPromptContent splits prompt.txt content on the "\n\n---\n\n" separator.
 // Returns nil if content is empty.
 func splitPromptContent(content string) []string {
@@ -1190,7 +1072,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	}
 	defer repo.Close()
 
-	checkpointID, err := id.Generate()
+	checkpointID, err := cpkg.GenerateCheckpointID(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to generate checkpoint ID: %w", err)
 	}
@@ -1232,6 +1114,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		)
 
 		state.StepCount = 0
+		state.CheckpointTokenUsage = nil
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.CheckpointTranscriptSize = int64(len(result.Transcript))
 		state.Phase = session.PhaseIdle
@@ -1289,14 +1172,6 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	}
 	defer repo.Close()
 
-	checkpointID, err := id.Generate()
-	if err != nil {
-		logging.Warn(logCtx, "eager condense: failed to generate checkpoint ID",
-			slog.String("error", err.Error()),
-		)
-		return nil // fail-open
-	}
-
 	var shadowBranchName string
 	var didCondense bool
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
@@ -1328,6 +1203,18 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			return nil
 		}
 
+		// Mint the checkpoint ID only now that condensation is actually going to
+		// run — the skip paths above (files-touched, no steps, no shadow branch)
+		// return before this, so a no-op session stop no longer pays the ID mint
+		// (and its checkpoints-config load).
+		checkpointID, genErr := cpkg.GenerateCheckpointID(logCtx)
+		if genErr != nil {
+			logging.Warn(logCtx, "eager condense: failed to generate checkpoint ID",
+				slog.String("error", genErr.Error()),
+			)
+			return ErrMutationSkip // fail-open; PostCommit retries
+		}
+
 		result, condErr := s.CondenseSession(ctx, repo, checkpointID, state, nil)
 		if condErr != nil {
 			logging.Warn(logCtx, "eager condense on session stop failed, PostCommit will retry",
@@ -1346,6 +1233,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		}
 
 		state.StepCount = 0
+		state.CheckpointTokenUsage = nil
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.LastCheckpointID = checkpointID
 		state.LastCheckpointCommitHash = state.BaseCommit

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1138,6 +1139,129 @@ func TestHandleLifecycleTurnStart_WritesPromptContent(t *testing.T) {
 	if string(data) != "create a file called hello.txt" {
 		t.Errorf("expected prompt content 'create a file called hello.txt', got %q", string(data))
 	}
+}
+
+// TestHandleLifecycleTurnEnd_PrefersEventTokenUsage verifies that when the
+// hook payload reports per-turn token usage (e.g., Cursor's stop hook),
+// the lifecycle handler uses those numbers verbatim instead of falling back
+// to transcript-based computation. This is the only way Cursor sessions get
+// non-zero token data, since Cursor's JSONL transcript has no usage fields.
+func TestHandleLifecycleTurnEnd_PrefersEventTokenUsage(t *testing.T) {
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	// Modify a file so SaveStep actually runs.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "init.txt"), []byte("changed"), 0o600))
+
+	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
+
+	sessionID := "test-prefer-event-tokens"
+	ag := newMockAgent()
+	ag.transcriptData = []byte(`{"type":"user","message":"test"}` + "\n")
+
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+		TokenUsage: &agent.TokenUsage{
+			InputTokens:         200,
+			CacheReadTokens:     4000,
+			CacheCreationTokens: 800,
+			OutputTokens:        50,
+			APICallCount:        1,
+		},
+	}
+
+	require.NoError(t, handleLifecycleTurnEnd(context.Background(), ag, event))
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.NotNil(t, state.TokenUsage, "session state TokenUsage must be populated from event.TokenUsage")
+	require.Equal(t, 200, state.TokenUsage.InputTokens, "InputTokens must match event-provided value, not transcript-derived")
+	require.Equal(t, 4000, state.TokenUsage.CacheReadTokens)
+	require.Equal(t, 800, state.TokenUsage.CacheCreationTokens)
+	require.Equal(t, 50, state.TokenUsage.OutputTokens)
+	require.Equal(t, 1, state.TokenUsage.APICallCount)
+}
+
+type mockContextInjectorAgent struct {
+	mockLifecycleAgent
+}
+
+var _ agent.ContextInjector = (*mockContextInjectorAgent)(nil)
+
+func (m *mockContextInjectorAgent) InjectionEvent() agent.EventType { return agent.TurnStart }
+
+func (m *mockContextInjectorAgent) RenderContextInjection(agent.ContextInjection) ([]byte, error) {
+	return nil, nil
+}
+
+func addGitHubOriginForLifecycleTest(t *testing.T, repoDir string) {
+	t.Helper()
+	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@github.com:acme/repo.git")
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+}
+
+func TestHandleLifecycleTurnStart_ContextInjectionUnknownCacheDoesNotMarkDecided(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir().
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	addGitHubOriginForLifecycleTest(t, tmpDir)
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	ag := &mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent()}
+	sessionID := "test-trail-inject-unknown"
+	event := &agent.Event{Type: agent.TurnStart, SessionID: sessionID, Prompt: "hello", Timestamp: time.Now()}
+
+	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, event))
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.False(t, state.ContextInjectionDecided, "unknown/missing cache should not permanently suppress later injection")
+}
+
+func TestHandleLifecycleTurnStart_ContextInjectionFreshTrueMarksDecided(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir().
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	addGitHubOriginForLifecycleTest(t, tmpDir)
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	require.NoError(t, saveTrailsEnabledForRepo(context.Background(), true))
+
+	ag := &mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent()}
+	sessionID := "test-trail-inject-true"
+	scope, err := currentTrailEnablementScope(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, saveTrailEnablementScopeHint(context.Background(), sessionID, scope))
+	event := &agent.Event{Type: agent.TurnStart, SessionID: sessionID, Prompt: "hello", Timestamp: time.Now()}
+
+	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, event))
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.True(t, state.ContextInjectionDecided, "fresh true cache should make a final injection decision")
 }
 
 func TestHandleLifecycleTurnStart_RecordsGenericSkillSlashEvent(t *testing.T) {

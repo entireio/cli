@@ -474,7 +474,7 @@ func TestShadowStrategy_GetRewindPoints_MultiSessionFallsBackToEarlierPrompt(t *
 
 	// Earlier session carries the only usable prompt.
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	require.NoError(t, store.WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
+	require.NoError(t, store.Write(t.Context(), checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    "session-earlier",
 		Strategy:     "manual-commit",
@@ -484,7 +484,7 @@ func TestShadowStrategy_GetRewindPoints_MultiSessionFallsBackToEarlierPrompt(t *
 		AuthorEmail:  "test@test.com",
 	}))
 	// Latest session has no prompt at all.
-	require.NoError(t, store.WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
+	require.NoError(t, store.Write(t.Context(), checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    "session-latest",
 		Strategy:     "manual-commit",
@@ -1330,6 +1330,13 @@ func TestSessionState_TokenUsagePersistence(t *testing.T) {
 			OutputTokens:        500,
 			APICallCount:        5,
 		},
+		CheckpointTokenUsage: &agent.TokenUsage{
+			InputTokens:         100,
+			CacheCreationTokens: 20,
+			CacheReadTokens:     30,
+			OutputTokens:        50,
+			APICallCount:        1,
+		},
 	}
 
 	// Save state
@@ -1373,6 +1380,26 @@ func TestSessionState_TokenUsagePersistence(t *testing.T) {
 	}
 	if loaded.TokenUsage.APICallCount != state.TokenUsage.APICallCount {
 		t.Errorf("TokenUsage.APICallCount = %d, want %d", loaded.TokenUsage.APICallCount, state.TokenUsage.APICallCount)
+	}
+
+	// Verify CheckpointTokenUsage
+	if loaded.CheckpointTokenUsage == nil {
+		t.Fatal("CheckpointTokenUsage should be persisted, got nil")
+	}
+	if loaded.CheckpointTokenUsage.InputTokens != state.CheckpointTokenUsage.InputTokens {
+		t.Errorf("CheckpointTokenUsage.InputTokens = %d, want %d", loaded.CheckpointTokenUsage.InputTokens, state.CheckpointTokenUsage.InputTokens)
+	}
+	if loaded.CheckpointTokenUsage.CacheCreationTokens != state.CheckpointTokenUsage.CacheCreationTokens {
+		t.Errorf("CheckpointTokenUsage.CacheCreationTokens = %d, want %d", loaded.CheckpointTokenUsage.CacheCreationTokens, state.CheckpointTokenUsage.CacheCreationTokens)
+	}
+	if loaded.CheckpointTokenUsage.CacheReadTokens != state.CheckpointTokenUsage.CacheReadTokens {
+		t.Errorf("CheckpointTokenUsage.CacheReadTokens = %d, want %d", loaded.CheckpointTokenUsage.CacheReadTokens, state.CheckpointTokenUsage.CacheReadTokens)
+	}
+	if loaded.CheckpointTokenUsage.OutputTokens != state.CheckpointTokenUsage.OutputTokens {
+		t.Errorf("CheckpointTokenUsage.OutputTokens = %d, want %d", loaded.CheckpointTokenUsage.OutputTokens, state.CheckpointTokenUsage.OutputTokens)
+	}
+	if loaded.CheckpointTokenUsage.APICallCount != state.CheckpointTokenUsage.APICallCount {
+		t.Errorf("CheckpointTokenUsage.APICallCount = %d, want %d", loaded.CheckpointTokenUsage.APICallCount, state.CheckpointTokenUsage.APICallCount)
 	}
 }
 
@@ -2126,96 +2153,10 @@ func TestCountTranscriptItems(t *testing.T) {
 	}
 }
 
-// TestExtractUserPrompts tests extraction of user prompts from different transcript formats.
-func TestExtractUserPrompts(t *testing.T) {
-	tests := []struct {
-		name      string
-		agentType types.AgentType
-		content   string
-		expected  []string
-	}{
-		{
-			name:      "Gemini single user prompt",
-			agentType: agent.AgentTypeGemini,
-			content: `{
-				"messages": [
-					{"type": "user", "content": "Create a file called test.txt"}
-				]
-			}`,
-			expected: []string{"Create a file called test.txt"},
-		},
-		{
-			name:      "Gemini multiple user prompts",
-			agentType: agent.AgentTypeGemini,
-			content: `{
-				"messages": [
-					{"type": "user", "content": "First prompt"},
-					{"type": "gemini", "content": "Response 1"},
-					{"type": "user", "content": "Second prompt"},
-					{"type": "gemini", "content": "Response 2"}
-				]
-			}`,
-			expected: []string{"First prompt", "Second prompt"},
-		},
-		{
-			name:      "Gemini no user messages",
-			agentType: agent.AgentTypeGemini,
-			content: `{
-				"messages": [
-					{"type": "gemini", "content": "Hello!"}
-				]
-			}`,
-			expected: nil,
-		},
-		{
-			name:      "Claude Code JSONL with user messages",
-			agentType: agent.AgentTypeClaudeCode,
-			content: `{"type":"user","message":{"content":"Hello"}}
-{"type":"assistant","message":{"content":"Hi"}}
-{"type":"user","message":{"content":"Goodbye"}}`,
-			expected: []string{"Hello", "Goodbye"},
-		},
-		{
-			name:      "empty string",
-			agentType: agent.AgentTypeClaudeCode,
-			content:   "",
-			expected:  nil,
-		},
-		{
-			name:      "Gemini array content (real format)",
-			agentType: agent.AgentTypeGemini,
-			content: `{
-				"messages": [
-					{"type": "user", "content": [{"text": "Create a file"}]},
-					{"type": "gemini", "content": "Done!"},
-					{"type": "user", "content": [{"text": "Edit the file"}]},
-					{"type": "gemini", "content": "Updated!"}
-				]
-			}`,
-			expected: []string{"Create a file", "Edit the file"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := extractUserPrompts(tt.agentType, tt.content)
-			if len(result) != len(tt.expected) {
-				t.Errorf("extractUserPrompts() returned %d prompts, want %d", len(result), len(tt.expected))
-				return
-			}
-			for i, prompt := range result {
-				if prompt != tt.expected[i] {
-					t.Errorf("prompt[%d] = %q, want %q", i, prompt, tt.expected[i])
-				}
-			}
-		})
-	}
-}
-
-// TestCondenseSession_IncludesInitialAttribution verifies that when manual-commit
-// condenses a session, it calculates InitialAttribution by comparing the shadow branch
+// TestCondenseSession_IncludesAttribution verifies that when manual-commit
+// condenses a session, it calculates Attribution by comparing the shadow branch
 // (agent work) to HEAD (what was committed).
-func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
+func TestCondenseSession_IncludesAttribution(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	repo, err := git.PlainOpen(dir)
@@ -2310,7 +2251,7 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Fatalf("loadSessionState() error = %v", err)
 	}
 
-	// Condense the session - this should calculate InitialAttribution
+	// Condense the session - this should calculate Attribution
 	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
 	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
 	if err != nil {
@@ -2322,7 +2263,7 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Errorf("CheckpointID = %q, want %q", result.CheckpointID, checkpointID)
 	}
 
-	// Read metadata from entire/checkpoints/v1 branch and verify InitialAttribution
+	// Read metadata from entire/checkpoints/v1 branch and verify Attribution
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
 		t.Fatalf("failed to get sessions branch: %v", err)
@@ -2338,7 +2279,7 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Fatalf("failed to get tree: %v", err)
 	}
 
-	// InitialAttribution is stored in session-level metadata (0/metadata.json), not root (0-based indexing)
+	// Attribution is stored in session-level metadata (0/metadata.json), not root (0-based indexing)
 	sessionMetadataPath := checkpointID.Path() + "/0/" + paths.MetadataFileName
 	metadataFile, err := tree.File(sessionMetadataPath)
 	if err != nil {
@@ -2350,9 +2291,9 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Fatalf("failed to read metadata.json: %v", err)
 	}
 
-	// Parse and verify InitialAttribution is present
+	// Parse and verify Attribution is present
 	var metadata struct {
-		InitialAttribution *struct {
+		Attribution *struct {
 			AgentLines      int     `json:"agent_lines"`
 			HumanAdded      int     `json:"human_added"`
 			HumanModified   int     `json:"human_modified"`
@@ -2365,40 +2306,40 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Fatalf("failed to parse metadata.json: %v", err)
 	}
 
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution should be present in session metadata.json for manual-commit")
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution should be present in session metadata.json for manual-commit")
 	}
 
 	// Verify the attribution values are reasonable
 	// Agent added new function, human added a comment line
 	// The exact line counts depend on how the diff algorithm interprets the changes
 	// (insertion vs modification), but we should have non-zero totals and reasonable percentages.
-	if metadata.InitialAttribution.TotalCommitted == 0 {
+	if metadata.Attribution.TotalCommitted == 0 {
 		t.Error("TotalCommitted should be > 0")
 	}
-	if metadata.InitialAttribution.AgentLines == 0 {
+	if metadata.Attribution.AgentLines == 0 {
 		t.Error("AgentLines should be > 0 (agent wrote code)")
 	}
 
 	// Human contribution should be captured in either HumanAdded or HumanModified
 	// When inserting lines in the middle of existing code, the diff algorithm may
 	// interpret it as a modification rather than a pure addition.
-	humanContribution := metadata.InitialAttribution.HumanAdded + metadata.InitialAttribution.HumanModified
+	humanContribution := metadata.Attribution.HumanAdded + metadata.Attribution.HumanModified
 	if humanContribution == 0 {
 		t.Error("Human contribution (HumanAdded + HumanModified) should be > 0")
 	}
 
-	if metadata.InitialAttribution.AgentPercentage <= 0 || metadata.InitialAttribution.AgentPercentage > 100 {
-		t.Errorf("AgentPercentage should be between 0-100, got %f", metadata.InitialAttribution.AgentPercentage)
+	if metadata.Attribution.AgentPercentage <= 0 || metadata.Attribution.AgentPercentage > 100 {
+		t.Errorf("AgentPercentage should be between 0-100, got %f", metadata.Attribution.AgentPercentage)
 	}
 
 	t.Logf("Attribution: agent=%d, human_added=%d, human_modified=%d, human_removed=%d, total=%d, percentage=%.1f%%",
-		metadata.InitialAttribution.AgentLines,
-		metadata.InitialAttribution.HumanAdded,
-		metadata.InitialAttribution.HumanModified,
-		metadata.InitialAttribution.HumanRemoved,
-		metadata.InitialAttribution.TotalCommitted,
-		metadata.InitialAttribution.AgentPercentage)
+		metadata.Attribution.AgentLines,
+		metadata.Attribution.HumanAdded,
+		metadata.Attribution.HumanModified,
+		metadata.Attribution.HumanRemoved,
+		metadata.Attribution.TotalCommitted,
+		metadata.Attribution.AgentPercentage)
 }
 
 // TestCondenseSession_AttributionWithoutShadowBranch verifies that when an agent
@@ -2517,7 +2458,7 @@ func TestCondenseSession_AttributionWithoutShadowBranch(t *testing.T) {
 	}
 
 	var metadata struct {
-		InitialAttribution *struct {
+		Attribution *struct {
 			AgentLines      int     `json:"agent_lines"`
 			HumanAdded      int     `json:"human_added"`
 			TotalCommitted  int     `json:"total_committed"`
@@ -2528,27 +2469,27 @@ func TestCondenseSession_AttributionWithoutShadowBranch(t *testing.T) {
 		t.Fatalf("failed to parse metadata: %v", err)
 	}
 
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution should be present even without shadow branch")
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution should be present even without shadow branch")
 	}
 
 	// Agent created all content (10 lines across 2 files), no human edits
-	if metadata.InitialAttribution.AgentLines == 0 {
+	if metadata.Attribution.AgentLines == 0 {
 		t.Error("AgentLines should be > 0 (agent created the file)")
 	}
-	if metadata.InitialAttribution.TotalCommitted == 0 {
+	if metadata.Attribution.TotalCommitted == 0 {
 		t.Error("TotalCommitted should be > 0")
 	}
-	if metadata.InitialAttribution.AgentPercentage <= 50 {
+	if metadata.Attribution.AgentPercentage <= 50 {
 		t.Errorf("AgentPercentage should be > 50%% (agent wrote all content), got %.1f%%",
-			metadata.InitialAttribution.AgentPercentage)
+			metadata.Attribution.AgentPercentage)
 	}
 
 	t.Logf("Attribution (no shadow branch): agent=%d, human_added=%d, total=%d, percentage=%.1f%%",
-		metadata.InitialAttribution.AgentLines,
-		metadata.InitialAttribution.HumanAdded,
-		metadata.InitialAttribution.TotalCommitted,
-		metadata.InitialAttribution.AgentPercentage)
+		metadata.Attribution.AgentLines,
+		metadata.Attribution.HumanAdded,
+		metadata.Attribution.TotalCommitted,
+		metadata.Attribution.AgentPercentage)
 }
 
 // TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent verifies attribution
@@ -2684,7 +2625,7 @@ func TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent(t *testi
 	}
 
 	var metadata struct {
-		InitialAttribution *struct {
+		Attribution *struct {
 			AgentLines      int     `json:"agent_lines"`
 			HumanAdded      int     `json:"human_added"`
 			TotalCommitted  int     `json:"total_committed"`
@@ -2695,11 +2636,11 @@ func TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent(t *testi
 		t.Fatalf("failed to parse metadata: %v", err)
 	}
 
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution should be present")
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution should be present")
 	}
 
-	attr := metadata.InitialAttribution
+	attr := metadata.Attribution
 	t.Logf("Attribution (mixed, no shadow): agent=%d, human_added=%d, total=%d, percentage=%.1f%%",
 		attr.AgentLines, attr.HumanAdded, attr.TotalCommitted, attr.AgentPercentage)
 
@@ -2717,78 +2658,6 @@ func TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent(t *testi
 	// Agent wrote 7/7 = 100%
 	if attr.AgentPercentage < 99.0 {
 		t.Errorf("AgentPercentage = %.1f%%, want ~100%% (pre-session human file excluded)", attr.AgentPercentage)
-	}
-}
-
-// TestExtractUserPromptsFromLines tests extraction of user prompts from JSONL format.
-func TestExtractUserPromptsFromLines(t *testing.T) {
-	tests := []struct {
-		name     string
-		lines    []string
-		expected []string
-	}{
-		{
-			name: "human type message",
-			lines: []string{
-				`{"type":"human","message":{"content":"Hello world"}}`,
-			},
-			expected: []string{"Hello world"},
-		},
-		{
-			name: "user type message",
-			lines: []string{
-				`{"type":"user","message":{"content":"Test prompt"}}`,
-			},
-			expected: []string{"Test prompt"},
-		},
-		{
-			name: "mixed human and assistant",
-			lines: []string{
-				`{"type":"human","message":{"content":"First"}}`,
-				`{"type":"assistant","message":{"content":"Response"}}`,
-				`{"type":"human","message":{"content":"Second"}}`,
-			},
-			expected: []string{"First", "Second"},
-		},
-		{
-			name: "array content",
-			lines: []string{
-				`{"type":"human","message":{"content":[{"type":"text","text":"Part 1"},{"type":"text","text":"Part 2"}]}}`,
-			},
-			expected: []string{"Part 1\n\nPart 2"},
-		},
-		{
-			name: "empty lines ignored",
-			lines: []string{
-				`{"type":"human","message":{"content":"Valid"}}`,
-				"",
-				"  ",
-			},
-			expected: []string{"Valid"},
-		},
-		{
-			name: "invalid JSON ignored",
-			lines: []string{
-				`{"type":"human","message":{"content":"Valid"}}`,
-				"not json",
-			},
-			expected: []string{"Valid"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := extractUserPromptsFromLines(tt.lines)
-			if len(result) != len(tt.expected) {
-				t.Errorf("extractUserPromptsFromLines() returned %d prompts, want %d", len(result), len(tt.expected))
-				return
-			}
-			for i, prompt := range result {
-				if prompt != tt.expected[i] {
-					t.Errorf("prompt[%d] = %q, want %q", i, prompt, tt.expected[i])
-				}
-			}
-		})
 	}
 }
 
@@ -2989,7 +2858,7 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 		t.Fatalf("failed to get tree: %v", err)
 	}
 
-	// InitialAttribution is stored in session-level metadata (0/metadata.json), not root (0-based indexing)
+	// Attribution is stored in session-level metadata (0/metadata.json), not root (0-based indexing)
 	sessionMetadataPath := checkpointID.Path() + "/0/" + paths.MetadataFileName
 	metadataFile, err := tree.File(sessionMetadataPath)
 	if err != nil {
@@ -3002,7 +2871,7 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 	}
 
 	var metadata struct {
-		InitialAttribution *struct {
+		Attribution *struct {
 			AgentLines      int     `json:"agent_lines"`
 			HumanAdded      int     `json:"human_added"`
 			HumanModified   int     `json:"human_modified"`
@@ -3015,38 +2884,38 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 		t.Fatalf("failed to parse metadata.json: %v", err)
 	}
 
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution should be present in session metadata")
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution should be present in session metadata")
 	}
 
 	t.Logf("Final Attribution: agent=%d, human_added=%d, human_modified=%d, human_removed=%d, total=%d, percentage=%.1f%%",
-		metadata.InitialAttribution.AgentLines,
-		metadata.InitialAttribution.HumanAdded,
-		metadata.InitialAttribution.HumanModified,
-		metadata.InitialAttribution.HumanRemoved,
-		metadata.InitialAttribution.TotalCommitted,
-		metadata.InitialAttribution.AgentPercentage)
+		metadata.Attribution.AgentLines,
+		metadata.Attribution.HumanAdded,
+		metadata.Attribution.HumanModified,
+		metadata.Attribution.HumanRemoved,
+		metadata.Attribution.TotalCommitted,
+		metadata.Attribution.AgentPercentage)
 
 	// Verify the attribution makes sense:
 	// - Agent modified agent.go: added ~8 lines total
 	// - User modified user.go: added ~5 lines
 	// - So agent percentage should be around 50-70%
-	if metadata.InitialAttribution.AgentLines == 0 {
+	if metadata.Attribution.AgentLines == 0 {
 		t.Error("AgentLines should be > 0")
 	}
-	if metadata.InitialAttribution.TotalCommitted == 0 {
+	if metadata.Attribution.TotalCommitted == 0 {
 		t.Error("TotalCommitted should be > 0")
 	}
 
 	// The key test: user's lines should be captured in HumanAdded
-	if metadata.InitialAttribution.HumanAdded == 0 {
+	if metadata.Attribution.HumanAdded == 0 {
 		t.Error("HumanAdded should be > 0 because user added lines to user.go")
 	}
 
 	// Agent percentage should not be 100% since user contributed
-	if metadata.InitialAttribution.AgentPercentage >= 100 {
+	if metadata.Attribution.AgentPercentage >= 100 {
 		t.Errorf("AgentPercentage should be < 100%% since user contributed, got %.1f%%",
-			metadata.InitialAttribution.AgentPercentage)
+			metadata.Attribution.AgentPercentage)
 	}
 }
 
@@ -4194,10 +4063,9 @@ func TestCondenseSession_RedactionFailure_DropsTranscriptButWritesMetadata(t *te
 	require.NoError(t, err, "redaction failure should not abort condensation")
 	require.NotNil(t, result)
 
-	store, err := s.getCheckpointStore(context.Background(), repo)
-	require.NoError(t, err)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 
-	committed, err := store.ListCommitted(context.Background())
+	committed, err := store.List(context.Background())
 	require.NoError(t, err)
 	require.NotEmpty(t, committed)
 

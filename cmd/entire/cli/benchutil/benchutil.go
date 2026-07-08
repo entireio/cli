@@ -38,8 +38,11 @@ type BenchRepo struct {
 	// Repo is the go-git repository handle.
 	Repo *git.Repository
 
-	// Store is the checkpoint GitStore for this repo.
+	// Store is the committed (persistent) checkpoint store for this repo.
 	Store *checkpoint.GitStore
+
+	// Ephemeral is the shadow-branch (temporary) checkpoint store for this repo.
+	Ephemeral checkpoint.EphemeralStore
 
 	// HeadHash is the current HEAD commit hash string.
 	HeadHash string
@@ -169,11 +172,15 @@ func NewBenchRepo(b *testing.B, opts RepoOpts) *BenchRepo {
 	}
 
 	br := &BenchRepo{
-		Dir:      dir,
-		Repo:     repo,
-		Store:    checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()),
-		HeadHash: headHash.String(),
-		Strategy: opts.Strategy,
+		Dir:  dir,
+		Repo: repo,
+		// Benchmark fixture: construct the git store directly rather than via
+		// checkpoint.Open. Benchmarks pin the v1 topology and never exercise
+		// settings-driven backend selection, so they deliberately bypass Open.
+		Store:     checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()),
+		Ephemeral: checkpoint.NewEphemeralStore(repo, checkpoint.DefaultV1Refs()),
+		HeadHash:  headHash.String(),
+		Strategy:  opts.Strategy,
 	}
 
 	// Determine worktree ID
@@ -357,7 +364,7 @@ func (br *BenchRepo) SeedShadowBranch(b *testing.B, sessionID string, checkpoint
 			b.Fatalf("write transcript: %v", err)
 		}
 
-		_, err := br.Store.WriteTemporary(context.Background(), checkpoint.WriteTemporaryOptions{
+		_, err := br.Ephemeral.Write(context.Background(), checkpoint.Step{
 			SessionID:         sessionID,
 			BaseCommit:        br.HeadHash,
 			WorktreeID:        br.WorktreeID,
@@ -398,7 +405,7 @@ func (br *BenchRepo) SeedMetadataBranch(b *testing.B, checkpointCount int) {
 			files = append(files, fmt.Sprintf("src/file_%03d.go", (i*5+j)%100))
 		}
 
-		err = br.Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		err = br.Store.Write(context.Background(), checkpoint.Session{
 			CheckpointID:     cpID,
 			SessionID:        sessionID,
 			Strategy:         br.Strategy,

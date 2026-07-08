@@ -222,13 +222,48 @@ func BranchExists(t *testing.T, repoDir, branchName string) bool {
 var gitEmptyConfig string
 var gitEmptyConfigOnce sync.Once
 
+// EnvGitHermetic, when set to a non-empty value, makes gitEmptyConfigPath append
+// per-host HTTP proxy config that routes git HTTPS transport to real external
+// hosts (github.com, gitlab.com) through an unroutable loopback proxy. Any test
+// whose git commands accidentally dial those hosts then fails fast (connection
+// refused at 127.0.0.1:1) instead of reaching the network or prompting for
+// credentials. It is opt-in per test process — the integration TestMain sets it
+// — so unit test packages that don't set it are unaffected. Because
+// GitIsolatedEnv strips all inherited GIT_CONFIG_* env, this config must live in
+// the file GIT_CONFIG_GLOBAL points at (this one), not in GIT_CONFIG_* env
+// entries.
+//
+// A dead proxy (not url.insteadOf) is used deliberately: insteadOf rewrites the
+// effective URL that git reports on read, which breaks production code that
+// resolves the origin URL to detect the forge (e.g. `entire trail`). The proxy
+// blocks transport only, leaving the configured URL string intact, and is scoped
+// per host so loopback (127.0.0.1) test servers are never proxied.
+//
+// Regression class: tests accidentally hitting live github.com / the macOS
+// keychain (#1463, 53bc37a88).
+const EnvGitHermetic = "ENTIRE_TEST_GIT_HERMETIC"
+
+// hermeticGitConfig routes HTTPS transport to real external hosts through a dead
+// loopback proxy. Loopback test servers (127.0.0.1) and file:// / bare-path
+// remotes are not proxied, so the in-process HTTPS git server still works. Only
+// HTTPS is covered — the accidental-dial regression class is HTTPS fetches; SSH
+// (git@…) to a real host fails on its own without credentials.
+const hermeticGitConfig = "[http \"https://github.com/\"]\n" +
+	"\tproxy = http://127.0.0.1:1\n" +
+	"[http \"https://gitlab.com/\"]\n" +
+	"\tproxy = http://127.0.0.1:1\n"
+
 func gitEmptyConfigPath() string {
 	gitEmptyConfigOnce.Do(func() {
 		f, err := os.CreateTemp("", "git-isolation-config-*")
 		if err != nil {
 			panic("create git isolation config: " + err.Error())
 		}
-		_, err = f.WriteString("[gc]\n\tauto = 0\n\tautoDetach = false\n[maintenance]\n\tauto = false\n[fetch]\n\twriteCommitGraph = false\n")
+		content := "[gc]\n\tauto = 0\n\tautoDetach = false\n[maintenance]\n\tauto = false\n[fetch]\n\twriteCommitGraph = false\n"
+		if os.Getenv(EnvGitHermetic) != "" {
+			content += hermeticGitConfig
+		}
+		_, err = f.WriteString(content)
 		if err != nil {
 			panic("write git isolation config: " + err.Error())
 		}

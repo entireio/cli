@@ -41,6 +41,15 @@ type Config struct {
 	SkipTLS      bool
 	SetAuth      SetAuthFunc
 	OnNodeFailed func(failedNode string)
+	// OnUnauthorized fires once per response with HTTP 401 — the data
+	// plane rejected the credential itself (bad signature, e.g. after a
+	// signing-key rotation; expired). Callers use it to invalidate a
+	// persisted token so the next invocation re-mints instead of replaying
+	// the dead credential until its recorded expiry. Deliberately NOT
+	// fired on 403: a 403 means the credential verified fine and
+	// authorization was denied — invalidating would churn valid tokens.
+	// Nil disables the hook.
+	OnUnauthorized func()
 	// UserAgent is stamped on every outbound HTTP request so the
 	// server can attribute git smart-HTTP traffic to the remote
 	// helper. Empty disables the wrapper, in which case the request
@@ -73,9 +82,14 @@ type Proxy struct {
 	// path is the URL path on each node.
 	path string
 
-	client       *http.Client
-	setAuth      SetAuthFunc
-	onNodeFailed func(failedNode string)
+	client *http.Client
+	// discoveryTransport is the RoundTripper used for the cold info/refs
+	// probe to the entry domain (see noRedirectClient). It carries a longer
+	// dial budget than client's transport because that first
+	// replica-discovery connect has no failover to fall back on.
+	discoveryTransport http.RoundTripper
+	setAuth            SetAuthFunc
+	onNodeFailed       func(failedNode string)
 
 	// stickyNode is the URL (matching one of nodes) of the replica
 	// that served the most recent successful request, post-redirects.
@@ -112,17 +126,43 @@ func New(cfg Config) *Proxy {
 	// User-Agent must be set before httpdebug logs the request, so the
 	// wrapper sits outside httpdebug. The order is:
 	//   user-agent → httpdebug → http.Transport
-	// so the debug log captures the same headers the wire sees.
-	var rt http.RoundTripper = httpclient.NewTransport(cfg.SkipTLS)
-	rt = &httpdebug.RoundTripper{Next: rt}
-	if cfg.UserAgent != "" {
-		rt = &httpclient.UserAgentTransport{Next: rt, UA: cfg.UserAgent}
+	// so the debug log captures the same headers the wire sees. Both the
+	// failover client and the discovery probe wrap identically; only the
+	// underlying transport's dial budget differs.
+	wrap := func(base http.RoundTripper) http.RoundTripper {
+		var rt http.RoundTripper = &httpdebug.RoundTripper{Next: base}
+		rt = &httpdebug.TimingRoundTripper{Next: rt, Label: "git"}
+		if cfg.OnUnauthorized != nil {
+			rt = &unauthorizedObserver{next: rt, fn: cfg.OnUnauthorized}
+		}
+		if cfg.UserAgent != "" {
+			rt = &httpclient.UserAgentTransport{Next: rt, UA: cfg.UserAgent}
+		}
+		return rt
 	}
 	p.client = &http.Client{
-		Transport:     rt,
+		Transport:     wrap(httpclient.NewTransport(cfg.SkipTLS)),
 		CheckRedirect: p.checkRedirect,
 	}
+	p.discoveryTransport = wrap(httpclient.NewDiscoveryTransport(cfg.SkipTLS))
 	return p
+}
+
+// unauthorizedObserver invokes fn on every HTTP 401 response, passing the
+// response through untouched. See Config.OnUnauthorized for the contract.
+type unauthorizedObserver struct {
+	next http.RoundTripper
+	fn   func()
+}
+
+// RoundTrip implements http.RoundTripper.
+func (o *unauthorizedObserver) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := o.next.RoundTrip(req)
+	if err == nil && resp.StatusCode == http.StatusUnauthorized {
+		o.fn()
+	}
+	//nolint:wrapcheck // passthrough - wrapping would change error semantics
+	return resp, err
 }
 
 // ErrorBaseURL returns a URL string suitable for embedding in error
@@ -257,22 +297,70 @@ func (p *Proxy) setAuthOrError(req *http.Request) error {
 // request body — the cold-path probe (no-redirect client), the
 // missing-replicas fallback, and the Location salvage all share this
 // shape.
+//
+// On a 401 it retries once with a freshly minted token: see retryOn401.
 func (p *Proxy) doGet(ctx context.Context, urlStr string, client *http.Client, setHeaders func(*http.Request)) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	build := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating request: %w", err)
+		}
+		if err := p.setAuthOrError(req); err != nil {
+			return nil, err
+		}
+		if setHeaders != nil {
+			setHeaders(req)
+		}
+		return req, nil
+	}
+	req, err := build()
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-	if err := p.setAuthOrError(req); err != nil {
 		return nil, err
-	}
-	if setHeaders != nil {
-		setHeaders(req)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("doing request: %w", err)
 	}
+	resp, err = p.retryOn401(client, resp, build)
+	if err != nil {
+		return nil, fmt.Errorf("doing request: %w", err)
+	}
 	return resp, nil
+}
+
+// retryOn401 resends the request once, with a freshly minted credential,
+// when resp is an HTTP 401; otherwise it returns resp untouched.
+//
+// A 401 means the data plane rejected the credential itself (a signing-key
+// rotation or clock skew invalidating a still-mid-TTL persisted token). The
+// unauthorizedObserver has already fired creds.Invalidate by the time this
+// runs — synchronously, inside the RoundTrip that produced this response — so
+// build's setAuthOrError re-resolves the Authorization header from the token
+// source, which now re-mints rather than replaying the dead credential. build
+// also rewinds any request body, so this is safe for POSTs. We deliberately
+// re-run build rather than replaying the original *http.Request: that yields a
+// fresh header (not a captured stale one) and a rewound body.
+//
+// Exactly one retry. If the resend also 401s, the caller renders the error;
+// there is no loop. A build error on the resend (e.g. the re-mint failing) is
+// surfaced verbatim, so the mint error reaches the user rather than a
+// nil-token retry.
+func (p *Proxy) retryOn401(client *http.Client, resp *http.Response, build func() (*http.Request, error)) (*http.Response, error) {
+	if resp.StatusCode != http.StatusUnauthorized {
+		return resp, nil
+	}
+	// Drain (bounded, like httpError and the 5xx failover path) before Close
+	// so net/http can reuse the connection for the immediate retry instead of
+	// paying a fresh TCP+TLS handshake.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024)) //nolint:errcheck // best-effort drain for connection reuse
+	_ = resp.Body.Close()
+	debuglog.Printf("data plane returned 401; credential invalidated, retrying once with a freshly minted token")
+	req, err := build()
+	if err != nil {
+		return nil, err
+	}
+	//nolint:wrapcheck // caller adds context; keeping the raw error preserves failover classification
+	return client.Do(req)
 }
 
 // doWithFailover tries an HTTP request against each node, starting
@@ -292,28 +380,43 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 		}
 	}
 	var lastErr error
+	// One auth retry per logical operation, not per replica: a 401 doesn't
+	// trigger failover, so the loop returns the first 401 to the retry — this
+	// flag stops a second node (or a re-entry) from re-minting again.
+	authRetried := false
 
 	for i := range nodes {
 		node := nodes[(start+i)%len(nodes)]
 		reqURL := p.nodeURL(node, makeSuffix)
 
-		var bodyReader io.Reader
-		if body != nil {
-			if _, err := body.Seek(0, io.SeekStart); err != nil {
-				return nil, fmt.Errorf("resetting request body: %w", err)
+		// build (re)constructs the request: rewind the body, mint/attach the
+		// Authorization header, and stamp the caller's headers. Reused by the
+		// 401 retry so the resend carries a rewound body and a fresh token
+		// rather than a replayed stale header.
+		build := func() (*http.Request, error) {
+			var bodyReader io.Reader
+			if body != nil {
+				if _, err := body.Seek(0, io.SeekStart); err != nil {
+					return nil, fmt.Errorf("resetting request body: %w", err)
+				}
+				bodyReader = body
 			}
-			bodyReader = body
+			req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
+			if err != nil {
+				return nil, fmt.Errorf("creating request: %w", err)
+			}
+			if err := p.setAuthOrError(req); err != nil {
+				return nil, err
+			}
+			if setHeaders != nil {
+				setHeaders(req)
+			}
+			return req, nil
 		}
 
-		req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
+		req, err := build()
 		if err != nil {
-			return nil, fmt.Errorf("creating request: %w", err)
-		}
-		if err := p.setAuthOrError(req); err != nil {
 			return nil, err
-		}
-		if setHeaders != nil {
-			setHeaders(req)
 		}
 
 		resp, err := p.client.Do(req)
@@ -322,6 +425,20 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 			lastErr = err
 			p.markNodeFailed(node)
 			continue
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized && !authRetried {
+			authRetried = true
+			debuglog.Printf("node %s returned HTTP 401; retrying once with a freshly minted token", node)
+			// The retry hits the same node it 401'd on. Surface any error
+			// directly (a re-mint failure or a transient connect on the
+			// resend) rather than failing over across healthy nodes — a
+			// blanket failover would churn the replica cache on a transient
+			// auth-provider outage, and the 401 already told us the node is up.
+			resp, err = p.retryOn401(p.client, resp, build)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		if shouldFailover(resp.StatusCode) {
@@ -350,12 +467,15 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 	return nil, fmt.Errorf("all %d nodes failed, last error: %w", len(nodes), lastErr)
 }
 
-// noRedirectClient returns a one-shot client that shares this proxy's
-// transport (so connection pooling still applies) but never follows
-// redirects, surfacing 3xx responses to the caller.
+// noRedirectClient returns a one-shot client for the cold info/refs probe
+// to the entry domain. It never follows redirects (surfacing 3xx responses
+// to the caller) and uses the discovery transport, whose longer dial budget
+// absorbs the cold first-contact connect that has no replica failover to
+// fall back on. Falls back to the proxy's main transport when no discovery
+// transport was wired (e.g. proxies built directly in tests).
 func (p *Proxy) noRedirectClient() *http.Client {
-	var transport http.RoundTripper
-	if p.client != nil {
+	transport := p.discoveryTransport
+	if transport == nil && p.client != nil {
 		transport = p.client.Transport
 	}
 	return &http.Client{

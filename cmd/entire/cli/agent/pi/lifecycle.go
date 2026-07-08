@@ -208,6 +208,7 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 			Type:       agent.TurnEnd,
 			SessionID:  sessionID,
 			SessionRef: sessionRef,
+			Model:      extractModelFromPiSessionFile(sessionRef),
 			Timestamp:  now,
 		}, nil
 
@@ -291,6 +292,22 @@ func cacheSessionID(ctx context.Context, id string) {
 	if err := os.WriteFile(filepath.Join(dir, activeSessionFile), []byte(id), 0o600); err != nil {
 		logging.Debug(ctx, "pi: cache session id write", slog.String("err", err.Error()))
 	}
+}
+
+func extractModelFromPiSessionFile(path string) string {
+	if path == "" {
+		return ""
+	}
+	//nolint:gosec // path comes from Pi's hook payload or our captured transcript path
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	model, err := (&PiAgent{}).ExtractModel(data)
+	if err != nil {
+		return ""
+	}
+	return model
 }
 
 func readCachedSessionID(ctx context.Context) string {
