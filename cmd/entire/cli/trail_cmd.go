@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -17,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trail"
 
@@ -1227,6 +1230,7 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 func newTrailCheckoutCmd() *cobra.Command {
 	var trailSelector string
 	var force bool
+	var worktree bool
 
 	cmd := &cobra.Command{
 		Use:   "checkout [<trail>]",
@@ -1236,6 +1240,9 @@ func newTrailCheckoutCmd() *cobra.Command {
 The trail may be given as the first argument or via --trail, as a number, id, or
 branch. Without one, the trail for the current branch is used. The trail's branch
 is checked out, fetching it from origin first when it only exists there.
+
+With --worktree, the branch is checked out under .entire/worktrees instead of
+switching the current checkout. The command prints a cd command for the worktree.
 
 This must be run from within a clone of the repository the trail belongs to; the
 trail is looked up against that repository's origin remote.`,
@@ -1251,17 +1258,23 @@ trail is looked up against that repository's origin remote.`,
 			if err := ensureNoTrailRepoOverride(cmd, "trail checkout"); err != nil {
 				return err
 			}
-			return runTrailCheckout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), selector, force)
+			return runTrailCheckout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), selector, trailCheckoutOptions{Force: force, Worktree: worktree})
 		},
 	}
 
 	cmd.Flags().StringVar(&trailSelector, "trail", "", "Trail to check out (number, id, or branch; defaults to the current branch's trail)")
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip the prompt before fetching a remote-only branch")
+	cmd.Flags().BoolVar(&worktree, "worktree", false, "Check out the trail branch in .entire/worktrees instead of switching this checkout")
 
 	return cmd
 }
 
-func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector string, force bool) error {
+type trailCheckoutOptions struct {
+	Force    bool
+	Worktree bool
+}
+
+func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector string, opts trailCheckoutOptions) error {
 	// checkout rejects --repo (it operates on the local clone), so the enablement
 	// cache always tracks the local origin here.
 	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, "", func(ctx context.Context, client *api.Client) error {
@@ -1280,6 +1293,11 @@ func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool,
 			return fmt.Errorf("%s has no branch to check out", describeTrailRef(found))
 		}
 
+		if opts.Worktree {
+			fmt.Fprintf(w, "Checking out %s in a worktree\n", describeTrailRef(found))
+			return checkoutTrailWorktree(ctx, w, errW, branch, opts.Force, found.Number)
+		}
+
 		currentBranch, _ := GetCurrentBranch(ctx) //nolint:errcheck // best-effort; a detached HEAD just means "not already on the branch"
 		if currentBranch == branch {
 			fmt.Fprintf(w, "Already on branch %s for %s.\n", branch, describeTrailRef(found))
@@ -1290,7 +1308,7 @@ func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool,
 		// switchToBranchForResume handles local vs. remote-only branches, the
 		// uncommitted-changes guard, and the fetch prompt; reuse it rather than
 		// re-deriving that logic here.
-		proceed, err := switchToBranchForResume(ctx, w, errW, branch, force)
+		proceed, err := switchToBranchForResume(ctx, w, errW, branch, opts.Force)
 		if err != nil {
 			return err
 		}
@@ -1302,6 +1320,180 @@ func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool,
 		}
 		return nil
 	})
+}
+
+func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string, force bool, trailNumber int) error {
+	if existing, ok, err := findWorktreeForBranch(ctx, branch); err != nil {
+		return err
+	} else if ok {
+		fmt.Fprintf(w, "✓ Worktree already exists at %s\n", existing)
+		fmt.Fprintf(w, "cd %s\n", shellQuotePath(existing))
+		return nil
+	}
+
+	if err := ensureTrailWorktreeBranchAvailable(ctx, w, branch, force); err != nil {
+		return err
+	}
+	if err := ensureTrailWorktreeLocalExclude(ctx); err != nil {
+		return err
+	}
+
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to find worktree root: %w", err)
+	}
+	worktreePath := defaultTrailWorktreePath(repoRoot, branch, trailNumber)
+	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o750); err != nil {
+		return fmt.Errorf("failed to create worktree parent: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "worktree", "add", worktreePath, branch)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(errW, "Error: failed to create worktree: %v\n", err)
+		return fmt.Errorf("failed to create worktree: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+	fmt.Fprintf(w, "✓ Worktree ready at %s\n", worktreePath)
+	fmt.Fprintf(w, "cd %s\n", shellQuotePath(worktreePath))
+	return nil
+}
+
+func ensureTrailWorktreeLocalExclude(ctx context.Context) error {
+	gitDir, err := gitCommonDirForTrailWorktree(ctx)
+	if err != nil {
+		return err
+	}
+	excludePath := filepath.Join(gitDir, "info", "exclude")
+	const rule = ".entire/worktrees/"
+
+	content, err := os.ReadFile(excludePath) //nolint:gosec // excludePath is under git rev-parse --git-common-dir.
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("failed to read local git exclude: %w", err)
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.TrimSpace(line) == rule {
+			return nil
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o750); err != nil {
+		return fmt.Errorf("failed to create local git exclude dir: %w", err)
+	}
+
+	// Controversial: mutate .git/info/exclude from a checkout command. We do it
+	// local-only to prevent accidental commits of .entire/worktrees without
+	// dirtying the user's tracked .gitignore.
+	prefix := ""
+	if len(content) > 0 && !strings.HasSuffix(string(content), "\n") {
+		prefix = "\n"
+	}
+	updated := string(content) + prefix + rule + "\n"
+	if err := os.WriteFile(excludePath, []byte(updated), 0o600); err != nil { //nolint:gosec // excludePath is under git rev-parse --git-common-dir.
+		return fmt.Errorf("failed to update local git exclude: %w", err)
+	}
+	return nil
+}
+
+func gitCommonDirForTrailWorktree(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get git common dir: %w", err)
+	}
+	gitDir := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(".", gitDir)
+	}
+	return filepath.Clean(gitDir), nil
+}
+
+func ensureTrailWorktreeBranchAvailable(ctx context.Context, w io.Writer, branch string, force bool) error {
+	exists, err := BranchExistsLocally(ctx, branch)
+	if err != nil {
+		return fmt.Errorf("failed to check branch: %w", err)
+	}
+	if exists {
+		return nil
+	}
+
+	remoteExists, err := BranchExistsOnRemote(ctx, branch)
+	if err != nil {
+		return fmt.Errorf("failed to check remote branch: %w", err)
+	}
+	if !remoteExists {
+		return fmt.Errorf("branch '%s' not found locally or on origin", branch)
+	}
+	if !force {
+		shouldFetch, err := promptFetchFromRemote(branch)
+		if err != nil {
+			return err
+		}
+		if !shouldFetch {
+			return errors.New("checkout cancelled")
+		}
+	}
+
+	fmt.Fprintf(w, "Fetching branch '%s' from origin...\n", branch)
+	if err := fetchTrailWorktreeBranch(ctx, branch); err != nil {
+		return err
+	}
+	return nil
+}
+
+func fetchTrailWorktreeBranch(ctx context.Context, branch string) error {
+	if err := ValidateBranchName(ctx, branch); err != nil {
+		return err
+	}
+	refSpec := fmt.Sprintf("refs/heads/%s:refs/heads/%s", branch, branch)
+	cmd := exec.CommandContext(ctx, "git", "fetch", "origin", refSpec)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to fetch branch from origin: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return nil
+}
+
+func findWorktreeForBranch(ctx context.Context, branch string) (string, bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "worktree", "list", "--porcelain")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", false, fmt.Errorf("failed to list worktrees: %w", err)
+	}
+	var currentPath string
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "worktree ") {
+			currentPath = strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
+			continue
+		}
+		if strings.TrimPrefix(line, "branch ") == "refs/heads/"+branch && currentPath != "" {
+			return currentPath, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func defaultTrailWorktreePath(repoRoot, branch string, trailNumber int) string {
+	name := sanitizeTrailWorktreeName(branch)
+	if trailNumber > 0 {
+		name = fmt.Sprintf("trail-%d-%s", trailNumber, name)
+	}
+	return filepath.Join(repoRoot, ".entire", "worktrees", name)
+}
+
+func shellQuotePath(path string) string {
+	return "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
+}
+
+func sanitizeTrailWorktreeName(branch string) string {
+	name := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			return r
+		}
+		return '-'
+	}, strings.TrimSpace(branch))
+	name = strings.Trim(name, "-.")
+	if name == "" {
+		return "branch"
+	}
+	return name
 }
 
 // describeTrailRef renders a short human reference to a trail for status
