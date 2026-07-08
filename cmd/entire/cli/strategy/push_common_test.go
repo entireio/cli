@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -258,7 +259,7 @@ func TestFetchAndRebase_NonBranchRef(t *testing.T) {
 
 	t.Chdir(tmpDir)
 
-	require.NoError(t, fetchAndRebaseRefCommon(ctx, "file://"+bareDir, customRef),
+	require.NoError(t, fetchAndRebaseRefCommon(ctx, "file://"+bareDir, customRef, io.Discard),
 		"fetchAndRebaseRefCommon should accept a non-branch ref")
 
 	// The local ref should remain at the same hash.
@@ -327,7 +328,7 @@ func TestFetchAndRebase_NonBranchRefDisconnected(t *testing.T) {
 
 	t.Chdir(cloneDir)
 
-	err := fetchAndRebaseRefCommon(ctx, "file://"+bareDir, customRef)
+	err := fetchAndRebaseRefCommon(ctx, "file://"+bareDir, customRef, io.Discard)
 	require.NoError(t, err)
 
 	repo, err := git.PlainOpen(cloneDir)
@@ -439,7 +440,7 @@ func TestFetchAndRebase_DivergedBranches(t *testing.T) {
 	// 5. Run fetchAndRebaseRefCommon on clone A (diverged: local has bb, remote has cc)
 	t.Chdir(cloneA)
 
-	err := fetchAndRebaseRefCommon(ctx, "origin", plumbing.NewBranchReferenceName(branchName))
+	err := fetchAndRebaseRefCommon(ctx, "origin", plumbing.NewBranchReferenceName(branchName), io.Discard)
 	require.NoError(t, err)
 
 	// 6. Verify results
@@ -548,7 +549,7 @@ func TestFetchAndRebase_SharedCloneLocalCommitInAlternate(t *testing.T) {
 	gitRun(remoteWorkDir, "push", "origin", branchName)
 
 	t.Chdir(cloneDir)
-	err := fetchAndRebaseRefCommon(ctx, "origin", plumbing.NewBranchReferenceName(branchName))
+	err := fetchAndRebaseRefCommon(ctx, "origin", plumbing.NewBranchReferenceName(branchName), io.Discard)
 	require.NoError(t, err)
 
 	treePaths := gitRun(cloneDir, "ls-tree", "-r", "--name-only", branchName)
@@ -621,7 +622,7 @@ func TestFetchAndRebase_LocalBehind(t *testing.T) {
 	// Clone is now behind — fetchAndRebase should fast-forward
 	t.Chdir(cloneDir)
 
-	err := fetchAndRebaseRefCommon(ctx, "origin", plumbing.NewBranchReferenceName(branchName))
+	err := fetchAndRebaseRefCommon(ctx, "origin", plumbing.NewBranchReferenceName(branchName), io.Discard)
 	require.NoError(t, err)
 
 	// Verify local now matches remote
@@ -734,7 +735,7 @@ func TestFetchAndRebase_MergeBaseOnSecondParent_DoesNotReplayAncestors(t *testin
 	// Rebase local metadata branch onto the updated remote tip.
 	t.Chdir(cloneLocal)
 
-	err := fetchAndRebaseRefCommon(ctx, "origin", plumbing.NewBranchReferenceName(branchName))
+	err := fetchAndRebaseRefCommon(ctx, "origin", plumbing.NewBranchReferenceName(branchName), io.Discard)
 	require.NoError(t, err)
 
 	repo, err := git.PlainOpen(cloneLocal)
@@ -862,7 +863,7 @@ func TestFetchAndRebase_DoesNotResurrectRemoteOnlyCheckpointFromMerge(t *testing
 
 	t.Chdir(cloneLocal)
 
-	err := fetchAndRebaseRefCommon(ctx, "origin", plumbing.NewBranchReferenceName(branchName))
+	err := fetchAndRebaseRefCommon(ctx, "origin", plumbing.NewBranchReferenceName(branchName), io.Discard)
 	require.NoError(t, err)
 
 	repo, err := git.PlainOpen(cloneLocal)
@@ -961,7 +962,7 @@ func TestFetchAndRebase_NonOriginRemote_ReconcilesFetchedRef(t *testing.T) {
 
 	t.Chdir(cloneDir)
 
-	err = fetchAndRebaseRefCommon(ctx, "backup", plumbing.NewBranchReferenceName(branchName))
+	err = fetchAndRebaseRefCommon(ctx, "backup", plumbing.NewBranchReferenceName(branchName), io.Discard)
 	require.NoError(t, err)
 
 	repo, err = git.PlainOpen(cloneDir)
@@ -1059,7 +1060,7 @@ func TestFetchAndRebase_URLTarget_ReconcilesFetchedTempRef(t *testing.T) {
 
 	t.Chdir(cloneDir)
 
-	err = fetchAndRebaseRefCommon(ctx, "file://"+bareDir, plumbing.NewBranchReferenceName(branchName))
+	err = fetchAndRebaseRefCommon(ctx, "file://"+bareDir, plumbing.NewBranchReferenceName(branchName), io.Discard)
 	require.NoError(t, err)
 
 	repo, err = git.PlainOpen(cloneDir)
@@ -1164,7 +1165,7 @@ func TestFetchAndRebase_FlaggedOriginTarget_UsesTempRef(t *testing.T) {
 	t.Chdir(cloneDir)
 	paths.ClearWorktreeRootCache()
 
-	err = fetchAndRebaseRefCommon(ctx, "origin", plumbing.NewBranchReferenceName(branchName))
+	err = fetchAndRebaseRefCommon(ctx, "origin", plumbing.NewBranchReferenceName(branchName), io.Discard)
 	require.NoError(t, err)
 
 	repo, err = git.PlainOpen(cloneDir)
@@ -1535,7 +1536,7 @@ func TestDoPushRef_AlreadyUpToDate(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, output, "already up-to-date", "should indicate nothing was pushed")
-	assert.NotContains(t, output, " done", "should not say 'done' when nothing was pushed")
+	assert.NotContains(t, output, "done (", "should not say 'done' when nothing was pushed")
 }
 
 // TestDoPushRef_NewContent_SaysDone verifies that when there are new commits
@@ -1560,7 +1561,7 @@ func TestDoPushRef_NewContent_SaysDone(t *testing.T) {
 	output := restore()
 
 	require.NoError(t, err)
-	assert.Contains(t, output, " done", "should say 'done' when new content was pushed")
+	assert.Contains(t, output, "done", "should say 'done' when new content was pushed")
 	assert.NotContains(t, output, "already up-to-date", "should not say 'already up-to-date' when content was pushed")
 }
 

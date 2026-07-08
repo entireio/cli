@@ -245,7 +245,8 @@ func uniqueStrings(values []string) []string {
 
 // PushResult holds raw porcelain output from git push.
 type PushResult struct {
-	Output string
+	Output string // stdout (porcelain status lines)
+	Stderr string // stderr (git --progress transfer lines)
 }
 
 // PushOptions configures a git push operation.
@@ -273,7 +274,7 @@ func PushWithOptions(ctx context.Context, opts PushOptions) (PushResult, error) 
 		return PushResult{}, fmt.Errorf("resolve push target: %w", err)
 	}
 
-	args := []string{"push", "--no-verify", "--porcelain"}
+	args := []string{"push", "--no-verify", "--porcelain", "--progress"}
 	args = append(args, opts.ExtraArgs...)
 	args = append(args, pushTarget)
 	args = append(args, opts.RefSpecs...)
@@ -283,11 +284,27 @@ func PushWithOptions(ctx context.Context, opts PushOptions) (PushResult, error) 
 		cmd.Dir = opts.Dir
 	}
 	disableTerminalPrompt(cmd)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return PushResult{Output: string(output)}, fmt.Errorf("git push: %w", err)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	result := PushResult{
+		Output: stdout.String(),
+		Stderr: stderr.String(),
 	}
-	return PushResult{Output: string(output)}, nil
+	if err != nil {
+		combined := stdout.String()
+		if stderr.Len() > 0 {
+			if combined != "" {
+				combined += "\n"
+			}
+			combined += stderr.String()
+		}
+		result.Output = combined
+		return result, fmt.Errorf("git push: %w", err)
+	}
+	return result, nil
 }
 
 // LsRemoteInDir is like LsRemote but runs in a specific directory.

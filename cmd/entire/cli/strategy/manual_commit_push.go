@@ -3,13 +3,19 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
 )
@@ -44,6 +50,8 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 	}
 
 	refs := checkpoint.ResolveCommittedRefs(ctx)
+
+	printPushSummary(ctx, remote, ps.pushTarget())
 
 	// OPF pre-push rewrite: if OPF is configured, resolve the user's
 	// decision (env > settings > prompt > non-TTY auto-run), then
@@ -121,4 +129,67 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 	}
 
 	return nil
+}
+
+// printPushSummary writes a session-level summary of pending checkpoint commits.
+// Silent on any failure — never blocks the push.
+func printPushSummary(ctx context.Context, remoteName, target string) {
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+
+	branchName := paths.MetadataBranchName
+	logFormat := "%H|%s|%(trailers:key=" + trailers.SessionTrailerKey + ",valueonly,separator=%x20)|%aI"
+
+	var logOutput string
+	isNewBranch := false
+
+	if !checkpointremote.IsURL(target) {
+		rangeSpec := "refs/remotes/" + remoteName + "/" + branchName + "..refs/heads/" + branchName
+		firstOut, firstErr := runPushSummaryGitLog(ctx, repoRoot, logFormat, rangeSpec)
+		if firstErr == nil && strings.TrimSpace(firstOut) != "" {
+			logOutput = firstOut
+		} else {
+			fallbackOut, fallbackErr := runPushSummaryGitLog(ctx, repoRoot, logFormat, "refs/heads/"+branchName)
+			if fallbackErr == nil && strings.TrimSpace(fallbackOut) != "" {
+				logOutput = fallbackOut
+				isNewBranch = true
+			}
+		}
+	} else {
+		fallbackOut, fallbackErr := runPushSummaryGitLog(ctx, repoRoot, logFormat, "refs/heads/"+branchName)
+		if fallbackErr == nil {
+			logOutput = fallbackOut
+			isNewBranch = strings.TrimSpace(logOutput) != ""
+		}
+	}
+	if strings.TrimSpace(logOutput) == "" {
+		return
+	}
+
+	summaries := parsePushSummaryFromLog(logOutput)
+	if len(summaries) == 0 {
+		return
+	}
+
+	totalCommits := len(strings.Split(strings.TrimSpace(logOutput), "\n"))
+	lines := formatSessionTree(summaries, formatSessionTreeOpts{
+		TotalCommits: totalCommits,
+		IsNewBranch:  isNewBranch,
+	})
+	w := pushProgressOutput()
+	for _, line := range lines {
+		fmt.Fprintln(w, line)
+	}
+}
+
+func runPushSummaryGitLog(ctx context.Context, repoRoot, format, rangeSpec string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "log", "--format="+format, rangeSpec)
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git log: %w", err)
+	}
+	return string(out), nil
 }

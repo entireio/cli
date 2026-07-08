@@ -201,7 +201,7 @@ func replayLocalCommits(ctx context.Context, repo *git.Repository, localRefName 
 		return setRefHash(repo, localRefName, targetHash)
 	}
 
-	newTip, err := cherryPickOnto(ctx, repo, targetHash, localCommits, shallow)
+	newTip, err := cherryPickOnto(ctx, repo, targetHash, localCommits, shallow, nil)
 	if err != nil {
 		return fmt.Errorf("failed to replay local commits for %s: %w", localRefName, err)
 	}
