@@ -142,14 +142,16 @@ func remainderBucket(flat *types.TokenUsage, buckets []types.ModelUsage, fallbac
 		sum.CacheCreationTokens += b.CacheCreationTokens
 		sum.CacheReadTokens += b.CacheReadTokens
 		sum.OutputTokens += b.OutputTokens
+		sum.APICallCount += b.APICallCount
 	}
 	short := types.TokenUsage{
 		InputTokens:         clampNonNegative(flat.InputTokens - sum.InputTokens),
 		CacheCreationTokens: clampNonNegative(flat.CacheCreationTokens - sum.CacheCreationTokens),
 		CacheReadTokens:     clampNonNegative(flat.CacheReadTokens - sum.CacheReadTokens),
 		OutputTokens:        clampNonNegative(flat.OutputTokens - sum.OutputTokens),
+		APICallCount:        clampNonNegative(flat.APICallCount - sum.APICallCount),
 	}
-	if short.InputTokens+short.CacheCreationTokens+short.CacheReadTokens+short.OutputTokens == 0 {
+	if short.InputTokens+short.CacheCreationTokens+short.CacheReadTokens+short.OutputTokens+short.APICallCount == 0 {
 		return types.ModelUsage{}, false
 	}
 	return types.ModelUsage{Model: fallbackModel, TokenUsage: short}, true

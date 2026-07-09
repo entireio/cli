@@ -140,9 +140,9 @@ func TestCalculateUsageWithCost_RemainderBucketPriced(t *testing.T) {
 	// (simulating subagent usage the flat path folds in but CalculateModelUsage
 	// never sees). The 1M shortfall must be attributed to fallbackModel test-b.
 	ag := &fakeModelUsageAgent{
-		flat: &TokenUsage{InputTokens: 2_000_000},
+		flat: &TokenUsage{InputTokens: 2_000_000, APICallCount: 7},
 		buckets: []types.ModelUsage{
-			{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000}},
+			{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000, APICallCount: 3}},
 		},
 	}
 
@@ -159,6 +159,9 @@ func TestCalculateUsageWithCost_RemainderBucketPriced(t *testing.T) {
 	}
 	if rem.TokenUsage.InputTokens != 1_000_000 {
 		t.Errorf("remainder input = %d, want 1_000_000", rem.TokenUsage.InputTokens)
+	}
+	if rem.TokenUsage.APICallCount != 4 {
+		t.Errorf("remainder api_call_count = %d, want 4 (7 flat - 3 bucketed)", rem.TokenUsage.APICallCount)
 	}
 	if rem.TokenUsage.CostUSD == nil || *rem.TokenUsage.CostUSD != 2.0 {
 		t.Errorf("remainder cost = %v, want 2.0 (1M @ $2/MTok)", rem.TokenUsage.CostUSD)
