@@ -40,6 +40,24 @@ func (f *fakeModelUsageAgent) CalculateModelUsage([]byte, int) ([]types.ModelUsa
 	return f.buckets, f.muErr
 }
 
+// fakeSubagentAwareAgent implements SubagentAwareExtractor (its flat total folds
+// subagent usage into a SubagentTokens subtree) but NOT ModelUsageCalculator, so
+// CalculateUsageWithCost takes the fallback single-bucket path (bucketTokens)
+// plus the subagent remainder bucket.
+type fakeSubagentAwareAgent struct {
+	mockBaseAgent
+
+	usage *TokenUsage
+}
+
+func (f *fakeSubagentAwareAgent) ExtractAllModifiedFiles([]byte, int, string) ([]string, error) {
+	return nil, nil
+}
+
+func (f *fakeSubagentAwareAgent) CalculateTotalTokenUsage([]byte, int, string) (*TokenUsage, error) { //nolint:unparam // test mock: error result satisfies SubagentAwareExtractor
+	return f.usage, nil
+}
+
 func ptrFloat(v float64) *float64 { return &v }
 
 // testTable returns a pricing table with two clean-rate override models on top
@@ -136,11 +154,18 @@ func TestCalculateUsageWithCost_UnknownModelMixed(t *testing.T) {
 
 func TestCalculateUsageWithCost_RemainderBucketPriced(t *testing.T) {
 	t.Parallel()
-	// Flat total covers 2M input, but the per-model buckets only account for 1M
-	// (simulating subagent usage the flat path folds in but CalculateModelUsage
-	// never sees). The 1M shortfall must be attributed to fallbackModel test-b.
+	// Real extractors report the MAIN-transcript totals in the flat scalar fields
+	// and the subagent totals in a SubagentTokens subtree, while CalculateModelUsage
+	// only ever sees the main transcript. So the subagent usage surfaces solely as
+	// a shortfall between the flattened flat total (main + subagents) and the
+	// per-model bucket sum, and must be priced under fallbackModel. Here: main 1M
+	// under test-a, subagent 1M must land in a test-b remainder bucket.
 	ag := &fakeModelUsageAgent{
-		flat: &TokenUsage{InputTokens: 2_000_000, APICallCount: 7},
+		flat: &TokenUsage{
+			InputTokens:    1_000_000, // main transcript
+			APICallCount:   3,
+			SubagentTokens: &TokenUsage{InputTokens: 1_000_000, APICallCount: 4}, // subagents
+		},
 		buckets: []types.ModelUsage{
 			{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000, APICallCount: 3}},
 		},
@@ -158,13 +183,19 @@ func TestCalculateUsageWithCost_RemainderBucketPriced(t *testing.T) {
 		t.Errorf("remainder bucket model = %q, want test-b", rem.Model)
 	}
 	if rem.TokenUsage.InputTokens != 1_000_000 {
-		t.Errorf("remainder input = %d, want 1_000_000", rem.TokenUsage.InputTokens)
+		t.Errorf("remainder input = %d, want 1_000_000 (subagent shortfall)", rem.TokenUsage.InputTokens)
 	}
 	if rem.TokenUsage.APICallCount != 4 {
-		t.Errorf("remainder api_call_count = %d, want 4 (7 flat - 3 bucketed)", rem.TokenUsage.APICallCount)
+		t.Errorf("remainder api_call_count = %d, want 4 (subagent api calls)", rem.TokenUsage.APICallCount)
 	}
 	if rem.TokenUsage.CostUSD == nil || *rem.TokenUsage.CostUSD != 2.0 {
 		t.Errorf("remainder cost = %v, want 2.0 (1M @ $2/MTok)", rem.TokenUsage.CostUSD)
+	}
+	// F7/F8: no returned bucket may carry a SubagentTokens subtree.
+	for i := range buckets {
+		if buckets[i].TokenUsage.SubagentTokens != nil {
+			t.Errorf("bucket %d carries SubagentTokens, want nil", i)
+		}
 	}
 	// test-a 1M@$1 = 1.0, remainder 1M@$2 = 2.0 → 3.0, all estimated.
 	if flat.CostUSD == nil || *flat.CostUSD != 3.0 {
@@ -172,6 +203,132 @@ func TestCalculateUsageWithCost_RemainderBucketPriced(t *testing.T) {
 	}
 	if flat.CostSource != types.CostSourceEstimated {
 		t.Errorf("flat source = %q, want estimated", flat.CostSource)
+	}
+}
+
+func TestCalculateUsageWithCost_RemainderBucketInflatedScalar(t *testing.T) {
+	t.Parallel()
+	// A ModelUsageCalculator whose buckets under-cover the flat SCALAR total (no
+	// subagent subtree involved) still yields a remainder for the shortfall.
+	ag := &fakeModelUsageAgent{
+		flat: &TokenUsage{InputTokens: 2_000_000, APICallCount: 7},
+		buckets: []types.ModelUsage{
+			{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000, APICallCount: 3}},
+		},
+	}
+
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "test-b", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("buckets = %d, want 2 (test-a + remainder)", len(buckets))
+	}
+	rem := buckets[1]
+	if rem.TokenUsage.InputTokens != 1_000_000 {
+		t.Errorf("remainder input = %d, want 1_000_000", rem.TokenUsage.InputTokens)
+	}
+	if rem.TokenUsage.APICallCount != 4 {
+		t.Errorf("remainder api_call_count = %d, want 4 (7 flat - 3 bucketed)", rem.TokenUsage.APICallCount)
+	}
+	if flat.CostUSD == nil || *flat.CostUSD != 3.0 {
+		t.Fatalf("flat cost = %v, want 3.0", flat.CostUSD)
+	}
+}
+
+func TestCalculateUsageWithCost_RemainderBucketNestedSubagents(t *testing.T) {
+	t.Parallel()
+	// Subagents that spawn subagents: the flat total's SubagentTokens nests two
+	// levels deep. flattenTokenUsage must sum EVERY level so the whole subtree is
+	// priced in the remainder bucket, not just the first.
+	ag := &fakeModelUsageAgent{
+		flat: &TokenUsage{
+			InputTokens:  1_000_000, // main
+			APICallCount: 1,
+			SubagentTokens: &TokenUsage{
+				InputTokens:    1_000_000, // depth-1 subagent
+				APICallCount:   1,
+				SubagentTokens: &TokenUsage{InputTokens: 1_000_000, APICallCount: 1}, // depth-2 subagent
+			},
+		},
+		buckets: []types.ModelUsage{
+			{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000, APICallCount: 1}},
+		},
+	}
+
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "test-b", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("buckets = %d, want 2", len(buckets))
+	}
+	rem := buckets[1]
+	if rem.TokenUsage.InputTokens != 2_000_000 {
+		t.Errorf("remainder input = %d, want 2_000_000 (both nested subagent levels)", rem.TokenUsage.InputTokens)
+	}
+	if rem.TokenUsage.APICallCount != 2 {
+		t.Errorf("remainder api_call_count = %d, want 2 (both subagent levels)", rem.TokenUsage.APICallCount)
+	}
+	// test-a 1M@$1 = 1.0, remainder 2M@$2 = 4.0 → 5.0.
+	if flat.CostUSD == nil || *flat.CostUSD != 5.0 {
+		t.Fatalf("flat cost = %v, want 5.0", flat.CostUSD)
+	}
+}
+
+func TestCalculateUsageWithCost_SubagentRemainderFallbackNoAliasing(t *testing.T) {
+	t.Parallel()
+	// SubagentAware but NOT ModelUsage: the flat total carries a subagent subtree
+	// and the single bucket comes from the fallback path (bucketTokens). The
+	// fallback bucket must carry main-scoped scalars only (nil SubagentTokens) and
+	// the subagent tokens must land in the remainder bucket — never aliased, so
+	// two runs cannot inflate and the agent's own usage is left untouched.
+	ag := &fakeSubagentAwareAgent{usage: &TokenUsage{
+		InputTokens:    1_000_000, // main
+		APICallCount:   2,
+		SubagentTokens: &TokenUsage{InputTokens: 1_000_000, APICallCount: 3}, // subagent
+	}}
+
+	run := func() ([]types.ModelUsage, *types.TokenUsage) {
+		flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "subdir", testTable(t), "test-a", false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return buckets, flat
+	}
+
+	buckets1, flat1 := run()
+	if len(buckets1) != 2 {
+		t.Fatalf("buckets = %d, want 2 (fallback main bucket + subagent remainder)", len(buckets1))
+	}
+	for i := range buckets1 {
+		if buckets1[i].TokenUsage.SubagentTokens != nil {
+			t.Errorf("bucket %d carries SubagentTokens, want nil", i)
+		}
+	}
+	if buckets1[0].TokenUsage.InputTokens != 1_000_000 {
+		t.Errorf("main bucket input = %d, want 1_000_000", buckets1[0].TokenUsage.InputTokens)
+	}
+	rem := buckets1[1]
+	if rem.TokenUsage.InputTokens != 1_000_000 || rem.TokenUsage.APICallCount != 3 {
+		t.Errorf("remainder = %+v, want 1M input / 3 api (subagent)", rem.TokenUsage)
+	}
+	// main 1M@$1 + subagent 1M@$1 = 2.0.
+	if flat1.CostUSD == nil || *flat1.CostUSD != 2.0 {
+		t.Fatalf("flat cost = %v, want 2.0", flat1.CostUSD)
+	}
+
+	// A second run must yield identical token counts — no cross-call inflation.
+	buckets2, _ := run()
+	if buckets2[0].TokenUsage.InputTokens != buckets1[0].TokenUsage.InputTokens ||
+		buckets2[1].TokenUsage.InputTokens != buckets1[1].TokenUsage.InputTokens {
+		t.Fatalf("cross-call inflation: run1=[%d,%d] run2=[%d,%d]",
+			buckets1[0].TokenUsage.InputTokens, buckets1[1].TokenUsage.InputTokens,
+			buckets2[0].TokenUsage.InputTokens, buckets2[1].TokenUsage.InputTokens)
+	}
+	// The agent's own usage subtree must not have been mutated.
+	if ag.usage.SubagentTokens.InputTokens != 1_000_000 {
+		t.Fatalf("agent usage subtree mutated: %d, want 1_000_000", ag.usage.SubagentTokens.InputTokens)
 	}
 }
 

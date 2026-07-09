@@ -48,6 +48,43 @@ func TestAccumulateTokenUsage_SumsCost_MixedSource(t *testing.T) {
 	}
 }
 
+// Two independent aggregates (mirroring state.TokenUsage and
+// state.CheckpointTokenUsage in manual_commit_git) that fold the SAME step must
+// not share the step's SubagentTokens object. Otherwise a later in-place
+// accumulation mutates the shared subtree and cross-contaminates both aggregates,
+// inflating subagent counts. Two steps of 100 subagent tokens must land each
+// aggregate at exactly 200.
+func TestAccumulateTokenUsage_SubagentNoSharedPointerAcrossAggregates(t *testing.T) {
+	t.Parallel()
+	step := &agent.TokenUsage{
+		InputTokens:    10,
+		SubagentTokens: &agent.TokenUsage{InputTokens: 100},
+	}
+
+	var aggA, aggB *agent.TokenUsage
+	// Step 1: seed both aggregates from the same step.
+	aggA = accumulateTokenUsage(aggA, step)
+	aggB = accumulateTokenUsage(aggB, step)
+	// Step 2: fold the same step again into each.
+	aggA = accumulateTokenUsage(aggA, step)
+	aggB = accumulateTokenUsage(aggB, step)
+
+	if aggA.SubagentTokens.InputTokens != 200 {
+		t.Fatalf("aggA subagent input = %d, want 200", aggA.SubagentTokens.InputTokens)
+	}
+	if aggB.SubagentTokens.InputTokens != 200 {
+		t.Fatalf("aggB subagent input = %d, want 200", aggB.SubagentTokens.InputTokens)
+	}
+	// The incoming step must never be mutated by accumulation.
+	if step.SubagentTokens.InputTokens != 100 {
+		t.Fatalf("step subagent mutated: %d, want 100", step.SubagentTokens.InputTokens)
+	}
+	// The two aggregates must not share the same SubagentTokens object.
+	if aggA.SubagentTokens == aggB.SubagentTokens {
+		t.Fatal("aggregates share the same SubagentTokens pointer")
+	}
+}
+
 func TestAccumulateTokenUsage_SubagentCostRecurses(t *testing.T) {
 	t.Parallel()
 	existing := &agent.TokenUsage{
