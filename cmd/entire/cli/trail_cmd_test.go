@@ -745,6 +745,87 @@ func TestDeleteTrailByNumber(t *testing.T) {
 	})
 }
 
+func TestAttachTrailBranch(t *testing.T) {
+	t.Parallel()
+
+	t.Run("posts action and branch_name to the /branch path and decodes the response", func(t *testing.T) {
+		t.Parallel()
+		var gotMethod, gotPath string
+		var gotBody api.TrailBranchRequest
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotMethod, gotPath = r.Method, r.URL.Path
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Errorf("decode request body: %v", err)
+			}
+			if err := json.NewEncoder(w).Encode(api.TrailBranchResponse{
+				Trail:         api.TrailResource{Number: 575, Branch: "feature/x"},
+				BranchCreated: true,
+			}); err != nil {
+				t.Errorf("encode response: %v", err)
+			}
+		}))
+		defer srv.Close()
+
+		client := api.NewClientWithBaseURL("tok", srv.URL)
+		resp, err := attachTrailBranch(t.Context(), client, "gh", "acme", "repo", 575, "create", "feature/x")
+		if err != nil {
+			t.Fatalf("attachTrailBranch: %v", err)
+		}
+		if gotMethod != http.MethodPost {
+			t.Fatalf("method = %q, want POST", gotMethod)
+		}
+		if want := "/api/v1/trails/gh/acme/repo/575/branch"; gotPath != want {
+			t.Fatalf("path = %q, want %q", gotPath, want)
+		}
+		if gotBody.Action != "create" || gotBody.BranchName != "feature/x" {
+			t.Fatalf("body = %+v, want {create feature/x}", gotBody)
+		}
+		if !resp.BranchCreated {
+			t.Fatal("BranchCreated = false, want true")
+		}
+	})
+
+	t.Run("surfaces a 409 when the trail already has a branch", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusConflict)
+			if err := json.NewEncoder(w).Encode(map[string]string{"error": "Trail already has a linked branch"}); err != nil {
+				t.Errorf("encode response: %v", err)
+			}
+		}))
+		defer srv.Close()
+
+		client := api.NewClientWithBaseURL("tok", srv.URL)
+		if _, err := attachTrailBranch(t.Context(), client, "gh", "acme", "repo", 575, "link", "feature/x"); err == nil {
+			t.Fatal("expected error for 409, got nil")
+		}
+	})
+}
+
+func TestBuildTrailUpdateRequestOmitsBranchByDefault(t *testing.T) {
+	t.Parallel()
+	// buildTrailUpdateRequest never sets Branch; a rename is folded in by the
+	// caller via updateReq.Branch. Guard that a plain metadata update omits it so
+	// it is never sent unintentionally.
+	req := buildTrailUpdateRequest(&api.TrailResource{Branch: "old"}, trailUpdateInputs{TitleChanged: true, Title: "new"})
+	if req.Branch != nil {
+		t.Fatalf("Branch = %v, want nil", *req.Branch)
+	}
+}
+
+func TestNewTrailUpdateCmdBranchFlags(t *testing.T) {
+	t.Parallel()
+	cmd := newTrailUpdateCmd()
+	for _, name := range []string{"set-branch", "trail", "branch-action", "branch"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Fatalf("update command is missing the --%s flag", name)
+		}
+	}
+	if got := cmd.Flags().Lookup("branch-action").DefValue; got != "link" {
+		t.Fatalf("--branch-action default = %q, want %q", got, "link")
+	}
+}
+
 // Not parallel: uses t.Chdir() to point ResolveRemoteRepo at a fake repo.
 func TestResolveTrailRemote_RejectsUnsupportedForge(t *testing.T) {
 	repoDir := t.TempDir()

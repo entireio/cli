@@ -112,11 +112,35 @@ type TrailUpdateRequest struct {
 	Title  *string   `json:"title,omitempty"`
 	Body   *string   `json:"body,omitempty"`
 	Labels *[]string `json:"labels,omitempty"`
+	// Branch changes the branch a trail that already has one points at. The
+	// server writes it straight to the trail row (a raw metadata rename); it
+	// does not create or verify the branch on the forge. To attach a branch to
+	// a branchless trail (with forge create/link), use TrailBranchRequest
+	// against the /branch endpoint instead.
+	Branch *string `json:"branch,omitempty"`
 }
 
 // TrailUpdateResponse is the response from PATCH /api/v1/trails/:org/:repo/:trailId.
 type TrailUpdateResponse struct {
 	Trail TrailResource `json:"trail"`
+}
+
+// TrailBranchRequest is the body for POST /api/v1/trails/:host/:owner/:repo/:number/branch.
+// It attaches a branch to a branchless trail; the server rejects it (409) when
+// the trail already has a branch. Action is required: "create" backfills the
+// branch on the forge at the trail's base if it is missing (needs App write
+// permission); "link" attaches an already-pushed branch and never backfills it.
+type TrailBranchRequest struct {
+	Action     string `json:"action"`
+	BranchName string `json:"branch_name,omitempty"`
+}
+
+// TrailBranchResponse is the response from POST /api/v1/trails/:host/:owner/:repo/:number/branch.
+// BranchCreated reports whether the server created the branch on the forge
+// (true for a "create" action that backfilled a missing branch).
+type TrailBranchResponse struct {
+	Trail         TrailResource `json:"trail"`
+	BranchCreated bool          `json:"branch_created"`
 }
 
 // TrailDeleteResponse is the response from DELETE /api/v1/trails/:host/:owner/:repo/:number.
