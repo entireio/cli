@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "claude-opus-4-8",
+      "provider": "anthropic",
+      "aliases": ["claude-opus-4-8-*", "anthropic/claude-opus-4-8"],
+      "input_per_mtok": 5,
+      "output_per_mtok": 25,
+      "effective_date": "2026-06-24"
+    },
+    {
+      "id": "claude-opus-4-7",
+      "provider": "anthropic",
+      "aliases": ["claude-opus-4-7-*", "anthropic/claude-opus-4-7"],
+      "input_per_mtok": 5,
+      "output_per_mtok": 25,
+      "effective_date": "2025-01-01"
+    },
+    {
+      "id": "claude-opus-4-6",
+      "provider": "anthropic",
+      "aliases": ["claude-opus-4-6-*", "anthropic/claude-opus-4-6"],
+      "input_per_mtok": 5,
+      "output_per_mtok": 25,
+      "effective_date": "2025-01-01"
+    },
+    {
+      "id": "claude-fable-5",
+      "provider": "anthropic",
+      "aliases": ["claude-fable-5-*", "anthropic/claude-fable-5"],
+      "input_per_mtok": 10,
+      "output_per_mtok": 50,
+      "effective_date": "2026-06-24"
+    },
+    {
+      "id": "claude-sonnet-5",
+      "provider": "anthropic",
+      "aliases": ["claude-sonnet-5-*", "anthropic/claude-sonnet-5"],
+      "input_per_mtok": 3,
+      "output_per_mtok": 15,
+      "effective_date": "2026-06-24"
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "aliases": ["claude-sonnet-4-6-*", "anthropic/claude-sonnet-4-6"],
+      "input_per_mtok": 3,
+      "output_per_mtok": 15,
+      "effective_date": "2025-01-01"
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "provider": "anthropic",
+      "aliases": ["claude-haiku-4-5-*", "claude-haiku-4-5-20251001", "anthropic/claude-haiku-4-5"],
+      "input_per_mtok": 1,
+      "output_per_mtok": 5,
+      "effective_date": "2025-10-01"
+    }
+  ]
+}

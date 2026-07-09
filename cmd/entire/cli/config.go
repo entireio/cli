@@ -7,6 +7,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/pricing"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
@@ -51,6 +52,14 @@ func SaveEntireSettingsLocal(ctx context.Context, s *settings.EntireSettings) er
 		return fmt.Errorf("saving local settings: %w", err)
 	}
 	return nil
+}
+
+// LoadPricingTable builds the model pricing table (embedded defaults plus any
+// configured overrides) and reports whether cost estimation is disabled. It is
+// the cli-package entry point over settings.LoadPricingTable and never fails: on
+// error the table is nil and callers omit cost rather than failing the hook.
+func LoadPricingTable(ctx context.Context) (*pricing.Table, bool) {
+	return settings.LoadPricingTable(ctx)
 }
 
 // IsEnabled returns whether Entire is currently enabled.
