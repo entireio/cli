@@ -18,9 +18,12 @@ type tokensProfileReport struct {
 	CheckpointsAvailable     int                           `json:"checkpoints_available"`
 	CheckpointsAnalyzed      int                           `json:"checkpoints_analyzed"`
 	CheckpointsWithTokenData int                           `json:"checkpoints_with_token_data"`
+	CheckpointsWithCostData  int                           `json:"checkpoints_with_cost_data,omitempty"`
 	MissingTokenData         int                           `json:"missing_token_data"`
 	MetadataReadWarnings     int                           `json:"metadata_read_warnings,omitempty"`
 	Tokens                   *sessionTokensUsage           `json:"tokens,omitempty"`
+	CostUSD                  *float64                      `json:"cost_usd,omitempty"`
+	CostSource               string                        `json:"cost_source,omitempty"`
 	Signals                  []tokensProfileSignal         `json:"signals,omitempty"`
 	Recommendations          []sessionTokensRecommendation `json:"recommendations,omitempty"`
 	Limitations              []string                      `json:"limitations,omitempty"`
@@ -176,11 +179,18 @@ func buildTokensProfileReport(ctx context.Context, store checkpoint.PersistentSt
 		}
 
 		report.CheckpointsWithTokenData++
+		if usage != nil && usage.CostUSD != nil {
+			report.CheckpointsWithCostData++
+		}
 		aggregate = addCheckpointTokenUsage(aggregate, usage)
 		addTokensProfileTokenSignals(signals, info.CheckpointID, tokens, report.CheckpointsAnalyzed)
 	}
 
 	report.Tokens = buildSessionTokensUsage(aggregate)
+	if report.Tokens != nil {
+		report.CostUSD = report.Tokens.CostUSD
+		report.CostSource = report.Tokens.CostSource
+	}
 	report.Signals = orderedTokensProfileSignals(signals)
 	report.Recommendations = tokensProfileRecommendations(report)
 	report.Limitations = tokensProfileLimitations(report)
@@ -379,6 +389,11 @@ func writeTokensProfileText(w io.Writer, report tokensProfileReport) {
 	}
 
 	writeTokenUsageSectionWithTitle(w, "Checkpoint-observed token usage", report.Tokens)
+	if report.CostUSD != nil {
+		fmt.Fprintf(w, "Total cost: %s across %d of %d checkpoints\n",
+			formatCostUSD(report.CostUSD, report.CostSource),
+			report.CheckpointsWithCostData, report.CheckpointsAnalyzed)
+	}
 	writeTokensProfileSignals(w, report.Signals)
 	if len(report.Recommendations) > 0 {
 		writeTokenRecommendations(w, report.Recommendations)
