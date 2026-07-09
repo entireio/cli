@@ -102,15 +102,26 @@ func LoadTable(overrides []ModelRate) (*Table, error) {
 // canonicalized (trimmed, lower-cased) for the index key so that an override
 // whose id differs only in case or surrounding whitespace replaces the builtin
 // entry instead of appending a phantom duplicate. The stored id is trimmed. When
-// an override omits aliases, it inherits the replaced entry's aliases so an
-// alias-less price override keeps resolving the dated and provider-prefixed
-// spellings the embedded entry covered.
+// an override omits aliases, provider, or cache rates, it inherits them from
+// the replaced entry so a minimal price override (id + input/output only)
+// keeps resolving the dated and provider-prefixed spellings the embedded
+// entry covered and keeps the provider's cache economics.
 func (t *Table) add(m ModelRate) {
 	m.ID = strings.TrimSpace(m.ID)
 	key := strings.ToLower(m.ID)
 	if idx, ok := t.index[key]; ok {
+		prev := t.models[idx]
 		if len(m.Aliases) == 0 {
-			m.Aliases = t.models[idx].Aliases
+			m.Aliases = prev.Aliases
+		}
+		if strings.TrimSpace(m.Provider) == "" {
+			m.Provider = prev.Provider
+		}
+		if m.CacheReadPerMTok == nil {
+			m.CacheReadPerMTok = prev.CacheReadPerMTok
+		}
+		if m.CacheWritePerMTok == nil {
+			m.CacheWritePerMTok = prev.CacheWritePerMTok
 		}
 		t.models[idx] = m
 		return
