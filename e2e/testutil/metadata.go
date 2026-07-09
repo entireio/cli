@@ -3,11 +3,20 @@ package testutil
 import "time"
 
 type TokenUsage struct {
-	InputTokens         int `json:"input_tokens"`
-	CacheCreationTokens int `json:"cache_creation_tokens"`
-	CacheReadTokens     int `json:"cache_read_tokens"`
-	OutputTokens        int `json:"output_tokens"`
-	APICallCount        int `json:"api_call_count"`
+	InputTokens         int      `json:"input_tokens"`
+	CacheCreationTokens int      `json:"cache_creation_tokens"`
+	CacheReadTokens     int      `json:"cache_read_tokens"`
+	OutputTokens        int      `json:"output_tokens"`
+	APICallCount        int      `json:"api_call_count"`
+	CostUSD             *float64 `json:"cost_usd,omitempty"`
+	CostSource          string   `json:"cost_source,omitempty"`
+}
+
+// ModelUsage mirrors the real per-model breakdown: a model identifier paired with
+// its token usage under a nested "token_usage" key (the canonical backend shape).
+type ModelUsage struct {
+	Model      string     `json:"model"`
+	TokenUsage TokenUsage `json:"token_usage"`
 }
 
 type Attribution struct {
@@ -29,6 +38,7 @@ type CheckpointMetadata struct {
 	FilesTouched     []string     `json:"files_touched"`
 	Sessions         []SessionRef `json:"sessions"`
 	TokenUsage       TokenUsage   `json:"token_usage"`
+	ModelUsage       []ModelUsage `json:"model_usage,omitempty"`
 }
 
 type SessionRef struct {
@@ -40,19 +50,20 @@ type SessionRef struct {
 }
 
 type SessionMetadata struct {
-	CLIVersion       string      `json:"cli_version"`
-	CheckpointID     string      `json:"checkpoint_id"`
-	SessionID        string      `json:"session_id"`
-	Strategy         string      `json:"strategy"`
-	CreatedAt        time.Time   `json:"created_at"`
-	Branch           string      `json:"branch"`
-	Agent            string      `json:"agent"`
-	Model            string      `json:"model"`
-	CheckpointsCount int         `json:"checkpoints_count"`
-	FilesTouched     []string    `json:"files_touched"`
-	TokenUsage       TokenUsage  `json:"token_usage"`
-	Attribution      Attribution `json:"initial_attribution"`
-	TranscriptPath   string      `json:"transcript_path"`
+	CLIVersion       string       `json:"cli_version"`
+	CheckpointID     string       `json:"checkpoint_id"`
+	SessionID        string       `json:"session_id"`
+	Strategy         string       `json:"strategy"`
+	CreatedAt        time.Time    `json:"created_at"`
+	Branch           string       `json:"branch"`
+	Agent            string       `json:"agent"`
+	Model            string       `json:"model"`
+	CheckpointsCount int          `json:"checkpoints_count"`
+	FilesTouched     []string     `json:"files_touched"`
+	TokenUsage       TokenUsage   `json:"token_usage"`
+	ModelUsage       []ModelUsage `json:"model_usage,omitempty"`
+	Attribution      Attribution  `json:"initial_attribution"`
+	TranscriptPath   string       `json:"transcript_path"`
 
 	// CheckpointTranscriptStart is the transcript.jsonl line offset where this
 	// checkpoint's contributions begin. For the first checkpoint in a session

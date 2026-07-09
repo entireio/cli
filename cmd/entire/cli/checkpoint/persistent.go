@@ -724,6 +724,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, // Deprecated: kept for backward compat
 		CompactTranscriptStart:      compactTranscriptStart,
 		TokenUsage:                  opts.TokenUsage,
+		ModelUsage:                  opts.ModelUsage,
 		SkillEventsVersion:          skillEventsVersion(opts.SkillEvents),
 		SkillEvents:                 opts.SkillEvents,
 		SessionMetrics:              opts.SessionMetrics,
@@ -760,7 +761,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 // writeCheckpointSummary writes the root-level CheckpointSummary with aggregated statistics.
 // sessions is the complete sessions array (already built by the caller).
 func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, entries map[string]object.TreeEntry, sessions []SessionFilePaths) error {
-	checkpointsCount, filesTouched, tokenUsage, err := s.reaggregateFromEntries(basePath, len(sessions), entries)
+	checkpointsCount, filesTouched, tokenUsage, modelUsage, err := s.reaggregateFromEntries(basePath, len(sessions), entries)
 	if err != nil {
 		return fmt.Errorf("failed to aggregate session stats: %w", err)
 	}
@@ -800,6 +801,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		FilesTouched:        filesTouched,
 		Sessions:            sessions,
 		TokenUsage:          tokenUsage,
+		ModelUsage:          modelUsage,
 		CombinedAttribution: combinedAttribution,
 		HasReview:           hasReview,
 		HasInvestigation:    hasInvestigation,
@@ -891,28 +893,30 @@ func (s *treeWriter) findSessionIndex(ctx context.Context, basePath string, exis
 }
 
 // reaggregateFromEntries reads all session metadata from the entries map and
-// reaggregates CheckpointsCount, FilesTouched, and TokenUsage.
-func (s *treeWriter) reaggregateFromEntries(basePath string, sessionCount int, entries map[string]object.TreeEntry) (int, []string, *agent.TokenUsage, error) {
+// reaggregates CheckpointsCount, FilesTouched, TokenUsage, and per-model ModelUsage.
+func (s *treeWriter) reaggregateFromEntries(basePath string, sessionCount int, entries map[string]object.TreeEntry) (int, []string, *agent.TokenUsage, []types.ModelUsage, error) {
 	var totalCount int
 	var allFiles []string
 	var totalTokens *agent.TokenUsage
+	var totalModels []types.ModelUsage
 
 	for i := range sessionCount {
 		path := checkpointSubtreePath(basePath, strconv.Itoa(i), paths.MetadataFileName)
 		entry, exists := entries[path]
 		if !exists {
-			return 0, nil, nil, fmt.Errorf("session %d metadata not found at %s", i, path)
+			return 0, nil, nil, nil, fmt.Errorf("session %d metadata not found at %s", i, path)
 		}
 		meta, err := s.readMetadataFromBlob(entry.Hash)
 		if err != nil {
-			return 0, nil, nil, fmt.Errorf("failed to read session %d metadata: %w", i, err)
+			return 0, nil, nil, nil, fmt.Errorf("failed to read session %d metadata: %w", i, err)
 		}
 		totalCount += meta.CheckpointsCount
 		allFiles = mergeFilesTouched(allFiles, meta.FilesTouched)
 		totalTokens = aggregateTokenUsage(totalTokens, meta.TokenUsage)
+		totalModels = mergeModelUsage(totalModels, meta.ModelUsage)
 	}
 
-	return totalCount, allFiles, totalTokens, nil
+	return totalCount, allFiles, totalTokens, totalModels, nil
 }
 
 func checkpointCreatedAt(opts WriteOptions) time.Time {
@@ -962,12 +966,15 @@ func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 		return nil
 	}
 	result := &agent.TokenUsage{}
+	var aCost, bCost *float64
+	var aSource, bSource string
 	if a != nil {
 		result.InputTokens = a.InputTokens
 		result.CacheCreationTokens = a.CacheCreationTokens
 		result.CacheReadTokens = a.CacheReadTokens
 		result.OutputTokens = a.OutputTokens
 		result.APICallCount = a.APICallCount
+		aCost, aSource = a.CostUSD, a.CostSource
 	}
 	if b != nil {
 		result.InputTokens += b.InputTokens
@@ -975,8 +982,42 @@ func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 		result.CacheReadTokens += b.CacheReadTokens
 		result.OutputTokens += b.OutputTokens
 		result.APICallCount += b.APICallCount
+		bCost, bSource = b.CostUSD, b.CostSource
 	}
+	result.CostUSD = types.AddCostUSD(aCost, bCost)
+	result.CostSource = types.MergeCostSource(aSource, bSource, aCost, bCost)
 	return result
+}
+
+// mergeModelUsage merges two per-model usage lists keyed by model, summing token
+// counts and folding costs with the same AddCostUSD/MergeCostSource rules as
+// aggregateTokenUsage. The result is sorted by model for deterministic output.
+// Returns nil when both inputs are empty so the omitempty JSON tag drops the field.
+func mergeModelUsage(a, b []types.ModelUsage) []types.ModelUsage {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	byModel := make(map[string]*agent.TokenUsage, len(a)+len(b))
+	fold := func(list []types.ModelUsage) {
+		for i := range list {
+			usage := list[i].TokenUsage
+			byModel[list[i].Model] = aggregateTokenUsage(byModel[list[i].Model], &usage)
+		}
+	}
+	fold(a)
+	fold(b)
+
+	models := make([]string, 0, len(byModel))
+	for model := range byModel {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+
+	out := make([]types.ModelUsage, 0, len(models))
+	for _, model := range models {
+		out = append(out, types.ModelUsage{Model: model, TokenUsage: *byModel[model]})
+	}
+	return out
 }
 
 // writeTranscript writes the transcript, compact transcript, and content hash

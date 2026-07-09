@@ -66,5 +66,6 @@ type ExtractedSessionData struct {
 	Prompts             []string // User prompts from the current checkpoint portion
 	FilesTouched        []string
 	TokenUsage          *agent.TokenUsage  // Token usage calculated from transcript (since CheckpointTranscriptStart)
+	ModelUsage          []agent.ModelUsage // Per-model breakdown of TokenUsage (since CheckpointTranscriptStart)
 	SkillEvents         []agent.SkillEvent // Skill events detected from transcript data
 }

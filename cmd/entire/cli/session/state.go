@@ -273,6 +273,14 @@ type State struct {
 	// This is checkpoint-scoped; TokenUsage remains the session-wide total.
 	CheckpointTokenUsage *agent.TokenUsage `json:"checkpoint_token_usage,omitempty"`
 
+	// ModelUsage tracks per-model token usage since the last condensation, keyed by
+	// model. Checkpoint-scoped like CheckpointTokenUsage (reset together at every
+	// condensation boundary); it is the per-model breakdown persisted into
+	// per-checkpoint metadata and used as the fallback when the freshly-extracted
+	// transcript yields no per-model buckets (e.g. Cursor, whose usage comes only
+	// from stop-hook payloads).
+	ModelUsage map[string]*agent.TokenUsage `json:"model_usage,omitempty"`
+
 	// SkillEvents records explicit native skill signals observed during this session.
 	// Stored as sidecar metadata so consumers can collapse skill-related transcript events
 	// without mutating the raw agent transcript.

@@ -1,0 +1,333 @@
+package agent
+
+import (
+	"errors"
+	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/pricing"
+)
+
+// --- Fakes ---
+
+// fakeTokenCalcAgent implements TokenCalculator only (no per-model attribution).
+type fakeTokenCalcAgent struct {
+	mockBaseAgent
+
+	usage *TokenUsage
+	err   error
+}
+
+func (f *fakeTokenCalcAgent) CalculateTokenUsage([]byte, int) (*TokenUsage, error) {
+	return f.usage, f.err
+}
+
+// fakeModelUsageAgent implements both TokenCalculator (for the flat total) and
+// ModelUsageCalculator (for per-model buckets).
+type fakeModelUsageAgent struct {
+	mockBaseAgent
+
+	flat    *TokenUsage
+	buckets []types.ModelUsage
+	muErr   error
+}
+
+func (f *fakeModelUsageAgent) CalculateTokenUsage([]byte, int) (*TokenUsage, error) { //nolint:unparam // test mock: error result satisfies TokenCalculator
+	return f.flat, nil
+}
+
+func (f *fakeModelUsageAgent) CalculateModelUsage([]byte, int) ([]types.ModelUsage, error) {
+	return f.buckets, f.muErr
+}
+
+func ptrFloat(v float64) *float64 { return &v }
+
+// testTable returns a pricing table with two clean-rate override models on top
+// of the embedded defaults: test-a ($1/MTok in&out) and test-b ($2/MTok in&out).
+func testTable(t *testing.T) *pricing.Table {
+	t.Helper()
+	table, err := pricing.LoadTable([]pricing.ModelRate{
+		{ID: "test-a", Provider: "test", InputPerMTok: 1, OutputPerMTok: 1},
+		{ID: "test-b", Provider: "test", InputPerMTok: 2, OutputPerMTok: 2},
+	})
+	if err != nil {
+		t.Fatalf("LoadTable: %v", err)
+	}
+	return table
+}
+
+func TestCalculateUsageWithCost_FallbackBucketPriced(t *testing.T) {
+	t.Parallel()
+	ag := &fakeTokenCalcAgent{usage: &TokenUsage{InputTokens: 1_000_000}}
+
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "test-a", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("buckets = %d, want 1", len(buckets))
+	}
+	if buckets[0].Model != "test-a" {
+		t.Errorf("bucket model = %q, want test-a", buckets[0].Model)
+	}
+	if flat.CostUSD == nil || *flat.CostUSD != 1.0 {
+		t.Fatalf("flat cost = %v, want 1.0", flat.CostUSD)
+	}
+	if flat.CostSource != types.CostSourceEstimated {
+		t.Errorf("flat source = %q, want estimated", flat.CostSource)
+	}
+	if buckets[0].TokenUsage.CostUSD == nil || *buckets[0].TokenUsage.CostUSD != 1.0 {
+		t.Errorf("bucket cost = %v, want 1.0", buckets[0].TokenUsage.CostUSD)
+	}
+}
+
+func TestCalculateUsageWithCost_TwoModelsSumEstimated(t *testing.T) {
+	t.Parallel()
+	ag := &fakeModelUsageAgent{
+		flat: &TokenUsage{InputTokens: 2_000_000},
+		buckets: []types.ModelUsage{
+			{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000}},
+			{Model: "test-b", TokenUsage: TokenUsage{InputTokens: 1_000_000}},
+		},
+	}
+
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if flat.CostUSD == nil || *flat.CostUSD != 3.0 {
+		t.Fatalf("flat cost = %v, want 3.0 (1+2)", flat.CostUSD)
+	}
+	if flat.CostSource != types.CostSourceEstimated {
+		t.Errorf("flat source = %q, want estimated", flat.CostSource)
+	}
+	if buckets[0].TokenUsage.CostUSD == nil || *buckets[0].TokenUsage.CostUSD != 1.0 {
+		t.Errorf("bucket a cost = %v, want 1.0", buckets[0].TokenUsage.CostUSD)
+	}
+	if buckets[1].TokenUsage.CostUSD == nil || *buckets[1].TokenUsage.CostUSD != 2.0 {
+		t.Errorf("bucket b cost = %v, want 2.0", buckets[1].TokenUsage.CostUSD)
+	}
+}
+
+func TestCalculateUsageWithCost_UnknownModelMixed(t *testing.T) {
+	t.Parallel()
+	ag := &fakeModelUsageAgent{
+		flat: &TokenUsage{InputTokens: 2_000_000},
+		buckets: []types.ModelUsage{
+			{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000}},
+			{Model: "who-knows", TokenUsage: TokenUsage{InputTokens: 1_000_000}},
+		},
+	}
+
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if flat.CostUSD == nil || *flat.CostUSD != 1.0 {
+		t.Fatalf("flat cost = %v, want 1.0 (only test-a priced)", flat.CostUSD)
+	}
+	if flat.CostSource != types.CostSourceMixed {
+		t.Errorf("flat source = %q, want mixed", flat.CostSource)
+	}
+	if buckets[1].TokenUsage.CostUSD != nil {
+		t.Errorf("unknown bucket cost = %v, want nil", buckets[1].TokenUsage.CostUSD)
+	}
+}
+
+func TestCalculateUsageWithCost_RemainderBucketPriced(t *testing.T) {
+	t.Parallel()
+	// Flat total covers 2M input, but the per-model buckets only account for 1M
+	// (simulating subagent usage the flat path folds in but CalculateModelUsage
+	// never sees). The 1M shortfall must be attributed to fallbackModel test-b.
+	ag := &fakeModelUsageAgent{
+		flat: &TokenUsage{InputTokens: 2_000_000},
+		buckets: []types.ModelUsage{
+			{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000}},
+		},
+	}
+
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "test-b", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("buckets = %d, want 2 (test-a + remainder)", len(buckets))
+	}
+	rem := buckets[1]
+	if rem.Model != "test-b" {
+		t.Errorf("remainder bucket model = %q, want test-b", rem.Model)
+	}
+	if rem.TokenUsage.InputTokens != 1_000_000 {
+		t.Errorf("remainder input = %d, want 1_000_000", rem.TokenUsage.InputTokens)
+	}
+	if rem.TokenUsage.CostUSD == nil || *rem.TokenUsage.CostUSD != 2.0 {
+		t.Errorf("remainder cost = %v, want 2.0 (1M @ $2/MTok)", rem.TokenUsage.CostUSD)
+	}
+	// test-a 1M@$1 = 1.0, remainder 1M@$2 = 2.0 → 3.0, all estimated.
+	if flat.CostUSD == nil || *flat.CostUSD != 3.0 {
+		t.Fatalf("flat cost = %v, want 3.0", flat.CostUSD)
+	}
+	if flat.CostSource != types.CostSourceEstimated {
+		t.Errorf("flat source = %q, want estimated", flat.CostSource)
+	}
+}
+
+func TestCalculateUsageWithCost_RemainderUnpriceableFallbackMixed(t *testing.T) {
+	t.Parallel()
+	// Same shortfall, but the fallbackModel is not priceable. The remainder
+	// bucket stays unpriced (tokens, no cost), so coverage folds to mixed.
+	ag := &fakeModelUsageAgent{
+		flat: &TokenUsage{InputTokens: 2_000_000},
+		buckets: []types.ModelUsage{
+			{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000}},
+		},
+	}
+
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "who-knows", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("buckets = %d, want 2 (test-a + remainder)", len(buckets))
+	}
+	rem := buckets[1]
+	if rem.Model != "who-knows" || rem.TokenUsage.InputTokens != 1_000_000 {
+		t.Errorf("remainder bucket = %+v, want who-knows with 1M input", rem)
+	}
+	if rem.TokenUsage.CostUSD != nil {
+		t.Errorf("remainder cost = %v, want nil (unpriceable)", rem.TokenUsage.CostUSD)
+	}
+	// Only test-a priced (1.0); remainder has tokens but no cost → mixed.
+	if flat.CostUSD == nil || *flat.CostUSD != 1.0 {
+		t.Fatalf("flat cost = %v, want 1.0 (test-a only)", flat.CostUSD)
+	}
+	if flat.CostSource != types.CostSourceMixed {
+		t.Errorf("flat source = %q, want mixed", flat.CostSource)
+	}
+}
+
+func TestCalculateUsageWithCost_NoRemainderWhenBucketsSumToFlat(t *testing.T) {
+	t.Parallel()
+	// Buckets already sum to the flat total: no remainder bucket is appended.
+	ag := &fakeModelUsageAgent{
+		flat: &TokenUsage{InputTokens: 2_000_000},
+		buckets: []types.ModelUsage{
+			{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000}},
+			{Model: "test-b", TokenUsage: TokenUsage{InputTokens: 1_000_000}},
+		},
+	}
+
+	_, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "test-a", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("buckets = %d, want 2 (no remainder appended)", len(buckets))
+	}
+}
+
+func TestCalculateUsageWithCost_ReportedKeptEstimationOff(t *testing.T) {
+	t.Parallel()
+	ag := &fakeModelUsageAgent{
+		flat: &TokenUsage{InputTokens: 2_000_000},
+		buckets: []types.ModelUsage{
+			{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000, CostUSD: ptrFloat(5.0), CostSource: types.CostSourceReported}},
+			{Model: "test-b", TokenUsage: TokenUsage{InputTokens: 1_000_000}},
+		},
+	}
+
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "", true /* disableEstimation */)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Reported bucket survives untouched.
+	if buckets[0].TokenUsage.CostUSD == nil || *buckets[0].TokenUsage.CostUSD != 5.0 {
+		t.Errorf("reported bucket cost = %v, want 5.0", buckets[0].TokenUsage.CostUSD)
+	}
+	if buckets[0].TokenUsage.CostSource != types.CostSourceReported {
+		t.Errorf("reported bucket source = %q, want reported", buckets[0].TokenUsage.CostSource)
+	}
+	// Estimation is off, so the priceable bucket stays unpriced.
+	if buckets[1].TokenUsage.CostUSD != nil {
+		t.Errorf("estimated-off bucket cost = %v, want nil", buckets[1].TokenUsage.CostUSD)
+	}
+	if flat.CostUSD == nil || *flat.CostUSD != 5.0 {
+		t.Errorf("flat cost = %v, want 5.0 (reported only)", flat.CostUSD)
+	}
+	if flat.CostSource != types.CostSourceMixed {
+		t.Errorf("flat source = %q, want mixed (reported + unpriced tokens)", flat.CostSource)
+	}
+}
+
+func TestCalculateUsageWithCost_NilTableNoCost(t *testing.T) {
+	t.Parallel()
+	ag := &fakeTokenCalcAgent{usage: &TokenUsage{InputTokens: 1_000_000}}
+
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil /* table */, "test-a", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if flat.CostUSD != nil {
+		t.Errorf("flat cost = %v, want nil", flat.CostUSD)
+	}
+	if flat.CostSource != "" {
+		t.Errorf("flat source = %q, want empty", flat.CostSource)
+	}
+	if buckets[0].TokenUsage.CostUSD != nil {
+		t.Errorf("bucket cost = %v, want nil", buckets[0].TokenUsage.CostUSD)
+	}
+}
+
+func TestCalculateUsageWithCost_NoUsage(t *testing.T) {
+	t.Parallel()
+	// Agent that supports neither TokenCalculator nor ModelUsageCalculator.
+	flat, buckets, err := CalculateUsageWithCost(&mockBaseAgent{}, nil, 0, "", testTable(t), "test-a", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if flat != nil || buckets != nil {
+		t.Errorf("got (%v, %v), want (nil, nil)", flat, buckets)
+	}
+}
+
+func TestCalculateUsageWithCost_FlatError(t *testing.T) {
+	t.Parallel()
+	ag := &fakeTokenCalcAgent{err: errors.New("boom")}
+	if _, _, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "test-a", false); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestPriceUsage_EstimatesUnderModel(t *testing.T) {
+	t.Parallel()
+	priced, buckets := PriceUsage(&TokenUsage{InputTokens: 1_000_000}, "test-b", testTable(t), false)
+	if priced.CostUSD == nil || *priced.CostUSD != 2.0 {
+		t.Fatalf("cost = %v, want 2.0", priced.CostUSD)
+	}
+	if priced.CostSource != types.CostSourceEstimated {
+		t.Errorf("source = %q, want estimated", priced.CostSource)
+	}
+	if len(buckets) != 1 || buckets[0].Model != "test-b" {
+		t.Errorf("buckets = %+v, want single test-b", buckets)
+	}
+}
+
+func TestPriceUsage_KeepsReported(t *testing.T) {
+	t.Parallel()
+	in := &TokenUsage{InputTokens: 1_000_000, CostUSD: ptrFloat(9.0), CostSource: types.CostSourceReported}
+	priced, _ := PriceUsage(in, "test-a", testTable(t), false)
+	if priced.CostUSD == nil || *priced.CostUSD != 9.0 {
+		t.Fatalf("cost = %v, want 9.0 (reported kept)", priced.CostUSD)
+	}
+	if priced.CostSource != types.CostSourceReported {
+		t.Errorf("source = %q, want reported", priced.CostSource)
+	}
+}
+
+func TestPriceUsage_NilUsage(t *testing.T) {
+	t.Parallel()
+	priced, buckets := PriceUsage(nil, "test-a", testTable(t), false)
+	if priced != nil || buckets != nil {
+		t.Errorf("got (%v, %v), want (nil, nil)", priced, buckets)
+	}
+}

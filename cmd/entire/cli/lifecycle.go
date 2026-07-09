@@ -912,14 +912,27 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		transcriptLinesAtStart = preState.TranscriptOffset
 	}
 
-	// Resolve token usage. Hook-provided counts (e.g., Cursor's stop hook,
-	// which is the only authoritative source for Cursor sessions because the
-	// JSONL transcript has no usage fields) take precedence; otherwise fall
-	// back to transcript-based computation, preferring SubagentAwareExtractor
-	// to include subagent tokens.
-	tokenUsage := event.TokenUsage
-	if tokenUsage == nil {
-		tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
+	// Resolve token usage and attribute cost. Hook-provided counts (e.g.,
+	// Cursor's stop hook, which is the only authoritative source for Cursor
+	// sessions because the JSONL transcript has no usage fields) take precedence
+	// and are priced directly as a single bucket under the session model;
+	// otherwise usage is computed from the transcript (preferring
+	// SubagentAwareExtractor to include subagent tokens) and priced per model.
+	// The per-model buckets are threaded through StepContext.ModelUsage so the
+	// strategy can accumulate them into checkpoint-scoped per-model metadata.
+	table, disableEstimation := LoadPricingTable(ctx)
+	var tokenUsage *agent.TokenUsage
+	var buckets []agent.ModelUsage
+	if event.TokenUsage != nil {
+		tokenUsage, buckets = agent.PriceUsage(event.TokenUsage, event.Model, table, disableEstimation)
+	} else {
+		var costErr error
+		tokenUsage, buckets, costErr = agent.CalculateUsageWithCost(ag, transcriptData, transcriptLinesAtStart, subagentsDir, table, event.Model, disableEstimation)
+		if costErr != nil {
+			logging.Debug(logCtx, "failed usage-with-cost extraction",
+				slog.String("error", costErr.Error()))
+			tokenUsage, buckets = nil, nil
+		}
 	}
 
 	// Build fully-populated step context and delegate to strategy
@@ -938,6 +951,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		StepTranscriptIdentifier: transcriptIdentifierAtStart,
 		StepTranscriptStart:      transcriptLinesAtStart,
 		TokenUsage:               tokenUsage,
+		ModelUsage:               buckets,
 	}
 
 	if err := strat.SaveStep(ctx, stepCtx); err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -195,6 +196,85 @@ func CalculateTokenUsageFromFile(path string, startLine int) (*agent.TokenUsage,
 	}
 
 	return CalculateTokenUsage(lines), nil
+}
+
+// modelUsageRow pairs a deduplicated assistant message's usage with the model
+// that produced it, so per-model attribution keys off the SAME kept row as the
+// flat token loop (dedup by message.id, keeping the highest-output row).
+type modelUsageRow struct {
+	model string
+	usage messageUsage
+}
+
+// CalculateModelUsage attributes per-message token usage to the model that
+// produced it (message.model), over the MAIN transcript only. The
+// ModelUsageCalculator signature carries no subagentsDir, so unlike
+// CalculateTotalTokenUsage this covers only the main-agent transcript; the
+// dispatcher's remainder bucket attributes any subagent shortfall under the
+// session model. It reuses the flat token loop's dedup semantics — one row per
+// message.id, keeping the highest output_tokens (final streaming state) — and
+// buckets each kept row by that row's model. Buckets are returned sorted by
+// model for deterministic output and sum to the flat CalculateTokenUsage total
+// over the same main-transcript slice. Cost fields are left nil; the framework
+// prices each bucket.
+func (c *ClaudeCodeAgent) CalculateModelUsage(transcriptData []byte, fromOffset int) ([]agent.ModelUsage, error) {
+	if len(transcriptData) == 0 {
+		return nil, nil
+	}
+
+	sliced := transcript.SliceFromLine(transcriptData, fromOffset)
+	parsed, err := transcript.ParseFromBytes(sliced)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse transcript: %w", err)
+	}
+
+	// Deduplicate by message.id, keeping the highest-output row; the model rides
+	// the kept row so attribution matches the flat token loop exactly.
+	rowByID := make(map[string]modelUsageRow)
+	for _, line := range parsed {
+		if line.Type != envelopeTypeAssistant {
+			continue
+		}
+		var msg messageWithUsage
+		if err := json.Unmarshal(line.Message, &msg); err != nil {
+			continue
+		}
+		if msg.ID == "" {
+			continue
+		}
+		existing, exists := rowByID[msg.ID]
+		if !exists || msg.Usage.OutputTokens > existing.usage.OutputTokens {
+			rowByID[msg.ID] = modelUsageRow{model: msg.Model, usage: msg.Usage}
+		}
+	}
+
+	// Aggregate the deduplicated rows into per-model buckets.
+	byModel := make(map[string]*agent.TokenUsage)
+	for _, row := range rowByID {
+		u := byModel[row.model]
+		if u == nil {
+			u = &agent.TokenUsage{}
+			byModel[row.model] = u
+		}
+		u.InputTokens += row.usage.InputTokens
+		u.CacheCreationTokens += row.usage.CacheCreationInputTokens
+		u.CacheReadTokens += row.usage.CacheReadInputTokens
+		u.OutputTokens += row.usage.OutputTokens
+		u.APICallCount++
+	}
+
+	// Emit in a deterministic order (map iteration is randomized).
+	models := make([]string, 0, len(byModel))
+	for m := range byModel {
+		models = append(models, m)
+	}
+	sort.Strings(models)
+
+	buckets := make([]agent.ModelUsage, 0, len(models))
+	for _, m := range models {
+		buckets = append(buckets, agent.ModelUsage{Model: m, TokenUsage: *byModel[m]})
+	}
+	return buckets, nil
 }
 
 // ExtractSpawnedAgentIDs extracts agent IDs from Task tool results in a transcript.

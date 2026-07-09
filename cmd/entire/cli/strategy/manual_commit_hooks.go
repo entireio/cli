@@ -1409,6 +1409,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	state.RealignAttributionBase(newHead)
 	state.StepCount = 0
 	state.CheckpointTokenUsage = nil
+	state.ModelUsage = nil
 	state.CheckpointTranscriptStart = result.TotalTranscriptLines
 	state.CheckpointTranscriptSize = int64(len(result.Transcript))
 

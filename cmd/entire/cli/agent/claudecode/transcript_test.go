@@ -340,6 +340,106 @@ func TestCalculateTokenUsage_StreamingDeduplication(t *testing.T) {
 	}
 }
 
+func TestCalculateModelUsage_TwoModelsWithStreamingDedup(t *testing.T) {
+	t.Parallel()
+
+	// Two models interleaved. msg_001 (opus) streams three rows with increasing
+	// output_tokens; the model stays constant on the id. msg_002 (opus) and
+	// msg_003 (fable) are single rows. Dedup keeps the max-output row per id, and
+	// the model rides that kept row.
+	data := buildJSONL(
+		`{"type":"user","uuid":"u1","message":{"content":"go"}}`,
+		`{"type":"assistant","uuid":"a1a","message":{"id":"msg_001","model":"claude-opus-4-8","usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":50,"output_tokens":1}}}`,
+		`{"type":"assistant","uuid":"a1b","message":{"id":"msg_001","model":"claude-opus-4-8","usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":50,"output_tokens":5}}}`,
+		`{"type":"assistant","uuid":"a1c","message":{"id":"msg_001","model":"claude-opus-4-8","usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":50,"output_tokens":20}}}`,
+		`{"type":"assistant","uuid":"a2","message":{"id":"msg_002","model":"claude-opus-4-8","usage":{"input_tokens":7,"cache_creation_input_tokens":30,"cache_read_input_tokens":0,"output_tokens":40}}}`,
+		`{"type":"assistant","uuid":"a3","message":{"id":"msg_003","model":"claude-fable-5","usage":{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":9,"output_tokens":12}}}`,
+	)
+
+	c := &ClaudeCodeAgent{}
+	buckets, err := c.CalculateModelUsage(data, 0)
+	if err != nil {
+		t.Fatalf("CalculateModelUsage error: %v", err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("buckets = %d, want 2", len(buckets))
+	}
+
+	// Deterministic order: sorted by model string. "claude-fable-5" < "claude-opus-4-8".
+	if buckets[0].Model != "claude-fable-5" || buckets[1].Model != "claude-opus-4-8" {
+		t.Fatalf("bucket order = [%q, %q], want [claude-fable-5, claude-opus-4-8]",
+			buckets[0].Model, buckets[1].Model)
+	}
+
+	// opus: msg_001 (deduped to output=20) + msg_002.
+	opus := buckets[1].TokenUsage
+	if opus.InputTokens != 17 { // 10 + 7 (msg_001 counted once)
+		t.Errorf("opus input = %d, want 17", opus.InputTokens)
+	}
+	if opus.CacheCreationTokens != 130 { // 100 + 30
+		t.Errorf("opus cache_creation = %d, want 130", opus.CacheCreationTokens)
+	}
+	if opus.CacheReadTokens != 50 { // 50 + 0
+		t.Errorf("opus cache_read = %d, want 50", opus.CacheReadTokens)
+	}
+	if opus.OutputTokens != 60 { // 20 (max of msg_001) + 40
+		t.Errorf("opus output = %d, want 60", opus.OutputTokens)
+	}
+	if opus.APICallCount != 2 { // msg_001 + msg_002
+		t.Errorf("opus api_call_count = %d, want 2", opus.APICallCount)
+	}
+
+	// fable: msg_003 only.
+	fable := buckets[0].TokenUsage
+	if fable.InputTokens != 3 || fable.CacheReadTokens != 9 || fable.OutputTokens != 12 || fable.APICallCount != 1 {
+		t.Errorf("fable bucket = %+v, want in=3 cacheRead=9 out=12 calls=1", fable)
+	}
+
+	// Buckets must sum to the flat CalculateTokenUsage total (main transcript only).
+	flat, err := c.CalculateTokenUsage(data, 0)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsage error: %v", err)
+	}
+	var sumIn, sumCC, sumCR, sumOut, sumCalls int
+	for _, b := range buckets {
+		sumIn += b.TokenUsage.InputTokens
+		sumCC += b.TokenUsage.CacheCreationTokens
+		sumCR += b.TokenUsage.CacheReadTokens
+		sumOut += b.TokenUsage.OutputTokens
+		sumCalls += b.TokenUsage.APICallCount
+	}
+	if sumIn != flat.InputTokens || sumCC != flat.CacheCreationTokens ||
+		sumCR != flat.CacheReadTokens || sumOut != flat.OutputTokens || sumCalls != flat.APICallCount {
+		t.Errorf("bucket sums (in=%d cc=%d cr=%d out=%d calls=%d) != flat (in=%d cc=%d cr=%d out=%d calls=%d)",
+			sumIn, sumCC, sumCR, sumOut, sumCalls,
+			flat.InputTokens, flat.CacheCreationTokens, flat.CacheReadTokens, flat.OutputTokens, flat.APICallCount)
+	}
+}
+
+func TestCalculateModelUsage_Offset(t *testing.T) {
+	t.Parallel()
+
+	// From an offset past the first assistant turn, only later turns contribute.
+	data := buildJSONL(
+		`{"type":"user","uuid":"u1","message":{"content":"go"}}`,
+		`{"type":"assistant","uuid":"a1","message":{"id":"msg_001","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":20}}}`,
+		`{"type":"user","uuid":"u2","message":{"content":"more"}}`,
+		`{"type":"assistant","uuid":"a2","message":{"id":"msg_002","model":"claude-fable-5","usage":{"input_tokens":15,"output_tokens":25}}}`,
+	)
+
+	c := &ClaudeCodeAgent{}
+	buckets, err := c.CalculateModelUsage(data, 2)
+	if err != nil {
+		t.Fatalf("CalculateModelUsage error: %v", err)
+	}
+	if len(buckets) != 1 || buckets[0].Model != "claude-fable-5" {
+		t.Fatalf("buckets = %+v, want single claude-fable-5", buckets)
+	}
+	if buckets[0].TokenUsage.InputTokens != 15 || buckets[0].TokenUsage.OutputTokens != 25 {
+		t.Errorf("bucket = %+v, want in=15 out=25", buckets[0].TokenUsage)
+	}
+}
+
 func TestCalculateTokenUsage_IgnoresUserMessages(t *testing.T) {
 	t.Parallel()
 
