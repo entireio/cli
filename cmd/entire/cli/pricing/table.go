@@ -113,6 +113,13 @@ func (t *Table) add(m ModelRate) {
 // matching against ids and aliases, where an alias may be a shell-style glob.
 // It performs no implicit model-family fallback; an unknown model returns
 // (ModelRate{}, false).
+//
+// Matching is attempted against the normalized query and, when the query carries
+// a bracketed long-context suffix such as "[1m]", the same query with that
+// suffix removed. path.Match treats "[...]" as a character class, so a literal
+// "[1m]" alias would never match; normalizing on the query side sidesteps that
+// trap and lets a bare id like "claude-fable-5[1m]" (the form Claude Code emits)
+// resolve to "claude-fable-5", which bills at the same base rate.
 func (t *Table) Lookup(model string) (ModelRate, bool) {
 	if idx, ok := t.index[model]; ok {
 		return t.models[idx], true
@@ -123,29 +130,52 @@ func (t *Table) Lookup(model string) (ModelRate, bool) {
 		return ModelRate{}, false
 	}
 
+	candidates := []string{norm}
+	if base := stripLongContextSuffix(norm); base != norm && base != "" {
+		candidates = append(candidates, base)
+	}
+
 	for i := range t.models {
 		r := t.models[i]
-		if strings.ToLower(r.ID) == norm {
-			return r, true
+		id := strings.ToLower(r.ID)
+		for _, q := range candidates {
+			if id == q {
+				return r, true
+			}
 		}
 		for _, alias := range r.Aliases {
 			na := strings.ToLower(strings.TrimSpace(alias))
 			if na == "" {
 				continue
 			}
-			if strings.ContainsAny(na, "*?[") {
-				if ok, err := path.Match(na, norm); err == nil && ok {
+			isGlob := strings.ContainsAny(na, "*?[")
+			for _, q := range candidates {
+				if isGlob {
+					if ok, err := path.Match(na, q); err == nil && ok {
+						return r, true
+					}
+					continue
+				}
+				if na == q {
 					return r, true
 				}
-				continue
-			}
-			if na == norm {
-				return r, true
 			}
 		}
 	}
 
 	return ModelRate{}, false
+}
+
+// stripLongContextSuffix removes a trailing bracketed suffix such as the "[1m]"
+// long-context marker that Claude Code appends to model ids (e.g.
+// "claude-fable-5[1m]"). It returns s unchanged when there is no such suffix.
+func stripLongContextSuffix(s string) string {
+	if strings.HasSuffix(s, "]") {
+		if i := strings.IndexByte(s, '['); i >= 0 {
+			return s[:i]
+		}
+	}
+	return s
 }
 
 // Estimate returns the USD cost of u under rate r. Fresh input, cache-read,

@@ -65,6 +65,63 @@ func TestTable_Lookup(t *testing.T) {
 	}
 }
 
+func TestTable_Lookup_AnthropicIDForms(t *testing.T) {
+	t.Parallel()
+
+	tbl, err := LoadTable(nil)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name   string
+		query  string
+		wantID string
+		wantOK bool
+	}{
+		{name: "bare id", query: "claude-opus-4-8", wantID: "claude-opus-4-8", wantOK: true},
+		{name: "anthropic dated", query: "claude-haiku-4-5-20251001", wantID: "claude-haiku-4-5", wantOK: true},
+		{name: "long-context 1m suffix on bare id", query: "claude-fable-5[1m]", wantID: "claude-fable-5", wantOK: true},
+		{name: "long-context 1m suffix on dated id", query: "claude-opus-4-8-20260624[1m]", wantID: "claude-opus-4-8", wantOK: true},
+		{name: "long-context 1m suffix uppercase", query: "CLAUDE-SONNET-5[1M]", wantID: "claude-sonnet-5", wantOK: true},
+		{name: "bedrock bare", query: "anthropic.claude-opus-4-8", wantID: "claude-opus-4-8", wantOK: true},
+		{name: "bedrock versioned regional", query: "us.anthropic.claude-opus-4-8-v1:0", wantID: "claude-opus-4-8", wantOK: true},
+		{name: "bedrock legacy dated versioned", query: "anthropic.claude-3-5-sonnet-20241022-v2:0", wantID: "claude-3-5-sonnet", wantOK: true},
+		{name: "vertex dated", query: "claude-opus-4-5@20251101", wantID: "claude-opus-4-5", wantOK: true},
+		{name: "slash prefixed", query: "anthropic/claude-sonnet-5", wantID: "claude-sonnet-5", wantOK: true},
+		{name: "legacy dated sonnet", query: "claude-3-5-sonnet-20241022", wantID: "claude-3-5-sonnet", wantOK: true},
+		{name: "legacy opus canonical alias", query: "claude-3-opus", wantID: "claude-opus-3", wantOK: true},
+		{name: "legacy opus dated alias", query: "claude-3-opus-20240229", wantID: "claude-opus-3", wantOK: true},
+		{name: "legacy haiku dated", query: "claude-3-haiku-20240307", wantID: "claude-3-haiku", wantOK: true},
+		{name: "non-claude id misses", query: "meta-llama-3-70b", wantOK: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := tbl.Lookup(tc.query)
+			assert.Equal(t, tc.wantOK, ok)
+			if tc.wantOK {
+				assert.Equal(t, tc.wantID, got.ID)
+			}
+		})
+	}
+}
+
+func TestTable_Lookup_LongContextSharesBaseRate(t *testing.T) {
+	t.Parallel()
+
+	tbl, err := LoadTable(nil)
+	require.NoError(t, err)
+
+	// The "[1m]" long-context id resolves to the base model and bills at the
+	// base rate (no long-context premium).
+	got, ok := tbl.Lookup("claude-fable-5[1m]")
+	require.True(t, ok)
+	assert.Equal(t, "claude-fable-5", got.ID)
+	assert.InDelta(t, 10.0, got.InputPerMTok, 1e-9)
+	assert.InDelta(t, 50.0, got.OutputPerMTok, 1e-9)
+}
+
 func TestEstimate_DefaultMultipliers(t *testing.T) {
 	t.Parallel()
 
