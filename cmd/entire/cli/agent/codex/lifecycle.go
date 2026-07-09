@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/internal/hookcompat"
 )
 
 // Compile-time interface assertions.
@@ -54,6 +54,14 @@ const (
 	HookNamePostToolUse      = "post-tool-use"
 )
 
+var codexHookEventToHookNames = map[string][]string{
+	"SessionStart":     {HookNameSessionStart},
+	"UserPromptSubmit": {HookNameUserPromptSubmit},
+	"Stop":             {HookNameStop},
+	"PreToolUse":       {HookNamePreToolUse},
+	"PostToolUse":      {HookNamePostToolUse},
+}
+
 // HookNames returns the hook verbs Codex supports.
 func (c *CodexAgent) HookNames() []string {
 	return []string{
@@ -70,47 +78,53 @@ func (c *CodexAgent) HookNames() []string {
 func (c *CodexAgent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
-		return c.parseSessionStart(stdin)
+		return c.parseSessionStart(stdin, hookName)
 	case HookNameUserPromptSubmit:
-		return c.parseTurnStart(stdin)
+		return c.parseTurnStart(stdin, hookName)
 	case HookNameStop:
-		return c.parseTurnEnd(stdin)
+		return c.parseTurnEnd(stdin, hookName)
 	case HookNamePreToolUse:
 		// PreToolUse has no lifecycle significance — pass through
 		return nil, nil //nolint:nilnil // nil event = no lifecycle action
 	case HookNamePostToolUse:
-		return c.parsePostToolUse(stdin)
+		return c.parsePostToolUse(stdin, hookName)
 	default:
 		return nil, nil //nolint:nilnil // Unknown hooks have no lifecycle action
 	}
 }
 
-func (c *CodexAgent) parseSessionStart(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionStartRaw](stdin)
+func (c *CodexAgent) parseSessionStart(stdin io.Reader, hookName string) (*agent.Event, error) {
+	env, ok, err := readCompatEnvelope(stdin, hookName)
 	if err != nil {
 		return nil, err
+	}
+	if !ok {
+		return nil, nil //nolint:nilnil // Mismatched plugin event — skip silently.
 	}
 	return &agent.Event{
 		Type:       agent.SessionStart,
-		SessionID:  raw.SessionID,
-		SessionRef: derefString(raw.TranscriptPath),
-		Model:      raw.Model,
-		Timestamp:  time.Now(),
+		SessionID:  env.SessionID,
+		SessionRef: env.TranscriptPath,
+		Model:      env.Model,
+		Timestamp:  env.Timestamp,
 	}, nil
 }
 
-func (c *CodexAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[userPromptSubmitRaw](stdin)
+func (c *CodexAgent) parseTurnStart(stdin io.Reader, hookName string) (*agent.Event, error) {
+	env, ok, err := readCompatEnvelope(stdin, hookName)
 	if err != nil {
 		return nil, err
 	}
+	if !ok {
+		return nil, nil //nolint:nilnil // Mismatched plugin event — skip silently.
+	}
 	return &agent.Event{
 		Type:       agent.TurnStart,
-		SessionID:  raw.SessionID,
-		SessionRef: derefString(raw.TranscriptPath),
-		Prompt:     raw.Prompt,
-		Model:      raw.Model,
-		Timestamp:  time.Now(),
+		SessionID:  env.SessionID,
+		SessionRef: env.TranscriptPath,
+		Prompt:     env.Prompt,
+		Model:      env.Model,
+		Timestamp:  env.Timestamp,
 	}, nil
 }
 
@@ -127,20 +141,28 @@ const (
 // parsePostToolUse turns a Codex PostToolUse hook into a ToolUse lifecycle event.
 // Non-mutating tools (shell, MCP) produce a nil event so the dispatcher skips
 // them — extracting files from arbitrary shell commands would be unreliable.
-func (c *CodexAgent) parsePostToolUse(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[postToolUseRaw](stdin)
+func (c *CodexAgent) parsePostToolUse(stdin io.Reader, hookName string) (*agent.Event, error) {
+	raw, err := hookcompat.ReadRaw(stdin)
 	if err != nil {
 		return nil, err
 	}
+	env, err := hookcompat.EnvelopeFromRaw(raw)
+	if err != nil {
+		return nil, err
+	}
+	if !hookcompat.HookEventMatches(env.HookEventName, hookName, codexHookEventToHookNames) {
+		return nil, nil //nolint:nilnil // Mismatched plugin event — skip silently.
+	}
 
-	if !isApplyPatchTool(raw.ToolName) {
+	toolName := hookcompat.FirstString(raw, "tool_name", "toolName")
+	if !isApplyPatchTool(toolName) {
 		return nil, nil //nolint:nilnil // non-mutating tools have no lifecycle action
 	}
 
 	var input applyPatchToolInput
 	// Best-effort: an unparseable tool_input means we can't extract files, but
 	// we shouldn't fail the hook (which would block the agent's tool call).
-	_ = json.Unmarshal(raw.ToolInput, &input) //nolint:errcheck // input.Command stays empty on failure
+	_ = json.Unmarshal(hookcompat.FirstRaw(raw, "tool_input", "toolInput"), &input) //nolint:errcheck // input.Command stays empty on failure
 
 	added, modified, deleted := classifyApplyPatchPaths(input.Command)
 	if len(added) == 0 && len(modified) == 0 && len(deleted) == 0 {
@@ -149,15 +171,15 @@ func (c *CodexAgent) parsePostToolUse(stdin io.Reader) (*agent.Event, error) {
 
 	return &agent.Event{
 		Type:          agent.ToolUse,
-		SessionID:     raw.SessionID,
-		SessionRef:    derefString(raw.TranscriptPath),
-		Model:         raw.Model,
-		ToolUseID:     raw.ToolUseID,
-		CWD:           raw.CWD,
+		SessionID:     env.SessionID,
+		SessionRef:    env.TranscriptPath,
+		Model:         env.Model,
+		ToolUseID:     hookcompat.FirstString(raw, "tool_use_id", "toolUseId", "toolUseID"),
+		CWD:           env.CWD,
 		ModifiedFiles: modified,
 		NewFiles:      added,
 		DeletedFiles:  deleted,
-		Timestamp:     time.Now(),
+		Timestamp:     env.Timestamp,
 	}, nil
 }
 
@@ -170,16 +192,30 @@ func isApplyPatchTool(name string) bool {
 	}
 }
 
-func (c *CodexAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[stopRaw](stdin)
+func (c *CodexAgent) parseTurnEnd(stdin io.Reader, hookName string) (*agent.Event, error) {
+	env, ok, err := readCompatEnvelope(stdin, hookName)
 	if err != nil {
 		return nil, err
 	}
+	if !ok {
+		return nil, nil //nolint:nilnil // Mismatched plugin event — skip silently.
+	}
 	return &agent.Event{
 		Type:       agent.TurnEnd,
-		SessionID:  raw.SessionID,
-		SessionRef: derefString(raw.TranscriptPath),
-		Model:      raw.Model,
-		Timestamp:  time.Now(),
+		SessionID:  env.SessionID,
+		SessionRef: env.TranscriptPath,
+		Model:      env.Model,
+		Timestamp:  env.Timestamp,
 	}, nil
+}
+
+func readCompatEnvelope(stdin io.Reader, hookName string) (*hookcompat.Envelope, bool, error) {
+	env, err := hookcompat.ReadEnvelope(stdin)
+	if err != nil {
+		return nil, false, err
+	}
+	if !hookcompat.HookEventMatches(env.HookEventName, hookName, codexHookEventToHookNames) {
+		return env, false, nil
+	}
+	return env, true, nil
 }

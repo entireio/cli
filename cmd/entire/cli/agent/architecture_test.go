@@ -43,18 +43,19 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 
 	// Packages within the repo that agents ARE allowed to import.
 	allowedPrefixes := []string{
-		repoPrefix + "agent",      // agent contract + sub-packages
-		repoPrefix + "logging",    // logging utilities
-		repoPrefix + "paths",      // path utilities
-		repoPrefix + "jsonutil",   // JSON utilities
-		repoPrefix + "textutil",   // text utilities
-		repoPrefix + "transcript", // transcript utilities
-		repoPrefix + "trailers",   // git trailer utilities
-		repoPrefix + "stringutil", // string utilities
-		repoPrefix + "telemetry",  // telemetry
-		repoPrefix + "validation", // validation utilities
-		repoPrefix + "settings",   // settings (read-only access)
-		repoPrefix + "review",     // review env contract + AgentReviewer types (used by per-agent reviewer.go files)
+		repoPrefix + "agent",               // agent contract + sub-packages
+		repoPrefix + "logging",             // logging utilities
+		repoPrefix + "paths",               // path utilities
+		repoPrefix + "jsonutil",            // JSON utilities
+		repoPrefix + "textutil",            // text utilities
+		repoPrefix + "transcript",          // transcript utilities
+		repoPrefix + "trailers",            // git trailer utilities
+		repoPrefix + "stringutil",          // string utilities
+		repoPrefix + "telemetry",           // telemetry
+		repoPrefix + "validation",          // validation utilities
+		repoPrefix + "settings",            // settings (read-only access)
+		repoPrefix + "review",              // review env contract + AgentReviewer types (used by per-agent reviewer.go files)
+		repoPrefix + "internal/hookcompat", // hook payload compatibility helpers
 	}
 
 	agentDir := findAgentDir(t)

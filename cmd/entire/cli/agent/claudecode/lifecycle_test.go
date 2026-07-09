@@ -76,6 +76,23 @@ func TestParseHookEvent_SessionStart_EmptyModel(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_SessionStart_PluginPayload(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"sessionId":"plugin-session","transcriptPath":"/tmp/plugin.jsonl","hookEventName":"SessionStart","timestamp":"2026-02-09T10:30:00.000Z","model":"claude-sonnet-4-20250514"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionStart, strings.NewReader(input))
+
+	require.NoError(t, err)
+	require.NotNil(t, event, "expected event, got nil")
+	require.Equal(t, agent.SessionStart, event.Type)
+	require.Equal(t, "plugin-session", event.SessionID)
+	require.Equal(t, "/tmp/plugin.jsonl", event.SessionRef)
+	require.Equal(t, "claude-sonnet-4-20250514", event.Model)
+	require.Equal(t, 2026, event.Timestamp.Year())
+}
+
 func TestParseHookEvent_TurnStart(t *testing.T) {
 	t.Parallel()
 
@@ -99,6 +116,24 @@ func TestParseHookEvent_TurnStart(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_TurnStart_PluginPayload(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"sessionId":"plugin-session","transcript_path":"/tmp/plugin.jsonl","hookEventName":"UserPromptSubmit","timestamp":1770633000000,"model":"claude-sonnet-4-20250514","prompt":"Hello from plugin"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameUserPromptSubmit, strings.NewReader(input))
+
+	require.NoError(t, err)
+	require.NotNil(t, event, "expected event, got nil")
+	require.Equal(t, agent.TurnStart, event.Type)
+	require.Equal(t, "plugin-session", event.SessionID)
+	require.Equal(t, "/tmp/plugin.jsonl", event.SessionRef)
+	require.Equal(t, "Hello from plugin", event.Prompt)
+	require.Equal(t, "claude-sonnet-4-20250514", event.Model)
+	require.False(t, event.Timestamp.IsZero())
+}
+
 func TestParseHookEvent_TurnEnd(t *testing.T) {
 	t.Parallel()
 
@@ -117,6 +152,22 @@ func TestParseHookEvent_TurnEnd(t *testing.T) {
 	if event.SessionID != "sess-789" {
 		t.Errorf("expected session_id 'sess-789', got %q", event.SessionID)
 	}
+}
+
+func TestParseHookEvent_TurnEnd_PluginPayload(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"sessionId":"plugin-session","transcriptPath":"/tmp/plugin.jsonl","hookEventName":"Stop","timestamp":"2026-02-09T10:30:00.000Z","model":"claude-opus-4-6"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+
+	require.NoError(t, err)
+	require.NotNil(t, event, "expected event, got nil")
+	require.Equal(t, agent.TurnEnd, event.Type)
+	require.Equal(t, "plugin-session", event.SessionID)
+	require.Equal(t, "/tmp/plugin.jsonl", event.SessionRef)
+	require.Equal(t, "claude-opus-4-6", event.Model)
 }
 
 func TestParseHookEvent_TurnEnd_IncludesModel(t *testing.T) {
@@ -154,6 +205,34 @@ func TestParseHookEvent_SessionEnd(t *testing.T) {
 	if event.SessionID != "ending-session" {
 		t.Errorf("expected session_id 'ending-session', got %q", event.SessionID)
 	}
+}
+
+func TestParseHookEvent_SessionEnd_PluginPayload(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"sessionId":"plugin-session","transcriptPath":"/tmp/plugin.jsonl","hookEventName":"SessionEnd","timestamp":"2026-02-09T10:30:00.000Z","model":"claude-sonnet-4-20250514"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionEnd, strings.NewReader(input))
+
+	require.NoError(t, err)
+	require.NotNil(t, event, "expected event, got nil")
+	require.Equal(t, agent.SessionEnd, event.Type)
+	require.Equal(t, "plugin-session", event.SessionID)
+	require.Equal(t, "/tmp/plugin.jsonl", event.SessionRef)
+	require.Equal(t, "claude-sonnet-4-20250514", event.Model)
+}
+
+func TestParseHookEvent_PluginPayloadMismatchedHookEventName_ReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"sessionId":"plugin-session","hookEventName":"SessionStart","timestamp":"2026-02-09T10:30:00.000Z"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+
+	require.NoError(t, err)
+	require.Nil(t, event)
 }
 
 func TestParseHookEvent_SessionEnd_IncludesModel(t *testing.T) {
