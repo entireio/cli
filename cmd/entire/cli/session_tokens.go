@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/spf13/cobra"
 )
@@ -27,13 +28,15 @@ type sessionTokensReport struct {
 }
 
 type sessionTokensUsage struct {
-	Total         int `json:"total"`
-	Input         int `json:"input"`
-	CacheRead     int `json:"cache_read"`
-	CacheWrite    int `json:"cache_write"`
-	Output        int `json:"output"`
-	APICalls      int `json:"api_calls"`
-	SubagentTotal int `json:"subagent_total,omitempty"`
+	Total         int      `json:"total"`
+	Input         int      `json:"input"`
+	CacheRead     int      `json:"cache_read"`
+	CacheWrite    int      `json:"cache_write"`
+	Output        int      `json:"output"`
+	APICalls      int      `json:"api_calls"`
+	SubagentTotal int      `json:"subagent_total,omitempty"`
+	CostUSD       *float64 `json:"cost_usd,omitempty"`
+	CostSource    string   `json:"cost_source,omitempty"`
 }
 
 type sessionTokensContext struct {
@@ -247,6 +250,8 @@ func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
 		Output:        usage.OutputTokens,
 		APICalls:      usage.APICallCount,
 		SubagentTotal: totalTokens(usage.SubagentTokens),
+		CostUSD:       usage.CostUSD,
+		CostSource:    usage.CostSource,
 	}
 }
 
@@ -409,6 +414,62 @@ func formatPercent(percent float64) string {
 	return formatted + "%"
 }
 
+// formatCostUSD renders a stored cost for display. It never computes cost; it
+// only formats what was persisted upstream at lifecycle/condensation time.
+//
+//   - v == nil        -> "" (unknown cost: caller omits the line, never $0.00)
+//   - 0 < v < $0.005  -> "<$0.01" (sub-cent, would round to $0.00)
+//   - otherwise       -> "$X.XX" (2dp)
+//
+// A non-empty source appends a provenance suffix: " (estimated)", " (reported)",
+// or " (mixed)". An empty/unknown source adds no suffix.
+func formatCostUSD(v *float64, source string) string {
+	if v == nil {
+		return ""
+	}
+	out := formatCostAmount(*v)
+	if suffix := costSourceSuffix(source); suffix != "" {
+		out += " " + suffix
+	}
+	return out
+}
+
+// formatCostAmount formats a bare dollar amount ("$X.XX"), collapsing a positive
+// sub-cent value to "<$0.01" so it never displays as "$0.00".
+func formatCostAmount(v float64) string {
+	if v > 0 && v < 0.005 {
+		return "<$0.01"
+	}
+	return fmt.Sprintf("$%.2f", v)
+}
+
+// costSourceSuffix maps a CostSource provenance to its parenthetical display
+// suffix; an empty/unknown source yields "".
+func costSourceSuffix(source string) string {
+	switch source {
+	case types.CostSourceReported:
+		return "(reported)"
+	case types.CostSourceEstimated:
+		return "(estimated)"
+	case types.CostSourceMixed:
+		return "(mixed)"
+	default:
+		return ""
+	}
+}
+
+// writeTokenCostLine emits the "Cost:" line inside a token usage block when a
+// cost is known. Shared by the session and checkpoint text writers. A nil usage
+// or nil cost prints nothing (unknown cost is never rendered as $0.00).
+func writeTokenCostLine(w io.Writer, tokens *sessionTokensUsage) {
+	if tokens == nil {
+		return
+	}
+	if line := formatCostUSD(tokens.CostUSD, tokens.CostSource); line != "" {
+		fmt.Fprintf(w, "Cost:  %s\n", line)
+	}
+}
+
 func skillEventLabels(events []agent.SkillEvent) []string {
 	seen := make(map[string]struct{}, len(events))
 	labels := make([]string, 0, len(events))
@@ -443,6 +504,7 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 	fmt.Fprintf(w, "Status:  %s\n", report.Status)
 
 	writeTokenUsageSection(w, report.Tokens)
+	writeTokenCostLine(w, report.Tokens)
 	if len(report.Recommendations) > 0 {
 		writeTokenRecommendations(w, report.Recommendations)
 	}
@@ -474,15 +536,21 @@ func agentBriefUsageLine(tokens *sessionTokensUsage) string {
 	if tokens == nil {
 		return "Token usage: unavailable."
 	}
+	var line string
 	if tokens.CacheRead > 0 {
-		return fmt.Sprintf(
+		line = fmt.Sprintf(
 			"Token usage: %s total; %s cache/context replay; %s.",
 			formatTokenCount(tokens.Total),
 			formatPercent(tokenPercent(tokens.CacheRead, topLevelSessionTokenTotal(tokens))),
 			formatAPICalls(tokens.APICalls),
 		)
+	} else {
+		line = fmt.Sprintf("Token usage: %s total; %s.", formatTokenCount(tokens.Total), formatAPICalls(tokens.APICalls))
 	}
-	return fmt.Sprintf("Token usage: %s total; %s.", formatTokenCount(tokens.Total), formatAPICalls(tokens.APICalls))
+	if cost := formatCostUSD(tokens.CostUSD, tokens.CostSource); cost != "" {
+		line += " Cost: " + cost + "."
+	}
+	return line
 }
 
 func formatAPICalls(count int) string {

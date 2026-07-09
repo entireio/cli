@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -293,6 +294,107 @@ func TestTokensProfileCmd_EmptyHistory(t *testing.T) {
 		if !strings.Contains(out, check) {
 			t.Errorf("expected %q in output, got:\n%s", check, out)
 		}
+	}
+}
+
+func TestTokensProfileCmd_TotalCostAcrossCheckpoints(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	ctx := context.Background()
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+
+	writeProfileTokenCheckpoint(ctx, t, store, "700ddd000001", "profile-cost-a", &agent.TokenUsage{
+		InputTokens:  1000,
+		OutputTokens: 100,
+		APICallCount: 2,
+		CostUSD:      costPtr(0.40),
+		CostSource:   types.CostSourceEstimated,
+	})
+	writeProfileTokenCheckpoint(ctx, t, store, "700ddd000002", "profile-cost-b", &agent.TokenUsage{
+		InputTokens:  2000,
+		OutputTokens: 200,
+		APICallCount: 3,
+		CostUSD:      costPtr(0.60),
+		CostSource:   types.CostSourceEstimated,
+	})
+	// Third checkpoint has token data but no cost: counts toward M, not N.
+	writeProfileTokenCheckpoint(ctx, t, store, "700ddd000003", "profile-cost-none", &agent.TokenUsage{
+		InputTokens:  500,
+		OutputTokens: 50,
+		APICallCount: 1,
+	})
+
+	cmd := newTokensGroupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"profile"})
+
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Total cost: $1.00 (estimated) across 2 of 3 checkpoints") {
+		t.Fatalf("expected total cost line, got:\n%s", out)
+	}
+}
+
+func TestTokensProfileCmd_JSONCost(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	ctx := context.Background()
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+
+	writeProfileTokenCheckpoint(ctx, t, store, "710eee000001", "profile-json-cost", &agent.TokenUsage{
+		InputTokens:  1000,
+		APICallCount: 1,
+		CostUSD:      costPtr(0.42),
+		CostSource:   types.CostSourceReported,
+	})
+
+	cmd := newTokensGroupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"profile", "--json"})
+
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	var result tokensProfileReport
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("expected valid JSON, got parse error: %v\noutput: %s", err, stdout.String())
+	}
+	if result.CostUSD == nil || *result.CostUSD != 0.42 {
+		t.Fatalf("cost_usd = %v, want 0.42", result.CostUSD)
+	}
+	if result.CostSource != types.CostSourceReported {
+		t.Fatalf("cost_source = %q, want reported", result.CostSource)
+	}
+	if result.CheckpointsWithCostData != 1 {
+		t.Fatalf("checkpoints_with_cost_data = %d, want 1", result.CheckpointsWithCostData)
+	}
+}
+
+func TestTokensProfileCmd_JSONOmitsCostWhenAbsent(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	ctx := context.Background()
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+
+	writeProfileTokenCheckpoint(ctx, t, store, "720fff000001", "profile-json-nocost", &agent.TokenUsage{
+		InputTokens:  1000,
+		APICallCount: 1,
+	})
+
+	cmd := newTokensGroupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"profile", "--json"})
+
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	if strings.Contains(stdout.String(), "cost_usd") {
+		t.Fatalf("expected cost_usd omitted when no cost tracked, got: %s", stdout.String())
 	}
 }
 
