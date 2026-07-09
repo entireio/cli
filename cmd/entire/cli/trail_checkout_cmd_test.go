@@ -278,6 +278,27 @@ func TestCheckoutTrailWorktreeFetchesRemoteOnlyBranch(t *testing.T) {
 	}
 }
 
+func TestFindWorktreeForBranchIgnoresMainWorktree(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, "README.md", "test\n")
+	runTrailCheckoutGit(t, repoDir, "add", "README.md")
+	runTrailCheckoutGit(t, repoDir, "commit", "-m", "initial")
+	t.Chdir(repoDir)
+
+	path, ok, err := findWorktreeForBranch(context.Background(), currentBranchTrailCheckoutTest(t, repoDir))
+	if err != nil {
+		t.Fatalf("findWorktreeForBranch: %v", err)
+	}
+	if ok {
+		t.Fatalf("findWorktreeForBranch returned %q, want no managed worktree for main checkout", path)
+	}
+}
+
 func TestCheckoutTrailWorktreeReusesExistingWorktree(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	paths.ClearWorktreeRootCache()

@@ -1472,6 +1472,12 @@ func fetchTrailWorktreeBranch(ctx context.Context, branch string) error {
 }
 
 func findWorktreeForBranch(ctx context.Context, branch string) (string, bool, error) {
+	baseRoot, err := trailWorktreeBaseRoot(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to find main worktree root: %w", err)
+	}
+	managedRoot := normalizeWorktreePath(filepath.Join(baseRoot, ".entire", "worktrees"))
+
 	cmd := exec.CommandContext(ctx, "git", "worktree", "list", "--porcelain")
 	output, err := cmd.Output()
 	if err != nil {
@@ -1480,12 +1486,19 @@ func findWorktreeForBranch(ctx context.Context, branch string) (string, bool, er
 	var currentPath string
 	for _, line := range strings.Split(string(output), "\n") {
 		line = strings.TrimSpace(line)
+		if line == "" {
+			currentPath = ""
+			continue
+		}
 		if strings.HasPrefix(line, "worktree ") {
 			currentPath = strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
 			continue
 		}
 		if strings.TrimPrefix(line, "branch ") == "refs/heads/"+branch && currentPath != "" {
-			return currentPath, true, nil
+			normalizedPath := normalizeWorktreePath(currentPath)
+			if normalizedPath == managedRoot || strings.HasPrefix(normalizedPath, managedRoot+string(filepath.Separator)) {
+				return currentPath, true, nil
+			}
 		}
 	}
 	return "", false, nil
