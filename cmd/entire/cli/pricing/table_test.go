@@ -172,9 +172,10 @@ func TestEstimate_ExplicitCacheRatesOverrideMultipliers(t *testing.T) {
 func TestLoadTable_OverrideReplacesByID(t *testing.T) {
 	t.Parallel()
 
+	// Deliberately minimal: no provider, no aliases, no cache rates — the
+	// natural shape of a price-bump override. Everything else must inherit.
 	override := ModelRate{
 		ID:            modelOpus48,
-		Provider:      "anthropic",
 		InputPerMTok:  99,
 		OutputPerMTok: 199,
 	}
@@ -198,6 +199,37 @@ func TestLoadTable_OverrideReplacesByID(t *testing.T) {
 	base, err := LoadTable(nil)
 	require.NoError(t, err)
 	assert.Len(t, tbl.models, len(base.models))
+
+	// The override omitted provider, so it must inherit the embedded entry's
+	// provider and keep Anthropic cache economics: 1M cache-read tokens at the
+	// overridden $99 input rate bill at the 0.1x multiplier, not full input.
+	assert.Equal(t, "anthropic", got.Provider)
+	cacheOnly := types.TokenUsage{CacheReadTokens: 1_000_000}
+	assert.InDelta(t, 9.9, Estimate(got, cacheOnly), 1e-9)
+}
+
+func TestLoadTable_OverrideInheritsCacheRates(t *testing.T) {
+	t.Parallel()
+
+	// gpt-5.5 carries explicit cache rates in the embedded table. A minimal
+	// provider-less override must inherit provider AND both cache-rate
+	// pointers, so cache tokens keep billing at the explicit OpenAI rates
+	// rather than falling back to full input rate.
+	base, err := LoadTable(nil)
+	require.NoError(t, err)
+	embedded, ok := base.Lookup(modelGPT55)
+	require.True(t, ok)
+	require.NotNil(t, embedded.CacheReadPerMTok)
+
+	tbl, err := LoadTable([]ModelRate{{ID: modelGPT55, InputPerMTok: 2, OutputPerMTok: 20}})
+	require.NoError(t, err)
+	got, ok := tbl.Lookup(modelGPT55)
+	require.True(t, ok)
+	assert.Equal(t, embedded.Provider, got.Provider)
+	require.NotNil(t, got.CacheReadPerMTok)
+	assert.InDelta(t, *embedded.CacheReadPerMTok, *got.CacheReadPerMTok, 1e-9)
+	require.NotNil(t, got.CacheWritePerMTok)
+	assert.InDelta(t, *embedded.CacheWritePerMTok, *got.CacheWritePerMTok, 1e-9)
 }
 
 func TestLoadTable_OverrideCanonicalizesID(t *testing.T) {
