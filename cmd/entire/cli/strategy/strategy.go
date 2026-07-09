@@ -163,6 +163,10 @@ type StepContext struct {
 
 	// TokenUsage contains the token usage for this checkpoint
 	TokenUsage *agent.TokenUsage
+
+	// ModelUsage is the per-model breakdown of TokenUsage for this checkpoint,
+	// carried alongside TokenUsage so the strategy can accumulate per-model usage.
+	ModelUsage []agent.ModelUsage
 }
 
 // TaskStepContext contains all information needed for saving a task step checkpoint.

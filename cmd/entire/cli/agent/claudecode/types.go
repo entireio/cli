@@ -92,8 +92,11 @@ type messageUsage struct {
 }
 
 // messageWithUsage represents an assistant message with usage data.
-// Used for extracting token counts from Claude Code transcripts.
+// Used for extracting token counts from Claude Code transcripts. Model is a
+// sibling of usage in the raw message JSON (message.model), carrying the model
+// that produced this assistant turn for per-model cost attribution.
 type messageWithUsage struct {
 	ID    string       `json:"id"`
+	Model string       `json:"model"`
 	Usage messageUsage `json:"usage"`
 }

@@ -123,6 +123,9 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			state.TokenUsage = accumulateTokenUsage(state.TokenUsage, step.TokenUsage)
 			state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)
 		}
+		if len(step.ModelUsage) > 0 {
+			state.ModelUsage = accumulateModelUsage(state.ModelUsage, step.ModelUsage)
+		}
 
 		if !branchExisted {
 			logging.Info(logging.WithComponent(ctx, "checkpoint"), "created shadow branch and committed changes",
@@ -323,10 +326,16 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 			OutputTokens:        incoming.OutputTokens,
 			APICallCount:        incoming.APICallCount,
 			SubagentTokens:      incoming.SubagentTokens,
+			// AddCostUSD(nil, ...) returns a fresh pointer, never aliasing incoming.CostUSD.
+			CostUSD:    types.AddCostUSD(nil, incoming.CostUSD),
+			CostSource: types.MergeCostSource("", incoming.CostSource, nil, incoming.CostUSD),
 		}
 	}
 
-	// Accumulate values
+	// Accumulate values. Merge the cost source BEFORE summing CostUSD, so the
+	// merge still sees the pre-sum (possibly nil) existing cost.
+	existing.CostSource = types.MergeCostSource(existing.CostSource, incoming.CostSource, existing.CostUSD, incoming.CostUSD)
+	existing.CostUSD = types.AddCostUSD(existing.CostUSD, incoming.CostUSD)
 	existing.InputTokens += incoming.InputTokens
 	existing.CacheCreationTokens += incoming.CacheCreationTokens
 	existing.CacheReadTokens += incoming.CacheReadTokens
@@ -339,6 +348,45 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 	}
 
 	return existing
+}
+
+// accumulateModelUsage merges per-model token buckets into an existing
+// checkpoint-scoped map keyed by model. Each bucket is folded into its model's
+// entry with accumulateTokenUsage (token sums plus AddCostUSD/MergeCostSource
+// cost folding). Returns existing unchanged when incoming is empty; lazily
+// allocates the map on first use. The map is the per-model mirror of
+// CheckpointTokenUsage and is reset together with it at every condensation.
+func accumulateModelUsage(existing map[string]*agent.TokenUsage, incoming []agent.ModelUsage) map[string]*agent.TokenUsage {
+	if len(incoming) == 0 {
+		return existing
+	}
+	if existing == nil {
+		existing = make(map[string]*agent.TokenUsage, len(incoming))
+	}
+	for i := range incoming {
+		bucket := incoming[i].TokenUsage
+		existing[incoming[i].Model] = accumulateTokenUsage(existing[incoming[i].Model], &bucket)
+	}
+	return existing
+}
+
+// sortedModelUsage flattens a per-model usage map into a slice sorted by model,
+// for deterministic serialization into checkpoint metadata. Returns nil for an
+// empty map so the omitempty JSON tag drops the field entirely.
+func sortedModelUsage(m map[string]*agent.TokenUsage) []agent.ModelUsage {
+	if len(m) == 0 {
+		return nil
+	}
+	models := make([]string, 0, len(m))
+	for model := range m {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	out := make([]agent.ModelUsage, 0, len(models))
+	for _, model := range models {
+		out = append(out, agent.ModelUsage{Model: model, TokenUsage: *m[model]})
+	}
+	return out
 }
 
 // deleteShadowBranch deletes a shadow branch by name.

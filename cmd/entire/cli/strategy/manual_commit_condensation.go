@@ -272,6 +272,14 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		sessionData.TokenUsage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
 	}
 
+	// Mirror the TokenUsage backfill for per-model usage: when the freshly-extracted
+	// transcript yields no per-model buckets (e.g. Cursor, whose usage arrives only
+	// via stop-hook payloads accumulated in state), fall back to the checkpoint-scoped
+	// per-model map so the checkpoint metadata still carries a per-model breakdown.
+	if !hasModelUsageData(sessionData.ModelUsage) && len(state.ModelUsage) > 0 {
+		sessionData.ModelUsage = sortedModelUsage(state.ModelUsage)
+	}
+
 	// Backfill the model from the transcript for agents that don't report it via
 	// hooks (e.g., Pi records message.model but its hook events carry no model
 	// field). Only fills when the model is otherwise unknown — hook-reported
@@ -379,6 +387,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
 		TokenUsage:                  sessionData.TokenUsage,
+		ModelUsage:                  sessionData.ModelUsage,
 		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),
 		Attribution:                 attribution,
@@ -733,11 +742,45 @@ func hasTokenUsageData(usage *agent.TokenUsage) bool {
 	return hasTokenUsageData(usage.SubagentTokens)
 }
 
+// hasModelUsageData reports whether any per-model bucket carries real token data.
+// It mirrors hasTokenUsageData so the ModelUsage backfill triggers on exactly the
+// same "no usable data" condition (an empty slice, or buckets with only zero
+// counts, both fall back to the accumulated state map).
+func hasModelUsageData(buckets []agent.ModelUsage) bool {
+	for i := range buckets {
+		bucket := buckets[i].TokenUsage
+		if hasTokenUsageData(&bucket) {
+			return true
+		}
+	}
+	return false
+}
+
+// tokenUsageWithCost computes token usage from a transcript slice and attributes
+// cost using the configured pricing table. It mirrors agent.CalculateTokenUsage's
+// nil-on-error contract (errors are debug-logged, never fatal to condensation)
+// and returns the per-model buckets alongside the flat usage. fallbackModel
+// prices agents that don't attribute usage per model; an empty value leaves such
+// usage unpriced (agents that implement ModelUsageCalculator, e.g. pi and gemini,
+// are priced from their own per-model buckets regardless).
+func tokenUsageWithCost(ctx context.Context, ag agent.Agent, transcript []byte, fromOffset int, subagentsDir, fallbackModel string) (*agent.TokenUsage, []agent.ModelUsage) {
+	table, disableEstimation := settings.LoadPricingTable(ctx)
+	usage, buckets, err := agent.CalculateUsageWithCost(ag, transcript, fromOffset, subagentsDir, table, fallbackModel, disableEstimation)
+	if err != nil {
+		logging.Debug(ctx, "failed usage-with-cost extraction",
+			slog.String("error", err.Error()))
+		return nil, nil
+	}
+	return usage, buckets
+}
+
 // sessionStateBackfillTokenUsage returns the best session-level token usage to
 // persist in session state after condensation.
 func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentType types.AgentType, transcript []byte, checkpointUsage *agent.TokenUsage) *agent.TokenUsage {
 	if agentType == agent.AgentTypeCopilotCLI && len(transcript) > 0 {
-		fullSessionUsage := agent.CalculateTokenUsage(ctx, ag, transcript, 0, "")
+		// Session-wide backfill (state.TokenUsage); per-model buckets are
+		// checkpoint-scoped and not persisted here, so discard them.
+		fullSessionUsage, _ := tokenUsageWithCost(ctx, ag, transcript, 0, "", "")
 		if hasTokenUsageData(fullSessionUsage) {
 			return fullSessionUsage
 		}
@@ -1021,7 +1064,10 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
 	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "") //TODO: why do we not use here subagents dir?
+		// No session model in scope here; pi/gemini price from their own
+		// per-model buckets, so the empty fallback only affects agents that
+		// don't implement ModelUsageCalculator (priced elsewhere in later chunks).
+		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, checkpointTranscriptStart, "", "") //TODO: why do we not use here subagents dir?
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
@@ -1063,7 +1109,7 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
 	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "") //TODO: why do we not use here subagents dir?
+		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "", state.ModelName) //TODO: why do we not use here subagents dir?
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
@@ -1209,6 +1255,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 
 		state.StepCount = 0
 		state.CheckpointTokenUsage = nil
+		state.ModelUsage = nil
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.CheckpointTranscriptSize = int64(len(result.Transcript))
 		state.Phase = session.PhaseIdle
@@ -1328,6 +1375,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 
 		state.StepCount = 0
 		state.CheckpointTokenUsage = nil
+		state.ModelUsage = nil
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.LastCheckpointID = checkpointID
 		state.LastCheckpointCommitHash = state.BaseCommit

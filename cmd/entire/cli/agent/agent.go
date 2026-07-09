@@ -211,6 +211,21 @@ type TokenCalculator interface {
 	CalculateTokenUsage(transcriptData []byte, fromOffset int) (*TokenUsage, error)
 }
 
+// ModelUsageCalculator is an optional capability for agents that can attribute
+// token usage to the specific model that produced it. Implementations must cover
+// the same usage the flat TokenUsage covers (including subagent usage when the
+// agent also implements SubagentAwareExtractor) so per-model buckets sum to the
+// flat total. Buckets carry token counts only; CostUSD is left nil unless the
+// agent itself reports cost (then CostSource must be CostSourceReported).
+type ModelUsageCalculator interface {
+	Agent
+
+	// CalculateModelUsage attributes token usage to each producing model,
+	// starting at the given offset. The returned buckets must sum to the flat
+	// TokenUsage from CalculateTokenUsage over the same slice.
+	CalculateModelUsage(transcriptData []byte, fromOffset int) ([]types.ModelUsage, error)
+}
+
 // ModelExtractor extracts the LLM model identifier from a transcript for agents
 // that do not report the model through lifecycle hooks. Pi, for example, records
 // the model on every assistant message (message.model) but its hook events carry

@@ -25,6 +25,7 @@ type DeclaredCaps struct {
 	TranscriptAnalyzer     bool `json:"transcript_analyzer"`
 	TranscriptPreparer     bool `json:"transcript_preparer"`
 	TokenCalculator        bool `json:"token_calculator"`
+	ModelUsageCalculator   bool `json:"model_usage_calculator"`
 	CompactTranscript      bool `json:"compact_transcript"`
 	TextGenerator          bool `json:"text_generator"`
 	HookResponseWriter     bool `json:"hook_response_writer"`
@@ -92,6 +93,12 @@ func AsSidecarImageProvider(ag Agent) (SidecarImageProvider, bool) {
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTokenCalculator(ag Agent) (TokenCalculator, bool) {
 	return declaredCapability[TokenCalculator](ag, func(c DeclaredCaps) bool { return c.TokenCalculator })
+}
+
+// AsModelUsageCalculator returns the agent as ModelUsageCalculator if it both
+// implements the interface and (for CapabilityDeclarer agents) has declared the capability.
+func AsModelUsageCalculator(ag Agent) (ModelUsageCalculator, bool) {
+	return declaredCapability[ModelUsageCalculator](ag, func(c DeclaredCaps) bool { return c.ModelUsageCalculator })
 }
 
 // AsTextGenerator returns the agent as TextGenerator if it both
