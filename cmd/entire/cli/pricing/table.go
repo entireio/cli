@@ -98,13 +98,24 @@ func LoadTable(overrides []ModelRate) (*Table, error) {
 	return t, nil
 }
 
-// add inserts m, replacing any existing entry that shares its id.
+// add inserts m, replacing any existing entry that shares its id. Ids are
+// canonicalized (trimmed, lower-cased) for the index key so that an override
+// whose id differs only in case or surrounding whitespace replaces the builtin
+// entry instead of appending a phantom duplicate. The stored id is trimmed. When
+// an override omits aliases, it inherits the replaced entry's aliases so an
+// alias-less price override keeps resolving the dated and provider-prefixed
+// spellings the embedded entry covered.
 func (t *Table) add(m ModelRate) {
-	if idx, ok := t.index[m.ID]; ok {
+	m.ID = strings.TrimSpace(m.ID)
+	key := strings.ToLower(m.ID)
+	if idx, ok := t.index[key]; ok {
+		if len(m.Aliases) == 0 {
+			m.Aliases = t.models[idx].Aliases
+		}
 		t.models[idx] = m
 		return
 	}
-	t.index[m.ID] = len(t.models)
+	t.index[key] = len(t.models)
 	t.models = append(t.models, m)
 }
 
@@ -121,13 +132,15 @@ func (t *Table) add(m ModelRate) {
 // trap and lets a bare id like "claude-fable-5[1m]" (the form Claude Code emits)
 // resolve to "claude-fable-5", which bills at the same base rate.
 func (t *Table) Lookup(model string) (ModelRate, bool) {
-	if idx, ok := t.index[model]; ok {
-		return t.models[idx], true
-	}
-
 	norm := strings.ToLower(strings.TrimSpace(model))
 	if norm == "" {
 		return ModelRate{}, false
+	}
+
+	// The index is keyed by canonical (trimmed, lower-cased) id, so the fast
+	// path must probe with the same canonicalization the query was normalized to.
+	if idx, ok := t.index[norm]; ok {
+		return t.models[idx], true
 	}
 
 	candidates := []string{norm}
@@ -179,15 +192,29 @@ func stripLongContextSuffix(s string) string {
 }
 
 // Estimate returns the USD cost of u under rate r. Fresh input, cache-read,
-// cache-write, and output tokens are each priced separately and summed. When r
-// omits an explicit cache-read or cache-write rate, the rate is derived from
-// InputPerMTok via AnthropicCacheReadMultiplier / AnthropicCacheWriteMultiplier.
+// cache-write, and output tokens are each priced separately and summed.
+//
+// The nil-cache-rate fallbacks are provider-aware. The
+// AnthropicCacheReadMultiplier (0.1x input) and AnthropicCacheWriteMultiplier
+// (1.25x input) encode Anthropic economics, so they apply only when Provider is
+// "anthropic" (case-insensitive). For any other provider a missing cache-read or
+// cache-write rate falls back to the full input rate (1.0x) — billing cached
+// tokens as normal input, which never undercharges. In practice the non-Anthropic
+// embedded tables carry explicit cache rates, so this fallback is a safety net.
 func Estimate(r ModelRate, u types.TokenUsage) float64 {
-	crRate := AnthropicCacheReadMultiplier * r.InputPerMTok
+	isAnthropic := strings.EqualFold(strings.TrimSpace(r.Provider), "anthropic")
+
+	crRate := r.InputPerMTok
+	if isAnthropic {
+		crRate = AnthropicCacheReadMultiplier * r.InputPerMTok
+	}
 	if r.CacheReadPerMTok != nil {
 		crRate = *r.CacheReadPerMTok
 	}
-	cwRate := AnthropicCacheWriteMultiplier * r.InputPerMTok
+	cwRate := r.InputPerMTok
+	if isAnthropic {
+		cwRate = AnthropicCacheWriteMultiplier * r.InputPerMTok
+	}
 	if r.CacheWritePerMTok != nil {
 		cwRate = *r.CacheWritePerMTok
 	}
@@ -218,6 +245,19 @@ func validateRate(r ModelRate) error {
 	}
 	if r.CacheWritePerMTok != nil && *r.CacheWritePerMTok < 0 {
 		return fmt.Errorf("model %q: cache_write_per_mtok must not be negative, got %v", r.ID, *r.CacheWritePerMTok)
+	}
+	for _, alias := range r.Aliases {
+		if strings.TrimSpace(alias) == "" {
+			return fmt.Errorf("model %q: alias must not be empty or whitespace", r.ID)
+		}
+		// A glob alias with malformed metacharacters (e.g. an unterminated "[")
+		// would silently never match at Lookup time (path.Match swallows
+		// ErrBadPattern there), so reject it up front where it is a config error.
+		if strings.ContainsAny(alias, "*?[") {
+			if _, err := path.Match(alias, "probe"); errors.Is(err, path.ErrBadPattern) {
+				return fmt.Errorf("model %q: invalid alias glob %q: %w", r.ID, alias, err)
+			}
+		}
 	}
 	return nil
 }

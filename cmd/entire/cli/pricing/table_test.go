@@ -187,10 +187,98 @@ func TestLoadTable_OverrideReplacesByID(t *testing.T) {
 	assert.InDelta(t, 99.0, got.InputPerMTok, 1e-9)
 	assert.InDelta(t, 199.0, got.OutputPerMTok, 1e-9)
 
+	// The override carried no aliases, so it must inherit the embedded entry's
+	// aliases: a dated spelling still resolves, and to the overridden price.
+	dated, ok := tbl.Lookup("claude-opus-4-8-20260624")
+	require.True(t, ok, "dated alias must still resolve after an alias-less override")
+	assert.Equal(t, modelOpus48, dated.ID)
+	assert.InDelta(t, 99.0, dated.InputPerMTok, 1e-9)
+
 	// Replacement must not duplicate the id in the table.
 	base, err := LoadTable(nil)
 	require.NoError(t, err)
 	assert.Len(t, tbl.models, len(base.models))
+}
+
+func TestLoadTable_OverrideCanonicalizesID(t *testing.T) {
+	t.Parallel()
+
+	base, err := LoadTable(nil)
+	require.NoError(t, err)
+
+	// An override whose id differs from the builtin only in case or surrounding
+	// whitespace must REPLACE the builtin, not append a phantom duplicate.
+	for _, variant := range []string{"Claude-Opus-4-8", "claude-opus-4-8 ", "  CLAUDE-OPUS-4-8  "} {
+		t.Run(variant, func(t *testing.T) {
+			t.Parallel()
+
+			tbl, err := LoadTable([]ModelRate{{
+				ID:            variant,
+				Provider:      "anthropic",
+				InputPerMTok:  42,
+				OutputPerMTok: 84,
+			}})
+			require.NoError(t, err)
+
+			got, ok := tbl.Lookup(modelOpus48)
+			require.True(t, ok)
+			assert.InDelta(t, 42.0, got.InputPerMTok, 1e-9, "override must take effect")
+
+			// No phantom entry: table size is unchanged from the embedded defaults.
+			assert.Len(t, tbl.models, len(base.models))
+		})
+	}
+}
+
+func TestEstimate_NonAnthropicCacheFallbackBillsAsInput(t *testing.T) {
+	t.Parallel()
+
+	// A non-anthropic rate with no explicit cache rates: both cache-read and
+	// cache-write fall back to the full input rate (1.0x), NOT the Anthropic
+	// 0.1x / 1.25x multipliers. Provider casing is ignored.
+	r := ModelRate{
+		ID:            "some-openai-model",
+		Provider:      "OpenAI",
+		InputPerMTok:  10,
+		OutputPerMTok: 20,
+	}
+	u := types.TokenUsage{
+		InputTokens:         1_000_000, // 10 * 1 = 10
+		CacheReadTokens:     1_000_000, // 1.0x input = 10 (anthropic would be 1)
+		CacheCreationTokens: 1_000_000, // 1.0x input = 10 (anthropic would be 12.5)
+		OutputTokens:        1_000_000, // 20 * 1 = 20
+	}
+
+	// 10 + 10 + 10 + 20 = 50 (anthropic multipliers would give 10+1+12.5+20 = 43.5).
+	assert.InDelta(t, 50.0, Estimate(r, u), 1e-9)
+}
+
+func TestLoadTable_RejectsBadAliasGlob(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		alias string
+	}{
+		{name: "unterminated character class", alias: "claude-[bad"},
+		{name: "whitespace-only alias", alias: " "},
+		{name: "empty alias", alias: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := LoadTable([]ModelRate{{
+				ID:            "custom-model",
+				Provider:      "inhouse",
+				Aliases:       []string{tc.alias},
+				InputPerMTok:  1,
+				OutputPerMTok: 2,
+			}})
+			require.Error(t, err)
+		})
+	}
 }
 
 func TestLoadTable_OverrideAppendsNewID(t *testing.T) {

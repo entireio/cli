@@ -8,6 +8,7 @@
       "input_per_mtok": 1.25,
       "output_per_mtok": 10,
       "cache_read_per_mtok": 0.125,
+      "cache_write_per_mtok": 1.25,
       "effective_date": "2026-01-01"
     },
     {
@@ -17,6 +18,7 @@
       "input_per_mtok": 1.25,
       "output_per_mtok": 10,
       "cache_read_per_mtok": 0.125,
+      "cache_write_per_mtok": 1.25,
       "effective_date": "2026-01-01"
     },
     {
@@ -26,6 +28,7 @@
       "input_per_mtok": 1.25,
       "output_per_mtok": 10,
       "cache_read_per_mtok": 0.125,
+      "cache_write_per_mtok": 1.25,
       "effective_date": "2025-08-07"
     }
   ]
