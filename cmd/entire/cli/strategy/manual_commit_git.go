@@ -318,14 +318,17 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 		return existing
 	}
 	if existing == nil {
-		// Return a copy to avoid sharing the pointer
+		// Return a copy to avoid sharing the pointer. SubagentTokens must be
+		// deep-copied too: aliasing incoming's subtree lets a later in-place
+		// accumulation mutate incoming (and cross-contaminate any other aggregate
+		// that folded the same step), inflating subagent token counts.
 		return &agent.TokenUsage{
 			InputTokens:         incoming.InputTokens,
 			CacheCreationTokens: incoming.CacheCreationTokens,
 			CacheReadTokens:     incoming.CacheReadTokens,
 			OutputTokens:        incoming.OutputTokens,
 			APICallCount:        incoming.APICallCount,
-			SubagentTokens:      incoming.SubagentTokens,
+			SubagentTokens:      accumulateTokenUsage(nil, incoming.SubagentTokens),
 			// AddCostUSD(nil, ...) returns a fresh pointer, never aliasing incoming.CostUSD.
 			CostUSD:    types.AddCostUSD(nil, incoming.CostUSD),
 			CostSource: types.MergeCostSource("", incoming.CostSource, nil, incoming.CostUSD),

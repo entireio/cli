@@ -102,7 +102,14 @@ func PriceUsage(usage *types.TokenUsage, model string, table *pricing.Table, dis
 	if usage == nil {
 		return nil, nil
 	}
-	buckets := []types.ModelUsage{{Model: model, TokenUsage: *usage}}
+	// Build the single bucket without aliasing usage.SubagentTokens: a shared
+	// subtree pointer would let a downstream in-place aggregator mutate the
+	// caller's usage. Estimate prices only the scalar fields, so dropping the
+	// subtree does not change the computed cost. A reported cost is preserved so
+	// priceBuckets leaves it untouched.
+	bucket := *usage
+	bucket.SubagentTokens = nil
+	buckets := []types.ModelUsage{{Model: model, TokenUsage: bucket}}
 	priceBuckets(buckets, table, disableEstimation)
 	cost, source := foldBucketCost(buckets)
 	out := *usage
@@ -127,13 +134,22 @@ func modelUsageBuckets(ag Agent, transcriptData []byte, fromOffset int, flat *ty
 }
 
 // remainderBucket returns a bucket carrying the per-field token shortfall
-// between the flat total and the sum of the per-model buckets, attributed to
-// fallbackModel. Each field is clamped at 0 (a bucket may legitimately exceed
-// the flat total on an individual field). The bool is false when no billable
-// token shortfall exists, which is the common case: the fallback (single-bucket)
-// path and any ModelUsageCalculator whose buckets sum to the flat total both
-// yield a zero remainder. Cost fields are left nil so the pricing pass estimates
-// the remainder when fallbackModel is priceable, or leaves it unpriced otherwise.
+// between the flat total (INCLUDING every nested SubagentTokens subtree) and the
+// sum of the per-model buckets, attributed to fallbackModel. The flat side is
+// flattened via flattenTokenUsage because the per-model buckets (and, per
+// bucketTokens, the fallback single bucket) carry only main-scoped scalar
+// counts, while a SubagentAwareExtractor folds subagent usage into the flat
+// total's SubagentTokens subtree. Without accounting for that subtree the
+// subagent tokens would go entirely unpriced — e.g. a Claude Code session with
+// 100k main + 500k subagent tokens would price only the 100k. Here the 500k
+// shortfall becomes a remainder bucket under fallbackModel.
+//
+// Each field is clamped at 0 (a bucket may legitimately exceed the flat total on
+// an individual field). The bool is false when no billable token shortfall
+// exists: the fallback (single-bucket) path with no subagents and any
+// ModelUsageCalculator whose buckets sum to the flat total both yield a zero
+// remainder. Cost fields are left nil so the pricing pass estimates the
+// remainder when fallbackModel is priceable, or leaves it unpriced otherwise.
 func remainderBucket(flat *types.TokenUsage, buckets []types.ModelUsage, fallbackModel string) (types.ModelUsage, bool) {
 	var sum types.TokenUsage
 	for i := range buckets {
@@ -144,17 +160,43 @@ func remainderBucket(flat *types.TokenUsage, buckets []types.ModelUsage, fallbac
 		sum.OutputTokens += b.OutputTokens
 		sum.APICallCount += b.APICallCount
 	}
+	flatTotal := flattenTokenUsage(flat)
 	short := types.TokenUsage{
-		InputTokens:         clampNonNegative(flat.InputTokens - sum.InputTokens),
-		CacheCreationTokens: clampNonNegative(flat.CacheCreationTokens - sum.CacheCreationTokens),
-		CacheReadTokens:     clampNonNegative(flat.CacheReadTokens - sum.CacheReadTokens),
-		OutputTokens:        clampNonNegative(flat.OutputTokens - sum.OutputTokens),
-		APICallCount:        clampNonNegative(flat.APICallCount - sum.APICallCount),
+		InputTokens:         clampNonNegative(flatTotal.InputTokens - sum.InputTokens),
+		CacheCreationTokens: clampNonNegative(flatTotal.CacheCreationTokens - sum.CacheCreationTokens),
+		CacheReadTokens:     clampNonNegative(flatTotal.CacheReadTokens - sum.CacheReadTokens),
+		OutputTokens:        clampNonNegative(flatTotal.OutputTokens - sum.OutputTokens),
+		APICallCount:        clampNonNegative(flatTotal.APICallCount - sum.APICallCount),
 	}
 	if short.InputTokens+short.CacheCreationTokens+short.CacheReadTokens+short.OutputTokens+short.APICallCount == 0 {
 		return types.ModelUsage{}, false
 	}
 	return types.ModelUsage{Model: fallbackModel, TokenUsage: short}, true
+}
+
+// flattenTokenUsage returns u's five scalar token fields summed with every
+// nested SubagentTokens subtree, at arbitrary depth. It is nil-safe (nil yields
+// a zero usage) and reads only token counts — the returned usage carries no cost
+// fields. This is how remainderBucket recovers the true billable total from a
+// flat usage whose subagent tokens live in a subtree rather than in the top-level
+// scalar fields.
+func flattenTokenUsage(u *types.TokenUsage) types.TokenUsage {
+	var out types.TokenUsage
+	if u == nil {
+		return out
+	}
+	out.InputTokens = u.InputTokens
+	out.CacheCreationTokens = u.CacheCreationTokens
+	out.CacheReadTokens = u.CacheReadTokens
+	out.OutputTokens = u.OutputTokens
+	out.APICallCount = u.APICallCount
+	sub := flattenTokenUsage(u.SubagentTokens)
+	out.InputTokens += sub.InputTokens
+	out.CacheCreationTokens += sub.CacheCreationTokens
+	out.CacheReadTokens += sub.CacheReadTokens
+	out.OutputTokens += sub.OutputTokens
+	out.APICallCount += sub.APICallCount
+	return out
 }
 
 // clampNonNegative returns v, or 0 when v is negative.
@@ -165,12 +207,18 @@ func clampNonNegative(v int) int {
 	return v
 }
 
-// bucketTokens returns a copy of u with its cost fields cleared, so it can serve
-// as a per-model bucket that carries token counts only.
+// bucketTokens returns a copy of u with its cost fields cleared and its
+// SubagentTokens subtree dropped, so it serves as a per-model bucket carrying
+// main-scoped scalar token counts only. Nil-ing SubagentTokens is essential:
+// remainderBucket attributes the subagent subtree to its own remainder bucket,
+// so a fallback bucket that also carried the shared subtree pointer would both
+// double-count the subagent tokens downstream and alias u's subtree (a mutation
+// hazard once aggregators fold buckets in place).
 func bucketTokens(u *types.TokenUsage) types.TokenUsage {
 	b := *u
 	b.CostUSD = nil
 	b.CostSource = ""
+	b.SubagentTokens = nil
 	return b
 }
 
