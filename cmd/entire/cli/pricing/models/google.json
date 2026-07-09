@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "gemini-3-pro",
+      "provider": "google",
+      "aliases": ["gemini-3-pro-*", "google/gemini-3-pro"],
+      "input_per_mtok": 2,
+      "output_per_mtok": 12,
+      "cache_read_per_mtok": 0.2,
+      "effective_date": "2026-01-01"
+    },
+    {
+      "id": "gemini-3-flash",
+      "provider": "google",
+      "aliases": ["gemini-3-flash-*", "google/gemini-3-flash"],
+      "input_per_mtok": 0.3,
+      "output_per_mtok": 2.5,
+      "cache_read_per_mtok": 0.03,
+      "effective_date": "2026-01-01"
+    }
+  ]
+}

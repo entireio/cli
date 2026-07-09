@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/pricing"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/redact"
 )
@@ -150,6 +151,10 @@ type EntireSettings struct {
 	// settings loader (DisallowUnknownFields) accepts a "checkpoints" key.
 	Checkpoints *CheckpointsConfig `json:"checkpoints,omitempty"`
 
+	// Pricing configures token-cost estimation: per-model rate overrides layered
+	// on top of the embedded defaults, plus a switch to disable estimation.
+	Pricing *PricingSettings `json:"pricing,omitempty"`
+
 	// Deprecated: no longer used. Exists to tolerate old settings files
 	// that still contain "strategy": "auto-commit" or similar.
 	Strategy string `json:"strategy,omitempty"`
@@ -256,6 +261,58 @@ type RedactionSettings struct {
 	// into the checkpoint's assets/ store (off by default). Restore re-injects
 	// them regardless of this flag.
 	ExternalizeImages bool `json:"externalize_images,omitempty"`
+}
+
+// PricingSettings configures token-cost estimation. Models are per-model rate
+// overrides layered on top of the embedded pricing defaults (an override whose
+// id matches a built-in entry replaces it; otherwise it is appended).
+// DisableEstimation, when true, turns off derived cost estimates entirely —
+// agent-reported costs still flow through, but unpriced usage keeps a nil cost
+// rather than an estimate.
+type PricingSettings struct {
+	Models            []pricing.ModelRate `json:"models,omitempty"`
+	DisableEstimation *bool               `json:"disable_estimation,omitempty"`
+}
+
+// PricingOverrides returns the configured per-model rate overrides, or nil when
+// none are set.
+func (s *EntireSettings) PricingOverrides() []pricing.ModelRate {
+	if s == nil || s.Pricing == nil {
+		return nil
+	}
+	return s.Pricing.Models
+}
+
+// IsEstimationDisabled reports whether cost estimation is turned off. Defaults
+// to false (estimation enabled) when unset.
+func (s *EntireSettings) IsEstimationDisabled() bool {
+	if s == nil || s.Pricing == nil || s.Pricing.DisableEstimation == nil {
+		return false
+	}
+	return *s.Pricing.DisableEstimation
+}
+
+// LoadPricingTable builds the model pricing table from settings — the embedded
+// defaults with any configured pricing.models overrides layered on top — and
+// reports whether cost estimation is disabled. It never fails the caller: a
+// settings-load or table-build error is logged and yields a nil table, which
+// callers treat as "cost unavailable" (they must never fail a hook path over
+// missing pricing).
+func LoadPricingTable(ctx context.Context) (*pricing.Table, bool) {
+	s, err := Load(ctx)
+	if err != nil {
+		logging.Debug(ctx, "pricing: settings load failed; cost estimation unavailable",
+			slog.String("error", err.Error()))
+		return nil, false
+	}
+	disable := s.IsEstimationDisabled()
+	table, err := pricing.LoadTable(s.PricingOverrides())
+	if err != nil {
+		logging.Warn(ctx, "pricing: table load failed; cost estimation unavailable",
+			slog.String("error", err.Error()))
+		return nil, disable
+	}
+	return table, disable
 }
 
 // PIISettings configures PII detection categories.
@@ -926,6 +983,41 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		return err
 	}
 
+	// Merge pricing sub-fields if present (field-level, not wholesale replace).
+	if pricingRaw, ok := raw["pricing"]; ok {
+		if settings.Pricing == nil {
+			settings.Pricing = &PricingSettings{}
+		}
+		if err := mergePricing(settings.Pricing, pricingRaw); err != nil {
+			return fmt.Errorf("parsing pricing field: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// mergePricing merges pricing overrides into existing PricingSettings. Only
+// fields present in the override JSON are applied; models are replaced wholesale
+// so a local override file fully controls the override set.
+func mergePricing(dst *PricingSettings, data json.RawMessage) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parsing pricing: %w", err)
+	}
+	if modelsRaw, ok := raw["models"]; ok {
+		var models []pricing.ModelRate
+		if err := unmarshalField("pricing.models", modelsRaw, &models); err != nil {
+			return err
+		}
+		dst.Models = models
+	}
+	if disableRaw, ok := raw["disable_estimation"]; ok {
+		var b bool
+		if err := unmarshalField("pricing.disable_estimation", disableRaw, &b); err != nil {
+			return err
+		}
+		dst.DisableEstimation = &b
+	}
 	return nil
 }
 
