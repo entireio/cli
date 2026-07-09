@@ -90,6 +90,44 @@ func TestMergeCostSource_Matrix(t *testing.T) {
 	}
 }
 
+func TestMergeCostSourceUsages_Matrix(t *testing.T) {
+	t.Parallel()
+	priced := func(source string) *TokenUsage {
+		return &TokenUsage{InputTokens: 100, CostUSD: costPtr(0.5), CostSource: source}
+	}
+	tokensNoCost := &TokenUsage{InputTokens: 200}                   // token-bearing, unpriced
+	cacheTokensNoCost := &TokenUsage{CacheReadTokens: 200}          // token-bearing (cache), unpriced
+	emptyNoCost := &TokenUsage{}                                    // no tokens, no cost
+	apiOnlyNoCost := &TokenUsage{APICallCount: 3}                   // api count is not billable tokens
+	estimatedNoCost := &TokenUsage{CostSource: CostSourceEstimated} // label but nil cost, no tokens
+
+	cases := []struct {
+		name string
+		a, b *TokenUsage
+		want string
+	}{
+		{"priced + unpriced-with-tokens -> mixed", priced(CostSourceEstimated), tokensNoCost, CostSourceMixed},
+		{"unpriced-with-tokens + priced -> mixed (order)", tokensNoCost, priced(CostSourceEstimated), CostSourceMixed},
+		{"priced + unpriced-with-cache-tokens -> mixed", priced(CostSourceReported), cacheTokensNoCost, CostSourceMixed},
+		{"priced + empty usage -> estimated", priced(CostSourceEstimated), emptyNoCost, CostSourceEstimated},
+		{"priced + api-only usage -> reported (api not billable)", priced(CostSourceReported), apiOnlyNoCost, CostSourceReported},
+		{"priced + nil -> that source", priced(CostSourceEstimated), nil, CostSourceEstimated},
+		{"reported + estimated (both priced) -> mixed", priced(CostSourceReported), priced(CostSourceEstimated), CostSourceMixed},
+		{"reported + reported (both priced) -> reported", priced(CostSourceReported), priced(CostSourceReported), CostSourceReported},
+		{"empty + empty -> empty", emptyNoCost, emptyNoCost, ""},
+		{"tokens-no-cost + estimated-label-no-cost -> empty", tokensNoCost, estimatedNoCost, ""},
+		{"both nil -> empty", nil, nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := MergeCostSourceUsages(tc.a, tc.b); got != tc.want {
+				t.Fatalf("MergeCostSourceUsages = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTokenUsage_JSON_NilCostOmitted(t *testing.T) {
 	t.Parallel()
 	u := TokenUsage{InputTokens: 10, OutputTokens: 5}
