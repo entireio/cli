@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -169,6 +170,45 @@ func TestCheckoutTrailWorktreeCreatesRepoLocalWorktree(t *testing.T) {
 	exclude := string(excludeBytes)
 	if !strings.Contains(exclude, ".entire/worktrees/") {
 		t.Fatalf("exclude = %q, want .entire/worktrees/", exclude)
+	}
+}
+
+func TestCheckoutTrailWorktreeFromLinkedWorktreeCreatesSiblingUnderMainRoot(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, "README.md", "test\n")
+	runTrailCheckoutGit(t, repoDir, "add", "README.md")
+	runTrailCheckoutGit(t, repoDir, "commit", "-m", "initial")
+	runTrailCheckoutGit(t, repoDir, "branch", "feature/first")
+	runTrailCheckoutGit(t, repoDir, "branch", "feature/second")
+	t.Chdir(repoDir)
+
+	var firstOut, firstErr bytes.Buffer
+	if err := checkoutTrailWorktree(context.Background(), &firstOut, &firstErr, "feature/first", true, 7); err != nil {
+		t.Fatalf("checkoutTrailWorktree first: %v; stderr: %s", err, firstErr.String())
+	}
+	firstPath := filepath.Join(repoDir, ".entire", "worktrees", "trail-7-feature-first")
+	t.Chdir(firstPath)
+
+	var secondOut, secondErr bytes.Buffer
+	if err := checkoutTrailWorktree(context.Background(), &secondOut, &secondErr, "feature/second", true, 8); err != nil {
+		t.Fatalf("checkoutTrailWorktree second: %v; stderr: %s", err, secondErr.String())
+	}
+
+	wantPath := filepath.Join(repoDir, ".entire", "worktrees", "trail-8-feature-second")
+	nestedPath := filepath.Join(firstPath, ".entire", "worktrees", "trail-8-feature-second")
+	if !strings.Contains(secondOut.String(), wantPath) {
+		t.Fatalf("output = %q, want main-root path %q", secondOut.String(), wantPath)
+	}
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("sibling worktree missing: %v", err)
+	}
+	if _, err := os.Stat(nestedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("nested worktree stat error = %v, want not exist", err)
 	}
 }
 

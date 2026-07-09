@@ -19,7 +19,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trail"
 
@@ -1346,9 +1345,9 @@ func checkoutTrailWorktree(ctx context.Context, w, _ io.Writer, branch string, f
 		return err
 	}
 
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	repoRoot, err := trailWorktreeBaseRoot(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to find worktree root: %w", err)
+		return fmt.Errorf("failed to find main worktree root: %w", err)
 	}
 	worktreePath := defaultTrailWorktreePath(repoRoot, branch, trailNumber)
 	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o750); err != nil {
@@ -1362,6 +1361,17 @@ func checkoutTrailWorktree(ctx context.Context, w, _ io.Writer, branch string, f
 	fmt.Fprintf(w, "✓ Worktree ready at %s\n", worktreePath)
 	fmt.Fprintf(w, "cd %s\n", shellQuotePath(worktreePath))
 	return nil
+}
+
+func trailWorktreeBaseRoot(ctx context.Context) (string, error) {
+	gitDir, err := gitCommonDirForTrailWorktree(ctx)
+	if err != nil {
+		return "", err
+	}
+	if filepath.Base(gitDir) != ".git" {
+		return "", fmt.Errorf("git common dir %q is not a .git directory", gitDir)
+	}
+	return filepath.Dir(gitDir), nil
 }
 
 func ensureTrailWorktreeLocalExclude(ctx context.Context) error {
@@ -1407,7 +1417,11 @@ func gitCommonDirForTrailWorktree(ctx context.Context) (string, error) {
 	}
 	gitDir := strings.TrimSpace(string(output))
 	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(".", gitDir)
+		cwd, wdErr := os.Getwd()
+		if wdErr != nil {
+			return "", fmt.Errorf("failed to get current directory: %w", wdErr)
+		}
+		gitDir = filepath.Join(cwd, gitDir)
 	}
 	return filepath.Clean(gitDir), nil
 }
