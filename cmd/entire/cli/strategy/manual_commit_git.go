@@ -332,9 +332,11 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 		}
 	}
 
-	// Accumulate values. Merge the cost source BEFORE summing CostUSD, so the
-	// merge still sees the pre-sum (possibly nil) existing cost.
-	existing.CostSource = types.MergeCostSource(existing.CostSource, incoming.CostSource, existing.CostUSD, incoming.CostUSD)
+	// Accumulate values. Merge the cost source BEFORE summing CostUSD and the
+	// token fields, so the merge still sees the pre-sum existing usage (its
+	// possibly-nil cost and its token counts). MergeCostSourceUsages folds a
+	// priced side with an unpriced-but-token-bearing side to mixed.
+	existing.CostSource = types.MergeCostSourceUsages(existing, incoming)
 	existing.CostUSD = types.AddCostUSD(existing.CostUSD, incoming.CostUSD)
 	existing.InputTokens += incoming.InputTokens
 	existing.CacheCreationTokens += incoming.CacheCreationTokens

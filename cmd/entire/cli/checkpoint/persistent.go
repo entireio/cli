@@ -995,14 +995,13 @@ func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 	}
 	result := &agent.TokenUsage{}
 	var aCost, bCost *float64
-	var aSource, bSource string
 	if a != nil {
 		result.InputTokens = a.InputTokens
 		result.CacheCreationTokens = a.CacheCreationTokens
 		result.CacheReadTokens = a.CacheReadTokens
 		result.OutputTokens = a.OutputTokens
 		result.APICallCount = a.APICallCount
-		aCost, aSource = a.CostUSD, a.CostSource
+		aCost = a.CostUSD
 	}
 	if b != nil {
 		result.InputTokens += b.InputTokens
@@ -1010,10 +1009,13 @@ func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 		result.CacheReadTokens += b.CacheReadTokens
 		result.OutputTokens += b.OutputTokens
 		result.APICallCount += b.APICallCount
-		bCost, bSource = b.CostUSD, b.CostSource
+		bCost = b.CostUSD
 	}
 	result.CostUSD = types.AddCostUSD(aCost, bCost)
-	result.CostSource = types.MergeCostSource(aSource, bSource, aCost, bCost)
+	// MergeCostSourceUsages folds a priced side with an unpriced-but-token-bearing
+	// side to mixed, so a summary that combines a costed session with an
+	// uncosted token-bearing one reports partial coverage honestly.
+	result.CostSource = types.MergeCostSourceUsages(a, b)
 	return result
 }
 

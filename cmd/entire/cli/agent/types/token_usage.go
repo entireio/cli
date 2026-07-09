@@ -114,3 +114,38 @@ func AddTokenUsage(a, b *TokenUsage) *TokenUsage {
 	sum.SubagentTokens = AddTokenUsage(aSub, bSub)
 	return sum
 }
+
+// MergeCostSourceUsages merges the cost-source provenance of two usages. It
+// behaves like MergeCostSource over the two sides' (CostSource, CostUSD) pairs
+// but additionally treats a token-bearing side with no cost as a distinct
+// provenance: when exactly one side carries a non-nil cost and the other side
+// has any nonzero token field with a nil cost, the merge is CostSourceMixed.
+// This mirrors foldBucketCost's partial-coverage rule, so a priced usage merged
+// with an unpriced-but-token-bearing usage honestly reports mixed coverage
+// instead of masquerading as fully priced. Either usage may be nil (contributes
+// nothing). APICallCount and SubagentTokens are not treated as billable tokens.
+func MergeCostSourceUsages(a, b *TokenUsage) string {
+	var aSource, bSource string
+	var aCost, bCost *float64
+	if a != nil {
+		aSource, aCost = a.CostSource, a.CostUSD
+	}
+	if b != nil {
+		bSource, bCost = b.CostSource, b.CostUSD
+	}
+
+	// Exactly one side priced while the other carries unpriced tokens -> mixed.
+	if aCost != nil && bCost == nil && usageHasBillableTokens(b) {
+		return CostSourceMixed
+	}
+	if bCost != nil && aCost == nil && usageHasBillableTokens(a) {
+		return CostSourceMixed
+	}
+	return MergeCostSource(aSource, bSource, aCost, bCost)
+}
+
+// usageHasBillableTokens reports whether u carries any nonzero billable token
+// count (input, cache-creation, cache-read, or output). It is nil-safe.
+func usageHasBillableTokens(u *TokenUsage) bool {
+	return u != nil && (u.InputTokens != 0 || u.CacheCreationTokens != 0 || u.CacheReadTokens != 0 || u.OutputTokens != 0)
+}

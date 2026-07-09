@@ -316,7 +316,10 @@ func TestTokensProfileCmd_TotalCostAcrossCheckpoints(t *testing.T) {
 		CostUSD:      costPtr(0.60),
 		CostSource:   types.CostSourceEstimated,
 	})
-	// Third checkpoint has token data but no cost: counts toward M, not N.
+	// Third checkpoint has token data but no cost: counts toward M, not N. Merging
+	// its uncosted-but-token-bearing usage with the priced checkpoints folds the
+	// aggregate cost source to "mixed" — partial coverage — so the $1.00 total is
+	// honestly flagged as combining priced and unpriced-token data.
 	writeProfileTokenCheckpoint(ctx, t, store, "700ddd000003", "profile-cost-none", &agent.TokenUsage{
 		InputTokens:  500,
 		OutputTokens: 50,
@@ -333,7 +336,7 @@ func TestTokensProfileCmd_TotalCostAcrossCheckpoints(t *testing.T) {
 	}
 
 	out := stdout.String()
-	if !strings.Contains(out, "Total cost: $1.00 (estimated) across 2 of 3 checkpoints") {
+	if !strings.Contains(out, "Total cost: $1.00 (mixed) across 2 of 3 checkpoints") {
 		t.Fatalf("expected total cost line, got:\n%s", out)
 	}
 }

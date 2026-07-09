@@ -49,6 +49,26 @@ func TestAggregateTokenUsage_NilCostSideIgnoredForSource(t *testing.T) {
 	}
 }
 
+// A costed session summed with an uncosted but token-bearing session must fold
+// to "mixed": the total cost is the one known figure, but coverage is partial.
+func TestAggregateTokenUsage_PricedPlusUnpricedTokensMixed(t *testing.T) {
+	t.Parallel()
+	sessionA := &agent.TokenUsage{InputTokens: 1000, CostUSD: costPtr(0.50), CostSource: types.CostSourceEstimated}
+	sessionB := &agent.TokenUsage{InputTokens: 200} // token-bearing, no cost
+	got := aggregateTokenUsage(sessionA, sessionB)
+	if got.CostUSD == nil || *got.CostUSD != 0.50 {
+		t.Fatalf("CostUSD = %v, want 0.50", got.CostUSD)
+	}
+	if got.CostSource != types.CostSourceMixed {
+		t.Fatalf("CostSource = %q, want mixed", got.CostSource)
+	}
+	// Order must not matter.
+	rev := aggregateTokenUsage(sessionB, sessionA)
+	if rev.CostSource != types.CostSourceMixed {
+		t.Fatalf("reversed CostSource = %q, want mixed", rev.CostSource)
+	}
+}
+
 func TestAggregateTokenUsage_BothNilCost(t *testing.T) {
 	t.Parallel()
 	a := &agent.TokenUsage{InputTokens: 1}
