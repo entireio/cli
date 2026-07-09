@@ -264,7 +264,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// Copilot CLI writes session.shutdown after the hooks return, so by condensation
 	// time we can recover the authoritative full-session total from the transcript
 	// while keeping checkpoint metadata scoped to CheckpointTranscriptStart.
-	if backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, sessionData.Transcript, sessionData.TokenUsage); backfillUsage != nil {
+	if backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, sessionData.Transcript, state.ModelName, sessionData.TokenUsage); backfillUsage != nil {
 		state.TokenUsage = backfillUsage
 	}
 
@@ -562,7 +562,7 @@ func (s *ManualCommitStrategy) extractOrCreateSessionData(ctx context.Context, r
 	case hasShadowBranch:
 		// Shadow branch exists (from SaveStep commits) — extract transcript and
 		// metadata from the branch tree, preferring the live transcript if fresher.
-		data, err := s.extractSessionData(ctx, repo, shadowHash, state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, state.Phase.IsActive())
+		data, err := s.extractSessionData(ctx, repo, shadowHash, state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, state.ModelName, state.Phase.IsActive())
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract session data: %w", err)
 		}
@@ -776,11 +776,11 @@ func tokenUsageWithCost(ctx context.Context, ag agent.Agent, transcript []byte, 
 
 // sessionStateBackfillTokenUsage returns the best session-level token usage to
 // persist in session state after condensation.
-func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentType types.AgentType, transcript []byte, checkpointUsage *agent.TokenUsage) *agent.TokenUsage {
+func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentType types.AgentType, transcript []byte, sessionModel string, checkpointUsage *agent.TokenUsage) *agent.TokenUsage {
 	if agentType == agent.AgentTypeCopilotCLI && len(transcript) > 0 {
 		// Session-wide backfill (state.TokenUsage); per-model buckets are
 		// checkpoint-scoped and not persisted here, so discard them.
-		fullSessionUsage, _ := tokenUsageWithCost(ctx, ag, transcript, 0, "", "")
+		fullSessionUsage, _ := tokenUsageWithCost(ctx, ag, transcript, 0, "", sessionModel)
 		if hasTokenUsageData(fullSessionUsage) {
 			return fullSessionUsage
 		}
@@ -996,7 +996,7 @@ func committedFilesExcludingMetadata(committedFiles map[string]struct{}) []strin
 // This handles the case where SaveStep was skipped (no code changes) but the transcript
 // continued growing — the shadow branch copy would be stale.
 // checkpointTranscriptStart is the line offset (Claude) or message index (Gemini) where the current checkpoint began.
-func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType types.AgentType, liveTranscriptPath string, checkpointTranscriptStart int, isActive bool) (*ExtractedSessionData, error) {
+func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType types.AgentType, liveTranscriptPath string, checkpointTranscriptStart int, sessionModel string, isActive bool) (*ExtractedSessionData, error) {
 	ag, _ := agent.GetByAgentType(agentType) //nolint:errcheck // ag may be nil for unknown agent types; callers use type assertions so nil is safe
 	commit, err := repo.CommitObject(shadowRef)
 	if err != nil {
@@ -1064,10 +1064,9 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
 	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
-		// No session model in scope here; pi/gemini price from their own
-		// per-model buckets, so the empty fallback only affects agents that
-		// don't implement ModelUsageCalculator (priced elsewhere in later chunks).
-		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, checkpointTranscriptStart, "", "") //TODO: why do we not use here subagents dir?
+		// sessionModel prices the fallback and remainder buckets (e.g. Claude
+		// Code subagent shortfall) that CalculateModelUsage cannot attribute.
+		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, checkpointTranscriptStart, "", sessionModel) //TODO: why do we not use here subagents dir?
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
