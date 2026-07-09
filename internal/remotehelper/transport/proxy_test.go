@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -1458,3 +1459,183 @@ func TestUnauthorizedObserver(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// fakeTokenSource models the jurisdiction token source the remote helper
+// wires into the proxy: Token memoizes a minted token, Invalidate drops the
+// memo so the next Token re-mints a distinct one. mintErrs[n], when non-nil,
+// makes the (n+1)th mint fail — used to exercise re-mint failure on a retry.
+type fakeTokenSource struct {
+	mu       sync.Mutex
+	token    string
+	mints    int
+	mintErrs []error
+}
+
+func (s *fakeTokenSource) Token() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.token != "" {
+		return s.token, nil
+	}
+	if s.mints < len(s.mintErrs) && s.mintErrs[s.mints] != nil {
+		err := s.mintErrs[s.mints]
+		s.mints++
+		return "", err
+	}
+	s.mints++
+	s.token = fmt.Sprintf("token-%d", s.mints)
+	return s.token, nil
+}
+
+func (s *fakeTokenSource) Invalidate() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.token = ""
+}
+
+// authRetryProxy builds a single-node Proxy wired the way git-remote-entire's
+// main wires production: SetAuth stamps a Bearer from src, and OnUnauthorized
+// invalidates src so the next mint is fresh.
+func authRetryProxy(t *testing.T, serverURL string, src *fakeTokenSource) *Proxy {
+	t.Helper()
+	return New(Config{
+		Nodes: replicas.NodeConfig{
+			InitialNodes: []string{serverURL},
+			ClusterHost:  mustHost(t, serverURL),
+		},
+		Path: "/et/alice/repo",
+		SetAuth: func(req *http.Request) error {
+			tok, err := src.Token()
+			if err != nil {
+				return err
+			}
+			req.Header.Set("Authorization", "Bearer "+tok)
+			return nil
+		},
+		OnUnauthorized: src.Invalidate,
+	})
+}
+
+// TestServiceRPCRetriesOnceOn401: a POST that 401s once then succeeds must be
+// retried in-process — exactly two attempts, the body replayed verbatim on the
+// retry, and the retry carrying a freshly minted Authorization header.
+func TestServiceRPCRetriesOnceOn401(t *testing.T) {
+	t.Parallel()
+	const reqBody = "0032want 1234567890123456789012345678901234567890\n0000"
+
+	type attempt struct{ auth, body string }
+	var mu sync.Mutex
+	var attempts []attempt
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body) //nolint:errcheck // test
+		mu.Lock()
+		n := len(attempts)
+		attempts = append(attempts, attempt{auth: r.Header.Get("Authorization"), body: string(b)})
+		mu.Unlock()
+		if n == 0 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "pack-data")
+	}))
+	defer server.Close()
+
+	src := &fakeTokenSource{}
+	p := authRetryProxy(t, server.URL, src)
+
+	body, err := p.ServiceRPC(context.Background(), "git-upload-pack", strings.NewReader(reqBody))
+	require.NoError(t, err)
+	defer body.Close()
+	got, _ := io.ReadAll(body) //nolint:errcheck // test
+	assert.Equal(t, "pack-data", string(got))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, attempts, 2, "expected exactly one in-process retry (two attempts total)")
+	assert.Equal(t, reqBody, attempts[0].body, "first attempt body")
+	assert.Equal(t, reqBody, attempts[1].body, "POST body must be fully replayed on the retry")
+	assert.Equal(t, "Bearer token-1", attempts[0].auth)
+	assert.Equal(t, "Bearer token-2", attempts[1].auth, "retry must carry a freshly minted token, not the replayed stale header")
+	assert.NotEqual(t, attempts[0].auth, attempts[1].auth)
+}
+
+// TestServiceRPCRetriesOnceThenFailsOnPersistent401: when the fresh token is
+// also rejected, we stop after exactly one retry and surface the refreshed
+// message — no retry loop.
+func TestServiceRPCRetriesOnceThenFailsOnPersistent401(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	src := &fakeTokenSource{}
+	p := authRetryProxy(t, server.URL, src)
+
+	_, err := p.ServiceRPC(context.Background(), "git-upload-pack", strings.NewReader("body"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "authentication failed even after refreshing credentials")
+	assert.Equal(t, int32(2), calls.Load(), "exactly two attempts: original + one retry")
+}
+
+// TestServiceRPCRetryReMintFailureSurfaces: if re-minting the token for the
+// retry fails, the mint error must reach the caller — not a nil-token retry —
+// and we must not have dialled the server a second time.
+func TestServiceRPCRetryReMintFailureSurfaces(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	// First mint succeeds (token-1, gets the 401); the retry's re-mint fails.
+	src := &fakeTokenSource{mintErrs: []error{nil, errors.New("core unreachable: exchange failed")}}
+	p := authRetryProxy(t, server.URL, src)
+
+	_, err := p.ServiceRPC(context.Background(), "git-upload-pack", strings.NewReader("body"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "core unreachable: exchange failed")
+	assert.Equal(t, int32(1), calls.Load(), "retry must abort at re-mint, before a second dial")
+}
+
+// TestInfoRefsRetriesOnceOn401: the GET info/refs path self-heals on a 401 the
+// same way, re-minting and retrying once.
+func TestInfoRefsRetriesOnceOn401(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var auths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n := len(auths)
+		auths = append(auths, r.Header.Get("Authorization"))
+		mu.Unlock()
+		if n == 0 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "refs")
+	}))
+	defer server.Close()
+
+	src := &fakeTokenSource{}
+	p := authRetryProxy(t, server.URL, src)
+
+	body, err := p.InfoRefs(context.Background(), "git-upload-pack")
+	require.NoError(t, err)
+	defer body.Close()
+	got, _ := io.ReadAll(body) //nolint:errcheck // test
+	assert.Equal(t, "refs", string(got))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, auths, 2, "expected exactly one in-process retry")
+	assert.Equal(t, "Bearer token-1", auths[0])
+	assert.Equal(t, "Bearer token-2", auths[1], "retry must carry a freshly minted token")
+}

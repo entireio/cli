@@ -9,14 +9,12 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// newOrgCmd is the hidden `entire org` command group: create, list, get, and
-// delete organizations on the Entire control plane. Surfaced via `entire
-// labs` while the control-plane surface matures.
+// newOrgCmd is the `entire org` command group: create, list, get, and
+// delete organizations on the Entire control plane.
 func newOrgCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "org",
-		Short:  "Manage Entire organizations",
-		Hidden: true,
+		Use:   "org",
+		Short: "Manage Entire organizations",
 	}
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newOrgCreateCmd())
@@ -55,11 +53,12 @@ func newOrgCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&region, "region", "", "Jurisdiction slug (defaults to the server's home jurisdiction)")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newOrgListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List organizations you can see",
 		Args:  cobra.NoArgs,
@@ -79,10 +78,12 @@ func newOrgListCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 func newOrgGetCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "get <org>",
 		Short: "Show an organization by name or ULID",
 		Args:  cobra.ExactArgs(1),
@@ -96,6 +97,8 @@ func newOrgGetCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 func newOrgDeleteCmd() *cobra.Command {

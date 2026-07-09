@@ -297,22 +297,70 @@ func (p *Proxy) setAuthOrError(req *http.Request) error {
 // request body — the cold-path probe (no-redirect client), the
 // missing-replicas fallback, and the Location salvage all share this
 // shape.
+//
+// On a 401 it retries once with a freshly minted token: see retryOn401.
 func (p *Proxy) doGet(ctx context.Context, urlStr string, client *http.Client, setHeaders func(*http.Request)) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	build := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating request: %w", err)
+		}
+		if err := p.setAuthOrError(req); err != nil {
+			return nil, err
+		}
+		if setHeaders != nil {
+			setHeaders(req)
+		}
+		return req, nil
+	}
+	req, err := build()
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-	if err := p.setAuthOrError(req); err != nil {
 		return nil, err
-	}
-	if setHeaders != nil {
-		setHeaders(req)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("doing request: %w", err)
 	}
+	resp, err = p.retryOn401(client, resp, build)
+	if err != nil {
+		return nil, fmt.Errorf("doing request: %w", err)
+	}
 	return resp, nil
+}
+
+// retryOn401 resends the request once, with a freshly minted credential,
+// when resp is an HTTP 401; otherwise it returns resp untouched.
+//
+// A 401 means the data plane rejected the credential itself (a signing-key
+// rotation or clock skew invalidating a still-mid-TTL persisted token). The
+// unauthorizedObserver has already fired creds.Invalidate by the time this
+// runs — synchronously, inside the RoundTrip that produced this response — so
+// build's setAuthOrError re-resolves the Authorization header from the token
+// source, which now re-mints rather than replaying the dead credential. build
+// also rewinds any request body, so this is safe for POSTs. We deliberately
+// re-run build rather than replaying the original *http.Request: that yields a
+// fresh header (not a captured stale one) and a rewound body.
+//
+// Exactly one retry. If the resend also 401s, the caller renders the error;
+// there is no loop. A build error on the resend (e.g. the re-mint failing) is
+// surfaced verbatim, so the mint error reaches the user rather than a
+// nil-token retry.
+func (p *Proxy) retryOn401(client *http.Client, resp *http.Response, build func() (*http.Request, error)) (*http.Response, error) {
+	if resp.StatusCode != http.StatusUnauthorized {
+		return resp, nil
+	}
+	// Drain (bounded, like httpError and the 5xx failover path) before Close
+	// so net/http can reuse the connection for the immediate retry instead of
+	// paying a fresh TCP+TLS handshake.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024)) //nolint:errcheck // best-effort drain for connection reuse
+	_ = resp.Body.Close()
+	debuglog.Printf("data plane returned 401; credential invalidated, retrying once with a freshly minted token")
+	req, err := build()
+	if err != nil {
+		return nil, err
+	}
+	//nolint:wrapcheck // caller adds context; keeping the raw error preserves failover classification
+	return client.Do(req)
 }
 
 // doWithFailover tries an HTTP request against each node, starting
@@ -332,28 +380,43 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 		}
 	}
 	var lastErr error
+	// One auth retry per logical operation, not per replica: a 401 doesn't
+	// trigger failover, so the loop returns the first 401 to the retry — this
+	// flag stops a second node (or a re-entry) from re-minting again.
+	authRetried := false
 
 	for i := range nodes {
 		node := nodes[(start+i)%len(nodes)]
 		reqURL := p.nodeURL(node, makeSuffix)
 
-		var bodyReader io.Reader
-		if body != nil {
-			if _, err := body.Seek(0, io.SeekStart); err != nil {
-				return nil, fmt.Errorf("resetting request body: %w", err)
+		// build (re)constructs the request: rewind the body, mint/attach the
+		// Authorization header, and stamp the caller's headers. Reused by the
+		// 401 retry so the resend carries a rewound body and a fresh token
+		// rather than a replayed stale header.
+		build := func() (*http.Request, error) {
+			var bodyReader io.Reader
+			if body != nil {
+				if _, err := body.Seek(0, io.SeekStart); err != nil {
+					return nil, fmt.Errorf("resetting request body: %w", err)
+				}
+				bodyReader = body
 			}
-			bodyReader = body
+			req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
+			if err != nil {
+				return nil, fmt.Errorf("creating request: %w", err)
+			}
+			if err := p.setAuthOrError(req); err != nil {
+				return nil, err
+			}
+			if setHeaders != nil {
+				setHeaders(req)
+			}
+			return req, nil
 		}
 
-		req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
+		req, err := build()
 		if err != nil {
-			return nil, fmt.Errorf("creating request: %w", err)
-		}
-		if err := p.setAuthOrError(req); err != nil {
 			return nil, err
-		}
-		if setHeaders != nil {
-			setHeaders(req)
 		}
 
 		resp, err := p.client.Do(req)
@@ -362,6 +425,20 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 			lastErr = err
 			p.markNodeFailed(node)
 			continue
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized && !authRetried {
+			authRetried = true
+			debuglog.Printf("node %s returned HTTP 401; retrying once with a freshly minted token", node)
+			// The retry hits the same node it 401'd on. Surface any error
+			// directly (a re-mint failure or a transient connect on the
+			// resend) rather than failing over across healthy nodes — a
+			// blanket failover would churn the replica cache on a transient
+			// auth-provider outage, and the 401 already told us the node is up.
+			resp, err = p.retryOn401(p.client, resp, build)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		if shouldFailover(resp.StatusCode) {

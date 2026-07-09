@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/cmd/entire/cli/recap"
 )
 
@@ -308,8 +309,8 @@ func recapFooterLine(color bool, items []recapHelpItem) string {
 		}
 		return strings.Join(parts, " · ")
 	}
-	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Bold(true)
+	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Faint(true)
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Bold(true)
 	item := func(k, desc string) string {
 		return keyStyle.Render(k) + helpStyle.Render(" "+desc)
 	}

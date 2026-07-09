@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/spf13/cobra"
 )
@@ -150,13 +151,13 @@ func expertsStylesForColor(useColor bool) expertsStyles {
 		return styles
 	}
 
-	styles.title = lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")).Bold(true)
-	styles.agent = lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")).Bold(true)
-	styles.label = lipgloss.NewStyle().Foreground(lipgloss.Color("#22d3ee"))
-	styles.facet = lipgloss.NewStyle().Foreground(lipgloss.Color("#818cf8"))
-	styles.muted = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styles.file = lipgloss.NewStyle().Foreground(lipgloss.Color("#22d3ee"))
-	styles.bullet = lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c"))
+	styles.title = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)).Bold(true)
+	styles.agent = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)).Bold(true)
+	styles.label = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Info))
+	styles.facet = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Blue))
+	styles.muted = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
+	styles.file = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Info))
+	styles.bullet = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent))
 	return styles
 }
 

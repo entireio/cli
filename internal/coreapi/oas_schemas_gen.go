@@ -5934,144 +5934,6 @@ func (o OptRepo) Or(d Repo) Repo {
 	return d
 }
 
-// NewOptRepoObjectFormat returns new OptRepoObjectFormat with value set to v.
-func NewOptRepoObjectFormat(v RepoObjectFormat) OptRepoObjectFormat {
-	return OptRepoObjectFormat{
-		Value: v,
-		Set:   true,
-	}
-}
-
-// OptRepoObjectFormat is optional RepoObjectFormat.
-type OptRepoObjectFormat struct {
-	Value RepoObjectFormat
-	Set   bool
-}
-
-// IsSet returns true if OptRepoObjectFormat was set.
-func (o OptRepoObjectFormat) IsSet() bool { return o.Set }
-
-// Reset unsets value.
-func (o *OptRepoObjectFormat) Reset() {
-	var v RepoObjectFormat
-	o.Value = v
-	o.Set = false
-}
-
-// SetTo sets value to v.
-func (o *OptRepoObjectFormat) SetTo(v RepoObjectFormat) {
-	o.Set = true
-	o.Value = v
-}
-
-// Get returns value and boolean that denotes whether value was set.
-func (o OptRepoObjectFormat) Get() (v RepoObjectFormat, ok bool) {
-	if !o.Set {
-		return v, false
-	}
-	return o.Value, true
-}
-
-// Or returns value if set, or given parameter if does not.
-func (o OptRepoObjectFormat) Or(d RepoObjectFormat) RepoObjectFormat {
-	if v, ok := o.Get(); ok {
-		return v
-	}
-	return d
-}
-
-// NewOptRepoState returns new OptRepoState with value set to v.
-func NewOptRepoState(v RepoState) OptRepoState {
-	return OptRepoState{
-		Value: v,
-		Set:   true,
-	}
-}
-
-// OptRepoState is optional RepoState.
-type OptRepoState struct {
-	Value RepoState
-	Set   bool
-}
-
-// IsSet returns true if OptRepoState was set.
-func (o OptRepoState) IsSet() bool { return o.Set }
-
-// Reset unsets value.
-func (o *OptRepoState) Reset() {
-	var v RepoState
-	o.Value = v
-	o.Set = false
-}
-
-// SetTo sets value to v.
-func (o *OptRepoState) SetTo(v RepoState) {
-	o.Set = true
-	o.Value = v
-}
-
-// Get returns value and boolean that denotes whether value was set.
-func (o OptRepoState) Get() (v RepoState, ok bool) {
-	if !o.Set {
-		return v, false
-	}
-	return o.Value, true
-}
-
-// Or returns value if set, or given parameter if does not.
-func (o OptRepoState) Or(d RepoState) RepoState {
-	if v, ok := o.Get(); ok {
-		return v
-	}
-	return d
-}
-
-// NewOptRepoVisibility returns new OptRepoVisibility with value set to v.
-func NewOptRepoVisibility(v RepoVisibility) OptRepoVisibility {
-	return OptRepoVisibility{
-		Value: v,
-		Set:   true,
-	}
-}
-
-// OptRepoVisibility is optional RepoVisibility.
-type OptRepoVisibility struct {
-	Value RepoVisibility
-	Set   bool
-}
-
-// IsSet returns true if OptRepoVisibility was set.
-func (o OptRepoVisibility) IsSet() bool { return o.Set }
-
-// Reset unsets value.
-func (o *OptRepoVisibility) Reset() {
-	var v RepoVisibility
-	o.Value = v
-	o.Set = false
-}
-
-// SetTo sets value to v.
-func (o *OptRepoVisibility) SetTo(v RepoVisibility) {
-	o.Set = true
-	o.Value = v
-}
-
-// Get returns value and boolean that denotes whether value was set.
-func (o OptRepoVisibility) Get() (v RepoVisibility, ok bool) {
-	if !o.Set {
-		return v, false
-	}
-	return o.Value, true
-}
-
-// Or returns value if set, or given parameter if does not.
-func (o OptRepoVisibility) Or(d RepoVisibility) RepoVisibility {
-	if v, ok := o.Get(); ok {
-		return v
-	}
-	return d
-}
-
 // NewOptString returns new OptString with value set to v.
 func NewOptString(v string) OptString {
 	return OptString{
@@ -6489,20 +6351,20 @@ type RemoveOrgMemberNoContent struct{}
 // Ref: #/components/schemas/Repo
 type Repo struct {
 	// A URL to the JSON Schema for this object.
-	Schema            OptURI              `json:"$schema"`
-	ClusterHost       OptString           `json:"clusterHost"`
-	Foreign           OptBool             `json:"foreign"`
-	ID                string              `json:"id"`
-	MirrorSuspended   OptBool             `json:"mirrorSuspended"`
-	MirrorSuspendedAt OptString           `json:"mirrorSuspendedAt"`
-	Name              string              `json:"name"`
-	ObjectFormat      OptRepoObjectFormat `json:"objectFormat"`
-	OwningProjectId   string              `json:"owningProjectId"`
-	Path              OptString           `json:"path"`
-	ProvisionAttempts OptInt64            `json:"provisionAttempts"`
-	ProvisionReason   OptString           `json:"provisionReason"`
-	State             OptRepoState        `json:"state"`
-	Visibility        OptRepoVisibility   `json:"visibility"`
+	Schema            OptURI    `json:"$schema"`
+	ClusterHost       OptString `json:"clusterHost"`
+	Foreign           OptBool   `json:"foreign"`
+	ID                string    `json:"id"`
+	MirrorSuspended   OptBool   `json:"mirrorSuspended"`
+	MirrorSuspendedAt OptString `json:"mirrorSuspendedAt"`
+	Name              string    `json:"name"`
+	ObjectFormat      OptString `json:"objectFormat"`
+	OwningProjectId   string    `json:"owningProjectId"`
+	Path              OptString `json:"path"`
+	ProvisionAttempts OptInt64  `json:"provisionAttempts"`
+	ProvisionReason   OptString `json:"provisionReason"`
+	State             OptString `json:"state"`
+	Visibility        OptString `json:"visibility"`
 	AdditionalProps   RepoAdditional
 }
 
@@ -6542,7 +6404,7 @@ func (s *Repo) GetName() string {
 }
 
 // GetObjectFormat returns the value of ObjectFormat.
-func (s *Repo) GetObjectFormat() OptRepoObjectFormat {
+func (s *Repo) GetObjectFormat() OptString {
 	return s.ObjectFormat
 }
 
@@ -6567,12 +6429,12 @@ func (s *Repo) GetProvisionReason() OptString {
 }
 
 // GetState returns the value of State.
-func (s *Repo) GetState() OptRepoState {
+func (s *Repo) GetState() OptString {
 	return s.State
 }
 
 // GetVisibility returns the value of Visibility.
-func (s *Repo) GetVisibility() OptRepoVisibility {
+func (s *Repo) GetVisibility() OptString {
 	return s.Visibility
 }
 
@@ -6617,7 +6479,7 @@ func (s *Repo) SetName(val string) {
 }
 
 // SetObjectFormat sets the value of ObjectFormat.
-func (s *Repo) SetObjectFormat(val OptRepoObjectFormat) {
+func (s *Repo) SetObjectFormat(val OptString) {
 	s.ObjectFormat = val
 }
 
@@ -6642,12 +6504,12 @@ func (s *Repo) SetProvisionReason(val OptString) {
 }
 
 // SetState sets the value of State.
-func (s *Repo) SetState(val OptRepoState) {
+func (s *Repo) SetState(val OptString) {
 	s.State = val
 }
 
 // SetVisibility sets the value of Visibility.
-func (s *Repo) SetVisibility(val OptRepoVisibility) {
+func (s *Repo) SetVisibility(val OptString) {
 	s.Visibility = val
 }
 
@@ -6862,47 +6724,6 @@ func (s *RepoIndexEntryAdditional) init() RepoIndexEntryAdditional {
 	return m
 }
 
-type RepoObjectFormat string
-
-const (
-	RepoObjectFormatSHA1   RepoObjectFormat = "sha1"
-	RepoObjectFormatSHA256 RepoObjectFormat = "sha256"
-)
-
-// AllValues returns all RepoObjectFormat values.
-func (RepoObjectFormat) AllValues() []RepoObjectFormat {
-	return []RepoObjectFormat{
-		RepoObjectFormatSHA1,
-		RepoObjectFormatSHA256,
-	}
-}
-
-// MarshalText implements encoding.TextMarshaler.
-func (s RepoObjectFormat) MarshalText() ([]byte, error) {
-	switch s {
-	case RepoObjectFormatSHA1:
-		return []byte(s), nil
-	case RepoObjectFormatSHA256:
-		return []byte(s), nil
-	default:
-		return nil, errors.Errorf("invalid value: %q", s)
-	}
-}
-
-// UnmarshalText implements encoding.TextUnmarshaler.
-func (s *RepoObjectFormat) UnmarshalText(data []byte) error {
-	switch RepoObjectFormat(data) {
-	case RepoObjectFormatSHA1:
-		*s = RepoObjectFormatSHA1
-		return nil
-	case RepoObjectFormatSHA256:
-		*s = RepoObjectFormatSHA256
-		return nil
-	default:
-		return errors.Errorf("invalid value: %q", data)
-	}
-}
-
 // Ref: #/components/schemas/RepoPlacement
 type RepoPlacement struct {
 	Cell            string `json:"cell"`
@@ -6971,95 +6792,6 @@ func (s *RepoPlacementAdditional) init() RepoPlacementAdditional {
 		*s = m
 	}
 	return m
-}
-
-type RepoState string
-
-const (
-	RepoStateProvisioning RepoState = "provisioning"
-	RepoStateActive       RepoState = "active"
-	RepoStateFailed       RepoState = "failed"
-)
-
-// AllValues returns all RepoState values.
-func (RepoState) AllValues() []RepoState {
-	return []RepoState{
-		RepoStateProvisioning,
-		RepoStateActive,
-		RepoStateFailed,
-	}
-}
-
-// MarshalText implements encoding.TextMarshaler.
-func (s RepoState) MarshalText() ([]byte, error) {
-	switch s {
-	case RepoStateProvisioning:
-		return []byte(s), nil
-	case RepoStateActive:
-		return []byte(s), nil
-	case RepoStateFailed:
-		return []byte(s), nil
-	default:
-		return nil, errors.Errorf("invalid value: %q", s)
-	}
-}
-
-// UnmarshalText implements encoding.TextUnmarshaler.
-func (s *RepoState) UnmarshalText(data []byte) error {
-	switch RepoState(data) {
-	case RepoStateProvisioning:
-		*s = RepoStateProvisioning
-		return nil
-	case RepoStateActive:
-		*s = RepoStateActive
-		return nil
-	case RepoStateFailed:
-		*s = RepoStateFailed
-		return nil
-	default:
-		return errors.Errorf("invalid value: %q", data)
-	}
-}
-
-type RepoVisibility string
-
-const (
-	RepoVisibilityPublic  RepoVisibility = "public"
-	RepoVisibilityPrivate RepoVisibility = "private"
-)
-
-// AllValues returns all RepoVisibility values.
-func (RepoVisibility) AllValues() []RepoVisibility {
-	return []RepoVisibility{
-		RepoVisibilityPublic,
-		RepoVisibilityPrivate,
-	}
-}
-
-// MarshalText implements encoding.TextMarshaler.
-func (s RepoVisibility) MarshalText() ([]byte, error) {
-	switch s {
-	case RepoVisibilityPublic:
-		return []byte(s), nil
-	case RepoVisibilityPrivate:
-		return []byte(s), nil
-	default:
-		return nil, errors.Errorf("invalid value: %q", s)
-	}
-}
-
-// UnmarshalText implements encoding.TextUnmarshaler.
-func (s *RepoVisibility) UnmarshalText(data []byte) error {
-	switch RepoVisibility(data) {
-	case RepoVisibilityPublic:
-		*s = RepoVisibilityPublic
-		return nil
-	case RepoVisibilityPrivate:
-		*s = RepoVisibilityPrivate
-		return nil
-	default:
-		return errors.Errorf("invalid value: %q", data)
-	}
 }
 
 // Ref: #/components/schemas/ResolvedIdentity

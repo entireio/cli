@@ -203,42 +203,45 @@ func assertRemoteHasCheckpointCommit(t *testing.T, bareDir, checkpointID string)
 func TestHTTPS_PushCheckpointBranchToRemote(t *testing.T) {
 	t.Parallel()
 
-	srv := startGitHTTPSServer(t, "testorg/main-repo")
-	env := NewFeatureBranchEnv(t)
+	ForEachBackend(t, func(t *testing.T, backend string) {
+		srv := startGitHTTPSServer(t, "testorg/main-repo")
+		env := NewFeatureBranchEnv(t)
+		env.CheckpointStore = backend
 
-	httpsURL := srv.URL + "/testorg/main-repo.git"
-	seedBareRepo(t, env, srv.BareDirs["testorg/main-repo"], httpsURL)
+		httpsURL := srv.URL + "/testorg/main-repo.git"
+		seedBareRepo(t, env, srv.BareDirs["testorg/main-repo"], httpsURL)
 
-	env.ExtraEnv = srv.tokenEnv("test-push-token")
+		env.ExtraEnv = srv.tokenEnv("test-push-token")
 
-	_ = createCheckpointedCommit(t, env, "Add feature", "feature.go", "package feature", "Add feature")
+		checkpointID := createCheckpointedCommit(t, env, "Add feature", "feature.go", "package feature", "Add feature")
 
-	if !env.BranchExists(paths.MetadataBranchName) {
-		t.Fatal("checkpoint branch should exist locally after condensation")
-	}
+		if !env.CheckpointsPresentLocally() {
+			t.Fatal("checkpoints should exist locally after condensation")
+		}
 
-	env.RunPrePush("origin")
+		env.RunPrePush("origin")
 
-	bareDir := srv.BareDirs["testorg/main-repo"]
-	if !env.BranchExistsOnRemote(bareDir, paths.MetadataBranchName) {
-		t.Fatal("checkpoint branch should exist on HTTPS remote after PrePush")
-	}
+		bareDir := srv.BareDirs["testorg/main-repo"]
+		if !env.CheckpointsPresentOnRemote(bareDir) {
+			t.Fatal("checkpoints should exist on HTTPS remote after PrePush")
+		}
 
-	checkpointID := env.GetLatestCheckpointID()
-	if checkpointID == "" {
-		t.Fatal("should have a checkpoint ID after condensation")
-	}
-	summaryPath := CheckpointSummaryPath(checkpointID)
-	if !fileExistsOnRemoteBranch(t, bareDir, summaryPath) {
-		t.Errorf("checkpoint metadata should exist on remote at %s", summaryPath)
-	}
+		if checkpointID == "" {
+			t.Fatal("should have a checkpoint ID after condensation")
+		}
+		if !env.CheckpointExistsOnRemote(bareDir, checkpointID) {
+			t.Errorf("checkpoint %s should exist on HTTPS remote", checkpointID)
+		}
 
-	// 2 commits: "Initialize metadata branch" + "Checkpoint: <id>"
-	commits := listRemoteMetadataCommits(t, bareDir)
-	if len(commits) != 2 {
-		t.Fatalf("expected 2 commits on remote metadata branch, got %d: %v", len(commits), commits)
-	}
-	assertRemoteHasCheckpointCommit(t, bareDir, checkpointID)
+		if !env.usingGitRefs() {
+			// 2 commits: "Initialize metadata branch" + "Checkpoint: <id>"
+			commits := listRemoteMetadataCommits(t, bareDir)
+			if len(commits) != 2 {
+				t.Fatalf("expected 2 commits on remote metadata branch, got %d: %v", len(commits), commits)
+			}
+			assertRemoteHasCheckpointCommit(t, bareDir, checkpointID)
+		}
+	})
 }
 
 // TestHTTPS_CheckpointRemoteRoutesToSeparateRepo verifies that when
@@ -254,6 +257,10 @@ func TestHTTPS_PushCheckpointBranchToRemote(t *testing.T) {
 //   - resolvePushSettings -> PushURL -> deriveCheckpointURLFromInfo (push routing)
 //   - fetchAndRebaseRefCommon with checkpoint URL target (fetch routing)
 //   - tryPushRefCommon retry after rebase (push retry)
+//
+// git-branch only: asserts on v1 commit counts/subjects and the rebased tip's
+// parent count. checkpoint_remote routing and non-FF rebase for git-refs
+// per-checkpoint refs are separate future work (test plan B5/D2, git-refs only).
 func TestHTTPS_CheckpointRemoteRoutesToSeparateRepo(t *testing.T) {
 	t.Parallel()
 
@@ -340,6 +347,10 @@ func TestHTTPS_CheckpointRemoteRoutesToSeparateRepo(t *testing.T) {
 // TestHTTPS_OutOfSyncCheckpointBranchRebases verifies that when two clones
 // push to the same HTTPS remote, the second pusher fetches, rebases its local
 // checkpoint branch, and retries the push successfully.
+//
+// git-branch only: asserts on v1 commit counts and the rebased tip's parent
+// count. The git-refs non-FF fetch+replay+retry equivalent is separate future
+// work (test plan D2/D3, git-refs only).
 func TestHTTPS_OutOfSyncCheckpointBranchRebases(t *testing.T) {
 	t.Parallel()
 
@@ -406,43 +417,50 @@ func TestHTTPS_OutOfSyncCheckpointBranchRebases(t *testing.T) {
 func TestHTTPS_PushFailsWithoutToken(t *testing.T) {
 	t.Parallel()
 
-	srv := startGitHTTPSServer(t, "testorg/main-repo")
-	env := NewFeatureBranchEnv(t)
+	ForEachBackend(t, func(t *testing.T, backend string) {
+		srv := startGitHTTPSServer(t, "testorg/main-repo")
+		env := NewFeatureBranchEnv(t)
+		env.CheckpointStore = backend
 
-	bareDir := srv.BareDirs["testorg/main-repo"]
-	httpsURL := srv.URL + "/testorg/main-repo.git"
-	seedBareRepo(t, env, bareDir, httpsURL)
+		bareDir := srv.BareDirs["testorg/main-repo"]
+		httpsURL := srv.URL + "/testorg/main-repo.git"
+		seedBareRepo(t, env, bareDir, httpsURL)
 
-	// SSL trust only — no token.
-	env.ExtraEnv = srv.sslEnv()
+		// SSL trust only — no token.
+		env.ExtraEnv = srv.sslEnv()
 
-	_ = createCheckpointedCommit(t, env, "Add service", "service.go", "package service", "Add service")
+		checkpointID := createCheckpointedCommit(t, env, "Add service", "service.go", "package service", "Add service")
 
-	if !env.BranchExists(paths.MetadataBranchName) {
-		t.Fatal("checkpoint branch should exist locally after condensation")
-	}
+		if !env.CheckpointsPresentLocally() {
+			t.Fatal("checkpoints should exist locally after condensation")
+		}
 
-	// Push without token — the server returns 401 for receive-pack. PrePush
-	// degrades gracefully (returns nil, logs a warning).
-	env.RunPrePush("origin")
+		// Push without token — the server returns 401 for receive-pack. PrePush
+		// degrades gracefully (returns nil, logs a warning).
+		env.RunPrePush("origin")
 
-	if env.BranchExistsOnRemote(bareDir, paths.MetadataBranchName) {
-		t.Error("checkpoint branch should NOT be on remote without token (401 expected)")
-	}
+		if env.CheckpointsPresentOnRemote(bareDir) {
+			t.Error("checkpoints should NOT be on remote without token (401 expected)")
+		}
 
-	// Now set the token and push again — should succeed.
-	env.ExtraEnv = srv.tokenEnv("valid-token")
-	env.RunPrePush("origin")
+		// Now set the token and push again — should succeed.
+		env.ExtraEnv = srv.tokenEnv("valid-token")
+		env.RunPrePush("origin")
 
-	if !env.BranchExistsOnRemote(bareDir, paths.MetadataBranchName) {
-		t.Fatal("checkpoint branch should be on remote after push with token")
-	}
+		if !env.CheckpointsPresentOnRemote(bareDir) {
+			t.Fatal("checkpoints should be on remote after push with token")
+		}
+		if !env.CheckpointExistsOnRemote(bareDir, checkpointID) {
+			t.Errorf("checkpoint %s should exist on HTTPS remote after token push", checkpointID)
+		}
 
-	// 2 commits: "Initialize metadata branch" + "Checkpoint: <id>"
-	checkpointID := env.GetLatestCheckpointID()
-	commits := listRemoteMetadataCommits(t, bareDir)
-	if len(commits) != 2 {
-		t.Fatalf("expected 2 commits on remote metadata branch, got %d: %v", len(commits), commits)
-	}
-	assertRemoteHasCheckpointCommit(t, bareDir, checkpointID)
+		if !env.usingGitRefs() {
+			// 2 commits: "Initialize metadata branch" + "Checkpoint: <id>"
+			commits := listRemoteMetadataCommits(t, bareDir)
+			if len(commits) != 2 {
+				t.Fatalf("expected 2 commits on remote metadata branch, got %d: %v", len(commits), commits)
+			}
+			assertRemoteHasCheckpointCommit(t, bareDir, checkpointID)
+		}
+	})
 }

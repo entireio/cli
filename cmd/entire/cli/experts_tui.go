@@ -11,6 +11,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	xansi "github.com/charmbracelet/x/ansi"
+
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 )
 
 // Layout budget for the experts viewer. The header is a single title line
@@ -43,12 +45,12 @@ func newExpertsTUIStyles(useColor bool) expertsTUIStyles {
 	if !useColor {
 		return s
 	}
-	s.selected = lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")).Bold(true)
-	s.section = lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")).Bold(true)
-	s.helpKey = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Bold(true)
-	s.helpDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	s.helpSep = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	s.sepBar = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	s.selected = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)).Bold(true)
+	s.section = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)).Bold(true)
+	s.helpKey = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Bold(true)
+	s.helpDesc = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Faint(true)
+	s.helpSep = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Faint(true)
+	s.sepBar = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
 	return s
 }
 

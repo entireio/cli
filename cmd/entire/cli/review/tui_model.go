@@ -20,6 +20,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
@@ -116,7 +117,7 @@ type reviewTUIModel struct {
 func newReviewTUIModel(agents []string, cancel context.CancelFunc) reviewTUIModel {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
-	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
 
 	rows := make([]agentRow, len(agents))
 	rowIdx := make(map[string]int, len(agents))

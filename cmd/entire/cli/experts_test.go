@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -212,13 +213,13 @@ func TestRenderExpertsWithStylesUsesEntirePalette(t *testing.T) {
 
 	styles := expertsStyles{
 		colorEnabled: true,
-		title:        lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")).Bold(true),
-		agent:        lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")).Bold(true),
-		label:        lipgloss.NewStyle().Foreground(lipgloss.Color("#22d3ee")),
-		facet:        lipgloss.NewStyle().Foreground(lipgloss.Color("#818cf8")),
-		muted:        lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		file:         lipgloss.NewStyle().Foreground(lipgloss.Color("#22d3ee")),
-		bullet:       lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")),
+		title:        lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)).Bold(true),
+		agent:        lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)).Bold(true),
+		label:        lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Info)),
+		facet:        lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Blue)),
+		muted:        lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)),
+		file:         lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Info)),
+		bullet:       lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)),
 	}
 
 	var out bytes.Buffer

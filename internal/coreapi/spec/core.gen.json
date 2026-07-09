@@ -1885,10 +1885,6 @@
             "type": "string"
           },
           "objectFormat": {
-            "enum": [
-              "sha1",
-              "sha256"
-            ],
             "type": "string"
           },
           "owningProjectId": {
@@ -1905,18 +1901,9 @@
             "type": "string"
           },
           "state": {
-            "enum": [
-              "provisioning",
-              "active",
-              "failed"
-            ],
             "type": "string"
           },
           "visibility": {
-            "enum": [
-              "public",
-              "private"
-            ],
             "type": "string"
           }
         },

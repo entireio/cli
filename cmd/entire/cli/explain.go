@@ -25,6 +25,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -643,6 +644,26 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		return NewSilentError(fmt.Errorf("%w: %s matches %d checkpoints", errAmbiguousCommitPrefix, checkpointIDPrefix, len(matches)))
 	}
 
+	// Fast-fail on imported checkpoints before the expensive content load.
+	// --generate is read-only-rejected for imported history, so fetching
+	// transcript blobs first (prefetch + ReadLatestSessionContent inside
+	// loadCheckpointForExplain) is wasted work for a guaranteed rejection.
+	// Imported lives in the checkpoint metadata, so a metadata-only
+	// ReadCheckpoint settles it without reading any session content. On the
+	// non-imported path loadCheckpointForExplain re-reads this summary, but
+	// that extra metadata-only read is cheap and happens only under
+	// --generate — the skipped blob prefetch + transcript load on the
+	// imported path is the larger win.
+	if generate {
+		summary, summaryErr := checkpoint.ReadCheckpoint(ctx, lookup.store, fullCheckpointID)
+		if summaryErr != nil {
+			return fmt.Errorf("failed to read checkpoint: %w", summaryErr)
+		}
+		if summary.Imported {
+			return fmt.Errorf("cannot generate a summary for imported checkpoint %s: imported history is read-only", fullCheckpointID)
+		}
+	}
+
 	// One spinner covers the entire data-loading pipeline: prefetch's
 	// missing-blob analysis (which spawns one cat-file -e per blob and
 	// can take seconds on a deep checkpoint subtree), the prefetch fetch
@@ -650,22 +671,6 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	// reads, and getAssociatedCommits' git log walk. Stop strictly before
 	// any write to w (stdout) so stderr spinner frames and stdout output
 	// never interleave.
-	// Fast-fail on imported checkpoints before the expensive content load.
-	// --generate is read-only-rejected for imported history, so fetching
-	// transcript blobs first (prefetch + ReadLatestSessionContent inside
-	// loadCheckpointForExplain) is wasted work for a guaranteed rejection.
-	// summary.Imported lives in the checkpoint metadata, so a metadata-only
-	// ReadCheckpoint settles it without reading any session content.
-	if generate {
-		meta, metaErr := checkpoint.ReadCheckpoint(ctx, lookup.store, fullCheckpointID)
-		if metaErr != nil {
-			return fmt.Errorf("failed to read checkpoint: %w", metaErr)
-		}
-		if meta.Imported {
-			return fmt.Errorf("cannot generate a summary for imported checkpoint %s: imported history is read-only", fullCheckpointID)
-		}
-	}
-
 	stopLoad := startSpinner(errW, fmt.Sprintf("Loading checkpoint %s", fullCheckpointID))
 
 	summary, content, err := loadCheckpointForExplain(ctx, lookup, fullCheckpointID)
@@ -1770,9 +1775,9 @@ func formatCheckpointHeader(
 
 	headline := "● Checkpoint " + cpID.String()
 	if styles.colorEnabled {
-		bullet := styles.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), "●")
+		bullet := styles.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)), "●")
 		key := styles.render(styles.bold, "Checkpoint")
-		val := styles.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), cpID.String())
+		val := styles.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)), cpID.String())
 		headline = bullet + " " + key + " " + val
 	}
 	sb.WriteString(headline)
@@ -2364,6 +2369,15 @@ func runExplainBranchWithFilter(ctx context.Context, w, errW io.Writer, noPager 
 	// reports whether it hit its budget; we render everything it returns (it
 	// already enforces the cap internally) and only surface a note when older
 	// checkpoints were actually dropped.
+	//
+	// Note this prose view and the --json list path (runExplainListJSON)
+	// truncate differently on purpose: getBranchCheckpoints budgets the live
+	// and imported lists independently, so it can return up to 2*limit entries.
+	// This grouped view renders them all and only notes when a budget was hit;
+	// the JSON path hard-caps the flat array at limit (its array contract). So
+	// e.g. 60 live + 60 imported shows 120 rows with no note here, but 100
+	// entries with a note under --json. The `--limit` help text ("Only meaningful with --json")
+	// reflects that the cap is a JSON-path concept.
 	points, truncated, err := getBranchCheckpoints(ctx, repo, branchCheckpointsLimit)
 	if err != nil {
 		// If context was cancelled (e.g. user hit Ctrl+C), exit silently
@@ -2709,7 +2723,7 @@ func groupByCheckpointID(points []strategy.RewindPoint) []checkpointGroup {
 }
 
 // formatCheckpointGroup formats a single checkpoint group for display.
-// The list view headline puts the checkpoint ID first (in bold orange),
+// The list view headline puts the checkpoint ID first (in bold accent/magenta),
 // followed by indicators and the prompt — which cascades from
 // SessionPrompt → latest commit message → dimmed `(no prompt recorded)`.
 func formatCheckpointGroup(sb *strings.Builder, group checkpointGroup, styles statusStyles) {

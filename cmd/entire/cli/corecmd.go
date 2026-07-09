@@ -14,22 +14,37 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
 // addControlPlaneFlags registers the persistent flags shared by every
 // control-plane command group. Persistent so they're inherited by nested
 // subcommands (e.g. `entire repo mirror list`):
-//   - --json: emit the raw wire JSON instead of the default human table.
 //   - --insecure-http-auth: permit the token exchange over plain http://
 //     (local/dev deployments where the core isn't behind TLS). Hidden, as
-//     elsewhere in the CLI.
+//     elsewhere in the CLI. Applies to every subcommand because they all build
+//     a control-plane client.
+//
+// --json is deliberately NOT persistent here: it only makes sense on the read
+// and mutation verbs that render a wire payload, so it's registered per-command
+// with addJSONFlag. A persistent --json was inherited by side-effect verbs
+// (delete, clone, mirror create/remove, grant remove) that silently ignored it;
+// cobra can't hide a persistent flag from a subset of children, so the flag
+// lives on exactly the commands that honor it.
 func addControlPlaneFlags(cmd *cobra.Command) {
-	cmd.PersistentFlags().Bool("json", false, "Output raw JSON instead of a table")
 	cmd.PersistentFlags().Bool("insecure-http-auth", false, "Allow authentication over plain HTTP (insecure, for local development only)")
 	if err := cmd.PersistentFlags().MarkHidden("insecure-http-auth"); err != nil {
 		panic(fmt.Sprintf("hide insecure-http-auth flag: %v", err))
 	}
+}
+
+// addJSONFlag registers the local --json flag on a command that renders a wire
+// payload (list/get/create/mutation verbs routed through the runCore* helpers).
+// Local, not persistent, so only these commands advertise and accept it — see
+// addControlPlaneFlags for why. Read it with jsonRequested.
+func addJSONFlag(cmd *cobra.Command) {
+	cmd.Flags().Bool("json", false, "Output raw JSON instead of a table")
 }
 
 // jsonRequested reports whether --json was set on cmd or an ancestor. A
@@ -214,7 +229,23 @@ func fetchAllPages[T any](ctx context.Context, fetch func(ctx context.Context, c
 // field/value list (default) or raw JSON (--json), reusing the same column
 // definition as the matching list view.
 func runCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) error {
-	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+	return runCore(cmd, renderCoreObject(cmd, headers, row, fn))
+}
+
+// runCoreObjectForCluster is runCoreObject for a resource-provider command (see
+// runCoreForCluster): identical field/JSON rendering, but dialing the core that
+// fronts clusterHost rather than the active context.
+func runCoreObjectForCluster[T any](cmd *cobra.Command, clusterHost string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) error {
+	return runCoreForCluster(cmd, clusterHost, renderCoreObject(cmd, headers, row, fn))
+}
+
+// renderCoreObject builds the run-function shared by runCoreObject and
+// runCoreObjectForCluster: fetch via fn, then render as a field/value list
+// (default) or raw JSON (--json). Kept separate from the client-selection so
+// the two object variants differ only in which core they dial (mirroring
+// renderCoreList).
+func renderCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) func(context.Context, *coreapi.Client) error {
+	return func(ctx context.Context, c *coreapi.Client) error {
 		item, err := fn(ctx, c)
 		if err != nil {
 			return err
@@ -223,7 +254,7 @@ func runCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []st
 			return printJSON(cmd.OutOrStdout(), item)
 		}
 		return printFields(cmd.OutOrStdout(), headers, row(*item))
-	})
+	}
 }
 
 // tableStyles holds the foreground styles for the human table/field views,
@@ -244,9 +275,9 @@ func newTableStyles(w io.Writer) tableStyles {
 	}
 	return tableStyles{
 		enabled: true,
-		header:  lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true),
-		primary: lipgloss.NewStyle().Foreground(lipgloss.Color("7")),
-		cell:    lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+		header:  lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Bold(true),
+		primary: lipgloss.NewStyle(), // default fg: inverts with terminal theme
+		cell:    lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)),
 	}
 }
 
@@ -383,6 +414,12 @@ func runCoreMutation(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi
 // without standing up the auth/context/TLS stack.
 var activeCoreClient = func(context.Context) (*coreapi.Client, error) { return coreapi.New() }
 
+// clusterCoreClient builds the control-plane client for cluster-addressed
+// commands (see runCoreForCluster). Same test seam as activeCoreClient —
+// production wiring is coreapi.NewForCluster, which does live /.well-known
+// discovery that command-level tests must not reach.
+var clusterCoreClient func(ctx context.Context, clusterHost string) (*coreapi.Client, error) = coreapi.NewForCluster
+
 // runCore is the shared base for every active-context control-plane command:
 // it owns the preamble only — silence usage, build the client, map API
 // errors — and leaves all rendering to fn. The delete/revoke verbs call it
@@ -403,7 +440,7 @@ func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client)
 // cluster_host". See coreapi.NewForCluster.
 func runCoreForCluster(cmd *cobra.Command, clusterHost string, fn func(ctx context.Context, c *coreapi.Client) error) error {
 	return runCoreClient(cmd, func(ctx context.Context) (*coreapi.Client, error) {
-		return coreapi.NewForCluster(ctx, clusterHost)
+		return clusterCoreClient(ctx, clusterHost)
 	}, fn)
 }
 

@@ -14,6 +14,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/spf13/cobra"
@@ -496,8 +497,8 @@ func newAuthTableStyles(w io.Writer) authTableStyles {
 	if !useColor {
 		return s
 	}
-	s.header = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true)
-	s.id = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
+	s.header = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Bold(true)
+	s.id = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Warning)) // yellow
 	s.name = lipgloss.NewStyle().Bold(true)
 	s.value = lipgloss.NewStyle() // default fg
 	return s

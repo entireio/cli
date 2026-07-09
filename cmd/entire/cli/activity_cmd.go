@@ -22,6 +22,9 @@ const (
 	dateUnknown       = "unknown"
 	activityTimeframe = "last-month"
 	activityLimit     = 1000
+	// sessionsOverviewLimit mirrors entire.io's USER_OVERVIEW_RECENT_SESSIONS_LIMIT
+	// so the CLI's recent-session list matches the web Overview page's window.
+	sessionsOverviewLimit = 50
 )
 
 // knownAgents maps normalized agent strings from the API to display IDs.
@@ -44,35 +47,58 @@ var knownAgents = map[string]string{
 }
 
 func newActivityCmd() *cobra.Command {
+	var showCommits bool
 	cmd := &cobra.Command{
 		Use:   "activity",
 		Short: "Show your activity overview",
-		Long:  "Display your activity overview, repository breakdown, and recent commits from entire.io",
+		Long: "Display your activity overview, repository breakdown, and recent sessions from entire.io.\n\n" +
+			"The recent list shows your sessions by default, matching the entire.io Overview page. " +
+			"Pass --commits to show recent commits instead.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runActivity(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr())
+			return runActivity(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), showCommits)
 		},
 	}
+	cmd.Flags().BoolVar(&showCommits, "commits", false, "Show recent commits instead of recent sessions")
 	return cmd
 }
 
-func runActivity(ctx context.Context, w, errW io.Writer) error {
+func runActivity(ctx context.Context, w, errW io.Writer, showCommits bool) error {
 	return runAuthenticatedActivityAPI(ctx, errW, false, func(ctx context.Context, client *api.Client) error {
 		// Non-interactive fallback: piped output or accessibility mode
 		if !interactive.IsTerminalWriter(w) || IsAccessibleMode() {
-			return runActivityStatic(ctx, w, client)
+			return runActivityStatic(ctx, w, client, showCommits)
 		}
 
-		return runActivityTUI(ctx, client)
+		return runActivityTUI(ctx, client, showCommits)
 	})
 }
 
-func runActivityStatic(ctx context.Context, w io.Writer, client *api.Client) error {
-	activity, commits, err := fetchActivityData(ctx, client)
+func runActivityStatic(ctx context.Context, w io.Writer, client *api.Client, showCommits bool) error {
+	sty := newActivityStyles(w)
+
+	if showCommits {
+		activity, commits, err := fetchActivityWith(ctx, client, fetchCommits)
+		if err != nil {
+			return err
+		}
+		renderActivityHeader(w, sty, statsFromActivity(activity), activity.Repos, activity.HourlyContributions)
+		renderCommitList(w, sty, groupCommitsByDay(commits))
+		return nil
+	}
+
+	activity, sessions, err := fetchActivityWith(ctx, client, fetchSessions)
 	if err != nil {
 		return err
 	}
+	renderActivityHeader(w, sty, statsFromActivity(activity), activity.Repos, activity.HourlyContributions)
+	renderSessionList(w, sty, groupSessionsByDay(sessions))
+	return nil
+}
 
-	stats := contributionStats{
+// statsFromActivity projects the aggregated /me/activity response onto the
+// stat-card view model. Shared by the static and TUI render paths.
+func statsFromActivity(activity *userActivityResponse) contributionStats {
+	return contributionStats{
 		Tasks:         activity.Stats.Tasks,
 		Throughput:    activity.Stats.Throughput,
 		Iteration:     activity.Stats.Iteration,
@@ -80,17 +106,14 @@ func runActivityStatic(ctx context.Context, w io.Writer, client *api.Client) err
 		Streak:        activity.Stats.LifetimeStreak,
 		CurrentStreak: activity.Stats.LifetimeCurrentStreak,
 	}
-	days := groupCommitsByDay(commits)
-
-	sty := newActivityStyles(w)
-	renderActivity(w, sty, stats, activity.Repos, activity.HourlyContributions, days)
-	return nil
 }
 
-// fetchActivityData fetches aggregated activity and commits concurrently.
-func fetchActivityData(ctx context.Context, client *api.Client) (*userActivityResponse, []userCommit, error) {
+// fetchActivityWith fetches the always-needed /me/activity aggregate
+// concurrently with the caller's chosen recent-list fetch (sessions or
+// commits). Either fetch failing fails the whole call.
+func fetchActivityWith[T any](ctx context.Context, client *api.Client, fetchList func(context.Context, *api.Client) (T, error)) (*userActivityResponse, T, error) {
 	var activity *userActivityResponse
-	var commits []userCommit
+	var list T
 
 	g, gCtx := errgroup.WithContext(ctx)
 	g.Go(func() error {
@@ -100,13 +123,13 @@ func fetchActivityData(ctx context.Context, client *api.Client) (*userActivityRe
 	})
 	g.Go(func() error {
 		var err error
-		commits, err = fetchCommits(gCtx, client)
+		list, err = fetchList(gCtx, client)
 		return err
 	})
 	if err := g.Wait(); err != nil {
-		return nil, nil, fmt.Errorf("fetch activity: %w", err)
+		return nil, list, fmt.Errorf("fetch activity: %w", err)
 	}
-	return activity, commits, nil
+	return activity, list, nil
 }
 
 func fetchActivity(ctx context.Context, client *api.Client) (*userActivityResponse, error) {
@@ -150,6 +173,29 @@ func fetchCommits(ctx context.Context, client *api.Client) ([]userCommit, error)
 		return nil, fmt.Errorf("decode commits: %w", err)
 	}
 	return result.Commits, nil
+}
+
+func fetchSessions(ctx context.Context, client *api.Client) ([]userSession, error) {
+	q := url.Values{}
+	q.Set("timeframe", activityTimeframe)
+	q.Set("limit", strconv.Itoa(sessionsOverviewLimit))
+	path := "/api/v1/me/sessions?" + q.Encode()
+
+	resp, err := client.Get(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("GET sessions: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := api.CheckResponse(resp); err != nil {
+		return nil, fmt.Errorf("sessions response: %w", err)
+	}
+
+	var result userSessionsResponse
+	if err := api.DecodeJSON(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode sessions: %w", err)
+	}
+	return result.Sessions, nil
 }
 
 // detectTimezone returns a best-effort timezone name for the current host.
@@ -201,37 +247,61 @@ func normalizeTimezone(raw string) string {
 	return name
 }
 
-func groupCommitsByDay(commits []userCommit) []commitDay {
-	byDate := make(map[string][]userCommit)
-	var dateOrder []string
-
-	for _, c := range commits {
-		date := dateUnknown
-		if c.CommitDate != nil {
-			if t, err := parseFlexibleTime(*c.CommitDate); err == nil {
-				date = t.Local().Format("2006-01-02")
-			}
-		}
-		if _, exists := byDate[date]; !exists {
-			dateOrder = append(dateOrder, date)
-		}
-		byDate[date] = append(byDate[date], c)
+// localDayOf returns the local "2006-01-02" day of an RFC3339 timestamp, or
+// dateUnknown when the pointer is nil/empty or the value can't be parsed.
+func localDayOf(ts *string) string {
+	if ts == nil || *ts == "" {
+		return dateUnknown
 	}
+	t, err := parseFlexibleTime(*ts)
+	if err != nil {
+		return dateUnknown
+	}
+	return t.Local().Format("2006-01-02")
+}
 
-	// Sort dates newest first, with unknown dates pushed to the end
-	sort.Slice(dateOrder, func(i, j int) bool {
-		if dateOrder[i] == dateUnknown {
+// groupItemsByDay buckets items by a local-day key, returning the distinct keys
+// ordered newest-first (with dateUnknown pushed to the end) plus the by-day map.
+// Shared by the commit and session day-grouped lists.
+func groupItemsByDay[T any](items []T, dayOf func(T) string) (order []string, byDate map[string][]T) {
+	byDate = make(map[string][]T)
+	for _, it := range items {
+		date := dayOf(it)
+		if _, exists := byDate[date]; !exists {
+			order = append(order, date)
+		}
+		byDate[date] = append(byDate[date], it)
+	}
+	sort.Slice(order, func(i, j int) bool {
+		if order[i] == dateUnknown {
 			return false
 		}
-		if dateOrder[j] == dateUnknown {
+		if order[j] == dateUnknown {
 			return true
 		}
-		return dateOrder[i] > dateOrder[j]
+		return order[i] > order[j]
 	})
+	return order, byDate
+}
 
-	result := make([]commitDay, 0, len(dateOrder))
-	for _, d := range dateOrder {
+func groupCommitsByDay(commits []userCommit) []commitDay {
+	order, byDate := groupItemsByDay(commits, func(c userCommit) string {
+		return localDayOf(c.CommitDate)
+	})
+	result := make([]commitDay, 0, len(order))
+	for _, d := range order {
 		result = append(result, commitDay{Date: d, Commits: byDate[d]})
+	}
+	return result
+}
+
+func groupSessionsByDay(sessions []userSession) []sessionDay {
+	order, byDate := groupItemsByDay(sessions, func(s userSession) string {
+		return localDayOf(&s.LastActivityAt)
+	})
+	result := make([]sessionDay, 0, len(order))
+	for _, d := range order {
+		result = append(result, sessionDay{Date: d, Sessions: byDate[d]})
 	}
 	return result
 }

@@ -37,6 +37,7 @@ const (
 const (
 	agentFlagName            = "agent"
 	flagCheckpointRemote     = "checkpoint-remote"
+	flagCheckpointBackend    = "checkpoint-backend"
 	flagSkipPushSessions     = "skip-push-sessions"
 	flagSummarizeModel       = "summarize-model"
 	flagSummarizeAgent       = "summarize-provider"
@@ -58,12 +59,16 @@ const externalAgentsAutoEnabledNotice = "Note: external agents are now enabled f
 
 // EnableOptions holds the flags for `entire enable`.
 type EnableOptions struct {
-	LocalDev            bool
-	UseLocalSettings    bool
-	UseProjectSettings  bool
-	ForceHooks          bool
-	SkipPushSessions    bool
-	CheckpointRemote    string
+	LocalDev           bool
+	UseLocalSettings   bool
+	UseProjectSettings bool
+	ForceHooks         bool
+	SkipPushSessions   bool
+	CheckpointRemote   string
+	// CheckpointBackend selects the persistent checkpoint storage backend
+	// ("branch"/"refs" or the canonical "git-branch"/"git-refs"). Empty leaves
+	// the current/default (git-branch) backend in place.
+	CheckpointBackend   string
 	Telemetry           bool
 	AbsoluteGitHookPath bool
 	// SuppressDoneMessage tells `runEnableInteractive` to skip its final
@@ -104,6 +109,10 @@ func hasStrategyFlags(cmd *cobra.Command) bool {
 	return cmd.Flags().Changed(flagCheckpointRemote) || cmd.Flags().Changed(flagSkipPushSessions)
 }
 
+func hasCheckpointBackendFlag(cmd *cobra.Command) bool {
+	return cmd.Flags().Changed(flagCheckpointBackend)
+}
+
 func hasSummaryProviderFlags(cmd *cobra.Command) bool {
 	return cmd.Flags().Changed(flagSummarizeAgent) || cmd.Flags().Changed(flagSummarizeModel)
 }
@@ -124,7 +133,7 @@ func hasGlobalSettingsFlags(cmd *cobra.Command) bool {
 // hasConfigureSettingsFlags reports whether configure was invoked with any
 // flag that mutates settings or hooks. Bare invocation prints help instead.
 func hasConfigureSettingsFlags(cmd *cobra.Command) bool {
-	return hasStrategyFlags(cmd) || hasSummaryProviderFlags(cmd) || hasSummaryTimeoutFlag(cmd) || hasGlobalSettingsFlags(cmd)
+	return hasStrategyFlags(cmd) || hasCheckpointBackendFlag(cmd) || hasSummaryProviderFlags(cmd) || hasSummaryTimeoutFlag(cmd) || hasGlobalSettingsFlags(cmd)
 }
 
 // enableUsesSetupFlow reports whether `entire enable` should delegate to the
@@ -132,7 +141,7 @@ func hasConfigureSettingsFlags(cmd *cobra.Command) bool {
 // Bare `enable` and `enable --local/--project` remain state-toggle operations;
 // any other setup-mutating flag should share configure's behavior.
 func enableUsesSetupFlow(cmd *cobra.Command, agentName string) bool {
-	if agentName != "" || hasStrategyFlags(cmd) || cmd.Flags().Changed(flagSearchSkill) || cmd.Flags().Changed(flagAgentHelpSkill) {
+	if agentName != "" || hasStrategyFlags(cmd) || hasCheckpointBackendFlag(cmd) || cmd.Flags().Changed(flagSearchSkill) || cmd.Flags().Changed(flagAgentHelpSkill) {
 		return true
 	}
 	return hasGlobalSettingsFlags(cmd) || cmd.Flags().Changed("yes")
@@ -713,6 +722,7 @@ Examples:
   entire configure --absolute-git-hook-path       # Reinstall git hook with absolute path
   entire configure --force                        # Reinstall git hook
   entire configure --checkpoint-remote github:org/checkpoints
+  entire configure --checkpoint-backend refs      # Store each checkpoint as its own git ref
   entire configure --summarize-provider claude-code
   entire configure --summarize-timeout-seconds 300   # 5m deadline for explain --generate`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -743,6 +753,11 @@ Examples:
 					return err
 				}
 			}
+			if hasCheckpointBackendFlag(cmd) {
+				if err := updateCheckpointBackend(ctx, cmd.OutOrStdout(), opts); err != nil {
+					return err
+				}
+			}
 			if hasSummaryProviderFlags(cmd) {
 				if err := updateSummaryGenerationSettings(ctx, cmd.OutOrStdout(), summarizeProvider, summarizeModel, opts); err != nil {
 					return err
@@ -769,6 +784,7 @@ Examples:
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Reinstall the Entire git hook")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: branch (default) or refs (one git ref per checkpoint)")
 	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, pi, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears (falls back to 5m default).")
@@ -808,6 +824,16 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				}
 				reportRepoEnabled(ctx, insecureHTTPAuth)
 			}()
+
+			// Validate --checkpoint-backend up front so a bad value fails before we
+			// bootstrap a repo or install any hooks.
+			if hasCheckpointBackendFlag(cmd) {
+				if _, err := resolveCheckpointBackendType(opts.CheckpointBackend); err != nil {
+					cmd.SilenceUsage = true
+					return err
+				}
+			}
+
 			// Check if we're in a git repository first. If not, offer to
 			// bootstrap one (git init + optional GitHub repo). If the user
 			// declines, fall back to the legacy prerequisite error.
@@ -886,34 +912,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 			// Any setup-mutating flags should behave like `configure` on repos that
 			// are already set up. Bare `enable` remains the lightweight re-enable path.
 			if settings.IsSetUpAny(ctx) {
-				usedSetupFlow := enableUsesSetupFlow(cmd, agentName)
-				if usedSetupFlow {
-					if hasStrategyFlags(cmd) {
-						if err := updateStrategyOptions(ctx, cmd.OutOrStdout(), opts); err != nil {
-							return err
-						}
-					}
-					if enableNeedsAgentManagement(cmd) {
-						var selectFn func(available []string) ([]string, error)
-						if opts.Yes {
-							selectFn = selectAllAgents
-						}
-						if err := runManageAgents(ctx, cmd.OutOrStdout(), opts, selectFn); err != nil {
-							return err
-						}
-					}
-				}
-
-				enabled, err := IsEnabled(ctx)
-				if err == nil && enabled {
-					w := cmd.OutOrStdout()
-					if !usedSetupFlow {
-						fmt.Fprintln(w, "Entire is already enabled.")
-					}
-					printEnabledStatus(ctx, w)
-					return nil
-				}
-				return runEnable(ctx, cmd.OutOrStdout(), opts.UseProjectSettings)
+				return runEnableOnConfiguredRepo(ctx, cmd, opts)
 			}
 
 			// Fresh repo — run full setup flow
@@ -931,6 +930,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: branch (default) or refs (one git ref per checkpoint)")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
@@ -1081,7 +1081,52 @@ To completely remove Entire integrations from this repository, use --uninstall:
 
 // runEnableInteractive runs the interactive enable flow.
 // agents must be provided by the caller (via detectOrSelectAgent).
+// runEnableOnConfiguredRepo handles `entire enable` when the repo is already set
+// up. Setup-mutating flags (strategy options, checkpoint backend, agent
+// management) behave like `configure`; a bare re-enable just flips the enabled
+// flag or reports current status.
+func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts EnableOptions) error {
+	w := cmd.OutOrStdout()
+	usedSetupFlow := enableUsesSetupFlow(cmd, "")
+	if usedSetupFlow {
+		if hasStrategyFlags(cmd) {
+			if err := updateStrategyOptions(ctx, w, opts); err != nil {
+				return err
+			}
+		}
+		if hasCheckpointBackendFlag(cmd) {
+			if err := updateCheckpointBackend(ctx, w, opts); err != nil {
+				return err
+			}
+		}
+		if enableNeedsAgentManagement(cmd) {
+			var selectFn func(available []string) ([]string, error)
+			if opts.Yes {
+				selectFn = selectAllAgents
+			}
+			if err := runManageAgents(ctx, w, opts, selectFn); err != nil {
+				return err
+			}
+		}
+	}
+
+	enabled, err := IsEnabled(ctx)
+	if err == nil && enabled {
+		if !usedSetupFlow {
+			fmt.Fprintln(w, "Entire is already enabled.")
+		}
+		printEnabledStatus(ctx, w)
+		return nil
+	}
+	return runEnable(ctx, w, opts.UseProjectSettings)
+}
+
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
+	// Capture first-run status before we write any settings: setupEntireDirectory
+	// and saveSettings below make IsSetUpAny report true. maybeOfferSessionImport
+	// uses this so the import offer only fires on the very first enable.
+	firstRun := !settings.IsSetUpAny(ctx)
+
 	// Uninstall hooks for agents that were previously active but are no longer selected
 	if err := uninstallDeselectedAgentHooks(ctx, w, agents); err != nil {
 		return fmt.Errorf("failed to clean up deselected agents: %w", err)
@@ -1129,6 +1174,20 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	}
 
 	opts.applyStrategyOptions(settings)
+
+	// Checkpoint storage backend. An explicit --checkpoint-backend always wins.
+	// Otherwise, on the first interactive setup, offer a choice (default: branch).
+	// Non-interactive or --yes first runs keep the default git-branch backend.
+	if opts.CheckpointBackend == "" && firstRun && !opts.Yes && interactive.CanPromptInteractively() {
+		chosen, err := promptCheckpointBackend(ctx, w)
+		if err != nil {
+			return err
+		}
+		opts.CheckpointBackend = chosen // "" keeps the default (or cancelled) backend
+	}
+	if err := applyCheckpointBackendFlag(settings, opts.CheckpointBackend); err != nil {
+		return err
+	}
 
 	// Determine which settings file to write to
 	// First run always creates settings.json (no prompt)
@@ -1200,6 +1259,10 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	if err := strategy.EnsureSetup(ctx); err != nil {
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
+
+	// Offer to import pre-existing agent history for the just-selected agents.
+	// First-run only; best-effort (never fails enable).
+	maybeOfferSessionImport(ctx, w, agents, opts, firstRun)
 
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary after
@@ -1395,20 +1458,49 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, localDev, forceHooks b
 	return count, nil
 }
 
+// promptAgentSelection shows the interactive multi-select agent picker and
+// returns the chosen agent names. It is a package-level var so tests can
+// substitute it — no real TTY/form is available under `go test`.
+var promptAgentSelection = func(options []huh.Option[string]) ([]string, error) {
+	var selected []string
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewMultiSelect[string]().
+				Title("Select the agents you want to use").
+				Description("Use space to select, enter to confirm.").
+				Options(options...).
+				Validate(func(sel []string) error {
+					if len(sel) == 0 {
+						return errors.New("please select at least one agent")
+					}
+					return nil
+				}).
+				Value(&selected),
+		),
+	)
+	if err := form.Run(); err != nil {
+		return nil, fmt.Errorf("agent selection cancelled: %w", err)
+	}
+	return selected, nil
+}
+
 // detectOrSelectAgent tries to auto-detect agents, or prompts the user to select.
 // Returns the detected/selected agents and any error.
 //
 // On first run (no hooks installed):
-//   - Single detected built-in agent: used automatically
-//   - Single detected external agent: interactive multi-select prompt
-//   - Multiple/no detected agents: interactive multi-select prompt
+//   - Shows the interactive multi-select (TTY available and no selectFn override)
+//   - Pre-selects detected built-in agents so the user can confirm with enter
+//     or add more; detected external agents are shown but not pre-selected
+//   - Non-interactive (no TTY): uses detected agents, else the default agent
 //
 // On re-run (hooks already installed):
-//   - Always shows the interactive multi-select
+//   - Shows the interactive multi-select (TTY available and no selectFn override)
 //   - Pre-selects only agents that have hooks installed (respects prior deselection)
+//   - Non-interactive (no TTY): keeps the currently installed agents
 //
-// selectFn overrides the interactive prompt for testing. When nil, the real form is used.
-// It receives available agent names and returns the selected names.
+// selectFn overrides the prompt with a caller-supplied selection (--yes uses
+// selectAllAgents; tests inject their own), bypassing the form even on a TTY.
+// When nil, the real multi-select form is shown.
 func detectOrSelectAgent(ctx context.Context, w io.Writer, selectFn func(available []string) ([]string, error)) ([]agent.Agent, error) {
 	// Check for agents with hooks already installed (re-run detection)
 	installedAgentNames := GetAgentsWithHooksInstalled(ctx)
@@ -1421,13 +1513,12 @@ func detectOrSelectAgent(ctx context.Context, w io.Writer, selectFn func(availab
 	if !hasInstalledHooks {
 		switch {
 		case len(detected) == 1:
-			if isBuiltInAgent(detected[0]) {
-				// When a selectFn is provided (e.g. --yes), skip the single-agent
-				// shortcut so the caller's selection logic runs instead.
-				if selectFn == nil {
-					fmt.Fprintf(w, "Detected agent: %s\n\n", detected[0].Type())
-					return detected, nil
-				}
+			// Announce the single detected built-in agent; it is pre-selected
+			// in the multi-select form below so the user can confirm it or add
+			// more. --yes (selectFn != nil) uses the caller's selection and
+			// skips the announcement.
+			if selectFn == nil && isBuiltInAgent(detected[0]) {
+				fmt.Fprintf(w, "Detected agent: %s\n\n", detected[0].Type())
 			}
 
 		case len(detected) > 1:
@@ -1493,35 +1584,21 @@ func detectOrSelectAgent(ctx context.Context, w io.Writer, selectFn func(availab
 		availableNames = append(availableNames, opt.Value)
 	}
 
-	var selectedAgentNames []string
-	if selectFn != nil {
-		var err error
-		selectedAgentNames, err = selectFn(availableNames)
-		if err != nil {
-			return nil, err
+	// selectFn overrides the prompt with a caller-supplied selection (--yes,
+	// tests). When nil, show the real interactive multi-select. Routing both
+	// through selectFn keeps a single selection step, so there is no "skip the
+	// picker" path a lone detected agent can slip back into.
+	if selectFn == nil {
+		selectFn = func([]string) ([]string, error) {
+			return promptAgentSelection(options)
 		}
-		if len(selectedAgentNames) == 0 {
-			return nil, errors.New("no agents selected")
-		}
-	} else {
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewMultiSelect[string]().
-					Title("Select the agents you want to use").
-					Description("Use space to select, enter to confirm.").
-					Options(options...).
-					Validate(func(selected []string) error {
-						if len(selected) == 0 {
-							return errors.New("please select at least one agent")
-						}
-						return nil
-					}).
-					Value(&selectedAgentNames),
-			),
-		)
-		if err := form.Run(); err != nil {
-			return nil, fmt.Errorf("agent selection cancelled: %w", err)
-		}
+	}
+	selectedAgentNames, err := selectFn(availableNames)
+	if err != nil {
+		return nil, err
+	}
+	if len(selectedAgentNames) == 0 {
+		return nil, errors.New("no agents selected")
 	}
 
 	selectedAgents := make([]agent.Agent, 0, len(selectedAgentNames))
@@ -1574,6 +1651,10 @@ func printWrongAgentError(w io.Writer, name string) {
 // setupAgentHooksNonInteractive sets up hooks for a specific agent non-interactively.
 // If strategyName is provided, it sets the strategy; otherwise uses default.
 func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Agent, opts EnableOptions) error {
+	// Capture first-run status before setupEntireDirectory/saveEnabledState make
+	// IsSetUpAny report true, so the import offer fires only on first enable.
+	firstRun := !settings.IsSetUpAny(ctx)
+
 	agentName := ag.Name()
 	// Check if agent supports hooks
 	if _, ok := agent.AsHookSupport(ag); !ok {
@@ -1620,6 +1701,11 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 
 	opts.applyStrategyOptions(settings)
 
+	// Apply an explicit --checkpoint-backend (no prompt on this non-interactive path).
+	if err := applyCheckpointBackendFlag(settings, opts.CheckpointBackend); err != nil {
+		return err
+	}
+
 	// Handle telemetry for non-interactive mode
 	// Note: if telemetry is nil (not configured), it defaults to disabled
 	if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
@@ -1663,6 +1749,10 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	if err := strategy.EnsureSetup(ctx); err != nil {
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
+
+	// Offer to import pre-existing history for the just-configured agent.
+	// First-run only; best-effort (never fails enable).
+	maybeOfferSessionImport(ctx, w, []agent.Agent{ag}, opts, firstRun)
 
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary.
