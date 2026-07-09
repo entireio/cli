@@ -264,7 +264,7 @@ func TestSessionStateBackfillTokenUsage_CopilotUsesZeroInputSessionAggregate(t *
 	require.Zero(t, checkpointUsage.InputTokens)
 	require.Equal(t, 25, checkpointUsage.OutputTokens)
 
-	backfillUsage := sessionStateBackfillTokenUsage(context.Background(), ag, agent.AgentTypeCopilotCLI, transcript, checkpointUsage)
+	backfillUsage := sessionStateBackfillTokenUsage(context.Background(), ag, agent.AgentTypeCopilotCLI, transcript, "", checkpointUsage)
 	require.NotNil(t, backfillUsage)
 	require.Zero(t, backfillUsage.InputTokens)
 	require.Equal(t, 50, backfillUsage.OutputTokens)
