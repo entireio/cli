@@ -202,33 +202,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// hooks (e.g., Pi records message.model but its hook events carry no model
 	// field). Only fills when the model is otherwise unknown — hook-reported
 	// models take precedence.
-	if state.ModelName == "" {
-		if model := sessionStateBackfillModel(ctx, ag, sessionData.Transcript); model != "" {
-			state.ModelName = model
-			// The pricing pass in extractOrCreateSessionData ran while the model
-			// was still unknown, so it used an empty fallbackModel and left the
-			// usage unpriced under an empty-model bucket — persisting Model set
-			// with a nil cost and ModelUsage=[{Model:"",…}]. Now that the model is
-			// recovered, re-price the SAME extracted slice: both extraction paths
-			// priced from state.CheckpointTranscriptStart with an empty subagents
-			// dir, so repeating those args keeps the reprice equivalent. The swap
-			// requires the re-extraction to carry real tokens — a zero slice (e.g.
-			// a Pi fork abandoning the branch that consumed the tokens) must not
-			// clobber usage restored from checkpoint state above. When the state
-			// total aliases the pre-reprice usage (Pi's backfill returns the
-			// checkpoint usage as-is), it is repointed to the priced copy so the
-			// session-state diagnostic matches the persisted checkpoint.
-			if sessionDataUnpricedFromTranscript(sessionData) {
-				if usage, buckets := tokenUsageWithCost(ctx, ag, sessionData.Transcript, state.CheckpointTranscriptStart, "", state.ModelName); hasTokenUsageData(usage) {
-					if state.TokenUsage == sessionData.TokenUsage {
-						state.TokenUsage = usage
-					}
-					sessionData.TokenUsage = usage
-					sessionData.ModelUsage = buckets
-				}
-			}
-		}
-	}
+	backfillModelAndReprice(ctx, ag, sessionData, state)
 
 	// Skip gate: if there is no transcript AND no files touched, there is nothing
 	// meaningful to condense. Return early to avoid writing metadata-only stubs.
@@ -715,10 +689,11 @@ func sessionDataUnpricedFromTranscript(d *ExtractedSessionData) bool {
 // and returns the per-model buckets alongside the flat usage. fallbackModel
 // prices agents that don't attribute usage per model; an empty value leaves such
 // usage unpriced (agents that implement ModelUsageCalculator, e.g. pi and gemini,
-// are priced from their own per-model buckets regardless).
-func tokenUsageWithCost(ctx context.Context, ag agent.Agent, transcript []byte, fromOffset int, subagentsDir, fallbackModel string) (*agent.TokenUsage, []agent.ModelUsage) {
+// are priced from their own per-model buckets regardless). Condensation never
+// passes a subagents dir (see the TODOs at the call sites), so none is taken.
+func tokenUsageWithCost(ctx context.Context, ag agent.Agent, transcript []byte, fromOffset int, fallbackModel string) (*agent.TokenUsage, []agent.ModelUsage) {
 	table, disableEstimation := settings.LoadPricingTable(ctx)
-	usage, buckets, err := agent.CalculateUsageWithCost(ag, transcript, fromOffset, subagentsDir, table, fallbackModel, disableEstimation)
+	usage, buckets, err := agent.CalculateUsageWithCost(ag, transcript, fromOffset, "", table, fallbackModel, disableEstimation)
 	if err != nil {
 		logging.Debug(ctx, "failed usage-with-cost extraction",
 			slog.String("error", err.Error()))
@@ -727,13 +702,52 @@ func tokenUsageWithCost(ctx context.Context, ag agent.Agent, transcript []byte, 
 	return usage, buckets
 }
 
+// backfillModelAndReprice recovers the model from the transcript for agents
+// that don't report it via hooks (e.g., Pi records message.model but its hook
+// events carry no model field) and re-prices the extracted usage with it. Only
+// fills when the model is otherwise unknown — hook-reported models take
+// precedence.
+//
+// The pricing pass in extractOrCreateSessionData ran while the model was still
+// unknown, so it used an empty fallbackModel and left the usage unpriced under
+// an empty-model bucket. Re-pricing the SAME extracted slice with the recovered
+// model is equivalent to the original pass (both extraction paths price from
+// state.CheckpointTranscriptStart with no subagents dir). The swap requires the
+// re-extraction to carry real tokens — a zero slice (e.g. a Pi fork abandoning
+// the branch that consumed the tokens) must not clobber usage restored from
+// checkpoint state. When the state total aliases the pre-reprice usage (Pi's
+// backfill returns the checkpoint usage as-is), it is repointed to the priced
+// copy so the session-state diagnostic matches the persisted checkpoint.
+func backfillModelAndReprice(ctx context.Context, ag agent.Agent, sessionData *ExtractedSessionData, state *SessionState) {
+	if state.ModelName != "" {
+		return
+	}
+	model := sessionStateBackfillModel(ctx, ag, sessionData.Transcript)
+	if model == "" {
+		return
+	}
+	state.ModelName = model
+	if !sessionDataUnpricedFromTranscript(sessionData) {
+		return
+	}
+	usage, buckets := tokenUsageWithCost(ctx, ag, sessionData.Transcript, state.CheckpointTranscriptStart, state.ModelName)
+	if !hasTokenUsageData(usage) {
+		return
+	}
+	if state.TokenUsage == sessionData.TokenUsage {
+		state.TokenUsage = usage
+	}
+	sessionData.TokenUsage = usage
+	sessionData.ModelUsage = buckets
+}
+
 // sessionStateBackfillTokenUsage returns the best session-level token usage to
 // persist in session state after condensation.
 func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentType types.AgentType, transcript []byte, sessionModel string, checkpointUsage *agent.TokenUsage) *agent.TokenUsage {
 	if agentType == agent.AgentTypeCopilotCLI && len(transcript) > 0 {
 		// Session-wide backfill (state.TokenUsage); per-model buckets are
 		// checkpoint-scoped and not persisted here, so discard them.
-		fullSessionUsage, _ := tokenUsageWithCost(ctx, ag, transcript, 0, "", sessionModel)
+		fullSessionUsage, _ := tokenUsageWithCost(ctx, ag, transcript, 0, sessionModel)
 		if hasTokenUsageData(fullSessionUsage) {
 			return fullSessionUsage
 		}
@@ -1019,7 +1033,7 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 	if len(data.Transcript) > 0 {
 		// sessionModel prices the fallback and remainder buckets (e.g. Claude
 		// Code subagent shortfall) that CalculateModelUsage cannot attribute.
-		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, checkpointTranscriptStart, "", sessionModel) //TODO: why do we not use here subagents dir?
+		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, checkpointTranscriptStart, sessionModel) //TODO: why do we not use here subagents dir?
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
@@ -1061,7 +1075,7 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
 	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
-		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "", state.ModelName) //TODO: why do we not use here subagents dir?
+		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, state.ModelName) //TODO: why do we not use here subagents dir?
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
