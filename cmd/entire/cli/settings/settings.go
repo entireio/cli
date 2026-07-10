@@ -276,6 +276,12 @@ type PricingSettings struct {
 	// "priority" prices Codex turns at the priority-tier premium via the
 	// model's "-priority" variant; empty (the default) prices at standard rates.
 	CodexServiceTier string `json:"codex_service_tier,omitempty"`
+	// Remote, when true, merges a locally cached remote pricing table (refreshed
+	// in the background, never fetched inline) on top of the embedded defaults
+	// and beneath any pricing.models overrides. Opt-in via a pointer so the
+	// default (nil/false) keeps estimation on embedded defaults + local
+	// overrides only, with no network activity.
+	Remote *bool `json:"remote,omitempty"`
 }
 
 // PricingOverrides returns the configured per-model rate overrides, or nil when
@@ -307,6 +313,27 @@ func (s *EntireSettings) CodexServiceTier() string {
 	return s.Pricing.CodexServiceTier
 }
 
+// IsRemoteEnabled reports whether remote pricing merging is enabled. It is
+// nil-safe and defaults to false (embedded defaults + local overrides only, no
+// network activity) when the setting is unset.
+func (s *EntireSettings) IsRemoteEnabled() bool {
+	if s == nil || s.Pricing == nil || s.Pricing.Remote == nil {
+		return false
+	}
+	return *s.Pricing.Remote
+}
+
+// IsRemoteEnabled loads settings and reports whether remote pricing merging is
+// enabled. A settings-load failure returns false, matching the opt-in default so
+// a load error can never switch the background network refresh on.
+func IsRemoteEnabled(ctx context.Context) bool {
+	s, err := Load(ctx)
+	if err != nil {
+		return false
+	}
+	return s.IsRemoteEnabled()
+}
+
 // LoadPricingTable builds the model pricing table from settings — the embedded
 // defaults with any configured pricing.models overrides layered on top — and
 // reports whether cost estimation is disabled. It never fails the caller: a
@@ -321,7 +348,27 @@ func LoadPricingTable(ctx context.Context) (*pricing.Table, bool) {
 		return nil, false
 	}
 	disable := s.IsEstimationDisabled()
-	table, err := pricing.LoadTable(s.PricingOverrides())
+
+	// Remote entries (opt-in) sit beneath the user's pricing.models: append the
+	// cached remote table first, then the user overrides, so LoadTable's
+	// last-writer-wins keeps a user override authoritative over the same id from
+	// the remote table, which in turn overrides the embedded default.
+	overrides := s.PricingOverrides()
+	if s.IsRemoteEnabled() {
+		remote := pricing.LoadRemoteEntries(ctx)
+		fetchedAt := pricing.RemoteFetchedAt()
+		var staleness time.Duration
+		if !fetchedAt.IsZero() {
+			staleness = time.Since(fetchedAt)
+		}
+		logging.Debug(ctx, "pricing: merging remote pricing entries",
+			slog.Int("remote_entries", len(remote)),
+			slog.Time("fetched_at", fetchedAt),
+			slog.Duration("staleness", staleness))
+		overrides = append(remote, overrides...)
+	}
+
+	table, err := pricing.LoadTable(overrides)
 	if err != nil {
 		logging.Warn(ctx, "pricing: table load failed; cost estimation unavailable",
 			slog.String("error", err.Error()))
@@ -1039,6 +1086,13 @@ func mergePricing(dst *PricingSettings, data json.RawMessage) error {
 			return err
 		}
 		dst.CodexServiceTier = tier
+	}
+	if remoteRaw, ok := raw["remote"]; ok {
+		var b bool
+		if err := unmarshalField("pricing.remote", remoteRaw, &b); err != nil {
+			return err
+		}
+		dst.Remote = &b
 	}
 	return nil
 }
