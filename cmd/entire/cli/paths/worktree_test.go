@@ -79,6 +79,24 @@ func TestGetWorktreeID(t *testing.T) {
 			wantErr:    true,
 			errContain: "unexpected gitdir format",
 		},
+		{
+			// #640: a submodule's .git file points at the superproject's modules
+			// dir (relative). It is the submodule's main worktree — no id, no error.
+			name: "submodule relative gitdir",
+			setupFunc: func(dir string) error {
+				content := "gitdir: ../.git/modules/go-git\n"
+				return os.WriteFile(filepath.Join(dir, ".git"), []byte(content), 0o644)
+			},
+			wantID: "",
+		},
+		{
+			name: "submodule absolute gitdir",
+			setupFunc: func(dir string) error {
+				content := "gitdir: /repo/.git/modules/nested/lib\n"
+				return os.WriteFile(filepath.Join(dir, ".git"), []byte(content), 0o644)
+			},
+			wantID: "",
+		},
 	}
 
 	for _, tt := range tests {

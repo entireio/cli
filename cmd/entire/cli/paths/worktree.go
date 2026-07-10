@@ -37,6 +37,15 @@ func GetWorktreeID(worktreePath string) (string, error) {
 
 	gitdir := strings.TrimPrefix(line, "gitdir: ")
 
+	// A submodule's .git file points at the superproject's modules dir, e.g.
+	// "gitdir: ../.git/modules/<name>". That is the submodule's own main working
+	// tree, not a linked worktree, so it has no worktree id — treat it like the
+	// main-worktree (empty) case. Without this the worktrees markers below don't
+	// match and session init fails with "unexpected gitdir format" (#640).
+	if strings.Contains(filepath.ToSlash(gitdir), ".git/modules/") {
+		return "", nil
+	}
+
 	// Extract worktree name from path like /repo/.git/worktrees/<name>
 	// or /repo/.bare/worktrees/<name> (bare repo + worktree layout).
 	// The path after the marker is the worktree identifier.
