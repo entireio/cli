@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -306,6 +307,48 @@ func (s *EntireSettings) CodexServiceTier() string {
 		return ""
 	}
 	return s.Pricing.CodexServiceTier
+}
+
+// codexAgentType mirrors agent.AgentTypeCodex. The settings package cannot
+// import the agent package (the agent plugin tree transitively imports settings),
+// so the Codex display-name value is duplicated here. It must stay in sync with
+// agent.AgentTypeCodex — the value is stored in metadata/trailers and is stable.
+const codexAgentType types.AgentType = "Codex"
+
+// PricingModelForAgent maps a turn's model to the id it should be priced under,
+// applying this session's opt-in service tier. A Codex session whose
+// pricing.codex_service_tier is "priority" bills at a premium the pricing table
+// carries as a "-priority" model variant; every other agent or tier prices under
+// the model unchanged. An empty model, or a model already ending in "-priority",
+// is returned as-is so the id never double-suffixes.
+//
+// The returned id is a pricing-lookup concern only: callers keep the STORED model
+// name (state.ModelName / checkpoint metadata) raw and apply this solely at the
+// point of pricing so both turn-end and condensation price the same tier.
+func (s *EntireSettings) PricingModelForAgent(agentType types.AgentType, model string) string {
+	if model == "" {
+		return model
+	}
+	if agentType == codexAgentType && strings.EqualFold(s.CodexServiceTier(), "priority") && !strings.HasSuffix(model, "-priority") {
+		return model + "-priority"
+	}
+	return model
+}
+
+// PricingModelForAgent loads settings and applies the service-tier suffix via the
+// EntireSettings method of the same name. Non-Codex agents short-circuit before
+// any settings load, preserving the "only Codex reads settings" property on the
+// pricing path. A settings-load failure returns the model unchanged, matching the
+// estimation defaults so a load error can never silently switch pricing tiers.
+func PricingModelForAgent(ctx context.Context, agentType types.AgentType, model string) string {
+	if model == "" || agentType != codexAgentType {
+		return model
+	}
+	s, err := Load(ctx)
+	if err != nil {
+		return model
+	}
+	return s.PricingModelForAgent(agentType, model)
 }
 
 // IsRemoteEnabled reports whether remote pricing merging is enabled. It is

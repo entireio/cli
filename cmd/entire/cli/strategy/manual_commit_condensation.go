@@ -691,9 +691,16 @@ func sessionDataUnpricedFromTranscript(d *ExtractedSessionData) bool {
 // usage unpriced (agents that implement ModelUsageCalculator, e.g. pi and gemini,
 // are priced from their own per-model buckets regardless). Condensation never
 // passes a subagents dir (see the TODOs at the call sites), so none is taken.
-func tokenUsageWithCost(ctx context.Context, ag agent.Agent, transcript []byte, fromOffset int, fallbackModel string) (*agent.TokenUsage, []agent.ModelUsage) {
+//
+// agentType selects the pricing service tier: a Codex session opted into the
+// "priority" tier (pricing.codex_service_tier) prices the fallback bucket under
+// the model's "-priority" variant, matching the turn-end hook so a committed
+// checkpoint carries the same tier the turn was priced at. The suffix is a
+// pricing-lookup concern only — the stored model name stays raw.
+func tokenUsageWithCost(ctx context.Context, ag agent.Agent, transcript []byte, fromOffset int, fallbackModel string, agentType types.AgentType) (*agent.TokenUsage, []agent.ModelUsage) {
 	table, disableEstimation := settings.LoadPricingTable(ctx)
-	usage, buckets, err := agent.CalculateUsageWithCost(ag, transcript, fromOffset, "", table, fallbackModel, disableEstimation)
+	pricingModel := settings.PricingModelForAgent(ctx, agentType, fallbackModel)
+	usage, buckets, err := agent.CalculateUsageWithCost(ag, transcript, fromOffset, "", table, pricingModel, disableEstimation)
 	if err != nil {
 		logging.Debug(ctx, "failed usage-with-cost extraction",
 			slog.String("error", err.Error()))
@@ -730,7 +737,7 @@ func backfillModelAndReprice(ctx context.Context, ag agent.Agent, sessionData *E
 	if !sessionDataUnpricedFromTranscript(sessionData) {
 		return
 	}
-	usage, buckets := tokenUsageWithCost(ctx, ag, sessionData.Transcript, state.CheckpointTranscriptStart, state.ModelName)
+	usage, buckets := tokenUsageWithCost(ctx, ag, sessionData.Transcript, state.CheckpointTranscriptStart, state.ModelName, state.AgentType)
 	if !hasTokenUsageData(usage) {
 		return
 	}
@@ -747,7 +754,7 @@ func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentTy
 	if agentType == agent.AgentTypeCopilotCLI && len(transcript) > 0 {
 		// Session-wide backfill (state.TokenUsage); per-model buckets are
 		// checkpoint-scoped and not persisted here, so discard them.
-		fullSessionUsage, _ := tokenUsageWithCost(ctx, ag, transcript, 0, sessionModel)
+		fullSessionUsage, _ := tokenUsageWithCost(ctx, ag, transcript, 0, sessionModel, agentType)
 		if hasTokenUsageData(fullSessionUsage) {
 			return fullSessionUsage
 		}
@@ -1033,7 +1040,7 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 	if len(data.Transcript) > 0 {
 		// sessionModel prices the fallback and remainder buckets (e.g. Claude
 		// Code subagent shortfall) that CalculateModelUsage cannot attribute.
-		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, checkpointTranscriptStart, sessionModel) //TODO: why do we not use here subagents dir?
+		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, checkpointTranscriptStart, sessionModel, agentType) //TODO: why do we not use here subagents dir?
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
@@ -1075,7 +1082,7 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
 	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
-		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, state.ModelName) //TODO: why do we not use here subagents dir?
+		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, state.ModelName, state.AgentType) //TODO: why do we not use here subagents dir?
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
