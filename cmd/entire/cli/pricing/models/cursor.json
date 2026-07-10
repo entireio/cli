@@ -28,6 +28,19 @@
       "effective_date": "2026-07-10"
     },
     {
+      "id": "composer-2.5",
+      "provider": "cursor",
+      "aliases": [
+        "cursor/composer-2.5",
+        "composer-2.5-2*"
+      ],
+      "input_per_mtok": 0.5,
+      "output_per_mtok": 2.5,
+      "cache_read_per_mtok": 0.05,
+      "cache_write_per_mtok": 0.5,
+      "effective_date": "2026-07-10"
+    },
+    {
       "id": "composer-2.5-fast",
       "provider": "cursor",
       "aliases": [
