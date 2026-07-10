@@ -20,6 +20,26 @@
       "cache_read_per_mtok": 0.03,
       "cache_write_per_mtok": 0.3,
       "effective_date": "2026-01-01"
+    },
+    {
+      "id": "gemini-3.1-pro",
+      "provider": "google",
+      "aliases": ["gemini-3.1-pro-*", "google/gemini-3.1-pro"],
+      "input_per_mtok": 2,
+      "output_per_mtok": 12,
+      "cache_read_per_mtok": 0.2,
+      "cache_write_per_mtok": 2,
+      "effective_date": "2026-07-10"
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "provider": "google",
+      "aliases": ["gemini-3.5-flash-*", "google/gemini-3.5-flash"],
+      "input_per_mtok": 1.5,
+      "output_per_mtok": 9,
+      "cache_read_per_mtok": 0.15,
+      "cache_write_per_mtok": 1.5,
+      "effective_date": "2026-07-10"
     }
   ]
 }
