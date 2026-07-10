@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/entireio/auth-go/tokens"
@@ -507,24 +508,15 @@ func openBrowser(ctx context.Context, browserURL string) error {
 		return errors.New("browser unavailable under test")
 	}
 
-	var command string
-	var args []string
-
-	switch runtime.GOOS {
-	case "darwin":
-		command = "open"
-		args = []string{browserURL}
-	case "linux":
-		command = "xdg-open"
-		args = []string{browserURL}
-	case "windows":
-		command = "cmd"
-		args = []string{"/c", "start", "", browserURL}
-	default:
-		return fmt.Errorf("unsupported platform %s", runtime.GOOS)
+	command, args, dir, err := resolveBrowserLauncher(runtime.GOOS, isWSL(), exec.LookPath, browserURL)
+	if err != nil {
+		return err
 	}
 
 	cmd := exec.CommandContext(ctx, command, args...)
+	// dir is set only for the WSL cmd.exe fallback, to keep cmd.exe from
+	// warning about the unsupported WSL (UNC) working directory.
+	cmd.Dir = dir
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start browser command %q: %w", command, err)
 	}
@@ -535,3 +527,59 @@ func openBrowser(ctx context.Context, browserURL string) error {
 
 	return nil
 }
+
+// resolveBrowserLauncher picks the command that opens browserURL, given the
+// OS, whether we're under WSL, and a PATH probe. It is pure so the platform
+// matrix is unit-testable without spawning anything; openBrowser wires in the
+// real runtime.GOOS, isWSL(), and exec.LookPath.
+//
+// Under WSL, xdg-open can't be trusted: with a Linux browser installed via
+// WSLg it resolves the https scheme handler to that Linux browser, ignoring
+// both $BROWSER and the xdg default, so the user lands in a browser with none
+// of their sessions. So on WSL we open the Windows default browser directly
+// via wslview (from wslu, preinstalled on Ubuntu-on-WSL), falling back to
+// cmd.exe on stripped-down distros without it. The cmd.exe working directory
+// is a Windows path so cmd doesn't warn about the unsupported WSL (UNC) cwd.
+func resolveBrowserLauncher(goos string, wsl bool, lookPath func(string) (string, error), browserURL string) (command string, args []string, dir string, err error) {
+	switch goos {
+	case "darwin":
+		return "open", []string{browserURL}, "", nil
+	case "windows":
+		return "cmd", []string{"/c", "start", "", browserURL}, "", nil
+	case "linux":
+		if wsl {
+			if path, lerr := lookPath("wslview"); lerr == nil {
+				return path, []string{browserURL}, "", nil
+			}
+			return "cmd.exe", []string{"/c", "start", "", browserURL}, "/mnt/c", nil
+		}
+		return "xdg-open", []string{browserURL}, "", nil
+	default:
+		return "", nil, "", fmt.Errorf("unsupported platform %s", goos)
+	}
+}
+
+// wslFromProcVersion reports whether a /proc/version string indicates WSL.
+// Both WSL1 ("...Microsoft...") and WSL2 ("...microsoft-standard-WSL2...")
+// carry the marker; the match is case-insensitive.
+func wslFromProcVersion(s string) bool {
+	return strings.Contains(strings.ToLower(s), "microsoft")
+}
+
+var wslDetect = sync.OnceValue(func() bool {
+	// Non-Linux hosts are never WSL, so /proc/version is only read on Linux.
+	// Detection keys on /proc/version rather than WSL_* env vars because those
+	// can be stripped when entire is spawned from a hook, service, or env -i —
+	// exactly the contexts the CLI must handle.
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	b, err := os.ReadFile("/proc/version")
+	if err != nil {
+		return false
+	}
+	return wslFromProcVersion(string(b))
+})
+
+// isWSL reports whether we're running under WSL, reading /proc/version once.
+func isWSL() bool { return wslDetect() }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -612,5 +613,75 @@ func TestRunBrowserLogin_ParentCancelNotReportedAsTimeout(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "timed out") {
 		t.Errorf("cancellation must not be reported as a timeout: %v", err)
+	}
+}
+
+func TestWSLFromProcVersion(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"wsl2", "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b)", true},
+		{"wsl1", "Linux version 4.4.0-19041-Microsoft (build)", true},
+		{"plain-linux", "Linux version 6.8.0-generic (buildd@lcy02)", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		if got := wslFromProcVersion(tc.in); got != tc.want {
+			t.Errorf("wslFromProcVersion(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestResolveBrowserLauncher(t *testing.T) {
+	t.Parallel()
+
+	const browserURL = "https://auth.test/cli/auth?user_code=ABCD"
+	found := func(string) (string, error) { return "/usr/bin/wslview", nil }
+	missing := func(string) (string, error) { return "", errors.New("not found") }
+
+	cases := []struct {
+		name     string
+		goos     string
+		wsl      bool
+		look     func(string) (string, error)
+		wantCmd  string
+		wantArgs []string
+		wantDir  string
+		wantErr  bool
+	}{
+		{"darwin", "darwin", false, missing, "open", []string{browserURL}, "", false},
+		{"windows", "windows", false, missing, "cmd", []string{"/c", "start", "", browserURL}, "", false},
+		{"linux-non-wsl", "linux", false, found, "xdg-open", []string{browserURL}, "", false},
+		{"wsl-with-wslview", "linux", true, found, "/usr/bin/wslview", []string{browserURL}, "", false},
+		{"wsl-without-wslview", "linux", true, missing, "cmd.exe", []string{"/c", "start", "", browserURL}, "/mnt/c", false},
+		{"unsupported", "plan9", false, missing, "", nil, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd, args, dir, err := resolveBrowserLauncher(tc.goos, tc.wsl, tc.look, browserURL)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got cmd=%q", cmd)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cmd != tc.wantCmd {
+				t.Errorf("cmd = %q, want %q", cmd, tc.wantCmd)
+			}
+			if !reflect.DeepEqual(args, tc.wantArgs) {
+				t.Errorf("args = %v, want %v", args, tc.wantArgs)
+			}
+			if dir != tc.wantDir {
+				t.Errorf("dir = %q, want %q", dir, tc.wantDir)
+			}
+		})
 	}
 }
