@@ -16,16 +16,34 @@ import (
 // invokes to run the daily remote-pricing refresh out of the foreground path.
 const refreshPricingCmdName = "__refresh_pricing"
 
+// detachedSpawn is the detached spawner used for the pricing-refresh worker,
+// held as a package var so tests can capture the working directory the worker is
+// asked to run in without spawning a real process.
+var detachedSpawn = telemetry.SpawnDetached
+
 // spawnDetachedRefresh starts the hidden pricing-refresh worker as a detached
-// background process. It is a package var so tests can replace it to assert the
-// turn-end / post-run triggers only ever *spawn* — they never fetch inline.
+// background process rooted at the current working directory — the project the
+// hook ran in — so the worker's own IsRemoteEnabled check resolves the project's
+// .entire/settings.json. Running at "/" (the analytics default) would hide a
+// project-only pricing.remote opt-in and silently no-op the refresh forever.
+// It is a package var so tests can replace it to assert the turn-end / post-run
+// triggers only ever *spawn* — they never fetch inline.
 var spawnDetachedRefresh = func() {
 	exe, err := os.Executable()
 	if err != nil {
 		return
 	}
+	// Root the worker at the process working directory so its own settings load
+	// resolves the project's .entire/settings.json. os.Getwd (not paths.RepoRoot)
+	// is deliberate: this captures the literal cwd to hand a detached child, not a
+	// git-relative path — the worker re-resolves the repo via git from there. An
+	// empty dir (Getwd failure) falls back to the platform default in SpawnDetached.
+	dir, err := os.Getwd() //nolint:forbidigo // hand cwd to a detached child; not a git-relative path
+	if err != nil {
+		dir = ""
+	}
 	//nolint:errcheck // Best effort background refresh - a failed spawn is non-fatal
-	_ = telemetry.SpawnDetached(exe, refreshPricingCmdName)
+	_ = detachedSpawn(dir, exe, refreshPricingCmdName)
 }
 
 // maybeSpawnPricingRefresh spawns the detached remote-pricing refresh worker

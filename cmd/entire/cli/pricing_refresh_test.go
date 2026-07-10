@@ -39,6 +39,47 @@ func stubSpawn(t *testing.T) *int {
 	return &calls
 }
 
+// TestSpawnDetachedRefreshUsesProjectDir is the regression for the defect where
+// the detached worker ran with cwd "/" (SpawnDetached's old hardcoded dir) and so
+// could not see a project-level pricing.remote opt-in — the auto-refresh silently
+// no-oped forever. The worker must be spawned rooted at the process working
+// directory (the project the hook ran in).
+func TestSpawnDetachedRefreshUsesProjectDir(t *testing.T) {
+	// Not parallel: uses t.Chdir and swaps a package var.
+	project := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatalf("evalsymlinks(project): %v", err)
+	}
+	t.Chdir(resolved)
+
+	var gotDir string
+	spawned := false
+	orig := detachedSpawn
+	detachedSpawn = func(dir, _ string, _ ...string) error {
+		gotDir = dir
+		spawned = true
+		return nil
+	}
+	t.Cleanup(func() { detachedSpawn = orig })
+
+	spawnDetachedRefresh()
+
+	if !spawned {
+		t.Fatal("spawnDetachedRefresh did not spawn the worker")
+	}
+	if gotDir == "/" || gotDir == "" {
+		t.Fatalf("worker dir = %q, want the project dir (a %q/empty dir hides project settings)", gotDir, "/")
+	}
+	gotResolved, err := filepath.EvalSymlinks(gotDir)
+	if err != nil {
+		t.Fatalf("evalsymlinks(gotDir=%q): %v", gotDir, err)
+	}
+	if gotResolved != resolved {
+		t.Fatalf("worker dir = %q (resolved %q), want project dir %q", gotDir, gotResolved, resolved)
+	}
+}
+
 func TestNewRefreshPricingCmd_Hidden(t *testing.T) {
 	t.Parallel()
 	cmd := newRefreshPricingCmd()
