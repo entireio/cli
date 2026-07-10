@@ -160,13 +160,31 @@ func TrackPluginDetached(pluginName string, isEntireEnabled bool, version string
 // spawnDetachedAnalytics spawns the hidden __send_analytics worker as a
 // detached background process so analytics never block the CLI. It resolves the
 // running executable and delegates to the platform-specific SpawnDetached.
+// Analytics carry no working-directory dependency, so it passes an empty dir to
+// keep the platform default ("/" on Unix, the temp dir on Windows).
 func spawnDetachedAnalytics(payloadJSON string) {
 	executable, err := os.Executable()
 	if err != nil {
 		return
 	}
 	//nolint:errcheck // Best effort telemetry - failure to spawn is non-fatal
-	_ = SpawnDetached(executable, "__send_analytics", payloadJSON)
+	_ = SpawnDetached("", executable, "__send_analytics", payloadJSON)
+}
+
+// resolveDetachedDir returns dir when it is a usable working directory for a
+// detached child, else fallback. An empty dir, or one that no longer exists
+// (e.g. a deleted project directory), yields the platform fallback so the spawn
+// never fails on a stale cwd. Callers that have no working-directory dependency
+// (analytics) pass "" to get the platform default; the pricing refresh passes
+// the project directory so the worker resolves project-level settings.
+func resolveDetachedDir(dir, fallback string) string {
+	if dir == "" {
+		return fallback
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return fallback
+	}
+	return dir
 }
 
 // SendEvent processes an event payload in the detached subprocess.
