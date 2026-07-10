@@ -618,7 +618,7 @@ func TestCondenseSession_RepricesTranscriptModelAfterBackfill(t *testing.T) {
 	require.NotEmpty(t, meta.ModelUsage, "per-model breakdown must be present")
 	var gpt55 *types.TokenUsage
 	for i := range meta.ModelUsage {
-		require.NotEqual(t, "", meta.ModelUsage[i].Model, "no bucket may be keyed under the empty model")
+		require.NotEmpty(t, meta.ModelUsage[i].Model, "no bucket may be keyed under the empty model")
 		if meta.ModelUsage[i].Model == "gpt-5.5" {
 			u := meta.ModelUsage[i].TokenUsage
 			gpt55 = &u
