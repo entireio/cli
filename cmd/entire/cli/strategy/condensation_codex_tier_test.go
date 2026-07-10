@@ -12,11 +12,18 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
-// codexTierTranscript is a minimal Codex rollout carrying a single cumulative
-// token_count: 35000 total input of which 20000 cached, and 8000 output. Over an
-// empty baseline that yields fresh=15000, cache_read=20000, output=8000
-// (Codex never reports cache-creation).
-const codexTierTranscript = `{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":35000,"cached_input_tokens":20000,"output_tokens":8000,"total_tokens":63000}}}}`
+// codexTierTranscript is a minimal Codex rollout: a turn_context naming the
+// serving model (as every real rollout carries before its token_counts)
+// followed by a single cumulative token_count of 35000 total input of which
+// 20000 cached, and 8000 output. Over an empty baseline that yields
+// fresh=15000, cache_read=20000, output=8000 (Codex never reports
+// cache-creation). The turn_context keeps the fixture valid for both pricing
+// paths: without a ModelUsageCalculator the flat usage falls back to a single
+// bucket under the caller's fallback model; with one, the snapshot is
+// attributed to gpt-5.5 and applyTierVariant retargets that bucket onto the
+// tier-variant id.
+const codexTierTranscript = `{"type":"turn_context","payload":{"cwd":"/tmp/repo","model":"gpt-5.5","effort":"high","summary":"auto"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":35000,"cached_input_tokens":20000,"output_tokens":8000,"total_tokens":63000}}}}`
 
 // Expected gpt-5.5 costs for the fixture above, computed from the embedded table:
 //
