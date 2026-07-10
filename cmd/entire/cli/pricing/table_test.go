@@ -94,6 +94,13 @@ func TestTable_Lookup_AnthropicIDForms(t *testing.T) {
 		{name: "legacy opus canonical alias", query: "claude-3-opus", wantID: "claude-opus-3", wantOK: true},
 		{name: "legacy opus dated alias", query: "claude-3-opus-20240229", wantID: "claude-opus-3", wantOK: true},
 		{name: "legacy haiku dated", query: "claude-3-haiku-20240307", wantID: "claude-3-haiku", wantOK: true},
+		{name: "gpt-5.6 sol resolves", query: "gpt-5.6-sol", wantID: "gpt-5.6-sol", wantOK: true},
+		{name: "gpt-5.6 sol dated resolves", query: "gpt-5.6-sol-20260709", wantID: "gpt-5.6-sol", wantOK: true},
+		{name: "gpt-5.6-sol-pro must NOT resolve to sol", query: "gpt-5.6-sol-pro", wantOK: false},
+		{name: "prefixed gpt-5.6-sol-pro must NOT resolve to sol", query: "openai/gpt-5.6-sol-pro", wantOK: false},
+		{name: "global-prefixed gpt-5.6-sol-pro must NOT resolve to sol", query: "global.openai.gpt-5.6-sol-pro", wantOK: false},
+		{name: "prefixed gpt-5.6-sol exact resolves", query: "openai/gpt-5.6-sol", wantID: "gpt-5.6-sol", wantOK: true},
+		{name: "prefixed gpt-5.6-sol dated resolves", query: "openai/gpt-5.6-sol-20260709", wantID: "gpt-5.6-sol", wantOK: true},
 		{name: "non-claude id misses", query: "meta-llama-3-70b", wantOK: false},
 	}
 
