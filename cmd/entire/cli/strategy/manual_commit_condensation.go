@@ -287,6 +287,22 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	if state.ModelName == "" {
 		if model := sessionStateBackfillModel(ctx, ag, sessionData.Transcript); model != "" {
 			state.ModelName = model
+			// The pricing pass in extractOrCreateSessionData ran while the model
+			// was still unknown, so it used an empty fallbackModel and left the
+			// usage unpriced under an empty-model bucket — persisting Model set
+			// with a nil cost and ModelUsage=[{Model:"",…}]. Now that the model is
+			// recovered, re-price the SAME extracted slice: both extraction paths
+			// priced from state.CheckpointTranscriptStart with an empty subagents
+			// dir, so repeating those args keeps the reprice equivalent. Swap in
+			// the priced usage and real-model buckets, leaving the state.ModelUsage
+			// mirror fallback above untouched (it only fires when the transcript
+			// yielded no usage, which sessionDataUnpricedFromTranscript excludes).
+			if sessionDataUnpricedFromTranscript(sessionData) {
+				if usage, buckets := tokenUsageWithCost(ctx, ag, sessionData.Transcript, state.CheckpointTranscriptStart, "", state.ModelName); usage != nil {
+					sessionData.TokenUsage = usage
+					sessionData.ModelUsage = buckets
+				}
+			}
 		}
 	}
 
@@ -751,6 +767,31 @@ func hasModelUsageData(buckets []agent.ModelUsage) bool {
 		bucket := buckets[i].TokenUsage
 		if hasTokenUsageData(&bucket) {
 			return true
+		}
+	}
+	return false
+}
+
+// sessionDataUnpricedFromTranscript reports whether transcript-extracted usage
+// came out unpriced in a way that a just-recovered model can fix: the flat usage
+// carries data but no cost, or a bucket keyed under the empty model still holds
+// token data (the signature of a pricing pass that ran before the model was
+// known). It first requires the flat usage to carry data so the reprice never
+// fires in the state.ModelUsage mirror-fallback case — where the transcript
+// produced no usage and re-pricing would clobber the mirrored per-model buckets.
+func sessionDataUnpricedFromTranscript(d *ExtractedSessionData) bool {
+	if !hasTokenUsageData(d.TokenUsage) {
+		return false
+	}
+	if d.TokenUsage.CostUSD == nil {
+		return true
+	}
+	for i := range d.ModelUsage {
+		if d.ModelUsage[i].Model == "" {
+			bucket := d.ModelUsage[i].TokenUsage
+			if hasTokenUsageData(&bucket) {
+				return true
+			}
 		}
 	}
 	return false

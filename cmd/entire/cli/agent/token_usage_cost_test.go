@@ -458,6 +458,63 @@ func TestCalculateUsageWithCost_FlatError(t *testing.T) {
 	}
 }
 
+func TestCalculateUsageWithCost_ZeroTokenBucketUnpriced(t *testing.T) {
+	t.Parallel()
+	// A non-ModelUsageCalculator agent whose usage carries no billable tokens
+	// (only APICallCount) takes the fallback single-bucket path under a resolvable
+	// fallbackModel. Estimating that bucket would fabricate a $0.00 "estimated"
+	// cost; instead it must stay unpriced (nil cost, empty source) so a zero-usage
+	// checkpoint reads as "no cost data", consistent with the ModelUsage path.
+	ag := &fakeTokenCalcAgent{usage: &TokenUsage{APICallCount: 5}}
+
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "test-a", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("buckets = %d, want 1 (fallback bucket, no remainder)", len(buckets))
+	}
+	if buckets[0].Model != "test-a" {
+		t.Errorf("bucket model = %q, want test-a", buckets[0].Model)
+	}
+	if buckets[0].TokenUsage.CostUSD != nil {
+		t.Errorf("zero-token bucket cost = %v, want nil (no $0 estimate)", buckets[0].TokenUsage.CostUSD)
+	}
+	if buckets[0].TokenUsage.CostSource != "" {
+		t.Errorf("zero-token bucket source = %q, want empty", buckets[0].TokenUsage.CostSource)
+	}
+	if flat.CostUSD != nil {
+		t.Errorf("flat cost = %v, want nil", flat.CostUSD)
+	}
+	if flat.CostSource != "" {
+		t.Errorf("flat source = %q, want empty (not estimated)", flat.CostSource)
+	}
+}
+
+func TestPriceUsage_ZeroTokenUsageMergesAsReported(t *testing.T) {
+	t.Parallel()
+	// End-to-end coupling for the zero-token guard: a zero-usage checkpoint priced
+	// under a resolvable model must come back unpriced (nil cost, empty source),
+	// so that when it is later aggregated with a reported checkpoint the merged
+	// provenance stays "reported" instead of flipping to "mixed" — which a
+	// fabricated $0.00 "estimated" figure would have caused.
+	zero, _ := PriceUsage(&TokenUsage{APICallCount: 4}, "test-a", testTable(t), false)
+	if zero.CostUSD != nil {
+		t.Fatalf("zero-usage priced cost = %v, want nil (no $0 estimate)", zero.CostUSD)
+	}
+	if zero.CostSource != "" {
+		t.Fatalf("zero-usage priced source = %q, want empty", zero.CostSource)
+	}
+
+	reported := &TokenUsage{InputTokens: 1_000_000, CostUSD: ptrFloat(6.25), CostSource: types.CostSourceReported}
+	if got := types.MergeCostSourceUsages(reported, zero); got != types.CostSourceReported {
+		t.Errorf("merge = %q, want reported (zero-usage checkpoint must not flip provenance)", got)
+	}
+	if got := types.MergeCostSourceUsages(zero, reported); got != types.CostSourceReported {
+		t.Errorf("merge (swapped) = %q, want reported", got)
+	}
+}
+
 func TestPriceUsage_EstimatesUnderModel(t *testing.T) {
 	t.Parallel()
 	priced, buckets := PriceUsage(&TokenUsage{InputTokens: 1_000_000}, "test-b", testTable(t), false)
