@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -73,6 +74,8 @@ func CalculateUsageWithCost(ag Agent, transcriptData []byte, fromOffset int, sub
 		return nil, nil, err
 	}
 
+	applyTierVariant(buckets, fallbackModel)
+
 	// The per-model buckets can cover fewer tokens than the flat total: an
 	// agent's CalculateModelUsage sees only the main transcript, while the flat
 	// path (SubagentAwareExtractor) may fold in extra usage the buckets never
@@ -116,6 +119,34 @@ func PriceUsage(usage *types.TokenUsage, model string, table *pricing.Table, dis
 	out.CostUSD = cost
 	out.CostSource = source
 	return &out, buckets
+}
+
+// tierVariantSuffixes are the pricing-tier decorations a caller may have
+// appended to fallbackModel via settings.PricingModelForAgent (e.g. the Codex
+// priority service tier). They exist in the pricing table as distinct model
+// ids but never appear in transcripts.
+var tierVariantSuffixes = []string{"-priority"}
+
+// applyTierVariant retargets per-model buckets onto the caller's tier-variant
+// pricing id. When fallbackModel carries a known tier suffix (the caller opted
+// the session into that service tier), a ModelUsageCalculator's buckets still
+// carry the raw transcript model id — priced as-is they'd silently fall back to
+// standard rates, re-introducing the tier-loss defect the suffixed fallback
+// fixed on the no-calculator path. Only buckets matching the fallback's base id
+// are remapped: other models have no table entry for the variant, and an
+// unpriceable id would be worse than a standard-rate estimate.
+func applyTierVariant(buckets []types.ModelUsage, fallbackModel string) {
+	for _, suffix := range tierVariantSuffixes {
+		base := strings.TrimSuffix(fallbackModel, suffix)
+		if base == fallbackModel || base == "" {
+			continue
+		}
+		for i := range buckets {
+			if buckets[i].Model == base {
+				buckets[i].Model = fallbackModel
+			}
+		}
+	}
 }
 
 // modelUsageBuckets returns per-model token buckets for the transcript slice. It
