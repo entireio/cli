@@ -440,6 +440,100 @@ func TestCalculateModelUsage_Offset(t *testing.T) {
 	}
 }
 
+func TestCalculateModelUsage_FastModeBucketsSeparately(t *testing.T) {
+	t.Parallel()
+
+	// Fixture: a standard turn and a fast turn on claude-opus-4-8 (the fast turn
+	// is a streaming duplicate pair — same message.id, increasing output, speed
+	// on both rows), plus a fast turn on a second model. Fast turns must bucket
+	// under the model's "-fast" variant; the standard turn stays on the base id.
+	data, err := os.ReadFile("testdata/stream_session_fast.jsonl")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	c := &ClaudeCodeAgent{}
+	buckets, err := c.CalculateModelUsage(data, 0)
+	if err != nil {
+		t.Fatalf("CalculateModelUsage error: %v", err)
+	}
+
+	// Deterministic order sorted by model string:
+	// "claude-opus-4-8" < "claude-opus-4-8-fast" < "claude-sonnet-5-fast".
+	if len(buckets) != 3 {
+		t.Fatalf("buckets = %d, want 3", len(buckets))
+	}
+	if buckets[0].Model != "claude-opus-4-8" ||
+		buckets[1].Model != "claude-opus-4-8-fast" ||
+		buckets[2].Model != "claude-sonnet-5-fast" {
+		t.Fatalf("bucket models = [%q, %q, %q], want [claude-opus-4-8, claude-opus-4-8-fast, claude-sonnet-5-fast]",
+			buckets[0].Model, buckets[1].Model, buckets[2].Model)
+	}
+
+	// Standard bucket: the single non-fast opus turn.
+	std := buckets[0].TokenUsage
+	if std.InputTokens != 10 || std.CacheCreationTokens != 100 || std.CacheReadTokens != 50 ||
+		std.OutputTokens != 100 || std.APICallCount != 1 {
+		t.Errorf("standard bucket = %+v, want in=10 cc=100 cr=50 out=100 calls=1", std)
+	}
+
+	// Fast bucket: streaming dedup kept the max-output row (200), and the speed
+	// rode that same kept row so it landed here, not on the base id.
+	fast := buckets[1].TokenUsage
+	if fast.InputTokens != 20 || fast.CacheCreationTokens != 200 || fast.CacheReadTokens != 80 ||
+		fast.OutputTokens != 200 || fast.APICallCount != 1 {
+		t.Errorf("fast bucket = %+v, want in=20 cc=200 cr=80 out=200 calls=1", fast)
+	}
+
+	// Second-model fast bucket.
+	sonnetFast := buckets[2].TokenUsage
+	if sonnetFast.InputTokens != 5 || sonnetFast.CacheReadTokens != 9 ||
+		sonnetFast.OutputTokens != 40 || sonnetFast.APICallCount != 1 {
+		t.Errorf("sonnet fast bucket = %+v, want in=5 cr=9 out=40 calls=1", sonnetFast)
+	}
+
+	// Buckets must still sum to the flat total: speed splits attribution but
+	// never changes token counts.
+	flat, err := c.CalculateTokenUsage(data, 0)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsage error: %v", err)
+	}
+	var sumIn, sumCC, sumCR, sumOut, sumCalls int
+	for _, b := range buckets {
+		sumIn += b.TokenUsage.InputTokens
+		sumCC += b.TokenUsage.CacheCreationTokens
+		sumCR += b.TokenUsage.CacheReadTokens
+		sumOut += b.TokenUsage.OutputTokens
+		sumCalls += b.TokenUsage.APICallCount
+	}
+	if sumIn != flat.InputTokens || sumCC != flat.CacheCreationTokens ||
+		sumCR != flat.CacheReadTokens || sumOut != flat.OutputTokens || sumCalls != flat.APICallCount {
+		t.Errorf("bucket sums (in=%d cc=%d cr=%d out=%d calls=%d) != flat (in=%d cc=%d cr=%d out=%d calls=%d)",
+			sumIn, sumCC, sumCR, sumOut, sumCalls,
+			flat.InputTokens, flat.CacheCreationTokens, flat.CacheReadTokens, flat.OutputTokens, flat.APICallCount)
+	}
+}
+
+func TestModelKeyWithSpeed(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		model, speed, want string
+	}{
+		{"claude-opus-4-8", "fast", "claude-opus-4-8-fast"},
+		{"claude-opus-4-8", "FAST", "claude-opus-4-8-fast"},
+		{"claude-opus-4-8", "standard", "claude-opus-4-8"},
+		{"claude-opus-4-8", "", "claude-opus-4-8"},
+		{"", "fast", ""},
+		{"claude-opus-4-8-fast", "fast", "claude-opus-4-8-fast"},
+	}
+	for _, tc := range cases {
+		if got := modelKeyWithSpeed(tc.model, tc.speed); got != tc.want {
+			t.Errorf("modelKeyWithSpeed(%q, %q) = %q, want %q", tc.model, tc.speed, got, tc.want)
+		}
+	}
+}
+
 func TestCalculateTokenUsage_IgnoresUserMessages(t *testing.T) {
 	t.Parallel()
 
