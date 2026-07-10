@@ -330,7 +330,7 @@ func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuth
 		fmt.Fprint(outW, "Waiting for sign-in... ")
 		code, err := flow.Wait(waitCtx)
 		if err != nil {
-			return browserWaitError(err, waitCtx, waitTimeout)
+			return browserWaitError(waitCtx, err, waitTimeout)
 		}
 		return exchangeAndPersist(ctx, outW, flow, baseURL, code)
 	}
@@ -359,7 +359,7 @@ func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuth
 	case r := <-callbackCh:
 		cancel() // unblock the fallback waiter (closes /dev/tty)
 		if r.err != nil {
-			return browserWaitError(r.err, waitCtx, waitTimeout)
+			return browserWaitError(waitCtx, r.err, waitTimeout)
 		}
 		return exchangeAndPersist(ctx, outW, flow, baseURL, r.code)
 	case ferr := <-fallbackCh:
@@ -367,7 +367,17 @@ func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuth
 		if ferr != nil {
 			// Not a real keypress — the waiter was cancelled (parent ctx or the
 			// backstop timeout), so surface that rather than falling back.
-			return browserWaitError(ferr, waitCtx, waitTimeout)
+			return browserWaitError(waitCtx, ferr, waitTimeout)
+		}
+		// The redirect may have already succeeded in the instant before Enter
+		// (a reflexive keypress on a working localhostForwarding setup). Prefer
+		// that buffered result over discarding a completed login.
+		select {
+		case r := <-callbackCh:
+			if r.err == nil {
+				return exchangeAndPersist(ctx, outW, flow, baseURL, r.code)
+			}
+		default:
 		}
 		fmt.Fprintln(outW)
 		return errBrowserFallbackRequested
@@ -376,7 +386,7 @@ func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuth
 
 // browserWaitError maps a Wait/fallback error to the user-facing message,
 // distinguishing the backstop timeout from other failures.
-func browserWaitError(err error, waitCtx context.Context, waitTimeout time.Duration) error {
+func browserWaitError(waitCtx context.Context, err error, waitTimeout time.Duration) error {
 	if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("timed out waiting for sign-in after %v; run `entire login` again, or use `entire login --device`", waitTimeout)
 	}
@@ -592,8 +602,14 @@ func openBrowser(ctx context.Context, browserURL string) error {
 
 	cmd := exec.CommandContext(ctx, command, args...)
 	// dir is set only for the WSL cmd.exe fallback, to keep cmd.exe from
-	// warning about the unsupported WSL (UNC) working directory.
-	cmd.Dir = dir
+	// warning about the unsupported WSL (UNC) working directory. It's
+	// best-effort: a customized automount root means /mnt/c may not exist, and
+	// suppressing a cosmetic warning must not become a hard chdir failure.
+	if dir != "" {
+		if _, statErr := os.Stat(dir); statErr == nil {
+			cmd.Dir = dir
+		}
+	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start browser command %q: %w", command, err)
 	}
