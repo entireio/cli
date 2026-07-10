@@ -272,6 +272,10 @@ type RedactionSettings struct {
 type PricingSettings struct {
 	Models            []pricing.ModelRate `json:"models,omitempty"`
 	DisableEstimation *bool               `json:"disable_estimation,omitempty"`
+	// CodexServiceTier opts a Codex session into a non-default pricing tier.
+	// "priority" prices Codex turns at the priority-tier premium via the
+	// model's "-priority" variant; empty (the default) prices at standard rates.
+	CodexServiceTier string `json:"codex_service_tier,omitempty"`
 }
 
 // PricingOverrides returns the configured per-model rate overrides, or nil when
@@ -290,6 +294,17 @@ func (s *EntireSettings) IsEstimationDisabled() bool {
 		return false
 	}
 	return *s.Pricing.DisableEstimation
+}
+
+// CodexServiceTier returns the configured Codex pricing service tier (e.g.
+// "priority"), or "" when unset. It is nil-safe. Codex priority-tier turns bill
+// at a premium that is priced via a "-priority" model variant; the default
+// empty tier prices at standard rates.
+func (s *EntireSettings) CodexServiceTier() string {
+	if s == nil || s.Pricing == nil {
+		return ""
+	}
+	return s.Pricing.CodexServiceTier
 }
 
 // LoadPricingTable builds the model pricing table from settings — the embedded
@@ -1017,6 +1032,13 @@ func mergePricing(dst *PricingSettings, data json.RawMessage) error {
 			return err
 		}
 		dst.DisableEstimation = &b
+	}
+	if tierRaw, ok := raw["codex_service_tier"]; ok {
+		var tier string
+		if err := unmarshalField("pricing.codex_service_tier", tierRaw, &tier); err != nil {
+			return err
+		}
+		dst.CodexServiceTier = tier
 	}
 	return nil
 }

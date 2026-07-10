@@ -639,6 +639,21 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	return nil
 }
 
+// pricingModelForTier maps a turn's model to the id it should be priced under.
+// A Codex session on the "priority" service tier bills at a premium the pricing
+// table carries as a "-priority" model variant; every other agent or tier
+// prices under the model unchanged. An empty model, or a model already ending
+// in "-priority", is returned as-is so the id never double-suffixes.
+func pricingModelForTier(agentType types.AgentType, serviceTier, model string) string {
+	if model == "" {
+		return model
+	}
+	if agentType == agent.AgentTypeCodex && strings.EqualFold(serviceTier, "priority") && !strings.HasSuffix(model, "-priority") {
+		return model + "-priority"
+	}
+	return model
+}
+
 // handleLifecycleTurnEnd handles turn end: validates transcript, extracts metadata,
 // detects file changes, saves step + checkpoint, transitions phase.
 //
@@ -921,13 +936,22 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// The per-model buckets are threaded through StepContext.ModelUsage so the
 	// strategy can accumulate them into checkpoint-scoped per-model metadata.
 	table, disableEstimation := LoadPricingTable(ctx)
+	// Codex "priority" service tier bills at a premium; when opted in, price the
+	// turn under the model's "-priority" variant. Only Codex reads settings here,
+	// so every other agent's turn-end skips the extra load.
+	pricingModel := event.Model
+	if agentType == agent.AgentTypeCodex && event.Model != "" {
+		if s, sErr := LoadEntireSettings(ctx); sErr == nil {
+			pricingModel = pricingModelForTier(agentType, s.CodexServiceTier(), event.Model)
+		}
+	}
 	var tokenUsage *agent.TokenUsage
 	var buckets []agent.ModelUsage
 	if event.TokenUsage != nil {
-		tokenUsage, buckets = agent.PriceUsage(event.TokenUsage, event.Model, table, disableEstimation)
+		tokenUsage, buckets = agent.PriceUsage(event.TokenUsage, pricingModel, table, disableEstimation)
 	} else {
 		var costErr error
-		tokenUsage, buckets, costErr = agent.CalculateUsageWithCost(ag, transcriptData, transcriptLinesAtStart, subagentsDir, table, event.Model, disableEstimation)
+		tokenUsage, buckets, costErr = agent.CalculateUsageWithCost(ag, transcriptData, transcriptLinesAtStart, subagentsDir, table, pricingModel, disableEstimation)
 		if costErr != nil {
 			logging.Debug(logCtx, "failed usage-with-cost extraction",
 				slog.String("error", costErr.Error()))
