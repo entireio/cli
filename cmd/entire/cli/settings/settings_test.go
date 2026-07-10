@@ -464,6 +464,53 @@ func TestMergeJSON_CommitLinking(t *testing.T) {
 	}
 }
 
+func TestPricingSettings_CodexServiceTier(t *testing.T) {
+	// Accessor defaults to "" and is nil-safe.
+	var nilSettings *EntireSettings
+	if got := nilSettings.CodexServiceTier(); got != "" {
+		t.Errorf("nil settings tier = %q, want empty", got)
+	}
+	if got := (&EntireSettings{}).CodexServiceTier(); got != "" {
+		t.Errorf("empty settings tier = %q, want empty", got)
+	}
+	if got := (&EntireSettings{Pricing: &PricingSettings{}}).CodexServiceTier(); got != "" {
+		t.Errorf("empty pricing tier = %q, want empty", got)
+	}
+
+	// omitempty: an unset tier does not serialize.
+	data, err := json.Marshal(&PricingSettings{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "codex_service_tier") {
+		t.Errorf("empty PricingSettings serialized the tier: %s", data)
+	}
+
+	// Load merges pricing.codex_service_tier through the strict (unknown-field-
+	// rejecting) decoder and the map-based merge, and the accessor reads it back.
+	tmpDir := t.TempDir()
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "pricing": {"codex_service_tier": "priority"}}`), 0o644); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	t.Chdir(tmpDir)
+
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := s.CodexServiceTier(); got != "priority" {
+		t.Errorf("CodexServiceTier() = %q, want priority", got)
+	}
+}
+
 func TestExternalAgents_DefaultsFalse(t *testing.T) {
 	s := &EntireSettings{}
 	if s.ExternalAgents {
