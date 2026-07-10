@@ -548,3 +548,45 @@ func TestPriceUsage_NilUsage(t *testing.T) {
 		t.Errorf("got (%v, %v), want (nil, nil)", priced, buckets)
 	}
 }
+
+// TestCalculateUsageWithCost_ClaudeFastVariantPricedAtPremium proves the
+// claudecode fast-mode buckets (Model "<model>-fast") price at the fast premium
+// through the REAL embedded table: claude-opus-4-8-fast bills at 10/50, double
+// the standard claude-opus-4-8 5/25. The bucket keys themselves are produced by
+// claudecode.CalculateModelUsage (covered in the claudecode package, which must
+// not import pricing); this is the priced half of that feature.
+func TestCalculateUsageWithCost_ClaudeFastVariantPricedAtPremium(t *testing.T) {
+	t.Parallel()
+
+	table, err := pricing.LoadTable(nil)
+	if err != nil {
+		t.Fatalf("LoadTable: %v", err)
+	}
+
+	ag := &fakeModelUsageAgent{
+		flat: &TokenUsage{InputTokens: 2_000_000, OutputTokens: 2_000_000},
+		buckets: []types.ModelUsage{
+			{Model: "claude-opus-4-8", TokenUsage: TokenUsage{InputTokens: 1_000_000, OutputTokens: 1_000_000}},
+			{Model: "claude-opus-4-8-fast", TokenUsage: TokenUsage{InputTokens: 1_000_000, OutputTokens: 1_000_000}},
+		},
+	}
+
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", table, "", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// standard: 1M@$5 + 1M@$25 = 30.0
+	if buckets[0].Model != "claude-opus-4-8" || buckets[0].TokenUsage.CostUSD == nil || *buckets[0].TokenUsage.CostUSD != 30.0 {
+		t.Errorf("standard bucket = %+v (cost %v), want claude-opus-4-8 @ 30.0", buckets[0].Model, buckets[0].TokenUsage.CostUSD)
+	}
+	// fast: 1M@$10 + 1M@$50 = 60.0 (double the standard)
+	if buckets[1].Model != "claude-opus-4-8-fast" || buckets[1].TokenUsage.CostUSD == nil || *buckets[1].TokenUsage.CostUSD != 60.0 {
+		t.Errorf("fast bucket = %+v (cost %v), want claude-opus-4-8-fast @ 60.0", buckets[1].Model, buckets[1].TokenUsage.CostUSD)
+	}
+	if flat.CostUSD == nil || *flat.CostUSD != 90.0 {
+		t.Fatalf("flat cost = %v, want 90.0", flat.CostUSD)
+	}
+	if flat.CostSource != types.CostSourceEstimated {
+		t.Errorf("flat source = %q, want estimated", flat.CostSource)
+	}
+}

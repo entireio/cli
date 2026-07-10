@@ -206,6 +206,18 @@ type modelUsageRow struct {
 	usage messageUsage
 }
 
+// modelKeyWithSpeed returns the pricing/attribution key for a turn's model,
+// appending a "-fast" suffix when the turn was billed at the fast-mode premium
+// (speed == "fast", case-insensitive). It leaves the model unchanged for
+// standard/empty speed, an empty model id, or an id that already ends in
+// "-fast", so buckets never double-suffix.
+func modelKeyWithSpeed(model, speed string) string {
+	if !strings.EqualFold(speed, "fast") || model == "" || strings.HasSuffix(model, "-fast") {
+		return model
+	}
+	return model + "-fast"
+}
+
 // CalculateModelUsage attributes per-message token usage to the model that
 // produced it (message.model), over the MAIN transcript only. The
 // ModelUsageCalculator signature carries no subagentsDir, so unlike
@@ -248,13 +260,18 @@ func (c *ClaudeCodeAgent) CalculateModelUsage(transcriptData []byte, fromOffset 
 		}
 	}
 
-	// Aggregate the deduplicated rows into per-model buckets.
+	// Aggregate the deduplicated rows into per-model buckets. A fast-mode turn
+	// (usage.speed == "fast" on the kept row) buckets under the model's "-fast"
+	// variant so the dispatcher prices it at the fast premium; the speed rides
+	// the SAME dedup-kept row as the model, keeping attribution consistent with
+	// the flat token loop.
 	byModel := make(map[string]*agent.TokenUsage)
 	for _, row := range rowByID {
-		u := byModel[row.model]
+		key := modelKeyWithSpeed(row.model, row.usage.Speed)
+		u := byModel[key]
 		if u == nil {
 			u = &agent.TokenUsage{}
-			byModel[row.model] = u
+			byModel[key] = u
 		}
 		u.InputTokens += row.usage.InputTokens
 		u.CacheCreationTokens += row.usage.CacheCreationInputTokens

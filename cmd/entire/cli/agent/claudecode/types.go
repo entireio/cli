@@ -89,6 +89,10 @@ type messageUsage struct {
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	OutputTokens             int `json:"output_tokens"`
+	// Speed distinguishes fast-mode turns ("fast") from standard turns
+	// ("standard" or ""). Fast-mode turns bill at a premium, so per-model
+	// attribution routes them to the model's "-fast" pricing variant.
+	Speed string `json:"speed"`
 }
 
 // messageWithUsage represents an assistant message with usage data.
