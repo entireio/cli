@@ -23,7 +23,7 @@ func TestLoadTable_EmbeddedParsesAndValidates(t *testing.T) {
 	require.NotNil(t, tbl)
 
 	// A representative model from each embedded provider file resolves.
-	for _, id := range []string{modelOpus48, modelGPT55, "gemini-3-pro"} {
+	for _, id := range []string{modelOpus48, modelGPT55, "gemini-3-pro", "composer-2"} {
 		_, ok := tbl.Lookup(id)
 		assert.Truef(t, ok, "expected embedded model %q to resolve", id)
 	}
@@ -130,6 +130,115 @@ func TestTable_Lookup_LongContextSharesBaseRate(t *testing.T) {
 	assert.Equal(t, "claude-fable-5", got.ID)
 	assert.InDelta(t, 10.0, got.InputPerMTok, 1e-9)
 	assert.InDelta(t, 50.0, got.OutputPerMTok, 1e-9)
+}
+
+func TestTable_Round2CorrectedAndNewRates(t *testing.T) {
+	t.Parallel()
+
+	tbl, err := LoadTable(nil)
+	require.NoError(t, err)
+
+	// Corrected OpenAI rates: the table previously carried the legacy gpt-5 rate
+	// (1.25/10) for both gpt-5.5 and gpt-5.4.
+	gpt55, ok := tbl.Lookup("gpt-5.5")
+	require.True(t, ok)
+	assert.InDelta(t, 5.0, gpt55.InputPerMTok, 1e-9)
+	assert.InDelta(t, 30.0, gpt55.OutputPerMTok, 1e-9)
+
+	gpt54, ok := tbl.Lookup("gpt-5.4")
+	require.True(t, ok)
+	assert.InDelta(t, 2.5, gpt54.InputPerMTok, 1e-9)
+	assert.InDelta(t, 15.0, gpt54.OutputPerMTok, 1e-9)
+
+	// gpt-5 keeps its genuine legacy rate.
+	gpt5, ok := tbl.Lookup("gpt-5")
+	require.True(t, ok)
+	assert.InDelta(t, 1.25, gpt5.InputPerMTok, 1e-9)
+	assert.InDelta(t, 10.0, gpt5.OutputPerMTok, 1e-9)
+
+	// New entries: gpt-5.3-codex, gpt-5.5-priority, and the cursor composer family.
+	codex, ok := tbl.Lookup("gpt-5.3-codex")
+	require.True(t, ok)
+	assert.InDelta(t, 1.75, codex.InputPerMTok, 1e-9)
+	assert.InDelta(t, 14.0, codex.OutputPerMTok, 1e-9)
+
+	prio, ok := tbl.Lookup("gpt-5.5-priority")
+	require.True(t, ok)
+	assert.InDelta(t, 12.5, prio.InputPerMTok, 1e-9)
+	assert.InDelta(t, 75.0, prio.OutputPerMTok, 1e-9)
+
+	composer, ok := tbl.Lookup("composer-2.5-fast")
+	require.True(t, ok)
+	assert.InDelta(t, 3.0, composer.InputPerMTok, 1e-9)
+	assert.InDelta(t, 15.0, composer.OutputPerMTok, 1e-9)
+}
+
+func TestTable_GPT55PriorityDistinctFromBase(t *testing.T) {
+	t.Parallel()
+
+	tbl, err := LoadTable(nil)
+	require.NoError(t, err)
+
+	// Both are exact ids resolving to their own entries: the base gpt-5.5 glob
+	// must not swallow the priority id, nor vice versa.
+	base, ok := tbl.Lookup("gpt-5.5")
+	require.True(t, ok)
+	assert.Equal(t, "gpt-5.5", base.ID)
+	assert.InDelta(t, 5.0, base.InputPerMTok, 1e-9)
+
+	prio, ok := tbl.Lookup("gpt-5.5-priority")
+	require.True(t, ok)
+	assert.Equal(t, "gpt-5.5-priority", prio.ID)
+	assert.InDelta(t, 12.5, prio.InputPerMTok, 1e-9)
+
+	// A dated priority spelling resolves to the priority entry — it is not
+	// glob-captured by the base gpt-5.5 alias (tightened to "gpt-5.5-2*").
+	datedPrio, ok := tbl.Lookup("gpt-5.5-priority-20260710")
+	require.True(t, ok)
+	assert.Equal(t, "gpt-5.5-priority", datedPrio.ID)
+
+	// A dated base spelling still resolves to the base entry.
+	datedBase, ok := tbl.Lookup("gpt-5.5-20260710")
+	require.True(t, ok)
+	assert.Equal(t, "gpt-5.5", datedBase.ID)
+}
+
+func TestTable_OpusFastVariant(t *testing.T) {
+	t.Parallel()
+
+	tbl, err := LoadTable(nil)
+	require.NoError(t, err)
+
+	fast, ok := tbl.Lookup("claude-opus-4-8-fast")
+	require.True(t, ok)
+	assert.Equal(t, "claude-opus-4-8-fast", fast.ID)
+	assert.InDelta(t, 10.0, fast.InputPerMTok, 1e-9)
+	assert.InDelta(t, 50.0, fast.OutputPerMTok, 1e-9)
+
+	// The fast entry carries no explicit cache rates, so Estimate derives them
+	// from the fast input rate via the Anthropic multipliers: cache-read 0.1x
+	// ($1.00 per MTok) and cache-write 1.25x ($12.50 per MTok).
+	require.Nil(t, fast.CacheReadPerMTok)
+	require.Nil(t, fast.CacheWritePerMTok)
+	assert.InDelta(t, 1.0, Estimate(fast, types.TokenUsage{CacheReadTokens: 1_000_000}), 1e-9)
+	assert.InDelta(t, 12.5, Estimate(fast, types.TokenUsage{CacheCreationTokens: 1_000_000}), 1e-9)
+
+	// The dated fast spelling resolves to the fast entry, not the base
+	// claude-opus-4-8 (whose "claude-opus-4-8-2*" glob would otherwise capture
+	// it — the fast entry is ordered first so its "-fast" glob wins).
+	dated, ok := tbl.Lookup("claude-opus-4-8-20260624-fast")
+	require.True(t, ok)
+	assert.Equal(t, "claude-opus-4-8-fast", dated.ID)
+
+	// A dated base spelling (no -fast) still resolves to the base entry.
+	datedBase, ok := tbl.Lookup("claude-opus-4-8-20260624")
+	require.True(t, ok)
+	assert.Equal(t, "claude-opus-4-8", datedBase.ID)
+
+	// The OpenRouter dotted fast spelling resolves too.
+	dotted, ok := tbl.Lookup("anthropic/claude-opus-4.8-fast")
+	require.True(t, ok)
+	assert.Equal(t, "claude-opus-4-8-fast", dotted.ID)
 }
 
 func TestEstimate_DefaultMultipliers(t *testing.T) {

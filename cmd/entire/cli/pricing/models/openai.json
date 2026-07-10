@@ -5,14 +5,27 @@
       "id": "gpt-5.5",
       "provider": "openai",
       "aliases": [
-        "gpt-5.5-*",
+        "gpt-5.5-2*",
         "openai/gpt-5.5"
       ],
-      "input_per_mtok": 1.25,
-      "output_per_mtok": 10,
-      "cache_read_per_mtok": 0.125,
-      "cache_write_per_mtok": 1.25,
-      "effective_date": "2026-01-01"
+      "input_per_mtok": 5,
+      "output_per_mtok": 30,
+      "cache_read_per_mtok": 0.5,
+      "cache_write_per_mtok": 6.25,
+      "effective_date": "2026-07-10"
+    },
+    {
+      "id": "gpt-5.5-priority",
+      "provider": "openai",
+      "aliases": [
+        "gpt-5.5-priority-2*",
+        "openai/gpt-5.5-priority"
+      ],
+      "input_per_mtok": 12.5,
+      "output_per_mtok": 75,
+      "cache_read_per_mtok": 1.25,
+      "cache_write_per_mtok": 15.625,
+      "effective_date": "2026-07-10"
     },
     {
       "id": "gpt-5.4",
@@ -21,11 +34,25 @@
         "gpt-5.4-*",
         "openai/gpt-5.4"
       ],
-      "input_per_mtok": 1.25,
-      "output_per_mtok": 10,
-      "cache_read_per_mtok": 0.125,
-      "cache_write_per_mtok": 1.25,
-      "effective_date": "2026-01-01"
+      "input_per_mtok": 2.5,
+      "output_per_mtok": 15,
+      "cache_read_per_mtok": 0.25,
+      "cache_write_per_mtok": 3.125,
+      "effective_date": "2026-07-10"
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "provider": "openai",
+      "aliases": [
+        "gpt-5.3-codex-2*",
+        "openai/gpt-5.3-codex",
+        "openai/gpt-5.3-codex-2*"
+      ],
+      "input_per_mtok": 1.75,
+      "output_per_mtok": 14,
+      "cache_read_per_mtok": 0.175,
+      "cache_write_per_mtok": 2.1875,
+      "effective_date": "2026-07-10"
     },
     {
       "id": "gpt-5",
