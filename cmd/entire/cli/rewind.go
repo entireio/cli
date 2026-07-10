@@ -1001,8 +1001,10 @@ func handleLogsOnlyCheckout(ctx context.Context, w, errW io.Writer, start *strat
 		return nil
 	}
 
-	// Perform git checkout
-	if err := CheckoutBranch(ctx, point.ID); err != nil {
+	// Perform git checkout. Force-discard uncommitted changes to match the
+	// "Any uncommitted changes will be lost!" warning above; a plain checkout
+	// aborts on local modifications instead (#668).
+	if err := CheckoutBranchForce(ctx, point.ID); err != nil {
 		logging.Error(logCtx, "logs-only checkout failed during git checkout",
 			slog.String("checkpoint_id", point.ID),
 			slog.String("error", err.Error()),

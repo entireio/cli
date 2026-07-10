@@ -276,12 +276,31 @@ func BranchExistsLocally(ctx context.Context, branchName string) (bool, error) {
 // Uses git CLI instead of go-git to work around go-git v5 bug where Checkout
 // deletes untracked files (see https://github.com/go-git/go-git/issues/970).
 // Should be switched back to go-git once we upgrade to go-git v6
-// Returns an error if the ref doesn't exist or checkout fails.
+// Returns an error if the ref doesn't exist or checkout fails. It does NOT
+// discard uncommitted changes — git aborts if the checkout would overwrite
+// local modifications.
 func CheckoutBranch(ctx context.Context, ref string) error {
+	return checkoutRef(ctx, ref, false)
+}
+
+// CheckoutBranchForce switches to ref like CheckoutBranch but discards
+// uncommitted changes to tracked files (git checkout --force). Used by rewind,
+// which explicitly warns that uncommitted changes will be lost; a plain
+// checkout aborts on such changes instead, contradicting the warning (#668).
+func CheckoutBranchForce(ctx context.Context, ref string) error {
+	return checkoutRef(ctx, ref, true)
+}
+
+func checkoutRef(ctx context.Context, ref string, force bool) error {
 	if strings.HasPrefix(ref, "-") {
 		return fmt.Errorf("checkout failed: invalid ref %q", ref)
 	}
-	cmd := exec.CommandContext(ctx, "git", "checkout", ref)
+	args := []string{"checkout"}
+	if force {
+		args = append(args, "--force")
+	}
+	args = append(args, ref)
+	cmd := exec.CommandContext(ctx, "git", args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("checkout failed: %s: %w", strings.TrimSpace(string(output)), err)
 	}

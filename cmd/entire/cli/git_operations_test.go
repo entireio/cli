@@ -635,3 +635,51 @@ func gitDefaultBranch(t *testing.T, dir string) string {
 	t.Helper()
 	return gitOutput(t, dir, "rev-parse", "--abbrev-ref", "HEAD")
 }
+
+// Regression for #668: rewind warns "any uncommitted changes will be lost" and
+// then checks out a commit; a plain checkout aborts on local modifications, so
+// the forced variant must discard them to match the warning.
+func TestCheckoutBranchForce_DiscardsUncommittedChanges(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	repo := initOpenedTestRepo(t, tmpDir)
+	w, err := repo.Worktree()
+	require.NoError(t, err)
+
+	file := filepath.Join(tmpDir, "f.txt")
+	commit := func(content string) plumbing.Hash {
+		require.NoError(t, os.WriteFile(file, []byte(content), 0o644))
+		_, err := w.Add("f.txt")
+		require.NoError(t, err)
+		h, err := w.Commit(content, &git.CommitOptions{
+			Author: &object.Signature{Name: "Test", Email: "test@example.com"},
+		})
+		require.NoError(t, err)
+		return h
+	}
+	c1 := commit("v1\n")
+	commit("v2\n") // advances HEAD so checking out c1 is a real switch
+
+	// Uncommitted modification to a tracked file.
+	require.NoError(t, os.WriteFile(file, []byte("dirty\n"), 0o644))
+
+	ctx := context.Background()
+	// Plain checkout aborts on the local change (the pre-fix rewind behavior).
+	require.Error(t, CheckoutBranch(ctx, c1.String()))
+
+	// Forced checkout succeeds and discards the change, restoring c1's content.
+	// (Assert on substance, not exact line endings, so a git autocrlf setting in
+	// the environment doesn't make the test flaky.)
+	require.NoError(t, CheckoutBranchForce(ctx, c1.String()))
+	got, err := os.ReadFile(file)
+	require.NoError(t, err)
+	require.Contains(t, string(got), "v1")
+	require.NotContains(t, string(got), "dirty")
+}
+
+// CheckoutBranchForce keeps the leading-dash guard against flag injection.
+func TestCheckoutBranchForce_RejectsLeadingDash(t *testing.T) {
+	err := CheckoutBranchForce(context.Background(), "-f")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid ref")
+}
