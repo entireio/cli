@@ -59,17 +59,20 @@ func newTokensGroupCmd() *cobra.Command {
 		Long: `Analyze token usage across sessions and checkpoints.
 
 Commands:
-  profile  Aggregate token usage across committed checkpoints
+  profile          Aggregate token usage across committed checkpoints
+  pricing-refresh  Force-refresh the cached remote pricing table
 
 Examples:
   entire tokens profile
-  entire tokens profile --json`,
+  entire tokens profile --json
+  entire tokens pricing-refresh`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
 	}
 
 	cmd.AddCommand(newTokensProfileCmd())
+	cmd.AddCommand(newTokensPricingRefreshCmd())
 	return cmd
 }
 

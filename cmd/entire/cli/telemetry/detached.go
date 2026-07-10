@@ -157,6 +157,18 @@ func TrackPluginDetached(pluginName string, isEntireEnabled bool, version string
 	}
 }
 
+// spawnDetachedAnalytics spawns the hidden __send_analytics worker as a
+// detached background process so analytics never block the CLI. It resolves the
+// running executable and delegates to the platform-specific SpawnDetached.
+func spawnDetachedAnalytics(payloadJSON string) {
+	executable, err := os.Executable()
+	if err != nil {
+		return
+	}
+	//nolint:errcheck // Best effort telemetry - failure to spawn is non-fatal
+	_ = SpawnDetached(executable, "__send_analytics", payloadJSON)
+}
+
 // SendEvent processes an event payload in the detached subprocess.
 // This is called by the hidden __send_analytics command.
 func SendEvent(payloadJSON string) {
