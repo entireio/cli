@@ -94,6 +94,30 @@ func TestCondensationRepricesCodexPriorityTier(t *testing.T) {
 	assertSingleBucket(t, "non-codex", claudeBuckets, "gpt-5.5", codexTierStandardCost)
 }
 
+// TestCondensationDowngradesUnpriceableTierVariant covers the tier knob on a
+// Codex model whose "-priority" variant has no table entry (only gpt-5.5 has
+// one): the session must price at the standard rate under the raw id — an
+// honest undercount — rather than going entirely unpriced under a
+// premium-claiming id.
+func TestCondensationDowngradesUnpriceableTierVariant(t *testing.T) {
+	t.Parallel()
+
+	ag, err := agent.GetByAgentType(agent.AgentTypeCodex)
+	if err != nil || ag == nil {
+		t.Fatalf("GetByAgentType(codex) = %v, %v", ag, err)
+	}
+	// gpt-5.3-codex over the shared fixture counts (fresh=15000,
+	// cache_read=20000, output=8000) at 1.75/14 with cache_read 0.175:
+	// 15000*1.75 + 20000*0.175 + 8000*14 = 141750 -> $0.14175.
+	transcript := []byte(`{"type":"turn_context","payload":{"cwd":"/tmp/repo","model":"gpt-5.3-codex","effort":"high","summary":"auto"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":35000,"cached_input_tokens":20000,"output_tokens":8000,"total_tokens":63000}}}}`)
+	const standardCost = 0.14175
+
+	usage, buckets := tokenUsageWithCost(ctxWithCodexTier(t, "priority"), ag, transcript, 0, "gpt-5.3-codex", agent.AgentTypeCodex)
+	assertCost(t, "downgraded flat", usage.CostUSD, standardCost)
+	assertSingleBucket(t, "downgraded", buckets, "gpt-5.3-codex", standardCost)
+}
+
 func assertCost(t *testing.T, label string, got *float64, want float64) {
 	t.Helper()
 	if got == nil {

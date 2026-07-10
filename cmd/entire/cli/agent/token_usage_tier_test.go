@@ -4,7 +4,9 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/pricing"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestApplyTierVariant covers the bucket retargeting that keeps a
@@ -77,6 +79,68 @@ func TestApplyTierVariant(t *testing.T) {
 			t.Parallel()
 			applyTierVariant(tt.buckets, tt.fallback)
 			assert.Equal(t, tt.want, models(tt.buckets))
+		})
+	}
+}
+
+// TestResolveTierFallback covers the downgrade of a tier-suffixed fallback
+// model to its base id when the pricing table has no entry for the variant, so
+// the session prices as an honest standard-rate undercount instead of going
+// entirely unpriced under a premium-claiming id.
+func TestResolveTierFallback(t *testing.T) {
+	t.Parallel()
+
+	table, err := pricing.LoadTable(nil)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		fallback string
+		table    *pricing.Table
+		want     string
+	}{
+		{
+			name:     "priceable variant is kept",
+			fallback: "gpt-5.5-priority",
+			table:    table,
+			want:     "gpt-5.5-priority",
+		},
+		{
+			name:     "unpriceable variant downgrades to its base",
+			fallback: "gpt-5.3-codex-priority",
+			table:    table,
+			want:     "gpt-5.3-codex",
+		},
+		{
+			name:     "unsuffixed model passes through",
+			fallback: "gpt-5.3-codex",
+			table:    table,
+			want:     "gpt-5.3-codex",
+		},
+		{
+			name:     "nil table keeps the base id",
+			fallback: "gpt-5.5-priority",
+			table:    nil,
+			want:     "gpt-5.5",
+		},
+		{
+			name:     "bare suffix passes through",
+			fallback: "-priority",
+			table:    table,
+			want:     "-priority",
+		},
+		{
+			name:     "empty model passes through",
+			fallback: "",
+			table:    table,
+			want:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, resolveTierFallback(tt.fallback, tt.table))
 		})
 	}
 }
