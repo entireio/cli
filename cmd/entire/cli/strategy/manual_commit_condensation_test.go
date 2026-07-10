@@ -521,6 +521,113 @@ func TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation(t *testing.T)
 	require.Equal(t, "Why is checkout flaky?", meta.InvestigateTopic, "per-session InvestigateTopic")
 }
 
+// TestCondenseSession_RepricesTranscriptModelAfterBackfill verifies the
+// reprice-after-backfill fix: Pi reports no model through hooks, so
+// state.ModelName is "" at condensation and the extraction pricing pass ran with
+// an empty fallback model — leaving the checkpoint usage unpriced under an
+// empty-model bucket. Once CondenseSession backfills the model from the
+// transcript it must re-price the same slice, so the persisted checkpoint carries
+// a real cost bucketed under the model instead of Model="gpt-5.5" with a nil cost
+// and ModelUsage=[{Model:"",…}].
+//
+// Uses t.Chdir for CWD-based git resolution, so it cannot run in parallel.
+func TestCondenseSession_RepricesTranscriptModelAfterBackfill(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-06-01-pi-reprice"
+
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	// Pi JSONL transcript: the assistant message carries model=gpt-5.5 and usage,
+	// but no model is reported through hooks (the whole point of ModelExtractor).
+	transcript := strings.Join([]string{
+		`{"type":"session","version":3,"id":"pi-uuid","cwd":"/tmp"}`,
+		`{"type":"message","id":"m1","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"Hi"}]}}`,
+		`{"type":"message","id":"m2","parentId":"m1","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}],"model":"gpt-5.5","provider":"openai-codex","usage":{"input":1000000,"output":500000,"cacheRead":0,"cacheWrite":0}}}`,
+	}, "\n") + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
+
+	// Modify a tracked file so SaveStep produces a non-empty session + shadow branch.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte("agent-modified content"), 0o644))
+
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"test.txt"},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Pi checkpoint 1",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	}))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+
+	// The bug scenario: Pi agent, model unknown at condensation, first checkpoint
+	// (offset 0 so the whole transcript is in scope).
+	state.AgentType = agent.AgentTypePi
+	state.ModelName = ""
+	state.CheckpointTranscriptStart = 0
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	checkpointID := id.MustCheckpointID("abcdef012345")
+	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped, "condensation must not skip when files are touched")
+
+	// The model was backfilled from the transcript in-memory.
+	require.Equal(t, "gpt-5.5", state.ModelName)
+
+	// Read persisted per-session metadata off the metadata branch.
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+	checkpointTree, err := tree.Tree(checkpointID.Path())
+	require.NoError(t, err)
+
+	sessionMeta, err := checkpointTree.File(checkpointID.Path() + "/0/" + paths.MetadataFileName)
+	if err != nil {
+		subtree, subErr := checkpointTree.Tree("0")
+		require.NoError(t, subErr)
+		sessionMeta, err = subtree.File(paths.MetadataFileName)
+		require.NoError(t, err)
+	}
+	sessionBytes, err := sessionMeta.Contents()
+	require.NoError(t, err)
+	var meta checkpoint.Metadata
+	require.NoError(t, json.Unmarshal([]byte(sessionBytes), &meta))
+
+	// The persisted checkpoint carries the backfilled model AND a real cost.
+	require.Equal(t, "gpt-5.5", meta.Model, "persisted model")
+	require.NotNil(t, meta.TokenUsage, "token usage must be persisted")
+	require.Equal(t, 1000000, meta.TokenUsage.InputTokens, "input tokens from transcript")
+	require.NotNil(t, meta.TokenUsage.CostUSD, "cost must be priced after model backfill")
+	require.Greater(t, *meta.TokenUsage.CostUSD, 0.0, "priced cost must be positive")
+
+	// The per-model breakdown must be bucketed under the real model, never "".
+	require.NotEmpty(t, meta.ModelUsage, "per-model breakdown must be present")
+	var gpt55 *types.TokenUsage
+	for i := range meta.ModelUsage {
+		require.NotEqual(t, "", meta.ModelUsage[i].Model, "no bucket may be keyed under the empty model")
+		if meta.ModelUsage[i].Model == "gpt-5.5" {
+			u := meta.ModelUsage[i].TokenUsage
+			gpt55 = &u
+		}
+	}
+	require.NotNil(t, gpt55, "usage must be bucketed under gpt-5.5")
+	require.NotNil(t, gpt55.CostUSD, "gpt-5.5 bucket must be priced")
+}
+
 // TestCheckpointStepCount covers the prompt-window math that produces the
 // displayed "steps" count: SessionTurnCount - PromptWindowBase, floored at 1.
 func TestCheckpointStepCount(t *testing.T) {

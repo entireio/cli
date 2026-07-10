@@ -225,15 +225,22 @@ func bucketTokens(u *types.TokenUsage) types.TokenUsage {
 // priceBuckets fills in each bucket's cost in place: a bucket that already has a
 // reported cost is left untouched; otherwise, when estimation is enabled and the
 // table resolves the bucket's model, the cost is estimated (CostSourceEstimated).
-// A bucket whose model is unknown, or any bucket when the table is nil or
-// estimation is disabled, keeps a nil cost.
+// A bucket whose model is unknown, a bucket carrying no billable tokens, or any
+// bucket when the table is nil or estimation is disabled, keeps a nil cost.
 func priceBuckets(buckets []types.ModelUsage, table *pricing.Table, disableEstimation bool) {
 	for i := range buckets {
 		b := &buckets[i].TokenUsage
 		if b.CostUSD != nil {
-			continue // reported cost wins
+			continue // reported cost wins (even on a zero-token bucket)
 		}
 		if disableEstimation || table == nil {
+			continue
+		}
+		if !bucketHasTokens(*b) {
+			// No billable tokens: leave the cost nil rather than fabricating a
+			// $0.00 "estimated" figure. Mirrors the ModelUsageCalculator path and
+			// keeps zero-usage checkpoints at "no cost data" instead of flipping
+			// aggregated provenance from reported to mixed.
 			continue
 		}
 		rate, ok := table.Lookup(buckets[i].Model)
