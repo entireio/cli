@@ -40,6 +40,25 @@
       "effective_date": "2026-06-24"
     },
     {
+      "id": "claude-opus-4-8-fast",
+      "provider": "anthropic",
+      "aliases": [
+        "claude-opus-4-8-2*-fast",
+        "anthropic/claude-opus-4-8-fast",
+        "anthropic.claude-opus-4-8-fast",
+        "us.anthropic.claude-opus-4-8-fast*",
+        "eu.anthropic.claude-opus-4-8-fast*",
+        "apac.anthropic.claude-opus-4-8-fast*",
+        "claude-opus-4-8-fast@*",
+        "global.anthropic.claude-opus-4-8-fast*",
+        "anthropic/claude-opus-4.8-fast",
+        "claude-opus-4.8-fast"
+      ],
+      "input_per_mtok": 10,
+      "output_per_mtok": 50,
+      "effective_date": "2026-07-10"
+    },
+    {
       "id": "claude-opus-4-8",
       "provider": "anthropic",
       "aliases": [
