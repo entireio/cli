@@ -90,6 +90,11 @@ func CalculateUsageWithCost(ag Agent, transcriptData []byte, fromOffset int, sub
 		buckets = append(buckets, rem)
 	}
 
+	// Revert unpriceable variant ids (e.g. a fast turn on a model with no -fast
+	// rate) to their base so they estimate at the base rate instead of going
+	// unpriced under a premium-claiming id the table can't resolve.
+	downgradeUnpriceableVariants(buckets, table)
+
 	priceBuckets(buckets, table, disableEstimation)
 	cost, source := foldBucketCost(buckets)
 	flat.CostUSD = cost
@@ -126,8 +131,17 @@ func PriceUsage(usage *types.TokenUsage, model string, table *pricing.Table, dis
 // tierVariantSuffixes are the pricing-tier decorations a caller may have
 // appended to fallbackModel via settings.PricingModelForAgent (e.g. the Codex
 // priority service tier). They exist in the pricing table as distinct model
-// ids but never appear in transcripts.
+// ids but never appear in transcripts. This is the subset the fallback-model
+// machinery (resolveTierFallback/applyTierVariant) is responsible for.
 var tierVariantSuffixes = []string{"-priority"}
+
+// variantSuffixes lists every pricing decoration a bucket's model id may carry
+// that the table might not price: "-fast" (appended by claudecode's
+// modelKeyWithSpeed for fast-mode turns) and "-priority" (the Codex service-tier
+// knob). downgradeUnpriceableVariants reverts an unpriceable one to its base id.
+// It is the superset of tierVariantSuffixes because a speed variant reaches a
+// bucket through a ModelUsageCalculator, not through the fallback model.
+var variantSuffixes = []string{"-fast", "-priority"}
 
 // resolveTierFallback downgrades a tier-suffixed fallback model to its base id
 // when the table cannot price the variant. The tier knob suffixes whatever
@@ -175,6 +189,59 @@ func applyTierVariant(buckets []types.ModelUsage, fallbackModel string) {
 			}
 		}
 	}
+}
+
+// downgradeUnpriceableVariants reverts, in place, each bucket whose model id
+// carries a known variant suffix (-fast, -priority) to its base id when the table
+// cannot price the variant but can price the base. A fast turn on a model with no
+// published fast rate (e.g. claude-fable-5-fast) would otherwise miss the table
+// entirely and go unpriced — worse than the honest base-rate estimate, under an
+// id claiming a premium that was never applied. Detection stays truthful at the
+// source (modelKeyWithSpeed, the tier knob); only here, at pricing time, is
+// priceability known. This is the calculator-bucket analogue of
+// resolveTierFallback, which only covers the fallback model.
+//
+// Rekeying is in place, not merging: a downgraded bucket may now share a model id
+// with another bucket, but same-model buckets are already emitted today (a
+// ModelUsageCalculator's per-model bucket plus the remainder bucket both sit under
+// the session model), and both foldBucketCost here and strategy.accumulateModelUsage
+// downstream fold buckets by model key. Leaving the duplicate is therefore the
+// token- and cost-conserving choice, and it keeps the pre-existing remainder
+// behavior (separate same-model buckets) unchanged.
+func downgradeUnpriceableVariants(buckets []types.ModelUsage, table *pricing.Table) {
+	for i := range buckets {
+		if base, ok := downgradedVariantBase(buckets[i].Model, table); ok {
+			buckets[i].Model = base
+		}
+	}
+}
+
+// downgradedVariantBase returns the base id a variant-suffixed model should be
+// priced under, and whether the downgrade applies. It reports (base, true) when
+// the model carries a known variant suffix and either the table is nil (nothing
+// can be verified, so fall back — mirroring resolveTierFallback), or the table
+// cannot price the variant but can price the base. It reports ("", false) for a
+// priceable variant (keep it), a variant whose base is also unpriceable (the base
+// is no better and the variant id is the more truthful label), or a model with no
+// known variant suffix.
+func downgradedVariantBase(model string, table *pricing.Table) (string, bool) {
+	for _, suffix := range variantSuffixes {
+		base := strings.TrimSuffix(model, suffix)
+		if base == model || base == "" {
+			continue
+		}
+		if table == nil {
+			return base, true
+		}
+		if _, ok := table.Lookup(model); ok {
+			return "", false
+		}
+		if _, ok := table.Lookup(base); ok {
+			return base, true
+		}
+		return "", false
+	}
+	return "", false
 }
 
 // modelUsageBuckets returns per-model token buckets for the transcript slice. It
