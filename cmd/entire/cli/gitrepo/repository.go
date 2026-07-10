@@ -102,10 +102,14 @@ func openPathWithAlternates(repoRoot string) (*git.Repository, error) {
 	// rewritten to absolute paths on read; go-git cannot follow relative
 	// alternates on its own. The alternates file lives under the common git dir
 	// for linked worktrees, so wrap both.
-	dotGitFS := wrapAlternatesRewrite(osfs.New(dotGitPath, osfs.WithBoundOS()))
+	// wrapConfigSanitize sits outside wrapAlternatesRewrite: it drops go-git-
+	// incompatible negative fetch refspecs from config reads (#778); the
+	// alternates wrapper rewrites objects/info/alternates. They intercept
+	// different files and compose cleanly.
+	dotGitFS := wrapConfigSanitize(wrapAlternatesRewrite(osfs.New(dotGitPath, osfs.WithBoundOS())))
 	var commonGitFS billy.Filesystem
 	if commonGitPath != "" {
-		commonGitFS = wrapAlternatesRewrite(osfs.New(commonGitPath, osfs.WithBoundOS()))
+		commonGitFS = wrapConfigSanitize(wrapAlternatesRewrite(osfs.New(commonGitPath, osfs.WithBoundOS())))
 	}
 
 	repositoryFS := dotgit.NewRepositoryFilesystem(dotGitFS, commonGitFS)
