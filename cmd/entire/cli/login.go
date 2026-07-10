@@ -100,6 +100,7 @@ func newLoginCmd() *cobra.Command {
 					useDevice:  useDevice,
 					canPrompt:  interactive.CanPromptInteractively(),
 					sshSession: isSSHSession(),
+					wsl:        isWSL(),
 				})
 		},
 	}
@@ -157,7 +158,7 @@ func requireSecureLoginServer(server string, insecureHTTPAuth bool) error {
 	return nil
 }
 
-func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient, openURL browserOpenFunc, canPrompt bool) error {
+func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient, openURL browserOpenFunc, canPrompt, autoOpen bool) error {
 	start, err := client.StartDeviceAuth(ctx)
 	if err != nil {
 		return fmt.Errorf("start login: %w", err)
@@ -173,14 +174,20 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 		// code is printed above regardless, so it's still available to confirm
 		// against the page (RFC 8628 §3.3.1) or to enter on the bare-URI fallback.
 		fmt.Fprintf(outW, "Login URL:   %s\n\n", approvalURL)
-		fmt.Fprintf(outW, "Press Enter to open in browser...")
 
-		// Read from /dev/tty so we get a real keypress and don't consume piped stdin.
-		if err := waitForEnter(ctx); err != nil {
-			return fmt.Errorf("wait for input: %w", err)
+		// autoOpen skips the Enter prompt and opens straight away: it's set when
+		// arriving here from the WSL browser-loopback fallback, where the user
+		// has already pressed Enter to signal the redirect failed.
+		if !autoOpen {
+			fmt.Fprintf(outW, "Press Enter to open in browser...")
+
+			// Read from /dev/tty so we get a real keypress and don't consume piped stdin.
+			if err := waitForEnter(ctx); err != nil {
+				return fmt.Errorf("wait for input: %w", err)
+			}
+			fmt.Fprintln(outW)
 		}
 
-		fmt.Fprintln(outW)
 		if err := openURL(ctx, approvalURL); err != nil {
 			fmt.Fprintf(errW, "Warning: failed to open browser: %v\n", err)
 			fmt.Fprintf(outW, "Open this URL in your browser to approve this login: %s\n", approvalURL)
@@ -206,6 +213,7 @@ type loginFlowFacts struct {
 	useDevice  bool // --device flag
 	canPrompt  bool // interactive terminal present
 	sshSession bool // running inside an SSH session
+	wsl        bool // running under WSL (Windows Subsystem for Linux)
 }
 
 // runLoginAuto picks between the browser (loopback authorization-code) and
@@ -224,9 +232,24 @@ func runLoginAuto(ctx context.Context, outW, errW io.Writer, deviceClient device
 			// exhausted ports); that shouldn't strand the user — warn and
 			// use the device flow instead.
 			fmt.Fprintf(errW, "Warning: could not start browser sign-in (%v); falling back to the device-code flow.\n", err)
-			return runLogin(ctx, outW, errW, deviceClient, openURL, facts.canPrompt)
+			return runLogin(ctx, outW, errW, deviceClient, openURL, facts.canPrompt, false)
 		}
-		return runBrowserLogin(ctx, outW, errW, flow, deviceClient.BaseURL(), openURL, browserLoginTimeout)
+		// Under WSL the Windows browser opened by openURL can't necessarily
+		// reach this WSL loopback listener (it depends on WSL2
+		// localhostForwarding), so arm the Enter-driven fallback that lets the
+		// user switch to the device-code flow when the redirect never arrives.
+		var waitFallback func(context.Context) error
+		if facts.wsl {
+			waitFallback = waitForEnter
+		}
+		err = runBrowserLogin(ctx, outW, errW, flow, deviceClient.BaseURL(), openURL, browserLoginTimeout, waitFallback)
+		if errors.Is(err, errBrowserFallbackRequested) {
+			fmt.Fprintln(errW, "Browser sign-in didn't complete; switching to code-based sign-in.")
+			// The user just signalled intent, so open the verification URL
+			// immediately instead of prompting for another Enter.
+			return runLogin(ctx, outW, errW, deviceClient, openURL, facts.canPrompt, true)
+		}
+		return err
 	}
 	switch {
 	case facts.useDevice:
@@ -236,8 +259,13 @@ func runLoginAuto(ctx context.Context, outW, errW io.Writer, deviceClient device
 	case facts.sshSession:
 		fmt.Fprintln(errW, "SSH session detected; using device-code flow (a browser opened here couldn't reach this machine).")
 	}
-	return runLogin(ctx, outW, errW, deviceClient, openURL, facts.canPrompt)
+	return runLogin(ctx, outW, errW, deviceClient, openURL, facts.canPrompt, false)
 }
+
+// errBrowserFallbackRequested signals that the user, during the WSL
+// browser-loopback flow, pressed Enter to abandon the (unreachable) redirect
+// and switch to the device-code flow. It never escapes runLoginAuto.
+var errBrowserFallbackRequested = errors.New("browser login fallback requested")
 
 // shouldUseBrowserLogin reports whether `entire login` should use the
 // loopback authorization-code (browser) flow. The browser flow is the
@@ -264,7 +292,7 @@ func isSSHSession() bool {
 // wait up to waitTimeout for the redirect back to the local listener, then
 // exchange the code for tokens. Shares the token validation + persistence
 // tail with runLogin via persistLogin.
-func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuthFlow, baseURL string, openURL browserOpenFunc, waitTimeout time.Duration) error {
+func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuthFlow, baseURL string, openURL browserOpenFunc, waitTimeout time.Duration, waitFallback func(context.Context) error) error {
 	// Wait tears the listener down on return, but Close is idempotent and
 	// covers the error paths before Wait runs.
 	defer func() { _ = flow.Close() }()
@@ -293,26 +321,75 @@ func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuth
 		fmt.Fprintf(outW, "Open this URL in your browser to sign in: %s\n", authURL)
 	}
 
-	fmt.Fprint(outW, "Waiting for sign-in... ")
-
 	// The clock starts here, after the Enter prompt, so time spent reading
 	// the prompt isn't counted against the sign-in itself.
 	waitCtx, cancel := context.WithTimeout(ctx, waitTimeout)
 	defer cancel()
 
-	code, err := flow.Wait(waitCtx)
-	if err != nil {
-		if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("timed out waiting for sign-in after %v; run `entire login` again, or use `entire login --device`", waitTimeout)
+	if waitFallback == nil {
+		fmt.Fprint(outW, "Waiting for sign-in... ")
+		code, err := flow.Wait(waitCtx)
+		if err != nil {
+			return browserWaitError(err, waitCtx, waitTimeout)
 		}
-		return fmt.Errorf("complete login: %w", err)
+		return exchangeAndPersist(ctx, outW, flow, baseURL, code)
 	}
 
+	// WSL: the Windows browser can't necessarily reach this WSL loopback
+	// listener (it depends on WSL2 localhostForwarding). Race the OAuth
+	// callback against an Enter keypress — the user presses Enter when the
+	// browser shows a "can't reach this page" error — and fall back to the
+	// device-code flow on Enter. Whichever fires first cancels the shared
+	// context, unblocking the loser (waitFallback closes /dev/tty on cancel).
+	fmt.Fprint(outW, "Waiting for sign-in... (press Enter if your browser shows a connection error) ")
+
+	type waitResult struct {
+		code string
+		err  error
+	}
+	callbackCh := make(chan waitResult, 1)
+	go func() {
+		code, err := flow.Wait(waitCtx)
+		callbackCh <- waitResult{code: code, err: err}
+	}()
+	fallbackCh := make(chan error, 1)
+	go func() { fallbackCh <- waitFallback(waitCtx) }()
+
+	select {
+	case r := <-callbackCh:
+		cancel() // unblock the fallback waiter (closes /dev/tty)
+		if r.err != nil {
+			return browserWaitError(r.err, waitCtx, waitTimeout)
+		}
+		return exchangeAndPersist(ctx, outW, flow, baseURL, r.code)
+	case ferr := <-fallbackCh:
+		cancel() // unblock flow.Wait
+		if ferr != nil {
+			// Not a real keypress — the waiter was cancelled (parent ctx or the
+			// backstop timeout), so surface that rather than falling back.
+			return browserWaitError(ferr, waitCtx, waitTimeout)
+		}
+		fmt.Fprintln(outW)
+		return errBrowserFallbackRequested
+	}
+}
+
+// browserWaitError maps a Wait/fallback error to the user-facing message,
+// distinguishing the backstop timeout from other failures.
+func browserWaitError(err error, waitCtx context.Context, waitTimeout time.Duration) error {
+	if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("timed out waiting for sign-in after %v; run `entire login` again, or use `entire login --device`", waitTimeout)
+	}
+	return fmt.Errorf("complete login: %w", err)
+}
+
+// exchangeAndPersist exchanges the authorization code for tokens and records
+// the login. Shared by the linear and WSL-fallback browser paths.
+func exchangeAndPersist(ctx context.Context, outW io.Writer, flow browserAuthFlow, baseURL, code string) error {
 	token, refreshToken, err := flow.Exchange(ctx, code)
 	if err != nil {
 		return fmt.Errorf("complete login: %w", err)
 	}
-
 	return persistLogin(outW, baseURL, token, refreshToken)
 }
 
