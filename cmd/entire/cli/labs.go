@@ -41,6 +41,11 @@ var experimentalCommands = []experimentalCommandInfo{
 		Summary:     "Aggregate token usage across committed checkpoints",
 	},
 	{
+		CommandPath: []string{"tokens", "pricing-refresh"},
+		Invocation:  "entire tokens pricing-refresh",
+		Summary:     "Refresh the remote pricing cache (opt in via pricing.remote)",
+	},
+	{
 		CommandPath: []string{"session", "tokens"},
 		Invocation:  "entire session tokens",
 		Summary:     "Show token usage and recommendations for a session",

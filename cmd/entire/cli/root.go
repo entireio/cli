@@ -74,6 +74,12 @@ func NewRootCmd() *cobra.Command {
 			// stdout is piped into jq or captured by scripts — a notice on stdout
 			// corrupts that output while staying invisible in the caller's logs.
 			versioncheck.CheckAndNotify(cmd.Context(), cmd.ErrOrStderr(), versioninfo.Version)
+
+			// Daily remote pricing refresh (opt-in, detached, non-blocking). The
+			// Hidden-command guard above means hooks, MCP, and the __refresh_pricing
+			// worker itself never reach here, so this only fires for real top-level
+			// commands and can't fork-bomb.
+			maybeSpawnPricingRefresh(cmd.Context())
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -139,6 +145,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newHooksCmd())
 	cmd.AddCommand(newTrailCmd())
 	cmd.AddCommand(newSendAnalyticsCmd())
+	cmd.AddCommand(newRefreshPricingCmd()) // hidden worker for the detached daily pricing refresh
 	cmd.AddCommand(newCurlBashPostInstallCmd())
 
 	// Experimental command (developer-only visibility; setup/tune runners).

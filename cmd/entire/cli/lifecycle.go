@@ -936,6 +936,11 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// The per-model buckets are threaded through StepContext.ModelUsage so the
 	// strategy can accumulate them into checkpoint-scoped per-model metadata.
 	table, disableEstimation := LoadPricingTable(ctx)
+	// Opt-in daily remote pricing refresh: when enabled and the cache is stale,
+	// spawn a detached worker to refresh it. Never fetches inline on this
+	// turn-end hook path; ShouldRefresh gates on the 24h backoff so the common
+	// case is a cheap cache stat.
+	maybeSpawnPricingRefresh(ctx)
 	// Codex "priority" service tier bills at a premium; when opted in, price the
 	// turn under the model's "-priority" variant. Only Codex reads settings here,
 	// so every other agent's turn-end skips the extra load.
