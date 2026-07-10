@@ -626,6 +626,92 @@ func TestCondenseSession_RepricesTranscriptModelAfterBackfill(t *testing.T) {
 	}
 	require.NotNil(t, gpt55, "usage must be bucketed under gpt-5.5")
 	require.NotNil(t, gpt55.CostUSD, "gpt-5.5 bucket must be priced")
+
+	// The session-state total must be repointed to the priced copy: the state
+	// backfill ran before the reprice and aliased the pre-reprice usage.
+	require.NotNil(t, state.TokenUsage, "state total present")
+	require.NotNil(t, state.TokenUsage.CostUSD, "state total must carry the repriced cost")
+}
+
+// A zero-token re-extraction (e.g. a Pi fork abandoning the branch that
+// consumed the tokens) must not clobber usage restored from checkpoint state:
+// the reprice swap requires real tokens in the re-extracted slice.
+func TestCondenseSession_RepriceDoesNotClobberStateRestoredUsage(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-06-01-pi-fork"
+
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	// The assistant message (with the model) sits BEFORE the checkpoint window:
+	// the model backfill scans the full transcript (offset 0) and recovers
+	// gpt-5.5, while the usage extraction starts at CheckpointTranscriptStart
+	// and sees nothing — the zero-data re-extraction that must not clobber the
+	// state-restored usage.
+	transcript := strings.Join([]string{
+		`{"type":"session","version":3,"id":"pi-uuid","cwd":"/tmp"}`,
+		`{"type":"message","id":"m1","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"Hi"}]}}`,
+		`{"type":"message","id":"m2","parentId":"m1","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}],"model":"gpt-5.5","provider":"openai-codex","usage":{"input":5,"output":5,"cacheRead":0,"cacheWrite":0}}}`,
+	}, "\n") + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte("fork content"), 0o644))
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"test.txt"},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Pi fork checkpoint",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	}))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	state.AgentType = agent.AgentTypePi
+	state.ModelName = ""
+	state.CheckpointTranscriptStart = 3 // window starts past m2: zero in-window usage
+	// Real usage accumulated in checkpoint state from earlier in the session,
+	// bucketed under the empty model (it was unknown at SaveStep time).
+	state.CheckpointTokenUsage = &agent.TokenUsage{InputTokens: 777000, OutputTokens: 111}
+	state.ModelUsage = map[string]*agent.TokenUsage{"": {InputTokens: 777000, OutputTokens: 111}}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	checkpointID := id.MustCheckpointID("fedcba987654")
+	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped)
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+	checkpointTree, err := tree.Tree(checkpointID.Path())
+	require.NoError(t, err)
+	sessionMeta, err := checkpointTree.File(checkpointID.Path() + "/0/" + paths.MetadataFileName)
+	if err != nil {
+		subtree, subErr := checkpointTree.Tree("0")
+		require.NoError(t, subErr)
+		sessionMeta, err = subtree.File(paths.MetadataFileName)
+		require.NoError(t, err)
+	}
+	sessionBytes, err := sessionMeta.Contents()
+	require.NoError(t, err)
+	var meta checkpoint.Metadata
+	require.NoError(t, json.Unmarshal([]byte(sessionBytes), &meta))
+
+	// The state-restored usage must survive: 777000 input tokens, not zero.
+	require.NotNil(t, meta.TokenUsage, "restored usage must be persisted")
+	require.Equal(t, 777000, meta.TokenUsage.InputTokens, "zero re-extraction must not clobber state-restored tokens")
 }
 
 // TestCheckpointStepCount covers the prompt-window math that produces the

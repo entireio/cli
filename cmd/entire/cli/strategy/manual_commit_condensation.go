@@ -211,12 +211,18 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 			// with a nil cost and ModelUsage=[{Model:"",…}]. Now that the model is
 			// recovered, re-price the SAME extracted slice: both extraction paths
 			// priced from state.CheckpointTranscriptStart with an empty subagents
-			// dir, so repeating those args keeps the reprice equivalent. Swap in
-			// the priced usage and real-model buckets, leaving the state.ModelUsage
-			// mirror fallback above untouched (it only fires when the transcript
-			// yielded no usage, which sessionDataUnpricedFromTranscript excludes).
+			// dir, so repeating those args keeps the reprice equivalent. The swap
+			// requires the re-extraction to carry real tokens — a zero slice (e.g.
+			// a Pi fork abandoning the branch that consumed the tokens) must not
+			// clobber usage restored from checkpoint state above. When the state
+			// total aliases the pre-reprice usage (Pi's backfill returns the
+			// checkpoint usage as-is), it is repointed to the priced copy so the
+			// session-state diagnostic matches the persisted checkpoint.
 			if sessionDataUnpricedFromTranscript(sessionData) {
-				if usage, buckets := tokenUsageWithCost(ctx, ag, sessionData.Transcript, state.CheckpointTranscriptStart, "", state.ModelName); usage != nil {
+				if usage, buckets := tokenUsageWithCost(ctx, ag, sessionData.Transcript, state.CheckpointTranscriptStart, "", state.ModelName); hasTokenUsageData(usage) {
+					if state.TokenUsage == sessionData.TokenUsage {
+						state.TokenUsage = usage
+					}
 					sessionData.TokenUsage = usage
 					sessionData.ModelUsage = buckets
 				}
