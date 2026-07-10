@@ -61,6 +61,8 @@ func flatTokenUsage(ag Agent, transcriptData []byte, fromOffset int, subagentsDi
 // Returns the flat usage (cost fields populated) and the buckets; (nil, nil, nil)
 // when the agent produces no usage.
 func CalculateUsageWithCost(ag Agent, transcriptData []byte, fromOffset int, subagentsDir string, table *pricing.Table, fallbackModel string, disableEstimation bool) (*types.TokenUsage, []types.ModelUsage, error) {
+	fallbackModel = resolveTierFallback(fallbackModel, table)
+
 	flat, err := flatTokenUsage(ag, transcriptData, fromOffset, subagentsDir)
 	if err != nil {
 		return nil, nil, err
@@ -126,6 +128,32 @@ func PriceUsage(usage *types.TokenUsage, model string, table *pricing.Table, dis
 // priority service tier). They exist in the pricing table as distinct model
 // ids but never appear in transcripts.
 var tierVariantSuffixes = []string{"-priority"}
+
+// resolveTierFallback downgrades a tier-suffixed fallback model to its base id
+// when the table cannot price the variant. The tier knob suffixes whatever
+// model the agent reports, but only some variants have published rates (e.g.
+// gpt-5.5-priority): pricing a gpt-5.3-codex session under a nonexistent
+// gpt-5.3-codex-priority id would leave it entirely unpriced — worse than the
+// standard-rate estimate, and the suffixed bucket id would claim a premium that
+// was never applied. Falling back to the base id keeps the estimate an honest
+// undercount, mirroring how fast turns on models without a published fast rate
+// price at the base id. With a nil table nothing can be priced or verified, so
+// the base id is kept there too.
+func resolveTierFallback(fallbackModel string, table *pricing.Table) string {
+	for _, suffix := range tierVariantSuffixes {
+		base := strings.TrimSuffix(fallbackModel, suffix)
+		if base == fallbackModel || base == "" {
+			continue
+		}
+		if table != nil {
+			if _, ok := table.Lookup(fallbackModel); ok {
+				return fallbackModel
+			}
+		}
+		return base
+	}
+	return fallbackModel
+}
 
 // applyTierVariant retargets per-model buckets onto the caller's tier-variant
 // pricing id. When fallbackModel carries a known tier suffix (the caller opted
