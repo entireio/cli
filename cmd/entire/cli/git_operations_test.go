@@ -683,3 +683,91 @@ func TestCheckoutBranchForce_RejectsLeadingDash(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid ref")
 }
+
+// Regression for finding 019f4e32 on #668: `git checkout --force` clobbers an
+// untracked file whose path collides with a tracked file in the target tree,
+// which a plain checkout would have refused ("would be overwritten by
+// checkout"). checkForceCheckoutSafety must detect and report that collision
+// so the confirmation prompt isn't silently wrong about what will be lost.
+func TestCheckForceCheckoutSafety_DetectsCollidingUntrackedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	repo := initOpenedTestRepo(t, tmpDir)
+	w, err := repo.Worktree()
+	require.NoError(t, err)
+
+	collidingPath := filepath.Join(tmpDir, "notes.txt")
+	safePath := filepath.Join(tmpDir, "readme.txt")
+
+	// Base commit that does NOT contain notes.txt.
+	require.NoError(t, os.WriteFile(safePath, []byte("base\n"), 0o644))
+	_, err = w.Add("readme.txt")
+	require.NoError(t, err)
+	_, err = w.Commit("base", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
+	})
+	require.NoError(t, err)
+
+	// Target commit DOES contain notes.txt (tracked).
+	require.NoError(t, os.WriteFile(collidingPath, []byte("tracked notes\n"), 0o644))
+	_, err = w.Add("notes.txt")
+	require.NoError(t, err)
+	target, err := w.Commit("adds notes.txt", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
+	})
+	require.NoError(t, err)
+
+	// Go back to base so notes.txt is untracked (never git-add-ed) at HEAD,
+	// then recreate it with unrelated local content.
+	gitRun(t, tmpDir, "checkout", "--force", "HEAD~1")
+	require.NoError(t, os.WriteFile(collidingPath, []byte("my local untracked scratch notes\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "unrelated.txt"), []byte("also untracked\n"), 0o644))
+
+	ctx := context.Background()
+	collisions, err := checkForceCheckoutSafety(ctx, target.String())
+	require.NoError(t, err)
+	require.Equal(t, []string{"notes.txt"}, collisions,
+		"only the untracked file whose path collides with the target tree should be reported")
+
+	// A plain checkout would indeed refuse due to this collision.
+	require.Error(t, CheckoutBranch(ctx, target.String()))
+
+	// The unrelated untracked file has no collision and must survive a forced checkout.
+	// (Assert on substance, not exact line endings, so a git autocrlf setting in
+	// the environment doesn't make the test flaky.)
+	require.NoError(t, CheckoutBranchForce(ctx, target.String()))
+	got, err := os.ReadFile(filepath.Join(tmpDir, "unrelated.txt"))
+	require.NoError(t, err)
+	require.Contains(t, string(got), "also untracked", "non-colliding untracked file must be preserved")
+
+	// The colliding file was overwritten with the checkpoint's tracked version,
+	// confirming the scenario checkForceCheckoutSafety warned about actually happens.
+	got, err = os.ReadFile(collidingPath)
+	require.NoError(t, err)
+	require.Contains(t, string(got), "tracked notes")
+	require.NotContains(t, string(got), "my local untracked scratch notes")
+}
+
+// checkForceCheckoutSafety reports no collisions when there's nothing to warn about.
+func TestCheckForceCheckoutSafety_NoCollisions(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	repo := initOpenedTestRepo(t, tmpDir)
+	w, err := repo.Worktree()
+	require.NoError(t, err)
+
+	file := filepath.Join(tmpDir, "f.txt")
+	require.NoError(t, os.WriteFile(file, []byte("v1\n"), 0o644))
+	_, err = w.Add("f.txt")
+	require.NoError(t, err)
+	target, err := w.Commit("v1", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "scratch.txt"), []byte("untracked\n"), 0o644))
+
+	collisions, err := checkForceCheckoutSafety(context.Background(), target.String())
+	require.NoError(t, err)
+	require.Empty(t, collisions)
+}

@@ -977,13 +977,33 @@ func handleLogsOnlyCheckout(ctx context.Context, w, errW io.Writer, start *strat
 		return fmt.Errorf("failed to restore logs: %w", err)
 	}
 
+	// Check for untracked files whose path collides with a file in the target
+	// checkpoint's tree. A plain `git checkout` would refuse ("would be
+	// overwritten by checkout") for these, but --force skips that check and
+	// silently clobbers them - a different, wider blast radius than the
+	// generic "uncommitted changes" warning below covers.
+	clobbered, safetyErr := checkForceCheckoutSafety(ctx, point.ID)
+	if safetyErr != nil {
+		// Non-fatal - fall back to the generic warning if we can't compute
+		// the precise collision list.
+		logging.Debug(logCtx, "failed to check force-checkout safety",
+			slog.String("error", safetyErr.Error()),
+		)
+	}
+
 	// Show warning about detached HEAD
+	desc := "This will checkout the commit directly. You'll be in 'detached HEAD' state.\nAny uncommitted changes will be lost!"
+	if len(clobbered) > 0 {
+		desc += "\n\nThe following untracked file(s) also collide with this checkpoint and will be OVERWRITTEN:\n" +
+			formatClobberedFiles(clobbered)
+	}
+
 	var confirm bool
 	confirmForm := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title("Create detached HEAD?").
-				Description("This will checkout the commit directly. You'll be in 'detached HEAD' state.\nAny uncommitted changes will be lost!").
+				Description(desc).
 				Value(&confirm),
 		),
 	)
@@ -1143,6 +1163,94 @@ func getCurrentHeadHash(ctx context.Context) (string, error) {
 	}
 
 	return head.Hash().String(), nil
+}
+
+// checkForceCheckoutSafety checks for untracked files that would be silently
+// overwritten by a `git checkout --force` to targetRef. Unlike a plain
+// checkout (which aborts with "would be overwritten by checkout" when an
+// untracked file's path collides with a file in the target tree), --force
+// skips that safety check and clobbers the file even though it was never
+// staged or committed - a scenario the generic "uncommitted changes will be
+// lost" warning doesn't cover (#668, finding 019f4e32).
+// Returns the colliding paths (empty if none / nothing to warn about).
+func checkForceCheckoutSafety(ctx context.Context, targetRef string) ([]string, error) {
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		repoRoot = "."
+	}
+
+	// Untracked, non-ignored files - these are the ones a user would be
+	// surprised to lose, since `git status` shows them as untracked rather
+	// than "changes not staged for commit".
+	untrackedCmd := exec.CommandContext(ctx, "git", "ls-files", "--others", "--exclude-standard", "-z")
+	untrackedCmd.Dir = repoRoot
+	untrackedOut, err := untrackedCmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list untracked files: %w", err)
+	}
+	untracked := splitNulTerminated(string(untrackedOut))
+	if len(untracked) == 0 {
+		return nil, nil
+	}
+
+	// Paths present in the target checkpoint's tree.
+	treeCmd := exec.CommandContext(ctx, "git", "ls-tree", "-r", "--name-only", "-z", targetRef)
+	treeCmd.Dir = repoRoot
+	treeOut, err := treeCmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list target tree for %s: %w", targetRef, err)
+	}
+	targetPaths := make(map[string]struct{}, len(treeOut))
+	for _, p := range splitNulTerminated(string(treeOut)) {
+		targetPaths[p] = struct{}{}
+	}
+
+	var collisions []string
+	for _, f := range untracked {
+		if _, ok := targetPaths[f]; ok {
+			collisions = append(collisions, f)
+		}
+	}
+	return collisions, nil
+}
+
+// splitNulTerminated splits a NUL-separated string (as produced by `git ... -z`)
+// into its component paths, dropping any trailing/empty entries.
+func splitNulTerminated(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(strings.TrimRight(s, "\x00"), "\x00")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+// formatClobberedFiles renders a bullet list of paths for a confirmation
+// dialog, truncating to keep the prompt readable when there are many.
+func formatClobberedFiles(paths []string) string {
+	const maxShown = 10
+	shown := paths
+	truncated := 0
+	if len(paths) > maxShown {
+		shown = paths[:maxShown]
+		truncated = len(paths) - maxShown
+	}
+
+	var b strings.Builder
+	for _, p := range shown {
+		b.WriteString("  • ")
+		b.WriteString(p)
+		b.WriteString("\n")
+	}
+	if truncated > 0 {
+		fmt.Fprintf(&b, "  ... and %d more\n", truncated)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // checkResetSafety checks for potential issues before a git reset --hard.
