@@ -152,3 +152,70 @@ func TestSanitizedConfig(t *testing.T) {
 		})
 	}
 }
+
+// Regression for the finding on config_sanitize.go:85 — a config that exceeds
+// maxConfigReadBytes must not fall back to the raw file, because a negative
+// fetch refspec past the cap would still reach go-git's parser unstripped and
+// reintroduce #778 for oversized configs.
+func TestSanitizedConfig_OverCap(t *testing.T) {
+	// Pad the config comfortably past the cap with an innocuous comment line,
+	// then place a negative fetch refspec near the end, well within the
+	// visible (capped) prefix.
+	padding := strings.Repeat("# padding line to exceed the read cap\n", (maxConfigReadBytes/38)+1000)
+	config := "[remote \"origin\"]\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n" +
+		"\tfetch = ^refs/heads/excluded\n" + padding
+
+	if len(config) <= maxConfigReadBytes {
+		t.Fatalf("test config (%d bytes) does not exceed maxConfigReadBytes (%d)", len(config), maxConfigReadBytes)
+	}
+
+	mem := memfs.New()
+	f, err := mem.Create(configFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte(config)); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	fs := &configSanitizeFS{Filesystem: mem}
+	got, ok := fs.sanitizedConfig()
+	if !ok {
+		t.Fatal("sanitizedConfig should sanitize an over-cap file instead of falling back to the raw file")
+	}
+	if strings.Contains(got, "fetch = ^refs/heads/excluded") {
+		t.Errorf("negative refspec should have been stripped from an over-cap config; got %q", got)
+	}
+	if !strings.Contains(got, "fetch = +refs/heads/*:refs/remotes/origin/*") {
+		t.Error("positive refspec near the start of an over-cap config should survive")
+	}
+}
+
+// Regression: even when an over-cap config has no negative refspec within
+// the visible prefix, ok must still be true — content past the cap is
+// unseen and could hold one, so the caller must never fall back to the raw
+// file for a truncated read.
+func TestSanitizedConfig_OverCap_NoCaretInPrefix(t *testing.T) {
+	config := "[core]\n\tbare = false\n" + strings.Repeat("# padding line to exceed the read cap\n", (maxConfigReadBytes/38)+1000)
+
+	if len(config) <= maxConfigReadBytes {
+		t.Fatalf("test config (%d bytes) does not exceed maxConfigReadBytes (%d)", len(config), maxConfigReadBytes)
+	}
+
+	mem := memfs.New()
+	f, err := mem.Create(configFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte(config)); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	fs := &configSanitizeFS{Filesystem: mem}
+	_, ok := fs.sanitizedConfig()
+	if !ok {
+		t.Fatal("sanitizedConfig should report ok=true for a truncated read even without a visible negative refspec")
+	}
+}

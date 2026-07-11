@@ -16,9 +16,11 @@ import (
 const configFilePath = "config"
 
 // maxConfigReadBytes caps how much of the config file we read for sanitizing.
-// Real .git/config files are a few KB; the cap is purely defensive. If the file
-// exceeds it we serve the original unchanged (go-git then behaves exactly as it
-// would without this wrapper) rather than risk truncating a live section.
+// Real .git/config files are a few KB; the cap is purely defensive. If the
+// file exceeds it we still sanitize the visible prefix (dropping any trailing
+// line truncated by the cap) rather than falling back to the raw file, which
+// could carry a negative fetch refspec past the cap and reintroduce #778 for
+// oversized configs. See maxAlternatesReadBytes for the analogous rationale.
 const maxConfigReadBytes = 1 << 20 // 1 MiB
 
 // negativeFetchRefspecRE matches a fetch line whose refspec is a git 2.29+
@@ -71,9 +73,12 @@ func isConfigFile(filename string) bool {
 }
 
 // sanitizedConfig returns a copy of the config with negative fetch refspec
-// lines removed. ok is false when the file is missing/unreadable, exceeds the
-// read cap, or contains no negative refspecs — in those cases the caller serves
-// the original file unchanged.
+// lines removed. ok is false when the file is missing/unreadable or it fit
+// within the read cap and contained no negative refspecs; in those cases the
+// caller serves the original file unchanged. When the file exceeds the cap,
+// ok is true even if no line needed stripping so the caller never falls back
+// to the uncapped original — which could contain a negative refspec past the
+// cap that go-git would still choke on.
 func (fs *configSanitizeFS) sanitizedConfig() (string, bool) {
 	f, err := fs.Filesystem.Open(filepath.FromSlash(configFilePath))
 	if err != nil {
@@ -81,19 +86,34 @@ func (fs *configSanitizeFS) sanitizedConfig() (string, bool) {
 	}
 	defer func() { _ = f.Close() }()
 
+	// Read one byte past the cap so we can tell whether the underlying file
+	// has more data than fits in the budget.
 	data, err := io.ReadAll(io.LimitReader(f, maxConfigReadBytes+1))
-	if err != nil || len(data) > maxConfigReadBytes {
+	if err != nil {
 		return "", false
+	}
+	truncated := false
+	if len(data) > maxConfigReadBytes {
+		data = data[:maxConfigReadBytes]
+		truncated = true
 	}
 
 	text := string(data)
-	// Fast path: '^' can only appear in a negative refspec's value, so a config
-	// without it never needs sanitizing.
-	if !strings.Contains(text, "^") {
+	lines := strings.Split(text, "\n")
+	if truncated && !strings.HasSuffix(text, "\n") && len(lines) > 0 {
+		// Discard the trailing line cut off by the cap rather than feed a
+		// partial (and possibly still-negative) refspec line through unseen.
+		lines = lines[:len(lines)-1]
+	}
+
+	// Fast path: '^' can only appear in a negative refspec's value, so an
+	// untruncated config without it never needs sanitizing. A truncated read
+	// must still be treated as changed, since content past the cap may hold
+	// a negative refspec we haven't seen.
+	if !truncated && !strings.Contains(text, "^") {
 		return "", false
 	}
 
-	lines := strings.Split(text, "\n")
 	kept := lines[:0]
 	changed := false
 	for _, line := range lines {
@@ -103,7 +123,7 @@ func (fs *configSanitizeFS) sanitizedConfig() (string, bool) {
 		}
 		kept = append(kept, line)
 	}
-	if !changed {
+	if !changed && !truncated {
 		return "", false
 	}
 	return strings.Join(kept, "\n"), true
