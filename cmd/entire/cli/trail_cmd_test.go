@@ -263,6 +263,71 @@ func TestRunTrailCreateBranchlessHappyPath(t *testing.T) {
 	require.Empty(t, errOut.String())
 }
 
+func TestRunTrailUpdateNumberBranchlessHappyPath(t *testing.T) {
+	// No t.Parallel: uses t.Chdir plus auth/tokenstore package-level test seams.
+	const trailNumberPath = "/api/v1/trails/gh/acme/repo/123"
+	var gotPatch map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"access_token":"exchanged-token","token_type":"Bearer","expires_in":3600}`)
+		case r.Method == http.MethodGet && r.URL.Path == trailNumberPath:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(struct {
+				Trail api.TrailResource `json:"trail"`
+			}{Trail: api.TrailResource{ID: "trl_branchless", Number: 123, Title: "Old", Status: string(trail.StatusOpen)}}); err != nil {
+				t.Errorf("encode detail response: %v", err)
+			}
+		case r.Method == http.MethodPatch && r.URL.Path == trailNumberPath:
+			if err := json.NewDecoder(r.Body).Decode(&gotPatch); err != nil {
+				t.Errorf("decode patch request: %v", err)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailUpdateResponse{Trail: api.TrailResource{ID: "trl_branchless", Number: 123, Title: "New"}}); err != nil {
+				t.Errorf("encode update response: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv(api.BaseURLEnvVar, srv.URL)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
+	service := tokenstore.CoreKeyringService(srv.URL)
+	jwt := makeContextJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"me","exp":%d}`, srv.URL, time.Now().Add(2*time.Hour).Unix()))
+	require.NoError(t, tokenstore.Set(service, "me", tokenstore.EncodeTokenWithExpiration(jwt, 7200)))
+	ctxObj := &contexts.Context{Name: "me@core", CoreURL: srv.URL, Handle: "me", KeychainService: service}
+	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
+		func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
+			return ctxObj, nil
+		}))
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	runGitTrailTest(t, repoDir, "remote", "add", "origin", "https://github.com/acme/repo.git")
+	t.Chdir(repoDir)
+
+	cmd := newTrailCmd()
+	cmd.SetContext(context.Background())
+	cmd.SetArgs([]string{"--insecure-http-auth", "update", "--number", "123", "--title", "New", "--body", "", "--status", string(trail.StatusClosed)})
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+
+	err := cmd.Execute()
+
+	require.NoError(t, err)
+	require.Equal(t, "New", gotPatch["title"])
+	require.Empty(t, gotPatch["body"])
+	require.Equal(t, string(trail.StatusClosed), gotPatch["status"])
+	require.Contains(t, out.String(), "Updated trail 123")
+	require.Empty(t, errOut.String())
+}
+
 func TestCleanupCreatedTrailBranch(t *testing.T) {
 	cases := []struct {
 		name             string
@@ -1028,6 +1093,58 @@ func TestTrailCreateAndUpdateRejectUnexpectedArgs(t *testing.T) {
 		if err := cmd.Args(cmd, []string{"unexpected"}); err == nil {
 			t.Fatalf("%s accepted an unexpected positional arg", cmd.Name())
 		}
+	}
+}
+
+func TestTrailUpdateRejectsNonPositiveNumber(t *testing.T) {
+	t.Parallel()
+	cmd := newTrailUpdateCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--number", "0", "--title", "New"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--number must be greater than 0") {
+		t.Fatalf("err = %v, want --number validation", err)
+	}
+}
+
+func TestTrailUpdateHelpMentionsNumber(t *testing.T) {
+	t.Parallel()
+	cmd := newTrailUpdateCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--help"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("help: %v", err)
+	}
+	if !strings.Contains(out.String(), "--number") {
+		t.Fatalf("help output missing --number flag:\n%s", out.String())
+	}
+}
+
+func TestFetchTrailByNumberDefaultsMissingNumber(t *testing.T) {
+	t.Parallel()
+	const trailNumberPath = "/api/v1/trails/gh/acme/repo/123"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != trailNumberPath {
+			t.Fatalf("path = %q, want trail number path", r.URL.Path)
+		}
+		if err := json.NewEncoder(w).Encode(struct {
+			Trail api.TrailResource `json:"trail"`
+		}{Trail: api.TrailResource{ID: "trl_123", Title: "Branchless"}}); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	found, err := fetchTrailByNumber(context.Background(), client, "gh", "acme", "repo", 123)
+	if err != nil {
+		t.Fatalf("fetchTrailByNumber: %v", err)
+	}
+	if found.Number != 123 {
+		t.Fatalf("Number = %d, want 123", found.Number)
 	}
 }
 

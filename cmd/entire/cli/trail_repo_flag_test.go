@@ -124,6 +124,7 @@ func TestTrailSelectorAndBranchAreMutuallyExclusive(t *testing.T) {
 		{name: "watch", args: []string{"watch", "5", "--branch", "foo"}, wantSub: "not both"},
 		{name: "finding list positional", args: []string{"finding", "list", "123", "--branch", "foo"}, wantSub: "not both"},
 		{name: "finding list --trail", args: []string{"finding", "list", "--trail", "123", "--branch", "foo"}, wantSub: "not both"},
+		{name: "update number", args: []string{"update", "--number", "123", "--branch", "foo"}, wantSub: "cannot combine --number with --branch"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
