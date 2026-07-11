@@ -35,33 +35,30 @@ func GetWorktreeID(worktreePath string) (string, error) {
 		return "", fmt.Errorf("invalid .git file format: %s", line)
 	}
 
-	gitdir := strings.TrimPrefix(line, "gitdir: ")
+	gitdir := filepath.ToSlash(strings.TrimPrefix(line, "gitdir: "))
+
+	// Extract worktree name from path like /repo/.git/worktrees/<name>,
+	// /repo/.bare/worktrees/<name> (bare repo + worktree layout), or
+	// /repo/.git/modules/<submodule>/worktrees/<name> (linked worktree created
+	// inside a submodule). Check this before the submodule-main-worktree
+	// fallback below: a linked worktree inside a submodule also contains
+	// ".git/modules/" in its gitdir, so checking for ".git/modules/" first
+	// would misidentify it as the submodule's main worktree instead of
+	// extracting its actual worktree id.
+	const worktreesMarker = "/worktrees/"
+	if idx := strings.LastIndex(gitdir, worktreesMarker); idx != -1 {
+		worktreeID := strings.TrimSuffix(gitdir[idx+len(worktreesMarker):], "/")
+		return worktreeID, nil
+	}
 
 	// A submodule's .git file points at the superproject's modules dir, e.g.
 	// "gitdir: ../.git/modules/<name>". That is the submodule's own main working
 	// tree, not a linked worktree, so it has no worktree id — treat it like the
-	// main-worktree (empty) case. Without this the worktrees markers below don't
-	// match and session init fails with "unexpected gitdir format" (#640).
-	if strings.Contains(filepath.ToSlash(gitdir), ".git/modules/") {
+	// main-worktree (empty) case. Without this the check above doesn't match
+	// and session init fails with "unexpected gitdir format" (#640).
+	if strings.Contains(gitdir, ".git/modules/") {
 		return "", nil
 	}
 
-	// Extract worktree name from path like /repo/.git/worktrees/<name>
-	// or /repo/.bare/worktrees/<name> (bare repo + worktree layout).
-	// The path after the marker is the worktree identifier.
-	var worktreeID string
-	var found bool
-	for _, marker := range []string{".git/worktrees/", ".bare/worktrees/"} {
-		_, worktreeID, found = strings.Cut(gitdir, marker)
-		if found {
-			break
-		}
-	}
-	if !found {
-		return "", fmt.Errorf("unexpected gitdir format (no worktrees): %s", gitdir)
-	}
-	// Remove trailing slashes if any
-	worktreeID = strings.TrimSuffix(worktreeID, "/")
-
-	return worktreeID, nil
+	return "", fmt.Errorf("unexpected gitdir format (no worktrees): %s", gitdir)
 }

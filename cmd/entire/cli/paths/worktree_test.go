@@ -97,6 +97,18 @@ func TestGetWorktreeID(t *testing.T) {
 			},
 			wantID: "",
 		},
+		{
+			// A linked worktree created from inside a submodule has a gitdir that
+			// contains both ".git/modules/" and "/worktrees/" — it must resolve to
+			// its own worktree id, not be misidentified as the submodule's main
+			// worktree (empty id).
+			name: "linked worktree inside a submodule",
+			setupFunc: func(dir string) error {
+				content := "gitdir: /repo/.git/modules/go-git/worktrees/test-wt\n"
+				return os.WriteFile(filepath.Join(dir, ".git"), []byte(content), 0o644)
+			},
+			wantID: "test-wt",
+		},
 	}
 
 	for _, tt := range tests {
