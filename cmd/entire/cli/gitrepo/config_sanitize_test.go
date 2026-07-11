@@ -132,7 +132,10 @@ func TestSanitizedConfig(t *testing.T) {
 			_ = f.Close()
 
 			fs := &configSanitizeFS{Filesystem: mem}
-			got, ok := fs.sanitizedConfig()
+			got, ok, err := fs.sanitizedConfig()
+			if err != nil {
+				t.Fatalf("sanitizedConfig() unexpected error: %v", err)
+			}
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v (got=%q)", ok, tc.wantOK, got)
 			}
@@ -153,15 +156,63 @@ func TestSanitizedConfig(t *testing.T) {
 	}
 }
 
-// Regression for the finding on config_sanitize.go:85 — a config that exceeds
-// maxConfigReadBytes must not fall back to the raw file, because a negative
-// fetch refspec past the cap would still reach go-git's parser unstripped and
-// reintroduce #778 for oversized configs.
-func TestSanitizedConfig_OverCap(t *testing.T) {
-	// Pad the config comfortably past the cap with an innocuous comment line,
-	// then place a negative fetch refspec near the end, well within the
-	// visible (capped) prefix.
-	padding := strings.Repeat("# padding line to exceed the read cap\n", (maxConfigReadBytes/38)+1000)
+// Regression for the follow-up finding on config_sanitize.go:126 — a config
+// past the old 1MiB prefix cap must have ALL of its content (both the
+// negative refspec and remotes/branches/submodules configured beyond where
+// the old cap would have cut it off) preserved, not silently dropped.
+func TestSanitizedConfig_LargeConfigPreservesEntriesPastOldCap(t *testing.T) {
+	// Pad the config comfortably past the old 1MiB cap (but well under the
+	// current maxConfigReadBytes) with an innocuous comment line, then place
+	// a second, meaningful remote after the padding to prove nothing past
+	// the old cutoff is lost.
+	const oldCap = 1 << 20
+	padding := strings.Repeat("# padding line to exceed the old 1MiB cap\n", (oldCap/40)+5000)
+	config := "[remote \"origin\"]\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n" +
+		"\tfetch = ^refs/heads/excluded\n" + padding +
+		"[remote \"meaningful\"]\n\turl = git@github.com:x/meaningful.git\n"
+
+	if len(config) <= oldCap {
+		t.Fatalf("test config (%d bytes) does not exceed the old 1MiB cap", len(config))
+	}
+	if len(config) >= maxConfigReadBytes {
+		t.Fatalf("test config (%d bytes) must stay under maxConfigReadBytes (%d)", len(config), maxConfigReadBytes)
+	}
+
+	mem := memfs.New()
+	f, err := mem.Create(configFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte(config)); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	fs := &configSanitizeFS{Filesystem: mem}
+	got, ok, err := fs.sanitizedConfig()
+	if err != nil {
+		t.Fatalf("sanitizedConfig() unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("sanitizedConfig should report ok=true when a negative refspec was stripped")
+	}
+	if strings.Contains(got, "fetch = ^refs/heads/excluded") {
+		t.Errorf("negative refspec should have been stripped; got a config still containing it")
+	}
+	if !strings.Contains(got, "fetch = +refs/heads/*:refs/remotes/origin/*") {
+		t.Error("positive refspec near the start of the config should survive")
+	}
+	if !strings.Contains(got, "url = git@github.com:x/meaningful.git") {
+		t.Error("remote configured past the old 1MiB cap was dropped instead of preserved")
+	}
+}
+
+// Regression for the finding on config_sanitize.go:126 — a config exceeding
+// maxConfigReadBytes must not be silently sanitized as a truncated prefix
+// (which could drop remotes/branches/submodules past the cutoff, or hide an
+// unstripped negative refspec from go-git). It must fail loudly instead.
+func TestSanitizedConfig_ExceedsCap_ReturnsError(t *testing.T) {
+	padding := strings.Repeat("# padding line to exceed the read cap\n", (maxConfigReadBytes/37)+50000)
 	config := "[remote \"origin\"]\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n" +
 		"\tfetch = ^refs/heads/excluded\n" + padding
 
@@ -180,42 +231,11 @@ func TestSanitizedConfig_OverCap(t *testing.T) {
 	_ = f.Close()
 
 	fs := &configSanitizeFS{Filesystem: mem}
-	got, ok := fs.sanitizedConfig()
-	if !ok {
-		t.Fatal("sanitizedConfig should sanitize an over-cap file instead of falling back to the raw file")
+	got, ok, err := fs.sanitizedConfig()
+	if err == nil {
+		t.Fatal("sanitizedConfig should return an error for a config exceeding maxConfigReadBytes instead of serving a partial view")
 	}
-	if strings.Contains(got, "fetch = ^refs/heads/excluded") {
-		t.Errorf("negative refspec should have been stripped from an over-cap config; got %q", got)
-	}
-	if !strings.Contains(got, "fetch = +refs/heads/*:refs/remotes/origin/*") {
-		t.Error("positive refspec near the start of an over-cap config should survive")
-	}
-}
-
-// Regression: even when an over-cap config has no negative refspec within
-// the visible prefix, ok must still be true — content past the cap is
-// unseen and could hold one, so the caller must never fall back to the raw
-// file for a truncated read.
-func TestSanitizedConfig_OverCap_NoCaretInPrefix(t *testing.T) {
-	config := "[core]\n\tbare = false\n" + strings.Repeat("# padding line to exceed the read cap\n", (maxConfigReadBytes/38)+1000)
-
-	if len(config) <= maxConfigReadBytes {
-		t.Fatalf("test config (%d bytes) does not exceed maxConfigReadBytes (%d)", len(config), maxConfigReadBytes)
-	}
-
-	mem := memfs.New()
-	f, err := mem.Create(configFilePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.Write([]byte(config)); err != nil {
-		t.Fatal(err)
-	}
-	_ = f.Close()
-
-	fs := &configSanitizeFS{Filesystem: mem}
-	_, ok := fs.sanitizedConfig()
-	if !ok {
-		t.Fatal("sanitizedConfig should report ok=true for a truncated read even without a visible negative refspec")
+	if ok {
+		t.Errorf("ok should be false alongside the error; got ok=true, content=%q", got)
 	}
 }

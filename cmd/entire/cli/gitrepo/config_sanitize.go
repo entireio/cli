@@ -1,6 +1,7 @@
 package gitrepo
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,13 +16,16 @@ import (
 // go-git opens it (the filesystem is rooted at the git directory).
 const configFilePath = "config"
 
-// maxConfigReadBytes caps how much of the config file we read for sanitizing.
-// Real .git/config files are a few KB; the cap is purely defensive. If the
-// file exceeds it we still sanitize the visible prefix (dropping any trailing
-// line truncated by the cap) rather than falling back to the raw file, which
-// could carry a negative fetch refspec past the cap and reintroduce #778 for
-// oversized configs. See maxAlternatesReadBytes for the analogous rationale.
-const maxConfigReadBytes = 1 << 20 // 1 MiB
+// maxConfigReadBytes bounds how much of the config file sanitization will
+// read. Real .git/config files are a few KB even with hundreds of
+// remotes/submodules; the cap exists purely to bound memory against a
+// pathological or corrupted file and is set far above any realistic config
+// size. Unlike a defensive prefix cap, a config that exceeds this limit is
+// never silently served truncated — doing so could drop remotes, branches,
+// or submodule config past the cutoff without any indication, which is worse
+// than the #778 bug this sanitizer exists to fix. sanitizedConfig instead
+// returns an error so the caller surfaces a loud failure.
+const maxConfigReadBytes = 64 << 20 // 64 MiB
 
 // negativeFetchRefspecRE matches a fetch line whose refspec is a git 2.29+
 // negative (exclusion) refspec, e.g. "\tfetch = ^refs/heads/excluded". go-git's
@@ -48,7 +52,11 @@ func wrapConfigSanitize(fs billy.Filesystem) billy.Filesystem {
 
 func (fs *configSanitizeFS) Open(filename string) (billy.File, error) {
 	if isConfigFile(filename) {
-		if content, ok := fs.sanitizedConfig(); ok {
+		content, ok, err := fs.sanitizedConfig()
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			return inMemoryConfigFile(content)
 		}
 	}
@@ -61,7 +69,11 @@ func (fs *configSanitizeFS) Open(filename string) (billy.File, error) {
 // the real file untouched.
 func (fs *configSanitizeFS) OpenFile(filename string, flag int, perm os.FileMode) (billy.File, error) {
 	if flag == os.O_RDONLY && isConfigFile(filename) {
-		if content, ok := fs.sanitizedConfig(); ok {
+		content, ok, err := fs.sanitizedConfig()
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			return inMemoryConfigFile(content)
 		}
 	}
@@ -73,16 +85,17 @@ func isConfigFile(filename string) bool {
 }
 
 // sanitizedConfig returns a copy of the config with negative fetch refspec
-// lines removed. ok is false when the file is missing/unreadable or it fit
-// within the read cap and contained no negative refspecs; in those cases the
-// caller serves the original file unchanged. When the file exceeds the cap,
-// ok is true even if no line needed stripping so the caller never falls back
-// to the uncapped original — which could contain a negative refspec past the
-// cap that go-git would still choke on.
-func (fs *configSanitizeFS) sanitizedConfig() (string, bool) {
+// lines removed. ok is false when the file is missing/unreadable or it
+// contained no negative refspecs; in that case the caller serves the
+// original file unchanged. err is non-nil when the file exceeds
+// maxConfigReadBytes: rather than sanitizing a truncated prefix and silently
+// dropping any remotes/branches/submodules configured past the cutoff (which
+// could also hide an unstripped negative refspec from go-git), the caller
+// surfaces a loud failure instead of serving a partial config.
+func (fs *configSanitizeFS) sanitizedConfig() (string, bool, error) {
 	f, err := fs.Filesystem.Open(filepath.FromSlash(configFilePath))
 	if err != nil {
-		return "", false
+		return "", false, nil
 	}
 	defer func() { _ = f.Close() }()
 
@@ -90,30 +103,21 @@ func (fs *configSanitizeFS) sanitizedConfig() (string, bool) {
 	// has more data than fits in the budget.
 	data, err := io.ReadAll(io.LimitReader(f, maxConfigReadBytes+1))
 	if err != nil {
-		return "", false
+		return "", false, nil
 	}
-	truncated := false
 	if len(data) > maxConfigReadBytes {
-		data = data[:maxConfigReadBytes]
-		truncated = true
+		return "", false, fmt.Errorf("gitrepo: .git/config exceeds %d bytes; refusing to sanitize a partial config (this could silently drop config past the limit)", maxConfigReadBytes)
 	}
 
 	text := string(data)
+
+	// Fast path: '^' can only appear in a negative refspec's value, so a
+	// config without it never needs sanitizing.
+	if !strings.Contains(text, "^") {
+		return "", false, nil
+	}
+
 	lines := strings.Split(text, "\n")
-	if truncated && !strings.HasSuffix(text, "\n") && len(lines) > 0 {
-		// Discard the trailing line cut off by the cap rather than feed a
-		// partial (and possibly still-negative) refspec line through unseen.
-		lines = lines[:len(lines)-1]
-	}
-
-	// Fast path: '^' can only appear in a negative refspec's value, so an
-	// untruncated config without it never needs sanitizing. A truncated read
-	// must still be treated as changed, since content past the cap may hold
-	// a negative refspec we haven't seen.
-	if !truncated && !strings.Contains(text, "^") {
-		return "", false
-	}
-
 	kept := lines[:0]
 	changed := false
 	for _, line := range lines {
@@ -123,10 +127,10 @@ func (fs *configSanitizeFS) sanitizedConfig() (string, bool) {
 		}
 		kept = append(kept, line)
 	}
-	if !changed && !truncated {
-		return "", false
+	if !changed {
+		return "", false, nil
 	}
-	return strings.Join(kept, "\n"), true
+	return strings.Join(kept, "\n"), true, nil
 }
 
 func inMemoryConfigFile(content string) (billy.File, error) {
