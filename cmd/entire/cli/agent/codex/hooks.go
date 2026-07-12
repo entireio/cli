@@ -372,10 +372,41 @@ const (
 	legacyFeatureLine = "codex_hooks = true"
 )
 
-// ensureProjectFeatureEnabled writes features.hooks = true to the
+// ensureProjectFeatureEnabled enables the hooks feature for repoRoot.
+//
+// Normally that means writing features.hooks = true to the project-level
+// .codex/config.toml, keeping the flag scoped per-repo. But when repoRoot
+// lives inside <CODEX_HOME>/agents (a reserved tree Codex recursively scans
+// for custom agent-role TOML files), a project-local .codex/config.toml
+// there gets misinterpreted as a malformed agent role definition and
+// triggers a Codex startup warning (entireio/cli#842). In that case the
+// flag is scoped to this project via a [projects."<repoRoot>".features]
+// table in the global config.toml instead, and any stale project-local
+// config.toml left behind by older entire versions is cleaned up.
+func ensureProjectFeatureEnabled(repoRoot string) error {
+	codexHome, err := resolveCodexHome()
+	if err == nil && isUnderCodexAgentsDir(repoRoot, codexHome) {
+		return ensureScopedProjectFeatureEnabled(codexHome, repoRoot)
+	}
+	return ensureLocalProjectFeatureEnabled(repoRoot)
+}
+
+// isUnderCodexAgentsDir reports whether repoRoot lives inside
+// <codexHome>/agents, the reserved tree Codex recursively scans for custom
+// agent-role TOML files (see developers.openai.com/codex/subagents).
+func isUnderCodexAgentsDir(repoRoot, codexHome string) bool {
+	agentsDir := filepath.Join(codexHome, "agents")
+	rel, err := filepath.Rel(agentsDir, repoRoot)
+	if err != nil {
+		return false
+	}
+	return rel == "." || !strings.HasPrefix(rel, "..")
+}
+
+// ensureLocalProjectFeatureEnabled writes features.hooks = true to the
 // project-level .codex/config.toml. This keeps the feature flag per-repo.
 // Replaces the deprecated codex_hooks = true line if it's present.
-func ensureProjectFeatureEnabled(repoRoot string) error {
+func ensureLocalProjectFeatureEnabled(repoRoot string) error {
 	configPath := filepath.Join(repoRoot, ".codex", configFileName)
 
 	data, err := os.ReadFile(configPath) //nolint:gosec // path constructed from repo root
@@ -437,4 +468,139 @@ func stripLegacyFeatureLine(content string) string {
 		end++
 	}
 	return content[:idx] + content[end:]
+}
+
+// ensureScopedProjectFeatureEnabled writes features.hooks = true scoped to
+// repoRoot via a [projects."<repoRoot>".features] table in the global
+// <codexHome>/config.toml, instead of a project-local .codex/config.toml.
+// This is used when repoRoot falls inside Codex's reserved agents tree; see
+// ensureProjectFeatureEnabled. It never touches other projects' sections or
+// unrelated keys in the global config, and cleans up any stale
+// project-local config.toml an older entire version left behind.
+func ensureScopedProjectFeatureEnabled(codexHome, repoRoot string) error {
+	configPath := filepath.Join(codexHome, configFileName)
+
+	data, err := os.ReadFile(configPath) //nolint:gosec // path resolved from CODEX_HOME or HOME
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read global config.toml: %w", err)
+	}
+
+	updated, changed := ensureLineInSection(string(data), scopedFeaturesHeader(repoRoot), featureLine)
+	if changed {
+		if err := os.MkdirAll(codexHome, 0o750); err != nil {
+			return fmt.Errorf("failed to create Codex home directory: %w", err)
+		}
+		if err := os.WriteFile(configPath, []byte(updated), 0o600); err != nil { //nolint:gosec // path resolved from CODEX_HOME or HOME
+			return fmt.Errorf("failed to write global config.toml: %w", err)
+		}
+	}
+
+	return cleanupStaleReservedTreeConfig(repoRoot)
+}
+
+// scopedFeaturesHeader returns the TOML table header used to scope the
+// hooks feature to a single project inside the global config.toml, e.g.
+//
+//	[projects."/Users/x/.codex/agents/repos/project".features]
+func scopedFeaturesHeader(repoRoot string) string {
+	return "[projects." + tomlQuoteString(repoRoot) + ".features]"
+}
+
+// tomlQuoteString renders s as a TOML basic (double-quoted) string.
+func tomlQuoteString(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// ensureLineInSection inserts line as the first line under the exact TOML
+// table header in content, creating the table (appended at the end of the
+// file) if it doesn't already exist. It reports the updated content and
+// whether a change was made. Like containsFeatureLine, this is a line-based
+// edit rather than a full TOML parse: it only recognizes an unindented,
+// exact header line, and a table's body ends at the next line starting
+// with "[". That's sufficient for the narrow shape this package writes and
+// avoids touching content it doesn't understand.
+func ensureLineInSection(content, header, line string) (string, bool) {
+	lines := strings.Split(content, "\n")
+
+	headerIdx := -1
+	for i, raw := range lines {
+		if strings.TrimSpace(raw) == header {
+			headerIdx = i
+			break
+		}
+	}
+
+	if headerIdx == -1 {
+		trimmed := strings.TrimRight(content, "\n")
+		if trimmed == "" {
+			return header + "\n" + line + "\n", true
+		}
+		return trimmed + "\n\n" + header + "\n" + line + "\n", true
+	}
+
+	end := len(lines)
+	for i := headerIdx + 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == line {
+			return content, false
+		}
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "[") {
+			end = i
+			break
+		}
+	}
+
+	updated := make([]string, 0, len(lines)+1)
+	updated = append(updated, lines[:headerIdx+1]...)
+	updated = append(updated, line)
+	updated = append(updated, lines[headerIdx+1:end]...)
+	updated = append(updated, lines[end:]...)
+	return strings.Join(updated, "\n"), true
+}
+
+// cleanupStaleReservedTreeConfig removes a project-local .codex/config.toml
+// left behind by an older entire version when repoRoot lives inside
+// Codex's reserved agents tree. Codex recursively scans that tree for
+// agent-role TOML files, so a leftover config.toml there keeps triggering
+// a "malformed agent role definition" warning (entireio/cli#842) even
+// after upgrading entire. Only removes the file when, after stripping the
+// exact feature-flag lines and an empty [features] header this package
+// writes, nothing else remains — a file carrying unrelated user content is
+// left alone.
+func cleanupStaleReservedTreeConfig(repoRoot string) error {
+	configPath := filepath.Join(repoRoot, ".codex", configFileName)
+
+	data, err := os.ReadFile(configPath) //nolint:gosec // path constructed from repo root
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read stale config.toml: %w", err)
+	}
+
+	remainder := string(data)
+	for _, known := range []string{legacyFeatureLine, featureLine, "[features]"} {
+		remainder = strings.ReplaceAll(remainder, known+"\n", "")
+		remainder = strings.ReplaceAll(remainder, known, "")
+	}
+	if strings.TrimSpace(remainder) != "" {
+		return nil
+	}
+
+	if err := os.Remove(configPath); err != nil {
+		return fmt.Errorf("failed to remove stale config.toml: %w", err)
+	}
+	return nil
 }

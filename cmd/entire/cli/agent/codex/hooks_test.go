@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
@@ -19,6 +20,21 @@ func setupTestEnv(t *testing.T) string {
 	t.Chdir(tempDir)
 	t.Setenv("CODEX_HOME", filepath.Join(tempDir, ".codex-home"))
 	return tempDir
+}
+
+// setupReservedAgentsTestEnv creates a temp CODEX_HOME and puts the CWD
+// (the "repo") inside <CODEX_HOME>/agents, reproducing the entireio/cli#842
+// layout: a repo checked out under Codex's reserved custom-agent-role
+// discovery tree. Returns (codexHome, repoRoot).
+func setupReservedAgentsTestEnv(t *testing.T) (string, string) {
+	t.Helper()
+	tempDir := t.TempDir()
+	codexHome := filepath.Join(tempDir, ".codex-home")
+	repoRoot := filepath.Join(codexHome, "agents", "repos", "project")
+	require.NoError(t, os.MkdirAll(repoRoot, 0o750))
+	t.Chdir(repoRoot)
+	t.Setenv("CODEX_HOME", codexHome)
+	return codexHome, repoRoot
 }
 
 func TestInstallHooks_CreatesConfig(t *testing.T) {
@@ -386,6 +402,137 @@ func TestInstallHooks_RewritesLegacyFeatureLine(t *testing.T) {
 	require.Contains(t, string(configData), "hooks = true")
 	require.NotContains(t, string(configData), "codex_hooks = true",
 		"legacy codex_hooks line must be replaced, not left alongside the new form")
+}
+
+// TestInstallHooks_ReservedAgentsDir_DoesNotWriteLocalConfigToml pins the
+// entireio/cli#842 fix: when the repo lives under <CODEX_HOME>/agents,
+// InstallHooks must not create a project-local .codex/config.toml, since
+// Codex recursively scans that tree for agent-role TOML files and would
+// misinterpret ours as a malformed role definition. hooks.json (JSON, not
+// scanned) is unaffected.
+func TestInstallHooks_ReservedAgentsDir_DoesNotWriteLocalConfigToml(t *testing.T) {
+	codexHome, repoRoot := setupReservedAgentsTestEnv(t)
+
+	ag := &CodexAgent{}
+	count, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+	require.Equal(t, 4, count)
+
+	localConfig := filepath.Join(repoRoot, ".codex", configFileName)
+	_, statErr := os.Stat(localConfig)
+	require.True(t, os.IsNotExist(statErr), "reserved-tree install must not create a project-local .codex/config.toml")
+
+	// hooks.json is JSON, not scanned by Codex's role-file discovery, so it
+	// stays project-local as normal.
+	hooksPath := filepath.Join(repoRoot, ".codex", HooksFileName)
+	_, err = os.Stat(hooksPath)
+	require.NoError(t, err)
+
+	// The feature flag is scoped to this project in the global config.toml.
+	globalConfig := filepath.Join(codexHome, configFileName)
+	data, err := os.ReadFile(globalConfig)
+	require.NoError(t, err)
+	require.Contains(t, string(data), scopedFeaturesHeader(repoRoot))
+	require.Contains(t, string(data), featureLine)
+}
+
+// TestInstallHooks_ReservedAgentsDir_PreservesExistingGlobalConfig ensures
+// the scoped write merges into an existing global config.toml rather than
+// clobbering unrelated top-level settings or other projects' sections.
+func TestInstallHooks_ReservedAgentsDir_PreservesExistingGlobalConfig(t *testing.T) {
+	codexHome, repoRoot := setupReservedAgentsTestEnv(t)
+
+	require.NoError(t, os.MkdirAll(codexHome, 0o750))
+	existing := "model = \"gpt-5.4\"\n\n" +
+		"[projects.\"/some/other/repo\"]\n" +
+		"trust_level = \"trusted\"\n\n" +
+		"[projects.\"/some/other/repo\".features]\n" +
+		"hooks = true\n"
+	globalConfig := filepath.Join(codexHome, configFileName)
+	require.NoError(t, os.WriteFile(globalConfig, []byte(existing), 0o600))
+
+	ag := &CodexAgent{}
+	_, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(globalConfig)
+	require.NoError(t, err)
+	content := string(data)
+	require.Contains(t, content, "model = \"gpt-5.4\"")
+	require.Contains(t, content, "[projects.\"/some/other/repo\"]")
+	require.Contains(t, content, "trust_level = \"trusted\"")
+	require.Contains(t, content, scopedFeaturesHeader(repoRoot))
+}
+
+// TestInstallHooks_ReservedAgentsDir_Idempotent ensures re-enabling in a
+// reserved-tree repo doesn't duplicate the scoped section.
+func TestInstallHooks_ReservedAgentsDir_Idempotent(t *testing.T) {
+	codexHome, repoRoot := setupReservedAgentsTestEnv(t)
+
+	ag := &CodexAgent{}
+	_, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+
+	_, err = ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+
+	globalConfig := filepath.Join(codexHome, configFileName)
+	data, err := os.ReadFile(globalConfig)
+	require.NoError(t, err)
+	content := string(data)
+	header := scopedFeaturesHeader(repoRoot)
+	require.Equal(t, 1, strings.Count(content, header), "scoped section header must not be duplicated")
+	require.Equal(t, 1, strings.Count(content, featureLine), "feature line must not be duplicated")
+}
+
+// TestInstallHooks_ReservedAgentsDir_CleansUpStaleLocalConfigToml pins the
+// self-heal behavior: a project-local .codex/config.toml left behind by an
+// older, buggy entire version (the exact file entireio/cli#842 reports) is
+// removed once it contains only content this package manages.
+func TestInstallHooks_ReservedAgentsDir_CleansUpStaleLocalConfigToml(t *testing.T) {
+	_, repoRoot := setupReservedAgentsTestEnv(t)
+
+	codexDir := filepath.Join(repoRoot, ".codex")
+	require.NoError(t, os.MkdirAll(codexDir, 0o750))
+	staleConfig := filepath.Join(codexDir, configFileName)
+	require.NoError(t, os.WriteFile(staleConfig, []byte("[features]\nhooks = true\n"), 0o600))
+
+	ag := &CodexAgent{}
+	_, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+
+	_, statErr := os.Stat(staleConfig)
+	require.True(t, os.IsNotExist(statErr), "stale entire-managed local config.toml must be removed")
+}
+
+// TestInstallHooks_ReservedAgentsDir_PreservesUnrelatedLocalConfigContent
+// ensures the cleanup never deletes a local config.toml that carries
+// content this package didn't write itself.
+func TestInstallHooks_ReservedAgentsDir_PreservesUnrelatedLocalConfigContent(t *testing.T) {
+	_, repoRoot := setupReservedAgentsTestEnv(t)
+
+	codexDir := filepath.Join(repoRoot, ".codex")
+	require.NoError(t, os.MkdirAll(codexDir, 0o750))
+	staleConfig := filepath.Join(codexDir, configFileName)
+	custom := "[features]\nhooks = true\nsome_other_setting = true\n"
+	require.NoError(t, os.WriteFile(staleConfig, []byte(custom), 0o600))
+
+	ag := &CodexAgent{}
+	_, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(staleConfig)
+	require.NoError(t, err)
+	require.Contains(t, string(data), "some_other_setting = true")
+}
+
+func TestIsUnderCodexAgentsDir(t *testing.T) {
+	codexHome := "/home/user/.codex"
+	require.True(t, isUnderCodexAgentsDir("/home/user/.codex/agents/repos/project", codexHome))
+	require.True(t, isUnderCodexAgentsDir("/home/user/.codex/agents", codexHome))
+	require.False(t, isUnderCodexAgentsDir("/home/user/code/project", codexHome))
+	require.False(t, isUnderCodexAgentsDir("/home/user/.codex", codexHome))
+	require.False(t, isUnderCodexAgentsDir("/home/user/.codex/agents-other/project", codexHome))
 }
 
 // assertHookCommand verifies that one of the hook entries in groups contains the expected command.
