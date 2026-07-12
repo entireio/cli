@@ -616,3 +616,78 @@ func checkpointSessionIDs(t *testing.T, env *TestEnv, checkpointID string) []str
 	}
 	return ids
 }
+
+// TestShadowStrategy_MidSessionCommit_HumanTTYCommit_BrokenHooks_Recovered is the
+// human sub-case of issue #487. The #487 root cause (global core.hooksPath, or
+// entire off the hook PATH) stops prepare-commit-msg from running for BOTH agent
+// and human-typed commits, and no link prompt ever appears. A developer typing
+// `git commit` at a terminal while an agent's ACTIVE session has overlapping
+// uncommitted work must therefore still have that work recovered — TTY presence
+// alone is NOT a decline when the linking hook was never wired.
+func TestShadowStrategy_MidSessionCommit_HumanTTYCommit_BrokenHooks_Recovered(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	session := env.NewSession()
+
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithTranscriptPath failed: %v", err)
+	}
+
+	env.WriteFile("recovered.txt", "content from agent")
+	session.CreateTranscript("Create recovered.txt", []FileChange{
+		{Path: "recovered.txt", Content: "content from agent"},
+	})
+
+	// Enter broken-hooks mode: the lifecycle installed hooks under .git/hooks, but
+	// remove prepare-commit-msg so git's active hooks dir no longer offers linking
+	// (a global core.hooksPath / Entire-off-PATH would have the same effect — the
+	// #487 root cause). The commit is at a TTY (human), yet the ACTIVE session's
+	// work must still recover.
+	env.RemoveEntirePrepareCommitMsgHook()
+	env.GitCommitNoTrailerAsHumanTTY("Add recovered.txt", "recovered.txt")
+
+	if cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash()); cpID != "" {
+		t.Fatalf("expected no trailer on the commit, got %s", cpID)
+	}
+	cpID := env.TryGetLatestCheckpointID()
+	if cpID == "" {
+		t.Fatal("human-typed trailerless commit in broken-hooks mode was not recovered (issue #487 human sub-case)")
+	}
+	env.ValidateCheckpoint(CheckpointValidation{
+		CheckpointID: cpID,
+		SessionID:    session.ID,
+		Strategy:     strategy.StrategyNameManualCommit,
+		FilesTouched: []string{"recovered.txt"},
+	})
+}
+
+// TestShadowStrategy_MidSessionCommit_HumanTTYCommit_WorkingHooks_NotRecovered is
+// the decline case that must keep working: when Entire's prepare-commit-msg hook
+// IS wired and a human commits at a TTY with no trailer, the absent trailer is a
+// deliberate decline (they answered "no" to the link prompt or deleted the
+// offered trailer in their editor). That intent is honored — no recovery.
+func TestShadowStrategy_MidSessionCommit_HumanTTYCommit_WorkingHooks_NotRecovered(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	// Working-hooks environment: prepare-commit-msg is wired, so a trailerless TTY
+	// commit is a genuine decline (distinct from the #487 broken-hooks mode).
+	env.InstallEntirePrepareCommitMsgHook()
+
+	session := env.NewSession()
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithTranscriptPath failed: %v", err)
+	}
+
+	env.WriteFile("declined.txt", "content from agent")
+	session.CreateTranscript("Create declined.txt", []FileChange{
+		{Path: "declined.txt", Content: "content from agent"},
+	})
+
+	before := env.CountCommittedCheckpoints()
+	env.GitCommitNoTrailerAsHumanTTY("Add declined.txt", "declined.txt")
+	if got := env.CountCommittedCheckpoints(); got != before {
+		t.Fatalf("declined TTY commit (wired prepare-commit-msg) must not be recovered: before=%d after=%d", before, got)
+	}
+}

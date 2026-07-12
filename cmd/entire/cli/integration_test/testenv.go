@@ -1146,6 +1146,86 @@ func (env *TestEnv) GitCommitNoTrailerAsAgent(message string, files ...string) {
 	}
 }
 
+// GitCommitNoTrailerAsHumanTTY stages the given files and creates a commit WITHOUT
+// running prepare-commit-msg (so no Entire-Checkpoint trailer), then runs the
+// post-commit hook with a simulated TTY (ENTIRE_TEST_TTY=1) so the hook's
+// CanPromptInteractively() returns true — reproducing a human typing `git commit`
+// at a terminal.
+//
+// Whether the missing trailer is treated as a deliberate decline depends on
+// whether Entire's prepare-commit-msg hook is wired (see PrepareCommitMsgHookWired
+// / issue #487): wired => decline, not recovered; not wired (broken hooks path)
+// => the ACTIVE session's overlapping work is still recovered.
+func (env *TestEnv) GitCommitNoTrailerAsHumanTTY(message string, files ...string) {
+	env.T.Helper()
+
+	for _, file := range files {
+		env.GitAdd(file)
+	}
+
+	repo, err := gitrepo.OpenPath(env.RepoDir)
+	if err != nil {
+		env.T.Fatalf("failed to open git repo: %v", err)
+	}
+	defer repo.Close()
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		env.T.Fatalf("failed to get worktree: %v", err)
+	}
+
+	if _, err := worktree.Commit(message, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+			When:  time.Now(),
+		},
+	}); err != nil {
+		env.T.Fatalf("failed to commit: %v", err)
+	}
+
+	// Simulate a controlling terminal so CanPromptInteractively() is true.
+	postCmd := exec.CommandContext(context.Background(), getTestBinary(), "hooks", "git", "post-commit")
+	postCmd.Dir = env.RepoDir
+	postCmd.Env = env.gitHookEnv("ENTIRE_TEST_TTY=1")
+	if output, err := postCmd.CombinedOutput(); err != nil {
+		env.T.Logf("post-commit (human TTY) output: %s", output)
+	}
+}
+
+// InstallEntirePrepareCommitMsgHook writes a prepare-commit-msg hook carrying the
+// Entire hook marker into the repo's .git/hooks so PrepareCommitMsgHookWired
+// reports it as wired. Used to model a working-hooks environment (a deliberate
+// human decline) vs the issue #487 broken-hooks mode (hook absent). The script is
+// never executed by these tests — only its presence + marker are read.
+func (env *TestEnv) InstallEntirePrepareCommitMsgHook() {
+	env.T.Helper()
+	hooksDir := filepath.Join(env.RepoDir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o750); err != nil {
+		env.T.Fatalf("mkdir hooks dir: %v", err)
+	}
+	// 0o600 is enough: PrepareCommitMsgHookWired only reads the file for its
+	// marker; the tests never execute this hook, so it need not be executable.
+	script := "#!/bin/sh\n# Entire CLI hooks\nentire hooks git prepare-commit-msg \"$@\" 2>/dev/null || true\n"
+	if err := os.WriteFile(filepath.Join(hooksDir, "prepare-commit-msg"), []byte(script), 0o600); err != nil {
+		env.T.Fatalf("write prepare-commit-msg hook: %v", err)
+	}
+}
+
+// RemoveEntirePrepareCommitMsgHook deletes prepare-commit-msg from the repo's
+// active hooks dir. Used to model the issue #487 broken-hooks mode: the directory
+// git uses for hooks does not contain Entire's prepare-commit-msg (a global
+// core.hooksPath, or Entire off the hook PATH), so no linking is ever offered and
+// PrepareCommitMsgHookWired reports it as not wired. Touches no .git/config, so
+// the config guard is not tripped.
+func (env *TestEnv) RemoveEntirePrepareCommitMsgHook() {
+	env.T.Helper()
+	path := filepath.Join(env.RepoDir, ".git", "hooks", "prepare-commit-msg")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		env.T.Fatalf("remove prepare-commit-msg hook: %v", err)
+	}
+}
+
 func (env *TestEnv) gitHookEnv(extra ...string) []string {
 	envVars := append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,

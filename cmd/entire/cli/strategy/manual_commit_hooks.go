@@ -1564,11 +1564,16 @@ func (s *ManualCommitStrategy) postCommitUpdateBaseCommitOnly(ctx context.Contex
 // Recovery is deliberately narrow:
 //   - It requires at least one ACTIVE session with recent interaction — a
 //     genuinely in-progress agent turn whose commit should have been linked.
-//   - It requires a NON-interactive commit. A human at a TTY with no trailer
-//     either declined linking or was never prompted; we cannot distinguish the
-//     two, so we honor a possible decline and never override it. Agent commits
-//     have no TTY, so this precisely targets the reported scenario (a trailer
-//     that prepare-commit-msg should have added automatically but didn't).
+//   - It suppresses recovery only for a deliberate decline: a commit made at a
+//     TTY *while Entire's prepare-commit-msg hook is wired*. In that case the
+//     human either answered "no" to the link prompt or deleted the offered
+//     trailer in their editor, and we honor that. When prepare-commit-msg is NOT
+//     wired (a global core.hooksPath, or Entire off the hook's PATH — the exact
+//     issue #487 root cause), no linking was ever offered, so a missing trailer
+//     is not a decline: the ACTIVE session's overlapping work is recovered for
+//     human-typed and agent commits alike. Agent commits have no TTY and are
+//     always eligible regardless of hook wiring (they auto-link when the hook
+//     runs, so reaching here means the hook did not add a trailer).
 //
 // Whether the committed files actually belong to the recovered session is still
 // decided per-session by shouldCondenseWithOverlapCheck (with the ACTIVE
@@ -1578,8 +1583,11 @@ func (s *ManualCommitStrategy) recoverTrailerlessCheckpointID(ctx context.Contex
 	if findErr != nil || len(sessions) == 0 {
 		return id.CheckpointID(""), false
 	}
-	// Only recover non-interactive (agent) commits — see doc comment.
-	if interactive.CanPromptInteractively() {
+	// Suppress recovery only for a genuine decline: a TTY commit made while
+	// prepare-commit-msg was wired to offer a trailer. A no-TTY (agent) commit,
+	// or any commit made when the hook was not wired (issue #487 broken-hooks
+	// mode), is not a decline and stays eligible — see doc comment.
+	if interactive.CanPromptInteractively() && PrepareCommitMsgHookWired(ctx) {
 		return id.CheckpointID(""), false
 	}
 	hasRecentActive := false

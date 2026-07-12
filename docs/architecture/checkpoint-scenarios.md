@@ -626,14 +626,25 @@ only capture their own work. This produced the reported "0 checkpoints during an
 active session".
 
 `PostCommit` now **recovers** such commits: with no trailer, if the commit was
-made non-interactively (agent, no TTY) and a recent ACTIVE session's tracked
-work content-overlaps the committed files, it generates a checkpoint ID and
-condenses via the normal `EventGitCommit → Condense` path (the recovered
-checkpoint is then finalized with the full transcript at Stop, like any mid-turn
-checkpoint). Guardrails:
+not a deliberate decline (see below) and a recent ACTIVE session's tracked work
+content-overlaps the committed files, it generates a checkpoint ID and condenses
+via the normal `EventGitCommit → Condense` path (the recovered checkpoint is then
+finalized with the full transcript at Stop, like any mid-turn checkpoint).
+Guardrails:
 
-- **No-TTY only**: a human at a terminal with no trailer may have declined
-  linking; that intent is honored, so interactive commits are never recovered.
+- **Decline is honored, not TTY presence**: recovery is suppressed only when the
+  commit was made at a TTY *and* Entire's `prepare-commit-msg` hook was actually
+  wired (`PrepareCommitMsgHookWired`). That combination means a human was offered
+  the link and the trailer is still absent — they answered "no" to the prompt or
+  deleted the offered trailer in their editor — so the decline is honored. Crucially,
+  the #487 root cause (a global `core.hooksPath`, or Entire off the hook PATH)
+  stops `prepare-commit-msg` from running for **both** agent and human-typed
+  commits, and no link prompt ever appears; in that mode the hook is not wired, so
+  a human typing `git commit` at a terminal is NOT treated as a decline and their
+  overlapping active-session work is recovered — the same as an agent's. Agent
+  commits have no TTY and are always eligible (they auto-link when the hook runs,
+  so a trailerless agent commit means the hook did not add one). This replaces an
+  earlier no-TTY-only gate that silently dropped the human-typed sub-case.
 - **Content-overlap required**: for the recovery path the ACTIVE-session
   overlap-skip in `shouldCondenseWithOverlapCheck` is disabled, so an unrelated
   agent/CI commit made while a session is active is not falsely linked. Overlap

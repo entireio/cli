@@ -1699,3 +1699,51 @@ func TestRemoveGitHook_PermissionDenied(t *testing.T) {
 		t.Errorf("error should mention 'failed to remove hooks', got: %v", err)
 	}
 }
+
+// TestPrepareCommitMsgHookWired verifies the signal that gates issue #487
+// recovery: whether Entire's prepare-commit-msg hook is present (with its marker)
+// in the hooks directory git actually uses. Absent or foreign hook => not wired
+// (broken-hooks mode); present with the Entire marker => wired.
+func TestPrepareCommitMsgHookWired(t *testing.T) {
+	tmpDir := t.TempDir()
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "init")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+	clearGlobalHooksPath(t, tmpDir)
+
+	t.Chdir(tmpDir)
+	ClearHooksDirCache()
+
+	hooksDir := filepath.Join(tmpDir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o750); err != nil {
+		t.Fatalf("mkdir hooks dir: %v", err)
+	}
+	pcm := filepath.Join(hooksDir, "prepare-commit-msg")
+
+	// Absent -> not wired (the #487 broken-hooks mode).
+	_ = os.Remove(pcm)
+	if PrepareCommitMsgHookWired(ctx) {
+		t.Error("expected not wired when prepare-commit-msg is absent")
+	}
+
+	// Present but not Entire's (e.g. a husky/foreign hook) -> not wired.
+	if err := os.WriteFile(pcm, []byte("#!/bin/sh\n# husky\nexit 0\n"), 0o600); err != nil {
+		t.Fatalf("write foreign hook: %v", err)
+	}
+	if PrepareCommitMsgHookWired(ctx) {
+		t.Error("expected not wired when prepare-commit-msg lacks the Entire marker")
+	}
+
+	// Present with the Entire marker -> wired.
+	wired := "#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git prepare-commit-msg \"$@\"\n"
+	if err := os.WriteFile(pcm, []byte(wired), 0o600); err != nil {
+		t.Fatalf("write entire hook: %v", err)
+	}
+	if !PrepareCommitMsgHookWired(ctx) {
+		t.Error("expected wired when Entire's prepare-commit-msg is installed")
+	}
+}

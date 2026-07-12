@@ -172,6 +172,29 @@ func isGitHookInstalledInHooksDir(hooksDir string) bool {
 	return true
 }
 
+// PrepareCommitMsgHookWired reports whether Entire's prepare-commit-msg hook is
+// present in the hooks directory git actually uses for this repo (GetHooksDir
+// resolves core.hooksPath and the linked-worktree common dir). When it is NOT
+// wired, a `git commit` could not have been offered an Entire-Checkpoint trailer
+// — the issue #487 broken-hooks failure mode (a global core.hooksPath, or Entire
+// off the hook's PATH) — so a missing trailer on such a commit is not evidence of
+// a deliberate decline. Checks prepare-commit-msg specifically rather than all
+// managed hooks: post-commit is what invokes this code, so it is necessarily
+// wired, and a partial install missing an unrelated hook must not be read as "the
+// trailer was declined". Fail-closed (returns false) on any resolution/read error
+// so an unreadable hooks dir does not suppress recovery of active-session work.
+func PrepareCommitMsgHookWired(ctx context.Context) bool {
+	hooksDir, err := GetHooksDir(ctx)
+	if err != nil {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(hooksDir, "prepare-commit-msg")) //nolint:gosec // hooksDir from git, filename constant
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), entireHookMarker)
+}
+
 // buildHookSpecs returns the hook specifications for all managed hooks.
 func buildHookSpecs(cmdPrefix string) []hookSpec {
 	prepareCommitMsgCmd := gitHookCommand(cmdPrefix, `prepare-commit-msg "$1" "$2" 2>/dev/null || true`, false)
