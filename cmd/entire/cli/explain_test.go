@@ -5720,6 +5720,282 @@ func TestGetBranchCheckpoints_NestedMergeIntoNonDefaultTarget(t *testing.T) {
 	}
 }
 
+func TestIsShadowBranchReachable_FollowsMergeSecondParents(t *testing.T) {
+	// A shadow branch based on a commit that entered the current branch's history
+	// via a merge commit's SECOND parent (e.g. an in-progress session on a feature
+	// branch that was merged into a non-default target) must be judged reachable.
+	// The old first-parent-only walk missed it and dropped the temporary
+	// checkpoints — the ephemeral counterpart of issue #931.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	masterBase, err := w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-3 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+	baseObj, err := repo.CommitObject(masterBase)
+	if err != nil {
+		t.Fatalf("failed to get base commit: %v", err)
+	}
+	baseTree, err := baseObj.Tree()
+	if err != nil {
+		t.Fatalf("failed to get base tree: %v", err)
+	}
+
+	// A feature commit that will become the merge's second parent.
+	featureCommit := createCommitWithTree(t, repo, baseTree.Hash, []plumbing.Hash{masterBase}, "feature work")
+	// release = merge(masterBase, featureCommit): featureCommit is reachable only
+	// via the second parent.
+	mergeHash := createMergeCommit(t, repo, masterBase, featureCommit, baseTree.Hash, "Merge feature into release")
+	setBranchHead(t, repo, "release", mergeHash)
+
+	ctx := context.Background()
+	shortHash := func(h plumbing.Hash) string { return h.String()[:7] }
+
+	// The fix: a shadow base on the merge's second parent is reachable.
+	if !isShadowBranchReachable(ctx, repo, shortHash(featureCommit), mergeHash, false) {
+		t.Errorf("expected shadow base on the merge's second parent (%s) to be reachable", shortHash(featureCommit))
+	}
+	// No regression: a first-parent-chain base is still reachable.
+	if !isShadowBranchReachable(ctx, repo, shortHash(masterBase), mergeHash, false) {
+		t.Errorf("expected first-parent base (%s) to remain reachable", shortHash(masterBase))
+	}
+	// An unrelated commit is not reachable.
+	if isShadowBranchReachable(ctx, repo, "0123abc", mergeHash, false) {
+		t.Errorf("an unrelated commit prefix must not be judged reachable")
+	}
+	// On the default branch the check short-circuits to true.
+	if !isShadowBranchReachable(ctx, repo, "0123abc", mergeHash, true) {
+		t.Errorf("isOnDefault must short-circuit to reachable")
+	}
+}
+
+func TestGetBranchCheckpoints_ShadowBranchBaseOnMergeSecondParent(t *testing.T) {
+	// End-to-end companion to the unit test above: a temporary (shadow-branch)
+	// checkpoint whose base commit lives on a merge's second parent must surface
+	// on a non-default target branch. First-parent-only reachability dropped it.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	masterBase, err := w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-3 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	// Feature branch commit (the merge's second parent) with modified content.
+	featureBranch := plumbing.NewBranchReferenceName("feature/x")
+	if err := w.Checkout(&git.CheckoutOptions{Hash: masterBase, Branch: featureBranch, Create: true}); err != nil {
+		t.Fatalf("failed to create feature branch: %v", err)
+	}
+	if err := os.WriteFile(testFile, []byte("feature content"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	featureCommit, err := w.Commit("feature work", &git.CommitOptions{
+		Author: &object.Signature{Name: "Feature Dev", Email: "dev@example.com", When: time.Now().Add(-2 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("failed to create feature commit: %v", err)
+	}
+	featureObj, err := repo.CommitObject(featureCommit)
+	if err != nil {
+		t.Fatalf("failed to get feature commit: %v", err)
+	}
+	featureTree, err := featureObj.Tree()
+	if err != nil {
+		t.Fatalf("failed to get feature tree: %v", err)
+	}
+
+	// release = merge(masterBase, featureCommit); feature reachable only via 2nd parent.
+	mergeHash := createMergeCommit(t, repo, masterBase, featureCommit, featureTree.Hash, "Merge feature/x into release")
+	setBranchHead(t, repo, "release", mergeHash)
+	if isOnDefault, cur := strategy.IsOnDefaultBranch(repo); isOnDefault {
+		t.Fatalf("test setup invalid: expected a non-default branch, got default branch %q", cur)
+	}
+
+	// Session metadata for the shadow-branch (temporary) checkpoint.
+	sessionID := "2026-07-11-shadow-second-parent"
+	metadataDir := filepath.Join(tmpDir, ".entire", "metadata", sessionID)
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, paths.PromptFileName), []byte("shadow session prompt"), 0o644); err != nil {
+		t.Fatalf("failed to write prompt file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// A shadow branch based on the feature commit (the merge's second parent).
+	store := checkpoint.NewEphemeralStore(repo, checkpoint.DefaultV1Refs())
+	baseCommit := featureCommit.String()[:7]
+	if _, err := store.Write(context.Background(), checkpoint.Step{
+		SessionID:         sessionID,
+		BaseCommit:        baseCommit,
+		ModifiedFiles:     []string{"test.txt"},
+		MetadataDir:       ".entire/metadata/" + sessionID,
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "baseline",
+		AuthorName:        "Feature Dev",
+		AuthorEmail:       "dev@example.com",
+		IsFirstCheckpoint: true,
+	}); err != nil {
+		t.Fatalf("ephemeral baseline write error: %v", err)
+	}
+	if err := os.WriteFile(testFile, []byte("feature content, in-progress edit"), 0o644); err != nil {
+		t.Fatalf("failed to modify file: %v", err)
+	}
+	if _, err := store.Write(context.Background(), checkpoint.Step{
+		SessionID:         sessionID,
+		BaseCommit:        baseCommit,
+		ModifiedFiles:     []string{"test.txt"},
+		MetadataDir:       ".entire/metadata/" + sessionID,
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "in-progress work",
+		AuthorName:        "Feature Dev",
+		AuthorEmail:       "dev@example.com",
+		IsFirstCheckpoint: false,
+	}); err != nil {
+		t.Fatalf("ephemeral second write error: %v", err)
+	}
+
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 100)
+	if err != nil {
+		t.Fatalf("getBranchCheckpoints error: %v", err)
+	}
+	var foundTemp bool
+	for _, p := range points {
+		if !p.IsLogsOnly && p.SessionID == sessionID {
+			foundTemp = true
+			break
+		}
+	}
+	if !foundTemp {
+		t.Errorf("expected the temporary checkpoint for session %s (shadow base on merge second parent) to surface, got %d points: %+v", sessionID, len(points), points)
+	}
+}
+
+func TestGetBranchCheckpoints_DeepHistoryDoesNotLeakMainCheckpoint(t *testing.T) {
+	// computeReachableFromMain must mark main's ENTIRE first-parent chain, not
+	// just the most recent MaxCommitTraversalDepth commits. A branch that merged
+	// main in long ago — with main since advanced past that depth — would
+	// otherwise have the merged-in former-main-tip fall outside the reachable
+	// set, and walkBranchOwnCommits would descend into main's older history and
+	// surface main's checkpoints on the branch. This exercises the leak beyond
+	// the old depth bound.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	masterBase, err := w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-3 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+	baseObj, err := repo.CommitObject(masterBase)
+	if err != nil {
+		t.Fatalf("failed to get base commit: %v", err)
+	}
+	tree, err := baseObj.Tree()
+	if err != nil {
+		t.Fatalf("failed to get base tree: %v", err)
+	}
+
+	cpMainOld := id.MustCheckpointID("aa5700000001")
+	cpFeature := id.MustCheckpointID("fea700000002")
+
+	// An old main tip carrying a checkpoint.
+	mainOld := createCommitWithTree(t, repo, tree.Hash, []plumbing.Hash{masterBase}, trailers.FormatCheckpoint("main: old work", cpMainOld))
+
+	// Advance master past the old depth bound so mainOld falls outside a
+	// depth-limited first-parent scan.
+	prev := mainOld
+	for range strategy.MaxCommitTraversalDepth + 5 {
+		prev = createCommitWithTree(t, repo, tree.Hash, []plumbing.Hash{prev}, "main: filler")
+	}
+	masterHead := prev
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("master"), masterHead)); err != nil {
+		t.Fatalf("failed to advance master ref: %v", err)
+	}
+
+	// Feature branches from the base, gets its own checkpoint, then merges the
+	// OLD main tip in (first parent = feature, second parent = mainOld).
+	featureCommit := createCommitWithTree(t, repo, tree.Hash, []plumbing.Hash{masterBase}, trailers.FormatCheckpoint("feat: work", cpFeature))
+	mergeHash := createMergeCommit(t, repo, featureCommit, mainOld, tree.Hash, "Merge old main into feature")
+	setBranchHead(t, repo, "feature/x", mergeHash)
+	if isOnDefault, cur := strategy.IsOnDefaultBranch(repo); isOnDefault {
+		t.Fatalf("test setup invalid: expected a non-default branch, got default branch %q", cur)
+	}
+
+	writeCommittedCheckpointsForTest(t, repo, cpMainOld, cpFeature)
+
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 100)
+	if err != nil {
+		t.Fatalf("getBranchCheckpoints error: %v", err)
+	}
+	found := collectCheckpointIDs(points)
+	if !found[cpFeature] {
+		t.Errorf("expected feature checkpoint %s to be found, got %d points: %v", cpFeature, len(points), points)
+	}
+	if found[cpMainOld] {
+		t.Errorf("old default-branch checkpoint %s (merged in beyond the reachable-set depth bound) must not leak onto the feature branch", cpMainOld)
+	}
+}
+
 func TestGetBranchCheckpoints_ReadsPromptFromCommittedCheckpoint(t *testing.T) {
 	// Verifies that getBranchCheckpoints populates RewindPoint.SessionPrompt
 	// from prompt.txt on entire/checkpoints/v1 (committed checkpoint) without

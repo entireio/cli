@@ -1951,6 +1951,16 @@ func getCurrentWorktreeHash(ctx context.Context) string {
 // On the default branch itself, returns an empty map (no filtering needed).
 // Only first-parent commits are included — commits from side branches merged into main are excluded,
 // since those could be feature branch commits that shouldn't be filtered out.
+//
+// The first-parent chain is walked to its root (no depth limit). This is
+// load-bearing for leak prevention: walkBranchOwnCommits prunes only at commits
+// present in this set, so any main commit missing from it is mis-treated as
+// branch-owned. If the walk stopped after a fixed depth, a branch that merged
+// main in long ago — where main has since advanced past that depth — would have
+// the merged-in former-main-tip fall outside the set, and the walk would descend
+// into main's older history and surface main's checkpoints on the branch
+// (issue #931's leak invariant, in reverse). This runs only on the read path
+// (checkpoint list/explain), so the linear first-parent scan is acceptable.
 func computeReachableFromMain(ctx context.Context, repo *git.Repository) map[plumbing.Hash]bool {
 	reachableFromMain := make(map[plumbing.Hash]bool)
 
@@ -1977,8 +1987,10 @@ func computeReachableFromMain(ctx context.Context, repo *git.Repository) map[plu
 		return reachableFromMain
 	}
 
-	// Walk main's first-parent chain to build the set
-	_ = walkFirstParentCommits(ctx, repo, mainBranchHash, strategy.MaxCommitTraversalDepth, func(c *object.Commit) error { //nolint:errcheck // Best-effort
+	// Walk main's ENTIRE first-parent chain to build the set (limit 0 = no depth
+	// bound). A truncated walk would leak main's older history onto branches that
+	// merged main in beyond the bound — see the doc comment above.
+	_ = walkFirstParentCommits(ctx, repo, mainBranchHash, 0, func(c *object.Commit) error { //nolint:errcheck // Best-effort
 		reachableFromMain[c.Hash] = true
 		return nil
 	})
@@ -2347,24 +2359,71 @@ func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository,
 
 // isShadowBranchReachable checks if a shadow branch's base commit is reachable from HEAD.
 // For default branches, all shadow branches are considered reachable.
-// For feature branches, we check if any commit with the base commit prefix is in HEAD's history.
+// For feature branches, we check if any commit with the base commit prefix is
+// reachable from HEAD by following ALL parents (a full DAG walk, not first-parent
+// only).
+//
+// A first-parent-only check misses base commits that entered HEAD's history via a
+// merge commit's second+ parents — e.g. an in-progress session whose shadow
+// branch is based on a feature commit that was merged into a non-default target
+// (`release`). Such a shadow branch would be judged unreachable and its temporary
+// checkpoints silently dropped, reproducing issue #931 for ephemeral checkpoints.
+// Following every parent keeps the shadow-branch (ephemeral) path consistent with
+// the committed-checkpoint path's merge awareness (walkBranchOwnCommits).
 func isShadowBranchReachable(ctx context.Context, repo *git.Repository, baseCommit string, headHash plumbing.Hash, isOnDefault bool) bool {
 	// For default branch: all shadow branches are potentially relevant
 	if isOnDefault {
 		return true
 	}
 
-	// Check if base commit hash prefix matches any commit in HEAD's first-parent chain
-	found := false
-	_ = walkFirstParentCommits(ctx, repo, headHash, commitScanLimit, func(c *object.Commit) error { //nolint:errcheck // Best-effort
-		if strings.HasPrefix(c.Hash.String(), baseCommit) {
-			found = true
-			return errStopIteration
-		}
-		return nil
-	})
+	return isCommitReachable(ctx, repo, headHash, baseCommit, commitScanLimit)
+}
 
-	return found
+// isCommitReachable reports whether a commit whose full hash is prefixed by
+// commitPrefix is reachable from `from` by following every parent (a full DAG
+// walk). It visits at most `limit` commits (0 = no limit), in breadth-first
+// order, and stops as soon as a match is found. Each commit is visited once.
+//
+// Unlike a first-parent-only search this also finds commits merged in via a merge
+// commit's second+ parents, which is what makes the shadow-branch reachability
+// check merge-aware (issue #931). Following all parents is a strict superset of
+// the first-parent chain, so nothing previously found becomes unreachable.
+//
+// An empty commitPrefix matches the first commit (strings.HasPrefix(x, "") is
+// always true), preserving the prior first-parent walk's behavior for that case.
+func isCommitReachable(ctx context.Context, repo *git.Repository, from plumbing.Hash, commitPrefix string, limit int) bool {
+	visited := map[plumbing.Hash]struct{}{from: {}}
+	queue := []plumbing.Hash{from}
+
+	for count := 0; len(queue) > 0 && (limit <= 0 || count < limit); count++ {
+		if ctx.Err() != nil {
+			return false
+		}
+
+		hash := queue[0]
+		queue = queue[1:]
+
+		if strings.HasPrefix(hash.String(), commitPrefix) {
+			return true
+		}
+
+		current, err := repo.CommitObject(hash)
+		if err != nil {
+			// Best-effort: skip commits we cannot read (e.g. a shallow-clone
+			// boundary) rather than aborting the whole reachability check.
+			continue
+		}
+
+		for _, parent := range current.ParentHashes {
+			if _, seen := visited[parent]; seen {
+				continue
+			}
+			visited[parent] = struct{}{}
+			queue = append(queue, parent)
+		}
+	}
+
+	return false
 }
 
 // convertTemporaryCheckpoint converts a EphemeralCheckpointInfo to a RewindPoint.
