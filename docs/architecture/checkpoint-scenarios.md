@@ -609,3 +609,36 @@ For anything that slips through, run `entire clean --all` manually:
 entire clean --all          # Preview orphaned items
 entire clean --all --force  # Delete orphaned items
 ```
+
+### 10. Trailerless Mid-Session Commit Recovery (issue #487)
+
+Scenario 2's contract is that a mid-session agent commit condenses on `PostCommit`
+(ACTIVE + GitCommit → Condense in the state machine). That relies on
+`PrepareCommitMsg` having added the `Entire-Checkpoint` trailer. When
+`PrepareCommitMsg` never runs — e.g. a global `core.hooksPath` is configured or
+`entire` is off the git hook's PATH so only `PostCommit` fires — the commit
+carries no trailer.
+
+Historically `PostCommit` returned early on a missing trailer, so the ACTIVE
+session's work for that commit was **lost**: the Stop hook can't recover it
+(the files are already committed, so nothing is "modified"), and later commits
+only capture their own work. This produced the reported "0 checkpoints during an
+active session".
+
+`PostCommit` now **recovers** such commits: with no trailer, if the commit was
+made non-interactively (agent, no TTY) and a recent ACTIVE session's tracked
+work content-overlaps the committed files, it generates a checkpoint ID and
+condenses via the normal `EventGitCommit → Condense` path (the recovered
+checkpoint is then finalized with the full transcript at Stop, like any mid-turn
+checkpoint). Guardrails:
+
+- **No-TTY only**: a human at a terminal with no trailer may have declined
+  linking; that intent is honored, so interactive commits are never recovered.
+- **Content-overlap required**: for the recovery path the ACTIVE-session
+  overlap-skip in `shouldCondenseWithOverlapCheck` is disabled, so an unrelated
+  agent/CI commit made while a session is active is not falsely linked.
+
+The recovered checkpoint lands on `entire/checkpoints/v1` (no data loss) but the
+already-made commit cannot be given a trailer retroactively, so a
+commit-anchored `entire explain <commit>` won't associate it; it is still
+visible in session-anchored views and counted on the metadata branch.

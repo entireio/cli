@@ -1098,6 +1098,54 @@ func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, f
 	}
 }
 
+// GitCommitNoTrailerAsAgent stages the given files and creates a commit WITHOUT
+// running prepare-commit-msg, so the commit carries no Entire-Checkpoint trailer.
+// It then runs the post-commit hook non-interactively (as an agent commit would),
+// so CanPromptInteractively() is false in the hook process.
+//
+// This reproduces the issue #487 scenario: a mid-session agent commit whose
+// prepare-commit-msg trailer was never added (e.g. the hook did not run because
+// of a global core.hooksPath or a PATH gap). It exercises PostCommit's recovery
+// path, which must still condense the ACTIVE session's work.
+func (env *TestEnv) GitCommitNoTrailerAsAgent(message string, files ...string) {
+	env.T.Helper()
+
+	for _, file := range files {
+		env.GitAdd(file)
+	}
+
+	repo, err := gitrepo.OpenPath(env.RepoDir)
+	if err != nil {
+		env.T.Fatalf("failed to open git repo: %v", err)
+	}
+	defer repo.Close()
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		env.T.Fatalf("failed to get worktree: %v", err)
+	}
+
+	if _, err := worktree.Commit(message, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+			When:  time.Now(),
+		},
+	}); err != nil {
+		env.T.Fatalf("failed to commit: %v", err)
+	}
+
+	// Run post-commit non-interactively so the hook's CanPromptInteractively()
+	// returns false, matching the no-TTY gate in the #487 recovery path.
+	postCmd := execx.NonInteractive(context.Background(), getTestBinary(), "hooks", "git", "post-commit")
+	postCmd.Dir = env.RepoDir
+	postCmd.Env = env.gitHookEnv()
+	if output, err := postCmd.CombinedOutput(); err != nil {
+		env.T.Logf("post-commit output: %s", output)
+		// Don't fail — hook is best-effort and may exit non-zero silently.
+	}
+}
+
 func (env *TestEnv) gitHookEnv(extra ...string) []string {
 	envVars := append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
@@ -1419,6 +1467,39 @@ func (env *TestEnv) GetLatestCheckpointID() string {
 	env.T.Fatalf("could not find checkpoint ID in %s branch commit message:\n%s",
 		paths.MetadataBranchName, commit.Message)
 	return ""
+}
+
+// CountCommittedCheckpoints returns the number of "Checkpoint:" commits on the
+// entire/checkpoints/v1 branch (excludes the metadata-init commit and any
+// "Finalize transcript for Checkpoint:" finalization commits). Returns 0 when
+// the branch does not exist.
+func (env *TestEnv) CountCommittedCheckpoints() int {
+	env.T.Helper()
+
+	repo, err := gitrepo.OpenPath(env.RepoDir)
+	if err != nil {
+		return 0
+	}
+	defer repo.Close()
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		return 0
+	}
+	iter, err := repo.Log(&git.LogOptions{From: ref.Hash()})
+	if err != nil {
+		return 0
+	}
+	defer iter.Close()
+
+	count := 0
+	_ = iter.ForEach(func(c *object.Commit) error {
+		if strings.HasPrefix(c.Message, "Checkpoint: ") {
+			count++
+		}
+		return nil
+	})
+	return count
 }
 
 // TryGetLatestCheckpointID returns the most recent checkpoint ID from the entire/checkpoints/v1 branch.

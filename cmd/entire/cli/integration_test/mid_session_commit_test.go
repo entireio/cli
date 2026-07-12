@@ -374,3 +374,151 @@ func TestShadowStrategy_MidTurnCommit_DifferentFilesThanCheckpoint(t *testing.T)
 
 	t.Log("Mid-turn commit with different files correctly condensed to entire/checkpoints/v1")
 }
+
+// TestShadowStrategy_MidSessionCommit_RecoversWhenTrailerMissing is the
+// regression test for issue #487. When an agent commits mid-session but the
+// commit carries no Entire-Checkpoint trailer (prepare-commit-msg never ran —
+// e.g. a global core.hooksPath or a PATH gap prevented it), PostCommit must
+// still condense the ACTIVE session's work to entire/checkpoints/v1 instead of
+// silently dropping it. Before the fix, PostCommit early-returned on the missing
+// trailer and the Stop hook could not recover the work (the files are already
+// committed), producing the reported "0 checkpoints during active session".
+func TestShadowStrategy_MidSessionCommit_RecoversWhenTrailerMissing(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	session := env.NewSession()
+
+	// ACTIVE session with a transcript path (has condensable content).
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithTranscriptPath failed: %v", err)
+	}
+
+	// Agent writes a file and records it in the live transcript.
+	env.WriteFile("recovered.txt", "content from agent")
+	session.CreateTranscript("Create recovered.txt", []FileChange{
+		{Path: "recovered.txt", Content: "content from agent"},
+	})
+
+	// Commit WITHOUT a trailer (prepare-commit-msg never ran), as an agent.
+	env.GitCommitNoTrailerAsAgent("Add recovered.txt", "recovered.txt")
+
+	// The commit itself must carry no trailer (we bypassed prepare-commit-msg).
+	if cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash()); cpID != "" {
+		t.Fatalf("expected no trailer on the commit, got %s", cpID)
+	}
+
+	// CRITICAL: the work must still be condensed to entire/checkpoints/v1.
+	if !env.BranchExists(paths.MetadataBranchName) {
+		t.Fatal("entire/checkpoints/v1 should exist — trailerless mid-session commit must be recovered (issue #487)")
+	}
+	cpID := env.TryGetLatestCheckpointID()
+	if cpID == "" {
+		t.Fatal("trailerless mid-session commit was not recovered — no checkpoint on entire/checkpoints/v1 (issue #487)")
+	}
+	t.Logf("Recovered checkpoint: %s", cpID)
+
+	// The recovered checkpoint must carry the committed file and belong to the session.
+	env.ValidateCheckpoint(CheckpointValidation{
+		CheckpointID: cpID,
+		SessionID:    session.ID,
+		Strategy:     strategy.StrategyNameManualCommit,
+		FilesTouched: []string{"recovered.txt"},
+	})
+}
+
+// TestShadowStrategy_MidSessionCommit_TrailerlessUnrelatedCommit_NotRecovered
+// verifies the #487 recovery does not over-reach: a trailerless commit whose
+// files do NOT overlap the ACTIVE session's tracked work is left alone (no
+// checkpoint), because the content-overlap check still gates recovery.
+func TestShadowStrategy_MidSessionCommit_TrailerlessUnrelatedCommit_NotRecovered(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	session := env.NewSession()
+
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithTranscriptPath failed: %v", err)
+	}
+
+	// The session touched agent_file.txt (recorded in the transcript)...
+	session.CreateTranscript("Create agent_file.txt", []FileChange{
+		{Path: "agent_file.txt", Content: "agent work"},
+	})
+
+	// ...but the commit contains only an UNRELATED file the session never touched.
+	env.WriteFile("unrelated.txt", "human wrote this")
+	env.GitCommitNoTrailerAsAgent("Add unrelated.txt", "unrelated.txt")
+
+	// No trailer, no overlap → must NOT be recovered.
+	if cpID := env.TryGetLatestCheckpointID(); cpID != "" {
+		t.Fatalf("unrelated trailerless commit must not be recovered, but got checkpoint %s", cpID)
+	}
+}
+
+// TestShadowStrategy_MidSessionCommit_TrailerlessIdleSession_NotRecovered
+// verifies that a trailerless commit made after the turn ended (session IDLE)
+// is not recovered: recovery targets in-progress agent turns only, so a
+// post-stop commit keeps the prior behavior.
+func TestShadowStrategy_MidSessionCommit_TrailerlessIdleSession_NotRecovered(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	session := env.NewSession()
+
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithTranscriptPath failed: %v", err)
+	}
+	env.WriteFile("idle.txt", "agent work")
+	session.CreateTranscript("Create idle.txt", []FileChange{
+		{Path: "idle.txt", Content: "agent work"},
+	})
+
+	// End the turn — session transitions to IDLE (Stop condenses the shadow work
+	// into a normal checkpoint path only if committed; here nothing is committed).
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+
+	before := env.CountCommittedCheckpoints()
+
+	// Commit the file after stop WITHOUT a trailer. The IDLE session must not be
+	// force-recovered by the #487 path (which requires a recent ACTIVE session).
+	env.GitCommitNoTrailerAsAgent("Add idle.txt after stop", "idle.txt")
+
+	if got := env.CountCommittedCheckpoints(); got != before {
+		t.Fatalf("post-stop trailerless commit changed checkpoint count: before=%d after=%d (must be unchanged)", before, got)
+	}
+}
+
+// TestShadowStrategy_MidSessionCommit_MultipleTrailerlessCommits_EachRecovered
+// verifies that several trailerless mid-session commits each get their own
+// recovered checkpoint (1:1 model preserved through the recovery path).
+func TestShadowStrategy_MidSessionCommit_MultipleTrailerlessCommits_EachRecovered(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	session := env.NewSession()
+
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithTranscriptPath failed: %v", err)
+	}
+
+	// Three files, committed one at a time, all mid-turn and all trailerless.
+	env.WriteFile("m1.txt", "one")
+	env.WriteFile("m2.txt", "two")
+	env.WriteFile("m3.txt", "three")
+	session.CreateTranscript("Create m1, m2, m3", []FileChange{
+		{Path: "m1.txt", Content: "one"},
+		{Path: "m2.txt", Content: "two"},
+		{Path: "m3.txt", Content: "three"},
+	})
+
+	env.GitCommitNoTrailerAsAgent("Add m1.txt", "m1.txt")
+	env.GitCommitNoTrailerAsAgent("Add m2.txt", "m2.txt")
+	env.GitCommitNoTrailerAsAgent("Add m3.txt", "m3.txt")
+
+	if got := env.CountCommittedCheckpoints(); got != 3 {
+		t.Fatalf("expected 3 recovered checkpoints (one per trailerless commit), got %d", got)
+	}
+}

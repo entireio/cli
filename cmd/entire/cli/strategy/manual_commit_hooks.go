@@ -668,6 +668,12 @@ type postCommitActionHandler struct {
 	filesTouchedBefore         []string
 	sessionsWithCommittedFiles int // number of processable sessions that have tracked files
 
+	// noTrailerRecovery is set when this PostCommit is condensing a commit that
+	// carried no Entire-Checkpoint trailer (issue #487 recovery). It forces the
+	// content-overlap check to run even for recent ACTIVE sessions, since there
+	// is no trailer to trust as evidence the commit belongs to the session.
+	noTrailerRecovery bool
+
 	// Cached git objects — resolved once per PostCommit invocation to avoid
 	// redundant reads across filesOverlapWithContent, filesWithRemainingAgentChanges,
 	// CondenseSession, and calculateSessionAttributions.
@@ -773,7 +779,12 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 	// We check LastInteractionTime to avoid condensing stale ACTIVE sessions
 	// (agent killed without Stop hook) into every subsequent commit. A stale
 	// session has no recent interaction and falls through to the overlap check.
-	if isActive && isRecentInteraction(lastInteraction) {
+	//
+	// Recovery exception (issue #487): when the commit had no trailer, there is
+	// no PrepareCommitMsg validation to trust, so we do NOT short-circuit here —
+	// we fall through to the content-overlap check below so only commits whose
+	// files match the session's tracked work are recovered.
+	if isActive && isRecentInteraction(lastInteraction) && !h.noTrailerRecovery {
 		if h.sessionsWithCommittedFiles > 0 && len(h.filesTouchedBefore) == 0 {
 			logging.Debug(h.ctx, "post-commit: skipping read-only ACTIVE session (no tracked files, other sessions claim committed files)",
 				slog.Int("sessions_with_committed_files", h.sessionsWithCommittedFiles),
@@ -907,32 +918,59 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	checkpointID, found := trailers.ParseCheckpoint(commit.Message)
 	openRepoSpan.End()
 
-	if !found {
-		// No trailer — user removed it or it was never added (mid-turn commit).
-		// Still update BaseCommit for active sessions so future commits can match.
-		s.postCommitUpdateBaseCommitOnly(ctx, head)
-		return nil
-	}
-
 	_, findSessionsSpan := perf.Start(ctx, "find_sessions_for_worktree")
 	worktreePath, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		findSessionsSpan.RecordError(err)
 		findSessionsSpan.End()
+		if !found {
+			// Keep the legacy no-trailer behavior when the worktree can't be
+			// resolved: sync BaseCommit for active sessions, condense nothing.
+			s.postCommitUpdateBaseCommitOnly(ctx, head)
+		}
 		return nil
 	}
 
-	// Find all active sessions for this worktree
-	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
-	findSessionsSpan.RecordError(err)
+	// Find all sessions for this worktree.
+	sessions, findErr := s.findSessionsForWorktree(ctx, worktreePath)
+	findSessionsSpan.RecordError(findErr)
 	findSessionsSpan.End()
 
-	if err != nil || len(sessions) == 0 {
-		logging.Warn(logCtx, "post-commit: no active sessions despite trailer",
+	// noTrailerRecovery is true when the commit carries no Entire-Checkpoint
+	// trailer but an ACTIVE agent session's work must still be condensed so it is
+	// not lost (issue #487). It disables the ACTIVE-session overlap-skip in
+	// shouldCondenseWithOverlapCheck so recovery only links commits whose files
+	// genuinely belong to the session.
+	noTrailerRecovery := false
+	if found {
+		if findErr != nil || len(sessions) == 0 {
+			logging.Warn(logCtx, "post-commit: no active sessions despite trailer",
+				slog.String("strategy", "manual-commit"),
+				slog.String("checkpoint_id", checkpointID.String()),
+			)
+			return nil
+		}
+	} else {
+		// No Entire-Checkpoint trailer. Either an unrelated commit, or a
+		// session-related commit whose prepare-commit-msg trailer was never added.
+		// The latter is a known failure mode when a global core.hooksPath is set
+		// or `entire` is off the git hook's PATH, so prepare-commit-msg silently
+		// does not run. Without recovery the ACTIVE session's work for this commit
+		// is lost forever: the Stop hook can't recover it (the files are already
+		// committed, so nothing is "modified"), which is exactly the 0-checkpoints
+		// report in issue #487.
+		recoverID, ok := s.recoverTrailerlessCheckpointID(ctx, sessions, findErr)
+		if !ok {
+			// Unrelated or human commit — keep BaseCommit in sync, condense nothing.
+			s.postCommitUpdateBaseCommitOnly(ctx, head)
+			return nil
+		}
+		checkpointID = recoverID
+		noTrailerRecovery = true
+		logging.Info(logCtx, "post-commit: recovering active-session commit with missing trailer (issue #487)",
 			slog.String("strategy", "manual-commit"),
 			slog.String("checkpoint_id", checkpointID.String()),
 		)
-		return nil
 	}
 
 	// Build transition context
@@ -1003,7 +1041,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 			s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
 				head, commit, newHead, worktreePath, headTree, parentTree,
 				committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
-				sessionsWithCommittedFiles)
+				sessionsWithCommittedFiles, noTrailerRecovery)
 			return nil
 		})
 		if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
@@ -1190,6 +1228,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	uncondensedActiveOnBranch map[string]bool,
 	allAgentFiles map[string]struct{},
 	sessionsWithCommittedFiles int,
+	noTrailerRecovery bool,
 ) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
@@ -1282,6 +1321,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		shadowTree:                 shadowTree,
 		allAgentFiles:              allAgentFiles,
 		sessionsWithCommittedFiles: sessionsWithCommittedFiles,
+		noTrailerRecovery:          noTrailerRecovery,
 	}
 
 	if err := TransitionAndLog(ctx, state, session.EventGitCommit, *transitionCtx, handler); err != nil {
@@ -1514,6 +1554,49 @@ func (s *ManualCommitStrategy) postCommitUpdateBaseCommitOnly(ctx context.Contex
 				slog.String("error", mutErr.Error()))
 		}
 	}
+}
+
+// recoverTrailerlessCheckpointID decides whether a commit that carries no
+// Entire-Checkpoint trailer should still be condensed so an ACTIVE agent
+// session's work is not lost (issue #487), and if so returns a freshly
+// generated checkpoint ID to condense under.
+//
+// Recovery is deliberately narrow:
+//   - It requires at least one ACTIVE session with recent interaction — a
+//     genuinely in-progress agent turn whose commit should have been linked.
+//   - It requires a NON-interactive commit. A human at a TTY with no trailer
+//     either declined linking or was never prompted; we cannot distinguish the
+//     two, so we honor a possible decline and never override it. Agent commits
+//     have no TTY, so this precisely targets the reported scenario (a trailer
+//     that prepare-commit-msg should have added automatically but didn't).
+//
+// Whether the committed files actually belong to the recovered session is still
+// decided per-session by shouldCondenseWithOverlapCheck (with the ACTIVE
+// overlap-skip disabled via noTrailerRecovery), so an unrelated agent/CI commit
+// made while a session is active is not falsely linked.
+func (s *ManualCommitStrategy) recoverTrailerlessCheckpointID(ctx context.Context, sessions []*SessionState, findErr error) (id.CheckpointID, bool) {
+	if findErr != nil || len(sessions) == 0 {
+		return id.CheckpointID(""), false
+	}
+	// Only recover non-interactive (agent) commits — see doc comment.
+	if interactive.CanPromptInteractively() {
+		return id.CheckpointID(""), false
+	}
+	hasRecentActive := false
+	for _, st := range sessions {
+		if st.Phase.IsActive() && isRecentInteraction(st.LastInteractionTime) {
+			hasRecentActive = true
+			break
+		}
+	}
+	if !hasRecentActive {
+		return id.CheckpointID(""), false
+	}
+	cpID, err := checkpoint.GenerateCheckpointID(ctx)
+	if err != nil {
+		return id.CheckpointID(""), false
+	}
+	return cpID, true
 }
 
 // truncateHash safely truncates a git hash to 7 chars for logging.
