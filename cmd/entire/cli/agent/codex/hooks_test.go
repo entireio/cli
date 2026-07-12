@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
@@ -533,6 +534,196 @@ func TestIsUnderCodexAgentsDir(t *testing.T) {
 	require.False(t, isUnderCodexAgentsDir("/home/user/code/project", codexHome))
 	require.False(t, isUnderCodexAgentsDir("/home/user/.codex", codexHome))
 	require.False(t, isUnderCodexAgentsDir("/home/user/.codex/agents-other/project", codexHome))
+	// A directory literally named "..foo" really does live under agents/ and
+	// must be detected as inside — a naive strings.HasPrefix(rel, "..") check
+	// would wrongly treat it as an escape.
+	require.True(t, isUnderCodexAgentsDir("/home/user/.codex/agents/..foo", codexHome))
+	require.True(t, isUnderCodexAgentsDir("/home/user/.codex/agents/..foo/project", codexHome))
+	// CODEX_HOME with a trailing slash resolves to the same reserved tree.
+	require.True(t, isUnderCodexAgentsDir("/home/user/.codex/agents/repos/project", "/home/user/.codex/"))
+}
+
+// TestTomlQuoteString_EscapesForSafeTOMLKey pins the exact escaping used when
+// embedding an attacker-influenceable repo path into the shared global
+// config.toml. Any gap here is a TOML-injection vector: a path that can
+// terminate the quoted key early could write arbitrary keys into the user's
+// global Codex config.
+func TestTomlQuoteString_EscapesForSafeTOMLKey(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", `/plain/path`, `"/plain/path"`},
+		{"quote", `a"b`, `"a\"b"`},
+		{"backslash", `a\b`, `"a\\b"`},
+		{"newline", "a\nb", `"a\nb"`},
+		{"tab", "a\tb", `"a\tb"`},
+		{"carriage_return", "a\rb", `"a\rb"`},
+		{"nul", "a\x00b", `"a\u0000b"`},
+		{"del", "a\x7fb", `"a\u007Fb"`},
+		{"vertical_tab", "a\x0bb", `"a\u000Bb"`},
+		{"unicode", "héllo/你", `"héllo/你"`},
+		// The classic injection attempt: close the quote and open a new key.
+		{"injection_attempt", `x".hacked = "1`, `"x\".hacked = \"1"`},
+	}
+	for _, tc := range cases {
+		got := tomlQuoteString(tc.in)
+		require.Equal(t, tc.want, got, "case %s input %q", tc.name, tc.in)
+		// Whatever the input, the rendered key must never contain a raw
+		// newline or carriage return: that alone would split the header
+		// across physical lines and break both parsing and idempotency.
+		require.NotContains(t, got, "\n", "case %s produced a raw newline", tc.name)
+		require.NotContains(t, got, "\r", "case %s produced a raw carriage return", tc.name)
+	}
+}
+
+// TestScopedFeaturesHeader_IsAlwaysSingleLine guarantees the generated table
+// header is a single physical line for pathological paths, which the
+// line-based ensureLineInSection relies on for correct matching/idempotency.
+func TestScopedFeaturesHeader_IsAlwaysSingleLine(t *testing.T) {
+	for _, p := range []string{
+		"/normal/repo",
+		"a\nb\nc",
+		"weird \"quoted\" .v2",
+		"tab\tinside",
+	} {
+		header := scopedFeaturesHeader(p)
+		require.Len(t, strings.Split(header, "\n"), 1, "header for %q must be one line: %q", p, header)
+	}
+}
+
+// TestInstallHooks_ReservedAgentsDir_NewlineInPath_NoGlobalConfigInjection is
+// the end-to-end proof of the no-injection property: a repo whose path
+// contains a newline must not be able to smuggle an extra TOML line into the
+// global config. Skips on filesystems that reject newline names.
+func TestInstallHooks_ReservedAgentsDir_NewlineInPath_NoGlobalConfigInjection(t *testing.T) {
+	tempDir := t.TempDir()
+	codexHome := filepath.Join(tempDir, ".codex-home")
+	repoRoot := filepath.Join(codexHome, "agents", "repo\ninjected = \"evil\"")
+	if err := os.MkdirAll(repoRoot, 0o750); err != nil {
+		t.Skipf("filesystem rejects newline in directory name: %v", err)
+	}
+	t.Chdir(repoRoot)
+	t.Setenv("CODEX_HOME", codexHome)
+
+	ag := &CodexAgent{}
+	_, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(codexHome, configFileName))
+	require.NoError(t, err)
+	content := string(data)
+
+	// The header is present as a single escaped line...
+	require.Contains(t, content, scopedFeaturesHeader(repoRoot))
+	// ...and the newline in the path did NOT create a standalone physical
+	// line resembling the injected assignment.
+	for _, line := range strings.Split(content, "\n") {
+		require.False(t, strings.HasPrefix(strings.TrimSpace(line), "injected"),
+			"path newline injected a rogue TOML line: %q", line)
+	}
+}
+
+// TestInstallHooks_ReservedAgentsDir_SpecialCharsPath_Idempotent runs the full
+// install flow with a repo path containing a quote, a space and dots, then
+// re-runs it, asserting the scoped section is written once and not duplicated.
+func TestInstallHooks_ReservedAgentsDir_SpecialCharsPath_Idempotent(t *testing.T) {
+	tempDir := t.TempDir()
+	codexHome := filepath.Join(tempDir, ".codex-home")
+	repoRoot := filepath.Join(codexHome, "agents", `weird "dir".v2`, "proj")
+	require.NoError(t, os.MkdirAll(repoRoot, 0o750))
+	t.Chdir(repoRoot)
+	t.Setenv("CODEX_HOME", codexHome)
+
+	ag := &CodexAgent{}
+	_, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+	_, err = ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(codexHome, configFileName))
+	require.NoError(t, err)
+	content := string(data)
+	header := scopedFeaturesHeader(repoRoot)
+	require.Equal(t, 1, strings.Count(content, header), "scoped header must not be duplicated: %q", content)
+}
+
+// TestWriteScopedFeatureToGlobalConfig_ConcurrentReposMerge proves the global
+// read-modify-write does not lose updates when two repos enable concurrently.
+// Without the file lock, the second writer could clobber the first repo's
+// section; the flock serializes them so both survive.
+func TestWriteScopedFeatureToGlobalConfig_ConcurrentReposMerge(t *testing.T) {
+	tempDir := t.TempDir()
+	codexHome := filepath.Join(tempDir, ".codex-home")
+	repoA := filepath.Join(codexHome, "agents", "a")
+	repoB := filepath.Join(codexHome, "agents", "b")
+	require.NoError(t, os.MkdirAll(repoA, 0o750))
+	require.NoError(t, os.MkdirAll(repoB, 0o750))
+
+	repos := []string{repoA, repoB}
+	errs := make([]error, len(repos))
+	var wg sync.WaitGroup
+	for i, r := range repos {
+		wg.Add(1)
+		go func(i int, r string) {
+			defer wg.Done()
+			errs[i] = ensureScopedProjectFeatureEnabled(codexHome, r)
+		}(i, r)
+	}
+	wg.Wait()
+	require.NoError(t, errs[0])
+	require.NoError(t, errs[1])
+
+	data, err := os.ReadFile(filepath.Join(codexHome, configFileName))
+	require.NoError(t, err)
+	content := string(data)
+	require.Contains(t, content, scopedFeaturesHeader(repoA), "repo A section lost")
+	require.Contains(t, content, scopedFeaturesHeader(repoB), "repo B section lost")
+}
+
+// TestCleanupStaleReservedTreeConfig_LineAnchored pins the self-heal safety
+// boundary: a local config carrying only our managed lines is removed, but any
+// file with a foreign line — even one that merely embeds our tokens as a
+// substring, like `webhooks = true` — is preserved.
+func TestCleanupStaleReservedTreeConfig_LineAnchored(t *testing.T) {
+	// removedAfterClean writes body to a stale local config.toml, runs the
+	// self-heal, and reports whether the file was removed.
+	removedAfterClean := func(t *testing.T, body string) bool {
+		t.Helper()
+		dir := t.TempDir()
+		codexDir := filepath.Join(dir, ".codex")
+		require.NoError(t, os.MkdirAll(codexDir, 0o750))
+		cfg := filepath.Join(codexDir, configFileName)
+		require.NoError(t, os.WriteFile(cfg, []byte(body), 0o600))
+		require.NoError(t, cleanupStaleReservedTreeConfig(dir))
+		_, statErr := os.Stat(cfg)
+		return os.IsNotExist(statErr)
+	}
+
+	// Only our content -> removed.
+	require.True(t, removedAfterClean(t, "[features]\nhooks = true\n"),
+		"pure entire-managed config must be removed")
+	require.True(t, removedAfterClean(t, "[features]\ncodex_hooks = true\n"),
+		"legacy entire-managed config must be removed")
+
+	// Substring-only lookalikes and foreign keys -> preserved.
+	require.False(t, removedAfterClean(t, "[features]\nwebhooks = true\n"),
+		"`webhooks = true` is not our line and must be preserved")
+	require.False(t, removedAfterClean(t, "[features]\nhooks = true\nsome_other_setting = true\n"),
+		"config with a foreign setting must be preserved")
+	require.False(t, removedAfterClean(t, "description = \"my [features] hooks = true list\"\n"),
+		"a value embedding our tokens must be preserved")
+
+	// A single malformed line concatenating our tokens is not something this
+	// package ever writes; a substring strip would erase it to nothing and
+	// delete the file, but a whole-line match keeps it.
+	require.False(t, removedAfterClean(t, "[features]hooks = true\n"),
+		"a concatenated non-managed line must be preserved")
+
+	// A blank-only file was never clearly written by us -> preserved.
+	require.False(t, removedAfterClean(t, "\n\n  \n"),
+		"a blank file is not positively ours and must be preserved")
 }
 
 // assertHookCommand verifies that one of the hook entries in groups contains the expected command.

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
@@ -400,7 +401,17 @@ func isUnderCodexAgentsDir(repoRoot, codexHome string) bool {
 	if err != nil {
 		return false
 	}
-	return rel == "." || !strings.HasPrefix(rel, "..")
+	if rel == "." {
+		return true
+	}
+	// rel escapes agentsDir only when it is exactly ".." or begins with
+	// "../". A plain strings.HasPrefix(rel, "..") check would wrongly reject
+	// a directory literally named "..foo" that really does live under
+	// agentsDir.
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
 }
 
 // ensureLocalProjectFeatureEnabled writes features.hooks = true to the
@@ -478,7 +489,32 @@ func stripLegacyFeatureLine(content string) string {
 // unrelated keys in the global config, and cleans up any stale
 // project-local config.toml an older entire version left behind.
 func ensureScopedProjectFeatureEnabled(codexHome, repoRoot string) error {
+	if err := writeScopedFeatureToGlobalConfig(codexHome, repoRoot); err != nil {
+		return err
+	}
+	return cleanupStaleReservedTreeConfig(repoRoot)
+}
+
+// writeScopedFeatureToGlobalConfig merges the scoped
+// [projects."<repoRoot>".features] hooks flag into the global config.toml.
+// The global file is shared by every repo that enables hooks from inside the
+// reserved agents tree and is read by Codex at startup, so the
+// read-modify-write is serialized under a cross-process advisory lock and
+// swapped in atomically. Two concurrent `entire enable` runs therefore can
+// neither lose each other's edits (a plain read-modify-write would let the
+// second writer clobber the first) nor expose a truncated half-written file
+// to a concurrent reader.
+func writeScopedFeatureToGlobalConfig(codexHome, repoRoot string) error {
+	if err := os.MkdirAll(codexHome, 0o750); err != nil {
+		return fmt.Errorf("failed to create Codex home directory: %w", err)
+	}
+
 	configPath := filepath.Join(codexHome, configFileName)
+	release, err := flock.Acquire(configPath + ".lock")
+	if err != nil {
+		return fmt.Errorf("failed to lock global config.toml: %w", err)
+	}
+	defer release()
 
 	data, err := os.ReadFile(configPath) //nolint:gosec // path resolved from CODEX_HOME or HOME
 	if err != nil && !os.IsNotExist(err) {
@@ -486,16 +522,13 @@ func ensureScopedProjectFeatureEnabled(codexHome, repoRoot string) error {
 	}
 
 	updated, changed := ensureLineInSection(string(data), scopedFeaturesHeader(repoRoot), featureLine)
-	if changed {
-		if err := os.MkdirAll(codexHome, 0o750); err != nil {
-			return fmt.Errorf("failed to create Codex home directory: %w", err)
-		}
-		if err := os.WriteFile(configPath, []byte(updated), 0o600); err != nil { //nolint:gosec // path resolved from CODEX_HOME or HOME
-			return fmt.Errorf("failed to write global config.toml: %w", err)
-		}
+	if !changed {
+		return nil
 	}
-
-	return cleanupStaleReservedTreeConfig(repoRoot)
+	if err := jsonutil.WriteFileAtomic(configPath, []byte(updated), 0o600); err != nil {
+		return fmt.Errorf("failed to write global config.toml: %w", err)
+	}
+	return nil
 }
 
 // scopedFeaturesHeader returns the TOML table header used to scope the
@@ -506,7 +539,16 @@ func scopedFeaturesHeader(repoRoot string) string {
 	return "[projects." + tomlQuoteString(repoRoot) + ".features]"
 }
 
-// tomlQuoteString renders s as a TOML basic (double-quoted) string.
+// tomlQuoteString renders s as a TOML basic (double-quoted) string, escaping
+// every character TOML requires so the result is always a single, valid,
+// self-contained key. This is security-critical: repoRoot is an
+// attacker-influenceable filesystem path that gets embedded into the shared
+// global config.toml. A path containing a quote, backslash, newline, or other
+// control character must not be able to terminate the quoted key early and
+// inject arbitrary TOML — nor split the header across physical lines, which
+// would also defeat the line-based idempotency check in ensureLineInSection.
+// Unicode scalar values >= U+0020 (other than " and \) are valid literally in
+// a TOML basic string and are emitted as-is.
 func tomlQuoteString(s string) string {
 	var b strings.Builder
 	b.WriteByte('"')
@@ -516,8 +558,22 @@ func tomlQuoteString(s string) string {
 			b.WriteString(`\"`)
 		case '\\':
 			b.WriteString(`\\`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\r':
+			b.WriteString(`\r`)
 		default:
-			b.WriteRune(r)
+			if r < 0x20 || r == 0x7f {
+				fmt.Fprintf(&b, `\u%04X`, r)
+			} else {
+				b.WriteRune(r)
+			}
 		}
 	}
 	b.WriteByte('"')
@@ -575,10 +631,10 @@ func ensureLineInSection(content, header, line string) (string, bool) {
 // Codex's reserved agents tree. Codex recursively scans that tree for
 // agent-role TOML files, so a leftover config.toml there keeps triggering
 // a "malformed agent role definition" warning (entireio/cli#842) even
-// after upgrading entire. Only removes the file when, after stripping the
-// exact feature-flag lines and an empty [features] header this package
-// writes, nothing else remains — a file carrying unrelated user content is
-// left alone.
+// after upgrading entire. Only removes the file when every non-blank line is
+// one of the exact feature-flag lines or the [features] header this package
+// writes (see isEntireManagedLocalConfig) — a file carrying any unrelated
+// user content is left alone.
 func cleanupStaleReservedTreeConfig(repoRoot string) error {
 	configPath := filepath.Join(repoRoot, ".codex", configFileName)
 
@@ -590,17 +646,42 @@ func cleanupStaleReservedTreeConfig(repoRoot string) error {
 		return fmt.Errorf("failed to read stale config.toml: %w", err)
 	}
 
-	remainder := string(data)
-	for _, known := range []string{legacyFeatureLine, featureLine, "[features]"} {
-		remainder = strings.ReplaceAll(remainder, known+"\n", "")
-		remainder = strings.ReplaceAll(remainder, known, "")
-	}
-	if strings.TrimSpace(remainder) != "" {
+	if !isEntireManagedLocalConfig(string(data)) {
 		return nil
 	}
-
 	if err := os.Remove(configPath); err != nil {
 		return fmt.Errorf("failed to remove stale config.toml: %w", err)
 	}
 	return nil
+}
+
+// isEntireManagedLocalConfig reports whether content consists of nothing but
+// the [features] header and feature-flag lines this package writes (plus blank
+// lines), with at least one such managed line present. Any other non-blank
+// line — a user's own setting or a comment — makes the file unmanaged, so
+// cleanup leaves it untouched.
+//
+// The check is line-anchored on purpose. An earlier substring scan could strip
+// our tokens out of the middle of unrelated content (`webhooks = true`
+// contains `hooks = true`; a value could contain `[features]`) and, in the
+// worst case, collapse a file we never wrote to whitespace and delete it. A
+// whole-line match cannot mistake a user's line for ours.
+func isEntireManagedLocalConfig(content string) bool {
+	managed := map[string]bool{
+		"[features]":      true,
+		featureLine:       true,
+		legacyFeatureLine: true,
+	}
+	sawManaged := false
+	for _, raw := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		if !managed[trimmed] {
+			return false
+		}
+		sawManaged = true
+	}
+	return sawManaged
 }
