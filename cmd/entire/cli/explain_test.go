@@ -5180,14 +5180,18 @@ func TestGetAssociatedCommits_SearchAllFindsMergedBranchCommits(t *testing.T) {
 		t.Fatalf("failed to set HEAD: %v", err)
 	}
 
-	// Without --search-all (first-parent only): should NOT find the feature commit
-	// because it's on the second parent of the merge
+	// Without --search-all: the branch-scoped walk still follows merge commits'
+	// second parents (pruning only the default branch's own history), so the
+	// feature commit merged in here is found. This is the issue #931 fix — a
+	// first-parent-only walk used to miss it and drop the merged reference.
+	// The remaining difference from --search-all is the depth bound and the
+	// default-branch-history pruning, not merge awareness.
 	commits, err := getAssociatedCommits(context.Background(), repo, checkpointID, false)
 	if err != nil {
 		t.Fatalf("getAssociatedCommits error: %v", err)
 	}
-	if len(commits) != 0 {
-		t.Errorf("expected 0 commits without --search-all (first-parent only), got %d", len(commits))
+	if len(commits) != 1 {
+		t.Errorf("expected 1 commit for merged feature checkpoint without --search-all, got %d", len(commits))
 	}
 
 	// With --search-all (full DAG walk): SHOULD find the feature commit
@@ -5313,6 +5317,138 @@ func TestGetBranchCheckpoints_DefaultBranchFindsMergedCheckpoints(t *testing.T) 
 	}
 	if !found {
 		t.Errorf("expected to find checkpoint %s from merged feature branch on default branch, got %d points: %v", cpID, len(points), points)
+	}
+}
+
+func TestGetBranchCheckpoints_NonDefaultTargetFindsMergedCheckpoints(t *testing.T) {
+	// Regression test for issue #931: merging a feature branch into a NON-default
+	// target branch (e.g. "release") via a merge commit puts the feature's
+	// checkpoint commits on the merge's second parent. First-parent-only
+	// traversal — used for every branch that is not the repo default — missed
+	// them, so the merged session references vanished from the target branch.
+	// The default-branch DAG walk added earlier only covered the default branch.
+	//
+	// It also asserts the exclusion invariant still holds: a checkpoint that
+	// lives only on the default branch is NOT surfaced on the target branch.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Initial commit on master (the default branch — InitRepo uses master).
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	masterBase, err := w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-5 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	// A checkpoint that lives only on master (must NOT leak onto the target).
+	cpMaster := id.MustCheckpointID("aa5700000001")
+	if err := os.WriteFile(testFile, []byte("master work"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	if _, err := w.Commit(trailers.FormatCheckpoint("master: work", cpMaster), &git.CommitOptions{
+		Author: &object.Signature{Name: "Main Dev", Email: "main@example.com", When: time.Now().Add(-4 * time.Hour)},
+	}); err != nil {
+		t.Fatalf("failed to create master checkpoint commit: %v", err)
+	}
+
+	// Feature branch off the base with its own checkpoint.
+	featureBranch := plumbing.NewBranchReferenceName("feature/x")
+	if err := w.Checkout(&git.CheckoutOptions{Hash: masterBase, Branch: featureBranch, Create: true}); err != nil {
+		t.Fatalf("failed to create feature branch: %v", err)
+	}
+	cpFeature := id.MustCheckpointID("fea700000002")
+	if err := os.WriteFile(testFile, []byte("feature work"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	featureCommit, err := w.Commit(trailers.FormatCheckpoint("feat: add feature", cpFeature), &git.CommitOptions{
+		Author: &object.Signature{Name: "Feature Dev", Email: "dev@example.com", When: time.Now().Add(-3 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("failed to create feature commit: %v", err)
+	}
+	featureObj, err := repo.CommitObject(featureCommit)
+	if err != nil {
+		t.Fatalf("failed to get feature commit: %v", err)
+	}
+	featureTree, err := featureObj.Tree()
+	if err != nil {
+		t.Fatalf("failed to get feature tree: %v", err)
+	}
+
+	// Create the non-default target branch "release" at the base, then merge the
+	// feature branch into it: first parent = release tip, second parent = feature.
+	mergeHash := createMergeCommit(t, repo, masterBase, featureCommit, featureTree.Hash, "Merge feature/x into release")
+	releaseBranch := plumbing.NewBranchReferenceName("release")
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(releaseBranch, mergeHash)); err != nil {
+		t.Fatalf("failed to set release ref: %v", err)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewSymbolicReference("HEAD", releaseBranch)); err != nil {
+		t.Fatalf("failed to point HEAD at release: %v", err)
+	}
+
+	// Sanity: we must be on a non-default branch for this test to be meaningful.
+	if isOnDefault, cur := strategy.IsOnDefaultBranch(repo); isOnDefault {
+		t.Fatalf("test setup invalid: expected to be on a non-default branch, got default branch %q", cur)
+	}
+
+	// Write committed checkpoint metadata for both checkpoints.
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	for _, cp := range []id.CheckpointID{cpFeature, cpMaster} {
+		if err := store.Write(context.Background(), checkpoint.Session{
+			CheckpointID: cp,
+			SessionID:    "test-session-" + cp.String(),
+			Strategy:     "manual-commit",
+			FilesTouched: []string{"test.txt"},
+			Prompts:      []string{"work"},
+		}); err != nil {
+			t.Fatalf("failed to write committed checkpoint %s: %v", cp, err)
+		}
+	}
+
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 100)
+	if err != nil {
+		t.Fatalf("getBranchCheckpoints error: %v", err)
+	}
+
+	var foundFeature, foundMaster bool
+	for _, p := range points {
+		if p.CheckpointID == cpFeature {
+			foundFeature = true
+		}
+		if p.CheckpointID == cpMaster {
+			foundMaster = true
+		}
+	}
+	if !foundFeature {
+		t.Errorf("expected feature checkpoint %s (merged into non-default target) to be found, got %d points: %v", cpFeature, len(points), points)
+	}
+	if foundMaster {
+		t.Errorf("master-only checkpoint %s must not leak onto the non-default target branch", cpMaster)
 	}
 }
 
