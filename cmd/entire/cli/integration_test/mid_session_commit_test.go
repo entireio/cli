@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -521,4 +522,97 @@ func TestShadowStrategy_MidSessionCommit_MultipleTrailerlessCommits_EachRecovere
 	if got := env.CountCommittedCheckpoints(); got != 3 {
 		t.Fatalf("expected 3 recovered checkpoints (one per trailerless commit), got %d", got)
 	}
+}
+
+// TestShadowStrategy_MidSessionCommit_ConcurrentDisjoint_OnlyOwningSessionRecovered
+// guards against wrong-session attribution in the #487 recovery path. Two ACTIVE
+// sessions run concurrently with DISJOINT tracked files. When only the owning
+// session's file is committed trailerless, recovery must condense ONLY that
+// session — the other session (whose tracked file is absent from the commit) must
+// NOT be pulled into the recovered checkpoint.
+//
+// This is stricter than the normal trailer path, which condenses every recent
+// ACTIVE session regardless of file overlap. Recovery's content-overlap gate
+// (enabled by noTrailerRecovery) is what keeps a trailerless commit from
+// cross-attributing to an unrelated concurrent session.
+func TestShadowStrategy_MidSessionCommit_ConcurrentDisjoint_OnlyOwningSessionRecovered(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+
+	owner := env.NewSession()
+	other := env.NewSession()
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(owner.ID, owner.TranscriptPath); err != nil {
+		t.Fatalf("owner SimulateUserPromptSubmitWithTranscriptPath failed: %v", err)
+	}
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(other.ID, other.TranscriptPath); err != nil {
+		t.Fatalf("other SimulateUserPromptSubmitWithTranscriptPath failed: %v", err)
+	}
+
+	// Both sessions are ACTIVE and each touched its own, disjoint file.
+	env.WriteFile("owner.txt", "owner work")
+	owner.CreateTranscript("Create owner.txt", []FileChange{
+		{Path: "owner.txt", Content: "owner work"},
+	})
+	env.WriteFile("other.txt", "other work")
+	other.CreateTranscript("Create other.txt", []FileChange{
+		{Path: "other.txt", Content: "other work"},
+	})
+
+	// Commit ONLY the owning session's file, trailerless and non-interactive.
+	env.GitCommitNoTrailerAsAgent("Add owner.txt", "owner.txt")
+
+	cpID := env.TryGetLatestCheckpointID()
+	if cpID == "" {
+		t.Fatal("owner's trailerless mid-session commit was not recovered (issue #487)")
+	}
+
+	// The recovered checkpoint must contain EXACTLY the owning session — not the
+	// concurrent session whose file was not part of this commit.
+	sessionIDs := checkpointSessionIDs(t, env, cpID)
+	if len(sessionIDs) != 1 || sessionIDs[0] != owner.ID {
+		t.Fatalf("recovered checkpoint should attribute only the owning session %s, got %v", owner.ID, sessionIDs)
+	}
+
+	env.ValidateCheckpoint(CheckpointValidation{
+		CheckpointID: cpID,
+		SessionID:    owner.ID,
+		Strategy:     strategy.StrategyNameManualCommit,
+		FilesTouched: []string{"owner.txt"},
+	})
+}
+
+// checkpointSessionIDs returns the SessionIDs recorded in a checkpoint's summary,
+// one per session slot. Used to assert which sessions a checkpoint condensed.
+func checkpointSessionIDs(t *testing.T, env *TestEnv, checkpointID string) []string {
+	t.Helper()
+
+	raw, ok := env.ReadFileFromBranch(paths.MetadataBranchName, CheckpointSummaryPath(checkpointID))
+	if !ok {
+		t.Fatalf("checkpoint summary not found for %s", checkpointID)
+	}
+	var summary struct {
+		Sessions []struct {
+			Metadata string `json:"metadata"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal([]byte(raw), &summary); err != nil {
+		t.Fatalf("failed to parse checkpoint summary: %v", err)
+	}
+
+	ids := make([]string, 0, len(summary.Sessions))
+	for _, sp := range summary.Sessions {
+		metaRaw, metaOK := env.ReadFileFromBranch(paths.MetadataBranchName, strings.TrimPrefix(sp.Metadata, "/"))
+		if !metaOK {
+			t.Fatalf("session metadata not found: %s", sp.Metadata)
+		}
+		var meta struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal([]byte(metaRaw), &meta); err != nil {
+			t.Fatalf("failed to parse session metadata: %v", err)
+		}
+		ids = append(ids, meta.SessionID)
+	}
+	return ids
 }

@@ -636,7 +636,18 @@ checkpoint). Guardrails:
   linking; that intent is honored, so interactive commits are never recovered.
 - **Content-overlap required**: for the recovery path the ACTIVE-session
   overlap-skip in `shouldCondenseWithOverlapCheck` is disabled, so an unrelated
-  agent/CI commit made while a session is active is not falsely linked.
+  agent/CI commit made while a session is active is not falsely linked. Overlap
+  is the intersection of the committed paths with the session's tracked files,
+  verified content-exact for newly-added files (blob-hash match against the
+  shadow branch) and by path for modified files — the same heuristic `PostCommit`
+  uses elsewhere. Consequences of that heuristic: a commit touching only files
+  the session never tracked is left alone, but a commit that modifies a
+  pre-existing file the session also edited is linked even if the committed bytes
+  differ; and two concurrent sessions that both edited the same committed file
+  are both condensed into the checkpoint, exactly as in the normal trailer path.
+  Recovery is therefore never looser than the trailer path (and is stricter for
+  disjoint concurrent sessions, which the trailer path condenses regardless of
+  overlap).
 
 The recovered checkpoint lands on `entire/checkpoints/v1` (no data loss) but the
 already-made commit cannot be given a trailer retroactively, so a
