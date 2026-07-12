@@ -2249,6 +2249,11 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 		points = append(points, point)
 	}
 
+	// Shared-with-main test for this branch, computed once and reused by both the
+	// committed-checkpoint walk (below) and the shadow-branch walk (via
+	// getReachableTemporaryCheckpoints). On the default branch it is empty.
+	mainReach := computeReachableFromMain(ctx, repo)
+
 	if isOnDefault {
 		// On the default branch, use full DAG walk to find checkpoint commits
 		// on merged feature branches (second parents of merge commits).
@@ -2280,8 +2285,6 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 		// misses checkpoints from a feature branch merged INTO this branch (they
 		// live on a merge commit's second parent), which dropped merged session
 		// references from non-default target branches (issue #931).
-		mainReach := computeReachableFromMain(ctx, repo)
-
 		err = walkBranchOwnCommits(ctx, repo, head.Hash(), mainReach, commitScanLimit, func(c *object.Commit) error {
 			collectCheckpoint(c)
 			return nil
@@ -2292,8 +2295,10 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 		return nil, false, fmt.Errorf("error iterating commits: %w", err)
 	}
 
-	// Get temporary checkpoints from ALL shadow branches whose base commit is reachable from HEAD.
-	tempPoints := getReachableTemporaryCheckpoints(ctx, repo, stores.Ephemeral(), head.Hash(), isOnDefault, limit)
+	// Get temporary checkpoints from shadow branches whose base commit is reachable
+	// from HEAD through this branch's OWN history (excluding the default branch's
+	// history, mirroring the committed-checkpoint walk above).
+	tempPoints := getReachableTemporaryCheckpoints(ctx, repo, stores.Ephemeral(), head.Hash(), isOnDefault, mainReach, limit)
 	points = append(points, tempPoints...)
 
 	truncated := false
@@ -2383,7 +2388,7 @@ func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.Sess
 // whose base commit is reachable from the given HEAD hash and that belong to this worktree.
 // For default branches, all shadow branches for this worktree are included.
 // For feature branches, only shadow branches whose base commit is in HEAD's history are included.
-func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository, store checkpoint.EphemeralStore, headHash plumbing.Hash, isOnDefault bool, limit int) []strategy.RewindPoint {
+func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository, store checkpoint.EphemeralStore, headHash plumbing.Hash, isOnDefault bool, mainReach *mainReachability, limit int) []strategy.RewindPoint {
 	var points []strategy.RewindPoint
 
 	// Compute current worktree's hash for filtering shadow branches
@@ -2400,7 +2405,7 @@ func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository,
 		}
 
 		// Check if this shadow branch's base commit is reachable from current HEAD
-		if !isShadowBranchReachable(ctx, repo, sb.BaseCommit, headHash, isOnDefault) {
+		if !isShadowBranchReachable(ctx, repo, sb.BaseCommit, headHash, isOnDefault, mainReach) {
 			continue
 		}
 
@@ -2417,73 +2422,50 @@ func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository,
 	return points
 }
 
-// isShadowBranchReachable checks if a shadow branch's base commit is reachable from HEAD.
-// For default branches, all shadow branches are considered reachable.
-// For feature branches, we check if any commit with the base commit prefix is
-// reachable from HEAD by following ALL parents (a full DAG walk, not first-parent
-// only).
+// isShadowBranchReachable reports whether a shadow branch's base commit belongs to
+// the current branch's own history, and therefore whether that shadow branch's
+// temporary (in-progress) checkpoints should be shown here.
 //
-// A first-parent-only check misses base commits that entered HEAD's history via a
-// merge commit's second+ parents — e.g. an in-progress session whose shadow
-// branch is based on a feature commit that was merged into a non-default target
-// (`release`). Such a shadow branch would be judged unreachable and its temporary
-// checkpoints silently dropped, reproducing issue #931 for ephemeral checkpoints.
-// Following every parent keeps the shadow-branch (ephemeral) path consistent with
-// the committed-checkpoint path's merge awareness (walkBranchOwnCommits).
-func isShadowBranchReachable(ctx context.Context, repo *git.Repository, baseCommit string, headHash plumbing.Hash, isOnDefault bool) bool {
-	// For default branch: all shadow branches are potentially relevant
+// On the default branch every worktree-local shadow branch is relevant.
+//
+// On a non-default branch it reuses walkBranchOwnCommits — the same walk the
+// committed-checkpoint path uses — so the ephemeral and committed paths agree:
+//   - A base merged in via a merge commit's second+ parent (an in-progress session
+//     on a feature branch merged into a non-default target) is still found: those
+//     commits are not shared with main, so the walk follows them (issue #931).
+//   - A base on the default branch's own history is pruned (sharedWithMain), so a
+//     shadow branch created while working on the default branch does NOT leak its
+//     in-progress checkpoints onto an unrelated branch that later merged the
+//     default branch in.
+//
+// Tradeoff (documented): the base commit is only the session's starting anchor, so
+// a session started on a commit that is shared with the default branch — e.g. a
+// brand-new feature branch before its first own commit — is treated the same as
+// the default branch's own history and its in-progress checkpoints are not shown
+// until the branch has a commit of its own. This is the safe direction: never leak
+// one branch's in-progress session data onto another. It cannot be avoided at read
+// time because the shadow branch records only its base commit and worktree, not the
+// branch it was created on (there is no session-origin metadata to disambiguate a
+// default-branch session from a feature session that happens to start at the same
+// shared commit).
+func isShadowBranchReachable(ctx context.Context, repo *git.Repository, baseCommit string, headHash plumbing.Hash, isOnDefault bool, mainReach *mainReachability) bool {
+	// For default branch: all shadow branches are potentially relevant.
 	if isOnDefault {
 		return true
 	}
 
-	return isCommitReachable(ctx, repo, headHash, baseCommit, commitScanLimit)
-}
-
-// isCommitReachable reports whether a commit whose full hash is prefixed by
-// commitPrefix is reachable from `from` by following every parent (a full DAG
-// walk). It visits at most `limit` commits (0 = no limit), in breadth-first
-// order, and stops as soon as a match is found. Each commit is visited once.
-//
-// Unlike a first-parent-only search this also finds commits merged in via a merge
-// commit's second+ parents, which is what makes the shadow-branch reachability
-// check merge-aware (issue #931). Following all parents is a strict superset of
-// the first-parent chain, so nothing previously found becomes unreachable.
-//
-// An empty commitPrefix matches the first commit (strings.HasPrefix(x, "") is
-// always true), preserving the prior first-parent walk's behavior for that case.
-func isCommitReachable(ctx context.Context, repo *git.Repository, from plumbing.Hash, commitPrefix string, limit int) bool {
-	visited := map[plumbing.Hash]struct{}{from: {}}
-	queue := []plumbing.Hash{from}
-
-	for count := 0; len(queue) > 0 && (limit <= 0 || count < limit); count++ {
-		if ctx.Err() != nil {
-			return false
+	// An empty base prefix matched anything under the old first-parent walk
+	// (strings.HasPrefix(x, "") is always true); preserve that by short-circuiting
+	// on HEAD, which is always in the branch's own history when not shared.
+	found := false
+	_ = walkBranchOwnCommits(ctx, repo, headHash, mainReach, commitScanLimit, func(c *object.Commit) error { //nolint:errcheck // Best-effort
+		if strings.HasPrefix(c.Hash.String(), baseCommit) {
+			found = true
+			return errStopIteration
 		}
-
-		hash := queue[0]
-		queue = queue[1:]
-
-		if strings.HasPrefix(hash.String(), commitPrefix) {
-			return true
-		}
-
-		current, err := repo.CommitObject(hash)
-		if err != nil {
-			// Best-effort: skip commits we cannot read (e.g. a shallow-clone
-			// boundary) rather than aborting the whole reachability check.
-			continue
-		}
-
-		for _, parent := range current.ParentHashes {
-			if _, seen := visited[parent]; seen {
-				continue
-			}
-			visited[parent] = struct{}{}
-			queue = append(queue, parent)
-		}
-	}
-
-	return false
+		return nil
+	})
+	return found
 }
 
 // convertTemporaryCheckpoint converts a EphemeralCheckpointInfo to a RewindPoint.

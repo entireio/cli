@@ -5769,21 +5769,26 @@ func TestIsShadowBranchReachable_FollowsMergeSecondParents(t *testing.T) {
 
 	ctx := context.Background()
 	shortHash := func(h plumbing.Hash) string { return h.String()[:7] }
+	reach := computeReachableFromMain(ctx, repo)
 
-	// The fix: a shadow base on the merge's second parent is reachable.
-	if !isShadowBranchReachable(ctx, repo, shortHash(featureCommit), mergeHash, false) {
+	// The #931 ephemeral fix: a shadow base on the merge's second parent (a
+	// feature commit, not shared with main) is reachable.
+	if !isShadowBranchReachable(ctx, repo, shortHash(featureCommit), mergeHash, false, reach) {
 		t.Errorf("expected shadow base on the merge's second parent (%s) to be reachable", shortHash(featureCommit))
 	}
-	// No regression: a first-parent-chain base is still reachable.
-	if !isShadowBranchReachable(ctx, repo, shortHash(masterBase), mergeHash, false) {
-		t.Errorf("expected first-parent base (%s) to remain reachable", shortHash(masterBase))
+	// Leak guard: a base on the default branch's own history (masterBase is
+	// master's tip here) is NOT reachable through this branch's own history — it is
+	// pruned as shared-with-main, exactly like the committed-checkpoint path, so a
+	// default-branch session's shadow does not leak onto this branch.
+	if isShadowBranchReachable(ctx, repo, shortHash(masterBase), mergeHash, false, reach) {
+		t.Errorf("shadow base on the default branch's own history (%s) must not be judged reachable (leak guard)", shortHash(masterBase))
 	}
 	// An unrelated commit is not reachable.
-	if isShadowBranchReachable(ctx, repo, "0123abc", mergeHash, false) {
+	if isShadowBranchReachable(ctx, repo, "0123abc", mergeHash, false, reach) {
 		t.Errorf("an unrelated commit prefix must not be judged reachable")
 	}
 	// On the default branch the check short-circuits to true.
-	if !isShadowBranchReachable(ctx, repo, "0123abc", mergeHash, true) {
+	if !isShadowBranchReachable(ctx, repo, "0123abc", mergeHash, true, reach) {
 		t.Errorf("isOnDefault must short-circuit to reachable")
 	}
 }
@@ -5910,6 +5915,150 @@ func TestGetBranchCheckpoints_ShadowBranchBaseOnMergeSecondParent(t *testing.T) 
 	}
 	if !foundTemp {
 		t.Errorf("expected the temporary checkpoint for session %s (shadow base on merge second parent) to surface, got %d points: %+v", sessionID, len(points), points)
+	}
+}
+
+// writeShadowSessionForTest creates a shadow branch based on baseCommitShort with
+// one temporary (in-progress) checkpoint for sessionID. The checkpoint's content
+// differs from the base commit so it is not filtered as a no-op.
+func writeShadowSessionForTest(t *testing.T, repo *git.Repository, dir, sessionID, baseCommitShort string) {
+	t.Helper()
+	metadataDir := filepath.Join(dir, ".entire", "metadata", sessionID)
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, paths.PromptFileName), []byte(sessionID+" prompt"), 0o644); err != nil {
+		t.Fatalf("failed to write prompt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "test.txt"), []byte(sessionID+" in-progress edit"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	store := checkpoint.NewEphemeralStore(repo, checkpoint.DefaultV1Refs())
+	if _, err := store.Write(context.Background(), checkpoint.Step{
+		SessionID:         sessionID,
+		BaseCommit:        baseCommitShort,
+		ModifiedFiles:     []string{"test.txt"},
+		MetadataDir:       ".entire/metadata/" + sessionID,
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "in-progress work",
+		AuthorName:        "Dev",
+		AuthorEmail:       "dev@example.com",
+		IsFirstCheckpoint: true,
+	}); err != nil {
+		t.Fatalf("ephemeral write for %s error: %v", sessionID, err)
+	}
+}
+
+func TestGetBranchCheckpoints_MasterShadowDoesNotLeakOntoFeatureAfterMerge(t *testing.T) {
+	// Both-properties guard for the ephemeral (shadow-branch) path after
+	// feature/x merges master in:
+	//   - a feature session's shadow (base = a feature-own commit) IS shown, and
+	//   - a default-branch session's shadow (base = a commit on master's own
+	//     history) is NOT shown — it would otherwise leak in-progress session data
+	//     across branches.
+	// The shadow path reuses walkBranchOwnCommits, so it prunes shared-with-main
+	// bases exactly like the committed-checkpoint path.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	masterBase, err := w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-3 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	// master advances with a plain commit (its tip) — the base for a "master
+	// session" shadow.
+	if err := os.WriteFile(testFile, []byte("master work"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	masterWork, err := w.Commit("master work", &git.CommitOptions{
+		Author: &object.Signature{Name: "Main Dev", Email: "main@example.com", When: time.Now().Add(-2 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("failed to create master work commit: %v", err)
+	}
+
+	// feature/x from the base with its own commit — the base for a feature session.
+	if err := w.Checkout(&git.CheckoutOptions{Hash: masterBase, Branch: plumbing.NewBranchReferenceName("feature/x"), Create: true}); err != nil {
+		t.Fatalf("failed to create feature branch: %v", err)
+	}
+	if err := os.WriteFile(testFile, []byte("feature work"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	featureCommit, err := w.Commit("feature work", &git.CommitOptions{
+		Author: &object.Signature{Name: "Feature Dev", Email: "dev@example.com", When: time.Now().Add(-1 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("failed to create feature commit: %v", err)
+	}
+	featureObj, err := repo.CommitObject(featureCommit)
+	if err != nil {
+		t.Fatalf("failed to get feature commit: %v", err)
+	}
+	featureTree, err := featureObj.Tree()
+	if err != nil {
+		t.Fatalf("failed to get feature tree: %v", err)
+	}
+
+	// In-progress shadow sessions: one based on master's tip, one on the feature commit.
+	writeShadowSessionForTest(t, repo, tmpDir, "session-master", masterWork.String()[:7])
+	writeShadowSessionForTest(t, repo, tmpDir, "session-feature", featureCommit.String()[:7])
+
+	// feature/x merges master in: first parent = feature, second parent = master tip.
+	mergeHash := createMergeCommit(t, repo, featureCommit, masterWork, featureTree.Hash, "Merge branch 'master' into feature/x")
+	setBranchHead(t, repo, "feature/x", mergeHash)
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("master"), masterWork)); err != nil {
+		t.Fatalf("failed to set master ref: %v", err)
+	}
+	if isOnDefault, cur := strategy.IsOnDefaultBranch(repo); isOnDefault {
+		t.Fatalf("test setup invalid: expected a non-default branch, got default branch %q", cur)
+	}
+
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 100)
+	if err != nil {
+		t.Fatalf("getBranchCheckpoints error: %v", err)
+	}
+	var foundFeatureSession, foundMasterSession bool
+	for _, p := range points {
+		switch p.SessionID {
+		case "session-feature":
+			foundFeatureSession = true
+		case "session-master":
+			foundMasterSession = true
+		}
+	}
+	if !foundFeatureSession {
+		t.Errorf("expected the feature session's in-progress checkpoint to be shown on feature/x, got %d points: %+v", len(points), points)
+	}
+	if foundMasterSession {
+		t.Errorf("a default-branch session's in-progress checkpoint must NOT leak onto feature/x after merging master in")
 	}
 }
 
