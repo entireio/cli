@@ -5913,14 +5913,37 @@ func TestGetBranchCheckpoints_ShadowBranchBaseOnMergeSecondParent(t *testing.T) 
 	}
 }
 
+// createCommitWithTreeAt is createCommitWithTree with an explicit commit time.
+// Git stores commit timestamps at 1-second resolution, so tests that exercise the
+// commit-date frontier must space their commits seconds apart rather than relying
+// on time.Now() (which ties for commits built in the same second).
+func createCommitWithTreeAt(t *testing.T, repo *git.Repository, treeHash plumbing.Hash, parents []plumbing.Hash, message string, when time.Time) plumbing.Hash {
+	t.Helper()
+	sig := object.Signature{Name: "Test", Email: "test@example.com", When: when}
+	commit := object.Commit{Author: sig, Committer: sig, Message: message, TreeHash: treeHash, ParentHashes: parents}
+	obj := repo.Storer.NewEncodedObject()
+	if err := commit.Encode(obj); err != nil {
+		t.Fatalf("failed to encode commit: %v", err)
+	}
+	hash, err := repo.Storer.SetEncodedObject(obj)
+	if err != nil {
+		t.Fatalf("failed to store commit: %v", err)
+	}
+	return hash
+}
+
 func TestGetBranchCheckpoints_DeepHistoryDoesNotLeakMainCheckpoint(t *testing.T) {
-	// computeReachableFromMain must mark main's ENTIRE first-parent chain, not
-	// just the most recent MaxCommitTraversalDepth commits. A branch that merged
-	// main in long ago — with main since advanced past that depth — would
-	// otherwise have the merged-in former-main-tip fall outside the reachable
-	// set, and walkBranchOwnCommits would descend into main's older history and
-	// surface main's checkpoints on the branch. This exercises the leak beyond
-	// the old depth bound.
+	// The shared-with-main test must still exclude main's history when main's
+	// first-parent chain is longer than the scan bound. A branch that merged main
+	// in long ago — with main since advanced past the bound — has the merged-in
+	// former-main-tip fall outside the scanned set; the commit-date frontier
+	// fail-safe (it is older than the oldest scanned main commit) must still prune
+	// it, so main's older checkpoints do not leak onto the branch, while the
+	// branch's own (newer) checkpoint is still shown.
+	//
+	// Commit times are explicit and seconds apart because git stores timestamps at
+	// 1-second resolution: mainOld is old, the branch commit is recent, and main's
+	// filler commits sit between them so the scan frontier lands between the two.
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 	testutil.InitRepo(t, tmpDir)
@@ -5933,6 +5956,8 @@ func TestGetBranchCheckpoints_DeepHistoryDoesNotLeakMainCheckpoint(t *testing.T)
 		t.Fatalf("failed to get worktree: %v", err)
 	}
 
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+
 	testFile := filepath.Join(tmpDir, "test.txt")
 	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
 		t.Fatalf("failed to write file: %v", err)
@@ -5941,7 +5966,7 @@ func TestGetBranchCheckpoints_DeepHistoryDoesNotLeakMainCheckpoint(t *testing.T)
 		t.Fatalf("failed to add file: %v", err)
 	}
 	masterBase, err := w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-3 * time.Hour)},
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: base},
 	})
 	if err != nil {
 		t.Fatalf("failed to create initial commit: %v", err)
@@ -5958,24 +5983,28 @@ func TestGetBranchCheckpoints_DeepHistoryDoesNotLeakMainCheckpoint(t *testing.T)
 	cpMainOld := id.MustCheckpointID("aa5700000001")
 	cpFeature := id.MustCheckpointID("fea700000002")
 
-	// An old main tip carrying a checkpoint.
-	mainOld := createCommitWithTree(t, repo, tree.Hash, []plumbing.Hash{masterBase}, trailers.FormatCheckpoint("main: old work", cpMainOld))
+	// An OLD main tip carrying a checkpoint (t = base + 1h).
+	mainOldTime := base.Add(1 * time.Hour)
+	mainOld := createCommitWithTreeAt(t, repo, tree.Hash, []plumbing.Hash{masterBase}, trailers.FormatCheckpoint("main: old work", cpMainOld), mainOldTime)
 
-	// Advance master past the old depth bound so mainOld falls outside a
-	// depth-limited first-parent scan.
+	// Advance master past the scan bound. Fillers sit in the MIDDLE (t = base+2h),
+	// so the scan frontier (some filler) is newer than mainOld and older than the
+	// branch commit.
+	fillerTime := base.Add(2 * time.Hour)
 	prev := mainOld
-	for range strategy.MaxCommitTraversalDepth + 5 {
-		prev = createCommitWithTree(t, repo, tree.Hash, []plumbing.Hash{prev}, "main: filler")
+	for range mainSpineScanLimit + 5 {
+		prev = createCommitWithTreeAt(t, repo, tree.Hash, []plumbing.Hash{prev}, "main: filler", fillerTime)
 	}
 	masterHead := prev
 	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("master"), masterHead)); err != nil {
 		t.Fatalf("failed to advance master ref: %v", err)
 	}
 
-	// Feature branches from the base, gets its own checkpoint, then merges the
-	// OLD main tip in (first parent = feature, second parent = mainOld).
-	featureCommit := createCommitWithTree(t, repo, tree.Hash, []plumbing.Hash{masterBase}, trailers.FormatCheckpoint("feat: work", cpFeature))
-	mergeHash := createMergeCommit(t, repo, featureCommit, mainOld, tree.Hash, "Merge old main into feature")
+	// Feature branches from the base with a RECENT checkpoint (t = base+3h), then
+	// merges the OLD main tip in (first parent = feature, second parent = mainOld).
+	featureTime := base.Add(3 * time.Hour)
+	featureCommit := createCommitWithTreeAt(t, repo, tree.Hash, []plumbing.Hash{masterBase}, trailers.FormatCheckpoint("feat: work", cpFeature), featureTime)
+	mergeHash := createCommitWithTreeAt(t, repo, tree.Hash, []plumbing.Hash{featureCommit, mainOld}, "Merge old main into feature", featureTime)
 	setBranchHead(t, repo, "feature/x", mergeHash)
 	if isOnDefault, cur := strategy.IsOnDefaultBranch(repo); isOnDefault {
 		t.Fatalf("test setup invalid: expected a non-default branch, got default branch %q", cur)
@@ -5992,7 +6021,133 @@ func TestGetBranchCheckpoints_DeepHistoryDoesNotLeakMainCheckpoint(t *testing.T)
 		t.Errorf("expected feature checkpoint %s to be found, got %d points: %v", cpFeature, len(points), points)
 	}
 	if found[cpMainOld] {
-		t.Errorf("old default-branch checkpoint %s (merged in beyond the reachable-set depth bound) must not leak onto the feature branch", cpMainOld)
+		t.Errorf("old default-branch checkpoint %s (merged in beyond the scan bound) must not leak onto the feature branch", cpMainOld)
+	}
+}
+
+func TestComputeReachableFromMain_ScanIsBounded(t *testing.T) {
+	// The default-branch first-parent scan must be bounded by mainSpineScanLimit
+	// regardless of how long main is — otherwise checkpoint list/explain would do
+	// an unbounded O(main) traversal on every call on a repo with a long history.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	masterBase, err := w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: base},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+	baseObj, err := repo.CommitObject(masterBase)
+	if err != nil {
+		t.Fatalf("failed to get base commit: %v", err)
+	}
+	tree, err := baseObj.Tree()
+	if err != nil {
+		t.Fatalf("failed to get base tree: %v", err)
+	}
+
+	// Main much longer than the bound.
+	prev := masterBase
+	total := mainSpineScanLimit + 50
+	for i := range total {
+		prev = createCommitWithTreeAt(t, repo, tree.Hash, []plumbing.Hash{prev}, "main: filler", base.Add(time.Duration(i)*time.Second))
+	}
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("master"), prev)); err != nil {
+		t.Fatalf("failed to advance master ref: %v", err)
+	}
+	// A feature branch so computeReachableFromMain does not short-circuit on default.
+	featureCommit := createCommitWithTreeAt(t, repo, tree.Hash, []plumbing.Hash{masterBase}, "feature work", base.Add(time.Duration(total+10)*time.Second))
+	setBranchHead(t, repo, "feature/x", featureCommit)
+
+	reach := computeReachableFromMain(context.Background(), repo)
+	if got := len(reach.onSpine); got > mainSpineScanLimit {
+		t.Errorf("scanned %d main commits, want at most mainSpineScanLimit=%d (scan must be bounded)", got, mainSpineScanLimit)
+	}
+	if reach.reachedRoot {
+		t.Errorf("expected reachedRoot=false when main (%d commits) exceeds the scan bound", total+1)
+	}
+}
+
+func TestGetBranchCheckpoints_ComputesReachabilityOncePerCall(t *testing.T) {
+	// The main first-parent scan must run once per getBranchCheckpoints call, not
+	// once per checkpoint — otherwise the bounded-but-nontrivial scan would be
+	// multiplied by the number of checkpoints on the branch.
+	//
+	// Not parallel: it reads a process-global call counter.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	masterBase, err := w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: base},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+	baseObj, err := repo.CommitObject(masterBase)
+	if err != nil {
+		t.Fatalf("failed to get base commit: %v", err)
+	}
+	tree, err := baseObj.Tree()
+	if err != nil {
+		t.Fatalf("failed to get base tree: %v", err)
+	}
+
+	// A feature branch with several committed checkpoints.
+	featureBranch := plumbing.NewBranchReferenceName("feature/x")
+	if err := w.Checkout(&git.CheckoutOptions{Hash: masterBase, Branch: featureBranch, Create: true}); err != nil {
+		t.Fatalf("failed to create feature branch: %v", err)
+	}
+	var ids []id.CheckpointID
+	prev := masterBase
+	for i, s := range []string{"a11100000001", "b22200000002", "c33300000003"} {
+		cp := id.MustCheckpointID(s)
+		ids = append(ids, cp)
+		prev = createCommitWithTreeAt(t, repo, tree.Hash, []plumbing.Hash{prev}, trailers.FormatCheckpoint("feat", cp), base.Add(time.Duration(i+1)*time.Minute))
+	}
+	setBranchHead(t, repo, "feature/x", prev)
+	writeCommittedCheckpointsForTest(t, repo, ids...)
+
+	before := computeReachableFromMainCalls.Load()
+	if _, _, err := getBranchCheckpoints(context.Background(), repo, 100); err != nil {
+		t.Fatalf("getBranchCheckpoints error: %v", err)
+	}
+	if delta := computeReachableFromMainCalls.Load() - before; delta != 1 {
+		t.Errorf("computeReachableFromMain ran %d times for one getBranchCheckpoints call over %d checkpoints; want exactly 1", delta, len(ids))
 	}
 }
 
