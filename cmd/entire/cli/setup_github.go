@@ -345,7 +345,11 @@ func confirmInitRepo(_ io.Writer, cwd string, opts GitHubBootstrapOptions) (bool
 	}
 
 	folder := filepath.Base(cwd)
-	confirmed := true
+	// Fail closed: git init mutates the user's directory, and huh's
+	// accessible mode silently resolves to the default when stdin hits
+	// EOF or a blank line — a default of "yes" turns an unanswered prompt
+	// into consent (e.g. automation with ACCESSIBLE set and piped stdin).
+	confirmed := false
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewConfirm().

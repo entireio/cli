@@ -1154,6 +1154,45 @@ func TestResolveRepoName_YesRepoExistsWithTTY_FallsBackToPrompt(t *testing.T) {
 	}
 }
 
+func TestConfirmInitRepo_AccessibleUnansweredPrompt_Declines(t *testing.T) {
+	// Regression: huh's accessible mode resolves the confirm to its default
+	// when stdin hits EOF or a blank line — no abort, no error. With a
+	// default of true, an unanswered prompt silently consented to `git init`
+	// (e.g. automation with ACCESSIBLE set and piped or closed stdin). The
+	// default must fail closed so silence means decline.
+	for name, stdin := range map[string]string{
+		"eof":        "",
+		"blank-line": "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("ENTIRE_TEST_TTY", "1")
+			// Accessible (text-based) mode reads os.Stdin instead of
+			// opening /dev/tty via bubbletea.
+			t.Setenv("ACCESSIBLE", "1")
+			pr, pw, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { pr.Close() })
+			if stdin != "" {
+				pw.WriteString(stdin) //nolint:errcheck // test helper
+			}
+			pw.Close()
+			oldStdin := os.Stdin
+			os.Stdin = pr
+			t.Cleanup(func() { os.Stdin = oldStdin })
+
+			confirmed, err := confirmInitRepo(io.Discard, t.TempDir(), GitHubBootstrapOptions{})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if confirmed {
+				t.Error("unanswered init-repo prompt must decline, got confirmed=true")
+			}
+		})
+	}
+}
+
 func TestRunGitHubBootstrap_YesWithNoGitHub(t *testing.T) {
 	// --yes combined with --no-github should skip GitHub but still init + commit.
 	dir := t.TempDir()
