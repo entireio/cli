@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	transcriptcompact "github.com/entireio/cli/cmd/entire/cli/transcript/compact"
+	"github.com/entireio/cli/cmd/entire/cli/transcript/imageextract"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
@@ -396,33 +398,52 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 				agentType = sessionMeta.Agent
 			}
 		}
-		if err := s.replaceTranscript(ctx, opts.Transcript, agentType, startLine, opts.PrecomputedBlobs, sessionDir, entries); err != nil {
+		rewrote, err := s.replaceTranscript(ctx, opts.Transcript, agentType, startLine, opts.PrecomputedBlobs, sessionDir, entries)
+		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to replace transcript: %w", err)
 		}
 
-		// Keep the root metadata.json compact_transcript pointer consistent with
-		// the finalized tree. replaceTranscript may have written transcript.jsonl
-		// that the initial write lacked (e.g. compaction was skipped then and
-		// succeeds now), so re-derive the pointer from the tree entry and rewrite
-		// the root summary when it changed.
-		compactPath := ""
-		if _, ok := entries[checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName)]; ok {
-			compactPath = "/" + checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName)
-		}
-		if checkpointSummary.Sessions[sessionIndex].CompactTranscript != compactPath {
-			checkpointSummary.Sessions[sessionIndex].CompactTranscript = compactPath
-			summaryJSON, err := jsonutil.MarshalIndentWithNewline(checkpointSummary, "", "  ")
+		// Only touch assets and the root pointers when the transcript was actually
+		// rewritten. If replaceTranscript short-circuited (identical content), the
+		// stored transcript, compact, and assets are all unchanged and already
+		// consistent — clearing/rewriting assets here would strip the blobs a
+		// still-present placeholder depends on, leaving a dangling placeholder.
+		if rewrote {
+			// Keep the externalized image assets consistent with the replaced
+			// transcript: write the new set (clearing any stale ones), so a finalize
+			// that re-externalizes matches its placeholders and one that produces an
+			// inline transcript leaves no orphaned blobs.
+			manifestPath, err := s.writeAssetsForBackfill(opts, sessionDir, entries)
 			if err != nil {
-				return plumbing.ZeroHash, fmt.Errorf("failed to marshal checkpoint summary: %w", err)
+				return plumbing.ZeroHash, fmt.Errorf("failed to write assets: %w", err)
 			}
-			summaryHash, err := CreateBlobFromContent(s.repo, summaryJSON)
-			if err != nil {
-				return plumbing.ZeroHash, fmt.Errorf("failed to create checkpoint summary blob: %w", err)
+
+			// Keep the root metadata.json compact_transcript and assets_manifest
+			// pointers consistent with the finalized tree. replaceTranscript may have
+			// written transcript.jsonl that the initial write lacked (e.g. compaction
+			// was skipped then and succeeds now), so re-derive both pointers from the
+			// tree and rewrite the root summary once when either changed.
+			compactPath := ""
+			if _, ok := entries[checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName)]; ok {
+				compactPath = "/" + checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName)
 			}
-			entries[rootMetadataPath] = object.TreeEntry{
-				Name: rootMetadataPath,
-				Mode: filemode.Regular,
-				Hash: summaryHash,
+			sess := &checkpointSummary.Sessions[sessionIndex]
+			if sess.CompactTranscript != compactPath || sess.AssetsManifest != manifestPath {
+				sess.CompactTranscript = compactPath
+				sess.AssetsManifest = manifestPath
+				summaryJSON, err := jsonutil.MarshalIndentWithNewline(checkpointSummary, "", "  ")
+				if err != nil {
+					return plumbing.ZeroHash, fmt.Errorf("failed to marshal checkpoint summary: %w", err)
+				}
+				summaryHash, err := CreateBlobFromContent(s.repo, summaryJSON)
+				if err != nil {
+					return plumbing.ZeroHash, fmt.Errorf("failed to create checkpoint summary blob: %w", err)
+				}
+				entries[rootMetadataPath] = object.TreeEntry{
+					Name: rootMetadataPath,
+					Mode: filemode.Regular,
+					Hash: summaryHash,
+				}
 			}
 		}
 	}
@@ -686,6 +707,13 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 			filePaths.CompactTranscript = "/" + checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName)
 		}
 	}
+
+	// Write externalized image assets (raw binary blobs + manifest), when present.
+	manifestPath, err := s.writeAssets(opts.Assets, sessionDir, entries)
+	if err != nil {
+		return filePaths, err
+	}
+	filePaths.AssetsManifest = manifestPath
 
 	// Write prompts via the 7-layer pipeline. OPF runs only in the
 	// pre-push rewrite path (manual_commit_opf_rewrite.go).
@@ -1474,7 +1502,7 @@ func readSessionContentFromTree(ctx context.Context, sessionTree *FetchingTree) 
 
 	// Read transcript (auto-fetches blobs if needed)
 	if transcript, transcriptErr := readTranscriptFromTree(ctx, sessionTree, agentType); transcriptErr == nil && transcript != nil {
-		result.Transcript = transcript
+		result.Transcript = reinjectAssets(sessionTree, agentType, transcript)
 		result.TranscriptBlobHashes = transcriptBlobHashesFromTreeEntries(sessionTree.RawEntries())
 	}
 
@@ -1813,7 +1841,122 @@ func (s *treeWriter) setCompactTranscriptStart(sessionPath string, start *int, e
 // reuse precomputed blobs: each checkpoint in a turn shares the full
 // transcript but has its own start offset, so the compact content differs per
 // checkpoint.
-func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.RedactedBytes, agentType types.AgentType, startLine int, precomputed *PrecomputedTranscriptBlobs, sessionDir string, entries map[string]object.TreeEntry) error {
+// assetManifestEntry describes one externalized asset in assets/manifest.json.
+// Size and SHA256 are descriptive metadata for external tooling and audits; they
+// are not used on reinject (git content-addresses the blobs, which already
+// guarantees their integrity on read).
+type assetManifestEntry struct {
+	Name      string `json:"name"`
+	MediaType string `json:"media_type,omitempty"`
+	Size      int    `json:"size"`
+	SHA256    string `json:"sha256"`
+}
+
+// writeAssetsForBackfill writes the update's assets, but preserves any
+// already-stored assets when the update carries none AND the update opts into
+// preservation (UpdateOptions.PreserveAssetsWhenEmpty). This guards a best-effort
+// sidecar capture (e.g. Cursor's sqlite3 store read) that transiently yields
+// nothing at finalize from wiping images a prior CondenseSession successfully
+// stored: leaving the existing assets/ subtree untouched is strictly safer than
+// clearing it. Returns the (possibly pre-existing) manifest path.
+func (s *treeWriter) writeAssetsForBackfill(opts UpdateOptions, sessionDir string, entries map[string]object.TreeEntry) (string, error) {
+	if len(opts.Assets) == 0 && opts.PreserveAssetsWhenEmpty {
+		manifestKey := checkpointSubtreePath(sessionDir, paths.AssetsManifestFile)
+		if _, ok := entries[manifestKey]; ok {
+			return "/" + manifestKey, nil
+		}
+		return "", nil
+	}
+	return s.writeAssets(opts.Assets, sessionDir, entries)
+}
+
+// writeAssets stores each externalized transcript asset as a raw binary blob
+// under the session's assets/ folder, plus an assets/manifest.json index, in the
+// same tree. Returns the manifest path ("" when there are no assets). git
+// content-addresses the blobs, so identical images dedupe across checkpoints.
+//
+// It first clears any assets already present under the session's assets/ folder,
+// so a re-write (backfill/finalize) replaces rather than accumulates, and an
+// empty asset set leaves no orphaned blobs behind a now-inline transcript.
+func (s *treeWriter) writeAssets(assets []TranscriptAsset, sessionDir string, entries map[string]object.TreeEntry) (string, error) {
+	assetsPrefix := checkpointSubtreePath(sessionDir, paths.AssetsDirName) + "/"
+	for key := range entries {
+		if strings.HasPrefix(key, assetsPrefix) {
+			delete(entries, key)
+		}
+	}
+	if len(assets) == 0 {
+		return "", nil
+	}
+	manifest := struct {
+		Version int                  `json:"version"`
+		Assets  []assetManifestEntry `json:"assets"`
+	}{Version: 1}
+	for _, a := range assets {
+		blobHash, err := CreateBlobFromContent(s.repo, a.Data)
+		if err != nil {
+			return "", err
+		}
+		p := checkpointSubtreePath(sessionDir, paths.AssetsDirName, a.Name)
+		entries[p] = object.TreeEntry{Name: p, Mode: filemode.Regular, Hash: blobHash}
+		sum := sha256.Sum256(a.Data)
+		manifest.Assets = append(manifest.Assets, assetManifestEntry{
+			Name: a.Name, MediaType: a.MediaType, Size: len(a.Data), SHA256: hex.EncodeToString(sum[:]),
+		})
+	}
+	manifestJSON, err := jsonutil.MarshalIndentWithNewline(manifest, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal assets manifest: %w", err)
+	}
+	manifestHash, err := CreateBlobFromContent(s.repo, manifestJSON)
+	if err != nil {
+		return "", err
+	}
+	mp := checkpointSubtreePath(sessionDir, paths.AssetsManifestFile)
+	entries[mp] = object.TreeEntry{Name: mp, Mode: filemode.Regular, Hash: manifestHash}
+	return "/" + mp, nil
+}
+
+// reinjectAssets restores externalized images into a transcript on read, so the
+// returned bytes match what was stored. Best-effort and gated on placeholder
+// presence, not on any config flag: an asset it can't load is left as a
+// placeholder rather than failing the read.
+func reinjectAssets(sessionTree *FetchingTree, agentType types.AgentType, transcript []byte) []byte {
+	if !imageextract.HasPlaceholders(transcript) {
+		return transcript
+	}
+	codec := imageextract.CodecFor(agentType)
+	if codec == nil {
+		return transcript
+	}
+	// No blob-integrity check is needed here: git content-addresses every asset
+	// blob, so a corrupt/truncated fetch fails object verification and Contents()
+	// errors out (leaving the placeholder). The manifest's sha256 is external
+	// metadata, not a second integrity gate — and since writeAssets derives both
+	// the blob and the sha256 from the same bytes, they can never disagree.
+	out, err := codec.ReinjectImages(transcript, func(name string) (agent.CompactedTranscriptAsset, bool) {
+		f, ferr := sessionTree.File(paths.AssetsDir + name)
+		if ferr != nil {
+			return agent.CompactedTranscriptAsset{}, false
+		}
+		content, cerr := f.Contents()
+		if cerr != nil {
+			return agent.CompactedTranscriptAsset{}, false
+		}
+		return agent.CompactedTranscriptAsset{Name: name, Data: []byte(content)}, true
+	})
+	if err != nil {
+		return transcript
+	}
+	return out
+}
+
+// replaceTranscript rewrites the session transcript (full.jsonl chunks +
+// content_hash + compact) in entries. It reports whether it actually rewrote:
+// false means the content-hash matched and everything was left as-is (the
+// caller must then leave coupled artifacts like assets untouched too, so they
+// stay consistent with the unchanged transcript).
+func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.RedactedBytes, agentType types.AgentType, startLine int, precomputed *PrecomputedTranscriptBlobs, sessionDir string, entries map[string]object.TreeEntry) (bool, error) {
 	// Ignore precompute if invariants are violated — fall back to fresh chunking.
 	if precomputed != nil && !precomputed.IsUsable() {
 		precomputed = nil
@@ -1837,7 +1980,7 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 				existingHash, readErr := io.ReadAll(rdr)
 				_ = rdr.Close()
 				if readErr == nil && string(existingHash) == newContentHash {
-					return nil
+					return false, nil
 				}
 			}
 		}
@@ -1858,13 +2001,13 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 	} else {
 		chunks, err := chunkTranscript(ctx, transcript.Bytes(), agentType)
 		if err != nil {
-			return fmt.Errorf("failed to chunk transcript: %w", err)
+			return false, fmt.Errorf("failed to chunk transcript: %w", err)
 		}
 		chunkHashes = make([]plumbing.Hash, len(chunks))
 		for i, chunk := range chunks {
 			blobHash, err := CreateBlobFromContent(s.repo, chunk)
 			if err != nil {
-				return fmt.Errorf("failed to create transcript blob: %w", err)
+				return false, fmt.Errorf("failed to create transcript blob: %w", err)
 			}
 			chunkHashes[i] = blobHash
 		}
@@ -1887,7 +2030,7 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 	} else {
 		h, err := CreateBlobFromContent(s.repo, []byte(newContentHash))
 		if err != nil {
-			return fmt.Errorf("failed to create content hash blob: %w", err)
+			return false, fmt.Errorf("failed to create content hash blob: %w", err)
 		}
 		hashBlob = h
 	}
@@ -1922,10 +2065,10 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 	// transcript.jsonl: record the new boundary when one was produced, or clear
 	// it (nil) when the compact transcript was dropped above.
 	if err := s.setCompactTranscriptStart(sessionDir, compactStart, entries); err != nil {
-		return fmt.Errorf("failed to update compact transcript start: %w", err)
+		return false, fmt.Errorf("failed to update compact transcript start: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // PrecomputeTranscriptBlobs chunks the given transcript and writes each chunk
@@ -2323,7 +2466,7 @@ func SignCommitBestEffort(ctx context.Context, commit *object.Commit) {
 	}
 	defer r.Close()
 
-	sig, err := signer.Sign(r)
+	sig, err := signer.Sign(ctx, r)
 	if err != nil {
 		logging.Warn(ctx, "failed to sign commit", slog.String("error", err.Error()))
 		return

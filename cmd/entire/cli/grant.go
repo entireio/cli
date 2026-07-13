@@ -42,9 +42,9 @@ func validateGrantRole(role string) error {
 	}
 }
 
-// newGrantCmd is the hidden `entire grant` command group: manage access
+// newGrantCmd is the `entire grant` command group: manage access
 // grants and org membership on the Entire control plane. Org, project, and
-// repo each support add / list / remove. Surfaced via `entire labs`.
+// repo each support add / list / remove.
 //
 // Grantees are addressed by a provider-qualified handle (e.g. github:alice),
 // which the CLI resolves to the provider account behind the scenes. `remove`
@@ -52,9 +52,8 @@ func validateGrantRole(role string) error {
 // repo) are addressed by name or ULID.
 func newGrantCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "grant",
-		Short:  "Manage Entire access grants and org membership",
-		Hidden: true,
+		Use:   "grant",
+		Short: "Manage Entire access grants and org membership",
 	}
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newGrantOrgCmd())
@@ -146,11 +145,12 @@ func newGrantOrgAddCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&role, "role", "", "Org role: owner, admin, or member (default member)")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newGrantOrgListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list <org>",
 		Short: "List org members",
 		Args:  cobra.ExactArgs(1),
@@ -174,6 +174,8 @@ func newGrantOrgListCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 func newGrantOrgRemoveCmd() *cobra.Command {
@@ -256,11 +258,12 @@ func newGrantProjectAddCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&role, "role", "", "Project role: reader, writer, or admin (required)")
 	markRequired(cmd, "role")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newGrantProjectListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list <project>",
 		Short: "List project members",
 		Args:  cobra.ExactArgs(1),
@@ -284,6 +287,8 @@ func newGrantProjectListCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 func newGrantProjectRemoveCmd() *cobra.Command {
@@ -405,6 +410,7 @@ func newGrantRepoAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&role, "role", "", "Repo role: reader, writer, or admin (required)")
 	bindRepoProjectFlag(cmd, &project)
 	markRequired(cmd, "role")
+	addJSONFlag(cmd)
 	return cmd
 }
 
@@ -435,6 +441,7 @@ func newGrantRepoListCmd() *cobra.Command {
 		},
 	}
 	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
 	return cmd
 }
 

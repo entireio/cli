@@ -935,7 +935,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
 	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
-	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit; then enable all agents and accept telemetry)")
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit, and push; then enable all agents and accept telemetry)")
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
 	// Bootstrap flags for non-git-repo folders.
@@ -945,10 +945,13 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().StringVar(&bootstrapOpts.RepoOwner, "repo-owner", "", "GitHub user or organization login for the new repo")
 	cmd.Flags().StringVar(&bootstrapOpts.RepoVisibility, "repo-visibility", "", "GitHub repository visibility: public, private, or internal")
 	cmd.Flags().BoolVar(&bootstrapOpts.NoGitHub, "no-github", false, "Initialize local git repo only; skip creating a GitHub remote")
+	cmd.Flags().BoolVar(&bootstrapOpts.Push, "push", false, "When bootstrapping a new repo, push the initial commit to the created GitHub remote (implies creating the remote; without it the repo is created but not pushed)")
 	cmd.Flags().StringVar(&bootstrapOpts.InitialCommitMessage, "initial-commit-message", "", "Commit message for the initial commit when bootstrapping a new repo")
 	cmd.Flags().BoolVar(&bootstrapOpts.SkipInitialCommit, "skip-initial-commit", false, "Don't create the initial commit when bootstrapping a new repo")
 	cmd.MarkFlagsMutuallyExclusive("init-repo", "no-init-repo")
 	cmd.MarkFlagsMutuallyExclusive("initial-commit-message", "skip-initial-commit")
+	cmd.MarkFlagsMutuallyExclusive("push", "no-github")
+	cmd.MarkFlagsMutuallyExclusive("push", "skip-initial-commit")
 
 	// Provide a helpful error when --agent is used without a value
 	defaultFlagErr := cmd.FlagErrorFunc()
@@ -1471,20 +1474,49 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, localDev, forceHooks b
 	return count, nil
 }
 
+// promptAgentSelection shows the interactive multi-select agent picker and
+// returns the chosen agent names. It is a package-level var so tests can
+// substitute it — no real TTY/form is available under `go test`.
+var promptAgentSelection = func(options []huh.Option[string]) ([]string, error) {
+	var selected []string
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewMultiSelect[string]().
+				Title("Select the agents you want to use").
+				Description("Use space to select, enter to confirm.").
+				Options(options...).
+				Validate(func(sel []string) error {
+					if len(sel) == 0 {
+						return errors.New("please select at least one agent")
+					}
+					return nil
+				}).
+				Value(&selected),
+		),
+	)
+	if err := form.Run(); err != nil {
+		return nil, fmt.Errorf("agent selection cancelled: %w", err)
+	}
+	return selected, nil
+}
+
 // detectOrSelectAgent tries to auto-detect agents, or prompts the user to select.
 // Returns the detected/selected agents and any error.
 //
 // On first run (no hooks installed):
-//   - Single detected built-in agent: used automatically
-//   - Single detected external agent: interactive multi-select prompt
-//   - Multiple/no detected agents: interactive multi-select prompt
+//   - Shows the interactive multi-select (TTY available and no selectFn override)
+//   - Pre-selects detected built-in agents so the user can confirm with enter
+//     or add more; detected external agents are shown but not pre-selected
+//   - Non-interactive (no TTY): uses detected agents, else the default agent
 //
 // On re-run (hooks already installed):
-//   - Always shows the interactive multi-select
+//   - Shows the interactive multi-select (TTY available and no selectFn override)
 //   - Pre-selects only agents that have hooks installed (respects prior deselection)
+//   - Non-interactive (no TTY): keeps the currently installed agents
 //
-// selectFn overrides the interactive prompt for testing. When nil, the real form is used.
-// It receives available agent names and returns the selected names.
+// selectFn overrides the prompt with a caller-supplied selection (--yes uses
+// selectAllAgents; tests inject their own), bypassing the form even on a TTY.
+// When nil, the real multi-select form is shown.
 func detectOrSelectAgent(ctx context.Context, w io.Writer, selectFn func(available []string) ([]string, error)) ([]agent.Agent, error) {
 	// Check for agents with hooks already installed (re-run detection)
 	installedAgentNames := GetAgentsWithHooksInstalled(ctx)
@@ -1497,13 +1529,12 @@ func detectOrSelectAgent(ctx context.Context, w io.Writer, selectFn func(availab
 	if !hasInstalledHooks {
 		switch {
 		case len(detected) == 1:
-			if isBuiltInAgent(detected[0]) {
-				// When a selectFn is provided (e.g. --yes), skip the single-agent
-				// shortcut so the caller's selection logic runs instead.
-				if selectFn == nil {
-					fmt.Fprintf(w, "Detected agent: %s\n\n", detected[0].Type())
-					return detected, nil
-				}
+			// Announce the single detected built-in agent; it is pre-selected
+			// in the multi-select form below so the user can confirm it or add
+			// more. --yes (selectFn != nil) uses the caller's selection and
+			// skips the announcement.
+			if selectFn == nil && isBuiltInAgent(detected[0]) {
+				fmt.Fprintf(w, "Detected agent: %s\n\n", detected[0].Type())
 			}
 
 		case len(detected) > 1:
@@ -1569,35 +1600,21 @@ func detectOrSelectAgent(ctx context.Context, w io.Writer, selectFn func(availab
 		availableNames = append(availableNames, opt.Value)
 	}
 
-	var selectedAgentNames []string
-	if selectFn != nil {
-		var err error
-		selectedAgentNames, err = selectFn(availableNames)
-		if err != nil {
-			return nil, err
+	// selectFn overrides the prompt with a caller-supplied selection (--yes,
+	// tests). When nil, show the real interactive multi-select. Routing both
+	// through selectFn keeps a single selection step, so there is no "skip the
+	// picker" path a lone detected agent can slip back into.
+	if selectFn == nil {
+		selectFn = func([]string) ([]string, error) {
+			return promptAgentSelection(options)
 		}
-		if len(selectedAgentNames) == 0 {
-			return nil, errors.New("no agents selected")
-		}
-	} else {
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewMultiSelect[string]().
-					Title("Select the agents you want to use").
-					Description("Use space to select, enter to confirm.").
-					Options(options...).
-					Validate(func(selected []string) error {
-						if len(selected) == 0 {
-							return errors.New("please select at least one agent")
-						}
-						return nil
-					}).
-					Value(&selectedAgentNames),
-			),
-		)
-		if err := form.Run(); err != nil {
-			return nil, fmt.Errorf("agent selection cancelled: %w", err)
-		}
+	}
+	selectedAgentNames, err := selectFn(availableNames)
+	if err != nil {
+		return nil, err
+	}
+	if len(selectedAgentNames) == 0 {
+		return nil, errors.New("no agents selected")
 	}
 
 	selectedAgents := make([]agent.Agent, 0, len(selectedAgentNames))

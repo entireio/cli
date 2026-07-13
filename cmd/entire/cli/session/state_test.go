@@ -234,6 +234,20 @@ func TestState_IsStale(t *testing.T) {
 		}
 		assert.False(t, state.IsStale())
 	})
+
+	t.Run("imported_is_never_stale", func(t *testing.T) {
+		t.Parallel()
+		// Imported sessions carry historical timestamps (always old) but must
+		// never be auto-purged, or they'd vanish from `session list` on read.
+		old := time.Now().Add(-30 * 24 * time.Hour)
+		imported := &State{Kind: KindImported, StartedAt: old, LastInteractionTime: &old}
+		assert.False(t, imported.IsStale(), "imported session should never be stale")
+
+		// Control: a non-imported session of the same age IS stale (guards
+		// against an over-broad exemption).
+		normal := &State{StartedAt: old, LastInteractionTime: &old}
+		assert.True(t, normal.IsStale())
+	})
 }
 
 func TestStateStore_Load_DeletesStaleSession(t *testing.T) {

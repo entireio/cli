@@ -94,14 +94,14 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newLabsCmd())            // 'labs' (experimental workflow discovery)
 	cmd.AddCommand(newPluginGroupCmd())     // 'plugin' (managed install/list/remove)
 	cmd.AddCommand(newImportCmd())          // 'import' (hidden; import pre-existing agent history)
+	cmd.AddCommand(newOrgCmd())             // 'org' — control-plane org management
+	cmd.AddCommand(newProjectCmd())         // 'project' — control-plane project management
+	cmd.AddCommand(newRepoCmd())            // 'repo' — control-plane repo lifecycle
+	cmd.AddCommand(newGrantCmd())           // 'grant' — control-plane access grants
 
 	// Top-level lifecycle and standalone commands.
 	cmd.AddCommand(cliReview.NewCommand(buildReviewDeps()))        // `review`; hidden during maturation
 	cmd.AddCommand(investigate.NewCommand(buildInvestigateDeps())) // hidden during maturation; runs a multi-agent investigation
-	cmd.AddCommand(newOrgCmd())                                    // hidden during maturation; control-plane org management
-	cmd.AddCommand(newProjectCmd())                                // hidden during maturation; control-plane project management
-	cmd.AddCommand(newRepoCmd())                                   // hidden during maturation; control-plane repo lifecycle
-	cmd.AddCommand(newGrantCmd())                                  // hidden during maturation; control-plane access grants
 	cmd.AddCommand(newCleanCmd())
 	cmd.AddCommand(newSetupCmd()) // 'configure' — non-agent settings; agent CRUD lives under 'agent'
 	cmd.AddCommand(newEnableCmd())

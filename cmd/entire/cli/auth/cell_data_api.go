@@ -17,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
+	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/httputil"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
@@ -262,16 +263,55 @@ type cellSubject struct {
 	httpClient     *http.Client
 }
 
-// resolveCellSubject picks the jurisdiction-exchange subject: ENTIRE_TOKEN when
-// set (exclusive, fail-closed), otherwise the active stored login context. This
-// is the ENTIRE_TOKEN-aware dispatcher used by JurisdictionToken;
-// NewEntireAPICellClient calls resolveStoredCellSubject directly so its behavior
-// is unchanged.
+// resolveCellSubject picks the jurisdiction-exchange subject for
+// JurisdictionToken (the `entire auth token --jurisdiction` scripting helper):
+// ENTIRE_TOKEN when set (exclusive, fail-closed), otherwise the ACTIVE stored
+// login context.
+//
+// It deliberately uses the active context — the same login `entire auth token`
+// (no flag) prints a bearer for — rather than resolveStoredCellSubject's
+// data-host discovery. `--jurisdiction` mints a token for the caller's SELECTED
+// environment, so with (say) a partial.to context active it must mint a
+// partial.to token even though the data host defaults to entire.io. Discovery
+// keys off api.BaseURL() and would pick whichever context that host trusts,
+// silently ignoring the selection. NewEntireAPICellClient is a different case —
+// it dials the data plane — so it keeps calling resolveStoredCellSubject.
 func resolveCellSubject(ctx context.Context, insecureHTTP bool) (cellSubject, error) {
 	if raw, ok := os.LookupEnv(EnvTokenVar); ok {
 		return resolveEnvTokenCellSubject(raw, insecureHTTP)
 	}
-	return resolveStoredCellSubject(ctx, insecureHTTP)
+	return resolveActiveContextCellSubject(ctx, insecureHTTP)
+}
+
+// resolveActiveContextCellSubject builds the exchange subject from the active
+// stored login context: it refreshes that context's login JWT and uses the
+// context's own core as both the environment signal (dataOrigin) and the
+// exchange target. See resolveCellSubject for why `--jurisdiction` follows the
+// active context instead of discovering one against the data host.
+func resolveActiveContextCellSubject(ctx context.Context, insecureHTTP bool) (cellSubject, error) {
+	if insecureHTTP {
+		EnableInsecureHTTP()
+	}
+	c, ok, err := activeContext()
+	if err != nil {
+		return cellSubject{}, err
+	}
+	if !ok {
+		return cellSubject{}, fmt.Errorf("not logged in (run 'entire login' first): %w", ErrNotLoggedIn)
+	}
+
+	loginJWT, err := refreshCellLoginJWT(ctx, c)
+	if err != nil {
+		return cellSubject{}, err
+	}
+
+	origin := api.OriginOnly(c.CoreURL)
+	return cellSubject{
+		loginJWT:       loginJWT,
+		discoveredCore: origin,
+		dataOrigin:     origin,
+		httpClient:     cellExchangeHTTPClient(origin),
+	}, nil
 }
 
 // resolveStoredCellSubject resolves the exchange subject from the active stored
@@ -303,23 +343,8 @@ func resolveStoredCellSubject(ctx context.Context, insecureHTTP bool) (cellSubje
 		return cellSubject{}, err
 	}
 
-	// Gate the login provider's HTTPS relaxation on the core it actually dials
-	// (selected.CoreURL) plus the explicit --insecure-http-auth opt-in, matching
-	// the sibling ResolveDataAPIToken. A loopback data API must not relax HTTPS
-	// for a non-loopback core.
-	allowInsecure := insecureHTTPEnabled() || isLoopbackHTTP(selected.CoreURL)
-	loginProvider, err := NewRefreshingLoginProvider(selected, cellExchangeTransportForTest, allowInsecure)
+	loginJWT, err := refreshCellLoginJWT(ctx, selected)
 	if err != nil {
-		return cellSubject{}, err
-	}
-
-	loginJWT, err := loginProvider(ctx)
-	if err != nil {
-		if errors.Is(err, ErrNotLoggedIn) {
-			return cellSubject{}, fmt.Errorf("not logged in (run 'entire login' first): %w", err)
-		}
-		// The provider already prefixes "refresh login token:"; return as-is to
-		// avoid a doubled prefix.
 		return cellSubject{}, err
 	}
 
@@ -329,6 +354,30 @@ func resolveStoredCellSubject(ctx context.Context, insecureHTTP bool) (cellSubje
 		dataOrigin:     dataOrigin,
 		httpClient:     httpClient,
 	}, nil
+}
+
+// refreshCellLoginJWT returns c's login JWT, transparently re-minting it from the
+// stored refresh token. Shared by the active-context and discovered-context cell
+// subject resolvers, which differ only in how they pick c.
+func refreshCellLoginJWT(ctx context.Context, c *contexts.Context) (string, error) {
+	// Gate the login provider's HTTPS relaxation on the core it actually dials
+	// plus the explicit --insecure-http-auth opt-in: a loopback core must not
+	// relax HTTPS for a non-loopback one.
+	allowInsecure := insecureHTTPEnabled() || isLoopbackHTTP(c.CoreURL)
+	loginProvider, err := NewRefreshingLoginProvider(c, cellExchangeTransportForTest, allowInsecure)
+	if err != nil {
+		return "", err
+	}
+	loginJWT, err := loginProvider(ctx)
+	if err != nil {
+		if errors.Is(err, ErrNotLoggedIn) {
+			return "", fmt.Errorf("not logged in (run 'entire login' first): %w", err)
+		}
+		// The provider already prefixes "refresh login token:"; return as-is to
+		// avoid a doubled prefix.
+		return "", err
+	}
+	return loginJWT, nil
 }
 
 // resolveEnvTokenCellSubject builds the exchange subject from ENTIRE_TOKEN: the

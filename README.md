@@ -250,6 +250,10 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire checkpoint explain` | Explain a session, commit, or checkpoint                                               |
 | `entire checkpoint rewind` | Rewind to a previous checkpoint (deprecated, will be removed in a future release)       |
 | `entire login`   | Authenticate the CLI with Entire device auth                                                      |
+| `entire org`     | Manage Entire organizations (create, list, get, delete)                                           |
+| `entire project` | Manage Entire projects (create, list, get, delete)                                                |
+| `entire repo`    | Manage Entire repositories (create, list, get, delete, clone, mirror, visibility)                 |
+| `entire grant`   | Manage access grants and org membership (org, project, repo)                                      |
 | `entire session` | View and manage agent sessions tracked by Entire                                                  |
 | `entire session resume`    | Switch to a branch, restore latest checkpointed session metadata, and show command(s) |
 | `entire session attach`    | Attach to a previously detached session                                                |
