@@ -161,6 +161,12 @@ func (a *AntigravityAgent) AreHooksInstalled(ctx context.Context) bool {
 		hasEntireHookInSimpleHandlers(cfg.Stop)
 }
 
+// stopHookTimeoutSeconds is the explicit timeout installed on the Stop
+// handler. Stop runs PrepareTranscript (short bounded wait) plus SaveStep — a
+// shadow-branch checkpoint write that can exceed agy's 30s default timeout on
+// large repos, in which case agy kills the hook mid-checkpoint with no trace.
+const stopHookTimeoutSeconds = 300
+
 // buildEntireHookConfig constructs the HookConfig for the "entire" entry.
 func buildEntireHookConfig(cmdPrefix string, localDev bool) HookConfig {
 	makeCmd := func(verb string) string {
@@ -184,7 +190,7 @@ func buildEntireHookConfig(cmdPrefix string, localDev bool) HookConfig {
 			},
 		},
 		PreInvocation: []SimpleHandler{{Type: "command", Command: makeCmd("pre-invocation")}},
-		Stop:          []SimpleHandler{{Type: "command", Command: makeCmd("stop")}},
+		Stop:          []SimpleHandler{{Type: "command", Command: makeCmd("stop"), Timeout: stopHookTimeoutSeconds}},
 	}
 }
 

@@ -3173,3 +3173,45 @@ func TestCleanRemoteURLForReport(t *testing.T) {
 		})
 	}
 }
+
+// TestRunRemoveAgent_AntigravityWarnsAboutGlobalTeeRemoval pins the
+// machine-global side effect of a repo-scoped command: removing the
+// Antigravity agent uninstalls the title-tee from agy's GLOBAL settings, which
+// disables token capture for every other repo still using Antigravity. The
+// user must be told, since the breakage is otherwise silent (zero-token
+// checkpoints) until doctor or agent add runs in the other repo.
+func TestRunRemoveAgent_AntigravityWarnsAboutGlobalTeeRemoval(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	agentsDir := filepath.Join(dir, ".agents")
+	if err := os.MkdirAll(agentsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentsDir, "hooks.json"), []byte(antigravityHooksJSON()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgDir := filepath.Join(t.TempDir(), "agy")
+	if err := os.MkdirAll(cfgDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	teeSettings := `{"title":{"type":"command","command":"entire hooks antigravity title-tee"}}`
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(teeSettings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", cfgDir)
+
+	var out bytes.Buffer
+	if err := runRemoveAgent(context.Background(), &out, "antigravity"); err != nil {
+		t.Fatalf("runRemoveAgent: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "Removed Antigravity hooks.") {
+		t.Errorf("missing removal confirmation: %q", got)
+	}
+	if !strings.Contains(got, "token capture") || !strings.Contains(got, "other repositories") {
+		t.Errorf("missing global title-tee removal warning: %q", got)
+	}
+}

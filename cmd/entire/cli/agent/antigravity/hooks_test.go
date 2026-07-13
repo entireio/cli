@@ -46,6 +46,13 @@ func TestInstallHooks_FreshRepo(t *testing.T) {
 	if cfg.PreToolUse[0].Matcher != "*" {
 		t.Errorf("PreToolUse matcher = %q, want %q", cfg.PreToolUse[0].Matcher, "*")
 	}
+	// Stop runs PrepareTranscript + SaveStep (a shadow-branch checkpoint
+	// write); agy's default hook timeout is 30s, which a large repo can
+	// exceed — agy would kill the hook mid-checkpoint with no trace. The
+	// installed handler must carry an explicit generous timeout.
+	if cfg.Stop[0].Timeout != stopHookTimeoutSeconds {
+		t.Errorf("Stop timeout = %d, want %d", cfg.Stop[0].Timeout, stopHookTimeoutSeconds)
+	}
 }
 
 func TestInstallHooks_Idempotent(t *testing.T) {

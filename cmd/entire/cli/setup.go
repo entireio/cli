@@ -1394,15 +1394,26 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 
 	// Antigravity's title tee lives in agy's GLOBAL settings.json, not in
 	// this repo — only remove it when the user removes the agent itself,
-	// never on per-repo disable.
-	if ag.Name() == agent.AgentNameAntigravity {
+	// never on per-repo disable. Because the slot is global, removing it here
+	// silently breaks token capture for every OTHER repo still using
+	// Antigravity, so tell the user (doctor / `entire agent add antigravity`
+	// in the affected repo repairs it).
+	teeRemoved := false
+	if ag.Name() == agent.AgentNameAntigravity && antigravity.TitleTeeInstalled() {
 		if err := antigravity.UninstallTitleTee(); err != nil {
 			logging.Warn(ctx, "failed to uninstall antigravity title tee",
 				"error", err.Error())
+		} else {
+			teeRemoved = true
 		}
 	}
 
 	fmt.Fprintf(w, "Removed %s hooks.\n", ag.Type())
+	if teeRemoved {
+		fmt.Fprintln(w, "Note: the Antigravity title-tee was removed from agy's global settings —")
+		fmt.Fprintln(w, "this disables token capture in any other repositories still using Antigravity.")
+		fmt.Fprintln(w, "Run `entire agent add antigravity` (or `entire doctor`) there to restore it.")
+	}
 	return nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -481,11 +482,17 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 // repo but agy's global title slot has NOT been claimed by the title-tee shim.
 // agy exposes token usage only through the title/statusline state JSON, so a
 // missing title-tee means token counts will be absent from every Antigravity
-// checkpoint. Stays silent when Antigravity hooks aren't installed here.
-// Warn-only.
+// checkpoint. Stays silent when Antigravity hooks aren't installed here, and
+// when there is no agy binary on PATH — .agents/hooks.json is committable, so
+// a teammate's checkout can carry the hooks on a machine that never uses agy;
+// warning there (and repairing into agy's global settings) is a false
+// positive. Warn-only.
 func checkAntigravityTitleTee(cmd *cobra.Command) {
 	ag := &antigravity.AntigravityAgent{}
 	if !ag.AreHooksInstalled(cmd.Context()) {
+		return
+	}
+	if _, err := exec.LookPath("agy"); err != nil {
 		return
 	}
 
@@ -498,7 +505,7 @@ func checkAntigravityTitleTee(cmd *cobra.Command) {
 	fmt.Fprintln(w, "Antigravity title-tee: NOT CONFIGURED")
 	fmt.Fprintln(w, "  agy's title command isn't routed through Entire, so token counts")
 	fmt.Fprintln(w, "  will be missing for Antigravity checkpoints.")
-	fmt.Fprintln(w, "  Re-run agent setup (`entire agent add`) to configure it.")
+	fmt.Fprintln(w, "  Re-run agent setup (`entire agent add antigravity`) to configure it.")
 }
 
 // canDeleteShadowBranch checks if a shadow branch can be safely deleted.

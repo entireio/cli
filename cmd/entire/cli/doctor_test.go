@@ -556,6 +556,37 @@ func antigravityHooksJSON() string {
 	return `{"entire":{"PreInvocation":[{"type":"command","command":"entire hooks antigravity pre-invocation"}]}}`
 }
 
+// stubAgyOnPath prepends a directory containing a fake executable `agy` to
+// PATH so the doctor check's binary-presence guard passes deterministically.
+func stubAgyOnPath(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	stub := filepath.Join(binDir, "agy")
+	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestCheckAntigravityTitleTee_SilentWhenAgyNotInstalled stays quiet for
+// developers who don't use agy at all: .agents/hooks.json is committable, so
+// a teammate's checkout can have Antigravity hooks "installed" on a machine
+// with no agy binary — warning there (and suggesting a repair that writes
+// agy's global settings) is a false positive.
+func TestCheckAntigravityTitleTee_SilentWhenAgyNotInstalled(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	agentsDir := filepath.Join(dir, ".agents")
+	require.NoError(t, os.MkdirAll(agentsDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(agentsDir, "hooks.json"),
+		[]byte(antigravityHooksJSON()), 0o600))
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", filepath.Join(t.TempDir(), "agy"))
+	t.Setenv("PATH", t.TempDir()) // no agy binary anywhere on PATH
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityTitleTee(cmd)
+	require.NotContains(t, stdout.String(), "Antigravity title-tee")
+}
+
 // TestCheckAntigravityTitleTee_SilentWhenHooksNotInstalled stays quiet when
 // the repo has no Antigravity hooks — nothing to check.
 func TestCheckAntigravityTitleTee_SilentWhenHooksNotInstalled(t *testing.T) {
@@ -573,6 +604,7 @@ func TestCheckAntigravityTitleTee_SilentWhenHooksNotInstalled(t *testing.T) {
 func TestCheckAntigravityTitleTee_OKWhenConfigured(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
+	stubAgyOnPath(t)
 
 	agentsDir := filepath.Join(dir, ".agents")
 	require.NoError(t, os.MkdirAll(agentsDir, 0o750))
@@ -595,6 +627,7 @@ func TestCheckAntigravityTitleTee_OKWhenConfigured(t *testing.T) {
 func TestCheckAntigravityTitleTee_WarnsWhenNotConfigured(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
+	stubAgyOnPath(t)
 
 	agentsDir := filepath.Join(dir, ".agents")
 	require.NoError(t, os.MkdirAll(agentsDir, 0o750))
@@ -610,7 +643,7 @@ func TestCheckAntigravityTitleTee_WarnsWhenNotConfigured(t *testing.T) {
 	out := stdout.String()
 	require.Contains(t, out, "Antigravity title-tee: NOT CONFIGURED")
 	require.Contains(t, out, "token counts")
-	require.Contains(t, out, "entire agent add")
+	require.Contains(t, out, "entire agent add antigravity")
 }
 
 // TestConfirmDoctorFix_CancelledContext verifies that a cancelled command
