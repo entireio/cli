@@ -18,9 +18,15 @@ import (
 // description, and they are referenced with a "/name" slash invocation.
 //
 // Scopes, in precedence order (global wins on name collision):
-//   - global (agy CLI only):     ~/.gemini/antigravity-cli/skills
-//   - shared (all Antigravity):  ~/.gemini/skills
-//   - project:                   <repo>/.agent/skills
+//   - global (agy 1.1+):           ~/.gemini/config/skills
+//   - global (pre-1.1 layouts):    ~/.gemini/antigravity-cli/skills, ~/.gemini/skills
+//   - workspace (agy 1.1+):        <repo>/.agents/skills
+//   - workspace (legacy, honored): <repo>/.agent/skills
+//
+// agy 1.1 moved the defaults ("Antigravity now defaults to .agents/skills,
+// but still maintains backward support for .agent/skills"; global discovery
+// under ~/.gemini/config/) — all roots are scanned so skills keep resolving
+// across agy versions.
 //
 // Google's built-in skills under ~/.gemini/antigravity-cli/builtin/skills are
 // deliberately NOT scanned — they are shipped guides (e.g. antigravity-guide),
@@ -39,9 +45,11 @@ func (a *AntigravityAgent) DiscoverReviewSkills(ctx context.Context) ([]agent.Di
 	}
 
 	var found []agent.DiscoveredSkill
+	found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(home, ".gemini", "config", "skills"), "")...)
 	found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(home, ".gemini", "antigravity-cli", "skills"), "")...)
 	found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(home, ".gemini", "skills"), "")...)
 	if root, rootErr := paths.WorktreeRoot(ctx); rootErr == nil {
+		found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(root, ".agents", "skills"), "")...)
 		found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(root, ".agent", "skills"), "")...)
 	}
 

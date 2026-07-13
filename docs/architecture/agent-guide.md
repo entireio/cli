@@ -941,9 +941,12 @@ limitations while in preview:
 - **Live E2E / CI is quota- and entitlement-gated**: agy has no API-key auth;
   see the entitlement caveat in `e2e/README.md`. The CI e2e leg is
   workflow_dispatch-only.
-- **Wire format pinned to agy 1.0.14/1.0.15**: hook payloads and the
-  statusline/title schema were verified against those releases; agy is
-  fast-moving and future releases may change the contract.
+- **Wire format captured on agy 1.0.14/1.0.15, re-verified unchanged on agy
+  1.1.1** (2026-07-13, docs + binary + live run): hook payloads, hooks.json
+  shape, and the statusline/title schema are stable so far, but agy is
+  fast-moving — skill directories already moved in 1.1 (now
+  `<workspace>/.agents/skills` and `~/.gemini/config/skills`; discovery scans
+  new and legacy roots). Re-verify the contract when agy versions bump.
 
 ### Nil Event Return Pattern
 

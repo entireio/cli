@@ -50,7 +50,8 @@ func TestAntigravity_FullEventFlow(t *testing.T) {
 		"artifactDirectoryPath": filepath.Join(env.RepoDir, ".gemini", "antigravity-cli", "artifacts"),
 	}
 
-	// agy 1.0.0 wire format: invocationNum is 0-indexed. The first model
+	// agy wire format (captured on 1.0.14/1.0.15, re-verified unchanged on
+	// 1.1.1): invocationNum is 0-indexed. The first model
 	// invocation of a conversation carries invocationNum=0; only that one
 	// is mapped to TurnStart by parsePreInvocation. initialNumSteps=1 reflects
 	// the user prompt being inserted as step 0 before the first model call —

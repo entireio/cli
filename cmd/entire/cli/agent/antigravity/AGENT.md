@@ -6,8 +6,9 @@ The `agy` binary (Antigravity 2.0, Google's Gemini CLI successor) supports
 workspace-scoped hooks via `.agents/hooks.json` and writes JSONL transcripts to
 a predictable per-conversation location. The integration is marked
 **Preview** (`IsPreview() == true`) — the label shows in the agent selector,
-`entire agent list`, and the hook-install message. Wire format verified against
-agy **1.0.14/1.0.15** (real captured stdin, not docs); agy is fast-moving.
+`entire agent list`, and the hook-install message. Wire format captured on
+agy **1.0.14/1.0.15** (real captured stdin, not docs) and re-verified
+unchanged against agy **1.1.1** (2026-07-13); agy is fast-moving.
 
 **Key differences from other agents:** hooks fire per *model invocation*, not
 per user prompt; the transcript is written **after** the Stop hook; token usage
@@ -153,7 +154,9 @@ worktree than the localDev install still cleans up).
   and the harness fails fast on `Individual quota reached` / `SERVICE_DISABLED`
   instead of retrying. Details: `e2e/README.md`.
 - **Review**: agy is eligible in the `entire review` skill picker (skill
-  discovery across `~/.gemini/antigravity-cli/skills`, `~/.gemini/skills`,
+  discovery across `~/.gemini/config/skills` (agy 1.1+ global),
+  `~/.gemini/antigravity-cli/skills`, `~/.gemini/skills`,
+  `<repo>/.agents/skills` (agy 1.1+ workspace), and legacy
   `<repo>/.agent/skills`; `/name` invocation form) but is not a launchable
   reviewer.
 
