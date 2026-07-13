@@ -967,7 +967,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		}
 		checkpointID = recoverID
 		noTrailerRecovery = true
-		logging.Info(logCtx, "post-commit: recovering active-session commit with missing trailer (issue #487)",
+		logging.Info(logCtx, "post-commit: candidate active-session recovery for commit with missing trailer (issue #487), pending per-session overlap check",
 			slog.String("strategy", "manual-commit"),
 			slog.String("checkpoint_id", checkpointID.String()),
 		)

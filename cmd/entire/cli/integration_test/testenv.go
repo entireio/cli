@@ -1573,12 +1573,14 @@ func (env *TestEnv) CountCommittedCheckpoints() int {
 	defer iter.Close()
 
 	count := 0
-	_ = iter.ForEach(func(c *object.Commit) error {
+	if err := iter.ForEach(func(c *object.Commit) error {
 		if strings.HasPrefix(c.Message, "Checkpoint: ") {
 			count++
 		}
 		return nil
-	})
+	}); err != nil {
+		env.T.Fatalf("failed to walk %s history: %v", paths.MetadataBranchName, err)
+	}
 	return count
 }
 
