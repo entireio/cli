@@ -292,399 +292,49 @@ func TestGhRepoExists_RealErrorPath(t *testing.T) {
 	}
 }
 
-func TestDoInitialCommit_EmptyFolder(t *testing.T) {
+// commitArgs is the argument vector for the initial commit our bootstrap makes:
+// GPG signing disabled and --allow-empty so a fresh dir (or the safe default
+// that stages nothing) still yields a commit.
+func commitArgs(message string) []string {
+	return []string{"-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", message}
+}
+
+func TestDoInitialCommit_EmptyDefaultDoesNotStage(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	r := newFakeRunner()
-	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, "", nil)
+	r.set("git", commitArgs("msg"), "", nil)
 
-	committed, err := doInitialCommit(context.Background(), r, dir, "msg")
-	if err != nil {
+	// commitExisting=false: no `git add`, just an --allow-empty commit.
+	if err := doInitialCommit(context.Background(), r, dir, "msg", false); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if committed {
-		t.Fatal("expected committed=false for empty folder")
+	if r.hasCall(argsMatch("git", []string{"add", "-A"})) {
+		t.Fatal("git add -A must not run when existing files are not being committed")
+	}
+	if !r.hasCall(argsMatch("git", commitArgs("msg"))) {
+		t.Fatal("expected an --allow-empty initial commit")
 	}
 }
 
-func TestDoInitialCommit_WithFiles(t *testing.T) {
+func TestDoInitialCommit_CommitExistingStages(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	r := newFakeRunner()
 	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, " M README.md\n", nil)
-	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "msg"}, "", nil)
+	r.set("git", commitArgs("msg"), "", nil)
 
-	committed, err := doInitialCommit(context.Background(), r, dir, "msg")
-	if err != nil {
+	if err := doInitialCommit(context.Background(), r, dir, "msg", true); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !committed {
-		t.Fatal("expected committed=true")
+	if !r.hasCall(argsMatch("git", []string{"add", "-A"})) {
+		t.Fatal("expected git add -A when committing existing files")
 	}
 	// Verify gpgsign=false was passed to the commit.
 	if !r.hasCall(func(c fakeCall) bool {
 		return c.name == cmdGit && len(c.args) >= 3 && c.args[0] == "-c" && c.args[1] == "commit.gpgsign=false" && c.args[2] == gitCmdCommit
 	}) {
 		t.Fatal("expected commit to pass -c commit.gpgsign=false")
-	}
-}
-
-func TestRunGitHubBootstrap_DeclinedInNonInteractive(t *testing.T) {
-	dir := t.TempDir()
-	restoreCwd(t, dir)
-
-	err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, GitHubBootstrapOptions{}, newFakeRunner())
-	if !errors.Is(err, errBootstrapDeclined) {
-		t.Fatalf("expected errBootstrapDeclined, got %v", err)
-	}
-}
-
-func TestRunGitHubBootstrap_NoGitHubFlow(t *testing.T) {
-	dir := t.TempDir()
-	restoreCwd(t, dir)
-
-	r := newFakeRunner()
-	r.setIdentityConfigured()
-	r.set("git", []string{"init"}, "", nil)
-	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, " M file\n", nil)
-	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "First!"}, "", nil)
-
-	opts := GitHubBootstrapOptions{
-		InitRepo:             true,
-		NoGitHub:             true,
-		InitialCommitMessage: "First!",
-	}
-	err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Verify git init ran in the cwd.
-	if !r.hasCall(func(c fakeCall) bool {
-		return c.name == cmdGit && len(c.args) == 1 && c.args[0] == "init"
-	}) {
-		t.Fatal("expected git init call")
-	}
-	// Verify no gh calls were made.
-	if r.hasCall(func(c fakeCall) bool { return c.name == "gh" }) {
-		t.Fatal("did not expect gh calls with --no-github")
-	}
-}
-
-func TestRunGitHubBootstrap_GhMissingFallsBackToLocal(t *testing.T) {
-	dir := t.TempDir()
-	restoreCwd(t, dir)
-
-	r := newFakeRunner()
-	r.setIdentityConfigured()
-	r.set("gh", []string{"--version"}, "", errors.New("not found"))
-	r.set("git", []string{"init"}, "", nil)
-	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, "", nil)
-
-	opts := GitHubBootstrapOptions{InitRepo: true}
-	var errBuf bytes.Buffer
-	err := runGitHubBootstrapWith(context.Background(), io.Discard, &errBuf, opts, r)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(errBuf.String(), "gh CLI not found") {
-		t.Fatalf("expected hint about installing gh, got %q", errBuf.String())
-	}
-}
-
-func TestRunGitHubBootstrap_FullNonInteractive(t *testing.T) {
-	dir := t.TempDir()
-	restoreCwd(t, dir)
-
-	r := newFakeRunner()
-	r.setIdentityConfigured()
-	r.set("gh", []string{"--version"}, "gh 2.81.0", nil)
-	r.set("gh", []string{"auth", "status"}, "Logged in", nil)
-	r.set("gh", []string{"api", "user", "--jq", ".login"}, "octocat\n", nil)
-	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "", nil)
-	// Name availability check: repo does not exist yet.
-	r.set("gh", []string{"repo", "view", "octocat/my-new", "--json", "name"}, "", errors.New("not found"))
-	r.set("git", []string{"init"}, "", nil)
-	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, " M f\n", nil)
-	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "Seed"}, "", nil)
-	r.set("gh", []string{
-		"repo", "create", "octocat/my-new",
-		"--private",
-		"--source=.",
-		"--remote=origin",
-	}, "", nil)
-	r.set("git", []string{"push", "-q", "--no-verify", "-u", "origin", "HEAD"}, "", nil)
-
-	opts := GitHubBootstrapOptions{
-		InitRepo:             true,
-		RepoName:             "my-new",
-		RepoVisibility:       "private",
-		InitialCommitMessage: "Seed",
-	}
-	err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !r.hasCall(func(c fakeCall) bool {
-		return c.name == "gh" && len(c.args) > 3 && c.args[0] == ghSubcmdRepo && c.args[1] == ghActCreate
-	}) {
-		t.Fatal("expected gh repo create call")
-	}
-	// The initial push must bypass hooks (--no-verify) and be quiet (-q).
-	if !r.hasCall(argsMatch("git", []string{"push", "-q", "--no-verify", "-u", "origin", "HEAD"})) {
-		t.Fatal("expected git push -q --no-verify after repo create")
-	}
-}
-
-func TestRunGitHubBootstrap_RepoExistsFails(t *testing.T) {
-	dir := t.TempDir()
-	restoreCwd(t, dir)
-
-	r := newFakeRunner()
-	r.set("gh", []string{"--version"}, "gh", nil)
-	r.set("gh", []string{"auth", "status"}, "", nil)
-	r.set("gh", []string{"api", "user", "--jq", ".login"}, "octocat\n", nil)
-	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "", nil)
-	// The name is already taken. Since we aren't returning an *exec.ExitError,
-	// ghRepoExists returns (false, err) and ghRepoExists wraps. To avoid
-	// plumbing ExitError into the test, use the "already exists" path directly
-	// by returning success — meaning the repo was found.
-	r.set("gh", []string{"repo", "view", "octocat/taken", "--json", "name"}, "{\"name\":\"taken\"}", nil)
-	r.set("git", []string{"init"}, "", nil)
-
-	opts := GitHubBootstrapOptions{
-		InitRepo: true,
-		RepoName: "taken",
-	}
-	err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r)
-	if err == nil {
-		t.Fatal("expected error when repo already exists")
-	}
-	if !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("expected 'already exists' error, got %v", err)
-	}
-}
-
-func TestResolveCommitMessage_SkipFlag(t *testing.T) {
-	t.Parallel()
-	msg, commit, err := resolveCommitMessage(GitHubBootstrapOptions{SkipInitialCommit: true})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if commit {
-		t.Fatal("commit should be false when SkipInitialCommit is set")
-	}
-	if msg != "" {
-		t.Fatalf("message should be empty when skipping, got %q", msg)
-	}
-}
-
-func TestResolveCommitMessage_FlagTakesMessage(t *testing.T) {
-	t.Parallel()
-	msg, commit, err := resolveCommitMessage(GitHubBootstrapOptions{InitialCommitMessage: "custom"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !commit {
-		t.Fatal("commit should be true with explicit message flag")
-	}
-	if msg != "custom" {
-		t.Fatalf("message = %q, want custom", msg)
-	}
-}
-
-func TestResolveCommitMessage_NonInteractiveDefault(t *testing.T) {
-	msg, commit, err := resolveCommitMessage(GitHubBootstrapOptions{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !commit {
-		t.Fatal("commit should default to true non-interactively")
-	}
-	if msg != "Initial commit" {
-		t.Fatalf("message = %q, want Initial commit", msg)
-	}
-}
-
-// TestRunGitHubBootstrap_SkipCommitKeepsGitHub verifies that passing
-// --skip-initial-commit still creates the GitHub repo (if requested) but
-// skips both commit and push. The local repo's files remain unstaged.
-func TestRunGitHubBootstrap_SkipCommitKeepsGitHub(t *testing.T) {
-	dir := t.TempDir()
-	restoreCwd(t, dir)
-
-	r := newFakeRunner()
-	r.set("gh", []string{"--version"}, "gh", nil)
-	r.set("gh", []string{"auth", "status"}, "ok", nil)
-	r.set("gh", []string{"api", "user", "--jq", ".login"}, "octocat\n", nil)
-	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "", nil)
-	r.set("gh", []string{"repo", "view", "octocat/skipme", "--json", "name"}, "", errors.New("not found"))
-	r.set("git", []string{"init"}, "", nil)
-	r.set("gh", []string{
-		"repo", "create", "octocat/skipme",
-		"--private",
-		"--source=.",
-		"--remote=origin",
-	}, "", nil)
-
-	opts := GitHubBootstrapOptions{
-		InitRepo:          true,
-		RepoName:          "skipme",
-		RepoVisibility:    "private",
-		SkipInitialCommit: true,
-	}
-	var out bytes.Buffer
-	if err := runGitHubBootstrapWith(context.Background(), &out, io.Discard, opts, r); err != nil {
-		t.Fatalf("bootstrap failed: %v", err)
-	}
-
-	if r.hasCall(argsMatch("git", []string{"add", "-A"})) {
-		t.Fatal("git add should not run when SkipInitialCommit is set")
-	}
-	if r.hasCall(func(c fakeCall) bool {
-		return c.name == cmdGit && len(c.args) >= 1 && (c.args[0] == gitCmdCommit || (len(c.args) >= 3 && c.args[2] == gitCmdCommit))
-	}) {
-		t.Fatal("git commit should not run when SkipInitialCommit is set")
-	}
-	if r.hasCall(argsMatch("git", []string{"push"})) {
-		t.Fatal("git push should not run when commit was skipped")
-	}
-	// gh repo create should still have run.
-	if !r.hasCall(argsMatch("gh", []string{"repo", "create"})) {
-		t.Fatal("gh repo create should still run when only the commit is skipped")
-	}
-	// Output should mention how to commit manually.
-	if !strings.Contains(out.String(), "git add -A") {
-		t.Fatalf("expected manual-commit hint in output, got: %s", out.String())
-	}
-}
-
-func TestGhFlagsProvided(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		opts GitHubBootstrapOptions
-		want bool
-	}{
-		{"none", GitHubBootstrapOptions{}, false},
-		{"repo-name", GitHubBootstrapOptions{RepoName: "foo"}, true},
-		{"repo-owner", GitHubBootstrapOptions{RepoOwner: "octocat"}, true},
-		{"repo-visibility", GitHubBootstrapOptions{RepoVisibility: "private"}, true},
-		// NoGitHub intentionally does NOT count as "provided" — it's the
-		// opposite signal. It's handled separately upstream.
-		{"no-github", GitHubBootstrapOptions{NoGitHub: true}, false},
-		{"init-repo only", GitHubBootstrapOptions{InitRepo: true}, false},
-	}
-	for _, tc := range cases {
-		if got := ghFlagsProvided(tc.opts); got != tc.want {
-			t.Errorf("%s: ghFlagsProvided = %v, want %v", tc.name, got, tc.want)
-		}
-	}
-}
-
-// TestRunGitHubBootstrap_NonInteractive_NoFlagsDefaultsToGitHub confirms the
-// non-interactive happy path still creates a GitHub repo when the user
-// didn't set any explicit flag (the confirm prompt is only interactive).
-func TestRunGitHubBootstrap_NonInteractive_NoFlagsDefaultsToGitHub(t *testing.T) {
-	dir := t.TempDir()
-	restoreCwd(t, dir)
-
-	r := newFakeRunner()
-	r.setIdentityConfigured()
-	r.set("gh", []string{"--version"}, "gh", nil)
-	r.set("gh", []string{"auth", "status"}, "ok", nil)
-	r.set("gh", []string{"api", "user", "--jq", ".login"}, "octocat\n", nil)
-	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "", nil)
-	// Default folder slug derived from t.TempDir().
-	suggested := slugifyRepoName(filepath.Base(dir))
-	r.set("gh", []string{"repo", "view", "octocat/" + suggested, "--json", "name"}, "", errors.New("not found"))
-	r.set("git", []string{"init"}, "", nil)
-
-	state, err := runGitHubBootstrapInitWith(context.Background(), io.Discard, io.Discard, GitHubBootstrapOptions{InitRepo: true}, r)
-	if err != nil {
-		t.Fatalf("init failed: %v", err)
-	}
-	if !state.useGitHub {
-		t.Fatal("non-interactive bootstrap should default to using GitHub")
-	}
-}
-
-// TestRunGitHubBootstrap_InitBeforeFinalize verifies the two-phase split:
-// init runs git init up front, finalize creates the commit + pushes. A
-// simulated "agent setup" step writes a file between the phases; that
-// file must end up in the initial commit (i.e. `git add -A` happens
-// after setup, not before).
-func TestRunGitHubBootstrap_InitBeforeFinalize(t *testing.T) {
-	dir := t.TempDir()
-	restoreCwd(t, dir)
-
-	r := newFakeRunner()
-	r.setIdentityConfigured()
-	r.set("gh", []string{"--version"}, "gh", nil)
-	r.set("gh", []string{"auth", "status"}, "ok", nil)
-	r.set("gh", []string{"api", "user", "--jq", ".login"}, "octocat\n", nil)
-	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "", nil)
-	r.set("gh", []string{"repo", "view", "octocat/phased", "--json", "name"}, "", errors.New("not found"))
-	r.set("git", []string{"init"}, "", nil)
-	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, " A .entire/settings.json\n", nil)
-	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "First"}, "", nil)
-	r.set("gh", []string{
-		"repo", "create", "octocat/phased",
-		"--private",
-		"--source=.",
-		"--remote=origin",
-	}, "", nil)
-	r.set("git", []string{"push", "-q", "--no-verify", "-u", "origin", "HEAD"}, "", nil)
-
-	opts := GitHubBootstrapOptions{
-		InitRepo:             true,
-		RepoName:             "phased",
-		RepoVisibility:       "private",
-		InitialCommitMessage: "First",
-	}
-
-	// Phase 1: init. This must NOT call git add/commit/ gh repo create.
-	state, err := runGitHubBootstrapInitWith(context.Background(), io.Discard, io.Discard, opts, r)
-	if err != nil {
-		t.Fatalf("init failed: %v", err)
-	}
-	if state == nil {
-		t.Fatal("expected non-nil state after init")
-	}
-	forbidden := [][]string{
-		{"add", "-A"},
-		{"status", "--porcelain"},
-		{"-c", "commit.gpgsign=false", "commit", "-m", "First"},
-	}
-	for _, args := range forbidden {
-		if r.hasCall(argsMatch("git", args)) {
-			t.Fatalf("git %v was called during init; should have been deferred to finalize", args)
-		}
-	}
-	if r.hasCall(func(c fakeCall) bool {
-		return c.name == "gh" && len(c.args) >= 2 && c.args[0] == ghSubcmdRepo && c.args[1] == ghActCreate
-	}) {
-		t.Fatal("gh repo create was called during init; should have been deferred to finalize")
-	}
-
-	// Phase 2: finalize. Now commit + push.
-	if err := runGitHubBootstrapFinalize(context.Background(), io.Discard, state); err != nil {
-		t.Fatalf("finalize failed: %v", err)
-	}
-	if !r.hasCall(argsMatch("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "First"})) {
-		t.Fatal("expected commit during finalize")
-	}
-	if !r.hasCall(func(c fakeCall) bool {
-		return c.name == "gh" && len(c.args) >= 2 && c.args[0] == ghSubcmdRepo && c.args[1] == ghActCreate
-	}) {
-		t.Fatal("expected gh repo create during finalize")
 	}
 }
 
@@ -704,16 +354,732 @@ func argsMatch(name string, args []string) func(fakeCall) bool {
 	}
 }
 
+// gitInitCalled reports whether `git init` was executed on the runner.
+func gitInitCalled(r *fakeRunner) bool {
+	return r.hasCall(func(c fakeCall) bool {
+		return c.name == cmdGit && len(c.args) == 1 && c.args[0] == "init"
+	})
+}
+
+// ghCalled reports whether any `gh` subprocess was invoked.
+func ghCalled(r *fakeRunner) bool {
+	return r.hasCall(func(c fakeCall) bool { return c.name == "gh" })
+}
+
+// restoreCwd chdirs into dir for the duration of the test.
+func restoreCwd(t *testing.T, dir string) {
+	t.Helper()
+	// macOS resolves /tmp → /private/tmp; canonicalize for safety.
+	canon, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		canon = dir
+	}
+	t.Chdir(canon)
+}
+
+// --- normalizeBootstrapOptions (flag model + back-compat mapping) ---------
+
+func TestNormalize_DefaultsToPrompt(t *testing.T) {
+	t.Parallel()
+	opts := GitHubBootstrapOptions{}
+	if err := normalizeBootstrapOptions(&opts); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.Bootstrap != bootstrapModePrompt {
+		t.Fatalf("Bootstrap = %q, want prompt", opts.Bootstrap)
+	}
+}
+
+func TestNormalize_InvalidModeRejected(t *testing.T) {
+	t.Parallel()
+	opts := GitHubBootstrapOptions{Bootstrap: "publish"}
+	if err := normalizeBootstrapOptions(&opts); err == nil {
+		t.Fatal("expected error for invalid --bootstrap value")
+	}
+}
+
+func TestNormalize_DeprecatedFlagMapping(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   GitHubBootstrapOptions
+		want string
+	}{
+		{"init-repo -> local", GitHubBootstrapOptions{InitRepo: true}, bootstrapModeLocal},
+		{"no-init-repo -> off", GitHubBootstrapOptions{NoInitRepo: true}, bootstrapModeOff},
+		{"no-github stays prompt", GitHubBootstrapOptions{NoGitHub: true}, bootstrapModePrompt},
+	}
+	for _, tc := range cases {
+		opts := tc.in
+		if err := normalizeBootstrapOptions(&opts); err != nil {
+			t.Fatalf("%s: unexpected error: %v", tc.name, err)
+		}
+		if opts.Bootstrap != tc.want {
+			t.Errorf("%s: Bootstrap = %q, want %q", tc.name, opts.Bootstrap, tc.want)
+		}
+	}
+}
+
+func TestNormalize_DeprecatedAndNewCombosRejected(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   GitHubBootstrapOptions
+	}{
+		{"bootstrap + init-repo", GitHubBootstrapOptions{Bootstrap: bootstrapModeGitHub, InitRepo: true}},
+		{"bootstrap + no-github", GitHubBootstrapOptions{Bootstrap: bootstrapModeLocal, NoGitHub: true}},
+		{"repo-name with local", GitHubBootstrapOptions{Bootstrap: bootstrapModeLocal, RepoName: "x"}},
+		{"repo-name with off", GitHubBootstrapOptions{Bootstrap: bootstrapModeOff, RepoName: "x"}},
+		{"repo-name with no-github", GitHubBootstrapOptions{NoGitHub: true, RepoName: "x"}},
+		{"initial-message without commit-existing", GitHubBootstrapOptions{Bootstrap: bootstrapModeGitHub, InitialCommitMessage: "hi"}},
+		{"skip + commit-existing", GitHubBootstrapOptions{SkipInitialCommit: true, CommitExistingFiles: true}},
+	}
+	for _, tc := range cases {
+		opts := tc.in
+		if err := normalizeBootstrapOptions(&opts); err == nil {
+			t.Errorf("%s: expected a hard error, got nil", tc.name)
+		}
+	}
+}
+
+func TestNormalize_ValidCombosAccepted(t *testing.T) {
+	t.Parallel()
+	cases := []GitHubBootstrapOptions{
+		{Bootstrap: bootstrapModeGitHub, RepoName: "x", RepoVisibility: "public"},
+		{Bootstrap: bootstrapModeGitHub, CommitExistingFiles: true, InitialCommitMessage: "hi"},
+		{Bootstrap: bootstrapModeLocal, CommitExistingFiles: true},
+		{RepoName: "x"}, // gh flag with default (prompt) mode is allowed
+		{SkipInitialCommit: true},
+	}
+	for i, in := range cases {
+		opts := in
+		if err := normalizeBootstrapOptions(&opts); err != nil {
+			t.Errorf("case %d %+v: unexpected error: %v", i, in, err)
+		}
+	}
+}
+
+// --- Decline / no-side-effect paths (issue #1717 core guarantees) ---------
+
+// TestBootstrap_BareNonInteractive_NoSideEffects is the core #1717 guarantee:
+// bare `enable` in a non-repo directory, non-interactively, must refuse WITHOUT
+// running git init / probing gh / creating anything.
+//
+// SECURITY-CRITICAL (mutation target: resolveBootstrapDecision's non-interactive
+// default must return proceed=false, not true).
+func TestBootstrap_BareNonInteractive_NoSideEffects(t *testing.T) {
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner() // no stubs: any git/gh call is an unexpected-call error
+	_, err := runGitHubBootstrapInitWith(context.Background(), io.Discard, io.Discard, GitHubBootstrapOptions{}, r)
+	if !errors.Is(err, errBootstrapDeclined) {
+		t.Fatalf("expected errBootstrapDeclined, got %v", err)
+	}
+	if gitInitCalled(r) {
+		t.Fatal("git init must NOT run when bootstrap is declined")
+	}
+	if ghCalled(r) {
+		t.Fatal("no gh calls expected on a declined bootstrap")
+	}
+}
+
+// TestBootstrap_Off_DeclinesWithoutGh verifies --bootstrap=off (and its
+// deprecated alias --no-init-repo) exits with no init and no gh probe.
+func TestBootstrap_Off_DeclinesWithoutGh(t *testing.T) {
+	for _, opts := range []GitHubBootstrapOptions{
+		{Bootstrap: bootstrapModeOff},
+		{NoInitRepo: true}, // deprecated alias
+	} {
+		t.Setenv("ENTIRE_TEST_TTY", "1") // even with a TTY, off never prompts or probes
+		dir := t.TempDir()
+		restoreCwd(t, dir)
+		r := newFakeRunner()
+		_, err := runGitHubBootstrapInitWith(context.Background(), io.Discard, io.Discard, opts, r)
+		if !errors.Is(err, errBootstrapDeclined) {
+			t.Fatalf("%+v: expected errBootstrapDeclined, got %v", opts, err)
+		}
+		if gitInitCalled(r) {
+			t.Fatalf("%+v: git init must not run for bootstrap=off", opts)
+		}
+		if ghCalled(r) {
+			t.Fatalf("%+v: no gh probe should run for bootstrap=off", opts)
+		}
+	}
+}
+
+// TestBootstrap_InteractiveDeclineInit_NoGhProbe is keeper #2 (no network before
+// consent): a user who declines the init prompt must make ZERO gh/network calls.
+//
+// SECURITY-CRITICAL (mutation target: the gh probe must sit AFTER git init in
+// runGitHubBootstrapInitWith, and the init confirm must default to NO).
+func TestBootstrap_InteractiveDeclineInit_NoGhProbe(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "1") // force interactive (canPrompt == true)
+	t.Setenv("ACCESSIBLE", "1")      // text prompt reads os.Stdin
+
+	// Immediate-EOF stdin so the init confirm falls back to its default (NO).
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw.Close()
+	t.Cleanup(func() { pr.Close() })
+	oldStdin := os.Stdin
+	os.Stdin = pr
+	t.Cleanup(func() { os.Stdin = oldStdin })
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "loose.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restoreCwd(t, dir)
+
+	// Default prompt mode: GitHub creation is on the table (no --no-github), so a
+	// pre-fix ordering would probe gh before the init prompt. No stubs — any gh
+	// call is an unexpected-call error.
+	r := newFakeRunner()
+	_, err = runGitHubBootstrapInitWith(context.Background(), io.Discard, io.Discard, GitHubBootstrapOptions{}, r)
+	if !errors.Is(err, errBootstrapDeclined) {
+		t.Fatalf("expected errBootstrapDeclined (default NO on EOF), got %v", err)
+	}
+	if ghCalled(r) {
+		t.Fatal("no gh availability/auth probe may run before the user consents to git init")
+	}
+	if gitInitCalled(r) {
+		t.Fatal("git init must not run when the init confirm defaults to NO")
+	}
+}
+
+// TestBootstrap_InteractiveDefaultsToNo is keeper #1 (default-NO on every
+// confirmation): a bare Enter / EOF on the init prompt must not initialize.
+//
+// SECURITY-CRITICAL (mutation target: confirmInitRepo's `confirmed := false`).
+func TestBootstrap_InteractiveDefaultsToNo(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	t.Setenv("ACCESSIBLE", "1")
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw.Close()
+	t.Cleanup(func() { pr.Close() })
+	oldStdin := os.Stdin
+	os.Stdin = pr
+	t.Cleanup(func() { os.Stdin = oldStdin })
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "loose.txt"), []byte("data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	// --no-github so the interactive init confirm is the only gate under test.
+	_, err = runGitHubBootstrapInitWith(context.Background(), io.Discard, io.Discard, GitHubBootstrapOptions{NoGitHub: true}, r)
+	if !errors.Is(err, errBootstrapDeclined) {
+		t.Fatalf("expected errBootstrapDeclined (default NO on EOF), got %v", err)
+	}
+	if gitInitCalled(r) {
+		t.Fatal("git init must NOT run when the init confirmation defaults to NO")
+	}
+}
+
+// --- local mode --------------------------------------------------------------
+
+// TestBootstrap_Local_EmptyCommit_NoGitHub covers the safe default in local
+// mode (and its --yes equivalent): git init, an EMPTY initial commit, existing
+// files NOT staged, no GitHub, and ZERO gh calls.
+//
+// SECURITY-CRITICAL (mutation target: doInitialCommit must not `git add` when
+// commitFiles is false; local mode must not touch gh).
+func TestBootstrap_Local_EmptyCommit_NoGitHub(t *testing.T) {
+	for _, opts := range []GitHubBootstrapOptions{
+		{Bootstrap: bootstrapModeLocal},
+		{Yes: true}, // prompt + --yes resolves to a local init
+	} {
+		dir := t.TempDir()
+		restoreCwd(t, dir)
+		if err := os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("shh"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		r := newFakeRunner()
+		r.setIdentityConfigured()
+		r.set("git", []string{"init"}, "", nil)
+		r.set("git", commitArgs("Initial commit"), "", nil)
+
+		if err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r); err != nil {
+			t.Fatalf("%+v: unexpected error: %v", opts, err)
+		}
+		if !gitInitCalled(r) {
+			t.Fatalf("%+v: expected git init", opts)
+		}
+		if r.hasCall(argsMatch("git", []string{"add", "-A"})) {
+			t.Fatalf("%+v: existing files must NOT be staged by default", opts)
+		}
+		if !r.hasCall(argsMatch("git", commitArgs("Initial commit"))) {
+			t.Fatalf("%+v: expected an empty initial commit", opts)
+		}
+		if ghCalled(r) {
+			t.Fatalf("%+v: local mode must make ZERO gh calls", opts)
+		}
+	}
+}
+
+// TestBootstrap_Local_CommitExisting stages + commits the existing files
+// locally, but still never touches GitHub.
+func TestBootstrap_Local_CommitExisting(t *testing.T) {
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	r.setIdentityConfigured()
+	r.set("git", []string{"init"}, "", nil)
+	r.set("git", []string{"add", "-A"}, "", nil)
+	r.set("git", commitArgs("Initial commit"), "", nil)
+
+	opts := GitHubBootstrapOptions{Bootstrap: bootstrapModeLocal, CommitExistingFiles: true}
+	if err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !r.hasCall(argsMatch("git", []string{"add", "-A"})) {
+		t.Fatal("expected git add -A with --commit-existing-files")
+	}
+	if ghCalled(r) {
+		t.Fatal("local mode must never call gh")
+	}
+}
+
+// TestBootstrap_DeprecatedInitRepo_LocalOnly verifies the back-compat alias:
+// --init-repo maps to local (no GitHub), even in an interactive context and
+// with no explicit --no-github.
+func TestBootstrap_DeprecatedInitRepo_LocalOnly(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "1") // even interactive, --init-repo => local, no GitHub confirm
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	r.setIdentityConfigured()
+	r.set("git", []string{"init"}, "", nil)
+
+	state, err := runGitHubBootstrapInitWith(context.Background(), io.Discard, io.Discard, GitHubBootstrapOptions{InitRepo: true}, r)
+	if err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	if state.useGitHub {
+		t.Fatal("--init-repo must map to a local-only init, never GitHub")
+	}
+	if ghCalled(r) {
+		t.Fatal("--init-repo (local) must not consult gh")
+	}
+}
+
+// --- github mode -------------------------------------------------------------
+
+// stubGitHubCreate wires a fakeRunner for a full github-mode create + push of
+// repo octocat/<name> at the given visibility.
+func stubGitHubCreate(r *fakeRunner, name, visibility string) {
+	r.setIdentityConfigured()
+	r.set("gh", []string{"--version"}, "gh 2.81.0", nil)
+	r.set("gh", []string{"auth", "status"}, "Logged in", nil)
+	r.set("gh", []string{"api", "user", "--jq", ".login"}, "octocat\n", nil)
+	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "", nil)
+	r.set("gh", []string{"repo", "view", "octocat/" + name, "--json", "name"}, "", errors.New("not found"))
+	r.set("git", []string{"init"}, "", nil)
+	r.set("gh", []string{"repo", "create", "octocat/" + name, "--" + visibility, "--source=.", "--remote=origin"}, "", nil)
+	r.set("git", []string{"push", "-q", "--no-verify", "-u", "origin", "HEAD"}, "", nil)
+}
+
+// TestBootstrap_GitHub_EmptyCommit_ExistingFilesNotPushed is the safe-default
+// github path: --bootstrap=github --yes creates the repo and pushes an EMPTY
+// initial commit — the user's existing files are NOT staged or pushed.
+//
+// SECURITY-CRITICAL (mutation target: commitFiles gate — no `git add` without
+// --commit-existing-files).
+func TestBootstrap_GitHub_EmptyCommit_ExistingFilesNotPushed(t *testing.T) {
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "secret.env"), []byte("TOKEN=abc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newFakeRunner()
+	stubGitHubCreate(r, "myrepo", "private")
+	r.set("git", commitArgs("Initial commit"), "", nil)
+
+	opts := GitHubBootstrapOptions{Bootstrap: bootstrapModeGitHub, Yes: true, RepoName: "myrepo"}
+	if err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Repo created + pushed…
+	if !r.hasCall(argsMatch("gh", []string{"repo", "create"})) {
+		t.Fatal("expected gh repo create")
+	}
+	if !r.hasCall(argsMatch("git", []string{"push", "-q", "--no-verify"})) {
+		t.Fatal("expected the empty initial commit to be pushed")
+	}
+	// …but the existing files were never staged.
+	if r.hasCall(argsMatch("git", []string{"add", "-A"})) {
+		t.Fatal("existing files must NOT be staged/pushed without --commit-existing-files")
+	}
+}
+
+// TestBootstrap_GitHub_CommitExisting_StagesAndPushes: with the explicit
+// opt-in, existing files are staged, committed, and pushed.
+func TestBootstrap_GitHub_CommitExisting_StagesAndPushes(t *testing.T) {
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	stubGitHubCreate(r, "myrepo", "private")
+	r.set("git", []string{"add", "-A"}, "", nil)
+	r.set("git", commitArgs("Initial commit"), "", nil)
+
+	opts := GitHubBootstrapOptions{Bootstrap: bootstrapModeGitHub, Yes: true, RepoName: "myrepo", CommitExistingFiles: true}
+	if err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !r.hasCall(argsMatch("git", []string{"add", "-A"})) {
+		t.Fatal("expected git add -A with --commit-existing-files")
+	}
+	if !r.hasCall(argsMatch("git", []string{"push", "-q", "--no-verify"})) {
+		t.Fatal("expected push after commit")
+	}
+}
+
+// TestBootstrap_GhFlagsWithYes_CreatesGitHub preserves released behavior for
+// scripts: a --repo-* flag is explicit GitHub intent, so `--repo-name x --yes`
+// (default prompt mode, non-interactive) still creates the repo — even though
+// --yes on its own resolves to a local-only init.
+func TestBootstrap_GhFlagsWithYes_CreatesGitHub(t *testing.T) {
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	stubGitHubCreate(r, "wanted", "private")
+	r.set("git", commitArgs("Initial commit"), "", nil)
+
+	// No --bootstrap: prompt mode. --repo-name provides the GitHub intent.
+	opts := GitHubBootstrapOptions{Yes: true, RepoName: "wanted"}
+	if err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !r.hasCall(argsMatch("gh", []string{"repo", "create", "octocat/wanted"})) {
+		t.Fatal("--repo-name --yes must still create the GitHub repo (back-compat)")
+	}
+	// Still safe-by-default on content: existing files not staged.
+	if r.hasCall(argsMatch("git", []string{"add", "-A"})) {
+		t.Fatal("existing files must not be staged without --commit-existing-files")
+	}
+}
+
+// TestBootstrap_BareYes_NeverGitHub is the counterpart: --yes ALONE (no --repo-*
+// flags, default prompt mode) must resolve to a local init and make ZERO gh
+// calls (keeper #4 scope-bounding).
+func TestBootstrap_BareYes_NeverGitHub(t *testing.T) {
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	r.setIdentityConfigured()
+	r.set("git", []string{"init"}, "", nil)
+	r.set("git", commitArgs("Initial commit"), "", nil)
+
+	if err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, GitHubBootstrapOptions{Yes: true}, r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ghCalled(r) {
+		t.Fatal("--yes alone must never touch GitHub")
+	}
+}
+
+// TestBootstrap_GitHub_CustomMessageAndVisibility exercises --initial-commit-message
+// (allowed with --commit-existing-files) and a non-default visibility.
+func TestBootstrap_GitHub_CustomMessageAndVisibility(t *testing.T) {
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	stubGitHubCreate(r, "seedme", "public")
+	r.set("git", []string{"add", "-A"}, "", nil)
+	r.set("git", commitArgs("Seed"), "", nil)
+
+	opts := GitHubBootstrapOptions{
+		Bootstrap:            bootstrapModeGitHub,
+		Yes:                  true,
+		RepoName:             "seedme",
+		RepoVisibility:       "public",
+		CommitExistingFiles:  true,
+		InitialCommitMessage: "Seed",
+	}
+	if err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !r.hasCall(argsMatch("gh", []string{"repo", "create", "octocat/seedme", "--public"})) {
+		t.Fatal("expected repo created with --public")
+	}
+	if !r.hasCall(argsMatch("git", commitArgs("Seed"))) {
+		t.Fatal("expected commit with custom message")
+	}
+}
+
+// TestBootstrap_GitHub_GhMissingFallsBackToLocal: github intent but gh isn't
+// installed — fall back to local-only and warn (still after init consent).
+func TestBootstrap_GitHub_GhMissingFallsBackToLocal(t *testing.T) {
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	r.setIdentityConfigured()
+	r.set("gh", []string{"--version"}, "", errors.New("not found"))
+	r.set("git", []string{"init"}, "", nil)
+	r.set("git", commitArgs("Initial commit"), "", nil)
+
+	opts := GitHubBootstrapOptions{Bootstrap: bootstrapModeGitHub, RepoName: "wanted"}
+	var errBuf bytes.Buffer
+	if err := runGitHubBootstrapWith(context.Background(), io.Discard, &errBuf, opts, r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(errBuf.String(), "gh CLI not found") {
+		t.Fatalf("expected hint about installing gh, got %q", errBuf.String())
+	}
+	if r.hasCall(argsMatch("gh", []string{"repo", "create"})) {
+		t.Fatal("must not create a repo when gh is unavailable")
+	}
+}
+
+// TestBootstrap_GitHub_RepoExistsFails surfaces a taken repo name.
+func TestBootstrap_GitHub_RepoExistsFails(t *testing.T) {
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	r.setIdentityConfigured()
+	r.set("gh", []string{"--version"}, "gh", nil)
+	r.set("gh", []string{"auth", "status"}, "ok", nil)
+	r.set("gh", []string{"api", "user", "--jq", ".login"}, "octocat\n", nil)
+	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "", nil)
+	r.set("gh", []string{"repo", "view", "octocat/taken", "--json", "name"}, "{\"name\":\"taken\"}", nil)
+	r.set("git", []string{"init"}, "", nil)
+
+	opts := GitHubBootstrapOptions{Bootstrap: bootstrapModeGitHub, RepoName: "taken"}
+	err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r)
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("expected 'already exists' error, got %v", err)
+	}
+}
+
+// TestBootstrap_YesRepoExistsNoTTY_Fails: github mode + --yes + suggested name
+// taken + no TTY => a clear error rather than a silent gh failure.
+func TestBootstrap_YesRepoExistsNoTTY_Fails(t *testing.T) {
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	r.setIdentityConfigured()
+	r.set("gh", []string{"--version"}, "gh 2.81.0", nil)
+	r.set("gh", []string{"auth", "status"}, "Logged in", nil)
+	r.set("gh", []string{"api", "user", "--jq", ".login"}, "myuser\n", nil)
+	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "", nil)
+	r.set("git", []string{"init"}, "", nil)
+	repoName := filepath.Base(dir)
+	r.set("gh", []string{"repo", "view", "myuser/" + repoName, "--json", "name"}, `{"name":"`+repoName+`"}`, nil)
+
+	opts := GitHubBootstrapOptions{Bootstrap: bootstrapModeGitHub, Yes: true}
+	err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r)
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("expected 'already exists' error, got %v", err)
+	}
+}
+
+func TestResolveRepoName_YesRepoExistsWithTTY_FallsBackToPrompt(t *testing.T) {
+	// When --yes is set, the name is taken, and a TTY is available,
+	// resolveRepoName should print a conflict message and fall through
+	// to the interactive prompt.
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	t.Setenv("ACCESSIBLE", "1")
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr.Close() })
+	go func() {
+		pw.WriteString("unique-test-repo\n") //nolint:errcheck // test helper
+		pw.Close()
+	}()
+	oldStdin := os.Stdin
+	os.Stdin = pr
+	t.Cleanup(func() { os.Stdin = oldStdin })
+
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	repoName := filepath.Base(dir)
+	r.set("gh", []string{"repo", "view", "myuser/" + repoName, "--json", "name"}, `{"name":"`+repoName+`"}`, nil)
+
+	var stdout bytes.Buffer
+	opts := GitHubBootstrapOptions{Yes: true}
+	name, err := resolveRepoName(context.Background(), &stdout, io.Discard, r, "myuser", dir, opts)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "already exists on GitHub") {
+		t.Errorf("expected conflict message in output, got: %s", stdout.String())
+	}
+	if name != "unique-test-repo" {
+		t.Errorf("expected name %q, got %q", "unique-test-repo", name)
+	}
+}
+
+// --- two-phase init/finalize ordering ---------------------------------------
+
+// TestBootstrap_InitBeforeFinalize verifies the two-phase split: init runs
+// `git init` up front; the commit + push happen only in finalize, so a file
+// written by "agent setup" between the phases would be captured by a
+// commit-existing-files run.
+func TestBootstrap_InitBeforeFinalize(t *testing.T) {
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	stubGitHubCreate(r, "phased", "private")
+	r.set("git", []string{"add", "-A"}, "", nil)
+	r.set("git", commitArgs("First"), "", nil)
+
+	opts := GitHubBootstrapOptions{
+		Bootstrap:            bootstrapModeGitHub,
+		Yes:                  true,
+		RepoName:             "phased",
+		CommitExistingFiles:  true,
+		InitialCommitMessage: "First",
+	}
+
+	// Phase 1: init. Must NOT commit or create the repo yet.
+	state, err := runGitHubBootstrapInitWith(context.Background(), io.Discard, io.Discard, opts, r)
+	if err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	if state == nil {
+		t.Fatal("expected non-nil state after init")
+	}
+	if r.hasCall(argsMatch("git", []string{"add", "-A"})) {
+		t.Fatal("git add must be deferred to finalize")
+	}
+	if r.hasCall(argsMatch("git", commitArgs("First"))) {
+		t.Fatal("commit must be deferred to finalize")
+	}
+	if r.hasCall(argsMatch("gh", []string{"repo", "create"})) {
+		t.Fatal("gh repo create must be deferred to finalize")
+	}
+
+	// Phase 2: finalize. Now commit + push.
+	if err := runGitHubBootstrapFinalize(context.Background(), io.Discard, state); err != nil {
+		t.Fatalf("finalize failed: %v", err)
+	}
+	if !r.hasCall(argsMatch("git", commitArgs("First"))) {
+		t.Fatal("expected commit during finalize")
+	}
+	if !r.hasCall(argsMatch("gh", []string{"repo", "create"})) {
+		t.Fatal("expected gh repo create during finalize")
+	}
+}
+
+// --- plan text (keeper #3: truthful visibility) -----------------------------
+
+// TestPrintBootstrapPlan_ShowsResolvedVisibility verifies the plan states the
+// visibility the repo will actually be created with — never a hardcoded default.
+func TestPrintBootstrapPlan_ShowsResolvedVisibility(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		opts        GitHubBootstrapOptions
+		wantContain string
+		wantAbsent  string
+	}{
+		{"default is private", GitHubBootstrapOptions{}, "PRIVATE repository", "PUBLIC"},
+		{"flag public", GitHubBootstrapOptions{RepoVisibility: "public"}, "PUBLIC repository", "PRIVATE"},
+		{"flag internal", GitHubBootstrapOptions{RepoVisibility: "internal"}, "INTERNAL repository", "PRIVATE"},
+		{"flag mixed case", GitHubBootstrapOptions{RepoVisibility: "Public"}, "PUBLIC repository", "PRIVATE"},
+		{"yes locks private", GitHubBootstrapOptions{Yes: true}, "PRIVATE repository", "PUBLIC"},
+	}
+	for _, tc := range cases {
+		var buf bytes.Buffer
+		printBootstrapPlan(&buf, t.TempDir(), tc.opts, true)
+		out := buf.String()
+		if !strings.Contains(out, tc.wantContain) {
+			t.Errorf("%s: plan missing %q\n%s", tc.name, tc.wantContain, out)
+		}
+		if tc.wantAbsent != "" && strings.Contains(out, tc.wantAbsent) {
+			t.Errorf("%s: plan must not contain %q\n%s", tc.name, tc.wantAbsent, out)
+		}
+	}
+}
+
+// TestPrintBootstrapPlan_CommitExistingClause verifies the plan tells the truth
+// about whether existing files will be committed.
+func TestPrintBootstrapPlan_CommitExistingClause(t *testing.T) {
+	t.Parallel()
+	var empty bytes.Buffer
+	printBootstrapPlan(&empty, t.TempDir(), GitHubBootstrapOptions{}, false)
+	if !strings.Contains(empty.String(), "empty initial commit") {
+		t.Errorf("default plan should mention an empty initial commit, got:\n%s", empty.String())
+	}
+	var full bytes.Buffer
+	printBootstrapPlan(&full, t.TempDir(), GitHubBootstrapOptions{CommitExistingFiles: true}, false)
+	if !strings.Contains(full.String(), "Stage and commit the files already") {
+		t.Errorf("commit-existing plan should mention staging existing files, got:\n%s", full.String())
+	}
+}
+
+// TestPlannedRepoVisibility_MatchesResolveVisibility guards that the plan's
+// planned visibility agrees with what resolveVisibility will actually use for
+// the deterministic (non-interactive) cases.
+func TestPlannedRepoVisibility_MatchesResolveVisibility(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		opts       GitHubBootstrapOptions
+		wantVis    string
+		wantLocked bool
+	}{
+		{GitHubBootstrapOptions{RepoVisibility: "public"}, "public", true},
+		{GitHubBootstrapOptions{RepoVisibility: "private"}, "private", true},
+		{GitHubBootstrapOptions{Yes: true}, "private", true},
+		{GitHubBootstrapOptions{}, "private", false},
+	}
+	for _, tc := range cases {
+		gotVis, gotLocked := plannedRepoVisibility(tc.opts)
+		if gotVis != tc.wantVis || gotLocked != tc.wantLocked {
+			t.Errorf("plannedRepoVisibility(%+v) = (%q, %v), want (%q, %v)", tc.opts, gotVis, gotLocked, tc.wantVis, tc.wantLocked)
+		}
+		if tc.wantLocked && tc.opts.RepoVisibility != "" {
+			resolved, err := resolveVisibility(testUser, testUser, tc.opts)
+			if err != nil {
+				t.Fatalf("resolveVisibility error: %v", err)
+			}
+			if resolved != gotVis {
+				t.Errorf("plan says %q but resolveVisibility yields %q", gotVis, resolved)
+			}
+		}
+	}
+}
+
+// --- git identity ------------------------------------------------------------
+
 func TestEnsureGitIdentity_AlreadyConfigured(t *testing.T) {
 	t.Parallel()
 	r := newFakeRunner()
 	r.setIdentityConfigured()
 
-	err := ensureGitIdentity(context.Background(), io.Discard, io.Discard, r, t.TempDir())
+	// allowGH=false: even with identity already set, no gh call should happen.
+	err := ensureGitIdentity(context.Background(), io.Discard, io.Discard, r, t.TempDir(), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// No git config writes should have occurred.
+	if ghCalled(r) {
+		t.Fatal("no gh calls when identity is already configured")
+	}
 	if r.hasCall(func(c fakeCall) bool {
 		return c.name == cmdGit && len(c.args) >= 2 && c.args[0] == gitCmdConfig && (c.args[1] == "user.name" || c.args[1] == "user.email")
 	}) {
@@ -721,21 +1087,37 @@ func TestEnsureGitIdentity_AlreadyConfigured(t *testing.T) {
 	}
 }
 
+// TestEnsureGitIdentity_LocalMode_NoGh verifies that a local-only init
+// (allowGH=false) never probes gh even when identity is missing — it errors
+// with guidance instead (non-interactive).
+//
+// SECURITY-CRITICAL for the "local => 0 gh calls" matrix guarantee.
+func TestEnsureGitIdentity_LocalMode_NoGh(t *testing.T) {
+	r := newFakeRunner()
+	r.set("git", []string{"config", "--get", "user.name"}, "", errors.New("not set"))
+	r.set("git", []string{"config", "--get", "user.email"}, "", errors.New("not set"))
+
+	err := ensureGitIdentity(context.Background(), io.Discard, io.Discard, r, t.TempDir(), false)
+	if err == nil {
+		t.Fatal("expected error when identity missing in local (no-gh) mode")
+	}
+	if ghCalled(r) {
+		t.Fatal("local mode must not probe gh to source identity")
+	}
+}
+
 func TestEnsureGitIdentity_SourcedFromGh(t *testing.T) {
 	t.Parallel()
 	r := newFakeRunner()
-	// Identity missing locally (empty stdout).
 	r.set("git", []string{"config", "--get", "user.name"}, "", errors.New("not set"))
 	r.set("git", []string{"config", "--get", "user.email"}, "", errors.New("not set"))
-	// gh available and authenticated.
 	r.set("gh", []string{"--version"}, "gh", nil)
 	r.set("gh", []string{"auth", "status"}, "ok", nil)
 	r.set("gh", []string{"api", "user"}, `{"id":42,"login":"octo","name":"Octo Cat","email":"octo@example.com"}`, nil)
-	// Expect writes with values from gh.
 	r.set("git", []string{"config", "user.name", "Octo Cat"}, "", nil)
 	r.set("git", []string{"config", "user.email", "octo@example.com"}, "", nil)
 
-	err := ensureGitIdentity(context.Background(), io.Discard, io.Discard, r, t.TempDir())
+	err := ensureGitIdentity(context.Background(), io.Discard, io.Discard, r, t.TempDir(), true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -748,41 +1130,30 @@ func TestEnsureGitIdentity_GhNoreplyFallback(t *testing.T) {
 	r.set("git", []string{"config", "--get", "user.email"}, "", errors.New("not set"))
 	r.set("gh", []string{"--version"}, "gh", nil)
 	r.set("gh", []string{"auth", "status"}, "ok", nil)
-	// email is null/missing: should fall back to id+login noreply.
 	r.set("gh", []string{"api", "user"}, `{"id":42,"login":"octo","name":"","email":null}`, nil)
 	r.set("git", []string{"config", "user.name", "octo"}, "", nil)
 	r.set("git", []string{"config", "user.email", "42+octo@users.noreply.github.com"}, "", nil)
 
-	err := ensureGitIdentity(context.Background(), io.Discard, io.Discard, r, t.TempDir())
+	err := ensureGitIdentity(context.Background(), io.Discard, io.Discard, r, t.TempDir(), true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-// TestEnsureGitIdentity_PreservesExistingName covers the partial-config
-// case: `user.name` is set globally but `user.email` is missing. We must
-// source only the email (from gh) and leave the name untouched — we
-// never want to silently replace the user's configured name with a
-// gh-derived login.
 func TestEnsureGitIdentity_PreservesExistingName(t *testing.T) {
 	t.Parallel()
 	r := newFakeRunner()
-	// Name is set globally, email is not.
 	r.set("git", []string{"config", "--get", "user.name"}, "John Doe\n", nil)
 	r.set("git", []string{"config", "--get", "user.email"}, "", errors.New("not set"))
-	// gh available and returns both values.
 	r.set("gh", []string{"--version"}, "gh", nil)
 	r.set("gh", []string{"auth", "status"}, "ok", nil)
 	r.set("gh", []string{"api", "user"}, `{"id":42,"login":"johndoe","name":"Johnny Dough","email":"john@example.com"}`, nil)
-	// Only the email should be written locally — the name must stay
-	// at the user's global value.
 	r.set("git", []string{"config", "user.email", "john@example.com"}, "", nil)
 
-	err := ensureGitIdentity(context.Background(), io.Discard, io.Discard, r, t.TempDir())
+	err := ensureGitIdentity(context.Background(), io.Discard, io.Discard, r, t.TempDir(), true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// No `git config user.name ...` call should have been made.
 	if r.hasCall(func(c fakeCall) bool {
 		return c.name == cmdGit && len(c.args) >= 2 && c.args[0] == gitCmdConfig && c.args[1] == "user.name"
 	}) {
@@ -790,8 +1161,6 @@ func TestEnsureGitIdentity_PreservesExistingName(t *testing.T) {
 	}
 }
 
-// TestEnsureGitIdentity_PreservesExistingEmail mirrors the above for the
-// other direction: email set, name missing.
 func TestEnsureGitIdentity_PreservesExistingEmail(t *testing.T) {
 	t.Parallel()
 	r := newFakeRunner()
@@ -802,7 +1171,7 @@ func TestEnsureGitIdentity_PreservesExistingEmail(t *testing.T) {
 	r.set("gh", []string{"api", "user"}, `{"id":42,"login":"johndoe","name":"Johnny","email":"other@example.com"}`, nil)
 	r.set("git", []string{"config", "user.name", "Johnny"}, "", nil)
 
-	err := ensureGitIdentity(context.Background(), io.Discard, io.Discard, r, t.TempDir())
+	err := ensureGitIdentity(context.Background(), io.Discard, io.Discard, r, t.TempDir(), true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -819,7 +1188,7 @@ func TestEnsureGitIdentity_NonInteractiveNoGh_Errors(t *testing.T) {
 	r.set("git", []string{"config", "--get", "user.email"}, "", errors.New("not set"))
 	r.set("gh", []string{"--version"}, "", errors.New("not found"))
 
-	err := ensureGitIdentity(context.Background(), io.Discard, io.Discard, r, t.TempDir())
+	err := ensureGitIdentity(context.Background(), io.Discard, io.Discard, r, t.TempDir(), true)
 	if err == nil {
 		t.Fatal("expected error when identity missing and gh unavailable")
 	}
@@ -844,64 +1213,14 @@ func TestGhUserIdentity_NameFallsBackToLogin(t *testing.T) {
 	}
 }
 
-// TestBootstrap_FreshMachine_RealGit is an integration-style test that runs
-// real git via execRunner on a temp dir isolated from the user's global git
-// config. Regression guard for the issue where bootstrap commits failed
-// without a configured identity or because of commit.gpgsign=true.
-func TestBootstrap_FreshMachine_RealGit(t *testing.T) {
-	// Isolate from any global git config: point HOME + GIT_CONFIG_* at
-	// empty/missing locations, and force a broken GPG signing config that
-	// would fail any commit if we did not pass -c commit.gpgsign=false.
-	emptyHome := t.TempDir()
-	t.Setenv("HOME", emptyHome)
-	t.Setenv("XDG_CONFIG_HOME", "")
-	// A global config that demands signing with a non-existent program. If
-	// our bootstrap did not override gpgsign for its commit, git would
-	// error out here.
-	globalCfg := filepath.Join(emptyHome, ".gitconfig")
-	globalContent := "[user]\n\tname = Fresh User\n\temail = fresh@example.com\n[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = /does/not/exist\n"
-	if err := writeTempFile(globalCfg, globalContent); err != nil {
-		t.Fatalf("write global gitconfig: %v", err)
-	}
-	t.Setenv("GIT_CONFIG_GLOBAL", globalCfg)
-	// Ensure no system config interferes.
-	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
-
-	projectDir := t.TempDir()
-	restoreCwd(t, projectDir)
-	// Create a file to commit.
-	if err := writeTempFile(filepath.Join(projectDir, "README.md"), "hello\n"); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-
-	opts := GitHubBootstrapOptions{
-		InitRepo:             true,
-		NoGitHub:             true,
-		InitialCommitMessage: "Initial",
-	}
-	err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, execRunner{})
-	if err != nil {
-		t.Fatalf("bootstrap failed: %v", err)
-	}
-
-	// Verify a commit actually landed on HEAD.
-	out, err := execRunner{}.RunInDir(context.Background(), projectDir, "git", "log", "--oneline")
-	if err != nil {
-		t.Fatalf("git log failed: %v", err)
-	}
-	if !strings.Contains(out, "Initial") {
-		t.Fatalf("expected 'Initial' commit in log, got: %q", out)
-	}
-}
+// --- real-git integration ----------------------------------------------------
 
 func writeTempFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
 }
 
 // ghFailingRunner wraps another bootstrapRunner and forces all `gh`
-// invocations to fail, while letting real `git` calls through. This
-// lets tests deterministically exercise the "gh unavailable" path
-// regardless of whether `gh` is installed/authenticated on the host.
+// invocations to fail, while letting real `git` calls through.
 type ghFailingRunner struct {
 	inner bootstrapRunner
 }
@@ -920,27 +1239,107 @@ func (r ghFailingRunner) RunInDir(ctx context.Context, dir, name string, args ..
 	return r.inner.RunInDir(ctx, dir, name, args...)
 }
 
-// TestBootstrap_FreshMachine_NoIdentity_RealGit verifies that a fresh
-// machine without any git identity configured fails cleanly in
-// non-interactive mode with a helpful error message, instead of letting
-// `git commit` fail with a confusing "please tell me who you are" stderr.
+// TestBootstrap_FreshMachine_RealGit runs real git via execRunner on a temp dir
+// isolated from the user's global git config. Regression guard for commits
+// failing without a configured identity or because of commit.gpgsign=true.
+func TestBootstrap_FreshMachine_RealGit(t *testing.T) {
+	emptyHome := t.TempDir()
+	t.Setenv("HOME", emptyHome)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	globalCfg := filepath.Join(emptyHome, ".gitconfig")
+	globalContent := "[user]\n\tname = Fresh User\n\temail = fresh@example.com\n[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = /does/not/exist\n"
+	if err := writeTempFile(globalCfg, globalContent); err != nil {
+		t.Fatalf("write global gitconfig: %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalCfg)
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+
+	projectDir := t.TempDir()
+	restoreCwd(t, projectDir)
+	if err := writeTempFile(filepath.Join(projectDir, "README.md"), "hello\n"); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	// Local mode, commit the existing files, so a real commit lands on HEAD.
+	opts := GitHubBootstrapOptions{
+		Bootstrap:            bootstrapModeLocal,
+		CommitExistingFiles:  true,
+		InitialCommitMessage: "Initial",
+	}
+	if err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, execRunner{}); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+	out, err := execRunner{}.RunInDir(context.Background(), projectDir, "git", "log", "--oneline")
+	if err != nil {
+		t.Fatalf("git log failed: %v", err)
+	}
+	if !strings.Contains(out, "Initial") {
+		t.Fatalf("expected 'Initial' commit in log, got: %q", out)
+	}
+	// The README the user placed must be tracked (we opted in).
+	files, err := execRunner{}.RunInDir(context.Background(), projectDir, "git", "ls-files")
+	if err != nil {
+		t.Fatalf("git ls-files failed: %v", err)
+	}
+	if !strings.Contains(files, "README.md") {
+		t.Fatalf("expected README.md tracked with --commit-existing-files, got: %q", files)
+	}
+}
+
+// TestBootstrap_FreshMachine_RealGit_EmptyCommitLeavesFilesUntracked is the
+// security-critical real-git counterpart: the safe default records an EMPTY
+// commit and leaves the user's file untracked.
 //
-// Uses a gh-failing runner wrapper rather than PATH manipulation so the
-// test isn't sensitive to whether `gh` + GH_TOKEN/GITHUB_TOKEN are set
-// on the host.
+// SECURITY-CRITICAL (mutation target: doInitialCommit must not stage when
+// commitFiles is false).
+func TestBootstrap_FreshMachine_RealGit_EmptyCommitLeavesFilesUntracked(t *testing.T) {
+	emptyHome := t.TempDir()
+	t.Setenv("HOME", emptyHome)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	globalCfg := filepath.Join(emptyHome, ".gitconfig")
+	if err := writeTempFile(globalCfg, "[user]\n\tname = Fresh User\n\temail = fresh@example.com\n"); err != nil {
+		t.Fatalf("write global gitconfig: %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalCfg)
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+
+	projectDir := t.TempDir()
+	restoreCwd(t, projectDir)
+	if err := writeTempFile(filepath.Join(projectDir, "secret.env"), "TOKEN=leak\n"); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	run := execRunner{}
+	opts := GitHubBootstrapOptions{Bootstrap: bootstrapModeLocal} // no --commit-existing-files
+	if err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, run); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+	// HEAD exists (empty commit)…
+	if _, err := run.RunInDir(context.Background(), projectDir, "git", "rev-parse", "HEAD"); err != nil {
+		t.Fatalf("expected a HEAD commit, git rev-parse failed: %v", err)
+	}
+	// …but the user's file is NOT tracked.
+	files, err := run.RunInDir(context.Background(), projectDir, "git", "ls-files")
+	if err != nil {
+		t.Fatalf("git ls-files failed: %v", err)
+	}
+	if strings.TrimSpace(files) != "" {
+		t.Fatalf("expected NO tracked files with the safe default, got: %q", files)
+	}
+}
+
+// TestBootstrap_FreshMachine_NoIdentity_RealGit verifies a fresh machine with
+// no git identity fails cleanly in non-interactive mode with a helpful message.
 func TestBootstrap_FreshMachine_NoIdentity_RealGit(t *testing.T) {
 	emptyHome := t.TempDir()
 	t.Setenv("HOME", emptyHome)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	// Empty global config: no user.name/user.email.
 	globalCfg := filepath.Join(emptyHome, ".gitconfig")
 	if err := writeTempFile(globalCfg, ""); err != nil {
 		t.Fatalf("write global gitconfig: %v", err)
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", globalCfg)
 	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
-	// Belt-and-suspenders: unset any GitHub tokens so a wrapper bypass
-	// would still not find credentials.
 	t.Setenv("GH_TOKEN", "")
 	t.Setenv("GITHUB_TOKEN", "")
 
@@ -950,11 +1349,7 @@ func TestBootstrap_FreshMachine_NoIdentity_RealGit(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	opts := GitHubBootstrapOptions{
-		InitRepo:             true,
-		NoGitHub:             true,
-		InitialCommitMessage: "x",
-	}
+	opts := GitHubBootstrapOptions{Bootstrap: bootstrapModeLocal, CommitExistingFiles: true}
 	runner := ghFailingRunner{inner: execRunner{}}
 	err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, runner)
 	if err == nil {
@@ -965,10 +1360,8 @@ func TestBootstrap_FreshMachine_NoIdentity_RealGit(t *testing.T) {
 	}
 }
 
-// TestErrSentinels_DistinctPrePostInit documents the contract that the two
-// error sentinels signal: errBootstrapDeclined before `git init`,
-// errBootstrapInterrupted after. setup.go relies on this to show the
-// right user-facing message.
+// --- sentinels + cobra flag wiring ------------------------------------------
+
 func TestErrSentinels_DistinctPrePostInit(t *testing.T) {
 	t.Parallel()
 	if errors.Is(errBootstrapDeclined, errBootstrapInterrupted) {
@@ -1010,174 +1403,22 @@ func TestEnableCmd_InitRepoFlagsMutuallyExclusive(t *testing.T) {
 	}
 }
 
-// restoreCwd chdirs into dir for the duration of the test.
-func restoreCwd(t *testing.T, dir string) {
-	t.Helper()
-	// macOS resolves /tmp → /private/tmp; canonicalize for safety.
-	canon, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		canon = dir
+func TestEnableCmd_BootstrapFlagRegistered(t *testing.T) {
+	cmd := newEnableCmd()
+	for _, name := range []string{"bootstrap", "commit-existing-files", "repo-name", "repo-owner", "repo-visibility", "initial-commit-message"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Errorf("expected flag --%s to be registered", name)
+		}
 	}
-	t.Chdir(canon)
-}
-
-func TestRunGitHubBootstrap_YesAcceptsAllDefaults(t *testing.T) {
-	// --yes should init repo, create GitHub repo under user's account (private),
-	// and use default commit message — without any interactive prompts.
-	dir := t.TempDir()
-	restoreCwd(t, dir)
-
-	r := newFakeRunner()
-	r.setIdentityConfigured()
-	r.set("gh", []string{"--version"}, "gh 2.81.0", nil)
-	r.set("gh", []string{"auth", "status"}, "Logged in", nil)
-	r.set("gh", []string{"api", "user", "--jq", ".login"}, "myuser\n", nil)
-	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "myorg\n", nil)
-	r.set("git", []string{"init"}, "", nil)
-	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, " M f\n", nil)
-	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "Initial commit"}, "", nil)
-
-	// Expect repo created under the user's account (not org), private
-	repoName := filepath.Base(dir)
-	fullName := "myuser/" + repoName
-	r.set("gh", []string{
-		"repo", "create", fullName,
-		"--private",
-		"--source=.",
-		"--remote=origin",
-	}, "", nil)
-	r.set("git", []string{"push", "-q", "--no-verify", "-u", "origin", "HEAD"}, "", nil)
-
-	opts := GitHubBootstrapOptions{Yes: true}
-	var stdout bytes.Buffer
-	err := runGitHubBootstrapWith(context.Background(), &stdout, io.Discard, opts, r)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Should have used user's account, not org
-	output := stdout.String()
-	if !strings.Contains(output, "Using GitHub owner: myuser") {
-		t.Errorf("expected owner to be user's account, got: %s", output)
-	}
-	// Should have committed with default message
-	if !r.hasCall(argsMatch("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "Initial commit"})) {
-		t.Error("expected commit with default 'Initial commit' message")
-	}
-	// Should have created the repo
-	if !r.hasCall(func(c fakeCall) bool {
-		return c.name == "gh" && len(c.args) > 3 && c.args[0] == ghSubcmdRepo && c.args[1] == ghActCreate
-	}) {
-		t.Error("expected gh repo create call")
-	}
-}
-
-func TestRunGitHubBootstrap_YesRepoExistsNoTTY_Fails(t *testing.T) {
-	// When --yes is set, the repo name is taken, and there's no TTY,
-	// we should get a clear error instead of a silent gh failure.
-	dir := t.TempDir()
-	restoreCwd(t, dir)
-
-	r := newFakeRunner()
-	r.setIdentityConfigured()
-	r.set("gh", []string{"--version"}, "gh 2.81.0", nil)
-	r.set("gh", []string{"auth", "status"}, "Logged in", nil)
-	r.set("gh", []string{"api", "user", "--jq", ".login"}, "myuser\n", nil)
-	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "", nil)
-	r.set("git", []string{"init"}, "", nil)
-
-	// The suggested repo name already exists.
-	repoName := filepath.Base(dir)
-	r.set("gh", []string{"repo", "view", "myuser/" + repoName, "--json", "name"}, `{"name":"`+repoName+`"}`, nil)
-
-	opts := GitHubBootstrapOptions{Yes: true}
-	err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r)
-	if err == nil {
-		t.Fatal("expected error when repo name exists and no TTY")
-	}
-	if !strings.Contains(err.Error(), "already exists") {
-		t.Errorf("expected 'already exists' in error, got: %v", err)
-	}
-}
-
-func TestResolveRepoName_YesRepoExistsWithTTY_FallsBackToPrompt(t *testing.T) {
-	// When --yes is set, the name is taken, and a TTY is available,
-	// resolveRepoName should print a conflict message and fall through
-	// to the interactive prompt. We verify the conflict message was
-	// printed (proving the fallback path was taken).
-	t.Setenv("ENTIRE_TEST_TTY", "1")
-
-	// Force accessible (text-based) mode so the huh form reads from
-	// os.Stdin instead of trying to open /dev/tty via bubbletea.
-	// Pipe a unique name so the form completes instead of blocking.
-	t.Setenv("ACCESSIBLE", "1")
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { pr.Close() })
-	go func() {
-		// The form reads one line; provide a unique name so it exits the loop.
-		pw.WriteString("unique-test-repo\n") //nolint:errcheck // test helper
-		pw.Close()
-	}()
-	oldStdin := os.Stdin
-	os.Stdin = pr
-	t.Cleanup(func() { os.Stdin = oldStdin })
-
-	dir := t.TempDir()
-	restoreCwd(t, dir)
-
-	r := newFakeRunner()
-	repoName := filepath.Base(dir)
-	// The suggested name exists.
-	r.set("gh", []string{"repo", "view", "myuser/" + repoName, "--json", "name"}, `{"name":"`+repoName+`"}`, nil)
-	// The unique name typed at the prompt does not exist (fakeRunner returns
-	// an error for unknown calls, which ghRepoExists treats as "proceed").
-
-	var stdout bytes.Buffer
-	opts := GitHubBootstrapOptions{Yes: true}
-	name, err := resolveRepoName(context.Background(), &stdout, io.Discard, r, "myuser", dir, opts)
-
-	output := stdout.String()
-	if !strings.Contains(output, "already exists on GitHub") {
-		t.Errorf("expected conflict message in output, got: %s", output)
-	}
-	// The form should complete with the unique name (fakeRunner can't verify
-	// the name, so resolveRepoName proceeds with a warning).
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	if name != "unique-test-repo" {
-		t.Errorf("expected name %q, got %q", "unique-test-repo", name)
-	}
-}
-
-func TestRunGitHubBootstrap_YesWithNoGitHub(t *testing.T) {
-	// --yes combined with --no-github should skip GitHub but still init + commit.
-	dir := t.TempDir()
-	restoreCwd(t, dir)
-
-	r := newFakeRunner()
-	r.setIdentityConfigured()
-	r.set("git", []string{"init"}, "", nil)
-	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, " M f\n", nil)
-	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "Initial commit"}, "", nil)
-
-	opts := GitHubBootstrapOptions{Yes: true, NoGitHub: true}
-	err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Should NOT have called gh at all
-	if r.hasCall(func(c fakeCall) bool { return c.name == "gh" }) {
-		t.Error("expected no gh calls with --no-github")
-	}
-	// Should have committed
-	if !r.hasCall(argsMatch("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "Initial commit"})) {
-		t.Error("expected commit with default message")
+	// Deprecated aliases remain registered (hidden) for back-compat.
+	for _, name := range []string{"init-repo", "no-init-repo", "no-github", "skip-initial-commit"} {
+		f := cmd.Flags().Lookup(name)
+		if f == nil {
+			t.Errorf("expected deprecated flag --%s to remain registered", name)
+			continue
+		}
+		if f.Deprecated == "" {
+			t.Errorf("expected --%s to be marked deprecated", name)
+		}
 	}
 }

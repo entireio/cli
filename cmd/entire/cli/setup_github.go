@@ -19,32 +19,58 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// GitHubBootstrapOptions holds flags that let `entire enable` run on a folder
-// that isn't yet a git repository. All fields are optional; supplying one
-// skips the matching interactive prompt.
+// Bootstrap modes for `entire enable --bootstrap`. They select what happens
+// when `enable` runs in a directory that is not yet a Git repository. The
+// model is safe-by-default: nothing user-visible (a GitHub repo) is created
+// and no existing file is committed or pushed unless the user explicitly opts
+// in (bootstrap=github for creation, --commit-existing-files for content).
+const (
+	// bootstrapModePrompt asks interactively (every confirmation defaults to
+	// NO). It is the default. Non-interactively it declines unless --yes is
+	// given, in which case it behaves like bootstrapModeLocal.
+	bootstrapModePrompt = "prompt"
+	// bootstrapModeLocal runs `git init` only; it never touches GitHub.
+	bootstrapModeLocal = "local"
+	// bootstrapModeGitHub runs `git init`, creates a GitHub repository, adds it
+	// as origin, and pushes the initial commit.
+	bootstrapModeGitHub = "github"
+	// bootstrapModeOff exits without doing anything.
+	bootstrapModeOff = "off"
+)
+
+// GitHubBootstrapOptions holds the flags that let `entire enable` run on a
+// folder that isn't yet a git repository.
 type GitHubBootstrapOptions struct {
-	// InitRepo is true if --init-repo was passed (accept git init without prompt).
-	InitRepo bool
-	// NoInitRepo is true if --no-init-repo was passed (decline without prompt).
-	NoInitRepo bool
-	// RepoName is the GitHub repository name (no owner).
-	RepoName string
-	// RepoOwner is the GitHub user or org login.
-	RepoOwner string
-	// RepoVisibility is one of "public", "private", "internal".
-	RepoVisibility string
-	// NoGitHub skips the GitHub repo creation step.
-	NoGitHub bool
-	// InitialCommitMessage overrides the default commit message prompt.
+	// Bootstrap selects behavior in a non-git directory: one of
+	// prompt|local|github|off. The empty string is treated as prompt (the
+	// documented default) and lets us tell "user passed --bootstrap=prompt"
+	// apart from "flag was never set" for deprecated-flag conflict detection.
+	Bootstrap string
+	// CommitExistingFiles opts into staging, committing, and (with
+	// Bootstrap=github) pushing the files already present in the directory.
+	// Default false => an EMPTY initial commit; existing files are left
+	// untracked, uncommitted, and unpushed. This is the core safety primitive.
+	CommitExistingFiles bool
+	// InitialCommitMessage overrides the default commit message. Requires
+	// CommitExistingFiles (enforced by normalizeBootstrapOptions).
 	InitialCommitMessage string
-	// SkipInitialCommit leaves the newly-created files unstaged so the
-	// user can commit themselves. The GitHub repo (if requested) is
-	// still created, but nothing is pushed.
-	SkipInitialCommit bool
-	// Yes accepts all defaults without prompting: init repo, create GitHub
-	// repo under the user's account (private), default commit message.
-	// Explicit flags (--no-github, --repo-owner, etc.) take precedence.
+	// RepoName / RepoOwner / RepoVisibility configure the new GitHub repo and
+	// are valid only with Bootstrap=github.
+	RepoName       string
+	RepoOwner      string
+	RepoVisibility string
+	// Yes accepts the selected mode's defaults without prompting. It is
+	// scope-bounded: with the default prompt mode it resolves to a LOCAL init
+	// (never GitHub), and it never commits existing files on its own — that
+	// still requires --commit-existing-files.
 	Yes bool
+
+	// Deprecated aliases (pre-existing released flags) mapped onto the model
+	// above by normalizeBootstrapOptions. Cobra prints the deprecation hint.
+	InitRepo          bool // --init-repo            -> --bootstrap=local
+	NoInitRepo        bool // --no-init-repo         -> --bootstrap=off
+	NoGitHub          bool // --no-github            -> suppress the GitHub step
+	SkipInitialCommit bool // --skip-initial-commit  -> no-op (matches new default)
 }
 
 // bootstrapRunner executes external commands. Tests override this to avoid
@@ -109,25 +135,100 @@ const (
 // step. The caller runs `runGitHubBootstrapInit` before agent setup to do
 // `git init` + identity + gather GitHub choices, then runs
 // `runGitHubBootstrapFinalize` afterwards so the initial commit captures
-// the `.entire/`, `.claude/`, etc. files written during setup.
+// the `.entire/`, `.claude/`, etc. files written during setup when the user
+// opted into committing existing files.
 type bootstrapState struct {
-	runner     bootstrapRunner
-	cwd        string
-	useGitHub  bool
-	fullName   string // owner/name, if useGitHub
-	visibility string // public/private/internal, if useGitHub
-	commit     bool   // false means the user opted out of the initial commit
-	message    string // resolved initial commit message (empty when !commit)
+	runner      bootstrapRunner
+	cwd         string
+	useGitHub   bool
+	fullName    string // owner/name, if useGitHub
+	visibility  string // public/private/internal, if useGitHub
+	commitFiles bool   // stage + commit (+ push) the files already in the dir
+	message     string // resolved initial commit message
+}
+
+// githubResolution captures whether a GitHub repo is intended, and whether that
+// still needs an interactive confirmation (deferred until after `git init` so a
+// declined init makes no network call — issue #1717).
+type githubResolution int
+
+const (
+	githubNo  githubResolution = iota // never create a GitHub repo
+	githubYes                         // create a GitHub repo (explicit intent)
+	githubAsk                         // ask the user (after init) whether to create one
+)
+
+// normalizeBootstrapOptions validates the flag combination and folds the
+// deprecated aliases onto the --bootstrap/--commit-existing-files model. It
+// mutates opts in place and must be called exactly once (it is not idempotent:
+// the deprecated→mode mapping would trip the "don't combine" guard on a second
+// pass). Cobra emits the per-flag deprecation hints via MarkDeprecated, so this
+// only performs the mapping and the hard-error validation.
+func normalizeBootstrapOptions(opts *GitHubBootstrapOptions) error {
+	// A non-empty Bootstrap means the user passed --bootstrap explicitly.
+	explicitBootstrap := opts.Bootstrap != ""
+
+	switch opts.Bootstrap {
+	case "", bootstrapModePrompt, bootstrapModeLocal, bootstrapModeGitHub, bootstrapModeOff:
+	default:
+		return fmt.Errorf("invalid --bootstrap %q: must be one of prompt, local, github, off", opts.Bootstrap)
+	}
+
+	// The deprecated mode flags map onto --bootstrap; combining them with an
+	// explicit --bootstrap is ambiguous, so reject it.
+	usesDeprecatedModeFlag := opts.InitRepo || opts.NoInitRepo || opts.NoGitHub
+	if explicitBootstrap && usesDeprecatedModeFlag {
+		return errors.New("--init-repo/--no-init-repo/--no-github are deprecated and cannot be combined with --bootstrap; use --bootstrap on its own")
+	}
+
+	// Map deprecated mode flags. --init-repo/--no-init-repo are mutually
+	// exclusive (enforced by cobra). --no-github only suppresses the GitHub
+	// step — on its own it does not opt into `git init`, matching its released
+	// behavior (interactive prompt / non-interactive decline).
+	switch {
+	case opts.NoInitRepo:
+		opts.Bootstrap = bootstrapModeOff
+	case opts.InitRepo:
+		opts.Bootstrap = bootstrapModeLocal
+	}
+	if opts.Bootstrap == "" {
+		opts.Bootstrap = bootstrapModePrompt
+	}
+
+	// --repo-name/--repo-owner/--repo-visibility only make sense when a GitHub
+	// repo will be created.
+	if ghFlagsProvided(*opts) {
+		if opts.NoGitHub {
+			return errors.New("--repo-name/--repo-owner/--repo-visibility cannot be combined with --no-github (which skips GitHub)")
+		}
+		switch opts.Bootstrap {
+		case bootstrapModeLocal, bootstrapModeOff:
+			return fmt.Errorf("--repo-name/--repo-owner/--repo-visibility are only valid with --bootstrap=github, not --bootstrap=%s", opts.Bootstrap)
+		}
+	}
+
+	// --skip-initial-commit is now the default (existing files are not
+	// committed). Keep it working as a no-op, but reject the contradiction.
+	if opts.SkipInitialCommit && opts.CommitExistingFiles {
+		return errors.New("--skip-initial-commit cannot be combined with --commit-existing-files")
+	}
+
+	// A commit message only has meaning when we actually commit the existing
+	// files. Fail loudly rather than silently ignoring the message or silently
+	// committing content the user didn't opt into (issue #1717).
+	if opts.InitialCommitMessage != "" && !opts.CommitExistingFiles {
+		return errors.New("--initial-commit-message requires --commit-existing-files")
+	}
+
+	return nil
 }
 
 // runGitHubBootstrapInit handles the pre-setup half of "enable on a non-git
-// folder": confirm + `git init`, ensure git identity, and (if we're going
-// to create a GitHub repo) gather owner/name/visibility up front so all
-// prompts happen before agent setup runs.
+// folder": resolve the bootstrap mode, confirm + `git init`, ensure git
+// identity, and (if we're going to create a GitHub repo) gather
+// owner/name/visibility up front so all prompts happen before agent setup runs.
 //
-// Returns errBootstrapDeclined if the user declined the init prompt.
-// Returns nil, nil if the caller is already inside a git repo and no
-// bootstrap is needed (defensive; the caller typically gates on this).
+// Returns errBootstrapDeclined if the user declined (or chose --bootstrap=off).
 func runGitHubBootstrapInit(ctx context.Context, w, errW io.Writer, opts GitHubBootstrapOptions) (*bootstrapState, error) {
 	return runGitHubBootstrapInitWith(ctx, w, errW, opts, execRunner{})
 }
@@ -141,8 +242,24 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 		return nil, fmt.Errorf("get working directory: %w", err)
 	}
 
-	// Step 1: confirm we should git init here.
-	proceed, err := confirmInitRepo(w, cwd, opts)
+	// Validate + fold deprecated aliases before any side effect. A bad flag
+	// combination must fail before `git init`, a network call, or a prompt.
+	if err := normalizeBootstrapOptions(&opts); err != nil {
+		return nil, err
+	}
+
+	// --bootstrap=off exits immediately: no directory read, no prompt, no
+	// network. setup.go turns errBootstrapDeclined into the user-facing guidance.
+	if opts.Bootstrap == bootstrapModeOff {
+		return nil, errBootstrapDeclined
+	}
+
+	canPrompt := interactive.CanPromptInteractively()
+
+	// Decide whether to run `git init` and whether a GitHub repo is intended.
+	// No side effect and no network call happen inside this step; the gh probe
+	// is deliberately deferred until after init consent below (issue #1717).
+	proceed, ghRes, err := resolveBootstrapDecision(w, cwd, opts, canPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +267,9 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 		return nil, errBootstrapDeclined
 	}
 
-	// Step 2: git init.
+	// git init — the first side effect, reached only after an explicit mode
+	// opt-in, an explicit --yes, or a default-NO confirmation that the user
+	// actively accepted.
 	printBootstrapSection(w, "Setting up git repository")
 	if err := gitInit(ctx, runner, cwd); err != nil {
 		return nil, fmt.Errorf("git init: %w", err)
@@ -160,10 +279,10 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 	paths.ClearWorktreeRootCache()
 	fmt.Fprintln(w, "  ✓ Initialized empty git repository")
 
-	// Step 3: decide whether to create a GitHub repo. If gh is missing or the
-	// user passed --no-github, we skip that branch but still bootstrap the
-	// local repo.
-	useGitHub := !opts.NoGitHub
+	// Only NOW (after init consent) may we probe gh — `gh auth status` is a
+	// network round-trip and must never run on a declined/local/off path
+	// (issue #1717). gh is only consulted when a GitHub repo is intended.
+	useGitHub := ghRes != githubNo
 	if useGitHub {
 		if !ghAvailable(ctx, runner) {
 			fmt.Fprintln(errW, "gh CLI not found. Install it from https://cli.github.com/ and run `gh auth login` to add a GitHub remote.")
@@ -176,11 +295,10 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 		}
 	}
 
-	// Step 3b: ask a simple yes/no before diving into owner/name/visibility
-	// prompts. Skip the confirm when any gh-specific flag is set (the flag
-	// implies intent) or when we're non-interactive (keep the documented
-	// happy path: default to yes).
-	if useGitHub && !opts.Yes && !ghFlagsProvided(opts) && interactive.CanPromptInteractively() {
+	// For the interactive prompt path, confirm the GitHub step now (after init,
+	// so an abort here is "interrupted after init"). Explicit github mode and
+	// the --repo-* flags carry their own intent and skip this confirm.
+	if useGitHub && ghRes == githubAsk {
 		confirmed, err := confirmCreateGitHubRepo()
 		if err != nil {
 			return nil, err
@@ -190,8 +308,7 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 		}
 	}
 
-	// Step 4: collect GitHub repo details up front so all prompts are
-	// contiguous.
+	// Gather GitHub repo details up front so all prompts are contiguous.
 	var fullName, visibility string
 	if useGitHub {
 		owner, name, vis, err := selectGitHubRepo(ctx, w, errW, runner, cwd, opts)
@@ -202,32 +319,76 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 		visibility = vis
 	}
 
-	// Step 5: resolve commit message (+ skip decision) and ensure git
-	// identity. Must run after `git init` so `git config` reads are
-	// scoped correctly. If the user chose to skip the commit we still
-	// need an identity *if* we're going to create the GitHub repo,
-	// because gh may read local config; but we can skip the identity
-	// check when the user is fully opting out of both commit and
-	// remote to keep the flow minimal.
-	message, commit, err := resolveCommitMessage(opts)
-	if err != nil {
+	// Resolve the commit message and ensure git identity. We always create at
+	// least an empty initial commit, so identity is always required. Source it
+	// from gh only when a GitHub repo is in play — a local init must make zero
+	// gh calls (issue #1717 verification matrix).
+	message := resolveInitialCommitMessage(opts)
+	if err := ensureGitIdentity(ctx, w, errW, runner, cwd, useGitHub); err != nil {
 		return nil, err
-	}
-	if commit {
-		if err := ensureGitIdentity(ctx, w, errW, runner, cwd); err != nil {
-			return nil, err
-		}
 	}
 
 	return &bootstrapState{
-		runner:     runner,
-		cwd:        cwd,
-		useGitHub:  useGitHub,
-		fullName:   fullName,
-		visibility: visibility,
-		commit:     commit,
-		message:    message,
+		runner:      runner,
+		cwd:         cwd,
+		useGitHub:   useGitHub,
+		fullName:    fullName,
+		visibility:  visibility,
+		commitFiles: opts.CommitExistingFiles,
+		message:     message,
 	}, nil
+}
+
+// resolveBootstrapDecision returns whether to run `git init` and whether a
+// GitHub repo is intended. It performs no side effect and no network call: the
+// only interaction is the (default-NO) init confirmation in the interactive
+// prompt path, so declining costs nothing and touches no gh (issue #1717).
+func resolveBootstrapDecision(w io.Writer, cwd string, opts GitHubBootstrapOptions, canPrompt bool) (proceed bool, gh githubResolution, err error) {
+	switch opts.Bootstrap {
+	case bootstrapModeLocal:
+		return true, githubNo, nil
+	case bootstrapModeGitHub:
+		return true, githubYes, nil
+	default: // prompt
+		// --yes is scope-bounded: on its own it accepts the safe default (a
+		// local init, no GitHub). It only creates a GitHub repo when the user
+		// also gave explicit GitHub intent via a --repo-* flag; --yes alone
+		// never touches GitHub (issue #1717 keeper #4).
+		yesResolution := githubNo
+		if ghFlagsProvided(opts) {
+			yesResolution = githubYes
+		}
+		// Non-interactive prompt: never create anything silently. Only an
+		// explicit --yes proceeds.
+		if !canPrompt {
+			if opts.Yes {
+				return true, yesResolution, nil
+			}
+			return false, githubNo, nil
+		}
+		// Interactive --yes skips the prompts and accepts the resolved defaults.
+		if opts.Yes {
+			return true, yesResolution, nil
+		}
+		// Interactive: show what will happen, then confirm (default NO).
+		printBootstrapPlan(w, cwd, opts, !opts.NoGitHub)
+		ok, err := confirmInitRepo()
+		if err != nil {
+			return false, githubNo, err
+		}
+		if !ok {
+			return false, githubNo, nil
+		}
+		switch {
+		case opts.NoGitHub:
+			return true, githubNo, nil
+		case ghFlagsProvided(opts):
+			// Explicit repo details imply GitHub intent; no extra confirm.
+			return true, githubYes, nil
+		default:
+			return true, githubAsk, nil
+		}
+	}
 }
 
 // runGitHubBootstrapWith runs the full bootstrap (init + finalize) in one
@@ -241,59 +402,51 @@ func runGitHubBootstrapWith(ctx context.Context, w, errW io.Writer, opts GitHubB
 	return runGitHubBootstrapFinalize(ctx, w, state)
 }
 
-// runGitHubBootstrapFinalize runs the post-setup half: stage + initial
-// commit (now including any `.entire/`, agent hook, and settings files
-// written by the enable flow), then create the GitHub repo and push.
-// If the user opted out of the initial commit we still create the
-// GitHub repo (if they opted in) but skip the push — there's nothing to
-// push — and print next-step instructions.
+// runGitHubBootstrapFinalize runs the post-setup half: create the initial
+// commit, then (if requested) create the GitHub repo and push. The initial
+// commit is EMPTY by default — existing files are staged only when the user
+// opted in with --commit-existing-files — so nothing user-authored is ever
+// committed or published without consent (issue #1717).
 func runGitHubBootstrapFinalize(ctx context.Context, w io.Writer, s *bootstrapState) error {
 	if s == nil {
 		return nil
 	}
 
-	// Pick a single section title for this phase based on what we'll do.
-	if s.useGitHub || s.commit {
-		switch {
-		case s.useGitHub && s.commit:
-			printBootstrapSection(w, "Publishing to GitHub")
-		case s.useGitHub:
-			printBootstrapSection(w, "Creating GitHub repository")
-		default:
-			printBootstrapSection(w, "Finalizing")
-		}
+	switch {
+	case s.useGitHub && s.commitFiles:
+		printBootstrapSection(w, "Publishing to GitHub")
+	case s.useGitHub:
+		printBootstrapSection(w, "Creating GitHub repository")
+	default:
+		printBootstrapSection(w, "Finalizing")
 	}
 
-	var committed bool
-	if s.commit {
-		c, err := doInitialCommit(ctx, s.runner, s.cwd, s.message)
-		if err != nil {
-			return fmt.Errorf("initial commit: %w", err)
-		}
-		committed = c
-		if committed {
-			fmt.Fprintln(w, "  ✓ Created initial commit")
-		} else {
-			fmt.Fprintln(w, "  ✓ Nothing to commit — the folder has no files yet")
-		}
+	if err := doInitialCommit(ctx, s.runner, s.cwd, s.message, s.commitFiles); err != nil {
+		return fmt.Errorf("initial commit: %w", err)
 	}
+	if s.commitFiles {
+		fmt.Fprintln(w, "  ✓ Created initial commit from the existing files")
+	} else {
+		fmt.Fprintln(w, "  ✓ Created an empty initial commit")
+	}
+
 	if s.useGitHub {
-		if err := ghRepoCreate(ctx, s.runner, s.cwd, s.fullName, s.visibility, committed); err != nil {
+		if err := ghRepoCreate(ctx, s.runner, s.cwd, s.fullName, s.visibility); err != nil {
 			return fmt.Errorf("gh repo create: %w", err)
 		}
 		fmt.Fprintf(w, "  ✓ Created %s (%s)\n", s.fullName, s.visibility)
 		fmt.Fprintf(w, "    https://github.com/%s\n", s.fullName)
-		if committed {
-			fmt.Fprintln(w, "  ✓ Pushed initial commit to origin")
-		}
+		fmt.Fprintln(w, "  ✓ Pushed the initial commit to origin")
 	}
-	if !s.commit {
+
+	if !s.commitFiles {
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "  Skipped initial commit. When you're ready:")
-		fmt.Fprintln(w, "    git add -A && git commit -m \"Initial commit\"")
+		fmt.Fprintln(w, "  Your existing files were left untracked. To commit them:")
+		fmt.Fprintln(w, "    git add -A && git commit -m \"Add existing files\"")
 		if s.useGitHub {
-			fmt.Fprintln(w, "    git push -u origin HEAD")
+			fmt.Fprintln(w, "    git push")
 		}
+		fmt.Fprintln(w, "  Or re-run `entire enable --commit-existing-files` to commit and push them.")
 	}
 
 	fmt.Fprintln(w, "\nDone.")
@@ -307,15 +460,38 @@ func ghFlagsProvided(opts GitHubBootstrapOptions) bool {
 	return opts.RepoName != "" || opts.RepoOwner != "" || opts.RepoVisibility != ""
 }
 
-// confirmCreateGitHubRepo asks the user whether they want to also create
-// a matching GitHub repository. Interactive-only; callers gate on
-// interactive.CanPromptInteractively.
-func confirmCreateGitHubRepo() (bool, error) {
-	confirmed := true
+// confirmInitRepo asks whether to `git init` in the current directory. It
+// defaults to NO so a bare Enter / EOF never proceeds (issue #1717).
+func confirmInitRepo() (bool, error) {
+	confirmed := false // default NO — never proceed on a bare Enter / EOF.
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewConfirm().
-				Title("Create a matching repository on GitHub?").
+				Title("Initialize a Git repository here and continue?").
+				Value(&confirmed),
+		),
+	)
+	if err := form.Run(); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			return false, nil
+		}
+		return false, fmt.Errorf("init-repo prompt: %w", err)
+	}
+	return confirmed, nil
+}
+
+// confirmCreateGitHubRepo asks whether to also create a matching GitHub
+// repository. Interactive-only; runs after `git init`, so an abort is an
+// "interrupted after init". Defaults to NO: creating and pushing to a GitHub
+// repository is externally visible, so a bare Enter / EOF must never publish
+// the directory (issue #1717).
+func confirmCreateGitHubRepo() (bool, error) {
+	confirmed := false
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Also create a new repository on GitHub and push to it?").
+				Description("This publishes the committed files to a new remote repository.").
 				Value(&confirmed),
 		),
 	)
@@ -328,38 +504,45 @@ func confirmCreateGitHubRepo() (bool, error) {
 	return confirmed, nil
 }
 
-// confirmInitRepo returns true if we should proceed with `git init`. It
-// respects --init-repo / --no-init-repo; otherwise prompts. In
-// non-interactive mode we return false without printing anything so
-// the caller (setup.go) owns the "Not a git repository" message and
-// doesn't end up with duplicate output on stdout + stderr.
-func confirmInitRepo(_ io.Writer, cwd string, opts GitHubBootstrapOptions) (bool, error) {
-	if opts.NoInitRepo {
-		return false, nil
+// plannedRepoVisibility reports the visibility the GitHub repository will be
+// created with, and whether that choice is already locked in. It mirrors
+// resolveVisibility's non-interactive decision: an explicit --repo-visibility
+// wins, --yes locks the private default, otherwise the default is private but
+// the user will still be prompted (interactive). The plan is a security
+// confirmation surface, so it must state the actual resolved visibility, not a
+// hardcoded default (issue #1717).
+func plannedRepoVisibility(opts GitHubBootstrapOptions) (visibility string, locked bool) {
+	if opts.RepoVisibility != "" {
+		return strings.ToLower(opts.RepoVisibility), true
 	}
-	if opts.InitRepo || opts.Yes {
-		return true, nil
+	if opts.Yes {
+		return visibilityPrivate, true
 	}
-	if !interactive.CanPromptInteractively() {
-		return false, nil
-	}
+	return visibilityPrivate, false
+}
 
-	folder := filepath.Base(cwd)
-	confirmed := true
-	form := NewAccessibleForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title(fmt.Sprintf("No git repository in %q. Initialize one here?", folder)).
-				Value(&confirmed),
-		),
-	)
-	if err := form.Run(); err != nil {
-		if errors.Is(err, huh.ErrUserAborted) {
-			return false, nil
-		}
-		return false, fmt.Errorf("init-repo prompt: %w", err)
+// printBootstrapPlan writes a short summary of what enabling Entire in a
+// non-git directory will do, so the interactive confirmation is informed. It
+// deliberately does not walk or size the directory — under safe-by-default the
+// initial commit is empty unless the user opts in, so there is nothing to
+// tally.
+func printBootstrapPlan(w io.Writer, cwd string, opts GitHubBootstrapOptions, githubPlanned bool) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "The current directory is not a Git repository:")
+	fmt.Fprintf(w, "  %s\n", cwd)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Enabling Entire here will:")
+	fmt.Fprintln(w, "  • Initialize a new Git repository (git init)")
+	if opts.CommitExistingFiles {
+		fmt.Fprintln(w, "  • Stage and commit the files already in this directory")
+	} else {
+		fmt.Fprintln(w, "  • Create an empty initial commit (your existing files are left untracked)")
 	}
-	return confirmed, nil
+	if githubPlanned {
+		visibility, _ := plannedRepoVisibility(opts)
+		fmt.Fprintf(w, "  • Create a new %s repository on GitHub and push the initial commit to it\n", strings.ToUpper(visibility))
+	}
+	fmt.Fprintln(w)
 }
 
 // selectGitHubRepo gathers owner, repo name, and visibility, respecting
@@ -561,73 +744,14 @@ func resolveVisibility(owner, currentUser string, opts GitHubBootstrapOptions) (
 	return selected, nil
 }
 
-// resolveCommitMessage returns the message to use for the initial
-// commit. The second return value is false when the user chose to skip
-// the initial commit entirely; callers must skip `doInitialCommit` and
-// any subsequent push.
-func resolveCommitMessage(opts GitHubBootstrapOptions) (string, bool, error) {
-	const defaultMsg = "Initial commit"
-
-	if opts.SkipInitialCommit {
-		return "", false, nil
-	}
+// resolveInitialCommitMessage returns the message for the initial commit.
+// normalizeBootstrapOptions guarantees a non-empty InitialCommitMessage
+// implies CommitExistingFiles, so this is a pure default lookup.
+func resolveInitialCommitMessage(opts GitHubBootstrapOptions) string {
 	if opts.InitialCommitMessage != "" {
-		return opts.InitialCommitMessage, true, nil
+		return opts.InitialCommitMessage
 	}
-	if opts.Yes || !interactive.CanPromptInteractively() {
-		return defaultMsg, true, nil
-	}
-
-	const (
-		choiceDefault   = "default"
-		choiceCustomize = "custom"
-		choiceSkip      = "skip"
-	)
-	choice := choiceDefault
-	form := NewAccessibleForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Initial commit").
-				Options(
-					huh.NewOption(`Commit with default message "Initial commit"`, choiceDefault),
-					huh.NewOption("Customize message...", choiceCustomize),
-					huh.NewOption("Skip — I'll commit manually later", choiceSkip),
-				).
-				Value(&choice),
-		),
-	)
-	if err := form.Run(); err != nil {
-		if errors.Is(err, huh.ErrUserAborted) {
-			return "", false, errBootstrapInterrupted
-		}
-		return "", false, fmt.Errorf("commit message prompt: %w", err)
-	}
-
-	switch choice {
-	case choiceSkip:
-		return "", false, nil
-	case choiceCustomize:
-		input := defaultMsg
-		custom := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewInput().
-					Title("Initial commit message").
-					Value(&input),
-			),
-		)
-		if err := custom.Run(); err != nil {
-			if errors.Is(err, huh.ErrUserAborted) {
-				return "", false, errBootstrapInterrupted
-			}
-			return "", false, fmt.Errorf("commit message prompt: %w", err)
-		}
-		if strings.TrimSpace(input) == "" {
-			return defaultMsg, true, nil
-		}
-		return input, true, nil
-	default:
-		return defaultMsg, true, nil
-	}
+	return "Initial commit"
 }
 
 // gitInit runs `git init` in the given directory.
@@ -638,27 +762,24 @@ func gitInit(ctx context.Context, runner bootstrapRunner, dir string) error {
 	return nil
 }
 
-// doInitialCommit stages all files and creates a commit. Returns whether a
-// commit was actually created (false if there were no files to stage).
-func doInitialCommit(ctx context.Context, runner bootstrapRunner, dir, message string) (bool, error) {
-	if _, err := runner.RunInDir(ctx, dir, "git", "add", "-A"); err != nil {
-		return false, wrapExecError("git add", err)
-	}
-	// Check if the staging area has anything at all.
-	out, err := runner.RunInDir(ctx, dir, "git", "status", "--porcelain")
-	if err != nil {
-		return false, wrapExecError("git status", err)
-	}
-	if strings.TrimSpace(out) == "" {
-		return false, nil
+// doInitialCommit creates the initial commit. When commitExisting is true it
+// stages every file first; otherwise it stages nothing and records an empty
+// commit — the safe default that leaves existing files untracked (issue #1717).
+// `--allow-empty` lets a fresh directory (or the safe default) still anchor the
+// branch and give a GitHub push a HEAD to send.
+func doInitialCommit(ctx context.Context, runner bootstrapRunner, dir, message string, commitExisting bool) error {
+	if commitExisting {
+		if _, err := runner.RunInDir(ctx, dir, "git", "add", "-A"); err != nil {
+			return wrapExecError("git add", err)
+		}
 	}
 	// Disable GPG signing for this commit only. Fresh environments often
 	// have commit.gpgsign=true inherited from a global config but no
 	// working signer; passing -c keeps the user's global config intact.
-	if _, err := runner.RunInDir(ctx, dir, "git", "-c", "commit.gpgsign=false", "commit", "-m", message); err != nil {
-		return false, wrapExecError("git commit", err)
+	if _, err := runner.RunInDir(ctx, dir, "git", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", message); err != nil {
+		return wrapExecError("git commit", err)
 	}
-	return true, nil
+	return nil
 }
 
 // wrapExecError formats err with stderr from *exec.ExitError when available,
@@ -675,10 +796,12 @@ func wrapExecError(prefix string, err error) error {
 
 // ensureGitIdentity guarantees the repo has a user.name/user.email set at
 // some scope. If neither is configured, we source values from `gh api user`
-// when available, otherwise prompt (interactive) or fail with a helpful
-// message (non-interactive). Values are written to the local repo config
-// only, so the user's global state is never mutated.
-func ensureGitIdentity(ctx context.Context, w, _ io.Writer, runner bootstrapRunner, dir string) error {
+// when allowGH is set (a GitHub repo is being created, so gh is already in
+// play), otherwise prompt (interactive) or fail with a helpful message
+// (non-interactive). A local-only init passes allowGH=false so it makes zero
+// gh calls. Values are written to the local repo config only, so the user's
+// global state is never mutated.
+func ensureGitIdentity(ctx context.Context, w, _ io.Writer, runner bootstrapRunner, dir string, allowGH bool) error {
 	// `git config --get` exits non-zero when the key isn't set. Treat any
 	// error as "unset" rather than fatal so we can fall through to sourcing
 	// the identity from elsewhere.
@@ -699,7 +822,7 @@ func ensureGitIdentity(ctx context.Context, w, _ io.Writer, runner bootstrapRunn
 	// globally but no email, we want to keep their name and just source
 	// the email.
 	var ghName, ghEmail string
-	if ghAvailable(ctx, runner) && ghAuthenticated(ctx, runner) {
+	if allowGH && ghAvailable(ctx, runner) && ghAuthenticated(ctx, runner) {
 		if n, e, err := ghUserIdentity(ctx, runner); err == nil {
 			ghName, ghEmail = n, e
 		}
@@ -865,8 +988,8 @@ func ghRepoExists(ctx context.Context, runner bootstrapRunner, owner, name strin
 }
 
 // ghRepoCreate creates a GitHub repo from the local source directory, adds
-// origin as its remote, and pushes if there's anything to push.
-func ghRepoCreate(ctx context.Context, runner bootstrapRunner, dir, fullName, visibility string, hasCommits bool) error {
+// origin as its remote, and pushes the initial commit.
+func ghRepoCreate(ctx context.Context, runner bootstrapRunner, dir, fullName, visibility string) error {
 	// Create the remote repo and add origin, but don't push yet. We push
 	// separately below with --no-verify so the pre-push hook doesn't run
 	// on this first push: the entire/checkpoints/v1 branch has nothing to
@@ -885,13 +1008,11 @@ func ghRepoCreate(ctx context.Context, runner bootstrapRunner, dir, fullName, vi
 	if _, err := runner.RunInDir(ctx, dir, "gh", args...); err != nil {
 		return fmt.Errorf("gh repo create: %w", ghRunnerErr(err))
 	}
-	if hasCommits {
-		// -q silences "Enumerating objects..." etc. --no-verify bypasses
-		// the pre-push hook so entire/checkpoints/v1 isn't pushed
-		// alongside the default branch.
-		if _, err := runner.RunInDir(ctx, dir, "git", "push", "-q", "--no-verify", "-u", "origin", "HEAD"); err != nil {
-			return fmt.Errorf("git push: %w", ghRunnerErr(err))
-		}
+	// -q silences "Enumerating objects..." etc. --no-verify bypasses the
+	// pre-push hook so entire/checkpoints/v1 isn't pushed alongside the
+	// default branch. We always have at least an empty initial commit to push.
+	if _, err := runner.RunInDir(ctx, dir, "git", "push", "-q", "--no-verify", "-u", "origin", "HEAD"); err != nil {
+		return fmt.Errorf("git push: %w", ghRunnerErr(err))
 	}
 	return nil
 }

@@ -848,7 +848,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				bootstrapOpts.Yes = opts.Yes
 				state, bootstrapErr := runGitHubBootstrapInit(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), bootstrapOpts)
 				if errors.Is(bootstrapErr, errBootstrapDeclined) {
-					fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Please run 'entire enable' from within a git repository, or pass --init-repo to initialize one here.")
+					fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Please run 'entire enable' from within a git repository, or pass --bootstrap=local to initialize one here.")
 					return NewSilentError(errors.New("not a git repository"))
 				}
 				if errors.Is(bootstrapErr, errBootstrapInterrupted) {
@@ -935,18 +935,29 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
 	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
-	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit; then enable all agents and accept telemetry)")
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept the selected mode's defaults without prompting (in a non-repo directory: git init only, empty initial commit, no GitHub; then enable all agents and accept telemetry)")
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
-	// Bootstrap flags for non-git-repo folders.
+	// Bootstrap flags for non-git-repo folders. The model is safe-by-default:
+	// nothing is created on GitHub and no existing file is committed or pushed
+	// unless the user explicitly opts in (--bootstrap=github, --commit-existing-files).
+	cmd.Flags().StringVar(&bootstrapOpts.Bootstrap, "bootstrap", "", "Behavior when not in a git repo: prompt (default), local, github, or off")
+	cmd.Flags().BoolVar(&bootstrapOpts.CommitExistingFiles, "commit-existing-files", false, "Stage, commit, and (with --bootstrap=github) push the files already in the directory. Default: empty initial commit, existing files left untracked")
+	cmd.Flags().StringVar(&bootstrapOpts.RepoName, "repo-name", "", "GitHub repository name for the new repo (only with --bootstrap=github)")
+	cmd.Flags().StringVar(&bootstrapOpts.RepoOwner, "repo-owner", "", "GitHub user or organization login for the new repo (only with --bootstrap=github)")
+	cmd.Flags().StringVar(&bootstrapOpts.RepoVisibility, "repo-visibility", "", "GitHub repository visibility: public, private, or internal (only with --bootstrap=github)")
+	cmd.Flags().StringVar(&bootstrapOpts.InitialCommitMessage, "initial-commit-message", "", "Commit message for the initial commit (requires --commit-existing-files)")
+
+	// Deprecated aliases (pre-existing released flags) mapped onto the model
+	// above. Cobra hides them from help and prints the hint when they are used.
 	cmd.Flags().BoolVar(&bootstrapOpts.InitRepo, "init-repo", false, "If not a git repo, initialize one non-interactively")
 	cmd.Flags().BoolVar(&bootstrapOpts.NoInitRepo, "no-init-repo", false, "If not a git repo, exit instead of prompting to initialize one")
-	cmd.Flags().StringVar(&bootstrapOpts.RepoName, "repo-name", "", "GitHub repository name for the new repo (used when bootstrapping)")
-	cmd.Flags().StringVar(&bootstrapOpts.RepoOwner, "repo-owner", "", "GitHub user or organization login for the new repo")
-	cmd.Flags().StringVar(&bootstrapOpts.RepoVisibility, "repo-visibility", "", "GitHub repository visibility: public, private, or internal")
 	cmd.Flags().BoolVar(&bootstrapOpts.NoGitHub, "no-github", false, "Initialize local git repo only; skip creating a GitHub remote")
-	cmd.Flags().StringVar(&bootstrapOpts.InitialCommitMessage, "initial-commit-message", "", "Commit message for the initial commit when bootstrapping a new repo")
 	cmd.Flags().BoolVar(&bootstrapOpts.SkipInitialCommit, "skip-initial-commit", false, "Don't create the initial commit when bootstrapping a new repo")
+	cmd.Flags().MarkDeprecated("init-repo", "use --bootstrap=local (or --bootstrap=github to also create a GitHub repo)")   //nolint:errcheck,gosec // flag is defined above
+	cmd.Flags().MarkDeprecated("no-init-repo", "use --bootstrap=off")                                                       //nolint:errcheck,gosec // flag is defined above
+	cmd.Flags().MarkDeprecated("no-github", "use --bootstrap=local")                                                        //nolint:errcheck,gosec // flag is defined above
+	cmd.Flags().MarkDeprecated("skip-initial-commit", "existing files are no longer committed by default; this is a no-op") //nolint:errcheck,gosec // flag is defined above
 	cmd.MarkFlagsMutuallyExclusive("init-repo", "no-init-repo")
 	cmd.MarkFlagsMutuallyExclusive("initial-commit-message", "skip-initial-commit")
 
