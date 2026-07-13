@@ -1,0 +1,126 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KXEY2J7444QE40FKRVV2VGBB",
+  "session_id": "50e3afb2-c325-45e7-aec5-3f54b10a12e7",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-13T23:47:59.793357Z",
+  "branch": "cli-onboard",
+  "checkpoints_count": 3,
+  "save_step_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/onboarding/onboarding.go",
+    "cmd/entire/cli/onboarding_mirror_cache.go",
+    "cmd/entire/cli/onboarding_offer_test.go",
+    "cmd/entire/cli/onboarding_rungs.go",
+    "cmd/entire/cli/onboarding_rungs_test.go",
+    "cmd/entire/cli/repo_mirror.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-fable-5",
+  "turn_id": "08b4836528d6",
+  "checkpoint_transcript_start": 166,
+  "transcript_lines_at_start": 166,
+  "compact_transcript_start": 33,
+  "token_usage": {
+    "input_tokens": 84,
+    "cache_creation_tokens": 77592,
+    "cache_read_tokens": 5763608,
+    "output_tokens": 37943,
+    "api_call_count": 46
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01LQfk1EKfMeRxoUyXVa5ChF",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:receiving-code-review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "08b4836528d6",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 195,
+        "end": 196,
+        "entry_ids": [
+          "c33bd99f-9666-4ee6-997a-e2c5186e1cc4"
+        ],
+        "tool_use_id": "toolu_01LQfk1EKfMeRxoUyXVa5ChF"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01LQfk1EKfMeRxoUyXVa5ChF"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:receiving-code-review",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-13T23:47:59.75189Z",
+    "agent_lines": 232,
+    "agent_removed": 56,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 232,
+    "total_lines_changed": 288,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 1937,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".agents/skills/agent-integration/README.md": 71,
+        ".agents/skills/agent-integration/SKILL.md": 107,
+        ".agents/skills/agent-integration/implementer.md": 346,
+        ".agents/skills/agent-integration/researcher.md": 161,
+        ".agents/skills/agent-integration/test-writer.md": 211,
+        ".agents/skills/changelog/SKILL.md": 88,
+        ".agents/skills/e2e/SKILL.md": 32,
+        ".agents/skills/e2e/debug.md": 88,
+        ".agents/skills/e2e/implement.md": 117,
+        ".agents/skills/e2e/triage-ci.md": 176,
+        ".agents/skills/test-repo/README.md": 65,
+        ".agents/skills/test-repo/SKILL.md": 230,
+        ".agents/skills/test-repo/test-harness.sh": 245
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 1937,
+      "user_lines_removed": 0,
+      "agent_lines_added": 232,
+      "agent_lines_removed": 56,
+      "user_added_per_file": {
+        ".agents/skills/agent-integration/README.md": 71,
+        ".agents/skills/agent-integration/SKILL.md": 107,
+        ".agents/skills/agent-integration/implementer.md": 346,
+        ".agents/skills/agent-integration/researcher.md": 161,
+        ".agents/skills/agent-integration/test-writer.md": 211,
+        ".agents/skills/changelog/SKILL.md": 88,
+        ".agents/skills/e2e/SKILL.md": 32,
+        ".agents/skills/e2e/debug.md": 88,
+        ".agents/skills/e2e/implement.md": 117,
+        ".agents/skills/e2e/triage-ci.md": 176,
+        ".agents/skills/test-repo/README.md": 65,
+        ".agents/skills/test-repo/SKILL.md": 230,
+        ".agents/skills/test-repo/test-harness.sh": 245
+      }
+    }
+  ]
+}

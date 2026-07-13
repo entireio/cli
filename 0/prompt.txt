@@ -1,0 +1,11 @@
+<task-notification>
+<task-id>byrdhq69b</task-id>
+<tool-use-id>toolu_01D9BS3HZzEzgoX59THZkdqb</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-cli-onboard/50e3afb2-c325-45e7-aec5-3f54b10a12e7/tasks/byrdhq69b.output</output-file>
+<status>completed</status>
+<summary>Background command "Watch PR checks until completion" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+there is finding on the trail
