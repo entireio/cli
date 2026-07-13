@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -336,30 +337,70 @@ func trailWebURL(base, forge, owner, repo string, number int) string {
 	return strings.TrimRight(base, "/") + "/" + forge + "/" + owner + "/" + repo + "/trails/" + strconv.Itoa(number)
 }
 
-// fetchTrailDescription fetches a trail's rendered description text
-// (`trail.body_document.text_snapshot`), which the list endpoint omits, by
-// integer number. It returns only the description — the list result already
-// supplies the metadata — and decodes only the fields it needs, so it is
-// unaffected by the shape of sibling fields like `checkpoints`/`thread`.
-func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, error) {
+// trailBody is the resolved body of a trail's editor document.
+//
+//   - text is the best available body text: the formatting-preserving markdown
+//     when the server provides it, else the legacy lossy text_snapshot.
+//   - exists is true when the trail has a body document at all.
+//   - editable is true when text is safe to seed into an editor and write back
+//     verbatim. It is false only when a new server returned markdown:null (it
+//     could not losslessly serialize the body); text then holds the flattened
+//     snapshot for display, and must never be saved back as the body.
+type trailBody struct {
+	text     string
+	exists   bool
+	editable bool
+}
+
+// fetchTrailBody fetches a trail's body (`trail.body_document`), which the list
+// endpoint omits, by integer number. It prefers the formatting-preserving
+// `markdown` field, falling back to the raw `text_snapshot` on older servers
+// that predate it. It decodes only the fields it needs, so it is unaffected by
+// the shape of sibling fields like `checkpoints`/`thread`.
+func fetchTrailBody(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (trailBody, error) {
 	resp, err := client.Get(ctx, trailNumberPath(forge, owner, repo, number))
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch trail detail: %w", err)
+		return trailBody{}, fmt.Errorf("failed to fetch trail detail: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		return "", err
+		return trailBody{}, err
 	}
 	var detail struct {
 		Trail api.TrailResource `json:"trail"`
 	}
 	if err := api.DecodeJSON(resp, &detail); err != nil {
-		return "", fmt.Errorf("failed to decode trail detail: %w", err)
+		return trailBody{}, fmt.Errorf("failed to decode trail detail: %w", err)
 	}
-	if detail.Trail.BodyDocument == nil {
-		return "", nil
+	doc := detail.Trail.BodyDocument
+	if doc == nil {
+		return trailBody{}, nil
 	}
-	return strings.TrimSpace(detail.Trail.BodyDocument.TextSnapshot), nil
+	switch {
+	case len(doc.Markdown) == 0:
+		// Old server (field absent): the snapshot is the only body we have.
+		return trailBody{text: doc.TextSnapshot, exists: true, editable: true}, nil
+	case string(doc.Markdown) == "null":
+		// New server that could not serialize the body losslessly: keep the
+		// snapshot for display only; the body is not safe to edit and re-save.
+		return trailBody{text: doc.TextSnapshot, exists: true, editable: false}, nil
+	default:
+		var md string
+		if err := json.Unmarshal(doc.Markdown, &md); err != nil {
+			return trailBody{}, fmt.Errorf("failed to decode trail body markdown: %w", err)
+		}
+		return trailBody{text: md, exists: true, editable: true}, nil
+	}
+}
+
+// fetchTrailDescription returns the trail's body trimmed for display (used by
+// `trail show`). Editing paths use fetchTrailBody to keep the raw text.
+func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, error) {
+	body, err := fetchTrailBody(ctx, client, forge, owner, repo, number)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(body.text), nil
 }
 
 func newTrailListCmd() *cobra.Command {
@@ -1001,86 +1042,200 @@ func newTrailCreateRequest(title, body, branch, base, statusStr string) api.Trai
 }
 
 func newTrailUpdateCmd() *cobra.Command {
-	var statusStr, title, body, branch string
+	var statusStr, title, body, bodyFile, branch, trailSelector string
 	var labelAdd, labelRemove []string
 
 	cmd := &cobra.Command{
-		Use:   "update",
-		Short: "Update trail metadata",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := ensureTrailRepoHasTarget(cmd, strings.TrimSpace(branch) != "", "pass --branch"); err != nil {
+		Use:   "update [<trail>]",
+		Short: "Update a trail",
+		Long: `Update a trail's body or metadata.
+
+The trail may be given as the first argument or via --trail, as a number, id, or
+branch (so a branchless trail can be updated by number or id). Without one, the
+trail for the current branch is used. --branch resolves by branch name only
+(never as a trail number or id).
+
+The body can be set with --body, --body-file <path>, or --body/--body-file -
+(read from stdin). Body and metadata are sent as separate requests.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target, err := resolveTrailUpdateTarget(cmd, args)
+			if err != nil {
 				return err
 			}
-			return runTrailUpdate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailUpdateInputs{
-				Status:        statusStr,
-				StatusChanged: cmd.Flags().Changed("status"),
-				Title:         title,
-				TitleChanged:  cmd.Flags().Changed("title"),
-				Body:          body,
-				BodyChanged:   cmd.Flags().Changed("body"),
-				Branch:        branch,
-				Repo:          trailRepoFlag(cmd),
-				LabelAdd:      labelAdd,
-				LabelRemove:   labelRemove,
+			if err := ensureTrailRepoHasTarget(cmd, target.selector != "" || target.branch != "", "pass a trail selector or --branch"); err != nil {
+				return err
+			}
+			return runTrailUpdate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), cmd.InOrStdin(), trailInsecureHTTP(cmd), target, trailUpdateInputs{
+				Status:          statusStr,
+				StatusChanged:   cmd.Flags().Changed("status"),
+				Title:           title,
+				TitleChanged:    cmd.Flags().Changed("title"),
+				Body:            body,
+				BodyChanged:     cmd.Flags().Changed("body"),
+				BodyFile:        bodyFile,
+				BodyFileChanged: cmd.Flags().Changed("body-file"),
+				Repo:            trailRepoFlag(cmd),
+				LabelAdd:        labelAdd,
+				LabelRemove:     labelRemove,
 			})
 		},
 	}
 
 	cmd.Flags().StringVar(&statusStr, "status", "", "Update status")
 	cmd.Flags().StringVar(&title, "title", "", "Update title")
-	cmd.Flags().StringVar(&body, "body", "", "Update body")
-	cmd.Flags().StringVar(&branch, "branch", "", "Branch to update trail for (defaults to current)")
+	cmd.Flags().StringVar(&body, "body", "", "Update body (use - to read from stdin)")
+	cmd.Flags().StringVar(&bodyFile, "body-file", "", "Read the body from a file (use - for stdin)")
+	cmd.Flags().StringVar(&branch, "branch", "", "Branch whose trail to update (defaults to current)")
+	cmd.Flags().StringVar(&trailSelector, "trail", "", "Trail to update (number, id, or branch; defaults to the current branch's trail)")
 	cmd.Flags().StringSliceVar(&labelAdd, "add-label", nil, "Add label(s)")
 	cmd.Flags().StringSliceVar(&labelRemove, "remove-label", nil, "Remove label(s)")
 
 	return cmd
 }
 
-type trailUpdateInputs struct {
-	Status        string
-	StatusChanged bool
-	Title         string
-	TitleChanged  bool
-	Body          string
-	BodyChanged   bool
-	Branch        string
-	Repo          string
-	LabelAdd      []string
-	LabelRemove   []string
+// trailUpdateTarget describes how to resolve the trail to update. A non-empty
+// branch means a branch-name-only lookup (the legacy --branch flag), which must
+// never be treated as a trail number or id. Otherwise selector is a generic
+// number/id/branch selector (from the positional arg or --trail); empty means
+// "the current branch's trail".
+type trailUpdateTarget struct {
+	selector string
+	branch   string
 }
 
-func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, inputs trailUpdateInputs) error {
+// resolveTrailUpdateTarget reconciles the positional <trail> arg, --trail, and
+// the legacy --branch flag. At most one may be given. --branch is kept distinct
+// from the generic selector so that e.g. `--branch 123` resolves the branch
+// named "123" rather than trail #123.
+func resolveTrailUpdateTarget(cmd *cobra.Command, args []string) (trailUpdateTarget, error) {
+	var target trailUpdateTarget
+	sources := 0
+	if cmd.Flags().Changed("trail") {
+		target.selector, _ = cmd.Flags().GetString("trail") //nolint:errcheck // flag is registered
+		sources++
+	}
+	if len(args) == 1 {
+		target.selector = args[0]
+		sources++
+	}
+	if cmd.Flags().Changed("branch") {
+		target.branch, _ = cmd.Flags().GetString("branch") //nolint:errcheck // flag is registered
+		sources++
+	}
+	if sources > 1 {
+		return trailUpdateTarget{}, errors.New("specify the trail only once (as an argument, --trail, or --branch)")
+	}
+	return target, nil
+}
+
+type trailUpdateInputs struct {
+	Status          string
+	StatusChanged   bool
+	Title           string
+	TitleChanged    bool
+	Body            string
+	BodyChanged     bool
+	BodyFile        string
+	BodyFileChanged bool
+	Repo            string
+	LabelAdd        []string
+	LabelRemove     []string
+}
+
+// trailUpdateEdits holds the editable fields of the interactive update form.
+type trailUpdateEdits struct {
+	status string
+	title  string
+	body   string
+}
+
+// interactiveUpdateInputs turns the interactive form's seed and edited values
+// into update inputs, marking a field changed only when the user actually edited
+// it away from the seed. The body in particular must not be re-sent when
+// unedited: its seed may be empty (the current body failed to load) or
+// whitespace-trimmed, and re-PATCHing it would erase or rewrite the live
+// collaborative document.
+func interactiveUpdateInputs(seed, edited trailUpdateEdits) trailUpdateInputs {
+	return trailUpdateInputs{
+		Status:        edited.status,
+		StatusChanged: edited.status != seed.status,
+		Title:         edited.title,
+		TitleChanged:  edited.title != seed.title,
+		Body:          edited.body,
+		BodyChanged:   edited.body != seed.body,
+	}
+}
+
+// interactiveBodySeed picks the seed for the interactive Body field from a
+// fetchTrailBody result and the list body, and whether the field should be
+// shown at all. A fetch error omits the field so a transient failure can't blank
+// the document; an absent document falls back to the list body so a present
+// description isn't shown blank and silently overwritten; a non-editable body
+// (server returned markdown:null) is omitted so the CLI can't save it back as
+// flattened text.
+func interactiveBodySeed(body trailBody, fetchErr error, listBody string) (seed string, loaded bool) {
+	switch {
+	case fetchErr != nil:
+		return "", false
+	case !body.exists:
+		return listBody, true
+	case !body.editable:
+		return "", false
+	default:
+		return body.text, true
+	}
+}
+
+// trailUpdateHasChanges reports whether any field would actually be sent.
+func trailUpdateHasChanges(inputs trailUpdateInputs) bool {
+	return inputs.StatusChanged || inputs.TitleChanged || inputs.BodyChanged ||
+		len(inputs.LabelAdd) > 0 || len(inputs.LabelRemove) > 0
+}
+
+func runTrailUpdate(ctx context.Context, w, errW io.Writer, stdin io.Reader, insecureHTTP bool, target trailUpdateTarget, inputs trailUpdateInputs) error {
 	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, inputs.Repo, func(ctx context.Context, client *api.Client) error {
 		forge, owner, repoName, err := resolveTrailRepoOrRemote(ctx, inputs.Repo)
 		if err != nil {
 			return err
 		}
 
-		// Determine branch.
-		branch := inputs.Branch
-		if branch == "" {
-			branch, err = GetCurrentBranch(ctx)
+		// Resolve the trail. --branch is a branch-name-only lookup; otherwise the
+		// selector accepts number/id/branch (empty = current branch's trail), so
+		// branchless trails are addressable by number/id.
+		var found *api.TrailResource
+		if target.branch != "" {
+			found, err = findTrailByBranch(ctx, client, forge, owner, repoName, target.branch)
 			if err != nil {
-				return fmt.Errorf("failed to determine current branch: %w", err)
+				return err
+			}
+			if found == nil {
+				return fmt.Errorf("no trail found for branch %q", target.branch)
+			}
+		} else {
+			found, err = resolveTrailBySelector(ctx, client, forge, owner, repoName, target.selector, "")
+			if err != nil {
+				return err
 			}
 		}
 
-		// Find the trail by branch.
-		found, err := findTrailByBranch(ctx, client, forge, owner, repoName, branch)
+		// Resolve the body from --body / --body-file / stdin.
+		body, bodyChanged, err := resolveTrailBodyInput(inputs.Body, inputs.BodyFile, inputs.BodyChanged, inputs.BodyFileChanged, stdin)
 		if err != nil {
 			return err
 		}
-		if found == nil {
-			return fmt.Errorf("no trail found for branch %q", branch)
-		}
+		inputs.Body = body
+		inputs.BodyChanged = bodyChanged
 
-		// Interactive mode when no update flags are provided.
-		statusStr := inputs.Status
-		title := inputs.Title
-		body := inputs.Body
-		noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged && inputs.LabelAdd == nil && inputs.LabelRemove == nil
+		// Interactive mode when no update inputs are provided.
+		noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged && len(inputs.LabelAdd) == 0 && len(inputs.LabelRemove) == 0
 		if noFlags {
+			// The interactive form seeds the body from the trail's collaborative
+			// document, which is keyed by number — reject a numberless trail up
+			// front rather than after the user has filled out the form.
+			if found.Number <= 0 {
+				return fmt.Errorf("%s has no number yet; cannot update", describeTrailRef(found))
+			}
 			metadata := found.ToMetadata()
 			// Build status options with current value as default.
 			var statusOptions []huh.Option[string]
@@ -1094,77 +1249,168 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 				}
 				statusOptions = append(statusOptions, huh.NewOption(label, string(s)))
 			}
-			statusStr = string(metadata.Status)
-			title = metadata.Title
-			body = metadata.Body
+			// Seed the body from the real collaborative document (body_document),
+			// preferring its formatting-preserving markdown. If the document is absent
+			// (an older/partial server), fall back to the list body so a description
+			// that IS present isn't shown blank and silently overwritten — the `show`
+			// path guards this same case. If the fetch fails outright, or the server
+			// could not serialize the body to markdown (markdown:null), omit the body
+			// field so status/title stay editable and the CLI can't blank or flatten a
+			// document it can't safely round-trip.
+			seedStatus := string(metadata.Status)
+			seedTitle := metadata.Title
+			body0, derr := fetchTrailBody(ctx, client, forge, owner, repoName, found.Number)
+			switch {
+			case derr != nil:
+				fmt.Fprintf(errW, "Warning: could not load the current body to edit (%v); leaving it unchanged. Use --body or --body-file to set it.\n", derr)
+			case body0.exists && !body0.editable:
+				fmt.Fprintf(errW, "Warning: this trail's body has formatting the CLI can't edit losslessly; leaving it unchanged. Edit it in the web editor, or replace it with --body or --body-file.\n")
+			}
+			seedBody, bodyLoaded := interactiveBodySeed(body0, derr, metadata.Body)
+			body = seedBody
+			statusStr := seedStatus
+			title := seedTitle
 
-			form := NewAccessibleForm(
-				huh.NewGroup(
-					huh.NewSelect[string]().
-						Title("Status").
-						Options(statusOptions...).
-						Value(&statusStr),
-					huh.NewInput().
-						Title("Title").
-						Value(&title),
-					huh.NewText().
-						Title("Body").
-						Value(&body),
-				),
-			)
+			fields := []huh.Field{
+				huh.NewSelect[string]().
+					Title("Status").
+					Options(statusOptions...).
+					Value(&statusStr),
+				huh.NewInput().
+					Title("Title").
+					Value(&title),
+			}
+			if bodyLoaded {
+				fields = append(fields, huh.NewText().
+					Title("Body").
+					Value(&body))
+			}
+			form := NewAccessibleForm(huh.NewGroup(fields...))
 			if formErr := form.Run(); formErr != nil {
 				return handleFormCancellation(w, "Trail update", formErr)
 			}
-			inputs.StatusChanged = true
-			inputs.TitleChanged = true
-			inputs.BodyChanged = true
+			// Mark only the fields the user actually edited. Crucially, an unedited
+			// body is left unchanged so it isn't re-sent — re-PATCHing a body that
+			// failed to load (empty seed) or was whitespace-trimmed would erase or
+			// rewrite the live document.
+			inputs = interactiveUpdateInputs(
+				trailUpdateEdits{status: seedStatus, title: seedTitle, body: seedBody},
+				trailUpdateEdits{status: statusStr, title: title, body: body},
+			)
 		}
 
-		statusStr = strings.TrimSpace(statusStr)
-		title = strings.TrimSpace(title)
-		if err := validateTrailUpdateFields(trailUpdateInputs{
-			Status:        statusStr,
-			StatusChanged: inputs.StatusChanged,
-			Title:         title,
-			TitleChanged:  inputs.TitleChanged,
-		}); err != nil {
+		inputs.Status = strings.TrimSpace(inputs.Status)
+		inputs.Title = strings.TrimSpace(inputs.Title)
+		if err := validateTrailUpdateFields(inputs); err != nil {
 			return err
 		}
 
-		// Build update request with only changed fields.
-		updateReq := buildTrailUpdateRequest(found, trailUpdateInputs{
-			Status:        statusStr,
+		if !trailUpdateHasChanges(inputs) {
+			fmt.Fprintf(w, "No changes to %s\n", describeTrailRef(found))
+			return nil
+		}
+
+		if err := applyTrailUpdate(ctx, client, forge, owner, repoName, found, inputs); err != nil {
+			return err
+		}
+
+		fmt.Fprintf(w, "Updated %s\n", describeTrailRef(found))
+		return nil
+	})
+}
+
+// resolveTrailBodyInput resolves the trail body to write from the --body and
+// --body-file flags; a value of "-" for either reads from stdin. The two flags
+// are mutually exclusive. It returns the body text, whether a body was supplied,
+// and any error. No trimming is applied — the body is written verbatim.
+func resolveTrailBodyInput(body, bodyFile string, bodyChanged, bodyFileChanged bool, stdin io.Reader) (string, bool, error) {
+	if bodyChanged && bodyFileChanged {
+		return "", false, errors.New("cannot combine --body with --body-file")
+	}
+	switch {
+	case bodyFileChanged:
+		if bodyFile == "-" {
+			return readTrailBodyStdin(stdin)
+		}
+		data, err := os.ReadFile(bodyFile) //nolint:gosec // user-provided body-file path is intentional
+		if err != nil {
+			return "", false, fmt.Errorf("read body file: %w", err)
+		}
+		return string(data), true, nil
+	case bodyChanged:
+		if body == "-" {
+			return readTrailBodyStdin(stdin)
+		}
+		return body, true, nil
+	default:
+		return "", false, nil
+	}
+}
+
+func readTrailBodyStdin(stdin io.Reader) (string, bool, error) {
+	if stdin == nil {
+		return "", false, errors.New("no stdin available to read the body from")
+	}
+	data, err := io.ReadAll(stdin)
+	if err != nil {
+		return "", false, fmt.Errorf("read body from stdin: %w", err)
+	}
+	return string(data), true, nil
+}
+
+// applyTrailUpdate writes the requested changes to a resolved trail. Body and
+// metadata are sent as SEPARATE PATCHes because the API rejects combining them:
+// the body is a collaborative editor document written through a Durable Object,
+// metadata is a row update, and the two share no transaction. Metadata is sent
+// first; if the body PATCH then fails, the error states the metadata already
+// landed so the partial outcome isn't hidden.
+func applyTrailUpdate(ctx context.Context, client *api.Client, forge, owner, repo string, found *api.TrailResource, inputs trailUpdateInputs) error {
+	// The single-trail endpoint is keyed by trail number; ids/branches are
+	// resolved to a number before this point.
+	if found.Number <= 0 {
+		return fmt.Errorf("%s has no number yet; cannot update", describeTrailRef(found))
+	}
+	path := trailNumberPath(forge, owner, repo, found.Number)
+
+	metadataChanged := inputs.StatusChanged || inputs.TitleChanged || len(inputs.LabelAdd) > 0 || len(inputs.LabelRemove) > 0
+	if metadataChanged {
+		req := buildTrailUpdateRequest(found, trailUpdateInputs{
+			Status:        inputs.Status,
 			StatusChanged: inputs.StatusChanged,
-			Title:         title,
+			Title:         inputs.Title,
 			TitleChanged:  inputs.TitleChanged,
-			Body:          body,
-			BodyChanged:   inputs.BodyChanged,
 			LabelAdd:      inputs.LabelAdd,
 			LabelRemove:   inputs.LabelRemove,
 		})
-
-		// The single-trail endpoint is keyed by trail number, not id; the server
-		// rejects an id here with "Invalid trail number format".
-		if found.Number <= 0 {
-			return fmt.Errorf("trail for branch %q has no number yet; cannot update", branch)
-		}
-		resp, err := client.Patch(ctx, trailNumberPath(forge, owner, repoName, found.Number), updateReq)
-		if err != nil {
-			return fmt.Errorf("failed to update trail: %w", err)
-		}
-		defer resp.Body.Close()
-		if err := checkTrailResponse(resp); err != nil {
+		if err := patchTrail(ctx, client, path, req); err != nil {
 			return err
 		}
-
-		var updateResp api.TrailUpdateResponse
-		if err := api.DecodeJSON(resp, &updateResp); err != nil {
-			return fmt.Errorf("failed to decode update response: %w", err)
+	}
+	if inputs.BodyChanged {
+		if err := patchTrail(ctx, client, path, api.TrailUpdateRequest{Body: &inputs.Body}); err != nil {
+			if metadataChanged {
+				return fmt.Errorf("metadata updated, but body update failed: %w", err)
+			}
+			return err
 		}
+	}
+	return nil
+}
 
-		fmt.Fprintf(w, "Updated trail for branch %s\n", branch)
-		return nil
-	})
+func patchTrail(ctx context.Context, client *api.Client, path string, req api.TrailUpdateRequest) error {
+	resp, err := client.Patch(ctx, path, req)
+	if err != nil {
+		return fmt.Errorf("failed to update trail: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return err
+	}
+	var updateResp api.TrailUpdateResponse
+	if err := api.DecodeJSON(resp, &updateResp); err != nil {
+		return fmt.Errorf("failed to decode update response: %w", err)
+	}
+	return nil
 }
 
 func validateTrailUpdateFields(inputs trailUpdateInputs) error {
@@ -1180,7 +1426,10 @@ func validateTrailUpdateFields(inputs trailUpdateInputs) error {
 	return nil
 }
 
-// buildTrailUpdateRequest constructs a PATCH request body from the current trail and the requested changes.
+// buildTrailUpdateRequest constructs a metadata PATCH request body from the
+// current trail and the requested changes. The body is never included here — it
+// is sent as a separate PATCH by applyTrailUpdate (the API rejects combining the
+// two), so this builder only handles status, title, and labels.
 func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInputs) api.TrailUpdateRequest {
 	var req api.TrailUpdateRequest
 
@@ -1189,9 +1438,6 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 	}
 	if inputs.TitleChanged {
 		req.Title = &inputs.Title
-	}
-	if inputs.BodyChanged {
-		req.Body = &inputs.Body
 	}
 
 	// Handle label changes: merge adds, remove removes.

@@ -28,7 +28,6 @@ import (
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/go-git/go-git/v6"
-	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1004,14 +1003,19 @@ func TestFindTrailStopsAtMaxPagesWithoutTotal(t *testing.T) {
 	}
 }
 
-func TestBuildTrailUpdateRequestCanClearBody(t *testing.T) {
+func TestBuildTrailUpdateRequestNeverIncludesBody(t *testing.T) {
 	t.Parallel()
-	req := buildTrailUpdateRequest(&api.TrailResource{Body: "old"}, trailUpdateInputs{BodyChanged: true, Body: ""})
-	if req.Body == nil {
-		t.Fatal("Body pointer is nil, want empty string pointer")
+	// The body is always sent as a separate PATCH by applyTrailUpdate, so the
+	// metadata request builder must never carry it — even when BodyChanged is set.
+	req := buildTrailUpdateRequest(&api.TrailResource{Body: "old"}, trailUpdateInputs{
+		Status: string(trail.StatusOpen), StatusChanged: true,
+		BodyChanged: true, Body: "new body",
+	})
+	if req.Body != nil {
+		t.Fatalf("Body = %q, want nil (body is sent in a separate PATCH)", *req.Body)
 	}
-	if *req.Body != "" {
-		t.Fatalf("Body = %q, want empty string", *req.Body)
+	if req.Status == nil || *req.Status != string(trail.StatusOpen) {
+		t.Fatalf("Status = %v, want %q", req.Status, trail.StatusOpen)
 	}
 }
 
@@ -1022,12 +1026,48 @@ func TestValidateTrailUpdateFieldsRejectsEmptyTitle(t *testing.T) {
 	}
 }
 
-func TestTrailCreateAndUpdateRejectUnexpectedArgs(t *testing.T) {
+func TestValidateTrailUpdateFieldsRejectsInvalidStatus(t *testing.T) {
 	t.Parallel()
-	for _, cmd := range []*cobra.Command{newTrailCreateCmd(), newTrailUpdateCmd()} {
-		if err := cmd.Args(cmd, []string{"unexpected"}); err == nil {
-			t.Fatalf("%s accepted an unexpected positional arg", cmd.Name())
-		}
+	if err := validateTrailUpdateFields(trailUpdateInputs{StatusChanged: true, Status: "bogus"}); err == nil {
+		t.Fatal("expected an invalid status to be rejected")
+	}
+	// An unchanged status is not validated even if its (unset) value is invalid.
+	if err := validateTrailUpdateFields(trailUpdateInputs{Status: "bogus"}); err != nil {
+		t.Fatalf("unchanged status should not be validated: %v", err)
+	}
+}
+
+func TestInteractiveBodySeed(t *testing.T) {
+	t.Parallel()
+
+	// Fetch error → omit the field so a transient failure can't blank the doc.
+	if seed, loaded := interactiveBodySeed(trailBody{}, errors.New("boom"), "list body"); loaded || seed != "" {
+		t.Fatalf("fetch error → (%q, %v), want (\"\", false)", seed, loaded)
+	}
+	// Editable document present → seed from the fetched body verbatim.
+	if seed, loaded := interactiveBodySeed(trailBody{text: "doc body", exists: true, editable: true}, nil, "list body"); !loaded || seed != "doc body" {
+		t.Fatalf("present editable doc → (%q, %v), want (\"doc body\", true)", seed, loaded)
+	}
+	// Document absent but a list body exists → fall back to it, do NOT show blank.
+	if seed, loaded := interactiveBodySeed(trailBody{exists: false}, nil, "list body"); !loaded || seed != "list body" {
+		t.Fatalf("absent doc with list body → (%q, %v), want (\"list body\", true)", seed, loaded)
+	}
+	// Document absent and no list body → an empty, editable field is correct.
+	if seed, loaded := interactiveBodySeed(trailBody{exists: false}, nil, ""); !loaded || seed != "" {
+		t.Fatalf("absent doc no list body → (%q, %v), want (\"\", true)", seed, loaded)
+	}
+	// Present but not editable (server returned markdown:null) → omit the field so
+	// the CLI can't flatten a body it can't losslessly round-trip.
+	if seed, loaded := interactiveBodySeed(trailBody{text: "flattened", exists: true, editable: false}, nil, "list body"); loaded || seed != "" {
+		t.Fatalf("non-editable doc → (%q, %v), want (\"\", false)", seed, loaded)
+	}
+}
+
+func TestTrailCreateRejectsUnexpectedArgs(t *testing.T) {
+	t.Parallel()
+	cmd := newTrailCreateCmd()
+	if err := cmd.Args(cmd, []string{"unexpected"}); err == nil {
+		t.Fatalf("%s accepted an unexpected positional arg", cmd.Name())
 	}
 }
 
@@ -1448,5 +1488,355 @@ func TestFetchCurrentUserLoginWrapsGhError(t *testing.T) {
 	// Surface the hint about the --author <login> fallback.
 	if !strings.Contains(err.Error(), "--author <login>") {
 		t.Fatalf("error should mention the --author fallback hint, got: %v", err)
+	}
+}
+
+func TestResolveTrailBodyInput(t *testing.T) {
+	t.Parallel()
+
+	t.Run("literal --body", func(t *testing.T) {
+		t.Parallel()
+		const want = "a literal body"
+		text, changed, err := resolveTrailBodyInput(want, "", true, false, nil)
+		if err != nil || !changed || text != want {
+			t.Fatalf("got (%q, %v, %v), want (%q, true, nil)", text, changed, err, want)
+		}
+	})
+
+	t.Run("--body-file reads file", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "body.md")
+		if err := os.WriteFile(path, []byte("# Title\n\nfrom file\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		text, changed, err := resolveTrailBodyInput("", path, false, true, nil)
+		if err != nil || !changed || text != "# Title\n\nfrom file\n" {
+			t.Fatalf("got (%q, %v, %v), want file contents", text, changed, err)
+		}
+	})
+
+	t.Run("--body - reads stdin", func(t *testing.T) {
+		t.Parallel()
+		text, changed, err := resolveTrailBodyInput("-", "", true, false, strings.NewReader("piped body"))
+		if err != nil || !changed || text != "piped body" {
+			t.Fatalf("got (%q, %v, %v), want (%q, true, nil)", text, changed, err, "piped body")
+		}
+	})
+
+	t.Run("--body-file - reads stdin", func(t *testing.T) {
+		t.Parallel()
+		text, changed, err := resolveTrailBodyInput("", "-", false, true, strings.NewReader("piped via file flag"))
+		if err != nil || !changed || text != "piped via file flag" {
+			t.Fatalf("got (%q, %v, %v), want stdin contents", text, changed, err)
+		}
+	})
+
+	t.Run("--body and --body-file are mutually exclusive", func(t *testing.T) {
+		t.Parallel()
+		if _, _, err := resolveTrailBodyInput("x", "f.md", true, true, nil); err == nil {
+			t.Fatal("expected error when both --body and --body-file are set")
+		}
+	})
+
+	t.Run("nothing set means no change", func(t *testing.T) {
+		t.Parallel()
+		text, changed, err := resolveTrailBodyInput("", "", false, false, nil)
+		if err != nil || changed || text != "" {
+			t.Fatalf("got (%q, %v, %v), want (\"\", false, nil)", text, changed, err)
+		}
+	})
+
+	t.Run("--body - with no stdin errors", func(t *testing.T) {
+		t.Parallel()
+		if _, _, err := resolveTrailBodyInput("-", "", true, false, nil); err == nil {
+			t.Fatal("expected an error reading stdin when none is available")
+		}
+	})
+
+	t.Run("--body-file with missing path errors", func(t *testing.T) {
+		t.Parallel()
+		missing := filepath.Join(t.TempDir(), "does-not-exist.md")
+		if _, _, err := resolveTrailBodyInput("", missing, false, true, nil); err == nil {
+			t.Fatal("expected an error reading a nonexistent body file")
+		}
+	})
+}
+
+// patchRecorder is an httptest server that records every PATCH it receives.
+func patchRecorder(t *testing.T) (*httptest.Server, *[]api.TrailUpdateRequest) {
+	t.Helper()
+	var got []api.TrailUpdateRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("unexpected method %s", r.Method)
+		}
+		var req api.TrailUpdateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode patch body: %v", err)
+		}
+		got = append(got, req)
+		if _, err := io.WriteString(w, `{"trail":{"number":42}}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &got
+}
+
+func TestApplyTrailUpdateSplitsBodyAndMetadata(t *testing.T) {
+	t.Parallel()
+	srv, got := patchRecorder(t)
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	found := &api.TrailResource{Number: 42}
+
+	err := applyTrailUpdate(t.Context(), client, "gh", "acme", "repo", found, trailUpdateInputs{
+		Status: "open", StatusChanged: true,
+		Body: "new body", BodyChanged: true,
+	})
+	if err != nil {
+		t.Fatalf("applyTrailUpdate: %v", err)
+	}
+	// Body and metadata must go in SEPARATE PATCHes (the API rejects combining them).
+	if len(*got) != 2 {
+		t.Fatalf("got %d PATCH calls, want 2 (metadata + body)", len(*got))
+	}
+	for _, req := range *got {
+		if req.Body != nil && req.Status != nil {
+			t.Fatalf("a single PATCH carried both body and metadata: %+v", req)
+		}
+	}
+}
+
+func TestApplyTrailUpdateBodyOnlyIsSinglePatch(t *testing.T) {
+	t.Parallel()
+	srv, got := patchRecorder(t)
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	found := &api.TrailResource{Number: 1488} // branchless trail: Branch == "" but Number > 0
+
+	err := applyTrailUpdate(t.Context(), client, "gh", "acme", "repo", found, trailUpdateInputs{
+		Body: "branchless body", BodyChanged: true,
+	})
+	if err != nil {
+		t.Fatalf("applyTrailUpdate: %v", err)
+	}
+	if len(*got) != 1 {
+		t.Fatalf("got %d PATCH calls, want 1", len(*got))
+	}
+	if (*got)[0].Body == nil || *(*got)[0].Body != "branchless body" {
+		t.Fatalf("PATCH body = %v, want %q", (*got)[0].Body, "branchless body")
+	}
+}
+
+func TestApplyTrailUpdateRejectsNumberlessTrail(t *testing.T) {
+	t.Parallel()
+	client := api.NewClientWithBaseURL("tok", "http://unused.invalid")
+	found := &api.TrailResource{Number: 0, Title: "Draft"}
+	if err := applyTrailUpdate(t.Context(), client, "gh", "acme", "repo", found, trailUpdateInputs{Body: "x", BodyChanged: true}); err == nil {
+		t.Fatal("expected error updating a trail with no number")
+	}
+}
+
+func TestApplyTrailUpdateReportsPartialFailureWhenBodyPatchFails(t *testing.T) {
+	t.Parallel()
+	// Metadata PATCH lands first and succeeds; the body PATCH (second) fails. The
+	// error must surface that the metadata change already landed so the partial
+	// outcome isn't hidden from the user.
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			if _, err := io.WriteString(w, `{"trail":{"number":42}}`); err != nil {
+				t.Errorf("write response: %v", err)
+			}
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		if _, err := io.WriteString(w, `{"error":"body write failed"}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+
+	err := applyTrailUpdate(t.Context(), client, "gh", "acme", "repo", &api.TrailResource{Number: 42}, trailUpdateInputs{
+		Status: string(trail.StatusOpen), StatusChanged: true,
+		Body: "new body", BodyChanged: true,
+	})
+	if err == nil {
+		t.Fatal("expected an error when the body PATCH fails")
+	}
+	if !strings.Contains(err.Error(), "metadata updated, but body update failed") {
+		t.Fatalf("error = %q, want it to report the partial failure", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("got %d PATCH calls, want 2 (metadata succeeded, body attempted)", got)
+	}
+}
+
+func trailBodyServer(t *testing.T, json string) *api.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := io.WriteString(w, json); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return api.NewClientWithBaseURL("tok", srv.URL)
+}
+
+func TestFetchTrailBodyPrefersMarkdown(t *testing.T) {
+	t.Parallel()
+	// A new server (PR #2574) returns markdown; the CLI must seed from it (not the
+	// flattened text_snapshot) so formatting survives an edit round-trip.
+	client := trailBodyServer(t, `{"trail":{"number":5,"body_document":{"text_snapshot":"H b","markdown":"# H\n\n**b**"}}}`)
+	body, err := fetchTrailBody(t.Context(), client, "gh", "acme", "repo", 5)
+	if err != nil || !body.exists || !body.editable || body.text != "# H\n\n**b**" {
+		t.Fatalf("fetchTrailBody = %+v (err %v), want text markdown, exists+editable", body, err)
+	}
+}
+
+func TestFetchTrailBodyFallsBackToSnapshotWhenMarkdownAbsent(t *testing.T) {
+	t.Parallel()
+	// An old server (pre-#2574) omits the markdown field entirely → fall back to the
+	// raw, untrimmed text_snapshot, still editable (its prior behavior).
+	client := trailBodyServer(t, `{"trail":{"number":5,"body_document":{"text_snapshot":"  spaced body \n"}}}`)
+	body, err := fetchTrailBody(t.Context(), client, "gh", "acme", "repo", 5)
+	if err != nil || !body.exists || !body.editable || body.text != "  spaced body \n" {
+		t.Fatalf("fetchTrailBody = %+v (err %v), want raw snapshot, exists+editable", body, err)
+	}
+
+	// fetchTrailDescription (used by `show`) trims for display.
+	desc, err := fetchTrailDescription(t.Context(), client, "gh", "acme", "repo", 5)
+	if err != nil || desc != "spaced body" {
+		t.Fatalf("fetchTrailDescription = (%q, %v), want (%q, nil)", desc, err, "spaced body")
+	}
+}
+
+func TestFetchTrailBodyRefusesNullMarkdown(t *testing.T) {
+	t.Parallel()
+	// A new server that could NOT losslessly serialize the body sends markdown:null.
+	// The body is marked non-editable so the CLI never flattens it on save; the
+	// text_snapshot is still carried for display-only use.
+	client := trailBodyServer(t, `{"trail":{"number":5,"body_document":{"text_snapshot":"flattened","markdown":null}}}`)
+	body, err := fetchTrailBody(t.Context(), client, "gh", "acme", "repo", 5)
+	if err != nil || !body.exists || body.editable || body.text != "flattened" {
+		t.Fatalf("fetchTrailBody = %+v (err %v), want exists, NOT editable, text=snapshot", body, err)
+	}
+}
+
+func TestFetchTrailBodyRendersMarkdownInShow(t *testing.T) {
+	t.Parallel()
+	// `show` renders the markdown (trimmed), not the flattened snapshot.
+	client := trailBodyServer(t, `{"trail":{"number":5,"body_document":{"text_snapshot":"H","markdown":"\n# H\n\n**b**\n"}}}`)
+	desc, err := fetchTrailDescription(t.Context(), client, "gh", "acme", "repo", 5)
+	if err != nil || desc != "# H\n\n**b**" {
+		t.Fatalf("fetchTrailDescription = (%q, %v), want trimmed markdown", desc, err)
+	}
+}
+
+func TestFetchTrailBodyReportsMissingDocument(t *testing.T) {
+	t.Parallel()
+	client := trailBodyServer(t, `{"trail":{"number":5}}`)
+	body, err := fetchTrailBody(t.Context(), client, "gh", "acme", "repo", 5)
+	if err != nil || body.exists || body.text != "" {
+		t.Fatalf("fetchTrailBody (no doc) = %+v (err %v), want zero value", body, err)
+	}
+}
+
+func TestInteractiveUpdateInputsMarksOnlyEditedFields(t *testing.T) {
+	t.Parallel()
+	seed := trailUpdateEdits{status: "open", title: "Title", body: "hello"}
+
+	// No edits → nothing marked changed.
+	got := interactiveUpdateInputs(seed, seed)
+	if got.StatusChanged || got.TitleChanged || got.BodyChanged {
+		t.Fatalf("unedited form marked a field changed: %+v", got)
+	}
+
+	// Only the body edited.
+	const editedBody = "an edited body"
+	got = interactiveUpdateInputs(seed, trailUpdateEdits{status: "open", title: "Title", body: editedBody})
+	if !got.BodyChanged || got.StatusChanged || got.TitleChanged {
+		t.Fatalf("body-only edit flags wrong: %+v", got)
+	}
+	if got.Body != editedBody {
+		t.Fatalf("Body = %q, want %q", got.Body, editedBody)
+	}
+}
+
+func TestInteractiveUpdateInputsUneditedBodyIsNotResent(t *testing.T) {
+	t.Parallel()
+	// Body failed to load → seed is empty. The user edits status only and leaves
+	// the body untouched. The empty body must NOT be marked changed, or a body
+	// PATCH would erase the live collaborative document.
+	seed := trailUpdateEdits{status: "open", title: "Title", body: ""}
+	got := interactiveUpdateInputs(seed, trailUpdateEdits{status: "closed", title: "Title", body: ""})
+	if got.BodyChanged {
+		t.Fatal("unedited (empty-seed) body marked changed — would erase the document")
+	}
+	if !got.StatusChanged {
+		t.Fatal("status edit should be marked changed")
+	}
+}
+
+func TestResolveTrailUpdateTargetKeepsBranchSeparate(t *testing.T) {
+	t.Parallel()
+
+	// --branch must be a branch-only lookup, never a number/id selector — so
+	// `--branch 123` targets the branch named "123", not trail #123.
+	cmd := newTrailUpdateCmd()
+	if err := cmd.Flags().Set("branch", "123"); err != nil {
+		t.Fatal(err)
+	}
+	target, err := resolveTrailUpdateTarget(cmd, nil)
+	if err != nil || target.branch != "123" || target.selector != "" {
+		t.Fatalf("--branch 123 → %+v (err %v), want branch=123 selector empty", target, err)
+	}
+
+	// A positional arg is a generic selector (number/id/branch).
+	cmd = newTrailUpdateCmd()
+	target, err = resolveTrailUpdateTarget(cmd, []string{"123"})
+	if err != nil || target.selector != "123" || target.branch != "" {
+		t.Fatalf("positional 123 → %+v (err %v), want selector=123 branch empty", target, err)
+	}
+
+	// --trail is a generic selector.
+	cmd = newTrailUpdateCmd()
+	if err := cmd.Flags().Set("trail", "abc"); err != nil {
+		t.Fatal(err)
+	}
+	target, err = resolveTrailUpdateTarget(cmd, nil)
+	if err != nil || target.selector != "abc" || target.branch != "" {
+		t.Fatalf("--trail abc → %+v (err %v), want selector=abc branch empty", target, err)
+	}
+
+	// Combining sources is rejected.
+	cmd = newTrailUpdateCmd()
+	if err := cmd.Flags().Set("branch", "b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveTrailUpdateTarget(cmd, []string{"1"}); err == nil {
+		t.Fatal("combining a positional with --branch should error")
+	}
+
+	// --trail and a positional both feed target.selector; supplying both must
+	// still error rather than letting the positional silently clobber --trail.
+	cmd = newTrailUpdateCmd()
+	if err := cmd.Flags().Set("trail", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveTrailUpdateTarget(cmd, []string{"b"}); err == nil {
+		t.Fatal("combining a positional with --trail should error")
+	}
+}
+
+func TestTrailUpdateAcceptsTrailSelectorArg(t *testing.T) {
+	t.Parallel()
+	cmd := newTrailUpdateCmd()
+	if err := cmd.Args(cmd, []string{"1488"}); err != nil {
+		t.Fatalf("update rejected a single trail selector arg: %v", err)
+	}
+	if err := cmd.Args(cmd, []string{"a", "b"}); err == nil {
+		t.Fatal("update accepted two positional args")
 	}
 }
