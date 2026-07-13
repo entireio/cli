@@ -15,6 +15,7 @@ import (
 // the '^' form, so before the config sanitizer every entire command failed with
 // "malformed refspec, separators are wrong".
 func TestOpenPath_ToleratesNegativeRefspecs(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	runGit := func(args ...string) {
 		t.Helper()
@@ -83,6 +84,7 @@ func remoteFetchStrings[T any](specs []T) []string {
 }
 
 func TestSanitizedConfig(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		config   string
@@ -121,6 +123,7 @@ func TestSanitizedConfig(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			mem := memfs.New()
 			f, err := mem.Create(configFilePath)
 			if err != nil {

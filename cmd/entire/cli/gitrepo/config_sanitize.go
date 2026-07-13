@@ -63,12 +63,17 @@ func (fs *configSanitizeFS) Open(filename string) (billy.File, error) {
 	return fs.Filesystem.Open(filename) //nolint:wrapcheck // preserve underlying FS errors
 }
 
+// writeIntentFlags are the os.OpenFile flags that indicate the caller wants to
+// modify the file. Any flag outside this set (including O_RDONLY itself, and
+// read-only modifiers like O_SYNC) is treated as read-only for interception
+// purposes, so config writes always hit the real file untouched.
+const writeIntentFlags = os.O_WRONLY | os.O_RDWR | os.O_CREATE | os.O_APPEND | os.O_TRUNC | os.O_EXCL
+
 // OpenFile intercepts read-only opens of the config file too, since go-git may
-// reach config through OpenFile rather than Open. Any write intent (a flag
-// other than read-only) is passed straight through so config writes always hit
-// the real file untouched.
+// reach config through OpenFile rather than Open. Any write intent is passed
+// straight through so config writes always hit the real file untouched.
 func (fs *configSanitizeFS) OpenFile(filename string, flag int, perm os.FileMode) (billy.File, error) {
-	if flag == os.O_RDONLY && isConfigFile(filename) {
+	if flag&writeIntentFlags == 0 && isConfigFile(filename) {
 		content, ok, err := fs.sanitizedConfig()
 		if err != nil {
 			return nil, err
@@ -111,8 +116,11 @@ func (fs *configSanitizeFS) sanitizedConfig() (string, bool, error) {
 
 	text := string(data)
 
-	// Fast path: '^' can only appear in a negative refspec's value, so a
-	// config without it never needs sanitizing.
+	// Fast path: negativeFetchRefspecRE can only match a line containing '^',
+	// so a config without any '^' at all definitely contains no negative
+	// refspec and never needs sanitizing. ('^' can still appear elsewhere,
+	// e.g. in a URL value — that's handled by the regex match below, not by
+	// this fast path.)
 	if !strings.Contains(text, "^") {
 		return "", false, nil
 	}
