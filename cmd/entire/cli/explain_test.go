@@ -5088,7 +5088,7 @@ func TestFormatCheckpointOutput_NoCommitsOnBranch(t *testing.T) {
 	}
 }
 
-func TestGetAssociatedCommits_SearchAllFindsMergedBranchCommits(t *testing.T) {
+func TestGetAssociatedCommits_FindsMergedBranchCommits(t *testing.T) {
 	// Regression test: --search-all should find checkpoint commits that live on
 	// a feature branch merged into main via a true merge commit. These commits
 	// are on the second parent of the merge, so first-parent-only traversal

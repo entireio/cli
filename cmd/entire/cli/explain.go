@@ -2098,14 +2098,16 @@ func walkFirstParentCommits(ctx context.Context, repo *git.Repository, from plum
 // walkBranchOwnCommits walks the commits that belong to the current branch's own
 // history — the branch's first-parent spine PLUS any side branch merged into it
 // (via a merge commit's second+ parents) — while excluding the default branch's
-// history. It calls fn for each such commit, visiting each at most once.
+// own first-parent spine (see mainReachability; this is not the full set of
+// commits reachable from the default branch's DAG). It calls fn for each such
+// commit, visiting each at most once.
 //
-// A commit reach.sharedWithMain reports true for is treated as shared with the
-// default branch: it is neither visited nor traversed through, so the walk stops
-// at the merge base with main and never descends into main's history. This is the
-// property that a full repo.Log() DAG walk lacked (it walked into main's entire
-// history through merge commits and hit the scan limit before older checkpoints
-// were found — see git history for getBranchCheckpoints).
+// A commit reach.sharedWithMain reports true for is treated as on main's spine:
+// it is neither visited nor traversed through, so the walk stops at main's
+// first-parent spine and never descends into it. This is the property that a
+// full repo.Log() DAG walk lacked (it walked into main's entire history through
+// merge commits and hit the scan limit before older checkpoints were found —
+// see git history for getBranchCheckpoints).
 //
 // Unlike a first-parent-only walk, this follows every parent that is not shared
 // with main, so checkpoints on a feature branch that was merged INTO this branch
