@@ -294,20 +294,7 @@ func TestFinalizeMirrorOffer_SuccessCachesAndReportsCloning(t *testing.T) {
 		t.Fatalf("finalizeMirrorOffer error = %v", err)
 	}
 	if !strings.Contains(out.String(), "clone continues in the background") {
-		t.Errorf("non-empty upstream should mention the background clone, got:\n%s", out.String())
-	}
-}
-
-func TestFinalizeMirrorOffer_EmptyUpstreamCachesWithoutCloneTalk(t *testing.T) {
-	t.Parallel()
-	var out bytes.Buffer
-	outcome := mirrorCreateOutcome{created: &coreapi.CreatedMirror{Empty: true}}
-
-	if err := finalizeMirrorOffer(&out, outcome); err != nil {
-		t.Fatalf("finalizeMirrorOffer error = %v", err)
-	}
-	if strings.Contains(out.String(), "clone continues") {
-		t.Errorf("empty upstream has no clone to wait for, got:\n%s", out.String())
+		t.Errorf("successful placement should mention the background clone, got:\n%s", out.String())
 	}
 }
 

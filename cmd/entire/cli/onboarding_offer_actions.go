@@ -122,8 +122,6 @@ func finalizeMirrorOffer(w io.Writer, outcome mirrorCreateOutcome) error {
 		fmt.Fprintln(w, "  WARNING: this mirror has been suspended by an admin and won't be usable.")
 		return errMirrorSuspended
 	}
-	if !created.Empty {
-		fmt.Fprintln(w, "  Mirror registered — the initial clone continues in the background.")
-	}
+	fmt.Fprintln(w, "  Mirror registered — the initial clone continues in the background.")
 	return nil
 }
