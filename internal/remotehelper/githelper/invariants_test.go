@@ -323,12 +323,72 @@ func TestInvariant_HelperStatusSurfacedOnSendPackError(t *testing.T) {
 	stdin := bufio.NewReader(strings.NewReader("\n"))
 
 	var stdout bytes.Buffer
-	err := handlePush(context.Background(), ft, firstLine, &Options{}, stdin, &stdout)
+	err := handlePush(context.Background(), ft, &refAdvCache{}, firstLine, &Options{}, stdin, &stdout)
 	if err == nil {
 		t.Fatal("expected error from send-pack exit 1")
 	}
 	if !strings.Contains(stdout.String(), helperStatusLine) {
 		t.Errorf("stdout missing helper-status line; got %q, want substring %q",
 			stdout.String(), helperStatusLine)
+	}
+}
+
+// TestInvariant_PushReusesListForPushAdvertisement pins the fix for ENCLI-267.
+// Within one helper session the "push" command MUST reuse the ref
+// advertisement fetched during "list for-push" rather than re-fetching
+// info/refs. Git snapshots the remote refs from "list for-push" into its
+// remote_refs list *before* running the pre-push hook, and the hook pushes
+// per-checkpoint refs to the same remote. A fresh info/refs at push time then
+// hands send-pack a ref (the freshly-pushed checkpoint) Git never asked to
+// push; send-pack emits `error <ref> no match`, and Git — not finding it in
+// remote_refs — warns `helper reported unexpected status of <ref>`. Reusing
+// the list-for-push snapshot mirrors remote-curl.c's discovery cache and keeps
+// that phantom ref out of send-pack's view.
+func TestInvariant_PushReusesListForPushAdvertisement(t *testing.T) {
+	// No t.Parallel(): t.Setenv("PATH", ...) mutates process-global state.
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script PATH stub is POSIX-only")
+	}
+
+	ref := testRefMain
+	oldSHA := strings.Repeat("a", 40)
+
+	// Stub git send-pack: emit the empty-request terminator, drain stdin,
+	// then the trailing flush + a plain "ok" helper-status, exit 0.
+	stubDir := t.TempDir()
+	stub := "#!/bin/sh\nprintf '0000'\ncat > /dev/null\nprintf '0000ok " + ref + "\\n'\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "git"), []byte(stub), 0o755); err != nil {
+		t.Fatalf("writing stub git: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// The checkpoint ref the pre-push hook would push between list-for-push
+	// and push: absent from the first advertisement, present in the second, so
+	// a re-fetch (the bug) would expose it to send-pack.
+	checkpointRef := "refs/entire/checkpoints/9H/01KX2ATMJ3FAZZFZ8CP1CA279H"
+	receivePackCalls := 0
+	ft := &fakeTransport{
+		infoRefsResp: func() (io.ReadCloser, error) {
+			receivePackCalls++
+			refLine := oldSHA + " " + ref + "\x00report-status object-format=sha1\n"
+			if receivePackCalls == 1 {
+				return stringRC(serviceAnnouncement(serviceReceivePack, refLine)), nil
+			}
+			return stringRC(serviceAnnouncement(serviceReceivePack, refLine,
+				oldSHA+" "+checkpointRef+"\n")), nil
+		},
+		serviceRPCResp: func(string, []byte) (io.ReadCloser, error) {
+			return stringRC(""), nil
+		},
+	}
+
+	stdin := strings.NewReader("list for-push\npush " + oldSHA + ":" + ref + "\n\n")
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), ft, 2, stdin, &stdout); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if receivePackCalls != 1 {
+		t.Fatalf("receive-pack info/refs fetched %d times; want 1 (push must reuse the list-for-push advertisement)", receivePackCalls)
 	}
 }

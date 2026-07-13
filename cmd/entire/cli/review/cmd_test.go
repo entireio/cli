@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -806,13 +807,28 @@ func TestDispatchFork_MultiAgentFailsWhenAllReviewersFail(t *testing.T) {
 func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 	setupCmdTestRepo(t)
 
+	// Codex has no curated built-ins — its skills are discovered on disk in
+	// $name form, so spawn-time validation needs a real SKILL.md under a
+	// controlled HOME. (Cannot t.Parallel — t.Setenv; setupCmdTestRepo
+	// already precludes parallelism via t.Chdir.)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	skillDir := filepath.Join(home, ".codex", "skills", "code-review")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skillMD := "---\nname: code-review\ndescription: Review code changes.\n---\n\nbody\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMD), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"claude-code": {
 			Skills: []string{"/review"},
 			Prompt: "Claude saved prompt.",
 		},
 		testCodexAgent: {
-			Skills: []string{"/review"},
+			Skills: []string{"$code-review"},
 			Prompt: "Codex saved prompt.",
 		},
 	}); err != nil {
@@ -859,16 +875,17 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		reviewer   *captureRunConfigReviewer
+		wantSkill  string
 		wantPrompt string
 	}{
-		{name: "claude-code", reviewer: claudeReviewer, wantPrompt: "Claude saved prompt."},
-		{name: "codex", reviewer: codexReviewer, wantPrompt: "Codex saved prompt."},
+		{name: "claude-code", reviewer: claudeReviewer, wantSkill: "/review", wantPrompt: "Claude saved prompt."},
+		{name: "codex", reviewer: codexReviewer, wantSkill: "$code-review", wantPrompt: "Codex saved prompt."},
 	} {
 		if !tc.reviewer.called {
 			t.Fatalf("%s reviewer was not started", tc.name)
 		}
-		if got := tc.reviewer.got.Skills; len(got) != 1 || got[0] != "/review" {
-			t.Fatalf("%s Skills = %v, want [/review]", tc.name, got)
+		if got := tc.reviewer.got.Skills; len(got) != 1 || got[0] != tc.wantSkill {
+			t.Fatalf("%s Skills = %v, want [%s]", tc.name, got, tc.wantSkill)
 		}
 		if tc.reviewer.got.AlwaysPrompt != tc.wantPrompt {
 			t.Fatalf("%s AlwaysPrompt = %q, want %q", tc.name, tc.reviewer.got.AlwaysPrompt, tc.wantPrompt)
@@ -1530,5 +1547,110 @@ func TestRunReview_AgentOverrideRunsAllExplodedWorkers(t *testing.T) {
 	}
 	if got := reviewer.captured(); len(got) != 2 {
 		t.Fatalf("Start called %d times, want 2 (agent override filters, not selects one)", len(got))
+	}
+}
+
+// TestDispatchFork_InvalidSkillExcludesWorkerNotWholeCrew pins the blast
+// radius of spawn-time skill validation in multi-agent runs: a worker whose
+// configured skill no longer validates (e.g. codex's legacy auto-preselected
+// "/review", orphaned when the curated builtin was removed) is excluded with
+// a loud warning, and the remaining reviewers still run. Aborting the whole
+// crew for one stale entry held every other agent hostage to a codex
+// reconfigure.
+func TestDispatchFork_InvalidSkillExcludesWorkerNotWholeCrew(t *testing.T) {
+	setupCmdTestRepo(t)
+	// Controlled empty HOME: codex discovery finds nothing, so its "/review"
+	// (no longer a curated builtin) fails validation. Cannot t.Parallel —
+	// t.Setenv (setupCmdTestRepo already precludes it via t.Chdir).
+	t.Setenv("HOME", t.TempDir())
+
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+		testAgentName: {
+			Skills: []string{"/review"},
+		},
+		testCodexAgent: {
+			Skills: []string{"/review"}, // stale legacy entry
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	claudeReviewer := &captureRunConfigReviewer{name: testAgentName}
+	codexReviewer := &captureRunConfigReviewer{name: testCodexAgent}
+	deps := review.Deps{
+		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
+			return []types.AgentName{testAgentName, testCodexAgent}
+		},
+		NewSilentError: func(err error) error { return err },
+		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
+			return false, ""
+		},
+		ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
+			switch agentName {
+			case testAgentName:
+				return claudeReviewer
+			case testCodexAgent:
+				return codexReviewer
+			default:
+				return nil
+			}
+		},
+	}
+
+	cmd := review.NewCommand(deps)
+	cmd.SetOut(&bytes.Buffer{})
+	errBuf := &bytes.Buffer{}
+	cmd.SetErr(errBuf)
+	cmd.SetArgs([]string{"general"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("run should proceed with the valid reviewer, got error: %v", err)
+	}
+	if !claudeReviewer.called {
+		t.Error("claude-code reviewer was not started — valid worker excluded with the invalid one")
+	}
+	if codexReviewer.called {
+		t.Error("codex reviewer started despite failing skill validation")
+	}
+	stderr := errBuf.String()
+	if !strings.Contains(stderr, "/review") || !strings.Contains(stderr, "skipping") {
+		t.Errorf("stderr should warn about the excluded worker and its skill; got:\n%s", stderr)
+	}
+}
+
+// TestDispatchFork_AllWorkersInvalidStillFails pins the floor: when skill
+// validation excludes every worker, the run fails loudly instead of silently
+// reviewing with nobody.
+func TestDispatchFork_AllWorkersInvalidStillFails(t *testing.T) {
+	setupCmdTestRepo(t)
+	t.Setenv("HOME", t.TempDir())
+
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+		testCodexAgent: {Skills: []string{"/review"}},
+		"gemini":       {Skills: []string{"$also-missing"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deps := review.Deps{
+		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
+			return []types.AgentName{testCodexAgent, "gemini"}
+		},
+		NewSilentError: func(err error) error { return err },
+		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
+			return false, ""
+		},
+		ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
+			return &captureRunConfigReviewer{name: agentName}
+		},
+	}
+
+	cmd := review.NewCommand(deps)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"general"})
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected an error when every worker fails skill validation")
 	}
 }

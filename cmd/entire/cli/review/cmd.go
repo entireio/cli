@@ -1177,6 +1177,7 @@ func runMultiAgentPath(
 	}
 	scopeCtx := buildScopeContextBestEffort(ctx, out, worktreeRoot, scopeBaseRef)
 	reviewers := make([]reviewtypes.AgentReviewer, 0, len(launchableEligible))
+	var excludedWorkers []string
 	for _, choice := range launchableEligible {
 		workerName := choice.Name
 		agentCfg := profile.Agents[workerName]
@@ -1187,9 +1188,14 @@ func runMultiAgentPath(
 				return fmt.Errorf("resolve agent %s: %w", agentName, agErr)
 			}
 			if err := VerifyConfiguredSkillsInstalled(ctx, ag, agentCfg); err != nil {
-				cmd.SilenceUsage = true
-				fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-				return deps.NewSilentError(err)
+				// One worker's stale config must not hold the whole crew
+				// hostage (e.g. codex's legacy auto-preselected "/review",
+				// orphaned when its curated builtin was removed). Exclude
+				// the worker loudly and let the remaining reviewers run;
+				// the all-excluded case fails below.
+				excludedWorkers = append(excludedWorkers, workerName)
+				fmt.Fprintf(cmd.ErrOrStderr(), "skipping reviewer %s: %s\n", workerName, err.Error())
+				continue
 			}
 		}
 		reviewer := deps.ReviewerFor(agentName)
@@ -1210,6 +1216,14 @@ func runMultiAgentPath(
 				StartingSHA:       headSHA,
 			}, agentCfg),
 		})
+	}
+
+	if len(reviewers) == 0 {
+		cmd.SilenceUsage = true
+		err := fmt.Errorf("no runnable reviewers: every configured worker failed skill validation (%s); run `entire review --edit` to reconfigure",
+			strings.Join(excludedWorkers, ", "))
+		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
+		return deps.NewSilentError(err)
 	}
 
 	runCtx, cancelRun := context.WithCancel(ctx)

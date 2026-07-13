@@ -24,7 +24,7 @@ require (
 	github.com/mattn/go-isatty v0.0.22
 	github.com/mattn/go-runewidth v0.0.24
 	github.com/muesli/termenv v0.16.0
-	github.com/ogen-go/ogen v1.22.0
+	github.com/ogen-go/ogen v1.23.0
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/posthog/posthog-go v1.17.5
 	github.com/sergi/go-diff v1.4.0
