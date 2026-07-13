@@ -17,6 +17,7 @@ import (
 	glamourstyles "charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
 	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/entireio/cli/cmd/entire/cli/codesearch"
 	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
@@ -44,6 +45,13 @@ type searchResultsMsg struct {
 type searchMoreResultsMsg struct {
 	results []search.Result
 	err     error
+}
+
+// codeSearchResultsMsg is sent when an async code search call completes.
+type codeSearchResultsMsg struct {
+	resp *codesearch.SearchResponse
+	err  error
+	gen  uint64 // generation counter; stale results are discarded
 }
 
 // searchStyles holds lipgloss styles specific to the search TUI.
@@ -112,6 +120,7 @@ const (
 	typeFilterCheckpoints typeFilter = typeFilter(search.TypeCheckpoint)
 	typeFilterCommits     typeFilter = typeFilter(search.TypeCommit)
 	typeFilterSessions    typeFilter = typeFilter(search.TypeSession)
+	typeFilterCode        typeFilter = "code"
 )
 
 // searchModel is the bubbletea model for interactive search results.
@@ -139,10 +148,22 @@ type searchModel struct {
 	// snippet renderer never re-queries the terminal via OSC during the Update
 	// loop (which would race against bubbletea's stdin reader and stall).
 	darkBg bool
+
+	// Code search state (behind ENTIRE_CODE_SEARCH=1 feature flag).
+	codeResults    []codesearch.Result // results from peregrine
+	codeStats      codesearch.Stats    // aggregate stats
+	codeLoading    bool                // true while async code search runs
+	codeSearchErr  string              // error from code search
+	codeSearchOpts codeSearchOpts      // opts for code search (set by caller)
+	codeSearchGen  uint64              // generation counter; incremented on each new code search
 }
 
 // filteredResults returns results matching the active type filter.
+// Returns nil when the Code tab is selected (code results are a different type).
 func (m searchModel) filteredResults() []search.Result {
+	if m.filterType == typeFilterCode {
+		return nil // code results are in codeResults, not here
+	}
 	if m.filterType == typeFilterAll {
 		return m.results
 	}
@@ -169,13 +190,31 @@ func (m searchModel) pageResults() []search.Result {
 	return filtered[start:end]
 }
 
+// codePageResults returns the slice of code results for the current page.
+func (m searchModel) codePageResults() []codesearch.Result {
+	start := m.page * resultsPerPage
+	if start >= len(m.codeResults) {
+		return nil
+	}
+	end := start + resultsPerPage
+	if end > len(m.codeResults) {
+		end = len(m.codeResults)
+	}
+	return m.codeResults[start:end]
+}
+
 // totalPages returns the number of pages based on the filtered result count.
 func (m searchModel) totalPages() int {
-	n := len(m.filteredResults())
-	// When showing all types, use the API total if it's larger than loaded results
-	// (we may not have fetched everything yet).
-	if m.filterType == typeFilterAll && m.total > n {
-		n = m.total
+	var n int
+	if m.filterType == typeFilterCode {
+		n = len(m.codeResults)
+	} else {
+		n = len(m.filteredResults())
+		// When showing all types, use the API total if it's larger than loaded results
+		// (we may not have fetched everything yet).
+		if m.filterType == typeFilterAll && m.total > n {
+			n = m.total
+		}
 	}
 	if n == 0 {
 		return 1
@@ -206,14 +245,14 @@ func (m searchModel) computeTypeCounts() (checkpoints, commits, sessions int) {
 			commits++
 		case typeFilterSessions:
 			sessions++
-		case typeFilterAll:
+		case typeFilterAll, typeFilterCode:
 			// not a valid result type; skip
 		}
 	}
 	return
 }
 
-func newSearchModel(results []search.Result, query string, total int, cfg search.Config, ss statusStyles) searchModel {
+func newSearchModel(results []search.Result, query string, total int, cfg search.Config, ss statusStyles, codeOpts *codeSearchOpts) searchModel {
 	styles := newSearchStyles(ss)
 
 	ti := textinput.New()
@@ -252,15 +291,26 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 		darkBg:     termenv.HasDarkBackground(),
 		filterType: typeFilterCheckpoints, // default the results table to checkpoints
 	}
+	if codeOpts != nil {
+		m.codeSearchOpts = *codeOpts
+		if codeOpts.query != "" {
+			m.codeLoading = true
+			m.codeSearchGen = 1
+		}
+	}
 	m = m.refreshBrowseContent()
 	return m
 }
 
 func (m searchModel) Init() tea.Cmd {
+	var cmds []tea.Cmd
 	if m.mode == modeSearch {
-		return textinput.Blink
+		cmds = append(cmds, textinput.Blink)
 	}
-	return nil
+	if m.codeLoading {
+		cmds = append(cmds, performCodeSearch(m.codeSearchOpts, m.codeSearchGen))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop // bubbletea interface
@@ -314,6 +364,26 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		m = m.refreshBrowseContent()
 		return m, nil
 
+	case codeSearchResultsMsg:
+		if msg.gen != m.codeSearchGen {
+			return m, nil // stale result from a superseded search
+		}
+		m.codeLoading = false
+		if msg.err != nil {
+			m.codeSearchErr = msg.err.Error()
+		} else if msg.resp != nil {
+			m.codeResults = msg.resp.Results
+			m.codeStats = msg.resp.Stats
+			m.codeSearchErr = ""
+		}
+		if m.filterType == typeFilterCode {
+			m.cursor = 0
+			m.page = 0
+			m.browseVP.GotoTop()
+		}
+		m = m.refreshBrowseContent()
+		return m, nil
+
 	case tea.KeyPressMsg:
 		switch m.mode {
 		case modeSearch:
@@ -339,28 +409,81 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		if raw == "" {
 			return m, nil
 		}
+		// Checkpoint search: ParseSearchInput extracts author:/date:/branch:/repo:.
+		// ValidateRepoFilters only applies to checkpoint search (single repo limit);
+		// code search handles multiple repos via fan-out.
 		parsed := search.ParseSearchInput(raw)
-		if err := search.ValidateRepoFilters(parsed.Repos); err != nil {
-			m.searchErr = err.Error()
-			m = m.refreshBrowseContent()
-			return m, nil
+		checkpointRepoErr := search.ValidateRepoFilters(parsed.Repos)
+
+		m.searchErr = ""
+
+		var cmds []tea.Cmd
+		willFireCodeSearch := false
+
+		// Code search uses extractInlineRepoFilters (not ParseSearchInput)
+		// so author:/date:/branch: tokens are preserved as literal search
+		// text, matching the --code CLI path.
+		if codeSearchEnabled() {
+			codeQuery, inlineRepos := extractInlineRepoFilters(raw)
+			if codeQuery != "" {
+				willFireCodeSearch = true
+				opts := m.codeSearchOpts
+				opts.query = codeQuery
+				// Always reset to the model's default repo scope, then apply
+				// inline overrides. This prevents a stale repo list from a
+				// previous query leaking into the next one.
+				opts.repoFilters = m.codeSearchOpts.repoFilters
+				if len(inlineRepos) > 0 {
+					if hasAllReposFilter(inlineRepos) {
+						opts.repoFilters = nil
+					} else {
+						opts.repoFilters = filterRepoWildcards(inlineRepos)
+					}
+				}
+				m.codeSearchGen++
+				m.codeLoading = true
+				m.codeResults = nil
+				m.codeSearchErr = ""
+				cmds = append(cmds, performCodeSearch(opts, m.codeSearchGen))
+			} else {
+				// No code query (e.g. repo-only input) — clear stale code
+				// results and bump the generation so any in-flight search
+				// from a prior query is discarded when it completes.
+				m.codeSearchGen++
+				m.codeLoading = false
+				m.codeResults = nil
+				m.codeSearchErr = ""
+			}
 		}
+
+		// Checkpoint search (only if repo filters are valid for the checkpoint API).
+		if checkpointRepoErr != nil {
+			m.searchErr = checkpointRepoErr.Error()
+			if !willFireCodeSearch {
+				// Neither search will fire — stay in search mode so the
+				// user can correct the input without pressing / again.
+				m = m.refreshBrowseContent()
+				return m, nil
+			}
+		} else {
+			m.loading = true
+			cfg := m.searchCfg
+			cfg.Query = parsed.Query
+			if cfg.Query == "" {
+				cfg.Query = search.WildcardQuery
+			}
+			cfg.Author = parsed.Author
+			cfg.Date = parsed.Date
+			cfg.Branch = parsed.Branch
+			cfg.Repos = parsed.Repos
+			m.searchCfg = cfg
+			cmds = append(cmds, performSearch(cfg))
+		}
+
 		m.mode = modeBrowse
 		m.input.Blur()
-		m.loading = true
-		m.searchErr = ""
-		cfg := m.searchCfg
-		cfg.Query = parsed.Query
-		if cfg.Query == "" {
-			cfg.Query = search.WildcardQuery
-		}
-		cfg.Author = parsed.Author
-		cfg.Date = parsed.Date
-		cfg.Branch = parsed.Branch
-		cfg.Repos = parsed.Repos
-		m.searchCfg = cfg
 		m = m.refreshBrowseContent()
-		return m, performSearch(cfg)
+		return m, tea.Batch(cmds...)
 	}
 
 	var cmd tea.Cmd
@@ -392,9 +515,23 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		m.browseVP.GotoTop()
 		m = m.refreshBrowseContent()
 		return m, nil
+	case "4":
+		if codeSearchEnabled() {
+			m.filterType = typeFilterCode
+			m.cursor = 0
+			m.page = 0
+			m.browseVP.GotoTop()
+			m = m.refreshBrowseContent()
+			return m, nil
+		}
 	}
 
-	pageLen := len(m.pageResults())
+	var pageLen int
+	if m.filterType == typeFilterCode {
+		pageLen = len(m.codePageResults())
+	} else {
+		pageLen = len(m.pageResults())
+	}
 	switch {
 	case key.Matches(msg, keys.Quit), key.Matches(msg, keys.Back), msg.String() == "h":
 		return m, tea.Quit
@@ -414,12 +551,23 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		m = m.refreshBrowseContent()
 		m.browseVP.GotoTop()
 	case key.Matches(msg, keys.End):
-		filtered := m.filteredResults()
-		if len(filtered) > 0 {
-			lastLoaded := len(filtered) - 1
+		var totalItems int
+		if m.filterType == typeFilterCode {
+			totalItems = len(m.codeResults)
+		} else {
+			totalItems = len(m.filteredResults())
+		}
+		if totalItems > 0 {
+			lastLoaded := totalItems - 1
 			m.page = min(lastLoaded/resultsPerPage, m.totalPages()-1)
-			if pageLen := len(m.pageResults()); pageLen > 0 {
-				m.cursor = pageLen - 1
+			var lastPageLen int
+			if m.filterType == typeFilterCode {
+				lastPageLen = len(m.codePageResults())
+			} else {
+				lastPageLen = len(m.pageResults())
+			}
+			if lastPageLen > 0 {
+				m.cursor = lastPageLen - 1
 			}
 			m = m.refreshBrowseContent()
 			m.browseVP.GotoBottom()
@@ -430,8 +578,9 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			m.cursor = 0
 			m.browseVP.GotoTop()
 			// Fetch next API page if we've scrolled past loaded results
+			// (code search loads all results at once, no fetch-more).
 			start := m.page * resultsPerPage
-			if start >= len(m.filteredResults()) && !m.fetchingMore {
+			if m.filterType != typeFilterCode && start >= len(m.filteredResults()) && !m.fetchingMore {
 				m.fetchingMore = true
 				m = m.refreshBrowseContent()
 				return m, fetchMoreResults(m.searchCfg, m.apiPage+1)
@@ -446,7 +595,16 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			m = m.refreshBrowseContent()
 		}
 	case key.Matches(msg, keys.Confirm):
-		if r := m.selectedResult(); r != nil {
+		if m.filterType == typeFilterCode {
+			codeResults := m.codePageResults()
+			if m.cursor >= 0 && m.cursor < len(codeResults) {
+				m.mode = modeDetail
+				content := m.renderCodeDetail(codeResults[m.cursor], m.width, true)
+				m.detailVP = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(max(m.height-2, 1)))
+				m.detailVP.SetContent(content)
+				return m, nil
+			}
+		} else if r := m.selectedResult(); r != nil {
 			m.mode = modeDetail
 			content := m.renderDetailContent(*r, m.width, true)
 			m.detailVP = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(max(m.height-2, 1)))
@@ -490,6 +648,13 @@ func performSearch(cfg search.Config) tea.Cmd {
 			return searchResultsMsg{err: err}
 		}
 		return searchResultsMsg{results: resp.Results, total: resp.Total, counts: resp.Counts}
+	}
+}
+
+func performCodeSearch(opts codeSearchOpts, gen uint64) tea.Cmd {
+	return func() tea.Msg {
+		resp, err := searchAllCells(context.Background(), opts)
+		return codeSearchResultsMsg{resp: resp, err: err, gen: gen}
 	}
 }
 
@@ -626,6 +791,9 @@ func (m searchModel) viewTypeTabs() string {
 		renderTab("Sessions", typeFilterSessions, ssCount, "2"),
 		renderTab("Commits", typeFilterCommits, cmCount, "3"),
 	}
+	if codeSearchEnabled() {
+		tabs = append(tabs, renderTab("Code", typeFilterCode, len(m.codeResults), "4"))
+	}
 
 	return strings.Join(tabs, "  ")
 }
@@ -644,17 +812,21 @@ func (m searchModel) viewBrowseHeader() (string, bool) {
 	b.WriteString(pad + m.styles.render(m.styles.sectionTitle, "›") + " " + m.styles.render(m.styles.bold, query))
 	b.WriteString("\n\n")
 
-	// Loading / error / empty states
-	if m.loading {
-		b.WriteString(pad + m.styles.render(m.styles.dim, "Searching..."))
-		return b.String(), false
-	}
-	if m.searchErr != "" {
-		b.WriteString(pad + m.styles.render(m.styles.red, "Error: "+m.searchErr))
-		return b.String(), false
-	}
-	if len(m.results) == 0 {
-		b.WriteString(pad + m.styles.render(m.styles.dim, "No results found."))
+	// When code search is available, always show type tabs so the user can
+	// switch to the Code tab even when checkpoint search is loading/errored/empty.
+	hasCodeTab := codeSearchEnabled()
+	checkpointBlocked := m.loading || m.searchErr != "" || len(m.results) == 0
+
+	if checkpointBlocked && !hasCodeTab {
+		// No code tab — show the checkpoint-only loading/error/empty state.
+		switch {
+		case m.loading:
+			b.WriteString(pad + m.styles.render(m.styles.dim, "Searching..."))
+		case m.searchErr != "":
+			b.WriteString(pad + m.styles.render(m.styles.red, "Error: "+m.searchErr))
+		default:
+			b.WriteString(pad + m.styles.render(m.styles.dim, "No results found."))
+		}
 		return b.String(), false
 	}
 
@@ -662,9 +834,39 @@ func (m searchModel) viewBrowseHeader() (string, bool) {
 	b.WriteString(pad + m.viewTypeTabs())
 	b.WriteString("\n\n")
 
+	// Checkpoint-specific loading/error/empty when on a checkpoint tab.
+	if checkpointBlocked && m.filterType != typeFilterCode {
+		switch {
+		case m.loading:
+			b.WriteString(pad + m.styles.render(m.styles.dim, "Searching..."))
+		case m.searchErr != "":
+			b.WriteString(pad + m.styles.render(m.styles.red, "Error: "+m.searchErr))
+		default:
+			b.WriteString(pad + m.styles.render(m.styles.dim, "No results found."))
+		}
+		return b.String(), false
+	}
+
 	// Section: RESULTS
 	b.WriteString(pad + m.styles.render(m.styles.sectionTitle, "RESULTS"))
 	b.WriteString("\n")
+
+	// Code tab has its own loading/empty state.
+	if m.filterType == typeFilterCode {
+		if m.codeLoading {
+			b.WriteString("\n" + pad + m.styles.render(m.styles.dim, "Searching code..."))
+			return b.String(), false
+		}
+		if m.codeSearchErr != "" {
+			b.WriteString("\n" + pad + m.styles.render(m.styles.red, "Code search error: "+m.codeSearchErr))
+			return b.String(), false
+		}
+		if len(m.codeResults) == 0 {
+			b.WriteString("\n" + pad + m.styles.render(m.styles.dim, "No code results found."))
+			return b.String(), false
+		}
+		return b.String(), true
+	}
 
 	filtered := m.filteredResults()
 	if len(filtered) == 0 {
@@ -707,7 +909,12 @@ func (m searchModel) refreshBrowseContent() searchModel {
 // pin one (in which case the list takes the full area and detail is reachable
 // via the full-screen view). headerLines is the height of the pinned top chrome.
 func (m searchModel) detailPaneHeight(headerLines int) int {
-	if m.height <= 0 || m.selectedResult() == nil {
+	hasSelection := m.selectedResult() != nil
+	if m.filterType == typeFilterCode {
+		codeResults := m.codePageResults()
+		hasSelection = m.cursor >= 0 && m.cursor < len(codeResults)
+	}
+	if m.height <= 0 || !hasSelection {
 		return 0
 	}
 	avail := m.height - 1 - headerLines - detailGap // footer + gap rows
@@ -766,7 +973,12 @@ func (m searchModel) viewListStatusRow() string {
 	}
 
 	// Right: page X/Y · N results (drops the page clause for a single page).
-	n := len(m.filteredResults())
+	var n int
+	if m.filterType == typeFilterCode {
+		n = len(m.codeResults)
+	} else {
+		n = len(m.filteredResults())
+	}
 	right := fmt.Sprintf("%d results", n)
 	if pages := m.totalPages(); pages > 1 {
 		right = fmt.Sprintf("page %d/%d · %d results", m.page+1, pages, n)
@@ -814,9 +1026,20 @@ func (m searchModel) viewResultList() string {
 	pad := " "
 
 	var b strings.Builder
-	results := m.pageResults()
 	rule := pad + m.styles.render(m.styles.dim, strings.Repeat("─", contentWidth)) + "\n"
 
+	if m.filterType == typeFilterCode {
+		codeResults := m.codePageResults()
+		for i, r := range codeResults {
+			if i > 0 {
+				b.WriteString(rule)
+			}
+			b.WriteString(m.viewCodeResultItem(r, i == m.cursor, contentWidth))
+		}
+		return b.String()
+	}
+
+	results := m.pageResults()
 	for i, r := range results {
 		if i > 0 {
 			b.WriteString(rule)
@@ -874,6 +1097,74 @@ func (m searchModel) viewResultItem(r search.Result, selected bool, contentWidth
 	b.WriteString(pad + indent + typeTag + "  " + m.styles.render(m.styles.dim, metaStr) + "\n")
 
 	return b.String()
+}
+
+// viewCodeResultItem renders a single two-line code search result (file:line + context).
+func (m searchModel) viewCodeResultItem(r codesearch.Result, selected bool, contentWidth int) string {
+	pad := " "
+	var b strings.Builder
+
+	// ── Title line: gutter + repo:path:line ──
+	node, caret := "◇", " "
+	if selected {
+		node, caret = "◆", "▸"
+	}
+	nodeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Green))
+	if !m.styles.colorEnabled {
+		nodeStyle = lipgloss.NewStyle()
+	}
+	if selected {
+		nodeStyle = m.styles.selected
+	}
+	gutter := caret + " " + m.styles.render(nodeStyle, node) + " "
+
+	location := fmt.Sprintf("%s:%s:%d", r.Repo, r.Path, r.Line)
+	titleMax := max(contentWidth-gutterWidth, 8)
+	location = stringutil.TruncateRunes(location, titleMax, "…")
+	titleStyle := m.styles.bold
+	if selected {
+		titleStyle = m.styles.selected
+	}
+	b.WriteString(pad + gutter + m.styles.render(titleStyle, location) + "\n")
+
+	// ── Context line: the matching source line, truncated ──
+	indent := strings.Repeat(" ", gutterWidth)
+	ctx := r.ContextLine
+	runes := []rune(ctx)
+	ctxMax := max(contentWidth-gutterWidth, 8)
+	if len(runes) > ctxMax {
+		ctx = string(runes[:ctxMax]) + "…"
+	}
+	b.WriteString(pad + indent + m.styles.render(m.styles.dim, ctx) + "\n")
+
+	return b.String()
+}
+
+// renderCodeDetail builds the detail content for a code search result.
+func (m searchModel) renderCodeDetail(r codesearch.Result, contentWidth int, showSections bool) string {
+	w := m.newDetailWriter("Code Match", contentWidth, showSections)
+
+	w.section("LOCATION")
+	w.field("Repo", r.Repo)
+	w.field("Path", r.Path)
+	w.field("Line", strconv.Itoa(r.Line))
+	if r.Column > 0 {
+		w.field("Column", strconv.Itoa(r.Column))
+	}
+	if r.Score > 0 {
+		w.field("Score", fmt.Sprintf("%.3f", r.Score))
+	}
+
+	w.section("CONTEXT")
+	for _, line := range r.ContextBefore {
+		w.b.WriteString(m.styles.render(m.styles.dim, "  "+line) + "\n")
+	}
+	w.b.WriteString("▸ " + r.ContextLine + "\n")
+	for _, line := range r.ContextAfter {
+		w.b.WriteString(m.styles.render(m.styles.dim, "  "+line) + "\n")
+	}
+
+	return w.String()
 }
 
 // resultNodeStyle returns the accent style for a result's graph node and type
@@ -1150,9 +1441,22 @@ func formatDetailCreatedAt(createdAt string, styles searchStyles) string {
 // available via the full-screen detail view). Shorter content is padded so
 // the pane occupies its full allotment and the footer stays pinned.
 func (m searchModel) viewDetailPane(paneH int) string {
-	r := m.selectedResult()
-	if r == nil || paneH <= 0 {
+	if paneH <= 0 {
 		return strings.TrimSuffix(padToHeight("", paneH), "\n")
+	}
+
+	// Code tab uses codeResults; other tabs use selectedResult().
+	var r *search.Result
+	if m.filterType == typeFilterCode {
+		codeResults := m.codePageResults()
+		if m.cursor < 0 || m.cursor >= len(codeResults) {
+			return strings.TrimSuffix(padToHeight("", paneH), "\n")
+		}
+	} else {
+		r = m.selectedResult()
+		if r == nil {
+			return strings.TrimSuffix(padToHeight("", paneH), "\n")
+		}
 	}
 
 	var contentWidth, borderWidth, chrome int
@@ -1172,7 +1476,16 @@ func (m searchModel) viewDetailPane(paneH int) string {
 	}
 
 	contentLines := max(paneH-chrome, 1)
-	lines := strings.Split(m.renderDetailContent(*r, contentWidth, false), "\n")
+	var detailContent string
+	if m.filterType == typeFilterCode {
+		codeResults := m.codePageResults()
+		if m.cursor >= 0 && m.cursor < len(codeResults) {
+			detailContent = m.renderCodeDetail(codeResults[m.cursor], contentWidth, false)
+		}
+	} else {
+		detailContent = m.renderDetailContent(*r, contentWidth, false)
+	}
+	lines := strings.Split(detailContent, "\n")
 	if len(lines) > contentLines {
 		lines = lines[:contentLines]
 		hint := m.styles.render(m.styles.dim, "▼ enter for more")
@@ -1234,7 +1547,11 @@ func (m searchModel) viewHelp() string {
 	if pages > 1 {
 		left += dot + m.styles.helpItem("n/p", "page")
 	}
-	left += dot + m.styles.helpItem("1-3", "type") + dot +
+	typeHint := "1-3"
+	if codeSearchEnabled() {
+		typeHint = "1-4"
+	}
+	left += dot + m.styles.helpItem(typeHint, "type") + dot +
 		m.styles.helpItem(keys.Quit.Help().Key, keys.Quit.Help().Desc)
 
 	// The page / results count lives on the status row beneath the list

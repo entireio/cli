@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -188,6 +189,65 @@ func TestRunPlugin_ExitCodePropagation(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(contents)); got != "a\nb" {
 		t.Errorf("argv: got %q, want %q", got, "a\nb")
+	}
+}
+
+// interceptVersionCheck swaps the post-plugin version-check seam for a
+// counter and restores it on cleanup.
+func interceptVersionCheck(t *testing.T) *int {
+	t.Helper()
+	calls := 0
+	orig := postPluginVersionCheck
+	postPluginVersionCheck = func(context.Context, io.Writer, string) { calls++ }
+	t.Cleanup(func() { postPluginVersionCheck = orig })
+	return &calls
+}
+
+func TestMaybeRunPlugin_VersionCheckAfterSuccess(t *testing.T) { //nolint:paralleltest // mutates PATH and the version-check seam
+	dir := t.TempDir()
+	writePluginBinary(t, dir, "entire-pgr", filepath.Join(dir, "args.txt"), 0)
+	withPathDir(t, dir)
+	calls := interceptVersionCheck(t)
+
+	handled, code := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"pgr"})
+	if !handled || code != 0 {
+		t.Fatalf("handled=%v code=%d, want handled=true code=0", handled, code)
+	}
+	if *calls != 1 {
+		t.Errorf("version check calls: got %d, want 1", *calls)
+	}
+}
+
+// After `entire upgrade` replaces the binary on disk, this process still
+// carries the pre-upgrade compiled-in version — a post-run version check
+// would see itself as outdated and prompt to redo the finished upgrade.
+func TestMaybeRunPlugin_NoVersionCheckAfterSelfUpdate(t *testing.T) { //nolint:paralleltest // mutates PATH and the version-check seam
+	dir := t.TempDir()
+	writePluginBinary(t, dir, "entire-upgrade", filepath.Join(dir, "args.txt"), 0)
+	withPathDir(t, dir)
+	calls := interceptVersionCheck(t)
+
+	handled, code := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"upgrade", "--nightly"})
+	if !handled || code != 0 {
+		t.Fatalf("handled=%v code=%d, want handled=true code=0", handled, code)
+	}
+	if *calls != 0 {
+		t.Errorf("version check calls: got %d, want 0", *calls)
+	}
+}
+
+func TestMaybeRunPlugin_NoVersionCheckAfterFailure(t *testing.T) { //nolint:paralleltest // mutates PATH and the version-check seam
+	dir := t.TempDir()
+	writePluginBinary(t, dir, "entire-pgr", filepath.Join(dir, "args.txt"), 3)
+	withPathDir(t, dir)
+	calls := interceptVersionCheck(t)
+
+	handled, code := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"pgr"})
+	if !handled || code != 3 {
+		t.Fatalf("handled=%v code=%d, want handled=true code=3", handled, code)
+	}
+	if *calls != 0 {
+		t.Errorf("version check calls: got %d, want 0", *calls)
 	}
 }
 

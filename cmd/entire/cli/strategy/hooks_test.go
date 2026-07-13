@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1698,4 +1699,56 @@ func TestRemoveGitHook_PermissionDenied(t *testing.T) {
 	if !strings.Contains(err.Error(), "failed to remove hooks") {
 		t.Errorf("error should mention 'failed to remove hooks', got: %v", err)
 	}
+}
+
+// TestResolveHookExePath covers the absolute-git-hook-path symlink resolution,
+// including the Windows fallback for NTFS junctions that EvalSymlinks cannot
+// resolve (e.g. Scoop's `…\current\` junction — issue #1424). GOOS and the
+// symlink resolver are injected so every branch runs on any host.
+func TestResolveHookExePath(t *testing.T) {
+	t.Parallel()
+
+	const exe = `C:\Users\admin\scoop\apps\cli\current\entire.exe`
+	// Stand-in for the Windows junction error ("The system cannot find the path
+	// specified") that filepath.EvalSymlinks returns on Scoop's `current\`.
+	junctionErr := errors.New("cannot find the path specified")
+
+	t.Run("resolves normally when EvalSymlinks succeeds", func(t *testing.T) {
+		t.Parallel()
+		got, err := resolveHookExePath("/tmp/linkto", func(string) (string, error) {
+			return "/opt/entire/entire", nil
+		}, "linux")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "/opt/entire/entire" {
+			t.Errorf("got %q, want resolved target", got)
+		}
+	})
+
+	t.Run("windows falls back to unresolved path on EvalSymlinks failure", func(t *testing.T) {
+		t.Parallel()
+		got, err := resolveHookExePath(exe, func(string) (string, error) {
+			return "", junctionErr
+		}, "windows")
+		if err != nil {
+			t.Fatalf("windows should fall back, got error: %v", err)
+		}
+		if got != exe {
+			t.Errorf("got %q, want unresolved exe %q", got, exe)
+		}
+	})
+
+	t.Run("non-windows surfaces EvalSymlinks failure", func(t *testing.T) {
+		t.Parallel()
+		_, err := resolveHookExePath("/usr/local/bin/entire", func(string) (string, error) {
+			return "", junctionErr
+		}, "linux")
+		if err == nil {
+			t.Fatal("expected error on non-windows EvalSymlinks failure")
+		}
+		if !strings.Contains(err.Error(), "failed to resolve symlinks") {
+			t.Errorf("error should mention symlink resolution, got: %v", err)
+		}
+	})
 }

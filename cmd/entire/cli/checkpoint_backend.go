@@ -126,7 +126,7 @@ func promptCheckpointBackend(ctx context.Context, w io.Writer) (string, error) {
 				Description("How Entire stores committed session checkpoints in your repo.").
 				Options(
 					huh.NewOption("Branch — one shared branch, entire/checkpoints/v1 (default)", checkpoint.BackendTypeGitBranch),
-					huh.NewOption("Refs — one git ref per checkpoint (experimental)", checkpoint.BackendTypeGitRefs),
+					huh.NewOption("Refs — one git ref per checkpoint", checkpoint.BackendTypeGitRefs),
 				).
 				Value(&choice),
 		),

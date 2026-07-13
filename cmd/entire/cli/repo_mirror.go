@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,22 +18,179 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
+// column is a table column with two separable identities: key is the canonical
+// name a caller types for --sort (and the value parseSortColumn returns, so the
+// sort switches compare against these constants directly); header is the text
+// shown in the table. They differ only where the header carries a display hint
+// the sort key shouldn't — e.g. NAME's inline "(owner/repo)" — which keeps
+// --sort matching a simple equality on key with no header parsing.
+type column struct {
+	key    string
+	header string
+}
+
+// Keys are lower-case, single shell tokens (kebab-case for multi-word columns)
+// so `--sort clone-url` needs no quoting; headers stay upper-case display text.
+var (
+	colName     = column{key: "name", header: "NAME (owner/repo)"}
+	colCloneURL = column{key: "clone-url", header: "CLONE URL"}
+	colPrivate  = column{key: "private", header: "PRIVATE"}
+	colAccess   = column{key: "access", header: "ACCESS"}
+	colStatus   = column{key: "status", header: "STATUS"}
+)
+
+// columnHeaders is the display-header view of a column set, for the table/field
+// renderers (runCoreList/runCoreObject) which take plain header strings.
+func columnHeaders(cols []column) []string {
+	h := make([]string, len(cols))
+	for i, c := range cols {
+		h[i] = c.header
+	}
+	return h
+}
+
 // mirrorColumns is the human table/field view of a mirror: the scannable
-// repo name, the clone URL you'd copy, and whether the upstream is
-// private. The cluster is omitted — it's already embedded in the clone
-// URL — and the wire model's internal ids are dropped entirely. The clone
-// URL is synthesised from the mirror's coords (the form `git clone`
-// accepts), since the list API doesn't return it.
-var mirrorColumns = []string{"REPO", "CLONE URL", "PRIVATE"}
+// owner/repo name, the clone URL you'd copy, and whether the upstream is
+// private. Owner, provider, and cluster aren't columns of their own — they're
+// inferable from the owner/repo pair and the clone URL
+// (entire://<cluster>/gh/<owner>/<repo>). `--name` filters on the owner/repo
+// name only; owner/provider/cluster stay server-side filters, and the wire
+// model's internal ids are dropped. The clone URL is synthesised from the
+// mirror's coords (the form `git clone` accepts), since the list API doesn't
+// return it.
+var mirrorColumns = []column{colName, colCloneURL, colPrivate}
+
+// mirrorPrivate renders the PRIVATE column ("yes"/"no"), shared by the table
+// row and the --sort private key so both agree on the cell value.
+func mirrorPrivate(m coreapi.Mirror) string {
+	if m.IsPrivate.Or(false) {
+		return "yes"
+	}
+	return "no"
+}
 
 func mirrorRow(m coreapi.Mirror) []string {
 	repo := m.Owner + "/" + m.Repo
 	cloneURL := mirrorCloneURL(m.ClusterHost, m.Owner, m.Repo)
-	private := "no"
-	if m.IsPrivate.Or(false) {
-		private = "yes"
+	return []string{repo, cloneURL, mirrorPrivate(m)}
+}
+
+// parseSortColumn resolves a --sort spec to the column it names and a
+// direction. It trims first, then reads the '-' prefix, so leading/trailing
+// whitespace is handled identically on every path (the direction and the column
+// name never disagree). An empty spec selects the first column. A spec matches a
+// column by its key (case-insensitive) — a plain equality, since key holds no
+// display hint. An unknown name errors naming the valid keys. Returning the
+// matched column lets callers switch on the col* constants directly.
+func parseSortColumn(spec string, columns []column) (col column, desc bool, err error) {
+	spec = strings.TrimSpace(spec)
+	desc = strings.HasPrefix(spec, "-")
+	name := strings.TrimSpace(strings.TrimPrefix(spec, "-"))
+	if name == "" {
+		return columns[0], desc, nil
 	}
-	return []string{repo, cloneURL, private}
+	for _, c := range columns {
+		if strings.EqualFold(c.key, name) {
+			return c, desc, nil
+		}
+	}
+	valid := make([]string, len(columns))
+	for i, c := range columns {
+		valid[i] = c.key
+	}
+	return column{}, false, fmt.Errorf("unknown sort column %q; valid columns: %s", name, strings.Join(valid, ", "))
+}
+
+// sortMirrors orders mirrors in place by the --sort spec: by the named column's
+// value ascending (case-insensitive), always breaking ties by owner/repo then
+// cluster host so a repo mirrored across clusters (or rows equal on any other
+// column) has a stable, deterministic order rather than arbitrary server order.
+// A '-' prefix reverses the whole ordering. `name`/default sorts by the
+// tiebreak alone.
+func sortMirrors(mirrors []coreapi.Mirror, spec string) error {
+	col, desc, err := parseSortColumn(spec, mirrorColumns)
+	if err != nil {
+		return err
+	}
+	key := func(m coreapi.Mirror) string {
+		switch col {
+		case colCloneURL:
+			return strings.ToLower(mirrorCloneURL(m.ClusterHost, m.Owner, m.Repo))
+		case colPrivate:
+			return mirrorPrivate(m)
+		default: // name -> tiebreak alone
+			return ""
+		}
+	}
+	slices.SortStableFunc(mirrors, func(a, b coreapi.Mirror) int {
+		c := cmp.Compare(key(a), key(b))
+		if c == 0 {
+			c = cmp.Compare(strings.ToLower(a.Owner+"/"+a.Repo), strings.ToLower(b.Owner+"/"+b.Repo))
+		}
+		if c == 0 {
+			c = cmp.Compare(strings.ToLower(a.ClusterHost), strings.ToLower(b.ClusterHost))
+		}
+		if desc {
+			return -c
+		}
+		return c
+	})
+	return nil
+}
+
+// sortAvailable orders available mirrors in place by the --sort spec, matching
+// sortMirrors: by the named column ascending (case-insensitive) with an
+// owner/repo tiebreak for a deterministic order on equal keys. AvailableMirror
+// has no cluster host (the onboardable set is cluster-agnostic), so owner/repo
+// is the only secondary key. A '-' prefix reverses the whole ordering.
+func sortAvailable(avail []coreapi.AvailableMirror, spec string) error {
+	col, desc, err := parseSortColumn(spec, availableMirrorColumns)
+	if err != nil {
+		return err
+	}
+	key := func(m coreapi.AvailableMirror) string {
+		switch col {
+		case colAccess:
+			return strings.ToLower(string(m.Access))
+		case colStatus:
+			return strings.ToLower(string(m.Status))
+		default: // name -> tiebreak alone
+			return ""
+		}
+	}
+	slices.SortStableFunc(avail, func(a, b coreapi.AvailableMirror) int {
+		c := cmp.Compare(key(a), key(b))
+		if c == 0 {
+			c = cmp.Compare(strings.ToLower(a.Owner+"/"+a.Repo), strings.ToLower(b.Owner+"/"+b.Repo))
+		}
+		if desc {
+			return -c
+		}
+		return c
+	})
+	return nil
+}
+
+// filterByName keeps items whose owner/repo name contains substr (case-
+// insensitive). The control plane already filters by owner/provider/cluster
+// server-side but not by name, so `repo mirror list --name` narrows that last
+// dimension client-side. nameOf returns the item's displayed identifier — the
+// callers pass the owner/repo form shown in the NAME column, so a value copied
+// from the table (e.g. acme/web) matches the row it came from. An empty substr
+// returns items unchanged.
+func filterByName[T any](items []T, nameOf func(T) string, substr string) []T {
+	substr = strings.TrimSpace(substr)
+	if substr == "" {
+		return items
+	}
+	substr = strings.ToLower(substr)
+	out := make([]T, 0, len(items))
+	for _, it := range items {
+		if strings.Contains(strings.ToLower(nameOf(it)), substr) {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 // availableMirrorColumns is the view of a repo you *could* mirror: the
@@ -41,7 +200,7 @@ func mirrorRow(m coreapi.Mirror) []string {
 // clone URL), or "owner-only" (a personal repo of another user; only its
 // owner may mirror it). No clone URL column: an un-onboarded repo doesn't
 // have one yet.
-var availableMirrorColumns = []string{"REPO", "ACCESS", "STATUS"}
+var availableMirrorColumns = []column{colName, colAccess, colStatus}
 
 func availableMirrorRow(m coreapi.AvailableMirror) []string {
 	return []string{m.Owner + "/" + m.Repo, string(m.Access), string(m.Status)}
@@ -199,7 +358,7 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 						// Only start a Cloning spinner when there's a clone to await —
 						// not for an empty upstream, and not for an admin-suspended
 						// placement (which never becomes ready).
-						if !noWait && !created.Empty && !created.Suspended {
+						if !noWait && !created.Empty && !created.Suspended { //nolint:staticcheck // CreatedMirror.Empty deprecated by /repos spec bump; create-flow cleanup tracked separately
 							cloning = startSpinner(errW, fmt.Sprintf("Cloning %s/%s into %s", owner, repo, clusterHost))
 						}
 					}, nil)
@@ -272,7 +431,7 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 		// so return no error.
 		return outcome, nil
 	}
-	if created.Empty {
+	if created.Empty { //nolint:staticcheck // CreatedMirror.Empty deprecated by /repos spec bump; create-flow cleanup tracked separately
 		// An empty upstream has nothing to clone, so don't poll for "ready" — it
 		// never would. But an *existing* placement can be suspended even when
 		// empty, and one status read surfaces that (a fresh create can't be
@@ -324,7 +483,7 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 	}
 
 	if !outcome.polled {
-		if created.Empty {
+		if created.Empty { //nolint:staticcheck // CreatedMirror.Empty deprecated by /repos spec bump; create-flow cleanup tracked separately
 			fmt.Fprintln(out, "Upstream has no commits yet — nothing to clone. The mirror will pick up refs once the upstream is pushed to.")
 		} else {
 			fmt.Fprintf(out, "Initial clone may still be in progress; `git clone %s` will work once it completes.\n", created.MirrorUrl)
@@ -354,15 +513,27 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 }
 
 func newRepoMirrorListCmd() *cobra.Command {
-	var cluster, provider, owner string
+	var cluster, provider, owner, name string
+	var sortSpec string
 	var showAvailable bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List mirrors you can see (or, with --show-available, repos you could mirror)",
 		Args:  cobra.NoArgs,
+		// Validate --sort before RunE so a bad column fails fast, without the
+		// network round-trip RunE would otherwise do first. The valid column
+		// set depends on --show-available (different table shape).
+		PreRunE: func(_ *cobra.Command, _ []string) error {
+			cols := mirrorColumns
+			if showAvailable {
+				cols = availableMirrorColumns
+			}
+			_, _, err := parseSortColumn(sortSpec, cols)
+			return err
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if showAvailable {
-				return runCoreList(cmd, "No repos available to mirror.", availableMirrorColumns, availableMirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.AvailableMirror, error) {
+				return runCoreList(cmd, "No repos available to mirror.", columnHeaders(availableMirrorColumns), availableMirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.AvailableMirror, error) {
 					// Computed live from GitHub using your own login, so name the
 					// core being dialled (same rationale as the existing-mirror
 					// banner). --cluster/--provider don't apply here: the
@@ -378,10 +549,14 @@ func newRepoMirrorListCmd() *cobra.Command {
 					if err != nil {
 						return nil, err
 					}
-					return out.Available, nil
+					avail := filterByName(out.Available, func(m coreapi.AvailableMirror) string { return m.Owner + "/" + m.Repo }, name)
+					if err := sortAvailable(avail, sortSpec); err != nil {
+						return nil, err
+					}
+					return avail, nil
 				})
 			}
-			return runCoreList(cmd, "No mirrors found.", mirrorColumns, mirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Mirror, error) {
+			return runCoreList(cmd, "No mirrors found.", columnHeaders(mirrorColumns), mirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Mirror, error) {
 				// mirror list is identity-scoped: it shows the mirrors visible
 				// from the active login's federation, so naming that login server
 				// makes a surprising empty result legible — e.g. mirrors in a
@@ -395,7 +570,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 				if !jsonRequested(cmd) {
 					fmt.Fprintf(cmd.ErrOrStderr(), "Listing mirrors on %s\n", c.CoreOrigin())
 				}
-				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Mirror, string, error) {
+				mirrors, err := fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Mirror, string, error) {
 					params := coreapi.ListMirrorsParams{}
 					if cluster != "" {
 						params.Cluster = coreapi.NewOptString(cluster)
@@ -415,36 +590,70 @@ func newRepoMirrorListCmd() *cobra.Command {
 					}
 					return out.Mirrors, out.NextPageToken.Or(""), nil
 				})
+				if err != nil {
+					return nil, err
+				}
+				mirrors = filterByName(mirrors, func(m coreapi.Mirror) string { return m.Owner + "/" + m.Repo }, name)
+				if err := sortMirrors(mirrors, sortSpec); err != nil {
+					return nil, err
+				}
+				return mirrors, nil
 			})
 		},
 	}
 	cmd.Flags().StringVar(&cluster, "cluster", "", "Filter by cluster public host")
 	cmd.Flags().StringVar(&provider, "provider", "", "Filter by upstream provider (e.g. github)")
 	cmd.Flags().StringVar(&owner, "owner", "", "Filter by upstream owner login")
+	cmd.Flags().StringVar(&name, "name", "", "Filter by owner/repo substring, matching the NAME column (case-insensitive)")
+	cmd.Flags().StringVar(&sortSpec, "sort", "", "Sort by column key (e.g. name, clone-url; prefix '-' for descending). Default: name ascending")
 	cmd.Flags().BoolVar(&showAvailable, "show-available", false, "Instead of existing mirrors, list GitHub repos you could onboard as mirrors (ignores --cluster/--provider)")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newRepoMirrorGetCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "get <mirror>",
 		Short: "Show a mirror by ULID or clone URL",
-		Long: "Show a mirror. <mirror> is either a mirror ULID or an entire:// clone " +
-			"URL\n(entire://<cluster>/gh/<owner>/<repo>) — the form `mirror list` " +
-			"prints and `git clone` accepts.",
+		Long: "Show a mirror. <mirror> is either a mirror ULID or an entire:// clone URL\n" +
+			"(entire://<cluster>/gh/<owner>/<repo>) — the form `mirror list` prints and\n" +
+			"`git clone` accepts; a trailing .git, as pasted from `git remote -v`, is\n" +
+			"accepted too. A clone URL is looked up on the login server fronting its\n" +
+			"cluster, so it resolves even when that cluster belongs to a federation other\n" +
+			"than the active auth context; a ULID is looked up on the active context's\n" +
+			"login server.",
 		Example: "  entire repo mirror get 01KS6KFJR2XS6PZ188MVYE07AN\n" +
 			"  entire repo mirror get entire://aws-us-east-2.entire.io/gh/octocat/hello-world",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreObject(cmd, mirrorColumns, mirrorRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Mirror, error) {
-				mirrorID, err := resolveMirrorRef(ctx, c, args[0])
+			ref := args[0]
+			show := func(ctx context.Context, c *coreapi.Client) (*coreapi.Mirror, error) {
+				mirrorID, err := resolveMirrorRef(ctx, c, ref)
 				if err != nil {
 					return nil, err
 				}
 				return c.GetMirror(ctx, coreapi.GetMirrorParams{MirrorId: mirrorID})
-			})
+			}
+			// A ULID carries no cluster coordinate, so it can only be looked up
+			// on the active context's core. A clone URL names its cluster — dial
+			// the core fronting that cluster (discovered from its well-known and
+			// authenticated with the matching local context, the same path
+			// create/remove use), so the lookup works when the mirror lives in a
+			// federation other than the active login instead of failing with
+			// "no mirror matching".
+			if looksLikeULID(ref) {
+				return runCoreObject(cmd, columnHeaders(mirrorColumns), mirrorRow, show)
+			}
+			clusterHost, _, _, _, err := parseMirrorCloneURL(ref)
+			if err != nil {
+				cmd.SilenceUsage = true
+				return badMirrorRefErr(err)
+			}
+			return runCoreObjectForCluster(cmd, clusterHost, columnHeaders(mirrorColumns), mirrorRow, show)
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 // resolveMirrorRef turns a mirror reference into its ULID. A ULID passes
@@ -459,7 +668,7 @@ func resolveMirrorRef(ctx context.Context, c *coreapi.Client, ref string) (strin
 	}
 	clusterHost, provider, owner, repo, err := parseMirrorCloneURL(ref)
 	if err != nil {
-		return "", fmt.Errorf("%w; pass a mirror ULID or a clone URL (entire://<cluster>/gh/<owner>/<repo>)", err)
+		return "", badMirrorRefErr(err)
 	}
 	mirrors, err := fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Mirror, string, error) {
 		params := coreapi.ListMirrorsParams{
@@ -520,6 +729,13 @@ func parseMirrorCloneURL(raw string) (clusterHost, provider, owner, repo string,
 
 func noMirrorErr(ref string) error {
 	return fmt.Errorf("no mirror matching %q (run `entire repo mirror list` to see clone URLs, or pass a ULID)", ref)
+}
+
+// badMirrorRefErr wraps a clone-URL parse failure with the accepted <mirror>
+// forms. Shared by the pre-dial parse in `mirror get` and resolveMirrorRef so
+// both boundaries report identically.
+func badMirrorRefErr(err error) error {
+	return fmt.Errorf("%w; pass a mirror ULID or a clone URL (entire://<cluster>/gh/<owner>/<repo>)", err)
 }
 
 func newRepoMirrorRemoveCmd() *cobra.Command {

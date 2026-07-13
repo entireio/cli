@@ -16,9 +16,9 @@ require (
 	github.com/go-faster/errors v0.7.1
 	github.com/go-faster/jx v1.2.0
 	github.com/go-git/go-billy/v6 v6.0.0-alpha.1.0.20260519112248-0095b064a6c6
-	github.com/go-git/go-git/v6 v6.0.0-alpha.4.0.20260521161150-3af8745c291b
-	github.com/go-git/x/plugin/objectsigner/auto v0.1.0
-	github.com/go-git/x/plugin/objectsigner/program v0.0.0-20260506121155-e7fc238fcab6
+	github.com/go-git/go-git/v6 v6.0.0-alpha.4.0.20260713100844-d5e9b9c7895b
+	github.com/go-git/x/plugin/objectsigner/auto v0.1.1-0.20260624122410-382b2905c041
+	github.com/go-git/x/plugin/objectsigner/program v0.0.0-20260624122410-382b2905c041
 	github.com/gofrs/flock v0.13.0
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-isatty v0.0.22
@@ -32,12 +32,12 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
 	github.com/zalando/go-keyring v0.2.8
-	golang.org/x/crypto v0.53.0
-	golang.org/x/mod v0.37.0
-	golang.org/x/net v0.56.0
-	golang.org/x/sync v0.21.0
-	golang.org/x/sys v0.46.0
-	golang.org/x/term v0.44.0
+	golang.org/x/crypto v0.54.0
+	golang.org/x/mod v0.38.0
+	golang.org/x/net v0.57.0
+	golang.org/x/sync v0.22.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -82,8 +82,8 @@ require (
 	github.com/gitleaks/go-gitdiff v0.9.1 // indirect
 	github.com/go-faster/yaml v0.4.6 // indirect
 	github.com/go-git/gcfg/v2 v2.0.2 // indirect
-	github.com/go-git/x/plugin/objectsigner/gpg v0.1.0 // indirect
-	github.com/go-git/x/plugin/objectsigner/ssh v0.1.0 // indirect
+	github.com/go-git/x/plugin/objectsigner/gpg v0.2.1-0.20260624122410-382b2905c041 // indirect
+	github.com/go-git/x/plugin/objectsigner/ssh v0.2.1-0.20260624122410-382b2905c041 // indirect
 	github.com/go-sprout/sprout v1.0.3 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
@@ -134,7 +134,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
 	golang.org/x/exp v0.0.0-20250218142911-aa4b98e5adaa // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251222181119-0a764e51fe1b // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
