@@ -992,7 +992,7 @@ func handleLogsOnlyCheckout(ctx context.Context, w, errW io.Writer, start *strat
 	}
 
 	// Show warning about detached HEAD
-	desc := "This will checkout the commit directly. You'll be in 'detached HEAD' state.\nAny uncommitted changes will be lost!"
+	desc := "This will checkout the commit directly. You'll be in 'detached HEAD' state.\nAny uncommitted changes to tracked files will be lost! (Untracked files are left in place, except any listed below.)"
 	if len(clobbered) > 0 {
 		desc += "\n\nThe following untracked file(s) also collide with this checkpoint and will be OVERWRITTEN:\n" +
 			formatClobberedFiles(clobbered)
@@ -1021,9 +1021,9 @@ func handleLogsOnlyCheckout(ctx context.Context, w, errW io.Writer, start *strat
 		return nil
 	}
 
-	// Perform git checkout. Force-discard uncommitted changes to match the
-	// "Any uncommitted changes will be lost!" warning above; a plain checkout
-	// aborts on local modifications instead (#668).
+	// Perform git checkout. Force-discard uncommitted changes to tracked files
+	// to match the warning above; a plain checkout aborts on local
+	// modifications instead (#668).
 	if err := CheckoutBranchForce(ctx, point.ID); err != nil {
 		logging.Error(logCtx, "logs-only checkout failed during git checkout",
 			slog.String("checkpoint_id", point.ID),

@@ -273,9 +273,9 @@ func BranchExistsLocally(ctx context.Context, branchName string) (bool, error) {
 }
 
 // CheckoutBranch switches to the specified local branch or commit.
-// Uses git CLI instead of go-git to work around go-git v5 bug where Checkout
+// Uses git CLI instead of go-git to work around a go-git bug where Checkout
 // deletes untracked files (see https://github.com/go-git/go-git/issues/970).
-// Should be switched back to go-git once we upgrade to go-git v6
+// Should be switched back to go-git once that upstream bug is fixed.
 // Returns an error if the ref doesn't exist or checkout fails. It does NOT
 // discard uncommitted changes — git aborts if the checkout would overwrite
 // local modifications.
