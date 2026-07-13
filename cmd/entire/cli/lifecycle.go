@@ -1358,6 +1358,21 @@ func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID s
 	if preState != nil {
 		baseline = preState.TokenBaseline
 	}
+	// A missing baseline means count-from-zero, which is only legitimate on
+	// the session's first tracked turn (no snapshot existed yet). Mid-session
+	// — after earlier turns already accumulated deltas — it means the
+	// PrePromptState was lost or corrupt: counting from zero would return
+	// session-cumulative totals and AccumulateSessionTokenUsage would re-add
+	// tokens the earlier turns already recorded. Degrade to no-data instead.
+	if len(baseline) == 0 {
+		if state, stateErr := strategy.LoadSessionState(ctx, sessionID); stateErr == nil &&
+			state != nil && state.TokenUsage != nil && state.TokenUsage.APICallCount > 0 {
+			logging.Warn(logging.WithComponent(ctx, "lifecycle"),
+				"out-of-band token baseline missing mid-session; skipping this turn's token delta to avoid double counting",
+				slog.String("session_id", sessionID))
+			return nil
+		}
+	}
 	oobUsage, oobErr := src.CalculateTokenUsageSince(ctx, sessionID, baseline)
 	if oobErr != nil {
 		logging.Warn(logging.WithComponent(ctx, "lifecycle"), "failed to compute out-of-band token usage",

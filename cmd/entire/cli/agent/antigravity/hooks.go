@@ -83,6 +83,13 @@ func (a *AntigravityAgent) InstallHooks(ctx context.Context, localDev bool, forc
 		if existing, ok := rawFile["entire"]; ok {
 			var existingCfg HookConfig
 			if err := json.Unmarshal(existing, &existingCfg); err == nil {
+				// A user-set "enabled": false (agy's documented per-entry
+				// disable knob) is a deliberate choice — leave the entry
+				// untouched rather than rewriting it and silently re-arming
+				// tracking. --force remains the explicit override.
+				if existingCfg.Enabled != nil && !*existingCfg.Enabled {
+					return 0, nil
+				}
 				existingBytes, err1 := jsonutil.MarshalWithNoHTMLEscape(existingCfg)
 				candidateBytes, err2 := jsonutil.MarshalWithNoHTMLEscape(candidate)
 				if err1 == nil && err2 == nil && bytes.Equal(existingBytes, candidateBytes) {
@@ -143,13 +150,20 @@ func (a *AntigravityAgent) AreHooksInstalled(ctx context.Context) bool {
 		return false
 	}
 
-	var f HooksFile
-	if err := json.Unmarshal(data, &f); err != nil {
+	// Parse per-entry: foreign hook entries are free-form user content and
+	// may not match Entire's handler struct shapes — a strict whole-file
+	// unmarshal would fail on them and permanently report "not installed"
+	// even though our entry is fine. Only the "entire" entry must conform.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return false
 	}
-
-	cfg, ok := f["entire"]
+	entireRaw, ok := raw["entire"]
 	if !ok {
+		return false
+	}
+	var cfg HookConfig
+	if err := json.Unmarshal(entireRaw, &cfg); err != nil {
 		return false
 	}
 

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -121,6 +122,59 @@ func TestDispatchLifecycleEvent_NilEvent(t *testing.T) {
 	if !strings.Contains(err.Error(), "event cannot be nil") {
 		t.Errorf("expected error message about nil event, got: %v", err)
 	}
+}
+
+// mockOOBTokenAgent implements OutOfBandTokenSource on top of the standard
+// lifecycle mock; CalculateTokenUsageSince returns a fixed value regardless of
+// baseline, mimicking the count-from-zero behavior of a nil baseline.
+type mockOOBTokenAgent struct {
+	mockLifecycleAgent
+
+	usage *agent.TokenUsage
+}
+
+func (m *mockOOBTokenAgent) SnapshotTokenBaseline(_ context.Context, _ string) (json.RawMessage, error) {
+	return nil, nil
+}
+
+//nolint:unparam // error return is fixed by the OutOfBandTokenSource interface
+func (m *mockOOBTokenAgent) CalculateTokenUsageSince(_ context.Context, _ string, _ json.RawMessage) (*agent.TokenUsage, error) {
+	return m.usage, nil
+}
+
+// TestComputeOutOfBandTokenUsage_MissingBaselineMidSession pins the nil-baseline
+// contract: a missing baseline is only legitimate on a session's first tracked
+// turn (count from zero). Mid-session — after earlier turns already accumulated
+// deltas — a lost/corrupt PrePromptState must degrade to no-data; counting from
+// zero would return session-cumulative totals and double-count every earlier
+// turn in entire status and the next checkpoint.
+func TestComputeOutOfBandTokenUsage_MissingBaselineMidSession(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+
+	cumulative := &agent.TokenUsage{InputTokens: 700, OutputTokens: 500, APICallCount: 3}
+	ag := &mockOOBTokenAgent{usage: cumulative}
+
+	sessionID := "test-oob-midsession"
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+		TokenUsage: &agent.TokenUsage{InputTokens: 250, OutputTokens: 280, APICallCount: 2},
+	}))
+
+	got := computeOutOfBandTokenUsage(ctx, ag, sessionID, nil)
+	require.Nil(t, got, "missing baseline mid-session must degrade to no-data, not count-from-zero")
+
+	// First tracked turn (nothing accumulated yet): count-from-zero is the
+	// documented, correct behavior — the guard must not break it.
+	freshID := "test-oob-first-turn"
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  freshID,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}))
+	require.Equal(t, cumulative, computeOutOfBandTokenUsage(ctx, ag, freshID, nil))
 }
 
 // TestDispatchLifecycleEvent_SkipsForwardedHookFromNonOwningAgent verifies the
