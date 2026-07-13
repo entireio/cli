@@ -116,6 +116,13 @@ var errBootstrapDeclined = errors.New("bootstrap declined")
 // pretending no init happened.
 var errBootstrapInterrupted = errors.New("bootstrap interrupted after init")
 
+// errBootstrapCancelled signals that the user actively cancelled (Esc / Ctrl+C)
+// a confirmation _before_ `git init` ran. It is distinct from
+// errBootstrapDeclined (a bare Enter / EOF, or a "no" answer): a deliberate
+// cancel should print a plain "cancelled" message, not the "Not a git
+// repository, pass --bootstrap=local" guidance that fits a decline.
+var errBootstrapCancelled = errors.New("bootstrap cancelled before init")
+
 // ghRepoNameRe validates GitHub repository names. GitHub allows
 // alphanumerics, hyphens, underscores, and periods — including as the
 // first character (e.g. `.github`). We don't enforce a leading-char
@@ -473,7 +480,9 @@ func confirmInitRepo() (bool, error) {
 	)
 	if err := form.Run(); err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
-			return false, nil
+			// A deliberate cancel (Esc / Ctrl+C) before init — distinct from a
+			// bare Enter / EOF, which returns the default (NO) with no error.
+			return false, errBootstrapCancelled
 		}
 		return false, fmt.Errorf("init-repo prompt: %w", err)
 	}
@@ -540,7 +549,15 @@ func printBootstrapPlan(w io.Writer, cwd string, opts GitHubBootstrapOptions, gi
 	}
 	if githubPlanned {
 		visibility, _ := plannedRepoVisibility(opts)
-		fmt.Fprintf(w, "  • Create a new %s repository on GitHub and push the initial commit to it\n", strings.ToUpper(visibility))
+		if ghFlagsProvided(opts) {
+			// Explicit --repo-* intent: the GitHub repo will be created.
+			fmt.Fprintf(w, "  • Create a new %s repository on GitHub and push the initial commit to it\n", strings.ToUpper(visibility))
+		} else {
+			// Prompt path with no explicit intent: creating the repo is a
+			// separate, opt-in step that defaults to NO, so don't state it as
+			// guaranteed.
+			fmt.Fprintf(w, "  • Optionally create a new %s repository on GitHub and push to it (you'll be asked; defaults to no)\n", strings.ToUpper(visibility))
+		}
 	}
 	fmt.Fprintln(w)
 }

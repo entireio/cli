@@ -847,6 +847,10 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 			if _, err := paths.WorktreeRoot(ctx); err != nil {
 				bootstrapOpts.Yes = opts.Yes
 				state, bootstrapErr := runGitHubBootstrapInit(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), bootstrapOpts)
+				if errors.Is(bootstrapErr, errBootstrapCancelled) {
+					fmt.Fprintln(cmd.ErrOrStderr(), "Cancelled. Nothing was initialized.")
+					return NewSilentError(errors.New("bootstrap cancelled"))
+				}
 				if errors.Is(bootstrapErr, errBootstrapDeclined) {
 					fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Please run 'entire enable' from within a git repository, or pass --bootstrap=local to initialize one here.")
 					return NewSilentError(errors.New("not a git repository"))

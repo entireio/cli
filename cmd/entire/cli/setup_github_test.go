@@ -1364,8 +1364,72 @@ func TestBootstrap_FreshMachine_NoIdentity_RealGit(t *testing.T) {
 
 func TestErrSentinels_DistinctPrePostInit(t *testing.T) {
 	t.Parallel()
-	if errors.Is(errBootstrapDeclined, errBootstrapInterrupted) {
-		t.Fatal("errBootstrapDeclined and errBootstrapInterrupted must not match as the same sentinel")
+	// The three pre/post-init sentinels must be mutually distinct so setup.go
+	// can print the right guidance for each: declined (bare Enter / EOF / no),
+	// cancelled (Esc / Ctrl+C before init), interrupted (abort after init).
+	sentinels := []error{errBootstrapDeclined, errBootstrapCancelled, errBootstrapInterrupted}
+	for i := range sentinels {
+		for j := range sentinels {
+			if i != j && errors.Is(sentinels[i], sentinels[j]) {
+				t.Fatalf("sentinels %d and %d must be distinct", i, j)
+			}
+		}
+	}
+}
+
+// TestConfirmInitRepo_EOFDeclinesNotCancelled proves EOF (a bare Enter with no
+// input) is handled as a plain decline — NOT the cancel sentinel — so the
+// safety-critical "default NO on EOF" path keeps its "Not a git repository"
+// guidance. Only a deliberate Esc/Ctrl+C yields errBootstrapCancelled.
+func TestConfirmInitRepo_EOFDeclinesNotCancelled(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	t.Setenv("ACCESSIBLE", "1")
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw.Close()
+	t.Cleanup(func() { pr.Close() })
+	oldStdin := os.Stdin
+	os.Stdin = pr
+	t.Cleanup(func() { os.Stdin = oldStdin })
+
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	_, err = runGitHubBootstrapInitWith(context.Background(), io.Discard, io.Discard, GitHubBootstrapOptions{NoGitHub: true}, r)
+	if !errors.Is(err, errBootstrapDeclined) {
+		t.Fatalf("EOF must map to errBootstrapDeclined, got %v", err)
+	}
+	if errors.Is(err, errBootstrapCancelled) {
+		t.Fatal("EOF must NOT be treated as an explicit cancel")
+	}
+	if gitInitCalled(r) {
+		t.Fatal("git init must not run on an EOF decline")
+	}
+}
+
+// TestPrintBootstrapPlan_GitHubOptInWording verifies the plan does not state
+// GitHub creation as guaranteed in the prompt path (default-NO opt-in), but
+// does when an explicit --repo-* flag signals intent.
+func TestPrintBootstrapPlan_GitHubOptInWording(t *testing.T) {
+	t.Parallel()
+	// No explicit intent: worded as optional / asked.
+	var optional bytes.Buffer
+	printBootstrapPlan(&optional, t.TempDir(), GitHubBootstrapOptions{}, true)
+	if !strings.Contains(optional.String(), "Optionally create") || !strings.Contains(optional.String(), "defaults to no") {
+		t.Errorf("prompt-path plan should mark GitHub creation optional, got:\n%s", optional.String())
+	}
+	// Explicit --repo-name intent: worded as definite.
+	var definite bytes.Buffer
+	printBootstrapPlan(&definite, t.TempDir(), GitHubBootstrapOptions{RepoName: "x"}, true)
+	if strings.Contains(definite.String(), "Optionally create") {
+		t.Errorf("explicit --repo-* intent should not be worded as optional, got:\n%s", definite.String())
+	}
+	if !strings.Contains(definite.String(), "Create a new PRIVATE repository") {
+		t.Errorf("explicit intent should state the create step, got:\n%s", definite.String())
 	}
 }
 
