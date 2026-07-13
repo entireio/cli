@@ -567,6 +567,93 @@ func TestCollectTreeBlobs_RedactsAllFileTypes(t *testing.T) {
 	require.False(t, collectedNames[paths.ContentHashFileName], "content_hash.txt must be excluded from collection (deferred path)")
 }
 
+// The OPF rewrite must not touch externalized image assets: byte-redacting the
+// raw image blobs would corrupt them (breaking restore), and the fail-closed
+// rebuild would abort the push if they were collected but not redacted. Both
+// passes skip the assets/ subtree, preserving it verbatim.
+func TestOPFRewrite_PreservesAssetsSubtreeVerbatim(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	tempDir := t.TempDir()
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
+	require.NoError(t, err)
+
+	writeBlob := func(content []byte) plumbing.Hash {
+		obj := repo.Storer.NewEncodedObject()
+		obj.SetType(plumbing.BlobObject)
+		w, err := obj.Writer()
+		require.NoError(t, err)
+		_, err = w.Write(content)
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
+		hash, err := repo.Storer.SetEncodedObject(obj)
+		require.NoError(t, err)
+		return hash
+	}
+	writeTree := func(entries []object.TreeEntry) plumbing.Hash {
+		tree := &object.Tree{Entries: entries}
+		obj := repo.Storer.NewEncodedObject()
+		require.NoError(t, tree.Encode(obj))
+		hash, err := repo.Storer.SetEncodedObject(obj)
+		require.NoError(t, err)
+		return hash
+	}
+
+	// Raw binary image (high-entropy: byte redaction would mangle it) + manifest.
+	imgBytes := []byte("\x89PNG\r\n\x1a\nPERSONABC-binary-image-bytes\x00\x01\x02\x03\xff\xfe")
+	imgHash := writeBlob(imgBytes)
+	manifestBytes := []byte(`{"version":1,"assets":[{"name":"img-abc.png"}]}` + "\n")
+	// Entries within a tree must be lexicographically ordered.
+	assetsTreeHash := writeTree([]object.TreeEntry{
+		{Name: "img-abc.png", Mode: filemode.Regular, Hash: imgHash},
+		{Name: "manifest.json", Mode: filemode.Regular, Hash: writeBlob(manifestBytes)},
+	})
+
+	fullHash := writeBlob([]byte(`{"type":"text","text":"hi"}` + "\n"))
+	tree := &object.Tree{Entries: []object.TreeEntry{
+		{Name: paths.AssetsDirName, Mode: filemode.Dir, Hash: assetsTreeHash},
+		{Name: paths.ContentHashFileName, Mode: filemode.Regular, Hash: writeBlob([]byte("sha256:abcd"))},
+		{Name: paths.TranscriptFileName, Mode: filemode.Regular, Hash: fullHash},
+	}}
+
+	// Collect pass: assets/ contents are excluded; full.jsonl is collected.
+	var blobs []redact.NamedBlob
+	var blobPaths []string
+	require.NoError(t, collectTreeBlobs(repo, tree, "", &blobs, &blobPaths))
+	collected := make(map[string]bool, len(blobs))
+	for _, b := range blobs {
+		collected[b.Name] = true
+	}
+	require.True(t, collected[paths.TranscriptFileName], "full.jsonl must be collected for redaction")
+	require.False(t, collected["img-abc.png"], "image asset must NOT be collected (would corrupt binary)")
+	require.False(t, collected["manifest.json"], "asset manifest must NOT be collected")
+
+	// Rebuild pass: must not fail-closed, and must preserve the assets subtree
+	// hash byte-for-byte (only full.jsonl gets redacted bytes from the map).
+	redactedByPath := map[string][]byte{paths.TranscriptFileName: []byte(`{"type":"text","text":"redacted"}` + "\n")}
+	newTreeHash, err := rebuildTreeWithCachedRedaction(repo, tree, "", redactedByPath)
+	require.NoError(t, err, "rebuild must not abort on the assets subtree")
+
+	newTree, err := repo.TreeObject(newTreeHash)
+	require.NoError(t, err)
+	var gotAssets plumbing.Hash
+	for _, e := range newTree.Entries {
+		if e.Name == paths.AssetsDirName {
+			gotAssets = e.Hash
+		}
+	}
+	require.Equal(t, assetsTreeHash, gotAssets, "assets subtree must be preserved verbatim")
+
+	// And the image blob inside is byte-identical.
+	rebuiltAssets, err := repo.TreeObject(gotAssets)
+	require.NoError(t, err)
+	imgFile, err := rebuiltAssets.File("img-abc.png")
+	require.NoError(t, err)
+	gotImg, err := imgFile.Contents()
+	require.NoError(t, err)
+	require.Equal(t, string(imgBytes), gotImg, "image bytes must survive the OPF rewrite unchanged")
+}
+
 // Fail-closed regression: when the OPF runtime fails and the breaker
 // trips, the rewrite must NOT CAS the ref. Otherwise the new commits
 // would carry Entire-OPF-Applied: true while their content is 7-layer

@@ -19,6 +19,40 @@ import (
 
 func ptrTime(t time.Time) *time.Time { return &t }
 
+func TestFilterResumableSessions_ExcludesImported(t *testing.T) {
+	t.Parallel()
+	base := time.Now().Add(-2 * time.Hour)
+	imported := &strategy.SessionState{
+		SessionID: "imp", Kind: session.KindImported,
+		Phase: session.PhaseEnded, StartedAt: base, EndedAt: ptrTime(base.Add(time.Hour)),
+	}
+	normal := &strategy.SessionState{
+		SessionID: "norm", Phase: session.PhaseIdle, StartedAt: base,
+	}
+	got := filterResumableSessions([]*strategy.SessionState{imported, normal})
+	for _, s := range got {
+		if s.SessionID == "imp" {
+			t.Fatal("imported session must not be resumable")
+		}
+	}
+	if len(got) != 1 || got[0].SessionID != "norm" {
+		t.Fatalf("want only the normal session, got %+v", got)
+	}
+}
+
+func TestCountImportedSessions(t *testing.T) {
+	t.Parallel()
+	states := []*strategy.SessionState{
+		{SessionID: "a", Kind: session.KindImported},
+		{SessionID: "b"},
+		nil,
+		{SessionID: "c", Kind: session.KindImported},
+	}
+	if got := countImportedSessions(states); got != 2 {
+		t.Fatalf("countImportedSessions = %d, want 2", got)
+	}
+}
+
 func TestFilterResumableSessions(t *testing.T) {
 	t.Parallel()
 

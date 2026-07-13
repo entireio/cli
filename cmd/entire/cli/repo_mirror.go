@@ -358,7 +358,7 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 						// Only start a Cloning spinner when there's a clone to await —
 						// not for an empty upstream, and not for an admin-suspended
 						// placement (which never becomes ready).
-						if !noWait && !created.Empty && !created.Suspended {
+						if !noWait && !created.Empty && !created.Suspended { //nolint:staticcheck // CreatedMirror.Empty deprecated by /repos spec bump; create-flow cleanup tracked separately
 							cloning = startSpinner(errW, fmt.Sprintf("Cloning %s/%s into %s", owner, repo, clusterHost))
 						}
 					}, nil)
@@ -423,7 +423,7 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 		// so return no error.
 		return outcome, nil
 	}
-	if created.Empty {
+	if created.Empty { //nolint:staticcheck // CreatedMirror.Empty deprecated by /repos spec bump; create-flow cleanup tracked separately
 		// An empty upstream has nothing to clone, so don't poll for "ready" — it
 		// never would. But an *existing* placement can be suspended even when
 		// empty, and one status read surfaces that (a fresh create can't be
@@ -475,7 +475,7 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 	}
 
 	if !outcome.polled {
-		if created.Empty {
+		if created.Empty { //nolint:staticcheck // CreatedMirror.Empty deprecated by /repos spec bump; create-flow cleanup tracked separately
 			fmt.Fprintln(out, "Upstream has no commits yet — nothing to clone. The mirror will pick up refs once the upstream is pushed to.")
 		} else {
 			fmt.Fprintf(out, "Initial clone may still be in progress; `git clone %s` will work once it completes.\n", created.MirrorUrl)

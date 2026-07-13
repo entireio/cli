@@ -31,6 +31,11 @@ import (
 	"github.com/go-git/go-git/v6/storage"
 )
 
+// assetsDirName mirrors paths.AssetsDirName, captured at package scope so the
+// OPF tree walkers can reference it even where a local variable named `paths`
+// shadows the paths package (collectTreeBlobs).
+const assetsDirName = paths.AssetsDirName
+
 // V1DivergedError: local entire/checkpoints/v1 has commits that aren't
 // ancestors of the remote tip (force-push or another machine pushed).
 // Rewriting under divergence would silently rebase rejected work, so
@@ -561,6 +566,13 @@ func collectTreeBlobs(repo *git.Repository, tree *object.Tree, pathPrefix string
 	for _, e := range tree.Entries {
 		switch e.Mode {
 		case filemode.Dir:
+			// Externalized image assets are opaque binary lifted out of the
+			// (already redaction-skipped) transcript; byte-redacting them would
+			// only corrupt the images. Skip the whole subtree — symmetrically with
+			// rebuildTreeWithCachedRedaction, which preserves it verbatim.
+			if e.Name == assetsDirName {
+				continue
+			}
 			subPath := e.Name
 			if pathPrefix != "" {
 				subPath = pathPrefix + "/" + e.Name
@@ -630,6 +642,13 @@ func rebuildTreeWithCachedRedaction(repo *git.Repository, tree *object.Tree, pat
 	for _, e := range tree.Entries {
 		switch e.Mode {
 		case filemode.Dir:
+			// Preserve externalized image assets verbatim (see collectTreeBlobs):
+			// they are opaque binary and carry no redactable text. Copying the
+			// subtree hash keeps blobs byte-identical so restore still round-trips.
+			if e.Name == assetsDirName {
+				entries = append(entries, e)
+				continue
+			}
 			subPath := e.Name
 			if pathPrefix != "" {
 				subPath = pathPrefix + "/" + e.Name

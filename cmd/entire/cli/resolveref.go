@@ -70,7 +70,7 @@ func resolveOrgRef(ctx context.Context, c *coreapi.Client, ref string) (string, 
 		}
 		return "", err
 	}
-	org, ok := out.Org.Get()
+	org, ok := out.Response.Org.Get()
 	if !ok {
 		return "", noOrgNamedErr(ref)
 	}

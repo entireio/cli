@@ -86,6 +86,16 @@ func (k Kind) IsInvestigate() bool {
 	return k == KindAgentInvestigate
 }
 
+// IsImported reports whether this Kind is a read-only session reconstructed by
+// `entire import` from a pre-existing transcript. Imported sessions are exempt
+// from lifecycle management (staleness, orphan cleanup) and are not
+// resumable/rewindable. Centralized here so those call sites don't couple to
+// the string literal across packages.
+func (k Kind) IsImported() bool {
+	// See IsReview for why this is an equality check rather than a switch.
+	return k == KindImported
+}
+
 // State represents the state of an active session.
 // This is stored in .git/entire-sessions/<session-id>.json
 type State struct {
@@ -481,6 +491,13 @@ func (s *State) OwnerExited() bool {
 }
 
 func (s *State) IsStale() bool {
+	// Imported sessions are historical, read-only records reconstructed from
+	// pre-existing transcripts; their timestamps are always old by nature.
+	// Never auto-purge them or they'd vanish from `entire session list` on the
+	// first read after import.
+	if s.Kind.IsImported() {
+		return false
+	}
 	var since time.Duration
 	if s.LastInteractionTime != nil {
 		since = time.Since(*s.LastInteractionTime)

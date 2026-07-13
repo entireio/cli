@@ -130,46 +130,38 @@ func (c *CursorAgent) InstallHooks(ctx context.Context, localDev bool, force boo
 	subagentStartCmd := cmdPrefix + HookNameSubagentStart
 	subagentEndCmd := cmdPrefix + HookNameSubagentStop
 	if !localDev {
-		sessionStartCmd = agent.WrapProductionSilentHookCommand(sessionStartCmd)
-		sessionEndCmd = agent.WrapProductionSilentHookCommand(sessionEndCmd)
-		beforeSubmitPromptCmd = agent.WrapProductionSilentHookCommand(beforeSubmitPromptCmd)
-		stopCmd = agent.WrapProductionSilentHookCommand(stopCmd)
-		preCompactCmd = agent.WrapProductionSilentHookCommand(preCompactCmd)
-		subagentStartCmd = agent.WrapProductionSilentHookCommand(subagentStartCmd)
-		subagentEndCmd = agent.WrapProductionSilentHookCommand(subagentEndCmd)
+		// Cursor spawns hook commands through the native OS shell (cmd.exe on
+		// Windows), so a `sh -c '…'` wrapper silently fails to launch on a
+		// Windows host without a working POSIX sh — no hook fires and, because
+		// this is the *silent* wrapper, no error surfaces (issue #1424).
+		// UseWindowsProductionHooks probes for a runnable sh and only swaps in
+		// the native cmd.exe wrapper when one is absent, so this is a no-op on
+		// hosts (incl. all non-Windows) where the sh wrapper already works.
+		useWindowsHooks := agent.UseWindowsProductionHooks(ctx, localDev)
+		sessionStartCmd = agent.WrapProductionSilentHookCommandForOS(sessionStartCmd, useWindowsHooks)
+		sessionEndCmd = agent.WrapProductionSilentHookCommandForOS(sessionEndCmd, useWindowsHooks)
+		beforeSubmitPromptCmd = agent.WrapProductionSilentHookCommandForOS(beforeSubmitPromptCmd, useWindowsHooks)
+		stopCmd = agent.WrapProductionSilentHookCommandForOS(stopCmd, useWindowsHooks)
+		preCompactCmd = agent.WrapProductionSilentHookCommandForOS(preCompactCmd, useWindowsHooks)
+		subagentStartCmd = agent.WrapProductionSilentHookCommandForOS(subagentStartCmd, useWindowsHooks)
+		subagentEndCmd = agent.WrapProductionSilentHookCommandForOS(subagentEndCmd, useWindowsHooks)
 	}
 
 	count := 0
 
-	// Add hooks if they don't exist
-	if !hookCommandExists(sessionStart, sessionStartCmd) {
-		sessionStart = append(sessionStart, CursorHookEntry{Command: sessionStartCmd})
-		count++
-	}
-	if !hookCommandExists(sessionEnd, sessionEndCmd) {
-		sessionEnd = append(sessionEnd, CursorHookEntry{Command: sessionEndCmd})
-		count++
-	}
-	if !hookCommandExists(beforeSubmitPrompt, beforeSubmitPromptCmd) {
-		beforeSubmitPrompt = append(beforeSubmitPrompt, CursorHookEntry{Command: beforeSubmitPromptCmd})
-		count++
-	}
-	if !hookCommandExists(stop, stopCmd) {
-		stop = append(stop, CursorHookEntry{Command: stopCmd})
-		count++
-	}
-	if !hookCommandExists(preCompact, preCompactCmd) {
-		preCompact = append(preCompact, CursorHookEntry{Command: preCompactCmd})
-		count++
-	}
-	if !hookCommandExists(subagentStart, subagentStartCmd) {
-		subagentStart = append(subagentStart, CursorHookEntry{Command: subagentStartCmd})
-		count++
-	}
-	if !hookCommandExists(subagentStop, subagentEndCmd) {
-		subagentStop = append(subagentStop, CursorHookEntry{Command: subagentEndCmd})
-		count++
-	}
+	// Sync each hook to its desired command. syncEntireHook replaces any
+	// stale-form Entire hook (e.g. an sh-wrapped entry from a previous install)
+	// with the current command even without --force, so a wrapper-form change —
+	// notably the sh↔cmd.exe migration driven by UseWindowsProductionHooks when
+	// a Windows host gains or loses a working POSIX sh — cleanly replaces rather
+	// than leaving a dead duplicate entry that could double-fire (issue #1424).
+	sessionStart, count = syncEntireHook(sessionStart, sessionStartCmd, count)
+	sessionEnd, count = syncEntireHook(sessionEnd, sessionEndCmd, count)
+	beforeSubmitPrompt, count = syncEntireHook(beforeSubmitPrompt, beforeSubmitPromptCmd, count)
+	stop, count = syncEntireHook(stop, stopCmd, count)
+	preCompact, count = syncEntireHook(preCompact, preCompactCmd, count)
+	subagentStart, count = syncEntireHook(subagentStart, subagentStartCmd, count)
+	subagentStop, count = syncEntireHook(subagentStop, subagentEndCmd, count)
 
 	if count == 0 {
 		return 0, nil
@@ -350,6 +342,21 @@ func marshalCursorHookType(rawHooks map[string]json.RawMessage, hookType string,
 }
 
 // Helper functions for hook management
+
+// syncEntireHook ensures entries contains exactly the given Entire hook command
+// for this hook type. If command is already present it is a no-op. Otherwise any
+// existing Entire hook (in any wrapper form) is removed before appending command,
+// so a changed wrapper form replaces the stale one rather than duplicating it.
+// Non-Entire entries are preserved. count is incremented when a change is made.
+func syncEntireHook(entries []CursorHookEntry, command string, count int) ([]CursorHookEntry, int) {
+	if hookCommandExists(entries, command) {
+		return entries, count
+	}
+	if hasEntireHook(entries) {
+		entries = removeEntireHooks(entries)
+	}
+	return append(entries, CursorHookEntry{Command: command}), count + 1
+}
 
 func hookCommandExists(entries []CursorHookEntry, command string) bool {
 	for _, entry := range entries {
