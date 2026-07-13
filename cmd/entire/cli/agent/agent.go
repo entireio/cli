@@ -209,6 +209,20 @@ type LateTranscriptWriter interface {
 	CountTranscriptPosition(content []byte) int
 }
 
+// SidecarImageProvider is implemented by agents that keep images OUTSIDE the
+// transcript Entire condenses — e.g. Cursor stores pasted images in a per-session
+// SQLite blob store, not the JSONL transcript. The strategy layer calls this
+// during condensation/finalize to capture those images as checkpoint assets so
+// they're preserved with the session. Best-effort: returns nil (no error) when
+// the sidecar store is unavailable or unreadable.
+type SidecarImageProvider interface {
+	Agent
+
+	// SidecarImages returns images stored outside the transcript for the session
+	// identified by sessionRef (the transcript path).
+	SidecarImages(ctx context.Context, sessionRef string) ([]CompactedTranscriptAsset, error)
+}
+
 // TokenCalculator provides token usage calculation for a session.
 // The framework calls this during step save and checkpoint if implemented.
 type TokenCalculator interface {

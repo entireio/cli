@@ -100,7 +100,14 @@ release:
   prerelease: auto
 
 scoops:
-  - repository:
+  # Name the manifest (and therefore the Scoop app directory) "entire". Without
+  # this, goreleaser defaults the manifest name to the project name, which
+  # resolves to the repo name ("cli"), so `scoop install` lands the binary in
+  # …\scoop\apps\cli\current\entire.exe. That mismatched app-dir name is
+  # surprising ("scoop install cli"?) and fed the Windows hook-path bug in
+  # https://github.com/entireio/cli/issues/1424.
+  - name: entire
+    repository:
       owner: entireio
       name: scoop-bucket
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"

@@ -38,8 +38,8 @@ func TestRunCoreList_EmptyHumanMessageOnStdout(t *testing.T) {
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestRunCoreList_EmptyJSONIsArray(t *testing.T) {
 	srv := serveOrgList(t, nil)
-	// org list's --json is persistent on the group root, so drive the full
-	// group command with "list" as a subcommand arg.
+	// Drive the full group command so the test covers Cobra's command-tree
+	// wiring as well as the leaf's local --json flag.
 	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "list", "--json")
 	require.NoError(t, err)
 	require.JSONEq(t, "[]", out, "empty --json list must be [], not null")

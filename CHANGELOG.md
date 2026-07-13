@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.42] - 2026-07-08
+
+### Added
+
+- Cross-region code search (work in progress, behind `ENTIRE_CODE_SEARCH=1`): `--code` and `--case-sensitive` flags on `entire search` plus a Code tab in the search TUI, backed by peregrine. It fans out across mirror placements — listing repos, grouping them by cell, searching each cell in parallel with per-cell timeouts, and merging/deduping results client-side — rather than only hitting the home cell ([#1616](https://github.com/entireio/cli/pull/1616), [#1674](https://github.com/entireio/cli/pull/1674))
+- `entire repo mirror list` gained a `--name` filter (matches the owner/repo form shown in the table) and `--sort` with shell-friendly kebab-case column keys, failing fast on an unknown sort key ([#1665](https://github.com/entireio/cli/pull/1665), [#1679](https://github.com/entireio/cli/pull/1679))
+
+### Changed
+
+- `entire review` no longer imposes a default reviewer timeout — reviewers run until done — while the judge's default rises from 5m to 20m; `--timeout` still governs both ([#1664](https://github.com/entireio/cli/pull/1664))
+- `org`, `project`, `repo`, and `grant` are promoted out of `entire labs` into the visible top-level command surface, so they now appear in `entire --help` (canonical paths unchanged) ([#1672](https://github.com/entireio/cli/pull/1672))
+- git-remote-entire prints an actionable hint when the cluster host is missing, and only suggests `clone` for a complete forge/owner/repo ref ([#1649](https://github.com/entireio/cli/pull/1649))
+
+### Fixed
+
+- `entire repo mirror get` resolves clone URLs via the owning cluster's login server instead of the control-plane core ([#1676](https://github.com/entireio/cli/pull/1676))
+
+### Housekeeping
+
+- Bump aws-actions/configure-aws-credentials from 6.2.1 to 6.2.2 ([#1670](https://github.com/entireio/cli/pull/1670))
+
 ## [0.8.1] - 2026-07-07
 
 ### Added

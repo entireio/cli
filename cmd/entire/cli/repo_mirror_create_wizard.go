@@ -604,7 +604,7 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 	}
 
 	if !outcome.polled {
-		if outcome.created.Empty {
+		if outcome.created.Empty { //nolint:staticcheck // CreatedMirror.Empty deprecated by /repos spec bump; create-flow cleanup tracked separately
 			res.status = mirrorStatusEmpty
 		} else {
 			res.status = mirrorStatusRegistered

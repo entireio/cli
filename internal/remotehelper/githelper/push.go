@@ -42,13 +42,17 @@ import (
 //  6. Send-pack writes a trailing flush + helper-status lines to
 //     stdout; we discard the flush and relay helper-status to git,
 //     then append the blank line that terminates the status batch.
-func handlePush(ctx context.Context, t Transport, firstLine string, opts *Options, stdin *bufio.Reader, stdout io.Writer) error {
+func handlePush(ctx context.Context, t Transport, adv *refAdvCache, firstLine string, opts *Options, stdin *bufio.Reader, stdout io.Writer) error {
 	refspecs, err := readPushBatch(firstLine, stdin)
 	if err != nil {
 		return err
 	}
 
-	refsResp, err := t.InfoRefs(ctx, serviceReceivePack)
+	// Reuse the advertisement "list for-push" already fetched. Re-fetching
+	// here would observe refs the pre-push hook pushed after Git's ref
+	// snapshot, which send-pack reports and Git flags as "unexpected status"
+	// (see refAdvCache / ENCLI-267).
+	refsResp, err := adv.infoRefs(ctx, t, serviceReceivePack)
 	if err != nil {
 		return fmt.Errorf("fetching receive-pack info/refs: %w", err)
 	}

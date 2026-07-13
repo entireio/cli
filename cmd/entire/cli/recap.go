@@ -272,3 +272,19 @@ func currentRepoSlug(ctx context.Context) string {
 	}
 	return owner + "/" + repoName
 }
+
+// currentRepoSlugWithForge is like currentRepoSlug but includes the forge
+// prefix (e.g. "gh/owner/repo", "et/proj/repo") when the remote maps to a
+// known forge. Code search needs this because the repo index FullName may
+// include the forge prefix (especially for Entire forge repos stored as
+// "et/proj/repo").
+func currentRepoSlugWithForge(ctx context.Context) string {
+	forge, owner, repoName, err := gitremote.ResolveRemoteRepo(ctx, "origin")
+	if err != nil || owner == "" || repoName == "" {
+		return ""
+	}
+	if forge != "" {
+		return forge + "/" + owner + "/" + repoName
+	}
+	return owner + "/" + repoName
+}

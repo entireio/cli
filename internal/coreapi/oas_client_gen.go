@@ -33,6 +33,12 @@ type Invoker interface {
 	//
 	// POST /lookup
 	BatchLookup(ctx context.Context, request *BatchLookupInputBody) (*BatchLookupOutputBody, error)
+	// CancelDeletion invokes cancelDeletion operation.
+	//
+	// Cancel a pending deletion request for the calling account.
+	//
+	// POST /me/cancel-deletion
+	CancelDeletion(ctx context.Context) error
 	// CreateBinding invokes createBinding operation.
 	//
 	// Create OIDC binding.
@@ -63,6 +69,12 @@ type Invoker interface {
 	//
 	// POST /repos
 	CreateRepo(ctx context.Context, request *CreateRepoInputBody) (*Repo, error)
+	// CreateRepoCIWebhook invokes createRepoCIWebhook operation.
+	//
+	// Enroll a repo into a CI webhook (Buildkite).
+	//
+	// POST /repos/{repoId}/ci-webhooks
+	CreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (*CIWebhookView, error)
 	// CreateServiceAccount invokes createServiceAccount operation.
 	//
 	// Create service account.
@@ -77,7 +89,7 @@ type Invoker interface {
 	DeleteBinding(ctx context.Context, params DeleteBindingParams) error
 	// DeleteMe invokes deleteMe operation.
 	//
-	// Request deletion of the calling account (7-day cooldown; login cancels).
+	// Request deletion of the calling account (7-day cooldown; cancel via POST /me/cancel-deletion).
 	//
 	// DELETE /me
 	DeleteMe(ctx context.Context) error
@@ -105,12 +117,24 @@ type Invoker interface {
 	//
 	// DELETE /repos/{repoId}
 	DeleteRepo(ctx context.Context, params DeleteRepoParams) error
+	// DeleteRepoCIWebhook invokes deleteRepoCIWebhook operation.
+	//
+	// Delete a repo's CI webhook.
+	//
+	// DELETE /repos/{repoId}/ci-webhooks/{id}
+	DeleteRepoCIWebhook(ctx context.Context, params DeleteRepoCIWebhookParams) error
 	// DeleteServiceAccount invokes deleteServiceAccount operation.
 	//
 	// Delete service account.
 	//
 	// DELETE /service-accounts/{accountId}
 	DeleteServiceAccount(ctx context.Context, params DeleteServiceAccountParams) error
+	// GetDeletionPreview invokes getDeletionPreview operation.
+	//
+	// Preview what deleting the calling account will erase, unlink, and block on.
+	//
+	// GET /me/deletion-preview
+	GetDeletionPreview(ctx context.Context) (*GetDeletionPreviewOutputBody, error)
 	// GetMe invokes getMe operation.
 	//
 	// Get the calling account's identity and profile.
@@ -123,6 +147,12 @@ type Invoker interface {
 	//
 	// GET /mirrors/{mirrorId}
 	GetMirror(ctx context.Context, params GetMirrorParams) (*Mirror, error)
+	// GetOnboardingStatus invokes getOnboardingStatus operation.
+	//
+	// Report whether the calling account still needs to onboard (has no mirror yet).
+	//
+	// GET /me/onboarding
+	GetOnboardingStatus(ctx context.Context) (*GetOnboardingStatusOutputBody, error)
 	// GetOrg invokes getOrg operation.
 	//
 	// Get an organization.
@@ -159,6 +189,12 @@ type Invoker interface {
 	//
 	// GET /service-accounts/{accountId}
 	GetServiceAccount(ctx context.Context, params GetServiceAccountParams) (*ServiceAccount, error)
+	// GetTopology invokes getTopology operation.
+	//
+	// Get the cluster topology as a jurisdiction → region → cluster tree.
+	//
+	// GET /topology
+	GetTopology(ctx context.Context) (*GetTopologyOutputBody, error)
 	// GetVersion invokes getVersion operation.
 	//
 	// Get the server version and mode.
@@ -242,7 +278,7 @@ type Invoker interface {
 	// List organizations the caller can see (or one by name).
 	//
 	// GET /orgs
-	ListOrgs(ctx context.Context, params ListOrgsParams) (*ListOrgsOutputBody, error)
+	ListOrgs(ctx context.Context, params ListOrgsParams) (*ListOrgsOutputBodyHeaders, error)
 	// ListProjectMembers invokes listProjectMembers operation.
 	//
 	// List project members and their roles.
@@ -261,6 +297,12 @@ type Invoker interface {
 	//
 	// GET /projects
 	ListProjects(ctx context.Context, params ListProjectsParams) (*ListProjectsOutputBody, error)
+	// ListRepoCIWebhooks invokes listRepoCIWebhooks operation.
+	//
+	// List a repo's CI webhooks.
+	//
+	// GET /repos/{repoId}/ci-webhooks
+	ListRepoCIWebhooks(ctx context.Context, params ListRepoCIWebhooksParams) (*ListRepoCIWebhooksOutputBody, error)
 	// ListRepoGrants invokes listRepoGrants operation.
 	//
 	// List repo grants.
@@ -272,7 +314,7 @@ type Invoker interface {
 	// List the caller's readable repositories (placement index).
 	//
 	// GET /repos
-	ListRepos(ctx context.Context) (*ListReposOutputBody, error)
+	ListRepos(ctx context.Context, params ListReposParams) (*ListReposOutputBody, error)
 	// ListServiceAccountGrants invokes listServiceAccountGrants operation.
 	//
 	// List service account grants.
@@ -297,6 +339,12 @@ type Invoker interface {
 	//
 	// GET /access/{resourceType}
 	LookupResources(ctx context.Context, params LookupResourcesParams) (*LookupResourcesOutputBody, error)
+	// PatchRepoCIWebhook invokes patchRepoCIWebhook operation.
+	//
+	// Update a repo's CI webhook.
+	//
+	// PATCH /repos/{repoId}/ci-webhooks/{id}
+	PatchRepoCIWebhook(ctx context.Context, request *PatchRepoCIWebhookInputBody, params PatchRepoCIWebhookParams) (*CIWebhookView, error)
 	// RemoveOrgMember invokes removeOrgMember operation.
 	//
 	// Remove a member from an organization.
@@ -345,12 +393,6 @@ type Invoker interface {
 	//
 	// PUT /repos/{repoId}/visibility
 	SetRepoVisibility(ctx context.Context, request *SetRepoVisibilityInputBody, params SetRepoVisibilityParams) (*SetRepoVisibilityOutputBody, error)
-	// UpdateMe invokes updateMe operation.
-	//
-	// Update the calling account's contact email.
-	//
-	// PATCH /me
-	UpdateMe(ctx context.Context, request *UpdateMeInputBody) (*UpdateMeOutputBody, error)
 }
 
 // Client implements OAS client.
@@ -576,6 +618,88 @@ func (c *Client) sendBatchLookup(ctx context.Context, request *BatchLookupInputB
 	defer body.Close()
 
 	result, err := decodeBatchLookupResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// CancelDeletion invokes cancelDeletion operation.
+//
+// Cancel a pending deletion request for the calling account.
+//
+// POST /me/cancel-deletion
+func (c *Client) CancelDeletion(ctx context.Context) error {
+	_, err := c.sendCancelDeletion(ctx)
+	return err
+}
+
+func (c *Client) sendCancelDeletion(ctx context.Context) (res *CancelDeletionOK, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/me/cancel-deletion"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, CancelDeletionOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, CancelDeletionOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeCancelDeletionResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -1027,6 +1151,110 @@ func (c *Client) sendCreateRepo(ctx context.Context, request *CreateRepoInputBod
 	return result, nil
 }
 
+// CreateRepoCIWebhook invokes createRepoCIWebhook operation.
+//
+// Enroll a repo into a CI webhook (Buildkite).
+//
+// POST /repos/{repoId}/ci-webhooks
+func (c *Client) CreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (*CIWebhookView, error) {
+	res, err := c.sendCreateRepoCIWebhook(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendCreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (res *CIWebhookView, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/ci-webhooks"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeCreateRepoCIWebhookRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, CreateRepoCIWebhookOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, CreateRepoCIWebhookOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeCreateRepoCIWebhookResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // CreateServiceAccount invokes createServiceAccount operation.
 //
 // Create service account.
@@ -1233,7 +1461,7 @@ func (c *Client) sendDeleteBinding(ctx context.Context, params DeleteBindingPara
 
 // DeleteMe invokes deleteMe operation.
 //
-// Request deletion of the calling account (7-day cooldown; login cancels).
+// Request deletion of the calling account (7-day cooldown; cancel via POST /me/cancel-deletion).
 //
 // DELETE /me
 func (c *Client) DeleteMe(ctx context.Context) error {
@@ -1241,7 +1469,7 @@ func (c *Client) DeleteMe(ctx context.Context) error {
 	return err
 }
 
-func (c *Client) sendDeleteMe(ctx context.Context) (res *DeleteMeNoContent, err error) {
+func (c *Client) sendDeleteMe(ctx context.Context) (res *DeleteMeAccepted, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [1]string
@@ -1754,6 +1982,145 @@ func (c *Client) sendDeleteRepo(ctx context.Context, params DeleteRepoParams) (r
 	return result, nil
 }
 
+// DeleteRepoCIWebhook invokes deleteRepoCIWebhook operation.
+//
+// Delete a repo's CI webhook.
+//
+// DELETE /repos/{repoId}/ci-webhooks/{id}
+func (c *Client) DeleteRepoCIWebhook(ctx context.Context, params DeleteRepoCIWebhookParams) error {
+	_, err := c.sendDeleteRepoCIWebhook(ctx, params)
+	return err
+}
+
+func (c *Client) sendDeleteRepoCIWebhook(ctx context.Context, params DeleteRepoCIWebhookParams) (res *DeleteRepoCIWebhookNoContent, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [4]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/ci-webhooks/"
+	{
+		// Encode "id" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "id",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ID))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[3] = encoded
+	}
+	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "teardown" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "teardown",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Teardown.Get(); ok {
+				return e.EncodeValue(conv.BoolToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	r, err := ht.NewRequest(ctx, "DELETE", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, DeleteRepoCIWebhookOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, DeleteRepoCIWebhookOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeDeleteRepoCIWebhookResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // DeleteServiceAccount invokes deleteServiceAccount operation.
 //
 // Delete service account.
@@ -1847,6 +2214,88 @@ func (c *Client) sendDeleteServiceAccount(ctx context.Context, params DeleteServ
 	defer body.Close()
 
 	result, err := decodeDeleteServiceAccountResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// GetDeletionPreview invokes getDeletionPreview operation.
+//
+// Preview what deleting the calling account will erase, unlink, and block on.
+//
+// GET /me/deletion-preview
+func (c *Client) GetDeletionPreview(ctx context.Context) (*GetDeletionPreviewOutputBody, error) {
+	res, err := c.sendGetDeletionPreview(ctx)
+	return res, err
+}
+
+func (c *Client) sendGetDeletionPreview(ctx context.Context) (res *GetDeletionPreviewOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/me/deletion-preview"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, GetDeletionPreviewOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, GetDeletionPreviewOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeGetDeletionPreviewResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -2029,6 +2478,88 @@ func (c *Client) sendGetMirror(ctx context.Context, params GetMirrorParams) (res
 	defer body.Close()
 
 	result, err := decodeGetMirrorResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// GetOnboardingStatus invokes getOnboardingStatus operation.
+//
+// Report whether the calling account still needs to onboard (has no mirror yet).
+//
+// GET /me/onboarding
+func (c *Client) GetOnboardingStatus(ctx context.Context) (*GetOnboardingStatusOutputBody, error) {
+	res, err := c.sendGetOnboardingStatus(ctx)
+	return res, err
+}
+
+func (c *Client) sendGetOnboardingStatus(ctx context.Context) (res *GetOnboardingStatusOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/me/onboarding"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, GetOnboardingStatusOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, GetOnboardingStatusOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeGetOnboardingStatusResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -2669,6 +3200,88 @@ func (c *Client) sendGetServiceAccount(ctx context.Context, params GetServiceAcc
 	defer body.Close()
 
 	result, err := decodeGetServiceAccountResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// GetTopology invokes getTopology operation.
+//
+// Get the cluster topology as a jurisdiction → region → cluster tree.
+//
+// GET /topology
+func (c *Client) GetTopology(ctx context.Context) (*GetTopologyOutputBody, error) {
+	res, err := c.sendGetTopology(ctx)
+	return res, err
+}
+
+func (c *Client) sendGetTopology(ctx context.Context) (res *GetTopologyOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/topology"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, GetTopologyOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, GetTopologyOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeGetTopologyResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -4194,12 +4807,12 @@ func (c *Client) sendListOrgProjects(ctx context.Context, params ListOrgProjects
 // List organizations the caller can see (or one by name).
 //
 // GET /orgs
-func (c *Client) ListOrgs(ctx context.Context, params ListOrgsParams) (*ListOrgsOutputBody, error) {
+func (c *Client) ListOrgs(ctx context.Context, params ListOrgsParams) (*ListOrgsOutputBodyHeaders, error) {
 	res, err := c.sendListOrgs(ctx, params)
 	return res, err
 }
 
-func (c *Client) sendListOrgs(ctx context.Context, params ListOrgsParams) (res *ListOrgsOutputBody, err error) {
+func (c *Client) sendListOrgs(ctx context.Context, params ListOrgsParams) (res *ListOrgsOutputBodyHeaders, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [1]string
@@ -4263,6 +4876,22 @@ func (c *Client) sendListOrgs(ctx context.Context, params ListOrgsParams) (res *
 	r, err := ht.NewRequest(ctx, "GET", u)
 	if err != nil {
 		return res, errors.Wrap(err, "create request")
+	}
+
+	h := uri.NewHeaderEncoder(r.Header)
+	{
+		cfg := uri.HeaderParameterEncodingConfig{
+			Name:    "If-None-Match",
+			Explode: false,
+		}
+		if err := h.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.IfNoneMatch.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode header")
+		}
 	}
 
 	{
@@ -4754,6 +5383,107 @@ func (c *Client) sendListProjects(ctx context.Context, params ListProjectsParams
 	return result, nil
 }
 
+// ListRepoCIWebhooks invokes listRepoCIWebhooks operation.
+//
+// List a repo's CI webhooks.
+//
+// GET /repos/{repoId}/ci-webhooks
+func (c *Client) ListRepoCIWebhooks(ctx context.Context, params ListRepoCIWebhooksParams) (*ListRepoCIWebhooksOutputBody, error) {
+	res, err := c.sendListRepoCIWebhooks(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListRepoCIWebhooks(ctx context.Context, params ListRepoCIWebhooksParams) (res *ListRepoCIWebhooksOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/ci-webhooks"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListRepoCIWebhooksOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListRepoCIWebhooksOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListRepoCIWebhooksResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // ListRepoGrants invokes listRepoGrants operation.
 //
 // List repo grants.
@@ -4897,17 +5627,37 @@ func (c *Client) sendListRepoGrants(ctx context.Context, params ListRepoGrantsPa
 // List the caller's readable repositories (placement index).
 //
 // GET /repos
-func (c *Client) ListRepos(ctx context.Context) (*ListReposOutputBody, error) {
-	res, err := c.sendListRepos(ctx)
+func (c *Client) ListRepos(ctx context.Context, params ListReposParams) (*ListReposOutputBody, error) {
+	res, err := c.sendListRepos(ctx, params)
 	return res, err
 }
 
-func (c *Client) sendListRepos(ctx context.Context) (res *ListReposOutputBody, err error) {
+func (c *Client) sendListRepos(ctx context.Context, params ListReposParams) (res *ListReposOutputBody, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [1]string
 	pathParts[0] = "/repos"
 	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "scope" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "scope",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Scope.Get(); ok {
+				return e.EncodeValue(conv.StringToString(string(val)))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
 
 	r, err := ht.NewRequest(ctx, "GET", u)
 	if err != nil {
@@ -5446,6 +6196,128 @@ func (c *Client) sendLookupResources(ctx context.Context, params LookupResources
 	defer body.Close()
 
 	result, err := decodeLookupResourcesResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// PatchRepoCIWebhook invokes patchRepoCIWebhook operation.
+//
+// Update a repo's CI webhook.
+//
+// PATCH /repos/{repoId}/ci-webhooks/{id}
+func (c *Client) PatchRepoCIWebhook(ctx context.Context, request *PatchRepoCIWebhookInputBody, params PatchRepoCIWebhookParams) (*CIWebhookView, error) {
+	res, err := c.sendPatchRepoCIWebhook(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendPatchRepoCIWebhook(ctx context.Context, request *PatchRepoCIWebhookInputBody, params PatchRepoCIWebhookParams) (res *CIWebhookView, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [4]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/ci-webhooks/"
+	{
+		// Encode "id" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "id",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ID))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[3] = encoded
+	}
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "PATCH", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodePatchRepoCIWebhookRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, PatchRepoCIWebhookOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, PatchRepoCIWebhookOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodePatchRepoCIWebhookResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -6497,91 +7369,6 @@ func (c *Client) sendSetRepoVisibility(ctx context.Context, request *SetRepoVisi
 	defer body.Close()
 
 	result, err := decodeSetRepoVisibilityResponse(resp)
-	if err != nil {
-		return res, errors.Wrap(err, "decode response")
-	}
-
-	return result, nil
-}
-
-// UpdateMe invokes updateMe operation.
-//
-// Update the calling account's contact email.
-//
-// PATCH /me
-func (c *Client) UpdateMe(ctx context.Context, request *UpdateMeInputBody) (*UpdateMeOutputBody, error) {
-	res, err := c.sendUpdateMe(ctx, request)
-	return res, err
-}
-
-func (c *Client) sendUpdateMe(ctx context.Context, request *UpdateMeInputBody) (res *UpdateMeOutputBody, err error) {
-
-	u := uri.Clone(c.requestURL(ctx))
-	var pathParts [1]string
-	pathParts[0] = "/me"
-	uri.AddPathParts(u, pathParts[:]...)
-
-	r, err := ht.NewRequest(ctx, "PATCH", u)
-	if err != nil {
-		return res, errors.Wrap(err, "create request")
-	}
-	if err := encodeUpdateMeRequest(request, r); err != nil {
-		return res, errors.Wrap(err, "encode request")
-	}
-
-	{
-		type bitset = [1]uint8
-		var satisfied bitset
-		{
-
-			switch err := c.securityBearerAuth(ctx, UpdateMeOperation, r); {
-			case err == nil: // if NO error
-				satisfied[0] |= 1 << 0
-			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
-				// Skip this security.
-			default:
-				return res, errors.Wrap(err, "security \"BearerAuth\"")
-			}
-		}
-		{
-
-			switch err := c.securitySessionAuth(ctx, UpdateMeOperation, r); {
-			case err == nil: // if NO error
-				satisfied[0] |= 1 << 1
-			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
-				// Skip this security.
-			default:
-				return res, errors.Wrap(err, "security \"SessionAuth\"")
-			}
-		}
-
-		if ok := func() bool {
-		nextRequirement:
-			for _, requirement := range []bitset{
-				{0b00000001},
-				{0b00000010},
-			} {
-				for i, mask := range requirement {
-					if satisfied[i]&mask != mask {
-						continue nextRequirement
-					}
-				}
-				return true
-			}
-			return false
-		}(); !ok {
-			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
-		}
-	}
-
-	resp, err := c.cfg.Client.Do(r)
-	if err != nil {
-		return res, errors.Wrap(err, "do request")
-	}
-	body := resp.Body
-	defer body.Close()
-
-	result, err := decodeUpdateMeResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

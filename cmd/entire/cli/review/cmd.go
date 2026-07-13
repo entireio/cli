@@ -134,11 +134,13 @@ Flags:
   --models       list the models each agent advertises (optionally --agent NAME)
   --profile NAME select a profile (also accepted as positional arg)
   --prompt TEXT  add one-off per-run instructions for this invocation
-  --timeout DUR  max time each reviewer may run before it's cancelled and marked
-                 failed; also bounds the consolidating judge, whose timeout or
-                 error fails the review with no verdict (default 20m; 0 disables
-                 both bounds). A timed-out reviewer's siblings and the judge
-                 still proceed.
+  --timeout DUR  optional hard cap on each reviewer before it's cancelled and
+                 marked failed. No default — reviewers run until they finish,
+                 like a directly-invoked skill. A positive value also bounds
+                 the consolidating judge, which otherwise keeps its own 20m
+                 default (the judge is never unbounded; its timeout or error
+                 fails the review with no verdict). A timed-out reviewer's
+                 siblings and the judge still proceed.
   --base REF     scope against REF instead of mainline. Useful for stacked
                  PRs where the base is the parent feature branch, not main.
                  Default: first existing of origin/HEAD, origin/main,
@@ -223,13 +225,12 @@ To tag an already-finished session as a review, use
 			if findings {
 				return runReviewFindings(ctx, cmd, positionalArg, deps.NewSilentError)
 			}
-			// Map the flag to the RunConfig timeout convention: a non-positive
-			// value (the user passed --timeout 0) means "disable", encoded as the
-			// negative sentinel, which disables BOTH the per-reviewer bound and the
-			// judge's deadline. A positive value passes through and bounds both.
-			// (The flag's default is nonzero, so 0 only appears on --timeout 0.)
-			timeoutArg := resolveReviewerTimeoutArg(reviewTimeout)
-			return runReview(ctx, cmd, agentOverride, modelOverride, baseOverride, profileName, perRunPrompt, timeoutArg, deps)
+			// The flag flows through unmapped: RunConfig.ReviewerTimeout is
+			// two-state (positive = hard cap, anything else = no cap), so the
+			// default 0, an explicit --timeout 0, and a negative all mean
+			// "reviewers run until done". The judge derives its own bound via
+			// judgeTimeoutArg and is never uncapped.
+			return runReview(ctx, cmd, agentOverride, modelOverride, baseOverride, profileName, perRunPrompt, reviewTimeout, deps)
 		},
 	}
 	cmd.Flags().BoolVar(&configure, "configure", false, "set up a review profile; shows available agents and accepts --set-* flags for non-interactive config")
@@ -250,7 +251,7 @@ To tag an already-finished session as a review, use
 	cmd.Flags().StringVar(&profileOverride, "profile", "", "review profile to run (default: review_default_profile or general)")
 	cmd.Flags().StringVar(&perRunPrompt, "prompt", "", "one-off instructions appended to this review run")
 	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)")
-	cmd.Flags().DurationVar(&reviewTimeout, "timeout", defaultReviewerTimeout, "max time each reviewer may run before it is cancelled and marked failed; also bounds the consolidating judge, whose timeout or error fails the review (0 disables both)")
+	cmd.Flags().DurationVar(&reviewTimeout, "timeout", 0, "optional hard cap per reviewer (default: none — reviewers run until they finish, like a skill invoked directly in a session). When set, it also bounds the consolidating judge; unset, the judge keeps its own 20m default")
 	// The listing modes and the action modes each select a distinct command
 	// behavior; combining them silently runs one and drops the rest, so reject
 	// the combination up front with a clear cobra error.
@@ -712,16 +713,14 @@ func reviewAgentNames(deps Deps) []string {
 	return names
 }
 
-// resolveReviewerTimeoutArg maps the --timeout flag value to the RunConfig
-// timeout convention used by reviewerTimeout and the judge's providerContext: a
-// non-positive value (the user passed --timeout 0) becomes the negative
-// "disabled" sentinel; a positive value passes through unchanged. The flag's
-// default is nonzero, so 0 only reaches here when the user explicitly set it.
-func resolveReviewerTimeoutArg(flagValue time.Duration) time.Duration {
-	if flagValue <= 0 {
-		return -1
-	}
-	return flagValue
+// judgeTimeoutArg maps the reviewer --timeout value to the judge's
+// ProviderTimeout. The judge is a single text-generation call with no event
+// stream, so unlike reviewers it always keeps a bound: an explicit positive
+// --timeout governs it, anything else (unset, 0, or a negative like
+// `--timeout -5m`) maps to 0 so the synthesis default (20m) applies — a
+// reviewer-side "no cap" must never leak through as "judge unbounded".
+func judgeTimeoutArg(reviewerArg time.Duration) time.Duration {
+	return max(reviewerArg, 0)
 }
 
 // runReview executes the main review flow.
@@ -1231,7 +1230,7 @@ func runMultiAgentPath(
 		profileName:       profileName,
 		task:              profile.Task,
 		masterName:        masterLabel,
-		judgeTimeout:      timeout,
+		judgeTimeout:      judgeTimeoutArg(timeout),
 		onSynthesisResult: func(result string) {
 			aggregateOutput = result
 		},

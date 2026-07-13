@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -29,7 +30,7 @@ type cellGroup struct {
 	// not report one (the group then routes by jurisdiction, or home).
 	cell string
 	// clusterSlug joins the group to the cluster catalog
-	// (RepoIndexEntry.ClusterSlug ↔ Cluster.Slug) to resolve baseURL. The
+	// (RepoPlacement.ClusterSlug ↔ Cluster.Slug) to resolve baseURL. The
 	// catalog does not expose a cell field, so the slug — not the cell name —
 	// is the only reliable join key. Several clusters may share a cell; any of
 	// them reports the jurisdiction's apiUrl, so the first seen slug serves.
@@ -52,27 +53,60 @@ type cellGroup struct {
 // includes the jurisdiction so entries whose index row carries no cell don't
 // collapse across jurisdictions into one group routed by whichever repo came
 // first — they stay per-jurisdiction and route via the jurisdiction fallback.
+//
+// When a RepoIndexEntry has Placements, each placement is added to the group
+// for its own cell/jurisdiction with its placement-specific repo ID. This
+// ensures mirror placements in other regions (e.g. a US-homed repo with an EU
+// mirror) are searched in both cells — matching the BFF's fan-out behavior.
+// When Placements is empty, the top-level Cell/Jurisdiction/ID are used as
+// before (backward compat for index responses that predate placements).
 func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
 	byCell := make(map[string]*cellGroup)
-	for _, r := range repos {
-		id := strings.TrimSpace(r.ID)
+
+	addToGroup := func(id, cell, jurisdiction, clusterSlug string) {
+		id = strings.TrimSpace(id)
 		if id == "" {
-			continue
+			return
 		}
-		cell := strings.ToLower(strings.TrimSpace(r.Cell))
-		jurisdiction := strings.ToLower(strings.TrimSpace(r.Jurisdiction))
+		cell = strings.ToLower(strings.TrimSpace(cell))
+		jurisdiction = strings.ToLower(strings.TrimSpace(jurisdiction))
+		clusterSlug = strings.ToLower(strings.TrimSpace(clusterSlug))
 		key := cell + "\x00" + jurisdiction
 		g, ok := byCell[key]
 		if !ok {
 			g = &cellGroup{
 				cell:         cell,
-				clusterSlug:  strings.ToLower(strings.TrimSpace(r.ClusterSlug)),
+				clusterSlug:  clusterSlug,
 				jurisdiction: jurisdiction,
 			}
 			byCell[key] = g
 		}
+		// Upgrade an empty slug if a later placement in the same cell provides
+		// one, so a slugless placement doesn't pin the group to jurisdiction
+		// fallback when a sibling could supply the exact catalog join key.
+		if g.clusterSlug == "" && clusterSlug != "" {
+			g.clusterSlug = clusterSlug
+		}
 		g.repoIDs = append(g.repoIDs, id)
 	}
+
+	for _, r := range repos {
+		if len(r.Placements) > 0 {
+			for _, p := range r.Placements {
+				// Each placement carries its own cluster slug, cell, and
+				// jurisdiction (the /repos spec bump; the top-level RepoIndexEntry
+				// fields are deprecated). Route every placement — home and mirror
+				// alike — by its OWN slug so resolveCellBaseURLs can do the exact
+				// catalog join (bySlug), instead of leaving mirrors slugless and
+				// falling back to jurisdiction-default routing, which can query
+				// the wrong cell within a jurisdiction and silently miss a mirror.
+				addToGroup(p.ID, p.Cell, p.Jurisdiction, p.ClusterSlug)
+			}
+		} else {
+			addToGroup(r.ID, r.Cell, r.Jurisdiction, r.ClusterSlug) //nolint:staticcheck // top-level Cell/ClusterSlug deprecated by /repos spec bump; migrate to per-placement fields separately
+		}
+	}
+
 	cells := make([]cellGroup, 0, len(byCell))
 	for _, g := range byCell {
 		cells = append(cells, *g)
@@ -102,11 +136,44 @@ func resolveCellBaseURLs(ctx context.Context, c cellCoreClient, cells []cellGrou
 		return
 	}
 	bySlug := make(map[string]coreapi.Cluster, len(clusters.Clusters))
+	byJurisdiction := make(map[string]coreapi.Cluster, len(clusters.Clusters))
 	for _, cl := range clusters.Clusters {
 		bySlug[strings.ToLower(strings.TrimSpace(cl.Slug))] = cl
+		// Prefer the default cluster per jurisdiction — matches the auth
+		// layer's resolution when routing by jurisdiction alone. A non-default
+		// cluster is kept only when no default has been seen yet.
+		j := strings.ToLower(strings.TrimSpace(cl.Jurisdiction))
+		if j != "" {
+			existing, exists := byJurisdiction[j]
+			if !exists || (cl.IsDefault && !existing.IsDefault) {
+				byJurisdiction[j] = cl
+			}
+		}
 	}
 	for i := range cells {
 		cl, ok := bySlug[cells[i].clusterSlug]
+		if !ok && cells[i].cell != "" {
+			// Try matching the group's cell name against catalog apiUrl
+			// hosts (e.g. cell "aws-eu-central-1" matches
+			// "https://aws-eu-central-1.api.entire.io"). This is more
+			// precise than jurisdiction when a jurisdiction has multiple
+			// cells — mirroring matchClusterByHost in cell_target.go.
+			cl, ok = matchClusterByCellInURL(clusters.Clusters, cells[i].cell)
+		}
+		if !ok && cells[i].jurisdiction != "" {
+			// Last resort: jurisdiction-level fallback using the default
+			// cluster. Less precise, but still routes to the right
+			// jurisdiction when the cell name doesn't appear in any URL.
+			if cl, ok = byJurisdiction[cells[i].jurisdiction]; ok {
+				// This binds the group to the jurisdiction's DEFAULT cluster,
+				// which may not be the cell hosting this placement's repo. If
+				// the placement lives in a non-default cell of the jurisdiction
+				// the query can hit a cell that returns nothing — a silent
+				// mirror miss. Log it so such a miss is diagnosable.
+				logging.Debug(ctx, "cell fan-out: jurisdiction-default fallback used (cell name not in any catalog URL); may mis-route within jurisdiction",
+					"cell", cells[i].cell, "jurisdiction", cells[i].jurisdiction, "resolved_cluster", cl.Slug)
+			}
+		}
 		if !ok {
 			logging.Debug(ctx, "cell fan-out: cluster not in catalog, using jurisdiction routing",
 				"cluster_slug", cells[i].clusterSlug, "cell", cells[i].cell)
@@ -128,6 +195,31 @@ func resolveCellBaseURLs(ctx context.Context, c cellCoreClient, cells []cellGrou
 		cells[i].jurisdiction = jurisdiction
 		cells[i].baseURL = strings.TrimRight(strings.TrimSpace(cl.ApiUrl.Or("")), "/")
 	}
+}
+
+// matchClusterByCellInURL finds a catalog cluster whose ApiUrl or PublicUrl
+// host contains the cell name as a prefix (e.g. cell "aws-eu-central-1"
+// matches "https://aws-eu-central-1.api.entire.io"). This is more precise
+// than a jurisdiction-level fallback when multiple clusters share a
+// jurisdiction — each cluster serves a different cell.
+func matchClusterByCellInURL(clusters []coreapi.Cluster, cell string) (coreapi.Cluster, bool) {
+	prefix := strings.ToLower(strings.TrimSpace(cell)) + "."
+	for _, cl := range clusters {
+		for _, rawURL := range []string{cl.ApiUrl.Or(""), cl.PublicUrl} {
+			rawURL = strings.TrimSpace(rawURL)
+			if rawURL == "" {
+				continue
+			}
+			u, err := url.Parse(rawURL)
+			if err != nil {
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(u.Hostname()), prefix) {
+				return cl, true
+			}
+		}
+	}
+	return coreapi.Cluster{}, false
 }
 
 // cellTarget converts the group's routing coordinates into the auth layer's

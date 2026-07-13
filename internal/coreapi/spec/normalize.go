@@ -6,15 +6,13 @@
 // committed artifact (core.gen.json) that ogen consumes; the upstream
 // file is never mutated, so a refresh is a clean `curl` overwrite.
 //
-// This command applies one transform, documented below. It is a deliberate
-// codegen-ergonomics fold, not a bug workaround — the upstream spec is
-// otherwise accurate (it declares real success codes and non-nullable
-// arrays). The running checklist of upstream fixes lives in
-// internal/coreapi/UPSTREAM.md.
+// This command applies two transforms, documented below. The running
+// checklist of upstream fixes lives in internal/coreapi/UPSTREAM.md.
 //
-// Fold every operation's explicit error responses (4xx/5xx) into a single
-// "default" error, leaving the real success response (201 for creates, 200
-// for reads, 204 for deletes) untouched. The spec declares accurate success
+// Transform 1 (codegen-ergonomics fold, not a bug workaround): fold every
+// operation's explicit error responses (4xx/5xx) into a single "default"
+// error, leaving the real success response (201 for creates, 200 for
+// reads, 204 for deletes) untouched. The spec declares accurate success
 // codes but enumerates each error status separately with no "default"; ogen
 // turns that into a per-operation sum type that forces a type switch at
 // every call site. All error responses reference the same ErrorModel, so
@@ -24,6 +22,17 @@
 // "2XX" range) means ogen returns the success type directly — no
 // `*…StatusCode` wrapper to unwrap. This stays until/unless the spec grows
 // a shared "default" response.
+//
+// Transform 2 (forward-compat, display-only read enums): drop the "enum"
+// constraint from selected read-model string fields (see
+// readModelEnumFields). ogen turns an enum field into a named type with a
+// strict Validate() that the response decoder calls unconditionally, so a
+// single unknown value the server adds later (a new repo state, say) fails
+// the whole list/get request. These fields are display-only on the client —
+// nothing branches on them — so we model them as open strings: unknown
+// values decode and print verbatim instead of aborting the request. Only
+// response read models are loosened; request-body enums stay strict so we
+// still reject a bad value we are about to send.
 //
 // Run via `go generate ./internal/coreapi/...` (the first generate step in
 // gen.go), or by hand after refreshing the spec:
@@ -68,6 +77,7 @@ func run() error {
 	}
 
 	ops := foldErrorResponses(doc)
+	loosened := loosenReadModelEnums(doc)
 
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -80,8 +90,60 @@ func run() error {
 		return fmt.Errorf("write spec: %w", err)
 	}
 
-	fmt.Printf("normalize: folded error responses on %d operation(s) → %s\n", ops, outPath)
+	fmt.Printf("normalize: folded error responses on %d operation(s), loosened %d read-model enum field(s) → %s\n", ops, loosened, outPath)
 	return nil
+}
+
+// readModelEnumFields lists the response read-model schema fields whose
+// "enum" constraint is dropped by loosenReadModelEnums, keyed by component
+// schema name. These are display-only on the client: the CLI prints them
+// but never branches on their value, so a value the server adds later must
+// pass through rather than fail the whole request in ogen's Validate().
+//
+// Only response read models belong here. Request-body schemas (e.g.
+// SetRepoVisibilityInputBody) keep their enums so we still reject a bad
+// value before sending it.
+var readModelEnumFields = map[string][]string{
+	"Repo": {"objectFormat", "state", "visibility"},
+}
+
+// loosenReadModelEnums deletes the "enum" key from each field named in
+// readModelEnumFields, leaving `type: string`. Without an enum, ogen emits a
+// plain string with no Validate() method, so an unknown server value decodes
+// and displays instead of aborting the request. Returns the number of fields
+// loosened; a missing schema or field is skipped (a spec refresh that renames
+// or removes one simply loosens nothing there).
+func loosenReadModelEnums(doc map[string]any) int {
+	components, ok := doc["components"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	schemas, ok := components["schemas"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	count := 0
+	for schemaName, fields := range readModelEnumFields {
+		schema, ok := schemas[schemaName].(map[string]any)
+		if !ok {
+			continue
+		}
+		props, ok := schema["properties"].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, field := range fields {
+			prop, ok := props[field].(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, had := prop["enum"]; had {
+				delete(prop, "enum")
+				count++
+			}
+		}
+	}
+	return count
 }
 
 // httpMethods is the set of OpenAPI path-item keys that are operations.

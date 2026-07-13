@@ -36,6 +36,13 @@ const (
 	CheckpointFileName        = "checkpoint.json"
 	ContentHashFileName       = "content_hash.txt"
 	SettingsFileName          = "settings.json"
+
+	// AssetsDir is the per-session subfolder holding externalized transcript
+	// assets (e.g. images); AssetsManifestFile indexes them. AssetsDirName is the
+	// bare tree-entry name (no trailing slash) used when walking git trees.
+	AssetsDirName      = "assets"
+	AssetsDir          = "assets/"
+	AssetsManifestFile = "assets/manifest.json"
 )
 
 // MetadataBranchName is the orphan branch used by manual-commit strategy to store metadata
