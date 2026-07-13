@@ -649,7 +649,7 @@ func TestAntigravityFatalFromLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msg, fatal := antigravityFatalFromLogs(time.Now().Add(-time.Minute))
+	msg, fatal := antigravityFatalFromLogs(time.Now().Add(-time.Minute), t.TempDir())
 	if !fatal {
 		t.Fatal("quota wall in agy CLI log must be detected as fatal")
 	}
@@ -658,9 +658,42 @@ func TestAntigravityFatalFromLogs(t *testing.T) {
 	}
 
 	// Logs older than `since` must be ignored (stale walls from prior runs).
-	_, fatalOld := antigravityFatalFromLogs(time.Now().Add(time.Hour))
+	_, fatalOld := antigravityFatalFromLogs(time.Now().Add(time.Hour), t.TempDir())
 	if fatalOld {
 		t.Error("log files older than the prompt start must not be considered")
+	}
+}
+
+// TestAntigravityFatalFromLogs_ADCIsolatedHome pins the ADC-mode path: with
+// GOOGLE_APPLICATION_CREDENTIALS set, agy runs with HOME redirected to the
+// per-repo test home (antigravityTestHomeDir), so its cli-*.log files land
+// there — NOT under the harness process's real HOME. The log peek must look
+// in the same isolated home or a CI quota wall is misclassified as transient
+// and retried into.
+func TestAntigravityFatalFromLogs_ADCIsolatedHome(t *testing.T) {
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repoDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	credsPath := filepath.Join(t.TempDir(), "adc.json")
+	if err := os.WriteFile(credsPath, []byte(`{"project_id":"p"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsPath)
+	t.Setenv("E2E_ANTIGRAVITY_LOG_DIR", "")
+
+	logDir := filepath.Join(antigravityTestHomeDir(repoDir), ".gemini", "antigravity-cli", "log")
+	if err := os.MkdirAll(logDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	logLine := "E0703 15:23:40.1 log.go:398] RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 1h46m10s.\n"
+	if err := os.WriteFile(filepath.Join(logDir, "cli-20260703_152340.log"), []byte(logLine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, fatal := antigravityFatalFromLogs(time.Now().Add(-time.Minute), repoDir)
+	if !fatal {
+		t.Fatal("ADC-mode quota wall in the isolated home's agy CLI log must be detected as fatal")
 	}
 }
 

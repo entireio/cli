@@ -102,8 +102,8 @@ jobs:
             exit 1
           fi
           creds="$RUNNER_TEMP/antigravity-google-credentials.json"
+          install -m 600 /dev/null "$creds"
           printf '%s' "$ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON" > "$creds"
-          chmod 600 "$creds"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$creds" >> "$GITHUB_ENV"
 
       - name: Bootstrap agent

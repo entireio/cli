@@ -131,11 +131,11 @@ func antigravityFatalError(content string) (string, bool) {
 // ~/.gemini/antigravity-cli/log/cli-*.log. Without this peek the harness
 // classifies the quota wall as transient and retries into it.
 // E2E_ANTIGRAVITY_LOG_DIR overrides the directory (tests).
-func antigravityFatalFromLogs(since time.Time) (string, bool) {
+func antigravityFatalFromLogs(since time.Time, repoDir string) (string, bool) {
 	dir := os.Getenv("E2E_ANTIGRAVITY_LOG_DIR")
 	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
+		home := antigravityHomeDir(repoDir)
+		if home == "" {
 			return "", false
 		}
 		dir = filepath.Join(home, ".gemini", "antigravity-cli", "log")
@@ -229,7 +229,7 @@ func (a *Antigravity) RunPrompt(ctx context.Context, dir string, prompt string, 
 		// The stdout/stderr surface can be clean while the wall is only in
 		// agy's CLI log (headless quota exhaustion). Peek before letting the
 		// error be classified transient.
-		if logMsg, fatal := antigravityFatalFromLogs(startedAt); fatal {
+		if logMsg, fatal := antigravityFatalFromLogs(startedAt, dir); fatal {
 			err = fmt.Errorf("%s (%w)", logMsg, err)
 		}
 	}
@@ -458,16 +458,26 @@ func antigravityTestHomeDir(repoDir string) string {
 	return filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-antigravity-home")
 }
 
-func antigravityBrainDir(repoDir string) string {
-	var homeDir string
+// antigravityHomeDir resolves the HOME the agy subprocess actually ran with:
+// the per-repo isolated test home in ADC mode (antigravityPromptEnvFrom sets
+// HOME=antigravityTestHomeDir), the developer's real HOME otherwise. Every
+// path that peeks at agy's on-disk state (brain, CLI logs) must go through
+// this, or ADC-mode runs read the wrong tree.
+func antigravityHomeDir(repoDir string) string {
 	if antigravityHasADCCredentials(os.Environ()) {
-		homeDir = antigravityTestHomeDir(repoDir)
-	} else {
-		var err error
-		homeDir, err = os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
+		return antigravityTestHomeDir(repoDir)
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return homeDir
+}
+
+func antigravityBrainDir(repoDir string) string {
+	homeDir := antigravityHomeDir(repoDir)
+	if homeDir == "" {
+		return ""
 	}
 	return filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain")
 }

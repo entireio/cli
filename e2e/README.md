@@ -105,7 +105,7 @@ To diagnose: read `console.log` in the failing test's artifact directory. Compar
 
 ## CI Workflows
 
-- **`.github/workflows/e2e.yml`** — Runs full suite on push to main. Matrix: `[claude-code, opencode, gemini-cli, antigravity, codex, cursor-cli, factoryai-droid, copilot-cli]`.
+- **`.github/workflows/e2e.yml`** — Runs full suite on push to main. Default matrix: `[claude-code, opencode, gemini-cli, codex, cursor-cli, factoryai-droid, copilot-cli, roger-roger]`. Antigravity is **not** in the push-run matrix — it is `workflow_dispatch`-only (select it via the `agent` input) because of the entitlement caveat above.
 - **`.github/workflows/e2e-isolated.yml`** — Manual dispatch for debugging a single test. Inputs: agent + test name filter.
 
 Both workflows run `go run ./e2e/bootstrap` before tests to handle agent-specific CI setup (auth config, warmup).
