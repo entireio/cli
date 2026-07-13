@@ -421,7 +421,7 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 	// suspended placement never serves, so it is deliberately not cached.
 	if !created.Suspended {
 		slugOwner, slugRepo := githubSlug(owner, repo)
-		defaultMirrorProbeCache().put(slugOwner+"/"+slugRepo, true, time.Now())
+		defaultMirrorProbeCache().put(slugOwner+"/"+slugRepo, mirrorProbeResult{Mirrored: true}, time.Now())
 	}
 	outcome := mirrorCreateOutcome{created: created}
 	if created.Suspended {

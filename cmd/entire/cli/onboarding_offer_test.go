@@ -34,8 +34,10 @@ func (f *fakeConnectState) deps() onboardingRungDeps {
 		resolveOrigin: func(context.Context) (string, string, string, error) {
 			return "gh", testOwnerAcme, testRepoAPI, nil
 		},
-		authed:      func(context.Context) bool { return f.loggedIn },
-		probeMirror: func(context.Context, string, string) (bool, error) { return f.mirrored, nil },
+		authed: func(context.Context) bool { return f.loggedIn },
+		probeMirror: func(context.Context, string, string) (mirrorProbeResult, error) {
+			return mirrorProbeResult{Mirrored: f.mirrored}, nil
+		},
 		discoverImports: func(context.Context) ([]agentImportStatus, error) {
 			return nil, nil // no history: import rung not applicable
 		},

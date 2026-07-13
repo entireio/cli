@@ -30,7 +30,9 @@ const (
 	StateDone
 	// StateMissing means the rung is actionable now.
 	StateMissing
-	// StateBlocked means a prerequisite rung is missing (e.g. mirror needs login).
+	// StateBlocked means the rung cannot be fixed by an offer right now:
+	// a prerequisite rung is missing (e.g. mirror needs login), or recovery
+	// is out of the user's hands (e.g. an admin-suspended mirror).
 	StateBlocked
 	// StateNotApplicable means the rung does not apply here (e.g. non-GitHub origin).
 	StateNotApplicable

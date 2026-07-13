@@ -38,6 +38,7 @@ func defaultMirrorProbeCache() mirrorProbeCache {
 
 type mirrorProbeEntry struct {
 	Mirrored    bool      `json:"mirrored"`
+	Suspended   bool      `json:"suspended,omitempty"`
 	Unreachable bool      `json:"unreachable,omitempty"`
 	CheckedAt   time.Time `json:"checked_at"`
 }
@@ -46,23 +47,23 @@ func (c mirrorProbeCache) shell() jsonFileCache[mirrorProbeEntry] {
 	return jsonFileCache[mirrorProbeEntry]{path: c.path}
 }
 
-func (c mirrorProbeCache) get(slug string, now time.Time) (mirrored, unreachable, ok bool) {
+func (c mirrorProbeCache) get(slug string, now time.Time) (probe mirrorProbeResult, unreachable, ok bool) {
 	entry, found := c.shell().load()[slug]
 	if !found {
-		return false, false, false
+		return mirrorProbeResult{}, false, false
 	}
 	ttl := c.ttl
 	if entry.Unreachable {
 		ttl = c.failureTTL
 	}
 	if now.Sub(entry.CheckedAt) > ttl {
-		return false, false, false
+		return mirrorProbeResult{}, false, false
 	}
-	return entry.Mirrored, entry.Unreachable, true
+	return mirrorProbeResult{Mirrored: entry.Mirrored, Suspended: entry.Suspended}, entry.Unreachable, true
 }
 
-func (c mirrorProbeCache) put(slug string, mirrored bool, now time.Time) {
-	c.write(slug, mirrorProbeEntry{Mirrored: mirrored, CheckedAt: now})
+func (c mirrorProbeCache) put(slug string, probe mirrorProbeResult, now time.Time) {
+	c.write(slug, mirrorProbeEntry{Mirrored: probe.Mirrored, Suspended: probe.Suspended, CheckedAt: now})
 }
 
 func (c mirrorProbeCache) putUnreachable(slug string, now time.Time) {

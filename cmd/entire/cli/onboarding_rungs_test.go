@@ -227,11 +227,11 @@ func TestMirrorRung_DoneWhenMirrored(t *testing.T) {
 			return "gh", "Acme", "API", nil // mixed case from remote URL
 		},
 		authed: func(context.Context) bool { return true },
-		probeMirror: func(_ context.Context, owner, repo string) (bool, error) {
+		probeMirror: func(_ context.Context, owner, repo string) (mirrorProbeResult, error) {
 			if owner != testOwnerAcme || repo != testRepoAPI {
 				t.Errorf("probeMirror(%q, %q), want lowercased acme/api", owner, repo)
 			}
-			return true, nil
+			return mirrorProbeResult{Mirrored: true}, nil
 		},
 	}
 
@@ -251,8 +251,10 @@ func TestMirrorRung_MissingWhenNotMirrored(t *testing.T) {
 		resolveOrigin: func(context.Context) (string, string, string, error) {
 			return "gh", testOwnerAcme, testRepoAPI, nil
 		},
-		authed:      func(context.Context) bool { return true },
-		probeMirror: func(context.Context, string, string) (bool, error) { return false, nil },
+		authed: func(context.Context) bool { return true },
+		probeMirror: func(context.Context, string, string) (mirrorProbeResult, error) {
+			return mirrorProbeResult{}, nil
+		},
 	}
 
 	check := mirrorRung(deps).Check(context.Background())
@@ -265,14 +267,41 @@ func TestMirrorRung_MissingWhenNotMirrored(t *testing.T) {
 	}
 }
 
+// A suspended mirror is registered but never serves. The rung must not show
+// it as done (a green checkmark masking the breakage) nor as missing
+// (re-offering a create that cannot fix it — recovery is operator-side).
+func TestMirrorRung_SuspendedMirrorIsBlocked(t *testing.T) {
+	t.Parallel()
+	deps := onboardingRungDeps{
+		resolveOrigin: func(context.Context) (string, string, string, error) {
+			return "gh", testOwnerAcme, testRepoAPI, nil
+		},
+		authed: func(context.Context) bool { return true },
+		probeMirror: func(context.Context, string, string) (mirrorProbeResult, error) {
+			return mirrorProbeResult{Mirrored: true, Suspended: true}, nil
+		},
+	}
+
+	check := mirrorRung(deps).Check(context.Background())
+
+	if check.State != onboarding.StateBlocked {
+		t.Errorf("State = %v, want StateBlocked for a suspended mirror", check.State)
+	}
+	if !strings.Contains(check.Detail, "suspended") {
+		t.Errorf("Detail = %q, want it to say the mirror is suspended", check.Detail)
+	}
+}
+
 func TestMirrorRung_UnknownWhenProbeFails(t *testing.T) {
 	t.Parallel()
 	deps := onboardingRungDeps{
 		resolveOrigin: func(context.Context) (string, string, string, error) {
 			return "gh", testOwnerAcme, testRepoAPI, nil
 		},
-		authed:      func(context.Context) bool { return true },
-		probeMirror: func(context.Context, string, string) (bool, error) { return false, errors.New("timeout") },
+		authed: func(context.Context) bool { return true },
+		probeMirror: func(context.Context, string, string) (mirrorProbeResult, error) {
+			return mirrorProbeResult{}, errors.New("timeout")
+		},
 	}
 
 	check := mirrorRung(deps).Check(context.Background())
@@ -398,10 +427,16 @@ func TestMirrorProbeCache_RoundTripAndTTL(t *testing.T) {
 		t.Error("empty cache should miss")
 	}
 
-	cache.put("acme/api", true, now)
-	mirrored, _, ok := cache.get("acme/api", now.Add(5*time.Minute))
-	if !ok || !mirrored {
-		t.Errorf("fresh entry: get = (%v, %v), want (true, true)", mirrored, ok)
+	cache.put("acme/api", mirrorProbeResult{Mirrored: true}, now)
+	probe, _, ok := cache.get("acme/api", now.Add(5*time.Minute))
+	if !ok || !probe.Mirrored {
+		t.Errorf("fresh entry: get = (%+v, %v), want mirrored hit", probe, ok)
+	}
+
+	cache.put("acme/stuck", mirrorProbeResult{Mirrored: true, Suspended: true}, now)
+	probe, _, ok = cache.get("acme/stuck", now.Add(5*time.Minute))
+	if !ok || !probe.Suspended {
+		t.Errorf("suspended entry: get = (%+v, %v), want suspension to survive the round-trip", probe, ok)
 	}
 
 	if _, _, ok := cache.get("acme/api", now.Add(16*time.Minute)); ok {
@@ -426,18 +461,53 @@ func TestMirrorProbeCache_CorruptFileIsAMiss(t *testing.T) {
 	}
 	// And put should recover by rewriting the file.
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
-	cache.put("acme/api", false, now)
-	mirrored, _, ok := cache.get("acme/api", now)
-	if !ok || mirrored {
-		t.Errorf("after recovery put: get = (%v, %v), want (false, true)", mirrored, ok)
+	cache.put("acme/api", mirrorProbeResult{}, now)
+	probe, _, ok := cache.get("acme/api", now)
+	if !ok || probe.Mirrored {
+		t.Errorf("after recovery put: get = (%+v, %v), want not-mirrored hit", probe, ok)
 	}
 }
 
 type fakeMirrorLister struct {
 	origin   string
 	mirrored map[string]bool // slug -> mirrored
-	err      error
-	calls    int
+	// placements overrides the ListMirrors answer per slug; a nil map
+	// reports one ready placement for every mirrored slug.
+	placements     map[string][]coreapi.MirrorStatus
+	err            error
+	listMirrorsErr error
+	calls          int
+}
+
+func (f *fakeMirrorLister) ListMirrors(_ context.Context, params coreapi.ListMirrorsParams) (*coreapi.ListMirrorsOutputBody, error) {
+	if f.listMirrorsErr != nil {
+		return nil, f.listMirrorsErr
+	}
+	placements := f.placements
+	if placements == nil {
+		placements = map[string][]coreapi.MirrorStatus{}
+		for slug, mirrored := range f.mirrored {
+			if mirrored {
+				placements[slug] = []coreapi.MirrorStatus{coreapi.MirrorStatusReady}
+			}
+		}
+	}
+	owner, _ := params.Owner.Get()
+	out := &coreapi.ListMirrorsOutputBody{}
+	for slug, statuses := range placements {
+		parts := strings.SplitN(slug, "/", 2)
+		if parts[0] != owner {
+			continue
+		}
+		for _, status := range statuses {
+			out.Mirrors = append(out.Mirrors, coreapi.Mirror{
+				Owner:  parts[0],
+				Repo:   parts[1],
+				Status: coreapi.NewOptMirrorStatus(status),
+			})
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeMirrorLister) ListAvailableMirrors(_ context.Context, params coreapi.ListAvailableMirrorsParams) (*coreapi.ListAvailableMirrorsOutputBody, error) {
@@ -473,9 +543,9 @@ func TestProbeMirrorAcross_FindsMirrorOnSecondCore(t *testing.T) {
 	active := &fakeMirrorLister{origin: "https://eu.core", mirrored: map[string]bool{}}
 	cluster := &fakeMirrorLister{origin: "https://us.core", mirrored: map[string]bool{"acme/api": true}}
 
-	mirrored, err := probeMirrorAcross(context.Background(), []availableMirrorLister{active, cluster}, "acme", "api")
-	if err != nil || !mirrored {
-		t.Errorf("probeMirrorAcross = (%v, %v), want (true, nil)", mirrored, err)
+	probe, err := probeMirrorAcross(context.Background(), []mirrorProbeClient{active, cluster}, "acme", "api")
+	if err != nil || !probe.Mirrored {
+		t.Errorf("probeMirrorAcross = (%+v, %v), want mirrored", probe, err)
 	}
 }
 
@@ -484,9 +554,9 @@ func TestProbeMirrorAcross_DedupesSameOrigin(t *testing.T) {
 	a := &fakeMirrorLister{origin: "https://us.core", mirrored: map[string]bool{}}
 	b := &fakeMirrorLister{origin: "https://us.core", mirrored: map[string]bool{}}
 
-	mirrored, err := probeMirrorAcross(context.Background(), []availableMirrorLister{a, b}, "acme", "api")
-	if err != nil || mirrored {
-		t.Errorf("probeMirrorAcross = (%v, %v), want (false, nil)", mirrored, err)
+	probe, err := probeMirrorAcross(context.Background(), []mirrorProbeClient{a, b}, "acme", "api")
+	if err != nil || probe.Mirrored {
+		t.Errorf("probeMirrorAcross = (%+v, %v), want not mirrored", probe, err)
 	}
 	if a.calls+b.calls != 1 {
 		t.Errorf("same-origin cores queried %d times, want 1", a.calls+b.calls)
@@ -498,7 +568,7 @@ func TestProbeMirrorAcross_AllCoresFailingIsAnError(t *testing.T) {
 	a := &fakeMirrorLister{origin: "https://us.core", err: errors.New("offline")}
 	b := &fakeMirrorLister{origin: "https://eu.core", err: errors.New("offline")}
 
-	if _, err := probeMirrorAcross(context.Background(), []availableMirrorLister{a, b}, "acme", "api"); err == nil {
+	if _, err := probeMirrorAcross(context.Background(), []mirrorProbeClient{a, b}, "acme", "api"); err == nil {
 		t.Error("want error when every core is unreachable")
 	}
 }
@@ -508,9 +578,62 @@ func TestProbeMirrorAcross_PartialFailureStillAnswers(t *testing.T) {
 	broken := &fakeMirrorLister{origin: "https://eu.core", err: errors.New("offline")}
 	working := &fakeMirrorLister{origin: "https://us.core", mirrored: map[string]bool{"acme/api": true}}
 
-	mirrored, err := probeMirrorAcross(context.Background(), []availableMirrorLister{broken, working}, "acme", "api")
-	if err != nil || !mirrored {
-		t.Errorf("probeMirrorAcross = (%v, %v), want (true, nil) from the reachable core", mirrored, err)
+	probe, err := probeMirrorAcross(context.Background(), []mirrorProbeClient{broken, working}, "acme", "api")
+	if err != nil || !probe.Mirrored {
+		t.Errorf("probeMirrorAcross = (%+v, %v), want mirrored from the reachable core", probe, err)
+	}
+}
+
+// ListAvailableMirrors cannot express suspension — its status enum stops at
+// "mirrored" — so a suspended placement reads as mirrored there. The probe
+// must consult the mirrors themselves; otherwise the checklist shows a green
+// "Repo mirrored" for a placement that will never serve.
+func TestProbeMirrorAcross_SuspendedPlacementIsReported(t *testing.T) {
+	t.Parallel()
+	core := &fakeMirrorLister{
+		origin:     "https://us.core",
+		mirrored:   map[string]bool{"acme/api": true},
+		placements: map[string][]coreapi.MirrorStatus{"acme/api": {coreapi.MirrorStatusSuspended}},
+	}
+
+	probe, err := probeMirrorAcross(context.Background(), []mirrorProbeClient{core}, "acme", "api")
+	if err != nil || !probe.Mirrored || !probe.Suspended {
+		t.Errorf("probeMirrorAcross = (%+v, %v), want mirrored and suspended", probe, err)
+	}
+}
+
+// A repo can have placements on several clusters; the rung is only stuck when
+// every one of them is suspended — any healthy placement still serves.
+func TestProbeMirrorAcross_AnyHealthyPlacementIsNotSuspended(t *testing.T) {
+	t.Parallel()
+	core := &fakeMirrorLister{
+		origin:   "https://us.core",
+		mirrored: map[string]bool{"acme/api": true},
+		placements: map[string][]coreapi.MirrorStatus{
+			"acme/api": {coreapi.MirrorStatusSuspended, coreapi.MirrorStatusReady},
+		},
+	}
+
+	probe, err := probeMirrorAcross(context.Background(), []mirrorProbeClient{core}, "acme", "api")
+	if err != nil || !probe.Mirrored || probe.Suspended {
+		t.Errorf("probeMirrorAcross = (%+v, %v), want mirrored and not suspended", probe, err)
+	}
+}
+
+// The suspension read is a best-effort refinement of an answer we already
+// have. If it fails, the probe must not degrade "mirrored" into an error or
+// a false "suspended" — it reports the placement as healthy.
+func TestProbeMirrorAcross_SuspensionCheckFailsOpen(t *testing.T) {
+	t.Parallel()
+	core := &fakeMirrorLister{
+		origin:         "https://us.core",
+		mirrored:       map[string]bool{"acme/api": true},
+		listMirrorsErr: errors.New("boom"),
+	}
+
+	probe, err := probeMirrorAcross(context.Background(), []mirrorProbeClient{core}, "acme", "api")
+	if err != nil || !probe.Mirrored || probe.Suspended {
+		t.Errorf("probeMirrorAcross = (%+v, %v), want mirrored and not suspended on check failure", probe, err)
 	}
 }
 
@@ -584,12 +707,12 @@ func TestMirrorProbeCache_ClearUnreachable(t *testing.T) {
 	t.Parallel()
 	cache := mirrorProbeCache{path: filepath.Join(t.TempDir(), "mirror.json"), ttl: 15 * time.Minute, failureTTL: 5 * time.Minute}
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
-	cache.put("acme/api", true, now)
+	cache.put("acme/api", mirrorProbeResult{Mirrored: true}, now)
 	cache.putUnreachable("acme/other", now)
 
 	cache.clearUnreachable()
 
-	if mirrored, _, ok := cache.get("acme/api", now); !ok || !mirrored {
+	if probe, _, ok := cache.get("acme/api", now); !ok || !probe.Mirrored {
 		t.Error("clearUnreachable must keep successful results")
 	}
 	if _, _, ok := cache.get("acme/other", now); ok {

@@ -40,8 +40,9 @@ type onboardingRungDeps struct {
 	// authed reports whether a usable login exists, without prompting.
 	authed func(ctx context.Context) bool
 	// probeMirror reports whether owner/repo is mirrored on any reachable
-	// core (production: cached, multi-core — see probeRepoMirrored).
-	probeMirror func(ctx context.Context, owner, repo string) (bool, error)
+	// core, and whether that mirror is suspended (production: cached,
+	// multi-core — see probeRepoMirrored).
+	probeMirror func(ctx context.Context, owner, repo string) (mirrorProbeResult, error)
 	// discoverImports reports per-agent local history discoverable for this
 	// repo and how much of it has not been imported yet. Local-only.
 	discoverImports func(ctx context.Context) ([]agentImportStatus, error)
@@ -93,9 +94,18 @@ func githubSlug(owner, repo string) (slugOwner, slugRepo string) {
 
 // availableMirrorLister is the subset of *coreapi.Client's methods the mirror
 // probe needs; a seam so probeMirrorAcross is testable without a control plane.
-type availableMirrorLister interface {
+type mirrorProbeClient interface {
 	ListAvailableMirrors(ctx context.Context, params coreapi.ListAvailableMirrorsParams) (*coreapi.ListAvailableMirrorsOutputBody, error)
+	mirrorLister
 	CoreOrigin() string
+}
+
+// mirrorProbeResult is the mirror rung's ground truth. Mirrored alone is not
+// "done": a registered placement can be admin-suspended, in which case it
+// never serves and recovery is operator-side.
+type mirrorProbeResult struct {
+	Mirrored  bool
+	Suspended bool
 }
 
 // probeMirrorAcross asks each distinct core (deduped by origin) whether
@@ -104,7 +114,7 @@ type availableMirrorLister interface {
 // different federations, and a mirror created on one is invisible to the
 // other — probing only one would leave the rung re-offering creation
 // forever. Errors matter only when every core is unreachable.
-func probeMirrorAcross(ctx context.Context, clients []availableMirrorLister, owner, repo string) (bool, error) {
+func probeMirrorAcross(ctx context.Context, clients []mirrorProbeClient, owner, repo string) (mirrorProbeResult, error) {
 	seen := map[string]bool{}
 	var lastErr error
 	answered := false
@@ -124,7 +134,10 @@ func probeMirrorAcross(ctx context.Context, clients []availableMirrorLister, own
 		for _, m := range out.Available {
 			if strings.EqualFold(m.Owner, owner) && strings.EqualFold(m.Repo, repo) &&
 				m.Status == coreapi.AvailableMirrorStatusMirrored {
-				return true, nil
+				return mirrorProbeResult{
+					Mirrored:  true,
+					Suspended: mirrorSuspendedOn(ctx, client, owner, repo),
+				}, nil
 			}
 		}
 	}
@@ -132,9 +145,34 @@ func probeMirrorAcross(ctx context.Context, clients []availableMirrorLister, own
 		if lastErr == nil {
 			lastErr = errors.New("no control-plane core reachable")
 		}
-		return false, fmt.Errorf("probe mirrors: %w", lastErr)
+		return mirrorProbeResult{}, fmt.Errorf("probe mirrors: %w", lastErr)
 	}
-	return false, nil
+	return mirrorProbeResult{}, nil
+}
+
+// mirrorSuspendedOn reports whether every placement of owner/repo visible on
+// this core is suspended. ListAvailableMirrors cannot express suspension —
+// its status enum stops at "mirrored" — so a suspended placement reads as
+// mirrored there; this follow-up read of the mirrors themselves keeps the
+// checklist from showing a green rung for a mirror that will never serve.
+// Best-effort and fail-open: an error, an absent status, or a listing that
+// doesn't surface the placement all count as not suspended, so the probe's
+// mirrored answer never degrades.
+func mirrorSuspendedOn(ctx context.Context, client mirrorLister, owner, repo string) bool {
+	mirrors, err := listMirrorsForRepo(ctx, client, mirrorCloneProviderGitHub, owner, repo)
+	if err != nil {
+		logging.Debug(ctx, "onboarding: mirror suspension check failed", "error", err)
+		return false
+	}
+	if len(mirrors) == 0 {
+		return false
+	}
+	for _, m := range mirrors {
+		if m.Status.Or("") != coreapi.MirrorStatusSuspended {
+			return false
+		}
+	}
+	return true
 }
 
 // probeRepoMirrored checks whether owner/repo has a mirror on the active
@@ -143,32 +181,32 @@ func probeMirrorAcross(ctx context.Context, clients []availableMirrorLister, own
 // round-trip on every run. Failures are cached briefly too, so an offline
 // terminal doesn't hang on every invocation. Owner/repo arrive lowercased
 // from the mirror rung.
-func probeRepoMirrored(ctx context.Context, owner, repo string) (bool, error) {
+func probeRepoMirrored(ctx context.Context, owner, repo string) (mirrorProbeResult, error) {
 	slug := owner + "/" + repo
 	cache := defaultMirrorProbeCache()
 	now := time.Now()
-	if mirrored, unreachable, ok := cache.get(slug, now); ok {
+	if probe, unreachable, ok := cache.get(slug, now); ok {
 		if unreachable {
-			return false, errors.New("control plane unreachable (cached)")
+			return mirrorProbeResult{}, errors.New("control plane unreachable (cached)")
 		}
-		return mirrored, nil
+		return probe, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, mirrorProbeTimeout)
 	defer cancel()
-	var clients []availableMirrorLister
+	var clients []mirrorProbeClient
 	if activeCore, err := coreapi.New(); err == nil {
 		clients = append(clients, activeCore)
 	}
 	if clusterCore, err := coreapi.NewForCluster(ctx, defaultClusterHost); err == nil {
 		clients = append(clients, clusterCore)
 	}
-	mirrored, err := probeMirrorAcross(ctx, clients, owner, repo)
+	probe, err := probeMirrorAcross(ctx, clients, owner, repo)
 	if err != nil {
 		cache.putUnreachable(slug, now)
-		return false, err
+		return mirrorProbeResult{}, err
 	}
-	cache.put(slug, mirrored, now)
-	return mirrored, nil
+	cache.put(slug, probe, now)
+	return probe, nil
 }
 
 // discoverAgentImports reports, per registered importer, how much local
@@ -335,11 +373,21 @@ func mirrorRung(deps onboardingRungDeps) onboarding.Rung {
 					Hint:   "entire auth login",
 				}
 			}
-			mirrored, err := deps.probeMirror(ctx, owner, repo)
+			probe, err := deps.probeMirror(ctx, owner, repo)
 			if err != nil {
 				return onboarding.Check{State: onboarding.StateUnknown, Hint: "entire repo mirror list"}
 			}
-			if mirrored {
+			if probe.Mirrored && probe.Suspended {
+				// Registered but admin-suspended: it never serves, and
+				// re-creating cannot fix it — recovery is operator-side.
+				// Blocked keeps the checklist honest without re-offering.
+				return onboarding.Check{
+					State:  onboarding.StateBlocked,
+					Detail: "mirror suspended by an admin",
+					Hint:   "entire repo mirror list",
+				}
+			}
+			if probe.Mirrored {
 				return onboarding.Check{State: onboarding.StateDone, Detail: slug}
 			}
 			return onboarding.Check{
