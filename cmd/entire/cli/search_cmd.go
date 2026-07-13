@@ -515,7 +515,7 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 	reposCtx, reposCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer reposCancel()
 
-	repoIndex, err := coreClient.ListRepos(reposCtx)
+	repoIndex, err := coreClient.ListRepos(reposCtx, coreapi.ListReposParams{})
 	if err != nil {
 		return nil, fmt.Errorf("listing repos for cell discovery: %w", err)
 	}

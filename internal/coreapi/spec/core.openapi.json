@@ -199,6 +199,72 @@
         ],
         "type": "object"
       },
+      "CIWebhookView": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CIWebhookView.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "bk_organization": {
+            "type": "string"
+          },
+          "bk_pipeline": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "ref_filter": {
+            "type": "string"
+          },
+          "repo_id": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "repo_id",
+          "provider",
+          "display_name",
+          "bk_organization",
+          "bk_pipeline",
+          "ref_filter",
+          "events",
+          "enabled",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
       "Cluster": {
         "additionalProperties": true,
         "properties": {
@@ -358,6 +424,55 @@
         ],
         "type": "object"
       },
+      "CreateRepoCIWebhookInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreateRepoCIWebhookInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "bk_cluster_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "bk_organization": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "bk_pipeline": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "events": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "provider": {
+            "enum": [
+              "buildkite"
+            ],
+            "type": "string"
+          },
+          "ref_filter": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "bk_organization",
+          "bk_cluster_id"
+        ],
+        "type": "object"
+      },
       "CreateRepoInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -441,7 +556,7 @@
             "type": "boolean"
           },
           "empty": {
-            "description": "true when the upstream has no refs to clone.",
+            "description": "Deprecated: always false. Poll the mirror status instead — an empty upstream still reaches 'ready'.",
             "type": "boolean"
           },
           "mirrorId": {
@@ -465,6 +580,118 @@
           "created",
           "empty",
           "suspended"
+        ],
+        "type": "object"
+      },
+      "DeletionBlocker": {
+        "additionalProperties": true,
+        "properties": {
+          "deletable": {
+            "description": "True when the account can self-serve delete this org (it is the only member and the org has no projects). When false, the org has other members or data and must be transferred/removed via support. The UI should offer a delete action only when this is true.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Resource ID (org ULID).",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Blocker kind. Currently always 'owned_org'.",
+            "enum": [
+              "owned_org"
+            ],
+            "type": "string"
+          },
+          "message": {
+            "description": "Copy explaining how to clear the blocker.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Human-readable resource name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "name",
+          "deletable",
+          "message"
+        ],
+        "type": "object"
+      },
+      "DeletionGrant": {
+        "additionalProperties": true,
+        "properties": {
+          "jurisdiction": {
+            "description": "Region the repo lives in (us/eu/au); empty for project grants.",
+            "type": "string"
+          },
+          "resourceId": {
+            "description": "Granted resource ULID.",
+            "type": "string"
+          },
+          "resourceName": {
+            "description": "Granted resource name.",
+            "type": "string"
+          },
+          "resourceType": {
+            "description": "Granted resource type.",
+            "enum": [
+              "project",
+              "repo"
+            ],
+            "type": "string"
+          },
+          "role": {
+            "description": "Granted role.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "resourceType",
+          "resourceId",
+          "resourceName",
+          "role"
+        ],
+        "type": "object"
+      },
+      "DeletionMembership": {
+        "additionalProperties": true,
+        "properties": {
+          "name": {
+            "description": "Org name.",
+            "type": "string"
+          },
+          "orgId": {
+            "description": "Org ULID.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "orgId",
+          "name"
+        ],
+        "type": "object"
+      },
+      "DeletionRepo": {
+        "additionalProperties": true,
+        "properties": {
+          "cluster": {
+            "description": "Cluster slug the repo is placed on, if known.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Repo ULID.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Repo name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
         ],
         "type": "object"
       },
@@ -546,6 +773,44 @@
         },
         "type": "object"
       },
+      "GetDeletionPreviewOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/GetDeletionPreviewOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "blocked": {
+            "description": "True when Blockers is non-empty: DELETE /me will be refused with 409.",
+            "type": "boolean"
+          },
+          "blockers": {
+            "description": "Resources that must be resolved before deletion (owned orgs).",
+            "items": {
+              "$ref": "#/components/schemas/DeletionBlocker"
+            },
+            "type": "array"
+          },
+          "willDelete": {
+            "$ref": "#/components/schemas/WillDeleteStruct"
+          },
+          "willUnlink": {
+            "$ref": "#/components/schemas/WillUnlinkStruct"
+          }
+        },
+        "required": [
+          "blocked",
+          "blockers",
+          "willDelete",
+          "willUnlink"
+        ],
+        "type": "object"
+      },
       "GetMeOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -560,6 +825,10 @@
           },
           "auth": {
             "$ref": "#/components/schemas/MeAuth"
+          },
+          "deletion": {
+            "$ref": "#/components/schemas/MeDeletion",
+            "description": "Present only when a deletion is pending; carries the cooldown window."
           },
           "global": {
             "$ref": "#/components/schemas/MeGlobal"
@@ -585,6 +854,28 @@
         "required": [
           "global",
           "auth"
+        ],
+        "type": "object"
+      },
+      "GetOnboardingStatusOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/GetOnboardingStatusOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "needsOnboarding": {
+            "description": "True when the account has no mirrored repo yet and should be sent through onboarding.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "needsOnboarding"
         ],
         "type": "object"
       },
@@ -645,6 +936,30 @@
         },
         "required": [
           "visibility"
+        ],
+        "type": "object"
+      },
+      "GetTopologyOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/GetTopologyOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "jurisdictions": {
+            "items": {
+              "$ref": "#/components/schemas/TopologyJurisdiction"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "jurisdictions"
         ],
         "type": "object"
       },
@@ -774,7 +1089,8 @@
             "enum": [
               "reader",
               "writer",
-              "admin"
+              "admin",
+              "ci_manager"
             ],
             "type": "string"
           }
@@ -1219,6 +1535,30 @@
         },
         "type": "object"
       },
+      "ListRepoCIWebhooksOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListRepoCIWebhooksOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "subscriptions": {
+            "items": {
+              "$ref": "#/components/schemas/CIWebhookView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "subscriptions"
+        ],
+        "type": "object"
+      },
       "ListRepoGrantsOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -1478,6 +1818,26 @@
         ],
         "type": "object"
       },
+      "MeDeletion": {
+        "additionalProperties": true,
+        "properties": {
+          "cooldownEndsAt": {
+            "description": "When the cooldown elapses and the account becomes eligible for irreversible hard-deletion.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "requestedAt": {
+            "description": "When deletion was requested (deletion_requested_at).",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "requestedAt",
+          "cooldownEndsAt"
+        ],
+        "type": "object"
+      },
       "MeGlobal": {
         "additionalProperties": true,
         "properties": {
@@ -1485,6 +1845,11 @@
             "type": "string"
           },
           "avatarUrl": {
+            "type": "string"
+          },
+          "createdAt": {
+            "description": "When the account was created (accounts.created_at).",
+            "format": "date-time",
             "type": "string"
           },
           "handle": {
@@ -1502,6 +1867,7 @@
         },
         "required": [
           "accountId",
+          "createdAt",
           "handles"
         ],
         "type": "object"
@@ -1781,6 +2147,36 @@
         ],
         "type": "object"
       },
+      "PatchRepoCIWebhookInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/PatchRepoCIWebhookInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ref_filter": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "Project": {
         "additionalProperties": true,
         "properties": {
@@ -1872,6 +2268,9 @@
           "foreign": {
             "type": "boolean"
           },
+          "fullName": {
+            "type": "string"
+          },
           "id": {
             "type": "string"
           },
@@ -1904,6 +2303,9 @@
           "provisionReason": {
             "type": "string"
           },
+          "repoGroupId": {
+            "type": "string"
+          },
           "state": {
             "enum": [
               "provisioning",
@@ -1924,6 +2326,27 @@
           "id",
           "owningProjectId",
           "name"
+        ],
+        "type": "object"
+      },
+      "RepoCandidate": {
+        "additionalProperties": true,
+        "properties": {
+          "access": {
+            "enum": [
+              "read",
+              "write",
+              "admin"
+            ],
+            "type": "string"
+          },
+          "onboardable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "access",
+          "onboardable"
         ],
         "type": "object"
       },
@@ -1957,10 +2380,15 @@
       "RepoIndexEntry": {
         "additionalProperties": true,
         "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/RepoCandidate"
+          },
           "cell": {
+            "deprecated": true,
             "type": "string"
           },
           "clusterSlug": {
+            "deprecated": true,
             "type": "string"
           },
           "full_name": {
@@ -1970,6 +2398,7 @@
             "type": "string"
           },
           "jurisdiction": {
+            "deprecated": true,
             "type": "string"
           },
           "name": {
@@ -2003,6 +2432,9 @@
           "cell": {
             "type": "string"
           },
+          "clusterSlug": {
+            "type": "string"
+          },
           "id": {
             "type": "string"
           },
@@ -2011,13 +2443,24 @@
           },
           "mirror": {
             "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "processing",
+              "ready",
+              "failed",
+              "suspended"
+            ],
+            "type": "string"
           }
         },
         "required": [
           "id",
           "jurisdiction",
           "cell",
-          "mirror"
+          "clusterSlug",
+          "mirror",
+          "status"
         ],
         "type": "object"
       },
@@ -2228,49 +2671,126 @@
         ],
         "type": "object"
       },
-      "UpdateMeInputBody": {
+      "TopologyCluster": {
         "additionalProperties": true,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/UpdateMeInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
+          "host": {
+            "description": "DNS host of this cluster; pass verbatim as clusterHost to POST /api/v1/mirrors.",
             "type": "string"
           },
-          "email": {
-            "description": "Contact email.",
-            "format": "email",
-            "maxLength": 254,
-            "minLength": 5,
+          "isDefault": {
+            "type": "boolean"
+          },
+          "label": {
+            "description": "Human cluster label (the cluster's display name).",
+            "type": "string"
+          },
+          "publicUrl": {
+            "type": "string"
+          },
+          "slug": {
             "type": "string"
           }
         },
         "required": [
-          "email"
+          "slug",
+          "label",
+          "host",
+          "publicUrl",
+          "isDefault"
         ],
         "type": "object"
       },
-      "UpdateMeOutputBody": {
+      "TopologyJurisdiction": {
         "additionalProperties": true,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/UpdateMeOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
+          "id": {
+            "description": "Jurisdiction id from the cluster registry (e.g. \"us\").",
             "type": "string"
           },
-          "email": {
+          "label": {
+            "type": "string"
+          },
+          "regions": {
+            "items": {
+              "$ref": "#/components/schemas/TopologyRegion"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "regions"
+        ],
+        "type": "object"
+      },
+      "TopologyRegion": {
+        "additionalProperties": true,
+        "properties": {
+          "clusters": {
+            "items": {
+              "$ref": "#/components/schemas/TopologyCluster"
+            },
+            "type": "array"
+          },
+          "id": {
+            "description": "Region id (the cell id from the cluster registry).",
+            "type": "string"
+          },
+          "label": {
             "type": "string"
           }
         },
         "required": [
-          "email"
+          "id",
+          "label",
+          "clusters"
+        ],
+        "type": "object"
+      },
+      "WillDeleteStruct": {
+        "additionalProperties": true,
+        "properties": {
+          "profileDataNote": {
+            "description": "Blanket note: profile PII is erased across all regions the account has data in (per-region residency is not globally tracked).",
+            "type": "string"
+          },
+          "repos": {
+            "description": "Repos in the account's home region that will be permanently deleted (personal + mirror). Foreign-region repos are also erased by the fan-out but not enumerated here.",
+            "items": {
+              "$ref": "#/components/schemas/DeletionRepo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "repos",
+          "profileDataNote"
+        ],
+        "type": "object"
+      },
+      "WillUnlinkStruct": {
+        "additionalProperties": true,
+        "properties": {
+          "grants": {
+            "description": "Collaborator grants that will be unlinked.",
+            "items": {
+              "$ref": "#/components/schemas/DeletionGrant"
+            },
+            "type": "array"
+          },
+          "memberships": {
+            "description": "Org memberships that will be dropped (non-owned).",
+            "items": {
+              "$ref": "#/components/schemas/DeletionMembership"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "grants",
+          "memberships"
         ],
         "type": "object"
       }
@@ -2910,8 +3430,8 @@
       "delete": {
         "operationId": "deleteMe",
         "responses": {
-          "204": {
-            "description": "No Content"
+          "202": {
+            "description": "Accepted"
           },
           "400": {
             "content": {
@@ -2943,6 +3463,16 @@
             },
             "description": "Forbidden"
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "500": {
             "content": {
               "application/problem+json": {
@@ -2952,6 +3482,16 @@
               }
             },
             "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "security": [
@@ -2962,7 +3502,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Request deletion of the calling account (7-day cooldown; login cancels)",
+        "summary": "Request deletion of the calling account (7-day cooldown; cancel via POST /me/cancel-deletion)",
         "tags": [
           "identity"
         ]
@@ -3033,25 +3573,89 @@
         "tags": [
           "identity"
         ]
-      },
-      "patch": {
-        "operationId": "updateMe",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateMeInputBody"
-              }
-            }
+      }
+    },
+    "/me/cancel-deletion": {
+      "post": {
+        "operationId": "cancelDeletion",
+        "responses": {
+          "200": {
+            "description": "OK"
           },
-          "required": true
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Cancel a pending deletion request for the calling account",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/me/deletion-preview": {
+      "get": {
+        "operationId": "getDeletionPreview",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UpdateMeOutputBody"
+                  "$ref": "#/components/schemas/GetDeletionPreviewOutputBody"
                 }
               }
             },
@@ -3087,7 +3691,7 @@
             },
             "description": "Forbidden"
           },
-          "422": {
+          "500": {
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3095,7 +3699,76 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Preview what deleting the calling account will erase, unlink, and block on",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/me/onboarding": {
+      "get": {
+        "operationId": "getOnboardingStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetOnboardingStatusOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "500": {
             "content": {
@@ -3116,7 +3789,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Update the calling account's contact email",
+        "summary": "Report whether the calling account still needs to onboard (has no mirror yet)",
         "tags": [
           "identity"
         ]
@@ -4085,6 +4758,13 @@
               "description": "Optional: exact-match org name (case-insensitive).",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -4096,7 +4776,24 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -4677,6 +5374,16 @@
             },
             "description": "Not Found"
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "422": {
             "content": {
               "application/problem+json": {
@@ -4787,6 +5494,16 @@
               }
             },
             "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "422": {
             "content": {
@@ -5594,6 +6311,16 @@
             },
             "description": "Not Found"
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "422": {
             "content": {
               "application/problem+json": {
@@ -5704,6 +6431,16 @@
               }
             },
             "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "422": {
             "content": {
@@ -5999,6 +6736,23 @@
     "/repos": {
       "get": {
         "operationId": "listRepos",
+        "parameters": [
+          {
+            "description": "onboarded (default): repos in Entire; all: also include onboardable GitHub candidates.",
+            "explode": false,
+            "in": "query",
+            "name": "scope",
+            "schema": {
+              "default": "onboarded",
+              "description": "onboarded (default): repos in Entire; all: also include onboardable GitHub candidates.",
+              "enum": [
+                "onboarded",
+                "all"
+              ],
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -6039,6 +6793,16 @@
               }
             },
             "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
           },
           "500": {
             "content": {
@@ -6474,6 +7238,519 @@
         "summary": "Get repository",
         "tags": [
           "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/ci-webhooks": {
+      "get": {
+        "operationId": "listRepoCIWebhooks",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRepoCIWebhooksOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "502": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List a repo's CI webhooks",
+        "tags": [
+          "ci-webhooks"
+        ]
+      },
+      "post": {
+        "operationId": "createRepoCIWebhook",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRepoCIWebhookInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CIWebhookView"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "502": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Enroll a repo into a CI webhook (Buildkite)",
+        "tags": [
+          "ci-webhooks"
+        ]
+      }
+    },
+    "/repos/{repoId}/ci-webhooks/{id}": {
+      "delete": {
+        "operationId": "deleteRepoCIWebhook",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "teardown",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "502": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete a repo's CI webhook",
+        "tags": [
+          "ci-webhooks"
+        ]
+      },
+      "patch": {
+        "operationId": "patchRepoCIWebhook",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchRepoCIWebhookInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CIWebhookView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "502": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Update a repo's CI webhook",
+        "tags": [
+          "ci-webhooks"
         ]
       }
     },
@@ -8395,6 +9672,75 @@
         "summary": "Revoke service account access",
         "tags": [
           "service-accounts"
+        ]
+      }
+    },
+    "/topology": {
+      "get": {
+        "operationId": "getTopology",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetTopologyOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get the cluster topology as a jurisdiction → region → cluster tree",
+        "tags": [
+          "clusters"
         ]
       }
     },

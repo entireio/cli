@@ -48,7 +48,7 @@ func newRepoMirrorCollaboratorsCmd() *cobra.Command {
 }
 
 func newRepoMirrorCollaboratorsListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list <github-url> [cluster-host]",
 		Short: "List the users with access to a mirror",
 		Long: "Lists the principals that can pull the mirror of <github-url> on " +
@@ -83,4 +83,6 @@ func newRepoMirrorCollaboratorsListCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }

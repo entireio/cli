@@ -38,11 +38,7 @@ func newRepoCmd() *cobra.Command {
 var repoColumns = []string{"ID", "NAME", "PROJECT", "CLUSTER", "STATE"}
 
 func repoRow(r coreapi.Repo) []string {
-	state := ""
-	if v, ok := r.State.Get(); ok {
-		state = string(v)
-	}
-	return []string{r.ID, r.Name, r.OwningProjectId, r.ClusterHost.Or("-"), state}
+	return []string{r.ID, r.Name, r.OwningProjectId, r.ClusterHost.Or("-"), r.State.Or("-")}
 }
 
 // repoDetailColumns / repoDetailRow extend the shared repo view with the
@@ -151,11 +147,12 @@ func newRepoCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&projectID, "project", "", "Owning project (name or ULID) (required)")
 	cmd.Flags().StringVar(&clusterHost, "cluster-host", "", "Public host of the cluster to pin the repo to (defaults to the jurisdiction default)")
 	markRequired(cmd, "project")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newRepoListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list <project>",
 		Short: "List repositories in a project",
 		Long:  "List repositories in a project, addressed by name or ULID.",
@@ -180,6 +177,8 @@ func newRepoListCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 func newRepoGetCmd() *cobra.Command {
@@ -199,6 +198,7 @@ func newRepoGetCmd() *cobra.Command {
 		},
 	}
 	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
 	return cmd
 }
 
@@ -287,6 +287,7 @@ func newRepoVisibilityGetCmd() *cobra.Command {
 		},
 	}
 	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
 	return cmd
 }
 
@@ -320,6 +321,7 @@ func newRepoVisibilitySetCmd() *cobra.Command {
 		},
 	}
 	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
 	return cmd
 }
 

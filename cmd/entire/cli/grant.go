@@ -145,11 +145,12 @@ func newGrantOrgAddCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&role, "role", "", "Org role: owner, admin, or member (default member)")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newGrantOrgListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list <org>",
 		Short: "List org members",
 		Args:  cobra.ExactArgs(1),
@@ -173,6 +174,8 @@ func newGrantOrgListCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 func newGrantOrgRemoveCmd() *cobra.Command {
@@ -255,11 +258,12 @@ func newGrantProjectAddCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&role, "role", "", "Project role: reader, writer, or admin (required)")
 	markRequired(cmd, "role")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newGrantProjectListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list <project>",
 		Short: "List project members",
 		Args:  cobra.ExactArgs(1),
@@ -283,6 +287,8 @@ func newGrantProjectListCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 func newGrantProjectRemoveCmd() *cobra.Command {
@@ -404,6 +410,7 @@ func newGrantRepoAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&role, "role", "", "Repo role: reader, writer, or admin (required)")
 	bindRepoProjectFlag(cmd, &project)
 	markRequired(cmd, "role")
+	addJSONFlag(cmd)
 	return cmd
 }
 
@@ -434,6 +441,7 @@ func newGrantRepoListCmd() *cobra.Command {
 		},
 	}
 	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
 	return cmd
 }
 

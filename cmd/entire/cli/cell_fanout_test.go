@@ -60,11 +60,12 @@ func TestGroupReposByCell_Placements(t *testing.T) {
 	t.Parallel()
 	repos := []coreapi.RepoIndexEntry{
 		{
-			// US-homed repo with an EU mirror — the real-world scenario.
+			// US-homed repo with an EU mirror — the real-world scenario. Each
+			// placement carries its OWN cluster slug (the /repos spec bump).
 			ID: "01US", Cell: "aws-us-east-2", ClusterSlug: "us-prod", Jurisdiction: "us",
 			Placements: []coreapi.RepoPlacement{
-				{ID: "01US", Cell: "aws-us-east-2", Jurisdiction: "us"},
-				{ID: "01EU", Cell: "aws-eu-central-1", Jurisdiction: "eu", Mirror: true},
+				{ID: "01US", Cell: "aws-us-east-2", ClusterSlug: "us-prod", Jurisdiction: "us"},
+				{ID: "01EU", Cell: "aws-eu-central-1", ClusterSlug: "eu-prod", Jurisdiction: "eu", Mirror: true},
 			},
 		},
 		{
@@ -85,9 +86,10 @@ func TestGroupReposByCell_Placements(t *testing.T) {
 	if got := strings.Join(eu.repoIDs, ","); got != "01EU" {
 		t.Fatalf("eu repoIDs = %q, want 01EU", got)
 	}
-	// EU placement has no cluster slug (cell differs from top-level).
-	if eu.clusterSlug != "" {
-		t.Fatalf("eu clusterSlug = %q, want empty", eu.clusterSlug)
+	// The EU mirror carries its own slug, so the group can do the exact
+	// catalog join instead of falling back to jurisdiction-default routing.
+	if eu.clusterSlug != "eu-prod" {
+		t.Fatalf("eu clusterSlug = %q, want eu-prod", eu.clusterSlug)
 	}
 	if us.cell != "aws-us-east-2" || us.jurisdiction != "us" {
 		t.Fatalf("us group = %+v", us)
@@ -96,7 +98,7 @@ func TestGroupReposByCell_Placements(t *testing.T) {
 	if got := strings.Join(us.repoIDs, ","); got != "01US,01LEGACY" {
 		t.Fatalf("us repoIDs = %q, want 01US,01LEGACY", got)
 	}
-	// Home placement inherits the top-level cluster slug.
+	// US group gets its slug from the placement (and the legacy entry agrees).
 	if us.clusterSlug != testClusterSlugUS {
 		t.Fatalf("us clusterSlug = %q, want us-prod", us.clusterSlug)
 	}
@@ -120,37 +122,40 @@ func TestGroupReposByCell_PlacementEmptyID(t *testing.T) {
 	}
 }
 
-// TestGroupReposByCell_PlacementSlugFromMirrorFlag verifies the home
-// placement's cluster slug is assigned via RepoPlacement.Mirror rather than by
-// string-matching the top-level Cell. When the index omits the top-level Cell
-// alongside the placement array, the string-match would find no home and drop
-// every group to the fuzzier fallback; keying off Mirror keeps the precise
-// slug->catalog join.
-func TestGroupReposByCell_PlacementSlugFromMirrorFlag(t *testing.T) {
+// TestGroupReposByCell_PlacementUsesOwnSlug verifies each placement routes by
+// its OWN cluster slug (home and mirror alike), independent of the Mirror flag
+// and of the deprecated top-level Cell/ClusterSlug. This is the fix for the
+// mirror-miss: a mirror placement that carries its slug gets the exact catalog
+// join instead of the jurisdiction-default fallback. A placement that genuinely
+// omits its slug still falls back (empty slug on its group).
+func TestGroupReposByCell_PlacementUsesOwnSlug(t *testing.T) {
 	t.Parallel()
 	repos := []coreapi.RepoIndexEntry{
 		{
-			// Top-level Cell intentionally empty; the home placement is
-			// identified by Mirror=false, not by matching the top-level Cell.
-			ID: "01US", ClusterSlug: "us-prod", Jurisdiction: "us",
+			// Top-level Cell/ClusterSlug intentionally empty; routing must come
+			// entirely from the per-placement fields.
+			ID: "01US", Jurisdiction: "us",
 			Placements: []coreapi.RepoPlacement{
-				{ID: "01US", Cell: "aws-us-east-2", Jurisdiction: "us", Mirror: false},
-				{ID: "01EU", Cell: "aws-eu-central-1", Jurisdiction: "eu", Mirror: true},
+				{ID: "01US", Cell: "aws-us-east-2", ClusterSlug: "us-prod", Jurisdiction: "us", Mirror: false},
+				{ID: "01EU", Cell: "aws-eu-central-1", ClusterSlug: "eu-prod", Jurisdiction: "eu", Mirror: true},
+				{ID: "01AP", Cell: "aws-ap-south-1", Jurisdiction: "ap", Mirror: true}, // no slug → fallback
 			},
 		},
 	}
 	cells := groupReposByCell(repos)
-	if len(cells) != 2 {
-		t.Fatalf("groups = %d, want 2: %+v", len(cells), cells)
+	if len(cells) != 3 {
+		t.Fatalf("groups = %d, want 3: %+v", len(cells), cells)
 	}
-	// Sorted: aws-eu-central-1 < aws-us-east-2.
-	eu := cells[0]
-	us := cells[1]
+	// Sorted by cell: aws-ap-south-1 < aws-eu-central-1 < aws-us-east-2.
+	ap, eu, us := cells[0], cells[1], cells[2]
 	if us.cell != "aws-us-east-2" || us.clusterSlug != testClusterSlugUS {
 		t.Fatalf("home group = %+v, want cell aws-us-east-2 with slug us-prod", us)
 	}
-	if eu.cell != "aws-eu-central-1" || eu.clusterSlug != "" {
-		t.Fatalf("mirror group = %+v, want cell aws-eu-central-1 with empty slug", eu)
+	if eu.cell != "aws-eu-central-1" || eu.clusterSlug != "eu-prod" {
+		t.Fatalf("mirror group = %+v, want cell aws-eu-central-1 with slug eu-prod", eu)
+	}
+	if ap.cell != "aws-ap-south-1" || ap.clusterSlug != "" {
+		t.Fatalf("slugless mirror group = %+v, want cell aws-ap-south-1 with empty slug", ap)
 	}
 }
 

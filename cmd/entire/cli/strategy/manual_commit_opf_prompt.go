@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/uiform"
 )
 
 // OPFDecision is the resolved gate for a single pre-push OPF run.
@@ -70,7 +71,7 @@ func resolveOPFDecisionForPrePush(ctx context.Context, opf *settings.OPFSettings
 		os.Getenv(envOPF),
 		promptDefault,
 		hasTTY,
-		func() (OPFDecision, error) { return askOPFPrompt(ctx, isAccessibleMode()) },
+		func() (OPFDecision, error) { return askOPFPrompt(ctx) },
 	)
 	if err != nil {
 		return OPFAbort, err
@@ -85,18 +86,18 @@ func resolveOPFDecisionForPrePush(ctx context.Context, opf *settings.OPFSettings
 // OPFAbort. Selecting "Always" persists prompt_default=always to
 // .entire/settings.local.json so future pushes don't ask.
 //
-// Style matches other entire CLI prompts: Dracula theme via
-// huh.ThemeDracula (the same theme cli.NewAccessibleForm applies for
-// callers in the cli package). Strategy can't import cli (cycle), so
-// we apply the theme inline.
-func askOPFPrompt(ctx context.Context, accessible bool) (OPFDecision, error) {
+// Style matches other entire CLI prompts via uiform.New, which applies the
+// shared base16 palette theme and accessibility handling (the same wiring
+// cli.NewAccessibleForm uses). uiform is a leaf package, so strategy can
+// import it without the cycle that importing cli would create.
+func askOPFPrompt(ctx context.Context) (OPFDecision, error) {
 	const (
 		choiceYes    = "yes"
 		choiceNo     = "no"
 		choiceAlways = "always"
 	)
 	choice := choiceYes
-	form := huh.NewForm(
+	form := uiform.New(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Run OpenAI Privacy Filter on these checkpoints?").
@@ -108,10 +109,7 @@ func askOPFPrompt(ctx context.Context, accessible bool) (OPFDecision, error) {
 				).
 				Value(&choice),
 		),
-	).WithTheme(huh.ThemeFunc(huh.ThemeDracula))
-	if accessible {
-		form = form.WithAccessible(true)
-	}
+	)
 	if err := form.RunWithContext(ctx); err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
 			return OPFAbort, nil

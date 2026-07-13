@@ -379,8 +379,9 @@ func serveMirrorList(t *testing.T, mirrors []coreapi.Mirror, available []coreapi
 }
 
 // execMirrorList runs `list` under a parent that carries the control-plane
-// persistent flags (--json lives there, not on the list command itself), so
-// tests can exercise --json and the client-side --name/--sort together.
+// persistent flags (--insecure-http-auth); --json is a local flag on the list
+// command itself, so tests can exercise --json and the client-side --name/--sort
+// together.
 func execMirrorList(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	parent := &cobra.Command{Use: "mirror"}

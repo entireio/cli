@@ -21,16 +21,30 @@ import (
 // addControlPlaneFlags registers the persistent flags shared by every
 // control-plane command group. Persistent so they're inherited by nested
 // subcommands (e.g. `entire repo mirror list`):
-//   - --json: emit the raw wire JSON instead of the default human table.
 //   - --insecure-http-auth: permit the token exchange over plain http://
 //     (local/dev deployments where the core isn't behind TLS). Hidden, as
-//     elsewhere in the CLI.
+//     elsewhere in the CLI. Applies to every subcommand because they all build
+//     a control-plane client.
+//
+// --json is deliberately NOT persistent here: it only makes sense on the read
+// and mutation verbs that render a wire payload, so it's registered per-command
+// with addJSONFlag. A persistent --json was inherited by side-effect verbs
+// (delete, clone, mirror create/remove, grant remove) that silently ignored it;
+// cobra can't hide a persistent flag from a subset of children, so the flag
+// lives on exactly the commands that honor it.
 func addControlPlaneFlags(cmd *cobra.Command) {
-	cmd.PersistentFlags().Bool("json", false, "Output raw JSON instead of a table")
 	cmd.PersistentFlags().Bool("insecure-http-auth", false, "Allow authentication over plain HTTP (insecure, for local development only)")
 	if err := cmd.PersistentFlags().MarkHidden("insecure-http-auth"); err != nil {
 		panic(fmt.Sprintf("hide insecure-http-auth flag: %v", err))
 	}
+}
+
+// addJSONFlag registers the local --json flag on a command that renders a wire
+// payload (list/get/create/mutation verbs routed through the runCore* helpers).
+// Local, not persistent, so only these commands advertise and accept it — see
+// addControlPlaneFlags for why. Read it with jsonRequested.
+func addJSONFlag(cmd *cobra.Command) {
+	cmd.Flags().Bool("json", false, "Output raw JSON instead of a table")
 }
 
 // jsonRequested reports whether --json was set on cmd or an ancestor. A
