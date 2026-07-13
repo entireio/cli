@@ -584,10 +584,11 @@ func tomlQuoteString(s string) string {
 // table header in content, creating the table (appended at the end of the
 // file) if it doesn't already exist. It reports the updated content and
 // whether a change was made. Like containsFeatureLine, this is a line-based
-// edit rather than a full TOML parse: it only recognizes an unindented,
-// exact header line, and a table's body ends at the next line starting
-// with "[". That's sufficient for the narrow shape this package writes and
-// avoids touching content it doesn't understand.
+// edit rather than a full TOML parse: it matches a header line by exact
+// content after trimming surrounding whitespace (so an indented header line
+// also matches), and a table's body ends at the next line starting with "[".
+// That's sufficient for the narrow shape this package writes and avoids
+// touching content it doesn't understand.
 func ensureLineInSection(content, header, line string) (string, bool) {
 	lines := strings.Split(content, "\n")
 
