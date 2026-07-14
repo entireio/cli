@@ -958,10 +958,12 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().BoolVar(&bootstrapOpts.NoInitRepo, "no-init-repo", false, "If not a git repo, exit instead of prompting to initialize one")
 	cmd.Flags().BoolVar(&bootstrapOpts.NoGitHub, "no-github", false, "Initialize local git repo only; skip creating a GitHub remote")
 	cmd.Flags().BoolVar(&bootstrapOpts.SkipInitialCommit, "skip-initial-commit", false, "Don't create the initial commit when bootstrapping a new repo")
+	cmd.Flags().BoolVar(&bootstrapOpts.Push, "push", false, "When bootstrapping a new repo, push the initial commit to the created GitHub remote")
 	cmd.Flags().MarkDeprecated("init-repo", "use --bootstrap=local (or --bootstrap=github to also create a GitHub repo)")   //nolint:errcheck,gosec // flag is defined above
 	cmd.Flags().MarkDeprecated("no-init-repo", "use --bootstrap=off")                                                       //nolint:errcheck,gosec // flag is defined above
 	cmd.Flags().MarkDeprecated("no-github", "use --bootstrap=local")                                                        //nolint:errcheck,gosec // flag is defined above
 	cmd.Flags().MarkDeprecated("skip-initial-commit", "existing files are no longer committed by default; this is a no-op") //nolint:errcheck,gosec // flag is defined above
+	cmd.Flags().MarkDeprecated("push", "removed; use --bootstrap=github to create a GitHub repo and push")                  //nolint:errcheck,gosec // flag is defined above
 	cmd.MarkFlagsMutuallyExclusive("init-repo", "no-init-repo")
 	cmd.MarkFlagsMutuallyExclusive("initial-commit-message", "skip-initial-commit")
 

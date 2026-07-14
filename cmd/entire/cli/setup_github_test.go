@@ -675,6 +675,33 @@ func TestBootstrap_DeprecatedInitRepo_LocalOnly(t *testing.T) {
 	}
 }
 
+// TestBootstrap_PushDeprecatedIsNoOp verifies --push is a safe no-op: it must
+// NOT flip the mode to github (that would escalate a bare --push from main's
+// decline-by-default into create+push). normalizeBootstrapOptions leaves
+// Bootstrap at the prompt default, and a bare --push non-interactively still
+// declines without touching GitHub.
+func TestBootstrap_PushDeprecatedIsNoOp(t *testing.T) {
+	t.Parallel()
+	opts := GitHubBootstrapOptions{Push: true}
+	if err := normalizeBootstrapOptions(&opts); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.Bootstrap != bootstrapModePrompt {
+		t.Fatalf("Bootstrap = %q, want prompt (--push must not map to --bootstrap=github)", opts.Bootstrap)
+	}
+
+	proceed, gh, err := resolveBootstrapDecision(io.Discard, t.TempDir(), opts, false /* canPrompt */)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if proceed {
+		t.Fatal("bare --push non-interactively must decline, not proceed")
+	}
+	if gh != githubNo {
+		t.Fatal("bare --push must never resolve to creating/pushing a GitHub repo")
+	}
+}
+
 // --- github mode -------------------------------------------------------------
 
 // stubGitHubCreate wires a fakeRunner for a full github-mode create + push of

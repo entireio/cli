@@ -71,6 +71,7 @@ type GitHubBootstrapOptions struct {
 	NoInitRepo        bool // --no-init-repo         -> --bootstrap=off
 	NoGitHub          bool // --no-github            -> suppress the GitHub step
 	SkipInitialCommit bool // --skip-initial-commit  -> no-op (matches new default)
+	Push              bool // --push                 -> no-op (creation+push is now --bootstrap=github)
 }
 
 // bootstrapRunner executes external commands. Tests override this to avoid
