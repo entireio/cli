@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -167,14 +168,118 @@ func TestWriteCodeSearchText(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeCodeSearchText(&buf, resp)
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf), false)
 
 	output := buf.String()
-	if !strings.Contains(output, "entireio/cli:main.go:10: func main() {") {
+	if !strings.Contains(output, "entireio/cli:main.go\n") {
+		t.Errorf("output missing file header:\n%s", output)
+	}
+	if !strings.Contains(output, "  10: func main() {") {
 		t.Errorf("output missing first result:\n%s", output)
+	}
+	if !strings.Contains(output, "  42: \tfmt.Println(\"hello\")") {
+		t.Errorf("output missing second result:\n%s", output)
 	}
 	if !strings.Contains(output, "2 matches across 1 files") {
 		t.Errorf("output missing summary line:\n%s", output)
+	}
+	if strings.Contains(output, "\x1b[") {
+		t.Errorf("expected no ANSI codes for non-terminal writer:\n%s", output)
+	}
+}
+
+func TestWriteCodeSearchText_GroupsByFile(t *testing.T) {
+	t.Parallel()
+
+	// Interleaved files (score-sorted input) should collapse into one header
+	// per file, in first-appearance order.
+	resp := &codesearch.SearchResponse{
+		Stats: codesearch.Stats{TotalMatches: 3, TotalFiles: 2, ReposSearched: 1, DurationMs: 1},
+		Results: []codesearch.Result{
+			{Repo: "r", Path: "a.go", Line: 1, ContextLine: "one"},
+			{Repo: "r", Path: "b.go", Line: 2, ContextLine: "two"},
+			{Repo: "r", Path: "a.go", Line: 3, ContextLine: "three"},
+		},
+	}
+
+	var buf bytes.Buffer
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf), false)
+
+	output := buf.String()
+	if got := strings.Count(output, "r:a.go\n"); got != 1 {
+		t.Errorf("expected exactly 1 header for a.go, got %d:\n%s", got, output)
+	}
+	if aIdx, bIdx := strings.Index(output, "r:a.go"), strings.Index(output, "r:b.go"); aIdx > bIdx {
+		t.Errorf("expected a.go header before b.go:\n%s", output)
+	}
+}
+
+func TestWriteCodeSearchText_CapsFilesAndMatchesPerFile(t *testing.T) {
+	t.Parallel()
+
+	var results []codesearch.Result
+	// First file has 5 matches — 2 over the per-file cap.
+	for line := 1; line <= maxCodeSearchFileMatches+2; line++ {
+		results = append(results, codesearch.Result{Repo: "r", Path: "hot.go", Line: line, ContextLine: "x"})
+	}
+	// More files than the file cap.
+	for f := range maxCodeSearchFiles + 3 {
+		results = append(results, codesearch.Result{Repo: "r", Path: fmt.Sprintf("f%02d.go", f), Line: 1, ContextLine: "y"})
+	}
+	resp := &codesearch.SearchResponse{
+		Stats:   codesearch.Stats{TotalMatches: len(results), TotalFiles: maxCodeSearchFiles + 4, ReposSearched: 1},
+		Results: results,
+	}
+
+	var buf bytes.Buffer
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf), false)
+	output := buf.String()
+
+	if got := strings.Count(output, "r:"); got != maxCodeSearchFiles {
+		t.Errorf("expected %d file headers, got %d:\n%s", maxCodeSearchFiles, got, output)
+	}
+	if !strings.Contains(output, "+ 2 matches") {
+		t.Errorf("expected '+ 2 matches' overflow for hot.go:\n%s", output)
+	}
+	// hot.go shows only the per-file cap: lines 1..3, not 4/5.
+	if strings.Contains(output, fmt.Sprintf("  %d: x", maxCodeSearchFileMatches+1)) {
+		t.Errorf("expected at most %d matches for hot.go:\n%s", maxCodeSearchFileMatches, output)
+	}
+}
+
+func TestHighlightCodeMatches(t *testing.T) {
+	t.Parallel()
+
+	styles := statusStyles{colorEnabled: true}
+
+	out := highlightCodeMatches("func HandleRequest(w)", "handlerequest", styles, false)
+	if !strings.Contains(out, "\x1b[") {
+		t.Errorf("expected ANSI codes in highlighted output, got %q", out)
+	}
+	if !strings.HasPrefix(out, "func ") || !strings.HasSuffix(out, "(w)") {
+		t.Errorf("expected unmatched text preserved around highlight, got %q", out)
+	}
+
+	if out := highlightCodeMatches("no match here", "zzz", styles, false); out != "no match here" {
+		t.Errorf("expected unchanged line when no match, got %q", out)
+	}
+
+	// Case-sensitive search must not highlight case variants.
+	if out := highlightCodeMatches("func HandleRequest(w)", "handlerequest", styles, true); out != "func HandleRequest(w)" {
+		t.Errorf("expected no highlight for case mismatch with caseSensitive, got %q", out)
+	}
+
+	// Non-ASCII input falls back to exact matching (no case folding).
+	if out := highlightCodeMatches("comment ÉTÉ ici", "été", styles, false); out != "comment ÉTÉ ici" {
+		t.Errorf("expected no case-folded highlight for non-ASCII input, got %q", out)
+	}
+	if out := highlightCodeMatches("comment été ici", "été", styles, false); !strings.Contains(out, "\x1b[") {
+		t.Errorf("expected exact non-ASCII match highlighted, got %q", out)
+	}
+
+	plain := statusStyles{colorEnabled: false}
+	if out := highlightCodeMatches("func main()", "main", plain, false); out != "func main()" {
+		t.Errorf("expected unchanged line when color disabled, got %q", out)
 	}
 }
 
@@ -218,7 +323,7 @@ func TestWriteCodeSearchText_TruncatesLongLines(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeCodeSearchText(&buf, resp)
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf), false)
 
 	output := buf.String()
 	if strings.Contains(output, longLine) {
@@ -234,6 +339,30 @@ func TestWriteCodeSearchText_TruncatesLongLines(t *testing.T) {
 	}
 }
 
+func TestWriteCodeSearchText_HighlightsTruncatedLines(t *testing.T) {
+	t.Parallel()
+
+	// The appended "…" is non-ASCII; it must not disable case-insensitive
+	// highlighting for an otherwise ASCII line.
+	longLine := "FooBar " + strings.Repeat("x", 300)
+	resp := &codesearch.SearchResponse{
+		Query:   "foobar",
+		Stats:   codesearch.Stats{TotalMatches: 1, TotalFiles: 1, ReposSearched: 1, DurationMs: 1},
+		Results: []codesearch.Result{{Repo: "r", Path: "f.go", Line: 1, ContextLine: longLine}},
+	}
+
+	var buf bytes.Buffer
+	writeCodeSearchText(&buf, resp, statusStyles{colorEnabled: true}, false)
+
+	output := buf.String()
+	if !strings.Contains(output, "…") {
+		t.Errorf("expected truncated line to end with ellipsis:\n%s", output)
+	}
+	if !strings.Contains(output, "\x1b[") {
+		t.Errorf("expected case-insensitive highlight on truncated line:\n%s", output)
+	}
+}
+
 func TestWriteCodeSearchText_Empty(t *testing.T) {
 	t.Parallel()
 
@@ -242,7 +371,7 @@ func TestWriteCodeSearchText_Empty(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeCodeSearchText(&buf, resp)
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf), false)
 
 	if !strings.Contains(buf.String(), "No code search results found") {
 		t.Errorf("expected empty results message, got:\n%s", buf.String())

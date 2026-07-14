@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -125,6 +126,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 					query:         codeQuery,
 					repoFilters:   codeRepos,
 					limit:         limitFlag,
+					limitExplicit: cmd.Flags().Changed("limit"),
 					caseSensitive: caseSensitive,
 					jsonOutput:    jsonOutput,
 					insecureHTTP:  insecureHTTPAuth,
@@ -375,6 +377,7 @@ type codeSearchOpts struct {
 	repoFilters     []string
 	resolvedRepoIDs []string // ULIDs resolved from repoFilters via repo index
 	limit           int
+	limitExplicit   bool // user passed --limit; don't override for text display
 	caseSensitive   bool
 	jsonOutput      bool
 	insecureHTTP    bool
@@ -476,6 +479,14 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 	}
 
 	w := cmd.OutOrStdout()
+	textOutput := !opts.jsonOutput && interactive.IsTerminalWriter(w)
+
+	// Text output shows up to maxCodeSearchFiles files with a few matches
+	// each, so fetch a deeper result set than the default --limit (which is
+	// tuned for flat JSON output) unless the user asked for a specific limit.
+	if textOutput && !opts.limitExplicit {
+		opts.limit = codeSearchTextFetchLimit
+	}
 
 	// Always fan out via searchAllCells — it fetches the repo index,
 	// resolves slugs to ULIDs, and handles single- vs multi-jurisdiction.
@@ -484,12 +495,11 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 		return err
 	}
 
-	isTerminal := interactive.IsTerminalWriter(w)
-	if opts.jsonOutput || !isTerminal {
+	if !textOutput {
 		return writeCodeSearchJSON(w, resp)
 	}
 
-	writeCodeSearchText(w, resp)
+	writeCodeSearchText(w, resp, newStatusStyles(w), opts.caseSensitive)
 	return nil
 }
 
@@ -803,8 +813,20 @@ func writeCodeSearchJSON(w io.Writer, resp *codesearch.SearchResponse) error {
 // with an ellipsis so that JSONL/minified files don't blow up the terminal.
 const maxContextLineLen = 200
 
-// writeCodeSearchText renders code search results in grep-style format.
-func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse) {
+// Text output display caps: show breadth (files) over depth (in-file matches).
+// The fetch limit leaves headroom beyond files×matches so per-file overflow
+// ("+ N matches") counts have data to count.
+const (
+	maxCodeSearchFiles       = 10  // files shown in text output
+	maxCodeSearchFileMatches = 3   // matches shown per file
+	codeSearchTextFetchLimit = 100 // results fetched for text display
+)
+
+// writeCodeSearchText renders code search results grouped by file (ripgrep
+// style): a colored "repo:path" header per file, indented line-numbered
+// matches beneath it, and a dimmed stats footer. Colors are applied only when
+// the writer supports them (styles.colorEnabled); piped output stays plain.
+func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse, styles statusStyles, caseSensitive bool) {
 	if len(resp.Results) == 0 {
 		if len(resp.FailedJurisdictions) > 0 {
 			fmt.Fprintf(w, "No code search results found (some regions failed: %s)\n",
@@ -814,26 +836,120 @@ func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse) {
 		}
 		return
 	}
-	for _, r := range resp.Results {
-		line := r.ContextLine
-		runes := []rune(line)
-		if len(runes) > maxContextLineLen {
-			line = string(runes[:maxContextLineLen]) + "…"
-		}
-		fmt.Fprintf(w, "%s:%s:%d: %s\n", r.Repo, r.Path, r.Line, line)
+
+	// Group results by repo:path, preserving first-appearance order so the
+	// best-scored file stays on top (results arrive globally score-sorted).
+	type fileGroup struct {
+		key     string
+		results []codesearch.Result
 	}
-	shown := len(resp.Results)
+	var groups []fileGroup
+	idx := make(map[string]int, len(resp.Results))
+	for _, r := range resp.Results {
+		key := r.Repo + ":" + r.Path
+		i, ok := idx[key]
+		if !ok {
+			i = len(groups)
+			idx[key] = i
+			groups = append(groups, fileGroup{key: key})
+		}
+		groups[i].results = append(groups[i].results, r)
+	}
+
+	shown := 0
+	for gi, g := range groups {
+		if gi == maxCodeSearchFiles {
+			break
+		}
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, styles.render(styles.cyan, g.key))
+		for mi, r := range g.results {
+			if mi == maxCodeSearchFileMatches {
+				break
+			}
+			// Truncate before highlighting but append the ellipsis after,
+			// so the non-ASCII "…" doesn't disable case-insensitive
+			// highlighting (isASCII) for the rest of the line.
+			line := r.ContextLine
+			ellipsis := ""
+			if runes := []rune(line); len(runes) > maxContextLineLen {
+				line = string(runes[:maxContextLineLen])
+				ellipsis = "…"
+			}
+			lineNo := styles.render(styles.dim, fmt.Sprintf("%d:", r.Line))
+			fmt.Fprintf(w, "  %s %s%s\n", lineNo, highlightCodeMatches(line, resp.Query, styles, caseSensitive), ellipsis)
+			shown++
+		}
+		// ponytail: overflow counts only what this page fetched (peregrine
+		// has no per-file totals); a hot file shows "+ 97 matches" at most.
+		if extra := len(g.results) - maxCodeSearchFileMatches; extra > 0 {
+			label := "matches"
+			if extra == 1 {
+				label = "match"
+			}
+			fmt.Fprintln(w, styles.render(styles.dim, fmt.Sprintf("  + %d %s", extra, label)))
+		}
+	}
+
+	var summary string
 	if resp.Stats.TotalMatches > shown {
-		fmt.Fprintf(w, "\nShowing %d of %d matches across %d files in %d repos (%.0fms)\n",
+		summary = fmt.Sprintf("Showing %d of %d matches across %d files in %d repos (%.0fms)",
 			shown, resp.Stats.TotalMatches, resp.Stats.TotalFiles, resp.Stats.ReposSearched, resp.Stats.DurationMs)
 	} else {
-		fmt.Fprintf(w, "\n%d matches across %d files in %d repos (%.0fms)\n",
+		summary = fmt.Sprintf("%d matches across %d files in %d repos (%.0fms)",
 			resp.Stats.TotalMatches, resp.Stats.TotalFiles, resp.Stats.ReposSearched, resp.Stats.DurationMs)
 	}
+	fmt.Fprintf(w, "\n%s\n", styles.render(styles.dim, summary))
 	if len(resp.FailedJurisdictions) > 0 {
-		fmt.Fprintf(w, "Warning: results may be incomplete (failed jurisdictions: %s)\n",
+		warning := fmt.Sprintf("Warning: results may be incomplete (failed jurisdictions: %s)",
 			strings.Join(resp.FailedJurisdictions, ", "))
+		fmt.Fprintln(w, styles.render(styles.yellow, warning))
 	}
+}
+
+// highlightCodeMatches bold-red highlights occurrences of query in line
+// (grep convention). Matching mirrors the search: case-insensitive unless
+// caseSensitive is set. Case folding is only applied when both strings are
+// pure ASCII, since Unicode case mappings can change byte widths and
+// misalign offsets against the original line; non-ASCII input falls back to
+// exact matching. Returns line unchanged when color is disabled or there's
+// nothing to highlight.
+func highlightCodeMatches(line, query string, styles statusStyles, caseSensitive bool) string {
+	if !styles.colorEnabled || query == "" {
+		return line
+	}
+	haystack, needle := line, query
+	if !caseSensitive && isASCII(line) && isASCII(query) {
+		haystack, needle = strings.ToLower(line), strings.ToLower(query)
+	}
+	matchStyle := styles.red.Bold(true)
+	var b strings.Builder
+	i := 0
+	for {
+		j := strings.Index(haystack[i:], needle)
+		if j < 0 {
+			break
+		}
+		j += i
+		b.WriteString(line[i:j])
+		b.WriteString(matchStyle.Render(line[j : j+len(needle)]))
+		i = j + len(needle)
+	}
+	if i == 0 {
+		return line // no matches; skip the builder copy
+	}
+	b.WriteString(line[i:])
+	return b.String()
+}
+
+// isASCII reports whether s contains only ASCII bytes.
+func isASCII(s string) bool {
+	for i := range len(s) {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }
 
 // writeSearchJSON writes client-side paginated search results as JSON.

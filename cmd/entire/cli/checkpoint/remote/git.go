@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -76,7 +78,8 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	case opts.Unshallow && isShallowRepository(ctx, opts.Dir):
 		args = append(args, "--unshallow")
 	}
-	if !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx) {
+	filtered := !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx)
+	if filtered {
 		args = append(args, "--filter=blob:none")
 	}
 	args = append(args, opts.Remote)
@@ -91,7 +94,71 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	if err != nil {
 		return out, fmt.Errorf("git fetch: %w", err)
 	}
+	if filtered && IsURL(opts.Remote) {
+		// Stamp the URL git actually fetched from: with a checkpoint token set,
+		// newCommand rewrites SSH targets to HTTPS, and git records the
+		// promisor entry under the rewritten URL.
+		target := opts.Remote
+		if token := strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)); token != "" && isValidToken(token) {
+			target, _ = resolveTargetForTokenAuth(ctx, target)
+		}
+		markPromisorEntrySkipped(ctx, opts.Dir, target)
+	}
 	return out, nil
+}
+
+// markPromisorEntrySkipped excludes the URL-keyed config section that git
+// creates for a filtered URL fetch (remote.<url>.promisor=true) from
+// `git fetch --all` and `git remote update`. Git needs the promisor entry to
+// lazy-fetch filtered-out objects later, but the entry also makes the URL show
+// up as a fetchable remote, so without this every checkpoint URL ever fetched
+// from lingers as a phantom remote that bulk fetches keep dialing.
+// Best-effort: the fetch already succeeded, so failures only log.
+func markPromisorEntrySkipped(ctx context.Context, dir, url string) {
+	if !gitConfigBool(ctx, dir, "remote."+url+".promisor") {
+		// Git didn't record a promisor entry for this URL; don't invent a
+		// config section that wouldn't otherwise exist.
+		return
+	}
+	for _, key := range []string{"skipFetchAll", "skipDefaultUpdate"} {
+		fullKey := "remote." + url + "." + key
+		if gitConfigBool(ctx, dir, fullKey) {
+			// Checked per key so a partially-stamped entry (e.g. an earlier
+			// run failing between the two writes) still gets completed.
+			continue
+		}
+		cmd := exec.CommandContext(ctx, "git", "config", "--local", fullKey, "true")
+		if dir != "" {
+			cmd.Dir = dir
+		}
+		if out, cfgErr := cmd.CombinedOutput(); cfgErr != nil {
+			redactedURL := RedactURL(url)
+			// The output can echo the key, which embeds the URL — and a URL
+			// can carry credentials. Redact before logging.
+			msg := strings.TrimSpace(strings.ReplaceAll(string(out), url, redactedURL))
+			logging.Warn(ctx, "failed to mark promisor config entry as skipped for bulk fetches",
+				slog.String("url", redactedURL),
+				slog.String("key", key),
+				slog.String("output", msg),
+				slog.String("error", cfgErr.Error()),
+			)
+			return
+		}
+	}
+}
+
+// gitConfigBool reads a local git config key and reports whether it is set to
+// a true value. Missing keys and read errors report false.
+func gitConfigBool(ctx context.Context, dir, key string) bool {
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get", "--type=bool", key)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "true"
 }
 
 // FetchBlobs fetches specific objects (typically blobs) by hash from a remote.

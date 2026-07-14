@@ -1310,10 +1310,18 @@ func IsSetUpAny(ctx context.Context) bool {
 }
 
 // IsSetUpAndEnabled returns true if Entire is both set up and enabled.
-// This checks if .entire/settings.json exists AND has enabled: true.
+// "Set up" spans either scope — .entire/settings.json OR
+// .entire/settings.local.json — so it must check IsSetUpAny, not IsSetUp.
+// `entire enable --local` writes only settings.local.json and never creates the
+// base file; gating on the base file alone would treat such a local-only repo
+// as inactive and make every hook a silent no-op, dropping all checkpoint
+// capture for that documented workflow. The IsSetUpAny guard is still required
+// so a never-enabled repo (no settings file in any scope) is not treated as
+// enabled by Load's default Enabled: true. Any settings read error is treated
+// as disabled (fail closed).
 // Use this for hooks that should be no-ops when Entire is not active.
 func IsSetUpAndEnabled(ctx context.Context) bool {
-	if !IsSetUp(ctx) {
+	if !IsSetUpAny(ctx) {
 		return false
 	}
 	s, err := Load(ctx)

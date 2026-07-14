@@ -313,15 +313,22 @@ func (env *TestEnv) gitConfigPath() string {
 var gitConfigGuardRepositoryFormatVersionRE = regexp.MustCompile(`(?m)^([ \t]*)repositoryformatversion = [01]$`)
 
 var gitConfigGuardTransportPromisorRemoteRE = regexp.MustCompile(
-	`(?m)^\[remote "(?:(?:https?|ssh|file)://|/|[A-Za-z]:[\\/]|[^"\n]+@[^"\n]+:[^"\n]+).+"\]\n(?:[ \t]+promisor = true\n[ \t]+partialclonefilter = blob:none\n?|[ \t]+partialclonefilter = blob:none\n[ \t]+promisor = true\n?)`,
+	`(?m)^\[remote "(?:(?:https?|ssh|file)://|/|[A-Za-z]:[\\/]|[^"\n]+@[^"\n]+:[^"\n]+).+"\]\n(?:[ \t]+(?:promisor = true|partialclonefilter = blob:none|skipFetchAll = true|skipDefaultUpdate = true)\n?){2,4}`,
 )
 
 func normalizeGitConfigForGuard(content string) string {
 	content = gitConfigGuardRepositoryFormatVersionRE.ReplaceAllString(content, `${1}repositoryformatversion = <normalized>`)
-	// Deliberately ignore only the full promisor+partialclonefilter pair that
-	// git writes for transport-keyed remotes during filtered fetches. If git ever
-	// writes a partial section, the guard should still fail loudly.
-	content = gitConfigGuardTransportPromisorRemoteRE.ReplaceAllString(content, "")
+	// Deliberately ignore only the URL-keyed remote sections written during
+	// filtered fetches: git's promisor+partialclonefilter pair plus the
+	// skipFetchAll/skipDefaultUpdate stamp the CLI adds so bulk fetches skip
+	// the entry. A section without the full promisor pair (or with any other
+	// key) still fails loudly.
+	content = gitConfigGuardTransportPromisorRemoteRE.ReplaceAllStringFunc(content, func(section string) string {
+		if strings.Contains(section, "promisor = true") && strings.Contains(section, "partialclonefilter = blob:none") {
+			return ""
+		}
+		return section
+	})
 	return content
 }
 

@@ -791,3 +791,136 @@ func envToMap(env []string) map[string]string {
 	}
 	return m
 }
+
+// TestFetch_FilteredURLFetchMarksPromisorSkipped verifies that after a
+// filtered fetch from a URL, the URL-keyed promisor config section git creates
+// is excluded from `git fetch --all` / `git remote update` — otherwise every
+// checkpoint URL ever fetched from lingers as a phantom remote that bulk
+// fetches keep dialing.
+func TestFetch_FilteredURLFetchMarksPromisorSkipped(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	originBare := filepath.Join(tmpDir, "origin.git")
+	checkpointBare := filepath.Join(tmpDir, "checkpoints.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	cloneDir := filepath.Join(tmpDir, "clone")
+
+	testutil.InitRepo(t, seedDir)
+	testutil.WriteFile(t, seedDir, "f.txt", "init")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "init")
+
+	// Separate origin and checkpoint repos, mirroring the real setup where
+	// checkpoints are fetched by URL from a repo that is not origin.
+	runIsolatedGit(ctx, t, "", "init", "--bare", originBare)
+	runIsolatedGit(ctx, t, "", "init", "--bare", checkpointBare)
+	runIsolatedGit(ctx, t, checkpointBare, "config", "uploadpack.allowFilter", "true")
+	runIsolatedGit(ctx, t, seedDir, "push", originBare, "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+originBare, cloneDir)
+
+	// A commit only in the checkpoint repo so the filtered fetch has
+	// something to transfer.
+	testutil.WriteFile(t, seedDir, "f.txt", "init\nnext\n")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "next")
+	runIsolatedGit(ctx, t, seedDir, "push", checkpointBare, "HEAD:refs/heads/main")
+
+	// Filtered fetches read .entire settings from the CWD repo.
+	testutil.WriteFile(
+		t,
+		cloneDir,
+		".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
+	)
+	t.Chdir(cloneDir)
+
+	fetchURL := "file://" + checkpointBare
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   fetchURL,
+		RefSpecs: []string{"+refs/heads/main:refs/entire-fetch-tmp/main"},
+		NoTags:   true,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	// Sanity: git recorded the URL-keyed promisor entry for the filtered fetch.
+	require.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".promisor"),
+		"expected git to record a promisor entry for the filtered URL fetch")
+
+	assert.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"),
+		"URL-keyed promisor entry should be excluded from git fetch --all")
+	assert.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipDefaultUpdate"),
+		"URL-keyed promisor entry should be excluded from git remote update")
+
+	// git fetch --all must no longer dial the phantom entry: with the
+	// checkpoint repo gone, --all only succeeds if the URL-keyed entry is
+	// skipped (origin is still reachable).
+	require.NoError(t, os.RemoveAll(checkpointBare))
+	runIsolatedGit(ctx, t, cloneDir, "fetch", "--all", "--no-auto-gc")
+}
+
+// TestFetch_UnfilteredFetchDoesNotCreateConfigSection verifies the stamp is
+// gated on git having created a promisor entry: a plain (unfiltered) URL fetch
+// must not invent a remote.<url> config section.
+func TestFetch_UnfilteredFetchDoesNotCreateConfigSection(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "bare.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	cloneDir := filepath.Join(tmpDir, "clone")
+
+	testutil.InitRepo(t, seedDir)
+	testutil.WriteFile(t, seedDir, "f.txt", "init")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "init")
+
+	runIsolatedGit(ctx, t, "", "init", "--bare", bareDir)
+	runIsolatedGit(ctx, t, seedDir, "remote", "add", "origin", bareDir)
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+bareDir, cloneDir)
+
+	testutil.WriteFile(
+		t,
+		cloneDir,
+		".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
+	)
+	t.Chdir(cloneDir)
+
+	fetchURL := "file://" + bareDir
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   fetchURL,
+		RefSpecs: []string{"+refs/heads/main:refs/remotes/origin/main"},
+		NoTags:   true,
+		NoFilter: true,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".promisor"))
+	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"))
+	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipDefaultUpdate"))
+}
+
+// TestMarkPromisorEntrySkipped_CompletesPartialStamp verifies the keys are
+// checked independently: an entry with skipFetchAll already set (e.g. an
+// earlier run failing between the two writes) still gets skipDefaultUpdate.
+func TestMarkPromisorEntrySkipped_CompletesPartialStamp(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	const url = "https://example.com/org/checkpoints.git"
+	runIsolatedGit(ctx, t, repoDir, "config", "--local", "remote."+url+".promisor", "true")
+	runIsolatedGit(ctx, t, repoDir, "config", "--local", "remote."+url+".skipFetchAll", "true")
+
+	markPromisorEntrySkipped(ctx, repoDir, url)
+
+	assert.True(t, gitConfigBool(ctx, repoDir, "remote."+url+".skipFetchAll"))
+	assert.True(t, gitConfigBool(ctx, repoDir, "remote."+url+".skipDefaultUpdate"),
+		"partially-stamped entry should be completed")
+}
