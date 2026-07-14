@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/internal/hookcompat"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
@@ -70,13 +71,13 @@ func (c *ClaudeCodeAgent) HookNames() []string {
 func (c *ClaudeCodeAgent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
-		return c.parseSessionInfoEvent(stdin, agent.SessionStart)
+		return c.parseSessionInfoEvent(stdin, hookName, agent.SessionStart)
 	case HookNameUserPromptSubmit:
-		return c.parseTurnStart(stdin)
+		return c.parseTurnStart(stdin, hookName)
 	case HookNameStop:
-		return c.parseSessionInfoEvent(stdin, agent.TurnEnd)
+		return c.parseSessionInfoEvent(stdin, hookName, agent.TurnEnd)
 	case HookNameSessionEnd:
-		return c.parseSessionInfoEvent(stdin, agent.SessionEnd)
+		return c.parseSessionInfoEvent(stdin, hookName, agent.SessionEnd)
 	case HookNamePreTask:
 		return c.parseSubagentStart(stdin)
 	case HookNamePostTask:
@@ -87,6 +88,15 @@ func (c *ClaudeCodeAgent) ParseHookEvent(_ context.Context, hookName string, std
 	default:
 		return nil, nil //nolint:nilnil // Unknown hooks have no lifecycle action
 	}
+}
+
+var claudeHookEventToHookNames = map[string][]string{
+	"SessionStart":     {HookNameSessionStart},
+	"SessionEnd":       {HookNameSessionEnd},
+	"Stop":             {HookNameStop},
+	"UserPromptSubmit": {HookNameUserPromptSubmit},
+	"PreToolUse":       {HookNamePreTask},
+	"PostToolUse":      {HookNamePostTask, HookNamePostTodo},
 }
 
 // ReadTranscript reads the raw JSONL transcript bytes for a session.
@@ -114,32 +124,50 @@ func (c *ClaudeCodeAgent) CalculateTokenUsage(transcriptData []byte, fromOffset 
 
 // parseSessionInfoEvent parses the hooks whose payload is sessionInfoRaw —
 // SessionStart, Stop, and SessionEnd differ only in the resulting event type.
-func (c *ClaudeCodeAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent.EventType) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
+func (c *ClaudeCodeAgent) parseSessionInfoEvent(stdin io.Reader, hookName string, eventType agent.EventType) (*agent.Event, error) {
+	env, ok, err := readCompatEnvelope(stdin, hookName)
 	if err != nil {
 		return nil, err
+	}
+	if !ok {
+		return nil, nil //nolint:nilnil // Mismatched plugin event — skip silently.
 	}
 	return &agent.Event{
 		Type:       eventType,
-		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
-		Model:      raw.Model,
-		Timestamp:  time.Now(),
+		SessionID:  env.SessionID,
+		SessionRef: env.TranscriptPath,
+		Model:      env.Model,
+		Timestamp:  env.Timestamp,
 	}, nil
 }
 
-func (c *ClaudeCodeAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[userPromptSubmitRaw](stdin)
+func (c *ClaudeCodeAgent) parseTurnStart(stdin io.Reader, hookName string) (*agent.Event, error) {
+	env, ok, err := readCompatEnvelope(stdin, hookName)
 	if err != nil {
 		return nil, err
 	}
+	if !ok {
+		return nil, nil //nolint:nilnil // Mismatched plugin event — skip silently.
+	}
 	return &agent.Event{
 		Type:       agent.TurnStart,
-		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
-		Prompt:     raw.Prompt,
-		Timestamp:  time.Now(),
+		SessionID:  env.SessionID,
+		SessionRef: env.TranscriptPath,
+		Prompt:     env.Prompt,
+		Model:      env.Model,
+		Timestamp:  env.Timestamp,
 	}, nil
+}
+
+func readCompatEnvelope(stdin io.Reader, hookName string) (*hookcompat.Envelope, bool, error) {
+	env, err := hookcompat.ReadEnvelope(stdin)
+	if err != nil {
+		return nil, false, err
+	}
+	if !hookcompat.HookEventMatches(env.HookEventName, hookName, claudeHookEventToHookNames) {
+		return env, false, nil
+	}
+	return env, true, nil
 }
 
 func (c *ClaudeCodeAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) {

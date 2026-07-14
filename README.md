@@ -382,6 +382,8 @@ Each agent stores its hook configuration in its own directory. When you run `ent
 
 You can enable multiple agents at the same time — each agent's hooks are independent. Entire detects which agents are active by checking for installed hooks, not by a setting in `settings.json`.
 
+For Claude Code and Codex, Entire accepts both native CLI hook payloads and plugin-style payloads that use camelCase field names such as `sessionId`, `transcriptPath`, and `hookEventName`. This improves compatibility with VS Code/plugin-style hosts when those hosts invoke the same `entire hooks ...` commands. Desktop apps or plugins that do not invoke hooks and do not expose readable transcript files cannot be captured live by the CLI alone; use `entire import` or `entire session attach` when transcripts are available after the fact.
+
 ### Checkpoint Remote
 
 By default, Entire pushes `entire/checkpoints/v1` to the same remote as your code. If you want to push checkpoint data to a separate repo (e.g., a private repo for public projects), configure `checkpoint_remote` with a structured provider and repo:
@@ -453,6 +455,7 @@ Local settings override project settings field-by-field. When you run `entire st
 ### Agent-Specific Steps & Limitations
 
 - When enabling Entire for Codex, the command will also create or update `.codex/config.toml` with `hooks = true` to enable Codex hooks. If you configure Codex manually, make sure this flag is set in your `.codex/config.toml`. Or select Codex from the interactive agent picker when running `entire enable`.
+- Codex and Claude Code CLI hooks are fully supported. VS Code/plugin hosts are supported when they call compatible Entire hook commands or provide standard transcript paths. Desktop hosts without hooks or transcript export cannot be live-captured by CLI-only integration.
 - Entire supports Cursor IDE and Cursor Agent CLI tool, but `entire rewind` is not available at this time. Other commands (`doctor`, `status` etc.) work the same as all other agents.
 - Entire supports Copilot CLI, but not Copilot in VS Code, in other IDEs, or on github.com.
 - Entire supports Pi coding agent (Preview). Pi uses a TypeScript extension instead of a JSON hook config. Subagent capture is not currently available.

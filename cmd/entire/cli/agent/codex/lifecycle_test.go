@@ -52,6 +52,28 @@ func TestParseHookEvent_SessionStartNullTranscript(t *testing.T) {
 	require.Empty(t, event.SessionRef)
 }
 
+func TestParseHookEvent_SessionStart_PluginPayload(t *testing.T) {
+	t.Parallel()
+	ag := &CodexAgent{}
+	input := `{
+		"sessionId": "plugin-session",
+		"transcriptPath": "/tmp/plugin-rollout.jsonl",
+		"cwd": "/tmp/testrepo",
+		"hookEventName": "SessionStart",
+		"timestamp": "2026-02-09T10:30:00.000Z",
+		"model": "gpt-5.2-codex"
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionStart, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, agent.SessionStart, event.Type)
+	require.Equal(t, "plugin-session", event.SessionID)
+	require.Equal(t, "/tmp/plugin-rollout.jsonl", event.SessionRef)
+	require.Equal(t, "gpt-5.2-codex", event.Model)
+	require.Equal(t, 2026, event.Timestamp.Year())
+}
+
 func TestParseHookEvent_UserPromptSubmit(t *testing.T) {
 	t.Parallel()
 	ag := &CodexAgent{}
@@ -76,6 +98,30 @@ func TestParseHookEvent_UserPromptSubmit(t *testing.T) {
 	require.Equal(t, "gpt-4.1", event.Model)
 }
 
+func TestParseHookEvent_UserPromptSubmit_PluginPayload(t *testing.T) {
+	t.Parallel()
+	ag := &CodexAgent{}
+	input := `{
+		"sessionId": "plugin-session",
+		"transcript_path": "/tmp/plugin-rollout.jsonl",
+		"cwd": "/tmp/testrepo",
+		"hookEventName": "UserPromptSubmit",
+		"timestamp": 1770633000000,
+		"model": "gpt-5.2-codex",
+		"prompt": "Create a hello.txt file"
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameUserPromptSubmit, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, agent.TurnStart, event.Type)
+	require.Equal(t, "plugin-session", event.SessionID)
+	require.Equal(t, "/tmp/plugin-rollout.jsonl", event.SessionRef)
+	require.Equal(t, "Create a hello.txt file", event.Prompt)
+	require.Equal(t, "gpt-5.2-codex", event.Model)
+	require.False(t, event.Timestamp.IsZero())
+}
+
 func TestParseHookEvent_Stop(t *testing.T) {
 	t.Parallel()
 	ag := &CodexAgent{}
@@ -98,6 +144,41 @@ func TestParseHookEvent_Stop(t *testing.T) {
 	require.Equal(t, "test-uuid", event.SessionID)
 	require.Equal(t, "/tmp/rollout.jsonl", event.SessionRef)
 	require.Equal(t, "gpt-4.1", event.Model)
+}
+
+func TestParseHookEvent_Stop_PluginPayload(t *testing.T) {
+	t.Parallel()
+	ag := &CodexAgent{}
+	input := `{
+		"sessionId": "plugin-session",
+		"transcriptPath": "/tmp/plugin-rollout.jsonl",
+		"cwd": "/tmp/testrepo",
+		"hookEventName": "Stop",
+		"timestamp": "2026-02-09T10:30:00.000Z",
+		"model": "gpt-5.2-codex"
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, agent.TurnEnd, event.Type)
+	require.Equal(t, "plugin-session", event.SessionID)
+	require.Equal(t, "/tmp/plugin-rollout.jsonl", event.SessionRef)
+	require.Equal(t, "gpt-5.2-codex", event.Model)
+}
+
+func TestParseHookEvent_PluginPayloadMismatchedHookEventName_ReturnsNil(t *testing.T) {
+	t.Parallel()
+	ag := &CodexAgent{}
+	input := `{
+		"sessionId": "plugin-session",
+		"hookEventName": "SessionStart",
+		"timestamp": "2026-02-09T10:30:00.000Z"
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.Nil(t, event)
 }
 
 func TestParseHookEvent_PreToolUse_ReturnsNil(t *testing.T) {
@@ -139,6 +220,34 @@ func TestParseHookEvent_PostToolUse_ApplyPatch(t *testing.T) {
 	require.Equal(t, []string{"a.txt"}, event.NewFiles)
 	require.Equal(t, []string{"b.txt"}, event.ModifiedFiles)
 	require.Equal(t, []string{"c.txt"}, event.DeletedFiles)
+}
+
+func TestParseHookEvent_PostToolUse_PluginPayload(t *testing.T) {
+	t.Parallel()
+	ag := &CodexAgent{}
+	input := `{
+		"sessionId": "plugin-session",
+		"transcriptPath": "/tmp/plugin-rollout.jsonl",
+		"cwd": "/tmp/testrepo",
+		"hookEventName": "PostToolUse",
+		"timestamp": "2026-02-09T10:30:00.000Z",
+		"model": "gpt-5.2-codex",
+		"toolName": "apply_patch",
+		"toolUseId": "call-plugin",
+		"toolInput": {"command": "*** Begin Patch\n*** Add File: plugin.txt\n+hi\n*** End Patch\n"}
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNamePostToolUse, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, agent.ToolUse, event.Type)
+	require.Equal(t, "plugin-session", event.SessionID)
+	require.Equal(t, "/tmp/plugin-rollout.jsonl", event.SessionRef)
+	require.Equal(t, "/tmp/testrepo", event.CWD)
+	require.Equal(t, "call-plugin", event.ToolUseID)
+	require.Equal(t, "gpt-5.2-codex", event.Model)
+	require.Equal(t, []string{"plugin.txt"}, event.NewFiles)
+	require.Equal(t, 2026, event.Timestamp.Year())
 }
 
 func TestParseHookEvent_PostToolUse_AcceptsClaudeAliases(t *testing.T) {
