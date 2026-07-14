@@ -167,7 +167,7 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			// bare "exit status 1". Only emitted below if the turn never
 			// completes, so a stray message on a successful run is ignored.
 			if msg := strings.TrimSpace(firstNonEmptyString(env.Error.Message, env.Message)); msg != "" {
-				failureMsg = msg
+				failureMsg = cleanCodexFailureMessage(msg)
 			}
 			// Add cases here when codex's envelope or item types grow; the
 			// default arm logs unknown types at Debug so drift can be
@@ -290,6 +290,39 @@ type codexEnvelope struct {
 // use ({"error":{"message":"..."}}); top-level "message" covers the flat shape.
 type codexErrorField struct {
 	Message string `json:"message"`
+}
+
+// cleanCodexFailureMessage unwraps a codex failure message that is itself a
+// JSON-encoded API error, returning the human-readable text at `.error.message`
+// (or a top-level `.message`) instead of the raw blob. Codex surfaces upstream
+// API errors this way — e.g. a model/version mismatch arrives as
+// `{"type":"error","status":400,"error":{"message":"The '…' model requires a
+// newer version of Codex…"}}`. A plain (non-JSON) message, or JSON without a
+// message field, passes through unchanged. Unwrapping is bounded in case the
+// message is nested more than once.
+func cleanCodexFailureMessage(msg string) string {
+	current := strings.TrimSpace(msg)
+	for range 3 {
+		trimmed := strings.TrimSpace(current)
+		if !strings.HasPrefix(trimmed, "{") {
+			return current
+		}
+		var wrapped struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &wrapped); err != nil {
+			return current
+		}
+		inner := firstNonEmptyString(wrapped.Error.Message, wrapped.Message)
+		if strings.TrimSpace(inner) == "" {
+			return current
+		}
+		current = strings.TrimSpace(inner)
+	}
+	return current
 }
 
 func firstNonEmptyString(values ...string) string {

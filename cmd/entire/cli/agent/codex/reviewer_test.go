@@ -566,3 +566,42 @@ func TestBuildCodexReviewCmd_PromptOverrideVerbatim(t *testing.T) {
 		t.Errorf("PromptOverride modified: %q", got)
 	}
 }
+
+// TestCleanCodexFailureMessage pins that a codex failure envelope whose
+// message is a JSON-encoded API error is unwrapped to the human-readable
+// `.error.message`, instead of surfacing the raw blob. Plain messages pass
+// through unchanged.
+func TestCleanCodexFailureMessage(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "wrapped API error extracts inner message",
+			in:   `{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-5.6-sol' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again."}}`,
+			want: "The 'gpt-5.6-sol' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again.",
+		},
+		{
+			name: "plain message unchanged",
+			in:   "exit status 1",
+			want: "exit status 1",
+		},
+		{
+			name: "top-level message when no nested error",
+			in:   `{"message":"rate limit exceeded"}`,
+			want: "rate limit exceeded",
+		},
+		{
+			name: "unparseable json left as-is",
+			in:   `{not valid json`,
+			want: `{not valid json`,
+		},
+	}
+	for _, tc := range cases {
+		if got := cleanCodexFailureMessage(tc.in); got != tc.want {
+			t.Errorf("%s: cleanCodexFailureMessage(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
