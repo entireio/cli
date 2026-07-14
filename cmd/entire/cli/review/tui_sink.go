@@ -64,118 +64,18 @@ type TUISink struct {
 	done     chan struct{} // closed when the tea.Program exits
 	pumpDone chan struct{} // closed when the pump goroutine exits
 
-	// One-row-per-agent grouping. Skill fan-out runs N parallel workers per
-	// agent (claude-code:review, claude-code:pr-review), but the fan-out is
-	// behavior-only: the dashboard shows one row per agent. rowOrder is the
-	// per-agent row labels; workerToAgent maps a worker's label to its row.
-	// Nil when there is nothing to collapse (single-agent path), so events
-	// and the summary pass through unchanged.
-	rowOrder      []string
-	workerToAgent map[string]string
-	rowWorkers    map[string][]string // agent row → its worker labels
-	// workerTokens holds each worker's latest cumulative Tokens so a
-	// collapsed row can display the per-agent SUM live (workers stream
-	// cumulative counts independently; overwriting would bounce between
-	// them). Written and read only from the serial dispatch goroutine.
-	workerTokens map[string]reviewtypes.Tokens
+	// group reconciles per-worker execution with one-row-per-agent display
+	// (skill fan-out). Nil on the single-agent path, where events and the
+	// summary pass through unchanged.
+	group *agentGrouping
 }
 
-// groupWorkers configures one-row-per-agent collapsing: rowOrder is the
-// ordered per-agent row labels (matching the model's rows), and workerToAgent
-// maps each worker label to the agent row its events and summary entry fold
-// into. Called before Start.
+// groupWorkers enables one-row-per-agent collapsing: rowOrder is the ordered
+// per-agent row labels (matching the model's rows) and workerToAgent maps
+// each worker label to the agent row its events and summary entry fold into.
+// Called before Start.
 func (s *TUISink) groupWorkers(rowOrder []string, workerToAgent map[string]string) {
-	s.rowOrder = rowOrder
-	s.workerToAgent = workerToAgent
-	s.rowWorkers = make(map[string][]string, len(rowOrder))
-	for worker, row := range workerToAgent {
-		s.rowWorkers[row] = append(s.rowWorkers[row], worker)
-	}
-	s.workerTokens = make(map[string]reviewtypes.Tokens, len(workerToAgent))
-}
-
-// agentRowTokens records worker's latest cumulative Tokens and returns the
-// summed Tokens across every worker folded into agentRow. Called only from
-// the serial dispatch goroutine (CU4 contract), so it needs no lock.
-func (s *TUISink) agentRowTokens(worker, agentRow string, tk reviewtypes.Tokens) reviewtypes.Tokens {
-	s.workerTokens[worker] = tk
-	var sum reviewtypes.Tokens
-	for _, w := range s.rowWorkers[agentRow] {
-		wt := s.workerTokens[w]
-		sum.In += wt.In
-		sum.Out += wt.Out
-	}
-	return sum
-}
-
-// agentRowFor resolves a worker label to its agent row, passing through any
-// name absent from the map (single-agent path, judge/master labels).
-func (s *TUISink) agentRowFor(name string) string {
-	if s.workerToAgent != nil {
-		if row, ok := s.workerToAgent[name]; ok {
-			return row
-		}
-	}
-	return name
-}
-
-// collapseSummaryForRows folds a per-worker summary into one AgentRun per
-// agent row, in rowOrder, so the model's by-index row sync still aligns:
-// worst status wins (Failed > Cancelled > Succeeded), tokens sum, the first
-// non-nil error is kept. Returns the summary unchanged when no grouping is
-// configured.
-func (s *TUISink) collapseSummaryForRows(summary reviewtypes.RunSummary) reviewtypes.RunSummary {
-	if s.workerToAgent == nil {
-		return summary
-	}
-	byRow := make(map[string]*reviewtypes.AgentRun, len(s.rowOrder))
-	for _, run := range summary.AgentRuns {
-		row := s.agentRowFor(run.Name)
-		agg, ok := byRow[row]
-		if !ok {
-			cloned := run
-			cloned.Name = row
-			byRow[row] = &cloned
-			continue
-		}
-		agg.Tokens.In += run.Tokens.In
-		agg.Tokens.Out += run.Tokens.Out
-		if reviewStatusWorse(run.Status, agg.Status) {
-			agg.Status = run.Status
-		}
-		if agg.Err == nil && run.Err != nil {
-			agg.Err = run.Err
-		}
-	}
-	out := summary
-	out.AgentRuns = make([]reviewtypes.AgentRun, 0, len(byRow))
-	for _, row := range s.rowOrder {
-		if agg, ok := byRow[row]; ok {
-			out.AgentRuns = append(out.AgentRuns, *agg)
-		}
-	}
-	return out
-}
-
-// reviewStatusWorse reports whether a is a worse terminal status than b, for
-// worst-wins aggregation across an agent's workers.
-func reviewStatusWorse(a, b reviewtypes.AgentStatus) bool {
-	return reviewStatusRank(a) > reviewStatusRank(b)
-}
-
-func reviewStatusRank(s reviewtypes.AgentStatus) int {
-	switch s {
-	case reviewtypes.AgentStatusFailed:
-		return 3
-	case reviewtypes.AgentStatusCancelled:
-		return 2
-	case reviewtypes.AgentStatusSucceeded:
-		return 1
-	case reviewtypes.AgentStatusUnknown:
-		return 0
-	default:
-		return 0
-	}
+	s.group = newAgentGrouping(rowOrder, workerToAgent)
 }
 
 // Compile-time interface check.
@@ -324,16 +224,21 @@ func (s *TUISink) AgentEvent(agent string, ev reviewtypes.Event) {
 	if !ok {
 		return
 	}
-	row := s.agentRowFor(agent)
-	// A collapsed row shows the SUM of its workers' cumulative token counts;
-	// forwarding a single worker's cumulative value would bounce the live
-	// number between siblings (row.tokens overwrites, per CU2). Ungrouped
-	// (single-worker) rows pass through unchanged.
-	if tk, ok := ev.(reviewtypes.Tokens); ok && s.workerTokens != nil {
-		ev = s.agentRowTokens(agent, row, tk)
+	// Collapse per-worker events onto the agent row (skill fan-out): route to
+	// the agent row, and show the SUM of its workers' cumulative tokens (a
+	// single worker's value would bounce the live number between siblings,
+	// since row.tokens overwrites per CU2). source carries the original
+	// worker label so drill-in can label interleaved skills. Ungrouped rows
+	// pass through unchanged.
+	row, source := agent, agent
+	if s.group != nil {
+		row = s.group.rowFor(agent)
+		if tk, ok := ev.(reviewtypes.Tokens); ok {
+			ev = s.group.liveTokens(agent, tk)
+		}
 	}
 	select {
-	case s.msgs <- agentEventMsg{agent: row, ev: ev}:
+	case s.msgs <- agentEventMsg{agent: row, source: source, ev: ev}:
 	default:
 		s.mu.Lock()
 		s.dropped++
@@ -379,7 +284,10 @@ func (s *TUISink) RunFinished(summary reviewtypes.RunSummary) {
 	s.finished = true
 	s.mu.Unlock()
 
-	s.enqueueControl(runFinishedMsg{summary: s.collapseSummaryForRows(summary)})
+	if s.group != nil {
+		summary = s.group.collapseSummary(summary)
+	}
+	s.enqueueControl(runFinishedMsg{summary: summary})
 }
 
 // FinalPhaseStarted updates the TUI with a visible post-run phase such as the

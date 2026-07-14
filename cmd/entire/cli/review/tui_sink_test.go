@@ -2,6 +2,7 @@ package review
 
 import (
 	"bytes"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -511,8 +512,7 @@ func TestTUISink_GroupsWorkerEventsByAgent(t *testing.T) {
 // tokens summed) so the model's by-index row sync still aligns.
 func TestTUISink_CollapsesSummaryToAgentRows(t *testing.T) {
 	t.Parallel()
-	sink := newTUISinkWithProgram(newRecordingProgram())
-	sink.groupWorkers([]string{tAgentClaude, "codex"}, map[string]string{
+	g := newAgentGrouping([]string{tAgentClaude, "codex"}, map[string]string{
 		"claude-code:review":    tAgentClaude,
 		"claude-code:pr-review": tAgentClaude,
 		"codex":                 "codex",
@@ -522,7 +522,7 @@ func TestTUISink_CollapsesSummaryToAgentRows(t *testing.T) {
 		{Name: "claude-code:pr-review", Status: reviewtypes.AgentStatusFailed, Tokens: reviewtypes.Tokens{In: 50, Out: 5}},
 		{Name: "codex", Status: reviewtypes.AgentStatusSucceeded, Tokens: reviewtypes.Tokens{In: 200, Out: 20}},
 	}}
-	got := sink.collapseSummaryForRows(in)
+	got := g.collapseSummary(in)
 	if len(got.AgentRuns) != 2 {
 		t.Fatalf("collapsed runs = %d, want 2 (one per agent row): %+v", len(got.AgentRuns), got.AgentRuns)
 	}
@@ -583,5 +583,63 @@ func TestTUISink_SumsLiveTokensAcrossWorkers(t *testing.T) {
 			t.Fatalf("last forwarded tokens = %v, want %v (per-worker sum)", last, want)
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+// TestAgentGrouping_CollapseAggregatesDurationSpan pins (a): a collapsed
+// agent run spans from its earliest worker's start to its latest worker's
+// end, not one worker's slice.
+func TestAgentGrouping_CollapseAggregatesDurationSpan(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	g := newAgentGrouping([]string{tAgentClaude}, map[string]string{
+		"claude-code:review":    tAgentClaude,
+		"claude-code:pr-review": tAgentClaude,
+	})
+	in := reviewtypes.RunSummary{AgentRuns: []reviewtypes.AgentRun{
+		// starts at +0, runs 4m → ends +4m
+		{Name: "claude-code:review", StartedAt: base, Duration: 4 * time.Minute},
+		// starts at +1m, runs 5m → ends +6m (latest)
+		{Name: "claude-code:pr-review", StartedAt: base.Add(time.Minute), Duration: 5 * time.Minute},
+	}}
+	got := g.collapseSummary(in)
+	if len(got.AgentRuns) != 1 {
+		t.Fatalf("collapsed runs = %d, want 1", len(got.AgentRuns))
+	}
+	run := got.AgentRuns[0]
+	if !run.StartedAt.Equal(base) {
+		t.Errorf("StartedAt = %v, want earliest %v", run.StartedAt, base)
+	}
+	if run.Duration != 6*time.Minute {
+		t.Errorf("Duration = %v, want 6m span (earliest start → latest end)", run.Duration)
+	}
+}
+
+// TestBuildEventLines_LabelsSkillWhenMultipleSources pins (b): when a
+// collapsed row's buffer holds events from more than one worker, drill-in
+// prefixes each with its skill tag so interleaved parallel skills read
+// cleanly; a single-source buffer stays unprefixed.
+func TestBuildEventLines_LabelsSkillWhenMultipleSources(t *testing.T) {
+	t.Parallel()
+	multi := []bufferedEvent{
+		{source: "claude-code:review", ev: reviewtypes.AssistantText{Text: "found A"}},
+		{source: "claude-code:pr-review", ev: reviewtypes.AssistantText{Text: "found B"}},
+	}
+	lines := buildEventLines(multi, 80)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "review") || !strings.Contains(joined, "pr-review") {
+		t.Errorf("multi-source drill-in should tag each event with its skill:\n%s", joined)
+	}
+	if !strings.Contains(joined, "found A") || !strings.Contains(joined, "found B") {
+		t.Errorf("event text lost:\n%s", joined)
+	}
+
+	single := []bufferedEvent{
+		{source: "codex", ev: reviewtypes.AssistantText{Text: "only one"}},
+		{source: "codex", ev: reviewtypes.ToolCall{Name: "exec", Args: "ls"}},
+	}
+	sl := strings.Join(buildEventLines(single, 80), "\n")
+	if strings.Contains(sl, "[codex]") || strings.Contains(sl, "codex:") {
+		t.Errorf("single-source drill-in must not add a skill prefix:\n%s", sl)
 	}
 }

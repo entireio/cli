@@ -44,14 +44,22 @@ type agentRow struct {
 	runEnd   time.Time          // stamped on Finished/RunError event
 	tokens   reviewtypes.Tokens // cumulative
 	preview  string             // latest AssistantText preview, capped by display width
-	buffer   []reviewtypes.Event
+	buffer   []bufferedEvent
 	err      error
 }
 
 // agentEventMsg is sent to the Bubble Tea program when an agent emits an event.
 type agentEventMsg struct {
-	agent string
-	ev    reviewtypes.Event
+	agent  string // dashboard row (agent) the event belongs to
+	source string // original worker label; drill-in tags interleaved skills
+	ev     reviewtypes.Event
+}
+
+// bufferedEvent is one event in a row's drill-in buffer, tagged with the
+// worker it came from so a collapsed agent row can label interleaved skills.
+type bufferedEvent struct {
+	source string
+	ev     reviewtypes.Event
 }
 
 // runFinishedMsg is sent when the orchestrator calls RunFinished.
@@ -320,7 +328,7 @@ func (m reviewTUIModel) handleAgentEvent(msg agentEventMsg) (tea.Model, tea.Cmd)
 		row.runStart = time.Now()
 	}
 
-	row.buffer = append(row.buffer, msg.ev)
+	row.buffer = append(row.buffer, bufferedEvent{source: msg.source, ev: msg.ev})
 
 	switch e := msg.ev.(type) {
 	case reviewtypes.Started:

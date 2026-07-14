@@ -55,17 +55,52 @@ func eventLines(ev reviewtypes.Event, maxWidth int) []string {
 }
 
 // buildEventLines returns every wrapped body line for the supplied event
-// buffer, in order. The result is suitable for feeding into a viewport via
-// SetContentLines.
-func buildEventLines(buffer []reviewtypes.Event, maxWidth int) []string {
+// buffer, in order. When the buffer holds events from more than one worker
+// (a collapsed agent row running skills in parallel), each event's first
+// line is tagged with its skill so the interleaved streams read cleanly;
+// a single-source buffer is left untagged.
+func buildEventLines(buffer []bufferedEvent, maxWidth int) []string {
 	if len(buffer) == 0 || maxWidth <= 0 {
 		return nil
 	}
+	label := multiSource(buffer)
 	out := make([]string, 0, len(buffer))
-	for _, ev := range buffer {
-		out = append(out, eventLines(ev, maxWidth)...)
+	for _, be := range buffer {
+		lines := eventLines(be.ev, maxWidth)
+		if label && len(lines) > 0 {
+			tag := "[" + skillTag(be.source) + "] "
+			lines[0] = tag + lines[0]
+		}
+		out = append(out, lines...)
 	}
 	return out
+}
+
+// multiSource reports whether a buffer holds events from more than one
+// distinct worker — the signal that a row was collapsed and its events need
+// per-skill tags to stay legible.
+func multiSource(buffer []bufferedEvent) bool {
+	var first string
+	for i, be := range buffer {
+		if i == 0 {
+			first = be.source
+			continue
+		}
+		if be.source != first {
+			return true
+		}
+	}
+	return false
+}
+
+// skillTag reduces a worker label to its skill for drill-in tagging:
+// "claude-code:pr-review" → "pr-review". Labels without a colon (the agent
+// itself) pass through unchanged.
+func skillTag(worker string) string {
+	if i := strings.LastIndex(worker, ":"); i >= 0 && i < len(worker)-1 {
+		return worker[i+1:]
+	}
+	return worker
 }
 
 // detailFrame renders the alt-screen drill-in chrome around a body string. The
