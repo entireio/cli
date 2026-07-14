@@ -605,3 +605,21 @@ func TestCleanCodexFailureMessage(t *testing.T) {
 		}
 	}
 }
+
+// TestCodexNativeSkillInvocations_RetainsDollarForm pins that codex's native
+// $name skills pass through untouched (only slash-form is rewritten to $),
+// and plain instruction text is preserved — so a configured $code-reviewer
+// reaches codex verbatim.
+func TestCodexNativeSkillInvocations_RetainsDollarForm(t *testing.T) {
+	t.Parallel()
+	got := codexNativeSkillInvocations([]string{"$code-reviewer", "/review", "$plugin:thing", "freeform text"})
+	want := []string{"$code-reviewer", "$review", "$plugin:thing", "freeform text"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
