@@ -1229,9 +1229,20 @@ func runMultiAgentPath(
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
-	agentNames := make([]string, len(reviewers))
-	for i, r := range reviewers {
-		agentNames[i] = r.Name()
+	// The dashboard shows one row per agent (skill fan-out is behavior-only:
+	// N parallel workers per agent must not leak into per-skill rows).
+	// rowNames is the ordered per-agent row labels (agent + optional model);
+	// workerToAgent folds each worker's events and summary entry into its row.
+	rowNames := make([]string, 0, len(reviewers))
+	workerToAgent := make(map[string]string, len(reviewers))
+	seenRow := make(map[string]bool, len(reviewers))
+	for _, r := range reviewers {
+		row := agentRowLabel(reviewerActualAgentName(r), reviewerModelName(r))
+		workerToAgent[r.Name()] = row
+		if !seenRow[row] {
+			seenRow[row] = true
+			rowNames = append(rowNames, row)
+		}
 	}
 	aggregateOutput := ""
 	var synthErr error
@@ -1244,7 +1255,8 @@ func runMultiAgentPath(
 		scope:             scopeCtx,
 		out:               out,
 		isTTY:             interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively(),
-		agentNames:        agentNames,
+		agentNames:        rowNames,
+		workerToAgent:     workerToAgent,
 		cancelRun:         cancelRun,
 		runContext:        runCtx,
 		synthesisProvider: synthProvider,
@@ -1345,6 +1357,7 @@ type multiAgentSinkInputs struct {
 	out               io.Writer
 	isTTY             bool
 	agentNames        []string
+	workerToAgent     map[string]string
 	cancelRun         context.CancelFunc
 	runContext        context.Context
 	synthesisProvider SynthesisProvider
@@ -1386,6 +1399,9 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 	sinks := []reviewtypes.Sink{}
 	if in.isTTY {
 		tui := NewTUISink(in.agentNames, in.cancelRun, in.out, os.Stdin)
+		if in.workerToAgent != nil {
+			tui.groupWorkers(in.agentNames, in.workerToAgent)
+		}
 		sinks = append(sinks, tui)
 		if in.synthesisProvider != nil {
 			postRunOut := &bytes.Buffer{}

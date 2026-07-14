@@ -154,6 +154,17 @@ func nonZeroNamed[T interface{ IsZero() bool }](in map[string]T) map[string]T {
 	return out
 }
 
+// agentRowLabel is the per-agent dashboard row label: the agent name plus its
+// model when set. Skill fan-out workers of the same agent+model collapse to
+// one row under this label; genuinely distinct agent+model workers stay
+// separate rows, matching the pre-fan-out display.
+func agentRowLabel(agentName, model string) string {
+	if strings.TrimSpace(model) != "" {
+		return agentName + " (" + model + ")"
+	}
+	return agentName
+}
+
 func reviewAgentName(workerName string, cfg settings.ReviewConfig) string {
 	if strings.TrimSpace(cfg.Agent) != "" {
 		return strings.TrimSpace(cfg.Agent)

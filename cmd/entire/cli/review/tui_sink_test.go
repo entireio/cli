@@ -466,3 +466,74 @@ func TestTUISink_WaitJoinsPump(t *testing.T) {
 		t.Fatal("Wait returned before the pump goroutine exited")
 	}
 }
+
+// TestTUISink_GroupsWorkerEventsByAgent pins the one-row-per-agent display:
+// skill fan-out runs N parallel workers per agent (claude-code:review,
+// claude-code:pr-review), but the dashboard must show a single row per agent
+// — the fan-out was behavior-only and must not leak per-skill rows. The sink
+// routes each worker's events to its agent row.
+func TestTUISink_GroupsWorkerEventsByAgent(t *testing.T) {
+	t.Parallel()
+	prog := newRecordingProgram()
+	sink := newTUISinkWithProgram(prog)
+	sink.groupWorkers([]string{tAgentClaude}, map[string]string{
+		"claude-code:review":    tAgentClaude,
+		"claude-code:pr-review": tAgentClaude,
+	})
+	sink.Start()
+	defer func() { prog.Kill(); sink.Wait() }()
+
+	sink.AgentEvent("claude-code:review", reviewtypes.AssistantText{Text: "a"})
+	sink.AgentEvent("claude-code:pr-review", reviewtypes.AssistantText{Text: "b"})
+
+	deadline := time.After(5 * time.Second)
+	seen := 0
+	for seen < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("only %d/2 events reached the program", seen)
+		default:
+		}
+		for _, m := range prog.recorded() {
+			if ae, ok := m.(agentEventMsg); ok {
+				if ae.agent != tAgentClaude {
+					t.Fatalf("event routed to row %q, want collapsed agent row tAgentClaude", ae.agent)
+				}
+			}
+		}
+		seen = len(prog.recorded())
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestTUISink_CollapsesSummaryToAgentRows pins that the per-worker
+// RunFinished summary folds into one entry per agent row (worst-status wins,
+// tokens summed) so the model's by-index row sync still aligns.
+func TestTUISink_CollapsesSummaryToAgentRows(t *testing.T) {
+	t.Parallel()
+	sink := newTUISinkWithProgram(newRecordingProgram())
+	sink.groupWorkers([]string{tAgentClaude, "codex"}, map[string]string{
+		"claude-code:review":    tAgentClaude,
+		"claude-code:pr-review": tAgentClaude,
+		"codex":                 "codex",
+	})
+	in := reviewtypes.RunSummary{AgentRuns: []reviewtypes.AgentRun{
+		{Name: "claude-code:review", Status: reviewtypes.AgentStatusSucceeded, Tokens: reviewtypes.Tokens{In: 100, Out: 10}},
+		{Name: "claude-code:pr-review", Status: reviewtypes.AgentStatusFailed, Tokens: reviewtypes.Tokens{In: 50, Out: 5}},
+		{Name: "codex", Status: reviewtypes.AgentStatusSucceeded, Tokens: reviewtypes.Tokens{In: 200, Out: 20}},
+	}}
+	got := sink.collapseSummaryForRows(in)
+	if len(got.AgentRuns) != 2 {
+		t.Fatalf("collapsed runs = %d, want 2 (one per agent row): %+v", len(got.AgentRuns), got.AgentRuns)
+	}
+	cc := got.AgentRuns[0]
+	if cc.Name != tAgentClaude || cc.Status != reviewtypes.AgentStatusFailed {
+		t.Errorf("claude-code row = {%s,%v}, want {claude-code, Failed} (worst-status wins)", cc.Name, cc.Status)
+	}
+	if cc.Tokens.In != 150 || cc.Tokens.Out != 15 {
+		t.Errorf("claude-code tokens = %+v, want {150,15} (summed)", cc.Tokens)
+	}
+	if got.AgentRuns[1].Name != "codex" || got.AgentRuns[1].Tokens.In != 200 {
+		t.Errorf("codex row = %+v, want single {codex,200}", got.AgentRuns[1])
+	}
+}
