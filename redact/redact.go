@@ -58,7 +58,16 @@ var (
 	// here; structured JSON keys are covered by secretJSONKeyRegex when content
 	// parses as JSON, while textual YAML/JSON inside a string leaf falls back to
 	// the entropy and betterleaks layers only.
-	secretValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + secretValueKeyShape + `)\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
+	// It also stays single-line by construction: the separator is
+	// [ \t]*=[ \t]* (never crossing a newline — real assignments don't), the
+	// value must not START with '=' (so comparisons like `apiKey == ""` and
+	// `=== RUN` banners after a *_token word are never treated as
+	// assignments; base64 '=' padding at the END still matches), and the
+	// quoted branches exclude newlines so a code snippet like
+	// `"api_key=" + secret` cannot open a quote that closes lines later.
+	// All three constraints are corpus-derived: each mangled real transcripts
+	// containing Go code before being added.
+	secretValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + secretValueKeyShape + `)[ \t]*=[ \t]*("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&=` + "`" + `][^\s,;&]*)`)
 	// shellStdinSecretPattern matches a printf literal piped into a
 	// secret-management command (`printf 'v' | mycli secrets put KEY`); only
 	// the literal (group 1) is redacted, keeping the command readable.
@@ -96,11 +105,12 @@ const entropyThreshold = 4.5
 const RedactedPlaceholder = "REDACTED"
 
 // nonSecretTokenPrefixes lists key-name prefixes that, when followed by
-// `_token` or `_secret`, denote routinely-non-sensitive debug or pagination
-// identifiers (e.g. cancel_token, pagination_token). These are excluded from
-// JSON-key redaction so they remain readable in transcripts. Real
-// high-entropy values still get caught by the entropy detector / Betterleaks
-// via the per-value String() call in collectJSONLReplacements.
+// `_token`, denote routinely-non-sensitive debug or pagination identifiers
+// (e.g. cancel_token, pagination_token). These are excluded from JSON-key
+// redaction so they remain readable in transcripts. Real high-entropy values
+// still get caught by the entropy detector / Betterleaks via the per-value
+// String() call in collectJSONLReplacements. See isKnownNonSecretTokenKey
+// for why `_secret` keys are deliberately not exempted.
 var nonSecretTokenPrefixes = map[string]struct{}{
 	"cancel":       {},
 	"continuation": {},
@@ -525,6 +535,18 @@ func isPlaceholderSecretValueQuoted(value string, singleQuoted bool) bool {
 		if strings.HasPrefix(normalized, "${") && strings.HasSuffix(normalized, "}") {
 			return true
 		}
+		// Command substitutions (`TOKEN="$(cat token)"`) are how docs and
+		// scripts reference a secret without containing it — the value here
+		// is the recipe, not the secret.
+		if strings.HasPrefix(normalized, "$(") && strings.HasSuffix(normalized, ")") {
+			return true
+		}
+		// Documentation ellipsis placeholders: `ANTHROPIC_API_KEY=sk-ant-...`.
+		// Real key material never ends in literal dots; anything sensitive
+		// before the ellipsis is still covered by entropy/betterleaks.
+		if strings.HasSuffix(normalized, "...") {
+			return true
+		}
 		if isShellVariableReference(trimmed) {
 			return true
 		}
@@ -552,10 +574,11 @@ func isShellVariableReference(s string) bool {
 }
 
 // bracketedPlaceholderInteriorRE matches the inside of a "<…>" placeholder
-// shape: lowercase letters joined by `-` or `_`. Digits, mixed case, and
-// special chars are rejected so values like `<hunter2>` or `<RealPassword>`
-// still fall through to redaction.
-var bracketedPlaceholderInteriorRE = regexp.MustCompile(`^[a-z][a-z_-]*$`)
+// shape: all-lowercase or all-uppercase letters joined by `-` or `_`
+// (`<your-token>`, `<ENTIRE_TOKEN>`). Digits, mixed case, and special chars
+// are rejected so values like `<hunter2>` or `<RealPassword>` still fall
+// through to redaction.
+var bracketedPlaceholderInteriorRE = regexp.MustCompile(`^(?:[a-z][a-z_-]*|[A-Z][A-Z_-]*)$`)
 
 // isBracketedPlaceholder reports whether s is a "<name>" doc placeholder
 // (e.g. "<password>", "<your-db-password>"). The minimum total length of 5

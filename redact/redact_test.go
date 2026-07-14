@@ -1849,3 +1849,42 @@ func TestString_ShellStdinSecretLiteralBoundHolds(t *testing.T) {
 		t.Fatalf("oversized literal should not be redacted by the bounded shell-stdin layer, got: %s", out)
 	}
 }
+
+// Corpus-derived over-redaction guards: each case mangled a real transcript
+// (Go code, test output, or documentation) before the corresponding
+// constraint was added to secretValuePattern / the placeholder rules.
+func TestString_CorpusDerivedCodeContextGuards(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "Go equality comparison is not an assignment",
+			input: `if apiKey == "" { return nil }`,
+			want:  `if apiKey == "" { return nil }`,
+		},
+		{
+			name:  "test banner after a _token word across a newline is not an assignment",
+			input: "RUN TestProbe/cross_host_leaks_token\n=== RUN TestNext",
+			want:  "RUN TestProbe/cross_host_leaks_token\n=== RUN TestNext",
+		},
+		{
+			name:  "quoted value cannot span lines to a later quote",
+			input: "input: \"api_key=\" + highEntropySecretVar,\nname: \"AWS access key\",",
+			want:  "input: \"api_key=\" + highEntropySecretVar,\nname: \"AWS access key\",",
+		},
+		{
+			name:  "command substitution is a placeholder recipe, not a secret",
+			input: `ENTIRE_TOKEN="$(cat token)"`,
+			want:  `ENTIRE_TOKEN="$(cat token)"`,
+		},
+		{
+			name:  "uppercase bracketed placeholder preserved",
+			input: `subject_token = <ENTIRE_TOKEN>`,
+			want:  `subject_token = <ENTIRE_TOKEN>`,
+		},
+		{
+			name:  "base64 padding at value end still redacts",
+			input: `api_key=dGVzdHZhbHVlCg==`,
+			want:  `api_key=REDACTED`,
+		},
+	})
+}
