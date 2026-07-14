@@ -1400,3 +1400,190 @@ Relevant files:
 - `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/auth/contexts.go`</result>
 <usage><subagent_tokens>66304</subagent_tokens><tool_uses>16</tool_uses><duration_ms>147025</duration_ms></usage>
 </task-notification>
+
+---
+
+<task-notification>
+<task-id>a608f4a8c8b257ef5</task-id>
+<tool-use-id>toolu_01DAfoijMjdkTL2LdHUzJ4rf</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/a608f4a8c8b257ef5.output</output-file>
+<status>completed</status>
+<summary>Agent "Final comment review PR #1750" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All claims verified. Compiling the report.
+
+**Summary**: Round-2 comment-accuracy pass over `git diff origin/main...HEAD` (8fc80b07a, fix/1036-headless-login-hint). Every factual claim in the new/modified comments was cross-checked against the implementation, including the refusal→warning redesign, locking claims, cross-references, and every command/env-var/path/error-string quoted in the README. No critical inaccuracies found. A few minor rot-prone/imprecise items below.
+
+**Critical Issues**: None.
+
+Verification detail per assignment:
+
+1. **file.go loose-permissions block** (`internal/entireclient/tokenstore/file.go:67-75`) — accurately describes warning semantics with no refusal remnants. Each claim checks out: `save()` always produces 0600 (`tmp.Chmod(0600)` at file.go:114 before rename), so the warning genuinely only fires on externally created/chmod-ed files; a hard refusal in `load()` would indeed block `Set()`'s repair path (Set → load → save at file.go:157-167); the Windows synthetic-modes claim is correct Go behavior.
+   - **warnedLoosePerms doc** (file.go:32-35): verified by exhaustive caller listing. `load()` is called at exactly four sites: file.go:134 (`Get`), file.go:158 (`Set`), file.go:176 (`Delete`) — each acquires `f.mu` at method entry — and one direct test call at `file_test.go:140` (`TestFileStore_DeleteCleansEmptyService`), which is single-goroutine. The Copilot-corrected claim is exactly right.
+   - **loosePermsWarnW doc** (file.go:22-24): the claimed precedent exists — `withFileLock` writes its unlock warning to `os.Stderr` at file.go:59. Accurate.
+
+2. **No stale refusal claims**: grep of the diff for refuse/refused/reject found only (a) "Deliberately a warning, not a refusal" phrasing (file.go:68-70, file_test.go:266-268) — correctly describing what the code is *not*; (b) "token store rejects writes" test fatals — refer to the fault-injected `Set` failure, not permissions; (c) "reject a token from the wrong issuer" — refers to `validateReceivedToken`, accurate (login.go:324 literally says "reject login token"). All four `TestFileStore_*` permission test names describe warn-and-work semantics and match behavior.
+
+3. **withHeadlessStoreHint doc** (`cmd/entire/cli/login.go:338-343`): both skip conditions match the code at login.go:345 exactly — `!errors.Is(err, auth.ErrCredentialStoreWrite)` ("failures the file store wouldn't help with") and `tokenstore.FileBackendSelected()` ("ENTIRE_TOKEN_STORE=file is already set"). The hint body's "0600 permissions" claim matches `save()`.
+
+4. **contexts.go** (`cmd/entire/cli/auth/contexts.go:23-33`): `ErrCredentialStoreWrite` doc's "Login UX branches on it via errors.Is" is true (login.go:345). `credStoreWriteError` "without changing its message" is true (`Error()` returns `inner.Error()`); the `Unwrap() []error` multi-unwrap correctly makes `errors.Is` see both. Wording is consistent at both sites: "store refresh token in credential store" (contexts.go:99) and "store login token in credential store" (contexts.go:107).
+
+5. **tokenstore.go**: `BackendDescription`'s "mirrors resolveBackendLocked's env semantics" holds — both go through `FileBackendSelected()`/`FileBackendPath()` (tokenstore.go:126-127 vs 143-144), and the "test-only overrides don't leak" clause correctly covers both `UseFileBackendForTesting` and the `testdirs` fallback (both test-only). `FileBackendSelected`'s "single predicate shared by" claim verified against all three named consumers: resolution (tokenstore.go:143), provenance (tokenstore.go:126), hint (login.go:345); no remaining direct `os.Getenv("ENTIRE_TOKEN_STORE")` reads exist outside this predicate in production code.
+
+6. **README** (`README.md:210-247`): all claims verified. `ENTIRE_TOKEN_STORE=file entire login` / `ENTIRE_TOKEN_STORE_PATH` match the exported constants; 0600 matches `save()`; default path `tokens.json` in `~/.config/entire` matches `FileBackendPath()` + `userdirs.Config()`; "the CLI prints an approval URL" matches `runLogin` (login.go:175, 189 — printed in both interactive and non-interactive branches, plus the browser-failure fallback at 186); "derives the control-plane endpoint from the token itself" matches `CoreURLFromEnvToken` (aud-based, `auth/env_token.go:62`); "Nothing is written to disk" is correct for the env-token path (no `RecordLoginContext`). Both quoted error strings are real: "save login" (login.go:331) and "failed to unlock correct collection" (verbatim in zalando/go-keyring `secret_service.go:126`). The TOC anchor `#headless--ci-authentication` is the correct GitHub slug.
+   - Test-comment cross-claim also verified: "TestMain sets ENTIRE_TOKEN_STORE=file process-wide" (login_headless_hint_test.go) is true — `cmd/entire/cli/global_test.go:35`.
+
+**Improvement Opportunities** (minor):
+
+- `internal/entireclient/tokenstore/file_test.go:391-392` — `TestBackendDescription_Keyring`'s comment says provenance "must track the env the way resolveBackendLocked does." Slightly imprecise: under `go test` with env unset, `resolveBackendLocked` actually resolves to the testdirs file fallback (tokenstore.go:151-152), not the keyring — the test pins the *production* env resolution. `BackendDescription`'s own doc gets this exactly right; the test comment could say "the production env resolution" to match. Cosmetic.
+- `internal/entireclient/tokenstore/file.go:18-19` — the `goosWindows` const doc explains only the permission-check use ("so permission checks are skipped"), but the constant is also consumed by `keyringProviderName()` (keyring_timeout.go:120) for provider naming. A neutral doc ("runtime.GOOS value for Windows") plus keeping the permission rationale in `load()` (where it already lives) would age better. Cosmetic.
+
+**Rot-prone (watch items, no action required)**:
+
+- `file.go:34-35` — "tests that call load directly are single-goroutine" embeds a claim about test code in production code; it will silently rot if someone later writes a concurrent direct-`load` test. Accurate today (only file_test.go:140), and it is the honest version of the previous over-claim, so acceptable.
+
+**Recommended Removals**: None.
+
+**Positive Findings**:
+
+- `file.go:67-75` — exemplary "why" comment: states the deliberate design choice (warning, not refusal), the three concrete reasons, the invariant that scopes when it fires, and the platform caveat, all verifiable against the code.
+- `login_headless_hint_test.go:37-43` — the "Both store-write sites are covered" claim is precisely true against `RecordLoginContext`'s write order (refresh Set at contexts.go:98 precedes login-token Set at contexts.go:106; with no refresh token, `Delete` is not fault-injected so the login-token write fails first).
+- `login_headless_hint_test.go:81-83` — the "assert on structural markers, not prose" comment documents why the assertion is rot-resistant; a model of test-intent documentation.
+- No comment anywhere in the diff cites review rounds or PR narrative; the "(Copilot review)" reference lives only in the commit message, where it belongs.</result>
+<usage><subagent_tokens>81106</subagent_tokens><tool_uses>17</tool_uses><duration_ms>263926</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a2b3b71800d481d1e</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/a2b3b71800d481d1e.output</output-file>
+<status>completed</status>
+<summary>Agent "Final silent-failure pass #1750" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All six round-2 questions investigated. Verdict up front: **no blockers introduced; the warning redesign is sound.** Findings below, introduced vs pre-existing marked, plus a couple of LOW notes.
+
+## 1. Blocked-stderr write under f.mu + flock — same class as precedent, marginally wider window
+
+`/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/internal/entireclient/tokenstore/file.go:76-81` (introduced) vs the pre-existing unlock warning at `file.go:56-61`.
+
+- The new warning in `load()` writes to stderr while holding **both** `f.mu` and the live flock (`load` runs inside `withFileLock` for every Get/Set/Delete). The pre-existing unlock warning writes while holding `f.mu` but during flock release. So yes, the window is technically wider: a permanently blocked stderr would pin the flock.
+- Realistic consequence if stderr blocks: other *processes* hit the 5s `TryLockContext` timeout and fail **loudly** ("timeout acquiring token store lock", `file.go:54`) — a loud failure, not a silent one. Same-process goroutines block on `f.mu`.
+- Realistic likelihood: near zero for this CLI. Stderr is a terminal or CI log; git drains helper stderr; hook stderr is streamed by git. A blocked pipe requires a parent that captures stderr and never reads it. The pre-existing unlock warning already accepted exactly this class of exposure.
+
+**Rating: LOW / informational, pre-existing class.** Not worth restructuring (moving the Fprintf outside the locks would mean threading state out of `load`, disproportionate to the risk).
+
+## 2. git-remote-entire protocol safety — confirmed safe
+
+- `fileStore` and the new warning never touch stdout: `loosePermsWarnW` defaults to `os.Stderr` (`file.go:25`) and nothing in `load`/`save` writes elsewhere. The helper's protocol channel is `os.Stdout` only (`cmd/git-remote-entire/main.go:62,173`).
+- Helper stderr is inherited from git and passes straight through to the invoking terminal (sideband is server→client, not helper→git), so the warning renders as one plain line among git's remote output. Single-line format with a concrete `chmod 0600 &lt;path&gt;` remediation — renders sanely.
+- The helper does read/write the tokenstore (`cmd/git-remote-entire/jurisdictionauth.go:119,152,174`), but only users who opted into `ENTIRE_TOKEN_STORE=file` ever construct a `fileStore`, so keyring users see nothing new.
+
+**No issue.**
+
+## 3. Warning multiplicity across hook-spawned processes — moot in practice
+
+I verified the actual token-store consumers: `grep` across `cmd/` and `internal/` shows production `tokenstore.Get/Set/Delete` call sites only in `cmd/entire/cli/auth/` (login/refresh/logout), `cmd/entire/cli/login.go`, and `cmd/git-remote-entire/jurisdictionauth.go`. The strategy/hook handlers and telemetry (`cmd/entire/cli/telemetry/`) never resolve tokens, and the pre-push v1 checkpoint push rides the same `git push` (same helper process — no nested `git push` in `strategy/manual_commit_push.go` / `push_common.go`).
+
+So a user-facing commit triggers **zero** warnings (hooks don't read the store); a `git push` to an `entire://` remote triggers exactly **one** (one helper process, once-per-instance dedup via `warnedLoosePerms`, one `fileStore` per process via the `currentBackend` singleton at `tokenstore.go:93-101`). Worst realistic case is one identical line per `entire` invocation that talks to the control plane — noisy-but-acceptable, and every copy names the same fix. Also note the dedup flag is only set when the warning actually fires (`file.go:78`), so perms that go loose mid-process still get warned — no false suppression.
+
+**No issue.**
+
+## 4. Stat-error silent skip — confirmed the only skip, and it's covered
+
+`file.go:77`: `statErr != nil` silently skips the perms check. Immediately after, `os.ReadFile` (`file.go:82`) surfaces any real access failure; ENOENT → empty store is pre-existing, intentional first-run behavior. The only other skip is the documented Windows guard (`runtime.GOOS != goosWindows`), correct since Go reports synthetic permission bits there. One micro-nuance, not actionable: `os.Stat` follows symlinks, so a symlinked `tokens.json` is checked against the target's perms — which is the right thing.
+
+**No new silent skip.**
+
+## 5. Hint path — no swallow, no double-wrap, no double-print
+
+- `withHeadlessStoreHint` (`cmd/entire/cli/login.go:341-348`) returns the **original** error unchanged when `!errors.Is(err, auth.ErrCredentialStoreWrite)` or the file backend is already selected. When it does fire, it wraps with `%w` (error text first, hint appended), so the final message reads `save login: store login token in credential store: &lt;keyring err&gt;\n\n&lt;hint&gt;` — single wrap, chain intact, `errors.Is` still works through `credStoreWriteError.Unwrap() []error` (`cmd/entire/cli/auth/contexts.go:31-34`).
+- Print-once confirmed: `persistLogin` is the sole `RecordLoginContext` caller; neither `runLogin`/`runBrowserLogin`/`runLoginAuto` nor the login RunE prints the returned error, no `NewSilentError` involved, so it lands exactly once in `main.go`'s default case (`cmd/entire/main.go:127`).
+- One interaction I checked deliberately: a Ctrl-C-aborted keyring write could carry both `context.Canceled` and the new hint; `main.go:93` handles the signal case **before** the printer, so the user never sees a file-store hint appended to their own abort. Correct.
+- Scope note (by design, not a defect): refresh-time `tokenstore.Set` failures (`cmd/entire/cli/auth/refresh.go:89,93`) are not tagged and never get the hint — the hint is login-only, which matches the comment's intent.
+
+**No issue.**
+
+## 6. Sweep of remaining round-2 diff for swallowed errors
+
+- `cmd/entire/cli/auth/contexts.go:102` `_ = tokenstore.Delete(...)` best-effort cleanup — **pre-existing** (context line in the hunk, unchanged), already carries a nolint justification.
+- `internal/entireclient/tokenstore/keyring_timeout.go` — constant rename only.
+- `cmd/entire/cli/auth.go:421` `BackendDescription()` — reads env at call time with the identical `== "file"` predicate production resolution uses (`FileBackendSelected`, `tokenstore.go:117-119`), so the provenance line cannot diverge from routing. An unrecognized value (e.g. `ENTIRE_TOKEN_STORE=File`) falls to keyring in **both** resolution and description — consistent, though silently ignoring a typo'd backend value is a **pre-existing** behavior this PR faithfully mirrors rather than introduces.
+- Test helpers: `looseStoreFile` and `captureLoosePermsWarnings` (`file_test.go`) check every error; the global-writer swap is correctly paired with non-parallel tests and `t.Cleanup` restore. `failingTokenStore` uses the **pre-existing** `UseFailingBackendForTesting` (`tokenstore/testing.go:35`, not added by this PR). No ignored returns.
+- README additions are docs-only and accurately name the real env vars/paths.
+- Sanity check: `go test` over both touched packages (`FileStore|BackendDescription|FileBackendPath|PersistLogin|AuthStatus` filters) passes.
+
+## Summary
+
+| # | Item | Verdict |
+|---|------|---------|
+| 1 | Warning under mu+flock vs blocked stderr | LOW, same class as pre-existing unlock warning; cross-process fallout is a loud 5s lock timeout, not a silent hang |
+| 2 | Remote-helper protocol | Safe — stderr only, renders as one line |
+| 3 | Multi-process warning noise | Moot — hooks never touch the tokenstore; one warning per token-touching process |
+| 4 | Stat-error skip | Only skip; ReadFile covers it |
+| 5 | Hint wrap/propagation | Clean; printed exactly once by main.go; signal path unaffected |
+| 6 | New swallowed errors | None introduced |
+
+No changes required from a silent-failure standpoint.</result>
+<usage><subagent_tokens>76234</subagent_tokens><tool_uses>23</tool_uses><duration_ms>287023</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ac5ca47c0885abdbb</task-id>
+<tool-use-id>toolu_01AKrPMzHPbz1d53BPSS4JVT</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/ac5ca47c0885abdbb.output</output-file>
+<status>completed</status>
+<summary>Agent "Final test review PR #1750" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result># Round 2 Test-Coverage Verification — PR #1750 (fix/1036-headless-login-hint)
+
+## Tree state confirmation
+
+- Branch `fix/1036-headless-login-hint` at `8fc80b07a`, working tree restored after every probe via `git checkout -- &lt;file&gt;`.
+- Final `git status`: only `?? .codex/agents/` (expected untracked). `git diff` and `git diff --cached` both empty.
+- Final baseline green: `internal/entireclient/tokenstore`, `cmd/entire/cli/auth`, and the hint/provenance tests in `cmd/entire/cli` all pass with `-count=1`.
+
+## Per-mutation status
+
+| # | Mutation | Result | Killed by |
+|---|---|---|---|
+| 1 | Remove `&amp;credStoreWriteError{err}` wrapper from the ACCESS-token `Set` site (`cmd/entire/cli/auth/contexts.go:107`) | **KILLED** | `TestPersistLogin_StoreWriteFailureIncludesHeadlessHint/login-token_write_fails` — failed with "store-write failure should point headless users at the file token store". The refresh-token case correctly kept passing, proving the table cases independently pin both wrap sites. |
+| 2a | `BackendDescription()` keyring branch → hardcoded `"OS keychain"` (`tokenstore.go:129`) | **KILLED** | `TestBackendDescription_Keyring` — `got "OS keychain", want "macOS Keychain"`. Comparing against `keyringProviderName()` makes this OS-portable rather than string-brittle. |
+| 2b | `FileBackendPath()` default `"tokens.json"` → `"token.json"` (`tokenstore.go:139`) | **KILLED** | `REDACTED`. |
+| 3 | Permission mask `0o077` → `0o044` (`file.go:77`) | **KILLED** | `TestFileStore_WarnsOnLoosePermissionsButWorks/group-writable` (0620 case) — warning went silent, test failed. The 0620 case is exactly the discriminator for write-bit masking. |
+| 4a | Revert warning to hard refusal (`load()` returns error on loose perms) | **KILLED** | All five: 3 subtests of `WarnsOnLoosePermissionsButWorks` + `SetOnLooseFileWarnsAndRestores0600` + `LoosePermissionWarningIsDeduped` failed. |
+| 4b | Remove the warning emission entirely (keep flag set) | **KILLED** | Same five tests failed (all assert `chmod 0600` content). |
+| 4c | Remove dedup (`f.warnedLoosePerms = true` deleted) | **KILLED** | `TestFileStore_LoosePermissionWarningIsDeduped` — "warning should be emitted once, got 3 occurrences". |
+| 5a probe | `loosePermsWarnW` default `os.Stderr` → `io.Discard` | **SURVIVED** | Full tokenstore package passes. See gaps below. |
+
+## Warning-test behavioral assessment (item 4)
+
+All four tests are genuinely behavioral, not implementation-coupled:
+
+- `TestFileStore_WarnsOnLoosePermissionsButWorks` asserts both halves of the contract (operation succeeds AND warning names the file + remediation) across group-read/world-read/group-write modes — catches refusal-reversion, warning removal, and mask narrowing.
+- `TestFileStore_SetOnLooseFileWarnsAndRestores0600` additionally pins the 0600-restore-on-rewrite invariant (the actual remediation path).
+- `TestFileStore_LoosePermissionWarningIsDeduped` counts occurrences, killing dedup removal.
+- `TestFileStore_Reads0600FileWithoutWarning` pins the negative (no false-positive warning), which would catch an inverted mask check.
+- Umask immunity **verified**: all four pass under `umask 077` (the `looseStoreFile` helper's explicit `os.Chmod` after `os.WriteFile` is what makes this hold — writes are umask-masked, chmod is not).
+
+## Remaining gaps
+
+1. **`loosePermsWarnW` production default is unpinned — rating 4.** Verified by probe: `var loosePermsWarnW io.Writer = io.Discard` survives the full suite, silently deleting the entire warning feature in production while every test passes (they all swap the writer via `captureLoosePermsWarnings`). A one-line non-parallel test (`if loosePermsWarnW != os.Stderr { t.Fatal(...) }`) kills it; safe because the capture helper restores via `t.Cleanup` and none of the capture tests are parallel. Mitigating context: the adjacent unlock warning in `withFileLock` writes `os.Stderr` directly with no seam and no pin, so this matches package precedent — but it is the only surviving mutation in the diff.
+2. **Once-per-store-instance ⇒ once-per-process assumption — rating 3.** The dedup comment (`file.go:32`) says "once per store instance"; the once-per-process behavior in real CLI use rests on `currentBackend()` caching one `fileStore` (`resolved`/`backend` in `tokenstore.go`). That caching is pre-existing tested-elsewhere behavior, but nothing documents or tests the composition. A comment tweak ("one instance per process via currentBackend, so effectively once per CLI invocation") would suffice; a test is optional.
+3. **Warning exercised only on `fileStore` directly, never through package-level `Get`/`Set` — rating 2.** `newTestStore`/`looseStoreFile` construct `fileStore` directly; no test drives the warning via `tokenstore.Get` with `ENTIRE_TOKEN_STORE=file`. The package-level path is a two-line delegation through `currentBackend()`, so divergence risk is minimal; not worth a test on its own, though a package-level variant would also close gap 2.
+
+None of these are blocking (nothing ≥5). Every gap named in round 1 is now closed with verified kills.
+
+## Files referenced
+
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/auth/contexts.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/login.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/login_headless_hint_test.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/internal/entireclient/tokenstore/file.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/internal/entireclient/tokenstore/file_test.go`
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/internal/entireclient/tokenstore/tokenstore.go`</result>
+<usage><subagent_tokens>87760</subagent_tokens><tool_uses>30</tool_uses><duration_ms>317954</duration_ms></usage>
+</task-notification>
