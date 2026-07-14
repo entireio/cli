@@ -1,0 +1,34 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KXGSK6HXV07GHA4P4S7FMPC8",
+  "strategy": "manual-commit",
+  "branch": "fix/1036-headless-login-hint",
+  "checkpoints_count": 34,
+  "files_touched": [
+    "cmd/entire/cli/auth.go",
+    "cmd/entire/cli/auth/contexts.go",
+    "cmd/entire/cli/auth_test.go",
+    "cmd/entire/cli/login.go",
+    "cmd/entire/cli/login_headless_hint_test.go",
+    "internal/entireclient/tokenstore/file.go",
+    "internal/entireclient/tokenstore/file_test.go",
+    "internal/entireclient/tokenstore/keyring_timeout.go",
+    "internal/entireclient/tokenstore/tokenstore.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 414,
+    "cache_creation_tokens": 1316409,
+    "cache_read_tokens": 57156022,
+    "output_tokens": 165521,
+    "api_call_count": 222
+  }
+}

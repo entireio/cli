@@ -1,0 +1,557 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KXGSK6HXV07GHA4P4S7FMPC8",
+  "session_id": "e58f9710-b989-430f-85d9-848c55561c35",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-14T17:08:11.508601Z",
+  "branch": "fix/1036-headless-login-hint",
+  "checkpoints_count": 34,
+  "save_step_count": 6,
+  "files_touched": [
+    "cmd/entire/cli/auth.go",
+    "cmd/entire/cli/auth/contexts.go",
+    "cmd/entire/cli/auth_test.go",
+    "cmd/entire/cli/login.go",
+    "cmd/entire/cli/login_headless_hint_test.go",
+    "internal/entireclient/tokenstore/file.go",
+    "internal/entireclient/tokenstore/file_test.go",
+    "internal/entireclient/tokenstore/keyring_timeout.go",
+    "internal/entireclient/tokenstore/tokenstore.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-fable-5",
+  "turn_id": "dee5a73f6c03",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 414,
+    "cache_creation_tokens": 1316409,
+    "cache_read_tokens": 57156022,
+    "output_tokens": 165521,
+    "api_call_count": 222
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01T2YhhpcAK6phjrZ47bVP58",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "dee5a73f6c03",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 20,
+        "end": 21,
+        "entry_ids": [
+          "61eae302-f404-41fa-8ba4-8576055f9058"
+        ],
+        "tool_use_id": "toolu_01T2YhhpcAK6phjrZ47bVP58"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01T2YhhpcAK6phjrZ47bVP58"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: review",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01Q3VuivUx6zpzn3FuQXWGyG",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "dee5a73f6c03",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 203,
+        "end": 204,
+        "entry_ids": [
+          "2f8735c8-1ff2-460d-a8be-ccc32137457c"
+        ],
+        "tool_use_id": "toolu_01Q3VuivUx6zpzn3FuQXWGyG"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01Q3VuivUx6zpzn3FuQXWGyG"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: review",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01UqaK6mW67pEFrnQJ39MDfN",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "dee5a73f6c03",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 317,
+        "end": 318,
+        "entry_ids": [
+          "17c7c14d-1945-4f79-bdd1-b878e0ad7d40"
+        ],
+        "tool_use_id": "toolu_01UqaK6mW67pEFrnQJ39MDfN"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01UqaK6mW67pEFrnQJ39MDfN"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: review",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01GfAc1T9xJsfE2jBmsfzGFi",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "pr-review-toolkit:review-pr"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "dee5a73f6c03",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 321,
+        "end": 322,
+        "entry_ids": [
+          "bb80211e-4628-4898-8068-4f7f94131431"
+        ],
+        "tool_use_id": "toolu_01GfAc1T9xJsfE2jBmsfzGFi"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01GfAc1T9xJsfE2jBmsfzGFi"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: pr-review-toolkit:review-pr",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01JtKCc5G7z8drDhrMrbWANa",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "dee5a73f6c03",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 495,
+        "end": 496,
+        "entry_ids": [
+          "d54eabaa-a69b-40e2-8428-1038267c097d"
+        ],
+        "tool_use_id": "toolu_01JtKCc5G7z8drDhrMrbWANa"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01JtKCc5G7z8drDhrMrbWANa"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: review",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01CeDhUezPVxmf1TThw7NFwn",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "pr-review-toolkit:review-pr"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "dee5a73f6c03",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 500,
+        "end": 501,
+        "entry_ids": [
+          "b8055fb5-68ca-4390-bc04-8acf888fdeb3"
+        ],
+        "tool_use_id": "toolu_01CeDhUezPVxmf1TThw7NFwn"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01CeDhUezPVxmf1TThw7NFwn"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: pr-review-toolkit:review-pr",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_012MWDS79QRBvnMapt2HjC5c",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "dee5a73f6c03",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 639,
+        "end": 640,
+        "entry_ids": [
+          "89d126dc-e37d-494e-b4b0-306956a4d0fa"
+        ],
+        "tool_use_id": "toolu_012MWDS79QRBvnMapt2HjC5c"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_012MWDS79QRBvnMapt2HjC5c"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: review",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_018rhMpetWHq2e8wd9VAKahd",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "dee5a73f6c03",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 685,
+        "end": 686,
+        "entry_ids": [
+          "322aa6d2-2df5-4f58-ade2-b0a7fc9bfcab"
+        ],
+        "tool_use_id": "toolu_018rhMpetWHq2e8wd9VAKahd"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_018rhMpetWHq2e8wd9VAKahd"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: review",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01GZhyqzDmF39J5iiMFRkwTX",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "pr-review-toolkit:review-pr"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "dee5a73f6c03",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 690,
+        "end": 691,
+        "entry_ids": [
+          "51c3b2c6-8193-4f3c-9e42-2561fba650c5"
+        ],
+        "tool_use_id": "toolu_01GZhyqzDmF39J5iiMFRkwTX"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01GZhyqzDmF39J5iiMFRkwTX"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: pr-review-toolkit:review-pr",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_017HXMS6P3Ma9W6USb62YVrd",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "dee5a73f6c03",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 827,
+        "end": 828,
+        "entry_ids": [
+          "cf5cd626-1a25-45f2-8ecb-9e034c52677d"
+        ],
+        "tool_use_id": "toolu_017HXMS6P3Ma9W6USb62YVrd"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_017HXMS6P3Ma9W6USb62YVrd"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: review",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01Y1Gsi818mnPeNVPCDT2kUr",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:test-driven-development"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "dee5a73f6c03",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 910,
+        "end": 911,
+        "entry_ids": [
+          "96471070-be89-4439-8e98-afb6451e2880"
+        ],
+        "tool_use_id": "toolu_01Y1Gsi818mnPeNVPCDT2kUr"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01Y1Gsi818mnPeNVPCDT2kUr"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:test-driven-development",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 34
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-14T17:08:11.328681Z",
+    "agent_lines": 399,
+    "agent_removed": 41,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 399,
+    "total_lines_changed": 440,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 2208,
+      "user_lines_removed": 9,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".agents/skills/agent-integration/README.md": 71,
+        ".agents/skills/agent-integration/SKILL.md": 107,
+        ".agents/skills/agent-integration/implementer.md": 346,
+        ".agents/skills/agent-integration/researcher.md": 161,
+        ".agents/skills/agent-integration/test-writer.md": 211,
+        ".agents/skills/changelog/SKILL.md": 88,
+        ".agents/skills/e2e/SKILL.md": 32,
+        ".agents/skills/e2e/debug.md": 88,
+        ".agents/skills/e2e/implement.md": 117,
+        ".agents/skills/e2e/triage-ci.md": 176,
+        ".agents/skills/test-repo/README.md": 65,
+        ".agents/skills/test-repo/SKILL.md": 230,
+        ".agents/skills/test-repo/test-harness.sh": 245,
+        ".codex/agents/dev.toml": 108,
+        ".codex/agents/reviewer.toml": 163
+      },
+      "user_removed_per_file": {
+        "cmd/entire/cli/strategy/manual_commit_condensation.go": 6,
+        "cmd/entire/cli/strategy/manual_commit_hooks.go": 3
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 1937,
+      "user_lines_removed": 0,
+      "agent_lines_added": 271,
+      "agent_lines_removed": 9,
+      "user_added_per_file": {
+        ".agents/skills/agent-integration/README.md": 71,
+        ".agents/skills/agent-integration/SKILL.md": 107,
+        ".agents/skills/agent-integration/implementer.md": 346,
+        ".agents/skills/agent-integration/researcher.md": 161,
+        ".agents/skills/agent-integration/test-writer.md": 211,
+        ".agents/skills/changelog/SKILL.md": 88,
+        ".agents/skills/e2e/SKILL.md": 32,
+        ".agents/skills/e2e/debug.md": 88,
+        ".agents/skills/e2e/implement.md": 117,
+        ".agents/skills/e2e/triage-ci.md": 176,
+        ".agents/skills/test-repo/README.md": 65,
+        ".agents/skills/test-repo/SKILL.md": 230,
+        ".agents/skills/test-repo/test-harness.sh": 245
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 1937,
+      "user_lines_removed": 0,
+      "agent_lines_added": 271,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".agents/skills/agent-integration/README.md": 71,
+        ".agents/skills/agent-integration/SKILL.md": 107,
+        ".agents/skills/agent-integration/implementer.md": 346,
+        ".agents/skills/agent-integration/researcher.md": 161,
+        ".agents/skills/agent-integration/test-writer.md": 211,
+        ".agents/skills/changelog/SKILL.md": 88,
+        ".agents/skills/e2e/SKILL.md": 32,
+        ".agents/skills/e2e/debug.md": 88,
+        ".agents/skills/e2e/implement.md": 117,
+        ".agents/skills/e2e/triage-ci.md": 176,
+        ".agents/skills/test-repo/README.md": 65,
+        ".agents/skills/test-repo/SKILL.md": 230,
+        ".agents/skills/test-repo/test-harness.sh": 245
+      }
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 2050,
+      "user_lines_removed": 29,
+      "agent_lines_added": 377,
+      "agent_lines_removed": 114,
+      "user_added_per_file": {
+        ".agents/skills/agent-integration/README.md": 71,
+        ".agents/skills/agent-integration/SKILL.md": 107,
+        ".agents/skills/agent-integration/implementer.md": 346,
+        ".agents/skills/agent-integration/researcher.md": 161,
+        ".agents/skills/agent-integration/test-writer.md": 211,
+        ".agents/skills/changelog/SKILL.md": 88,
+        ".agents/skills/e2e/SKILL.md": 32,
+        ".agents/skills/e2e/debug.md": 88,
+        ".agents/skills/e2e/implement.md": 117,
+        ".agents/skills/e2e/triage-ci.md": 176,
+        ".agents/skills/test-repo/README.md": 65,
+        ".agents/skills/test-repo/SKILL.md": 230,
+        ".agents/skills/test-repo/test-harness.sh": 245,
+        "cmd/entire/cli/setup.go": 113
+      },
+      "user_removed_per_file": {
+        "cmd/entire/cli/setup.go": 29
+      }
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 1937,
+      "user_lines_removed": 0,
+      "agent_lines_added": 348,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".agents/skills/agent-integration/README.md": 71,
+        ".agents/skills/agent-integration/SKILL.md": 107,
+        ".agents/skills/agent-integration/implementer.md": 346,
+        ".agents/skills/agent-integration/researcher.md": 161,
+        ".agents/skills/agent-integration/test-writer.md": 211,
+        ".agents/skills/changelog/SKILL.md": 88,
+        ".agents/skills/e2e/SKILL.md": 32,
+        ".agents/skills/e2e/debug.md": 88,
+        ".agents/skills/e2e/implement.md": 117,
+        ".agents/skills/e2e/triage-ci.md": 176,
+        ".agents/skills/test-repo/README.md": 65,
+        ".agents/skills/test-repo/SKILL.md": 230,
+        ".agents/skills/test-repo/test-harness.sh": 245
+      }
+    },
+    {
+      "checkpoint_number": 6,
+      "user_lines_added": 1937,
+      "user_lines_removed": 0,
+      "agent_lines_added": 271,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".agents/skills/agent-integration/README.md": 71,
+        ".agents/skills/agent-integration/SKILL.md": 107,
+        ".agents/skills/agent-integration/implementer.md": 346,
+        ".agents/skills/agent-integration/researcher.md": 161,
+        ".agents/skills/agent-integration/test-writer.md": 211,
+        ".agents/skills/changelog/SKILL.md": 88,
+        ".agents/skills/e2e/SKILL.md": 32,
+        ".agents/skills/e2e/debug.md": 88,
+        ".agents/skills/e2e/implement.md": 117,
+        ".agents/skills/e2e/triage-ci.md": 176,
+        ".agents/skills/test-repo/README.md": 65,
+        ".agents/skills/test-repo/SKILL.md": 230,
+        ".agents/skills/test-repo/test-harness.sh": 245
+      }
+    },
+    {
+      "checkpoint_number": 7,
+      "user_lines_added": 1937,
+      "user_lines_removed": 0,
+      "agent_lines_added": 572,
+      "agent_lines_removed": 11,
+      "user_added_per_file": {
+        ".agents/skills/agent-integration/README.md": 71,
+        ".agents/skills/agent-integration/SKILL.md": 107,
+        ".agents/skills/agent-integration/implementer.md": 346,
+        ".agents/skills/agent-integration/researcher.md": 161,
+        ".agents/skills/agent-integration/test-writer.md": 211,
+        ".agents/skills/changelog/SKILL.md": 88,
+        ".agents/skills/e2e/SKILL.md": 32,
+        ".agents/skills/e2e/debug.md": 88,
+        ".agents/skills/e2e/implement.md": 117,
+        ".agents/skills/e2e/triage-ci.md": 176,
+        ".agents/skills/test-repo/README.md": 65,
+        ".agents/skills/test-repo/SKILL.md": 230,
+        ".agents/skills/test-repo/test-harness.sh": 245
+      }
+    }
+  ]
+}
