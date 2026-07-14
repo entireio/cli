@@ -819,6 +819,15 @@ func tokenUsageWithCost(ctx context.Context, ag agent.Agent, transcript []byte, 
 // checkpoint state. When the state total aliases the pre-reprice usage (Pi's
 // backfill returns the checkpoint usage as-is), it is repointed to the priced
 // copy so the session-state diagnostic matches the persisted checkpoint.
+//
+// Copilot CLI is a second, independent case: sessionStateBackfillTokenUsage (run
+// earlier, before this function) prices the full-session transcript with
+// whatever model was known at that point, so when the model was still unknown
+// state.TokenUsage ends up as its OWN unpriced usage — a distinct object from
+// sessionData.TokenUsage's checkpoint-scoped slice, so the alias check above
+// never fires for it. Reprice that full-session total too, guarded the same way
+// (recovered model, real token data required) so a zero-data recovery window can
+// never clobber a good value.
 func backfillModelAndReprice(ctx context.Context, ag agent.Agent, sessionData *ExtractedSessionData, state *SessionState) {
 	if state.ModelName != "" {
 		return
@@ -828,6 +837,15 @@ func backfillModelAndReprice(ctx context.Context, ag agent.Agent, sessionData *E
 		return
 	}
 	state.ModelName = model
+
+	if state.AgentType == agent.AgentTypeCopilotCLI && state.TokenUsage != sessionData.TokenUsage &&
+		hasTokenUsageData(state.TokenUsage) && state.TokenUsage.CostUSD == nil {
+		fullUsage, _ := tokenUsageWithCost(ctx, ag, sessionData.Transcript, 0, state.ModelName, state.AgentType)
+		if hasTokenUsageData(fullUsage) {
+			state.TokenUsage = fullUsage
+		}
+	}
+
 	if !sessionDataUnpricedFromTranscript(sessionData) {
 		return
 	}
