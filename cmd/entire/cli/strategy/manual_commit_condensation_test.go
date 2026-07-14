@@ -744,3 +744,88 @@ func TestCheckpointStepCount(t *testing.T) {
 		})
 	}
 }
+
+// TestBackfillModelAndReprice_CopilotSessionStateRepricedOnModelRecovery proves
+// the session-state diagnostic total (state.TokenUsage) is repriced alongside
+// the checkpoint-scoped sessionData.TokenUsage once the model is recovered,
+// for the Copilot CLI full-session-backfill case where state.TokenUsage is a
+// distinct object from sessionData.TokenUsage (so the pre-existing
+// "state.TokenUsage == sessionData.TokenUsage" alias check never fires for it).
+// The test uses Pi's real ModelExtractor/TokenCalculator implementation to
+// drive model recovery, while forcing state.AgentType to Copilot CLI to
+// exercise that branch in isolation.
+func TestBackfillModelAndReprice_CopilotSessionStateRepricedOnModelRecovery(t *testing.T) {
+	t.Parallel()
+
+	transcript := []byte(strings.Join([]string{
+		`{"type":"session","version":3,"id":"pi-uuid","cwd":"/tmp"}`,
+		`{"type":"message","id":"m1","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"Hi"}]}}`,
+		`{"type":"message","id":"m2","parentId":"m1","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}],"model":"gpt-5.5","provider":"openai-codex","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0}}}`,
+	}, "\n") + "\n")
+
+	ag, err := agent.GetByAgentType(agent.AgentTypePi)
+	require.NoError(t, err)
+
+	sessionData := &ExtractedSessionData{
+		Transcript: transcript,
+		TokenUsage: &agent.TokenUsage{InputTokens: 100, OutputTokens: 50},
+	}
+	// A distinct object from sessionData.TokenUsage, standing in for the
+	// full-session total sessionStateBackfillTokenUsage would have produced
+	// earlier with an empty fallback model (unpriced).
+	sessionStateTotal := &agent.TokenUsage{InputTokens: 100, OutputTokens: 50}
+	state := &session.State{
+		AgentType:  agent.AgentTypeCopilotCLI,
+		TokenUsage: sessionStateTotal,
+	}
+
+	backfillModelAndReprice(context.Background(), ag, sessionData, state)
+
+	require.Equal(t, "gpt-5.5", state.ModelName)
+
+	require.NotSame(t, sessionStateTotal, state.TokenUsage)
+	require.NotNil(t, state.TokenUsage.CostUSD, "session-state diagnostic total was not repriced")
+	require.Equal(t, types.CostSourceEstimated, state.TokenUsage.CostSource)
+
+	require.NotNil(t, sessionData.TokenUsage.CostUSD, "checkpoint-scoped sessionData total was not repriced")
+	require.Equal(t, types.CostSourceEstimated, sessionData.TokenUsage.CostSource)
+}
+
+// TestBackfillModelAndReprice_ZeroDataRecoveryDoesNotClobberSessionState proves
+// the Copilot session-state reprice guard: if the recovered-model pass yields
+// no token data (e.g. a truncated re-extraction), the pre-existing
+// state.TokenUsage is left untouched rather than being clobbered with a
+// zero/unpriced value.
+func TestBackfillModelAndReprice_ZeroDataRecoveryDoesNotClobberSessionState(t *testing.T) {
+	t.Parallel()
+
+	// Transcript carries a model on the assistant message, but no usage data
+	// (so tokenUsageWithCost's recovered-model pass yields zero tokens).
+	transcript := []byte(strings.Join([]string{
+		`{"type":"session","version":3,"id":"pi-uuid","cwd":"/tmp"}`,
+		`{"type":"message","id":"m1","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"Hi"}]}}`,
+		`{"type":"message","id":"m2","parentId":"m1","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}],"model":"gpt-5.5","provider":"openai-codex"}}`,
+	}, "\n") + "\n")
+
+	ag, err := agent.GetByAgentType(agent.AgentTypePi)
+	require.NoError(t, err)
+
+	// No sessionData.TokenUsage of its own, so the checkpoint-scoped reprice
+	// branch is a no-op here and the test isolates the session-state branch.
+	sessionData := &ExtractedSessionData{Transcript: transcript}
+	unpricedUsage := &agent.TokenUsage{InputTokens: 100, OutputTokens: 50}
+	state := &session.State{
+		AgentType:  agent.AgentTypeCopilotCLI,
+		TokenUsage: unpricedUsage,
+	}
+
+	backfillModelAndReprice(context.Background(), ag, sessionData, state)
+
+	// The model is still recovered (unguarded by token data)...
+	require.Equal(t, "gpt-5.5", state.ModelName)
+	// ...but the recovered-model transcript pass yields zero token data (no
+	// usage on the assistant message), so state.TokenUsage must survive
+	// untouched rather than being clobbered with an empty priced value.
+	require.Same(t, unpricedUsage, state.TokenUsage)
+	require.Nil(t, state.TokenUsage.CostUSD)
+}
