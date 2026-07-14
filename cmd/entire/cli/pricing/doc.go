@@ -3,10 +3,18 @@
 //
 // The rate table is maintained as JSON files under models/ and compiled into
 // the binary via go:embed. To change or add a price, edit the appropriate JSON
-// file (grouped by provider) and open a pull request; there is no runtime
-// fetch. Operators can layer per-repository overrides through settings, which
-// LoadTable applies on top of the embedded defaults (replacing an entry whose
-// id matches, or appending a new one).
+// file (grouped by provider) and open a pull request. Operators can layer
+// per-repository overrides through settings, which LoadTable applies on top of
+// the embedded defaults (replacing an entry whose id matches, or appending a
+// new one).
+//
+// An opt-in remote layer (remote.go, gated by the pricing.remote setting) can
+// additionally refresh a cached rate table from a remote source roughly once a
+// day (RefreshRemoteCache), layered on top of the embedded defaults the same
+// way settings overrides are. There is no inline fetch on the hook/condensation
+// path: the refresh is spawned as a detached background worker
+// (maybeSpawnPricingRefresh) and never blocks a foreground command — LoadTable
+// only ever reads the on-disk cache the worker last wrote.
 //
 // Lookup performs exact-id and alias matching only, with no implicit
 // model-family fallback: an unknown model resolves to no rate, and callers must
