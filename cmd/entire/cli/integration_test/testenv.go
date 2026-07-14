@@ -313,15 +313,21 @@ func (env *TestEnv) gitConfigPath() string {
 var gitConfigGuardRepositoryFormatVersionRE = regexp.MustCompile(`(?m)^([ \t]*)repositoryformatversion = [01]$`)
 
 var gitConfigGuardTransportPromisorRemoteRE = regexp.MustCompile(
-	`(?m)^\[remote "(?:(?:https?|ssh|file)://|/|[A-Za-z]:[\\/]|[^"\n]+@[^"\n]+:[^"\n]+).+"\]\n(?:[ \t]+promisor = true\n[ \t]+partialclonefilter = blob:none\n?|[ \t]+partialclonefilter = blob:none\n[ \t]+promisor = true\n?)`,
+	`(?m)^\[remote "(?:(?:https?|ssh|file)://|/|[A-Za-z]:[\\/]|[^"\n]+@[^"\n]+:[^"\n]+).+"\]\n(?:[ \t]+(?:promisor = true|partialclonefilter = blob:none|skipFetchAll = true)\n?){2,3}`,
 )
 
 func normalizeGitConfigForGuard(content string) string {
 	content = gitConfigGuardRepositoryFormatVersionRE.ReplaceAllString(content, `${1}repositoryformatversion = <normalized>`)
-	// Deliberately ignore only the full promisor+partialclonefilter pair that
-	// git writes for transport-keyed remotes during filtered fetches. If git ever
-	// writes a partial section, the guard should still fail loudly.
-	content = gitConfigGuardTransportPromisorRemoteRE.ReplaceAllString(content, "")
+	// Deliberately ignore only the URL-keyed remote sections written during
+	// filtered fetches: git's promisor+partialclonefilter pair plus the
+	// skipFetchAll stamp the CLI adds so bulk fetches skip the entry. A section
+	// without the full promisor pair (or with any other key) still fails loudly.
+	content = gitConfigGuardTransportPromisorRemoteRE.ReplaceAllStringFunc(content, func(section string) string {
+		if strings.Contains(section, "promisor = true") && strings.Contains(section, "partialclonefilter = blob:none") {
+			return ""
+		}
+		return section
+	})
 	return content
 }
 
@@ -1103,6 +1109,9 @@ func (env *TestEnv) gitHookEnv(extra ...string) []string {
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_TEST_OPENCODE_MOCK_EXPORT=1",
 	)
+	// Propagate per-test overrides (e.g. agent project/store dirs) to hook
+	// subprocesses. Empty for tests that don't set ExtraEnv.
+	envVars = append(envVars, env.ExtraEnv...)
 	envVars = append(envVars, env.checkpointStoreEnv()...)
 	return append(envVars, extra...)
 }

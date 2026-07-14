@@ -239,6 +239,11 @@ func TestParseClaudeOutput_DecodesStreamJSON(t *testing.T) {
 		t.Error("expected AssistantText carrying fixture prose 'Cats are…'")
 	}
 
+	// The parser emits Tokens on every assistant envelope that carries
+	// non-zero usage plus a terminal Tokens on the result envelope. The
+	// fixture's two assistant envelopes both carry usage, so expect >=2
+	// here (the exact count is fixture-defined and not asserted to keep
+	// the fixture editable).
 	var tokensSeen int
 	var tokensOut int
 	for _, ev := range events {
@@ -247,11 +252,11 @@ func TestParseClaudeOutput_DecodesStreamJSON(t *testing.T) {
 			tokensOut = tk.Out
 		}
 	}
-	if tokensSeen != 1 {
-		t.Errorf("Tokens count = %d, want 1", tokensSeen)
+	if tokensSeen < 2 {
+		t.Errorf("Tokens count = %d, want >=2 (per-assistant snapshots + result)", tokensSeen)
 	}
 	if tokensOut == 0 {
-		t.Error("Tokens.Out = 0, want > 0")
+		t.Error("final Tokens.Out = 0, want > 0")
 	}
 }
 
@@ -382,6 +387,98 @@ func TestParseClaudeOutput_GarbledLineEmitsRunErrorAndContinues(t *testing.T) {
 	}
 	if !sawSuccess {
 		t.Error("expected Finished{Success:true} after recovering from garbled line")
+	}
+}
+
+// TestParseClaudeOutput_EmitsCumulativeInputDuringRun captures the live-token
+// contract for Claude. The `Tokens` type is documented as cumulative running
+// totals (each emission replaces the previous), so mid-run emissions must be
+// running sums, not per-call snapshots. Claude's assistant envelopes carry a
+// usage block per API call (repeated verbatim on every content-block envelope
+// of the same message id), where output_tokens is a 1–8 token "initial
+// decision" stub — so the parser accumulates input across unique message ids,
+// emits `Tokens{In: <running sum>, Out: 0}`, and lets the terminal `result`
+// envelope deliver the true {In, Out} aggregate.
+//
+// Fixture is derived from real `claude -p --output-format stream-json
+// --verbose` output captured against claude-haiku-4-5: six assistant
+// envelopes across three API calls (message ids msg_turn1..3, with turn 1
+// repeated on three envelopes), then a final result. The per-call input sums
+// are 56277, 56626, and 56734 — running totals 56277, 112903, 169637 — and
+// the result aggregate is exactly {In: 169637, Out: 2511}, which pins that
+// accumulation converges to the final figure.
+func TestParseClaudeOutput_EmitsCumulativeInputDuringRun(t *testing.T) {
+	t.Parallel()
+	f, err := os.Open("testdata/stream_with_deltas.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	var events []reviewtypes.Event
+	for ev := range parseClaudeOutput(f) {
+		events = append(events, ev)
+	}
+
+	var tokens []reviewtypes.Tokens
+	sawFinished := false
+	for _, e := range events {
+		switch ev := e.(type) {
+		case reviewtypes.Tokens:
+			if sawFinished {
+				t.Errorf("Tokens event arrived AFTER Finished — wrong ordering")
+			}
+			tokens = append(tokens, ev)
+		case reviewtypes.Finished:
+			sawFinished = true
+		}
+	}
+
+	// One emission per unique message id (duplicate envelopes of the same
+	// API call must not re-emit) plus the terminal result emission.
+	want := []reviewtypes.Tokens{
+		{In: 56277, Out: 0},
+		{In: 112903, Out: 0},
+		{In: 169637, Out: 0},
+		{In: 169637, Out: 2511},
+	}
+	if len(tokens) != len(want) {
+		t.Fatalf("Tokens events = %d, want %d (one per unique message id + result): %+v", len(tokens), len(want), tokens)
+	}
+	for i, w := range want {
+		if tokens[i] != w {
+			t.Errorf("tokens[%d] = %+v, want %+v", i, tokens[i], w)
+		}
+	}
+}
+
+// TestParseClaudeOutput_UsagelessResultDoesNotClobberCumulative pins the
+// terminal emission guard: a result envelope with no/zero usage must not
+// emit Tokens{0,0} — under the consumers' overwrite-not-sum semantics that
+// would erase the mid-run cumulative input total.
+func TestParseClaudeOutput_UsagelessResultDoesNotClobberCumulative(t *testing.T) {
+	t.Parallel()
+	input := strings.Join([]string{
+		`{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":10,"cache_read_input_tokens":90,"cache_creation_input_tokens":0,"output_tokens":2}}}`,
+		`{"type":"result","subtype":"success","is_error":false}`,
+		"",
+	}, "\n")
+
+	var tokens []reviewtypes.Tokens
+	for ev := range parseClaudeOutput(strings.NewReader(input)) {
+		if tk, ok := ev.(reviewtypes.Tokens); ok {
+			tokens = append(tokens, tk)
+		}
+	}
+	if len(tokens) == 0 {
+		t.Fatal("expected the mid-run cumulative Tokens emission")
+	}
+	last := tokens[len(tokens)-1]
+	if last.In == 0 && last.Out == 0 {
+		t.Fatalf("final tokens = %+v — usage-less result clobbered the cumulative total", last)
+	}
+	if last.In != 100 {
+		t.Errorf("final tokens = %+v, want the cumulative {100, 0} to stand", last)
 	}
 }
 

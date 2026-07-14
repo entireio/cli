@@ -251,6 +251,11 @@ type RedactionSettings struct {
 	// OpenAIPrivacyFilter is the optional 8th redaction layer (opt-in).
 	// See docs/security-and-privacy.md.
 	OpenAIPrivacyFilter *OPFSettings `json:"openai_privacy_filter,omitempty"`
+
+	// ExternalizeImages opts into lifting inline base64 images out of transcripts
+	// into the checkpoint's assets/ store (off by default). Restore re-injects
+	// them regardless of this flag.
+	ExternalizeImages bool `json:"externalize_images,omitempty"`
 }
 
 // PIISettings configures PII detection categories.
@@ -1139,6 +1144,13 @@ func mergeRedaction(dst *RedactionSettings, data json.RawMessage) error {
 			return err
 		}
 	}
+	if extRaw, ok := raw["externalize_images"]; ok {
+		var v bool
+		if err := json.Unmarshal(extRaw, &v); err != nil {
+			return fmt.Errorf("parsing redaction.externalize_images: %w", err)
+		}
+		dst.ExternalizeImages = v
+	}
 	return nil
 }
 
@@ -1298,10 +1310,18 @@ func IsSetUpAny(ctx context.Context) bool {
 }
 
 // IsSetUpAndEnabled returns true if Entire is both set up and enabled.
-// This checks if .entire/settings.json exists AND has enabled: true.
+// "Set up" spans either scope — .entire/settings.json OR
+// .entire/settings.local.json — so it must check IsSetUpAny, not IsSetUp.
+// `entire enable --local` writes only settings.local.json and never creates the
+// base file; gating on the base file alone would treat such a local-only repo
+// as inactive and make every hook a silent no-op, dropping all checkpoint
+// capture for that documented workflow. The IsSetUpAny guard is still required
+// so a never-enabled repo (no settings file in any scope) is not treated as
+// enabled by Load's default Enabled: true. Any settings read error is treated
+// as disabled (fail closed).
 // Use this for hooks that should be no-ops when Entire is not active.
 func IsSetUpAndEnabled(ctx context.Context) bool {
-	if !IsSetUp(ctx) {
+	if !IsSetUpAny(ctx) {
 		return false
 	}
 	s, err := Load(ctx)
@@ -1331,6 +1351,21 @@ func IsSummarizeEnabled(ctx context.Context) bool {
 		return false
 	}
 	return settings.IsSummarizeEnabled()
+}
+
+// IsImageExternalizationEnabled reports whether inline base64 images should be
+// lifted out of transcripts into the checkpoint asset store. Opt-in via
+// redaction.externalize_images, or the ENTIRE_EXTERNALIZE_IMAGES=1 env override
+// (handy for testing/rollout). Off by default.
+func IsImageExternalizationEnabled(ctx context.Context) bool {
+	if v := os.Getenv("ENTIRE_EXTERNALIZE_IMAGES"); v == "1" || v == "true" {
+		return true
+	}
+	s, err := Load(ctx)
+	if err != nil {
+		return false
+	}
+	return s.Redaction != nil && s.Redaction.ExternalizeImages
 }
 
 // IsSummarizeEnabled checks if auto-summarize is enabled in this settings instance.

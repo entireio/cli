@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"runtime"
 
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
@@ -85,30 +86,30 @@ func NewRootCmd() *cobra.Command {
 	}
 
 	// Noun groups (canonical homes for subcommands).
-	cmd.AddCommand(newSessionsCmd())        // 'session' (with 'sessions' as Cobra alias)
-	cmd.AddCommand(newCheckpointGroupCmd()) // 'checkpoint' / 'cp' / 'checkpoints'
-	cmd.AddCommand(newTokensGroupCmd())     // 'tokens'
-	cmd.AddCommand(newAgentGroupCmd())      // 'agent'
-	cmd.AddCommand(newAuthCmd())            // 'auth'
-	cmd.AddCommand(newDoctorCmd())          // 'doctor' (group: trace/logs/bundle)
-	cmd.AddCommand(newLabsCmd())            // 'labs' (experimental workflow discovery)
-	cmd.AddCommand(newPluginGroupCmd())     // 'plugin' (managed install/list/remove)
-	cmd.AddCommand(newImportCmd())          // 'import' (hidden; import pre-existing agent history)
-	cmd.AddCommand(newOrgCmd())             // 'org' — control-plane org management
-	cmd.AddCommand(newProjectCmd())         // 'project' — control-plane project management
-	cmd.AddCommand(newRepoCmd())            // 'repo' — control-plane repo lifecycle
-	cmd.AddCommand(newGrantCmd())           // 'grant' — control-plane access grants
+	cmd.AddCommand(newSessionsCmd())                // 'session' (with 'sessions' as Cobra alias)
+	cmd.AddCommand(newCheckpointGroupCmd())         // 'checkpoint' / 'cp' / 'checkpoints'
+	experimental.Register(cmd, newTokensGroupCmd()) // 'tokens' (experimental)
+	cmd.AddCommand(newAgentGroupCmd())              // 'agent'
+	cmd.AddCommand(newAuthCmd())                    // 'auth'
+	cmd.AddCommand(newDoctorCmd())                  // 'doctor' (group: trace/logs/bundle)
+	cmd.AddCommand(newLabsCmd())                    // 'labs' (experimental workflow discovery)
+	cmd.AddCommand(newPluginGroupCmd())             // 'plugin' (managed install/list/remove)
+	experimental.Register(cmd, newImportCmd())      // 'import' (experimental; import pre-existing agent history)
+	cmd.AddCommand(newOrgCmd())                     // 'org' — control-plane org management
+	cmd.AddCommand(newProjectCmd())                 // 'project' — control-plane project management
+	cmd.AddCommand(newRepoCmd())                    // 'repo' — control-plane repo lifecycle
+	cmd.AddCommand(newGrantCmd())                   // 'grant' — control-plane access grants
 
 	// Top-level lifecycle and standalone commands.
-	cmd.AddCommand(cliReview.NewCommand(buildReviewDeps()))        // `review`; hidden during maturation
-	cmd.AddCommand(investigate.NewCommand(buildInvestigateDeps())) // hidden during maturation; runs a multi-agent investigation
+	experimental.Register(cmd, cliReview.NewCommand(buildReviewDeps()))        // `review` (experimental)
+	experimental.Register(cmd, investigate.NewCommand(buildInvestigateDeps())) // `investigate` (experimental); multi-agent investigation
 	cmd.AddCommand(newCleanCmd())
 	cmd.AddCommand(newSetupCmd()) // 'configure' — non-agent settings; agent CRUD lives under 'agent'
 	cmd.AddCommand(newEnableCmd())
 	cmd.AddCommand(newDisableCmd())
 	cmd.AddCommand(newStatusCmd())
-	cmd.AddCommand(newBlameCmd())
-	cmd.AddCommand(newWhyCmd())
+	experimental.Register(cmd, newBlameCmd()) // 'blame' (experimental)
+	experimental.Register(cmd, newWhyCmd())   // 'why' (experimental)
 	cmd.AddCommand(newLoginCmd())
 	cmd.AddCommand(newLogoutCmd())
 	cmd.AddCommand(newVersionCmd())
@@ -123,10 +124,10 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(hideAsAlias(newAttachCmd(), "entire session attach"))
 	cmd.AddCommand(hideAsAlias(newExplainCmd(), "entire checkpoint explain"))
 	cmd.AddCommand(hideAsAlias(newTraceCmd(), "entire doctor trace"))
-	cmd.AddCommand(newSearchCmd()) // 'entire search' = 'checkpoint search' (hidden, no hint)
+	experimental.Register(cmd, newSearchCmd()) // 'entire search' = 'checkpoint search' (experimental)
 
-	// Hidden labs commands (listed via `entire labs`; not deprecation shortcuts).
-	cmd.AddCommand(newExpertsCmd()) // agent/workflow provenance
+	// Experimental labs commands (listed via `entire labs`; not deprecation shortcuts).
+	experimental.Register(cmd, newExpertsCmd()) // 'experts' (experimental); agent/workflow provenance
 
 	// Deprecated top-level commands (functional; the constructors mark them
 	// Deprecated, which also excludes them from help and completion).
@@ -137,9 +138,11 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newMCPCmd(cmd)) // MCP stdio server for MCP-host agents
 	cmd.AddCommand(newHooksCmd())
 	cmd.AddCommand(newTrailCmd())
-	cmd.AddCommand(newRunnerCmd()) // 'runner' (setup/tune runners); hidden during maturation
 	cmd.AddCommand(newSendAnalyticsCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
+
+	// Experimental command (developer-only visibility; setup/tune runners).
+	experimental.Register(cmd, newRunnerCmd()) // 'runner' (experimental)
 
 	cmd.SetVersionTemplate(versionString())
 

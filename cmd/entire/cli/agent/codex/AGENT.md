@@ -193,7 +193,7 @@ The `systemMessage` field can be used to display messages to the user via the ag
 
 ## Gaps & Limitations
 
-- **Hooks require feature flag:** The `hooks` feature is `default_enabled: false` (stage: UnderDevelopment). It must be enabled via `--enable hooks` CLI flag, or `features.hooks = true` in `config.toml`, or `-c features.hooks=true`. Without this, hooks.json is ignored entirely.
+- **Hooks require feature flag:** The `codex_hooks` feature is `default_enabled: false` (stage: UnderDevelopment). It must be enabled via `--enable codex_hooks` CLI flag, or `features.codex_hooks = true` in `config.toml`, or `-c features.codex_hooks=true`. Without this, hooks.json is ignored entirely.
 - **No SessionEnd hook:** Codex does not fire a hook when a session is completely terminated. The `Stop` hook fires at end-of-turn, not end-of-session. This is similar to some other agents — the framework handles this gracefully.
 - **PreToolUse is shell-only:** Currently only fires for `Bash` tool (direct shell execution). MCP tools, stdin streaming, and other tool types are not yet hooked. PostToolUse is in review.
 - **Transcript may be null:** In `--ephemeral` mode, `transcript_path` is null. The integration should handle this gracefully.
@@ -204,3 +204,11 @@ The `systemMessage` field can be used to display messages to the user via the ag
 
 - JSON schemas at `codex-rs/hooks/schema/generated/` in the Codex repository
 - Hook config structure at `codex-rs/hooks/src/engine/config.rs` in the Codex repository
+
+## Review integration (`entire review`)
+
+Codex review runs via `codex exec --skip-git-repo-check --json [-m <model>] [-c model_reasoning_effort=<level>] -` (prompt on stdin). **`codex exec` fires no lifecycle hooks**, which shapes the whole integration (see CLAUDE.md → `entire review` → "Codex specifics"):
+
+- **Skills are passed verbatim, not paraphrased.** Codex injects its installed-skill catalog into every exec session and loads the matching `SKILL.md`; configured skills use codex's `$name` / `$plugin:name` form (`DiscoverReviewSkills` in `discovery.go`). Native `codex exec review` is not used — it rejects a prompt under a scope flag and can't carry Entire's scope/per-run/checkpoint context.
+- **Live tokens come from the rollout file, not stdout.** `codex exec --json` carries `usage` only on the terminal `turn.completed`, and a review is a single turn. `review_tokens.go` resolves the rollout transcript by `thread_id` (from the `thread.started` envelope), tails it (the same `~/.codex/.../rollout-*-<thread-id>.jsonl` documented under Transcript above), and emits cumulative `Tokens` per `token_count` event — the source codex's interactive UI reads.
+- **No tagged review session.** Because no hook fires, codex's session is never tagged `KindAgentReview`. The fix manifest therefore sources codex from its **live run output** (`run.Buffer`), and `entire review fix` skill verification is advisory for codex (loose description match), not a hard block.

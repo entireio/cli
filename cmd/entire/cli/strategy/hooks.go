@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -461,13 +462,34 @@ func hookCmdPrefix(localDev, absolutePath bool) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve binary path: %w", err)
 		}
-		resolved, err := filepath.EvalSymlinks(exe)
+		resolved, err := resolveHookExePath(exe, filepath.EvalSymlinks, runtime.GOOS)
 		if err != nil {
-			return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve symlinks for %s: %w", exe, err)
+			return "", err
 		}
 		return shellQuote(resolved), nil
 	}
 	return "entire", nil
+}
+
+// resolveHookExePath resolves exe through symlinks for embedding as an absolute
+// path in a git hook. On Windows, filepath.EvalSymlinks can fail when a path
+// component is an NTFS directory junction rather than a plain symlink — notably
+// Scoop's `…\scoop\apps\<app>\current\` junction, which yields "The system
+// cannot find the path specified" (issue #1424). The unresolved os.Executable()
+// path is itself a valid, launchable absolute path (and on Scoop the stable
+// `current\` junction path is actually preferable, since it survives version
+// updates that repoint the junction), so on Windows we fall back to it rather
+// than failing the hook install outright. Off Windows, an EvalSymlinks failure
+// is unexpected and still surfaced as an error.
+func resolveHookExePath(exe string, evalSymlinks func(string) (string, error), goos string) (string, error) {
+	resolved, err := evalSymlinks(exe)
+	if err != nil {
+		if goos == "windows" {
+			return exe, nil
+		}
+		return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve symlinks for %s: %w", exe, err)
+	}
+	return resolved, nil
 }
 
 // shellQuote wraps a string in single quotes for safe use in #!/bin/sh scripts.

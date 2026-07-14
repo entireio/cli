@@ -67,6 +67,7 @@ be condensed will be discarded.`,
 	cmd.AddCommand(newTraceCmd())
 	cmd.AddCommand(newDoctorLogsCmd())
 	cmd.AddCommand(newDoctorBundleCmd())
+	cmd.AddCommand(newDoctorMigrateCheckpointsCmd())
 
 	return cmd
 }

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
+
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -116,7 +118,7 @@ func expertsSuccessBody() string {
 }`
 }
 
-func TestExpertsCommandIsHiddenAndListedInLabs(t *testing.T) {
+func TestExpertsCommandIsExperimentalAndListedInLabs(t *testing.T) {
 	root := NewRootCmd()
 	cmd, _, err := root.Find([]string{"experts"})
 	if err != nil {
@@ -125,8 +127,10 @@ func TestExpertsCommandIsHiddenAndListedInLabs(t *testing.T) {
 	if cmd.Name() != "experts" {
 		t.Fatalf("found command %q, want experts", cmd.Name())
 	}
-	if !cmd.Hidden {
-		t.Fatal("experts command should be hidden while in labs")
+	// Gated as experimental: visible and grouped in developer builds
+	// (the default test build), hidden in shipped releases.
+	if cmd.GroupID != experimental.GroupID {
+		t.Fatalf("experts GroupID = %q, want %q (experimental)", cmd.GroupID, experimental.GroupID)
 	}
 	if !strings.Contains(labsOverview(), "entire experts") {
 		t.Fatalf("labs overview missing experts:\n%s", labsOverview())

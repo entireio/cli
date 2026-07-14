@@ -107,7 +107,7 @@ func TestHandleList(t *testing.T) {
 			defer server.Close()
 
 			var out bytes.Buffer
-			if err := handleList(context.Background(), testTransport(server), tt.forPush, &out); err != nil {
+			if err := handleList(context.Background(), testTransport(server), &refAdvCache{}, tt.forPush, &out); err != nil {
 				t.Fatalf("handleList: %v", err)
 			}
 			if out.String() != tt.want {

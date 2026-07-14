@@ -18,8 +18,9 @@ import (
 const originRemote = "origin"
 
 const (
-	ProtocolSSH   = gitremote.ProtocolSSH
-	ProtocolHTTPS = gitremote.ProtocolHTTPS
+	ProtocolSSH    = gitremote.ProtocolSSH
+	ProtocolHTTPS  = gitremote.ProtocolHTTPS
+	ProtocolEntire = gitremote.ProtocolEntire
 )
 
 // Info is an alias for gitremote.Info.
@@ -112,8 +113,9 @@ func FetchURL(ctx context.Context, opts ...FetchURLOptions) (string, error) {
 
 	checkpointURL, err := deriveCheckpointURLFromInfo(info, config)
 	if err != nil {
-		// Origin's protocol can't be mapped to a git transport (e.g. entire://,
-		// file://). Honor the configured checkpoint_remote by targeting the
+		// Origin's protocol can't be mapped to a checkpoint URL (e.g. file://,
+		// or an entire:// mirror of a different forge than the configured
+		// provider). Honor the configured checkpoint_remote by targeting the
 		// provider's canonical host over HTTPS rather than falling back to origin.
 		if providerURL, ok := resolveProviderCheckpointURL(config, opt.WorktreeRoot); ok {
 			return providerURL, nil
@@ -186,12 +188,12 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 		}
 		return "", true, fmt.Errorf("no push URL found: %w", err)
 	}
-	if strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)) != "" && isDerivableProtocol(pushInfo.Protocol) {
-		// Coerce a derivable (ssh/https) remote to HTTPS so the token applies,
+	withToken := strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)) != ""
+	if withToken && isDirectGitTransport(pushInfo.Protocol) {
+		// Coerce a direct (ssh/https) remote to HTTPS so the token applies,
 		// keeping the host so enterprise installations stay on their own host.
-		// A non-derivable protocol (e.g. entire://) carries a host that isn't a
-		// usable HTTPS host, so it's left untouched and falls through to the
-		// providerCheckpointURL fallback below.
+		// An entire:// remote carries a cluster host that isn't a usable HTTPS
+		// host, so it's handled separately after the owner check below.
 		//
 		// Keep the port only when the source was already HTTPS. SSH ports
 		// (e.g., :2222) don't map to HTTPS ports on the same host.
@@ -217,10 +219,20 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 		return fallbackURL, false, nil
 	}
 
+	if withToken && pushInfo.Protocol == ProtocolEntire {
+		// The checkpoint token is an HTTPS credential for the provider host;
+		// it can't ride through the entire:// helper (which does its own
+		// auth). Route to the provider over HTTPS instead of the mirror.
+		if providerURL, ok := resolveProviderCheckpointURL(config, ""); ok {
+			return providerURL, true, nil
+		}
+	}
+
 	pushURL, err := deriveCheckpointURLFromInfo(pushInfo, config)
 	if err != nil {
-		// The push remote's protocol can't be mapped to a git transport
-		// (e.g. entire://, file://). Honor the configured checkpoint_remote by
+		// The push remote's protocol can't be mapped to a checkpoint URL
+		// (e.g. file://, or an entire:// mirror of a different forge than the
+		// configured provider). Honor the configured checkpoint_remote by
 		// targeting the provider's canonical host over HTTPS rather than
 		// misrouting checkpoints to the origin remote.
 		if providerURL, ok := resolveProviderCheckpointURL(config, ""); ok {
@@ -278,10 +290,11 @@ func ParseURL(rawURL string) (*Info, error) {
 	return info, nil
 }
 
-// isDerivableProtocol reports whether deriveCheckpointURLFromInfo can map the
-// protocol to a checkpoint URL (i.e. it's a real git transport, not a remote
-// helper scheme like entire:// or a local file://).
-func isDerivableProtocol(protocol string) bool {
+// isDirectGitTransport reports whether the protocol talks to the git host
+// directly over ssh/https (where the host is a usable HTTPS host for token
+// auth), as opposed to a remote helper scheme like entire:// or a local
+// file://.
+func isDirectGitTransport(protocol string) bool {
 	return protocol == ProtocolSSH || protocol == ProtocolHTTPS
 }
 
@@ -296,8 +309,18 @@ func deriveCheckpointURLFromInfo(info *Info, config *settings.CheckpointRemoteCo
 		return fmt.Sprintf("git@%s:%s.git", info.Host, config.Repo), nil
 	case ProtocolHTTPS:
 		return fmt.Sprintf("https://%s/%s.git", info.HostPort(), config.Repo), nil
+	case ProtocolEntire:
+		// entire:// push-through mirrors are cluster-scoped: keep the cluster
+		// host and forge segment, swap in the checkpoint repo. Only derivable
+		// when the forge maps back to the configured provider's host, so a
+		// github checkpoint_remote never routes through another forge's mirror.
+		host, ok := providerHost(config.Provider)
+		if !ok || !strings.EqualFold(info.CanonicalHost(), host) {
+			return "", fmt.Errorf("entire:// remote forge %q does not match checkpoint provider %q", info.Forge, config.Provider)
+		}
+		return fmt.Sprintf("entire://%s/%s/%s", info.HostPort(), info.Forge, config.Repo), nil
 	default:
-		return "", fmt.Errorf("unsupported protocol %q in origin remote", info.Protocol)
+		return "", fmt.Errorf("unsupported protocol %q in remote URL", info.Protocol)
 	}
 }
 
@@ -393,7 +416,7 @@ func findRemoteInfoForHost(repo *git.Repository, host string) (*Info, bool) {
 			if err != nil {
 				continue
 			}
-			if strings.EqualFold(info.Host, host) && isDerivableProtocol(info.Protocol) {
+			if strings.EqualFold(info.Host, host) && isDirectGitTransport(info.Protocol) {
 				return info, true
 			}
 		}

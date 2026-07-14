@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
 )
 
 func TestLabsCmd_PrintsExperimentalCommandList(t *testing.T) {
@@ -82,28 +84,68 @@ func TestLabsCmd_RejectsTopicWithoutRunningIt(t *testing.T) {
 	}
 }
 
-func TestRootHelp_ShowsLabsButHidesReview(t *testing.T) {
-	t.Parallel()
-
+// rootHelp renders `entire --help` and returns its stdout.
+func rootHelp(t *testing.T) string {
+	t.Helper()
 	root := NewRootCmd()
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&bytes.Buffer{})
 	root.SetArgs([]string{"--help"})
-
 	if err := root.Execute(); err != nil {
 		t.Fatalf("entire --help failed: %v", err)
 	}
-	got := out.String()
+	return out.String()
+}
+
+// TestRootHelp_AlwaysShowsLabs confirms the labs command is present in root
+// help regardless of the experimental visibility gate — labs is the always-on
+// discovery entry point for experimental workflows.
+func TestRootHelp_AlwaysShowsLabs(t *testing.T) {
+	t.Parallel()
+
+	got := rootHelp(t)
 	if !strings.Contains(got, "labs") || !strings.Contains(got, "Explore experimental Entire workflows") {
 		t.Fatalf("root help should include labs command, got:\n%s", got)
 	}
-	for _, hiddenExperimentalCommand := range []string{
-		"review",
-		"tokens                 Analyze token usage across sessions and checkpoints",
-	} {
-		if strings.Contains(got, hiddenExperimentalCommand) {
-			t.Fatalf("root help should not include %q while it is listed in labs, got:\n%s", hiddenExperimentalCommand, got)
+}
+
+// experimentalCommandMarkers are substrings that only appear in root help when
+// experimental commands are visible.
+var experimentalCommandMarkers = []string{
+	"Experimental commands:",
+	"review",
+	"tokens                 Analyze token usage across sessions and checkpoints",
+}
+
+// TestRootHelp_ReleaseHidesExperimental verifies a shipped build
+// (experimental.Visible="false") omits experimental commands and the group
+// header from root help. Mutates the global gate, so it cannot run in parallel.
+func TestRootHelp_ReleaseHidesExperimental(t *testing.T) {
+	withVisible(t, "false")
+
+	got := rootHelp(t)
+	for _, marker := range experimentalCommandMarkers {
+		if strings.Contains(got, marker) {
+			t.Fatalf("release root help should not include %q, got:\n%s", marker, got)
+		}
+	}
+}
+
+// TestRootHelp_DevShowsExperimentalGroup verifies a developer build
+// (experimental.Visible="true") shows experimental commands under the
+// "Experimental commands:" group in root help. Mutates the global gate, so it
+// cannot run in parallel.
+func TestRootHelp_DevShowsExperimentalGroup(t *testing.T) {
+	withVisible(t, "true")
+
+	got := rootHelp(t)
+	if !strings.Contains(got, experimental.GroupID) && !strings.Contains(got, "Experimental commands:") {
+		t.Fatalf("dev root help should include the experimental group header, got:\n%s", got)
+	}
+	for _, marker := range experimentalCommandMarkers {
+		if !strings.Contains(got, marker) {
+			t.Fatalf("dev root help should include %q, got:\n%s", marker, got)
 		}
 	}
 }

@@ -131,8 +131,14 @@ func TestFetchURL_EdgeCases(t *testing.T) {
 			wantURL:      "git@github.com:acme/checkpoints.git",
 		},
 		{
-			name:         "entire:// origin without token routes to provider checkpoint url (ssh default)",
+			name:         "entire:// origin without token derives mirror checkpoint url on same cluster",
 			originURL:    "entire://app.entire.io/gh/acme/app",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "entire://app.entire.io/gh/acme/checkpoints",
+		},
+		{
+			name:         "entire:// origin with forge not matching provider routes to provider checkpoint url (ssh default)",
+			originURL:    "entire://app.entire.io/et/acme/app",
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
 			wantURL:      "git@github.com:acme/checkpoints.git",
 		},
@@ -312,12 +318,28 @@ func TestPushURL(t *testing.T) {
 			wantEnabled:  false,
 		},
 		{
-			name:         "entire:// origin routes to provider checkpoint url (ssh default)",
+			name:         "entire:// origin derives mirror checkpoint url on same cluster",
 			originURL:    "entire://app.entire.io/gh/acme/app",
+			pushRemote:   "origin",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "entire://app.entire.io/gh/acme/checkpoints",
+			wantEnabled:  true,
+		},
+		{
+			name:         "entire:// origin with forge not matching provider routes to provider checkpoint url (ssh default)",
+			originURL:    "entire://app.entire.io/et/acme/app",
 			pushRemote:   "origin",
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
 			wantURL:      "git@github.com:acme/checkpoints.git",
 			wantEnabled:  true,
+		},
+		{
+			name:         "entire:// origin with different owner disables checkpoint push url",
+			originURL:    "entire://app.entire.io/gh/fork/app",
+			pushRemote:   "origin",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "entire://app.entire.io/gh/fork/app",
+			wantEnabled:  false,
 		},
 		{
 			name:         "file:// origin routes to provider checkpoint url (ssh default)",
@@ -398,14 +420,16 @@ func TestPushURL(t *testing.T) {
 	}
 }
 
-// TestPushURL_EntireOriginReusesProviderRemoteScheme reproduces the real-world
-// setup: origin migrated to an entire:// URL (forge-prefixed /gh/owner/repo)
-// with a github checkpoint_remote. The checkpoint URL must route to github
-// rather than fall back to the entire:// origin, reusing the auth/scheme the
-// repo had for that endpoint — a token forces HTTPS, then an existing remote
-// on the provider host, then defaulting to SSH.
-func TestPushURL_EntireOriginReusesProviderRemoteScheme(t *testing.T) {
-	const entireOrigin = "entire://aws-eu-central-1.entire.io/gh/entireio/cli"
+// TestPushURL_EntireOriginDerivesMirrorURL reproduces the real-world setup:
+// origin migrated to an entire:// URL (forge-prefixed /gh/owner/repo) with a
+// github checkpoint_remote. Checkpoints must follow origin through the
+// push-through mirror on the same cluster — even when leftover direct github
+// remotes (e.g. URL-named promisor entries from filtered fetches) exist. The
+// exception is a checkpoint token, which is an HTTPS credential for the
+// provider host and therefore forces direct provider HTTPS.
+func TestPushURL_EntireOriginDerivesMirrorURL(t *testing.T) {
+	const entireOrigin = "entire://aws-ap-southeast-2.entire.io/gh/entireio/cli"
+	const mirrorCheckpointURL = "entire://aws-ap-southeast-2.entire.io/gh/entireio/cli-checkpoints"
 	tests := []struct {
 		name        string
 		githubURL   string
@@ -414,24 +438,24 @@ func TestPushURL_EntireOriginReusesProviderRemoteScheme(t *testing.T) {
 		wantEnabled bool
 	}{
 		{
-			name:        "ssh github remote yields ssh checkpoint url",
+			name:        "existing ssh github remote does not divert checkpoints off the mirror",
 			githubURL:   "git@github.com:entireio/cli.git",
-			wantURL:     "git@github.com:entireio/cli-checkpoints.git",
+			wantURL:     mirrorCheckpointURL,
 			wantEnabled: true,
 		},
 		{
-			name:        "https github remote yields https checkpoint url",
+			name:        "existing https github remote does not divert checkpoints off the mirror",
 			githubURL:   "https://github.com/entireio/cli.git",
-			wantURL:     "https://github.com/entireio/cli-checkpoints.git",
+			wantURL:     mirrorCheckpointURL,
 			wantEnabled: true,
 		},
 		{
-			name:        "no signal defaults to ssh",
-			wantURL:     "git@github.com:entireio/cli-checkpoints.git",
+			name:        "entire origin alone derives mirror checkpoint url",
+			wantURL:     mirrorCheckpointURL,
 			wantEnabled: true,
 		},
 		{
-			name:        "token forces https over existing ssh remote",
+			name:        "token forces https on the provider host",
 			githubURL:   "git@github.com:entireio/cli.git",
 			token:       "ci-token",
 			wantURL:     "https://github.com/entireio/cli-checkpoints.git",
@@ -581,6 +605,24 @@ func TestDeriveCheckpointURLFromInfo(t *testing.T) {
 			pushRemoteURL:  "ssh://git@git.example.com:2222/org/main-repo.git",
 			checkpointRepo: "org/checkpoints",
 			want:           "ssh://git@git.example.com:2222/org/checkpoints.git",
+		},
+		{
+			name:           "entire push remote keeps cluster and forge",
+			pushRemoteURL:  "entire://aws-ap-southeast-2.entire.io/gh/org/main-repo",
+			checkpointRepo: "org/checkpoints",
+			want:           "entire://aws-ap-southeast-2.entire.io/gh/org/checkpoints",
+		},
+		{
+			name:           "entire push remote with non-standard port",
+			pushRemoteURL:  "entire://cluster.example.com:8443/gh/org/main-repo",
+			checkpointRepo: "org/checkpoints",
+			want:           "entire://cluster.example.com:8443/gh/org/checkpoints",
+		},
+		{
+			name:           "entire push remote with forge not matching provider",
+			pushRemoteURL:  "entire://aws-ap-southeast-2.entire.io/et/org/main-repo",
+			checkpointRepo: "org/checkpoints",
+			wantDeriveErr:  true,
 		},
 		{
 			name:          "invalid push remote",

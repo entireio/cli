@@ -30,7 +30,7 @@ type cellGroup struct {
 	// not report one (the group then routes by jurisdiction, or home).
 	cell string
 	// clusterSlug joins the group to the cluster catalog
-	// (RepoIndexEntry.ClusterSlug ↔ Cluster.Slug) to resolve baseURL. The
+	// (RepoPlacement.ClusterSlug ↔ Cluster.Slug) to resolve baseURL. The
 	// catalog does not expose a cell field, so the slug — not the cell name —
 	// is the only reliable join key. Several clusters may share a cell; any of
 	// them reports the jurisdiction's apiUrl, so the first seen slug serves.
@@ -81,9 +81,9 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
 			}
 			byCell[key] = g
 		}
-		// Upgrade an empty slug if a later entry provides one (a mirror
-		// placement may create the group before the home placement adds the
-		// slug).
+		// Upgrade an empty slug if a later placement in the same cell provides
+		// one, so a slugless placement doesn't pin the group to jurisdiction
+		// fallback when a sibling could supply the exact catalog join key.
 		if g.clusterSlug == "" && clusterSlug != "" {
 			g.clusterSlug = clusterSlug
 		}
@@ -93,22 +93,17 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
 	for _, r := range repos {
 		if len(r.Placements) > 0 {
 			for _, p := range r.Placements {
-				// Placements don't carry a cluster slug; the top-level slug
-				// applies only to the home placement. RepoPlacement.Mirror is
-				// the contract-guaranteed home(false)/mirror(true) marker, so
-				// assign the slug to the home placement and leave mirrors
-				// slugless — resolveCellBaseURLs falls back to cell/jurisdiction
-				// matching for groups without a slug. (Keying off Mirror rather
-				// than p.Cell == r.Cell means the join still works if the index
-				// omits the top-level Cell alongside the placement array.)
-				slug := ""
-				if !p.Mirror {
-					slug = r.ClusterSlug
-				}
-				addToGroup(p.ID, p.Cell, p.Jurisdiction, slug)
+				// Each placement carries its own cluster slug, cell, and
+				// jurisdiction (the /repos spec bump; the top-level RepoIndexEntry
+				// fields are deprecated). Route every placement — home and mirror
+				// alike — by its OWN slug so resolveCellBaseURLs can do the exact
+				// catalog join (bySlug), instead of leaving mirrors slugless and
+				// falling back to jurisdiction-default routing, which can query
+				// the wrong cell within a jurisdiction and silently miss a mirror.
+				addToGroup(p.ID, p.Cell, p.Jurisdiction, p.ClusterSlug)
 			}
 		} else {
-			addToGroup(r.ID, r.Cell, r.Jurisdiction, r.ClusterSlug)
+			addToGroup(r.ID, r.Cell, r.Jurisdiction, r.ClusterSlug) //nolint:staticcheck // top-level Cell/ClusterSlug deprecated by /repos spec bump; migrate to per-placement fields separately
 		}
 	}
 
