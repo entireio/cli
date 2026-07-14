@@ -224,12 +224,15 @@ func TestShouldSkipJSONLField(t *testing.T) {
 		{"ids", true},
 		{"session_ids", true},
 		{"userIds", true},
-		// Fields ending in "account" should be skipped (identifier shape,
-		// not credential): google_adsense_account, aws_account_id, etc.
-		{"account", true},
-		{"google_adsense_account", true},
-		{"aws_account", true},
-		{"service_account", true},
+		// Fields ending in "account" are deliberately NOT skipped: skipping
+		// bypasses every content layer and prunes subtrees, and
+		// "service_account" is the canonical GCP credential container whose
+		// nested private_key must stay scanned. Low-entropy account
+		// identifiers survive value-level scanning on their own.
+		{"account", false},
+		{"google_adsense_account", false},
+		{"aws_account", false},
+		{"service_account", false},
 		// Exact match "signature" should be skipped.
 		{"signature", true},
 		// Path-related fields should be skipped.
@@ -1568,33 +1571,54 @@ func TestString_RedactionIsIdempotent(t *testing.T) {
 	}
 }
 
-// Pins that `*_account` JSON keys are preserved by structure, not by entropy
-// coincidence. The value here is intentionally high-entropy (well above the
-// 4.5 threshold) so the test would fail if `_account` were not in the skip
-// list — proving the protection is design-driven, not luck-driven.
-func TestJSONLContent_AccountJSONKeysPreservedDespiteHighEntropy(t *testing.T) {
+// Regression pins for the `*_account` skip-list hazard: account-named fields
+// must keep value-level scanning. A high-entropy or provider-shaped secret in
+// an account field (including the nested private_key of a GCP
+// service_account JSON, the canonical credential container) must redact,
+// while low-entropy account identifiers are preserved by the entropy
+// threshold on their own — which is what fixes the original
+// GOOGLE_ADSENSE_ACCOUNT over-redaction without a key-name bypass.
+func TestJSONLContent_AccountJSONKeysStayScanned(t *testing.T) {
 	t.Parallel()
-	cases := []string{
+	redactedCases := []string{
 		`{"google_adsense_account":"` + highEntropySecret + `"}`,
 		`{"aws_account":"` + highEntropySecret + `"}`,
 		`{"service_account":"` + highEntropySecret + `"}`,
+		`{"service_account":{"private_key":"` + highEntropySecret + `"}}`,
+		`{"service_account":["` + highEntropySecret + `"]}`,
 	}
-	for _, in := range cases {
+	for _, in := range redactedCases {
+		out, err := JSONLContent(in)
+		if err != nil {
+			t.Fatalf("unexpected error for %q: %v", in, err)
+		}
+		if strings.Contains(out, highEntropySecret) {
+			t.Errorf("high-entropy secret in account field must redact, got: %s", out)
+		}
+	}
+
+	preservedCases := []string{
+		`{"google_adsense_account":"pub-1234567890123456"}`,
+		`{"aws_account":"123456789012"}`,
+	}
+	for _, in := range preservedCases {
 		out, err := JSONLContent(in)
 		if err != nil {
 			t.Fatalf("unexpected error for %q: %v", in, err)
 		}
 		if out != in {
-			t.Errorf("expected %q preserved (account is identifier-shape), got: %s", in, out)
+			t.Errorf("low-entropy account identifier must be preserved, got: %s", out)
 		}
 	}
 }
 
 // Pins that JSON keys with known non-secret prefixes (cancel/pagination/
 // continuation/idempotency/cursor/next/previous/page/sync) followed by
-// `_token` or `_secret` are NOT flat-redacted. These are routinely safe
-// debug/pagination identifiers. Real high-entropy credential-shaped values
-// still get caught by entropy + Betterleaks via the per-value String() call.
+// `_token` are NOT flat-redacted. These are routinely safe debug/pagination
+// identifiers. Real high-entropy credential-shaped values still get caught
+// by entropy + Betterleaks via the per-value String() call. The allowlist
+// deliberately does NOT extend to `_secret` keys — see
+// TestJSONLContent_RotationSecretKeysRedacted.
 func TestJSONLContent_NonSecretTokenPrefixesPreserved(t *testing.T) {
 	t.Parallel()
 	cases := []string{
@@ -1608,7 +1632,6 @@ func TestJSONLContent_NonSecretTokenPrefixesPreserved(t *testing.T) {
 		`{"prev_token":"page-1-marker"}`,
 		`{"page_token":"page-2-marker"}`,
 		`{"sync_token":"sync-state-marker"}`,
-		`{"cancel_secret":"cancel-state-marker"}`,
 	}
 	for _, in := range cases {
 		out, err := JSONLContent(in)
@@ -1702,5 +1725,127 @@ func TestJSONLContent_CrossContextValueCollision(t *testing.T) {
 	}
 	if strings.Count(result, `"password":"REDACTED"`) != 2 {
 		t.Errorf("expected both password fields redacted, got: %s", result)
+	}
+}
+
+// Rotation-secret field names (previous_secret/next_secret/sync_secret) are
+// real webhook/HMAC rotation payload keys, and hex values can never trip the
+// entropy layer (16 symbols cap Shannon entropy at 4.0 < 4.5), so the
+// non-secret prefix allowlist must not extend to the `_secret` suffix.
+func TestJSONLContent_RotationSecretKeysRedacted(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		`{"previous_secret":"9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928"}`,
+		`{"next_secret":"deadbeefcafef00ddeadbeefcafef00d"}`,
+		`{"sync_secret":"0123456789abcdef0123456789abcdef"}`,
+		`{"cancel_secret":"deadbeefcafef00ddeadbeefcafef00d"}`,
+	}
+	for _, in := range cases {
+		out, err := JSONLContent(in)
+		if err != nil {
+			t.Fatalf("unexpected error for %q: %v", in, err)
+		}
+		if !strings.Contains(out, RedactedPlaceholder) {
+			t.Errorf("rotation-style secret must redact (hex defeats the entropy fallback), got: %s", out)
+		}
+	}
+}
+
+// A single-quoted shell value is a literal — `'$uperSecret123'` is a real
+// password convention ($ as leet S), never a variable expansion. The
+// shell-variable placeholder rule must only unredact unquoted or
+// double-quoted $-leading values.
+func TestString_SingleQuotedDollarPasswordRedacted(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "single-quoted $-leading password is a literal, not a var ref",
+			input: `DB_PASSWORD='$uperSecret123'`,
+			want:  `DB_PASSWORD='REDACTED'`,
+		},
+		{
+			name:  "single-quoted ${...} shape is also a literal",
+			input: `DB_PASSWORD='${notAVar}'`,
+			want:  `DB_PASSWORD='REDACTED'`,
+		},
+		{
+			name:  "unquoted $VAR stays a placeholder",
+			input: `DB_PASSWORD=$DB_PASS`,
+			want:  `DB_PASSWORD=$DB_PASS`,
+		},
+		{
+			name:  "double-quoted $VAR stays a placeholder",
+			input: `DB_PASSWORD="$DB_PASS"`,
+			want:  `DB_PASSWORD="$DB_PASS"`,
+		},
+	})
+}
+
+// Pins the high-entropy escape hatch inside isNonSecretIdentifierAssignment:
+// an identifier-named key carrying a genuinely random value must still
+// redact on the raw-text path. Removing the isHighEntropySecretCandidate
+// check silently reopens this leak.
+func TestString_IdentifierKeyWithHighEntropyValueStillRedacts(t *testing.T) {
+	t.Parallel()
+	in := "SERVICE_ACCOUNT=" + highEntropySecret
+	out := String(in)
+	if strings.Contains(out, highEntropySecret) {
+		t.Fatalf("high-entropy value under identifier-named key must redact, got: %s", out)
+	}
+}
+
+// Pins the zero-separator branch of secretValueKeyShape ([_-]*): separator-less
+// credential keys are matched by design in both the env-var and JSONL paths.
+func TestString_NoSeparatorCredentialKeysRedacted(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "APIKEY without separator",
+			input: `APIKEY=correct-horse-battery`,
+			want:  `APIKEY=REDACTED`,
+		},
+		{
+			name:  "clientsecret without separator",
+			input: `clientsecret=correct-horse-battery`,
+			want:  `clientsecret=REDACTED`,
+		},
+	})
+}
+
+func TestJSONLContent_NoSeparatorCredentialJSONKeyRedacted(t *testing.T) {
+	t.Parallel()
+	out, err := JSONLContent(`{"clientsecret":"correct-horse-battery"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, RedactedPlaceholder) {
+		t.Fatalf("separator-less credential JSON key must redact, got: %s", out)
+	}
+}
+
+// Pins every verb and both noun forms of the shell-stdin pattern so no
+// alternative can be silently dropped.
+func TestString_ShellStdinSecretVerbMatrix(t *testing.T) {
+	t.Parallel()
+	for _, noun := range []string{"secret", "secrets"} {
+		for _, verb := range []string{"put", "set", "add", "create"} {
+			in := `printf 'literal-secret-value' | examplectl ` + noun + ` ` + verb + ` deploy_token`
+			out := String(in)
+			if strings.Contains(out, "literal-secret-value") {
+				t.Errorf("%s %s: literal not redacted: %s", noun, verb, out)
+			}
+		}
+	}
+}
+
+// Pins the {1,512} literal bound: an oversized "literal" is not eaten by the
+// shell-stdin layer — the bound is the layer's only span-size safety valve.
+func TestString_ShellStdinSecretLiteralBoundHolds(t *testing.T) {
+	t.Parallel()
+	huge := strings.Repeat("m", 600)
+	in := `printf '` + huge + `' | examplectl secrets put deploy_token`
+	out := String(in)
+	if !strings.Contains(out, huge) {
+		t.Fatalf("oversized literal should not be redacted by the bounded shell-stdin layer, got: %s", out)
 	}
 }

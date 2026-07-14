@@ -28,13 +28,13 @@ type NamedBlob struct {
 // returns a non-nil error. Callers running this for privacy-critical
 // operations (e.g. the pre-push rewrite) must abort rather than
 // proceed with partially-redacted content. The per-blob
-// JSONLContentWithPrivacyFilter falls back to 7-layer on batch
+// JSONLContentWithPrivacyFilter falls back to 9-layer on batch
 // failure; this batched variant intentionally does not, because the
 // only caller (cross-blob walker) needs an explicit signal that OPF
 // did not finish.
 //
 // When OPF is unconfigured, disabled, has no enabled categories, or
-// the per-process circuit breaker has tripped, returns 7-layer-only
+// the per-process circuit breaker has tripped, returns 9-layer-only
 // output for every blob with no error. This matches the existing
 // non-batched paths and keeps the caller's hot-path code clean.
 func BatchBytesWithPrivacyFilter(ctx context.Context, inputs []NamedBlob) ([][]byte, error) {
@@ -114,7 +114,7 @@ func BatchBytesWithPrivacyFilter(ctx context.Context, inputs []NamedBlob) ([][]b
 //
 // JSON parse failures fall back to whole-content treatment, matching
 // RedactBlobBytes's behavior: a malformed JSON blob still gets the
-// 7-layer pipeline applied, just without leaf-by-leaf precision.
+// 9-layer pipeline applied, just without leaf-by-leaf precision.
 func collectLeaves(in NamedBlob, add func(string)) {
 	if isJSONLikeName(in.Name) {
 		if _, err := jsonlContentImpl(string(in.Content), func(v string) string {
@@ -129,7 +129,7 @@ func collectLeaves(in NamedBlob, add func(string)) {
 }
 
 // applyToBlob produces the redacted bytes for a single blob, combining
-// the 7 regex layers with the cached OPF spans for each leaf. The
+// the 9 regex layers with the cached OPF spans for each leaf. The
 // per-leaf closure mirrors JSONLContentWithPrivacyFilter's Pass 3.
 func applyToBlob(in NamedBlob, spansByInput map[string][]Span, cfg *OPFConfig) []byte {
 	applier := func(v string) string {

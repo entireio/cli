@@ -54,11 +54,24 @@ var (
 	credentialValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + dbPasswordKeyShape + `)\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
 	// secretValuePattern targets shell/env-var assignments (`KEY=value`). It uses
 	// `=` only, not `:`, to avoid colliding with English prose ("the token: foo")
-	// in transcripts. YAML/JSON `key: value` shapes are handled by the JSON-aware
-	// path (`secretJSONKeyRegex`) which sees structured boundaries, not text.
-	secretValuePattern      = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + secretValueKeyShape + `)\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
+	// in transcripts. Colon shapes (`key: value`) are deliberately out of scope
+	// here; structured JSON keys are covered by secretJSONKeyRegex when content
+	// parses as JSON, while textual YAML/JSON inside a string leaf falls back to
+	// the entropy and betterleaks layers only.
+	secretValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + secretValueKeyShape + `)\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
+	// shellStdinSecretPattern matches a printf literal piped into a
+	// secret-management command (`printf 'v' | mycli secrets put KEY`); only
+	// the literal (group 1) is redacted, keeping the command readable.
+	// Scope: printf only (echo and flag forms like `printf --` are not
+	// matched), an optional leading format spec (%s / '%s\n' / "%s\n"), a
+	// {1,512} literal bound and {0,300} pipe-to-command gap so the layer can
+	// never swallow more than one bounded, same-line span, verbs
+	// put/set/add/create after `secret(s)`, and a credential-shaped key name.
+	// Every piece is newline-bounded via character classes, so matches cannot
+	// bleed across transcript lines (only the whitespace around the pipe may
+	// span a line break).
 	shellStdinSecretPattern = regexp.MustCompile(
-		`(?is)\bprintf\s+(?:(?:%[A-Za-z]|'%-?[0-9.]*[A-Za-z](?:\\n)?'|"%-?[0-9.]*[A-Za-z](?:\\n)?")\s+)?("[^"\r\n]{1,512}"|'[^'\r\n]{1,512}'|[^\s|&;]{1,512})\s*\|\s*[^&;\r\n]{0,300}\bsecrets?\s+(?:put|set|add|create)\s+` + secretValueKeyShape + `\b`,
+		`(?i)\bprintf\s+(?:(?:%[A-Za-z]|'%-?[0-9.]*[A-Za-z](?:\\n)?'|"%-?[0-9.]*[A-Za-z](?:\\n)?")\s+)?("[^"\r\n]{1,512}"|'[^'\r\n]{1,512}'|[^\s|&;]{1,512})\s*\|\s*[^&;\r\n]{0,300}\bsecrets?\s+(?:put|set|add|create)\s+` + secretValueKeyShape + `\b`,
 	)
 
 	keywordHostPattern      = regexp.MustCompile(`(?i)(?:^|\s)host=`)
@@ -420,8 +433,8 @@ func detectShellStdinSecrets(s string) []taggedRegion {
 		if len(loc) < 4 || loc[2] < 0 || loc[3] < 0 {
 			continue
 		}
-		start, end := unquoteRange(s, loc[2], loc[3])
-		if hasNonPlaceholderPasswordValue(s[start:end]) {
+		start, end, singleQuoted := unquoteRange(s, loc[2], loc[3])
+		if hasNonPlaceholderQuotedPasswordValue(s[start:end], singleQuoted) {
 			regions = append(regions, taggedRegion{region: region{start, end}})
 		}
 	}
@@ -439,8 +452,8 @@ func detectCredentialValues(s string) []taggedRegion {
 			if len(loc) < 6 || loc[4] < 0 || loc[5] < 0 {
 				continue
 			}
-			start, end := unquoteRange(s, loc[4], loc[5])
-			if hasNonPlaceholderPasswordValue(s[start:end]) {
+			start, end, singleQuoted := unquoteRange(s, loc[4], loc[5])
+			if hasNonPlaceholderQuotedPasswordValue(s[start:end], singleQuoted) {
 				regions = append(regions, taggedRegion{region: region{start, end}})
 			}
 		}
@@ -448,22 +461,28 @@ func detectCredentialValues(s string) []taggedRegion {
 	return regions
 }
 
-func unquoteRange(s string, start, end int) (int, int) {
+// unquoteRange narrows [start,end) past a matching pair of surrounding
+// quotes and reports whether those quotes were single quotes. Single-quoted
+// shell values are literals — `'$uperSecret123'` is a real password, never a
+// variable expansion — so callers must pass singleQuoted through to the
+// placeholder check to keep the shell-variable heuristic from unredacting
+// them.
+func unquoteRange(s string, start, end int) (int, int, bool) {
 	if end-start < 2 {
-		return start, end
+		return start, end, false
 	}
 	first, last := s[start], s[end-1]
 	if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
-		return start + 1, end - 1
+		return start + 1, end - 1, first == '\''
 	}
-	return start, end
+	return start, end, false
 }
 
 func hasNonPlaceholderPasswordAssignment(candidate string) bool {
 	for _, loc := range passwordAssignmentRegex.FindAllStringSubmatchIndex(candidate, -1) {
 		if len(loc) >= 4 && loc[2] >= 0 && loc[3] >= 0 {
-			start, end := unquoteRange(candidate, loc[2], loc[3])
-			if hasNonPlaceholderPasswordValue(candidate[start:end]) {
+			start, end, singleQuoted := unquoteRange(candidate, loc[2], loc[3])
+			if hasNonPlaceholderQuotedPasswordValue(candidate[start:end], singleQuoted) {
 				return true
 			}
 		}
@@ -472,11 +491,25 @@ func hasNonPlaceholderPasswordAssignment(candidate string) bool {
 }
 
 func hasNonPlaceholderPasswordValue(value string) bool {
-	return value != "" && !isPlaceholderSecretValue(value)
+	return hasNonPlaceholderQuotedPasswordValue(value, false)
 }
 
-func isPlaceholderSecretValue(value string) bool {
-	trimmed := strings.Trim(strings.TrimSpace(value), `"'`)
+// hasNonPlaceholderQuotedPasswordValue is the quote-aware variant:
+// singleQuoted marks values whose surrounding single quotes were stripped by
+// unquoteRange, which makes any $-leading content a literal, not a shell
+// expansion.
+func hasNonPlaceholderQuotedPasswordValue(value string, singleQuoted bool) bool {
+	return value != "" && !isPlaceholderSecretValueQuoted(value, singleQuoted)
+}
+
+func isPlaceholderSecretValueQuoted(value string, singleQuoted bool) bool {
+	trimmedSpace := strings.TrimSpace(value)
+	// Values that arrive still wearing their own single quotes are shell
+	// literals too (some callers match quoted forms without unquoting).
+	if len(trimmedSpace) >= 2 && trimmedSpace[0] == '\'' && trimmedSpace[len(trimmedSpace)-1] == '\'' {
+		singleQuoted = true
+	}
+	trimmed := strings.Trim(trimmedSpace, `"'`)
 	if trimmed == "" {
 		return true
 	}
@@ -484,11 +517,17 @@ func isPlaceholderSecretValue(value string) bool {
 		return true
 	}
 	normalized := strings.ToLower(trimmed)
-	if strings.HasPrefix(normalized, "${") && strings.HasSuffix(normalized, "}") {
-		return true
-	}
-	if isShellVariableReference(trimmed) {
-		return true
+	// Inside single quotes the shell performs no expansion: `'$uperSecret123'`
+	// and `'${looks_like_var}'` are literal passwords, so the
+	// variable-reference placeholder rules only apply to unquoted or
+	// double-quoted values.
+	if !singleQuoted {
+		if strings.HasPrefix(normalized, "${") && strings.HasSuffix(normalized, "}") {
+			return true
+		}
+		if isShellVariableReference(trimmed) {
+			return true
+		}
 	}
 	if _, ok := placeholderSecretValues[normalized]; ok {
 		return true
@@ -562,16 +601,18 @@ func isCredentialJSONSecretKey(key string, credentialContext bool) bool {
 }
 
 // isKnownNonSecretTokenKey reports whether the normalized JSON key is
-// `<prefix>_token` or `<prefix>_secret` where prefix is in
-// nonSecretTokenPrefixes. Used to short-circuit JSON-key redaction for keys
-// like `cancel_token`, `pagination_token`, `idempotency_token` that are
-// routinely non-credentials.
+// `<prefix>_token` where prefix is in nonSecretTokenPrefixes. Used to
+// short-circuit JSON-key redaction for keys like `cancel_token`,
+// `pagination_token`, `idempotency_token` that are routinely
+// non-credentials. Deliberately NOT applied to `_secret` keys:
+// `previous_secret`/`next_secret` are real field names in webhook/HMAC
+// secret-rotation payloads, and the entropy fallback cannot catch them when
+// hex-encoded (16 symbols cap Shannon entropy at 4.0, below the 4.5
+// threshold).
 func isKnownNonSecretTokenKey(normalized string) bool {
-	for _, suffix := range []string{"_token", "_secret"} {
-		if prefix, ok := strings.CutSuffix(normalized, suffix); ok {
-			if _, allowed := nonSecretTokenPrefixes[prefix]; allowed {
-				return true
-			}
+	if prefix, ok := strings.CutSuffix(normalized, "_token"); ok {
+		if _, allowed := nonSecretTokenPrefixes[prefix]; allowed {
+			return true
 		}
 	}
 	return false
@@ -976,15 +1017,13 @@ func shouldSkipJSONLField(key string) bool {
 		return true
 	}
 
-	// Skip account fields. These are identifier-shape (e.g.,
-	// google_adsense_account, aws_account, service_account), not credential
-	// fields. Protects against entropy / vendor-regex false positives when
-	// account identifiers happen to look high-entropy. A misnamed credential
-	// field literally named `*_account` would slip through — acceptable trade
-	// because real credential fields use `*_secret`, `*_token`, etc.
-	if strings.HasSuffix(lower, "account") {
-		return true
-	}
+	// Account fields (google_adsense_account, aws_account, ...) are
+	// deliberately NOT skipped here: shouldSkipJSONLField bypasses every
+	// content layer and prunes whole subtrees, and "service_account" is the
+	// canonical field name of the GCP credential container whose nested
+	// private_key must stay scanned. Low-entropy account identifiers survive
+	// value-level scanning on their own; the text-path false positive is
+	// handled by isNonSecretIdentifierAssignment instead.
 
 	// Skip common path and directory fields from agent transcripts.
 	// These appear frequently in tool calls and are structural, not secrets.

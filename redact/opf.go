@@ -88,7 +88,7 @@ func getOPFConfig() *OPFConfig {
 
 // OPFEnabled reports whether the OpenAI Privacy Filter is configured
 // and turned on for this process. Callers gate pre-push rewrite work
-// on this: when false, the pre-push hook pushes the local 7-layer
+// on this: when false, the pre-push hook pushes the local 9-layer
 // checkpoint branch verbatim with no extra processing. Independent of
 // the circuit breaker — a tripped breaker still reports Enabled=true
 // because the runtime config didn't change; the rewrite logic itself
@@ -101,9 +101,9 @@ func OPFEnabled() bool {
 // OPFBreakerTripped reports whether the per-process OPF circuit breaker
 // has been tripped — i.e. an OPF invocation failed at some point during
 // this process's lifetime. The pre-push rewrite uses this to detect
-// when OPF silently fell back to 7-layer mid-rewrite and abort before
+// when OPF silently fell back to 9-layer mid-rewrite and abort before
 // CAS-ing the new ref; otherwise the rewritten commits would carry the
-// Entire-OPF-Applied: true trailer despite containing only 7-layer
+// Entire-OPF-Applied: true trailer despite containing only 9-layer
 // content, and the next push would skip them.
 func OPFBreakerTripped() bool {
 	return opfBreakerTripped.Load()
@@ -185,7 +185,7 @@ func enabledCategories(cfg *OPFConfig) []string {
 // in the pre-push rewrite path (strategy/manual_commit_opf_rewrite.go),
 // whose hook is installed without a `2>/dev/null` redirect, so plain
 // stderr reaches the user's terminal during `git push`. Post-commit
-// condensation never invokes OPF (it calls the 7-layer functions
+// condensation never invokes OPF (it calls the 9-layer functions
 // directly via RedactBlobBytes(..., usePrivacyFilter=false)), so the
 // historical `/dev/tty` routing that survived the post-commit hook's
 // stderr redirect is no longer needed. Tests override this directly.

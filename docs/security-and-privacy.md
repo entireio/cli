@@ -23,7 +23,7 @@ Entire automatically scans transcript and metadata content before writing it to 
 3. **Provider token prefixes** — Deterministically redacts known secret-key prefixes (e.g. Supabase `sb_secret_`, `sbp_`) regardless of entropy or surrounding context.
 4. **Credentialed URI detection** — Redacts URLs with embedded passwords, such as `scheme://user:password@host`.
 5. **Database connection-string detection** — Redacts JDBC, Postgres keyword DSN, SQL Server, and ODBC-style connection strings containing passwords.
-6. **Shell-stdin secret literals** — Redacts literals piped into secret-management commands, such as `printf 'value' | mycli secrets put API_KEY`, while preserving the command itself.
+6. **Shell-stdin secret literals** — Redacts literals `printf`-piped into `secrets put/set/add/create` commands, such as `printf 'value' | mycli secrets put API_KEY`, while preserving the command itself.
 7. **Bounded credential value detection** — Redacts credential-shaped config values such as `DB_PASSWORD=...`, `GITHUB_CLIENT_SECRET=...`, and `AUTH_TOKEN=...` while preserving the surrounding key.
 
 Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. The seven secret-detection passes above are **always on** and cannot be disabled. User-defined rules (inline `custom_redactions` and rule packs) add an eighth secret-detection pass that only runs when configured.
