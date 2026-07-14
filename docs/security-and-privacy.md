@@ -16,16 +16,17 @@ If your repository is **public**, this data is visible to the entire internet.
 
 ### What Entire redacts automatically
 
-Entire automatically scans transcript and metadata content before writing it to the `entire/checkpoints/v1` branch. Six always-on secret detection methods run during condensation, plus a conditional seventh pass for user-defined secret rules (see [Customizing redaction](#customizing-redaction) below), an opt-in eighth pass for PII (see [Optional PII redaction](#optional-pii-redaction) below), and an opt-in ninth pass that shells out to the OpenAI Privacy Filter model (see [Optional OpenAI Privacy Filter](#optional-openai-privacy-filter-opf) below):
+Entire automatically scans transcript and metadata content before writing it to the `entire/checkpoints/v1` branch. Seven always-on secret detection methods run during condensation, plus a conditional eighth pass for user-defined secret rules (see [Customizing redaction](#customizing-redaction) below), an opt-in ninth pass for PII (see [Optional PII redaction](#optional-pii-redaction) below), and an opt-in tenth pass that shells out to the OpenAI Privacy Filter model (see [Optional OpenAI Privacy Filter](#optional-openai-privacy-filter-opf) below):
 
 1. **Entropy scoring** — Identifies high-entropy strings (Shannon entropy > 4.5) that look like randomly generated secrets, even if they don't match a known pattern.
 2. **Pattern matching** — Uses [Betterleaks](https://github.com/betterleaks/betterleaks) built-in rules to detect known secret formats.
 3. **Provider token prefixes** — Deterministically redacts known secret-key prefixes (e.g. Supabase `sb_secret_`, `sbp_`) regardless of entropy or surrounding context.
 4. **Credentialed URI detection** — Redacts URLs with embedded passwords, such as `scheme://user:password@host`.
 5. **Database connection-string detection** — Redacts JDBC, Postgres keyword DSN, SQL Server, and ODBC-style connection strings containing passwords.
-6. **Bounded credential value detection** — Redacts password-like config values such as `DB_PASSWORD=...` and `PGPASSWORD=...` while preserving the surrounding key.
+6. **Shell-stdin secret literals** — Redacts literals piped into secret-management commands, such as `printf 'value' | mycli secrets put API_KEY`, while preserving the command itself.
+7. **Bounded credential value detection** — Redacts credential-shaped config values such as `DB_PASSWORD=...`, `GITHUB_CLIENT_SECRET=...`, and `AUTH_TOKEN=...` while preserving the surrounding key.
 
-Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. The six secret-detection passes above are **always on** and cannot be disabled. User-defined rules (inline `custom_redactions` and rule packs) add a seventh secret-detection pass that only runs when configured.
+Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. The seven secret-detection passes above are **always on** and cannot be disabled. User-defined rules (inline `custom_redactions` and rule packs) add an eighth secret-detection pass that only runs when configured.
 
 ### Optional PII redaction
 
@@ -63,7 +64,7 @@ If a custom pattern itself reveals sensitive structure (e.g. an internal ID form
 
 ### Optional OpenAI Privacy Filter (`opf`)
 
-A separate, **opt-in** layer that shells out to the [OpenAI Privacy Filter](https://github.com/openai/privacy-filter) (`opf`) — a 1.5B-parameter token-classification model that finds names, emails, phone numbers, addresses, dates, URLs, account numbers, and secrets that pure regex can miss. Disabled by default. Runs *in addition to* the eight built-in layers, **only at push time** — never per-turn and never at commit time. Local commits stay on the fast 8-layer pipeline so per-commit latency is unchanged; OPF only re-redacts checkpoints right before they leave the machine via `git push`.
+A separate, **opt-in** layer that shells out to the [OpenAI Privacy Filter](https://github.com/openai/privacy-filter) (`opf`) — a 1.5B-parameter token-classification model that finds names, emails, phone numbers, addresses, dates, URLs, account numbers, and secrets that pure regex can miss. Disabled by default. Runs *in addition to* the nine built-in layers, **only at push time** — never per-turn and never at commit time. Local commits stay on the fast 9-layer pipeline so per-commit latency is unchanged; OPF only re-redacts checkpoints right before they leave the machine via `git push`.
 
 Prerequisites:
 
@@ -144,7 +145,7 @@ Ctrl-C to cancel the push.
 ```
 
 - **Yes** runs OPF for this push only.
-- **No** skips OPF for this push only; the 8-layer-redacted content reaches the remote.
+- **No** skips OPF for this push only; the 9-layer-redacted content reaches the remote.
 - **Always** runs OPF this push AND writes `prompt_default: "always"` to `.entire/settings.local.json` so future pushes don't ask.
 - **Ctrl-C** aborts the push entirely — `git push` exits non-zero, no refs go to the remote.
 
@@ -152,7 +153,7 @@ Non-interactive contexts (CI, scripted pipes with no TTY) skip the prompt and ru
 
 **CI consideration**: if you've enabled OPF locally and your CI runs `git push` (e.g. an agent-driven workflow), the CI push will attempt to run OPF too. If the `opf` binary isn't installed in CI, the push will abort with `OPFRuntimeFailedError` rather than silently shipping under-redacted content — by design, since "I enabled OPF" should mean "no content leaves my machines without OPF." The remedies are (a) install `opf` in CI, (b) set `ENTIRE_OPF=no` for CI pushes, or (c) set `prompt_default: "never"` if you only want OPF on interactive pushes.
 
-OPF failures at push time are **fail-closed**: if OPF is not on PATH, fails to start, or times out during the pre-push rewrite, the per-process circuit breaker trips and the rewrite aborts the push with `OPF runtime failed; aborting push`. Nothing reaches the remote. The intent is that "the user enabled OPF" means "I do not want unredacted content leaving this machine" — falling back to 8-layer silently on the push path would violate that contract. Fix the install or set `ENTIRE_OPF=no` for a one-off push.
+OPF failures at push time are **fail-closed**: if OPF is not on PATH, fails to start, or times out during the pre-push rewrite, the per-process circuit breaker trips and the rewrite aborts the push with `OPF runtime failed; aborting push`. Nothing reaches the remote. The intent is that "the user enabled OPF" means "I do not want unredacted content leaving this machine" — falling back to 9-layer silently on the push path would violate that contract. Fix the install or set `ENTIRE_OPF=no` for a one-off push.
 
 (The circuit breaker is per-process, so a broken install costs one warning instead of one timeout per blob — but the push still aborts.)
 
@@ -162,14 +163,14 @@ Cost note: each shell-out loads the OPF model (~1.5B parameters on CPU). The pre
 
 OPF execution lives in the pre-push hook. The flow:
 
-1. **Post-commit** writes the checkpoint with **8-layer-only** redaction to your local `entire/checkpoints/v1` branch. Fast, predictable, no OPF cost on the hot path.
-2. **Pre-push** (`git push`): if OPF is enabled, the hook re-reads each unpushed `entire/checkpoints/v1` commit, runs the OpenAI Privacy Filter over its blobs to add the categories the regex layers don't catch (person names, addresses, etc.), and builds **new commits** carrying an `Entire-OPF-Applied: true` trailer. The local v1 ref fast-forwards atomically to the new tip, and the (now 9-layer-redacted) commits are what get pushed.
-3. The original 8-layer-only commits become **unreachable** in the local git object database and eventually get swept by `git gc`.
+1. **Post-commit** writes the checkpoint with **9-layer-only** redaction to your local `entire/checkpoints/v1` branch. Fast, predictable, no OPF cost on the hot path.
+2. **Pre-push** (`git push`): if OPF is enabled, the hook re-reads each unpushed `entire/checkpoints/v1` commit, runs the OpenAI Privacy Filter over its blobs to add the categories the regex layers don't catch (person names, addresses, etc.), and builds **new commits** carrying an `Entire-OPF-Applied: true` trailer. The local v1 ref fast-forwards atomically to the new tip, and the (now 10-layer-redacted) commits are what get pushed.
+3. The original 9-layer-only commits become **unreachable** in the local git object database and eventually get swept by `git gc`.
 
 This means:
 
-- **The remote only ever sees 9-layer-redacted content** when OPF is enabled.
-- **Local-only commits are 8-layer-redacted** until the moment you push. If you never push, OPF never runs.
+- **The remote only ever sees 10-layer-redacted content** when OPF is enabled.
+- **Local-only commits are 9-layer-redacted** until the moment you push. If you never push, OPF never runs.
 - **Re-running pre-push is idempotent** — commits already carrying the trailer get re-parented into the chain but are not re-redacted.
 
 #### Force-pushed remote, bootstrap, and concurrent pushes
@@ -202,10 +203,10 @@ Three places retain content that OPF *didn't* redact, with different lifetimes. 
 | Location | Redaction level | Lifetime | Reaches remote? |
 |---|---|---|---|
 | `.entire/<session>.jsonl` | **None — raw** | Until session is deleted (managed by the agent) | No |
-| Shadow branch `entire/<commit>-<worktree>` | 8-layer | Auto-deleted after the next successful push (only when its session has ended cleanly) | No |
-| Unreachable git objects after pre-push rewrite | 8-layer | Until `git gc --prune` (default `gc.pruneExpire` is 2 weeks) | No |
-| Reflog `git reflog show entire/checkpoints/v1` | 8-layer tips | Default `gc.reflogExpire` is 90 days | No |
-| `<remote>/entire/checkpoints/v1` | 9-layer (after OPF rewrite) | Until you delete the branch on the remote | Yes |
+| Shadow branch `entire/<commit>-<worktree>` | 9-layer | Auto-deleted after the next successful push (only when its session has ended cleanly) | No |
+| Unreachable git objects after pre-push rewrite | 9-layer | Until `git gc --prune` (default `gc.pruneExpire` is 2 weeks) | No |
+| Reflog `git reflog show entire/checkpoints/v1` | 9-layer tips | Default `gc.reflogExpire` is 90 days | No |
+| `<remote>/entire/checkpoints/v1` | 10-layer (after OPF rewrite) | Until you delete the branch on the remote | Yes |
 
 The `.entire/<session>.jsonl` files are raw working state owned by the agent (Claude Code, etc.) — Entire reads from them but does not redact them in place, because the agent is reading and writing them continuously and editing under the agent's feet would corrupt the session.
 
@@ -223,7 +224,7 @@ Verifying it's working:
 ```fish
 # After enabling OPF, run an agent turn that includes a name in the prompt,
 # e.g. "Create notes.txt with: Alice Johnson reviewed the proposal."
-# Commit (this stays on the fast 8-layer pipeline), then push. OPF runs
+# Commit (this stays on the fast 9-layer pipeline), then push. OPF runs
 # during the pre-push step:
 git commit -m "demo"
 git push   # → "→ OpenAI Privacy Filter: scanning N checkpoints (~30s)…"
