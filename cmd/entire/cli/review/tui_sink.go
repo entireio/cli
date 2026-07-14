@@ -72,6 +72,12 @@ type TUISink struct {
 	// and the summary pass through unchanged.
 	rowOrder      []string
 	workerToAgent map[string]string
+	rowWorkers    map[string][]string // agent row → its worker labels
+	// workerTokens holds each worker's latest cumulative Tokens so a
+	// collapsed row can display the per-agent SUM live (workers stream
+	// cumulative counts independently; overwriting would bounce between
+	// them). Written and read only from the serial dispatch goroutine.
+	workerTokens map[string]reviewtypes.Tokens
 }
 
 // groupWorkers configures one-row-per-agent collapsing: rowOrder is the
@@ -81,6 +87,25 @@ type TUISink struct {
 func (s *TUISink) groupWorkers(rowOrder []string, workerToAgent map[string]string) {
 	s.rowOrder = rowOrder
 	s.workerToAgent = workerToAgent
+	s.rowWorkers = make(map[string][]string, len(rowOrder))
+	for worker, row := range workerToAgent {
+		s.rowWorkers[row] = append(s.rowWorkers[row], worker)
+	}
+	s.workerTokens = make(map[string]reviewtypes.Tokens, len(workerToAgent))
+}
+
+// agentRowTokens records worker's latest cumulative Tokens and returns the
+// summed Tokens across every worker folded into agentRow. Called only from
+// the serial dispatch goroutine (CU4 contract), so it needs no lock.
+func (s *TUISink) agentRowTokens(worker, agentRow string, tk reviewtypes.Tokens) reviewtypes.Tokens {
+	s.workerTokens[worker] = tk
+	var sum reviewtypes.Tokens
+	for _, w := range s.rowWorkers[agentRow] {
+		wt := s.workerTokens[w]
+		sum.In += wt.In
+		sum.Out += wt.Out
+	}
+	return sum
 }
 
 // agentRowFor resolves a worker label to its agent row, passing through any
@@ -299,8 +324,16 @@ func (s *TUISink) AgentEvent(agent string, ev reviewtypes.Event) {
 	if !ok {
 		return
 	}
+	row := s.agentRowFor(agent)
+	// A collapsed row shows the SUM of its workers' cumulative token counts;
+	// forwarding a single worker's cumulative value would bounce the live
+	// number between siblings (row.tokens overwrites, per CU2). Ungrouped
+	// (single-worker) rows pass through unchanged.
+	if tk, ok := ev.(reviewtypes.Tokens); ok && s.workerTokens != nil {
+		ev = s.agentRowTokens(agent, row, tk)
+	}
 	select {
-	case s.msgs <- agentEventMsg{agent: s.agentRowFor(agent), ev: ev}:
+	case s.msgs <- agentEventMsg{agent: row, ev: ev}:
 	default:
 		s.mu.Lock()
 		s.dropped++

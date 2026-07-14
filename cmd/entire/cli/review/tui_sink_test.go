@@ -537,3 +537,51 @@ func TestTUISink_CollapsesSummaryToAgentRows(t *testing.T) {
 		t.Errorf("codex row = %+v, want single {codex,200}", got.AgentRuns[1])
 	}
 }
+
+// TestTUISink_SumsLiveTokensAcrossWorkers pins that live token counts on a
+// collapsed agent row are the SUM of its workers' cumulative counts, not
+// last-writer-wins. Since #1666 streams cumulative tokens per worker and the
+// row overwrites on each Tokens event, two skill-workers sharing one agent
+// row would otherwise bounce between their individual counts mid-run.
+func TestTUISink_SumsLiveTokensAcrossWorkers(t *testing.T) {
+	t.Parallel()
+	prog := newRecordingProgram()
+	sink := newTUISinkWithProgram(prog)
+	sink.groupWorkers([]string{tAgentClaude}, map[string]string{
+		"claude-code:review":    tAgentClaude,
+		"claude-code:pr-review": tAgentClaude,
+	})
+	sink.Start()
+	defer func() { prog.Kill(); sink.Wait() }()
+
+	sink.AgentEvent("claude-code:review", reviewtypes.Tokens{In: 100, Out: 1})
+	sink.AgentEvent("claude-code:pr-review", reviewtypes.Tokens{In: 50, Out: 2})
+	sink.AgentEvent("claude-code:review", reviewtypes.Tokens{In: 120, Out: 3}) // worker 1 advances
+
+	// Last forwarded Tokens for the agent row must be the running sum:
+	// worker1's latest {120,3} + worker2's latest {50,2} = {170,5}.
+	want := reviewtypes.Tokens{In: 170, Out: 5}
+	deadline := time.After(5 * time.Second)
+	for {
+		var last *reviewtypes.Tokens
+		for _, m := range prog.recorded() {
+			if ae, ok := m.(agentEventMsg); ok {
+				if tk, ok := ae.ev.(reviewtypes.Tokens); ok {
+					if ae.agent != tAgentClaude {
+						t.Fatalf("tokens routed to %q, want %q", ae.agent, tAgentClaude)
+					}
+					tk := tk
+					last = &tk
+				}
+			}
+		}
+		if last != nil && *last == want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("last forwarded tokens = %v, want %v (per-worker sum)", last, want)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
