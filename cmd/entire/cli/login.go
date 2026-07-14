@@ -595,21 +595,12 @@ func openBrowser(ctx context.Context, browserURL string) error {
 		return errors.New("browser unavailable under test")
 	}
 
-	command, args, dir, err := resolveBrowserLauncher(runtime.GOOS, isWSL(), exec.LookPath, browserURL)
+	command, args, err := resolveBrowserLauncher(runtime.GOOS, isWSL(), exec.LookPath, browserURL)
 	if err != nil {
 		return err
 	}
 
 	cmd := exec.CommandContext(ctx, command, args...)
-	// dir is set only for the WSL cmd.exe fallback, to keep cmd.exe from
-	// warning about the unsupported WSL (UNC) working directory. It's
-	// best-effort: a customized automount root means /mnt/c may not exist, and
-	// suppressing a cosmetic warning must not become a hard chdir failure.
-	if dir != "" {
-		if _, statErr := os.Stat(dir); statErr == nil {
-			cmd.Dir = dir
-		}
-	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start browser command %q: %w", command, err)
 	}
@@ -631,24 +622,28 @@ func openBrowser(ctx context.Context, browserURL string) error {
 // both $BROWSER and the xdg default, so the user lands in a browser with none
 // of their sessions. So on WSL we open the Windows default browser directly
 // via wslview (from wslu, preinstalled on Ubuntu-on-WSL), falling back to
-// cmd.exe on stripped-down distros without it. The cmd.exe working directory
-// is a Windows path so cmd doesn't warn about the unsupported WSL (UNC) cwd.
-func resolveBrowserLauncher(goos string, wsl bool, lookPath func(string) (string, error), browserURL string) (command string, args []string, dir string, err error) {
+// explorer.exe on stripped-down distros without it. explorer.exe takes the
+// URL as a plain argument and hands it to the shell URL handler, so unlike
+// cmd.exe `start` it never reparses the command line (`&` in OAuth query
+// strings would split a cmd.exe line) and doesn't warn about the WSL (UNC)
+// working directory. Its exit code is meaningless (1 even on success), which
+// is fine here: openBrowser only checks that the process starts.
+func resolveBrowserLauncher(goos string, wsl bool, lookPath func(string) (string, error), browserURL string) (command string, args []string, err error) {
 	switch goos {
 	case "darwin":
-		return "open", []string{browserURL}, "", nil
+		return "open", []string{browserURL}, nil
 	case "windows":
-		return "cmd", []string{"/c", "start", "", browserURL}, "", nil
+		return "cmd", []string{"/c", "start", "", browserURL}, nil
 	case "linux":
 		if wsl {
 			if path, lerr := lookPath("wslview"); lerr == nil {
-				return path, []string{browserURL}, "", nil
+				return path, []string{browserURL}, nil
 			}
-			return "cmd.exe", []string{"/c", "start", "", browserURL}, "/mnt/c", nil
+			return "explorer.exe", []string{browserURL}, nil
 		}
-		return "xdg-open", []string{browserURL}, "", nil
+		return "xdg-open", []string{browserURL}, nil
 	default:
-		return "", nil, "", fmt.Errorf("unsupported platform %s", goos)
+		return "", nil, fmt.Errorf("unsupported platform %s", goos)
 	}
 }
 

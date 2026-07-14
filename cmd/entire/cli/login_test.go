@@ -748,20 +748,19 @@ func TestResolveBrowserLauncher(t *testing.T) {
 		look     func(string) (string, error)
 		wantCmd  string
 		wantArgs []string
-		wantDir  string
 		wantErr  bool
 	}{
-		{"darwin", "darwin", false, missing, "open", []string{browserURL}, "", false},
-		{"windows", "windows", false, missing, "cmd", []string{"/c", "start", "", browserURL}, "", false},
-		{"linux-non-wsl", "linux", false, found, "xdg-open", []string{browserURL}, "", false},
-		{"wsl-with-wslview", "linux", true, found, "/usr/bin/wslview", []string{browserURL}, "", false},
-		{"wsl-without-wslview", "linux", true, missing, "cmd.exe", []string{"/c", "start", "", browserURL}, "/mnt/c", false},
-		{"unsupported", "plan9", false, missing, "", nil, "", true},
+		{"darwin", "darwin", false, missing, "open", []string{browserURL}, false},
+		{"windows", "windows", false, missing, "cmd", []string{"/c", "start", "", browserURL}, false},
+		{"linux-non-wsl", "linux", false, found, "xdg-open", []string{browserURL}, false},
+		{"wsl-with-wslview", "linux", true, found, "/usr/bin/wslview", []string{browserURL}, false},
+		{"wsl-without-wslview", "linux", true, missing, "explorer.exe", []string{browserURL}, false},
+		{"unsupported", "plan9", false, missing, "", nil, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cmd, args, dir, err := resolveBrowserLauncher(tc.goos, tc.wsl, tc.look, browserURL)
+			cmd, args, err := resolveBrowserLauncher(tc.goos, tc.wsl, tc.look, browserURL)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got cmd=%q", cmd)
@@ -776,9 +775,6 @@ func TestResolveBrowserLauncher(t *testing.T) {
 			}
 			if !reflect.DeepEqual(args, tc.wantArgs) {
 				t.Errorf("args = %v, want %v", args, tc.wantArgs)
-			}
-			if dir != tc.wantDir {
-				t.Errorf("dir = %q, want %q", dir, tc.wantDir)
 			}
 		})
 	}
