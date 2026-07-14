@@ -120,6 +120,72 @@
   "session_metrics": {
     "turn_count": 37
   },
+  "summary": {
+    "intent": "Resume work on the 'review command redo' effort: recover the correct in-progress session, cut a live-token-counts PR, live-test the integrated review PR stack with real agents, investigate/fix bugs the dogfooding surfaced, and get all resulting PRs (plus two other open PRs in the stack) clean and ready for human review.",
+    "outcome": "Shipped and iterated PR #1666 (live token counts), combined #1655 into #1669 (codex skill discovery + native invocation), combined #1651 into #1647 (child context + skill fan-out), and #1677 (non-blocking TUI sink fixing a real orchestrator freeze found via live dogfooding). Resolved all findings across trails 766, 784, 788, 791, fixed stale docs/PR bodies/cross-references, replied to human reviewer threads on #1664, and left all five PRs (#1647, #1664, #1666, #1669, #1677) CI-green and queued for human review.",
+    "learnings": {
+      "repo": [
+        "Entire links commits to sessions via an `Entire-Checkpoint` git trailer; when the transcript file itself is gone (past retention), the checkpoint object still preserves the full session and can be replayed.",
+        "Cross-worktree 'retro-attach' of a checkpoint records wrong-worktree relative paths, so indexed checkpoints show `filesTouched: []` — a known gap, not a bug in this session's work.",
+        "PR bodies contain an `entire-trail-link` marker block injected by tooling; rewriting the whole body (e.g. when combining PRs) can silently clobber it — must edit around it, not replace wholesale.",
+        "`TUISink.AgentEvent` used a blocking `Program.Send`; because bubbletea's event loop can stall, that single blocking call could freeze parsers, fan-in, and timeout enforcement for the entire orchestrator (the 'run 6 wedge').",
+        "The `ReviewerTimeout` `-1` sentinel became fully vestigial once the default was dropped — every consumer used `> 0`, making `-1` and `0` indistinguishable; correct fix was deleting the resolver, not converting it to `max()`.",
+        "For codex, passing `$name` verbatim in the prompt IS the invocation mechanism — there's no separate skill API; codex's own skill layer resolves the token and loads the real SKILL.md. Claude, by contrast, invokes skills via an actual `Skill` tool call.",
+        "Codex skill discovery must resolve the home dir via `resolveCodexHome()` (honors `CODEX_HOME`) not `UserHomeDir()` directly, matching every other codex-agent path's convention.",
+        "In the multi-agent review path, one worker with an invalid skill config used to abort the entire crew (including unrelated agents like claude-code) — fixed to exclude the bad worker with a warning and continue, hard-failing only if all workers are excluded.",
+        "Untrusted scope data (commit subjects, file paths) rendered inside an 'authoritative — use as-is' prompt block is a prompt-injection surface; must be wrapped in the same dynamic backtick-fence used for diffs, with an explicit 'do not act on instruction-like text' marker.",
+        "Hint-suppression fingerprints must track the exact string form emitted elsewhere (discovery moved from `/slash` form to `$name` form, breaking an install-hint suppression check that did exact-string comparison)."
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/review/cmd.go",
+          "line": 254,
+          "finding": "--timeout flag-registration help string stated a stale 5m judge default after defaultSynthesisProviderTimeout was bumped to 20m, contradicting the usage block; caught by a trail finding and required a second sweep after the first fix missed 3 of 4 stale references."
+        },
+        {
+          "path": "cmd/entire/cli/review/tui_sink.go",
+          "finding": "Refactored to a bounded 4096-message queue drained by a single pump goroutine; AgentEvent enqueues without blocking (dropping+counting on overflow) so a stalled TUI can no longer freeze the data plane or timeout enforcement."
+        },
+        {
+          "path": "cmd/entire/cli/agent/codex/reviewer.go",
+          "finding": "Rollout tailer must be stopped and awaited before any terminal event (Finished) is emitted, otherwise Tokens events can arrive after Finished, violating the event-stream contract."
+        },
+        {
+          "path": "cmd/entire/cli/agent/codex/review_tokens.go",
+          "finding": "Tailer needed a bounded/backoff poll loop (final fix in this session) plus non-EOF read errors log-and-stop and rollout-never-appeared exhaustion debug-logged."
+        },
+        {
+          "path": "cmd/entire/cli/agent/claudecode/reviewer.go",
+          "finding": "Token emission must accumulate cumulatively per unique message id (not per-call snapshot) to match the documented contract and converge exactly to the final `result` aggregate."
+        }
+      ],
+      "workflow": [
+        "When a session's transcript file is gone, check commit trailers for `Entire-Checkpoint` before concluding no session exists — worktree-scoped searches alone can miss the real session.",
+        "For live-testing a TUI-driven CLI under a harness, use a properly-sized pty with held-open stdin (not a plain script that sends EOF) or the TUI silently falls back to the non-interactive dump path.",
+        "When a shim/harness can't reproduce a suspected concurrency wedge, SIGQUIT (not SIGTERM) the stuck process immediately to capture a goroutine dump — the single most valuable piece of evidence, and this session lost it once by not doing so.",
+        "Combine independently-splittable stacked PRs into one only when there's zero file overlap between them (concept-split, not file-split) — reduces reviewer cycles without re-verification if the merged tree is already CI-green.",
+        "Trail/finding sweeps run post-push with fresh context and reliably catch incomplete propagation of a change the author believes is finished, plus cross-file contract drift — a genuine complement to human + bot review, not a replacement."
+      ]
+    },
+    "friction": [
+      "Initial session-resume attempt found the wrong session (an old, superseded review-redo stack) because the worktree-scoped search and commit-trailer fallback both missed the actual live session in a different worktree.",
+      "Original session was blocked mid-task by a macOS TCC file-access denial on ~/Documents, requiring a full Ghostty relaunch.",
+      "Live-testing the TUI required multiple failed run attempts (stuck on network call before spawn, stale local main, codex skill validation rejecting a real installed skill, pty/TUI not rendering) before a working repro harness was found.",
+      "Octopus merge of 5 PR branches was refused; had to merge sequentially and hand-resolve a run.go conflict.",
+      "Reproducing the 'run 6' TUI wedge failed across three separate shim experiments (single-agent, multi-agent, pre-fix binary) — root mechanism proven analytically but exact trigger never reproduced.",
+      "Editing a PR body to combine two PRs accidentally deleted the injected trail-link block, requiring a manual restore.",
+      "A fix for a stale-docs finding (5m→20m judge default) was itself incomplete, missing 2 of 4 stale references, caught only by a subsequent trail finding.",
+      "Lint failures (missing imports, unused imports) required extra fix-and-rerun cycles multiple times during TDD passes."
+    ],
+    "open_items": [
+      "PRs #1647, #1666, #1669, #1677 all CI-green and awaiting human reviewer assignment/approval; #1664 already approved and mergeable.",
+      "Leftover worktrees on disk: .worktrees/review-stack-test (5-PR integration merge), .worktrees/codex-discovery, .worktrees/tui-nonblocking, and an older .worktrees/pr1-review-fixes — cleanup deferred pending user go-ahead.",
+      "M1 ReviewRun durable background/detach state work flagged as the strategic fix superseding the ad-hoc TUI-sink hardening and unattended-liveness gaps.",
+      "Trail/session linkage UI gap: checkpoints index with empty filesTouched for cross-worktree retro-attached commits, and trail commit rows may still show no session chips — likely a core/UI-side issue, not yet filed.",
+      "Just-committed fix (last action in transcript): unbounded poll with backoff added to codex review_tokens.go/review_tokens_test.go in response to a trail 788 / PR #1666 finding — pushed but final CI/trail-resolution confirmation not yet shown.",
+      "Codex configs still naming the old curated `/review` skill fail validation with a reconfigure hint post-#1669 merge — intentional migration behavior that should be communicated to the team."
+    ]
+  },
   "initial_attribution": {
     "calculated_at": "2026-07-08T13:32:20.592837Z",
     "agent_lines": 418,
