@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "01KXGSKTMF9W72WJX2EJG8GPTS",
+  "strategy": "manual-commit",
+  "branch": "fix/1036-headless-login-hint",
+  "checkpoints_count": 34,
+  "files_touched": [
+    "README.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 415,
+    "cache_creation_tokens": 1317267,
+    "cache_read_tokens": 57578429,
+    "output_tokens": 165843,
+    "api_call_count": 223
+  }
+}
