@@ -294,7 +294,7 @@ func remainderBucket(flat *types.TokenUsage, buckets []types.ModelUsage, fallbac
 		OutputTokens:        clampNonNegative(flatTotal.OutputTokens - sum.OutputTokens),
 		APICallCount:        clampNonNegative(flatTotal.APICallCount - sum.APICallCount),
 	}
-	if short.InputTokens+short.CacheCreationTokens+short.CacheReadTokens+short.OutputTokens+short.APICallCount == 0 {
+	if short.InputTokens+short.CacheCreationTokens+short.CacheReadTokens+short.OutputTokens == 0 {
 		return types.ModelUsage{}, false
 	}
 	return types.ModelUsage{Model: fallbackModel, TokenUsage: short}, true
@@ -383,6 +383,13 @@ func priceBuckets(buckets []types.ModelUsage, table *pricing.Table, disableEstim
 // Costs sum via AddCostUSD and sources fold via MergeCostSource; when at least
 // one bucket was priced and at least one bucket has tokens but no cost, the
 // source is CostSourceMixed to signal partial coverage.
+//
+// Defensive normalization: a bucket carrying a non-nil CostUSD with an empty
+// CostSource (currently unreachable — priceBuckets always pairs a cost it sets
+// with CostSourceEstimated, and every other producer of a priced bucket is
+// expected to set a source too) is treated as CostSourceEstimated here rather
+// than folding into a costed-but-unlabeled total that would render with no
+// reported/estimated/mixed suffix.
 func foldBucketCost(buckets []types.ModelUsage) (*float64, string) {
 	var cost *float64
 	var source string
@@ -390,7 +397,11 @@ func foldBucketCost(buckets []types.ModelUsage) (*float64, string) {
 	anyUnpricedTokens := false
 	for i := range buckets {
 		b := buckets[i].TokenUsage
-		source = types.MergeCostSource(source, b.CostSource, cost, b.CostUSD)
+		bSource := b.CostSource
+		if b.CostUSD != nil && bSource == "" {
+			bSource = types.CostSourceEstimated
+		}
+		source = types.MergeCostSource(source, bSource, cost, b.CostUSD)
 		cost = types.AddCostUSD(cost, b.CostUSD)
 		switch {
 		case b.CostUSD != nil:
