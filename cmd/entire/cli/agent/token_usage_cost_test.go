@@ -590,3 +590,58 @@ func TestCalculateUsageWithCost_ClaudeFastVariantPricedAtPremium(t *testing.T) {
 		t.Errorf("flat source = %q, want estimated", flat.CostSource)
 	}
 }
+
+// TestRemainderBucket_APICallCountOnlyShortfallNoRemainder proves a shortfall
+// that is only an APICallCount delta (all four token fields fully covered by
+// the per-model buckets) does not produce a spurious zero-token remainder
+// bucket.
+func TestRemainderBucket_APICallCountOnlyShortfallNoRemainder(t *testing.T) {
+	t.Parallel()
+	flat := &TokenUsage{InputTokens: 1_000_000, APICallCount: 5}
+	buckets := []types.ModelUsage{
+		{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000, APICallCount: 2}},
+	}
+
+	_, ok := remainderBucket(flat, buckets, "test-a")
+	if ok {
+		t.Fatalf("remainderBucket returned a bucket for an APICallCount-only shortfall, want none")
+	}
+}
+
+// TestRemainderBucket_RealTokenShortfallStillReturned proves a genuine token
+// shortfall (not just an APICallCount delta) still produces a remainder
+// bucket, guarding against an overly broad fix to the APICallCount exclusion.
+func TestRemainderBucket_RealTokenShortfallStillReturned(t *testing.T) {
+	t.Parallel()
+	flat := &TokenUsage{InputTokens: 2_000_000, APICallCount: 5}
+	buckets := []types.ModelUsage{
+		{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000, APICallCount: 2}},
+	}
+
+	rem, ok := remainderBucket(flat, buckets, "test-a")
+	if !ok {
+		t.Fatalf("remainderBucket returned no bucket for a real token shortfall")
+	}
+	if rem.TokenUsage.InputTokens != 1_000_000 {
+		t.Errorf("remainder InputTokens = %d, want 1_000_000", rem.TokenUsage.InputTokens)
+	}
+}
+
+// TestFoldBucketCost_EmptySourceWithCostNormalizesToEstimated proves a bucket
+// carrying a non-nil CostUSD but an empty CostSource (currently unreachable via
+// priceBuckets, but defended against as a boundary case) folds into a total
+// labeled CostSourceEstimated rather than an unlabeled "" source.
+func TestFoldBucketCost_EmptySourceWithCostNormalizesToEstimated(t *testing.T) {
+	t.Parallel()
+	buckets := []types.ModelUsage{
+		{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000, CostUSD: ptrFloat(5.0), CostSource: ""}},
+	}
+
+	cost, source := foldBucketCost(buckets)
+	if cost == nil || *cost != 5.0 {
+		t.Fatalf("cost = %v, want 5.0", cost)
+	}
+	if source != types.CostSourceEstimated {
+		t.Errorf("source = %q, want estimated", source)
+	}
+}
