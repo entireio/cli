@@ -93,6 +93,11 @@ var (
 	credentialJSONKeyRegex  = regexp.MustCompile(`^` + dbPasswordKeyShape + `$`)
 	secretJSONKeyRegex      = regexp.MustCompile(`^` + secretValueKeyShape + `$`)
 	genericPasswordKeyRegex = regexp.MustCompile(`(?i)^(?:password|passwd|pwd)$`)
+	// credentialWordInKeyRE spots a credential-flavored word segment anywhere
+	// in a normalized key. Used by isNonSecretIdentifierAssignment: an
+	// id/account-suffixed key that also names a credential
+	// (aws_access_key_id, api_token_id) must never suppress redaction.
+	credentialWordInKeyRE = regexp.MustCompile(`(?:^|_)(?:key|token|secret|pass|passwd|password|pwd|credential|cred|auth|cert)(?:_|$)`)
 )
 
 // entropyThreshold is the minimum Shannon entropy for a string to be considered
@@ -648,6 +653,16 @@ func isNonSecretIdentifierAssignment(candidate string) bool {
 	}
 	normalized := normalizeCredentialJSONKey(key)
 	if isSensitiveNormalizedJSONValueKey(normalized) || genericPasswordKeyRegex.MatchString(normalized) {
+		return false
+	}
+	// A credential word anywhere in the key disqualifies suppression even
+	// under an id/account suffix: aws_access_key_id names a credential, not
+	// an identifier. This is the only reliable discriminator — Shannon
+	// entropy is not monotonic under concatenation, so a combined key=value
+	// can clear the 4.5 threshold while the value alone does not (e.g.
+	// aws_access_key_id=AKIA… scores 4.50 combined vs 3.68 for the value),
+	// and betterleaks' vendor rules filter the moderate-entropy forms too.
+	if credentialWordInKeyRE.MatchString(normalized) {
 		return false
 	}
 	if isHighEntropySecretCandidate(value) {

@@ -1888,3 +1888,43 @@ func TestString_CorpusDerivedCodeContextGuards(t *testing.T) {
 		},
 	})
 }
+
+// Trail-finding regression: Shannon entropy is not monotonic under
+// concatenation, so key=value can clear the 4.5 threshold while the value
+// alone does not (aws_access_key_id=AKIA… is 4.50 combined, 3.68 alone) —
+// and betterleaks' AWS rule filters these moderate-entropy forms, so no
+// layer backstops the identifier guard. A credential word inside the key
+// must therefore disqualify suppression even under an _id/_account suffix.
+func TestString_CredentialWordInIdentifierKeyStillRedacts(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "aws access key id (canonical docs example value)",
+			input: "aws_access_key_id=AKIAIOSFODNN7EXAMPLE",
+			want:  "REDACTED",
+		},
+		{
+			// The regression window is mixed-case key=value forms: an
+			// all-uppercase key shares the value's character set and keeps
+			// combined entropy below 4.5 (leaks on main too — out of scope).
+			name:  "aws access key id (lowercase key, realistic value; combined 4.58)",
+			input: "aws_access_key_id=AKIAJ4X2QZKTPBWTNZRQ",
+			want:  "REDACTED",
+		},
+		{
+			name:  "token-flavored id key",
+			input: "api_token_id=Kj8mN3pQ7rXw2Zv5Yb9c",
+			want:  "REDACTED",
+		},
+		{
+			name:  "pure identifier keys still suppress the combined-entropy FP",
+			input: "GOOGLE_ADSENSE_ACCOUNT=pub-1234567890123456",
+			want:  "GOOGLE_ADSENSE_ACCOUNT=pub-1234567890123456",
+		},
+		{
+			name:  "user id with random-looking value stays preserved (identifier semantics)",
+			input: "tenant_id=Kj8mN3pQ7rXw2Zv5Yb9c",
+			want:  "tenant_id=Kj8mN3pQ7rXw2Zv5Yb9c",
+		},
+	})
+}
