@@ -1550,17 +1550,77 @@ func TestRunReview_AgentOverrideRunsAllExplodedWorkers(t *testing.T) {
 	}
 }
 
+// TestDispatchFork_LegacyGeneratedCodexSkillIsRepairedAndLaunched prevents
+// guided setup's historical /review default from silently removing Codex from
+// a multi-agent run. The compatibility repair must reach dispatch, not merely
+// make the profile look valid in listing/configuration code.
+func TestDispatchFork_LegacyGeneratedCodexSkillIsRepairedAndLaunched(t *testing.T) {
+	setupCmdTestRepo(t)
+	t.Setenv("HOME", t.TempDir())
+
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+		testAgentName: {Skills: []string{"/review"}},
+		testCodexAgent: {
+			Skills: []string{"/review"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	claudeReviewer := &captureRunConfigReviewer{name: testAgentName}
+	codexReviewer := &captureRunConfigReviewer{name: testCodexAgent}
+	deps := review.Deps{
+		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
+			return []types.AgentName{testAgentName, testCodexAgent}
+		},
+		NewSilentError: func(err error) error { return err },
+		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
+			return false, ""
+		},
+		ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
+			switch agentName {
+			case testAgentName:
+				return claudeReviewer
+			case testCodexAgent:
+				return codexReviewer
+			default:
+				return nil
+			}
+		},
+	}
+
+	cmd := review.NewCommand(deps)
+	cmd.SetOut(&bytes.Buffer{})
+	errBuf := &bytes.Buffer{}
+	cmd.SetErr(errBuf)
+	cmd.SetArgs([]string{"general"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("run legacy generated profile: %v", err)
+	}
+	if !codexReviewer.called {
+		t.Fatalf("Codex was silently excluded; stderr:\n%s", errBuf.String())
+	}
+	if len(codexReviewer.got.Skills) != 0 {
+		t.Fatalf("Codex received obsolete generated skills %v, want none", codexReviewer.got.Skills)
+	}
+	if codexReviewer.got.AlwaysPrompt != "Review the change according to the profile task." {
+		t.Fatalf("Codex repaired prompt = %q", codexReviewer.got.AlwaysPrompt)
+	}
+	if strings.Contains(errBuf.String(), "skipping reviewer codex") {
+		t.Fatalf("Codex was reported as skipped:\n%s", errBuf.String())
+	}
+}
+
 // TestDispatchFork_InvalidSkillExcludesWorkerNotWholeCrew pins the blast
 // radius of spawn-time skill validation in multi-agent runs: a worker whose
-// configured skill no longer validates (e.g. codex's legacy auto-preselected
-// "/review", orphaned when the curated builtin was removed) is excluded with
-// a loud warning, and the remaining reviewers still run. Aborting the whole
-// crew for one stale entry held every other agent hostage to a codex
-// reconfigure.
+// explicitly configured skill no longer validates is excluded with a loud
+// warning, and the remaining reviewers still run. Aborting the whole crew for
+// one stale entry would hold every other agent hostage to a reconfigure.
 func TestDispatchFork_InvalidSkillExcludesWorkerNotWholeCrew(t *testing.T) {
 	setupCmdTestRepo(t)
-	// Controlled empty HOME: codex discovery finds nothing, so its "/review"
-	// (no longer a curated builtin) fails validation. Cannot t.Parallel —
+	// Controlled empty HOME: Codex discovery finds nothing, so the configured
+	// custom skill fails validation. Cannot t.Parallel —
 	// t.Setenv (setupCmdTestRepo already precludes it via t.Chdir).
 	t.Setenv("HOME", t.TempDir())
 
@@ -1569,7 +1629,7 @@ func TestDispatchFork_InvalidSkillExcludesWorkerNotWholeCrew(t *testing.T) {
 			Skills: []string{"/review"},
 		},
 		testCodexAgent: {
-			Skills: []string{"/review"}, // stale legacy entry
+			Skills: []string{"$missing-review"},
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -1613,7 +1673,7 @@ func TestDispatchFork_InvalidSkillExcludesWorkerNotWholeCrew(t *testing.T) {
 		t.Error("codex reviewer started despite failing skill validation")
 	}
 	stderr := errBuf.String()
-	if !strings.Contains(stderr, "/review") || !strings.Contains(stderr, "skipping") {
+	if !strings.Contains(stderr, "$missing-review") || !strings.Contains(stderr, "skipping") {
 		t.Errorf("stderr should warn about the excluded worker and its skill; got:\n%s", stderr)
 	}
 }
@@ -1626,7 +1686,7 @@ func TestDispatchFork_AllWorkersInvalidStillFails(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
-		testCodexAgent: {Skills: []string{"/review"}},
+		testCodexAgent: {Skills: []string{"$missing-review"}},
 		"gemini":       {Skills: []string{"$also-missing"}},
 	}); err != nil {
 		t.Fatal(err)

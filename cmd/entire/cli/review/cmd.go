@@ -210,7 +210,7 @@ To tag an already-finished session as a review, use
 				}, deps)
 			}
 			if edit {
-				if !interactive.IsTerminalWriter(cmd.OutOrStdout()) || !interactive.CanPromptInteractively() {
+				if !reviewCommandIsInteractive(cmd) {
 					err := errors.New("--edit requires an interactive terminal")
 					cmd.SilenceUsage = true
 					fmt.Fprintln(cmd.ErrOrStderr(), "--edit requires an interactive terminal.")
@@ -268,6 +268,41 @@ type reviewConfigureOptions struct {
 	Task   string   // profile task text (--set-task)
 	Models []string // per-reviewer "agent=model" entries (--set-model)
 	Slots  []string // reviewer slots as "agent[=model]" entries (--set-slot)
+}
+
+// reviewCommandIsInteractive requires the exact stdin consumed by huh and
+// Bubble Tea, plus stdout, to be terminals. CanPromptInteractively adds the
+// independent policy gate for tests, CI, and agent subprocess sentinels; a
+// controlling /dev/tty alone is insufficient because stdin may still be piped.
+func reviewCommandIsInteractive(cmd *cobra.Command) bool {
+	hardDisabled := reviewInteractivityHardDisabled(
+		os.Getenv(interactive.EnvTestTTY),
+		os.Getenv("CI"),
+		interactive.UnderTest(),
+	)
+	return reviewTTYIsInteractive(
+		interactive.IsTerminalReader(cmd.InOrStdin()),
+		interactive.IsTerminalWriter(cmd.OutOrStdout()),
+		interactive.CanPromptInteractively(),
+		hardDisabled,
+	)
+}
+
+func reviewInteractivityHardDisabled(testTTY, ci string, underTest bool) bool {
+	// Match CanPromptInteractively's precedence: ENTIRE_TEST_TTY=1 may opt an
+	// in-process test into interaction, while tests without that explicit
+	// override must never read from a developer's real terminal.
+	if testTTY != "" {
+		return testTTY != "1"
+	}
+	return underTest || (ci != "" && ci != "false")
+}
+
+func reviewTTYIsInteractive(stdinTTY, stdoutTTY, canPrompt, hardDisabled bool) bool {
+	// Real stdio terminals are necessary but not sufficient: agent shells can
+	// allocate a PTY while advertising that no human is available through the
+	// sentinels enforced by CanPromptInteractively.
+	return !hardDisabled && stdinTTY && stdoutTTY && canPrompt
 }
 
 func (o reviewConfigureOptions) scripted() bool {
@@ -329,7 +364,7 @@ func runReviewConfigure(ctx context.Context, cmd *cobra.Command, profileOverride
 	// duplicate the catalog here. Pass the raw --profile value (empty when not
 	// given) so the guided setup runs the "what kind of review?" type picker
 	// instead of being silently defaulted to the general profile.
-	if interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively() {
+	if reviewCommandIsInteractive(cmd) {
 		name, profile, setupErr := RunReviewGuidedSetup(ctx, out, installed, deps.ReviewerFor, strings.TrimSpace(profileOverride), false, s)
 		if setupErr != nil {
 			return handlePickerError(cmd, silentErr, setupErr)
@@ -752,7 +787,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	applyLegacyReviewProfileFallback(s)
 
 	profileOverride = strings.TrimSpace(profileOverride)
-	interactiveTTY := interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively()
+	interactiveTTY := reviewCommandIsInteractive(cmd)
 
 	// Bare `entire review` never auto-runs a profile. Without a TTY we cannot
 	// prompt, so list the profiles (or point at setup) and require an explicit
@@ -781,7 +816,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 		// Non-interactive first run writes the shared project settings; interactive
 		// setup asks the user where to save below.
 		saveScope := reviewScopeProject
-		guidedSetup := interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively()
+		guidedSetup := interactiveTTY
 		if guidedSetup {
 			var setupErr error
 			profileForSetup, profile, setupErr = RunReviewGuidedSetup(ctx, out, installed, deps.ReviewerFor, profileForSetup, true, s)
@@ -945,12 +980,12 @@ func nonLaunchableEligibleNames(profile settings.ReviewProfileConfig, eligible [
 // (true, nil). In a non-interactive context it cannot prompt, so it proceeds
 // (the user explicitly invoked `entire review`) after printing a note rather
 // than blocking on a confirm form that would error out.
-func confirmReReviewOrProceed(ctx context.Context, out io.Writer, deps Deps) (bool, error) {
+func confirmReReviewOrProceed(ctx context.Context, out io.Writer, deps Deps, canPrompt bool) (bool, error) {
 	reviewed, meta := deps.HeadHasReviewCheckpoint(ctx)
 	if !reviewed {
 		return true, nil
 	}
-	if !interactive.CanPromptInteractively() {
+	if !canPrompt {
 		fmt.Fprintf(out, "Note: HEAD was already reviewed (%s); re-running.\n", meta)
 		return true, nil
 	}
@@ -1012,7 +1047,8 @@ func runSingleAgentPath(
 	}
 
 	// 4. Re-run guard: check if HEAD's checkpoint already has a review.
-	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps); guardErr != nil {
+	canPrompt := reviewCommandIsInteractive(cmd)
+	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps, canPrompt); guardErr != nil {
 		fmt.Fprintln(out, "prompt cancelled")
 		return silentErr(guardErr)
 	} else if !proceed {
@@ -1068,10 +1104,9 @@ func runSingleAgentPath(
 	defer cancelRun()
 
 	runCfg.EnrichSummary = reviewSummaryTokenEnricher(worktreeRoot, headSHA)
-	canPrompt := interactive.CanPromptInteractively()
 	sinks := composeSingleAgentSinks(singleAgentSinkInputs{
 		out:       out,
-		isTTY:     interactive.IsTerminalWriter(out) && canPrompt,
+		isTTY:     canPrompt,
 		canPrompt: canPrompt,
 		agentName: displayName,
 		cancelRun: cancelRun,
@@ -1158,7 +1193,8 @@ func runMultiAgentPath(
 		return fmt.Errorf("resolve HEAD: %w", shaErr)
 	}
 
-	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps); guardErr != nil {
+	canPrompt := reviewCommandIsInteractive(cmd)
+	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps, canPrompt); guardErr != nil {
 		fmt.Fprintln(out, "prompt cancelled")
 		return deps.NewSilentError(guardErr)
 	} else if !proceed {
@@ -1254,7 +1290,7 @@ func runMultiAgentPath(
 	sinks := composeMultiAgentSinks(multiAgentSinkInputs{
 		scope:             scopeCtx,
 		out:               out,
-		isTTY:             interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively(),
+		isTTY:             canPrompt,
 		agentNames:        rowNames,
 		workerToAgent:     workerToAgent,
 		cancelRun:         cancelRun,
@@ -1348,11 +1384,10 @@ func buildScopeContextBestEffort(ctx context.Context, out io.Writer, worktreeRoo
 // instead of monkey-patching interactive helpers at run time.
 //
 // isTTY here means "the TUI sink is safe to compose" — production callers
-// AND IsTerminalWriter(out) with CanPromptInteractively() before passing
-// it in, since the TUI both writes ANSI to stdout AND reads keypresses
-// from stdin. A terminal-stdout-but-non-interactive-stdin scenario (an
-// agent host like Claude Code invoking `entire review`) must NOT use the
-// TUI — its dismissal loop would block forever.
+// use reviewCommandIsInteractive before passing it in, since the TUI both
+// writes ANSI to stdout and reads keypresses from stdin. A terminal stdout
+// with non-interactive stdin must not use the TUI; its dismissal loop would
+// block forever.
 type multiAgentSinkInputs struct {
 	out               io.Writer
 	isTTY             bool

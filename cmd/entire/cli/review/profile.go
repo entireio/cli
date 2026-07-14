@@ -116,7 +116,19 @@ func selectReviewProfile(s *settings.EntireSettings, override string) (string, s
 }
 
 func applyLegacyReviewProfileFallback(s *settings.EntireSettings) {
-	if s == nil || len(nonZeroProfiles(s.ReviewProfiles)) > 0 {
+	if s == nil {
+		return
+	}
+	// Older guided setup wrote Codex reviewers with Claude's curated /review
+	// command. Codex has no such built-in, so spawn-time validation excludes
+	// those workers. Repair that generated shape in memory to a prompt-only
+	// Codex reviewer; explicitly configured Codex skills are left untouched.
+	normalizeLegacyCodexDefaultSkills(s.Review) //nolint:staticcheck // intentional compatibility repair for deprecated review config
+	for name, profile := range s.ReviewProfiles {
+		normalizeLegacyCodexDefaultSkills(profile.Agents)
+		s.ReviewProfiles[name] = profile
+	}
+	if len(nonZeroProfiles(s.ReviewProfiles)) > 0 {
 		return
 	}
 	legacyAgents := nonZeroAgentConfigs(s.Review) //nolint:staticcheck // intentional compatibility fallback for deprecated review config
@@ -130,6 +142,20 @@ func applyLegacyReviewProfileFallback(s *settings.EntireSettings) {
 	}
 	if strings.TrimSpace(s.ReviewDefaultProfile) == "" {
 		s.ReviewDefaultProfile = DefaultProfileName
+	}
+}
+
+func normalizeLegacyCodexDefaultSkills(configs map[string]settings.ReviewConfig) {
+	for workerName, cfg := range configs {
+		if reviewAgentName(workerName, cfg) != string(agent.AgentNameCodex) ||
+			len(cfg.Skills) != 1 || strings.TrimSpace(cfg.Skills[0]) != defaultReviewSkill {
+			continue
+		}
+		cfg.Skills = nil
+		if strings.TrimSpace(cfg.Prompt) == "" {
+			cfg.Prompt = defaultAgentReviewPrompt
+		}
+		configs[workerName] = cfg
 	}
 }
 
@@ -383,6 +409,13 @@ func defaultReviewProfileForInstalledAgents(
 	return profile, nil
 }
 
+const defaultAgentReviewPrompt = "Review the change according to the profile task."
+
+// defaultReviewSkill is the built-in review skill claude uses by default and
+// the legacy value old guided setup wrote for every agent (which codex can't
+// run — see normalizeLegacyCodexDefaultSkills).
+const defaultReviewSkill = "/review"
+
 func defaultReviewAgentConfig(profileName, agentName string) settings.ReviewConfig {
 	focus := defaultProfileFocus(profileName)
 	switch agentName {
@@ -390,11 +423,9 @@ func defaultReviewAgentConfig(profileName, agentName string) settings.ReviewConf
 		if strings.EqualFold(profileName, "security") {
 			return settings.ReviewConfig{Skills: []string{"/security-review"}}
 		}
-		return settings.ReviewConfig{Skills: []string{"/review"}, Prompt: focus}
-	case string(agent.AgentNameCodex):
-		return settings.ReviewConfig{Skills: []string{"/review"}, Prompt: focus}
-	case string(agent.AgentNameGemini), string(agent.AgentNamePi):
-		prompt := "Review the change according to the profile task."
+		return settings.ReviewConfig{Skills: []string{defaultReviewSkill}, Prompt: focus}
+	case string(agent.AgentNameCodex), string(agent.AgentNameGemini), string(agent.AgentNamePi):
+		prompt := defaultAgentReviewPrompt
 		if focus != "" {
 			prompt += " " + focus
 		}

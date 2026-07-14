@@ -80,6 +80,17 @@ func isAgentSubprocessEnv() bool {
 		os.Getenv("GIT_TERMINAL_PROMPT") == "0"
 }
 
+// IsTerminalReader reports whether r is an *os.File backed by a terminal.
+// It is useful when an explicitly interactive command needs to distinguish a
+// human at stdin from an agent process that merely inherited a controlling TTY.
+func IsTerminalReader(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(f.Fd())) //nolint:gosec // G115: uintptr->int is safe for fd
+}
+
 // IsTerminalWriter reports whether w is an *os.File backed by a terminal.
 // Use for deciding on color, pager, progress bars, or other writer-scoped
 // TTY formatting. For "can I prompt the user?" use CanPromptInteractively.

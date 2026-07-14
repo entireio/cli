@@ -43,6 +43,126 @@ func configureTestDeps(adapter ...string) Deps {
 	}
 }
 
+func TestDefaultReviewAgentConfig_CodexIsPromptOnly(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultReviewAgentConfig(DefaultProfileName, tAgentCodex)
+	if len(cfg.Skills) != 0 {
+		t.Fatalf("Codex default skills = %v, want none", cfg.Skills)
+	}
+	if cfg.Prompt != defaultAgentReviewPrompt {
+		t.Fatalf("Codex default prompt = %q, want %q", cfg.Prompt, defaultAgentReviewPrompt)
+	}
+}
+
+func TestApplyLegacyReviewProfileFallback_RepairsGeneratedCodexSkill(t *testing.T) {
+	t.Parallel()
+
+	s := &settings.EntireSettings{ReviewProfiles: map[string]settings.ReviewProfileConfig{
+		DefaultProfileName: {Agents: map[string]settings.ReviewConfig{
+			tAgentCodex: {Skills: []string{"/review"}},
+			"codex-opus": {
+				Agent:  tAgentCodex,
+				Model:  "o3",
+				Skills: []string{"/review"},
+			},
+			"codex-custom": {
+				Agent:  tAgentCodex,
+				Skills: []string{"$security-audit"},
+			},
+		}},
+	}}
+	applyLegacyReviewProfileFallback(s)
+
+	got := s.ReviewProfiles[DefaultProfileName].Agents[tAgentCodex]
+	if len(got.Skills) != 0 || got.Prompt != defaultAgentReviewPrompt {
+		t.Fatalf("repaired Codex config = %+v, want prompt-only default", got)
+	}
+	alias := s.ReviewProfiles[DefaultProfileName].Agents["codex-opus"]
+	if len(alias.Skills) != 0 || alias.Prompt != defaultAgentReviewPrompt || alias.Model != "o3" {
+		t.Fatalf("repaired aliased Codex config = %+v", alias)
+	}
+	custom := s.ReviewProfiles[DefaultProfileName].Agents["codex-custom"]
+	if len(custom.Skills) != 1 || custom.Skills[0] != "$security-audit" {
+		t.Fatalf("custom Codex config changed: %+v", custom)
+	}
+}
+
+func TestConfirmReReviewOrProceed_NonInteractiveDoesNotPrompt(t *testing.T) {
+	t.Parallel()
+
+	out := &bytes.Buffer{}
+	proceed, err := confirmReReviewOrProceed(context.Background(), out, Deps{
+		HeadHasReviewCheckpoint: func(context.Context) (bool, string) {
+			return true, "existing review"
+		},
+	}, false)
+	if err != nil {
+		t.Fatalf("confirmReReviewOrProceed: %v", err)
+	}
+	if !proceed {
+		t.Fatal("non-interactive re-review should proceed")
+	}
+	if !strings.Contains(out.String(), "already reviewed") {
+		t.Fatalf("missing non-interactive re-review note: %q", out.String())
+	}
+}
+
+func TestReviewInteractivityHardDisabled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		testTTY   string
+		ci        string
+		underTest bool
+		want      bool
+	}{
+		{name: "go test defaults off", underTest: true, want: true},
+		{name: "test override enables", testTTY: "1", ci: "true", underTest: true, want: false},
+		{name: "test override disables", testTTY: "0", want: true},
+		{name: "CI disables", ci: "true", want: true},
+		{name: "CI false does not disable", ci: "false", want: false},
+		{name: "normal process", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := reviewInteractivityHardDisabled(tt.testTTY, tt.ci, tt.underTest); got != tt.want {
+				t.Fatalf("reviewInteractivityHardDisabled(%q, %q, %v) = %v, want %v", tt.testTTY, tt.ci, tt.underTest, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReviewTTYIsInteractive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		stdinTTY     bool
+		stdoutTTY    bool
+		canPrompt    bool
+		hardDisabled bool
+		want         bool
+	}{
+		{name: "direct human terminal", stdinTTY: true, stdoutTTY: true, canPrompt: true, want: true},
+		{name: "agent sentinel overrides real PTY", stdinTTY: true, stdoutTTY: true, canPrompt: false, want: false},
+		{name: "controlling terminal does not override piped stdin", stdinTTY: false, stdoutTTY: true, canPrompt: true, want: false},
+		{name: "captured stdout", stdinTTY: true, stdoutTTY: false, canPrompt: true, want: false},
+		{name: "agent with piped stdin", stdinTTY: false, stdoutTTY: true, canPrompt: false, want: false},
+		{name: "explicitly forced non-interactive", stdinTTY: true, stdoutTTY: true, canPrompt: true, hardDisabled: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := reviewTTYIsInteractive(tt.stdinTTY, tt.stdoutTTY, tt.canPrompt, tt.hardDisabled); got != tt.want {
+				t.Fatalf("reviewTTYIsInteractive(%v, %v, %v, %v) = %v, want %v", tt.stdinTTY, tt.stdoutTTY, tt.canPrompt, tt.hardDisabled, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildConfiguredProfile_FromFlags(t *testing.T) {
 	t.Parallel()
 	deps := configureTestDeps("claude-code", "codex")
