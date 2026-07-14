@@ -459,6 +459,66 @@ func TestNormalize_ValidCombosAccepted(t *testing.T) {
 	}
 }
 
+// TestNormalize_InitRepoWithRepoFlags verifies the deprecated --init-repo flag
+// preserves its released behavior with --repo-* flags. --init-repo historically
+// governed only the init prompt, not GitHub creation, so with repo flags it maps
+// to github mode (keeping `enable --init-repo --repo-name=X` working) rather than
+// hard-erroring; alone or with --no-github it maps to local.
+func TestNormalize_InitRepoWithRepoFlags(t *testing.T) {
+	t.Parallel()
+	t.Run("init-repo + repo-name -> github", func(t *testing.T) {
+		t.Parallel()
+		opts := GitHubBootstrapOptions{InitRepo: true, RepoName: "foo"}
+		if err := normalizeBootstrapOptions(&opts); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if opts.Bootstrap != bootstrapModeGitHub {
+			t.Errorf("Bootstrap = %q, want %q", opts.Bootstrap, bootstrapModeGitHub)
+		}
+	})
+	t.Run("init-repo + repo-owner -> github", func(t *testing.T) {
+		t.Parallel()
+		opts := GitHubBootstrapOptions{InitRepo: true, RepoOwner: "acme"}
+		if err := normalizeBootstrapOptions(&opts); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if opts.Bootstrap != bootstrapModeGitHub {
+			t.Errorf("Bootstrap = %q, want %q", opts.Bootstrap, bootstrapModeGitHub)
+		}
+	})
+	t.Run("init-repo alone -> local", func(t *testing.T) {
+		t.Parallel()
+		opts := GitHubBootstrapOptions{InitRepo: true}
+		if err := normalizeBootstrapOptions(&opts); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if opts.Bootstrap != bootstrapModeLocal {
+			t.Errorf("Bootstrap = %q, want %q", opts.Bootstrap, bootstrapModeLocal)
+		}
+	})
+	t.Run("init-repo + no-github -> local", func(t *testing.T) {
+		t.Parallel()
+		opts := GitHubBootstrapOptions{InitRepo: true, NoGitHub: true}
+		if err := normalizeBootstrapOptions(&opts); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if opts.Bootstrap != bootstrapModeLocal {
+			t.Errorf("Bootstrap = %q, want %q", opts.Bootstrap, bootstrapModeLocal)
+		}
+	})
+	t.Run("init-repo + no-github + repo-name -> error mentions --no-github", func(t *testing.T) {
+		t.Parallel()
+		opts := GitHubBootstrapOptions{InitRepo: true, NoGitHub: true, RepoName: "foo"}
+		err := normalizeBootstrapOptions(&opts)
+		if err == nil {
+			t.Fatal("expected a hard error, got nil")
+		}
+		if !strings.Contains(err.Error(), "--no-github") {
+			t.Errorf("error %q should mention --no-github", err.Error())
+		}
+	})
+}
+
 // --- Decline / no-side-effect paths (issue #1717 core guarantees) ---------
 
 // TestBootstrap_BareNonInteractive_NoSideEffects is the core #1717 guarantee:

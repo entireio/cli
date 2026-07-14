@@ -67,7 +67,7 @@ type GitHubBootstrapOptions struct {
 
 	// Deprecated aliases (pre-existing released flags) mapped onto the model
 	// above by normalizeBootstrapOptions. Cobra prints the deprecation hint.
-	InitRepo          bool // --init-repo            -> --bootstrap=local
+	InitRepo          bool // --init-repo            -> local, or github when --repo-* flags are present
 	NoInitRepo        bool // --no-init-repo         -> --bootstrap=off
 	NoGitHub          bool // --no-github            -> suppress the GitHub step
 	SkipInitialCommit bool // --skip-initial-commit  -> no-op (matches new default)
@@ -197,7 +197,16 @@ func normalizeBootstrapOptions(opts *GitHubBootstrapOptions) error {
 	case opts.NoInitRepo:
 		opts.Bootstrap = bootstrapModeOff
 	case opts.InitRepo:
-		opts.Bootstrap = bootstrapModeLocal
+		// --init-repo historically governed only the init prompt, not GitHub
+		// creation; --repo-* flags independently opted into creating a repo.
+		// Preserve that combination: with repo flags (and not --no-github) map
+		// to github, else local. Creation stays safe — the initial commit is
+		// empty unless --commit-existing-files.
+		if ghFlagsProvided(*opts) && !opts.NoGitHub {
+			opts.Bootstrap = bootstrapModeGitHub
+		} else {
+			opts.Bootstrap = bootstrapModeLocal
+		}
 	}
 	if opts.Bootstrap == "" {
 		opts.Bootstrap = bootstrapModePrompt
