@@ -629,21 +629,26 @@ func isCredentialJSONSecretKey(key string, credentialContext bool) bool {
 }
 
 // isKnownNonSecretTokenKey reports whether the normalized JSON key is
-// `<prefix>_token` where prefix is in nonSecretTokenPrefixes. Used to
-// short-circuit JSON-key redaction for keys like `cancel_token`,
-// `pagination_token`, `idempotency_token` that are routinely
-// non-credentials. Deliberately NOT applied to `_secret` keys:
-// `previous_secret`/`next_secret` are real field names in webhook/HMAC
-// secret-rotation payloads, and the entropy fallback cannot catch them when
-// hex-encoded (16 symbols cap Shannon entropy at 4.0, below the 4.5
-// threshold).
+// `<prefix>_token` where every `_`-separated segment of prefix is in
+// nonSecretTokenPrefixes — so compound pagination keys like
+// `next_page_token` qualify alongside `cancel_token` and
+// `pagination_token`, while any non-allowlisted segment
+// (`auth_page_token`, `csrf_token`) still redacts. Deliberately NOT
+// applied to `_secret` keys: `previous_secret`/`next_secret` are real
+// field names in webhook/HMAC secret-rotation payloads, and the entropy
+// fallback cannot catch them when hex-encoded (16 symbols cap Shannon
+// entropy at 4.0, below the 4.5 threshold).
 func isKnownNonSecretTokenKey(normalized string) bool {
-	if prefix, ok := strings.CutSuffix(normalized, "_token"); ok {
-		if _, allowed := nonSecretTokenPrefixes[prefix]; allowed {
-			return true
+	prefix, ok := strings.CutSuffix(normalized, "_token")
+	if !ok || prefix == "" {
+		return false
+	}
+	for _, segment := range strings.Split(prefix, "_") {
+		if _, allowed := nonSecretTokenPrefixes[segment]; !allowed {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func isNonSecretIdentifierAssignment(candidate string) bool {

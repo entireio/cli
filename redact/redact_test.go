@@ -1928,3 +1928,37 @@ func TestString_CredentialWordInIdentifierKeyStillRedacts(t *testing.T) {
 		},
 	})
 }
+
+// Trail-finding regression: compound pagination keys whose every segment is
+// allowlisted (next_page_token) must stay readable, while a single
+// non-allowlisted segment (auth_page_token) still redacts.
+func TestJSONLContent_CompoundNonSecretTokenKeys(t *testing.T) {
+	t.Parallel()
+	preserved := []string{
+		`{"next_page_token":"page-2-opaque-marker"}`,
+		`{"prev_page_token":"page-1-opaque-marker"}`,
+		`{"next_sync_token":"sync-state-marker"}`,
+	}
+	for _, in := range preserved {
+		out, err := JSONLContent(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != in {
+			t.Errorf("compound allowlisted token key must be preserved, got: %s", out)
+		}
+	}
+	redacted := []string{
+		`{"auth_page_token":"opaque-value-here"}`,
+		`{"session_next_token":"opaque-value-here"}`,
+	}
+	for _, in := range redacted {
+		out, err := JSONLContent(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, RedactedPlaceholder) {
+			t.Errorf("token key with non-allowlisted segment must redact, got: %s", out)
+		}
+	}
+}
