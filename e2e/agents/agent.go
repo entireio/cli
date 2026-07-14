@@ -2,7 +2,10 @@ package agents
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -20,14 +23,6 @@ type runConfig struct {
 	Model          string
 	PermissionMode string
 	PromptTimeout  time.Duration
-}
-
-func WithModel(model string) Option {
-	return func(c *runConfig) { c.Model = model }
-}
-
-func WithPermissionMode(mode string) Option {
-	return func(c *runConfig) { c.PermissionMode = mode }
 }
 
 func WithPromptTimeout(d time.Duration) Option {
@@ -111,6 +106,26 @@ func ReleaseSlot(a Agent) {
 
 func All() []Agent {
 	return registry
+}
+
+// runCapture runs cmd and returns its exit code (-1 when the process
+// didn't produce one) and the run error. When promptCtx hit its deadline
+// the error wraps context.DeadlineExceeded so IsTransientError can detect
+// it — cmd.Run reports "signal: killed" in that case, not the context error.
+func runCapture(cmd *exec.Cmd, promptCtx context.Context) (int, error) {
+	err := cmd.Run()
+	if err == nil {
+		return 0, nil
+	}
+	exitCode := -1
+	exitErr := &exec.ExitError{}
+	if errors.As(err, &exitErr) {
+		exitCode = exitErr.ExitCode()
+	}
+	if errors.Is(promptCtx.Err(), context.DeadlineExceeded) {
+		err = fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
+	}
+	return exitCode, err
 }
 
 // filterEnv returns env with entries matching any of the given variable names

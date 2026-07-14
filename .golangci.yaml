@@ -33,7 +33,6 @@ linters:
     - inamedparam
     - ineffassign
     - intrange
-    - ireturn
     - loggercheck
     - maintidx
     - makezero
@@ -82,6 +81,20 @@ linters:
     errcheck:
       check-type-assertions: true
       check-blank: true
+    wrapcheck:
+      # Errors from the generated control-plane client are mapped centrally
+      # by renderCoreError (cmd/entire/cli/corecmd.go), which extracts the
+      # RFC 7807 problem detail via errors.As. Per-call-site wrapping would
+      # only be unwrapped again, so the command closures return coreapi
+      # errors verbatim.
+      #
+      # checkpointpolicy.EnsureCanReadVersion already returns a clean,
+      # user-facing message (including the checkpoint ID and version), and
+      # callers classify it via IsUnsupportedVersion. Wrapping would obscure
+      # that purpose-built message, so call sites return it verbatim.
+      ignore-package-globs:
+        - github.com/entireio/cli/internal/coreapi
+        - github.com/entireio/cli/cmd/entire/cli/checkpointpolicy
     forbidigo:
       analyze-types: true
       forbid:
@@ -94,27 +107,14 @@ linters:
         - pattern: '^.*\.Checkout$'
           msg: "go-git Checkout deletes .gitignored dirs - use CheckoutBranch() from git_operations.go"
           pkg: 'github\.com/go-git/go-git'
+        - pattern: '^.*\.(Print|Println|Printf)$'
+          msg: "cobra's Print* writes to OutOrStderr (stderr in production); use fmt.Fprint*(cmd.OutOrStdout(), ...)"
+          pkg: 'github\.com/spf13/cobra'
     govet:
       enable-all: true
       disable:
         - fieldalignment
         - shadow
-    ireturn:
-      allow:
-        - anon
-        - error
-        - empty
-        - stdlib
-        - grpc.DialOption
-        - github.com/entireio/cli/cmd/entire/cli/agent.Agent
-        - github.com/entireio/cli/cmd/entire/cli/checkpoint.CommittedReader
-        - github.com/entireio/cli/cmd/entire/cli/strategy.Strategy
-        - github.com/go-git/go-git/v6/plumbing/storer.ReferenceIter
-        - github.com/go-git/go-git/v6/plumbing.EncodedObject
-        - github.com/go-git/go-git/v6/storage.Storer
-        - github.com/go-git/go-git/v6/plumbing/storer.EncodedObjectIter
-        - github.com/entireio/cli/e2e/agents.Session
-        - github.com/go-git/go-billy/v6.Filesystem
     nolintlint:
       require-explanation: true
       require-specific: true
@@ -148,6 +148,12 @@ linters:
         linters:
           - wrapcheck
       - path: ^internal/sim/
+        linters:
+          - wrapcheck
+      # configloader.go is a thin os-backed billy.Basic adapter. It must return
+      # raw os errors unwrapped so go-git's os.IsNotExist() fall-through (for
+      # absent config files) keeps working; wrapping would break it.
+      - path: ^cmd/entire/cli/checkpoint/configloader\.go$
         linters:
           - wrapcheck
       - text: "`strat` is a misspelling"

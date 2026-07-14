@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
@@ -163,6 +164,31 @@ esac
 	}
 }
 
+func writeExternalSummaryAgentBinary(t *testing.T, dir, name string) {
+	t.Helper()
+
+	script := `#!/bin/sh
+case "$1" in
+  info)
+    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External summary test agent","is_preview":false,"protected_dirs":[],"hook_names":[],"capabilities":{"hooks":false,"transcript_analyzer":false,"transcript_preparer":false,"token_calculator":false,"compact_transcript":false,"text_generator":true,"hook_response_writer":false,"subagent_aware_extractor":false}}'
+    ;;
+  detect)
+    echo '{"present": true}'
+    ;;
+  generate-text)
+    echo '{"text":"{\"intent\":\"Intent\",\"outcome\":\"Outcome\",\"learnings\":{\"repo\":[],\"code\":[],\"workflow\":[]},\"friction\":[],\"open_items\":[]}"}'
+    ;;
+  *)
+    echo '{}'
+    ;;
+esac
+`
+
+	if err := os.WriteFile(filepath.Join(dir, "entire-agent-"+name), []byte(script), 0o755); err != nil {
+		t.Fatalf("Failed to write external summary agent binary: %v", err)
+	}
+}
+
 func TestRunEnable(t *testing.T) {
 	setupTestDir(t)
 	writeSettings(t, testSettingsDisabled)
@@ -260,6 +286,43 @@ func TestRunEnable_DefaultFlag_ClearsLocalDisable(t *testing.T) {
 	}
 	if !enabled {
 		t.Error("Expected enabled after runEnable, but IsEnabled() returned false")
+	}
+}
+
+func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeClaudeHooksFixture(t)
+
+	var buf bytes.Buffer
+	if err := runDisable(context.Background(), &buf, false); err != nil {
+		t.Fatalf("runDisable() error = %v", err)
+	}
+
+	enabled, err := IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled() error = %v", err)
+	}
+	if enabled {
+		t.Fatal("expected disabled after runDisable")
+	}
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+
+	buf.Reset()
+	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, EnableOptions{}); err != nil {
+		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
+	}
+
+	enabled, err = IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled() error = %v", err)
+	}
+	if !enabled {
+		t.Fatal("expected enabled after setupAgentHooksNonInteractive")
 	}
 }
 
@@ -968,6 +1031,7 @@ func TestEnableUsesSetupFlow(t *testing.T) {
 		{name: "telemetry changed", args: []string{"--telemetry=false"}, want: true},
 		{name: "checkpoint remote", args: []string{"--checkpoint-remote", "github:org/repo"}, want: true},
 		{name: "skip push sessions", args: []string{"--skip-push-sessions"}, want: true},
+		{name: "search skill", args: []string{"--search-skill"}, want: true},
 		{name: "agent flag", args: []string{"--agent", "claude-code"}, agentName: "claude-code", want: true},
 		{name: "yes flag", args: []string{"--yes"}, want: true},
 		{name: "yes short flag", args: []string{"-y"}, want: true},
@@ -994,7 +1058,6 @@ func TestEnableUsesSetupFlow(t *testing.T) {
 
 func TestEnableCmd_ForceOnConfiguredRepo_UsesConfigureFlow(t *testing.T) {
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0")
 	writeSettings(t, testSettingsEnabled)
 	writeClaudeHooksFixture(t)
 
@@ -1020,7 +1083,6 @@ func TestEnableCmd_ForceOnConfiguredRepo_UsesConfigureFlow(t *testing.T) {
 
 func TestEnableCmd_ForceOnConfiguredDisabledRepo_Reenables(t *testing.T) {
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0")
 	writeSettings(t, testSettingsDisabled)
 	writeClaudeHooksFixture(t)
 
@@ -1054,7 +1116,6 @@ func TestEnableCmd_ForceOnConfiguredDisabledRepo_Reenables(t *testing.T) {
 
 func TestEnableCmd_ForceAndStrategyFlagsOnConfiguredDisabledRepo_ReenablesAndUpdatesSettings(t *testing.T) {
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0")
 	writeSettings(t, testSettingsDisabled)
 	writeClaudeHooksFixture(t)
 
@@ -1115,6 +1176,9 @@ func TestDetectOrSelectAgent_AgentDetected(t *testing.T) {
 		t.Fatalf("Failed to create .claude directory: %v", err)
 	}
 
+	// No TTY here, so this exercises the non-interactive fallback: the single
+	// detected agent is used without a picker. The interactive path pre-selects
+	// it in the multi-select instead (see FirstRun_SingleBuiltIn test below).
 	var buf bytes.Buffer
 	agents, err := detectOrSelectAgent(context.Background(), &buf, nil)
 	if err != nil {
@@ -1164,6 +1228,58 @@ func TestDetectOrSelectAgent_GeminiDetected(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "Detected agent:") {
 		t.Errorf("Expected output to contain 'Detected agent:', got: %s", output)
+	}
+}
+
+func TestDetectOrSelectAgent_FirstRun_SingleBuiltIn_ShowsPickerPreSelected(t *testing.T) {
+	// Not parallel: uses t.Chdir/t.Setenv and swaps the package-level
+	// promptAgentSelection seam.
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+
+	// Create .claude directory so exactly one built-in agent (Claude Code) is detected.
+	if err := os.MkdirAll(".claude", 0o755); err != nil {
+		t.Fatalf("Failed to create .claude directory: %v", err)
+	}
+
+	// First run: no hooks installed yet.
+	if installed := GetAgentsWithHooksInstalled(context.Background()); len(installed) != 0 {
+		t.Fatalf("Expected no installed hooks on first run, got %v", installed)
+	}
+
+	// Stub the real picker so we can assert it is shown (rather than the agent
+	// being auto-used) and inspect which options it was given. Driving the
+	// selectFn == nil path is what makes this a real regression guard: the old
+	// shortcut returned early precisely when selectFn == nil, so a test that
+	// injected a selectFn would have passed even before the fix.
+	prev := promptAgentSelection
+	t.Cleanup(func() { promptAgentSelection = prev })
+	var offered []string
+	var shown bool
+	promptAgentSelection = func(options []huh.Option[string]) ([]string, error) {
+		shown = true
+		for _, o := range options {
+			offered = append(offered, o.Value)
+		}
+		return []string{string(agent.AgentNameClaudeCode)}, nil
+	}
+
+	var buf bytes.Buffer
+	agents, err := detectOrSelectAgent(context.Background(), &buf, nil)
+	if err != nil {
+		t.Fatalf("detectOrSelectAgent() error = %v", err)
+	}
+
+	// A lone detected built-in agent must no longer be auto-used: the picker
+	// must be shown so the user can confirm it or add more.
+	if !shown {
+		t.Fatal("Expected the picker to be shown for a single detected agent, but it was auto-used")
+	}
+	if !slices.Contains(offered, string(agent.AgentNameClaudeCode)) {
+		t.Errorf("Expected the detected agent among the picker options, got %v", offered)
+	}
+	if len(agents) != 1 || agents[0].Name() != agent.AgentNameClaudeCode {
+		t.Fatalf("Expected the picked agent [claude-code] to be returned, got %v", agents)
 	}
 }
 
@@ -1254,7 +1370,6 @@ func TestIsBuiltInAgent_BuiltInAgent_True(t *testing.T) {
 func TestDetectOrSelectAgent_NoDetection_NoTTY_FallsBackToDefault(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0") // No TTY available
 
 	// No .claude or .gemini directory - detection will fail
 
@@ -1405,7 +1520,6 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_PromptsUser(t *testing.T) {
 func TestDetectOrSelectAgent_BothDirectoriesExist_NoTTY_UsesAll(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0") // No TTY available
 
 	// Create both .claude and .gemini directories
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
@@ -1510,7 +1624,6 @@ func TestDetectOrSelectAgent_ReRun_AlwaysPromptsWithInstalledPreSelected(t *test
 func TestDetectOrSelectAgent_ReRun_NoTTY_KeepsInstalled(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0") // No TTY available
 
 	// Install Claude Code hooks
 	writeClaudeHooksFixture(t)
@@ -1719,7 +1832,7 @@ func TestManageAgents_DeselectAll_RemovesAllAndShowsGuidance(t *testing.T) {
 	if !strings.Contains(output, "All agents have been removed.") {
 		t.Errorf("Expected 'All agents have been removed.' message, got: %s", output)
 	}
-	if !strings.Contains(output, "entire configure --agent") {
+	if !strings.Contains(output, "entire agent add") {
 		t.Errorf("Expected guidance on how to re-add agents, got: %s", output)
 	}
 
@@ -2054,35 +2167,6 @@ func TestMaybePromptVercelDeploymentDisable_WritesLocalSettingsWhenRequested(t *
 	}
 }
 
-func TestConfigureCmd_RemoveFlag_StillWorks(t *testing.T) {
-	// Cannot use t.Parallel() because we use t.Chdir
-	setupTestRepo(t)
-	writeSettings(t, testSettingsEnabled)
-	writeClaudeHooksFixture(t)
-
-	if !checkClaudeCodeHooksInstalled() {
-		t.Fatal("Expected Claude Code hooks to be installed before test")
-	}
-
-	cmd := newSetupCmd()
-	var stdout bytes.Buffer
-	cmd.SetOut(&stdout)
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--remove", "claude-code"})
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("configure --remove claude-code error = %v", err)
-	}
-
-	if checkClaudeCodeHooksInstalled() {
-		t.Error("Expected Claude Code hooks to be removed after --remove")
-	}
-
-	if !strings.Contains(stdout.String(), "Removed") {
-		t.Errorf("Expected removal message, got: %s", stdout.String())
-	}
-}
-
 func TestDetectOrSelectAgent_ReRun_NewlyDetectedAgentAvailableNotPreSelected(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
@@ -2251,6 +2335,111 @@ func TestConfigureCmd_CheckpointRemote_LocalOnlyRepo(t *testing.T) {
 	}
 }
 
+// Tests for configure --summarize-timeout-seconds (issue #1198)
+
+func TestConfigureCmd_SummarizeTimeoutSeconds_WritesProjectSettings(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--summarize-timeout-seconds", "300"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --summarize-timeout-seconds failed: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Settings updated") {
+		t.Errorf("expected 'Settings updated' output, got: %s", stdout.String())
+	}
+
+	s, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load settings: %v", err)
+	}
+	if s.SummaryTimeoutSeconds != 300 {
+		t.Errorf("SummaryTimeoutSeconds = %d, want 300", s.SummaryTimeoutSeconds)
+	}
+}
+
+func TestConfigureCmd_SummarizeTimeoutSeconds_WritesLocalSettings(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--local", "--summarize-timeout-seconds", "600"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --local --summarize-timeout-seconds failed: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "settings.local.json") {
+		t.Errorf("expected output to reference settings.local.json, got: %s", stdout.String())
+	}
+
+	localS, err := settings.LoadFromFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to load local settings: %v", err)
+	}
+	if localS.SummaryTimeoutSeconds != 600 {
+		t.Errorf("local SummaryTimeoutSeconds = %d, want 600", localS.SummaryTimeoutSeconds)
+	}
+
+	// Project settings must not have been mutated.
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load project settings: %v", err)
+	}
+	if projectS.SummaryTimeoutSeconds != 0 {
+		t.Errorf("project SummaryTimeoutSeconds = %d, want 0 (unchanged)", projectS.SummaryTimeoutSeconds)
+	}
+}
+
+func TestConfigureCmd_SummarizeTimeoutSeconds_ClearsValue(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true,"summary_timeout_seconds":300}`)
+
+	cmd := newSetupCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--summarize-timeout-seconds", "0"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --summarize-timeout-seconds 0 failed: %v", err)
+	}
+
+	s, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load settings: %v", err)
+	}
+	if s.SummaryTimeoutSeconds != 0 {
+		t.Errorf("SummaryTimeoutSeconds = %d, want 0 (cleared)", s.SummaryTimeoutSeconds)
+	}
+}
+
+func TestConfigureCmd_SummarizeTimeoutSeconds_RejectsNegative(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--summarize-timeout-seconds", "-5"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for negative --summarize-timeout-seconds")
+	}
+	if !strings.Contains(err.Error(), "non-negative") {
+		t.Errorf("expected 'non-negative' in error, got: %v", err)
+	}
+}
+
 func TestConfigureCmd_CheckpointRemote_InvalidFormat(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
@@ -2372,6 +2561,75 @@ func TestConfigureCmd_SummarizeProvider_WritesToLocalFile(t *testing.T) {
 	}
 	if projectS.SummaryGeneration != nil {
 		t.Fatal("summary_generation should not leak into project settings")
+	}
+}
+
+func TestConfigureCmd_SummarizeProvider_ExternalEnablesExternalAgents(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	const provider = "external-summary-config"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, provider)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--summarize-provider", provider})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --summarize-provider external failed: %v", err)
+	}
+
+	s, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load settings: %v", err)
+	}
+	if s.SummaryGeneration == nil {
+		t.Fatal("expected summary_generation to be set")
+	}
+	if s.SummaryGeneration.Provider != provider {
+		t.Fatalf("summary provider = %q, want %q", s.SummaryGeneration.Provider, provider)
+	}
+	if !s.ExternalAgents {
+		t.Fatal("external summary provider should enable external_agents")
+	}
+	if !strings.Contains(stdout.String(), externalAgentsAutoEnabledNotice) {
+		t.Fatalf("expected notice surfacing the external_agents flip, got stdout:\n%s", stdout.String())
+	}
+}
+
+func TestConfigureCmd_SummarizeProvider_ExternalAlreadyEnabled_NoNotice(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "external_agents": true}`)
+
+	const provider = "external-summary-already-on"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, provider)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--summarize-provider", provider})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --summarize-provider external failed: %v", err)
+	}
+
+	if strings.Contains(stdout.String(), externalAgentsAutoEnabledNotice) {
+		t.Fatalf("notice should not fire when external_agents was already enabled, got stdout:\n%s", stdout.String())
 	}
 }
 
@@ -2544,7 +2802,6 @@ func TestDetectOrSelectAgent_YesSelectsAll(t *testing.T) {
 func TestManageAgents_YesWorksNonInteractive(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0") // non-interactive
 
 	// Install claude-code hooks so there's something installed
 	writeClaudeHooksFixture(t)
@@ -2586,7 +2843,7 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 
 	t.Run("yes with telemetry=false", func(t *testing.T) {
 		s := &EntireSettings{}
-		opts := EnableOptions{Yes: true, Telemetry: false}
+		opts := EnableOptions{Telemetry: false}
 		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
 			f := false
 			s.Telemetry = &f
@@ -2602,7 +2859,7 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 	t.Run("yes with ENTIRE_TELEMETRY_OPTOUT", func(t *testing.T) {
 		t.Setenv("ENTIRE_TELEMETRY_OPTOUT", "1")
 		s := &EntireSettings{}
-		opts := EnableOptions{Yes: true, Telemetry: true}
+		opts := EnableOptions{Telemetry: true}
 		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
 			f := false
 			s.Telemetry = &f
@@ -2617,7 +2874,7 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 
 	t.Run("yes defaults to telemetry enabled", func(t *testing.T) {
 		s := &EntireSettings{}
-		opts := EnableOptions{Yes: true, Telemetry: true}
+		opts := EnableOptions{Telemetry: true}
 		if !opts.Telemetry {
 			f := false
 			s.Telemetry = &f
@@ -2633,7 +2890,7 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 	t.Run("yes preserves existing telemetry setting", func(t *testing.T) {
 		existing := false
 		s := &EntireSettings{Telemetry: &existing}
-		opts := EnableOptions{Yes: true, Telemetry: true}
+		opts := EnableOptions{Telemetry: true}
 		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
 			f := false
 			s.Telemetry = &f
@@ -2653,7 +2910,6 @@ func TestEnableCmd_YesFreshRepo_SkipsPromptsAndEnables(t *testing.T) {
 	testutil.WriteFile(t, ".", "f.txt", "init")
 	testutil.GitAdd(t, ".", "f.txt")
 	testutil.GitCommit(t, ".", "init")
-	t.Setenv("ENTIRE_TEST_TTY", "0") // non-interactive — proves --yes bypasses prompts
 
 	// Use --yes with --agent to test the realistic CI scenario.
 	// The --yes flag skips telemetry/Vercel prompts while --agent selects a specific agent.
@@ -2689,7 +2945,6 @@ func TestEnableCmd_YesWithAgent_AgentTakesPrecedence(t *testing.T) {
 	testutil.WriteFile(t, ".", "f.txt", "init")
 	testutil.GitAdd(t, ".", "f.txt")
 	testutil.GitCommit(t, ".", "init")
-	t.Setenv("ENTIRE_TEST_TTY", "0")
 
 	cmd := newEnableCmd()
 	var stdout, stderr bytes.Buffer
@@ -2715,7 +2970,6 @@ func TestEnableCmd_YesWithAgent_AgentTakesPrecedence(t *testing.T) {
 func TestEnableCmd_YesOnConfiguredRepo_ManagesAgents(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0") // non-interactive
 	writeSettings(t, testSettingsEnabled)
 	writeClaudeHooksFixture(t)
 
@@ -2742,7 +2996,6 @@ func TestEnableCmd_YesWithTelemetryFalse(t *testing.T) {
 	testutil.WriteFile(t, ".", "f.txt", "init")
 	testutil.GitAdd(t, ".", "f.txt")
 	testutil.GitCommit(t, ".", "init")
-	t.Setenv("ENTIRE_TEST_TTY", "0")
 
 	cmd := newEnableCmd()
 	var stdout, stderr bytes.Buffer
@@ -2764,10 +3017,9 @@ func TestEnableCmd_YesWithTelemetryFalse(t *testing.T) {
 	}
 }
 
-func TestConfigureCmd_YesOnConfiguredRepo(t *testing.T) {
-	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+func TestConfigureCmd_BarePrintsHelpHint(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0")
 	writeSettings(t, testSettingsEnabled)
 	writeClaudeHooksFixture(t)
 
@@ -2775,18 +3027,205 @@ func TestConfigureCmd_YesOnConfiguredRepo(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--yes"})
+	cmd.SetArgs([]string{})
 
-	// May partially fail due to stale external agents in global registry,
-	// but the key behavior is that it doesn't bail out with the non-interactive message.
-	_ = cmd.Execute() //nolint:errcheck // partial failure from stale test agents is expected
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure error = %v", err)
+	}
 
 	output := stdout.String()
-	if strings.Contains(output, "Cannot show agent selection in non-interactive mode") {
-		t.Error("--yes should bypass non-interactive check, but got bail-out message")
+	if !strings.Contains(output, "entire agent") {
+		t.Errorf("expected hint about 'entire agent' in help output, got: %s", output)
 	}
-	// Should have added at least some built-in agents
-	if !strings.Contains(output, "Added agents:") && !strings.Contains(output, "No changes made.") {
-		t.Errorf("expected agent management output, got: %s", output)
+	// Bare configure must not run the agent picker.
+	if strings.Contains(output, "Cannot show agent selection in non-interactive mode") {
+		t.Errorf("bare configure should not invoke agent picker, got: %s", output)
+	}
+}
+
+func TestConfigureCmd_AgentFlagRemoved(t *testing.T) {
+	t.Parallel()
+	cmd := newSetupCmd()
+	if cmd.Flags().Lookup("agent") != nil {
+		t.Error("'configure' must not expose --agent (use 'entire agent add')")
+	}
+	if cmd.Flags().Lookup("remove") != nil {
+		t.Error("'configure' must not expose --remove (use 'entire agent remove')")
+	}
+	if cmd.Flags().Lookup("yes") != nil {
+		t.Error("'configure' must not expose --yes (lives on 'entire enable')")
+	}
+}
+
+func TestConfigureCmd_TelemetryFlag_PersistsSetting(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--telemetry=false"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --telemetry=false error = %v", err)
+	}
+
+	s, err := LoadEntireSettings(context.Background())
+	if err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	if s.Telemetry == nil || *s.Telemetry != false {
+		t.Errorf("expected telemetry=false, got %v", s.Telemetry)
+	}
+}
+
+func TestConfigureCmd_AbsoluteGitHookPathFlag_PersistsAndReinstallsHook(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--absolute-git-hook-path"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --absolute-git-hook-path error = %v", err)
+	}
+
+	s, err := LoadEntireSettings(context.Background())
+	if err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	if !s.AbsoluteGitHookPath {
+		t.Error("expected absolute_git_hook_path=true after configure --absolute-git-hook-path")
+	}
+	if !strings.Contains(stdout.String(), "Reinstalled git hook") {
+		t.Errorf("expected hook reinstall message, got: %s", stdout.String())
+	}
+}
+
+func TestConfigureCmd_TelemetryAlone_DoesNotReinstallHook(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--telemetry=false"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --telemetry=false error = %v", err)
+	}
+
+	if strings.Contains(stdout.String(), "Reinstalled git hook") {
+		t.Errorf("--telemetry alone should not trigger hook reinstall, got: %s", stdout.String())
+	}
+}
+
+func TestConfigureCmd_FreshRepo_PointsAtEnable(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir
+	setupTestRepo(t)
+	// No settings written — fresh repo.
+
+	cmd := newSetupCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--telemetry=false"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected configure on fresh repo to fail")
+	}
+	if !strings.Contains(stderr.String(), "entire enable") {
+		t.Errorf("expected hint pointing at 'entire enable', got stderr: %s", stderr.String())
+	}
+}
+
+func TestCleanRemoteURLForReport(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		rawURL  string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:   "https without credentials is normalized",
+			rawURL: "https://github.com/entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "https token credentials are stripped",
+			rawURL: "https://ghp_secrettoken@github.com/entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "https user:password credentials are stripped",
+			rawURL: "https://x-access-token:ghp_secret@github.com/entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "query parameters are dropped",
+			rawURL: "https://github.com/entireio/cli.git?token=secret",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "scp-style ssh remote is normalized to https and the user is dropped",
+			rawURL: "git@github.com:entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "missing .git suffix is added",
+			rawURL: "https://github.com/entireio/cli",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "entire:// mirror origin maps the forge back to its real host",
+			rawURL: "entire://aws-us-east-2.entire.io/gh/entireio/cli",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "unknown forge host is preserved (self-hosted enterprise)",
+			rawURL: "git@ghe.corp.example.com:entireio/cli.git",
+			want:   "https://ghe.corp.example.com/entireio/cli.git",
+		},
+		{
+			name:    "unparseable single-segment path errors",
+			rawURL:  "https://github.com/onlyowner.git",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := cleanRemoteURLForReport(tt.rawURL)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got %q", tt.rawURL, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tt.rawURL, err)
+			}
+			if got != tt.want {
+				t.Errorf("cleanRemoteURLForReport(%q) = %q, want %q", tt.rawURL, got, tt.want)
+			}
+			// The cleaned URL must never carry the original credentials.
+			for _, secret := range []string{"ghp_secrettoken", "ghp_secret", "x-access-token", "token=secret"} {
+				if strings.Contains(got, secret) {
+					t.Errorf("cleaned URL %q leaked credential %q", got, secret)
+				}
+			}
+		})
 	}
 }

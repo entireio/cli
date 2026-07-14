@@ -19,16 +19,16 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
-	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
@@ -50,6 +50,8 @@ const MaxCommitTraversalDepth = 1000
 // Each package needs its own package-scoped sentinel for git log iteration patterns.
 var errStop = errors.New("stop iteration")
 
+var errNoMergeBase = errors.New("no merge base")
+
 // IsEmptyRepository returns true if the repository has no commits yet.
 // After git-init, HEAD points to an unborn branch (e.g., refs/heads/main)
 // whose target does not yet exist. repo.Head() returns ErrReferenceNotFound
@@ -70,11 +72,12 @@ func EnsureSetup(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 	if err := vercelconfig.InitSettings(ctx); err != nil {
 		return fmt.Errorf("failed to initialize vercel settings: %w", err)
 	}
-	if err := EnsureMetadataBranch(repo); err != nil {
-		return fmt.Errorf("failed to ensure metadata branch: %w", err)
+	if err := EnsurePrimaryRef(ctx, repo); err != nil {
+		return fmt.Errorf("failed to ensure primary metadata ref: %w", err)
 	}
 
 	// Install generic hooks (they delegate to strategy at runtime)
@@ -92,28 +95,22 @@ func EnsureSetup(ctx context.Context) error {
 // PromoteTmpRefSafely). Prefer using the named constants below when possible.
 const FetchTmpRefPrefix = "refs/entire-fetch-tmp/"
 
-// V2MainFetchTmpRef is the staging ref for fetches that target V2MainRefName.
-// Shared between the cli package's origin-based fetches and the strategy
-// package's checkpoint_remote URL-based fetch — those code paths never run
-// concurrently (they are sequenced in explain and resume), so reusing one
-// staging ref is safe and avoids divergent conventions.
-const V2MainFetchTmpRef = FetchTmpRefPrefix + "v2-main"
-
 // PromoteTmpRefSafely reads tmpRefName (the ref a fetch just landed into),
 // advances destRefName to its hash via SafelyAdvanceLocalRef, then removes
 // the tmp ref. The cleanup is deferred so the tmp ref is reaped even when
 // the advance fails.
 //
-// label is a short human-readable name used in error messages (e.g.
-// "v2 /main", "entire/checkpoints/v1"). Typical use:
+// label is a short human-readable name used in error messages. Typical use:
 //
-//	// fetch with refspec "+<src>:<V2MainFetchTmpRef>"
-//	return PromoteTmpRefSafely(ctx, V2MainFetchTmpRef, paths.V2MainRefName, "v2 /main")
+//	// fetch with refspec "+<src>:<tmpRefName>"
+//	refs := checkpoint.ResolveRefs(ctx)
+//	return PromoteTmpRefSafely(ctx, tmpRefName, refs.Primary, refs.Primary.Short())
 func PromoteTmpRefSafely(ctx context.Context, tmpRefName, destRefName plumbing.ReferenceName, label string) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open repository for %s promote: %w", label, err)
 	}
+	defer repo.Close()
 	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
 
 	tmpRef, err := repo.Reference(tmpRefName, true)
@@ -126,28 +123,139 @@ func PromoteTmpRefSafely(ctx context.Context, tmpRefName, destRefName plumbing.R
 	return nil
 }
 
-// SafelyAdvanceLocalRef updates localRefName to point at targetHash, except
-// when the existing local ref is already at or ahead of targetHash. In that
-// case it leaves the local ref unchanged to avoid rewinding locally-ahead
-// work. Otherwise (local missing, behind, or diverged) it updates the ref to
-// targetHash.
-//
-// The ancestry check walks from the local ref (which has full history), so
-// callers that fetched with --depth=1 do not break the check.
+// SafelyAdvanceLocalRef updates localRefName to include targetHash without
+// dropping local-only commits. Missing and behind refs advance to targetHash;
+// already-current or locally-ahead refs are left unchanged; diverged refs replay
+// commits after the merge-base onto targetHash and move localRefName to the
+// replayed tip. If there is no merge-base and the reachable histories are
+// complete, the full local chain is replayed.
 func SafelyAdvanceLocalRef(ctx context.Context, repo *git.Repository, localRefName plumbing.ReferenceName, targetHash plumbing.Hash) error {
 	currentLocal, localErr := repo.Reference(localRefName, true)
-	if localErr == nil {
-		if currentLocal.Hash() == targetHash {
-			return nil
+	if localErr != nil {
+		if !errors.Is(localErr, plumbing.ErrReferenceNotFound) {
+			return fmt.Errorf("failed to read local ref %s: %w", localRefName, localErr)
 		}
-		if IsAncestorOf(ctx, repo, targetHash, currentLocal.Hash()) {
-			return nil
-		}
+		return setRefHash(repo, localRefName, targetHash)
 	}
 
-	newRef := plumbing.NewHashReference(localRefName, targetHash)
+	localHash := currentLocal.Hash()
+	if localHash == targetHash {
+		return nil
+	}
+
+	repoPath, err := getRepoPath(repo)
+	if err != nil {
+		return fmt.Errorf("failed to get repo path: %w", err)
+	}
+
+	mergeBase, err := getMergeBase(ctx, repoPath, localHash.String(), targetHash.String())
+	if errors.Is(err, errNoMergeBase) {
+		shallow, shallowErr := hasReachableShallowBoundary(ctx, repo, repoPath, localHash.String(), targetHash.String())
+		if shallowErr != nil {
+			return fmt.Errorf("failed to check shallow history for %s: %w", localRefName, shallowErr)
+		}
+		if shallow {
+			return fmt.Errorf("no merge base for %s, and reachable shallow history prevents proving refs are disconnected; run 'entire doctor' or 'git fetch --unshallow' and try again", localRefName)
+		}
+		return replayDisconnectedLocalRef(ctx, repo, repoPath, localRefName, localHash, targetHash)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to find merge base for %s: %w", localRefName, err)
+	}
+	if mergeBase == targetHash {
+		return nil
+	}
+	if mergeBase == localHash {
+		return setRefHash(repo, localRefName, targetHash)
+	}
+
+	return replayLocalRefFromBase(ctx, repo, repoPath, localRefName, localHash, targetHash, mergeBase)
+}
+
+func replayLocalRefFromBase(ctx context.Context, repo *git.Repository, repoPath string, localRefName plumbing.ReferenceName, localHash, targetHash, baseHash plumbing.Hash) error {
+	localCommits, err := collectCommitsSince(ctx, repo, repoPath, localHash, baseHash)
+	if err != nil {
+		return fmt.Errorf("failed to collect local replay commits for %s: %w", localRefName, err)
+	}
+	shallow, err := loadShallowHashes(ctx, repoPath)
+	if err != nil {
+		return fmt.Errorf("failed to load shallow boundaries for %s: %w", localRefName, err)
+	}
+	return replayLocalCommits(ctx, repo, localRefName, targetHash, localCommits, shallow)
+}
+
+func replayDisconnectedLocalRef(ctx context.Context, repo *git.Repository, repoPath string, localRefName plumbing.ReferenceName, localHash, targetHash plumbing.Hash) error {
+	shallow, err := loadShallowHashes(ctx, repoPath)
+	if err != nil {
+		return fmt.Errorf("failed to load shallow boundaries for %s: %w", localRefName, err)
+	}
+	localCommits, err := collectCommitChain(repo, localHash, shallow)
+	if err != nil {
+		return fmt.Errorf("failed to collect disconnected local commits for %s: %w", localRefName, err)
+	}
+	return replayLocalCommits(ctx, repo, localRefName, targetHash, localCommits, shallow)
+}
+
+func replayLocalCommits(ctx context.Context, repo *git.Repository, localRefName plumbing.ReferenceName, targetHash plumbing.Hash, localCommits []*object.Commit, shallow map[plumbing.Hash]bool) error {
+	if len(localCommits) == 0 {
+		return setRefHash(repo, localRefName, targetHash)
+	}
+
+	newTip, err := cherryPickOnto(ctx, repo, targetHash, localCommits, shallow)
+	if err != nil {
+		return fmt.Errorf("failed to replay local commits for %s: %w", localRefName, err)
+	}
+
+	return setRefHash(repo, localRefName, newTip)
+}
+
+func hasReachableShallowBoundary(ctx context.Context, repo *git.Repository, repoPath string, hashes ...string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	shallowHashes, err := repo.Storer.Shallow()
+	if err != nil {
+		return false, fmt.Errorf("read shallow commits: %w", err)
+	}
+	if len(shallowHashes) == 0 {
+		return false, nil
+	}
+
+	shallowCommits := make(map[string]struct{}, len(shallowHashes))
+	for _, hash := range shallowHashes {
+		shallowCommits[hash.String()] = struct{}{}
+	}
+	for _, hash := range hashes {
+		reachesBoundary, err := historyReachesShallowBoundary(ctx, repoPath, hash, shallowCommits)
+		if err != nil {
+			return false, err
+		}
+		if reachesBoundary {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func historyReachesShallowBoundary(ctx context.Context, repoPath, hash string, shallowCommits map[string]struct{}) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-list", hash)
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git rev-list %s failed: %w", hash, err)
+	}
+	for _, commitHash := range strings.Fields(string(output)) {
+		if _, ok := shallowCommits[commitHash]; ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func setRefHash(repo *git.Repository, refName plumbing.ReferenceName, hash plumbing.Hash) error {
+	newRef := plumbing.NewHashReference(refName, hash)
 	if err := repo.Storer.SetReference(newRef); err != nil {
-		return fmt.Errorf("failed to update local ref %s: %w", localRefName, err)
+		return fmt.Errorf("failed to update local ref %s: %w", refName, err)
 	}
 	return nil
 }
@@ -186,115 +294,49 @@ func IsAncestorOf(ctx context.Context, repo *git.Repository, commit, target plum
 	return found
 }
 
-// ListCheckpoints returns all checkpoints from the entire/checkpoints/v1 branch.
-// Scans sharded paths: <id[:2]>/<id[2:]>/ directories containing metadata.json.
+// ListCheckpoints returns all checkpoints from committed checkpoint storage.
 func ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Warn (once per process) if metadata branches are disconnected
 	WarnIfMetadataDisconnected()
 
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	ref, err := repo.Reference(refName, true)
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
 	if err != nil {
-		//nolint:nilerr // No sessions branch yet is expected, return empty list
-		return []CheckpointInfo{}, nil
+		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
-
-	commit, err := repo.CommitObject(ref.Hash())
+	committed, err := stores.Persistent.List(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get commit object: %w", err)
+		return nil, fmt.Errorf("failed to list committed checkpoints: %w", err)
 	}
+	return checkpointInfosFromCommitted(committed), nil
+}
 
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit tree: %w", err)
+func checkpointInfosFromCommitted(committed []checkpoint.CheckpointInfo) []CheckpointInfo {
+	result := make([]CheckpointInfo, 0, len(committed))
+	for _, c := range committed {
+		result = append(result, CheckpointInfo{
+			CheckpointID:     c.CheckpointID,
+			SessionID:        c.SessionID,
+			CreatedAt:        c.CreatedAt,
+			CheckpointsCount: c.CheckpointsCount,
+			FilesTouched:     c.FilesTouched,
+			Agent:            c.Agent,
+			IsTask:           c.IsTask,
+			ToolUseID:        c.ToolUseID,
+			SessionCount:     c.SessionCount,
+			SessionIDs:       c.SessionIDs,
+			Imported:         c.Imported,
+		})
 	}
-
-	var checkpoints []CheckpointInfo
-
-	// Scan sharded structure: <2-char-prefix>/<remaining-id>/metadata.json
-	// The tree has 2-character directories (hex buckets)
-	for _, bucketEntry := range tree.Entries {
-		if bucketEntry.Mode != filemode.Dir {
-			continue
-		}
-		// Bucket should be 2 hex chars
-		if len(bucketEntry.Name) != 2 {
-			continue
-		}
-
-		bucketTree, treeErr := repo.TreeObject(bucketEntry.Hash)
-		if treeErr != nil {
-			continue
-		}
-
-		// Each entry in the bucket is the remaining part of the checkpoint ID
-		for _, checkpointEntry := range bucketTree.Entries {
-			if checkpointEntry.Mode != filemode.Dir {
-				continue
-			}
-
-			checkpointTree, cpTreeErr := repo.TreeObject(checkpointEntry.Hash)
-			if cpTreeErr != nil {
-				continue
-			}
-
-			// Reconstruct checkpoint ID: <bucket><remaining>
-			checkpointIDStr := bucketEntry.Name + checkpointEntry.Name
-			checkpointID, cpErr := id.NewCheckpointID(checkpointIDStr)
-			if cpErr != nil {
-				// Skip invalid checkpoint IDs
-				continue
-			}
-
-			info := CheckpointInfo{
-				CheckpointID: checkpointID,
-			}
-
-			// Get details from metadata file (CheckpointSummary format)
-			if summary, ok := decodeSummaryLiteFromTree(checkpointTree); ok {
-				info.CheckpointsCount = summary.CheckpointsCount
-				info.FilesTouched = summary.FilesTouched
-				info.SessionCount = len(summary.Sessions)
-
-				// Read session-level metadata for Agent, SessionID, CreatedAt, SessionIDs
-				for i, sessionPaths := range summary.Sessions {
-					if sessionPaths.Metadata == "" {
-						continue
-					}
-					// SessionFilePaths contains absolute paths with leading "/"
-					// Strip the leading "/" for tree.File() which expects paths without leading slash
-					sessionMetadataPath := strings.TrimPrefix(sessionPaths.Metadata, "/")
-					sessionMeta, sErr := decodeSessionMetadataLite(tree, sessionMetadataPath)
-					if sErr != nil {
-						continue
-					}
-					info.SessionIDs = append(info.SessionIDs, sessionMeta.SessionID)
-					// Use first session's metadata for Agent, SessionID, CreatedAt
-					if i == 0 {
-						info.Agent = sessionMeta.Agent
-						info.SessionID = sessionMeta.SessionID
-						info.CreatedAt = sessionMeta.CreatedAt
-						info.IsTask = sessionMeta.IsTask
-						info.ToolUseID = sessionMeta.ToolUseID
-					}
-				}
-			}
-
-			checkpoints = append(checkpoints, info)
-		}
-	}
-
-	// Sort by time (most recent first)
-	sort.Slice(checkpoints, func(i, j int) bool {
-		return checkpoints[i].CreatedAt.After(checkpoints[j].CreatedAt)
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.After(result[j].CreatedAt)
 	})
-
-	return checkpoints, nil
+	return result
 }
 
 const (
@@ -341,33 +383,75 @@ var (
 
 var initRedactionOnce sync.Once
 
-// EnsureRedactionConfigured loads PII redaction settings and configures the
-// redact package. No-op if PII is not enabled in settings.
-// Must be called at each process entry point before checkpoint writes
-// (e.g., hook PersistentPreRunE, doctor PreRun).
+// EnsureRedactionConfigured loads redaction settings and configures the
+// redact package: PII detection (opt-in), inline custom_redactions, and rule
+// packs auto-discovered from .entire/redactors/.
+//
+// Must be called at each process entry point before checkpoint writes.
 func EnsureRedactionConfigured() {
 	initRedactionOnce.Do(func() {
 		ctx := context.Background()
 		s, err := settings.Load(ctx)
 		if err != nil {
 			logCtx := logging.WithComponent(ctx, "redaction")
-			logging.Warn(logCtx, "failed to load settings for PII redaction", slog.String("error", err.Error()))
+			logging.Warn(logCtx, "failed to load settings for redaction", slog.String("error", err.Error()))
 			return
 		}
-		if s.Redaction == nil || s.Redaction.PII == nil || !s.Redaction.PII.Enabled {
-			return
+
+		// PII detection (opt-in).
+		if s.Redaction != nil && s.Redaction.PII != nil && s.Redaction.PII.Enabled {
+			pii := s.Redaction.PII
+			cfg := redact.PIIConfig{
+				Enabled:        true,
+				Categories:     make(map[redact.PIICategory]bool),
+				CustomPatterns: pii.CustomPatterns,
+			}
+			cfg.Categories[redact.PIIEmail] = pii.Email == nil || *pii.Email
+			cfg.Categories[redact.PIIPhone] = pii.Phone == nil || *pii.Phone
+			cfg.Categories[redact.PIIAddress] = pii.Address != nil && *pii.Address
+			redact.ConfigurePII(cfg)
 		}
-		pii := s.Redaction.PII
-		cfg := redact.PIIConfig{
-			Enabled:        true,
-			Categories:     make(map[redact.PIICategory]bool),
-			CustomPatterns: pii.CustomPatterns,
+
+		// Custom rules: inline + packs.
+		var inline map[string]string
+		if s.Redaction != nil {
+			inline = s.Redaction.CustomRedactions
 		}
-		// Email and phone default to true when PII is enabled; address defaults to false.
-		cfg.Categories[redact.PIIEmail] = pii.Email == nil || *pii.Email
-		cfg.Categories[redact.PIIPhone] = pii.Phone == nil || *pii.Phone
-		cfg.Categories[redact.PIIAddress] = pii.Address != nil && *pii.Address
-		redact.ConfigurePII(cfg)
+		packsRelPath := filepath.Join(paths.EntireDir, redact.RedactorsDirName)
+		packsDir, perr := paths.AbsPath(ctx, packsRelPath)
+		if perr != nil {
+			logCtx := logging.WithComponent(ctx, "redaction")
+			logging.Warn(logCtx, "failed to resolve redactors path", slog.String("error", perr.Error()))
+			packsDir = packsRelPath
+		}
+		packs, lerr := redact.LoadPacks(packsDir)
+		if lerr != nil {
+			logCtx := logging.WithComponent(ctx, "redaction")
+			logging.Warn(logCtx, "failed to load redactor packs", slog.String("error", lerr.Error()))
+			// Hooks log to .entire/logs/entire.log, where most users never
+			// look. Surface a one-line breadcrumb on stderr when we have a
+			// real terminal so the user can find the detail.
+			if interactive.IsTerminalWriter(os.Stderr) {
+				fmt.Fprintf(os.Stderr, "[entire] redactor packs failed to load (%v); see .entire/logs/entire.log or run `entire doctor`.\n", lerr)
+			}
+		}
+		if len(inline) > 0 || len(packs) > 0 {
+			redact.ConfigureCustomRules(redact.CustomRulesConfig{
+				Inline: inline,
+				Packs:  packs,
+			})
+		}
+
+		// OpenAI Privacy Filter (opt-in 8th layer).
+		if s.Redaction != nil && s.Redaction.OpenAIPrivacyFilter != nil {
+			opf := s.Redaction.OpenAIPrivacyFilter
+			redact.ConfigurePrivacyFilter(redact.OPFConfig{
+				Enabled:    opf.Enabled,
+				Categories: opf.Categories,
+				Command:    opf.Command,
+				Timeout:    opf.TimeoutSeconds,
+			})
+		}
 	})
 }
 
@@ -380,41 +464,44 @@ func resolveAgentType(ctxAgentType types.AgentType, state *SessionState) types.A
 	return ctxAgentType
 }
 
-// EnsureMetadataBranch creates or updates the local entire/checkpoints/v1 branch.
-// If the remote-tracking branch (origin/entire/checkpoints/v1) exists and the local
-// branch is missing or empty, creates/updates the local branch from it.
+// EnsurePrimaryRef creates or updates the local primary metadata ref. If
+// Primary is in Push (i.e. origin tracks it) and the local ref is missing or
+// empty, creates/updates the local ref from origin's remote-tracking ref.
 // Otherwise creates an empty orphan.
-func EnsureMetadataBranch(repo *git.Repository) error {
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
+	refs := checkpoint.ResolveRefs(ctx)
+	primaryName := refs.Primary.Short()
 
-	// Check if remote-tracking branch exists (e.g., after clone/fetch)
-	remoteRefName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
-	remoteRef, remoteErr := repo.Reference(remoteRefName, true)
-	if remoteErr != nil && !errors.Is(remoteErr, plumbing.ErrReferenceNotFound) {
-		return fmt.Errorf("failed to check remote metadata branch: %w", remoteErr)
+	// Origin only tracks Primary when Primary is in Push.
+	var remoteRef *plumbing.Reference
+	if refs.PrimaryFetchableFromOrigin() {
+		var remoteErr error
+		remoteRef, remoteErr = repo.Reference(plumbing.NewRemoteReferenceName("origin", primaryName), true)
+		if remoteErr != nil && !errors.Is(remoteErr, plumbing.ErrReferenceNotFound) {
+			return fmt.Errorf("failed to check remote metadata ref: %w", remoteErr)
+		}
 	}
 
-	// Check if local branch already exists
-	localRef, err := repo.Reference(refName, true)
+	// Check if local ref already exists
+	localRef, err := repo.Reference(refs.Primary, true)
 	if err == nil {
-		if remoteErr == nil && localRef.Hash() != remoteRef.Hash() {
+		if remoteRef != nil && localRef.Hash() != remoteRef.Hash() {
 			// Local and remote exist but differ — determine relationship
 			isEmpty, checkErr := isEmptyMetadataBranch(repo, localRef)
 			if checkErr != nil {
-				return fmt.Errorf("failed to check metadata branch contents: %w", checkErr)
+				return fmt.Errorf("failed to check metadata ref contents: %w", checkErr)
 			}
 			if isEmpty {
 				// Empty orphan — just point to remote
-				ref := plumbing.NewHashReference(refName, remoteRef.Hash())
-				if setErr := repo.Storer.SetReference(ref); setErr != nil {
-					return fmt.Errorf("failed to update metadata branch from remote: %w", setErr)
+				if setErr := setRefHash(repo, refs.Primary, remoteRef.Hash()); setErr != nil {
+					return fmt.Errorf("failed to update metadata ref from remote: %w", setErr)
 				}
-				fmt.Fprintf(os.Stderr, "[entire] Updated local branch '%s' from origin\n", paths.MetadataBranchName)
+				fmt.Fprintf(os.Stderr, "[entire] Updated local ref '%s' from origin\n", primaryName)
 			} else {
 				// Local has real data and differs from remote — if disconnected
 				// (no common ancestor), reconciliation happens at pre-push time
 				// or via 'entire doctor'. Read paths warn but do not auto-fix.
-				logging.Debug(context.Background(), "metadata branch differs from remote, reconciliation deferred to read/write time",
+				logging.Debug(ctx, "metadata ref differs from remote, reconciliation deferred to read/write time",
 					"local_hash", localRef.Hash().String()[:7],
 					"remote_hash", remoteRef.Hash().String()[:7],
 				)
@@ -423,20 +510,19 @@ func EnsureMetadataBranch(repo *git.Repository) error {
 		return nil
 	}
 	if !errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return fmt.Errorf("failed to check metadata branch: %w", err)
+		return fmt.Errorf("failed to check metadata ref: %w", err)
 	}
 
-	// Local branch doesn't exist — create from remote if available
-	if remoteErr == nil {
-		ref := plumbing.NewHashReference(refName, remoteRef.Hash())
-		if err := repo.Storer.SetReference(ref); err != nil {
-			return fmt.Errorf("failed to create metadata branch from remote: %w", err)
+	// Local ref doesn't exist — create from remote if available
+	if remoteRef != nil {
+		if err := setRefHash(repo, refs.Primary, remoteRef.Hash()); err != nil {
+			return fmt.Errorf("failed to create metadata ref from remote: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "✓ Created local branch '%s' from origin\n", paths.MetadataBranchName)
+		fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from origin\n", primaryName)
 		return nil
 	}
 
-	// No local or remote branch — create empty orphan
+	// No local ref and nothing to bootstrap from — create empty orphan
 	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
 	obj := repo.Storer.NewEncodedObject()
 	if err := emptyTree.Encode(obj); err != nil {
@@ -448,7 +534,7 @@ func EnsureMetadataBranch(repo *git.Repository) error {
 	}
 	emptyTreeHash, err = vercelconfig.MaybeMergeMetadataBranchConfig(repo, emptyTreeHash)
 	if err != nil {
-		return fmt.Errorf("failed to initialize metadata branch vercel config: %w", err)
+		return fmt.Errorf("failed to initialize metadata ref vercel config: %w", err)
 	}
 
 	// Create orphan commit (no parent)
@@ -464,9 +550,17 @@ func EnsureMetadataBranch(repo *git.Repository) error {
 		TreeHash:  emptyTreeHash,
 		Author:    sig,
 		Committer: sig,
-		Message:   "Initialize metadata branch\n\nThis branch stores session metadata.\n",
+		Message:   "Initialize metadata ref\n\nThis ref stores session metadata.\n",
 	}
 	// Note: No ParentHashes - this is an orphan commit
+
+	// Sign the orphan commit when signing is enabled, matching the path used
+	// for every other metadata commit (see metadata_reconcile.go and
+	// push_common.go). Without this, repos that enforce a "verified
+	// signatures" ruleset on entire/* refs reject the very first push of
+	// the metadata ref with GH013, even though every later commit on it
+	// is correctly signed.
+	checkpoint.SignCommitBestEffort(ctx, commit)
 
 	commitObj := repo.Storer.NewEncodedObject()
 	if err := commit.Encode(commitObj); err != nil {
@@ -477,13 +571,11 @@ func EnsureMetadataBranch(repo *git.Repository) error {
 		return fmt.Errorf("failed to store orphan commit: %w", err)
 	}
 
-	// Create branch reference
-	ref := plumbing.NewHashReference(refName, commitHash)
-	if err := repo.Storer.SetReference(ref); err != nil {
-		return fmt.Errorf("failed to create metadata branch: %w", err)
+	if err := setRefHash(repo, refs.Primary, commitHash); err != nil {
+		return fmt.Errorf("failed to create metadata ref: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "  ✓ Created orphan branch %s for session metadata\n", paths.MetadataBranchName)
+	fmt.Fprintf(os.Stderr, "  ✓ Created orphan ref %s for session metadata\n", primaryName)
 	return nil
 }
 
@@ -502,222 +594,19 @@ func isEmptyMetadataBranch(repo *git.Repository, ref *plumbing.Reference) (bool,
 	return len(tree.Entries) == 0, nil
 }
 
-// sessionMetadataLite contains only the fields needed from session-level metadata.json.
-// Using a minimal struct avoids allocating large nested objects (Summary, InitialAttribution,
-// TokenUsage, etc.) that CommittedMetadata carries but callers never need here.
-type sessionMetadataLite struct {
-	SessionID string          `json:"session_id"`
-	Agent     types.AgentType `json:"agent,omitempty"`
-	CreatedAt time.Time       `json:"created_at"`
-	IsTask    bool            `json:"is_task,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-}
-
-// checkpointSummaryLite contains only the fields needed from the root metadata.json.
-// Avoids allocating TokenUsage and other heavy fields from CheckpointSummary.
-type checkpointSummaryLite struct {
-	CheckpointID     id.CheckpointID               `json:"checkpoint_id"`
-	CheckpointsCount int                           `json:"checkpoints_count"`
-	FilesTouched     []string                      `json:"files_touched"`
-	Sessions         []checkpoint.SessionFilePaths `json:"sessions"`
-}
-
-// decodeSessionMetadataLite reads a session metadata.json from the tree using a streaming
-// json.Decoder and a minimal struct to avoid allocating large unused fields.
-func decodeSessionMetadataLite(tree checkpoint.FileReader, metadataPath string) (*sessionMetadataLite, error) {
-	file, err := tree.File(metadataPath)
+// GetMetadataRefTree returns the tree object at the given committed-metadata ref.
+func GetMetadataRefTree(repo *git.Repository, ref plumbing.ReferenceName) (*object.Tree, error) {
+	resolvedRef, err := repo.Reference(ref, true)
 	if err != nil {
-		return nil, fmt.Errorf("session metadata file %s: %w", metadataPath, err)
+		return nil, fmt.Errorf("read ref %s: %w", ref, err)
 	}
-	reader, err := file.Reader()
+	commit, err := repo.CommitObject(resolvedRef.Hash())
 	if err != nil {
-		return nil, fmt.Errorf("session metadata reader %s: %w", metadataPath, err)
+		return nil, fmt.Errorf("read commit at %s: %w", ref, err)
 	}
-	defer reader.Close()
-
-	var meta sessionMetadataLite
-	if err := json.NewDecoder(reader).Decode(&meta); err != nil {
-		return nil, fmt.Errorf("decode session metadata %s: %w", metadataPath, err)
-	}
-	return &meta, nil
-}
-
-// decodeSummaryLiteFromTree reads and decodes metadata.json from a checkpoint tree
-// using a streaming decoder and minimal struct. Returns the decoded summary and true
-// if successful with at least one session, or zero value and false otherwise.
-func decodeSummaryLiteFromTree(checkpointTree checkpoint.FileReader) (checkpointSummaryLite, bool) {
-	metadataFile, fileErr := checkpointTree.File(paths.MetadataFileName)
-	if fileErr != nil {
-		return checkpointSummaryLite{}, false
-	}
-	reader, readerErr := metadataFile.Reader()
-	if readerErr != nil {
-		return checkpointSummaryLite{}, false
-	}
-	defer reader.Close()
-
-	var summary checkpointSummaryLite
-	if err := json.NewDecoder(reader).Decode(&summary); err != nil || len(summary.Sessions) == 0 {
-		return checkpointSummaryLite{}, false
-	}
-	return summary, true
-}
-
-// ReadCheckpointMetadata reads metadata.json from a checkpoint path on entire/checkpoints/v1.
-// With the new format, root metadata.json is a CheckpointSummary with Agents array.
-// This function reads the summary and extracts relevant fields into CheckpointInfo,
-// also reading session-level metadata for IsTask/ToolUseID fields.
-//
-// Uses streaming json.Decoder and minimal structs to avoid loading large nested
-// objects (Summary, InitialAttribution, TokenUsage) into memory.
-func ReadCheckpointMetadata(tree checkpoint.FileReader, checkpointPath string) (*CheckpointInfo, error) {
-	metadataPath := checkpointPath + "/metadata.json"
-	file, err := tree.File(metadataPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find metadata at %s: %w", metadataPath, err)
-	}
-
-	// Session metadata paths in the summary are absolute (e.g., "/ca/b75de47439/0/metadata.json").
-	// For a full tree, strip the leading "/" to get tree-relative paths.
-	normalizePath := func(raw string) string {
-		return strings.TrimPrefix(raw, "/")
-	}
-	return decodeCheckpointInfo(file, tree, checkpointPath, normalizePath)
-}
-
-// ReadCheckpointMetadataFromSubtree reads checkpoint metadata from a tree that is
-// already rooted at the checkpoint directory (e.g., after tree.Tree(checkpointID.Path())).
-// checkpointPath is the original sharded path (e.g., "ca/b75de47439") and is used
-// to strip the prefix from absolute session metadata paths stored in the summary.
-func ReadCheckpointMetadataFromSubtree(tree checkpoint.FileReader, checkpointPath string) (*CheckpointInfo, error) {
-	file, err := tree.File(paths.MetadataFileName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find %s in checkpoint subtree: %w", paths.MetadataFileName, err)
-	}
-
-	// Session metadata paths are absolute from the tree root (e.g., "/ca/b75de47439/0/metadata.json").
-	// Strip the checkpoint prefix to get paths relative to the subtree (e.g., "0/metadata.json").
-	prefix := "/" + checkpointPath + "/"
-	normalizePath := func(raw string) string {
-		return strings.TrimPrefix(raw, prefix)
-	}
-	return decodeCheckpointInfo(file, tree, checkpointPath, normalizePath)
-}
-
-// decodeCheckpointInfo is the shared implementation for ReadCheckpointMetadata and
-// ReadCheckpointMetadataFromSubtree. It decodes the root metadata.json, reads
-// per-session metadata, and populates a CheckpointInfo.
-//
-// normalizePath transforms absolute session metadata paths from the summary into
-// paths that are valid for tree.File() lookups (the transform differs depending on
-// whether tree is a full metadata branch tree or a checkpoint subtree).
-func decodeCheckpointInfo(
-	file checkpoint.FileOpener,
-	tree checkpoint.FileReader,
-	checkpointPath string,
-	normalizePath func(string) string,
-) (*CheckpointInfo, error) {
-	reader, err := file.Reader()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read metadata: %w", err)
-	}
-	defer reader.Close()
-
-	// Try to parse as CheckpointSummary first (new format) using lite struct
-	var summary checkpointSummaryLite
-	if decodeErr := json.NewDecoder(reader).Decode(&summary); decodeErr == nil {
-		if len(summary.Sessions) > 0 {
-			info := &CheckpointInfo{
-				CheckpointID:     summary.CheckpointID,
-				CheckpointsCount: summary.CheckpointsCount,
-				FilesTouched:     summary.FilesTouched,
-				SessionCount:     len(summary.Sessions),
-			}
-
-			// Read all sessions' metadata to populate SessionIDs and get other fields from first session
-			var sessionIDs []string
-			for i, sessionPaths := range summary.Sessions {
-				if sessionPaths.Metadata == "" {
-					continue
-				}
-				sessionMetadataPath := normalizePath(sessionPaths.Metadata)
-				sessionMeta, sErr := decodeSessionMetadataLite(tree, sessionMetadataPath)
-				if sErr != nil {
-					logging.Debug(context.Background(), "decodeCheckpointInfo: session metadata decode failed",
-						slog.Int("session_index", i),
-						slog.String("metadata_path", sessionMetadataPath),
-						slog.String("checkpoint_path", checkpointPath),
-						slog.String("error", sErr.Error()),
-					)
-					continue
-				}
-				sessionIDs = append(sessionIDs, sessionMeta.SessionID)
-				if i == 0 {
-					info.Agent = sessionMeta.Agent
-					info.SessionID = sessionMeta.SessionID
-					info.CreatedAt = sessionMeta.CreatedAt
-					info.IsTask = sessionMeta.IsTask
-					info.ToolUseID = sessionMeta.ToolUseID
-				}
-			}
-			info.SessionIDs = sessionIDs
-			return info, nil
-		}
-	}
-
-	// Fall back to parsing as CheckpointInfo (old format or direct info).
-	// Re-read the file since the decoder consumed the reader.
-	fallbackReader, err := file.Reader()
-	if err != nil {
-		return nil, fmt.Errorf("failed to re-read metadata: %w", err)
-	}
-	defer fallbackReader.Close()
-
-	var metadata CheckpointInfo
-	if err := json.NewDecoder(fallbackReader).Decode(&metadata); err != nil {
-		return nil, fmt.Errorf("failed to parse metadata: %w", err)
-	}
-	return &metadata, nil
-}
-
-// GetMetadataBranchTree returns the tree object for the entire/checkpoints/v1 branch.
-func GetMetadataBranchTree(repo *git.Repository) (*object.Tree, error) {
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	ref, err := repo.Reference(refName, true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get metadata branch reference: %w", err)
-	}
-
-	commit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get metadata branch commit: %w", err)
-	}
-
 	tree, err := commit.Tree()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get metadata branch tree: %w", err)
-	}
-	return tree, nil
-}
-
-// GetV2MetadataBranchTree returns the tree object at the tip of the v2 /main ref.
-// The v2 /main ref uses the same sharded checkpoint layout as v1, so
-// ReadLatestSessionPromptFromCommittedTree works with either tree.
-func GetV2MetadataBranchTree(repo *git.Repository) (*object.Tree, error) {
-	refName := plumbing.ReferenceName(paths.V2MainRefName)
-	ref, err := repo.Reference(refName, true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get v2 /main reference: %w", err)
-	}
-
-	commit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get v2 /main commit: %w", err)
-	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get v2 /main tree: %w", err)
+		return nil, fmt.Errorf("read tree at %s: %w", ref, err)
 	}
 	return tree, nil
 }
@@ -777,7 +666,7 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 	metadataPath := checkpointPath + "/" + paths.MetadataFileName
 	if file, err := tree.File(metadataPath); err == nil {
 		if content, err := file.Contents(); err == nil {
-			var metadata checkpoint.CommittedMetadata
+			var metadata checkpoint.Metadata
 			if err := json.Unmarshal([]byte(content), &metadata); err == nil && metadata.Agent != "" {
 				return metadata.Agent
 			}
@@ -842,7 +731,7 @@ func isOnlySeparators(s string) bool {
 //
 // Falls back through earlier sessions when the latest has no prompt.
 // Avoids reading full transcripts — only reads prompt.txt files.
-// sessionCount is the number of sessions in the checkpoint (from CommittedInfo.SessionCount).
+// sessionCount is the number of sessions in the checkpoint (from CheckpointInfo.SessionCount).
 func ReadLatestSessionPromptFromCommittedTree(tree *object.Tree, cpID id.CheckpointID, sessionCount int) string {
 	cpPath := cpID.Path()
 	cpTree, err := tree.Tree(cpPath)
@@ -884,48 +773,57 @@ func ReadLatestSessionPromptFromCommittedTree(tree *object.Tree, cpID id.Checkpo
 
 // ReadAllSessionPromptsFromTree reads the first prompt for all sessions in a multi-session checkpoint.
 // Returns a slice of prompts parallel to sessionIDs (oldest to newest).
-// For single-session checkpoints, returns a slice with just the root prompt.
+// For single-session checkpoints, returns a slice with just the session prompt.
 func ReadAllSessionPromptsFromTree(tree *object.Tree, checkpointPath string, sessionCount int, sessionIDs []string) []string {
 	if sessionCount <= 1 || len(sessionIDs) <= 1 {
-		// Single session - just return the root prompt
-		prompt := ReadSessionPromptFromTree(tree, checkpointPath)
+		prompt := ReadSessionPromptFromTree(tree, checkpointPath+"/0")
+		if prompt == "" {
+			prompt = ReadSessionPromptFromTree(tree, checkpointPath)
+		}
 		if prompt != "" {
 			return []string{prompt}
 		}
 		return nil
 	}
 
-	// Multi-session: read prompts from archived folders (0/, 1/, etc.) and root
 	prompts := make([]string, len(sessionIDs))
 
-	// Read archived session prompts (folders 0, 1, ... N-2)
-	for i := range sessionCount - 1 {
-		archivedPath := fmt.Sprintf("%s/%d", checkpointPath, i)
-		prompts[i] = ReadSessionPromptFromTree(tree, archivedPath)
+	sessionLimit := min(sessionCount, len(prompts))
+	for i := range sessionLimit {
+		sessionPath := fmt.Sprintf("%s/%d", checkpointPath, i)
+		prompts[i] = ReadSessionPromptFromTree(tree, sessionPath)
 	}
 
-	// Read the most recent session prompt (at root level)
-	prompts[len(prompts)-1] = ReadSessionPromptFromTree(tree, checkpointPath)
+	// Older committed metadata stored the latest prompt at the checkpoint root.
+	latestIndex := sessionLimit - 1
+	if latestIndex >= 0 && prompts[latestIndex] == "" {
+		prompts[latestIndex] = ReadSessionPromptFromTree(tree, checkpointPath)
+	}
 
 	return prompts
 }
 
-// GetRemoteMetadataBranchTree returns the tree object for origin/entire/checkpoints/v1.
-func GetRemoteMetadataBranchTree(repo *git.Repository) (*object.Tree, error) {
-	refName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
+// GetRemotePrimaryTree returns the tree at origin's remote-tracking ref for
+// the configured Primary. Errors when Primary isn't in Push (no origin shadow).
+func GetRemotePrimaryTree(ctx context.Context, repo *git.Repository) (*object.Tree, error) {
+	refs := checkpoint.ResolveRefs(ctx)
+	if !refs.PrimaryFetchableFromOrigin() {
+		return nil, fmt.Errorf("primary metadata ref %s is not pushed to origin", refs.Primary)
+	}
+	refName := plumbing.NewRemoteReferenceName("origin", refs.Primary.Short())
 	ref, err := repo.Reference(refName, true)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get remote metadata branch reference: %w", err)
+		return nil, fmt.Errorf("failed to get remote metadata reference %s: %w", refName, err)
 	}
 
 	commit, err := repo.CommitObject(ref.Hash())
 	if err != nil {
-		return nil, fmt.Errorf("failed to get remote metadata branch commit: %w", err)
+		return nil, fmt.Errorf("failed to get remote metadata commit: %w", err)
 	}
 
 	tree, err := commit.Tree()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get remote metadata branch tree: %w", err)
+		return nil, fmt.Errorf("failed to get remote metadata tree: %w", err)
 	}
 	return tree, nil
 }
@@ -934,74 +832,11 @@ func GetRemoteMetadataBranchTree(repo *git.Repository) (*object.Tree, error) {
 // It uses 'git rev-parse --show-toplevel' to find the repository root,
 // which works correctly even when called from a subdirectory or a linked worktree.
 func OpenRepository(ctx context.Context) (*git.Repository, error) {
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		// Fallback to current directory if git command fails
-		// (e.g., if git is not installed or we're not in a repo)
-		repoRoot = "."
-	}
-
-	repo, err := git.PlainOpen(repoRoot)
+	repo, err := gitrepo.OpenCurrent(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
 	return repo, nil
-}
-
-// IsInsideWorktree returns true if the current directory is inside a git worktree
-// (as opposed to the main repository). Worktrees have .git as a file pointing
-// to the main repo, while the main repo has .git as a directory.
-// This function works correctly from any subdirectory within the repository.
-func IsInsideWorktree(ctx context.Context) bool {
-	// First find the repository root
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return false
-	}
-
-	gitPath := filepath.Join(repoRoot, gitDir)
-	gitInfo, err := os.Stat(gitPath)
-	if err != nil {
-		return false
-	}
-	return !gitInfo.IsDir()
-}
-
-// GetMainRepoRoot returns the root directory of the main repository.
-// In the main repo, this is the worktree path (repo root).
-// In a worktree, this parses the .git file to find the main repo.
-// This function works correctly from any subdirectory within the repository.
-//
-// Per gitrepository-layout(5), a worktree's .git file is a "gitfile" containing
-// "gitdir: <path>" pointing to $GIT_DIR/worktrees/<id> in the main repository.
-// See: https://git-scm.com/docs/gitrepository-layout
-func GetMainRepoRoot(ctx context.Context) (string, error) {
-	// First find the worktree/repo root
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return "", fmt.Errorf("failed to get worktree path: %w", err)
-	}
-
-	if !IsInsideWorktree(ctx) {
-		return repoRoot, nil
-	}
-
-	// Worktree .git file contains: "gitdir: /path/to/main/.git/worktrees/<id>"
-	gitFilePath := filepath.Join(repoRoot, gitDir)
-	content, err := os.ReadFile(gitFilePath) //nolint:gosec // G304: gitFilePath is constructed from repo root, not user input
-	if err != nil {
-		return "", fmt.Errorf("failed to read .git file: %w", err)
-	}
-
-	gitdir := strings.TrimSpace(string(content))
-	gitdir = strings.TrimPrefix(gitdir, "gitdir: ")
-
-	// Extract main repo root: everything before "/.git/"
-	idx := strings.LastIndex(gitdir, "/.git/")
-	if idx < 0 {
-		return "", fmt.Errorf("unexpected gitdir format: %s", gitdir)
-	}
-	return gitdir[:idx], nil
 }
 
 // GetGitCommonDir returns the path to the shared git directory.
@@ -1048,6 +883,7 @@ func EnsureEntireGitignore(ctx context.Context) error {
 		"settings.local.json",
 		"metadata/",
 		"logs/",
+		redact.RedactorsDirName + "/local/",
 	}
 
 	// Track what needs to be added
@@ -1088,17 +924,18 @@ func checkCanRewindWithWarning(ctx context.Context) (bool, string, error) {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		// Can't open repo - still allow rewind but without stats
-		return true, "", nil //nolint:nilerr // Rewind allowed even if repo can't be opened
+		return true, "", nil
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even if worktree can't be accessed
+		return true, "", nil
 	}
 
 	status, err := worktree.Status()
 	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even if status can't be retrieved
+		return true, "", nil
 	}
 
 	if status.IsClean() {
@@ -1108,17 +945,17 @@ func checkCanRewindWithWarning(ctx context.Context) (bool, string, error) {
 	// Get HEAD commit tree for comparison - if we can't get it, just return without stats
 	head, err := repo.Head()
 	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even without HEAD (e.g., empty repo)
+		return true, "", nil
 	}
 
 	headCommit, err := repo.CommitObject(head.Hash())
 	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even if commit lookup fails
+		return true, "", nil
 	}
 
 	headTree, err := headCommit.Tree()
 	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even if tree lookup fails
+		return true, "", nil
 	}
 
 	type fileChange struct {
@@ -1132,7 +969,7 @@ func checkCanRewindWithWarning(ctx context.Context) (bool, string, error) {
 	// Use repo root, not cwd - git status returns paths relative to repo root
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even if worktree root lookup fails
+		return true, "", nil
 	}
 
 	for file, st := range status {
@@ -1307,6 +1144,7 @@ func getTaskCheckpointFromTree(ctx context.Context, point RewindPoint) (*TaskChe
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	commitHash := plumbing.NewHash(point.ID)
 	commit, err := repo.CommitObject(commitHash)
@@ -1350,6 +1188,7 @@ func getTaskTranscriptFromTree(ctx context.Context, point RewindPoint) ([]byte, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	commitHash := plumbing.NewHash(point.ID)
 	commit, err := repo.CommitObject(commitHash)
@@ -1388,12 +1227,6 @@ func getTaskTranscriptFromTree(ctx context.Context, point RewindPoint) ([]byte, 
 // ErrBranchNotFound is returned by DeleteBranchCLI when the branch does not exist.
 var ErrBranchNotFound = errors.New("branch not found")
 
-// ErrRefNotFound is returned by DeleteRefCLI when the ref does not exist.
-var ErrRefNotFound = errors.New("ref not found")
-
-// ErrRefChanged is returned by DeleteRefCLI when the ref no longer points to the expected OID.
-var ErrRefChanged = errors.New("ref changed since inspection")
-
 // DeleteBranchCLI deletes a git branch using the git CLI.
 // Uses `git branch -D` instead of go-git's RemoveReference because go-git v5
 // doesn't properly persist deletions when refs are packed (.git/packed-refs)
@@ -1422,72 +1255,6 @@ func DeleteBranchCLI(ctx context.Context, branchName string) error {
 		return fmt.Errorf("failed to delete branch %s: %s: %w", branchName, strings.TrimSpace(string(output)), err)
 	}
 	return nil
-}
-
-// DeleteRefCLI deletes an arbitrary ref using the git CLI.
-// Uses `git update-ref -d` instead of go-git's RemoveReference because go-git
-// ref deletion is unreliable with packed refs and worktrees.
-//
-// When expectedOID is non-empty, it is passed to `git update-ref -d <ref> <old-oid>`
-// as a compare-and-swap guard: git will refuse the deletion if the ref no longer
-// points to expectedOID, and ErrRefChanged is returned.
-//
-// Returns ErrRefNotFound if the ref does not exist, allowing callers to use
-// errors.Is for idempotent deletion patterns.
-func DeleteRefCLI(ctx context.Context, refName string, expectedOID string) error {
-	exists, _, err := refStateCLI(ctx, refName)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return fmt.Errorf("%w: %s", ErrRefNotFound, refName)
-	}
-
-	args := []string{"update-ref", "-d", refName}
-	if expectedOID != "" {
-		args = append(args, expectedOID)
-	}
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return classifyDeleteRefFailure(ctx, refName, expectedOID, output, err)
-	}
-	return nil
-}
-
-func classifyDeleteRefFailure(ctx context.Context, refName string, expectedOID string, output []byte, updateErr error) error {
-	baseErr := fmt.Errorf("failed to delete ref %s: %s: %w", refName, strings.TrimSpace(string(output)), updateErr)
-
-	exists, currentOID, stateErr := refStateCLI(ctx, refName)
-	if stateErr != nil {
-		return baseErr
-	}
-	if !exists {
-		return fmt.Errorf("%w: %s", ErrRefNotFound, refName)
-	}
-	if expectedOID != "" && currentOID != expectedOID {
-		return fmt.Errorf("%w: %s (expected %s)", ErrRefChanged, refName, expectedOID)
-	}
-
-	return baseErr
-}
-
-func refStateCLI(ctx context.Context, refName string) (exists bool, oid string, err error) {
-	check := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", refName)
-	if err := check.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			return false, "", nil
-		}
-		return false, "", fmt.Errorf("failed to check ref %s: %w", refName, err)
-	}
-
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", refName)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return false, "", fmt.Errorf("failed to resolve ref %s: %s: %w", refName, strings.TrimSpace(string(output)), err)
-	}
-
-	return true, strings.TrimSpace(string(output)), nil
 }
 
 // branchExistsCLI checks if a branch exists using git CLI.
@@ -1557,22 +1324,10 @@ func collectUntrackedFiles(ctx context.Context) ([]string, error) {
 	return files, nil
 }
 
-// ExtractSessionIDFromCommit extracts the session ID from a commit's trailers.
-// It checks the Entire-Session trailer first, then falls back to extracting from
-// the metadata directory path in the Entire-Metadata trailer.
-// Returns empty string if no session ID is found.
-func ExtractSessionIDFromCommit(commit *object.Commit) string {
-	// Try Entire-Session trailer first
-	if sessionID, found := trailers.ParseSession(commit.Message); found {
-		return sessionID
-	}
-
-	// Try extracting from metadata directory (last path component)
-	if metadataDir, found := trailers.ParseMetadata(commit.Message); found {
-		return filepath.Base(metadataDir)
-	}
-
-	return ""
+// CollectUntrackedFiles collects untracked, non-ignored paths relative to the
+// repository root.
+func CollectUntrackedFiles(ctx context.Context) ([]string, error) {
+	return collectUntrackedFiles(ctx)
 }
 
 // NOTE: The following git tree helper functions have been moved to checkpoint/ package:
@@ -1583,73 +1338,6 @@ func ExtractSessionIDFromCommit(commit *object.Commit) string {
 // - treeNode, insertIntoTree, buildTreeObject (internal to checkpoint package)
 //
 // See push_common.go and session_test.go for usage examples.
-
-// getSessionDescriptionFromTree reads the first line of prompt.txt from a git tree.
-// This is the tree-based equivalent of getSessionDescription (which reads from filesystem).
-//
-// If metadataDir is provided, looks for files at metadataDir/prompt.txt.
-// If metadataDir is empty, first tries the root of the tree (for when the tree is already
-// the session directory), then falls back to
-// searching for .entire/metadata/*/prompt.txt (for full worktree trees).
-func getSessionDescriptionFromTree(tree *object.Tree, metadataDir string) string {
-	// Helper to read first line from a file in tree
-	readFirstLine := func(path string) string {
-		file, err := tree.File(path)
-		if err != nil {
-			return ""
-		}
-		content, err := file.Contents()
-		if err != nil {
-			return ""
-		}
-		lines := strings.SplitN(content, "\n", 2)
-		if len(lines) > 0 && lines[0] != "" {
-			return strings.TrimSpace(lines[0])
-		}
-		return ""
-	}
-
-	// If metadataDir is provided, look there directly
-	if metadataDir != "" {
-		if desc := readFirstLine(metadataDir + "/" + paths.PromptFileName); desc != "" {
-			return desc
-		}
-		return NoDescription
-	}
-
-	// No metadataDir provided - first try looking at the root of the tree
-	// (used when the tree is already the session directory)
-	if desc := readFirstLine(paths.PromptFileName); desc != "" {
-		return desc
-	}
-
-	// Fall back to searching for .entire/metadata/*/prompt.txt
-	// (used when the tree is the full worktree)
-	var desc string
-	//nolint:errcheck // We ignore errors here as we're just searching for a description
-	_ = tree.Files().ForEach(func(f *object.File) error {
-		if desc != "" {
-			return nil // Already found description
-		}
-		name := f.Name
-		if strings.Contains(name, ".entire/metadata/") && strings.HasSuffix(name, "/"+paths.PromptFileName) {
-			content, err := f.Contents()
-			if err != nil {
-				return nil //nolint:nilerr // Skip files we can't read, continue searching
-			}
-			lines := strings.SplitN(content, "\n", 2)
-			if len(lines) > 0 && lines[0] != "" {
-				desc = strings.TrimSpace(lines[0])
-			}
-		}
-		return nil
-	})
-
-	if desc != "" {
-		return desc
-	}
-	return NoDescription
-}
 
 // GetGitAuthorFromRepo retrieves the git user.name and user.email,
 // checking both the repository-local config and the global ~/.gitconfig.

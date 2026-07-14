@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
 
@@ -39,7 +41,7 @@ func TestIsOutdated(t *testing.T) {
 		// Pre-release versions (semver uses hyphen)
 		{"1.0.0-rc1", "1.0.0", true, "prerelease in current"},
 		{"1.0.0", "1.0.1-rc1", true, "prerelease in latest is still newer"},
-		{"1.0.0-dev-xxx", "1.0.1", false, "dev build skips version check"},
+		{"0.6.3-nightly.202605250745.b5855692.0.20260527023747-77e1fedc5741", "0.6.4", false, "pseudo-version (local dev build) skips check"},
 
 		// Nightly-vs-nightly comparisons (same channel)
 		{"0.5.3-nightly.202604051159.abc1234", "0.5.3-nightly.202604061200.def5678", true, "older nightly is outdated by newer nightly"},
@@ -76,6 +78,36 @@ func TestIsNightly(t *testing.T) {
 			t.Parallel()
 			if got := isNightly(tt.version); got != tt.want {
 				t.Errorf("isNightly(%q) = %v, want %v", tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsDevBuild(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		version string
+		want    bool
+	}{
+		{"dev", true},
+		{"", true},
+		{"garbage", true}, // unparseable -> treat as local build, don't nag
+		// Released builds: clean semver, should be checked for updates.
+		{"0.6.3", false},
+		{"v0.6.3", false},
+		{"1.0.0-rc1", false},
+		{"0.6.3-nightly.202605250745.b5855692", false},
+		{"v0.6.3-nightly.202605250745.b5855692", false},
+		// Local builds: Go pseudo-versions and dirty trees.
+		{"0.6.3-nightly.202605250745.b5855692.0.20260527023747-77e1fedc5741", true},
+		{"0.6.3-nightly.202605250745.b5855692.0.20260527023747-77e1fedc5741+dirty", true},
+		{"0.6.4-0.20260527023747-77e1fedc5741", true}, // pseudo-version off a stable tag
+	}
+	for _, tt := range tests {
+		t.Run(tt.version, func(t *testing.T) {
+			t.Parallel()
+			if got := isDevBuild(tt.version); got != tt.want {
+				t.Errorf("isDevBuild(%q) = %v, want %v", tt.version, got, tt.want)
 			}
 		})
 	}
@@ -217,8 +249,8 @@ func TestFetchLatestVersion(t *testing.T) {
 		if r.Header.Get("Accept") != "application/vnd.github+json" {
 			t.Errorf("Accept header = %q, want application/vnd.github+json", r.Header.Get("Accept"))
 		}
-		if r.Header.Get("User-Agent") != "entire-cli" {
-			t.Errorf("User-Agent header = %q, want entire-cli", r.Header.Get("User-Agent"))
+		if want := versioninfo.UserAgent(); r.Header.Get("User-Agent") != want {
+			t.Errorf("User-Agent header = %q, want %q", r.Header.Get("User-Agent"), want)
 		}
 
 		release := GitHubRelease{
@@ -309,7 +341,15 @@ func TestParseGitHubRelease(t *testing.T) {
 	}
 }
 
+// brewUpgradeCmd is the install command produced for any brew-installed
+// binary on a stable channel. Hoisted to a const so tests can reference
+// it without tripping goconst on repeated string literals.
+const brewUpgradeCmd = "brew upgrade --yes entire"
+
+const scoopExecutablePath = `C:\Users\test\scoop\apps\cli\current\entire.exe`
+
 func TestUpdateCommand(t *testing.T) {
+	const plainBinPath = "/usr/local/bin/entire"
 	tests := []struct {
 		name           string
 		currentVersion string
@@ -317,28 +357,28 @@ func TestUpdateCommand(t *testing.T) {
 		want           string
 	}{
 		{
-			name:           "homebrew stable cellar path uses cask command",
+			name:           "homebrew stable cellar path uses brew command",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return "/opt/homebrew/Cellar/entire/1.0.0/bin/entire", nil },
-			want:           "brew upgrade --cask entire",
+			want:           brewUpgradeCmd,
 		},
 		{
-			name:           "homebrew stable cask path uses cask command",
+			name:           "homebrew stable cask path uses brew command",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return "/opt/homebrew/bin/entire", nil },
-			want:           "brew upgrade --cask entire",
+			want:           brewUpgradeCmd,
 		},
 		{
-			name:           "homebrew nightly path uses cask command",
+			name:           "homebrew nightly path uses brew command",
 			currentVersion: "1.0.1-nightly.202604101200.abc1234",
 			execPath:       func() (string, error) { return "/opt/homebrew/bin/entire", nil },
-			want:           "brew upgrade --cask entire@nightly",
+			want:           "brew upgrade --yes entire@nightly",
 		},
 		{
 			name:           "linuxbrew path",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return "/home/linuxbrew/.linuxbrew/bin/entire", nil },
-			want:           "brew upgrade --cask entire",
+			want:           brewUpgradeCmd,
 		},
 		{
 			name:           "mise path",
@@ -349,19 +389,19 @@ func TestUpdateCommand(t *testing.T) {
 		{
 			name:           "scoop path",
 			currentVersion: "1.0.0",
-			execPath:       func() (string, error) { return `C:\Users\test\scoop\apps\cli\current\entire.exe`, nil },
+			execPath:       func() (string, error) { return scoopExecutablePath, nil },
 			want:           "scoop update entire/cli",
 		},
 		{
 			name:           "unknown path stable falls back to stable curl command",
 			currentVersion: "1.0.0",
-			execPath:       func() (string, error) { return "/usr/local/bin/entire", nil },
+			execPath:       func() (string, error) { return plainBinPath, nil },
 			want:           "curl -fsSL https://entire.io/install.sh | bash",
 		},
 		{
 			name:           "unknown path nightly falls back to nightly curl command",
 			currentVersion: "1.0.1-nightly.202604101200.abc1234",
-			execPath:       func() (string, error) { return "/usr/local/bin/entire", nil },
+			execPath:       func() (string, error) { return plainBinPath, nil },
 			want:           "curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly",
 		},
 		{
@@ -385,13 +425,61 @@ func TestUpdateCommand(t *testing.T) {
 	}
 }
 
-// setupCheckAndNotifyTest sets HOME to a temp dir and overrides githubAPIURL.
-// Returns a cobra.Command with captured stdout and a cleanup function.
+func TestUpdateCommandForCurrentBinary(t *testing.T) {
+	tests := []struct {
+		name           string
+		currentVersion string
+		goos           string
+		execPath       func() (string, error)
+		want           string
+	}{
+		{
+			name:           "known installer returns command",
+			currentVersion: "1.2.3",
+			goos:           goosWindows,
+			execPath:       func() (string, error) { return scoopExecutablePath, nil },
+			want:           "scoop update entire/cli",
+		},
+		{
+			name:           "windows unknown installer returns releases URL",
+			currentVersion: "1.2.3",
+			goos:           goosWindows,
+			execPath:       func() (string, error) { return `C:\Program Files\Entire\entire.exe`, nil },
+			want:           downloadsURL,
+		},
+		{
+			name:           "non-windows unknown installer returns curl command",
+			currentVersion: "1.2.3",
+			goos:           "linux",
+			execPath:       func() (string, error) { return "/usr/local/bin/entire", nil },
+			want:           "curl -fsSL https://entire.io/install.sh | bash",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originalExecPath := executablePath
+			executablePath = tt.execPath
+			t.Cleanup(func() { executablePath = originalExecPath })
+
+			originalGOOS := goos
+			goos = tt.goos
+			t.Cleanup(func() { goos = originalGOOS })
+
+			if got := UpdateCommandForCurrentBinary(tt.currentVersion); got != tt.want {
+				t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// setupCheckAndNotifyTest points the global config dir at a per-test temp
+// dir and overrides githubAPIURL. Returns a cobra.Command with captured
+// stdout and a cleanup function.
 func setupCheckAndNotifyTest(t *testing.T, serverURL string) (*cobra.Command, *bytes.Buffer) {
 	t.Helper()
 
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 
 	origURL := githubAPIURL
 	githubAPIURL = serverURL
@@ -417,6 +505,16 @@ func newVersionServer(t *testing.T, version string) *httptest.Server {
 	return server
 }
 
+func seedVersionCache(t *testing.T, cache *VersionCache) {
+	t.Helper()
+	if err := ensureGlobalConfigDir(); err != nil {
+		t.Fatalf("ensureGlobalConfigDir() error = %v", err)
+	}
+	if err := saveCache(cache); err != nil {
+		t.Fatalf("saveCache() error = %v", err)
+	}
+}
+
 func TestCheckAndNotify_SkipsDevVersion(t *testing.T) {
 	server := newVersionServer(t, "v9.9.9")
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
@@ -439,15 +537,26 @@ func TestCheckAndNotify_SkipsEmptyVersion(t *testing.T) {
 	}
 }
 
+func TestCheckAndNotify_SkipsPseudoVersion(t *testing.T) {
+	server := newVersionServer(t, "v9.9.9")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+
+	// A local working-tree build reports a Go pseudo-version; it must not be
+	// nagged to update even though it isn't the bare "dev" sentinel.
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(),
+		"0.6.3-nightly.202605250745.b5855692.0.20260527023747-77e1fedc5741")
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for pseudo-version build, got %q", buf.String())
+	}
+}
+
 func TestCheckAndNotify_SkipsWhenCacheIsFresh(t *testing.T) {
 	server := newVersionServer(t, "v9.9.9")
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
 
 	// Pre-seed the cache with a recent check time
-	configDir, err := globalConfigDirPath()
-	if err != nil {
-		t.Fatalf("globalConfigDirPath() error = %v", err)
-	}
+	configDir := globalConfigDirPath()
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
@@ -478,6 +587,77 @@ func TestCheckAndNotify_PrintsNotificationWhenOutdated(t *testing.T) {
 	}
 }
 
+func TestCheckAndNotify_BrewSkipUntilNextVersionCachesLatest(t *testing.T) {
+	server := newVersionServer(t, "v2.0.0")
+	cmd, _ := setupCheckAndNotifyTest(t, server.URL)
+	f := newAutoUpdateFixture(t)
+	useBrewExecutable(t)
+	f.chooseValue = autoUpdateActionSkipUntilNextVersion
+
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+	if f.installCalls != 0 {
+		t.Fatalf("installer called %d times, want 0", f.installCalls)
+	}
+	cache, err := loadCache()
+	if err != nil {
+		t.Fatalf("loadCache() error = %v", err)
+	}
+	if cache.SkippedVersion != "v2.0.0" {
+		t.Errorf("SkippedVersion = %q, want v2.0.0", cache.SkippedVersion)
+	}
+	if f.lastCmdStr != brewUpgradeCmd {
+		t.Errorf("prompt got cmd %q, want %q", f.lastCmdStr, brewUpgradeCmd)
+	}
+}
+
+// TestCheckAndNotify_MiseSkipUntilNextVersionCachesLatest verifies the
+// skip-until-next-version persistence works for non-brew installers too.
+// The cache flow is installer-agnostic; this locks that contract in.
+func TestCheckAndNotify_MiseSkipUntilNextVersionCachesLatest(t *testing.T) {
+	server := newVersionServer(t, "v2.0.0")
+	cmd, _ := setupCheckAndNotifyTest(t, server.URL)
+	f := newAutoUpdateFixture(t)
+	useMiseExecutable(t)
+	f.chooseValue = autoUpdateActionSkipUntilNextVersion
+
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+	if f.installCalls != 0 {
+		t.Fatalf("installer called %d times, want 0", f.installCalls)
+	}
+	cache, err := loadCache()
+	if err != nil {
+		t.Fatalf("loadCache() error = %v", err)
+	}
+	if cache.SkippedVersion != "v2.0.0" {
+		t.Errorf("SkippedVersion = %q, want v2.0.0", cache.SkippedVersion)
+	}
+	if f.lastCmdStr != "mise upgrade entire" {
+		t.Errorf("prompt got cmd %q, want mise upgrade entire", f.lastCmdStr)
+	}
+}
+
+func TestCheckAndNotify_SkipsVersionMarkedSkipped(t *testing.T) {
+	server := newVersionServer(t, "v2.0.0")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+	f := newAutoUpdateFixture(t)
+	useBrewExecutable(t)
+	seedVersionCache(t, &VersionCache{
+		LastCheckTime:  time.Now().Add(-checkInterval - time.Minute),
+		SkippedVersion: "v2.0.0",
+	})
+
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+	if f.installCalls != 0 {
+		t.Fatalf("installer called %d times for skipped version, want 0", f.installCalls)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for skipped version, got %q", buf.String())
+	}
+}
+
 func TestCheckAndNotify_NoNotificationWhenUpToDate(t *testing.T) {
 	server := newVersionServer(t, "v1.0.0")
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
@@ -486,6 +666,51 @@ func TestCheckAndNotify_NoNotificationWhenUpToDate(t *testing.T) {
 
 	if buf.Len() != 0 {
 		t.Errorf("expected no output when up to date, got %q", buf.String())
+	}
+}
+
+func TestCheckAndNotify_InstallerFailureKeepsCacheFresh(t *testing.T) {
+	server := newVersionServer(t, "v2.0.0")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+
+	// Simulate an interactive user who accepts the upgrade prompt, and an
+	// installer that fails (e.g. brew upgrade blew up mid-run).
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	useBrewExecutable(t)
+
+	origChoose := chooseUpdate
+	chooseUpdate = func(_ context.Context, _, _, _ string) (AutoUpdateAction, error) {
+		return autoUpdateActionUpdate, nil
+	}
+	t.Cleanup(func() { chooseUpdate = origChoose })
+
+	origRun := runInstaller
+	runInstaller = func(_ context.Context, _ string) error { return errors.New("boom") }
+	t.Cleanup(func() { runInstaller = origRun })
+
+	origIsTerminalOut := isTerminalOut
+	isTerminalOut = func(_ io.Writer) bool { return true }
+	t.Cleanup(func() { isTerminalOut = origIsTerminalOut })
+
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+	// User sees the failure message with a manual-retry hint.
+	if !strings.Contains(buf.String(), "Try again later running:") {
+		t.Errorf("missing retry hint in output: %q", buf.String())
+	}
+
+	// Cache must remain bumped: we don't want to re-prompt every invocation
+	// while the upstream issue is still in place. The user already has the
+	// hint with the exact command to run manually.
+	cache, err := loadCache()
+	if err != nil {
+		t.Fatalf("loadCache() error = %v", err)
+	}
+	if cache.LastCheckTime.IsZero() {
+		t.Errorf("cache LastCheckTime was reset after installer failure; want fresh bump")
+	}
+	if time.Since(cache.LastCheckTime) > time.Minute {
+		t.Errorf("cache LastCheckTime not fresh after installer failure: %v", cache.LastCheckTime)
 	}
 }
 

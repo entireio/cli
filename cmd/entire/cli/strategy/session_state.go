@@ -2,14 +2,22 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 
-	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
@@ -26,6 +34,44 @@ func getSessionStateDir(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return filepath.Join(commonDir, session.SessionStateDirName), nil
+}
+
+// openSessionStateRoot creates the session state directory if needed and returns
+// an os.Root scoped to it. Hint/marker files are named from the (already
+// validated) session ID; routing their writes through os.Root makes escaping
+// the directory impossible at the kernel level even if validation were bypassed.
+// Callers must Close the returned root.
+func openSessionStateRoot(ctx context.Context) (*os.Root, error) {
+	stateDir, err := getSessionStateDir(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session state directory: %w", err)
+	}
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		return nil, fmt.Errorf("failed to create session state directory: %w", err)
+	}
+	root, err := os.OpenRoot(stateDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open session state directory: %w", err)
+	}
+	return root, nil
+}
+
+// openSessionStateRootForRead returns an os.Root scoped to the session state
+// directory without creating it. Returns (nil, nil) when the directory does not
+// exist, so read paths can treat a missing directory as "no hint".
+func openSessionStateRootForRead(ctx context.Context) (*os.Root, error) {
+	stateDir, err := getSessionStateDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(stateDir)
+	if os.IsNotExist(err) {
+		return nil, nil //nolint:nilnil // missing dir = no hint; callers handle nil root
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to open session state directory: %w", err)
+	}
+	return root, nil
 }
 
 // sessionStateFile returns the path to a session state file.
@@ -55,37 +101,13 @@ func LoadSessionState(ctx context.Context, sessionID string) (*SessionState, err
 
 // SaveSessionState saves the session state atomically.
 func SaveSessionState(ctx context.Context, state *SessionState) error {
-	// Validate session ID to prevent path traversal
-	if err := validation.ValidateSessionID(state.SessionID); err != nil {
-		return fmt.Errorf("invalid session ID: %w", err)
-	}
-
-	stateDir, err := getSessionStateDir(ctx)
+	store, err := session.NewStateStore(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get session state directory: %w", err)
+		return fmt.Errorf("failed to create state store: %w", err)
 	}
 
-	if err := os.MkdirAll(stateDir, 0o750); err != nil {
-		return fmt.Errorf("failed to create session state directory: %w", err)
-	}
-
-	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal session state: %w", err)
-	}
-
-	stateFile, err := sessionStateFile(ctx, state.SessionID)
-	if err != nil {
-		return fmt.Errorf("failed to get session state file path: %w", err)
-	}
-
-	// Atomic write: write to temp file, then rename
-	tmpFile := stateFile + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0o600); err != nil {
-		return fmt.Errorf("failed to write session state: %w", err)
-	}
-	if err := os.Rename(tmpFile, stateFile); err != nil {
-		return fmt.Errorf("failed to rename session state file: %w", err)
+	if err := store.Save(ctx, state); err != nil {
+		return fmt.Errorf("failed to save session state: %w", err)
 	}
 	return nil
 }
@@ -116,20 +138,40 @@ func FindMostRecentSession(ctx context.Context) string {
 	}
 
 	// Scope to current worktree to prevent cross-worktree pollution.
-	worktreePath, wpErr := paths.WorktreeRoot(ctx)
-	if wpErr == nil && worktreePath != "" {
-		var filtered []*SessionState
-		for _, s := range states {
-			if s.WorktreePath == worktreePath {
-				filtered = append(filtered, s)
-			}
-		}
-		if len(filtered) > 0 {
-			states = filtered
-		}
-		// If no sessions match the worktree, fall back to all sessions
+	if filtered := sessionStatesForCurrentWorktree(ctx, states); len(filtered) > 0 {
+		states = filtered
+		// If no sessions match the worktree, fall back to all sessions.
 	}
 
+	return mostRecentSessionID(states)
+}
+
+// FindMostRecentSessionInCurrentWorktree returns the most recently interacted
+// session from the current worktree only. Unlike FindMostRecentSession, it does
+// not fall back to sessions from other worktrees.
+func FindMostRecentSessionInCurrentWorktree(ctx context.Context) string {
+	states, err := ListSessionStates(ctx)
+	if err != nil || len(states) == 0 {
+		return ""
+	}
+	return mostRecentSessionID(sessionStatesForCurrentWorktree(ctx, states))
+}
+
+func sessionStatesForCurrentWorktree(ctx context.Context, states []*SessionState) []*SessionState {
+	worktreePath, err := paths.WorktreeRoot(ctx)
+	if err != nil || worktreePath == "" {
+		return nil
+	}
+	filtered := make([]*SessionState, 0, len(states))
+	for _, s := range states {
+		if s.WorktreePath == worktreePath {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered
+}
+
+func mostRecentSessionID(states []*SessionState) string {
 	var best *SessionState
 	for _, s := range states {
 		if s.LastInteractionTime == nil {
@@ -224,16 +266,13 @@ func StoreModelHint(ctx context.Context, sessionID, model string) error {
 		return nil
 	}
 
-	stateDir, err := getSessionStateDir(ctx)
+	root, err := openSessionStateRoot(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get session state directory: %w", err)
+		return err
 	}
-	if err := os.MkdirAll(stateDir, 0o750); err != nil {
-		return fmt.Errorf("failed to create session state directory: %w", err)
-	}
+	defer root.Close()
 
-	hintFile := filepath.Join(stateDir, sessionID+".model")
-	if err := os.WriteFile(hintFile, []byte(model), 0o600); err != nil {
+	if err := osroot.WriteFile(root, sessionID+".model", []byte(model), 0o600); err != nil {
 		return fmt.Errorf("failed to write model hint file: %w", err)
 	}
 	return nil
@@ -246,25 +285,416 @@ func LoadModelHint(ctx context.Context, sessionID string) string {
 		return ""
 	}
 
-	stateDir, err := getSessionStateDir(ctx)
+	root, err := openSessionStateRootForRead(ctx)
 	if err != nil {
 		logging.Warn(logging.WithComponent(ctx, "session"), "failed to resolve state dir for model hint",
 			slog.String("session_id", sessionID),
 			slog.Any("error", err))
 		return ""
 	}
+	if root == nil {
+		return ""
+	}
+	defer root.Close()
 
-	hintPath := filepath.Join(stateDir, sessionID+".model")
-	data, err := os.ReadFile(hintPath) //nolint:gosec // sessionID is validated above
+	data, err := osroot.ReadFile(root, sessionID+".model")
 	if err != nil {
 		if !os.IsNotExist(err) {
 			logging.Warn(logging.WithComponent(ctx, "session"), "failed to read model hint file",
-				slog.String("path", hintPath),
+				slog.String("session_id", sessionID),
 				slog.Any("error", err))
 		}
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// StoreAgentTypeHint records the agent type that owns a session before
+// SessionState exists. Used by the lifecycle dispatcher when SessionStart fires
+// (state isn't created until TurnStart, so we need a place to remember which
+// agent claimed the session first).
+//
+// Semantics: first writer wins. When multiple agents fire hooks for the same
+// session ID — e.g., Cursor IDE running cursor-agent while also forwarding to
+// Claude Code's hook system — only the agent that fires SessionStart first
+// gets recorded. Subsequent calls return nil without overwriting.
+//
+// At TurnStart, InitializeSession reads this hint to override agentType when
+// the hook firing isn't the same agent that owns the session. After the state
+// file is written, the hint is unused but remains until ClearSessionState
+// removes it alongside the state file.
+//
+// Returns (created=true) when this call wrote the hint, (created=false) when
+// the hint already existed (no-op) or agentType was empty/Unknown.
+//
+// Banner display is gated separately via ClaimSessionStartBanner — winning
+// the ownership claim does NOT mean this agent should also print the banner,
+// because the winner may not implement HookResponseWriter (e.g., Cursor).
+func StoreAgentTypeHint(ctx context.Context, sessionID string, agentType types.AgentType) (created bool, err error) {
+	if vErr := validation.ValidateSessionID(sessionID); vErr != nil {
+		return false, fmt.Errorf("invalid session ID: %w", vErr)
+	}
+	if agentType == "" || agentType == agent.AgentTypeUnknown {
+		return false, nil
+	}
+
+	root, rErr := openSessionStateRoot(ctx)
+	if rErr != nil {
+		return false, rErr
+	}
+	defer root.Close()
+
+	f, oErr := root.OpenFile(sessionID+".agent", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if oErr != nil {
+		if errors.Is(oErr, os.ErrExist) {
+			// First-writer-wins: another caller already claimed this session.
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to create agent hint file: %w", oErr)
+	}
+	defer f.Close()
+	if _, wErr := f.WriteString(string(agentType)); wErr != nil {
+		return false, fmt.Errorf("failed to write agent hint file: %w", wErr)
+	}
+	return true, nil
+}
+
+// ClaimSessionStartBanner records that the SessionStart banner has been emitted
+// for a session. First-writer-wins semantics, separate from StoreAgentTypeHint
+// so a non-banner-capable agent winning the ownership race (e.g. Cursor, which
+// doesn't implement HookResponseWriter) doesn't suppress the banner from a
+// banner-capable agent that fires SessionStart for the same session.
+//
+// Callers MUST only invoke this from within the HookResponseWriter branch — the
+// claim represents "a banner was actually shown", not just "an agent considered
+// showing one". Otherwise a non-writer claimant would re-introduce the bug.
+//
+// Returns (claimed=true) when this call won the race and the caller should
+// emit the banner; (claimed=false) when an earlier call already claimed it.
+func ClaimSessionStartBanner(ctx context.Context, sessionID string) (claimed bool, err error) {
+	if vErr := validation.ValidateSessionID(sessionID); vErr != nil {
+		return false, fmt.Errorf("invalid session ID: %w", vErr)
+	}
+
+	root, rErr := openSessionStateRoot(ctx)
+	if rErr != nil {
+		return false, rErr
+	}
+	defer root.Close()
+
+	f, oErr := root.OpenFile(sessionID+".banner", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if oErr != nil {
+		if errors.Is(oErr, os.ErrExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to create banner marker file: %w", oErr)
+	}
+	_ = f.Close()
+	return true, nil
+}
+
+// LoadAgentTypeHint reads the agent type hint written by SessionStart.
+// Returns empty string if the hint file doesn't exist, can't be read, or the
+// value isn't a registered agent type.
+func LoadAgentTypeHint(ctx context.Context, sessionID string) types.AgentType {
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		return ""
+	}
+
+	root, err := openSessionStateRootForRead(ctx)
+	if err != nil {
+		logging.Warn(logging.WithComponent(ctx, "session"), "failed to resolve state dir for agent hint",
+			slog.String("session_id", sessionID),
+			slog.Any("error", err))
+		return ""
+	}
+	if root == nil {
+		return ""
+	}
+	defer root.Close()
+
+	data, err := osroot.ReadFile(root, sessionID+".agent")
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logging.Warn(logging.WithComponent(ctx, "session"), "failed to read agent hint file",
+				slog.String("session_id", sessionID),
+				slog.Any("error", err))
+		}
+		return ""
+	}
+	return types.AgentType(strings.TrimSpace(string(data)))
+}
+
+// sessionMutationGate provides per-process serialization layered over the
+// OS-level flock so that nested MutateSessionState calls in the same
+// goroutine don't deadlock or lose updates. POSIX flock isn't reentrant
+// across distinct file descriptors in the same process; on top of that, a
+// nested call that did its own load → save would have its save overwritten
+// by the outer save. The gate fixes both: nested calls in the same
+// goroutine reuse the outer's state pointer (no second load, no second
+// save), and only the outermost release drops the flock.
+//
+// Growth: the map accumulates one entry per session ID touched by this
+// process and is never trimmed. Fine today because hook invocations are
+// short-lived subprocesses; a future long-running daemon (status watcher,
+// MCP server) would need a TTL or eviction pass.
+var sessionMutationGate sync.Map // map[string]*sessionGate
+
+type sessionGate struct {
+	mu          sync.Mutex
+	owner       int64 // goroutine ID of the current holder, 0 when unlocked
+	depth       int
+	flockRel    func()
+	activeState *SessionState // shared state pointer for nested mutations
+}
+
+// goroutineID extracts the runtime goroutine ID from the stack header. Used
+// only as a reentrancy key for the session mutation gate — never as a
+// security boundary or for application logic. Returns -1 if the stack
+// header doesn't parse: real goroutine IDs are positive, and gate.owner is
+// initialised to 0, so a -1 sentinel can't falsely match the freshly-
+// constructed gate (or a freshly-released one).
+func goroutineID() int64 {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	const prefix = "goroutine "
+	s := string(buf[:n])
+	if !strings.HasPrefix(s, prefix) {
+		return -1
+	}
+	s = s[len(prefix):]
+	end := strings.IndexByte(s, ' ')
+	if end < 0 {
+		return -1
+	}
+	id, err := strconv.ParseInt(s[:end], 10, 64)
+	if err != nil {
+		return -1
+	}
+	return id
+}
+
+// MutateSessionState is the safe load → mutate → save helper. It takes an
+// OS-level advisory lock against .git/entire-session-locks/<id>.lock for the
+// duration of the read+write so concurrent processes cannot lose each
+// other's updates. fn receives the freshly-loaded state and mutates it in
+// place; returning ErrMutationSkip skips the save. Reentrant within the same
+// goroutine: nested calls share the outer's state pointer and skip the
+// inner load/save, so all mutations are flushed by the outermost call.
+//
+// fn may hold the lock for slow operations — PostCommit's callback, for
+// example, runs CondenseSession (shadow-branch tree builds, transcript
+// compaction) inside the gate. That's deliberate: PostToolUse must not slip
+// in mid-condense and revert CheckpointTranscriptStart or files_touched.
+// A concurrent PostToolUse on the same session waits for the commit to
+// finish.
+//
+// Returns ErrStateNotFound if the state file doesn't exist (event arrived
+// before InitializeSession). Errors from fn or from load/save propagate.
+//
+// All session-state mutations funnel through this helper so the hot-path
+// PostToolUse hook cannot revert fields written by lifecycle handlers
+// (TurnEnd, PostCommit, ModelUpdate) that ran between our load and our save.
+func MutateSessionState(ctx context.Context, sessionID string, fn func(*SessionState) error) error {
+	if sessionID == "" {
+		return ErrStateNotFound
+	}
+	gate, isOuter, release, err := acquireSessionGate(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	if !isOuter {
+		// Nested call: reuse the outer's state pointer. The outer save will
+		// flush our mutations; we don't load or save here.
+		if gate.activeState == nil {
+			return ErrStateNotFound
+		}
+		if err := fn(gate.activeState); err != nil && !errors.Is(err, ErrMutationSkip) {
+			return err
+		}
+		return nil
+	}
+
+	state, err := LoadSessionState(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("load session state: %w", err)
+	}
+	if state == nil {
+		return ErrStateNotFound
+	}
+	gate.activeState = state
+	defer func() { gate.activeState = nil }()
+
+	if err := fn(state); err != nil {
+		if errors.Is(err, ErrMutationSkip) {
+			return nil
+		}
+		return err
+	}
+	if err := SaveSessionState(ctx, state); err != nil {
+		return fmt.Errorf("save session state: %w", err)
+	}
+	return nil
+}
+
+// acquireSessionGate takes the per-process gate (in-memory) and, on the
+// outermost call, the cross-process flock. Returns isOuter=true on the
+// outermost call so MutateSessionState knows whether to load/save.
+func acquireSessionGate(ctx context.Context, sessionID string) (gate *sessionGate, isOuter bool, release func(), err error) {
+	val, _ := sessionMutationGate.LoadOrStore(sessionID, &sessionGate{})
+	gate, ok := val.(*sessionGate)
+	if !ok {
+		return nil, false, nil, fmt.Errorf("session gate type assertion failed for %s", sessionID)
+	}
+
+	gid := goroutineID()
+	gate.mu.Lock()
+	if gate.owner == gid {
+		gate.depth++
+		gate.mu.Unlock()
+		return gate, false, func() {
+			gate.mu.Lock()
+			gate.depth--
+			gate.mu.Unlock()
+		}, nil
+	}
+	gate.mu.Unlock()
+
+	lockPath, err := stateLockPath(ctx, sessionID)
+	if err != nil {
+		return nil, false, nil, fmt.Errorf("resolve state lock path: %w", err)
+	}
+	flockRel, err := flock.Acquire(lockPath)
+	if err != nil {
+		return nil, false, nil, fmt.Errorf("acquire state lock: %w", err)
+	}
+
+	gate.mu.Lock()
+	gate.owner = gid
+	gate.depth = 1
+	gate.flockRel = flockRel
+	gate.mu.Unlock()
+
+	return gate, true, func() {
+		gate.mu.Lock()
+		gate.depth--
+		if gate.depth == 0 {
+			rel := gate.flockRel
+			gate.flockRel = nil
+			gate.owner = 0
+			gate.mu.Unlock()
+			rel()
+			return
+		}
+		gate.mu.Unlock()
+	}, nil
+}
+
+// WithSessionStateLocks acquires the per-session state lock in each git common
+// dir, then runs fn. Lock paths are deduplicated and sorted so callers that
+// span repositories or worktrees can safely acquire more than one lock.
+func WithSessionStateLocks(ctx context.Context, sessionID string, commonDirs []string, fn func() error) error {
+	lockPaths := make([]string, 0, len(commonDirs))
+	seen := make(map[string]struct{}, len(commonDirs))
+	for _, commonDir := range commonDirs {
+		lockPath, err := stateLockPathInCommonDir(commonDir, sessionID)
+		if err != nil {
+			return err
+		}
+		if _, ok := seen[lockPath]; ok {
+			continue
+		}
+		seen[lockPath] = struct{}{}
+		lockPaths = append(lockPaths, lockPath)
+	}
+	slices.Sort(lockPaths)
+
+	releases := make([]func(), 0, len(lockPaths))
+	releaseAll := func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+	}
+	for _, lockPath := range lockPaths {
+		if err := ctx.Err(); err != nil {
+			releaseAll()
+			return fmt.Errorf("session state lock canceled: %w", err)
+		}
+		release, err := flock.Acquire(lockPath)
+		if err != nil {
+			releaseAll()
+			return fmt.Errorf("acquire session state lock: %w", err)
+		}
+		releases = append(releases, release)
+	}
+	defer releaseAll()
+
+	return fn()
+}
+
+// ErrMutationSkip signals MutateSessionState to skip the save without
+// treating fn's return as an error. Use it when the mutation function
+// observes the loaded state and decides no write is needed (for example,
+// when a merge produces no new entries).
+var ErrMutationSkip = errors.New("session state mutation skipped")
+
+// ErrStateNotFound is returned by MutateSessionState when no state file
+// exists for the session ID (typically because the event arrived before
+// InitializeSession ran). Callers that need to distinguish "no state"
+// from a successful no-op can branch on errors.Is(err, ErrStateNotFound).
+var ErrStateNotFound = errors.New("session state not found")
+
+// RecordFilesTouched merges paths into the session's FilesTouched, used by
+// mid-turn lifecycle events (per-tool-use hooks) so PostCommit's carry-forward
+// decision sees an accurate file list. Caller must pre-normalize paths to
+// repo-relative form. No-ops when the session state doesn't exist or the
+// merge produced no changes.
+func RecordFilesTouched(ctx context.Context, sessionID string, modified, added, deleted []string) error {
+	if len(modified) == 0 && len(added) == 0 && len(deleted) == 0 {
+		return nil
+	}
+	err := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		merged := mergeFilesTouched(state.FilesTouched, modified, added, deleted)
+		if slices.Equal(merged, state.FilesTouched) {
+			return ErrMutationSkip
+		}
+		state.FilesTouched = merged
+		return nil
+	})
+	if errors.Is(err, ErrStateNotFound) {
+		return nil
+	}
+	return err
+}
+
+// stateLockPath returns the lock file path for a session. Lock files live in
+// .git/entire-session-locks/ (a sibling to entire-sessions/) so callers that
+// enumerate session state files don't have to filter lock entries. A
+// separate file (rather than locking the state file itself) keeps the lock
+// holder distinct from the data — Save's atomic-rename pattern would
+// otherwise unlink the inode the flock is held on.
+func stateLockPath(ctx context.Context, sessionID string) (string, error) {
+	commonDir, err := GetGitCommonDir(ctx)
+	if err != nil {
+		return "", err
+	}
+	return stateLockPathInCommonDir(commonDir, sessionID)
+}
+
+func stateLockPathInCommonDir(commonDir, sessionID string) (string, error) {
+	if strings.TrimSpace(commonDir) == "" {
+		return "", errors.New("empty git common dir")
+	}
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		return "", fmt.Errorf("invalid session ID: %w", err)
+	}
+	lockDir := filepath.Join(commonDir, "entire-session-locks")
+	if err := os.MkdirAll(lockDir, 0o750); err != nil {
+		return "", fmt.Errorf("create session lock directory: %w", err)
+	}
+	return filepath.Join(lockDir, sessionID+".lock"), nil
 }
 
 // ClearSessionState removes the session state file for the given session ID.
@@ -279,11 +709,36 @@ func ClearSessionState(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("failed to get session state directory: %w", err)
 	}
 
-	// Remove all files for this session (state .json, .model hint, any future hint files).
-	matches, _ := filepath.Glob(filepath.Join(stateDir, sessionID+".*")) //nolint:errcheck // pattern is always valid
-	for _, f := range matches {
-		_ = os.Remove(f)
+	// Remove all files for this session (state .json, .model hint, any future
+	// hint files). Match by literal prefix rather than filepath.Glob: the
+	// session ID is user-controlled, and a glob pattern would let metacharacters
+	// match and delete other sessions' files. os.Root ensures traversal-resistant
+	// removal.
+	prefix := sessionID + "."
+	entries, _ := os.ReadDir(stateDir) //nolint:errcheck // best-effort cleanup; missing dir => nothing to clear
+	var matches []string
+	for _, e := range entries {
+		if name := e.Name(); strings.HasPrefix(name, prefix) {
+			matches = append(matches, name)
+		}
+	}
+	if len(matches) > 0 {
+		root, rootErr := os.OpenRoot(stateDir)
+		if rootErr != nil {
+			return fmt.Errorf("failed to open session state directory for cleanup: %w", rootErr)
+		}
+		defer root.Close()
+		for _, name := range matches {
+			_ = osroot.Remove(root, name) //nolint:errcheck // best-effort cleanup
+		}
 	}
 
+	// Intentionally do NOT remove the per-session lock file under
+	// entire-session-locks/. POSIX flock and Windows LockFileEx are bound to
+	// the inode/file-handle: unlinking the lock path while another process
+	// holds it lets a third caller recreate the file and acquire an
+	// independent lock, breaking mutual exclusion. Lock files are 0-byte
+	// sentinels and session IDs aren't reused, so leaving them in place is
+	// harmless. Bulk cleanup happens via RemoveAll on uninstall.
 	return nil
 }

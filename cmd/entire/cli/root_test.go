@@ -4,11 +4,10 @@ import (
 	"bytes"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
-	"github.com/go-git/go-git/v6/x/plugin"
 	"github.com/spf13/cobra"
 )
 
@@ -67,21 +66,6 @@ func TestVersionFlag_ContainsExpectedInfo(t *testing.T) {
 		if !strings.Contains(output, c.contains) {
 			t.Errorf("--version output missing %s (%q):\n%s", c.name, c.contains, output)
 		}
-	}
-}
-
-func TestRegisterObjectSigner_RegistersPlugin(t *testing.T) {
-	resetPluginEntry("object-signer")
-	registerObjectSignerOnce = sync.Once{}
-	t.Cleanup(func() {
-		resetPluginEntry("object-signer")
-		registerObjectSignerOnce = sync.Once{}
-	})
-
-	RegisterObjectSigner()
-
-	if !plugin.Has(plugin.ObjectSigner()) {
-		t.Fatal("expected object signer plugin to be registered")
 	}
 }
 
@@ -191,4 +175,98 @@ func TestPersistentPostRun_ParentHiddenWalk(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRoot_NounGroupShorthandsUseCobraAliases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		alias     string
+		canonical string
+	}{
+		{alias: "sessions", canonical: "session"},
+		{alias: "cp", canonical: "checkpoint"},
+		{alias: "checkpoints", canonical: "checkpoint"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.alias, func(t *testing.T) {
+			t.Parallel()
+
+			root := NewRootCmd()
+			cmd, _, err := root.Find([]string{tt.alias})
+			if err != nil {
+				t.Fatalf("root.Find(%q): %v", tt.alias, err)
+			}
+			if cmd.Name() != tt.canonical {
+				t.Fatalf("alias %q resolved to %q, want %q", tt.alias, cmd.Name(), tt.canonical)
+			}
+			if !containsString(cmd.Aliases, tt.alias) {
+				t.Fatalf("%q should be registered in %q Aliases, got %v", tt.alias, tt.canonical, cmd.Aliases)
+			}
+			for _, direct := range root.Commands() {
+				if direct.Name() == tt.alias {
+					t.Fatalf("%q should be a Cobra alias, not a duplicate root command", tt.alias)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckpointSearchIsVisibleButTopLevelSearchIsExperimental(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+
+	checkpointSearch, _, err := root.Find([]string{"checkpoint", "search"})
+	if err != nil {
+		t.Fatalf("find checkpoint search: %v", err)
+	}
+	if checkpointSearch.Hidden {
+		t.Fatal("checkpoint search should be visible in checkpoint help")
+	}
+
+	// The top-level `entire search` shortcut is gated as experimental:
+	// visible and grouped in developer builds (the default test build),
+	// hidden in shipped releases.
+	topLevelSearch, _, err := root.Find([]string{"search"})
+	if err != nil {
+		t.Fatalf("find top-level search: %v", err)
+	}
+	if topLevelSearch.GroupID != experimental.GroupID {
+		t.Fatalf("top-level search GroupID = %q, want %q (experimental)", topLevelSearch.GroupID, experimental.GroupID)
+	}
+}
+
+func TestCheckpointPolicyCommandIsExperimental(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+
+	checkpointPolicy, remaining, err := root.Find([]string{"checkpoint", "policy"})
+	if err != nil {
+		t.Fatalf("find checkpoint policy command: %v", err)
+	}
+	if len(remaining) != 0 || checkpointPolicy.Use != "policy" {
+		t.Fatalf("checkpoint policy resolved to %q with remaining args %v", checkpointPolicy.Use, remaining)
+	}
+	// Gated as experimental: visible and grouped in developer builds
+	// (the default test build), hidden in shipped releases.
+	if checkpointPolicy.GroupID != experimental.GroupID {
+		t.Fatalf("checkpoint policy GroupID = %q, want %q (experimental)", checkpointPolicy.GroupID, experimental.GroupID)
+	}
+
+	topLevelPolicy, remaining, err := root.Find([]string{"policy"})
+	if err == nil && len(remaining) == 0 && topLevelPolicy.Use == "policy" {
+		t.Fatal("top-level policy command should not remain after moving policy under checkpoint")
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

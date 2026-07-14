@@ -202,7 +202,12 @@ func CleanupPrePromptState(ctx context.Context, sessionID string) error {
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid session ID for pre-prompt state cleanup: %w", err)
 	}
+	return cleanupTmpStateFile(ctx, fmt.Sprintf("pre-prompt-%s.json", sessionID))
+}
 
+// cleanupTmpStateFile removes one state file from .entire/tmp, treating a
+// missing directory as already clean.
+func cleanupTmpStateFile(ctx context.Context, fileName string) error {
 	tmpDirAbs := resolveTmpDir(ctx)
 
 	root, err := os.OpenRoot(tmpDirAbs)
@@ -214,7 +219,6 @@ func CleanupPrePromptState(ctx context.Context, sessionID string) error {
 	}
 	defer root.Close()
 
-	fileName := fmt.Sprintf("pre-prompt-%s.json", sessionID)
 	return osroot.Remove(root, fileName) //nolint:wrapcheck // best-effort cleanup, caller adds context via wrapping function name
 }
 
@@ -264,6 +268,7 @@ func DetectFileChanges(ctx context.Context, previouslyUntracked []string) (*File
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -324,6 +329,7 @@ func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot stri
 	if err != nil {
 		return files // fail open
 	}
+	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
@@ -431,6 +437,7 @@ func getUntrackedFilesForState(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer repo.Close()
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -567,20 +574,7 @@ func CleanupPreTaskState(ctx context.Context, toolUseID string) error {
 	if err := validation.ValidateToolUseID(toolUseID); err != nil {
 		return fmt.Errorf("invalid tool use ID for pre-task state cleanup: %w", err)
 	}
-
-	tmpDirAbs := resolveTmpDir(ctx)
-
-	root, err := os.OpenRoot(tmpDirAbs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // Directory doesn't exist, nothing to clean up
-		}
-		return fmt.Errorf("failed to open tmp directory root: %w", err)
-	}
-	defer root.Close()
-
-	fileName := fmt.Sprintf("pre-task-%s.json", toolUseID)
-	return osroot.Remove(root, fileName) //nolint:wrapcheck // best-effort cleanup, caller adds context via wrapping function name
+	return cleanupTmpStateFile(ctx, fmt.Sprintf("pre-task-%s.json", toolUseID))
 }
 
 // preTaskFilePrefix is the prefix for pre-task state files
@@ -635,6 +629,13 @@ func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found boo
 // It counts existing checkpoint files in the task metadata checkpoints directory.
 // Returns 1 if no checkpoints exist yet.
 func GetNextCheckpointSequence(sessionID, taskToolUseID string) int {
+	// sessionID/taskToolUseID arrive from agent hook input and are used as path
+	// components below. Reject unsafe values so a crafted "../.." cannot redirect
+	// the os.ReadDir to an arbitrary directory; an invalid ID just starts at 1.
+	if validation.ValidateSessionID(sessionID) != nil || validation.ValidateToolUseID(taskToolUseID) != nil {
+		return 1
+	}
+
 	// Use the session ID directly as the metadata directory name
 	sessionMetadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
 	taskMetadataDir := strategy.TaskMetadataDir(sessionMetadataDir, taskToolUseID)

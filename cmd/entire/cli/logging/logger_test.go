@@ -9,8 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
-	"time"
 )
 
 // Test constants to avoid goconst warnings
@@ -442,70 +442,6 @@ func TestLogging_AdditionalAttrs(t *testing.T) {
 	}
 }
 
-func TestLogDuration(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	initGitRepo(t, tmpDir)
-
-	sessionID := "2025-01-15-duration-test"
-	err := Init(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
-
-	ctx := WithSession(context.Background(), "context-session") // Will be ignored, global takes precedence
-	ctx = WithComponent(ctx, testComponent)
-
-	// Simulate some work
-	start := time.Now().Add(-100 * time.Millisecond) // Fake 100ms ago
-
-	LogDuration(ctx, slog.LevelInfo, "operation completed", start,
-		slog.String("hook", "pre-push"),
-		slog.Bool("success", true),
-	)
-
-	Close()
-
-	// Read log file
-	content, err := os.ReadFile(testLogFilePath(tmpDir))
-	if err != nil {
-		t.Fatalf("Failed to read log file: %v", err)
-	}
-
-	// Parse as JSON
-	var logEntry map[string]interface{}
-	if err := json.Unmarshal(content, &logEntry); err != nil {
-		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, content)
-	}
-
-	// Verify duration_ms is present and reasonable
-	durationMs, ok := logEntry["duration_ms"].(float64)
-	if !ok {
-		t.Fatalf("Expected duration_ms to be a number, got %T: %v", logEntry["duration_ms"], logEntry["duration_ms"])
-	}
-	if durationMs < 90 || durationMs > 200 {
-		t.Errorf("Expected duration_ms around 100, got %v", durationMs)
-	}
-
-	// session_id comes from Init(), not context
-	if logEntry["session_id"] != sessionID {
-		t.Errorf("Expected session_id='%s' (from Init), got %v", sessionID, logEntry["session_id"])
-	}
-	if logEntry["component"] != testComponent {
-		t.Errorf("Expected component='%s', got %v", testComponent, logEntry["component"])
-	}
-	if logEntry["hook"] != "pre-push" {
-		t.Errorf("Expected hook='pre-push', got %v", logEntry["hook"])
-	}
-	if logEntry["success"] != true {
-		t.Errorf("Expected success=true, got %v", logEntry["success"])
-	}
-	if logEntry["level"] != levelINFO {
-		t.Errorf("Expected level='%s', got %v", levelINFO, logEntry["level"])
-	}
-}
-
 func TestLogging_ContextSessionID_WhenNoGlobalSet(t *testing.T) {
 	// Reset any global state to ensure no global session ID
 	resetLogger()
@@ -534,6 +470,66 @@ func TestLogging_ContextSessionID_WhenNoGlobalSet(t *testing.T) {
 	}
 
 	resetLogger()
+}
+
+func TestLogging_ConcurrentInitAndLog(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	initGitRepo(t, tmpDir)
+
+	if err := Init(context.Background(), ""); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	defer Close()
+
+	const (
+		logGoroutines   = 8
+		initGoroutines  = 4
+		closeGoroutines = 2
+		iterations      = 200
+	)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	for i := range logGoroutines {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			<-start
+			for j := range iterations {
+				Info(context.Background(), "concurrent log", slog.Int("worker", worker), slog.Int("iteration", j))
+			}
+		}(i)
+	}
+
+	for range initGoroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range iterations {
+				if err := Init(context.Background(), ""); err != nil {
+					t.Errorf("Init() error = %v", err)
+					return
+				}
+			}
+		}()
+	}
+
+	for range closeGoroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range iterations {
+				Close()
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
 }
 
 func TestInit_RejectsInvalidSessionIDs(t *testing.T) {

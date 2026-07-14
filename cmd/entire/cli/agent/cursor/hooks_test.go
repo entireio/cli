@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -61,6 +62,95 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	assertEntryCommand(t, hooksFile.Hooks.PreCompact, agent.WrapProductionSilentHookCommand("entire hooks cursor pre-compact"))
 	assertEntryCommand(t, hooksFile.Hooks.SubagentStart, agent.WrapProductionSilentHookCommand("entire hooks cursor subagent-start"))
 	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, agent.WrapProductionSilentHookCommand("entire hooks cursor subagent-stop"))
+}
+
+// TestInstallHooks_WindowsProbeSuccessKeepsShWrappers verifies that on a
+// Windows host where a POSIX sh is runnable, Cursor keeps the sh-based wrappers
+// (parity with non-Windows). Mutates the shared probe, so no t.Parallel().
+func TestInstallHooks_WindowsProbeSuccessKeepsShWrappers(t *testing.T) {
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
+		return true // sh works
+	}))
+
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &CursorAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	hooksFile := readHooksFile(t, tempDir)
+	assertEntryCommand(t, hooksFile.Hooks.SessionStart, agent.WrapProductionSilentHookCommand("entire hooks cursor session-start"))
+	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapProductionSilentHookCommand("entire hooks cursor stop"))
+}
+
+// TestInstallHooks_WindowsProbeFailureUsesCmdWrappers verifies that on a Windows
+// host with no runnable POSIX sh, Cursor installs the native cmd.exe wrappers so
+// hooks actually fire (issue #1424). Mutates the shared probe, so no t.Parallel().
+func TestInstallHooks_WindowsProbeFailureUsesCmdWrappers(t *testing.T) {
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
+		return false // no working sh
+	}))
+
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &CursorAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	hooksFile := readHooksFile(t, tempDir)
+	assertEntryCommand(t, hooksFile.Hooks.SessionStart, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor session-start"))
+	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor stop"))
+	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor subagent-stop"))
+}
+
+// TestInstallHooks_WindowsProbeFlipMigratesCleanly verifies that when a host's
+// sh availability changes between installs, a non-force reinstall REPLACES the
+// stale sh-wrapped hooks with cmd.exe ones rather than leaving both (which would
+// double-fire). Mirrors the codex migration test. Mutates the shared probe, so
+// no t.Parallel().
+func TestInstallHooks_WindowsProbeFlipMigratesCleanly(t *testing.T) {
+	shWorks := true
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
+		return shWorks
+	}))
+
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	ag := &CursorAgent{}
+
+	// First install with a working sh → sh-based wrappers.
+	if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("first InstallHooks() error = %v", err)
+	}
+
+	// sh stops working; reinstall WITHOUT force.
+	shWorks = false
+	if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("second InstallHooks() error = %v", err)
+	}
+
+	hooksFile := readHooksFile(t, tempDir)
+	// Exactly one entry per type — the stale sh entry must be gone, not duplicated.
+	if len(hooksFile.Hooks.Stop) != 1 {
+		t.Errorf("Stop hooks = %d after wrapper migration, want 1 (no duplicate)", len(hooksFile.Hooks.Stop))
+	}
+	if len(hooksFile.Hooks.SessionStart) != 1 {
+		t.Errorf("SessionStart hooks = %d after wrapper migration, want 1 (no duplicate)", len(hooksFile.Hooks.SessionStart))
+	}
+	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor stop"))
+
+	// No sh-based Entire wrapper may survive the migration.
+	data, err := os.ReadFile(filepath.Join(tempDir, ".cursor", HooksFileName))
+	if err != nil {
+		t.Fatalf("failed to read hooks file: %v", err)
+	}
+	if strings.Contains(string(data), "sh -c") || strings.Contains(string(data), "command -v entire") {
+		t.Errorf("stale sh-based wrapper survived migration:\n%s", data)
+	}
 }
 
 func TestInstallHooks_Idempotent(t *testing.T) {
@@ -238,7 +328,7 @@ func TestInstallHooks_LocalDev(t *testing.T) {
 	}
 
 	hooksFile := readHooksFile(t, tempDir)
-	assertEntryCommand(t, hooksFile.Hooks.Stop, `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks cursor stop`)
+	assertEntryCommand(t, hooksFile.Hooks.Stop, `"$(git rev-parse --show-toplevel)"/scripts/entire-dev hooks cursor stop`)
 }
 
 func TestInstallHooks_PreservesUnknownFields(t *testing.T) {

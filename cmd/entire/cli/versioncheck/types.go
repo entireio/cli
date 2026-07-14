@@ -4,7 +4,8 @@ import "time"
 
 // VersionCache represents the cached version check data.
 type VersionCache struct {
-	LastCheckTime time.Time `json:"last_check_time"`
+	LastCheckTime  time.Time `json:"last_check_time"`
+	SkippedVersion string    `json:"skipped_version,omitempty"`
 }
 
 // GitHubRelease represents the GitHub API response for a release.

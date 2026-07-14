@@ -178,7 +178,7 @@ func TestAgentHookInstallation(t *testing.T) {
 		}
 	})
 
-	t.Run("localDev mode uses go run", func(t *testing.T) {
+	t.Run("localDev mode delegates to entire-dev script", func(t *testing.T) {
 		// Not parallel - uses os.Chdir
 		env := NewTestEnv(t)
 		env.InitRepo()
@@ -197,7 +197,8 @@ func TestAgentHookInstallation(t *testing.T) {
 			t.Fatalf("InstallHooks(localDev=true) error = %v", err)
 		}
 
-		// Read settings and verify commands use "go run"
+		// Read settings and verify commands delegate to scripts/entire-dev,
+		// which handles compile-on-demand with a PATH-binary fallback.
 		settingsPath := filepath.Join(env.RepoDir, ".claude", claudecode.ClaudeSettingsFileName)
 		data, err := os.ReadFile(settingsPath)
 		if err != nil {
@@ -205,13 +206,13 @@ func TestAgentHookInstallation(t *testing.T) {
 		}
 
 		content := string(data)
-		if !strings.Contains(content, "go run") {
-			t.Error("localDev hooks should use 'go run', but settings.json doesn't contain it")
+		if !strings.Contains(content, "scripts/entire-dev") {
+			t.Error("localDev hooks should delegate to scripts/entire-dev, but settings.json doesn't contain it")
 		}
 	})
 }
 
-// TestAgentSessionOperations verifies ReadSession/WriteSession via agent interface.
+// TestAgentSessionOperations verifies ReadSession/Session via agent interface.
 func TestAgentSessionOperations(t *testing.T) {
 	t.Parallel()
 
@@ -259,7 +260,7 @@ func TestAgentSessionOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("WriteSession writes NativeData to file", func(t *testing.T) {
+	t.Run("Session writes NativeData to file", func(t *testing.T) {
 		t.Parallel()
 		env := NewTestEnv(t)
 		env.InitRepo()
@@ -297,7 +298,7 @@ func TestAgentSessionOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("WriteSession rejects wrong agent", func(t *testing.T) {
+	t.Run("Session rejects wrong agent", func(t *testing.T) {
 		t.Parallel()
 
 		ag, _ := agent.Get("claude-code")
@@ -572,7 +573,7 @@ func TestGeminiCLIHookInstallation(t *testing.T) {
 		}
 	})
 
-	t.Run("localDev mode uses go run", func(t *testing.T) {
+	t.Run("localDev mode delegates to entire-dev script", func(t *testing.T) {
 		// Not parallel - uses os.Chdir
 		env := NewTestEnv(t)
 		env.InitRepo()
@@ -591,7 +592,7 @@ func TestGeminiCLIHookInstallation(t *testing.T) {
 			t.Fatalf("InstallHooks(localDev=true) error = %v", err)
 		}
 
-		// Read settings and verify commands use "go run"
+		// Read settings and verify commands delegate to scripts/entire-dev
 		settingsPath := filepath.Join(env.RepoDir, ".gemini", geminicli.GeminiSettingsFileName)
 		data, err := os.ReadFile(settingsPath)
 		if err != nil {
@@ -599,8 +600,8 @@ func TestGeminiCLIHookInstallation(t *testing.T) {
 		}
 
 		content := string(data)
-		if !strings.Contains(content, "go run") {
-			t.Error("localDev hooks should use 'go run', but settings.json doesn't contain it")
+		if !strings.Contains(content, "scripts/entire-dev") {
+			t.Error("localDev hooks should delegate to scripts/entire-dev, but settings.json doesn't contain it")
 		}
 		if !strings.Contains(content, "$(git rev-parse --show-toplevel)") {
 			t.Error("localDev hooks should use '$(git rev-parse --show-toplevel)', but settings.json doesn't contain it")
@@ -670,7 +671,7 @@ func TestGeminiCLIHookInstallation(t *testing.T) {
 	})
 }
 
-// TestGeminiCLISessionOperations verifies ReadSession/WriteSession via Gemini agent interface.
+// TestGeminiCLISessionOperations verifies ReadSession/Session via Gemini agent interface.
 func TestGeminiCLISessionOperations(t *testing.T) {
 	t.Parallel()
 
@@ -721,7 +722,7 @@ func TestGeminiCLISessionOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("WriteSession writes NativeData to file", func(t *testing.T) {
+	t.Run("Session writes NativeData to file", func(t *testing.T) {
 		t.Parallel()
 		env := NewTestEnv(t)
 		env.InitRepo()
@@ -758,7 +759,7 @@ func TestGeminiCLISessionOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("WriteSession rejects wrong agent", func(t *testing.T) {
+	t.Run("Session rejects wrong agent", func(t *testing.T) {
 		t.Parallel()
 
 		ag, _ := agent.Get("gemini")
@@ -967,7 +968,7 @@ func TestFactoryAIDroidHookInstallation(t *testing.T) {
 		}
 	})
 
-	t.Run("localDev mode uses go run", func(t *testing.T) {
+	t.Run("localDev mode delegates to entire-dev script", func(t *testing.T) {
 		// Not parallel - uses os.Chdir
 		env := NewTestEnv(t)
 		env.InitRepo()
@@ -987,7 +988,7 @@ func TestFactoryAIDroidHookInstallation(t *testing.T) {
 			t.Fatalf("InstallHooks(localDev=true) error = %v", err)
 		}
 
-		// Read settings and verify commands use "go run"
+		// Read settings and verify commands delegate to scripts/entire-dev
 		settingsPath := filepath.Join(env.RepoDir, ".factory", factoryaidroid.FactorySettingsFileName)
 		data, err := os.ReadFile(settingsPath)
 		if err != nil {
@@ -995,8 +996,8 @@ func TestFactoryAIDroidHookInstallation(t *testing.T) {
 		}
 
 		content := string(data)
-		if !strings.Contains(content, "go run") {
-			t.Error("localDev hooks should use 'go run', but settings.json doesn't contain it")
+		if !strings.Contains(content, "scripts/entire-dev") {
+			t.Error("localDev hooks should delegate to scripts/entire-dev, but settings.json doesn't contain it")
 		}
 		if !strings.Contains(content, "$(git rev-parse --show-toplevel)") {
 			t.Error("localDev hooks should use '$(git rev-parse --show-toplevel)', but settings.json doesn't contain it")
@@ -1068,7 +1069,7 @@ func TestFactoryAIDroidHookInstallation(t *testing.T) {
 	})
 }
 
-// TestFactoryAIDroidSessionMethods verifies ReadSession, WriteSession, and GetSessionDir.
+// TestFactoryAIDroidSessionMethods verifies ReadSession, Session, and GetSessionDir.
 func TestFactoryAIDroidSessionMethods(t *testing.T) {
 	t.Parallel()
 
@@ -1112,7 +1113,7 @@ func TestFactoryAIDroidSessionMethods(t *testing.T) {
 		}
 	})
 
-	t.Run("WriteSession round-trips with ReadSession", func(t *testing.T) {
+	t.Run("Session round-trips with ReadSession", func(t *testing.T) {
 		t.Parallel()
 
 		tmpDir := t.TempDir()
@@ -1329,7 +1330,7 @@ func TestOpenCodeHookInstallation(t *testing.T) {
 	})
 }
 
-// TestOpenCodeSessionOperations verifies ReadSession/WriteSession via OpenCode agent interface.
+// TestOpenCodeSessionOperations verifies ReadSession/Session via OpenCode agent interface.
 func TestOpenCodeSessionOperations(t *testing.T) {
 	t.Parallel()
 
@@ -1381,7 +1382,7 @@ func TestOpenCodeSessionOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("WriteSession validates input", func(t *testing.T) {
+	t.Run("Session validates input", func(t *testing.T) {
 		t.Parallel()
 
 		ag, _ := agent.Get("opencode")
@@ -1390,7 +1391,7 @@ func TestOpenCodeSessionOperations(t *testing.T) {
 			t.Error("WriteSession(nil) should error")
 		}
 		if err := ag.WriteSession(context.Background(), &agent.AgentSession{}); err == nil {
-			t.Error("WriteSession with empty NativeData should error")
+			t.Error("Session with empty NativeData should error")
 		}
 	})
 }

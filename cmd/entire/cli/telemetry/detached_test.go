@@ -8,6 +8,44 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func TestBuildPluginEventPayload(t *testing.T) {
+	t.Parallel()
+	payload := BuildPluginEventPayload("pgr", true, "1.2.3")
+	if payload == nil {
+		t.Fatal("BuildPluginEventPayload returned nil")
+		return
+	}
+	if payload.Event != "cli_plugin_executed" {
+		t.Errorf("Event = %q, want %q", payload.Event, "cli_plugin_executed")
+	}
+	if got := payload.Properties["plugin"]; got != "pgr" {
+		t.Errorf("plugin property = %v, want %q", got, "pgr")
+	}
+	if got := payload.Properties["command"]; got != "entire pgr" {
+		t.Errorf("command property = %v, want %q", got, "entire pgr")
+	}
+	if got := payload.Properties["cli_version"]; got != "1.2.3" {
+		t.Errorf("cli_version property = %v, want %q", got, "1.2.3")
+	}
+	if got := payload.Properties["isEntireEnabled"]; got != true {
+		t.Errorf("isEntireEnabled property = %v, want true", got)
+	}
+	// Plugin args/flags must never appear in the payload.
+	if _, ok := payload.Properties["flags"]; ok {
+		t.Error("plugin payload must not include 'flags'")
+	}
+	if _, ok := payload.Properties["args"]; ok {
+		t.Error("plugin payload must not include 'args'")
+	}
+}
+
+func TestBuildPluginEventPayload_EmptyName(t *testing.T) {
+	t.Parallel()
+	if got := BuildPluginEventPayload("", true, "1.0.0"); got != nil {
+		t.Errorf("expected nil for empty plugin name, got %+v", got)
+	}
+}
+
 func TestEventPayloadSerialization(t *testing.T) {
 	payload := EventPayload{
 		Event:      "cli_command_executed",
@@ -115,4 +153,29 @@ func TestSendEventHandlesInvalidJSON(_ *testing.T) {
 	SendEvent("invalid json")
 	SendEvent("")
 	SendEvent("{}")
+}
+
+func TestParseGitVersion(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		out  string
+		want string
+	}{
+		{"standard", "git version 2.43.0\n", "2.43.0"},
+		{"apple suffix", "git version 2.39.3 (Apple Git-146)\n", "2.39.3"},
+		{"windows suffix", "git version 2.45.1.windows.1\n", "2.45.1.windows.1"},
+		{"no trailing newline", "git version 2.40.0", "2.40.0"},
+		{"empty", "", ""},
+		{"unexpected prefix", "not git output", ""},
+		{"missing version token", "git version", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := parseGitVersion(tt.out); got != tt.want {
+				t.Errorf("parseGitVersion(%q) = %q, want %q", tt.out, got, tt.want)
+			}
+		})
+	}
 }

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -69,8 +71,20 @@ func TestRegistryOperations(t *testing.T) {
 	})
 }
 
-func TestDetect(t *testing.T) {
-	// Save original registry state
+// sessionDirAgent is a mock with a configurable session dir, for path-prefix tests.
+type sessionDirAgent struct {
+	mockAgent
+
+	name       types.AgentName
+	agentType  types.AgentType
+	sessionDir string
+}
+
+func (s *sessionDirAgent) Name() types.AgentName                  { return s.name }
+func (s *sessionDirAgent) Type() types.AgentType                  { return s.agentType }
+func (s *sessionDirAgent) GetSessionDir(_ string) (string, error) { return s.sessionDir, nil }
+
+func TestAgentForTranscriptPath(t *testing.T) {
 	originalRegistry := make(map[types.AgentName]Factory)
 	registryMu.Lock()
 	for k, v := range registry {
@@ -78,60 +92,111 @@ func TestDetect(t *testing.T) {
 	}
 	registry = make(map[types.AgentName]Factory)
 	registryMu.Unlock()
-
-	defer func() {
+	t.Cleanup(func() {
 		registryMu.Lock()
 		registry = originalRegistry
 		registryMu.Unlock()
-	}()
-
-	t.Run("returns error when no agents detected", func(t *testing.T) {
-		// Register an agent that won't be detected
-		Register(types.AgentName("undetected"), func() Agent {
-			return &mockAgent{} // DetectPresence returns false
-		})
-
-		_, err := Detect(context.Background())
-		if err == nil {
-			t.Error("expected error when no agent detected")
-		}
-		if !strings.Contains(err.Error(), "no agent detected") {
-			t.Errorf("expected 'no agent detected' in error, got: %v", err)
-		}
 	})
 
-	t.Run("returns detected agent", func(t *testing.T) {
-		// Clear registry
-		registryMu.Lock()
-		registry = make(map[types.AgentName]Factory)
-		registryMu.Unlock()
+	cursor := &sessionDirAgent{
+		name:       types.AgentName("cursor"),
+		agentType:  types.AgentType("Cursor"),
+		sessionDir: "/home/u/.cursor/projects/repo/agent-transcripts",
+	}
+	claude := &sessionDirAgent{
+		name:       types.AgentName("claude-code"),
+		agentType:  types.AgentType("Claude Code"),
+		sessionDir: "/home/u/.claude/projects/repo",
+	}
+	Register(cursor.name, func() Agent { return cursor })
+	Register(claude.name, func() Agent { return claude })
 
-		// Register an agent that will be detected
-		Register(types.AgentName("detected"), func() Agent {
-			return &detectableAgent{}
+	cases := []struct {
+		name       string
+		transcript string
+		wantAgent  types.AgentType
+		wantOK     bool
+	}{
+		{
+			name:       "cursor IDE nested layout",
+			transcript: "/home/u/.cursor/projects/repo/agent-transcripts/abc/abc.jsonl",
+			wantAgent:  cursor.Type(),
+			wantOK:     true,
+		},
+		{
+			name:       "cursor CLI flat layout",
+			transcript: "/home/u/.cursor/projects/repo/agent-transcripts/abc.jsonl",
+			wantAgent:  cursor.Type(),
+			wantOK:     true,
+		},
+		{
+			name:       "claude code transcript",
+			transcript: "/home/u/.claude/projects/repo/abc.jsonl",
+			wantAgent:  claude.Type(),
+			wantOK:     true,
+		},
+		{
+			name:       "empty transcript path returns false",
+			transcript: "",
+			wantOK:     false,
+		},
+		{
+			name:       "unrelated path returns false",
+			transcript: "/home/u/somewhere/else/transcript.jsonl",
+			wantOK:     false,
+		},
+		{
+			name: "directory-prefix collision is rejected",
+			// Without a separator-aware prefix check, this would erroneously
+			// match an agent rooted at /home/u/.cursor/projects/rep.
+			transcript: "/home/u/.cursor/projects/repository/agent-transcripts/x.jsonl",
+			wantOK:     false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ag, ok := AgentForTranscriptPath(tc.transcript, "/repo")
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !tc.wantOK {
+				return
+			}
+			if ag.Type() != tc.wantAgent {
+				t.Errorf("agent = %q, want %q", ag.Type(), tc.wantAgent)
+			}
 		})
+	}
+}
 
-		agent, err := Detect(context.Background())
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+// TestPathHasDirPrefix_CaseSensitivity verifies the platform-dependent
+// case-handling of pathHasDirPrefix. On Windows, NTFS/ReFS are case-
+// insensitive and filepath.Abs preserves whatever casing the input had, so
+// the transcript-path override must match across casing differences. On Unix
+// the comparison stays case-sensitive (different cases are different files).
+func TestPathHasDirPrefix_CaseSensitivity(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		// Mixed-case paths that refer to the same NTFS location must match.
+		if !pathHasDirPrefix(`C:\Users\Bob\.cursor\projects\repo\agent-transcripts\abc.jsonl`,
+			`c:\users\bob\.cursor\projects\repo\agent-transcripts`) {
+			t.Errorf("expected case-insensitive match on Windows for mixed-case prefix")
 		}
-		if agent.Name() != types.AgentName("detectable") {
-			t.Errorf("expected Name() %q, got %q", "detectable", agent.Name())
+		// Equality with different casing should also match.
+		if !pathHasDirPrefix(`C:\Users\Bob\.cursor\projects\repo`,
+			`c:\users\bob\.cursor\projects\repo`) {
+			t.Errorf("expected case-insensitive equality match on Windows")
 		}
-	})
-}
+		return
+	}
 
-// detectableAgent is a mock that returns true for DetectPresence
-type detectableAgent struct {
-	mockAgent
-}
-
-func (d *detectableAgent) Name() types.AgentName {
-	return types.AgentName("detectable")
-}
-
-func (d *detectableAgent) DetectPresence(_ context.Context) (bool, error) {
-	return true, nil
+	// Unix: case-sensitive — different casing means different files.
+	if pathHasDirPrefix("/Home/u/.cursor/projects/repo/x.jsonl",
+		"/home/u/.cursor/projects/repo") {
+		t.Errorf("expected case-sensitive comparison on %s", runtime.GOOS)
+	}
 }
 
 func TestAgentNameConstants(t *testing.T) {
@@ -331,3 +396,44 @@ type protectedDirAgent struct {
 
 func (p *protectedDirAgent) ProtectedDirs() []string  { return p.dirs }
 func (p *protectedDirAgent) ProtectedFiles() []string { return p.files }
+
+func TestLauncherFor(t *testing.T) {
+	t.Parallel()
+	// Claude Code should be found. (claudecode init() registers it via the blank
+	// import in generate_external_test.go — but registry_test.go is package agent,
+	// so we register a launcher directly here.)
+	Register(types.AgentName("launcher-test-agent"), func() Agent {
+		return &mockLauncherAgent{}
+	})
+	t.Cleanup(func() {
+		registryMu.Lock()
+		delete(registry, types.AgentName("launcher-test-agent"))
+		registryMu.Unlock()
+	})
+
+	l, ok := LauncherFor(types.AgentName("launcher-test-agent"))
+	if !ok {
+		t.Fatal("expected launcher-test-agent to implement Launcher")
+	}
+	if l == nil {
+		t.Fatal("expected non-nil Launcher")
+	}
+	// A non-existent agent should return false.
+	l2, ok2 := LauncherFor(types.AgentName("does-not-exist"))
+	if ok2 {
+		t.Error("expected ok=false for unknown agent")
+	}
+	if l2 != nil {
+		t.Error("expected nil Launcher for unknown agent")
+	}
+}
+
+// mockLauncherAgent implements Agent and Launcher for testing.
+type mockLauncherAgent struct {
+	mockAgent
+}
+
+//nolint:unparam // error is always nil in this mock; satisfies the Launcher interface.
+func (m *mockLauncherAgent) LaunchCmd(ctx context.Context, _ string) (*exec.Cmd, error) {
+	return exec.CommandContext(ctx, "true"), nil
+}

@@ -1,7 +1,6 @@
 package paths
 
 import (
-	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -19,6 +18,7 @@ func TestIsSubpath(t *testing.T) {
 		{name: "equal paths", parent: "/a/b", child: "/a/b", want: true},
 		{name: "child outside parent", parent: "/a/b", child: "/a/c", want: false},
 		{name: "parent prefix but not subpath", parent: "/a/b", child: "/a/bc", want: false},
+		{name: "dot-dot prefixed child inside parent", parent: "/a/b", child: "/a/b/..generated/schema.json", want: true},
 
 		// Traversal attacks
 		{name: "dot-dot escape", parent: "/a/b", child: "/a/b/../../../etc/passwd", want: false},
@@ -46,6 +46,35 @@ func TestIsSubpath(t *testing.T) {
 	}
 }
 
+func TestIsRelativeTraversal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		rel  string
+		want bool
+	}{
+		{name: "exact dot-dot", rel: "..", want: true},
+		{name: "dot-dot child", rel: filepath.Join("..", "outside.txt"), want: true},
+		{name: "slash dot-dot child", rel: "../outside.txt", want: true},
+		{name: "backslash dot-dot child", rel: `..\outside.txt`, want: true},
+		{name: "dot-dot prefixed name", rel: filepath.Join("..generated", "schema.json"), want: false},
+		{name: "slash dot-dot prefixed name", rel: "../generated/schema.json", want: true},
+		{name: "backslash dot-dot prefixed name", rel: `..\generated\schema.json`, want: true},
+		{name: "ordinary child", rel: filepath.Join("dir", "file.txt"), want: false},
+		{name: "current dir", rel: ".", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := IsRelativeTraversal(tt.rel)
+			if got != tt.want {
+				t.Errorf("IsRelativeTraversal(%q) = %v, want %v", tt.rel, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsInfrastructurePath(t *testing.T) {
 	tests := []struct {
 		path string
@@ -64,62 +93,6 @@ func TestIsInfrastructurePath(t *testing.T) {
 				t.Errorf("IsInfrastructurePath(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestSanitizePathForClaude(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"/Users/test/myrepo", "-Users-test-myrepo"},
-		{"/home/user/project", "-home-user-project"},
-		{"simple", "simple"},
-		{"/path/with spaces/here", "-path-with-spaces-here"},
-		{"/path.with.dots/file", "-path-with-dots-file"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := SanitizePathForClaude(tt.input)
-			if got != tt.want {
-				t.Errorf("SanitizePathForClaude(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestGetClaudeProjectDir_Override(t *testing.T) {
-	// Set the override environment variable
-	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", "/tmp/test-claude-project")
-
-	result, err := GetClaudeProjectDir("/some/repo/path")
-	if err != nil {
-		t.Fatalf("GetClaudeProjectDir() error = %v", err)
-	}
-
-	if result != "/tmp/test-claude-project" {
-		t.Errorf("GetClaudeProjectDir() = %q, want %q", result, "/tmp/test-claude-project")
-	}
-}
-
-func TestGetClaudeProjectDir_Default(t *testing.T) {
-	// Ensure env var is not set by setting it to empty string
-	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", "")
-
-	result, err := GetClaudeProjectDir("/Users/test/myrepo")
-	if err != nil {
-		t.Fatalf("GetClaudeProjectDir() error = %v", err)
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("os.UserHomeDir() error = %v", err)
-	}
-	expected := filepath.Join(homeDir, ".claude", "projects", "-Users-test-myrepo")
-
-	if result != expected {
-		t.Errorf("GetClaudeProjectDir() = %q, want %q", result, expected)
 	}
 }
 
@@ -162,6 +135,29 @@ func TestToRelativePath_MSYSPaths(t *testing.T) {
 				t.Errorf("ToRelativePath(%q, %q) = %q, want %q", tt.absPath, tt.cwd, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestToRelativePath_AllowsDotDotPrefixedRepoPath(t *testing.T) {
+	t.Parallel()
+	cwd := t.TempDir()
+	absPath := filepath.Join(cwd, "..generated", "schema.json")
+	want := filepath.Join("..generated", "schema.json")
+
+	got := ToRelativePath(absPath, cwd)
+	if got != want {
+		t.Errorf("ToRelativePath(%q, %q) = %q, want %q", absPath, cwd, got, want)
+	}
+}
+
+func TestToRelativePath_RejectsDotDotTraversal(t *testing.T) {
+	t.Parallel()
+	cwd := t.TempDir()
+	absPath := filepath.Join(filepath.Dir(cwd), "..generated", "schema.json")
+
+	got := ToRelativePath(absPath, cwd)
+	if got != "" {
+		t.Errorf("ToRelativePath(%q, %q) = %q, want empty string", absPath, cwd, got)
 	}
 }
 

@@ -20,23 +20,25 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.release-type.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
 
-      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
       - name: Setup Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           cache: false
           go-version-file: go.mod
 
       - name: Generate Homebrew Tap token
         id: app-token
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
           private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
@@ -82,8 +84,19 @@ jobs:
             git log --oneline "${BASE_TAG}..HEAD" --no-merges >> "$RUNNER_TEMP/release_notes.md"
           fi
 
+      - name: Detect macOS signing availability
+        id: signing
+        env:
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+        run: |
+          if [ -n "$MACOS_SIGN_P12" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
           distribution: goreleaser-pro
           version: latest
@@ -103,13 +116,86 @@ jobs:
           DISCORD_WEBHOOK_ID: ${{ secrets.DISCORD_WEBHOOK_ID }}
           DISCORD_WEBHOOK_TOKEN: ${{ secrets.DISCORD_WEBHOOK_TOKEN }}
 
-  notify-slack:
+      # Guard against the notarize pipe silently skipping (e.g. notarize.macos.ids
+      # not matching the build ids). GoReleaser only warns and exits 0 in that
+      # case, so the job stays green while shipping ad-hoc-signed binaries that
+      # Gatekeeper kills on launch. We can't run codesign/spctl on Linux, but a
+      # Developer ID signed Mach-O embeds the signing certificate, whose subject
+      # ("Developer ID Application: … (TEAMID)") is greppable; an ad-hoc binary
+      # embeds no certificate. Fail closed if any darwin binary is unsigned or if
+      # none are found at all.
+      - name: Verify macOS binaries are Developer ID signed
+        if: steps.signing.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          mapfile -t bins < <(jq -r '.[] | select(.type=="Binary" and .goos=="darwin") | .path' dist/artifacts.json)
+          if [ "${#bins[@]}" -eq 0 ]; then
+            echo "::error::No darwin binaries found in dist/artifacts.json — cannot verify signing. Did the build matrix change?"
+            exit 1
+          fi
+          fail=0
+          for bin in "${bins[@]}"; do
+            if grep -aq "Developer ID Application" "$bin"; then
+              echo "ok: $bin is Developer ID signed"
+            else
+              echo "::error::$bin is NOT Developer ID signed (ad-hoc only) — the notarize pipe was skipped. Check that notarize.macos.ids in .goreleaser.yaml matches the build ids."
+              fail=1
+            fi
+          done
+          exit $fail
+
+  # A stable tag only refreshes the stable cask; the nightly channel would
+  # otherwise not catch up until the next scheduled nightly run cuts a tag from
+  # a *newer* commit (and create-nightly-tag.sh skips when HEAD already has a
+  # nightly). To ship the release on both channels immediately, cut a nightly
+  # tag from the exact stable commit and push it. That push re-triggers this
+  # workflow on the nightly-tag path, which uploads the entire@nightly cask.
+  mirror-nightly:
     runs-on: ubuntu-latest
     needs: [release]
-    if: ${{ always() && needs.release.result == 'failure' }}
+    # Only mirror stable releases. On a nightly-tag run the release job already
+    # published the nightly channel, so this would recurse — skip it there.
+    if: ${{ needs.release.result == 'success' && needs.release.outputs.prerelease == 'false' }}
+    steps:
+      # A cli-scoped GitHub App token (not the default GITHUB_TOKEN) so the tag
+      # push triggers a fresh workflow run — GITHUB_TOKEN pushes are suppressed
+      # to prevent recursion, which would leave the nightly cask un-uploaded.
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: cli
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Cut nightly tag from the stable commit
+        run: |
+          TAG=$(scripts/create-nightly-tag.sh) && EXIT_CODE=0 || EXIT_CODE=$?
+          if [ "$EXIT_CODE" -eq 2 ]; then
+            echo "Nightly already current for this commit — nothing to mirror."
+            exit 0
+          elif [ "$EXIT_CODE" -ne 0 ] || [ -z "$TAG" ]; then
+            echo "::error::Failed to generate nightly tag to mirror ${RELEASE_TAG}"
+            exit 1
+          fi
+          echo "Mirroring ${RELEASE_TAG} to nightly channel as ${TAG}"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+  notify-slack:
+    runs-on: ubuntu-latest
+    needs: [release, mirror-nightly]
+    if: ${{ always() && (needs.release.result == 'failure' || needs.mirror-nightly.result == 'failure') }}
     steps:
       - name: Notify Slack of release failure
-        uses: slackapi/slack-github-action@af78098f536edbc4de71162a307590698245be95 # v3.0.1
+        uses: slackapi/slack-github-action@0d95c9a7becc1e6e297d76df9bc735c44f4cbcbc # v3.0.5
         with:
           webhook: ${{ secrets.E2E_SLACK_WEBHOOK_URL }}
           webhook-type: incoming-webhook

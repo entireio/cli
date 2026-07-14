@@ -4,14 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,8 +24,6 @@ type DeepCheckpointValidation struct {
 	ExpectedTranscriptContent []string
 }
 
-var hexIDPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
-
 // AssertFileExists asserts that at least one file matches the glob pattern
 // relative to dir.
 func AssertFileExists(t *testing.T, dir string, glob string) {
@@ -34,22 +31,6 @@ func AssertFileExists(t *testing.T, dir string, glob string) {
 	matches, err := filepath.Glob(filepath.Join(dir, glob))
 	require.NoError(t, err)
 	assert.NotEmpty(t, matches, "expected files matching %s in %s", glob, dir)
-}
-
-// AssertConsoleLogDoesNotContain asserts that the current test's console.log
-// does not contain any of the forbidden substrings.
-func AssertConsoleLogDoesNotContain(t *testing.T, s *RepoState, forbidden ...string) {
-	t.Helper()
-
-	require.NoError(t, s.ConsoleLog.Sync())
-
-	data, err := os.ReadFile(filepath.Join(s.ArtifactDir, "console.log"))
-	require.NoError(t, err)
-
-	log := string(data)
-	for _, needle := range forbidden {
-		assert.NotContains(t, log, needle, "console.log should not contain %q", needle)
-	}
 }
 
 // WaitForFileExists polls until at least one file matches the glob pattern
@@ -110,17 +91,16 @@ func WaitForCheckpoint(t *testing.T, s *RepoState, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		after := GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
-		if after != s.CheckpointBefore {
+		if CheckpointState(s.Dir) != s.CheckpointBefore {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Fatalf("checkpoint branch did not advance within %s", timeout)
+	t.Fatalf("checkpoint state did not advance within %s", timeout)
 }
 
-// shadowBranches returns all shadow branches (entire/*) excluding entire/checkpoints/*.
-func shadowBranches(t *testing.T, dir string) []string {
+// ShadowBranches returns all shadow branches (entire/*) excluding entire/checkpoints/*.
+func ShadowBranches(t *testing.T, dir string) []string {
 	t.Helper()
 	branches := GitOutput(t, dir, "for-each-ref", "--format=%(refname:short)", "refs/heads/entire/")
 	var shadow []string
@@ -142,13 +122,13 @@ func WaitForNoShadowBranches(t *testing.T, dir string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		shadow := shadowBranches(t, dir)
+		shadow := ShadowBranches(t, dir)
 		if len(shadow) == 0 {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	shadow := shadowBranches(t, dir)
+	shadow := ShadowBranches(t, dir)
 	require.Emptyf(t, shadow,
 		"shadow branches should be cleaned up within %s after commit, found: %v", timeout, shadow)
 }
@@ -158,30 +138,31 @@ func WaitForNoShadowBranches(t *testing.T, dir string, timeout time.Duration) {
 // expected to persist (e.g., session is still idle).
 func AssertHasShadowBranches(t *testing.T, dir string) {
 	t.Helper()
-	shadow := shadowBranches(t, dir)
+	shadow := ShadowBranches(t, dir)
 	assert.NotEmpty(t, shadow,
 		"expected at least one shadow branch to persist, but none found")
 }
 
-// AssertCheckpointAdvanced asserts the checkpoint branch moved forward.
+// AssertCheckpointAdvanced asserts the committed checkpoint state moved forward.
 func AssertCheckpointAdvanced(t *testing.T, s *RepoState) {
 	t.Helper()
-	after := GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
-	assert.NotEqual(t, s.CheckpointBefore, after, "checkpoint branch did not advance")
+	assert.NotEqual(t, s.CheckpointBefore, CheckpointState(s.Dir), "checkpoint state did not advance")
 }
 
-// AssertCheckpointNotAdvanced asserts the checkpoint branch has NOT moved.
+// AssertCheckpointNotAdvanced asserts the committed checkpoint state has NOT moved.
 func AssertCheckpointNotAdvanced(t *testing.T, s *RepoState) {
 	t.Helper()
-	after := GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
-	assert.Equal(t, s.CheckpointBefore, after, "checkpoint branch advanced unexpectedly")
+	assert.Equal(t, s.CheckpointBefore, CheckpointState(s.Dir), "checkpoint state advanced unexpectedly")
 }
 
-// AssertCheckpointIDFormat asserts the checkpoint ID is 12 lowercase hex chars.
+// AssertCheckpointIDFormat asserts the checkpoint ID is a valid checkpoint ID:
+// either 12 lowercase hex chars or a canonical 26-char ULID. It calls the
+// production validator (not a loose regex) so the test rejects exactly what
+// production rejects — e.g. a ULID-shaped but timestamp-overflowing string.
 func AssertCheckpointIDFormat(t *testing.T, checkpointID string) {
 	t.Helper()
-	assert.Regexp(t, hexIDPattern, checkpointID,
-		"checkpoint ID %q should be 12 lowercase hex chars", checkpointID)
+	assert.NoErrorf(t, checkpointid.Validate(checkpointID),
+		"checkpoint ID %q should be a valid checkpoint ID (12-hex or ULID)", checkpointID)
 }
 
 // AssertHasCheckpointTrailer asserts the commit has an Entire-Checkpoint trailer,
@@ -200,8 +181,12 @@ func AssertHasCheckpointTrailer(t *testing.T, dir string, ref string) string {
 // commits from multi-commit agent turns don't cause false failures.
 func AssertCheckpointInLastN(t *testing.T, dir string, checkpointID string, n int) {
 	t.Helper()
+	logRef := checkpointReadRef()
+	if UsingGitRefs() {
+		logRef = checkpointRefName(checkpointID)
+	}
 	out := GitOutput(t, dir, "log", "--grep="+checkpointID,
-		"--format=%s", "entire/checkpoints/v1")
+		"--format=%s", logRef)
 	var lines []string
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if line != "" {
@@ -217,11 +202,19 @@ func AssertCheckpointInLastN(t *testing.T, dir string, checkpointID string, n in
 // the checkpoint branch and that its metadata.json exists in the tree.
 func AssertCheckpointExists(t *testing.T, dir string, checkpointID string) {
 	t.Helper()
-	out := GitOutput(t, dir, "log", "entire/checkpoints/v1", "--grep="+checkpointID, "--oneline")
+	if UsingGitRefs() {
+		// No single branch to grep; existence is the per-checkpoint ref carrying a
+		// readable root metadata.json.
+		blob := checkpointBlobSpec(checkpointID, "metadata.json")
+		raw := gitOutputSafe(dir, "show", blob)
+		assert.NotEmpty(t, raw, "checkpoint %s metadata not found at %s", checkpointID, blob)
+		return
+	}
+	out := GitOutput(t, dir, "log", checkpointReadRef(), "--grep="+checkpointID, "--oneline")
 	assert.NotEmpty(t, out, "checkpoint %s not found on checkpoint branch", checkpointID)
 
 	path := CheckpointPath(checkpointID) + "/metadata.json"
-	blob := "entire/checkpoints/v1:" + path
+	blob := checkpointReadRef() + ":" + path
 	raw := gitOutputSafe(dir, "show", blob)
 	assert.NotEmpty(t, raw,
 		"checkpoint %s metadata not found at %s", checkpointID, path)
@@ -233,10 +226,17 @@ func WaitForCheckpointExists(t *testing.T, dir string, checkpointID string, time
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		out := gitOutputSafe(dir, "log", "entire/checkpoints/v1", "--grep="+checkpointID, "--oneline")
+		if UsingGitRefs() {
+			if gitOutputSafe(dir, "show", checkpointBlobSpec(checkpointID, "metadata.json")) != "" {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		out := gitOutputSafe(dir, "log", checkpointReadRef(), "--grep="+checkpointID, "--oneline")
 		if out != "" {
 			path := CheckpointPath(checkpointID) + "/metadata.json"
-			blob := "entire/checkpoints/v1:" + path
+			blob := checkpointReadRef() + ":" + path
 			raw := gitOutputSafe(dir, "show", blob)
 			if raw != "" {
 				return
@@ -244,7 +244,7 @@ func WaitForCheckpointExists(t *testing.T, dir string, checkpointID string, time
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Fatalf("checkpoint %s not found on checkpoint branch within %s", checkpointID, timeout)
+	t.Fatalf("checkpoint %s not found within %s", checkpointID, timeout)
 }
 
 // AssertCommitLinkedToCheckpoint asserts the trailer exists AND the
@@ -281,13 +281,16 @@ func WaitForCheckpointAdvanceFrom(t *testing.T, dir string, fromRef string, time
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		after := GitOutput(t, dir, "rev-parse", "entire/checkpoints/v1")
-		if after != fromRef {
+		if CheckpointState(dir) != fromRef {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Fatalf("checkpoint branch did not advance from %s within %s", fromRef[:8], timeout)
+	displayRef := fromRef
+	if len(displayRef) > 8 {
+		displayRef = displayRef[:8]
+	}
+	t.Fatalf("checkpoint state did not advance from %s within %s", displayRef, timeout)
 }
 
 // WaitForSessionIdle polls the session state files in .git/entire-sessions/
@@ -390,10 +393,8 @@ func ValidateCheckpointDeep(t *testing.T, dir string, v DeepCheckpointValidation
 		AssertCheckpointFilesTouched(t, dir, v.CheckpointID, v.FilesTouched)
 	}
 
-	path := CheckpointPath(v.CheckpointID)
-
 	// Validate session metadata exists and has checkpoint_id
-	sessionBlob := fmt.Sprintf("entire/checkpoints/v1:%s/0/metadata.json", path)
+	sessionBlob := checkpointBlobSpec(v.CheckpointID, "0/metadata.json")
 	sessionRaw := gitOutputSafe(dir, "show", sessionBlob)
 	if assert.NotEmpty(t, sessionRaw, "session metadata should exist at %s", sessionBlob) {
 		var sessionMeta map[string]any
@@ -405,7 +406,7 @@ func ValidateCheckpointDeep(t *testing.T, dir string, v DeepCheckpointValidation
 	}
 
 	// Validate transcript is valid JSONL
-	transcriptBlob := fmt.Sprintf("entire/checkpoints/v1:%s/0/full.jsonl", path)
+	transcriptBlob := checkpointBlobSpec(v.CheckpointID, "0/full.jsonl")
 	transcriptRaw := gitOutputSafe(dir, "show", transcriptBlob)
 	if assert.NotEmpty(t, transcriptRaw, "transcript should exist at %s", transcriptBlob) {
 		lines := strings.Split(transcriptRaw, "\n")
@@ -423,7 +424,7 @@ func ValidateCheckpointDeep(t *testing.T, dir string, v DeepCheckpointValidation
 		}
 
 		// Validate content hash
-		hashBlob := fmt.Sprintf("entire/checkpoints/v1:%s/0/content_hash.txt", path)
+		hashBlob := checkpointBlobSpec(v.CheckpointID, "0/content_hash.txt")
 		hashRaw := gitOutputSafe(dir, "show", hashBlob)
 		if hashRaw != "" {
 			hash := sha256.Sum256([]byte(transcriptRaw))
@@ -435,7 +436,7 @@ func ValidateCheckpointDeep(t *testing.T, dir string, v DeepCheckpointValidation
 
 	// Validate prompt.txt if expected prompts specified
 	if len(v.ExpectedPrompts) > 0 {
-		promptBlob := fmt.Sprintf("entire/checkpoints/v1:%s/0/prompt.txt", path)
+		promptBlob := checkpointBlobSpec(v.CheckpointID, "0/prompt.txt")
 		promptRaw := gitOutputSafe(dir, "show", promptBlob)
 		for _, expected := range v.ExpectedPrompts {
 			assert.Contains(t, promptRaw, expected,

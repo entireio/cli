@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"runtime"
 
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
+	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
@@ -15,9 +18,10 @@ import (
 const gettingStarted = `
 
 Getting Started:
-  To get started with Entire CLI, run 'entire configure' to configure
-  your repository. For more information, visit:
-  https://docs.entire.io/introduction
+  To get started with Entire CLI, run 'entire enable' to enable
+  session tracking in your repository, then 'entire agent add <name>'
+  to install hooks for a specific agent. For more information, visit:
+  https://docs.entire.io/overview
 
 `
 
@@ -65,8 +69,11 @@ func NewRootCmd() *cobra.Command {
 			}
 
 			// Version check and notification (synchronous with 2s timeout)
-			// Runs AFTER command completes to avoid interfering with interactive modes
-			versioncheck.CheckAndNotify(cmd.Context(), cmd.OutOrStdout(), versioninfo.Version)
+			// Runs AFTER command completes to avoid interfering with interactive modes.
+			// Stderr, never stdout: this hook also fires after --json commands whose
+			// stdout is piped into jq or captured by scripts — a notice on stdout
+			// corrupts that output while staying invisible in the caller's logs.
+			versioncheck.CheckAndNotify(cmd.Context(), cmd.ErrOrStderr(), versioninfo.Version)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -78,29 +85,64 @@ func NewRootCmd() *cobra.Command {
 		},
 	}
 
-	// Add subcommands here
-	cmd.AddCommand(newRewindCmd())
-	cmd.AddCommand(newResumeCmd())
+	// Noun groups (canonical homes for subcommands).
+	cmd.AddCommand(newSessionsCmd())                // 'session' (with 'sessions' as Cobra alias)
+	cmd.AddCommand(newCheckpointGroupCmd())         // 'checkpoint' / 'cp' / 'checkpoints'
+	experimental.Register(cmd, newTokensGroupCmd()) // 'tokens' (experimental)
+	cmd.AddCommand(newAgentGroupCmd())              // 'agent'
+	cmd.AddCommand(newAuthCmd())                    // 'auth'
+	cmd.AddCommand(newDoctorCmd())                  // 'doctor' (group: trace/logs/bundle)
+	cmd.AddCommand(newLabsCmd())                    // 'labs' (experimental workflow discovery)
+	cmd.AddCommand(newPluginGroupCmd())             // 'plugin' (managed install/list/remove)
+	experimental.Register(cmd, newImportCmd())      // 'import' (experimental; import pre-existing agent history)
+	cmd.AddCommand(newOrgCmd())                     // 'org' — control-plane org management
+	cmd.AddCommand(newProjectCmd())                 // 'project' — control-plane project management
+	cmd.AddCommand(newRepoCmd())                    // 'repo' — control-plane repo lifecycle
+	cmd.AddCommand(newGrantCmd())                   // 'grant' — control-plane access grants
+
+	// Top-level lifecycle and standalone commands.
+	experimental.Register(cmd, cliReview.NewCommand(buildReviewDeps()))        // `review` (experimental)
+	experimental.Register(cmd, investigate.NewCommand(buildInvestigateDeps())) // `investigate` (experimental); multi-agent investigation
 	cmd.AddCommand(newCleanCmd())
-	cmd.AddCommand(newResetCmd())
-	cmd.AddCommand(newSessionsCmd())
-	cmd.AddCommand(newSetupCmd())
+	cmd.AddCommand(newSetupCmd()) // 'configure' — non-agent settings; agent CRUD lives under 'agent'
 	cmd.AddCommand(newEnableCmd())
 	cmd.AddCommand(newDisableCmd())
 	cmd.AddCommand(newStatusCmd())
+	experimental.Register(cmd, newBlameCmd()) // 'blame' (experimental)
+	experimental.Register(cmd, newWhyCmd())   // 'why' (experimental)
 	cmd.AddCommand(newLoginCmd())
 	cmd.AddCommand(newLogoutCmd())
-	cmd.AddCommand(newHooksCmd())
 	cmd.AddCommand(newVersionCmd())
-	cmd.AddCommand(newExplainCmd())
-	cmd.AddCommand(newDoctorCmd())
-	cmd.AddCommand(newTraceCmd())
+	cmd.AddCommand(newDispatchCmd())
+	cmd.AddCommand(newActivityCmd())
+	cmd.AddCommand(newRecapCmd())
+	cmd.AddCommand(newAPICmd())          // authenticated passthrough to core/cell APIs
+	cmd.AddCommand(newAgentHelpCmd(cmd)) // visible: agents on transports without context injection discover it via `entire help`
+
+	// Hidden top-level shortcuts. Functional but print a deprecation hint.
+	cmd.AddCommand(hideAsAlias(newResumeCmd(), "entire session resume"))
+	cmd.AddCommand(hideAsAlias(newAttachCmd(), "entire session attach"))
+	cmd.AddCommand(hideAsAlias(newExplainCmd(), "entire checkpoint explain"))
+	cmd.AddCommand(hideAsAlias(newTraceCmd(), "entire doctor trace"))
+	experimental.Register(cmd, newSearchCmd()) // 'entire search' = 'checkpoint search' (experimental)
+
+	// Experimental labs commands (listed via `entire labs`; not deprecation shortcuts).
+	experimental.Register(cmd, newExpertsCmd()) // 'experts' (experimental); agent/workflow provenance
+
+	// Deprecated top-level commands (functional; the constructors mark them
+	// Deprecated, which also excludes them from help and completion).
+	cmd.AddCommand(newResetCmd())
+	cmd.AddCommand(newRewindCmd())
+
+	// Hidden infrastructure.
+	cmd.AddCommand(newMCPCmd(cmd)) // MCP stdio server for MCP-host agents
+	cmd.AddCommand(newHooksCmd())
 	cmd.AddCommand(newTrailCmd())
-	cmd.AddCommand(newSearchCmd())
 	cmd.AddCommand(newSendAnalyticsCmd())
-	cmd.AddCommand(newAttachCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
-	cmd.AddCommand(newMigrateCmd())
+
+	// Experimental command (developer-only visibility; setup/tune runners).
+	experimental.Register(cmd, newRunnerCmd()) // 'runner' (experimental)
 
 	cmd.SetVersionTemplate(versionString())
 
@@ -111,8 +153,8 @@ func NewRootCmd() *cobra.Command {
 }
 
 func versionString() string {
-	return fmt.Sprintf("Entire CLI %s (%s)\nGo version: %s\nOS/Arch: %s/%s\n",
-		versioninfo.Version, versioninfo.Commit, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	return fmt.Sprintf("Entire CLI %s\nGo version: %s\nOS/Arch: %s/%s\n",
+		versioninfo.Version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
 func newVersionCmd() *cobra.Command {

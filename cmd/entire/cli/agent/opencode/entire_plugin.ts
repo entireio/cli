@@ -14,6 +14,9 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   let currentModel: string | null = null
   // In-memory store for message metadata (role, tokens, etc.)
   const messageStore = new Map<string, any>()
+  // One-time model-context injection captured from the turn-start hook's stdout,
+  // applied on the next LLM call via experimental.chat.system.transform.
+  let pendingInjection: string | null = null
 
   /**
    * Build the shell command for a hook invocation.
@@ -66,6 +69,46 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
     }
   }
 
+  // parseInjectedContext scans a hook's stdout for Entire's injection envelope
+  // ({"inject_context":"..."}) and returns the text to inject, or null.
+  function parseInjectedContext(stdout: string): string | null {
+    if (!stdout) return null
+    for (const line of stdout.split("\n")) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith("{")) continue
+      try {
+        const parsed = JSON.parse(trimmed) as { inject_context?: unknown }
+        if (typeof parsed.inject_context === "string" && parsed.inject_context.length > 0) {
+          return parsed.inject_context
+        }
+      } catch {
+        // not our envelope — ignore
+      }
+    }
+    return null
+  }
+
+  // fireTurnStart fires turn-start synchronously (state must be ready before
+  // mid-turn commits) and stashes any model-context injection emitted on stdout
+  // for experimental.chat.system.transform to apply. Entire emits the injection
+  // at most once per session, so pendingInjection is set on the first turn only.
+  function fireTurnStart(payload: Record<string, unknown>) {
+    try {
+      const json = JSON.stringify(payload)
+      const proc = Bun.spawnSync(hookCmd("turn-start"), {
+        cwd: directory,
+        stdin: new TextEncoder().encode(json + "\n"),
+        stdout: "pipe",
+        stderr: "ignore",
+      })
+      const out = proc.stdout ? proc.stdout.toString() : ""
+      const injected = parseInjectedContext(out)
+      if (injected) pendingInjection = injected
+    } catch {
+      // Silently ignore — plugin failures must not crash OpenCode
+    }
+  }
+
   function resetSessionTracking(sessionID: string) {
     if (currentSessionID === sessionID) {
       return false
@@ -78,6 +121,14 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   }
 
   return {
+    // Apply the one-time Entire context injection captured at turn-start by
+    // appending it to the system prompt for this LLM call.
+    "experimental.chat.system.transform": async (_input: unknown, output: { system: string[] }) => {
+      if (pendingInjection && Array.isArray(output.system)) {
+        output.system.push(pendingInjection)
+        pendingInjection = null
+      }
+    },
     event: async ({ event }) => {
       try {
         switch (event.type) {
@@ -124,7 +175,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
               seenUserMessages.add(msg.id)
               const sessionID = msg.sessionID ?? currentSessionID
               if (sessionID) {
-                callHookSync("turn-start", {
+                fireTurnStart({
                   session_id: sessionID,
                   prompt: "",
                   model: currentModel ?? "",
@@ -144,7 +195,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
               seenUserMessages.add(msg.id)
               const sessionID = msg.sessionID ?? currentSessionID
               if (sessionID) {
-                callHookSync("turn-start", {
+                fireTurnStart({
                   session_id: sessionID,
                   prompt: part.text ?? "",
                   model: currentModel ?? "",

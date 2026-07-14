@@ -39,6 +39,7 @@ type AssistantMessage struct {
 // ContentBlock represents a block within an assistant message.
 type ContentBlock struct {
 	Type  string          `json:"type"`
+	ID    string          `json:"id,omitempty"`
 	Text  string          `json:"text,omitempty"`
 	Name  string          `json:"name,omitempty"`
 	Input json.RawMessage `json:"input,omitempty"`

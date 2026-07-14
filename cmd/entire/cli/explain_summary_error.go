@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -23,6 +24,8 @@ func displayNameFor(p types.AgentName) string {
 		return "Cursor"
 	case agent.AgentNameCopilotCLI:
 		return "Copilot"
+	case agent.AgentNamePi:
+		return "Pi"
 	default:
 		return string(p)
 	}
@@ -49,7 +52,8 @@ func kindPrefix(k agent.TextGenErrorKind, displayName string) string {
 // It is applied only when the provider is in
 // providersNeedingSynthesizedRemediation AND the envelope-derived Message is
 // absent (so we have nothing better to show), OR — for Claude — in addition
-// to Message (to byte-match 963's established wording).
+// to Message (preserving 963's established remediation wording, now
+// rendered as a lowercase "try" row in the failure block).
 //
 // Non-Claude entries are deliberately generic ("Check your X CLI
 // authentication") rather than inventing CLI-specific subcommands: the
@@ -58,29 +62,34 @@ func kindPrefix(k agent.TextGenErrorKind, displayName string) string {
 // when the real subcommand is different.
 var syntheticFallback = map[types.AgentName]map[agent.TextGenErrorKind]string{
 	agent.AgentNameClaudeCode: {
-		agent.TextGenErrorAuth:      "Run `claude login` and retry",
-		agent.TextGenErrorRateLimit: "Wait and retry",
-		agent.TextGenErrorConfig:    "Check your Claude CLI config and selected model",
+		agent.TextGenErrorAuth:      "run `claude login` and retry",
+		agent.TextGenErrorRateLimit: "wait and retry",
+		agent.TextGenErrorConfig:    "check your Claude CLI config and selected model",
 	},
 	agent.AgentNameCodex: {
-		agent.TextGenErrorAuth:      "Check your Codex CLI authentication",
-		agent.TextGenErrorRateLimit: "Wait and retry",
-		agent.TextGenErrorConfig:    "Check your Codex CLI config and selected model",
+		agent.TextGenErrorAuth:      "check your Codex CLI authentication",
+		agent.TextGenErrorRateLimit: "wait and retry",
+		agent.TextGenErrorConfig:    "check your Codex CLI config and selected model",
 	},
 	agent.AgentNameGemini: {
-		agent.TextGenErrorAuth:      "Check your Gemini CLI authentication",
-		agent.TextGenErrorRateLimit: "Wait and retry",
-		agent.TextGenErrorConfig:    "Check your Gemini CLI config and selected model",
+		agent.TextGenErrorAuth:      "check your Gemini CLI authentication",
+		agent.TextGenErrorRateLimit: "wait and retry",
+		agent.TextGenErrorConfig:    "check your Gemini CLI config and selected model",
 	},
 	agent.AgentNameCursor: {
-		agent.TextGenErrorAuth:      "Check your Cursor CLI authentication",
-		agent.TextGenErrorRateLimit: "Wait and retry",
-		agent.TextGenErrorConfig:    "Check your Cursor CLI config and selected model",
+		agent.TextGenErrorAuth:      "check your Cursor CLI authentication",
+		agent.TextGenErrorRateLimit: "wait and retry",
+		agent.TextGenErrorConfig:    "check your Cursor CLI config and selected model",
 	},
 	agent.AgentNameCopilotCLI: {
-		agent.TextGenErrorAuth:      "Check your Copilot CLI authentication",
-		agent.TextGenErrorRateLimit: "Wait and retry",
-		agent.TextGenErrorConfig:    "Check your Copilot CLI config and selected model",
+		agent.TextGenErrorAuth:      "check your Copilot CLI authentication",
+		agent.TextGenErrorRateLimit: "wait and retry",
+		agent.TextGenErrorConfig:    "check your Copilot CLI config and selected model",
+	},
+	agent.AgentNamePi: {
+		agent.TextGenErrorAuth:      "check your Pi CLI authentication",
+		agent.TextGenErrorRateLimit: "wait and retry",
+		agent.TextGenErrorConfig:    "check your Pi CLI config and selected model",
 	},
 }
 
@@ -127,45 +136,49 @@ func formatTextGenErrorSuffix(e *agent.TextGenError, displayName string) string 
 	}
 }
 
-// renderTextGenError maps a typed *agent.TextGenError to the user-facing
-// error message. Claude's wording is byte-identical to 963's baseline in
-// formatCheckpointSummaryError; non-Claude providers prefer their CLI's
-// own stderr verbatim (captured in Message) and only synthesize a generic
-// remediation line when Message is empty.
-func renderTextGenError(e *agent.TextGenError) error {
+// renderTextGenError maps a typed *agent.TextGenError to a structured
+// failure block matching formatCheckpointSummaryError's contract: a
+// user-visible label, supporting rows, and a structured error for
+// NewSilentError. Claude's wording preserves 963's established baseline;
+// non-Claude providers prefer their CLI's own stderr verbatim (captured in
+// Message) and only synthesize a generic remediation row when Message is
+// empty.
+func renderTextGenError(e *agent.TextGenError) (string, []explainRow, error) {
 	displayName := displayNameFor(e.Provider)
 
 	if e.Kind == agent.TextGenErrorCLIMissing {
 		// Short, provider-agnostic: the CLI isn't even present, so there's
 		// no stderr to show and no useful kind-specific remediation beyond
 		// "install it".
-		return fmt.Errorf("%s CLI is not installed or not on PATH", displayName)
+		label := displayName + " CLI is not installed or not on PATH"
+		return label, nil, errors.New(label)
 	}
 
 	if e.Kind == agent.TextGenErrorUnknown {
-		return fmt.Errorf("%s%s", kindPrefix(e.Kind, displayName), formatTextGenErrorSuffix(e, displayName))
+		label := kindPrefix(e.Kind, displayName)
+		suffix := formatTextGenErrorSuffix(e, displayName)
+		rows := []explainRow{
+			{Label: "detail", Value: strings.TrimPrefix(strings.TrimPrefix(suffix, ": "), " ")},
+		}
+		return label, rows, fmt.Errorf("%s%s", label, suffix)
 	}
 
-	prefix := kindPrefix(e.Kind, displayName)
-	needsSynthesis := providersNeedingSynthesizedRemediation[e.Provider]
-	fallback := syntheticFallback[e.Provider][e.Kind]
-
-	switch {
-	case e.Message != "" && needsSynthesis && fallback != "":
-		// Claude path: byte-identical to 963's "<prefix>: <msg>\n<fallback>"
-		// when the envelope carries a terse API message that lacks
-		// remediation.
-		return fmt.Errorf("%s: %s\n%s", prefix, e.Message, fallback)
-	case e.Message != "":
-		// Non-Claude path: the CLI's own stderr already carries the
-		// authoritative remediation, so we render it verbatim without
-		// appending a synthesized line.
-		return fmt.Errorf("%s: %s", prefix, e.Message)
-	case fallback != "":
-		// No Message but we have a generic fallback — better than a bare
-		// prefix line.
-		return fmt.Errorf("%s\n%s", prefix, fallback)
-	default:
-		return errors.New(prefix)
+	label := kindPrefix(e.Kind, displayName)
+	var rows []explainRow
+	if e.Message != "" {
+		rows = append(rows, explainRow{Label: "message", Value: e.Message})
 	}
+	// Remediation row: synthesized when the provider's envelope lacks
+	// actionable guidance (Claude), or when the CLI's own stderr gave us
+	// nothing to show. Non-Claude CLIs with a Message carry their own
+	// remediation verbatim, so adding ours would be noisy or contradictory.
+	if fallback := syntheticFallback[e.Provider][e.Kind]; fallback != "" &&
+		(providersNeedingSynthesizedRemediation[e.Provider] || e.Message == "") {
+		rows = append(rows, explainRow{Label: "try", Value: fallback})
+	}
+	suffix := ""
+	if e.Message != "" {
+		suffix = ": " + e.Message
+	}
+	return label, rows, fmt.Errorf("%s%s", label, suffix)
 }

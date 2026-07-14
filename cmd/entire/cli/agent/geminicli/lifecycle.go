@@ -16,18 +16,43 @@ var (
 	_ agent.TranscriptAnalyzer = (*GeminiCLIAgent)(nil)
 	_ agent.TokenCalculator    = (*GeminiCLIAgent)(nil)
 	_ agent.HookResponseWriter = (*GeminiCLIAgent)(nil)
+	_ agent.ContextInjector    = (*GeminiCLIAgent)(nil)
 )
 
-// WriteHookResponse outputs a JSON hook response to stdout.
-// Gemini CLI reads this JSON and displays the systemMessage to the user.
+// WriteHookResponse outputs a hook response message as plain text to stdout.
+//
+// Why plain text and not JSON? Gemini CLI (as of v0.40.0) double-displays
+// systemMessage when it arrives in JSON form: once via emitHookSystemMessage
+// (rendered with the [hookName] source tag) and again via the SessionStart
+// path's direct historyManager.addItem (rendered without a tag). With plain
+// text, gemini's convertPlainTextToHookOutput synthesizes a systemMessage
+// internally, the JSON-only emitHookSystemMessage event doesn't fire, and
+// the user sees the banner exactly once.
 func (g *GeminiCLIAgent) WriteHookResponse(message string) error {
-	resp := struct {
-		SystemMessage string `json:"systemMessage,omitempty"`
-	}{SystemMessage: message}
-	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
-		return fmt.Errorf("failed to encode hook response: %w", err)
+	if message == "" {
+		return nil
+	}
+	if _, err := fmt.Fprintln(os.Stdout, message); err != nil {
+		return fmt.Errorf("failed to write hook response: %w", err)
 	}
 	return nil
+}
+
+// InjectionEvent reports that Gemini injects model context at TurnStart (its
+// BeforeAgent hook). Gemini CLI's hook runner merges
+// hookSpecificOutput.additionalContext into the model context (the plain-text
+// path in WriteHookResponse is only a systemMessage double-display workaround,
+// which does not apply to additionalContext).
+func (g *GeminiCLIAgent) InjectionEvent() agent.EventType { return agent.TurnStart }
+
+// RenderContextInjection renders the BeforeAgent additionalContext payload
+// Gemini injects into the model context.
+func (g *GeminiCLIAgent) RenderContextInjection(inj agent.ContextInjection) ([]byte, error) {
+	out, err := agent.RenderAdditionalContextHookOutput("BeforeAgent", inj.Text)
+	if err != nil {
+		return nil, fmt.Errorf("render gemini context injection: %w", err)
+	}
+	return out, nil
 }
 
 // HookNames returns the hook verbs Gemini CLI supports.
@@ -53,15 +78,15 @@ func (g *GeminiCLIAgent) HookNames() []string {
 func (g *GeminiCLIAgent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
-		return g.parseSessionStart(stdin)
+		return g.parseSessionInfoEvent(stdin, agent.SessionStart)
 	case HookNameBeforeAgent:
 		return g.parseTurnStart(stdin)
 	case HookNameAfterAgent:
 		return g.parseTurnEnd(stdin)
 	case HookNameSessionEnd:
-		return g.parseSessionEnd(stdin)
+		return g.parseSessionInfoEvent(stdin, agent.SessionEnd)
 	case HookNamePreCompress:
-		return g.parseCompaction(stdin)
+		return g.parseSessionInfoEvent(stdin, agent.Compaction)
 	case HookNameBeforeModel:
 		return g.parseBeforeModel(stdin)
 	case HookNameBeforeTool, HookNameAfterTool,
@@ -120,13 +145,15 @@ func (g *GeminiCLIAgent) CalculateTokenUsage(transcriptData []byte, fromOffset i
 
 // --- Internal hook parsing functions ---
 
-func (g *GeminiCLIAgent) parseSessionStart(stdin io.Reader) (*agent.Event, error) {
+// parseSessionInfoEvent parses the hooks whose payload is sessionInfoRaw —
+// SessionStart, SessionEnd, and PreCompress differ only in the event type.
+func (g *GeminiCLIAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent.EventType) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
 	if err != nil {
 		return nil, err
 	}
 	return &agent.Event{
-		Type:       agent.SessionStart,
+		Type:       eventType,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
 		Timestamp:  time.Now(),
@@ -160,19 +187,6 @@ func (g *GeminiCLIAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
 	}, nil
 }
 
-func (g *GeminiCLIAgent) parseSessionEnd(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
-	if err != nil {
-		return nil, err
-	}
-	return &agent.Event{
-		Type:       agent.SessionEnd,
-		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
-		Timestamp:  time.Now(),
-	}, nil
-}
-
 func (g *GeminiCLIAgent) parseBeforeModel(stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[beforeModelRaw](stdin)
 	if err != nil {
@@ -187,18 +201,5 @@ func (g *GeminiCLIAgent) parseBeforeModel(stdin io.Reader) (*agent.Event, error)
 		SessionID: raw.SessionID,
 		Model:     model,
 		Timestamp: time.Now(),
-	}, nil
-}
-
-func (g *GeminiCLIAgent) parseCompaction(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
-	if err != nil {
-		return nil, err
-	}
-	return &agent.Event{
-		Type:       agent.Compaction,
-		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
-		Timestamp:  time.Now(),
 	}, nil
 }

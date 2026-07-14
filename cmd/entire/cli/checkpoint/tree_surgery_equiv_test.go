@@ -7,18 +7,20 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	gogit "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// TestBuildTreeWithChanges_EquivalenceWithFlattenRebuild verifies that
-// the ApplyTreeChanges-based buildTreeWithChanges produces identical
-// tree hashes to the old FlattenTree+BuildTreeFromEntries approach.
-func TestBuildTreeWithChanges_EquivalenceWithFlattenRebuild(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
+// TestBuildTreeWithChanges_AppliesModificationsDeletionsAndMetadata verifies
+// that the ApplyTreeChanges-based buildTreeWithChanges applies file
+// modifications, deletions, and metadata-directory additions while leaving
+// unrelated tree entries untouched.
+func TestBuildTreeWithChanges_AppliesModificationsDeletionsAndMetadata(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
 	repo, dir := setupTestRepo(t)
-	store := NewGitStore(repo)
+	store := newEphemeralStore(repo, DefaultV1Refs())
 
 	// Get the base tree hash from HEAD
 	head, err := repo.Head()
@@ -56,17 +58,46 @@ func TestBuildTreeWithChanges_EquivalenceWithFlattenRebuild(t *testing.T) { //no
 	// Switch to repo dir so paths.WorktreeRoot() resolves correctly
 	t.Chdir(dir)
 
-	// --- New approach: ApplyTreeChanges (what buildTreeWithChanges now does) ---
 	newHash, err := store.buildTreeWithChanges(context.Background(), baseTreeHash, modifiedFiles, deletedFiles, metadataDir, metadataDirAbs)
 	if err != nil {
-		t.Fatalf("buildTreeWithChanges (new): %v", err)
+		t.Fatalf("buildTreeWithChanges: %v", err)
 	}
 
-	// --- Old approach: FlattenTree + modify map + BuildTreeFromEntries ---
-	oldHash := flattenRebuildTree(t, repo, baseTreeHash, modifiedFiles, deletedFiles, metadataDir, metadataDirAbs, dir)
+	newTree, err := repo.TreeObject(newHash)
+	if err != nil {
+		t.Fatalf("read new tree: %v", err)
+	}
 
-	if newHash != oldHash {
-		t.Errorf("tree hash mismatch: new=%s old=%s", newHash, oldHash)
+	// Modified files carry the new on-disk content.
+	for _, f := range modifiedFiles {
+		file, fileErr := newTree.File(f)
+		if fileErr != nil {
+			t.Fatalf("modified file %s missing from tree: %v", f, fileErr)
+		}
+		content, contentErr := file.Contents()
+		if contentErr != nil {
+			t.Fatalf("read %s: %v", f, contentErr)
+		}
+		if want := "modified content for " + f; content != want {
+			t.Errorf("%s content = %q, want %q", f, content, want)
+		}
+	}
+
+	// Deleted files are gone.
+	for _, f := range deletedFiles {
+		if _, fileErr := newTree.File(f); fileErr == nil {
+			t.Errorf("deleted file %s still present in tree", f)
+		}
+	}
+
+	// Metadata directory content was added at the tree-relative path.
+	if _, err := newTree.File(metadataDir + "/full.jsonl"); err != nil {
+		t.Errorf("metadata file missing from tree: %v", err)
+	}
+
+	// Unrelated entries are untouched.
+	if _, err := newTree.File("src/main.go"); err != nil {
+		t.Errorf("unrelated file src/main.go missing from tree: %v", err)
 	}
 }
 
@@ -76,7 +107,7 @@ func TestAddTaskMetadataToTree_EquivalenceWithFlattenRebuild(t *testing.T) {
 	t.Parallel()
 
 	repo, _ := setupTestRepo(t)
-	store := NewGitStore(repo)
+	store := newEphemeralStore(repo, DefaultV1Refs())
 
 	head, err := repo.Head()
 	if err != nil {
@@ -90,7 +121,7 @@ func TestAddTaskMetadataToTree_EquivalenceWithFlattenRebuild(t *testing.T) {
 
 	// Test without transcripts — the tree structure equivalence is what matters.
 	// Transcript processing (chunking, redaction) is covered by integration tests.
-	opts := WriteTemporaryTaskOptions{
+	opts := WriteEphemeralTaskOptions{
 		SessionID:      "sess-001",
 		ToolUseID:      "tool-001",
 		AgentID:        "agent-001",
@@ -119,7 +150,7 @@ func TestAddTaskMetadataToTree_IncrementalPath(t *testing.T) {
 	t.Parallel()
 
 	repo, _ := setupTestRepo(t)
-	store := NewGitStore(repo)
+	store := newEphemeralStore(repo, DefaultV1Refs())
 
 	head, err := repo.Head()
 	if err != nil {
@@ -130,7 +161,7 @@ func TestAddTaskMetadataToTree_IncrementalPath(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	opts := WriteTemporaryTaskOptions{
+	opts := WriteEphemeralTaskOptions{
 		SessionID:           "sess-002",
 		ToolUseID:           "tool-002",
 		IsIncremental:       true,
@@ -184,9 +215,10 @@ func setupTestRepo(t *testing.T) (*gogit.Repository, string) {
 		dir = resolved
 	}
 
-	repo, err := gogit.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := gogit.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("git init: %v", err)
+		t.Fatalf("git open: %v", err)
 	}
 
 	wt, err := repo.Worktree()
@@ -226,65 +258,12 @@ func setupTestRepo(t *testing.T) (*gogit.Repository, string) {
 	return repo, dir
 }
 
-// flattenRebuildTree is the old FlattenTree+BuildTreeFromEntries approach
-// for comparison in equivalence tests.
-func flattenRebuildTree(
-	t *testing.T, repo *gogit.Repository,
-	baseTreeHash plumbing.Hash,
-	modifiedFiles, deletedFiles []string,
-	metadataDir, metadataDirAbs, repoRoot string,
-) plumbing.Hash {
-	t.Helper()
-
-	baseTree, err := repo.TreeObject(baseTreeHash)
-	if err != nil {
-		t.Fatalf("tree: %v", err)
-	}
-	entries := make(map[string]object.TreeEntry)
-	if err := FlattenTree(repo, baseTree, "", entries); err != nil {
-		t.Fatalf("flatten: %v", err)
-	}
-
-	for _, file := range deletedFiles {
-		delete(entries, file)
-	}
-
-	for _, file := range modifiedFiles {
-		absPath := filepath.Join(repoRoot, file)
-		if !fileExists(absPath) {
-			delete(entries, file)
-			continue
-		}
-		blobHash, mode, blobErr := createBlobFromFile(repo, absPath)
-		if blobErr != nil {
-			continue
-		}
-		entries[file] = object.TreeEntry{
-			Name: file,
-			Mode: mode,
-			Hash: blobHash,
-		}
-	}
-
-	if metadataDir != "" && metadataDirAbs != "" {
-		if err := addDirectoryToEntriesWithAbsPath(repo, metadataDirAbs, metadataDir, entries); err != nil {
-			t.Fatalf("add metadata: %v", err)
-		}
-	}
-
-	hash, err := BuildTreeFromEntries(context.Background(), repo, entries)
-	if err != nil {
-		t.Fatalf("build tree: %v", err)
-	}
-	return hash
-}
-
 // flattenRebuildTaskMetadata is the old FlattenTree+BuildTreeFromEntries approach
 // for addTaskMetadataToTree comparison.
 func flattenRebuildTaskMetadata(
 	t *testing.T, repo *gogit.Repository,
 	baseTreeHash plumbing.Hash,
-	opts WriteTemporaryTaskOptions,
+	opts WriteEphemeralTaskOptions,
 ) plumbing.Hash {
 	t.Helper()
 

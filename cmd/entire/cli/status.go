@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -21,7 +22,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
-	"github.com/go-git/go-git/v6"
 	"github.com/spf13/cobra"
 )
 
@@ -72,11 +72,11 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	}
 
 	// Check which settings files exist
-	_, projectErr := os.Stat(settingsPath)
+	_, projectErr := os.Lstat(settingsPath)
 	if projectErr != nil && !errors.Is(projectErr, fs.ErrNotExist) {
 		return fmt.Errorf("cannot access project settings file: %w", projectErr)
 	}
-	_, localErr := os.Stat(localSettingsPath)
+	_, localErr := os.Lstat(localSettingsPath)
 	if localErr != nil && !errors.Is(localErr, fs.ErrNotExist) {
 		return fmt.Errorf("cannot access local settings file: %w", localErr)
 	}
@@ -104,8 +104,23 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
+	writeAgentHelpHint(w, sty)
 
 	return nil
+}
+
+// agentHelpCommand is the invocation a coding agent runs to get machine-readable
+// usage. It is surfaced both in the human status footer (writeAgentHelpHint) and
+// in `entire status --json` (statusJSON.AgentHelp), so no-channel agents (Cursor,
+// Copilot CLI, Factory Droid, MCP hosts) can discover entire's surface by reading
+// either output.
+const agentHelpCommand = "entire agent-help"
+
+// writeAgentHelpHint prints a one-line pointer at `entire agent-help` for coding
+// agents that have no context-injection channel (Cursor, Copilot CLI, Factory
+// Droid) and so discover entire's surface only by reading command output.
+func writeAgentHelpHint(w io.Writer, sty statusStyles) {
+	fmt.Fprintln(w, sty.render(sty.dim, "Agents: run `"+agentHelpCommand+"` for machine-readable usage."))
 }
 
 // runStatusDetailed shows the effective status plus detailed status for each settings file.
@@ -139,6 +154,7 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 	if effectiveSettings.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
+	writeAgentHelpHint(w, sty)
 
 	return nil
 }
@@ -182,6 +198,26 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		}
 	}
 
+	// Show review status for HEAD's checkpoint, if any.
+	if reviewed, meta := headHasReviewCheckpoint(ctx); reviewed {
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.dim, "  Review · "))
+		b.WriteString("reviewed (")
+		b.WriteString(meta)
+		b.WriteString(")")
+	}
+
+	// Show investigation status for HEAD's checkpoint, if any. Review and
+	// investigation can both be true on the same checkpoint, so we render
+	// both lines independently rather than gating one on the other.
+	if investigated, meta := headHasInvestigateCheckpoint(ctx); investigated {
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.dim, "  Investigation · "))
+		b.WriteString("investigated (")
+		b.WriteString(meta)
+		b.WriteString(")")
+	}
+
 	return b.String()
 }
 
@@ -208,19 +244,22 @@ func formatSettingsStatus(prefix string, s *EntireSettings, sty statusStyles) st
 
 // timeAgo formats a time as a human-readable relative duration.
 func timeAgo(t time.Time) string {
-	d := time.Since(t)
+	return formatRelativeDuration(time.Since(t))
+}
+
+// formatRelativeDuration renders a positive duration as "just now" / "Xm ago"
+// / "Xh ago" / "Xd ago". Shared between `entire status` and `entire auth list`
+// so the bucket thresholds and labels stay consistent.
+func formatRelativeDuration(d time.Duration) string {
 	switch {
 	case d < time.Minute:
-		return "just now"
+		return lastUsedJustNow
 	case d < time.Hour:
-		m := int(d.Minutes())
-		return fmt.Sprintf("%dm ago", m)
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
 	case d < 24*time.Hour:
-		h := int(d.Hours())
-		return fmt.Sprintf("%dh ago", h)
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
 	default:
-		days := int(d.Hours() / 24)
-		return fmt.Sprintf("%dd ago", days)
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }
 
@@ -246,6 +285,14 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 	states, err := store.List(ctx)
 	if err != nil || len(states) == 0 {
 		return
+	}
+
+	// Finalize any ACTIVE session whose agent process has exited without a
+	// SessionStop hook firing, so it doesn't linger as "active" until the
+	// inactivity timeout. The sweep marks them ended in place, so the filter
+	// below drops them.
+	if n := finalizeExitedSessions(ctx, states); n > 0 {
+		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("Finalized %d exited session(s) (agent process gone).", n)))
 	}
 
 	// Filter to active sessions only
@@ -356,11 +403,18 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 			}
 
 			statsLine := strings.Join(stats, sty.render(sty.dim, " · "))
-			if st.IsStuckActive() {
+			switch {
+			case st.OwnerExited():
+				// Agent process is gone but the session couldn't be finalized
+				// above (e.g. condense/transition error); flag it explicitly.
+				fmt.Fprintf(w, "%s %s %s\n", sty.render(sty.dim, statsLine),
+					sty.render(sty.dim, "·"),
+					sty.render(sty.yellow, "exited")+" (run 'entire doctor')")
+			case st.IsStuckActive():
 				fmt.Fprintf(w, "%s %s %s\n", sty.render(sty.dim, statsLine),
 					sty.render(sty.dim, "·"),
 					sty.render(sty.yellow, "stale")+" (run 'entire doctor')")
-			} else {
+			default:
 				fmt.Fprintln(w, sty.render(sty.dim, statsLine))
 			}
 			if warning := divergenceWarnings[st.SessionID]; warning != "" {
@@ -458,10 +512,11 @@ func currentHeadLinkage(ctx context.Context) (string, headLinkage, error) {
 		return "", headLinkage{}, fmt.Errorf("resolve worktree root: %w", err)
 	}
 
-	repo, err := git.PlainOpen(repoRoot)
+	repo, err := gitrepo.OpenPath(repoRoot)
 	if err != nil {
 		return "", headLinkage{}, fmt.Errorf("open repo: %w", err)
 	}
+	defer repo.Close()
 
 	headRef, err := repo.Head()
 	if err != nil {
@@ -540,7 +595,11 @@ type statusJSON struct {
 	Enabled        bool               `json:"enabled"`
 	Agents         []string           `json:"agents"`
 	ActiveSessions []sessionBriefJSON `json:"active_sessions"`
-	Error          string             `json:"error,omitempty"`
+	// AgentHelp is the machine-readable pointer for no-channel agents that parse
+	// `entire status --json` instead of the human footer. Set only on the
+	// success path (mirrors writeAgentHelpHint, which only renders when set up).
+	AgentHelp string `json:"agent_help,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type sessionBriefJSON struct {
@@ -567,11 +626,11 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		localSettingsPath = EntireSettingsLocalFile
 	}
 
-	_, projectErr := os.Stat(settingsPath)
+	_, projectErr := os.Lstat(settingsPath)
 	if projectErr != nil && !errors.Is(projectErr, fs.ErrNotExist) {
 		return writeJSON(statusJSON{Error: fmt.Sprintf("cannot access project settings file: %v", projectErr)})
 	}
-	_, localErr := os.Stat(localSettingsPath)
+	_, localErr := os.Lstat(localSettingsPath)
 	if localErr != nil && !errors.Is(localErr, fs.ErrNotExist) {
 		return writeJSON(statusJSON{Error: fmt.Sprintf("cannot access local settings file: %v", localErr)})
 	}
@@ -589,6 +648,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		Enabled:        s.Enabled,
 		Agents:         []string{},
 		ActiveSessions: []sessionBriefJSON{},
+		AgentHelp:      agentHelpCommand,
 	}
 
 	if s.Enabled {
@@ -598,6 +658,10 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 
 		if store, err := session.NewStateStore(ctx); err == nil {
 			if states, err := store.List(ctx); err == nil {
+				// Finalize sessions whose agent has exited (matches the human
+				// status path) so --json doesn't leave them orphaned ACTIVE or
+				// report them under active_sessions.
+				finalizeExitedSessions(ctx, states)
 				// Deduplicate by agent: one entry per agent, "active" wins over "idle".
 				type agentEntry struct {
 					brief    sessionBriefJSON
@@ -647,6 +711,10 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 func sessionStatusLabel(s *session.State) string {
 	if s.EndedAt != nil {
 		return "ended"
+	}
+	if s.OwnerExited() {
+		// ACTIVE on disk, but the owning agent process is gone.
+		return "exited"
 	}
 	if s.Phase != "" {
 		return string(s.Phase)

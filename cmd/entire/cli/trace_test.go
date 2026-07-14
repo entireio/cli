@@ -297,6 +297,62 @@ func TestParseTraceEntry_WithSubSteps(t *testing.T) {
 	}
 }
 
+func TestParseTraceEntry_WithNestedNamedSpans(t *testing.T) {
+	t.Parallel()
+
+	line := `{"time":"2026-01-15T10:30:00Z","level":"DEBUG","msg":"perf","op":"why","duration_ms":500,"steps.enrich_commits_ms":300,"steps.enrich_commits.why_checkpoint_info_ms":200,"steps.enrich_commits.why_checkpoint_info.why_checkpoint_read_session_ms":120,"steps.enrich_commits.why_checkpoint_info.why_checkpoint_read_session_err":true,"steps.render_ms":50}`
+
+	entry := parseTraceEntry(line)
+	if entry == nil {
+		t.Fatal("parseTraceEntry returned nil")
+		return
+	}
+
+	if len(entry.Steps) != 2 {
+		t.Fatalf("len(Steps) = %d, want 2", len(entry.Steps))
+	}
+
+	if entry.Steps[0].Name != "enrich_commits" {
+		t.Errorf("Steps[0].Name = %q, want %q", entry.Steps[0].Name, "enrich_commits")
+	}
+	if entry.Steps[1].Name != "render" {
+		t.Errorf("Steps[1].Name = %q, want %q", entry.Steps[1].Name, "render")
+	}
+
+	enrich := entry.Steps[0]
+	if enrich.DurationMs != 300 {
+		t.Errorf("enrich.DurationMs = %d, want %d", enrich.DurationMs, 300)
+	}
+	if len(enrich.SubSteps) != 1 {
+		t.Fatalf("enrich should have 1 sub-step, got %d", len(enrich.SubSteps))
+	}
+
+	checkpointInfo := enrich.SubSteps[0]
+	if checkpointInfo.Name != "enrich_commits.why_checkpoint_info" {
+		t.Errorf("checkpointInfo.Name = %q, want %q", checkpointInfo.Name, "enrich_commits.why_checkpoint_info")
+	}
+	if checkpointInfo.DurationMs != 200 {
+		t.Errorf("checkpointInfo.DurationMs = %d, want %d", checkpointInfo.DurationMs, 200)
+	}
+	if checkpointInfo.Error {
+		t.Error("checkpointInfo.Error = true, want false")
+	}
+	if len(checkpointInfo.SubSteps) != 1 {
+		t.Fatalf("checkpointInfo should have 1 sub-step, got %d", len(checkpointInfo.SubSteps))
+	}
+
+	readSession := checkpointInfo.SubSteps[0]
+	if readSession.Name != "enrich_commits.why_checkpoint_info.why_checkpoint_read_session" {
+		t.Errorf("readSession.Name = %q, want %q", readSession.Name, "enrich_commits.why_checkpoint_info.why_checkpoint_read_session")
+	}
+	if readSession.DurationMs != 120 {
+		t.Errorf("readSession.DurationMs = %d, want %d", readSession.DurationMs, 120)
+	}
+	if !readSession.Error {
+		t.Error("readSession.Error = false, want true")
+	}
+}
+
 func TestParseTraceEntry_SubStepNumericOrdering(t *testing.T) {
 	t.Parallel()
 
@@ -384,6 +440,55 @@ func TestRenderTraceEntries_WithSubSteps(t *testing.T) {
 	// Regular step still appears
 	if !strings.Contains(out, "cleanup") {
 		t.Errorf("output missing regular step 'cleanup':\n%s", out)
+	}
+}
+
+func TestRenderTraceEntries_WithNestedNamedSubSteps(t *testing.T) {
+	t.Parallel()
+
+	entries := []traceEntry{
+		{
+			Op:         "why",
+			DurationMs: 500,
+			Steps: []traceStep{
+				{Name: "enrich_commits", DurationMs: 300, SubSteps: []traceStep{
+					{Name: "enrich_commits.why_checkpoint_info", DurationMs: 200, SubSteps: []traceStep{
+						{Name: "enrich_commits.why_checkpoint_info.why_checkpoint_read_session", DurationMs: 120, Error: true},
+					}},
+				}},
+				{Name: "render", DurationMs: 50},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	renderTraceEntries(&buf, entries)
+	out := buf.String()
+
+	if !strings.Contains(out, "enrich_commits") {
+		t.Errorf("output missing parent step 'enrich_commits':\n%s", out)
+	}
+	if !strings.Contains(out, "├─ enrich_commits.why_checkpoint_info") &&
+		!strings.Contains(out, "└─ enrich_commits.why_checkpoint_info") {
+		t.Errorf("output missing named nested sub-step with tree connector:\n%s", out)
+	}
+
+	lines := strings.Split(out, "\n")
+	foundReadSession := false
+	foundReadSessionError := false
+	for _, line := range lines {
+		if strings.Contains(line, "enrich_commits.why_checkpoint_info.why_checkpoint_read_session") {
+			foundReadSession = true
+			if strings.Contains(line, "x") {
+				foundReadSessionError = true
+			}
+		}
+	}
+	if !foundReadSession {
+		t.Errorf("output missing deeper named sub-step:\n%s", out)
+	}
+	if !foundReadSessionError {
+		t.Errorf("output missing error marker on deeper named sub-step:\n%s", out)
 	}
 }
 

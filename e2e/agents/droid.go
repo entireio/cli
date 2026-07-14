@@ -20,6 +20,10 @@ func init() {
 		return
 	}
 	Register(&Droid{})
+	// factoryai-droid is run serially in CI (E2E_CONCURRENT_TEST_LIMIT=1).
+	// Without a registered gate, AcquireSlot is a no-op and that limit has no
+	// effect; register the gate so the intended serialization is respected.
+	RegisterGate("factoryai-droid", 1)
 }
 
 // Droid implements the Agent interface for Factory AI Droid.

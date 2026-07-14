@@ -2,16 +2,19 @@ package strategy
 
 import (
 	"context"
-	"errors"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -67,9 +70,10 @@ func TestIsShadowBranch(t *testing.T) {
 func TestListShadowBranches(t *testing.T) {
 	// Setup: create a temp git repo with various branches
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -138,173 +142,13 @@ func TestListShadowBranches(t *testing.T) {
 	}
 }
 
-func TestDeleteRefCLI_DeletesPackedCustomRef(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	repo, err := git.PlainOpen(dir)
-	if err != nil {
-		t.Fatalf("failed to open git repo: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	emptyTreeHash := plumbing.NewHash("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
-	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, emptyTreeHash, plumbing.ZeroHash, "initial commit", "test", "test@test.com")
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	headRef := plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("master"))
-	if err := repo.Storer.SetReference(headRef); err != nil {
-		t.Fatalf("failed to set HEAD: %v", err)
-	}
-	masterRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName("master"), commitHash)
-	if err := repo.Storer.SetReference(masterRef); err != nil {
-		t.Fatalf("failed to set master: %v", err)
-	}
-
-	refName := paths.V2FullRefPrefix + "0000000000001"
-	ref := plumbing.NewHashReference(plumbing.ReferenceName(refName), commitHash)
-	if err := repo.Storer.SetReference(ref); err != nil {
-		t.Fatalf("failed to create custom ref: %v", err)
-	}
-
-	packRefsCmd := exec.CommandContext(context.Background(), "git", "pack-refs", "--all")
-	if output, err := packRefsCmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to pack refs: %s: %v", strings.TrimSpace(string(output)), err)
-	}
-
-	if err := DeleteRefCLI(context.Background(), refName, ""); err != nil {
-		t.Fatalf("DeleteRefCLI() error = %v", err)
-	}
-
-	showRefCmd := exec.CommandContext(context.Background(), "git", "show-ref", "--verify", "--quiet", refName)
-	if err := showRefCmd.Run(); err == nil {
-		t.Fatalf("ref %s should be deleted", refName)
-	}
-}
-
-func TestDeleteRefCLI_RejectsOIDMismatch(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	repo, err := git.PlainOpen(dir)
-	if err != nil {
-		t.Fatalf("failed to open git repo: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	emptyTreeHash := plumbing.NewHash("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
-	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, emptyTreeHash, plumbing.ZeroHash, "initial commit", "test", "test@test.com")
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	headRef := plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("master"))
-	if err := repo.Storer.SetReference(headRef); err != nil {
-		t.Fatalf("failed to set HEAD: %v", err)
-	}
-	masterRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName("master"), commitHash)
-	if err := repo.Storer.SetReference(masterRef); err != nil {
-		t.Fatalf("failed to set master: %v", err)
-	}
-
-	refName := paths.V2FullRefPrefix + "0000000000099"
-	ref := plumbing.NewHashReference(plumbing.ReferenceName(refName), commitHash)
-	if err := repo.Storer.SetReference(ref); err != nil {
-		t.Fatalf("failed to create custom ref: %v", err)
-	}
-
-	staleOID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	err = DeleteRefCLI(context.Background(), refName, staleOID)
-	if err == nil {
-		t.Fatal("expected error from DeleteRefCLI with stale OID, got nil")
-	}
-	if !errors.Is(err, ErrRefChanged) {
-		t.Fatalf("expected ErrRefChanged, got: %v", err)
-	}
-
-	// Ref must still exist after the rejected deletion.
-	showRefCmd := exec.CommandContext(context.Background(), "git", "show-ref", "--verify", "--quiet", refName)
-	if err := showRefCmd.Run(); err != nil {
-		t.Fatalf("ref %s should still exist after rejected deletion", refName)
-	}
-}
-
-func TestRefStateCLI_ReturnsCurrentOID(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	repo, err := git.PlainOpen(dir)
-	if err != nil {
-		t.Fatalf("failed to open git repo: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	emptyTreeHash := plumbing.NewHash("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
-	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, emptyTreeHash, plumbing.ZeroHash, "initial commit", "test", "test@test.com")
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	headRef := plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("master"))
-	if err := repo.Storer.SetReference(headRef); err != nil {
-		t.Fatalf("failed to set HEAD: %v", err)
-	}
-	masterRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName("master"), commitHash)
-	if err := repo.Storer.SetReference(masterRef); err != nil {
-		t.Fatalf("failed to set master: %v", err)
-	}
-
-	refName := paths.V2FullRefPrefix + "0000000000100"
-	ref := plumbing.NewHashReference(plumbing.ReferenceName(refName), commitHash)
-	if err := repo.Storer.SetReference(ref); err != nil {
-		t.Fatalf("failed to create custom ref: %v", err)
-	}
-
-	exists, oid, err := refStateCLI(context.Background(), refName)
-	if err != nil {
-		t.Fatalf("refStateCLI() error = %v", err)
-	}
-	if !exists {
-		t.Fatalf("refStateCLI() exists = false, want true")
-	}
-	if oid != commitHash.String() {
-		t.Fatalf("refStateCLI() oid = %q, want %q", oid, commitHash.String())
-	}
-}
-
-func TestListEligibleV2Generations_UsesProvidedSettings(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-
-	t.Chdir(dir)
-
-	s := &settings.EntireSettings{
-		StrategyOptions: map[string]any{
-			"checkpoints_v2": true,
-			"full_transcript_generation_retention_days": 14,
-		},
-	}
-
-	items, warnings, err := ListEligibleV2Generations(context.Background(), s)
-	if err != nil {
-		t.Fatalf("ListEligibleV2Generations() error = %v", err)
-	}
-	if len(items) != 0 {
-		t.Fatalf("ListEligibleV2Generations() items = %d, want 0", len(items))
-	}
-	if len(warnings) != 0 {
-		t.Fatalf("ListEligibleV2Generations() warnings = %d, want 0", len(warnings))
-	}
-}
-
 func TestListShadowBranches_Empty(t *testing.T) {
 	// Setup: create a temp git repo with no shadow branches
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -344,9 +188,10 @@ func TestListShadowBranches_Empty(t *testing.T) {
 func TestDeleteShadowBranches(t *testing.T) {
 	// Setup: create a temp git repo with shadow branches
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -408,9 +253,10 @@ func TestDeleteShadowBranches(t *testing.T) {
 func TestDeleteShadowBranches_NonExistent(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -451,10 +297,7 @@ func TestDeleteShadowBranches_NonExistent(t *testing.T) {
 func TestDeleteShadowBranches_Empty(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -482,9 +325,10 @@ func TestDeleteShadowBranches_Empty(t *testing.T) {
 func TestListOrphanedSessionStates_RecentSessionNotOrphaned(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -546,9 +390,10 @@ func TestListOrphanedSessionStates_RecentSessionNotOrphaned(t *testing.T) {
 func TestListOrphanedSessionStates_ShadowBranchMatching(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -627,5 +472,61 @@ func TestListOrphanedSessionStates_ShadowBranchMatching(t *testing.T) {
 				shadowBranchName, fullHash, worktreeID,
 				checkpoint.ShadowBranchNameForCommit(fullHash, worktreeID), item.Reason)
 		}
+	}
+}
+
+// Archived sessions of a multi-session condensed checkpoint must not be
+// flagged as orphaned: their IDs appear in cp.SessionIDs even though
+// cp.SessionID is the most-recent session.
+func TestListOrphanedSessionStates_MultiSessionArchivedNotOrphaned(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	cpID := id.MustCheckpointID("c3d4e5f6a1b2")
+	const archivedSessionID = "archived-session"
+	const latestSessionID = "latest-session"
+
+	// Two sequential writes with the same checkpoint ID produce a multi-session
+	// checkpoint: the second write archives the first session under <sharded>/0
+	// and lists both IDs in SessionIDs.
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	for _, sid := range []string{archivedSessionID, latestSessionID} {
+		require.NoError(t, store.Write(t.Context(), checkpoint.Session{
+			CheckpointID: cpID,
+			SessionID:    sid,
+			Strategy:     "manual-commit",
+			Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
+			Prompts:      []string{"prompt-" + sid},
+			AuthorName:   "Test",
+			AuthorEmail:  "test@test.com",
+		}))
+	}
+
+	staleStart := time.Now().Add(-(sessionGracePeriod + time.Minute))
+	for _, sid := range []string{archivedSessionID, latestSessionID} {
+		require.NoError(t, SaveSessionState(t.Context(), &SessionState{
+			SessionID:  sid,
+			BaseCommit: "0000000000000000000000000000000000000000",
+			StartedAt:  staleStart,
+			StepCount:  1,
+		}))
+	}
+
+	orphans, err := ListOrphanedSessionStates(t.Context())
+	require.NoError(t, err)
+
+	for _, item := range orphans {
+		assert.NotEqual(t, archivedSessionID, item.ID,
+			"archived session in multi-session checkpoint must not be flagged orphaned")
+		assert.NotEqual(t, latestSessionID, item.ID,
+			"latest session in multi-session checkpoint must not be flagged orphaned")
 	}
 }

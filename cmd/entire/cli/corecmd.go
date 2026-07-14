@@ -1,0 +1,509 @@
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+
+	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/spf13/cobra"
+
+	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
+	"github.com/entireio/cli/internal/coreapi"
+)
+
+// addControlPlaneFlags registers the persistent flags shared by every
+// control-plane command group. Persistent so they're inherited by nested
+// subcommands (e.g. `entire repo mirror list`):
+//   - --insecure-http-auth: permit the token exchange over plain http://
+//     (local/dev deployments where the core isn't behind TLS). Hidden, as
+//     elsewhere in the CLI. Applies to every subcommand because they all build
+//     a control-plane client.
+//
+// --json is deliberately NOT persistent here: it only makes sense on the read
+// and mutation verbs that render a wire payload, so it's registered per-command
+// with addJSONFlag. A persistent --json was inherited by side-effect verbs
+// (delete, clone, mirror create/remove, grant remove) that silently ignored it;
+// cobra can't hide a persistent flag from a subset of children, so the flag
+// lives on exactly the commands that honor it.
+func addControlPlaneFlags(cmd *cobra.Command) {
+	cmd.PersistentFlags().Bool("insecure-http-auth", false, "Allow authentication over plain HTTP (insecure, for local development only)")
+	if err := cmd.PersistentFlags().MarkHidden("insecure-http-auth"); err != nil {
+		panic(fmt.Sprintf("hide insecure-http-auth flag: %v", err))
+	}
+}
+
+// addJSONFlag registers the local --json flag on a command that renders a wire
+// payload (list/get/create/mutation verbs routed through the runCore* helpers).
+// Local, not persistent, so only these commands advertise and accept it — see
+// addControlPlaneFlags for why. Read it with jsonRequested.
+func addJSONFlag(cmd *cobra.Command) {
+	cmd.Flags().Bool("json", false, "Output raw JSON instead of a table")
+}
+
+// jsonRequested reports whether --json was set on cmd or an ancestor. A
+// lookup error means the flag isn't defined on this command tree, which is
+// treated as "not requested".
+func jsonRequested(cmd *cobra.Command) bool {
+	v, err := cmd.Flags().GetBool("json")
+	return err == nil && v
+}
+
+// insecureHTTPRequested reports whether --insecure-http-auth was set on cmd
+// or an ancestor.
+func insecureHTTPRequested(cmd *cobra.Command) bool {
+	v, err := cmd.Flags().GetBool("insecure-http-auth")
+	return err == nil && v
+}
+
+// addForceFlag registers the standard confirmation bypass on a destructive
+// control-plane command: --force/-f, with --yes/-y as an alias. Either skips
+// the prompt. Read the combined value with forceRequested.
+func addForceFlag(cmd *cobra.Command) {
+	cmd.Flags().BoolP("force", "f", false, "Skip the confirmation prompt")
+	cmd.Flags().BoolP("yes", "y", false, "Skip the confirmation prompt (alias for --force)")
+}
+
+// forceRequested reports whether the delete should skip its confirmation
+// prompt, i.e. --force or its --yes alias was set.
+func forceRequested(cmd *cobra.Command) bool {
+	force, ferr := cmd.Flags().GetBool("force")
+	yes, yerr := cmd.Flags().GetBool("yes")
+	return (ferr == nil && force) || (yerr == nil && yes)
+}
+
+// runControlPlaneDelete is the shared body of the destructive `delete` verbs
+// (org/project/repo). It resolves the target ref to a ULID, gates on a
+// confirmation prompt (bypassed by --force/--yes), deletes, and reports the
+// resolved identifier. noun names the resource ("org"); ref is the user's
+// original argument, shown alongside the resolved ULID. resolve and del isolate
+// the per-resource API calls.
+func runControlPlaneDelete(
+	cmd *cobra.Command,
+	noun, ref string,
+	resolve func(context.Context, *coreapi.Client) (string, error),
+	del func(context.Context, *coreapi.Client, string) error,
+) error {
+	force := forceRequested(cmd)
+	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+		id, err := resolve(ctx, c)
+		if err != nil {
+			return err
+		}
+		label := noun + " " + resolvedRefLabel(ref, id)
+		proceed, err := confirmControlPlaneDeletion(ctx, cmd.OutOrStdout(), label, force, interactive.CanPromptInteractively())
+		if err != nil {
+			return err
+		}
+		if !proceed {
+			return nil
+		}
+		if err := del(ctx, c, id); err != nil {
+			// Idempotent delete: a resource that's already gone (a 404 from the
+			// delete call — e.g. a ULID passed straight through, or a concurrent
+			// delete) is the desired end state, not an error.
+			if isCoreNotFound(err) {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s not found; nothing to delete\n", label)
+				return nil
+			}
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "✓ Deleted %s\n", label)
+		return nil
+	})
+}
+
+// confirmControlPlaneDeletion gates a destructive control-plane delete. With
+// force it proceeds silently. Otherwise it requires an interactive terminal:
+// with none it refuses (returns an error) rather than deleting unprompted; with
+// one it shows a confirmation form. canPrompt is passed in (not queried) so the
+// decision is unit-testable without a TTY. label is the human description of
+// the target, e.g. `org acme (01J…)`.
+func confirmControlPlaneDeletion(ctx context.Context, w io.Writer, label string, force, canPrompt bool) (bool, error) {
+	if force {
+		return true, nil
+	}
+	if !canPrompt {
+		return false, fmt.Errorf("refusing to delete %s without confirmation; pass --force", label)
+	}
+	// huh opens the TTY during form startup regardless of context state, so
+	// guard explicitly to honor an already-cancelled command context.
+	if ctx.Err() != nil {
+		return false, nil //nolint:nilerr // cancelled context is a clean skip, not an error
+	}
+	confirmed := false
+	form := NewAccessibleForm(
+		huh.NewGroup(huh.NewConfirm().Title(fmt.Sprintf("Delete %s?", label)).Value(&confirmed)),
+	)
+	if err := form.RunWithContext(ctx); err != nil {
+		// A user abort (Esc) or context cancel (Ctrl+C) is a clean cancel, not
+		// an error — mirror confirmTrailDeletion.
+		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
+			return false, nil
+		}
+		return false, fmt.Errorf("deletion prompt: %w", err)
+	}
+	if !confirmed {
+		fmt.Fprintln(w, "Deletion cancelled.")
+		return false, nil
+	}
+	return true, nil
+}
+
+// runCoreList fetches a slice via fn and renders it as an aligned table
+// (default) or the raw wire JSON (--json). empty is the full sentence printed
+// to stdout in place of the table when there are no items (e.g. "No
+// organizations found."). headers names the columns; row maps one item to its
+// cells in the same order. The human view keeps the output actionable — only
+// the columns a person acts on — while --json preserves the full model for
+// scripting.
+func runCoreList[T any](cmd *cobra.Command, empty string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
+	return runCore(cmd, renderCoreList(cmd, empty, headers, row, fn))
+}
+
+// runCoreListForCluster is runCoreList for a resource-provider command (see
+// runCoreForCluster): identical table/JSON/empty-state rendering, but dialing
+// the core that fronts clusterHost rather than the active context.
+func runCoreListForCluster[T any](cmd *cobra.Command, clusterHost, empty string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
+	return runCoreForCluster(cmd, clusterHost, renderCoreList(cmd, empty, headers, row, fn))
+}
+
+// renderCoreList builds the run-function shared by runCoreList and
+// runCoreListForCluster: fetch via fn, then render as a table (default), the
+// empty sentence (no items), or raw JSON (--json). Kept separate from the
+// client-selection so the two list variants differ only in which core they
+// dial.
+func renderCoreList[T any](cmd *cobra.Command, empty string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) func(context.Context, *coreapi.Client) error {
+	return func(ctx context.Context, c *coreapi.Client) error {
+		items, err := fn(ctx, c)
+		if err != nil {
+			return err
+		}
+		if jsonRequested(cmd) {
+			if items == nil {
+				items = []T{} // a nil slice encodes as null; scripts expect []
+			}
+			return printJSON(cmd.OutOrStdout(), items)
+		}
+		if len(items) == 0 {
+			fmt.Fprintln(cmd.OutOrStdout(), empty)
+			return nil
+		}
+		return printTable(cmd.OutOrStdout(), headers, items, row)
+	}
+}
+
+// fetchAllPages drives a keyset-paginated list endpoint to completion: it
+// calls fetch with an empty cursor, then re-calls it with each returned
+// nextPageToken until the cursor comes back empty, concatenating every page.
+// The control plane caps the page size (and may cap it further than a caller
+// requests), so a single call only returns one page — list commands must loop
+// or they silently truncate. The next==cursor guard turns a misbehaving server
+// that fails to advance the cursor into an error instead of an infinite loop.
+func fetchAllPages[T any](ctx context.Context, fetch func(ctx context.Context, cursor string) (items []T, next string, err error)) ([]T, error) {
+	var all []T
+	cursor := ""
+	for {
+		items, next, err := fetch(ctx, cursor)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, items...)
+		if next == "" {
+			return all, nil
+		}
+		if next == cursor {
+			return nil, fmt.Errorf("pagination did not advance (cursor %q repeated)", next)
+		}
+		cursor = next
+	}
+}
+
+// runCoreObject fetches a single value via fn and renders it as a vertical
+// field/value list (default) or raw JSON (--json), reusing the same column
+// definition as the matching list view.
+func runCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) error {
+	return runCore(cmd, renderCoreObject(cmd, headers, row, fn))
+}
+
+// runCoreObjectForCluster is runCoreObject for a resource-provider command (see
+// runCoreForCluster): identical field/JSON rendering, but dialing the core that
+// fronts clusterHost rather than the active context.
+func runCoreObjectForCluster[T any](cmd *cobra.Command, clusterHost string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) error {
+	return runCoreForCluster(cmd, clusterHost, renderCoreObject(cmd, headers, row, fn))
+}
+
+// renderCoreObject builds the run-function shared by runCoreObject and
+// runCoreObjectForCluster: fetch via fn, then render as a field/value list
+// (default) or raw JSON (--json). Kept separate from the client-selection so
+// the two object variants differ only in which core they dial (mirroring
+// renderCoreList).
+func renderCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) func(context.Context, *coreapi.Client) error {
+	return func(ctx context.Context, c *coreapi.Client) error {
+		item, err := fn(ctx, c)
+		if err != nil {
+			return err
+		}
+		if jsonRequested(cmd) {
+			return printJSON(cmd.OutOrStdout(), item)
+		}
+		return printFields(cmd.OutOrStdout(), headers, row(*item))
+	}
+}
+
+// tableStyles holds the foreground styles for the human table/field views,
+// matching the activity/session palette: gray ("8") for headers and
+// secondary cells, white ("7") for the primary (first-column) value. When
+// color is disabled (non-TTY, NO_COLOR — e.g. piped output and tests) the
+// styles are no-ops and output is plain.
+type tableStyles struct {
+	enabled bool
+	header  lipgloss.Style
+	primary lipgloss.Style
+	cell    lipgloss.Style
+}
+
+func newTableStyles(w io.Writer) tableStyles {
+	if !shouldUseColor(w) {
+		return tableStyles{}
+	}
+	return tableStyles{
+		enabled: true,
+		header:  lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Bold(true),
+		primary: lipgloss.NewStyle(), // default fg: inverts with terminal theme
+		cell:    lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)),
+	}
+}
+
+// style applies s to text only when color is enabled; otherwise it returns
+// text unchanged so padding math and plain output stay correct.
+func (t tableStyles) style(s lipgloss.Style, text string) string {
+	if !t.enabled {
+		return text
+	}
+	return s.Render(text)
+}
+
+// columnStyle picks the foreground for a data cell: the first column is the
+// primary identifier (white), the rest are secondary (gray).
+func (t tableStyles) columnStyle(col int) lipgloss.Style {
+	if col == 0 {
+		return t.primary
+	}
+	return t.cell
+}
+
+// printTable writes headers plus one row per item, columns aligned on the
+// plain-text widths so ANSI color codes don't throw off the layout (they're
+// applied after padding). Callers handle the empty case.
+func printTable[T any](w io.Writer, headers []string, items []T, row func(T) []string) error {
+	st := newTableStyles(w)
+	rows := make([][]string, len(items))
+	for i, it := range items {
+		rows[i] = row(it)
+	}
+	widths := columnWidths(headers, rows)
+
+	var b strings.Builder
+	writeTableRow(&b, headers, widths, func(int) lipgloss.Style { return st.header }, st)
+	for _, r := range rows {
+		writeTableRow(&b, r, widths, st.columnStyle, st)
+	}
+	if _, err := io.WriteString(w, b.String()); err != nil {
+		return fmt.Errorf("render table: %w", err)
+	}
+	return nil
+}
+
+// printFields writes a single record as aligned "FIELD  value" lines: the
+// label in header gray, the value in the same primary/secondary color the
+// list view would give that column.
+func printFields(w io.Writer, headers, values []string) error {
+	st := newTableStyles(w)
+	labelWidth := 0
+	for _, h := range headers {
+		if n := lipgloss.Width(h); n > labelWidth {
+			labelWidth = n
+		}
+	}
+	var b strings.Builder
+	for i, h := range headers {
+		var v string
+		if i < len(values) {
+			v = values[i]
+		}
+		label := st.style(st.header, h+strings.Repeat(" ", labelWidth-lipgloss.Width(h)))
+		b.WriteString(label)
+		b.WriteString("  ")
+		b.WriteString(st.style(st.columnStyle(i), v))
+		b.WriteByte('\n')
+	}
+	if _, err := io.WriteString(w, b.String()); err != nil {
+		return fmt.Errorf("render fields: %w", err)
+	}
+	return nil
+}
+
+// columnWidths returns the max plain-text width of each column across the
+// headers and all rows.
+func columnWidths(headers []string, rows [][]string) []int {
+	widths := make([]int, len(headers))
+	for i, h := range headers {
+		widths[i] = lipgloss.Width(h)
+	}
+	for _, r := range rows {
+		for i, c := range r {
+			if i < len(widths) && lipgloss.Width(c) > widths[i] {
+				widths[i] = lipgloss.Width(c)
+			}
+		}
+	}
+	return widths
+}
+
+// writeTableRow pads each cell to its column width on the plain text, then
+// styles it — so alignment is computed before any ANSI codes are added.
+// The final column isn't padded, avoiding trailing whitespace.
+func writeTableRow(b *strings.Builder, cells []string, widths []int, styleFor func(col int) lipgloss.Style, st tableStyles) {
+	for i, c := range cells {
+		last := i == len(cells)-1
+		padded := c
+		if !last && i < len(widths) {
+			padded = c + strings.Repeat(" ", widths[i]-lipgloss.Width(c))
+		}
+		b.WriteString(st.style(styleFor(i), padded))
+		if !last {
+			b.WriteString("  ")
+		}
+	}
+	b.WriteByte('\n')
+}
+
+// runCoreMutation runs fn against the control plane and renders its outcome
+// the way the rest of the CLI renders mutations: prints the caller's
+// ✓-prefixed confirmation on stdout by default, or the wire object as JSON
+// when --json was passed. fn
+// returns both so the human line can name the created resource while --json
+// preserves the full wire model (additive-only: synthesized fields like the
+// repo remote URL are merged in, nothing is ever omitted). It owns the same
+// preamble as the other runCore variants: silence usage, build the client,
+// map API errors to problem-detail messages.
+func runCoreMutation(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client) (message string, wire any, err error)) error {
+	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+		message, wire, err := fn(ctx, c)
+		if err != nil {
+			return err
+		}
+		if jsonRequested(cmd) {
+			return printJSON(cmd.OutOrStdout(), wire)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), message)
+		return nil
+	})
+}
+
+// activeCoreClient builds the control-plane client for active-context
+// commands. A package-level seam (production wiring is coreapi.New) so
+// command-level tests can point the whole command tree at an httptest server
+// without standing up the auth/context/TLS stack.
+var activeCoreClient = func(context.Context) (*coreapi.Client, error) { return coreapi.New() }
+
+// clusterCoreClient builds the control-plane client for cluster-addressed
+// commands (see runCoreForCluster). Same test seam as activeCoreClient —
+// production wiring is coreapi.NewForCluster, which does live /.well-known
+// discovery that command-level tests must not reach.
+var clusterCoreClient func(ctx context.Context, clusterHost string) (*coreapi.Client, error) = coreapi.NewForCluster
+
+// runCore is the shared base for every active-context control-plane command:
+// it owns the preamble only — silence usage, build the client, map API
+// errors — and leaves all rendering to fn. The delete/revoke verbs call it
+// directly and render their own output; runCoreList, runCoreObject, and
+// runCoreMutation build on it to add their table/JSON/confirmation
+// rendering. The client dials the active context's core (coreapi.New); use
+// runCoreForCluster for commands addressed at a specific cluster.
+func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client) error) error {
+	return runCoreClient(cmd, activeCoreClient, fn)
+}
+
+// runCoreForCluster is runCore for resource-provider commands addressed at a
+// specific cluster (mirror create/remove, mirror collaborators list):
+// it dials the core that fronts clusterHost — discovered from the cluster's
+// /.well-known/entire-cluster.json, authenticating with the matching local
+// context — instead of the active context. So the command works on a cluster in
+// a federation other than the active login, instead of failing with "unknown
+// cluster_host". See coreapi.NewForCluster.
+func runCoreForCluster(cmd *cobra.Command, clusterHost string, fn func(ctx context.Context, c *coreapi.Client) error) error {
+	return runCoreClient(cmd, func(ctx context.Context) (*coreapi.Client, error) {
+		return clusterCoreClient(ctx, clusterHost)
+	}, fn)
+}
+
+// runCoreClient owns the control-plane preamble shared by the active-context
+// (runCore) and cluster-addressed (runCoreForCluster) variants: silence usage,
+// opt into plain-HTTP token exchange if requested, build the client via
+// newClient, run fn, and map API errors. The only difference between the two
+// variants is which core newClient dials.
+func runCoreClient(cmd *cobra.Command, newClient func(context.Context) (*coreapi.Client, error), fn func(ctx context.Context, c *coreapi.Client) error) error {
+	cmd.SilenceUsage = true
+	// Opt into plain-HTTP token exchange before the client (and its lazily
+	// built token manager) is constructed — the manager freezes the
+	// setting on first use.
+	if insecureHTTPRequested(cmd) {
+		auth.EnableInsecureHTTP()
+	}
+	client, err := newClient(cmd.Context())
+	if err != nil {
+		return fmt.Errorf("connect to Entire control plane: %w", err)
+	}
+	if err := fn(cmd.Context(), client); err != nil {
+		return renderCoreError(err)
+	}
+	return nil
+}
+
+// markRequired marks one or more flags required, panicking if a name
+// doesn't exist — that can only happen from a typo at wiring time, never
+// at runtime, so a panic surfaces the bug immediately rather than letting
+// a "required" flag silently not be enforced.
+func markRequired(cmd *cobra.Command, names ...string) {
+	for _, name := range names {
+		if err := cmd.MarkFlagRequired(name); err != nil {
+			panic(fmt.Sprintf("mark flag %q required: %v", name, err))
+		}
+	}
+}
+
+// renderCoreError converts a Core API error into the server's
+// problem-detail message (so users see "organization name already taken"
+// rather than ogen's decode-wrapped string), falling back to the raw error
+// for transport/local failures. It returns a plain error, not a
+// SilentError: main.go prints plain errors, and runCore has already set
+// SilenceUsage, so the message reaches the user without a usage dump. (A
+// SilentError here would be swallowed — main.go skips printing those —
+// leaving e.g. a 409 conflict with no output.)
+func renderCoreError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if msg := coreapi.APIError(err); msg != "" {
+		return errors.New(msg)
+	}
+	return err
+}
+
+// printJSON writes v as indented JSON to w — the --json view for list/get
+// and mutations.
+func printJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		return fmt.Errorf("encode output: %w", err)
+	}
+	return nil
+}

@@ -31,9 +31,12 @@ func TestFactoryTaskCheckpointExistsBeforeCommit(t *testing.T) {
 			"Can you run a Worker that inspects this code and comes up with a short summary about what it is about? Have the Worker write that summary to docs/factory-hook-check.md as one short paragraph followed by exactly 3 bullet points. Do not create or edit the file in the main agent process. Only the Worker should write the file. Do not commit. Do not ask for confirmation.")
 		s.WaitFor(t, session, s.Agent.PromptPattern(), 90*time.Second)
 
-		testutil.WaitForFileExists(t, s.Dir, "docs/factory-hook-check.md", 10*time.Second)
+		// WaitFor can return while droid is still working: the input box's
+		// "> Enter to steer" matches the prompt pattern even mid-turn, so the
+		// file wait must absorb the Worker's runtime (60-120s turns on CI).
+		testutil.WaitForFileExists(t, s.Dir, "docs/factory-hook-check.md", 120*time.Second)
 
-		waitForTaskRewindPoint(t, s.Dir, 15*time.Second)
+		waitForTaskRewindPoint(t, s.Dir, 30*time.Second)
 	})
 }
 
@@ -57,8 +60,10 @@ func TestFactoryCommittedCheckpointExcludesPreExistingUntrackedFiles(t *testing.
 			"Can you run a Worker that inspects this code and writes its findings to docs/factory-prehook-worker.md as one short paragraph followed by exactly 3 bullet points? Do not read, modify, or mention docs/factory-preexisting-human-note.md. Do not create or edit the file in the main agent process. Only the Worker should write docs/factory-prehook-worker.md. Do not commit. Do not ask for confirmation.")
 		s.WaitFor(t, session, s.Agent.PromptPattern(), 90*time.Second)
 
-		testutil.WaitForFileExists(t, s.Dir, "docs/factory-prehook-worker.md", 10*time.Second)
-		waitForTaskRewindPoint(t, s.Dir, 15*time.Second)
+		// See TestFactoryTaskCheckpointExistsBeforeCommit: the file wait must
+		// absorb the Worker's runtime because WaitFor can return mid-turn.
+		testutil.WaitForFileExists(t, s.Dir, "docs/factory-prehook-worker.md", 120*time.Second)
+		waitForTaskRewindPoint(t, s.Dir, 30*time.Second)
 
 		s.Git(t, "add", "docs/factory-prehook-worker.md")
 		s.Git(t, "commit", "-m", "Add factory worker checkpoint regression fixtures")

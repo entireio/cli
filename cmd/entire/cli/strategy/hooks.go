@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -18,6 +19,14 @@ const entireHookMarker = "Entire CLI hooks"
 
 const backupSuffix = ".pre-entire"
 const chainComment = "# Chain: run pre-existing hook"
+const missingEntireGitHookWarning = "[entire] Entire CLI is enabled but not installed or not on PATH. Skipping Entire Git hook; continuing. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
+
+// localDevHookCmdPrefix is the command prefix used for git hooks in local
+// development mode. It points at scripts/entire-dev, which compiles the CLI on
+// demand and falls back to the entire binary on PATH when the tree does not
+// build. The path is relative to the repository root, which is git's working
+// directory when it runs hooks.
+const localDevHookCmdPrefix = "./scripts/entire-dev"
 
 // gitHookNames are the git hooks managed by Entire CLI
 var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite", "pre-push"}
@@ -166,37 +175,61 @@ func isGitHookInstalledInHooksDir(hooksDir string) bool {
 
 // buildHookSpecs returns the hook specifications for all managed hooks.
 func buildHookSpecs(cmdPrefix string) []hookSpec {
+	prepareCommitMsgCmd := gitHookCommand(cmdPrefix, `prepare-commit-msg "$1" "$2" 2>/dev/null || true`, false)
+	commitMsgCmd := gitHookCommand(cmdPrefix, `commit-msg "$1" || true`, true)
+	postCommitCmd := gitHookCommand(cmdPrefix, `post-commit 2>/dev/null || true`, false)
+	postRewriteCmd := gitHookCommand(cmdPrefix, `post-rewrite "$1" 2>/dev/null || true`, false)
+	// pre-push intentionally does NOT swallow exit codes — the OPF
+	// rewrite returns errors when it detects a privacy-critical
+	// condition (diverged remote, oversized bootstrap, CAS conflict,
+	// OPF runtime failure) and the user's git push must abort.
+	// Transient checkpoint-push failures (e.g. the
+	// entire/checkpoints/v1 push itself failing) are NOT returned
+	// from PrePush — they're logged and swallowed at the CLI level
+	// so they never reach this point as non-zero exits.
+	//
+	// Trade-off: an unrelated `entire` crash (segfault, panic in
+	// non-OPF code) ALSO aborts the user's push. This is the safer
+	// failure mode — we cannot distinguish from the shell's point of
+	// view whether a non-zero exit means "OPF declined to redact" or
+	// "entire crashed mid-rewrite", and silently letting potentially-
+	// unredacted content reach the remote would violate the contract
+	// the user opted into by enabling OPF. Users hit by unrelated
+	// bugs can `ENTIRE_OPF=no git push` for a one-off bypass while
+	// the bug is fixed.
+	prePushCmd := gitHookCommand(cmdPrefix, `pre-push "$1"`, false)
+
 	return []hookSpec{
 		{
 			name: "prepare-commit-msg",
 			content: fmt.Sprintf(`#!/bin/sh
 # %s
-%s hooks git prepare-commit-msg "$1" "$2" 2>/dev/null || true
-`, entireHookMarker, cmdPrefix),
+%s
+`, entireHookMarker, prepareCommitMsgCmd),
 		},
 		{
 			name: "commit-msg",
 			content: fmt.Sprintf(`#!/bin/sh
 # %s
 # Commit-msg hook: strip trailer if no user content (allows aborting empty commits)
-%s hooks git commit-msg "$1" || exit 1
-`, entireHookMarker, cmdPrefix),
+%s
+`, entireHookMarker, commitMsgCmd),
 		},
 		{
 			name: "post-commit",
 			content: fmt.Sprintf(`#!/bin/sh
 # %s
 # Post-commit hook: condense session data if commit has Entire-Checkpoint trailer
-%s hooks git post-commit 2>/dev/null || true
-`, entireHookMarker, cmdPrefix),
+%s
+`, entireHookMarker, postCommitCmd),
 		},
 		{
 			name: "post-rewrite",
 			content: fmt.Sprintf(`#!/bin/sh
 # %s
 # Post-rewrite hook: remap session linkage after amend/rebase rewrites
-%s hooks git post-rewrite "$1" 2>/dev/null || true
-`, entireHookMarker, cmdPrefix),
+%s
+`, entireHookMarker, postRewriteCmd),
 		},
 		{
 			name: "pre-push",
@@ -204,10 +237,49 @@ func buildHookSpecs(cmdPrefix string) []hookSpec {
 # %s
 # Pre-push hook: push session logs alongside user's push
 # $1 is the remote name (e.g., "origin")
-%s hooks git pre-push "$1" || true
-`, entireHookMarker, cmdPrefix),
+%s
+`, entireHookMarker, prePushCmd),
 		},
 	}
+}
+
+func gitHookCommand(cmdPrefix, args string, warnMissing bool) string {
+	invocation := fmt.Sprintf("%s hooks git %s", cmdPrefix, args)
+	availableTest, ok := gitHookCommandAvailableTest(cmdPrefix)
+	if !ok {
+		return invocation
+	}
+
+	missingAction := ":"
+	if warnMissing {
+		missingAction = fmt.Sprintf("printf '%%s\\n' %s >&2 || :", shellQuote(missingEntireGitHookWarning))
+	}
+	return fmt.Sprintf("if %s; then %s; else %s; fi", availableTest, invocation, missingAction)
+}
+
+func gitHookCommandAvailableTest(cmdPrefix string) (string, bool) {
+	if cmdPrefix == "entire" {
+		return "command -v entire >/dev/null 2>&1", true
+	}
+	if isWindowsAbsoluteHookCommand(cmdPrefix) {
+		return fmt.Sprintf("[ -f %s ]", cmdPrefix), true
+	}
+	if strings.HasPrefix(cmdPrefix, "/") || strings.HasPrefix(cmdPrefix, "'/") {
+		return fmt.Sprintf("[ -x %s ]", cmdPrefix), true
+	}
+	return "", false
+}
+
+func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
+	path := strings.TrimPrefix(cmdPrefix, "'")
+	if len(path) < len("C:\\") || path[1] != ':' {
+		return false
+	}
+	driveLetter := path[0]
+	if (driveLetter < 'A' || driveLetter > 'Z') && (driveLetter < 'a' || driveLetter > 'z') {
+		return false
+	}
+	return path[2] == '\\' || path[2] == '/'
 }
 
 // InstallGitHook installs generic git hooks that delegate to `entire hook` commands.
@@ -355,15 +427,19 @@ fi
 }
 
 func generatePostRewriteChainedContent(baseContent string) string {
-	const original = `entire hooks git post-rewrite "$1" 2>/dev/null || true`
-	const replacement = `entire hooks git post-rewrite "$1" < "$_entire_stdin" 2>/dev/null || true`
+	const original = `hooks git post-rewrite "$1" 2>/dev/null || true`
+	const replacement = `hooks git post-rewrite "$1" < "$_entire_stdin" 2>/dev/null || true`
 
-	replayPrefix := `_entire_stdin="$(mktemp "${TMPDIR:-/tmp}/entire-post-rewrite.XXXXXX")"
+	replayPrefix := `#!/bin/sh
+_entire_stdin="$(mktemp "${TMPDIR:-/tmp}/entire-post-rewrite.XXXXXX")"
 cat > "$_entire_stdin"
 trap 'rm -f "$_entire_stdin"' EXIT
-` + replacement
+`
 
-	return strings.Replace(baseContent, original, replayPrefix, 1) + fmt.Sprintf(`
+	body := strings.TrimPrefix(baseContent, "#!/bin/sh\n")
+	body = strings.Replace(body, original, replacement, 1)
+
+	return replayPrefix + body + fmt.Sprintf(`
 %s
 _entire_hook_dir="$(dirname "$0")"
 if [ -x "$_entire_hook_dir/post-rewrite%s" ]; then
@@ -373,26 +449,47 @@ fi
 }
 
 // hookCmdPrefix returns the command prefix for hook scripts and warning messages.
-// Returns "go run ./cmd/entire/main.go" when local_dev is enabled.
+// Returns the scripts/entire-dev launcher when local_dev is enabled.
 // When absolutePath is true, resolves the full binary path via os.Executable()
 // and returns an error if resolution fails. This is needed for GUI git clients
 // (Xcode, Tower, etc.) that don't source shell profiles.
 func hookCmdPrefix(localDev, absolutePath bool) (string, error) {
 	if localDev {
-		return "go run ./cmd/entire/main.go", nil
+		return localDevHookCmdPrefix, nil
 	}
 	if absolutePath {
 		exe, err := os.Executable()
 		if err != nil {
 			return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve binary path: %w", err)
 		}
-		resolved, err := filepath.EvalSymlinks(exe)
+		resolved, err := resolveHookExePath(exe, filepath.EvalSymlinks, runtime.GOOS)
 		if err != nil {
-			return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve symlinks for %s: %w", exe, err)
+			return "", err
 		}
 		return shellQuote(resolved), nil
 	}
 	return "entire", nil
+}
+
+// resolveHookExePath resolves exe through symlinks for embedding as an absolute
+// path in a git hook. On Windows, filepath.EvalSymlinks can fail when a path
+// component is an NTFS directory junction rather than a plain symlink — notably
+// Scoop's `…\scoop\apps\<app>\current\` junction, which yields "The system
+// cannot find the path specified" (issue #1424). The unresolved os.Executable()
+// path is itself a valid, launchable absolute path (and on Scoop the stable
+// `current\` junction path is actually preferable, since it survives version
+// updates that repoint the junction), so on Windows we fall back to it rather
+// than failing the hook install outright. Off Windows, an EvalSymlinks failure
+// is unexpected and still surfaced as an error.
+func resolveHookExePath(exe string, evalSymlinks func(string) (string, error), goos string) (string, error) {
+	resolved, err := evalSymlinks(exe)
+	if err != nil {
+		if goos == "windows" {
+			return exe, nil
+		}
+		return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve symlinks for %s: %w", exe, err)
+	}
+	return resolved, nil
 }
 
 // shellQuote wraps a string in single quotes for safe use in #!/bin/sh scripts.

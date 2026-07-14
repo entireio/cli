@@ -5,14 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
+	"os"
+	"path/filepath"
 	"time"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v6"
@@ -33,13 +34,13 @@ Checks performed:
      entire/checkpoints/v1 branches share no common ancestor (caused by a
      previous bug). Fixes by cherry-picking local checkpoints onto remote tip.
 
-  When checkpoints_v2 is enabled:
-  2. Disconnected v2 /main ref: same detection for v2 refs under refs/entire/.
-  3. v2 ref existence: verifies /main and /full/current refs exist consistently.
-  4. v2 checkpoint counts: verifies /main and /full/current checkpoint counts are consistent.
-  5. v2 generation health: checks archived generations for valid metadata.
+  When Codex hooks are installed:
+  2. Codex hook trust: warn when hooks declared in .codex/hooks.json
+     lack a trusted_hash entry in the user's Codex config (i.e. /hooks
+     review hasn't run yet on this machine, or a newer entire release
+     added a hook the user hasn't approved yet).
 
-  6. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  3. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -61,6 +62,12 @@ be condensed will be discarded.`,
 	}
 
 	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Auto-fix all issues without prompting")
+
+	// Diagnostic subcommands.
+	cmd.AddCommand(newTraceCmd())
+	cmd.AddCommand(newDoctorLogsCmd())
+	cmd.AddCommand(newDoctorBundleCmd())
+	cmd.AddCommand(newDoctorMigrateCheckpointsCmd())
 
 	return cmd
 }
@@ -84,54 +91,13 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Error: metadata check failed: %v\n", metadataErr)
 		finalErr = NewSilentError(fmt.Errorf("metadata check failed: %w", metadataErr))
 	}
+
 	fmt.Fprintln(cmd.OutOrStdout())
 
-	// v2 checks (only when checkpoints_v2 is enabled)
 	ctx := cmd.Context()
-	if settings.IsCheckpointsV2Enabled(ctx) {
-		// Check 2: Disconnected v2 /main ref
-		v2DisconnectedErr := checkDisconnectedV2Main(cmd, force)
-		if v2DisconnectedErr != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Error: v2 /main check failed: %v\n", v2DisconnectedErr)
-			if finalErr == nil {
-				finalErr = NewSilentError(fmt.Errorf("v2 /main check failed: %w", v2DisconnectedErr))
-			}
-		}
 
-		repo, repoErr := openRepository(ctx)
-		if repoErr != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Error: could not open repository for v2 checks: %v\n", repoErr)
-			if finalErr == nil {
-				finalErr = NewSilentError(fmt.Errorf("v2 checks failed: %w", repoErr))
-			}
-		} else {
-			// Check 3: v2 ref existence
-			if refErr := checkV2RefExistence(cmd, repo); refErr != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Error: v2 ref existence check failed: %v\n", refErr)
-				if finalErr == nil {
-					finalErr = NewSilentError(fmt.Errorf("v2 ref check failed: %w", refErr))
-				}
-			}
-
-			// Check 4: v2 checkpoint count consistency
-			if countErr := checkV2CheckpointCounts(cmd, repo); countErr != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Error: v2 checkpoint count check failed: %v\n", countErr)
-				if finalErr == nil {
-					finalErr = NewSilentError(fmt.Errorf("v2 count check failed: %w", countErr))
-				}
-			}
-
-			// Check 5: v2 generation health
-			if genErr := checkV2GenerationHealth(cmd, repo); genErr != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Error: v2 generation health check failed: %v\n", genErr)
-				if finalErr == nil {
-					finalErr = NewSilentError(fmt.Errorf("v2 generation check failed: %w", genErr))
-				}
-			}
-		}
-
-		fmt.Fprintln(cmd.OutOrStdout())
-	}
+	// Agent-specific: Codex hook trust state.
+	checkCodexHookTrust(cmd)
 
 	// Stuck sessions
 	// Load all session states
@@ -152,6 +118,15 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
+	}
+	defer repo.Close()
+
+	// Finalize any ACTIVE session whose agent process has exited (no SessionStop
+	// hook fired). A gone process is unambiguous, so these are condensed on the
+	// spot rather than left for the interactive prompt below; the sweep marks
+	// them ended in place so classifySession won't re-flag them.
+	if n := finalizeExitedSessions(ctx, states); n > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Finalized %d exited session(s) (agent process gone).\n\n", n)
 	}
 
 	// Identify stuck sessions
@@ -244,14 +219,22 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 
 	switch {
 	case state.Phase.IsActive():
-		if !state.IsStuckActive() {
-			return nil
-		}
-
 		var reason string
-		if state.LastInteractionTime != nil {
+		switch {
+		case state.OwnerExited():
+			// Detected immediately (no timeout wait): the owning agent process
+			// is gone. Normally finalized up front in runSessionsFix; this
+			// branch covers a session that couldn't be finalized there.
+			pid := 0
+			if state.Owner != nil {
+				pid = state.Owner.PID
+			}
+			reason = fmt.Sprintf("agent process %d exited (no longer running)", pid)
+		case !state.IsStuckActive():
+			return nil
+		case state.LastInteractionTime != nil:
 			reason = fmt.Sprintf("active, last interaction %s ago", now.Sub(*state.LastInteractionTime).Truncate(time.Minute))
-		} else {
+		default:
 			reason = fmt.Sprintf("active, started %s ago with no recorded interaction", now.Sub(state.StartedAt).Truncate(time.Minute))
 		}
 
@@ -368,15 +351,20 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	ctx := cmd.Context()
-	remoteRefName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
+	refs := checkpoint.ResolveRefs(ctx)
+	w := cmd.OutOrStdout()
+	if !refs.PrimaryFetchableFromOrigin() {
+		fmt.Fprintf(w, "✓ Metadata branches: OK (primary ref %s is not pushed to origin)\n", refs.Primary)
+		return nil
+	}
+	remoteRefName := plumbing.NewRemoteReferenceName("origin", refs.Primary.Short())
 	disconnected, err := strategy.IsMetadataDisconnected(ctx, repo, remoteRefName)
 	if err != nil {
 		return fmt.Errorf("could not check metadata branch state: %w", err)
 	}
-
-	w := cmd.OutOrStdout()
 
 	if !disconnected {
 		fmt.Fprintln(w, "✓ Metadata branches: OK")
@@ -384,32 +372,21 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	}
 
 	fmt.Fprintln(w, "Metadata branches: DISCONNECTED")
-	fmt.Fprintln(w, "  Local and remote entire/checkpoints/v1 branches share no common ancestor.")
+	fmt.Fprintf(w, "  Local and remote %s branches share no common ancestor.\n", refs.Primary.Short())
 	fmt.Fprintln(w, "  Some remote checkpoints may not be visible locally.")
 	fmt.Fprintln(w, "  Fix: cherry-pick local checkpoints onto remote tip (preserves all data).")
 
 	if !force {
-		var confirmed bool
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title("Fix disconnected metadata branches?").
-					Value(&confirmed),
-			),
-		)
-		if formErr := form.Run(); formErr != nil {
-			if errors.Is(formErr, huh.ErrUserAborted) {
-				return nil
-			}
-			return fmt.Errorf("prompt failed: %w", formErr)
+		proceed, promptErr := confirmDoctorFix(ctx, w, "Fix disconnected metadata branches?")
+		if promptErr != nil {
+			return promptErr
 		}
-		if !confirmed {
-			fmt.Fprintln(w, "  -> Skipped")
+		if !proceed {
 			return nil
 		}
 	}
 
-	if fixErr := strategy.ReconcileDisconnectedMetadataBranch(ctx, repo, remoteRefName, cmd.ErrOrStderr()); fixErr != nil {
+	if fixErr := strategy.ReconcileDisconnectedMetadataRef(ctx, repo, refs.Primary, remoteRefName, cmd.ErrOrStderr()); fixErr != nil {
 		return fmt.Errorf("failed to reconcile metadata branches: %w", fixErr)
 	}
 
@@ -417,246 +394,84 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	return nil
 }
 
-// checkDisconnectedV2Main detects and optionally repairs disconnected
-// local/remote v2 /main refs.
-func checkDisconnectedV2Main(cmd *cobra.Command, force bool) error {
-	repo, err := openRepository(cmd.Context())
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
+// confirmDoctorFix prompts to apply a doctor fix. Declining (which prints
+// "-> Skipped"), aborting (Ctrl+C), and context cancellation all return false
+// with no error.
+func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, error) {
+	// huh opens the TTY during form startup regardless of context state, so
+	// guard explicitly to honor an already-cancelled command context.
+	if ctx.Err() != nil {
+		return false, nil //nolint:nilerr // cancelled context is a clean skip, not an error
 	}
-
-	ctx := cmd.Context()
-	remote, configured, resolveErr := strategy.ResolveCheckpointRemoteURL(ctx)
-	if configured && resolveErr != nil {
-		return fmt.Errorf("checkpoint_remote is configured but could not be resolved: %w", resolveErr)
-	}
-	if remote == "" {
-		remote = "origin"
-	}
-
-	disconnected, err := strategy.IsV2MainDisconnected(ctx, repo, remote)
-	if err != nil {
-		// If no checkpoint_remote is configured and origin doesn't exist or is
-		// unreachable, treat as "can't check" rather than a hard failure — mirrors
-		// the v1 behavior which no-ops when the remote-tracking ref is absent.
-		if !configured {
-			fmt.Fprintln(cmd.OutOrStdout(), "✓ v2 /main ref: OK (no remote to compare)")
-			return nil
+	var confirmed bool
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title(title).
+				Value(&confirmed),
+		),
+	)
+	if err := form.RunWithContext(ctx); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
+			return false, nil
 		}
-		return fmt.Errorf("could not check v2 /main ref state: %w", err)
+		return false, fmt.Errorf("prompt failed: %w", err)
 	}
-
-	w := cmd.OutOrStdout()
-
-	if !disconnected {
-		fmt.Fprintln(w, "✓ v2 /main ref: OK")
-		return nil
+	if !confirmed {
+		fmt.Fprintln(w, "  -> Skipped")
 	}
-
-	fmt.Fprintln(w, "v2 /main ref: DISCONNECTED")
-	fmt.Fprintln(w, "  Local and remote v2 /main refs share no common ancestor.")
-	fmt.Fprintln(w, "  Fix: cherry-pick local checkpoints onto remote tip (preserves all data).")
-
-	if !force {
-		var confirmed bool
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title("Fix disconnected v2 /main ref?").
-					Value(&confirmed),
-			),
-		)
-		if formErr := form.Run(); formErr != nil {
-			if errors.Is(formErr, huh.ErrUserAborted) {
-				return nil
-			}
-			return fmt.Errorf("prompt failed: %w", formErr)
-		}
-		if !confirmed {
-			fmt.Fprintln(w, "  -> Skipped")
-			return nil
-		}
-	}
-
-	if fixErr := strategy.ReconcileDisconnectedV2Ref(ctx, repo, remote, cmd.ErrOrStderr()); fixErr != nil {
-		return fmt.Errorf("failed to reconcile v2 /main ref: %w", fixErr)
-	}
-
-	fmt.Fprintln(w, "  ✓ Fixed: v2 /main ref reconciled")
-	return nil
+	return confirmed, nil
 }
 
-// checkV2GenerationHealth verifies that archived /full/* generations are well-formed.
-// Checks: generation.json exists and is valid, timestamps are sane, generation has checkpoints,
-// and generation sequence numbers are contiguous.
-func checkV2GenerationHealth(cmd *cobra.Command, repo *git.Repository) error {
-	w := cmd.OutOrStdout()
-
-	v2Store := checkpoint.NewV2GitStore(repo, "origin")
-
-	archived, err := v2Store.ListArchivedGenerations()
+// checkCodexHookTrust warns about two kinds of drift in the Codex hook
+// setup:
+//
+//  1. .codex/hooks.json is stale relative to what the CLI installs
+//     today (e.g. a release added PostToolUse after the user enabled
+//     Codex). Fix: re-run `entire enable`.
+//
+//  2. A declared hook lacks a `trusted_hash` entry in the user's Codex
+//     config — either a fresh clone or a newer hook on the file the
+//     user hasn't approved yet. Fix: open /hooks in Codex.
+//
+// Both checks are structural (file/key presence). Stays silent when
+// this repo doesn't have codex hooks installed or when we can't
+// resolve the worktree root. Warn-only.
+func checkCodexHookTrust(cmd *cobra.Command) {
+	repoRoot, err := paths.WorktreeRoot(cmd.Context())
 	if err != nil {
-		return fmt.Errorf("failed to list archived generations: %w", err)
+		return
+	}
+	if _, statErr := os.Stat(filepath.Join(repoRoot, ".codex", "hooks.json")); statErr != nil {
+		return
 	}
 
-	if len(archived) == 0 {
-		fmt.Fprintln(w, "✓ v2 generations: OK (no archived generations)")
-		return nil
-	}
-
-	var warnings []string
-
-	for _, genName := range archived {
-		refName := plumbing.ReferenceName(paths.V2FullRefPrefix + genName)
-
-		_, treeHash, refErr := v2Store.GetRefState(refName)
-		if refErr != nil {
-			warnings = append(warnings, fmt.Sprintf("generation %s: cannot read ref: %v", genName, refErr))
-			continue
-		}
-
-		gen, genErr := v2Store.ReadGeneration(treeHash)
-		if genErr != nil {
-			warnings = append(warnings, fmt.Sprintf("generation %s: failed to read generation.json: %v", genName, genErr))
-			continue
-		}
-
-		hasOldest := !gen.OldestCheckpointAt.IsZero()
-		hasNewest := !gen.NewestCheckpointAt.IsZero()
-
-		switch {
-		case !hasOldest && !hasNewest:
-			// ReadGeneration returns zero-value when the file is absent
-			warnings = append(warnings, fmt.Sprintf("generation %s: WARNING — missing generation.json", genName))
-		case hasOldest != hasNewest:
-			warnings = append(warnings, fmt.Sprintf("generation %s: WARNING — incomplete generation.json (partial timestamps)", genName))
-		case gen.OldestCheckpointAt.After(gen.NewestCheckpointAt):
-			warnings = append(warnings, fmt.Sprintf("generation %s: WARNING — invalid timestamps (oldest > newest)", genName))
-		}
-
-		cpCount, countErr := v2Store.CountCheckpointsInTree(treeHash)
-		if countErr != nil {
-			warnings = append(warnings, fmt.Sprintf("generation %s: failed to count checkpoints: %v", genName, countErr))
-			continue
-		}
-		if cpCount == 0 {
-			warnings = append(warnings, fmt.Sprintf("generation %s: WARNING — empty (no checkpoint shards)", genName))
-		}
-	}
-
-	if len(archived) > 1 {
-		for i := 1; i < len(archived); i++ {
-			prev, prevErr := strconv.ParseInt(archived[i-1], 10, 64)
-			curr, currErr := strconv.ParseInt(archived[i], 10, 64)
-			if prevErr != nil || currErr != nil {
-				continue
-			}
-			if curr-prev > 1 {
-				first := prev + 1
-				last := curr - 1
-				if first == last {
-					warnings = append(warnings, fmt.Sprintf("INFO — gap in generation sequence (%013d missing)", first))
-				} else {
-					warnings = append(warnings, fmt.Sprintf("INFO — gap in generation sequence (%013d–%013d missing)", first, last))
-				}
-			}
-		}
-	}
-
-	if len(warnings) > 0 {
-		fmt.Fprintf(w, "v2 generations: %d issue(s) found in %d archived generation(s):\n", len(warnings), len(archived))
-		for _, warning := range warnings {
-			fmt.Fprintf(w, "  %s\n", warning)
-		}
-		return fmt.Errorf("v2 generation health: %d issue(s) found", len(warnings))
-	}
-
-	fmt.Fprintf(w, "✓ v2 generations: OK (%d archived)\n", len(archived))
-	return nil
-}
-
-// checkV2CheckpointCounts verifies checkpoint count consistency between /main and /full/current.
-// /main is permanent (accumulates all checkpoints), /full/current holds only the current generation.
-// So main count >= full/current count. If full/current exceeds main, a dual-write partially failed.
-// Skips silently if either ref doesn't exist (already covered by checkV2RefExistence).
-func checkV2CheckpointCounts(cmd *cobra.Command, repo *git.Repository) error {
 	w := cmd.OutOrStdout()
+	missing := codex.MissingEntireHooks(repoRoot)
+	gaps := codex.HookTrustGaps(repoRoot)
 
-	v2Store := checkpoint.NewV2GitStore(repo, "origin")
+	if len(missing) == 0 && len(gaps) == 0 {
+		fmt.Fprintln(w, "✓ Codex hook trust: OK")
+		return
+	}
 
-	mainRefName := plumbing.ReferenceName(paths.V2MainRefName)
-	fullRefName := plumbing.ReferenceName(paths.V2FullCurrentRefName)
-
-	_, mainTreeHash, mainErr := v2Store.GetRefState(mainRefName)
-	_, fullTreeHash, fullErr := v2Store.GetRefState(fullRefName)
-
-	// Skip only when ref is missing (already covered by checkV2RefExistence).
-	if mainErr != nil {
-		if errors.Is(mainErr, plumbing.ErrReferenceNotFound) {
-			return nil
+	if len(missing) > 0 {
+		fmt.Fprintln(w, "Codex hooks: OUT OF DATE")
+		fmt.Fprintf(w, "  %d hook(s) the CLI installs today aren't declared in .codex/hooks.json:\n", len(missing))
+		for _, ev := range missing {
+			fmt.Fprintf(w, "    - %s\n", ev)
 		}
-		return fmt.Errorf("failed to read /main ref: %w", mainErr)
+		fmt.Fprintln(w, "  Run `entire enable` to refresh the hooks file.")
 	}
-	if fullErr != nil {
-		if errors.Is(fullErr, plumbing.ErrReferenceNotFound) {
-			return nil
+
+	if len(gaps) > 0 {
+		fmt.Fprintln(w, "Codex hook trust: REVIEW NEEDED")
+		fmt.Fprintf(w, "  %d hook(s) declared in .codex/hooks.json have no trusted_hash entry yet:\n", len(gaps))
+		for _, ev := range gaps {
+			fmt.Fprintf(w, "    - %s\n", ev)
 		}
-		return fmt.Errorf("failed to read /full/current ref: %w", fullErr)
+		fmt.Fprintln(w, "  Open /hooks inside Codex to approve them.")
 	}
-
-	mainCount, err := v2Store.CountCheckpointsInTree(mainTreeHash)
-	if err != nil {
-		return fmt.Errorf("failed to count /main checkpoints: %w", err)
-	}
-
-	fullCount, err := v2Store.CountCheckpointsInTree(fullTreeHash)
-	if err != nil {
-		return fmt.Errorf("failed to count /full/current checkpoints: %w", err)
-	}
-
-	if fullCount > mainCount {
-		fmt.Fprintf(w, "v2 checkpoint counts: INCONSISTENT — /full/current has %d checkpoints but /main has only %d\n", fullCount, mainCount)
-		return fmt.Errorf("v2 checkpoint counts inconsistent: /full/current (%d) exceeds /main (%d)", fullCount, mainCount)
-	}
-
-	fmt.Fprintf(w, "✓ v2 checkpoint counts: OK (main: %d, full/current: %d)\n", mainCount, fullCount)
-	return nil
-}
-
-// checkV2RefExistence verifies that v2 refs exist (or both are absent for a fresh repo).
-// One ref without the other suggests a partial initialization.
-func checkV2RefExistence(cmd *cobra.Command, repo *git.Repository) error {
-	w := cmd.OutOrStdout()
-
-	mainRefName := plumbing.ReferenceName(paths.V2MainRefName)
-	fullRefName := plumbing.ReferenceName(paths.V2FullCurrentRefName)
-
-	_, mainErr := repo.Reference(mainRefName, true)
-	_, fullErr := repo.Reference(fullRefName, true)
-	if mainErr != nil && !errors.Is(mainErr, plumbing.ErrReferenceNotFound) {
-		return fmt.Errorf("failed to read /main ref: %w", mainErr)
-	}
-	if fullErr != nil && !errors.Is(fullErr, plumbing.ErrReferenceNotFound) {
-		return fmt.Errorf("failed to read /full/current ref: %w", fullErr)
-	}
-
-	hasMain := mainErr == nil
-	hasFull := fullErr == nil
-
-	switch {
-	case hasMain && hasFull:
-		fmt.Fprintln(w, "✓ v2 refs: OK")
-	case !hasMain && !hasFull:
-		fmt.Fprintln(w, "✓ v2 refs: OK (no checkpoints written yet)")
-	case hasMain && !hasFull:
-		fmt.Fprintln(w, "v2 refs: INCONSISTENT — /main exists but /full/current is missing")
-		return errors.New("v2 refs inconsistent: /main exists but /full/current is missing")
-	case !hasMain && hasFull:
-		fmt.Fprintln(w, "v2 refs: INCONSISTENT — /full/current exists but /main is missing")
-		return errors.New("v2 refs inconsistent: /full/current exists but /main is missing")
-	}
-
-	return nil
 }
 
 // canDeleteShadowBranch checks if a shadow branch can be safely deleted.

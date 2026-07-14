@@ -15,7 +15,10 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,16 +27,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/google/uuid"
 )
 
 func main() {
-	prompt := ""
-	for i := 1; i < len(os.Args); i++ {
-		if os.Args[i] == "-p" && i+1 < len(os.Args) {
-			prompt = os.Args[i+1]
-			i++
-		}
+	cfg := parseArgs(os.Args[1:])
+
+	if cfg.writeSessionOnly {
+		transcriptPath := setupTranscript(cfg.sessionID)
+		appendTranscript(transcriptPath, "user", cfg.userPrompt)
+		appendTranscript(transcriptPath, "assistant", cfg.assistantMessage)
+		fmt.Fprintln(os.Stdout, cfg.sessionID)
+		return
 	}
 
 	dir, err := os.Getwd() //nolint:forbidigo // Standalone binary, not part of CLI — CWD is the repo dir
@@ -41,44 +47,99 @@ func main() {
 		fatal("getwd: %v", err)
 	}
 
-	sessionID := uuid.New().String()
-	transcriptPath := setupTranscript(sessionID)
+	transcriptPath := setupTranscript(cfg.sessionID)
 
 	fireHook(dir, "session-start", map[string]string{
-		"session_id":      sessionID,
+		"session_id":      cfg.sessionID,
 		"transcript_path": transcriptPath,
 		"model":           "vogon-llm-42",
 	})
 
-	if prompt != "" {
+	if cfg.prompt != "" {
 		// Headless mode: single prompt
-		runTurn(dir, sessionID, transcriptPath, prompt)
+		runTurn(dir, cfg.sessionID, transcriptPath, cfg.prompt)
 	} else {
 		// Interactive mode: read prompts from stdin
 		fmt.Fprint(os.Stdout, "> ")
 		scanner := bufio.NewScanner(os.Stdin)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
-			if line == "" || line == "exit" || line == "quit" {
+			if line == "exit" || line == "quit" {
 				break
 			}
-			// Give tmux's Send() time to capture the echoed-input state
-			// before we produce any output. Send polls every 200ms; without
-			// this pause, vogon output appears in the same capture window
-			// as the echo, causing stableAtSend to include final output and
-			// preventing WaitFor's contentChanged detection.
+			// Ignore empty lines: tmux's Send() may retry Enter when the pane
+			// doesn't visibly react in time, and treating that as termination
+			// would end the session mid-test.
+			if line == "" {
+				fmt.Fprint(os.Stdout, "> ")
+				continue
+			}
+			// Give tmux's Send() time to observe a distinct pre-output pane
+			// state, so its Enter verification and WaitFor's contentChanged
+			// detection see a clean echo -> output transition.
 			time.Sleep(700 * time.Millisecond)
 			fmt.Fprintln(os.Stdout, "Working...")
-			runTurn(dir, sessionID, transcriptPath, line)
+			runTurn(dir, cfg.sessionID, transcriptPath, line)
 			fmt.Fprint(os.Stdout, "> ")
 		}
 	}
 
 	fireHook(dir, "session-end", map[string]string{
-		"session_id":      sessionID,
+		"session_id":      cfg.sessionID,
 		"transcript_path": transcriptPath,
 		"model":           "vogon-llm-42",
 	})
+}
+
+type config struct {
+	prompt           string
+	sessionID        string
+	writeSessionOnly bool
+	userPrompt       string
+	assistantMessage string
+}
+
+func parseArgs(args []string) config {
+	cfg := config{
+		sessionID: uuid.New().String(),
+	}
+
+	fs := flag.NewFlagSet("vogon", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.StringVar(&cfg.prompt, "p", "", "single-turn prompt")
+	fs.StringVar(&cfg.sessionID, "session-id", cfg.sessionID, "session identifier")
+	fs.BoolVar(&cfg.writeSessionOnly, "write-session", false, "write a session transcript without firing hooks")
+	fs.StringVar(&cfg.userPrompt, "user-prompt", "", "user prompt to record in write-session mode")
+	fs.StringVar(&cfg.assistantMessage, "assistant-message", "", "assistant message to record in write-session mode")
+	if err := fs.Parse(args); err != nil {
+		fatal("parse args: %v", err)
+	}
+	if cfg.writeSessionOnly {
+		if cfg.userPrompt == "" {
+			fatal("--user-prompt is required with --write-session")
+		}
+		if cfg.assistantMessage == "" {
+			fatal("--assistant-message is required with --write-session")
+		}
+	}
+	if err := validateSessionID(cfg.sessionID); err != nil {
+		fatal("invalid --session-id: %v", err)
+	}
+
+	return cfg
+}
+
+func validateSessionID(sessionID string) error {
+	if sessionID == "" {
+		return errors.New("session ID cannot be empty")
+	}
+	if filepath.Base(sessionID) != sessionID {
+		return errors.New("must not contain path separators")
+	}
+	if sessionID == "." || sessionID == ".." || strings.Contains(sessionID, "..") {
+		return errors.New("must not contain dot path elements")
+	}
+	return nil
 }
 
 func runTurn(dir, sessionID, transcriptPath, prompt string) {
@@ -485,10 +546,10 @@ func fireHook(dir, hookName string, payload any) {
 		return
 	}
 
-	cmd := exec.Command("entire", "hooks", "vogon", hookName)
+	cmd := execx.NonInteractive(context.Background(), "entire", "hooks", "vogon", hookName)
 	cmd.Dir = dir
 	cmd.Stdin = bytes.NewReader(data)
-	cmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=0")
+	cmd.Env = os.Environ()
 	// Capture output but don't show it — hooks may output banners
 	out, err := cmd.CombinedOutput()
 	if err != nil {

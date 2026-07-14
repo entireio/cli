@@ -1,0 +1,87 @@
+package skilldiscovery_test
+
+import (
+	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent/skilldiscovery"
+)
+
+func TestCuratedBuiltinsFor_KnownAgents(t *testing.T) {
+	t.Parallel()
+	claude := skilldiscovery.CuratedBuiltinsFor("claude-code")
+	if len(claude) != 3 {
+		t.Fatalf("claude-code built-ins: got %d entries, want 3", len(claude))
+	}
+	// Codex has no binary-bundled review command usable from `codex exec`;
+	// its review skills are discovered on disk in $name form instead.
+	codex := skilldiscovery.CuratedBuiltinsFor("codex")
+	if len(codex) != 0 {
+		t.Errorf("codex built-ins: got %+v, want 0 (discovery-driven)", codex)
+	}
+	gemini := skilldiscovery.CuratedBuiltinsFor("gemini")
+	if len(gemini) != 0 {
+		t.Errorf("gemini built-ins: got %d, want 0", len(gemini))
+	}
+}
+
+func TestCuratedBuiltinsFor_UnknownAgentReturnsEmpty(t *testing.T) {
+	t.Parallel()
+	if got := skilldiscovery.CuratedBuiltinsFor("nonexistent"); len(got) != 0 {
+		t.Errorf("unknown agent: got %d entries, want 0", len(got))
+	}
+}
+
+func TestActiveInstallHintsFor_SuppressesWhenProvidesAnyDiscovered(t *testing.T) {
+	t.Parallel()
+	discovered := map[string]struct{}{"/pr-review-toolkit:review-pr": {}}
+	hints := skilldiscovery.ActiveInstallHintsFor("claude-code", discovered)
+	for _, h := range hints {
+		for _, name := range h.ProvidesAny {
+			if name == "/pr-review-toolkit:review-pr" {
+				t.Errorf("pr-review-toolkit hint should have been suppressed, got %+v", h)
+			}
+		}
+	}
+}
+
+func TestActiveInstallHintsFor_ShowsAllWhenNothingDiscovered(t *testing.T) {
+	t.Parallel()
+	hints := skilldiscovery.ActiveInstallHintsFor("claude-code", nil)
+	if len(hints) == 0 {
+		t.Fatal("expected at least one hint when discovery set is empty")
+	}
+}
+
+func TestActiveInstallHintsFor_GeminiAlwaysShownRegardlessOfDiscovery(t *testing.T) {
+	t.Parallel()
+	hints := skilldiscovery.ActiveInstallHintsFor("gemini", map[string]struct{}{"/anything": {}})
+	if len(hints) == 0 {
+		t.Error("gemini hint with nil ProvidesAny should always show")
+	}
+}
+
+func TestIsEligible_IncludesAgentWithOnlyInstallHint(t *testing.T) {
+	t.Parallel()
+	if !skilldiscovery.IsEligible("gemini") {
+		t.Error("gemini should be eligible via install hint alone")
+	}
+	if !skilldiscovery.IsEligible("claude-code") {
+		t.Error("claude-code should be eligible via built-ins")
+	}
+	if skilldiscovery.IsEligible("nonexistent") {
+		t.Error("unknown agent should not be eligible")
+	}
+}
+
+// TestActiveInstallHintsFor_CodexFingerprintMatchesDollarFormDiscovery pins
+// the suppression fingerprint to the invocation form codex discovery actually
+// produces: DiscoverReviewSkills emits `$plugin:name`, so a slash-form
+// ProvidesAny entry could never intersect the discovered set and the hint
+// would show forever even with the plugin installed.
+func TestActiveInstallHintsFor_CodexFingerprintMatchesDollarFormDiscovery(t *testing.T) {
+	t.Parallel()
+	discovered := map[string]struct{}{"$codex:adversarial-review": {}}
+	if hints := skilldiscovery.ActiveInstallHintsFor("codex", discovered); len(hints) != 0 {
+		t.Fatalf("codex hint not suppressed by $-form discovery; got %d hints: %+v", len(hints), hints)
+	}
+}

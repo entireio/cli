@@ -3,24 +3,26 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/go-git/go-git/v6"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestLoadSessionState_PackageLevel tests the package-level LoadSessionState function.
 func TestLoadSessionState_PackageLevel(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -34,7 +36,7 @@ func TestLoadSessionState_PackageLevel(t *testing.T) {
 	}
 
 	// Save using package-level function
-	err = SaveSessionState(context.Background(), state)
+	err := SaveSessionState(context.Background(), state)
 	if err != nil {
 		t.Fatalf("SaveSessionState() error = %v", err)
 	}
@@ -70,142 +72,309 @@ func verifySessionState(t *testing.T, loaded, expected *SessionState) {
 }
 
 // TestLoadSessionState_WithEndedAt tests that EndedAt serializes/deserializes correctly.
-func TestLoadSessionState_WithEndedAt(t *testing.T) {
-	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+// TestLoadSessionState_OptionalTimeFields verifies that the optional *time.Time
+// fields on SessionState (EndedAt, LastInteractionTime) round-trip correctly
+// through save/load — both when set (preserved and Equal) and when nil (stays nil).
+func TestLoadSessionState_OptionalTimeFields(t *testing.T) {
+	tests := []struct {
+		name string
+		// set assigns the field on a state and returns the value assigned.
+		set func(s *SessionState, ts time.Time)
+		// get reads the field back from a loaded state.
+		get func(s *SessionState) *time.Time
+	}{
+		{
+			name: "EndedAt",
+			set:  func(s *SessionState, ts time.Time) { s.EndedAt = &ts },
+			get:  func(s *SessionState) *time.Time { return s.EndedAt },
+		},
+		{
+			name: "LastInteractionTime",
+			set:  func(s *SessionState, ts time.Time) { s.LastInteractionTime = &ts },
+			get:  func(s *SessionState) *time.Time { return s.LastInteractionTime },
+		},
 	}
 
-	t.Chdir(dir)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			testutil.InitRepo(t, dir)
+			t.Chdir(dir)
 
-	// Test with EndedAt set
-	endedAt := time.Now().Add(-time.Hour) // 1 hour ago
-	state := &SessionState{
-		SessionID:  "test-session-ended",
-		BaseCommit: "abc123def456",
-		StartedAt:  time.Now().Add(-2 * time.Hour),
-		EndedAt:    &endedAt,
-		StepCount:  5,
-	}
+			// Field set: it should be preserved and Equal after load.
+			ts := time.Now().Add(-time.Hour)
+			state := &SessionState{
+				SessionID:  "test-session-set",
+				BaseCommit: "abc123def456",
+				StartedAt:  time.Now().Add(-2 * time.Hour),
+				StepCount:  5,
+			}
+			tt.set(state, ts)
 
-	err = SaveSessionState(context.Background(), state)
-	if err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
+			if err := SaveSessionState(context.Background(), state); err != nil {
+				t.Fatalf("SaveSessionState() error = %v", err)
+			}
+			loaded, err := LoadSessionState(context.Background(), "test-session-set")
+			if err != nil {
+				t.Fatalf("LoadSessionState() error = %v", err)
+			}
+			require.NotNil(t, loaded, "LoadSessionState() returned nil")
 
-	loaded, err := LoadSessionState(context.Background(), "test-session-ended")
-	if err != nil {
-		t.Fatalf("LoadSessionState() error = %v", err)
-	}
-	require.NotNil(t, loaded, "LoadSessionState() returned nil")
+			got := tt.get(loaded)
+			if got == nil {
+				t.Fatalf("%s was nil after load, expected non-nil", tt.name)
+			}
+			if !got.Equal(ts) {
+				t.Errorf("%s = %v, want %v", tt.name, *got, ts)
+			}
 
-	// Verify EndedAt was preserved
-	if loaded.EndedAt == nil {
-		t.Fatal("EndedAt was nil after load, expected non-nil")
-	}
-	if !loaded.EndedAt.Equal(endedAt) {
-		t.Errorf("EndedAt = %v, want %v", *loaded.EndedAt, endedAt)
-	}
+			// Field nil: it should remain nil after load.
+			stateNil := &SessionState{
+				SessionID:  "test-session-nil",
+				BaseCommit: "xyz789",
+				StartedAt:  time.Now(),
+				StepCount:  1,
+			}
+			if err := SaveSessionState(context.Background(), stateNil); err != nil {
+				t.Fatalf("SaveSessionState() error = %v", err)
+			}
+			loadedNil, err := LoadSessionState(context.Background(), "test-session-nil")
+			if err != nil {
+				t.Fatalf("LoadSessionState() error = %v", err)
+			}
+			require.NotNil(t, loadedNil, "LoadSessionState() returned nil")
 
-	// Test with EndedAt nil (active session)
-	stateActive := &SessionState{
-		SessionID:  "test-session-active",
-		BaseCommit: "xyz789",
-		StartedAt:  time.Now(),
-		EndedAt:    nil,
-		StepCount:  1,
-	}
-
-	err = SaveSessionState(context.Background(), stateActive)
-	if err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-
-	loadedActive, err := LoadSessionState(context.Background(), "test-session-active")
-	if err != nil {
-		t.Fatalf("LoadSessionState() error = %v", err)
-	}
-	require.NotNil(t, loadedActive, "LoadSessionState() returned nil")
-
-	// Verify EndedAt remains nil
-	if loadedActive.EndedAt != nil {
-		t.Errorf("EndedAt = %v, want nil for active session", *loadedActive.EndedAt)
+			if gotNil := tt.get(loadedNil); gotNil != nil {
+				t.Errorf("%s = %v, want nil", tt.name, *gotNil)
+			}
+		})
 	}
 }
 
-// TestLoadSessionState_WithLastInteractionTime tests that LastInteractionTime serializes/deserializes correctly.
-func TestLoadSessionState_WithLastInteractionTime(t *testing.T) {
+// TestRecordFilesTouched_MergesIncrementally verifies the helper merges new
+// files into existing FilesTouched without losing prior entries — the
+// invariant per-tool-use hooks rely on so PostCommit's carry-forward decision
+// stays accurate.
+func TestRecordFilesTouched_MergesIncrementally(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
+	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
 
-	// Test with LastInteractionTime set
-	lastInteraction := time.Now().Add(-5 * time.Minute)
 	state := &SessionState{
-		SessionID:           "test-session-interaction",
-		BaseCommit:          "abc123def456",
-		StartedAt:           time.Now().Add(-2 * time.Hour),
-		LastInteractionTime: &lastInteraction,
-		StepCount:           3,
+		SessionID:    "ft-merge",
+		BaseCommit:   "deadbeef",
+		StartedAt:    time.Now(),
+		FilesTouched: []string{"existing.txt"},
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	require.NoError(t, RecordFilesTouched(context.Background(), "ft-merge",
+		[]string{"updated.txt"}, []string{"new.txt"}, []string{"removed.txt"}))
+
+	loaded, err := LoadSessionState(context.Background(), "ft-merge")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.ElementsMatch(t, []string{"existing.txt", "updated.txt", "new.txt", "removed.txt"}, loaded.FilesTouched)
+}
+
+func TestRecordFilesTouched_NoStateIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	// Hook fires before InitializeSession ran — RecordFilesTouched must not
+	// fabricate a state file or error.
+	err := RecordFilesTouched(context.Background(), "missing", []string{"f.txt"}, nil, nil)
+	require.NoError(t, err)
+
+	loaded, err := LoadSessionState(context.Background(), "missing")
+	require.NoError(t, err)
+	require.Nil(t, loaded)
+}
+
+func TestRecordFilesTouched_EmptyInputsIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	state := &SessionState{
+		SessionID:    "ft-empty",
+		BaseCommit:   "deadbeef",
+		StartedAt:    time.Now(),
+		FilesTouched: []string{"keep.txt"},
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	require.NoError(t, RecordFilesTouched(context.Background(), "ft-empty", nil, nil, nil))
+
+	loaded, err := LoadSessionState(context.Background(), "ft-empty")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.Equal(t, []string{"keep.txt"}, loaded.FilesTouched)
+}
+
+// TestClearSessionState_PreservesLockFile pins the rule that ClearSessionState
+// must NOT unlink the per-session lock file. Unlinking the lock path while
+// another process holds an advisory lock on the inode would let a third
+// caller recreate the file and acquire an independent lock — losing mutual
+// exclusion. The lock file is a 0-byte sentinel; leaving it on disk after
+// state-file removal is harmless.
+func TestClearSessionState_PreservesLockFile(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	sessionID := "ft-clear-keeps-lock"
+	state := &SessionState{
+		SessionID:  sessionID,
+		BaseCommit: "deadbeef",
+		StartedAt:  time.Now(),
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	// Touch the lock file by entering MutateSessionState once.
+	require.NoError(t, MutateSessionState(context.Background(), sessionID, func(_ *SessionState) error {
+		return ErrMutationSkip
+	}))
+
+	lockPath, err := stateLockPath(context.Background(), sessionID)
+	require.NoError(t, err)
+	_, statErr := os.Stat(lockPath)
+	require.NoError(t, statErr, "lock file must exist after a MutateSessionState call")
+
+	require.NoError(t, ClearSessionState(context.Background(), sessionID))
+
+	_, statErr = os.Stat(lockPath)
+	require.NoError(t, statErr, "ClearSessionState must not unlink the lock file (would break flock semantics)")
+}
+
+// TestMutateSessionState_DoesNotClobberRicherStateUnderRace simulates the
+// TOCTOU window between an existence check and a default-state init: a
+// caller observes "no state", but a concurrent richer write lands before
+// the init takes the lock. The init must re-read under lock and skip the
+// write rather than overwriting TranscriptPath, LastPrompt, etc. with
+// blanks.
+func TestMutateSessionState_DoesNotClobberRicherStateUnderRace(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	sessionID := "ft-toctou"
+	rich := &SessionState{
+		SessionID:      sessionID,
+		BaseCommit:     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+		StartedAt:      time.Now(),
+		TranscriptPath: "/tmp/transcript.jsonl",
+		LastPrompt:     "find the bug",
+		ModelName:      "gpt-5",
+	}
+	require.NoError(t, SaveSessionState(context.Background(), rich))
+
+	// Pretend another process raced past its existence check while ours
+	// was about to initialize: do a no-op MutateSessionState that sets a
+	// clearly different value for an init-overwritten field. If the next
+	// call (simulating initializeSession's create path) reloads under the
+	// lock and bails out, our richer fields survive.
+	require.NoError(t, MutateSessionState(context.Background(), sessionID, func(_ *SessionState) error {
+		// no mutation; the test is about what the simulated init does next
+		return ErrMutationSkip
+	}))
+
+	// Now run the lock-then-recheck dance the real init does. Pass a state
+	// with all-empty derived fields to mimic the default-state shape.
+	_, _, release, lockErr := acquireSessionGate(context.Background(), sessionID)
+	require.NoError(t, lockErr)
+	existing, loadErr := LoadSessionState(context.Background(), sessionID)
+	release()
+	require.NoError(t, loadErr)
+	require.NotNil(t, existing)
+	require.Equal(t, "/tmp/transcript.jsonl", existing.TranscriptPath, "richer state must survive re-check under lock")
+	require.Equal(t, "find the bug", existing.LastPrompt)
+	require.Equal(t, "gpt-5", existing.ModelName)
+}
+
+// TestMutateSessionState_NestedCallsAreReentrant verifies that calling
+// MutateSessionState from within an outer MutateSessionState callback
+// doesn't deadlock. POSIX flock isn't reentrant across distinct FDs in the
+// same process, so the gate's goroutine-ID ownership tracking has to skip
+// the flock re-acquire on the inner call.
+func TestMutateSessionState_NestedCallsAreReentrant(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	state := &SessionState{
+		SessionID:  "ft-nested",
+		BaseCommit: "deadbeef",
+		StartedAt:  time.Now(),
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		err := MutateSessionState(context.Background(), "ft-nested", func(outer *SessionState) error {
+			outer.LastPrompt = "outer"
+			return MutateSessionState(context.Background(), "ft-nested", func(inner *SessionState) error {
+				inner.ModelName = "inner"
+				return nil
+			})
+		})
+		assert.NoError(t, err)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("nested MutateSessionState deadlocked")
 	}
 
-	err = SaveSessionState(context.Background(), state)
-	if err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
+	loaded, err := LoadSessionState(context.Background(), "ft-nested")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, "outer", loaded.LastPrompt)
+	assert.Equal(t, "inner", loaded.ModelName)
+}
 
-	loaded, err := LoadSessionState(context.Background(), "test-session-interaction")
-	if err != nil {
-		t.Fatalf("LoadSessionState() error = %v", err)
-	}
-	require.NotNil(t, loaded, "LoadSessionState() returned nil")
+// TestRecordFilesTouched_ParallelMergesAreSerialized verifies the file-lock
+// in RecordFilesTouched: many concurrent callers, each merging a unique
+// file, must all land in FilesTouched. Without the lock, parallel
+// load → merge → save would lose updates and the final list would be missing
+// entries (or have duplicates).
+func TestRecordFilesTouched_ParallelMergesAreSerialized(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
 
-	// Verify LastInteractionTime was preserved
-	if loaded.LastInteractionTime == nil {
-		t.Fatal("LastInteractionTime was nil after load, expected non-nil")
+	state := &SessionState{
+		SessionID:  "ft-parallel",
+		BaseCommit: "deadbeef",
+		StartedAt:  time.Now(),
 	}
-	if !loaded.LastInteractionTime.Equal(lastInteraction) {
-		t.Errorf("LastInteractionTime = %v, want %v", *loaded.LastInteractionTime, lastInteraction)
-	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
 
-	// Test with LastInteractionTime nil (old session without this field)
-	stateOld := &SessionState{
-		SessionID:           "test-session-no-interaction",
-		BaseCommit:          "xyz789",
-		StartedAt:           time.Now(),
-		LastInteractionTime: nil,
-		StepCount:           1,
+	const n = 20
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range n {
+		go func() {
+			defer wg.Done()
+			path := fmt.Sprintf("file-%02d.go", i)
+			err := RecordFilesTouched(context.Background(), "ft-parallel", nil, []string{path}, nil)
+			assert.NoError(t, err)
+		}()
 	}
+	wg.Wait()
 
-	err = SaveSessionState(context.Background(), stateOld)
-	if err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-
-	loadedOld, err := LoadSessionState(context.Background(), "test-session-no-interaction")
-	if err != nil {
-		t.Fatalf("LoadSessionState() error = %v", err)
-	}
-	require.NotNil(t, loadedOld, "LoadSessionState() returned nil")
-
-	// Verify LastInteractionTime remains nil
-	if loadedOld.LastInteractionTime != nil {
-		t.Errorf("LastInteractionTime = %v, want nil for old session", *loadedOld.LastInteractionTime)
-	}
+	loaded, err := LoadSessionState(context.Background(), "ft-parallel")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.Len(t, loaded.FilesTouched, n, "every concurrent merge should be present")
 }
 
 // TestLoadSessionState_PackageLevel_NonExistent tests loading a non-existent session.
 func TestLoadSessionState_PackageLevel_NonExistent(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -222,10 +391,7 @@ func TestLoadSessionState_PackageLevel_NonExistent(t *testing.T) {
 // methods delegate to the package-level functions.
 func TestManualCommitStrategy_SessionState_UsesPackageFunctions(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -283,10 +449,7 @@ func TestManualCommitStrategy_SessionState_UsesPackageFunctions(t *testing.T) {
 // returns sessions from the current worktree, not from other worktrees.
 func TestFindMostRecentSession_FiltersByWorktree(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -339,10 +502,7 @@ func TestFindMostRecentSession_FiltersByWorktree(t *testing.T) {
 // FindMostRecentSession falls back to all sessions when none match the current worktree.
 func TestFindMostRecentSession_FallsBackWhenNoWorktreeMatch(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -412,10 +572,7 @@ func TestTransitionAndLog_ReturnsHandlerError(t *testing.T) {
 // for a stale session and deletes the file from disk.
 func TestLoadSessionState_DeletesStaleSession(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -429,7 +586,7 @@ func TestLoadSessionState_DeletesStaleSession(t *testing.T) {
 		StepCount:           5,
 	}
 
-	err = SaveSessionState(context.Background(), state)
+	err := SaveSessionState(context.Background(), state)
 	if err != nil {
 		t.Fatalf("SaveSessionState() error = %v", err)
 	}
@@ -462,16 +619,13 @@ func TestLoadSessionState_DeletesStaleSession(t *testing.T) {
 
 func TestStoreModelHint_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
 
 	ctx := context.Background()
 	sessionID := "2026-01-01-hint-roundtrip"
 
-	err = StoreModelHint(ctx, sessionID, "claude-sonnet-4-20250514")
+	err := StoreModelHint(ctx, sessionID, "claude-sonnet-4-20250514")
 	if err != nil {
 		t.Fatalf("StoreModelHint() error = %v", err)
 	}
@@ -484,16 +638,13 @@ func TestStoreModelHint_RoundTrip(t *testing.T) {
 
 func TestStoreModelHint_EmptyModel_NoOp(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
 
 	ctx := context.Background()
 	sessionID := "2026-01-01-hint-empty"
 
-	err = StoreModelHint(ctx, sessionID, "")
+	err := StoreModelHint(ctx, sessionID, "")
 	if err != nil {
 		t.Fatalf("StoreModelHint() error = %v", err)
 	}
@@ -511,10 +662,7 @@ func TestStoreModelHint_EmptyModel_NoOp(t *testing.T) {
 
 func TestLoadModelHint_NoFile_ReturnsEmpty(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
 
 	got := LoadModelHint(context.Background(), "2026-01-01-nonexistent")
@@ -525,13 +673,10 @@ func TestLoadModelHint_NoFile_ReturnsEmpty(t *testing.T) {
 
 func TestStoreModelHint_InvalidSessionID_ReturnsError(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
 
-	err = StoreModelHint(context.Background(), "../../../etc/passwd", "model")
+	err := StoreModelHint(context.Background(), "../../../etc/passwd", "model")
 	if err == nil {
 		t.Error("StoreModelHint() should return error for invalid session ID")
 	}
@@ -539,10 +684,7 @@ func TestStoreModelHint_InvalidSessionID_ReturnsError(t *testing.T) {
 
 func TestLoadModelHint_InvalidSessionID_ReturnsEmpty(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
 
 	got := LoadModelHint(context.Background(), "../../../etc/passwd")
@@ -553,10 +695,7 @@ func TestLoadModelHint_InvalidSessionID_ReturnsEmpty(t *testing.T) {
 
 func TestLoadModelHint_TrimsWhitespace(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
 
 	ctx := context.Background()
@@ -581,12 +720,157 @@ func TestLoadModelHint_TrimsWhitespace(t *testing.T) {
 	}
 }
 
+// --- Agent type hint file tests ---
+
+func TestStoreAgentTypeHint_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	sessionID := "2026-01-01-agent-roundtrip"
+
+	created, err := StoreAgentTypeHint(ctx, sessionID, agent.AgentTypeCursor)
+	require.NoError(t, err)
+	require.True(t, created, "first call must report it created the hint")
+
+	got := LoadAgentTypeHint(ctx, sessionID)
+	require.Equal(t, agent.AgentTypeCursor, got)
+}
+
+func TestStoreAgentTypeHint_FirstWriterWins(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	sessionID := "2026-01-01-agent-firstwriter"
+
+	// Cursor claims the session first.
+	created, err := StoreAgentTypeHint(ctx, sessionID, agent.AgentTypeCursor)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	// Claude Code's hook fires next (concurrent forwarded-hook scenario).
+	// Should be a no-op — does not overwrite the existing hint.
+	created, err = StoreAgentTypeHint(ctx, sessionID, agent.AgentTypeClaudeCode)
+	require.NoError(t, err)
+	require.False(t, created, "second call must report it did not create the hint")
+
+	got := LoadAgentTypeHint(ctx, sessionID)
+	require.Equal(t, agent.AgentTypeCursor, got, "first writer's hint must persist")
+}
+
+func TestStoreAgentTypeHint_EmptyOrUnknown_NoOp(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		sid string
+		at  types.AgentType
+	}{
+		{"2026-01-01-empty", ""},
+		{"2026-01-01-unknown", agent.AgentTypeUnknown},
+	} {
+		created, hErr := StoreAgentTypeHint(ctx, tc.sid, tc.at)
+		require.NoError(t, hErr)
+		require.False(t, created, "empty/Unknown must report created=false")
+	}
+
+	stateDir, sdErr := getSessionStateDir(ctx)
+	require.NoError(t, sdErr)
+
+	for _, sid := range []string{"2026-01-01-empty", "2026-01-01-unknown"} {
+		hintPath := filepath.Join(stateDir, sid+".agent")
+		_, statErr := os.Stat(hintPath)
+		require.True(t, os.IsNotExist(statErr), "no hint file should be created for empty/Unknown agent type")
+	}
+}
+
+func TestLoadAgentTypeHint_NoFile_ReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	got := LoadAgentTypeHint(context.Background(), "2026-01-01-nonexistent")
+	require.Empty(t, string(got))
+}
+
+func TestStoreAgentTypeHint_InvalidSessionID_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	_, err := StoreAgentTypeHint(context.Background(), "../../../etc/passwd", agent.AgentTypeCursor)
+	require.Error(t, err)
+}
+
+func TestClaimSessionStartBanner_FirstWriterWins(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	sessionID := "2026-01-01-banner-claim"
+
+	claimed, err := ClaimSessionStartBanner(ctx, sessionID)
+	require.NoError(t, err)
+	require.True(t, claimed, "first call must win the banner claim")
+
+	claimed, err = ClaimSessionStartBanner(ctx, sessionID)
+	require.NoError(t, err)
+	require.False(t, claimed, "subsequent calls must report the banner already claimed")
+}
+
+func TestClaimSessionStartBanner_InvalidSessionID_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	_, err := ClaimSessionStartBanner(context.Background(), "../../../etc/passwd")
+	require.Error(t, err)
+}
+
+func TestClearSessionState_RemovesBannerMarker(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	sessionID := "2026-01-01-clear-banner"
+
+	_, err := ClaimSessionStartBanner(ctx, sessionID)
+	require.NoError(t, err)
+	require.NoError(t, ClearSessionState(ctx, sessionID))
+
+	// After clear, the marker is gone — the next claim wins again.
+	claimed, err := ClaimSessionStartBanner(ctx, sessionID)
+	require.NoError(t, err)
+	require.True(t, claimed, "ClearSessionState should remove the banner marker")
+}
+
+func TestClearSessionState_RemovesAgentHint(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	sessionID := "2026-01-01-clear-agent-hint"
+
+	_, err := StoreAgentTypeHint(ctx, sessionID, agent.AgentTypeCursor)
+	require.NoError(t, err)
+	require.NoError(t, ClearSessionState(ctx, sessionID))
+
+	got := LoadAgentTypeHint(ctx, sessionID)
+	require.Empty(t, string(got))
+}
+
 func TestClearSessionState_RemovesHintFile(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
 
 	ctx := context.Background()
@@ -625,10 +909,7 @@ func TestClearSessionState_RemovesHintFile(t *testing.T) {
 
 func TestClearSessionState_RemovesOrphanedHintFile(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
 
 	ctx := context.Background()

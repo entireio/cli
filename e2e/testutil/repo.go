@@ -2,8 +2,6 @@ package testutil
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,11 +12,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/e2e/agents"
 	"github.com/entireio/cli/e2e/entire"
 )
 
 const droidRepoSettingsPath = ".factory/settings.json"
+
+const (
+	checkpointRefV1 = "entire/checkpoints/v1"
+)
 
 // RepoState holds the working state for a single test's cloned repository.
 type RepoState struct {
@@ -47,9 +50,24 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	// Always use os.MkdirTemp instead of t.TempDir(). Go's t.TempDir()
 	// creates nested subdirectories (TestName.../001/) whose structure
 	// confuses some agents' (e.g. opencode) working-directory resolution.
-	dir, err := os.MkdirTemp("", "e2e-repo-*")
+	//
+	// Codex refuses to operate from /tmp (e.g. "Refusing to create helper
+	// binaries under temporary dir"), so for codex we place the repo under
+	// $HOME/.cache/entire-e2e-repos/ instead.
+	root := ""
+	if agent.Name() == "codex" {
+		cache, cerr := os.UserCacheDir()
+		if cerr != nil {
+			t.Fatalf("resolve user cache dir: %v", cerr)
+		}
+		root = filepath.Join(cache, "entire-e2e-repos")
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatalf("create e2e repo root %q: %v", root, err)
+		}
+	}
+	dir, err := os.MkdirTemp(root, "e2e-repo-*")
 	if err != nil {
-		t.Fatalf("create temp dir: %v", err)
+		t.Fatalf("create temporary e2e repo under %q: %v", root, err)
 	}
 	if keepRepos {
 		t.Logf("E2E_KEEP_REPOS: repo will be preserved at %s", dir)
@@ -94,10 +112,11 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	}
 	// commit_linking=always ensures the prepare-commit-msg hook adds the
 	// Entire-Checkpoint trailer unconditionally. This is needed because
-	// interactive agents run inside tmux (hasTTY()=true) but can't respond to
-	// prompts, and content detection may fail on the first checkpoint when no
-	// shadow branch exists yet. Prompt-mode agents still exercise the !hasTTY()
-	// fast path since they have no TTY regardless of this setting.
+	// interactive agents run inside tmux (CanPromptInteractively()=true) but
+	// can't respond to prompts, and content detection may fail on the first
+	// checkpoint when no shadow branch exists yet. Prompt-mode agents still
+	// exercise the !CanPromptInteractively() fast path since they have no TTY
+	// regardless of this setting.
 	PatchSettings(t, dir, map[string]any{"log_level": "debug", "commit_linking": "always"})
 
 	// Copilot CLI blocks on a "No copilot instructions found" notice in fresh
@@ -139,7 +158,7 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 		Dir:              dir,
 		ArtifactDir:      artDir,
 		HeadBefore:       GitOutput(t, dir, "rev-parse", "HEAD"),
-		CheckpointBefore: GitOutput(t, dir, "rev-parse", "entire/checkpoints/v1"),
+		CheckpointBefore: CheckpointState(dir),
 		ConsoleLog:       consoleLog,
 	}
 
@@ -151,6 +170,57 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	})
 
 	return state
+}
+
+func checkpointReadRef() string {
+	return checkpointRefV1
+}
+
+// CurrentCheckpointRef returns the current committed-checkpoint state used for
+// advance detection in the active suite mode: the v1 branch hash (git-branch) or
+// the per-checkpoint-ref digest (git-refs). Pair it with WaitForCheckpointAdvanceFrom.
+func CurrentCheckpointRef(t *testing.T, dir string) string {
+	t.Helper()
+	if UsingGitRefs() {
+		return CheckpointState(dir)
+	}
+	return GitOutput(t, dir, "rev-parse", checkpointReadRef())
+}
+
+// PushCheckpointRefs pushes the committed checkpoint refs to the origin remote.
+// Remote-resume tests use this instead of hardcoding v1 branch pushes.
+func PushCheckpointRefs(t *testing.T, dir string) {
+	t.Helper()
+
+	if UsingGitRefs() {
+		Git(t, dir, "push", "origin", checkpointRefPrefix+"*:"+checkpointRefPrefix+"*")
+		return
+	}
+	Git(t, dir, "push", "origin", checkpointRefV1+":"+checkpointRefV1)
+}
+
+// AssertCheckpointsOnRemote asserts that the backend-appropriate committed
+// checkpoint refs are present on the bare remote at bareDir: the
+// entire/checkpoints/v1 branch (git-branch) or at least one
+// refs/entire/checkpoints/* ref (git-refs). Use it in remote e2e tests to verify
+// the real pre-push hook synced checkpoints WITHOUT an explicit PushCheckpointRefs.
+func AssertCheckpointsOnRemote(t *testing.T, _ *RepoState, bareDir string) {
+	t.Helper()
+
+	if UsingGitRefs() {
+		out, err := GitOutputErr(bareDir, "for-each-ref", "--format=%(refname)", checkpointRefPrefix)
+		if err != nil {
+			t.Errorf("listing %s* refs on remote %s failed: %v", checkpointRefPrefix, bareDir, err)
+			return
+		}
+		if strings.TrimSpace(out) == "" {
+			t.Errorf("expected at least one %s* ref on remote %s, found none", checkpointRefPrefix, bareDir)
+		}
+		return
+	}
+	if _, err := GitOutputErr(bareDir, "rev-parse", "--verify", "refs/heads/"+checkpointRefV1); err != nil {
+		t.Errorf("expected %s branch on remote %s: %v", checkpointRefV1, bareDir, err)
+	}
 }
 
 func setupGeminiTestHome(t *testing.T, repoDir string) {
@@ -171,43 +241,6 @@ func setupGeminiTestHome(t *testing.T, repoDir string) {
 	config := `{"security":{"auth":{"selectedType":"gemini-api-key"}}}`
 	if err := os.WriteFile(filepath.Join(geminiDir, "settings.json"), []byte(config), 0o644); err != nil {
 		t.Fatalf("write gemini settings: %v", err)
-	}
-
-	agentFile := filepath.Join(repoDir, ".gemini", "agents", "entire-search.md")
-	content, err := os.ReadFile(agentFile)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return
-		}
-		t.Fatalf("read gemini agent file: %v", err)
-	}
-
-	sum := sha256.Sum256(content)
-	hash := hex.EncodeToString(sum[:])
-
-	ackPath := filepath.Join(geminiDir, "acknowledgments", "agents.json")
-	acks := map[string]map[string]string{}
-	if data, readErr := os.ReadFile(ackPath); readErr == nil {
-		if err := json.Unmarshal(data, &acks); err != nil {
-			t.Fatalf("parse gemini acknowledgments: %v", err)
-		}
-	} else if !errors.Is(readErr, os.ErrNotExist) {
-		t.Fatalf("read gemini acknowledgments: %v", readErr)
-	}
-
-	if acks[repoDir] == nil {
-		acks[repoDir] = map[string]string{}
-	}
-	acks[repoDir]["entire-search"] = hash
-
-	out, err := json.MarshalIndent(acks, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal gemini acknowledgments: %v", err)
-	}
-	out = append(out, '\n')
-
-	if err := os.WriteFile(ackPath, out, 0o644); err != nil {
-		t.Fatalf("write gemini acknowledgments: %v", err)
 	}
 }
 
@@ -354,6 +387,35 @@ func ForEachAgent(t *testing.T, timeout time.Duration, fn func(t *testing.T, s *
 	if len(all) == 0 {
 		t.Skip("no agents registered (check E2E_AGENT filter)")
 	}
+	runForAgents(t, all, timeout, fn)
+}
+
+// ForEachNamedAgent runs fn as a parallel subtest for each registered agent
+// whose name matches one of the provided names.
+func ForEachNamedAgent(t *testing.T, timeout time.Duration, names []string, fn func(t *testing.T, s *RepoState, ctx context.Context)) {
+	t.Helper()
+	t.Parallel()
+
+	allowed := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		allowed[name] = struct{}{}
+	}
+
+	var selected []agents.Agent
+	for _, agent := range agents.All() {
+		if _, ok := allowed[agent.Name()]; ok {
+			selected = append(selected, agent)
+		}
+	}
+	if len(selected) == 0 {
+		t.Skip("no matching agents registered (check E2E_AGENT filter)")
+	}
+
+	runForAgents(t, selected, timeout, fn)
+}
+
+func runForAgents(t *testing.T, all []agents.Agent, timeout time.Duration, fn func(t *testing.T, s *RepoState, ctx context.Context)) {
+	t.Helper()
 	for _, agent := range all {
 		t.Run(agent.Name(), func(t *testing.T) {
 			// Use the global test deadline for slot wait so we don't
@@ -516,9 +578,7 @@ func PatchSettings(t *testing.T, dir string, extra map[string]any) {
 	if err := json.Unmarshal(data, &settings); err != nil {
 		t.Fatalf("parse settings: %v", err)
 	}
-	for k, v := range extra {
-		settings[k] = v
-	}
+	mergeSettings(settings, extra)
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal settings: %v", err)
@@ -526,6 +586,35 @@ func PatchSettings(t *testing.T, dir string, extra map[string]any) {
 	if err := os.WriteFile(path, out, 0o644); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
+}
+
+func mergeSettings(dst, src map[string]any) {
+	for k, v := range src {
+		srcMap, ok := v.(map[string]any)
+		if !ok {
+			dst[k] = v
+			continue
+		}
+
+		if existing, ok := dst[k].(map[string]any); ok {
+			mergeSettings(existing, srcMap)
+			continue
+		}
+
+		dst[k] = cloneSettingsMap(srcMap)
+	}
+}
+
+func cloneSettingsMap(src map[string]any) map[string]any {
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		if child, ok := v.(map[string]any); ok {
+			dst[k] = cloneSettingsMap(child)
+			continue
+		}
+		dst[k] = v
+	}
+	return dst
 }
 
 // EmptyDir returns the path to an empty temporary directory, cleaned up when
@@ -541,11 +630,11 @@ func EmptyDir(t *testing.T) string {
 func Git(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
-	cmd := exec.Command("git", args...)
+	cmd := execx.NonInteractive(context.Background(), "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=0")
+	cmd.Env = os.Environ()
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -576,12 +665,22 @@ func GitOutput(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// NewCheckpointCommits returns the SHAs of commits added to the
-// entire/checkpoints/v1 branch since the test was set up, oldest first.
+// NewCheckpointCommits returns the SHAs of checkpoint commits to capture for
+// artifacts. Under git-branch these are the commits added to entire/checkpoints/v1
+// since setup, oldest first. Under git-refs there is no single advancing branch,
+// so it returns the tip commit of each per-checkpoint ref (diagnostic only).
 func NewCheckpointCommits(t *testing.T, s *RepoState) []string {
 	t.Helper()
 
-	log := GitOutput(t, s.Dir, "log", "--reverse", "--format=%H", s.CheckpointBefore+"..entire/checkpoints/v1")
+	if UsingGitRefs() {
+		out := gitOutputSafe(s.Dir, "for-each-ref", "--format=%(objectname)", checkpointRefPrefix)
+		if strings.TrimSpace(out) == "" {
+			return nil
+		}
+		return strings.Split(strings.TrimSpace(out), "\n")
+	}
+
+	log := GitOutput(t, s.Dir, "log", "--reverse", "--format=%H", s.CheckpointBefore+".."+checkpointReadRef())
 	if log == "" {
 		return nil
 	}
@@ -593,7 +692,25 @@ func NewCheckpointCommits(t *testing.T, s *RepoState) []string {
 // ({prefix}/{suffix}/metadata.json) and returns the concatenated IDs.
 func CheckpointIDs(t *testing.T, dir string) []string {
 	t.Helper()
-	out := gitOutputSafe(dir, "ls-tree", "-r", "--name-only", "entire/checkpoints/v1")
+	if UsingGitRefs() {
+		out := gitOutputSafe(dir, "for-each-ref", "--format=%(refname)", checkpointRefPrefix)
+		if strings.TrimSpace(out) == "" {
+			return nil
+		}
+		seen := map[string]bool{}
+		var ids []string
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			// refs/entire/checkpoints/<shard>/<id> — the ID is the last segment.
+			parts := strings.Split(strings.TrimSpace(line), "/")
+			id := parts[len(parts)-1]
+			if id != "" && !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+		return ids
+	}
+	out := gitOutputSafe(dir, "ls-tree", "-r", "--name-only", checkpointReadRef())
 	if out == "" {
 		return nil
 	}
@@ -618,8 +735,7 @@ func CheckpointIDs(t *testing.T, dir string) []string {
 func ReadCheckpointMetadata(t *testing.T, dir string, checkpointID string) CheckpointMetadata {
 	t.Helper()
 
-	path := CheckpointPath(checkpointID) + "/metadata.json"
-	blob := "entire/checkpoints/v1:" + path
+	blob := checkpointBlobSpec(checkpointID, "metadata.json")
 
 	raw := GitOutput(t, dir, "show", blob)
 
@@ -636,8 +752,7 @@ func ReadCheckpointMetadata(t *testing.T, dir string, checkpointID string) Check
 func ReadSessionMetadata(t *testing.T, dir string, checkpointID string, sessionIndex int) SessionMetadata {
 	t.Helper()
 
-	path := fmt.Sprintf("%s/%d/metadata.json", CheckpointPath(checkpointID), sessionIndex)
-	blob := "entire/checkpoints/v1:" + path
+	blob := checkpointBlobSpec(checkpointID, fmt.Sprintf("%d/metadata.json", sessionIndex))
 
 	raw := GitOutput(t, dir, "show", blob)
 
@@ -656,8 +771,7 @@ func ReadSessionMetadata(t *testing.T, dir string, checkpointID string, sessionI
 func WaitForSessionMetadata(t *testing.T, dir string, checkpointID string, sessionIndex int, timeout time.Duration) SessionMetadata {
 	t.Helper()
 
-	path := fmt.Sprintf("%s/%d/metadata.json", CheckpointPath(checkpointID), sessionIndex)
-	blob := "entire/checkpoints/v1:" + path
+	blob := checkpointBlobSpec(checkpointID, fmt.Sprintf("%d/metadata.json", sessionIndex))
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -707,6 +821,24 @@ func GitOutputErr(dir string, args ...string) (string, error) {
 	}
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// CommitIfDirty stages all changes and creates a commit only when the worktree
+// or index is non-empty. This keeps cloned-repo E2E tests robust when
+// `entire enable` is already idempotent and produces no repo changes.
+func CommitIfDirty(t *testing.T, dir string, message string) {
+	t.Helper()
+
+	status, err := GitOutputErr(dir, "status", "--porcelain")
+	if err != nil {
+		t.Fatalf("git status --porcelain failed: %v\n%s", err, status)
+	}
+	if strings.TrimSpace(status) == "" {
+		return
+	}
+
+	Git(t, dir, "add", ".")
+	Git(t, dir, "commit", "-m", message)
 }
 
 // GetCheckpointTrailer extracts the Entire-Checkpoint trailer value from a

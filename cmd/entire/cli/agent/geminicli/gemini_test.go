@@ -3,8 +3,10 @@ package geminicli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +15,8 @@ import (
 )
 
 func TestNewGeminiCLIAgent(t *testing.T) {
+	t.Parallel()
+
 	ag := NewGeminiCLIAgent()
 	if ag == nil {
 		t.Fatal("NewGeminiCLIAgent() returned nil")
@@ -28,6 +32,8 @@ func TestNewGeminiCLIAgent(t *testing.T) {
 }
 
 func TestName(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 	if name := ag.Name(); name != agent.AgentNameGemini {
 		t.Errorf("Name() = %q, want %q", name, agent.AgentNameGemini)
@@ -35,6 +41,8 @@ func TestName(t *testing.T) {
 }
 
 func TestDescription(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 	desc := ag.Description()
 	if desc == "" {
@@ -78,6 +86,8 @@ func TestDetectPresence(t *testing.T) {
 }
 
 func TestGetSessionID(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 	input := &agent.HookInput{SessionID: "test-session-123"}
 
@@ -184,6 +194,8 @@ func TestGetSessionDir_DefaultPath(t *testing.T) {
 }
 
 func TestFormatResumeCommand(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 
 	cmd := ag.FormatResumeCommand("abc123")
@@ -194,6 +206,8 @@ func TestFormatResumeCommand(t *testing.T) {
 }
 
 func TestReadSession(t *testing.T) {
+	t.Parallel()
+
 	tempDir := t.TempDir()
 
 	// Create a transcript file
@@ -226,6 +240,8 @@ func TestReadSession(t *testing.T) {
 }
 
 func TestReadSession_NoSessionRef(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 	input := &agent.HookInput{SessionID: "test-session"}
 
@@ -236,6 +252,8 @@ func TestReadSession_NoSessionRef(t *testing.T) {
 }
 
 func TestWriteSession(t *testing.T) {
+	t.Parallel()
+
 	tempDir := t.TempDir()
 	transcriptPath := filepath.Join(tempDir, "transcript.json")
 
@@ -264,6 +282,8 @@ func TestWriteSession(t *testing.T) {
 }
 
 func TestWriteSession_Nil(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 
 	err := ag.WriteSession(context.Background(), nil)
@@ -273,6 +293,8 @@ func TestWriteSession_Nil(t *testing.T) {
 }
 
 func TestWriteSession_WrongAgent(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 	session := &agent.AgentSession{
 		AgentName:  "claude-code",
@@ -287,6 +309,8 @@ func TestWriteSession_WrongAgent(t *testing.T) {
 }
 
 func TestWriteSession_NoSessionRef(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 	session := &agent.AgentSession{
 		AgentName:  agent.AgentNameGemini,
@@ -300,6 +324,8 @@ func TestWriteSession_NoSessionRef(t *testing.T) {
 }
 
 func TestWriteSession_NoNativeData(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 	session := &agent.AgentSession{
 		AgentName:  agent.AgentNameGemini,
@@ -337,6 +363,8 @@ func TestGetProjectHash(t *testing.T) {
 // Chunking tests
 
 func TestChunkTranscript_SmallContent(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 
 	content := []byte(`{"messages":[{"type":"user","content":"hello"},{"type":"gemini","content":"hi there"}]}`)
@@ -351,6 +379,8 @@ func TestChunkTranscript_SmallContent(t *testing.T) {
 }
 
 func TestChunkTranscript_LargeContent(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 
 	// Create a transcript with many messages that exceeds maxSize
@@ -407,6 +437,8 @@ func TestChunkTranscript_LargeContent(t *testing.T) {
 }
 
 func TestChunkTranscript_EmptyMessages(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 
 	content := []byte(`{"messages":[]}`)
@@ -424,6 +456,8 @@ func TestChunkTranscript_EmptyMessages(t *testing.T) {
 }
 
 func TestChunkTranscript_InvalidJSON_FallsBackToJSONL(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 
 	// Invalid JSON that looks like JSONL
@@ -441,6 +475,8 @@ func TestChunkTranscript_InvalidJSON_FallsBackToJSONL(t *testing.T) {
 }
 
 func TestChunkTranscript_RoundTrip(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 
 	// Create a realistic transcript
@@ -497,6 +533,8 @@ func TestChunkTranscript_RoundTrip(t *testing.T) {
 }
 
 func TestReassembleTranscript_SingleChunk(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 
 	content := []byte(`{"messages":[{"type":"user","content":"hello"}]}`)
@@ -518,6 +556,8 @@ func TestReassembleTranscript_SingleChunk(t *testing.T) {
 }
 
 func TestReassembleTranscript_MultipleChunks(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 
 	chunk1 := []byte(`{"messages":[{"type":"user","content":"hello"}]}`)
@@ -546,6 +586,8 @@ func TestReassembleTranscript_MultipleChunks(t *testing.T) {
 }
 
 func TestReassembleTranscript_InvalidChunk(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 
 	chunk1 := []byte(`{"messages":[{"type":"user","content":"hello"}]}`)
@@ -559,6 +601,8 @@ func TestReassembleTranscript_InvalidChunk(t *testing.T) {
 }
 
 func TestReassembleTranscript_EmptyChunks(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 
 	result, err := ag.ReassembleTranscript([][]byte{})
@@ -578,6 +622,8 @@ func TestReassembleTranscript_EmptyChunks(t *testing.T) {
 }
 
 func TestChunkTranscript_SingleOversizedMessage(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 
 	// Create a single message that exceeds maxSize
@@ -616,6 +662,8 @@ func TestChunkTranscript_SingleOversizedMessage(t *testing.T) {
 }
 
 func TestChunkTranscript_ChunkBoundary(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 
 	// Create messages where the boundary matters
@@ -658,6 +706,8 @@ func TestChunkTranscript_ChunkBoundary(t *testing.T) {
 }
 
 func TestChunkTranscript_PreservesMessageOrder(t *testing.T) {
+	t.Parallel()
+
 	ag := &GeminiCLIAgent{}
 
 	// Create messages with numbered content to verify order
@@ -697,5 +747,32 @@ func TestChunkTranscript_PreservesMessageOrder(t *testing.T) {
 		if msg.Content != expected {
 			t.Errorf("Message %d content = %q, want %q", i, msg.Content, expected)
 		}
+	}
+}
+
+func TestGeminiCLIAgent_LaunchCmd(t *testing.T) {
+	t.Parallel()
+	a := NewGeminiCLIAgent()
+	launcher, ok := a.(agent.Launcher)
+	if !ok {
+		t.Fatal("GeminiCLIAgent does not implement agent.Launcher")
+	}
+	// Binary may not be on PATH in CI; ErrNotFound is acceptable for this test.
+	cmd, err := launcher.LaunchCmd(context.Background(), "hello world")
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			t.Skip("gemini binary not on PATH; skipping cmd shape check")
+		}
+		t.Fatalf("LaunchCmd: %v", err)
+	}
+	if cmd == nil {
+		t.Fatal("nil cmd")
+	}
+	if cmd.Path == "" {
+		t.Error("cmd.Path empty")
+	}
+	joined := strings.Join(cmd.Args, " ")
+	if !strings.Contains(joined, "hello world") {
+		t.Errorf("args missing prompt: %v", cmd.Args)
 	}
 }

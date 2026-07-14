@@ -124,6 +124,12 @@ func (w *wrappedAgent) GenerateText(ctx context.Context, prompt string, model st
 	return w.ea.GenerateText(ctx, prompt, model)
 }
 
+// --- TranscriptCompactor ---
+
+func (w *wrappedAgent) CompactTranscript(ctx context.Context, sessionRef string) (*agent.CompactedTranscript, error) {
+	return w.ea.CompactTranscript(ctx, sessionRef)
+}
+
 // --- HookResponseWriter ---
 
 func (w *wrappedAgent) WriteHookResponse(message string) error {
@@ -145,8 +151,12 @@ func (w *wrappedAgent) CalculateTotalTokenUsage(data []byte, offset int, dir str
 
 // IsExternal reports whether ag is backed by an external agent binary.
 func IsExternal(ag agent.Agent) bool {
-	_, ok := ag.(*wrappedAgent)
-	return ok
+	switch ag.(type) {
+	case *wrappedAgent, *wrappedAgentWithProtectedFiles:
+		return true
+	default:
+		return false
+	}
 }
 
 var (
@@ -156,6 +166,7 @@ var (
 	_ agent.TranscriptPreparer     = (*wrappedAgent)(nil)
 	_ agent.TokenCalculator        = (*wrappedAgent)(nil)
 	_ agent.TextGenerator          = (*wrappedAgent)(nil)
+	_ agent.TranscriptCompactor    = (*wrappedAgent)(nil)
 	_ agent.HookResponseWriter     = (*wrappedAgent)(nil)
 	_ agent.SubagentAwareExtractor = (*wrappedAgent)(nil)
 )

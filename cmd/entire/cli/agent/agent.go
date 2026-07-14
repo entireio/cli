@@ -6,6 +6,7 @@ package agent
 import (
 	"context"
 	"io"
+	"os/exec"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
@@ -65,6 +66,15 @@ type Agent interface {
 	GetSessionDir(repoPath string) (string, error)
 
 	// ResolveSessionFile returns the path to the session transcript file.
+	//
+	// SECURITY CONTRACT: agentSessionID is used to build a filesystem path and
+	// some implementations use it as a directory component or (Codex/Pi) return
+	// it verbatim when absolute. Callers that source agentSessionID from
+	// untrusted data (e.g. checkpoint metadata on the shared
+	// entire/checkpoints/v1 branch, hook input) MUST validate it with
+	// validation.ValidateSessionID first. The resume/rewind restore paths do
+	// this at their choke points (transcript.resolveTranscriptPath and
+	// strategy.RestoreLogsOnly); do not call this with unvalidated input.
 	ResolveSessionFile(sessionDir, agentSessionID string) string
 
 	// ReadSession reads session data from agent's storage.
@@ -178,6 +188,20 @@ type TranscriptPreparer interface {
 	PrepareTranscript(ctx context.Context, sessionRef string) error
 }
 
+// SidecarImageProvider is implemented by agents that keep images OUTSIDE the
+// transcript Entire condenses — e.g. Cursor stores pasted images in a per-session
+// SQLite blob store, not the JSONL transcript. The strategy layer calls this
+// during condensation/finalize to capture those images as checkpoint assets so
+// they're preserved with the session. Best-effort: returns nil (no error) when
+// the sidecar store is unavailable or unreadable.
+type SidecarImageProvider interface {
+	Agent
+
+	// SidecarImages returns images stored outside the transcript for the session
+	// identified by sessionRef (the transcript path).
+	SidecarImages(ctx context.Context, sessionRef string) ([]CompactedTranscriptAsset, error)
+}
+
 // TokenCalculator provides token usage calculation for a session.
 // The framework calls this during step save and checkpoint if implemented.
 type TokenCalculator interface {
@@ -185,6 +209,20 @@ type TokenCalculator interface {
 
 	// CalculateTokenUsage computes token usage from the transcript starting at the given offset.
 	CalculateTokenUsage(transcriptData []byte, fromOffset int) (*TokenUsage, error)
+}
+
+// ModelExtractor extracts the LLM model identifier from a transcript for agents
+// that do not report the model through lifecycle hooks. Pi, for example, records
+// the model on every assistant message (message.model) but its hook events carry
+// no model field, so the transcript is the only source. The framework calls this
+// during condensation to backfill session state when the model is otherwise
+// unknown.
+type ModelExtractor interface {
+	Agent
+
+	// ExtractModel returns the model identifier from the transcript (e.g.
+	// "gpt-5.5"), or "" if none can be determined.
+	ExtractModel(transcriptData []byte) (string, error)
 }
 
 // TextGenerator is an optional interface for agents whose CLI supports
@@ -196,6 +234,31 @@ type TextGenerator interface {
 	// GenerateText sends a prompt to the agent's CLI and returns the raw text response.
 	// model is a hint (e.g., "haiku", "sonnet"). Implementations may ignore if not applicable.
 	GenerateText(ctx context.Context, prompt string, model string) (string, error)
+}
+
+// CompactedTranscript contains the result of transcript compaction into Entire
+// Transcript Format. Assets are accepted in the protocol shape for forward
+// compatibility but may not yet be persisted by all call sites.
+type CompactedTranscript struct {
+	Transcript []byte
+	Assets     []CompactedTranscriptAsset
+}
+
+// CompactedTranscriptAsset is binary data extracted during transcript compaction.
+type CompactedTranscriptAsset struct {
+	Name      string
+	MediaType string
+	Data      []byte
+}
+
+// TranscriptCompactor is implemented by agents that can produce Entire
+// Transcript Format directly from their native transcript representation.
+type TranscriptCompactor interface {
+	Agent
+
+	// CompactTranscript converts the transcript referenced by sessionRef into
+	// Entire Transcript Format and returns the compact transcript bytes.
+	CompactTranscript(ctx context.Context, sessionRef string) (*CompactedTranscript, error)
 }
 
 // HookResponseWriter is implemented by agents that support structured hook responses.
@@ -227,6 +290,50 @@ type RestoredSessionPathResolver interface {
 type TestOnly interface {
 	Agent
 	IsTestOnly() bool
+}
+
+// Launcher is implemented by agents that `entire` can subprocess-spawn.
+// This is used by `entire review` to start an agent with a pre-composed
+// initial prompt; other commands may use it later.
+//
+// Contract:
+//   - LaunchCmd builds an *exec.Cmd with stdin/stdout/stderr wired to the
+//     caller's TTY. The agent runs in the foreground and the call blocks.
+//   - The returned cmd is ready to Run() or Start(); it must NOT be modified
+//     by the caller except to set environment variables or working dir.
+//   - initialPrompt is the first user message to send to the agent.
+type Launcher interface {
+	LaunchCmd(ctx context.Context, initialPrompt string) (*exec.Cmd, error)
+}
+
+// DiscoveredSkill describes one review-adjacent skill found on disk by a
+// SkillDiscoverer. Name is the agent-native invocation form (e.g. a
+// slash-prefixed command); Description is scraped from on-disk metadata
+// if available; SourcePath is kept for debug logging and is not shown to
+// the user.
+type DiscoveredSkill struct {
+	Name        string
+	Description string
+	SourcePath  string
+}
+
+// SkillDiscoverer is implemented by agents that can enumerate review-adjacent
+// skills installed locally on disk (e.g. plugin skills under
+// ~/.claude/plugins/...). This powers the "Installed plugin skills" section
+// of the `entire review` picker and the runtime verification that configured
+// skills still exist before spawn.
+//
+// Contract:
+//   - Safe to call on fresh installs where no plugin dir exists yet —
+//     return (nil, nil), not an error.
+//   - Malformed individual skill metadata must be skipped with a Debug log,
+//     not propagated as an error.
+//   - A (nil, non-nil) error means "discovery could not run at all" (e.g.
+//     home dir inaccessible). Callers may treat all errors as "found nothing"
+//     and log at Debug — discovery must never block the picker.
+type SkillDiscoverer interface {
+	Agent
+	DiscoverReviewSkills(ctx context.Context) ([]DiscoveredSkill, error)
 }
 
 // SessionBaseDirProvider is implemented by agents that store transcripts in a

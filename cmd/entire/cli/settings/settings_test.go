@@ -2,16 +2,22 @@ package settings
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 const (
 	baseSettingsClaudeSonnet = `{"enabled": true, "summary_generation": {"provider": "claude-code", "model": "sonnet"}}`
 	providerCodex            = "codex"
+	agentClaudeCode          = "claude-code"
 )
 
 // setupSettingsDir creates a temp repo directory with the provided settings
@@ -39,6 +45,36 @@ func setupSettingsDir(t *testing.T, base, local string) {
 		t.Fatalf("failed to create .git directory: %v", err)
 	}
 	t.Chdir(tmpDir)
+}
+
+func TestLoad_WithWorktreeRootReadsSettingsFromExplicitRepo(t *testing.T) {
+	cwdDir := t.TempDir()
+	targetDir := t.TempDir()
+	testutil.InitRepo(t, cwdDir)
+	testutil.InitRepo(t, targetDir)
+
+	for dir, content := range map[string]string{
+		cwdDir:    `{"enabled": true, "strategy_options": {"filtered_fetches": false}}`,
+		targetDir: `{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
+	} {
+		entireDir := filepath.Join(dir, ".entire")
+		if err := os.MkdirAll(entireDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Chdir(cwdDir)
+
+	got, err := Load(WithWorktreeRoot(context.Background(), targetDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.IsFilteredFetchesEnabled() {
+		t.Fatal("IsFilteredFetchesEnabled() = false, want target repo setting")
+	}
 }
 
 func TestLoad_RejectsUnknownKeys(t *testing.T) {
@@ -665,255 +701,6 @@ func TestMergeJSON_SummaryGeneration_SameProviderPreservesModel(t *testing.T) {
 	}
 }
 
-func TestIsCheckpointsV2Enabled_DefaultsFalse(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{Enabled: true}
-	if s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to default to false")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_EmptyStrategyOptions(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{Enabled: true, StrategyOptions: map[string]any{}}
-	if s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be false with empty strategy_options")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_True(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{
-		Enabled:         true,
-		StrategyOptions: map[string]any{"checkpoints_v2": true},
-	}
-	if !s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be true")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_V2Only(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{
-		Enabled:         true,
-		StrategyOptions: map[string]any{"checkpoints_v2_only": true},
-	}
-	if !s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be true when checkpoints_v2_only is enabled")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_ExplicitlyFalse(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{
-		Enabled:         true,
-		StrategyOptions: map[string]any{"checkpoints_v2": false},
-	}
-	if s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be false when explicitly set to false")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_WrongType(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{
-		Enabled:         true,
-		StrategyOptions: map[string]any{"checkpoints_v2": "yes"},
-	}
-	if s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be false for non-bool value")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_LoadFromFile(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	entireDir := filepath.Join(tmpDir, ".entire")
-	if err := os.MkdirAll(entireDir, 0o755); err != nil {
-		t.Fatalf("failed to create .entire directory: %v", err)
-	}
-
-	settingsFile := filepath.Join(entireDir, "settings.json")
-	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`), 0o644); err != nil {
-		t.Fatalf("failed to write settings file: %v", err)
-	}
-
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
-		t.Fatalf("failed to create .git directory: %v", err)
-	}
-
-	t.Chdir(tmpDir)
-
-	s, err := Load(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be true after loading from file")
-	}
-}
-
-func TestIsCheckpointsV2Enabled_LocalOverride(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	entireDir := filepath.Join(tmpDir, ".entire")
-	if err := os.MkdirAll(entireDir, 0o755); err != nil {
-		t.Fatalf("failed to create .entire directory: %v", err)
-	}
-
-	// Base settings without checkpoints_v2
-	settingsFile := filepath.Join(entireDir, "settings.json")
-	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true}`), 0o644); err != nil {
-		t.Fatalf("failed to write settings file: %v", err)
-	}
-
-	// Local override enables checkpoints_v2
-	localFile := filepath.Join(entireDir, "settings.local.json")
-	if err := os.WriteFile(localFile, []byte(`{"strategy_options": {"checkpoints_v2": true}}`), 0o644); err != nil {
-		t.Fatalf("failed to write local settings file: %v", err)
-	}
-
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
-		t.Fatalf("failed to create .git directory: %v", err)
-	}
-
-	t.Chdir(tmpDir)
-
-	s, err := Load(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !s.IsCheckpointsV2Enabled() {
-		t.Error("expected IsCheckpointsV2Enabled to be true from local override")
-	}
-}
-
-func TestIsCheckpointsV2OnlyEnabled_DefaultsFalse(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{Enabled: true}
-	if s.IsCheckpointsV2OnlyEnabled() {
-		t.Error("expected IsCheckpointsV2OnlyEnabled to default to false")
-	}
-}
-
-func TestIsCheckpointsV2OnlyEnabled_True(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{
-		Enabled:         true,
-		StrategyOptions: map[string]any{"checkpoints_v2_only": true},
-	}
-	if !s.IsCheckpointsV2OnlyEnabled() {
-		t.Error("expected IsCheckpointsV2OnlyEnabled to be true")
-	}
-}
-
-func TestIsCheckpointsV2OnlyEnabled_WrongType(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{
-		Enabled:         true,
-		StrategyOptions: map[string]any{"checkpoints_v2_only": "yes"},
-	}
-	if s.IsCheckpointsV2OnlyEnabled() {
-		t.Error("expected IsCheckpointsV2OnlyEnabled to be false for non-bool value")
-	}
-}
-
-func TestIsPushV2RefsEnabled_DefaultsFalse(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{Enabled: true}
-	if s.IsPushV2RefsEnabled() {
-		t.Error("expected IsPushV2RefsEnabled to default to false")
-	}
-}
-
-func TestIsPushV2RefsEnabled_RequiresBothFlags(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		opts     map[string]any
-		expected bool
-	}{
-		{"v2 only supersedes both", map[string]any{"checkpoints_v2": false, "push_v2_refs": false, "checkpoints_v2_only": true}, true},
-		{"both true", map[string]any{"checkpoints_v2": true, "push_v2_refs": true}, true},
-		{"only checkpoints_v2", map[string]any{"checkpoints_v2": true}, false},
-		{"only push_v2_refs", map[string]any{"push_v2_refs": true}, false},
-		{"both false", map[string]any{"checkpoints_v2": false, "push_v2_refs": false}, false},
-		{"push_v2_refs wrong type", map[string]any{"checkpoints_v2": true, "push_v2_refs": "yes"}, false},
-		{"empty options", map[string]any{}, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			s := &EntireSettings{
-				Enabled:         true,
-				StrategyOptions: tt.opts,
-			}
-			if got := s.IsPushV2RefsEnabled(); got != tt.expected {
-				t.Errorf("IsPushV2RefsEnabled() = %v, want %v", got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestGetFullTranscriptGenerationRetentionDays(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		opts map[string]any
-		want int
-	}{
-		{
-			name: "defaults to sixty when missing",
-			opts: nil,
-			want: 60,
-		},
-		{
-			name: "returns configured integer",
-			opts: map[string]any{"full_transcript_generation_retention_days": 30},
-			want: 30,
-		},
-		{
-			name: "returns configured float from json decode",
-			opts: map[string]any{"full_transcript_generation_retention_days": float64(21)},
-			want: 21,
-		},
-		{
-			name: "returns default for wrong type",
-			opts: map[string]any{"full_transcript_generation_retention_days": "30"},
-			want: 60,
-		},
-		{
-			name: "returns default for zero",
-			opts: map[string]any{"full_transcript_generation_retention_days": 0},
-			want: 60,
-		},
-		{
-			name: "returns default for negative",
-			opts: map[string]any{"full_transcript_generation_retention_days": -5},
-			want: 60,
-		},
-		{
-			name: "returns default for non integral float",
-			opts: map[string]any{"full_transcript_generation_retention_days": 1.5},
-			want: 60,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			s := &EntireSettings{StrategyOptions: tt.opts}
-			if got := s.GetFullTranscriptGenerationRetentionDays(); got != tt.want {
-				t.Fatalf("GetFullTranscriptGenerationRetentionDays() = %d, want %d", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestIsFilteredFetchesEnabled_DefaultsFalse(t *testing.T) {
 	t.Parallel()
 	s := &EntireSettings{Enabled: true}
@@ -970,4 +757,576 @@ func TestSummaryTimeoutValue(t *testing.T) {
 func containsUnknownField(msg string) bool {
 	// Go's json package reports unknown fields with this message format
 	return strings.Contains(msg, "unknown field")
+}
+
+func TestLoadMerged_CustomRedactionsPerKeyOverride(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	base := filepath.Join(dir, "settings.json")
+	local := filepath.Join(dir, "settings.local.json")
+
+	if err := os.WriteFile(base, []byte(`{
+  "redaction": {
+    "custom_redactions": {
+      "team_token":   "TEAM_[A-Za-z0-9]{16,}",
+      "shared_token": "SHARED_[A-Z]{4}_[A-Za-z0-9]{12,}"
+    }
+  }
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, []byte(`{
+  "redaction": {
+    "custom_redactions": {
+      "shared_token": "SHARED_[A-Z]{4}_[A-Za-z0-9]{20,}",
+      "personal":     "PERSONAL_[a-z]{32}"
+    }
+  }
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// preferencesFileAbs="" skips the clone-preferences layer; this test only
+	// exercises the project + local merge.
+	merged, err := loadMergedSettings(base, "", local)
+	if err != nil {
+		t.Fatalf("loadMergedSettings: %v", err)
+	}
+
+	want := map[string]string{
+		"team_token":   "TEAM_[A-Za-z0-9]{16,}",
+		"shared_token": "SHARED_[A-Z]{4}_[A-Za-z0-9]{20,}",
+		"personal":     "PERSONAL_[a-z]{32}",
+	}
+	got := merged.Redaction.CustomRedactions
+	if len(got) != len(want) {
+		t.Fatalf("CustomRedactions size: want %d, have %d (%v)", len(want), len(got), got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("CustomRedactions[%s]: want %q, have %q", k, v, got[k])
+		}
+	}
+}
+
+func TestLoadFromBytes_CustomRedactions(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{
+  "redaction": {
+    "custom_redactions": {
+      "acme_token": "ACME_TOKEN_[A-Za-z0-9]{20,}"
+    }
+  }
+}`)
+
+	got, err := LoadFromBytes(data)
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	if got.Redaction == nil {
+		t.Fatalf("Redaction is nil")
+	}
+	if want, have := "ACME_TOKEN_[A-Za-z0-9]{20,}", got.Redaction.CustomRedactions["acme_token"]; want != have {
+		t.Errorf("CustomRedactions[acme_token]: want %q, have %q", want, have)
+	}
+}
+
+func TestLoadFromBytes_OPFSettings_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{
+  "redaction": {
+    "openai_privacy_filter": {
+      "enabled": true,
+      "categories": {"private_person": true, "secret": false},
+      "command": "/usr/local/bin/opf",
+      "timeout_seconds": 45
+    }
+  }
+}`)
+	got, err := LoadFromBytes(data)
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	opf := got.Redaction.OpenAIPrivacyFilter
+	if opf == nil {
+		t.Fatal("OpenAIPrivacyFilter is nil")
+	}
+	if !opf.Enabled {
+		t.Error("Enabled: want true")
+	}
+	if !opf.Categories["private_person"] {
+		t.Error("Categories[private_person]: want true")
+	}
+	if opf.Categories["secret"] {
+		t.Error("Categories[secret]: want false")
+	}
+	if opf.Command != "/usr/local/bin/opf" {
+		t.Errorf("Command: want /usr/local/bin/opf, got %q", opf.Command)
+	}
+	if opf.TimeoutSeconds != 45 {
+		t.Errorf("TimeoutSeconds: want 45, got %d", opf.TimeoutSeconds)
+	}
+}
+
+// TestLoadFromBytes_OPFSettings_RejectsUnknownCategory pins down that
+// category-name typos fail at parse time. Silent zero-detection of a
+// privacy category is effectively a correctness bug — the user thinks
+// they're protected but they're not. Runs on both load paths.
+func TestLoadFromBytes_OPFSettings_RejectsUnknownCategory(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		key     string
+		wantErr bool
+	}{
+		{"known_person", "private_person", false},
+		{"known_email", "private_email", false},
+		{"known_secret", "secret", false},
+		{"typo_peerson", "private_peerson", true},
+		{"unknown", "social_security_number", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := `{"redaction":{"openai_privacy_filter":{"categories":{"` + tc.key + `":true}}}}`
+			_, err := LoadFromBytes([]byte(body))
+			if tc.wantErr && err == nil {
+				t.Errorf("LoadFromBytes(%q): want error, got nil", tc.key)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("LoadFromBytes(%q): want nil, got %v", tc.key, err)
+			}
+		})
+	}
+}
+
+// TestLoadFromBytes_OPFSettings_RejectsOnFailureField pins down that the
+// dropped on_failure field is rejected by DisallowUnknownFields — there is
+// no warn-only fallback masquerading as fail-closed.
+func TestLoadFromBytes_OPFSettings_RejectsOnFailureField(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"redaction":{"openai_privacy_filter":{"enabled":true,"on_failure":"block"}}}`)
+	if _, err := LoadFromBytes(body); err == nil {
+		t.Error("LoadFromBytes with on_failure: want error from DisallowUnknownFields, got nil")
+	}
+}
+
+// TestLoadFromBytes_OPFSettings_PromptDefault covers parsing + validation
+// of the prompt_default field added for the pre-push prompt UX. Empty is
+// allowed (treated as "ask"); ask/never/always are the only valid values.
+func TestLoadFromBytes_OPFSettings_PromptDefault(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		value   string
+		wantErr bool
+		wantVal string
+	}{
+		{name: "ask", value: `"ask"`, wantVal: "ask"},
+		{name: "never", value: `"never"`, wantVal: "never"},
+		{name: "always", value: `"always"`, wantVal: "always"},
+		{name: "empty_string_allowed_as_ask", value: `""`, wantVal: ""},
+		{name: "bogus_value_rejected", value: `"sometimes"`, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := []byte(`{"redaction":{"openai_privacy_filter":{"prompt_default":` + tc.value + `}}}`)
+			s, err := LoadFromBytes(body)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil", tc.value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if s.Redaction == nil || s.Redaction.OpenAIPrivacyFilter == nil {
+				t.Fatal("OPF settings not parsed")
+			}
+			if got := s.Redaction.OpenAIPrivacyFilter.PromptDefault; got != tc.wantVal {
+				t.Errorf("PromptDefault = %q, want %q", got, tc.wantVal)
+			}
+		})
+	}
+}
+
+func TestLoadFromBytes_OPFSettings_TimeoutValidation(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{name: "positive_allowed", value: 45},
+		{name: "zero_allowed_as_default", value: 0},
+		{name: "negative_rejected", value: -1, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := []byte(`{"redaction":{"openai_privacy_filter":{"timeout_seconds":` + strconv.Itoa(tc.value) + `}}}`)
+			_, err := LoadFromBytes(body)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for timeout_seconds=%d, got nil", tc.value)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error for timeout_seconds=%d: %v", tc.value, err)
+			}
+		})
+	}
+}
+
+// TestLoadFromBytes_OPFSettings_Merge verifies override semantics for the
+// merge path (settings.local.json on top of settings.json): present fields
+// override, omitted fields preserve, categories merge per-key.
+func TestLoadFromBytes_OPFSettings_Merge(t *testing.T) {
+	t.Parallel()
+	base := []byte(`{"redaction":{"openai_privacy_filter":{"enabled":true,"categories":{"private_person":true,"secret":false}}}}`)
+	override := []byte(`{"redaction":{"openai_privacy_filter":{"categories":{"secret":true},"command":"/opt/opf"}}}`)
+
+	s, err := LoadFromBytes(base)
+	if err != nil {
+		t.Fatalf("base load: %v", err)
+	}
+	if err := mergeJSON(s, override); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	opf := s.Redaction.OpenAIPrivacyFilter
+	if !opf.Enabled {
+		t.Error("Enabled: want preserved=true")
+	}
+	if !opf.Categories["private_person"] {
+		t.Error("Categories[private_person]: want preserved=true")
+	}
+	if !opf.Categories["secret"] {
+		t.Error("Categories[secret]: want override=true")
+	}
+	if opf.Command != "/opt/opf" {
+		t.Errorf("Command: want override /opt/opf, got %q", opf.Command)
+	}
+}
+
+func TestEntireSettings_ReviewRoundTrip(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{
+      "enabled": true,
+      "review_fix_agent": "codex",
+      "review": {
+        "claude-code": {
+          "skills": ["/pr-review-toolkit:review-pr", "/test-auditor"],
+          "prompt": "Focus on security regressions."
+        },
+        "codex": {
+          "skills": ["/codex:adversarial-review"]
+        }
+      }
+    }`)
+	var s EntireSettings
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if s.ReviewFixAgent != "codex" {
+		t.Fatalf("review_fix_agent = %q, want codex", s.ReviewFixAgent)
+	}
+	claude := s.Review["claude-code"]
+	if len(claude.Skills) != 2 || claude.Skills[0] != "/pr-review-toolkit:review-pr" {
+		t.Fatalf("unexpected claude skills: %v", claude.Skills)
+	}
+	if claude.Prompt != "Focus on security regressions." {
+		t.Fatalf("unexpected claude prompt: %q", claude.Prompt)
+	}
+	codex := s.Review["codex"]
+	if len(codex.Skills) != 1 {
+		t.Fatalf("unexpected codex skills: %v", codex.Skills)
+	}
+	if codex.Prompt != "" {
+		t.Fatalf("expected empty prompt for codex, got %q", codex.Prompt)
+	}
+}
+
+func TestMergeJSON_ReviewWholesaleReplacesBase(t *testing.T) {
+	t.Parallel()
+	s := &EntireSettings{Review: map[string]ReviewConfig{
+		"claude-code": {Skills: []string{"/old"}},
+	}}
+	raw := []byte(`{"review":{"codex":{"prompt":"new"}}}`)
+
+	if err := mergeJSON(s, raw); err != nil {
+		t.Fatalf("mergeJSON: %v", err)
+	}
+	if _, ok := s.Review["claude-code"]; ok {
+		t.Fatalf("base review entry survived wholesale replace: %+v", s.Review)
+	}
+	if got := s.Review["codex"].Prompt; got != "new" {
+		t.Fatalf("codex prompt = %q, want new", got)
+	}
+}
+
+func TestLoad_AppliesClonePreferencesBeforeLocalSettings(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	t.Chdir(tmp)
+	session.ClearGitCommonDirCache()
+
+	entireDir := filepath.Join(tmp, ".entire")
+	if err := os.MkdirAll(entireDir, 0o750); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	projectSettings := []byte(`{
+		"enabled": true,
+		"review": {"project-agent": {"prompt": "project"}},
+		"review_fix_agent": "project-agent"
+	}`)
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), projectSettings, 0o600); err != nil {
+		t.Fatalf("write project settings: %v", err)
+	}
+
+	preferencesDir := filepath.Join(tmp, ".git", "entire")
+	if err := os.MkdirAll(preferencesDir, 0o750); err != nil {
+		t.Fatalf("mkdir preferences dir: %v", err)
+	}
+	preferences := []byte(`{
+		"review": {"clone-agent": {"prompt": "clone"}},
+		"review_fix_agent": "clone-agent"
+	}`)
+	if err := os.WriteFile(filepath.Join(preferencesDir, "preferences.json"), preferences, 0o600); err != nil {
+		t.Fatalf("write preferences: %v", err)
+	}
+
+	localSettings := []byte(`{
+		"review": {"local-agent": {"prompt": "local"}},
+		"review_fix_agent": "local-agent"
+	}`)
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"), localSettings, 0o600); err != nil {
+		t.Fatalf("write local settings: %v", err)
+	}
+
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := s.Review["project-agent"]; ok {
+		t.Fatalf("project review survived overrides: %+v", s.Review)
+	}
+	if _, ok := s.Review["clone-agent"]; ok {
+		t.Fatalf("clone review survived local override: %+v", s.Review)
+	}
+	if got := s.Review["local-agent"].Prompt; got != "local" {
+		t.Fatalf("local-agent prompt = %q, want local", got)
+	}
+	if s.ReviewFixAgent != "local-agent" {
+		t.Fatalf("ReviewFixAgent = %q, want local-agent", s.ReviewFixAgent)
+	}
+}
+
+func TestReviewConfig_IsZero(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		cfg  ReviewConfig
+		want bool
+	}{
+		{"empty", ReviewConfig{}, true},
+		{"skills-only", ReviewConfig{Skills: []string{"/x"}}, false},
+		{"prompt-only", ReviewConfig{Prompt: "hello"}, false},
+		{"both", ReviewConfig{Skills: []string{"/x"}, Prompt: "y"}, false},
+		{"empty-slice", ReviewConfig{Skills: []string{}}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.cfg.IsZero(); got != tc.want {
+				t.Errorf("IsZero() = %v, want %v (cfg=%+v)", got, tc.want, tc.cfg)
+			}
+		})
+	}
+}
+
+// TestEntireSettings_InvestigateRoundTrip pins the JSON wire format for the
+// investigate config: all four fields must round-trip through Unmarshal.
+func TestEntireSettings_InvestigateRoundTrip(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{
+      "enabled": true,
+      "investigate": {
+        "agents": ["` + agentClaudeCode + `", "` + providerCodex + `"],
+        "max_turns": 5,
+        "quorum": 2,
+        "always_prompt": "Be terse."
+      }
+    }`)
+	var s EntireSettings
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if s.Investigate == nil {
+		t.Fatalf("expected investigate config, got nil")
+	}
+	if len(s.Investigate.Agents) != 2 || s.Investigate.Agents[0] != agentClaudeCode || s.Investigate.Agents[1] != providerCodex {
+		t.Errorf("Agents = %v", s.Investigate.Agents)
+	}
+	if s.Investigate.MaxTurns != 5 {
+		t.Errorf("MaxTurns = %d, want 5", s.Investigate.MaxTurns)
+	}
+	if s.Investigate.Quorum != 2 {
+		t.Errorf("Quorum = %d, want 2", s.Investigate.Quorum)
+	}
+	if s.Investigate.AlwaysPrompt != "Be terse." {
+		t.Errorf("AlwaysPrompt = %q", s.Investigate.AlwaysPrompt)
+	}
+}
+
+// TestInvestigateConfig_IsZero pins the truth table for IsZero, including the
+// nil-receiver case (callers can ask "do we have any config?" without
+// nil-checking first).
+func TestInvestigateConfig_IsZero(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		cfg  *InvestigateConfig
+		want bool
+	}{
+		{"nil", nil, true},
+		{"empty", &InvestigateConfig{}, true},
+		{"agents", &InvestigateConfig{Agents: []string{"x"}}, false},
+		{"max_turns", &InvestigateConfig{MaxTurns: 1}, false},
+		{"quorum", &InvestigateConfig{Quorum: 1}, false},
+		{"always_prompt", &InvestigateConfig{AlwaysPrompt: "hello"}, false},
+		{"empty-slice", &InvestigateConfig{Agents: []string{}}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.cfg.IsZero(); got != tc.want {
+				t.Errorf("IsZero() = %v, want %v (cfg=%+v)", got, tc.want, tc.cfg)
+			}
+		})
+	}
+}
+
+// TestEntireSettings_InvestigateConfig pins the receiver helper, including
+// the nil-receiver case used by callers that don't want to nil-check first.
+func TestEntireSettings_InvestigateConfig(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil_receiver", func(t *testing.T) {
+		t.Parallel()
+		var s *EntireSettings
+		if got := s.InvestigateConfig(); got != nil {
+			t.Errorf("nil receiver: got %+v, want nil", got)
+		}
+	})
+
+	t.Run("unset", func(t *testing.T) {
+		t.Parallel()
+		s := &EntireSettings{}
+		if got := s.InvestigateConfig(); got != nil {
+			t.Errorf("unset: got %+v, want nil", got)
+		}
+	})
+
+	t.Run("set", func(t *testing.T) {
+		t.Parallel()
+		s := &EntireSettings{Investigate: &InvestigateConfig{Agents: []string{agentClaudeCode}}}
+		got := s.InvestigateConfig()
+		if got == nil || len(got.Agents) != 1 || got.Agents[0] != agentClaudeCode {
+			t.Errorf("set: got %+v", got)
+		}
+	})
+}
+
+// TestLoad_MergesInvestigateLocalOverride pins that a local settings file
+// overrides the base file's investigate config wholesale (whole-object
+// replacement, parallel to mergeSummaryGeneration but simpler).
+func TestLoad_MergesInvestigateLocalOverride(t *testing.T) {
+	base := `{
+      "enabled": true,
+      "investigate": {
+        "agents": ["` + agentClaudeCode + `"],
+        "max_turns": 3
+      }
+    }`
+	local := `{
+      "investigate": {
+        "agents": ["` + providerCodex + `"],
+        "max_turns": 5,
+        "quorum": 1,
+        "always_prompt": "Be brief."
+      }
+    }`
+	setupSettingsDir(t, base, local)
+
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	cfg := s.InvestigateConfig()
+	if cfg == nil {
+		t.Fatalf("expected investigate config after merge")
+	}
+	if len(cfg.Agents) != 1 || cfg.Agents[0] != providerCodex {
+		t.Errorf("Agents = %v, want [%s]", cfg.Agents, providerCodex)
+	}
+	if cfg.MaxTurns != 5 {
+		t.Errorf("MaxTurns = %d, want 5", cfg.MaxTurns)
+	}
+	if cfg.Quorum != 1 {
+		t.Errorf("Quorum = %d, want 1", cfg.Quorum)
+	}
+	if cfg.AlwaysPrompt != "Be brief." {
+		t.Errorf("AlwaysPrompt = %q, want %q", cfg.AlwaysPrompt, "Be brief.")
+	}
+}
+
+func TestMergeReviewProfiles_PureAndPrecedence(t *testing.T) {
+	t.Parallel()
+	base := map[string]ReviewProfileConfig{
+		"general":  {Task: "base general"},
+		"security": {Task: "base security"},
+	}
+	src := map[string]ReviewProfileConfig{
+		"general": {Task: "override general"}, // overrides base
+		"scratch": {Task: "src scratch"},      // unique to src
+	}
+
+	out := mergeReviewProfiles(base, src)
+
+	// Merged result: src overrides same-named, both layers' unique profiles kept.
+	if out["general"].Task != "override general" {
+		t.Errorf("general = %q, want src override", out["general"].Task)
+	}
+	if out["security"].Task != "base security" {
+		t.Errorf("security = %q, want base preserved", out["security"].Task)
+	}
+	if out["scratch"].Task != "src scratch" {
+		t.Errorf("scratch = %q, want src-only profile kept", out["scratch"].Task)
+	}
+
+	// Inputs must not be mutated.
+	if _, leaked := base["scratch"]; leaked {
+		t.Error("base was mutated: src profile leaked into it")
+	}
+	if base["general"].Task != "base general" {
+		t.Errorf("base[general] mutated: %q", base["general"].Task)
+	}
+	if len(src) != 2 {
+		t.Errorf("src mutated: len = %d, want 2", len(src))
+	}
+
+	// The result is always a fresh, non-nil map, even when both inputs are
+	// empty/nil, so callers never receive nil from a non-nil input.
+	if got := mergeReviewProfiles(nil, nil); got == nil {
+		t.Error("merge(nil, nil) should return a non-nil empty map, got nil")
+	} else if len(got) != 0 {
+		t.Errorf("merge(nil, nil) = %v, want empty", got)
+	}
+	if got := mergeReviewProfiles(nil, map[string]ReviewProfileConfig{}); got == nil {
+		t.Error("merge(nil, emptyNonNil) should return a non-nil empty map, got nil")
+	}
 }

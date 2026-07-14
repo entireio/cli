@@ -5,14 +5,11 @@ package strategy
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 // ErrNoMetadata is returned when a commit does not have an Entire metadata trailer.
@@ -99,6 +96,10 @@ type RewindPoint struct {
 	// SessionPrompts contains the first prompt for each session (parallel to SessionIDs).
 	// Used to display context when showing resume commands for multi-session checkpoints.
 	SessionPrompts []string
+
+	// Imported indicates this point is a read-only imported (commit-less)
+	// checkpoint on the v1 metadata branch. Imported points are not rewindable.
+	Imported bool
 }
 
 // RewindPreview describes what will happen when rewinding to a checkpoint.
@@ -265,35 +266,15 @@ func TaskMetadataDir(sessionMetadataDir, toolUseID string) string {
 	return sessionMetadataDir + "/tasks/" + toolUseID
 }
 
-// ReadTaskCheckpoint reads the checkpoint.json file from a task metadata directory.
-// This is used during rewind to get the checkpoint UUID for transcript truncation.
-// Uses os.Root for traversal-resistant file reads within the metadata directory.
-func ReadTaskCheckpoint(taskMetadataDir string) (*TaskCheckpoint, error) {
-	root, err := os.OpenRoot(taskMetadataDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open task metadata directory: %w", err)
-	}
-	defer root.Close()
-
-	data, err := osroot.ReadFile(root, "checkpoint.json")
-	if err != nil {
-		return nil, err //nolint:wrapcheck // already present in codebase
-	}
-
-	var checkpoint TaskCheckpoint
-	if err := json.Unmarshal(data, &checkpoint); err != nil {
-		return nil, err //nolint:wrapcheck // already present in codebase
-	}
-
-	return &checkpoint, nil
-}
-
 // RestoredSession describes a single session that was restored by RestoreLogsOnly.
 // Each session may come from a different agent, so callers use this to print
 // per-session resume commands without re-reading the metadata tree.
 type RestoredSession struct {
-	SessionID string
-	Agent     types.AgentType
-	Prompt    string
-	CreatedAt time.Time // From session metadata; used by resume to determine most recent
+	SessionID    string
+	CheckpointID string
+	Agent        types.AgentType
+	Prompt       string
+	CreatedAt    time.Time // From session metadata; used by resume to determine most recent
+	Kind         string
+	ReviewPrompt string
 }

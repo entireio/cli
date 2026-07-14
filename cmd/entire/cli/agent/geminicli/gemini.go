@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -376,6 +377,23 @@ func (g *GeminiCLIAgent) ChunkTranscript(ctx context.Context, content []byte, ma
 	}
 
 	return chunks, nil
+}
+
+// LaunchCmd builds an exec.Cmd for `gemini "<initialPrompt>"`. Stdio is wired
+// to the caller's TTY so the agent runs foreground and the user interacts
+// normally. The call site is expected to Run() and wait. Hooks inherit the
+// parent environment.
+func (g *GeminiCLIAgent) LaunchCmd(ctx context.Context, initialPrompt string) (*exec.Cmd, error) {
+	bin, err := exec.LookPath("gemini")
+	if err != nil {
+		return nil, fmt.Errorf("gemini binary not on PATH: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, bin, initialPrompt)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	return cmd, nil
 }
 
 // ReassembleTranscript merges Gemini JSON chunks by combining their message arrays.

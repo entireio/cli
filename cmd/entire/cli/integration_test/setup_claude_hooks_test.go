@@ -76,18 +76,6 @@ func TestSetupClaudeHooks_AddsAllRequiredHooks(t *testing.T) {
 		t.Error("PostToolUse[TodoWrite] hook should exist")
 	}
 
-	searchAgentPath := filepath.Join(env.RepoDir, ".claude", "agents", "entire-search.md")
-	data, err := os.ReadFile(searchAgentPath)
-	if err != nil {
-		t.Fatalf("failed to read generated Claude search subagent: %v", err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "ENTIRE-MANAGED SEARCH SUBAGENT") {
-		t.Error("Claude search subagent should be marked as Entire-managed")
-	}
-	if !strings.Contains(content, "entire search --json") {
-		t.Error("Claude search subagent should instruct use of `entire search --json`")
-	}
 }
 
 // TestSetupClaudeHooks_PreservesExistingSettings is a smoke test verifying that
@@ -170,7 +158,7 @@ func TestSetupClaudeHooks_PreservesExistingSettings(t *testing.T) {
 	}
 }
 
-func TestSetupClaudeHooks_ConfigureForce_RewritesExistingEntireHooks(t *testing.T) {
+func TestSetupClaudeHooks_AgentAddForce_RewritesExistingEntireHooks(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	env.InitRepo()
@@ -180,16 +168,16 @@ func TestSetupClaudeHooks_ConfigureForce_RewritesExistingEntireHooks(t *testing.
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 
-	output, err := env.RunCLIWithError("configure", "--agent", "claude-code")
+	output, err := env.RunCLIWithError("agent", "add", "claude-code")
 	if err != nil {
-		t.Fatalf("configure claude-hooks command failed: %v\nOutput: %s", err, output)
+		t.Fatalf("agent add claude-code command failed: %v\nOutput: %s", err, output)
 	}
 
 	writeStaleClaudeStopHook(t, env)
 
-	output, err = env.RunCLIWithError("configure", "--agent", "claude-code", "--force")
+	output, err = env.RunCLIWithError("agent", "add", "claude-code", "--force")
 	if err != nil {
-		t.Fatalf("configure --force claude-hooks command failed: %v\nOutput: %s", err, output)
+		t.Fatalf("agent add --force claude-code command failed: %v\nOutput: %s", err, output)
 	}
 
 	assertClaudeStopHookRewritten(t, env)

@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
@@ -33,6 +34,67 @@ const (
 	// interaction is considered stuck (used by "entire doctor" and "entire status").
 	StuckActiveThreshold = 1 * time.Hour
 )
+
+// Kind identifies the purpose of a session. Empty means "normal" (legacy
+// sessions + every session that isn't a review). Callers must not rely on
+// Kind being set unless they specifically want to branch on it.
+//
+// Kind is a discriminator — it distinguishes review variants at a per-session
+// granularity. The checkpoint-level HasReview flag remains an umbrella that
+// any review-kind session should set (so future review kinds like manual
+// review can be added without changing summary-shape).
+type Kind string
+
+const (
+	// KindAgentReview tags a session created by `entire review` (agent-driven
+	// review). Future review kinds (e.g., manual review) should be defined as
+	// distinct Kind values AND added to Kind.IsReview so the checkpoint's
+	// HasReview umbrella flag keeps covering them.
+	KindAgentReview Kind = "agent_review"
+
+	// KindAgentInvestigate tags a session created by `entire investigate`
+	// (agent-driven investigation). A session is review OR investigate, not
+	// both — Kind is single-valued. Future investigate kinds should be added
+	// to Kind.IsInvestigate so the checkpoint's HasInvestigation umbrella
+	// flag keeps covering them.
+	KindAgentInvestigate Kind = "agent_investigate"
+
+	// KindImported tags a checkpoint created by `entire import` from a
+	// pre-existing agent transcript. Imported checkpoints are read-only and
+	// commit-less; they live on the v1 metadata branch and push like any other
+	// checkpoint.
+	KindImported Kind = "imported"
+)
+
+// IsReview reports whether this Kind counts as "a review happened" for the
+// purpose of CheckpointSummary.HasReview. Extend this when adding new
+// review-kind Kind values (e.g. KindManualReview) so the umbrella flag stays
+// accurate without string-literal coupling across packages.
+func (k Kind) IsReview() bool {
+	// Note: a switch is the natural shape here, but golangci's
+	// singleCaseSwitch flags a one-case switch — so we keep it as a list of
+	// equality checks. Add new review-kind values to the disjunction below.
+	return k == KindAgentReview
+}
+
+// IsInvestigate reports whether this Kind counts as "an investigation
+// happened" for the purpose of CheckpointSummary.HasInvestigation. Extend
+// this when adding new investigate-kind Kind values so the umbrella flag
+// stays accurate without string-literal coupling across packages.
+func (k Kind) IsInvestigate() bool {
+	// See IsReview for why this is an equality check rather than a switch.
+	return k == KindAgentInvestigate
+}
+
+// IsImported reports whether this Kind is a read-only session reconstructed by
+// `entire import` from a pre-existing transcript. Imported sessions are exempt
+// from lifecycle management (staleness, orphan cleanup) and are not
+// resumable/rewindable. Centralized here so those call sites don't couple to
+// the string literal across packages.
+func (k Kind) IsImported() bool {
+	// See IsReview for why this is an equality check rather than a switch.
+	return k == KindImported
+}
 
 // State represents the state of an active session.
 // This is stored in .git/entire-sessions/<session-id>.json
@@ -61,6 +123,24 @@ type State struct {
 	// Derived from .git/worktrees/<name>/, stable across git worktree move
 	WorktreeID string `json:"worktree_id,omitempty"`
 
+	// AdoptedIntoWorktreePath marks a source-side tombstone left behind after
+	// `entire session adopt` moves this session into another repository/worktree.
+	// Hook TurnStart must not reactivate tombstoned source records, otherwise the
+	// same session ID can diverge in two session stores.
+	AdoptedIntoWorktreePath string `json:"adopted_into_worktree_path,omitempty"`
+
+	// AdoptedIntoWorktreeID is the target worktree ID paired with
+	// AdoptedIntoWorktreePath when available.
+	AdoptedIntoWorktreeID string `json:"adopted_into_worktree_id,omitempty"`
+
+	// Branch is the git branch HEAD pointed at the last time this session took a
+	// turn. Captured on each turn start so it tracks branches created or renamed
+	// after the session began. Empty when HEAD was detached or for sessions
+	// recorded before this field existed (callers derive it from commit trailers
+	// as a fallback). Lets `entire resume` map a stopped session back to its
+	// branch without the user remembering it.
+	Branch string `json:"branch,omitempty"`
+
 	// StartedAt is when the session was started
 	StartedAt time.Time `json:"started_at"`
 
@@ -71,6 +151,33 @@ type State struct {
 	// Phase is the lifecycle stage of this session (see phase.go).
 	// Empty means idle (backward compat with pre-state-machine files).
 	Phase Phase `json:"phase,omitempty"`
+
+	// Kind tags the session's purpose. Empty for normal agent sessions;
+	// set to KindAgentReview when the session was started by `entire review`.
+	Kind Kind `json:"kind,omitempty"`
+
+	// ReviewSkills is the snapshot of configured review skills at session start.
+	// Preserved so checkpoint metadata records which skills were run. May be
+	// empty when a review was attached post-hoc and skills were not declared;
+	// ReviewPrompt is the ground truth in that case.
+	ReviewSkills []string `json:"review_skills,omitempty"`
+
+	// ReviewPrompt is the actual text of the review request — the composed
+	// prompt sent to the agent (spawn path) or the session's first user
+	// prompt (attach path). Always populated when Kind is a review kind.
+	ReviewPrompt string `json:"review_prompt,omitempty"`
+
+	// InvestigateRunID is the 12-hex-char ID of the parent investigation
+	// run when Kind is an investigate kind. Multiple sessions across rounds
+	// share this ID so the loop driver can correlate them. Empty for
+	// non-investigate sessions.
+	InvestigateRunID string `json:"investigate_run_id,omitempty"`
+
+	// InvestigateTopic is the human-readable topic the investigation was
+	// asked to investigate. Snapshot at session start so checkpoint
+	// metadata records what the agent was investigating. Only meaningful
+	// when Kind is an investigate kind.
+	InvestigateTopic string `json:"investigate_topic,omitempty"`
 
 	// TurnID is a unique identifier for the current agent turn.
 	// Lifecycle:
@@ -108,11 +215,6 @@ type State struct {
 	// Used for fast "has new content?" checks in PostCommit: compare the git blob size
 	// against this value without reading the full transcript content.
 	CheckpointTranscriptSize int64 `json:"checkpoint_transcript_size,omitempty"`
-
-	// CompactTranscriptStart is the transcript.jsonl line offset where the current
-	// checkpoint cycle began. It parallels CheckpointTranscriptStart (full.jsonl)
-	// and is updated after each condensation.
-	CompactTranscriptStart int `json:"compact_transcript_start,omitempty"`
 
 	// Deprecated: CondensedTranscriptLines is replaced by CheckpointTranscriptStart.
 	// Kept for backward compatibility with existing state files.
@@ -158,6 +260,15 @@ type State struct {
 	// than being captured by hooks during normal agent execution.
 	AttachedManually bool `json:"attached_manually,omitempty"`
 
+	// ContextInjectionDecided records that the once-per-session model-context
+	// injection (e.g. the `entire trail` pointer) has been handled for this
+	// session, so the dispatcher does not re-inject on later turns. Set on the
+	// first normal turn regardless of whether anything was injected: the prompt
+	// path reads only clone-local cached trail enablement, and a missing/stale
+	// false cache fails closed (miss the hint) rather than retrying/spamming.
+	// Review/investigate sessions leave this false because they skip injection.
+	ContextInjectionDecided bool `json:"context_injection_decided,omitempty"`
+
 	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Gemini CLI", "Cursor")
 	AgentType types.AgentType `json:"agent_type,omitempty"`
 
@@ -168,11 +279,34 @@ type State struct {
 	// Token usage tracking (accumulated across all checkpoints in this session)
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
 
+	// CheckpointTokenUsage tracks hook-provided token usage since the last condensation.
+	// This is checkpoint-scoped; TokenUsage remains the session-wide total.
+	CheckpointTokenUsage *agent.TokenUsage `json:"checkpoint_token_usage,omitempty"`
+
+	// SkillEvents records explicit native skill signals observed during this session.
+	// Stored as sidecar metadata so consumers can collapse skill-related transcript events
+	// without mutating the raw agent transcript.
+	SkillEvents []agent.SkillEvent `json:"skill_events,omitempty"`
+
 	// Hook-provided session metrics (for agents like Cursor that report via hooks)
 	SessionDurationMs int64 `json:"session_duration_ms,omitempty"`
 	SessionTurnCount  int   `json:"session_turn_count,omitempty"`
 	ContextTokens     int   `json:"context_tokens,omitempty"`
 	ContextWindowSize int   `json:"context_window_size,omitempty"`
+
+	// PromptWindowBase is the SessionTurnCount value at the start of the current
+	// checkpoint window. The number of prompts attributed to the next checkpoint is
+	// SessionTurnCount - PromptWindowBase (floored at 1 when written). It is only
+	// advanced (deferred reset) the next time a turn is counted after a checkpoint
+	// was written, so two checkpoints with no prompt between them report the same
+	// count. Zero-value safe on old state files: base 0 ⇒ window = SessionTurnCount,
+	// i.e. "all prompts so far" (correct first-checkpoint semantics).
+	PromptWindowBase int `json:"prompt_window_base,omitempty"`
+
+	// PromptWindowResetPending indicates a checkpoint was just written and the
+	// window base must be re-anchored to the current SessionTurnCount the next time
+	// a turn is counted. Deferred so back-to-back checkpoints share a count.
+	PromptWindowResetPending bool `json:"prompt_window_reset_pending,omitempty"`
 
 	// Deprecated: TranscriptLinesAtStart is replaced by CheckpointTranscriptStart.
 	// Kept for backward compatibility with existing state files.
@@ -197,6 +331,15 @@ type State struct {
 	// PendingPromptAttribution holds attribution calculated at prompt start (before agent runs).
 	// This is moved to PromptAttributions when SaveStep is called.
 	PendingPromptAttribution *PromptAttribution `json:"pending_prompt_attribution,omitempty"`
+
+	// Owner fingerprints the process that owns this session's agent turn,
+	// captured at each turn start via proclive.ResolveOwner. It lets liveness
+	// checks detect an ACTIVE session whose agent has exited (clean /exit,
+	// crash, kill, terminal close, reboot) without a SessionStop hook firing —
+	// see OwnerExited. nil for legacy sessions or when the owner couldn't be
+	// resolved, in which case liveness falls back to the StuckActiveThreshold
+	// timeout. Only meaningful on Owner.Host.
+	Owner *proclive.Identity `json:"owner,omitempty"`
 }
 
 // PromptAttribution captures line-level attribution data at the start of each prompt.
@@ -261,8 +404,7 @@ func (s *State) NormalizeAfterLoad(ctx context.Context) {
 	// will see 0 for these fields and fall back to scoping from the transcript start.
 	// This is acceptable since CLI upgrades are monotonic and the worst case is
 	// redundant transcript content in a condensation, not data loss.
-	s.CondensedTranscriptLines = 0
-	s.TranscriptLinesAtStart = 0
+	s.ClearLegacyTranscriptOffsets()
 
 	// Backfill AttributionBaseCommit for sessions created before this field existed.
 	// Without this, a mid-turn commit would migrate BaseCommit and the fallback in
@@ -277,6 +419,14 @@ func (s *State) NormalizeAfterLoad(ctx context.Context) {
 	if s.DivergenceNoticeShown && s.AttributionBaseCommit == s.BaseCommit {
 		s.DivergenceNoticeShown = false
 	}
+}
+
+// ClearLegacyTranscriptOffsets clears deprecated transcript offset fields so
+// callers that intentionally reset CheckpointTranscriptStart do not re-persist
+// stale legacy state.
+func (s *State) ClearLegacyTranscriptOffsets() {
+	s.CondensedTranscriptLines = 0
+	s.TranscriptLinesAtStart = 0
 }
 
 // RealignAttributionBase sets AttributionBaseCommit to newBase and clears any
@@ -307,7 +457,39 @@ func (s *State) IsStuckActive() bool {
 	return time.Since(*ref) > StuckActiveThreshold
 }
 
+// OwnerLiveness reports the liveness of this session's recorded owner process.
+// It returns proclive.LivenessUnknown when no owner was recorded (legacy
+// sessions, or sessions where the owner couldn't be resolved), so callers can
+// fall back to the time-based IsStuckActive heuristic.
+func (s *State) OwnerLiveness() proclive.Liveness {
+	if s.Owner == nil {
+		return proclive.LivenessUnknown
+	}
+	return proclive.Check(*s.Owner)
+}
+
+// OwnerExited reports true when this session is ACTIVE but its owning agent
+// process is gone — exited cleanly, crashed, was killed, or the machine
+// rebooted — without a SessionStop hook firing. Unlike IsStuckActive (a
+// time-based heuristic), this is detected immediately, regardless of how
+// recently the session interacted. It returns false when liveness is Unknown
+// (no owner recorded, cross-host state, or an unsupported platform) so behavior
+// degrades to the StuckActiveThreshold timeout.
+func (s *State) OwnerExited() bool {
+	if !s.Phase.IsActive() {
+		return false
+	}
+	return s.OwnerLiveness() == proclive.LivenessDead
+}
+
 func (s *State) IsStale() bool {
+	// Imported sessions are historical, read-only records reconstructed from
+	// pre-existing transcripts; their timestamps are always old by nature.
+	// Never auto-purge them or they'd vanish from `entire session list` on the
+	// first read after import.
+	if s.Kind.IsImported() {
+		return false
+	}
 	var since time.Duration
 	if s.LastInteractionTime != nil {
 		since = time.Since(*s.LastInteractionTime)
@@ -406,31 +588,49 @@ func (s *StateStore) Save(ctx context.Context, state *State) error {
 		return fmt.Errorf("failed to create session state directory: %w", err)
 	}
 
-	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal session state: %w", err)
-	}
-
-	// Use os.Root for traversal-resistant write of temp file.
-	// Rename is not available on os.Root, so we keep using os.Rename.
+	// Scope the final rename to an os.Root so the session-ID-derived destination
+	// cannot escape the state directory even if validation were ever bypassed
+	// (defense in depth; the ID is already validated above).
 	root, err := os.OpenRoot(s.stateDir)
 	if err != nil {
 		return fmt.Errorf("failed to open session state directory: %w", err)
 	}
 	defer root.Close()
 
-	fileName := state.SessionID + ".json"
-	tmpFileName := fileName + ".tmp"
-	if err := osroot.WriteFile(root, tmpFileName, data, 0o600); err != nil {
-		return fmt.Errorf("failed to write session state: %w", err)
+	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal session state: %w", err)
 	}
 
-	// Atomic rename: not available on os.Root, use os.Rename with validated paths.
-	stateFile := s.stateFilePath(state.SessionID)
-	tmpFile := stateFile + ".tmp"
-	if err := os.Rename(tmpFile, stateFile); err != nil {
+	fileName := state.SessionID + ".json"
+
+	// Use a unique temp file per save. Concurrent hook processes can write the
+	// same session ID, so a fixed "<session>.json.tmp" path can corrupt JSON.
+	tmpFile, err := os.CreateTemp(s.stateDir, fileName+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary session state file: %w", err)
+	}
+	tmpFileName := tmpFile.Name()
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = os.Remove(tmpFileName)
+		}
+	}()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to write session state: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close session state file: %w", err)
+	}
+
+	// Atomic rename into the validated final path, via os.Root.
+	if err := root.Rename(filepath.Base(tmpFileName), fileName); err != nil {
 		return fmt.Errorf("failed to rename session state file: %w", err)
 	}
+	removeTmp = false
 	return nil
 }
 
@@ -443,21 +643,43 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
 
-	// Remove all files for this session (state .json, .model hint, any future hint files).
-	// filepath.Glob finds matches; os.Root ensures traversal-resistant removal.
-	matches, _ := filepath.Glob(filepath.Join(s.stateDir, sessionID+".*")) //nolint:errcheck // pattern is always valid
+	// Remove all files for this session (state .json, .model hint, any future
+	// hint files). Match by literal prefix rather than filepath.Glob: the
+	// session ID is user-controlled, and a glob pattern would let metacharacters
+	// match and delete other sessions' files. os.Root ensures traversal-resistant
+	// removal.
+	matches := matchSessionFiles(s.stateDir, sessionID)
 	if len(matches) > 0 {
 		root, rootErr := os.OpenRoot(s.stateDir)
 		if rootErr != nil {
 			return fmt.Errorf("failed to open session state directory for cleanup: %w", rootErr)
 		}
 		defer root.Close()
-		for _, f := range matches {
-			_ = osroot.Remove(root, filepath.Base(f)) //nolint:errcheck // best-effort cleanup
+		for _, name := range matches {
+			_ = osroot.Remove(root, name) //nolint:errcheck // best-effort cleanup
 		}
 	}
 
 	return nil
+}
+
+// matchSessionFiles returns the names (not paths) of files in dir that belong to
+// the given session ID — i.e. "<sessionID>.<ext>". It uses literal prefix
+// matching, never glob patterns, so a session ID containing glob metacharacters
+// cannot match unrelated files.
+func matchSessionFiles(dir, sessionID string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil // missing/unreadable dir => nothing to clear
+	}
+	prefix := sessionID + "."
+	var matched []string
+	for _, e := range entries {
+		if name := e.Name(); strings.HasPrefix(name, prefix) {
+			matched = append(matched, name)
+		}
+	}
+	return matched
 }
 
 // RemoveAll removes the entire session state directory.
@@ -502,11 +724,6 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 	return states, nil
 }
 
-// stateFilePath returns the path to a session state file.
-func (s *StateStore) stateFilePath(sessionID string) string {
-	return filepath.Join(s.stateDir, sessionID+".json")
-}
-
 // gitCommonDirCache caches the git common dir to avoid repeated subprocess calls.
 // Keyed by working directory to handle directory changes (same pattern as paths.WorktreeRoot).
 var (
@@ -522,6 +739,15 @@ func ClearGitCommonDirCache() {
 	gitCommonDirCache = ""
 	gitCommonDirCacheDir = ""
 	gitCommonDirMu.Unlock()
+}
+
+// GetGitCommonDir returns the .git common directory for the current working
+// directory. In a regular checkout this is .git/; in a worktree, it's the
+// main repo's .git/ (not .git/worktrees/<name>/). Result is cached per
+// working directory. This is a public wrapper around the package-internal
+// helper for callers outside this package.
+func GetGitCommonDir(ctx context.Context) (string, error) {
+	return getGitCommonDir(ctx)
 }
 
 // getGitCommonDir returns the path to the shared git directory.

@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
 // defaultRunTimeout is the maximum time an external binary call may take when
@@ -122,6 +123,24 @@ func (e *Agent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 	return e.run(context.Background(), input, "reassemble-transcript")
 }
 
+func (e *Agent) CompactTranscript(ctx context.Context, sessionRef string) (*agent.CompactedTranscript, error) {
+	stdout, err := e.run(ctx, nil, "compact-transcript", "--session-ref", sessionRef)
+	if err != nil {
+		return nil, fmt.Errorf("compact-transcript: %w", err)
+	}
+
+	var resp CompactTranscriptResponse
+	if err := json.Unmarshal(stdout, &resp); err != nil {
+		return nil, fmt.Errorf("compact-transcript: invalid JSON: %w", err)
+	}
+
+	compacted, err := resp.toCompactedTranscript()
+	if err != nil {
+		return nil, err
+	}
+	return compacted, nil
+}
+
 // --- Agent interface: Legacy methods ---
 
 func (e *Agent) GetSessionID(input *agent.HookInput) string {
@@ -213,11 +232,16 @@ func (e *Agent) HookNames() []string {
 
 func (e *Agent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	const maxParseHookBytes = 10 * 1024 * 1024 // 10 MB
-	data, err := io.ReadAll(io.LimitReader(stdin, maxParseHookBytes))
+	// Stream a single (size-bounded) JSON value rather than io.ReadAll, so the
+	// hook never blocks waiting for stdin EOF that some agents don't send on
+	// Windows/Git Bash (issue #1398). The external "parse-hook" contract receives
+	// the host's hook payload — which is JSON — and we forward its raw bytes
+	// verbatim to the subprocess, so a plain byte copy is preserved.
+	raw, err := agent.ReadHookInputRawLimited(stdin, maxParseHookBytes)
 	if err != nil {
 		return nil, fmt.Errorf("parse-hook: read stdin: %w", err)
 	}
-	stdout, err := e.run(ctx, data, "parse-hook", "--hook", hookName)
+	stdout, err := e.run(ctx, raw, "parse-hook", "--hook", hookName)
 	if err != nil {
 		return nil, fmt.Errorf("parse-hook: %w", err)
 	}
@@ -416,9 +440,9 @@ func (e *Agent) run(ctx context.Context, stdin []byte, args ...string) ([]byte, 
 	// so cmd.Run() doesn't block waiting for pipe reads.
 	cmd.WaitDelay = 3 * time.Second
 
-	// Set environment: repo root + protocol version
 	cmd.Env = append(cmd.Environ(),
 		"ENTIRE_PROTOCOL_VERSION="+strconv.Itoa(ProtocolVersion),
+		"ENTIRE_CLI_VERSION="+versioninfo.Version,
 	)
 	if repoRoot, err := paths.WorktreeRoot(ctx); err == nil {
 		cmd.Env = append(cmd.Env, "ENTIRE_REPO_ROOT="+repoRoot)

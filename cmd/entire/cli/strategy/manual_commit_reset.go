@@ -4,18 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v6/plumbing"
 )
-
-// isAccessibleMode returns true if accessibility mode should be enabled.
-// This checks the ACCESSIBLE environment variable.
-func isAccessibleMode() bool {
-	return os.Getenv("ACCESSIBLE") != ""
-}
 
 // Reset deletes the shadow branch and session state for the current HEAD.
 // This allows starting fresh without existing checkpoints.
@@ -24,6 +17,7 @@ func (s *ManualCommitStrategy) Reset(ctx context.Context, w, errW io.Writer) err
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Get current HEAD
 	head, err := repo.Head()
@@ -115,6 +109,7 @@ func (s *ManualCommitStrategy) ResetSession(ctx context.Context, w, errW io.Writ
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
+	defer repo.Close()
 
 	// Clean up shadow branch if no other sessions need it
 	if err := s.cleanupShadowBranchIfUnused(ctx, repo, shadowBranchName, sessionID); err != nil {

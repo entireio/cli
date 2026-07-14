@@ -30,7 +30,7 @@ func TestAttach_NewSession_NoHooks(t *testing.T) {
 	}
 
 	// Run attach
-	output := env.RunCLI("attach", sessionID, "-a", "claude-code", "-f")
+	output := env.RunCLI("session", "attach", sessionID, "-a", "claude-code", "-f")
 
 	// Verify output
 	if !strings.Contains(output, "Attached session") {
@@ -75,7 +75,7 @@ func TestAttach_ResearchSession_NoFileChanges(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	output := env.RunCLI("attach", sessionID, "-a", "claude-code", "-f")
+	output := env.RunCLI("session", "attach", sessionID, "-a", "claude-code", "-f")
 
 	if !strings.Contains(output, "Attached session") {
 		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
@@ -130,7 +130,7 @@ func TestAttach_ExistingCheckpoint_AddSession(t *testing.T) {
 	}
 
 	// Attach the second session
-	output := env.RunCLI("attach", session2ID, "-a", "claude-code")
+	output := env.RunCLI("session", "attach", session2ID, "-a", "claude-code")
 
 	if !strings.Contains(output, "Attached session") {
 		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
@@ -187,7 +187,7 @@ func TestAttach_AlreadyTracked_NoCheckpoint(t *testing.T) {
 	env.GitCommit("add research notes")
 
 	// Now attach — session state exists but has no checkpoint.
-	output := env.RunCLI("attach", session1.ID, "-a", "claude-code", "-f")
+	output := env.RunCLI("session", "attach", session1.ID, "-a", "claude-code", "-f")
 
 	if !strings.Contains(output, "Attached session") {
 		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
@@ -243,7 +243,7 @@ func TestAttach_AlreadyTracked_HasCheckpoint(t *testing.T) {
 	}
 
 	// Re-attach the same session
-	output := env.RunCLI("attach", session1.ID, "-a", "claude-code")
+	output := env.RunCLI("session", "attach", session1.ID, "-a", "claude-code")
 
 	if !strings.Contains(output, "already has checkpoint") {
 		t.Errorf("expected 'already has checkpoint' in output, got:\n%s", output)
@@ -358,7 +358,7 @@ func TestAttach_InvalidSessionID(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 
-	_, err := env.RunCLIWithError("attach", "../path-traversal", "-a", "claude-code")
+	_, err := env.RunCLIWithError("session", "attach", "../path-traversal", "-a", "claude-code")
 	if err == nil {
 		t.Error("expected error for invalid session ID")
 	}
